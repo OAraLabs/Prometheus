@@ -201,6 +201,32 @@ FIELD_RULES: list[FieldRule] = [
     ),
 ]
 
+@dataclass(frozen=True)
+class OrdinalFieldRule(Rule):
+    """Replace the WHOLE value of any column/key named in ``fields`` with an
+    ORDINAL placeholder (``<label:N>``), so which rows share a value stays
+    comparable."""
+
+    fields: frozenset = frozenset()
+    label: str = ""
+
+
+ORDINAL_FIELD_RULES: list[OrdinalFieldRule] = [
+    OrdinalFieldRule(
+        name="turn-id",
+        family="observable",
+        replaces="the value of any column/key named turn_id (telemetry v2: tool_calls, "
+                 "responses, turns; training_pairs), as <turn:N> by first appearance",
+        why="minted once per run_loop as f'{session_id}:{uuid4().hex}' "
+            "(coordinator/divergence.py::DivergenceDetector.new_task_id) — random by "
+            "construction, like the row ids the uuid4 rule covers",
+        cost="the session prefix inside the id; the row's own session_id column is still "
+             "compared, and the ordinal keeps which rows belong to the same turn comparable",
+        fields=frozenset({"turn_id"}),
+        label="turn",
+    ),
+]
+
 TOOLU = PatternRule(
     name="daemon-minted-tool-use-ids",
     family="request+observable",
@@ -279,11 +305,15 @@ KEYVALUE_RULES: list[KeyValueRule] = [
     KeyValueRule(
         name="schema-meta-stamps",
         family="observable",
-        replaces="telemetry.db schema_meta values for keys created_at and billing_recorded_since",
-        why="both are the wall-clock moment the telemetry DB was created (first boot)",
-        cost="when the DB was created; the other schema_meta keys (versions) are compared",
+        replaces="telemetry.db schema_meta values for keys created_at, billing_recorded_since "
+                 "and telemetry_v2_since",
+        why="all three are the wall-clock moment the telemetry DB was created (first boot); "
+            "telemetry_v2_since is stamped from time.time() on first open, as "
+            "billing_recorded_since is (telemetry/tracker.py)",
+        cost="when the DB was created; the other schema_meta keys (versions) are compared, "
+             "and so is whether each key is present",
         table="schema_meta",
-        keys=frozenset({"created_at", "billing_recorded_since"}),
+        keys=frozenset({"created_at", "billing_recorded_since", "telemetry_v2_since"}),
         placeholder="<time>",
     ),
 ]
@@ -471,6 +501,16 @@ class _Ordinals:
             return f"<{rule.label}:{table[key]}>"
         return rule.pattern.sub(repl, text)
 
+    def whole(self, label: str, value: str) -> str:
+        """The ordinal for an entire value. An existing placeholder is kept, so
+        a committed expected file is a fixed point of the rules."""
+        if re.fullmatch(rf"<{re.escape(label)}:[0-9]+>", value):
+            return value
+        table = self.maps.setdefault(label, {})
+        if value not in table:
+            table[value] = len(table) + 1
+        return f"<{label}:{table[value]}>"
+
 
 def _norm_text(value: str, ords: _Ordinals) -> str:
     for literal, placeholder in _host_paths():
@@ -486,6 +526,9 @@ def _norm_value(field: str | None, value: Any, ords: _Ordinals) -> Any:
         for rule in FIELD_RULES:
             if field in rule.fields:
                 return rule.placeholder
+        for orule in ORDINAL_FIELD_RULES:
+            if field in orule.fields and isinstance(value, str):
+                return ords.whole(orule.label, value)
     if isinstance(value, str):
         stripped = value.lstrip()
         if stripped[:1] in ("{", "["):
@@ -554,5 +597,6 @@ def normalize_observables(obs: dict, root: Any = None) -> dict:
 
 
 def all_rules() -> list[Rule]:
-    return [*REQUEST_RULES, *FIELD_RULES, *PATTERN_RULES, *COLUMN_PATTERN_RULES, *COLUMN_RULES,
+    return [*REQUEST_RULES, *FIELD_RULES, *ORDINAL_FIELD_RULES, *PATTERN_RULES,
+            *COLUMN_PATTERN_RULES, *COLUMN_RULES,
             *KEYVALUE_RULES, *PATH_RULES, GIT_INTERNALS, HOST_PATH_RULE, *RESPONSE_RULES]
