@@ -599,7 +599,7 @@ async def cmd_backend_override(
         target["model"] = status.model
     if status.vision is True:
         target["vision"] = True
-    router.set_override(session_key, target)
+    router.set_override(session_key, target, key=key)
     log.info("Backend override for session %s → %s (%s/%s)", session_key, name, target.get("provider"), target.get("model"))
     window = f"{status.n_ctx // 1024}k" if status.n_ctx else "window unknown"
     vision = "vision" if status.vision else ("no vision" if status.vision is False else "vision unknown")
@@ -2258,7 +2258,12 @@ def cmd_provider_override(
 
     # Record the override. set_override raises ValueError if called with a
     # reserved session_id, but gateway session keys are never reserved.
-    router.set_override(session_key, dict(preset))
+    # Stored by picker key (`qwen:qwen3.8-flash`), so a restart resolves the
+    # same choice again (WP-X.7).
+    router.set_override(
+        session_key, dict(preset),
+        key=f"{preset_name}:{model}" if model else preset_name,
+    )
     display = PROVIDER_PRESET_DISPLAY_NAMES.get(preset_name, preset_name)
     log.info(
         "Provider override for session %s → %s/%s (auth=%s)",

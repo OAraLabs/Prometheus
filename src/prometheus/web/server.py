@@ -4879,6 +4879,13 @@ def create_app(
         if key == _LOCAL_MODEL_KEY:
             router.clear_override(session_id)
             return _effective_model(router, session_id)
+        # The same switch the chat commands honour (cmd_provider_override,
+        # cmd_backend_override): off means no NEW choice from any surface. Going
+        # back to the default (above, and DELETE) is never refused.
+        if not getattr(router.config, "overrides_enabled", True):
+            return JSONResponse(status_code=403, content={
+                "error": "model overrides are disabled (router.overrides.enabled: false "
+                         "in prometheus.yaml); this session stays on the default model"})
         # Composite-aware: "qwen" takes the preset default, "qwen:qwen3.7-plus"
         # takes that model — but only if it is in the preset's vetted list, so a
         # client still cannot name an arbitrary model (let alone a provider).
@@ -4903,7 +4910,9 @@ def create_app(
                 if st.vision is True:
                     preset["vision"] = True
         try:
-            router.set_override(session_id, preset)
+            # The picker key is what gets stored, so a restart resolves the
+            # same choice again (WP-X.7).
+            router.set_override(session_id, preset, key=key)
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
         return _effective_model(router, session_id)

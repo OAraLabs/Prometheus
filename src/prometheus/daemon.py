@@ -1307,6 +1307,41 @@ async def run_daemon(args: argparse.Namespace) -> None:
             except Exception as exc:
                 logger.warning("per-session profile binding unavailable: %s", exc)
 
+    # WP-X.7: every sticky model choice is stored with its session (the
+    # conversation store's `session_backends`, by picker key) the moment it is
+    # made, from any surface, and CLOUD choices are restored HERE — after the
+    # store exists and before any gateway starts, because a Telegram update
+    # pending at boot is served the instant its adapter starts (see the LCM
+    # ordering note above). Until this, only deploy.sh recorded and re-applied
+    # cloud choices, and a plain restart on 2026-09-28 dropped five of them
+    # for ~16 hours without a word. Backend choices (`/4090`) are restored
+    # further down, where they always were.
+    _choice_store = getattr(lcm_engine, "conversation_store", None)
+    if (
+        model_router is not None
+        and _choice_store is not None
+        and hasattr(_choice_store, "set_session_backend")
+    ):
+        from prometheus.router.model_router import (
+            restore_cloud_overrides,
+            settle_restore,
+            store_backed_persister,
+        )
+
+        model_router.persist_override = store_backed_persister(_choice_store)
+        try:
+            _restored, _skipped = restore_cloud_overrides(
+                model_router, _choice_store.all_session_backends(), config,
+            )
+            if _restored or _skipped:
+                logger.info(
+                    "Cloud model choices restored for %d session(s); %d not restored",
+                    _restored, len(_skipped),
+                )
+            settle_restore(_skipped, _choice_store, telemetry)
+        except Exception:  # noqa: BLE001 — restore is a convenience; boot continues on the default
+            logger.exception("Cloud model choice restore failed; sessions start on the default model")
+
     # Collect async tasks to run
     tasks: list[asyncio.Task] = []
     shutdown_event = asyncio.Event()
@@ -1835,46 +1870,26 @@ async def run_daemon(args: argparse.Namespace) -> None:
     except Exception as exc:
         logger.warning("Memory extractor not available: %s", exc)
 
-    # A session's BACKEND override (`/4090`) persists beside its workspace, in
-    # the same durable store, and is restored at boot — but only onto a box the
-    # boot probe found up. A session whose box is down comes back on the
-    # primary, said once here in the log; a dead pointer is never restored.
-    # Placed AFTER the agent loop and its LCM engine exist (the store hangs off
-    # the loop) and after the boot probe, so restore sees real probe results.
-    _backend_store = getattr(getattr(agent_loop, "lcm_engine", None), "conversation_store", None)
-    if (
-        model_router is not None
-        and _backend_store is not None
-        and hasattr(_backend_store, "set_session_backend")
+    # A session's BACKEND choice (`/4090`) is stored like every other choice
+    # (the persister is wired above, before the gateways) and restored HERE, at
+    # boot, but only onto a box the boot probe found up. A session whose box is
+    # down comes back on the primary, said once in the log; a dead pointer is
+    # never restored. Placed after the agent loop and its LCM engine exist and
+    # after the boot probe, so restore sees real probe results.
+    if model_router is not None and _choice_store is not None and hasattr(
+        _choice_store, "all_session_backends"
     ):
-        def _persist_backend(session_id: str, override: dict | None) -> None:
-            # `override` is the provider tuple the router holds for the session
-            # (provider/base_url/model/backend), not a prometheus.yaml section.
-            if override is None:
-                _backend_store.set_session_backend(session_id, None)
-                return
-            fields = dict(override)
-            key = str(fields.pop("backend", "") or "")
-            model = fields.pop("model", None)
-            spec = backend_registry.get(key)
-            # Store the catalog key: bare for the backend's default model, composite
-            # when a specific vetted model was chosen — the same key REST accepts.
-            if spec is not None and model and spec.models and model != spec.models[0] and model in spec.models:
-                key = f"{key}:{model}"
-            _backend_store.set_session_backend(session_id, key)
-
-        model_router.persist_override = _persist_backend
         try:
-            from prometheus.router.model_router import restore_backend_overrides
+            from prometheus.router.model_router import restore_backend_overrides, settle_restore
             restored, skipped = restore_backend_overrides(
-                model_router, backend_registry, _backend_store.all_session_backends(), config,
+                model_router, backend_registry, _choice_store.all_session_backends(), config,
             )
             if restored or skipped:
                 logger.info(
-                    "Backend overrides restored for %d session(s); %d left on the primary: %s",
+                    "Backend overrides restored for %d session(s); %d left on the primary",
                     restored, len(skipped),
-                    "; ".join(f"{s} → {k} ({why})" for s, k, why in skipped) or "—",
                 )
+            settle_restore(skipped, _choice_store, telemetry)
         except Exception:  # noqa: BLE001 — restore is a convenience; boot continues on the primary
             logger.exception("Backend override restore failed; sessions start on the primary")
 
