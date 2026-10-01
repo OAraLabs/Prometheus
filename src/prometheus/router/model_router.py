@@ -504,6 +504,15 @@ def _backend_of(override_fields: Mapping[str, Any] | None) -> str | None:
     return str(value) if value else None
 
 
+def _model_of(override_fields: Mapping[str, Any] | None) -> str | None:
+    """The model an override names, or None — read through a helper for the
+    same reason as :func:`_backend_of`."""
+    if not isinstance(override_fields, Mapping):
+        return None
+    value = override_fields.get("model")
+    return str(value) if value else None
+
+
 def _backend_key(provider_config: Mapping[str, Any] | None) -> str | None:
     """The picker key a backend config is stored under when its caller named
     none: bare for the backend's default model, composite (`mini:<model>`)
@@ -512,7 +521,7 @@ def _backend_key(provider_config: Mapping[str, Any] | None) -> str | None:
     name = _backend_of(provider_config)
     if not name:
         return None
-    model = (provider_config or {}).get("model")
+    model = _model_of(provider_config)
     spec = _backend_table(None).get(name)
     models = tuple(getattr(spec, "models", ()) or ())
     if model and models and model != models[0] and model in models:
