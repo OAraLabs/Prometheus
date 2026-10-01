@@ -141,3 +141,52 @@ def test_record_run_returns_the_id_of_the_row_it_wrote(tmp_path):
     _refuse(db, "subsystem_runs", "synthetic refusal")
     assert tel.record_run("agent_loop", "loop_round", "success") is None
     tel.close()
+
+
+def _diagnose(tel: ToolCallTelemetry) -> None:
+    tel.record_diagnosis(
+        model_id="m", adapter_tier="light", tool_name="bash", failure_category="malformed",
+        config_drift=False, raw_sample="sample", recovered=False, recovery_method="none",
+    )
+
+
+def test_a_refused_diagnosis_is_a_warning_and_a_silent_failure_row(tmp_path, caplog):
+    # The loop's call site catches, but only into a log line; this makes the
+    # failure a silent_failures row, as record() does.
+    db = tmp_path / "telemetry.db"
+    tel = ToolCallTelemetry(db)
+    _refuse(db, "circuit_breaker_diagnostics", "synthetic refusal")
+
+    with caplog.at_level(logging.WARNING, logger="prometheus.telemetry.tracker"):
+        _diagnose(tel)
+
+    assert any("record_diagnosis" in r.getMessage() and r.levelno == logging.WARNING
+               for r in caplog.records)
+    rows = _rows(db, "SELECT subsystem, operation, exception_type, exception_msg, context "
+                     "FROM silent_failures")
+    assert len(rows) == 1
+    subsystem, operation, exc_type, msg, context = rows[0]
+    assert (subsystem, operation, exc_type) == ("telemetry", "record_diagnosis", "IntegrityError")
+    assert "synthetic refusal" in msg
+    assert "bash" in context
+    assert _rows(db, "SELECT COUNT(*) FROM circuit_breaker_diagnostics") == [(0,)]
+    tel.close()
+
+
+def test_a_failed_diagnosis_leaves_no_half_written_transaction(tmp_path):
+    # Both writes refused. The connection must not keep the write lock: the
+    # side connection's DROP TRIGGER below would then be "database is locked".
+    db = tmp_path / "telemetry.db"
+    tel = ToolCallTelemetry(db)
+    _refuse(db, "circuit_breaker_diagnostics", "synthetic refusal")
+    _refuse(db, "silent_failures", "also refused")
+    _diagnose(tel)  # both refused: still no raise
+    conn = sqlite3.connect(str(db))
+    conn.execute("DROP TRIGGER refuse_circuit_breaker_diagnostics")
+    conn.execute("DROP TRIGGER refuse_silent_failures")
+    conn.commit()
+    conn.close()
+    tel.record(model="m", tool_name="after", success=True)
+    assert _rows(db, "SELECT COUNT(*) FROM circuit_breaker_diagnostics") == [(0,)]
+    assert _rows(db, "SELECT tool_name FROM tool_calls") == [("after",)]
+    tel.close()

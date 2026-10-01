@@ -1260,7 +1260,48 @@ class ToolCallTelemetry:
         ``parsed_tool_call`` JSON from the best-match golden trace for this
         tool (or None if no golden trace exists). Stored for later analysis
         of "what would a cloud teacher have done differently".
+
+        NEVER RAISES, like :meth:`record`. The loop's call site already
+        catches (``engine/agent_loop.py``, the circuit breaker's diagnosis),
+        but only into a log line; other callers do not catch at all. A failed
+        write now rolls back and becomes a WARNING plus a ``silent_failures``
+        row (``telemetry`` / ``record_diagnosis``), which ``/health`` sees.
         """
+        try:
+            self._record_diagnosis(
+                model_id, adapter_tier, tool_name, failure_category, config_drift,
+                raw_sample, recovered, recovery_method, golden_reference=golden_reference,
+            )
+        except Exception as exc:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            log.warning(
+                "ToolCallTelemetry.record_diagnosis: write failed for model=%s tool=%s",
+                model_id, tool_name, exc_info=True,
+            )
+            self.record_silent_failure(
+                subsystem="telemetry",
+                operation="record_diagnosis",
+                exc=exc,
+                context={"model_id": model_id, "tool_name": tool_name,
+                         "failure_category": failure_category},
+            )
+
+    def _record_diagnosis(
+        self,
+        model_id: str,
+        adapter_tier: str,
+        tool_name: str,
+        failure_category: str,
+        config_drift: bool,
+        raw_sample: str | None,
+        recovered: bool,
+        recovery_method: str,
+        *,
+        golden_reference: str | None,
+    ) -> None:
         # Redact before truncating: a cut can leave a token too short to match.
         sample = redact_secrets(raw_sample or "")[:500]
         self._conn.execute(
@@ -1322,6 +1363,13 @@ class ToolCallTelemetry:
             insert_silent_failure(self._conn, subsystem, operation, exc, context)
             self._conn.commit()
         except Exception:
+            # A refused INSERT aborts the statement, not the implicit
+            # transaction: without this the connection keeps the write lock
+            # until its next commit, and every other writer waits on it.
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
             # Never let telemetry plumbing crash a subsystem path. The whole
             # point of this table is observability — a write failure here
             # would be ironic but not load-bearing.
