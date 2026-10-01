@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import time
 import traceback as _traceback
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from prometheus.security.log_redaction import redact_json_text, redact_secrets
 
 from prometheus.telemetry.db import connect_telemetry_db
 from prometheus.telemetry.latency import LatencyAggregate
+from prometheus.telemetry.writer import TelemetryV2Writer
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +117,10 @@ LUCKY_GUESS_OPERATION = "lucky_guess"
 # move every golden without a single request changing. ``skill_load_stats`` is the reader.
 SKILL_LOAD_SUBSYSTEM = "skills"
 SKILL_LOAD_OPERATION = "load"
+
+# Telemetry v2: how much of a tool's result `tool_calls.result_summary` keeps.
+# Enough to tell what came back; the full result is in lcm.db, by tool_use_id.
+RESULT_SUMMARY_CHARS = 500
 
 
 # FOUNDATION 1.3: the telemetry schema version. The first real version
@@ -254,6 +260,73 @@ CREATE TABLE IF NOT EXISTS signal_events (
     source_subsystem  TEXT NOT NULL,        -- ActivitySignal.source: "SkillCreator", ...
     read_at           TEXT                  -- nullable: when surfaced to user (reserved)
 );
+
+-- TELEMETRY V2 (WP-X.54 T-1). Three tables for the training flywheel: when a
+-- turn ended and why, what every model response was, and which tools it was
+-- offered. Written ONLY through telemetry/writer.py's queue (ruling 6); T-1
+-- creates them and nothing writes them yet. Additive: no schema_version bump
+-- (ruling 4) — the `telemetry_v2_since` key in schema_meta marks the boundary.
+
+-- One row per turn: one run_loop call, i.e. one user request and everything
+-- the loop did until it yielded or was stopped (ruling 3; in coding mode one
+-- episode, ruling 5). Written as two upserts, start and end, because the turn
+-- id is minted before anything that can raise.
+CREATE TABLE IF NOT EXISTS turns (
+    turn_id                 TEXT PRIMARY KEY,   -- divergence.new_task_id(): "<session>:<uuid4 hex>"
+    session_id              TEXT NOT NULL,
+    coding_run_id           TEXT,               -- coding mode: the run this episode belongs to
+    surface                 TEXT,               -- beacon / telegram / slack / discord / rest / cli / coding_mode
+    mode                    TEXT,               -- agent / chat
+    started_at              REAL,
+    ended_at                REAL,
+    rounds                  INTEGER,
+    total_prompt_tokens     INTEGER,
+    total_completion_tokens INTEGER,
+    models_used             TEXT,               -- JSON array of model ids, in order, deduplicated
+    tools_used              TEXT,               -- JSON array of tool names actually called
+    -- Calls the loop never ran (repeat guard, iteration cap). Counted here,
+    -- never invented as tool_calls rows (ruling 2).
+    not_run_calls           INTEGER,
+    first_prose_round       INTEGER,            -- round of the first prose-only response
+    terminal_kind           TEXT,               -- response_kind of the last response
+    forced_stop_reason      TEXT,               -- circuit_breaker / iteration_limit / ... ; NULL = not forced
+    task_class              TEXT,               -- derived offline; NULL at write time
+    outcome                 TEXT,               -- spec 4.4 vocabulary; NULL = not yet known
+    outcome_source          TEXT,
+    outcome_at              REAL                -- an outcome can arrive after ended_at
+);
+
+-- One row per model response in the loop. Tokens, duration and the model are
+-- NOT copied here: they are on the round's agent_loop/loop_round row in
+-- subsystem_runs, which `loop_round_id` points at (ruling 1).
+CREATE TABLE IF NOT EXISTS responses (
+    id                  INTEGER PRIMARY KEY,
+    ts                  REAL NOT NULL,          -- when the write was QUEUED
+    session_id          TEXT NOT NULL,
+    turn_id             TEXT,                   -- turns.turn_id
+    round_index         INTEGER NOT NULL,       -- 0-based, as subsystem_runs.round_index
+    loop_round_id       TEXT,                   -- subsystem_runs.id of this round's loop_round row
+    provider            TEXT,
+    adapter_tier        TEXT,                   -- off / light / full
+    ctx_window          INTEGER,
+    tool_set_hash       TEXT,                   -- tool_sets.tool_set_hash; NULL = no tools offered
+    response_kind       TEXT NOT NULL,          -- tool_call / prose / mixed / empty / error
+    tool_call_count     INTEGER,
+    prose_chars         INTEGER,
+    prose               TEXT,                   -- redacted; only the turn's first and last prose (option b)
+    mode                TEXT,
+    surface             TEXT,
+    forced_tool_choice  TEXT                    -- the tool a forced round required, else NULL
+);
+
+-- The tools offered in a round, stored once per distinct set and keyed by a
+-- hash of it; responses carry only the hash (Will's addition, 2026-09-30).
+CREATE TABLE IF NOT EXISTS tool_sets (
+    tool_set_hash   TEXT PRIMARY KEY,           -- writer.tool_set_row()
+    tool_names      TEXT NOT NULL,              -- JSON array, sorted, deduplicated
+    tool_count      INTEGER NOT NULL,
+    created_at      REAL NOT NULL               -- first time this set was offered
+);
 """
 
 # Indexes run AFTER _migrate_schema so they can reference columns that are
@@ -286,6 +359,10 @@ CREATE INDEX IF NOT EXISTS idx_subsystem_runs_session_ts ON subsystem_runs (sess
 -- hydration; the composite index serves both.
 CREATE INDEX IF NOT EXISTS idx_signal_events_type_time
     ON signal_events (signal_type, timestamp DESC);
+
+-- Telemetry v2: a turn's responses, and a session's turns.
+CREATE INDEX IF NOT EXISTS idx_responses_turn ON responses (turn_id, round_index);
+CREATE INDEX IF NOT EXISTS idx_turns_session ON turns (session_id);
 """
 
 
@@ -321,6 +398,23 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # memory/lcm_summary_store.py — different database; the telemetry
         # name is the fleet-facing one from the spec.
         ("node_id", "TEXT"),
+        # TELEMETRY V2 (WP-X.54 T-1). NULL on every row written before the
+        # `telemetry_v2_since` boundary, and never backfilled. Riding on the
+        # INSERT that already happens, so no new statement per call.
+        #
+        # Rule for the writers (audit Q6): on `_loop_transition` rows only
+        # turn_id and round_index may be filled. Several readers exclude those
+        # rows only because their other columns hold NULL or 0.
+        #
+        # Deliberately NOT here: `result_status` (derived from success and
+        # error_type, ruling 2) and `repaired` (the existing `repairs` count).
+        ("turn_id", "TEXT"),          # turns.turn_id
+        ("round_index", "INTEGER"),   # as subsystem_runs.round_index
+        ("tool_use_id", "TEXT"),      # the call's id; joins to lcm.db tool_result blocks
+        ("repair_kind", "TEXT"),      # which adapter repair changed the call
+        ("raw_before_repair", "TEXT"),  # the call as the model emitted it, redacted
+        ("retry_index", "INTEGER"),   # 0 = first attempt, n = n-th retry of the same call
+        ("result_summary", "TEXT"),   # the tool result's first RESULT_SUMMARY_CHARS, redacted
     ],
     "circuit_breaker_diagnostics": [
         ("golden_reference", "TEXT"),
@@ -462,6 +556,49 @@ def _response_body(exc: BaseException) -> str | None:
     return None
 
 
+def insert_silent_failure(
+    conn: sqlite3.Connection,
+    subsystem: str,
+    operation: str,
+    exc: BaseException,
+    context: dict[str, Any] | None = None,
+) -> None:
+    """INSERT one ``silent_failures`` row on ``conn``. The caller commits.
+
+    Shared by :meth:`ToolCallTelemetry.record_silent_failure` and the v2
+    writer's thread, which has its own connection. Raises on a failed INSERT;
+    both callers catch it.
+    """
+    try:
+        ctx_json = json.dumps(context, default=str) if context else None
+    except Exception:
+        ctx_json = None
+    try:
+        tb_text = "".join(_traceback.format_exception(type(exc), exc, exc.__traceback__))
+    except Exception:
+        tb_text = ""
+    conn.execute(
+        """
+        INSERT INTO silent_failures
+          (id, timestamp, subsystem, operation,
+           exception_type, exception_msg, traceback, context,
+           response_body)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            uuid4().hex,
+            time.time(),
+            subsystem,
+            operation,
+            type(exc).__name__,
+            _redact(str(exc)[:2000]),
+            _redact(tb_text[:8000]),
+            _redact(ctx_json),
+            _redact(_response_body(exc)),
+        ),
+    )
+
+
 class ToolCallTelemetry:
     """Record and report tool-call outcomes.
 
@@ -517,6 +654,7 @@ class ToolCallTelemetry:
         self._migrate_schema()
         self._migrate_latency_nullable()
         self._stamp_billing_boundary()
+        self._stamp_telemetry_v2_boundary()
         self._conn.executescript(_SCHEMA_SQL_INDEXES)
         # A DB at or below the current version is stamped current — the
         # additive migration above IS the upgrade path. A legacy DB (no
@@ -542,6 +680,10 @@ class ToolCallTelemetry:
         # (the entry points do that, at first run). NULL honestly until
         # an identity exists.
         self._node_id: str | None = None
+        # Telemetry v2's queued writer. Started on first use, so a process
+        # that never writes the v2 tables runs no extra thread.
+        self._v2_writer: TelemetryV2Writer | None = None
+        self._v2_writer_lock = threading.Lock()
 
     def _current_node_id(self) -> str | None:
         """The node ID to stamp on rows. Cached once found.
@@ -580,6 +722,7 @@ class ToolCallTelemetry:
     #: the old NOT NULL DEFAULT, which is what readers tag as `unknown`.
     LATENCY_NULLABLE_SINCE_KEY = "latency_nullable_since"
     BILLING_RECORDED_SINCE_KEY = "billing_recorded_since"
+    TELEMETRY_V2_SINCE_KEY = "telemetry_v2_since"
 
     def _restore_pre_v2(self) -> None:
         """Undo a half-applied rebuild: put ``tool_calls_pre_v2`` back.
@@ -802,6 +945,43 @@ class ToolCallTelemetry:
         except sqlite3.DatabaseError:
             pass
 
+    def _stamp_telemetry_v2_boundary(self) -> None:
+        """Record when this database gained the telemetry v2 schema. Set once.
+
+        The v2 columns are NULL on every row written before this instant, and
+        those rows are never backfilled, so a reader needs to tell "not
+        recorded yet" from "recorded as NULL". INSERT OR IGNORE, like the
+        billing boundary: reopening never moves it.
+
+        This replaces a schema_version bump (ruling 4). The additions are
+        purely additive and a v3 binary simply ignores them, so refusing to
+        open — what a bump would make a rolled-back binary do — buys nothing.
+        """
+        try:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO schema_meta (key, value) VALUES (?, ?)",
+                (self.TELEMETRY_V2_SINCE_KEY, str(time.time())),
+            )
+            self._conn.commit()
+        except sqlite3.DatabaseError:
+            pass
+
+    def telemetry_v2_boundary(self) -> float | None:
+        """Timestamp from which this database had the v2 schema, or None."""
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM schema_meta WHERE key = ?",
+                (self.TELEMETRY_V2_SINCE_KEY,),
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return None
+        if row is None:
+            return None
+        try:
+            return float(row[0])
+        except (TypeError, ValueError):
+            return None
+
     def billing_boundary(self) -> float | None:
         """Timestamp from which ``billing_mode`` was written by the writer.
 
@@ -887,8 +1067,15 @@ class ToolCallTelemetry:
         served_model: str | None = None,
         session_id: str | None = None,
         tool_schema: str | None = None,
+        turn_id: str | None = None,
+        round_index: int | None = None,
+        tool_use_id: str | None = None,
+        repair_kind: str | None = None,
+        raw_before_repair: str | None = None,
+        retry_index: int | None = None,
+        result_summary: str | None = None,
     ) -> None:
-        """Record a single tool-call outcome.
+        """Record a single tool-call outcome. Never raises.
 
         Golden Trace Capture sprint additions (all keyword-only for clarity):
           - ``raw_model_output``: the text the model produced BEFORE adapter
@@ -912,7 +1099,76 @@ class ToolCallTelemetry:
         provider is cloud AND ``success`` AND ``retries == 0`` AND
         ``raw_model_output`` was supplied. Only cloud wins count as "teacher
         model" examples worth keeping.
+
+        Telemetry v2 (WP-X.54) fields, all optional and NULL when not given:
+        ``turn_id`` and ``round_index`` place the call in its turn;
+        ``tool_use_id`` is the call's own id; ``repair_kind``,
+        ``raw_before_repair`` and ``retry_index`` describe what the adapter
+        did to it; ``result_summary`` is the start of the tool's result.
+        ``raw_before_repair`` and ``result_summary`` are redacted, and the
+        summary is cut to ``RESULT_SUMMARY_CHARS`` AFTER redaction, so a cut
+        can never leave half a token unmatched.
+
+        NEVER RAISES. The agent loop calls this inside ``_log_iteration`` and
+        on every tool path; a raise there ended the turn, or turned a tool
+        call that succeeded into a reported failure (audit 2026-09-30). A
+        failed write is a WARNING plus a ``silent_failures`` row
+        (``telemetry`` / ``record``), as ``record_signal_event`` already does.
         """
+        try:
+            self._record(
+                model, tool_name, success, retries, latency_ms, error_type, error_detail,
+                raw_model_output=raw_model_output, parsed_tool_call=parsed_tool_call,
+                provider=provider, repairs=repairs, served_model=served_model,
+                session_id=session_id, tool_schema=tool_schema, turn_id=turn_id,
+                round_index=round_index, tool_use_id=tool_use_id, repair_kind=repair_kind,
+                raw_before_repair=raw_before_repair, retry_index=retry_index,
+                result_summary=result_summary,
+            )
+        except Exception as exc:
+            # Undo the half: a commit that failed (the lock case) leaves the
+            # INSERT pending, and the silent_failures commit below would
+            # otherwise write the row this WARNING says was lost.
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            log.warning(
+                "ToolCallTelemetry.record: write failed for model=%s tool=%s",
+                model, tool_name, exc_info=True,
+            )
+            self.record_silent_failure(
+                subsystem="telemetry",
+                operation="record",
+                exc=exc,
+                context={"model": model, "tool_name": tool_name, "session_id": session_id},
+            )
+
+    def _record(
+        self,
+        model: str,
+        tool_name: str,
+        success: bool,
+        retries: int,
+        latency_ms: float | None,
+        error_type: str | None,
+        error_detail: str | None,
+        *,
+        raw_model_output: str | None,
+        parsed_tool_call: str | None,
+        provider: str,
+        repairs: int,
+        served_model: str | None,
+        session_id: str | None,
+        tool_schema: str | None,
+        turn_id: str | None,
+        round_index: int | None,
+        tool_use_id: str | None,
+        repair_kind: str | None,
+        raw_before_repair: str | None,
+        retry_index: int | None,
+        result_summary: str | None,
+    ) -> None:
         is_golden = (
             provider in _CLOUD_PROVIDERS
             and success
@@ -930,14 +1186,23 @@ class ToolCallTelemetry:
         # A JSON string: redacted value by value, or a token right after an
         # escaped newline is missed (X.37, redact_json_text).
         parsed_tool_call = redact_json_text(parsed_tool_call)
+        # Either may be JSON (the raw call) or plain text (a tool's output);
+        # redact_json_text handles both. Redact first, then cut.
+        raw_before_repair = redact_json_text(raw_before_repair)
+        result_summary = redact_json_text(result_summary)
+        if result_summary is not None:
+            result_summary = result_summary[:RESULT_SUMMARY_CHARS]
         self._conn.execute(
             """
             INSERT INTO tool_calls
               (id, timestamp, model, tool_name, success, retries, latency_ms,
                error_type, error_detail,
                raw_model_output, parsed_tool_call, is_golden, repairs,
-               served_model, session_id, tool_schema, node_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               served_model, session_id, tool_schema, node_id,
+               turn_id, round_index, tool_use_id, repair_kind,
+               raw_before_repair, retry_index, result_summary)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uuid4().hex,
@@ -957,6 +1222,13 @@ class ToolCallTelemetry:
                 session_id,
                 tool_schema,
                 self._current_node_id(),
+                turn_id,
+                round_index,
+                tool_use_id,
+                repair_kind,
+                raw_before_repair,
+                retry_index,
+                result_summary,
             ),
         )
         self._conn.commit()
@@ -1047,34 +1319,7 @@ class ToolCallTelemetry:
         could not tell a media-marker rejection from a context overflow.
         """
         try:
-            ctx_json = json.dumps(context, default=str) if context else None
-        except Exception:
-            ctx_json = None
-        try:
-            tb_text = "".join(_traceback.format_exception(type(exc), exc, exc.__traceback__))
-        except Exception:
-            tb_text = ""
-        try:
-            self._conn.execute(
-                """
-                INSERT INTO silent_failures
-                  (id, timestamp, subsystem, operation,
-                   exception_type, exception_msg, traceback, context,
-                   response_body)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    uuid4().hex,
-                    time.time(),
-                    subsystem,
-                    operation,
-                    type(exc).__name__,
-                    _redact(str(exc)[:2000]),
-                    _redact(tb_text[:8000]),
-                    _redact(ctx_json),
-                    _redact(_response_body(exc)),
-                ),
-            )
+            insert_silent_failure(self._conn, subsystem, operation, exc, context)
             self._conn.commit()
         except Exception:
             # Never let telemetry plumbing crash a subsystem path. The whole
@@ -1104,7 +1349,7 @@ class ToolCallTelemetry:
         cache_write_tokens: int | None = None,
         billing_mode: str | None = None,
         billing_marker: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Record one autonomous-subsystem cycle / pass / invocation.
 
         The companion to :meth:`record_silent_failure`. Every Curator pass,
@@ -1128,9 +1373,14 @@ class ToolCallTelemetry:
         different from any particular mode: a reader must be able to tell
         "nobody recorded this" from "this was metered". See the column comment
         in ``_EXPECTED_COLUMNS``.
+
+        Returns the new row's ``id``, or None when the write failed. Telemetry
+        v2's ``responses.loop_round_id`` points at the round's row by this id
+        (ruling 1), instead of copying its tokens, duration and model.
         """
         if outcome not in {"success", "partial", "failed", "skipped"}:
             outcome = "failed"
+        run_id: str | None = uuid4().hex
         try:
             # Redacted after serialising, so a value default=str turned into
             # text is covered too (X.37).
@@ -1152,7 +1402,7 @@ class ToolCallTelemetry:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    uuid4().hex,
+                    run_id,
                     time.time(),
                     subsystem,
                     operation,
@@ -1174,6 +1424,7 @@ class ToolCallTelemetry:
             )
             self._conn.commit()
         except Exception:
+            run_id = None
             log.warning(
                 "ToolCallTelemetry.record_run: write failed for "
                 "subsystem=%s operation=%s",
@@ -1194,6 +1445,7 @@ class ToolCallTelemetry:
                     handle.record(model, input_tokens or 0, output_tokens or 0)
             except Exception:
                 log.debug("cost tracker feed skipped", exc_info=True)
+        return run_id
 
     # ------------------------------------------------------------------
     # SignalBus Persistence sprint — signal_events writer + reader
@@ -2271,8 +2523,22 @@ class ToolCallTelemetry:
         """
         return self._db_path
 
+    def v2_writer(self) -> TelemetryV2Writer:
+        """The queued writer for the telemetry v2 tables, started on first call.
+
+        One per tracker, on the same file, with its own connection and
+        thread (see telemetry/writer.py). ``close()`` drains it.
+        """
+        with self._v2_writer_lock:
+            if self._v2_writer is None:
+                self._v2_writer = TelemetryV2Writer(self._db_path)
+            return self._v2_writer
+
     def close(self) -> None:
-        """Close the database connection."""
+        """Drain the v2 writer, if one was started, then close the connection."""
+        writer = self._v2_writer
+        if writer is not None:
+            writer.close()
         self._conn.close()
 
     def __del__(self) -> None:
