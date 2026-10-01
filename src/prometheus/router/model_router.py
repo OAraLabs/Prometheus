@@ -272,6 +272,13 @@ class ProviderOverride:
     provider_config: dict           # source config (for diagnostics + lazy rebuild)
     provider: Any | None = None     # ModelProvider instance (lazy)
     adapter: Any | None = None      # ModelAdapter instance (lazy)
+    # The picker key the surface was given (`claude`, `qwen:qwen3.8-flash`,
+    # `4090`) — what is stored, and what a boot resolves again. None when the
+    # caller set a raw config without one.
+    key: str | None = None
+    # True when this choice has a row in the durable store, so dropping it
+    # must delete that row.
+    persisted: bool = False
 
 
 # -- Provider override presets for /claude, /gpt, etc. --
@@ -497,6 +504,31 @@ def _backend_of(override_fields: Mapping[str, Any] | None) -> str | None:
     return str(value) if value else None
 
 
+def _model_of(override_fields: Mapping[str, Any] | None) -> str | None:
+    """The model an override names, or None — read through a helper for the
+    same reason as :func:`_backend_of`."""
+    if not isinstance(override_fields, Mapping):
+        return None
+    value = override_fields.get("model")
+    return str(value) if value else None
+
+
+def _backend_key(provider_config: Mapping[str, Any] | None) -> str | None:
+    """The picker key a backend config is stored under when its caller named
+    none: bare for the backend's default model, composite (`mini:<model>`)
+    when a specific vetted model was chosen — the key REST accepts. None for
+    a cloud config (it has no backend name to fall back on)."""
+    name = _backend_of(provider_config)
+    if not name:
+        return None
+    model = _model_of(provider_config)
+    spec = _backend_table(None).get(name)
+    models = tuple(getattr(spec, "models", ()) or ())
+    if model and models and model != models[0] and model in models:
+        return f"{name}{MODEL_KEY_SEPARATOR}{model}"
+    return name
+
+
 def _backend_table(prometheus_config: dict[str, Any] | None) -> Any:
     """The registry: the daemon's live one (probed) when it exists, else a
     config-only table with the same specs and no probe results. One source of
@@ -566,22 +598,160 @@ def restore_backend_overrides(
     longer configured, or whose box is down, is SKIPPED with the reason and the
     session starts on the primary — a dead pointer is never restored. Applied
     directly to the override table (not via set_override) so restoring does
-    not re-persist what is already persisted. Returns (restored, skipped)."""
+    not re-persist what is already persisted. Cloud keys in the same table are
+    not this function's: :func:`restore_cloud_overrides` settles them earlier,
+    before the gateways start. Nothing is restored while
+    ``router.overrides.enabled`` is false. Returns (restored, skipped)."""
     restored = 0
     skipped: list[tuple[str, str, str]] = []
+    if not router.config.overrides_enabled:
+        return restored, skipped
     for session_id, key in bindings.items():
+        if not is_backend_key(key, prometheus_config):
+            continue  # a cloud choice: restore_cloud_overrides already settled it
+        if session_id in router._overrides:
+            continue  # chosen this boot, and stored when it was; never overwrite it
         target = resolve_model_target(key, prometheus_config)
         name = (target or {}).get("backend")
         status = registry.status(name) if name else None
         if target is None:
-            skipped.append((session_id, key, "not configured"))
+            skipped.append((session_id, key, RESTORE_NOT_CONFIGURED))
             continue
         if status is None or not status.ok:
             skipped.append((session_id, key, (status.error if status is not None else "never probed") or "down"))
             continue
-        router._overrides[session_id] = ProviderOverride(provider_config=dict(target))
+        router._overrides[session_id] = ProviderOverride(
+            provider_config=dict(target), key=key, persisted=True,
+        )
         restored += 1
     return restored, skipped
+
+
+# Why a stored choice was not restored. `settle_restore` acts on these two:
+# a retired key's row is deleted; a keyless one is kept for the next boot.
+RESTORE_NOT_CONFIGURED = "not configured"
+RESTORE_NO_CREDENTIAL = "no credential"
+
+
+def is_backend_key(key: str, prometheus_config: dict[str, Any] | None = None) -> bool:
+    """True when a stored picker key names a local backend (`4090`,
+    `mini:qwen2.5:7b-instruct`) rather than a cloud preset. Decided by the
+    preset part, so a key whose model was retired is still sorted to the
+    restore that owns it. A name that is neither is not a backend: the cloud
+    restore reports it as retired."""
+    preset, _model = split_model_key(key)
+    return _backend_spec(preset, prometheus_config) is not None
+
+
+def restore_cloud_overrides(
+    router: "ModelRouter",
+    bindings: Mapping[str, str],
+    prometheus_config: dict[str, Any] | None = None,
+) -> tuple[int, list[tuple[str, str, str]]]:
+    """Re-apply stored CLOUD choices at boot (WP-X.7), before any gateway starts.
+
+    ``bindings`` is session_id → picker key, as the conversation store holds
+    them. Backend keys are skipped here and restored later, after the boot
+    probe, by :func:`restore_backend_overrides`. Each cloud key is resolved
+    against the CURRENT vetted list (config + built-ins) — a key the config no
+    longer offers is reported ``not configured``, never restored as a raw
+    model name — and its credential is checked the way ``/claude`` checks it,
+    so a choice whose key is missing is reported ``no credential`` instead of
+    failing on the session's first turn. With ``router.overrides.enabled:
+    false`` nothing is restored and nothing is reported: the rows stay for the
+    day the switch comes back on. Returns (restored, skipped)."""
+    from prometheus.providers.credentials import credential_status
+
+    restored = 0
+    skipped: list[tuple[str, str, str]] = []
+    if not router.config.overrides_enabled:
+        return restored, skipped
+    for session_id, key in bindings.items():
+        if is_backend_key(key, prometheus_config):
+            continue
+        if session_id in router._overrides:
+            continue
+        target = resolve_model_target(key, prometheus_config)
+        if target is None:
+            skipped.append((session_id, key, RESTORE_NOT_CONFIGURED))
+            continue
+        api_key_env = target.get("api_key_env", "")
+        if api_key_env and credential_status(target.get("provider", ""), api_key_env)["mode"] is None:
+            skipped.append((session_id, key, RESTORE_NO_CREDENTIAL))
+            continue
+        router._overrides[session_id] = ProviderOverride(
+            provider_config=dict(target), key=key, persisted=True,
+        )
+        restored += 1
+    return restored, skipped
+
+
+def store_backed_persister(store: Any) -> Callable[[str, str | None], None]:
+    """The router's ``persist_override``, writing to the conversation store's
+    per-session model table (``session_backends``; the name predates cloud
+    choices being stored there). A key is written; None deletes the row.
+
+    An EPHEMERAL session's choice is never written — "Prometheus won't
+    remember this" covers which model the chat used. A choice made while
+    ephemeral DELETES any row written before the session went ephemeral:
+    skipping the write would leave that older choice to come back at the next
+    boot."""
+    from prometheus.config.ephemeral import is_session_ephemeral
+
+    def persist(session_id: str, key: str | None) -> None:
+        if key is not None and is_session_ephemeral(session_id):
+            key = None
+        store.set_session_backend(session_id, key)
+
+    return persist
+
+
+def settle_restore(
+    skipped: list[tuple[str, str, str]],
+    store: Any,
+    telemetry: Any | None,
+) -> None:
+    """Act on what a boot restore could not restore, so nothing fails silently.
+
+    * ``not configured`` — the model or provider is gone from the config: the
+      session is on the default model, a WARNING names the session and the key,
+      a ``silent_failures`` row records it (the key survives there), and the
+      stored row is DELETED so what is stored matches what is served.
+    * ``no credential`` — the same WARNING and row, but the stored row is KEPT:
+      fix the key, restart, and the choice comes back.
+    * anything else (a backend box that is down) — logged at INFO and kept, as
+      the backend restore always has.
+    """
+    down: list[str] = []
+    for session_id, key, why in skipped:
+        if why not in (RESTORE_NOT_CONFIGURED, RESTORE_NO_CREDENTIAL):
+            down.append(f"{session_id} → {key} ({why})")
+            continue
+        deleted = why == RESTORE_NOT_CONFIGURED
+        if deleted:
+            try:
+                store.set_session_backend(session_id, None)
+            except Exception:  # noqa: BLE001 — the warning below still says what happened
+                log.exception("stored model choice for %s could not be deleted", session_id)
+                deleted = False
+        log.warning(
+            "Model choice for session %s NOT restored: %r is %s — the session is on "
+            "the default model. %s",
+            session_id, key, why,
+            "The stored choice was deleted; pick a model again."
+            if why == RESTORE_NOT_CONFIGURED else
+            "The stored choice is kept; set the provider's key and restart to get it back.",
+        )
+        if telemetry is not None and hasattr(telemetry, "record_silent_failure"):
+            telemetry.record_silent_failure(
+                subsystem="model_choice",
+                operation="restore",
+                exc=LookupError(f"{key!r}: {why}"),
+                context={"session_id": session_id, "key": key, "reason": why,
+                         "row_deleted": deleted},
+            )
+    if down:
+        log.info("Model choices left on the default model: %s", "; ".join(down))
 
 
 def split_model_key(key: str) -> tuple[str, str | None]:
@@ -711,17 +881,19 @@ class ModelRouter:
         primary_provider: Any,
         primary_adapter: Any,
         primary_model: str = "local",
-        persist_override: Callable[[str, dict | None], None] | None = None,
+        persist_override: Callable[[str, str | None], None] | None = None,
     ) -> None:
         self.config = config
         self.primary_provider = primary_provider
         self.primary_adapter = primary_adapter
         self.primary_model = primary_model
-        # Durable home for a BACKEND override (`/4090`), so a chat pointed at a
-        # box comes back on it after a restart. Called with the provider config
-        # on set and None on clear; only overrides carrying a `backend` key are
-        # persisted — cloud presets stay RAM-only, as they always were. Wired by
-        # the daemon to the conversation store; None in tests and the CLI.
+        # Durable home for every STICKY choice, cloud and backend alike, so a
+        # session comes back on its model after any restart, crash or stop
+        # (WP-X.7; until then only `/4090`-style backend choices were stored and
+        # cloud ones were RAM-only — a plain restart dropped them silently).
+        # Called with the picker key on set and None on clear. Wired by the
+        # daemon to the conversation store (`store_backed_persister`); None in
+        # tests and the CLI.
         self.persist_override = persist_override
 
         # Lazy-built providers
@@ -799,12 +971,27 @@ class ModelRouter:
 
     # ── Per-session user override (Phase 3.5) ─────────────────────
 
-    def set_override(self, session_id: str, provider_config: dict) -> None:
+    def set_override(
+        self,
+        session_id: str,
+        provider_config: dict,
+        *,
+        key: str | None = None,
+        persist: bool = True,
+    ) -> None:
         """Set a per-session user override (called by /claude, /gpt, etc.).
 
         Reserved session_ids (None and "system") cannot hold an override —
         they're the escape hatch for system-invocation flows. Passing one
         raises ValueError to catch callsite bugs early.
+
+        ``key`` is the picker key the surface was given (`claude`,
+        `qwen:qwen3.8-flash`, `4090`); it is what gets stored, and a boot
+        resolves it again against the config of that day. A backend config
+        set without one is stored by its backend name, as before; a cloud
+        config without one cannot be resolved again and is not stored.
+        ``persist=False`` is for a choice that lives for one request (the
+        OpenAI-compatible surface): a row would outlive it.
         """
         if session_id in _RESERVED_NO_OVERRIDE_SESSION_IDS:
             raise ValueError(
@@ -812,32 +999,47 @@ class ModelRouter:
                 f"Reserved IDs {tuple(_RESERVED_NO_OVERRIDE_SESSION_IDS)} always "
                 f"resolve to the primary provider."
             )
-        self._overrides[session_id] = ProviderOverride(
-            provider_config=provider_config,
-        )
+        stored_key = key or _backend_key(provider_config)
+        entry = ProviderOverride(provider_config=provider_config, key=stored_key)
+        self._overrides[session_id] = entry
         if (
-            self.persist_override is not None
-            and _backend_of(provider_config)
+            persist
+            and self.persist_override is not None
+            and stored_key
             and self.config.overrides_sticky
         ):
             try:
-                self.persist_override(session_id, dict(provider_config))
-            except Exception:  # noqa: BLE001 — persistence is a convenience; the override is set
-                log.exception("backend override for %s could not be persisted", session_id)
+                self.persist_override(session_id, stored_key)
+                entry.persisted = True
+            except Exception:  # noqa: BLE001 — the choice is set; the log says it will not survive a restart
+                log.exception(
+                    "model choice %r for %s could not be stored — it will not survive a restart",
+                    stored_key, session_id,
+                )
 
-    def clear_override(self, session_id: str) -> None:
+    def clear_override(self, session_id: str, *, persist: bool = True) -> None:
         """Clear the override for one session (called by /local).
 
-        Clearing a session that never had an override is a silent no-op.
+        Clearing a session that never had an override is a no-op in memory.
         Clearing a reserved session_id is also a silent no-op (nothing to
         clear — reserved IDs never hold overrides).
+
+        The stored choice is deleted whether or not one is in memory: a row a
+        boot could not restore (a box that was down, a key that was missing) is
+        still the session's choice until the user picks another, and `/local`
+        must stick across the next boot too. ``persist=False`` pairs with the
+        same flag on :meth:`set_override`.
         """
-        had = self._overrides.pop(session_id, None)
-        if self.persist_override is not None and had is not None and _backend_of(had.provider_config):
+        self._overrides.pop(session_id, None)
+        if (
+            persist
+            and self.persist_override is not None
+            and session_id not in _RESERVED_NO_OVERRIDE_SESSION_IDS
+        ):
             try:
                 self.persist_override(session_id, None)
             except Exception:  # noqa: BLE001
-                log.exception("backend override for %s could not be un-persisted", session_id)
+                log.exception("stored model choice for %s could not be deleted", session_id)
 
     def get_override_for_session(self, session_id: str | None) -> ProviderOverride | None:
         """Look up an override for this session.
@@ -906,20 +1108,20 @@ class ModelRouter:
                     provider_name, model_name, session_id,
                     type(exc).__name__, exc,
                 )
-                # Drop it exactly the way clear_override does, including the
-                # backend-only persistence rule — a dropped override and a
-                # user-cleared one must leave the same state behind.
+                # Drop it the way clear_override does — a dropped override and
+                # a user-cleared one must leave the same state behind, stored
+                # row included. Only a stored choice has a row to delete.
                 had = self._overrides.pop(session_id, None)
                 if (
                     self.persist_override is not None
                     and had is not None
-                    and _backend_of(had.provider_config)
+                    and had.persisted
                 ):
                     try:
                         self.persist_override(session_id, None)
                     except Exception:  # noqa: BLE001
                         log.exception(
-                            "backend override for %s could not be un-persisted",
+                            "stored model choice for %s could not be deleted",
                             session_id,
                         )
                 return None

@@ -17,7 +17,7 @@ What these pin:
     the primary keeps the bare `detected` string
   * the compactor budgets a `/4090` turn at THAT box's window, live
   * the router: RouteDecision carries `backend`; a backend override persists
-    (set + clear, sticky only, cloud never); boot restore skips dead boxes
+    (set + clear, sticky only — cloud too since WP-X.7); boot restore skips dead boxes
   * /api/lcm reports the SESSION's window, not the primary's
   * the shared /<backend> command: unknown, down (refused, named), success
 """
@@ -55,6 +55,7 @@ from prometheus.router.model_router import (  # noqa: E402
     resolve_model_target,
     resolve_slash_command_target,
     restore_backend_overrides,
+    restore_cloud_overrides,
 )
 from prometheus.web.server import create_app  # noqa: E402
 
@@ -208,24 +209,50 @@ def test_route_decision_carries_the_backend(monkeypatch):
     assert router._route_override("s2").backend is None
 
 
-def test_backend_overrides_persist_and_cloud_ones_do_not():
-    saved: list[tuple[str, dict | None]] = []
-    router = _router(persist_override=lambda sid, cfg: saved.append((sid, cfg)))
-    router.set_override("s1", {"provider": "anthropic", "model": "claude-opus-5"})
-    assert saved == []                                                  # cloud: RAM-only, as before
-    router.set_override("s1", {"provider": "llama_cpp", "backend": "4090", "model": "m"})
-    assert saved[-1] == ("s1", {"provider": "llama_cpp", "backend": "4090", "model": "m"})
+def test_sticky_choices_persist_cloud_and_backend_alike():
+    """WP-X.7 reverses #390's "cloud stays RAM-only": every sticky choice is
+    stored, by the picker key the surface was given, so a restart keeps it."""
+    saved: list[tuple[str, str | None]] = []
+    router = _router(persist_override=lambda sid, key: saved.append((sid, key)))
+    router.set_override("s1", {"provider": "anthropic", "model": "claude-opus-5"}, key="claude")
+    assert saved == [("s1", "claude")]                                  # cloud: stored now
+    router.set_override("s1", {"provider": "qwen", "model": "qwen3.8-flash"}, key="qwen:qwen3.8-flash")
+    assert saved[-1] == ("s1", "qwen:qwen3.8-flash")                    # the composite key, verbatim
+    router.set_override("s1", {"provider": "llama_cpp", "backend": "4090", "model": "m"}, key="4090")
+    assert saved[-1] == ("s1", "4090")
     router.clear_override("s1")
     assert saved[-1] == ("s1", None)
-    router.clear_override("never-set")                                  # silent, nothing persisted
-    assert len(saved) == 2
+    # An explicit clear removes a stored choice even when none is in memory
+    # (a row a boot restore skipped): `local` must stick across the next boot.
+    router.clear_override("restored-nothing")
+    assert saved[-1] == ("restored-nothing", None)
+    router.clear_override("system")                                     # reserved: never stored
+    assert saved[-1] == ("restored-nothing", None)
+
+
+def test_a_backend_choice_set_without_a_key_still_persists_by_backend_name():
+    saved: list[tuple[str, str | None]] = []
+    router = _router(persist_override=lambda sid, key: saved.append((sid, key)))
+    router.set_override("s1", {"provider": "llama_cpp", "backend": "4090", "model": "m"})
+    assert saved == [("s1", "4090")]
+
+
+def test_a_transient_choice_is_never_stored():
+    """The OpenAI-compatible surface sets and clears a choice around ONE
+    request; a crash between the two must not leave a row to restore."""
+    saved: list = []
+    router = _router(persist_override=lambda sid, key: saved.append((sid, key)))
+    router.set_override("openai:abc", {"provider": "anthropic", "model": "m"}, key="claude", persist=False)
+    router.clear_override("openai:abc", persist=False)
+    assert saved == []
 
 
 def test_one_shot_mode_does_not_persist():
     saved: list = []
     router = ModelRouter(RouterConfig(overrides_sticky=False), primary_provider=object(), primary_adapter=object(),
-                         persist_override=lambda sid, cfg: saved.append((sid, cfg)))
-    router.set_override("s1", {"provider": "llama_cpp", "backend": "4090"})
+                         persist_override=lambda sid, key: saved.append((sid, key)))
+    router.set_override("s1", {"provider": "llama_cpp", "backend": "4090"}, key="4090")
+    router.set_override("s2", {"provider": "anthropic", "model": "m"}, key="claude")
     assert saved == []
 
 
@@ -243,7 +270,13 @@ def test_boot_restore_applies_only_onto_boxes_found_up(live_registry):
     assert router.get_override_for_session("tg:1").provider_config["backend"] == "4090"
     assert router.get_override_for_session("tg:2") is None
     reasons = {sid: why for sid, _k, why in skipped}
-    assert "connect timeout" in reasons["tg:2"] and reasons["tg:3"] == "not configured"
+    assert "connect timeout" in reasons["tg:2"]
+    # A name that is no longer a configured backend is not this restore's row
+    # since WP-X.7: the early restore reports it as retired, before the gateways
+    # start, and settle_restore deletes it with a WARNING.
+    assert "tg:3" not in reasons
+    _restored, early = restore_cloud_overrides(_router(), {"tg:3": "gone"}, CFG)
+    assert early == [("tg:3", "gone", "not configured")]
 
 
 def test_conversation_store_remembers_and_purges_the_binding(tmp_path):

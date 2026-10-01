@@ -201,7 +201,9 @@ def register_openai_routes(
             if preset is None:
                 return _error(404, f"model {key!r} has no resolvable preset", "model_not_found")
             try:
-                router_obj.set_override(session_id, preset)
+                # One request's choice: stored, it would outlive the request
+                # (and a crash mid-request would leave a row to restore).
+                router_obj.set_override(session_id, preset, persist=False)
             except ValueError as exc:
                 return _error(400, str(exc), "model_override_rejected")
 
@@ -234,7 +236,7 @@ def register_openai_routes(
                     # ToolExecutionStarted / Completed / ProviderDegraded: server-side, not surfaced.
             finally:
                 if key != LOCAL_MODEL_KEY and router_obj is not None:
-                    router_obj.clear_override(session_id)
+                    router_obj.clear_override(session_id, persist=False)
             usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
             yield ("done", usage)
 

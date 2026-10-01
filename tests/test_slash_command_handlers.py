@@ -90,8 +90,9 @@ def _build_telegram_adapter(prometheus_config: dict):
     router = MagicMock()
     router.config = router_config
 
-    def _record_set_override(session_key, preset_dict):
+    def _record_set_override(session_key, preset_dict, *, key=None, persist=True):
         captured["set_override_calls"].append((session_key, dict(preset_dict)))
+        captured.setdefault("set_override_keys", []).append(key)
 
     router.set_override = MagicMock(side_effect=_record_set_override)
 
