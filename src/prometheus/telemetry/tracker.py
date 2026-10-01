@@ -265,7 +265,8 @@ CREATE TABLE IF NOT EXISTS signal_events (
 -- turn ended and why, what every model response was, and which tools it was
 -- offered. Written ONLY through telemetry/writer.py's queue (ruling 6); T-1
 -- creates them and nothing writes them yet. Additive: no schema_version bump
--- (ruling 4) — the `telemetry_v2_since` key in schema_meta marks the boundary.
+-- (ruling 4). schema_meta `telemetry_v2_since` marks when the schema arrived;
+-- `telemetry_v2_capture_since` (stamped by T-3) marks when writing started.
 
 -- One row per turn: one run_loop call, i.e. one user request and everything
 -- the loop did until it yielded or was stopped (ruling 3; in coding mode one
@@ -399,7 +400,8 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # name is the fleet-facing one from the spec.
         ("node_id", "TEXT"),
         # TELEMETRY V2 (WP-X.54 T-1). NULL on every row written before the
-        # `telemetry_v2_since` boundary, and never backfilled. Riding on the
+        # `telemetry_v2_capture_since` key (T-3 stamps it when it starts
+        # writing; see _stamp_telemetry_v2_boundary), and never backfilled. Riding on the
         # INSERT that already happens, so no new statement per call.
         #
         # Rule for the writers (audit Q6): on `_loop_transition` rows only
@@ -948,10 +950,15 @@ class ToolCallTelemetry:
     def _stamp_telemetry_v2_boundary(self) -> None:
         """Record when this database gained the telemetry v2 schema. Set once.
 
-        The v2 columns are NULL on every row written before this instant, and
-        those rows are never backfilled, so a reader needs to tell "not
-        recorded yet" from "recorded as NULL". INSERT OR IGNORE, like the
-        billing boundary: reopening never moves it.
+        THIS IS SCHEMA ARRIVAL, NOT CAPTURE. It says from when the v2 tables
+        and columns EXIST; it does not say from when anything writes them.
+        T-1 ships the schema alone, so rows written after this instant can
+        still carry NULL in every v2 column. The write points (T-3) stamp a
+        separate ``telemetry_v2_capture_since`` key the first time they write,
+        and that key, not this one, separates "not recorded" from "recorded as
+        NULL" (Will's ruling, 2026-09-30). This split is what lets T-1 deploy
+        on its own. Rows from before either key are never backfilled.
+        INSERT OR IGNORE, like the billing boundary: reopening never moves it.
 
         This replaces a schema_version bump (ruling 4). The additions are
         purely additive and a v3 binary simply ignores them, so refusing to
