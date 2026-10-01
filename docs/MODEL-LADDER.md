@@ -346,7 +346,8 @@ The run's token totals stay off the summary row's columns on purpose: `usage_rol
 twice.
 
 `summary_json` also carries the suite sha, the harness commit (`-dirty` when the ladder code
-differs from it), run label, rung, KV-cache provenance, the thinking-suppression probe result,
+differs from it), run label, rung, KV-cache provenance, the served chat template's tool-calling
+verdict (`tool_template`: native or not, call format, evidence), the thinking-suppression probe result,
 the bash write-floor state, verdict source and reasons, the acceptance result (tests run /
 failed), the judge's score and provenance (model and `pinned`; the endpoint is not stored),
 `stopped_by` (done / round_cap / tool_call_cap / timeout / repeat_halt / circuit_breaker /
@@ -461,11 +462,13 @@ uv run python scripts/ladder_run.py --provider llama_cpp --base-url "$LADDER_BAS
   selected with the `PROMETHEUS_*` path variables, so cron jobs, wiki, memory files and LCM
   history are throwaway and nothing reaches the real stores.
 - The config is built from the flags, not read from the machine's `prometheus.yaml`, so two boxes
-  running the same rung run the same pipeline. The adapter tier comes from
-  `config/model_registry.yaml`, or the `full` fallback: the ladder builds its adapter without the
-  served chat template. Since #583 the daemon also reads that template, so for a model the registry
-  does not list the two differ — `r27b-pq2` and `r09b-ornith` run at `full` here and would get
-  `light` in the daemon (checked offline from each GGUF's template, 2026-09-30).
+  running the same rung run the same pipeline. The adapter tier is the one the daemon would pick:
+  `config/model_registry.yaml` for a listed model, else the served chat template's verdict — asked
+  at preflight with the provider's own `detect_tool_template`, as the daemon asks it at boot, and
+  recorded on every row as `summary_json.tool_template` — else the `full` fallback. Until
+  2026-09-30 the ladder never read the template, so models the registry does not list (`r27b-pq2`,
+  `r09b-ornith`) ran at `full` while the daemon gave them `light`; the first run's smokes for those
+  two were measured at `full`, and their rungs are now pinned `light`.
 - One ladder run per sandbox root and per telemetry DB at a time (file locks): a second run
   is refused — give it its own `--workdir` and `--telemetry-db`. A run label that already has
   rows is refused too, so a report never mixes two runs; unknown class names or task ids are

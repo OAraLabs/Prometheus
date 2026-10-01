@@ -45,6 +45,7 @@ from prometheus.gym.ladder.tiers import (
     counts_for_row,
     forced_adapter_factory,
     instrument_adapter,
+    served_adapter_factory,
     tier_end,
 )
 from prometheus.gym.ladder.verdict import ERROR, FAIL, FORMAT_MISS, PASS, UNSCORED, Verdict, decide
@@ -762,17 +763,26 @@ async def run_ladder(
         from prometheus.gateway.cron_scheduler import set_cron_security_gate
 
         set_cron_security_gate(pipeline["security_gate"])
+        # The tier is decided as the daemon decides it: with the served chat
+        # template's verdict (daemon.py asks detect_tool_template and hands
+        # the answer to create_adapter). Without it, a model the registry does
+        # not list fell to the `full` fallback here while the daemon gave it
+        # `light`, and --rung enforced the ladder's tier, not the daemon's.
+        tool_template = await _probe_tool_template(pipeline["provider"], model_name)
+        if tool_template is not None:
+            pipeline["adapter_factory"] = served_adapter_factory(
+                pipeline["model_cfg"], config.get("adapter"), tool_template)
         probe_adapter = pipeline["adapter_factory"]()
         if expect_adapter_tier and probe_adapter.tier != expect_adapter_tier:
             raise LadderPreflightError(
                 f"rung {rung!r} expects adapter tier {expect_adapter_tier!r} but the daemon's "
-                f"selection gives {probe_adapter.tier!r} for {model_name!r} — "
-                f"config/model_registry.yaml and the rung disagree"
+                f"selection gives {probe_adapter.tier!r} for {model_name!r} — the rung and the "
+                f"daemon's sources (config/model_registry.yaml, then the served chat template) disagree"
             )
         daemon_tier = probe_adapter.tier
         if force_adapter_tier is not None:
             pipeline["adapter_factory"] = forced_adapter_factory(
-                force_adapter_tier, pipeline["model_cfg"], config.get("adapter"))
+                force_adapter_tier, pipeline["model_cfg"], config.get("adapter"), template=tool_template)
             pipeline["tier_forced"] = True
             probe_adapter = pipeline["adapter_factory"]()
         kv = await _probe_kv_cache(pipeline["provider"])
@@ -816,6 +826,7 @@ async def run_ladder(
             "quantization_declared": declared,
             "adapter_tier": probe_adapter.tier,
             "adapter_strictness": probe_adapter._base_strictness.value,
+            "tool_template": _redact_tree(tool_template.as_dict()) if tool_template is not None else None,
             "kv_cache": {"k": kv.get("k"), "v": kv.get("v"), "source": kv.get("source")},
             "thinking_suppression": thinking["status"],
             "bash_write_floor": bash_floor,
@@ -877,6 +888,18 @@ def _lock_db(db: Path):  # noqa: ANN202
         raise SandboxError(f"another ladder run is writing {db} — use a different "
                            f"--telemetry-db, or wait") from None
     return fh
+
+
+async def _probe_tool_template(provider: Any, model_name: str) -> Any:
+    """The served chat template's tool-calling verdict (``adapter.tier.ToolTemplate``),
+    asked exactly as the daemon asks it at boot. A provider without the probe
+    answers None — no template, so the registry or the fallback decides, as in
+    the daemon. A server that cannot be asked is the provider's recorded fact
+    (``native=None``), not an error."""
+    detect = getattr(provider, "detect_tool_template", None)
+    if detect is None:
+        return None
+    return await detect(model_name)
 
 
 async def _probe_thinking(provider: Any) -> dict[str, str]:

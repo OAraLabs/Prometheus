@@ -41,6 +41,7 @@ from prometheus.providers.base import (
     ModelProvider,
 )
 from prometheus.telemetry.tracker import ToolCallTelemetry
+from tests.support.served_template import recorded_tool_template
 
 
 # ---------------------------------------------------------------------------
@@ -1533,10 +1534,11 @@ def test_a_forced_tier_run_counts_what_the_adapter_did(tmp_path, tier, verdict, 
     assert (provider.grammars[-1] is None) is grammar_is_none
 
 
-def _sweep_ladder(tmp_path, monkeypatch, *, force, expect_tier="full", rung="r27b-pq2"):
+def _sweep_ladder(tmp_path, monkeypatch, *, force, expect_tier="full", rung="r27b-pq2", provider=None):
     from prometheus.__main__ import create_adapter, create_security_gate
 
     suite, task = _one_task(tmp_path, TEXT_CALL_TASK, "max_rounds: 4, max_tool_calls: 3")
+    provider = provider if provider is not None else _TextToolCall()
     monkeypatch.setattr(lr, "preflight_endpoint", lambda config: None)
 
     async def identity(provider, base_url, model):
@@ -1551,7 +1553,7 @@ def _sweep_ladder(tmp_path, monkeypatch, *, force, expect_tier="full", rung="r27
 
     def build(config):
         model_cfg = dict(config["model"], grammar_enforcement=True)
-        return {"provider": _TextToolCall(), "adapter_factory": lambda: create_adapter(model_cfg, {}),
+        return {"provider": provider, "adapter_factory": lambda: create_adapter(model_cfg, {}),
                 "security_gate": create_security_gate({"workspace_root": config["security"]["workspace_root"]}
                                                       if "security" in config else {}),
                 "model_name": model_cfg["model"], "model_cfg": model_cfg}
@@ -1595,6 +1597,56 @@ class TestTierSweep:
         r = _cli("--force-adapter-tier", "light", "--base-url", "http://127.0.0.1:9", "--no-judge",
                  "--telemetry-db", db)
         assert r.returncode == 2 and "needs --rung" in r.stdout
+
+
+class _ServedTemplate(_TextToolCall):
+    """The same provider, answering the template probe as llama.cpp's does."""
+
+    def __init__(self, template) -> None:  # noqa: ANN001
+        super().__init__()
+        self.template = template
+        self.asked: list = []
+
+    async def detect_tool_template(self, model_name=None):  # noqa: ANN001
+        self.asked.append(model_name)
+        return self.template
+
+
+class TestServedTemplate:
+    """The ladder decides the tier as the daemon does: with the served chat template
+    (daemon.py asks ``detect_tool_template`` and hands the verdict to create_adapter).
+    Without it, a model the registry does not list fell to the ``full`` fallback in
+    the ladder while the daemon gave it ``light`` — and ``--rung`` enforced the
+    ladder's tier, not the daemon's."""
+
+    def test_an_unlisted_model_gets_the_daemons_tier_from_the_served_template(self, tmp_path, monkeypatch):
+        from prometheus.__main__ import create_adapter
+
+        template = recorded_tool_template()
+        cfg = {"provider": "llama_cpp", "model": BONSAI}
+        # The daemon's path: the template decides light. Without it: the full fallback.
+        assert create_adapter(cfg, {}, template=template).tier == "light"
+        assert create_adapter(cfg, {}).tier == "full"
+
+        provider = _ServedTemplate(template)
+        (row,) = _sweep_ladder(tmp_path, monkeypatch, force=None, expect_tier="light", provider=provider)
+        assert provider.asked == [BONSAI]
+        assert (row["rung"], row["adapter_tier"], row["adapter_tier_start"]) == ("r27b-pq2", "light", "light")
+        assert row["tool_template"] == template.as_dict()
+
+    def test_a_sweep_reports_the_tier_the_daemon_would_pick(self, tmp_path, monkeypatch):
+        (row,) = _sweep_ladder(tmp_path, monkeypatch, force="full", expect_tier="light",
+                               provider=_ServedTemplate(recorded_tool_template()))
+        assert row["tier_sweep"] == {"of": "r27b-pq2", "forced_tier": "full", "daemon_tier": "light"}
+        assert row["adapter_tier"] == "full"
+
+    def test_a_server_that_cannot_say_leaves_the_fallback(self, tmp_path, monkeypatch):
+        from prometheus.adapter.tier import ToolTemplate
+
+        unknown = ToolTemplate(native=None, call_format=None, evidence="/props could not be read (ConnectError)")
+        with pytest.raises(lr.LadderPreflightError, match="expects adapter tier 'light'"):
+            _sweep_ladder(tmp_path, monkeypatch, force=None, expect_tier="light",
+                          provider=_ServedTemplate(unknown))
 
 
 def _sweep_row(task, tier, verdict, *, bumped=False, retries=0):
