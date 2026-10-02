@@ -797,8 +797,8 @@
         }
        },
        "<hash-of-time>",
-       null,
-       null,
+       "<turn:1>",
+       0,
        "type_coerce",
        null
       ]
