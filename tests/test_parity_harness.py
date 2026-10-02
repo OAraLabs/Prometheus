@@ -93,6 +93,38 @@ def test_field_rules_do_not_touch_counts_or_outcomes():
     assert norm.normalize_observables(obs)["steps"][0] == obs["steps"][0]
 
 
+def _turn_rows(turns: list) -> list:
+    obs = {"steps": [], "stores": {"home/.prometheus/telemetry.db": {"sqlite": {"responses": {
+        "columns": ["session_id", "turn_id", "round_index"],
+        "rows": [["desktop:parity-x", t, i] for i, t in enumerate(turns)],
+    }}}}}
+    return norm.normalize_observables(obs)["stores"]["home/.prometheus/telemetry.db"][
+        "sqlite"]["responses"]["rows"]
+
+
+def test_turn_ids_become_ordinals_that_keep_which_rows_share_a_turn():
+    # Two runs of the same code mint different uuid4 halves; the diff must not see that.
+    a = _turn_rows(["desktop:parity-x:" + "a1" * 16, "desktop:parity-x:" + "a1" * 16])
+    b = _turn_rows(["desktop:parity-x:" + "b2" * 16, "desktop:parity-x:" + "b2" * 16])
+    assert a == b == [["desktop:parity-x", "<turn:1>", 0], ["desktop:parity-x", "<turn:1>", 1]]
+    # But a round filed under a DIFFERENT turn is still a diff.
+    split = _turn_rows(["desktop:parity-x:" + "a1" * 16, "desktop:parity-x:" + "c3" * 16])
+    assert split != a
+    assert split[1][1] == "<turn:2>"
+    # NULL stays NULL: whether a row was stamped at all is compared.
+    assert _turn_rows([None])[0][1] is None
+
+
+def test_the_v2_boundary_stamp_is_hidden_and_the_version_is_not():
+    obs = {"steps": [], "stores": {"home/.prometheus/telemetry.db": {"sqlite": {"schema_meta": {
+        "columns": ["key", "value"],
+        "rows": [["telemetry_v2_since", "1790814892.34"], ["schema_version", "3"]],
+    }}}}}
+    rows = norm.normalize_observables(obs)["stores"]["home/.prometheus/telemetry.db"][
+        "sqlite"]["schema_meta"]["rows"]
+    assert rows == [["telemetry_v2_since", "<time>"], ["schema_version", "3"]]
+
+
 def test_every_rule_is_documented():
     rules = norm.all_rules()
     assert len({r.name for r in rules}) == len(rules)

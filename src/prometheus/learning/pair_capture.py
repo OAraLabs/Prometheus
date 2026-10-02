@@ -92,6 +92,21 @@ CREATE INDEX IF NOT EXISTS idx_pairs_tool ON training_pairs (tool_name);
 CREATE INDEX IF NOT EXISTS idx_pairs_ts ON training_pairs (timestamp);
 """
 
+# Columns added after the table first shipped, added on open when missing
+# (PRAGMA-guarded ADD COLUMN, as telemetry.db's _EXPECTED_COLUMNS). Nullable,
+# never backfilled.
+#
+# TELEMETRY V2 (WP-X.54 T-1): where a pair came from in telemetry terms.
+# None of these is part of `context_hash`: the miner re-runs with no cursor
+# and relies on that hash to dedupe, so a field inside it would make a re-run
+# write every pair twice (audit Q10). The pair KIND stays `pair_source`.
+_EXPECTED_COLUMNS: list[tuple[str, str]] = [
+    ("turn_id", "TEXT"),          # telemetry.db turns.turn_id
+    ("round_index", "INTEGER"),   # the round the rejected/chosen call came from
+    ("repair_kind", "TEXT"),      # the adapter repair, as tool_calls.repair_kind
+    ("outcome", "TEXT"),          # the turn's outcome, copied at mine time
+]
+
 
 def _call_json(name: str, input_: Any) -> str:
     try:
@@ -109,7 +124,24 @@ class PairStore:
         self._conn = sqlite3.connect(str(p), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add any ``_EXPECTED_COLUMNS`` missing from an older training.db."""
+        try:
+            existing = {r[1] for r in self._conn.execute("PRAGMA table_info(training_pairs)")}
+        except sqlite3.DatabaseError:
+            return
+        for name, sql in _EXPECTED_COLUMNS:
+            if name in existing:
+                continue
+            try:
+                self._conn.execute(f"ALTER TABLE training_pairs ADD COLUMN {name} {sql}")
+            except sqlite3.DatabaseError:
+                # Read-only, or added by a concurrent opener. Best-effort, as
+                # telemetry's migration is; writes then fail loudly instead.
+                log.warning("training.db: could not add column %s", name, exc_info=True)
 
     def add_pair(
         self,
@@ -121,8 +153,17 @@ class PairStore:
         rejected: dict[str, Any] | None,   # {"name":..., "input":...}
         chosen: dict[str, Any],
         meta: dict[str, Any] | None = None,
+        turn_id: str | None = None,
+        round_index: int | None = None,
+        repair_kind: str | None = None,
+        outcome: str | None = None,
     ) -> bool:
         """Insert a pair; returns False on dedupe-hit.
+
+        ``turn_id``, ``round_index``, ``repair_kind`` and ``outcome`` are
+        stored beside the pair and are NOT part of the dedupe hash (see
+        ``_EXPECTED_COLUMNS``): the same (context, rejected) with different
+        telemetry fields is still the same pair.
 
         Raises on a bad source, and on a ``chosen`` side carrying leaked
         chat-template markup (``CorruptPairRejected``). ``capture_pair`` turns
@@ -166,8 +207,9 @@ class PairStore:
             self._conn.execute(
                 "INSERT INTO training_pairs "
                 "(id, timestamp, pair_source, model_id, tool_name, context, "
-                " rejected, chosen, meta, context_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " rejected, chosen, meta, context_hash, "
+                " turn_id, round_index, repair_kind, outcome) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     hashlib.sha256(f"{h}{time.time()}".encode()).hexdigest()[:32],
                     time.time(),
@@ -179,6 +221,10 @@ class PairStore:
                     chosen_json,
                     json.dumps(meta or {}, default=str),
                     h,
+                    turn_id,
+                    round_index,
+                    repair_kind,
+                    outcome,
                 ),
             )
             self._conn.commit()

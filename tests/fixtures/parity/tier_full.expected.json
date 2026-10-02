@@ -1047,7 +1047,11 @@
       "rejected",
       "chosen",
       "meta",
-      "context_hash"
+      "context_hash",
+      "turn_id",
+      "round_index",
+      "repair_kind",
+      "outcome"
      ],
      "rows": []
     }
@@ -1249,6 +1253,28 @@
      ],
      "rows": []
     },
+    "responses": {
+     "columns": [
+      "id",
+      "ts",
+      "session_id",
+      "turn_id",
+      "round_index",
+      "loop_round_id",
+      "provider",
+      "adapter_tier",
+      "ctx_window",
+      "tool_set_hash",
+      "response_kind",
+      "tool_call_count",
+      "prose_chars",
+      "prose",
+      "mode",
+      "surface",
+      "forced_tool_choice"
+     ],
+     "rows": []
+    },
     "schema_meta": {
      "columns": [
       "key",
@@ -1261,6 +1287,10 @@
       ],
       [
        "billing_recorded_since",
+       "<time>"
+      ],
+      [
+       "telemetry_v2_since",
        "<time>"
       ],
       [
@@ -2072,7 +2102,14 @@
       "served_model",
       "session_id",
       "tool_schema",
-      "node_id"
+      "node_id",
+      "turn_id",
+      "round_index",
+      "tool_use_id",
+      "repair_kind",
+      "raw_before_repair",
+      "retry_index",
+      "result_summary"
      ],
      "rows": [
       [
@@ -2136,7 +2173,14 @@
          }
         }
        },
-       "<node>"
+       "<node>",
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null
       ],
       [
        "<uuid:40>",
@@ -2155,7 +2199,14 @@
        null,
        "desktop:parity-tierfull",
        null,
-       "<node>"
+       "<node>",
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null
       ],
       [
        "<uuid:41>",
@@ -2218,7 +2269,14 @@
          }
         }
        },
-       "<node>"
+       "<node>",
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null
       ],
       [
        "<uuid:42>",
@@ -2237,7 +2295,14 @@
        null,
        "desktop:parity-tierfull",
        null,
-       "<node>"
+       "<node>",
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null
       ],
       [
        "<uuid:43>",
@@ -2298,7 +2363,14 @@
          }
         }
        },
-       "<node>"
+       "<node>",
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null
       ],
       [
        "<uuid:44>",
@@ -2317,9 +2389,50 @@
        null,
        "desktop:parity-tierfull",
        null,
-       "<node>"
+       "<node>",
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null
       ]
      ]
+    },
+    "tool_sets": {
+     "columns": [
+      "tool_set_hash",
+      "tool_names",
+      "tool_count",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "turns": {
+     "columns": [
+      "turn_id",
+      "session_id",
+      "coding_run_id",
+      "surface",
+      "mode",
+      "started_at",
+      "ended_at",
+      "rounds",
+      "total_prompt_tokens",
+      "total_completion_tokens",
+      "models_used",
+      "tools_used",
+      "not_run_calls",
+      "first_prose_round",
+      "terminal_kind",
+      "forced_stop_reason",
+      "task_class",
+      "outcome",
+      "outcome_source",
+      "outcome_at"
+     ],
+     "rows": []
     }
    }
   },

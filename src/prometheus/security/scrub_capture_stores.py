@@ -75,8 +75,13 @@ DEFAULT_TRAINING = HOME / ".prometheus" / "data" / "training.db"
 DEFAULT_TRAJECTORIES = HOME / ".prometheus" / "trajectories"
 
 # (table, key column, text columns that may carry a secret)
+# tests/test_scrub_covers_every_text_column.py fails on any text column in these
+# stores that is neither listed here nor exempted there with a reason.
 TELEMETRY_TARGETS = (
-    ("tool_calls", "id", ("error_detail", "raw_model_output", "parsed_tool_call")),
+    ("tool_calls", "id", ("error_detail", "raw_model_output", "parsed_tool_call",
+                          # telemetry v2 (WP-X.54)
+                          "raw_before_repair", "result_summary")),
+    ("responses", "id", ("prose",)),
     ("silent_failures", "id", ("exception_msg", "traceback", "context", "response_body")),
     ("subsystem_runs", "id", ("summary_json",)),
     ("signal_events", "id", ("payload",)),
