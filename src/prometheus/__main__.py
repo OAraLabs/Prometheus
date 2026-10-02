@@ -1225,6 +1225,7 @@ def run_coding_task(args) -> int:
         ),
         suppress_thinking=True if args.suppress_thinking else False,
         control_dir=args.control_dir,
+        training_config=config.get("training") or {},
     )
     # A coding run must ALWAYS emit a JSON report and a verdict exit code —
     # an uncaught exception mid-run (a model-output edge case, a provider

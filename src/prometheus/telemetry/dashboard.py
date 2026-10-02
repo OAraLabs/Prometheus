@@ -66,7 +66,10 @@ class ToolDashboard:
         * ``lucky_guesses``         – deferred tools called by name: the
           ``agent_loop``/``lucky_guess`` runs, plus the marker rows written to
           ``tool_calls`` before those existed
-        * ``adapter_repairs``       – count of records where ``retries > 0``
+        * ``adapter_repairs``       – calls the adapter repaired before
+          running them (``repairs > 0``)
+        * ``validation_failures``   – calls that failed validation and could
+          not be repaired (``retries > 0``; the loop asked the model to retry)
         * ``total_calls``           – real tool calls in window (synthetic
           ``_loop_transition`` loop echoes excluded)
         * ``total_denials``         – policy refusals (SecurityGate / hooks);
@@ -81,6 +84,7 @@ class ToolDashboard:
         circuit_breaker_trips = self._count_circuit_breaker_trips(cutoff)
         lucky_guesses = self._count_lucky_guesses(cutoff)
         adapter_repairs = self._count_adapter_repairs(cutoff)
+        validation_failures = self._count_validation_failures(cutoff)
         total_calls, total_denials, overall_success_rate = self._totals(cutoff)
 
         return {
@@ -90,6 +94,7 @@ class ToolDashboard:
             "circuit_breaker_trips": circuit_breaker_trips,
             "lucky_guesses": lucky_guesses,
             "adapter_repairs": adapter_repairs,
+            "validation_failures": validation_failures,
             "total_calls": total_calls,
             "total_denials": total_denials,
             "overall_success_rate": overall_success_rate,
@@ -239,12 +244,29 @@ class ToolDashboard:
         return old + new
 
     def _count_adapter_repairs(self, cutoff: float) -> int:
+        # `repairs` is the length of the adapter's repair log for the call.
+        # This used to count `retries > 0`, which are the calls the adapter
+        # could NOT repair: failures reported as repairs (WP-X.54 audit Q1).
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+              FROM tool_calls
+             WHERE timestamp >= ?
+               AND repairs > 0
+               AND tool_name != '_loop_transition'
+            """,
+            (cutoff,),
+        ).fetchone()
+        return row["cnt"]
+
+    def _count_validation_failures(self, cutoff: float) -> int:
         row = self._conn.execute(
             """
             SELECT COUNT(*) AS cnt
               FROM tool_calls
              WHERE timestamp >= ?
                AND retries > 0
+               AND tool_name != '_loop_transition'
             """,
             (cutoff,),
         ).fetchone()

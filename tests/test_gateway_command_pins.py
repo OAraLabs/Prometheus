@@ -469,6 +469,36 @@ class TestToolsPairsPins:
         )
 
     @pytest.mark.asyncio
+    async def test_tools_pin_names_validation_failures_apart(self, monkeypatch):
+        """WP-X.54 T-2: failed-validation calls are their own line, never
+        counted as adapter repairs."""
+        import prometheus.telemetry.dashboard as dash
+
+        fake = MagicMock()
+        fake.get_stats.return_value = {
+            "total_calls": 10,
+            "overall_success_rate": 0.9,
+            "total_denials": 0,
+            "most_called": [{"tool_name": "bash", "calls": 6}],
+            "success_rate_by_tool": {"bash": 1.0},
+            "circuit_breaker_trips": 0,
+            "adapter_repairs": 0,
+            "validation_failures": 3,
+            "lucky_guesses": 0,
+        }
+        monkeypatch.setattr(dash, "ToolDashboard", lambda: fake)
+        adapter = _make_adapter()
+        await adapter._cmd_tools(_make_update(), _make_context())
+        assert _sent_text(adapter) == (
+            "Tool Call Stats (24h)\n\n"
+            "Total calls: 10\n"
+            "Success rate: 90%\n"
+            "\nMost called:\n"
+            "  bash: 6 calls (100% ok)\n"
+            "Validation failures: 3"
+        )
+
+    @pytest.mark.asyncio
     async def test_pairs_pin(self, monkeypatch):
         import prometheus.learning.pair_capture as pc
 

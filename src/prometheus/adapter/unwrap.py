@@ -29,13 +29,16 @@ Two deterministic transforms, tried in order:
      (only when the inner dict's keys overlap the schema's properties).
 
 Every accepted unwrap is logged loudly and surfaces in the repair log (so
-telemetry `repairs` counts it) — and becomes a training pair upstream.
+telemetry `repairs` counts it) — and becomes a training pair upstream. Its
+log entries carry the repair kind ``dict_unwrap`` (``validator.RepairNote``).
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any
+
+from prometheus.adapter.validator import RepairNote
 
 log = logging.getLogger(__name__)
 
@@ -80,7 +83,9 @@ def try_unwrap_arguments(
             and next(iter(value)) == key
         ):
             unwrapped[key] = value[key]
-            notes.append(f"unwrapped self-keyed dict for param {key!r}")
+            notes.append(RepairNote(
+                f"unwrapped self-keyed dict for param {key!r}", "dict_unwrap",
+            ))
         else:
             unwrapped[key] = value
     if notes and _validates(tool, unwrapped):
@@ -100,7 +105,10 @@ def try_unwrap_arguments(
             and set(inner) & properties
         ):
             if _validates(tool, inner):
-                note = f"promoted inner dict wrapped under {key!r} to arguments"
+                note = RepairNote(
+                    f"promoted inner dict wrapped under {key!r} to arguments",
+                    "dict_unwrap",
+                )
                 log.warning(
                     "Adapter unwrapped top-level wrap for %s: %s",
                     getattr(tool, "name", "?"), note,

@@ -4185,7 +4185,8 @@ context:
 class ToolDashboard:
     def get_stats(hours: int = 24) -> dict
     # Returns: success_rate_by_tool, most_called, avg_latency_by_tool,
-    #          circuit_breaker_trips, lucky_guesses, adapter_repairs
+    #          circuit_breaker_trips, lucky_guesses, adapter_repairs,
+    #          validation_failures
 ```
 
 - `/tools` Telegram command calls `ToolDashboard.get_stats()` and formats for chat
