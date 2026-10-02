@@ -4213,6 +4213,8 @@ def cmd_tools() -> str:
             lines.append(f"\nCircuit breaker trips: {stats['circuit_breaker_trips']}")
         if stats["adapter_repairs"]:
             lines.append(f"Adapter repairs: {stats['adapter_repairs']}")
+        if stats.get("validation_failures"):
+            lines.append(f"Validation failures: {stats['validation_failures']}")
         if stats["lucky_guesses"]:
             lines.append(f"Lucky guesses (deferred): {stats['lucky_guesses']}")
 

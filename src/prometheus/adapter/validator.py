@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -63,6 +64,54 @@ class ValidationResult:
     error_type: str = ""   # unknown_tool | invalid_json | missing_param | wrong_type | extra_param
 
 
+# The kind of each adapter repair (WP-X.54 T-2). Until now a repair was known
+# only by its free-text ``repair_log`` line; training and telemetry need to
+# count and filter by kind without parsing prose. ``other`` is any entry the
+# adapter did not mint (a plain string from elsewhere).
+REPAIR_KINDS: tuple[str, ...] = (
+    "fuzzy_name",     # tool name fuzzy-matched to a registered one
+    "json_extract",   # arguments pulled out of a text/markdown string
+    "type_coerce",    # an argument coerced to its schema type
+    "strip_params",   # unknown parameters dropped
+    "dict_unwrap",    # phantom dict nesting removed (adapter/unwrap.py)
+    "other",
+)
+
+
+class RepairNote(str):
+    """One ``repair_log`` entry: the same string it always was, plus its kind.
+
+    A ``str`` subclass so that what the adapter returns does not change:
+    ``validate_and_repair`` still returns a ``list[str]`` that compares,
+    joins, counts and JSON-encodes exactly as before. The kind rides beside
+    the text, and ``repair_kind`` reads it back (``other`` for a plain str).
+    """
+
+    kind: str
+
+    def __new__(cls, text: str, kind: str) -> RepairNote:
+        if kind not in REPAIR_KINDS:
+            raise ValueError(f"unknown repair kind {kind!r}")
+        note = super().__new__(cls, text)
+        note.kind = kind
+        return note
+
+    def __getnewargs__(self) -> tuple[str, str]:  # type: ignore[override]
+        # copy/pickle rebuild through __new__, which needs the kind too.
+        return str(self), self.kind
+
+
+def repair_kind(entry: str) -> str:
+    """The kind of one ``repair_log`` entry; ``other`` when it carries none."""
+    kind = getattr(entry, "kind", None)
+    return kind if kind in REPAIR_KINDS else "other"
+
+
+def repair_kinds(log: Iterable[str]) -> list[str]:
+    """The kinds of a ``repair_log``, one per entry, in order."""
+    return [repair_kind(entry) for entry in log]
+
+
 @dataclass
 class RepairResult:
     repaired: bool
@@ -70,6 +119,10 @@ class RepairResult:
     tool_input: dict[str, Any]
     repairs_made: list[str] = field(default_factory=list)
     error: str = ""
+
+    @property
+    def repair_kinds(self) -> list[str]:
+        return repair_kinds(self.repairs_made)
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +340,10 @@ class ToolCallValidator:
             if best_name and best_dist <= 3:
                 repaired_name = best_name
                 tool = tool_registry.get(repaired_name)
-                repairs.append(f"fuzzy-matched tool name {tool_name!r} → {repaired_name!r} (distance {best_dist})")
+                repairs.append(RepairNote(
+                    f"fuzzy-matched tool name {tool_name!r} → {repaired_name!r} (distance {best_dist})",
+                    "fuzzy_name",
+                ))
 
         if tool is None:
             return RepairResult(
@@ -307,7 +363,7 @@ class ToolCallValidator:
             extracted = _find_json_in_text(tool_input)
             if extracted is not None:
                 tool_input = extracted
-                repairs.append("extracted JSON from text/markdown")
+                repairs.append(RepairNote("extracted JSON from text/markdown", "json_extract"))
             else:
                 return RepairResult(
                     repaired=False,
@@ -338,9 +394,10 @@ class ToolCallValidator:
                         coerced_val = _coerce_value(original, target_type)
                         if coerced_val != original:
                             coerced[param_name] = coerced_val
-                            repairs.append(
-                                f"coerced {param_name}: {type(original).__name__} → {target_type}"
-                            )
+                            repairs.append(RepairNote(
+                                f"coerced {param_name}: {type(original).__name__} → {target_type}",
+                                "type_coerce",
+                            ))
             tool_input = coerced
 
         # --- 4. Strip unknown parameters ---
@@ -349,7 +406,9 @@ class ToolCallValidator:
             extra = set(tool_input.keys()) - known
             if extra:
                 tool_input = {k: v for k, v in tool_input.items() if k in known}
-                repairs.append(f"stripped unknown params: {sorted(extra)}")
+                repairs.append(RepairNote(
+                    f"stripped unknown params: {sorted(extra)}", "strip_params",
+                ))
 
         # --- Final validation ---
         try:

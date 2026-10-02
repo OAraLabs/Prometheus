@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     tool_name    TEXT NOT NULL,
     success      INTEGER NOT NULL,
     retries      INTEGER NOT NULL DEFAULT 0,
+    repairs      INTEGER NOT NULL DEFAULT 0,
     latency_ms   REAL NOT NULL DEFAULT 0.0,
     error_type   TEXT,
     error_detail TEXT
@@ -36,6 +37,7 @@ def _insert(
     model: str = "qwen2.5",
     success: int = 1,
     retries: int = 0,
+    repairs: int = 0,
     latency_ms: float = 100.0,
     error_type: str | None = None,
     error_detail: str | None = None,
@@ -44,9 +46,9 @@ def _insert(
     conn.execute(
         """
         INSERT INTO tool_calls
-          (id, timestamp, model, tool_name, success, retries, latency_ms,
-           error_type, error_detail)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, timestamp, model, tool_name, success, retries, repairs,
+           latency_ms, error_type, error_detail)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             uuid4().hex,
@@ -55,6 +57,7 @@ def _insert(
             tool_name,
             success,
             retries,
+            repairs,
             latency_ms,
             error_type,
             error_detail,
@@ -97,6 +100,7 @@ class TestEmptyDB:
         assert stats["circuit_breaker_trips"] == 0
         assert stats["lucky_guesses"] == 0
         assert stats["adapter_repairs"] == 0
+        assert stats["validation_failures"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -195,16 +199,33 @@ class TestPopulatedDB:
         assert stats["lucky_guesses"] == 2
         dash.close()
 
-    def test_adapter_repairs(self, db_path: Path):
+    def test_adapter_repairs_counts_repairs_not_retries(self, db_path: Path):
+        """`retries > 0` marks a call that FAILED validation and could not be
+        repaired (the loop writes success=0, retries=1). Counting those as
+        "adapter_repairs" reported failures as repairs (WP-X.54 audit Q1):
+        a repaired call is one with `repairs > 0`."""
         conn = sqlite3.connect(str(db_path))
         _insert(conn, retries=0)
-        _insert(conn, retries=1)
-        _insert(conn, retries=3)
+        _insert(conn, success=0, retries=1, error_type="validation_failed")
+        _insert(conn, success=0, retries=3, error_type="validation_failed")
+        _insert(conn, repairs=1)
         conn.close()
 
         dash = ToolDashboard(db_path=db_path)
         stats = dash.get_stats(hours=24)
-        assert stats["adapter_repairs"] == 2
+        assert stats["adapter_repairs"] == 1
+        assert stats["validation_failures"] == 2
+        dash.close()
+
+    def test_transition_rows_are_neither(self, db_path: Path):
+        conn = sqlite3.connect(str(db_path))
+        _insert(conn, tool_name="_loop_transition", retries=1, repairs=1)
+        conn.close()
+
+        dash = ToolDashboard(db_path=db_path)
+        stats = dash.get_stats(hours=24)
+        assert stats["adapter_repairs"] == 0
+        assert stats["validation_failures"] == 0
         dash.close()
 
     def test_total_calls_and_overall_success(self, db_path: Path):

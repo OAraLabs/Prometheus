@@ -138,6 +138,7 @@ class CodingSession:
         suppress_thinking: bool | None = False,  # coding turns THINK by default
         acceptance_timeout_seconds: float = 240.0,
         control_dir: str | None = None,  # Loop Manager Sprint 2 — mid-run control (off if None)
+        training_config: dict[str, Any] | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -149,6 +150,9 @@ class CodingSession:
         self._suppress_thinking = suppress_thinking
         self._acceptance_timeout = acceptance_timeout_seconds
         self._control = RunControl(control_dir)
+        # The run's `training:` block, from the config the runner loaded. None
+        # means the caller owns pair capture and the session leaves it alone.
+        self._training_config = training_config
         self._policy = IterateToGreenPolicy(
             acceptance_command=task.acceptance_command,
             max_rounds=max_rounds,
@@ -248,8 +252,36 @@ class CodingSession:
     # The run
     # ------------------------------------------------------------------
 
+    def _configure_pair_capture(self) -> None:
+        """Set up repair-pair capture for this run (WP-X.54 T-2).
+
+        A coding run is its own process (``oara code``), and capture's setup
+        call lived only in the daemon's boot and the gym harvest, so every
+        capture here returned at its no-store guard: about 135 "validation
+        failed, then succeeded" arcs from local-model coding runs became no
+        pair. ``configure`` honours ``capture_enabled``. A store that cannot
+        be opened is logged and recorded, never a failed run.
+        """
+        if self._training_config is None:
+            return
+        from prometheus.learning import pair_capture
+        try:
+            pair_capture.configure(self._training_config)
+        except Exception as exc:
+            log.error("coding run: pair capture setup failed; capturing nothing",
+                      exc_info=True)
+            try:
+                if self._telemetry is not None:
+                    self._telemetry.record_silent_failure(
+                        subsystem="pair_capture", operation="configure", exc=exc,
+                        context={"task_id": self._task.task_id},
+                    )
+            except Exception:
+                log.exception("coding run: silent-failure recording also failed")
+
     async def run(self) -> CodingRunReport:
         started = time.monotonic()
+        self._configure_pair_capture()
         await self._prepare_branch()
 
         context = LoopContext(
