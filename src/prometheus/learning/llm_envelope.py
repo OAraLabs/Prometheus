@@ -180,6 +180,13 @@ class LLMCallEnvelope:
         self._telemetry = telemetry
         self._on_failure = on_failure
         self._redact_prompts = redact_prompts
+        # The subsystem_runs id of the usage row the most recent ``stream()``
+        # wrote (telemetry v2, WP-X.54 T-3): a ``responses`` row links to its
+        # round's ``loop_round`` row by it (ruling 1). None until a stream has
+        # written one, and reset when the next stream starts. Read it from the
+        # task that drove the stream, after the stream ended; the agent loop
+        # makes one envelope per run, so concurrent turns never share it.
+        self.last_run_id: str | None = None
 
     # ------------------------------------------------------------------
     # Primary entry point
@@ -324,6 +331,7 @@ class LLMCallEnvelope:
             suppress = getattr(provider, "_suppress_thinking", None)
         thinking: bool | None = None if suppress is None else not suppress
 
+        self.last_run_id = None
         started = time.time()
         usage_in: int | None = None
         usage_out: int | None = None
@@ -376,7 +384,7 @@ class LLMCallEnvelope:
                         "LLMCallEnvelope.stream: silent-failure write failed",
                         exc_info=True,
                     )
-            self._record_usage_row(
+            self.last_run_id = self._record_usage_row(
                 operation=operation,
                 outcome="failed",
                 duration_ms=duration_ms,
@@ -395,7 +403,7 @@ class LLMCallEnvelope:
 
         duration_ms = (time.time() - started) * 1000.0
         if not complete_seen:
-            self._record_usage_row(
+            self.last_run_id = self._record_usage_row(
                 operation=operation,
                 outcome="failed",
                 duration_ms=duration_ms,
@@ -424,7 +432,7 @@ class LLMCallEnvelope:
             # row's model, which stays the requested name: a blank config name
             # otherwise leaves the round with no model at all.
             summary["served_model"] = served_model
-        self._record_usage_row(
+        self.last_run_id = self._record_usage_row(
             operation=operation,
             outcome="success",
             duration_ms=duration_ms,
@@ -458,8 +466,10 @@ class LLMCallEnvelope:
         cached_input_tokens: int | None = None,
         cache_write_tokens: int | None = None,
         provider: object | None = None,
-    ) -> None:
+    ) -> str | None:
         """Best-effort ``subsystem_runs`` write with the F1 usage columns.
+
+        Returns the row's id, or None when nothing was written.
 
         ``provider`` is the LIVE provider that served (or failed to serve) this
         call, and it is here for one reason: it is the only thing that knows
@@ -471,10 +481,10 @@ class LLMCallEnvelope:
         the row is the MODE. See ``telemetry/cost.billing_host_of``.
         """
         if self._telemetry is None:
-            return
+            return None
         billing_mode, billing_marker = self._billing_of(model, provider)
         try:
-            self._telemetry.record_run(
+            return self._telemetry.record_run(
                 subsystem=self._subsystem,
                 operation=operation,
                 outcome=outcome,
@@ -497,6 +507,7 @@ class LLMCallEnvelope:
                 self._subsystem, operation,
                 exc_info=True,
             )
+            return None
 
     # ------------------------------------------------------------------
     # Explicit message-shape validator (used by tests + future callers)

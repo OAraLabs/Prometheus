@@ -328,8 +328,14 @@ def capture_pair(
     chosen: dict[str, Any],
     meta: dict[str, Any] | None = None,
     telemetry: Any = None,
+    repair_kind: str | None = None,
 ) -> None:
-    """Fail-loud-but-non-blocking capture. Never raises into the turn."""
+    """Fail-loud-but-non-blocking capture. Never raises into the turn.
+
+    ``repair_kind`` is the adapter repair's kind (WP-X.54 T-2's vocabulary,
+    folded by the loop when a call took several), stored in its own column
+    and outside the dedupe hash, as ``add_pair`` stores it.
+    """
     if _store is None:
         return
     effective_source = pair_source
@@ -350,6 +356,7 @@ def capture_pair(
             rejected=rejected,
             chosen=chosen,
             meta=meta,
+            repair_kind=repair_kind,
         )
     except Exception as exc:
         log.error("pair capture failed (%s/%s): %s", pair_source, tool_name, exc,
