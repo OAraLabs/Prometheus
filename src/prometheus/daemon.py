@@ -52,7 +52,7 @@ from prometheus.__main__ import (
     create_security_gate,
     create_tool_registry,
 )
-from prometheus.telemetry.tracker import ToolCallTelemetry
+from prometheus.telemetry.tracker import TELEMETRY_OFF_NOTE, ToolCallTelemetry
 from prometheus.tools.base import ToolRegistry
 from prometheus.engine.fallback import build_fallback_target
 
@@ -259,6 +259,34 @@ async def _detect_loaded_model_with_retry(
             )
             await sleep(attempt)
     return detected
+
+
+def build_daemon_telemetry(config: dict[str, Any]) -> ToolCallTelemetry | None:
+    """The daemon's one tracker — or None when ``infrastructure.telemetry_enabled``
+    is false, registered process-wide either way.
+
+    Off means NO tracker (ruled 2026-10-02), the same as the CLI and the coding
+    entry point: every consumer guards None, and a tracker that "writes nothing"
+    would need that check in every writer, forever. The off flag is recorded
+    beside the handle so /health and /events can say "off" rather than
+    "not wired — restart".
+    """
+    from prometheus.telemetry.tracker import (
+        set_telemetry_handle,
+        set_telemetry_off,
+        telemetry_enabled,
+    )
+
+    telemetry = ToolCallTelemetry() if telemetry_enabled(config) else None
+    set_telemetry_off(telemetry is None)
+    set_telemetry_handle(telemetry)
+    if telemetry is None:
+        logger.info(
+            "Telemetry: off (infrastructure.telemetry_enabled: false) — no "
+            "telemetry.db writes; /health, /events, the activity feed, the "
+            "trajectory exporter, GEPA and cloud cost are unavailable",
+        )
+    return telemetry
 
 
 def _wire_skill_creator(
@@ -877,23 +905,26 @@ async def run_daemon(args: argparse.Namespace) -> None:
         logger.warning("Backend registry: boot probe did not finish cleanly: %s", exc)
     logger.info("%s", backend_registry.render_table())
 
+    # Telemetry — shared instance for AgentLoop and SENTINEL digest, or None
+    # when infrastructure.telemetry_enabled is false.
+    # Wired BEFORE build_tool_registry so per-tool registration failures
+    # (Phase 2 — see prometheus.tools.registration.try_register) land in
+    # ``subsystem_runs`` and surface to /health on the very first startup.
+    # Sprint 4 A3: also exposed to gateway/commands.py for the /health command.
+    telemetry = build_daemon_telemetry(config)
+
     # Cost tracker for cloud providers
     cost_tracker = None
     if ProviderRegistry.is_cloud(model_config.get("provider", "")):
         from prometheus.telemetry.cost import CostTracker, set_cost_tracker_handle
-        cost_tracker = CostTracker()
+        # Telemetry's usage seam is its only feed: with telemetry off, $0.00
+        # would be a claim, so /status says "unavailable" instead.
+        cost_tracker = CostTracker(
+            unavailable_reason=TELEMETRY_OFF_NOTE if telemetry is None else None,
+        )
         # Register the process-wide handle so the telemetry usage seam feeds it
         # (audit: was instantiated + reported but never .record()'d → always $0).
         set_cost_tracker_handle(cost_tracker)
-
-    # Telemetry — shared instance for AgentLoop and SENTINEL digest.
-    # Wired BEFORE build_tool_registry so per-tool registration failures
-    # (Phase 2 — see prometheus.tools.registration.try_register) land in
-    # ``subsystem_runs`` and surface to /health on the very first startup.
-    telemetry = ToolCallTelemetry()
-    # Sprint 4 A3: expose to gateway/commands.py for the /health command.
-    from prometheus.telemetry.tracker import set_telemetry_handle
-    set_telemetry_handle(telemetry)
 
     # Repair-pair flywheel: every adapter repair / retry-success /
     # self-correction becomes a training pair in training.db. Local capture
@@ -2037,14 +2068,17 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     decay_rate=sentinel_config.get("confidence_decay_rate", 0.05),
                 )
 
+            # The digest reads telemetry unguarded: with telemetry off it would
+            # raise every dream cycle, so it is not built.
             tel_digest = None
-            try:
-                tel_digest = TelemetryDigest(
-                    telemetry,
-                    period_hours=sentinel_config.get("digest_lookback_hours", 24),
-                )
-            except Exception:
-                logger.debug("SENTINEL: telemetry digest not available")
+            if telemetry is not None:
+                try:
+                    tel_digest = TelemetryDigest(
+                        telemetry,
+                        period_hours=sentinel_config.get("digest_lookback_hours", 24),
+                    )
+                except Exception:
+                    logger.debug("SENTINEL: telemetry digest not available")
 
             knowledge_synth = None
             if "memory_store" in dir() and sentinel_config.get("synthesis_enabled", True):
@@ -2160,7 +2194,14 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # downstream consumers (e.g. GEPAEngine) can react to fresh exports.
     try:
         trajectory_cfg = config.get("trajectory_export", {})
-        if trajectory_cfg.get("enabled", False):
+        # Golden traces come out of telemetry.db: with telemetry off there is
+        # nothing to export, and the exporter calls telemetry unguarded.
+        if trajectory_cfg.get("enabled", False) and telemetry is None:
+            logger.warning(
+                "GoldenTraceExporter: not started — trajectory_export.enabled "
+                "is true but %s", TELEMETRY_OFF_NOTE,
+            )
+        if trajectory_cfg.get("enabled", False) and telemetry is not None:
             from prometheus.sentinel.golden_trace_exporter import GoldenTraceExporter
             # The conversation store is what makes an exported trace
             # trainable: telemetry records the tool call, the LCM store holds
@@ -2374,7 +2415,19 @@ async def run_daemon(args: argparse.Namespace) -> None:
     gepa_engine = None
     try:
         learning_cfg = config.get("learning", {}) or {}
-        if learning_cfg.get("gepa_enabled", False) and "signal_bus" in dir():
+        # GEPA's evidence is skill loads in telemetry.db. Handed no tracker it
+        # opens that file BY PATH and works on frozen rows — so with telemetry
+        # off it is not built at all.
+        if learning_cfg.get("gepa_enabled", False) and telemetry is None:
+            logger.warning(
+                "GEPAEngine: not started — learning.gepa_enabled is true but %s",
+                TELEMETRY_OFF_NOTE,
+            )
+        if (
+            learning_cfg.get("gepa_enabled", False)
+            and "signal_bus" in dir()
+            and telemetry is not None
+        ):
             from prometheus.learning.gepa import GEPAOptimizer
             from prometheus.sentinel.gepa_engine import GEPAEngine
 

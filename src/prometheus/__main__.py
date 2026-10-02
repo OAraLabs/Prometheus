@@ -1144,8 +1144,10 @@ def run_coding_task(args) -> int:
         model_cfg, config.get("adapter"), template=_detect_tool_template_or_none(model_cfg),
     )
 
+    from prometheus.telemetry.tracker import telemetry_enabled
+
     telemetry = None
-    if config.get("infrastructure", {}).get("telemetry_enabled", True):
+    if telemetry_enabled(config):
         try:
             from prometheus.telemetry.tracker import ToolCallTelemetry
             telemetry = ToolCallTelemetry()
@@ -1997,8 +1999,10 @@ def main() -> None:
     system_prompt = build_system_prompt(config)
 
     # Telemetry (optional)
+    from prometheus.telemetry.tracker import telemetry_enabled
+
     telemetry = None
-    if config.get("infrastructure", {}).get("telemetry_enabled", True):
+    if telemetry_enabled(config):
         try:
             from prometheus.telemetry.tracker import ToolCallTelemetry
             telemetry = ToolCallTelemetry()

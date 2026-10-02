@@ -614,12 +614,18 @@ def create_app(
     # run and fans coding_round/coding_complete/coding_stream_error over the WS
     # bridge. Read-only; started by POST /api/code, stopped by the run's
     # task_completed/task_failed event (subscribed here).
+    # With telemetry off there is no stream: the coding subprocess reads the
+    # same key and writes no rows, and the tail's connect would CREATE
+    # telemetry.db. POST /api/code already handles a missing stream.
     from prometheus.coding.livestream import CodingLiveStream, DEFAULT_DB_PATH
-    coding_stream = CodingLiveStream(
-        signal_bus,
-        db_path=getattr(telemetry, "db_path", DEFAULT_DB_PATH),
-    )
-    coding_stream.subscribe_lifecycle()
+    from prometheus.telemetry.tracker import telemetry_is_off
+    coding_stream: CodingLiveStream | None = None
+    if not telemetry_is_off():
+        coding_stream = CodingLiveStream(
+            signal_bus,
+            db_path=getattr(telemetry, "db_path", DEFAULT_DB_PATH),
+        )
+        coding_stream.subscribe_lifecycle()
     app.state.coding_stream = coding_stream
 
     # ── Boot-SHA staleness (merged-but-dark detector) ───────────────
@@ -1852,9 +1858,13 @@ def create_app(
 
     @app.get("/api/telemetry")
     async def get_telemetry():
+        # `enabled` tells "switched off" apart from "nothing recorded yet":
+        # both used to be the same row of zeros.
         if not telemetry:
-            return {"total_calls": 0, "overall_success_rate": 0, "tools": {}}
-        return telemetry.report()
+            from prometheus.telemetry.tracker import telemetry_is_off
+            return {"total_calls": 0, "overall_success_rate": 0, "tools": {},
+                    "enabled": not telemetry_is_off()}
+        return {**telemetry.report(), "enabled": True}
 
     # ── Background tasks ─────────────────────────────────────────────────
     # The tasks table has been durable since June and NOTHING has ever served it. The task_*

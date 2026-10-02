@@ -21,6 +21,7 @@ import sqlite3
 import threading
 import time
 import traceback as _traceback
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -2625,3 +2626,35 @@ def set_telemetry_handle(tel: "ToolCallTelemetry | None") -> None:
 def get_telemetry_handle() -> "ToolCallTelemetry | None":
     """Return the registered telemetry handle (None if not wired)."""
     return _telemetry_singleton
+
+
+# ---------------------------------------------------------------------------
+# The off switch — ``infrastructure.telemetry_enabled: false``.
+# ---------------------------------------------------------------------------
+
+#: What a surface says instead of its data when telemetry was switched off.
+TELEMETRY_OFF_NOTE = "telemetry is off (infrastructure.telemetry_enabled: false)"
+
+# Off means NO tracker, so a None handle alone cannot tell "switched off" from
+# "never wired" — and only the second one is a fault worth a "restart" hint.
+# Kept apart from the handle so a caller that swaps and restores the handle
+# (the gym runners) never flips it.
+_telemetry_off = False
+
+
+def telemetry_enabled(config: Mapping[str, Any]) -> bool:
+    """``infrastructure.telemetry_enabled`` (default on) — the one reading of
+    the key, shared by the daemon, the CLI and the coding entry point."""
+    infra = config.get("infrastructure") or {}
+    return bool(infra.get("telemetry_enabled", True))
+
+
+def set_telemetry_off(off: bool) -> None:
+    """Record that telemetry was switched off by config (the daemon sets it)."""
+    global _telemetry_off
+    _telemetry_off = bool(off)
+
+
+def telemetry_is_off() -> bool:
+    """True when telemetry was switched off by config, not merely unwired."""
+    return _telemetry_off
