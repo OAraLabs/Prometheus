@@ -404,6 +404,57 @@ class TestRedaction:
 
 
 # --------------------------------------------------------------------------- #
+# training_pairs carry the turn and round they were captured in (Will, 10-02)
+# --------------------------------------------------------------------------- #
+
+
+class TestPairsCarryTheirTurn:
+
+    def _pairs(self, tmp_path):
+        return _rows(tmp_path / "training.db",
+                     "SELECT pair_source, turn_id, round_index, repair_kind FROM training_pairs")
+
+    def test_an_adapter_repair_pair_names_its_turn_and_round(self, tmp_path):
+        from prometheus.adapter import ModelAdapter
+
+        pair_capture.configure({"capture_enabled": True, "db_path": str(tmp_path / "training.db")})
+        db = _run(tmp_path, [_call("count_tool", "c0", count=1), _call("count_tol", "r1", count=3),
+                             _prose("done")],
+                  adapter=ModelAdapter(tier=ModelAdapter.TIER_LIGHT))
+        turn_id = _turn(db)["turn_id"]
+        [pair] = self._pairs(tmp_path)
+        assert (pair["pair_source"], pair["turn_id"], pair["round_index"]) == (
+            "levenshtein_repair", turn_id, 1)
+        # The same turn and round as the call row it pairs with.
+        [call] = [c for c in _calls(db) if c["repair_kind"]]
+        assert (call["turn_id"], call["round_index"]) == (turn_id, 1)
+
+    def test_a_retry_success_pair_names_the_turn_and_round_that_completed_it(self, tmp_path):
+        from prometheus.adapter import ModelAdapter
+
+        pair_capture.configure({"capture_enabled": True, "db_path": str(tmp_path / "training.db")})
+        db = _run(tmp_path, [_call("zzqx_nothing_like_it", "z1", count=1),
+                             _call("count_tool", "c1", count=2), _prose("done")],
+                  adapter=ModelAdapter(tier=ModelAdapter.TIER_LIGHT))
+        turn_id = _turn(db)["turn_id"]
+        [pair] = self._pairs(tmp_path)
+        assert (pair["pair_source"], pair["turn_id"], pair["round_index"]) == (
+            "retry_success", turn_id, 1)
+        assert pair["repair_kind"] is None, "nothing was repaired; the model retried"
+
+    def test_turn_and_round_stay_out_of_the_dedupe_hash(self, tmp_path):
+        pair_capture.configure({"capture_enabled": True, "db_path": str(tmp_path / "training.db")})
+        for turn_id, round_index in (("s:aa", 0), ("s:bb", 3)):
+            pair_capture.capture_pair(
+                pair_source="schema_repair", model_id="m", tool_name="count_tool",
+                context={"messages": "same"}, rejected={"name": "count_tool", "input": {"count": "1"}},
+                chosen={"name": "count_tool", "input": {"count": 1}},
+                turn_id=turn_id, round_index=round_index,
+            )
+        assert [(p["turn_id"], p["round_index"]) for p in self._pairs(tmp_path)] == [("s:aa", 0)]
+
+
+# --------------------------------------------------------------------------- #
 # Telemetry off; the writer never blocks the turn
 # --------------------------------------------------------------------------- #
 
