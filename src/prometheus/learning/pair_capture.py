@@ -329,12 +329,17 @@ def capture_pair(
     meta: dict[str, Any] | None = None,
     telemetry: Any = None,
     repair_kind: str | None = None,
+    turn_id: str | None = None,
+    round_index: int | None = None,
 ) -> None:
     """Fail-loud-but-non-blocking capture. Never raises into the turn.
 
     ``repair_kind`` is the adapter repair's kind (WP-X.54 T-2's vocabulary,
-    folded by the loop when a call took several), stored in its own column
-    and outside the dedupe hash, as ``add_pair`` stores it.
+    folded by the loop when a call took several). ``turn_id`` and
+    ``round_index`` are the telemetry v2 turn and round the pair was captured
+    in, joining it to its ``tool_calls`` and ``responses`` rows. All three
+    are stored in their own columns, outside the dedupe hash, as ``add_pair``
+    stores them.
     """
     if _store is None:
         return
@@ -357,6 +362,8 @@ def capture_pair(
             chosen=chosen,
             meta=meta,
             repair_kind=repair_kind,
+            turn_id=turn_id,
+            round_index=round_index,
         )
     except Exception as exc:
         log.error("pair capture failed (%s/%s): %s", pair_source, tool_name, exc,

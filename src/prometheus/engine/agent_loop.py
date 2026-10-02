@@ -3447,6 +3447,7 @@ def _capture_success_pairs(
                 chosen=chosen,
                 meta={"error_feedback": entry["error"]},
                 telemetry=context.telemetry,
+                **_v2_pair_fields(),
             )
         if cloud_golden_enabled():
             from prometheus.telemetry.tracker import _CLOUD_PROVIDERS
@@ -3460,6 +3461,7 @@ def _capture_success_pairs(
                     rejected=None,
                     chosen=chosen,
                     telemetry=context.telemetry,
+                    **_v2_pair_fields(),
                 )
     except Exception:
         log.error("pair capture (success path) failed", exc_info=True)
@@ -3900,6 +3902,19 @@ def _v2_call(
         tool_name, success=success, repair_log=repair_log, raw_call=raw_call,
         result_summary=result_summary,
     )}
+
+
+def _v2_pair_fields() -> dict:
+    """``training_pairs.turn_id`` / ``round_index`` for a pair captured now.
+
+    A pair is filed under the turn and round of the call that completed it
+    (the repair, or the success after a failure), the same pair of values
+    that call's ``tool_calls`` row carries. Both NULL outside a recorded turn.
+    """
+    turn = _RUN_TURN.get()
+    if turn is None:
+        return {"turn_id": None, "round_index": None}
+    return {"turn_id": turn.turn_id, "round_index": turn.round_index}
 
 
 async def _safe_execute(
@@ -4543,6 +4558,7 @@ async def _execute_tool_call(
                             meta={"repair_log": repair_log},
                             telemetry=context.telemetry,
                             repair_kind=_fold_repair_kinds(repair_log),
+                            **_v2_pair_fields(),
                         )
                 except Exception:
                     log.error("pair capture (repair path) failed", exc_info=True)
@@ -4762,6 +4778,7 @@ async def _execute_tool_call(
                         meta={"unwrap_log": _unwrap_log},
                         telemetry=context.telemetry,
                         repair_kind=_fold_repair_kinds(_unwrap_log),
+                        **_v2_pair_fields(),
                     )
             except Exception:
                 log.error("pair capture (unwrap path) failed", exc_info=True)
