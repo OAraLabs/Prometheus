@@ -215,13 +215,20 @@ def test_the_prose_column_is_redacted_before_it_is_stored(db):
 
 
 def test_the_tracker_starts_no_writer_until_one_is_asked_for(tmp_path):
-    before = {t.name for t in threading.enumerate()}
+    # Counted against what was already running: since T-3, a test earlier in
+    # the session that drove a real turn and never closed its tracker leaves
+    # its own writer alive. This test is about THIS tracker's writer.
+    def writers() -> set:
+        return {t for t in threading.enumerate() if t.name == TelemetryV2Writer.THREAD_NAME}
+
+    before = writers()
     tel = ToolCallTelemetry(tmp_path / "telemetry.db")
     tel.record(model="m", tool_name="bash", success=True)
-    assert {t.name for t in threading.enumerate()} == before
+    assert writers() == before
     w = tel.v2_writer()
     assert w is tel.v2_writer()
+    assert len(writers() - before) == 1
     w.insert("responses", _response(), stamp="ts")
     tel.close()   # closing the tracker drains its writer
     assert _rows(tmp_path / "telemetry.db", "SELECT COUNT(*) FROM responses") == [(1,)]
-    assert not any(t.name == TelemetryV2Writer.THREAD_NAME for t in threading.enumerate())
+    assert writers() - before == set()

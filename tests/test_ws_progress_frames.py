@@ -106,7 +106,7 @@ async def test_progress_pulses_during_a_silent_turn(monkeypatch):
     _fast_progress(monkeypatch)
     bridge, rec = _bridge()
 
-    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None):
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None, surface=None):
         await asyncio.Event().wait()
         yield  # pragma: no cover
 
@@ -131,7 +131,7 @@ async def test_progress_reports_phase_tool_and_chars(monkeypatch):
     _fast_progress(monkeypatch)
     bridge, rec = _bridge()
 
-    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None):
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None, surface=None):
         yield AssistantTextDelta(text="hello"), None
         yield ToolExecutionStarted("c1", "bash", {"cmd": "du -sh"}), None
         await asyncio.Event().wait()
@@ -158,7 +158,7 @@ async def test_progress_stops_when_the_turn_finishes(monkeypatch):
     _fast_progress(monkeypatch)
     bridge, rec = _bridge()
 
-    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None):
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None, surface=None):
         yield AssistantTextDelta(text="done"), None
 
     _patch_loop(monkeypatch, run_loop)
@@ -175,7 +175,7 @@ async def test_progress_stops_after_an_interrupt(monkeypatch):
     _fast_progress(monkeypatch)
     bridge, rec = _bridge()
 
-    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None):
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None, surface=None):
         yield AssistantTextDelta(text="partial"), None
         await asyncio.Event().wait()
 
@@ -200,7 +200,7 @@ async def test_agent_state_frames_carry_session_id(monkeypatch):
     _fast_progress(monkeypatch)
     bridge, rec = _bridge()
 
-    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None):
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None, surface=None):
         yield AssistantTextDelta(text="hi"), None
 
     _patch_loop(monkeypatch, run_loop)
@@ -230,7 +230,7 @@ async def test_error_frame_is_session_scoped_and_actionable(monkeypatch):
         response = _Resp()
         request = _Req()
 
-    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None):
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None, surface=None):
         raise Boom("Client error '400 Bad Request' for url 'https://api.anthropic.com/v1/messages'")
         yield  # pragma: no cover
 
@@ -264,7 +264,7 @@ async def test_tool_frames_carry_session_id(monkeypatch):
     _fast_progress(monkeypatch)
     bridge, rec = _bridge()
 
-    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None):
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None, surface=None):
         yield ToolExecutionStarted("c1", "bash", {"cmd": "ls"}), None
         yield ToolExecutionCompleted("c1", "bash", False, "ok"), None
 
@@ -307,7 +307,7 @@ async def test_chat_done_carries_row_id_when_persist_reports_one(monkeypatch):
     _fast_progress(monkeypatch)
     bridge, rec = _bridge()
 
-    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None):
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None, surface=None):
         yield AssistantTextDelta(text="done"), None
 
     _patch_loop(monkeypatch, run_loop)
@@ -327,7 +327,7 @@ async def test_chat_done_omits_row_id_when_persist_reports_none(monkeypatch):
     _fast_progress(monkeypatch)
     bridge, rec = _bridge()
 
-    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None):
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None, surface=None):
         yield AssistantTextDelta(text="done"), None
 
     _patch_loop(monkeypatch, run_loop)

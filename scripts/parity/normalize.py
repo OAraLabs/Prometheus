@@ -225,6 +225,18 @@ ORDINAL_FIELD_RULES: list[OrdinalFieldRule] = [
         fields=frozenset({"turn_id"}),
         label="turn",
     ),
+    OrdinalFieldRule(
+        name="coding-run-id",
+        family="observable",
+        replaces="the value of any column/key named coding_run_id (telemetry v2: turns), "
+                 "as <codingrun:N> by first appearance",
+        why="the coding runner's sandbox instance id, f'{task_id}-{uuid4().hex[:8]}' "
+            "(__main__.py, run_coding_task) — random by construction",
+        cost="the task-id prefix inside it; the turn's session_id (coding:<task_id>) is "
+             "still compared, and the ordinal keeps which episodes share a run comparable",
+        fields=frozenset({"coding_run_id"}),
+        label="codingrun",
+    ),
 ]
 
 TOOLU = PatternRule(
@@ -305,15 +317,18 @@ KEYVALUE_RULES: list[KeyValueRule] = [
     KeyValueRule(
         name="schema-meta-stamps",
         family="observable",
-        replaces="telemetry.db schema_meta values for keys created_at, billing_recorded_since "
-                 "and telemetry_v2_since",
-        why="all three are the wall-clock moment the telemetry DB was created (first boot); "
-            "telemetry_v2_since is stamped from time.time() on first open, as "
-            "billing_recorded_since is (telemetry/tracker.py)",
-        cost="when the DB was created; the other schema_meta keys (versions) are compared, "
-             "and so is whether each key is present",
+        replaces="telemetry.db schema_meta values for keys created_at, billing_recorded_since, "
+                 "telemetry_v2_since and telemetry_v2_capture_since",
+        why="the first three are the wall-clock moment the telemetry DB was created (first "
+            "boot); telemetry_v2_since is stamped from time.time() on first open, as "
+            "billing_recorded_since is (telemetry/tracker.py). telemetry_v2_capture_since is "
+            "the wall-clock moment the loop first wrote v2 rows (the first turn; "
+            "telemetry/writer.py stamp_meta)",
+        cost="when the DB was created and when capture began; the other schema_meta keys "
+             "(versions) are compared, and so is whether each key is present",
         table="schema_meta",
-        keys=frozenset({"created_at", "billing_recorded_since", "telemetry_v2_since"}),
+        keys=frozenset({"created_at", "billing_recorded_since", "telemetry_v2_since",
+                        "telemetry_v2_capture_since"}),
         placeholder="<time>",
     ),
 ]

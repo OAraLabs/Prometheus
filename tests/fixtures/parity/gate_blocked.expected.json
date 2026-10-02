@@ -923,7 +923,46 @@
       "surface",
       "forced_tool_choice"
      ],
-     "rows": []
+     "rows": [
+      [
+       1,
+       "<time>",
+       "desktop:parity-gate",
+       "<turn:1>",
+       0,
+       "<uuid:5>",
+       "llama_cpp",
+       "light",
+       32768,
+       "0ac69752b6f71969",
+       "tool_call",
+       2,
+       0,
+       null,
+       "agent",
+       "beacon",
+       null
+      ],
+      [
+       2,
+       "<time>",
+       "desktop:parity-gate",
+       "<turn:1>",
+       1,
+       "<uuid:6>",
+       "llama_cpp",
+       "light",
+       32768,
+       "0ac69752b6f71969",
+       "prose",
+       0,
+       600,
+       "Both calls were refused by the security gate, as expected:\n\n1. **`read_file` on `/etc/prometheus-parity.conf`** — rejected with `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'`. The tool blocks access to the `/etc` prefix entirely.\n2. **`bash` with `echo 'DROP TABLE parity_canary'`** — rejected with `Command matches deny list entry: 'DROP TABLE'`. The deny list pattern-matched the literal SQL fragment before any execution.\n\nNo file was read and no command was executed. The gate fired on path prefix and command-pattern checks respectively — the expected behavior for this test.",
+       "agent",
+       "beacon",
+       null
+      ]
+     ]
     },
     "schema_meta": {
      "columns": [
@@ -954,6 +993,10 @@
       [
        "schema_version",
        "3"
+      ],
+      [
+       "telemetry_v2_capture_since",
+       "<time>"
       ]
      ]
     },
@@ -1005,7 +1048,7 @@
      ],
      "rows": [
       [
-       "<uuid:5>",
+       "<uuid:7>",
        "<time>",
        "tool_registration",
        "TaskCreateTool",
@@ -1030,7 +1073,7 @@
        null
       ],
       [
-       "<uuid:6>",
+       "<uuid:8>",
        "<time>",
        "tool_registration",
        "GitHubSearchTool",
@@ -1055,7 +1098,7 @@
        null
       ],
       [
-       "<uuid:7>",
+       "<uuid:9>",
        "<time>",
        "tool_registration",
        "SymbioteScoutTool",
@@ -1080,7 +1123,7 @@
        null
       ],
       [
-       "<uuid:8>",
+       "<uuid:10>",
        "<time>",
        "tool_registration",
        "SymbioteHarvestTool",
@@ -1105,7 +1148,7 @@
        null
       ],
       [
-       "<uuid:9>",
+       "<uuid:11>",
        "<time>",
        "tool_registration",
        "SymbioteGraftTool",
@@ -1130,7 +1173,7 @@
        null
       ],
       [
-       "<uuid:10>",
+       "<uuid:12>",
        "<time>",
        "tool_registration",
        "SymbioteStatusTool",
@@ -1155,7 +1198,7 @@
        null
       ],
       [
-       "<uuid:11>",
+       "<uuid:13>",
        "<time>",
        "tool_registration",
        "SkillTool",
@@ -1180,7 +1223,7 @@
        null
       ],
       [
-       "<uuid:12>",
+       "<uuid:14>",
        "<time>",
        "tool_registration",
        "MemoryTool",
@@ -1205,7 +1248,7 @@
        null
       ],
       [
-       "<uuid:13>",
+       "<uuid:15>",
        "<time>",
        "tool_registration",
        "TodoWriteTool",
@@ -1230,7 +1273,7 @@
        null
       ],
       [
-       "<uuid:14>",
+       "<uuid:16>",
        "<time>",
        "tool_registration",
        "VaultSearchTool",
@@ -1255,7 +1298,7 @@
        null
       ],
       [
-       "<uuid:15>",
+       "<uuid:17>",
        "<time>",
        "tool_registration",
        "VaultReadTool",
@@ -1280,7 +1323,7 @@
        null
       ],
       [
-       "<uuid:16>",
+       "<uuid:18>",
        "<time>",
        "tool_registration",
        "AnatomyTool",
@@ -1305,7 +1348,7 @@
        null
       ],
       [
-       "<uuid:17>",
+       "<uuid:19>",
        "<time>",
        "tool_registration",
        "BrowserTool",
@@ -1330,7 +1373,7 @@
        null
       ],
       [
-       "<uuid:18>",
+       "<uuid:20>",
        "<time>",
        "tool_registration",
        "SessionsListTool",
@@ -1355,7 +1398,7 @@
        null
       ],
       [
-       "<uuid:19>",
+       "<uuid:21>",
        "<time>",
        "tool_registration",
        "SessionsSendTool",
@@ -1380,7 +1423,7 @@
        null
       ],
       [
-       "<uuid:20>",
+       "<uuid:22>",
        "<time>",
        "tool_registration",
        "SessionsSpawnTool",
@@ -1405,7 +1448,7 @@
        null
       ],
       [
-       "<uuid:21>",
+       "<uuid:23>",
        "<time>",
        "tool_registration",
        "TaskGetTool",
@@ -1430,7 +1473,7 @@
        null
       ],
       [
-       "<uuid:22>",
+       "<uuid:24>",
        "<time>",
        "tool_registration",
        "TaskListTool",
@@ -1455,7 +1498,7 @@
        null
       ],
       [
-       "<uuid:23>",
+       "<uuid:25>",
        "<time>",
        "tool_registration",
        "TaskUpdateTool",
@@ -1480,7 +1523,7 @@
        null
       ],
       [
-       "<uuid:24>",
+       "<uuid:26>",
        "<time>",
        "tool_registration",
        "TaskStopTool",
@@ -1505,7 +1548,7 @@
        null
       ],
       [
-       "<uuid:25>",
+       "<uuid:27>",
        "<time>",
        "tool_registration",
        "TaskOutputTool",
@@ -1530,7 +1573,7 @@
        null
       ],
       [
-       "<uuid:26>",
+       "<uuid:28>",
        "<time>",
        "tool_registration",
        "ImageGenerateTool",
@@ -1555,7 +1598,7 @@
        null
       ],
       [
-       "<uuid:27>",
+       "<uuid:29>",
        "<time>",
        "tool_registration",
        "KlingVideoTool",
@@ -1580,7 +1623,7 @@
        null
       ],
       [
-       "<uuid:28>",
+       "<uuid:30>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -1608,7 +1651,7 @@
        null
       ],
       [
-       "<uuid:29>",
+       "<uuid:5>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1633,7 +1676,7 @@
        null
       ],
       [
-       "<uuid:30>",
+       "<uuid:6>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1737,12 +1780,12 @@
        "desktop:parity-gate",
        null,
        "<node>",
+       "<turn:1>",
+       0,
+       "2FbvJ4ZaM963ljag9ZRlZzC9pg5bBbwy",
        null,
        null,
-       null,
-       null,
-       null,
-       null,
+       0,
        null
       ],
       [
@@ -1770,12 +1813,12 @@
        "desktop:parity-gate",
        null,
        "<node>",
+       "<turn:1>",
+       0,
+       "BSjXkm1yNBC2bSzWg7y9cXgckofUNgFk",
        null,
        null,
-       null,
-       null,
-       null,
-       null,
+       0,
        null
       ],
       [
@@ -1796,8 +1839,8 @@
        "desktop:parity-gate",
        null,
        "<node>",
-       null,
-       null,
+       "<turn:1>",
+       0,
        null,
        null,
        null,
@@ -1813,7 +1856,29 @@
       "tool_count",
       "created_at"
      ],
-     "rows": []
+     "rows": [
+      [
+       "0ac69752b6f71969",
+       {
+        "$json": [
+         "bash",
+         "edit_file",
+         "glob",
+         "grep",
+         "memory",
+         "read_file",
+         "skill",
+         "task_create",
+         "tool_search",
+         "web_fetch",
+         "web_search",
+         "write_file"
+        ]
+       },
+       12,
+       "<time>"
+      ]
+     ]
     },
     "turns": {
      "columns": [
@@ -1838,7 +1903,39 @@
       "outcome_source",
       "outcome_at"
      ],
-     "rows": []
+     "rows": [
+      [
+       "<turn:1>",
+       "desktop:parity-gate",
+       null,
+       "beacon",
+       "agent",
+       "<time>",
+       "<time>",
+       2,
+       12569,
+       205,
+       {
+        "$json": [
+         "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
+        ]
+       },
+       {
+        "$json": [
+         "read_file",
+         "bash"
+        ]
+       },
+       0,
+       1,
+       "prose",
+       null,
+       null,
+       null,
+       null,
+       null
+      ]
+     ]
     }
    }
   }

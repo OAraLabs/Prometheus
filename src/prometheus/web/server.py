@@ -4605,6 +4605,7 @@ def create_app(
                 # that would change the permission origin and the router's
                 # override lookup for this route, which stays 'system'.
                 record_session_id=f"web:{session_id}",
+                surface="rest",
             )
             session.add_result_messages(result.messages, pre_len)
             return {

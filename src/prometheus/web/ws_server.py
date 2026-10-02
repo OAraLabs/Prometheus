@@ -1241,7 +1241,8 @@ class WebSocketBridge:
             messages = session.get_messages()
             original_len = len(messages)
             async for event, _usage in run_loop(
-                self.loop_context, messages, mode=mode, session_id=session_id, tool_choice=tool_choice
+                self.loop_context, messages, mode=mode, session_id=session_id, tool_choice=tool_choice,
+                surface="beacon",
             ):
                 if _usage is not None:
                     last_usage = _usage

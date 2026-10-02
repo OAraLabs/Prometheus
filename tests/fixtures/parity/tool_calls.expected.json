@@ -998,7 +998,65 @@
       "surface",
       "forced_tool_choice"
      ],
-     "rows": []
+     "rows": [
+      [
+       1,
+       "<time>",
+       "desktop:parity-tools",
+       "<turn:1>",
+       0,
+       "<uuid:7>",
+       "llama_cpp",
+       "light",
+       32768,
+       "0ac69752b6f71969",
+       "tool_call",
+       1,
+       0,
+       null,
+       "agent",
+       "beacon",
+       null
+      ],
+      [
+       2,
+       "<time>",
+       "desktop:parity-tools",
+       "<turn:1>",
+       1,
+       "<uuid:8>",
+       "llama_cpp",
+       "light",
+       32768,
+       "0ac69752b6f71969",
+       "tool_call",
+       1,
+       0,
+       null,
+       "agent",
+       "beacon",
+       null
+      ],
+      [
+       3,
+       "<time>",
+       "desktop:parity-tools",
+       "<turn:1>",
+       2,
+       "<uuid:9>",
+       "llama_cpp",
+       "light",
+       32768,
+       "0ac69752b6f71969",
+       "prose",
+       0,
+       110,
+       "There are **11 sprockets** in inventory.txt (line 3).\n\nFull inventory:\n- widgets: 7\n- gears: 3\n- sprockets: 11",
+       "agent",
+       "beacon",
+       null
+      ]
+     ]
     },
     "schema_meta": {
      "columns": [
@@ -1029,6 +1087,10 @@
       [
        "schema_version",
        "3"
+      ],
+      [
+       "telemetry_v2_capture_since",
+       "<time>"
       ]
      ]
     },
@@ -1080,7 +1142,7 @@
      ],
      "rows": [
       [
-       "<uuid:7>",
+       "<uuid:10>",
        "<time>",
        "tool_registration",
        "TaskCreateTool",
@@ -1105,7 +1167,7 @@
        null
       ],
       [
-       "<uuid:8>",
+       "<uuid:11>",
        "<time>",
        "tool_registration",
        "GitHubSearchTool",
@@ -1130,7 +1192,7 @@
        null
       ],
       [
-       "<uuid:9>",
+       "<uuid:12>",
        "<time>",
        "tool_registration",
        "SymbioteScoutTool",
@@ -1155,7 +1217,7 @@
        null
       ],
       [
-       "<uuid:10>",
+       "<uuid:13>",
        "<time>",
        "tool_registration",
        "SymbioteHarvestTool",
@@ -1180,7 +1242,7 @@
        null
       ],
       [
-       "<uuid:11>",
+       "<uuid:14>",
        "<time>",
        "tool_registration",
        "SymbioteGraftTool",
@@ -1205,7 +1267,7 @@
        null
       ],
       [
-       "<uuid:12>",
+       "<uuid:15>",
        "<time>",
        "tool_registration",
        "SymbioteStatusTool",
@@ -1230,7 +1292,7 @@
        null
       ],
       [
-       "<uuid:13>",
+       "<uuid:16>",
        "<time>",
        "tool_registration",
        "SkillTool",
@@ -1255,7 +1317,7 @@
        null
       ],
       [
-       "<uuid:14>",
+       "<uuid:17>",
        "<time>",
        "tool_registration",
        "MemoryTool",
@@ -1280,7 +1342,7 @@
        null
       ],
       [
-       "<uuid:15>",
+       "<uuid:18>",
        "<time>",
        "tool_registration",
        "TodoWriteTool",
@@ -1305,7 +1367,7 @@
        null
       ],
       [
-       "<uuid:16>",
+       "<uuid:19>",
        "<time>",
        "tool_registration",
        "VaultSearchTool",
@@ -1330,7 +1392,7 @@
        null
       ],
       [
-       "<uuid:17>",
+       "<uuid:20>",
        "<time>",
        "tool_registration",
        "VaultReadTool",
@@ -1355,7 +1417,7 @@
        null
       ],
       [
-       "<uuid:18>",
+       "<uuid:21>",
        "<time>",
        "tool_registration",
        "AnatomyTool",
@@ -1380,7 +1442,7 @@
        null
       ],
       [
-       "<uuid:19>",
+       "<uuid:22>",
        "<time>",
        "tool_registration",
        "BrowserTool",
@@ -1405,7 +1467,7 @@
        null
       ],
       [
-       "<uuid:20>",
+       "<uuid:23>",
        "<time>",
        "tool_registration",
        "SessionsListTool",
@@ -1430,7 +1492,7 @@
        null
       ],
       [
-       "<uuid:21>",
+       "<uuid:24>",
        "<time>",
        "tool_registration",
        "SessionsSendTool",
@@ -1455,7 +1517,7 @@
        null
       ],
       [
-       "<uuid:22>",
+       "<uuid:25>",
        "<time>",
        "tool_registration",
        "SessionsSpawnTool",
@@ -1480,7 +1542,7 @@
        null
       ],
       [
-       "<uuid:23>",
+       "<uuid:26>",
        "<time>",
        "tool_registration",
        "TaskGetTool",
@@ -1505,7 +1567,7 @@
        null
       ],
       [
-       "<uuid:24>",
+       "<uuid:27>",
        "<time>",
        "tool_registration",
        "TaskListTool",
@@ -1530,7 +1592,7 @@
        null
       ],
       [
-       "<uuid:25>",
+       "<uuid:28>",
        "<time>",
        "tool_registration",
        "TaskUpdateTool",
@@ -1555,7 +1617,7 @@
        null
       ],
       [
-       "<uuid:26>",
+       "<uuid:29>",
        "<time>",
        "tool_registration",
        "TaskStopTool",
@@ -1580,7 +1642,7 @@
        null
       ],
       [
-       "<uuid:27>",
+       "<uuid:30>",
        "<time>",
        "tool_registration",
        "TaskOutputTool",
@@ -1605,7 +1667,7 @@
        null
       ],
       [
-       "<uuid:28>",
+       "<uuid:31>",
        "<time>",
        "tool_registration",
        "ImageGenerateTool",
@@ -1630,7 +1692,7 @@
        null
       ],
       [
-       "<uuid:29>",
+       "<uuid:32>",
        "<time>",
        "tool_registration",
        "KlingVideoTool",
@@ -1655,7 +1717,7 @@
        null
       ],
       [
-       "<uuid:30>",
+       "<uuid:33>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -1683,7 +1745,7 @@
        null
       ],
       [
-       "<uuid:31>",
+       "<uuid:7>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1708,7 +1770,7 @@
        null
       ],
       [
-       "<uuid:32>",
+       "<uuid:8>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1733,7 +1795,7 @@
        null
       ],
       [
-       "<uuid:33>",
+       "<uuid:9>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1880,13 +1942,13 @@
         }
        },
        "<node>",
+       "<turn:1>",
+       0,
+       "1Cf7yIh8yXHa4UmHdQ3D6HMBrKpyT87d",
        null,
        null,
-       null,
-       null,
-       null,
-       null,
-       null
+       0,
+       "inventory.txt"
       ],
       [
        "<uuid:36>",
@@ -1906,8 +1968,8 @@
        "desktop:parity-tools",
        null,
        "<node>",
-       null,
-       null,
+       "<turn:1>",
+       0,
        null,
        null,
        null,
@@ -1976,13 +2038,13 @@
         }
        },
        "<node>",
+       "<turn:1>",
+       1,
+       "LAgXC4YK1bHx73SAvW5SQa2eIXKLm6zd",
        null,
        null,
-       null,
-       null,
-       null,
-       null,
-       null
+       0,
+       "     1\twidgets: 7\n     2\tgears: 3\n     3\tsprockets: 11"
       ],
       [
        "<uuid:38>",
@@ -2002,8 +2064,8 @@
        "desktop:parity-tools",
        null,
        "<node>",
-       null,
-       null,
+       "<turn:1>",
+       1,
        null,
        null,
        null,
@@ -2019,7 +2081,29 @@
       "tool_count",
       "created_at"
      ],
-     "rows": []
+     "rows": [
+      [
+       "0ac69752b6f71969",
+       {
+        "$json": [
+         "bash",
+         "edit_file",
+         "glob",
+         "grep",
+         "memory",
+         "read_file",
+         "skill",
+         "task_create",
+         "tool_search",
+         "web_fetch",
+         "web_search",
+         "write_file"
+        ]
+       },
+       12,
+       "<time>"
+      ]
+     ]
     },
     "turns": {
      "columns": [
@@ -2044,7 +2128,39 @@
       "outcome_source",
       "outcome_at"
      ],
-     "rows": []
+     "rows": [
+      [
+       "<turn:1>",
+       "desktop:parity-tools",
+       null,
+       "beacon",
+       "agent",
+       "<time>",
+       "<time>",
+       3,
+       18745,
+       95,
+       {
+        "$json": [
+         "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
+        ]
+       },
+       {
+        "$json": [
+         "glob",
+         "read_file"
+        ]
+       },
+       0,
+       2,
+       "prose",
+       null,
+       null,
+       null,
+       null,
+       null
+      ]
+     ]
     }
    }
   }

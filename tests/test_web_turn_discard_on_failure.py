@@ -80,7 +80,8 @@ class _PoisonThen400:
     refuses.
     """
 
-    def __call__(self, ctx, messages, *, mode="agent", session_id=None, tool_choice=None):
+    def __call__(self, ctx, messages, *, mode="agent", session_id=None, tool_choice=None,
+                 surface=None):
         async def gen():
             yield AssistantTextDelta(text="checking the server…"), None
             messages.append(_tool_result_msg(f"props output:\n{POISON}\n"))
@@ -99,7 +100,8 @@ class _RecordsPrompt:
     def __init__(self) -> None:
         self.seen: list[list] = []
 
-    def __call__(self, ctx, messages, *, mode="agent", session_id=None, tool_choice=None):
+    def __call__(self, ctx, messages, *, mode="agent", session_id=None, tool_choice=None,
+                 surface=None):
         self.seen.append(list(messages))
 
         async def gen():
