@@ -540,8 +540,13 @@ class TestSurfacesAndCoding:
 
         root = Path(__file__).resolve().parents[1]
         src = (root / path).read_text()
-        calls = [m.start() for m in re.finditer(r"\b(run_async|run_loop)\(", src)
-                 if not src[max(0, m.start() - 4):m.start()].endswith("def ")]
+        # Calls only: `await ….run_async(` or `async for … in run_loop(`, not a
+        # name mentioned in a docstring or a comment.
+        calls = []
+        for m in re.finditer(r"\b(run_async|run_loop)\(", src):
+            line = src[src.rfind("\n", 0, m.start()) + 1:m.start()]
+            if "#" not in line and ("await " in line or "async for " in line):
+                calls.append(m.start())
         assert calls, f"no loop call found in {path}"
         for start in calls:
             # The call's own argument list: up to the matching close paren.

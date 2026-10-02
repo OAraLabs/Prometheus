@@ -722,6 +722,7 @@ class SlackAdapter(BasePlatformAdapter):
                 # the tools; it did not and does not.
                 # Phase 3.5: per-channel override namespace.
                 session_id=session_id,
+                surface="slack",
             )
             session.add_result_messages(result.messages, pre_len)
             session.trim(self.session_manager.MAX_SESSION_MESSAGES)
@@ -896,6 +897,7 @@ class SlackAdapter(BasePlatformAdapter):
                 tool_choice="none",
                 # Phase 3.5: diagnostic path — never inherit user overrides.
                 session_id="system",
+                surface="slack",
             )
             elapsed = time.monotonic() - t0
 

@@ -1035,7 +1035,7 @@ async def run_interactive(
         # Stream the response
         response_text = ""
         try:
-            async for event, usage in run_loop(context, messages):
+            async for event, usage in run_loop(context, messages, surface="cli"):
                 if isinstance(event, AssistantTextDelta):
                     print(event.text, end="", flush=True)
                     response_text += event.text
@@ -1226,6 +1226,9 @@ def run_coding_task(args) -> int:
         suppress_thinking=True if args.suppress_thinking else False,
         control_dir=args.control_dir,
         training_config=config.get("training") or {},
+        # Telemetry v2: the run every episode's turn belongs to. The instance
+        # id, not the task id, which a caller may reuse (audit Q2).
+        coding_run_id=sandbox_instance_id,
     )
     # A coding run must ALWAYS emit a JSON report and a verdict exit code —
     # an uncaught exception mid-run (a model-output edge case, a provider
@@ -1285,7 +1288,7 @@ async def run_once(context: LoopContext, query: str) -> None:
     messages = [ConversationMessage.from_user_text(query)]
     response_text = ""
 
-    async for event, usage in run_loop(context, messages):
+    async for event, usage in run_loop(context, messages, surface="cli"):
         if isinstance(event, AssistantTextDelta):
             print(event.text, end="", flush=True)
             response_text += event.text

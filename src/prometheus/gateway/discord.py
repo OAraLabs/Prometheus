@@ -615,6 +615,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 # the tools; it did not and does not.
                 # Per-channel override namespace (provider overrides etc.).
                 session_id=session_id,
+                surface="discord",
             )
             session.add_result_messages(result.messages, pre_len)
             session.trim(self.session_manager.MAX_SESSION_MESSAGES)
@@ -1274,6 +1275,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 tool_choice="none",
                 # Diagnostic path — never inherit user overrides.
                 session_id="system",
+                surface="discord",
             )
             elapsed = time.monotonic() - t0
             response = (result.text or "").strip()
