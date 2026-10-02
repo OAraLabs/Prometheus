@@ -5284,7 +5284,9 @@ class TestCircuitBreakerDiagnosis:
         adapter = MagicMock()
         adapter.tier = "off"
         ctx = LoopContext(
-            provider=MagicMock(),
+            # Named, not a bare MagicMock: a CLOUD provider at tier off is
+            # retried at off, never bumped (WP-X.41). This pins the local case.
+            provider=MagicMock(provider_name="llama_cpp"),
             model="test-model",
             system_prompt="",
             max_tokens=256,

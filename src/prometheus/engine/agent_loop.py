@@ -468,6 +468,8 @@ def _do_diagnose_and_recover(
     config_drift = _detect_config_drift(active_model_id)
 
     # ── Step 3: Recover (decide method, then act) ─────────────────
+    from prometheus.providers.registry import ProviderRegistry
+
     recovery_method = "none"
     recovered = False
     new_tier: str | None = None
@@ -479,6 +481,16 @@ def _do_diagnose_and_recover(
         # v1: we diagnose it but don't auto-rewrite the arguments. The user's
         # diagnostic message surfaces the category so they know what broke.
         recovery_method = "diagnostic_only:special_char_escape"
+    elif active_tier == "off" and ProviderRegistry.is_cloud(
+            _provider_name_for_telemetry(context.provider)):
+        # Cloud: the API already enforces tool-call structure, so the adapter
+        # has nothing to repair, and lifting tier "off" turns on local-only
+        # trimming (X.41): on 2026-09-23 a bumped qwen3.8-max run then
+        # microcompacted 65 times, each rewrite discarding its prompt cache.
+        # Keep what the bump actually bought: a counter reset and one more chance.
+        recovery_method = "retry:cloud_tier_off"
+        recovered = True
+        breaker.record_success()
     elif active_tier in _TIER_BUMP_LADDER and context.adapter is not None:
         # Bump the adapter tier one rung up (off → light, light → full).
         #
@@ -541,7 +553,13 @@ def _do_diagnose_and_recover(
             log.warning("Telemetry record_diagnosis failed", exc_info=True)
 
     # ── Step 4: Build user-facing message ─────────────────────────
-    if recovered:
+    if recovery_method == "retry:cloud_tier_off":
+        status = (
+            "attempted (retry at tier 'off' — a cloud provider's tool calls are "
+            "structured by its API, so there is no adapter tier to raise), "
+            "will retry once"
+        )
+    elif recovered:
         status = f"attempted ({recovery_method}), will retry once"
     elif recovery_method == "already_attempted":
         status = "not possible (recovery already tried once this run)"
