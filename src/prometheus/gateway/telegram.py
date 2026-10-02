@@ -1262,6 +1262,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 # Phase 3.5: /benchmark is a diagnostic, not a user chat —
                 # use reserved "system" so it never inherits user overrides.
                 session_id="system",
+                surface="telegram",
             )
             elapsed = time.monotonic() - t0
 
@@ -2009,6 +2010,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 # SPRINT-2 WS1: pass the live ChatSession so the loop can
                 # drain ``queued_steers`` between tool batches.
                 session_state=session,
+                surface="telegram",
             )
             # Append assistant response (and any tool call/result pairs) to session
             session.add_result_messages(result.messages, pre_len)

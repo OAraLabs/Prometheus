@@ -9,7 +9,8 @@ tables add a write per model response, so they go through this instead: a
 bounded queue drained by ONE thread with its OWN WAL connection. The caller
 puts a row on the queue and returns.
 
-WHAT IT WRITES. The new tables only (``V2_TABLES``). The existing INSERTs stay
+WHAT IT WRITES. The new tables only (``V2_TABLES``), plus the write-once
+``telemetry_v2_capture_since`` stamp in ``schema_meta`` (``stamp_meta``). The existing INSERTs stay
 synchronous (ruling 6): the Beacon coding live stream, the context meter and
 the parity runner read those rows back immediately, and a queue would make
 them late.
@@ -61,6 +62,9 @@ log = logging.getLogger(__name__)
 
 #: The only tables this writer will touch.
 V2_TABLES: frozenset[str] = frozenset({"turns", "responses", "tool_sets"})
+
+#: The one other table the writer touches, through ``stamp_meta`` only.
+_META_TABLE = "schema_meta"
 
 #: Columns that can carry conversation text, redacted before they are stored.
 #: tests/test_scrub_covers_every_text_column.py holds the scrub to the same list.
@@ -172,6 +176,21 @@ class TelemetryV2Writer:
             raise ValueError(f"upsert row has no value for its key {key!r}")
         return self._submit(_Write(table, dict(row), "upsert", key), stamp)
 
+    def stamp_meta(self, key: str) -> bool:
+        """Queue a ``schema_meta`` boundary stamp: ``key`` = now, set ONCE.
+
+        INSERT OR IGNORE, so a later process never moves it. The value is the
+        clock when the stamp was QUEUED, like every row here, and as a string,
+        like the tracker's other boundary keys. The one write outside
+        ``V2_TABLES``, and only to ``schema_meta``: T-3 stamps
+        ``telemetry_v2_capture_since`` through the queue rather than with a
+        synchronous write on the turn path.
+        """
+        if not _IDENT.match(key):
+            raise ValueError(f"not a schema_meta key: {key!r}")
+        return self._enqueue(_Write(_META_TABLE, {"key": key, "value": str(self._clock())},
+                                    "insert_or_ignore"))
+
     def flush(self, timeout: float = 5.0) -> bool:
         """Wait until everything queued so far is written. True if it was."""
         if self._closed:
@@ -211,6 +230,9 @@ class TelemetryV2Writer:
                 raise ValueError(f"not a column name: {col!r}")
         if stamp and write.row.get(stamp) is None:
             write.row[stamp] = self._clock()
+        return self._enqueue(write)
+
+    def _enqueue(self, write: _Write) -> bool:
         # Check and put under the lock close() takes, so no row can land
         # behind the stop sentinel and be lost without being counted.
         with self._lock:

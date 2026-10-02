@@ -58,7 +58,7 @@ async def test_same_session_turns_serialize(monkeypatch):
     release_first = asyncio.Event()
 
     async def fake_run_loop(context, messages, mode="agent", session_id=None,
-                            tool_choice=None):
+                            tool_choice=None, surface=None):
         entered.append(len(messages))
         if len(entered) == 1:
             await release_first.wait()
@@ -98,7 +98,7 @@ async def test_different_sessions_do_not_block_each_other(monkeypatch):
     release = asyncio.Event()
 
     async def fake_run_loop(context, messages, mode="agent", session_id=None,
-                            tool_choice=None):
+                            tool_choice=None, surface=None):
         order.append(f"enter:{session_id}")
         if session_id == "desktop:a":
             await release.wait()
@@ -131,7 +131,7 @@ async def test_interrupt_targets_running_turn_and_queued_turn_proceeds(monkeypat
     entered: list[int] = []
 
     async def fake_run_loop(context, messages, mode="agent", session_id=None,
-                            tool_choice=None):
+                            tool_choice=None, surface=None):
         entered.append(len(entered) + 1)
         if entered[0] == 1 and len(entered) == 1:
             await asyncio.Event().wait()  # A parks here until cancelled

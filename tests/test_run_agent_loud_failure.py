@@ -22,7 +22,8 @@ from tests.support.doubles import register_double
 class _ExplodingRunLoop:
     """Matches the real run_loop call shape, then raises — the drift-class error."""
 
-    def __call__(self, ctx, messages, *, mode="agent", session_id=None, tool_choice=None):
+    def __call__(self, ctx, messages, *, mode="agent", session_id=None, tool_choice=None,
+                 surface=None):
         raise TypeError("simulated interface drift")
 
 

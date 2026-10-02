@@ -125,6 +125,33 @@ def test_the_v2_boundary_stamp_is_hidden_and_the_version_is_not():
     assert rows == [["telemetry_v2_since", "<time>"], ["schema_version", "3"]]
 
 
+def test_the_v2_capture_stamp_is_hidden_too():
+    # WP-X.54 T-3: stamped from the clock when the first turn writes v2 rows.
+    obs = {"steps": [], "stores": {"home/.prometheus/telemetry.db": {"sqlite": {"schema_meta": {
+        "columns": ["key", "value"],
+        "rows": [["telemetry_v2_capture_since", "1790814899.01"]],
+    }}}}}
+    rows = norm.normalize_observables(obs)["stores"]["home/.prometheus/telemetry.db"][
+        "sqlite"]["schema_meta"]["rows"]
+    assert rows == [["telemetry_v2_capture_since", "<time>"]]
+
+
+def test_coding_run_ids_become_ordinals_that_keep_which_episodes_share_a_run():
+    def rows(ids: list) -> list:
+        obs = {"steps": [], "stores": {"home/.prometheus/telemetry.db": {"sqlite": {"turns": {
+            "columns": ["session_id", "coding_run_id"],
+            "rows": [["coding:cparity01", r] for r in ids],
+        }}}}}
+        return [r[1] for r in norm.normalize_observables(obs)["stores"][
+            "home/.prometheus/telemetry.db"]["sqlite"]["turns"]["rows"]]
+
+    # The runner mints f"{task_id}-{uuid4().hex[:8]}": random per run.
+    assert rows(["cparity01-1a2b3c4d"] * 2) == rows(["cparity01-9f8e7d6c"] * 2) == [
+        "<codingrun:1>", "<codingrun:1>"]
+    assert rows(["cparity01-1a2b3c4d", "cparity01-9f8e7d6c"]) == ["<codingrun:1>", "<codingrun:2>"]
+    assert rows([None]) == [None]
+
+
 def test_every_rule_is_documented():
     rules = norm.all_rules()
     assert len({r.name for r in rules}) == len(rules)

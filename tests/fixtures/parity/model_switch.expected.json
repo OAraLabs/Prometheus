@@ -1051,7 +1051,65 @@
       "surface",
       "forced_tool_choice"
      ],
-     "rows": []
+     "rows": [
+      [
+       1,
+       "<time>",
+       "desktop:parity-switch",
+       "<turn:1>",
+       0,
+       "<uuid:7>",
+       "llama_cpp",
+       "light",
+       32768,
+       "0ac69752b6f71969",
+       "prose",
+       0,
+       3,
+       "one",
+       "agent",
+       "beacon",
+       null
+      ],
+      [
+       2,
+       "<time>",
+       "desktop:parity-switch",
+       "<turn:2>",
+       0,
+       "<uuid:8>",
+       "ollama",
+       "full",
+       32768,
+       "0ac69752b6f71969",
+       "prose",
+       0,
+       3,
+       "two",
+       "agent",
+       "beacon",
+       null
+      ],
+      [
+       3,
+       "<time>",
+       "desktop:parity-switch",
+       "<turn:3>",
+       0,
+       "<uuid:9>",
+       "llama_cpp",
+       "light",
+       32768,
+       "0ac69752b6f71969",
+       "prose",
+       0,
+       5,
+       "three",
+       "agent",
+       "beacon",
+       null
+      ]
+     ]
     },
     "schema_meta": {
      "columns": [
@@ -1082,6 +1140,10 @@
       [
        "schema_version",
        "3"
+      ],
+      [
+       "telemetry_v2_capture_since",
+       "<time>"
       ]
      ]
     },
@@ -1133,7 +1195,7 @@
      ],
      "rows": [
       [
-       "<uuid:7>",
+       "<uuid:10>",
        "<time>",
        "tool_registration",
        "TaskCreateTool",
@@ -1158,7 +1220,7 @@
        null
       ],
       [
-       "<uuid:8>",
+       "<uuid:11>",
        "<time>",
        "tool_registration",
        "GitHubSearchTool",
@@ -1183,7 +1245,7 @@
        null
       ],
       [
-       "<uuid:9>",
+       "<uuid:12>",
        "<time>",
        "tool_registration",
        "SymbioteScoutTool",
@@ -1208,7 +1270,7 @@
        null
       ],
       [
-       "<uuid:10>",
+       "<uuid:13>",
        "<time>",
        "tool_registration",
        "SymbioteHarvestTool",
@@ -1233,7 +1295,7 @@
        null
       ],
       [
-       "<uuid:11>",
+       "<uuid:14>",
        "<time>",
        "tool_registration",
        "SymbioteGraftTool",
@@ -1258,7 +1320,7 @@
        null
       ],
       [
-       "<uuid:12>",
+       "<uuid:15>",
        "<time>",
        "tool_registration",
        "SymbioteStatusTool",
@@ -1283,7 +1345,7 @@
        null
       ],
       [
-       "<uuid:13>",
+       "<uuid:16>",
        "<time>",
        "tool_registration",
        "SkillTool",
@@ -1308,7 +1370,7 @@
        null
       ],
       [
-       "<uuid:14>",
+       "<uuid:17>",
        "<time>",
        "tool_registration",
        "MemoryTool",
@@ -1333,7 +1395,7 @@
        null
       ],
       [
-       "<uuid:15>",
+       "<uuid:18>",
        "<time>",
        "tool_registration",
        "TodoWriteTool",
@@ -1358,7 +1420,7 @@
        null
       ],
       [
-       "<uuid:16>",
+       "<uuid:19>",
        "<time>",
        "tool_registration",
        "VaultSearchTool",
@@ -1383,7 +1445,7 @@
        null
       ],
       [
-       "<uuid:17>",
+       "<uuid:20>",
        "<time>",
        "tool_registration",
        "VaultReadTool",
@@ -1408,7 +1470,7 @@
        null
       ],
       [
-       "<uuid:18>",
+       "<uuid:21>",
        "<time>",
        "tool_registration",
        "AnatomyTool",
@@ -1433,7 +1495,7 @@
        null
       ],
       [
-       "<uuid:19>",
+       "<uuid:22>",
        "<time>",
        "tool_registration",
        "BrowserTool",
@@ -1458,7 +1520,7 @@
        null
       ],
       [
-       "<uuid:20>",
+       "<uuid:23>",
        "<time>",
        "tool_registration",
        "SessionsListTool",
@@ -1483,7 +1545,7 @@
        null
       ],
       [
-       "<uuid:21>",
+       "<uuid:24>",
        "<time>",
        "tool_registration",
        "SessionsSendTool",
@@ -1508,7 +1570,7 @@
        null
       ],
       [
-       "<uuid:22>",
+       "<uuid:25>",
        "<time>",
        "tool_registration",
        "SessionsSpawnTool",
@@ -1533,7 +1595,7 @@
        null
       ],
       [
-       "<uuid:23>",
+       "<uuid:26>",
        "<time>",
        "tool_registration",
        "TaskGetTool",
@@ -1558,7 +1620,7 @@
        null
       ],
       [
-       "<uuid:24>",
+       "<uuid:27>",
        "<time>",
        "tool_registration",
        "TaskListTool",
@@ -1583,7 +1645,7 @@
        null
       ],
       [
-       "<uuid:25>",
+       "<uuid:28>",
        "<time>",
        "tool_registration",
        "TaskUpdateTool",
@@ -1608,7 +1670,7 @@
        null
       ],
       [
-       "<uuid:26>",
+       "<uuid:29>",
        "<time>",
        "tool_registration",
        "TaskStopTool",
@@ -1633,7 +1695,7 @@
        null
       ],
       [
-       "<uuid:27>",
+       "<uuid:30>",
        "<time>",
        "tool_registration",
        "TaskOutputTool",
@@ -1658,7 +1720,7 @@
        null
       ],
       [
-       "<uuid:28>",
+       "<uuid:31>",
        "<time>",
        "tool_registration",
        "ImageGenerateTool",
@@ -1683,7 +1745,7 @@
        null
       ],
       [
-       "<uuid:29>",
+       "<uuid:32>",
        "<time>",
        "tool_registration",
        "KlingVideoTool",
@@ -1708,7 +1770,7 @@
        null
       ],
       [
-       "<uuid:30>",
+       "<uuid:33>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -1736,7 +1798,7 @@
        null
       ],
       [
-       "<uuid:31>",
+       "<uuid:7>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1761,7 +1823,7 @@
        null
       ],
       [
-       "<uuid:32>",
+       "<uuid:34>",
        "<time>",
        "session_titles",
        "generate",
@@ -1786,7 +1848,7 @@
        null
       ],
       [
-       "<uuid:33>",
+       "<uuid:35>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -1814,7 +1876,7 @@
        null
       ],
       [
-       "<uuid:34>",
+       "<uuid:8>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1839,7 +1901,7 @@
        null
       ],
       [
-       "<uuid:35>",
+       "<uuid:36>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -1867,7 +1929,7 @@
        null
       ],
       [
-       "<uuid:36>",
+       "<uuid:9>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1929,7 +1991,29 @@
       "tool_count",
       "created_at"
      ],
-     "rows": []
+     "rows": [
+      [
+       "0ac69752b6f71969",
+       {
+        "$json": [
+         "bash",
+         "edit_file",
+         "glob",
+         "grep",
+         "memory",
+         "read_file",
+         "skill",
+         "task_create",
+         "tool_search",
+         "web_fetch",
+         "web_search",
+         "write_file"
+        ]
+       },
+       12,
+       "<time>"
+      ]
+     ]
     },
     "turns": {
      "columns": [
@@ -1954,7 +2038,92 @@
       "outcome_source",
       "outcome_at"
      ],
-     "rows": []
+     "rows": [
+      [
+       "<turn:1>",
+       "desktop:parity-switch",
+       null,
+       "beacon",
+       "agent",
+       "<time>",
+       "<time>",
+       1,
+       6170,
+       2,
+       {
+        "$json": [
+         "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
+        ]
+       },
+       {
+        "$json": []
+       },
+       0,
+       0,
+       "prose",
+       null,
+       null,
+       null,
+       null,
+       null
+      ],
+      [
+       "<turn:2>",
+       "desktop:parity-switch",
+       null,
+       "beacon",
+       "agent",
+       "<time>",
+       "<time>",
+       1,
+       2679,
+       2,
+       {
+        "$json": [
+         "qwen2.5:7b-instruct"
+        ]
+       },
+       {
+        "$json": []
+       },
+       0,
+       0,
+       "prose",
+       null,
+       null,
+       null,
+       null,
+       null
+      ],
+      [
+       "<turn:3>",
+       "desktop:parity-switch",
+       null,
+       "beacon",
+       "agent",
+       "<time>",
+       "<time>",
+       1,
+       6214,
+       2,
+       {
+        "$json": [
+         "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
+        ]
+       },
+       {
+        "$json": []
+       },
+       0,
+       0,
+       "prose",
+       null,
+       null,
+       null,
+       null,
+       null
+      ]
+     ]
     }
    }
   }

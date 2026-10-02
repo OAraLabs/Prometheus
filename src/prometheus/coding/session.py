@@ -25,6 +25,7 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 from prometheus.coding.control import RunControl
 from prometheus.coding.policy import IterateToGreenPolicy
@@ -139,6 +140,7 @@ class CodingSession:
         acceptance_timeout_seconds: float = 240.0,
         control_dir: str | None = None,  # Loop Manager Sprint 2 — mid-run control (off if None)
         training_config: dict[str, Any] | None = None,
+        coding_run_id: str | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -160,6 +162,11 @@ class CodingSession:
         )
         self._registry = build_coding_registry(sandbox)
         self._branch = f"coding/{task.task_id}"
+        # Telemetry v2 (WP-X.54 T-3, ruling 5): each episode is one turn, and
+        # every one of them carries this run's id. The runner passes the
+        # sandbox instance id; a caller that passes none still gets an id
+        # unique to this run, because a task id may be reused.
+        self._coding_run_id = coding_run_id or f"{task.task_id}-{uuid4().hex[:8]}"
 
     # ------------------------------------------------------------------
     # Git plumbing (inside the sandbox, repo-local identity, never pushes)
@@ -337,7 +344,9 @@ class CodingSession:
 
             rounds_before = self._policy.rounds_used
             try:
-                async for event, _usage in run_loop(context, messages):
+                async for event, _usage in run_loop(
+                    context, messages, surface="coding_mode", coding_run_id=self._coding_run_id,
+                ):
                     if isinstance(event, AssistantTurnComplete):
                         self._policy.observe_round()
                     elif isinstance(event, ToolExecutionStarted):

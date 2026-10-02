@@ -219,7 +219,8 @@ def register_openai_routes(
             usage = {"prompt_tokens": 0, "completion_tokens": 0}
             round_acc = ""
             try:
-                async for event, _u in run_loop(ctx, history, mode=mode, session_id=session_id, tool_choice=tool_choice):
+                async for event, _u in run_loop(ctx, history, mode=mode, session_id=session_id,
+                                                tool_choice=tool_choice, surface="rest"):
                     if isinstance(event, AssistantTextDelta):
                         round_acc += event.text
                         yield ("delta", {"text": event.text})

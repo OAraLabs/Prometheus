@@ -72,7 +72,7 @@ def _hanging_run_loop(deltas: list[str], append_to: list | None = None):
     """Fake run_loop: stream ``deltas``, optionally append a completed-round
     message in place (as the real loop does), then hang until cancelled."""
 
-    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None):
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None, surface=None):
         for text in deltas:
             yield AssistantTextDelta(text=text), None
         if append_to is not None:

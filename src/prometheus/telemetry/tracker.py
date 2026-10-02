@@ -686,6 +686,7 @@ class ToolCallTelemetry:
         # that never writes the v2 tables runs no extra thread.
         self._v2_writer: TelemetryV2Writer | None = None
         self._v2_writer_lock = threading.Lock()
+        self._v2_capture_stamped = False
 
     def _current_node_id(self) -> str | None:
         """The node ID to stamp on rows. Cached once found.
@@ -725,6 +726,11 @@ class ToolCallTelemetry:
     LATENCY_NULLABLE_SINCE_KEY = "latency_nullable_since"
     BILLING_RECORDED_SINCE_KEY = "billing_recorded_since"
     TELEMETRY_V2_SINCE_KEY = "telemetry_v2_since"
+    #: When the loop first WROTE telemetry v2 (T-3), as distinct from when the
+    #: schema arrived (``telemetry_v2_since``, T-1). Rows older than this carry
+    #: NULL in the v2 columns because nothing wrote them, not because the value
+    #: was NULL (Will's ruling, 2026-09-30).
+    TELEMETRY_V2_CAPTURE_SINCE_KEY = "telemetry_v2_capture_since"
 
     def _restore_pre_v2(self) -> None:
         """Undo a half-applied rebuild: put ``tool_calls_pre_v2`` back.
@@ -975,10 +981,17 @@ class ToolCallTelemetry:
 
     def telemetry_v2_boundary(self) -> float | None:
         """Timestamp from which this database had the v2 schema, or None."""
+        return self._meta_float(self.TELEMETRY_V2_SINCE_KEY)
+
+    def telemetry_v2_capture_boundary(self) -> float | None:
+        """Timestamp from which the loop wrote telemetry v2, or None if it never has."""
+        return self._meta_float(self.TELEMETRY_V2_CAPTURE_SINCE_KEY)
+
+    def _meta_float(self, key: str) -> float | None:
         try:
             row = self._conn.execute(
                 "SELECT value FROM schema_meta WHERE key = ?",
-                (self.TELEMETRY_V2_SINCE_KEY,),
+                (key,),
             ).fetchone()
         except sqlite3.DatabaseError:
             return None
@@ -2588,6 +2601,20 @@ class ToolCallTelemetry:
             if self._v2_writer is None:
                 self._v2_writer = TelemetryV2Writer(self._db_path)
             return self._v2_writer
+
+    def v2_capture_writer(self) -> TelemetryV2Writer:
+        """The v2 writer, for a caller about to write v2 rows (the loop, T-3).
+
+        The first call also queues the ``telemetry_v2_capture_since`` stamp,
+        ahead of the rows it is about to queue, so the key's value is never
+        later than the first row it vouches for. INSERT OR IGNORE: a later
+        process, or another tracker on the same file, never moves it.
+        """
+        writer = self.v2_writer()
+        if not self._v2_capture_stamped:
+            self._v2_capture_stamped = True
+            writer.stamp_meta(self.TELEMETRY_V2_CAPTURE_SINCE_KEY)
+        return writer
 
     def close(self) -> None:
         """Drain the v2 writer, if one was started, then close the connection."""
