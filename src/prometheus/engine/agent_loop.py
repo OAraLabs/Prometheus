@@ -910,6 +910,291 @@ _ROUND_SERVING: contextvars.ContextVar = contextvars.ContextVar("prometheus_roun
 # scope; a ContextVar for _RUN_PATHS's reason. Descriptive only.
 _RUN_SESSION: contextvars.ContextVar = contextvars.ContextVar("prometheus_run_session", default=None)
 
+# The turn the run is recording into telemetry v2 (WP-X.54 T-3): a _TurnRecord,
+# or None when the run has no telemetry. Beside _RUN_SESSION for the same
+# reason: _log_iteration and the tool-call writers stamp turn_id and
+# round_index and have no turn in scope. The read-only calls run under gather in
+# tasks that COPY the context, which is why the record is one mutable object
+# rather than values rebound per round.
+_RUN_TURN: contextvars.ContextVar = contextvars.ContextVar("prometheus_run_turn", default=None)
+
+
+class _StopReason:
+    """``turns.forced_stop_reason``: why the LOOP ended a turn, not the model.
+
+    NULL means the model chose to stop. The hook contract's ``turn_end``
+    payload carries an ``_IterationReason`` value as its ``reason``
+    (docs/contracts/hooks.md 4.3), so the stops that have one use it; the rest
+    are named for the exit they mark (audit Q4's table).
+    """
+    CIRCUIT_BREAKER = _IterationReason.CIRCUIT_BREAKER_TRIP
+    ITERATION_LIMIT = _IterationReason.MAX_ITERATIONS_HIT
+    REPEAT_DETECTOR = _IterationReason.UNPRODUCTIVE_REPEAT
+    DIVERGENCE_HALT = _IterationReason.DIVERGENCE_HALT
+    EMPTY_RESPONSE = _IterationReason.EMPTY_RESPONSE
+    CONTEXT_PREFLIGHT = "context_preflight_refusal"
+    BOUNDARY_ESCAPE = "boundary_escape"
+    FORCED_TOOL_NOT_HONORED = "forced_tool_not_honored"
+    NO_FINAL_MESSAGE = "no_final_message"
+    PROVIDER_ERROR = "provider_error"
+    MAX_TURNS = "max_turns_exhausted"
+    CANCELLED = "cancelled"
+    ERROR = "error"
+
+
+def _response_kind(message: ConversationMessage) -> str:
+    """``responses.response_kind`` of the message the loop acts on."""
+    calls = bool(message.tool_uses)
+    text = bool((message.text or "").strip())
+    if calls:
+        return "mixed" if text else "tool_call"
+    return "prose" if text else "empty"
+
+
+def _fold_repair_kinds(repair_log) -> str | None:  # noqa: ANN001
+    """One ``repair_kind`` value for a call's whole ``repair_log``.
+
+    A call can take several repairs (a fuzzy name, then a type coerce), and
+    the column is one value (T-2 left the fold to T-3). Each distinct kind
+    once, in the order applied, comma-joined: ``fuzzy_name,type_coerce``. The
+    common single repair is the bare kind. NULL when nothing was repaired.
+    """
+    if not repair_log:
+        return None
+    from prometheus.adapter.validator import repair_kind
+
+    return ",".join(dict.fromkeys(repair_kind(entry) for entry in repair_log))
+
+
+class _TurnRecord:
+    """One turn's telemetry v2 rows: ``turns``, its ``responses``, ``tool_sets``.
+
+    One per ``run_loop`` call (ruling 3; one per coding episode, ruling 5).
+    Every write goes through the T-1 queued writer, so nothing here waits on
+    SQLite (ruling 6), and nothing here raises into the turn: a refused write
+    is the writer's WARNING plus ``silent_failures`` row. ``writer`` None
+    records state only, for the ``tool_calls`` columns.
+
+    The turn is two upserts on ``turn_id``: ``start`` at the ``turn_start``
+    seam and ``end`` from ``run_loop``'s ``finally``. The id is minted before
+    anything that can raise, so a turn that fails before its start write
+    still gets its row from ``end``, which repeats the identity columns.
+
+    Prose (spec 4.1a, option b): only a turn's FIRST and LAST prose-only
+    responses keep their text. The first is written as it arrives. A later
+    one is held until the next response supersedes it (then written without
+    text) or the turn ends (then written with it), so rows still land in
+    round order and nothing is rewritten. On an ephemeral turn no text is kept.
+    """
+
+    def __init__(
+        self,
+        *,
+        turn_id: str,
+        session_id: str | None,
+        surface: str | None,
+        mode: str,
+        coding_run_id: str | None,
+        ephemeral: bool,
+        writer,  # noqa: ANN001 — TelemetryV2Writer, or None
+    ) -> None:
+        self.turn_id = turn_id
+        # turns/responses.session_id is NOT NULL. "" is a turn with no session
+        # of its own to record under, or an ephemeral one, whose id the rows
+        # must not carry (the tool_calls rule).
+        self.session_id = session_id or ""
+        self.surface = surface
+        self.mode = mode
+        self.coding_run_id = coding_run_id
+        self.ephemeral = ephemeral
+        self._writer = writer
+        self.started_at = time.time()
+        #: The round in progress, for the tool_calls rows written during it.
+        self.round_index = 0
+        self.rounds = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.models_used: list[str] = []
+        self.tools_used: list[str] = []
+        self.not_run_calls = 0
+        self.first_prose_round: int | None = None
+        self.terminal_kind: str | None = None
+        self.forced_stop_reason: str | None = None
+        self._fail_streak: dict[str, int] = {}
+        self._prose_kept = False
+        self._held: dict | None = None
+        self._ended = False
+
+    # -- writes ----------------------------------------------------------
+
+    def _identity(self) -> dict:
+        return {
+            "turn_id": self.turn_id,
+            "session_id": self.session_id,
+            "coding_run_id": self.coding_run_id,
+            "surface": self.surface,
+            "mode": self.mode,
+            "started_at": self.started_at,
+        }
+
+    def _write(self, verb: str, table: str, row: dict, **kw) -> None:
+        if self._writer is None:
+            return
+        try:
+            getattr(self._writer, verb)(table, row, **kw)
+        except Exception:
+            # The writer raises only on a programming error (a bad column
+            # name); telemetry must still never be what ends a turn.
+            log.warning("telemetry v2: %s into %s failed", verb, table, exc_info=True)
+
+    def start(self, tool_set: dict | None) -> None:
+        """The ``turn_start`` seam: the tools offered, then the turn's first half."""
+        if tool_set is not None:
+            self._write("insert", "tool_sets", tool_set, stamp="created_at", or_ignore=True)
+        self._write("upsert", "turns", self._identity(), key="turn_id")
+
+    def response(
+        self,
+        *,
+        round_index: int,
+        kind: str,
+        tool_call_count: int,
+        prose: str,
+        model: str | None,
+        provider: str | None,
+        adapter_tier: str | None,
+        ctx_window: int | None,
+        tool_set_hash: str | None,
+        forced_tool_choice: str | None,
+        loop_round_id: str | None,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> None:
+        """One model response: a ``responses`` row, and the turn's running totals."""
+        self.rounds += 1
+        self.prompt_tokens += prompt_tokens or 0
+        self.completion_tokens += completion_tokens or 0
+        if model and model not in self.models_used:
+            self.models_used.append(model)
+        self.terminal_kind = kind
+        row = {
+            "ts": time.time(),
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "round_index": round_index,
+            "loop_round_id": loop_round_id,
+            "provider": provider,
+            "adapter_tier": adapter_tier,
+            "ctx_window": ctx_window,
+            "tool_set_hash": tool_set_hash,
+            "response_kind": kind,
+            "tool_call_count": tool_call_count,
+            "prose_chars": len(prose),
+            "prose": None,
+            "mode": self.mode,
+            "surface": self.surface,
+            "forced_tool_choice": forced_tool_choice,
+        }
+        self._release_held(keep_prose=False)
+        if kind != "prose":
+            self._write("insert", "responses", row)
+            return
+        if self.first_prose_round is None:
+            self.first_prose_round = round_index
+        if not self._prose_kept:
+            # The first prose response: written now, with its text.
+            self._prose_kept = True
+            self._write("insert", "responses", {**row, "prose": None if self.ephemeral else prose})
+            return
+        self._held = {**row, "prose": None if self.ephemeral else prose}
+
+    def _release_held(self, *, keep_prose: bool) -> None:
+        held, self._held = self._held, None
+        if held is not None:
+            self._write("insert", "responses", held if keep_prose else {**held, "prose": None})
+
+    def stop(self, reason: str) -> None:
+        """Mark why the loop ended this turn. The first reason set is the one kept."""
+        if self.forced_stop_reason is None:
+            self.forced_stop_reason = reason
+
+    def not_run(self, count: int) -> None:
+        """Calls the model made that the loop never ran (ruling 2)."""
+        self.not_run_calls += count
+
+    def ran(self, names) -> None:  # noqa: ANN001
+        for name in names:
+            if name not in self.tools_used:
+                self.tools_used.append(name)
+
+    def call_fields(
+        self,
+        tool_name: str,
+        *,
+        success: bool,
+        repair_log=(),  # noqa: ANN001
+        raw_call: dict | None = None,
+        result_summary: str | None = None,
+    ) -> dict:
+        """The v2 ``tool_calls`` columns for one executed-or-refused call.
+
+        ``retry_index`` is how many calls to the same tool failed in a row
+        just before this one, in this turn: 0 for a first attempt or one after
+        a success. The repair fields only when the adapter changed the call;
+        content columns never on an ephemeral turn.
+        """
+        retry_index = self._fail_streak.get(tool_name, 0)
+        if success:
+            self._fail_streak.pop(tool_name, None)
+        else:
+            self._fail_streak[tool_name] = retry_index + 1
+        fields: dict = {
+            "turn_id": self.turn_id,
+            "round_index": self.round_index,
+            "retry_index": retry_index,
+        }
+        if repair_log:
+            fields["repair_kind"] = _fold_repair_kinds(repair_log)
+            if raw_call is not None and not self.ephemeral:
+                import json as _json
+                try:
+                    fields["raw_before_repair"] = _json.dumps(raw_call, default=str)
+                except Exception:
+                    pass
+        if result_summary is not None and not self.ephemeral:
+            fields["result_summary"] = result_summary
+        return fields
+
+    def end(self, exc: BaseException | None = None) -> None:
+        """The ``turn_end`` seam, from ``run_loop``'s ``finally``. Once."""
+        if self._ended:
+            return
+        self._ended = True
+        if exc is not None:
+            if isinstance(exc, (GeneratorExit, asyncio.CancelledError)):
+                # A consumer that stops reading after the final answer has not
+                # cut anything short (a prose-only response always ends the
+                # turn); one that stops earlier has — the Stop button.
+                if self.terminal_kind != "prose":
+                    self.stop(_StopReason.CANCELLED)
+            else:
+                self.stop(_StopReason.ERROR)
+        self._release_held(keep_prose=True)
+        import json as _json
+        self._write("upsert", "turns", {
+            **self._identity(),
+            "ended_at": time.time(),
+            "rounds": self.rounds,
+            "total_prompt_tokens": self.prompt_tokens,
+            "total_completion_tokens": self.completion_tokens,
+            "models_used": _json.dumps(self.models_used),
+            "tools_used": _json.dumps(self.tools_used),
+            "not_run_calls": self.not_run_calls,
+            "first_prose_round": self.first_prose_round,
+            "terminal_kind": self.terminal_kind,
+            "forced_stop_reason": self.forced_stop_reason,
+        }, key="turn_id")
+
 
 def _serving_model(context: "LoopContext") -> str:
     """The model to RECORD for the round in progress: the fallback's, if it served."""
@@ -932,6 +1217,8 @@ async def run_loop(
     tool_choice: object | None = None,
     record_session_id: str | None = None,
     record_summary: dict | None = None,
+    surface: str | None = None,
+    coding_run_id: str | None = None,
 ) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
     """Run the conversation loop until the model stops requesting tools.
 
@@ -960,6 +1247,15 @@ async def run_loop(
     ordinary chat would inherit ``False`` and persist a turn the user had
     flagged. Resolving it HERE means both loop construction sites get it by
     construction, with nothing to remember to pass and nothing to cross-talk.
+
+    And it scopes the turn's TELEMETRY V2 record (WP-X.54 T-3), for the same
+    reason again: one ``turns`` row per call, its id minted here before
+    anything can raise, its end written from the ``finally`` whatever the
+    exit. ``surface`` names the front door the turn came through (beacon /
+    telegram / slack / discord / rest / cli / coding_mode); the loop cannot
+    infer it, so each surface passes it. ``coding_run_id`` is the coding run
+    an episode belongs to (ruling 5). Both are DESCRIPTIVE: recorded, never
+    read for behaviour.
     """
     # THE PER-RUN COPY. Everything below — and everything `_run_loop` does —
     # works on a context private to this turn, so the router swap, the
@@ -1020,11 +1316,19 @@ async def run_loop(
     # paths untracked: CROSS-CUTTING §2, the two-loop defect, rebuilt.
     # ``start_task`` is what ``current_task_id`` was always missing — without
     # it every checkpoint and every evaluation returned at its first guard.
+    #
+    # WP-X.54 T-3: the same id is the TURN id, so it is now minted on every
+    # run, not only when the detector is on (audit Q2). An ephemeral turn's id
+    # carries no session: it is stamped on tool_calls rows that are
+    # deliberately session-less there.
+    from prometheus.coordinator.divergence import DivergenceDetector
+
+    turn_id = DivergenceDetector.new_task_id(None if ephemeral else effective_session_id)
     div = getattr(context, "divergence_detector", None)
     div_task_id: str | None = None
     if div is not None and getattr(div, "enabled", False):
         try:
-            div_task_id = div.new_task_id(session_id or context.session_id)
+            div_task_id = turn_id
             div.start_task(div_task_id, _goal_message_from(messages))
         except Exception:
             # Fail-open: divergence is observational. It must never be able
@@ -1039,6 +1343,28 @@ async def run_loop(
     _paths_token = _RUN_PATHS.set(None)
     _serving_token = _ROUND_SERVING.set(None)
     _session_token = _RUN_SESSION.set(None if ephemeral else recorded_session_id)
+    # Telemetry v2 (WP-X.54 T-3). No telemetry, no record and no writer: with
+    # telemetry off nothing reaches the v2 tables.
+    turn_record: _TurnRecord | None = None
+    if context.telemetry is not None:
+        _v2_writer = None
+        _capture = getattr(context.telemetry, "v2_capture_writer", None)
+        if callable(_capture):
+            try:
+                _v2_writer = _capture()
+            except Exception:
+                log.warning("telemetry v2 writer unavailable; recording nothing", exc_info=True)
+        turn_record = _TurnRecord(
+            turn_id=turn_id,
+            session_id=None if ephemeral else recorded_session_id,
+            surface=surface,
+            mode=mode,
+            coding_run_id=coding_run_id,
+            ephemeral=ephemeral,
+            writer=_v2_writer,
+        )
+    _turn_token = _RUN_TURN.set(turn_record)
+    _turn_exit: BaseException | None = None
     try:
         async for item in _run_loop(
             context,
@@ -1052,9 +1378,22 @@ async def run_loop(
             effective_session_id=effective_session_id,
             recorded_session_id=recorded_session_id,
             record_summary=record_summary,
+            turn_record=turn_record,
         ):
             yield item
+    except BaseException as exc:
+        # Kept only to say how the turn ended (the turn_end write below).
+        _turn_exit = exc
+        raise
     finally:
+        if turn_record is not None:
+            # The turn_end seam: one upsert, whatever the exit (audit Q4: every
+            # exit but SIGKILL or a restart reaches this). Queued, never awaited.
+            try:
+                turn_record.end(_turn_exit)
+            except Exception:
+                log.warning("telemetry v2: turn end not recorded", exc_info=True)
+        _RUN_TURN.reset(_turn_token)
         _RUN_PATHS.reset(_paths_token)
         _ROUND_SERVING.reset(_serving_token)
         _RUN_SESSION.reset(_session_token)
@@ -1111,6 +1450,29 @@ def _human_message_from(messages: list[ConversationMessage]) -> str:
     return ""
 
 
+async def _on_stream_error(
+    stream: AsyncIterator, on_error: Callable[[], None],
+) -> AsyncIterator:
+    """Pass ``stream`` through unchanged; call ``on_error`` before an
+    ``Exception`` raised BY the stream propagates (telemetry v2's
+    provider-error row, WP-X.54 T-3).
+
+    Only the stream's own failures: an exception raised in the consumer's
+    loop body never enters here, and cancellation and generator close are
+    BaseExceptions, so a Stop is never recorded as a provider error.
+    ``on_error`` failing changes nothing about what propagates.
+    """
+    try:
+        async for event in stream:
+            yield event
+    except Exception:
+        try:
+            on_error()
+        except Exception:
+            log.debug("telemetry v2: provider-error row not recorded", exc_info=True)
+        raise
+
+
 async def _run_loop(
     context: LoopContext,
     messages: list[ConversationMessage],
@@ -1124,6 +1486,7 @@ async def _run_loop(
     effective_session_id: str | None = None,
     recorded_session_id: str | None = None,
     record_summary: dict | None = None,
+    turn_record: "_TurnRecord | None" = None,
 ) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
     """The loop body. See :func:`run_loop` — call that, not this.
 
@@ -1139,6 +1502,11 @@ async def _run_loop(
     a run with none. Behaviour — resolvers, checkpoints, the compactor — keeps
     reading ``effective_session_id``. ``record_summary`` adds keys to this
     run's tool_advertisement row (a subagent names its parent there).
+
+    ``turn_record`` is the turn's telemetry v2 record (None without
+    telemetry). Every exit below that the LOOP chooses calls its ``stop``
+    with the reason before returning or raising; a plain return is the model
+    choosing to stop.
     """
     rec_sid = recorded_session_id or effective_session_id
     # Scopes every verifier call below to THIS turn. Empty for a duck-typed
@@ -1444,7 +1812,58 @@ async def _run_loop(
     from prometheus.learning.llm_envelope import LLMCallEnvelope
     loop_envelope = LLMCallEnvelope("agent_loop", telemetry=context.telemetry)
 
+    # Telemetry v2 (WP-X.54 T-3), the turn_start seam. The catalog is frozen
+    # for the run (above), so the tools offered are hashed once, stored once
+    # per distinct set, and every response carries only the hash.
+    _v2_tool_set: dict | None = None
+    if turn_record is not None and tools_enabled and tool_schema:
+        from prometheus.telemetry.writer import tool_set_row
+        _v2_tool_set = tool_set_row(
+            str(s.get("name") or (s.get("function") or {}).get("name") or "")
+            for s in tool_schema
+        )
+    if turn_record is not None:
+        turn_record.start(_v2_tool_set)
+
+    def _v2_response(kind: str, message: ConversationMessage | None) -> None:
+        """One ``responses`` row for the round in progress (telemetry v2).
+
+        Called at the after_model_response seam and, for the rounds the
+        guards retry or end before it, in their own branch (audit, the seams
+        table). ``kind`` comes from :func:`_response_kind` of the message
+        the loop acts on, or is ``error`` when there is none.
+        """
+        if turn_record is None:
+            return
+        _deg = degrade_notice_this_turn[0] if degrade_notice_this_turn else None
+        _run_id = loop_envelope.last_run_id
+        _choice = round_tool_choice
+        turn_record.response(
+            round_index=turn,
+            kind=kind,
+            tool_call_count=len(message.tool_uses) if message is not None else 0,
+            prose=(message.text or "") if message is not None else "",
+            # The SERVING model and provider: the fallback's when it served.
+            model=(_deg.model or context.model) if _deg is not None else context.model,
+            provider=(
+                (_deg.provider_name or None) if _deg is not None
+                else _provider_name_for_telemetry(context.provider)
+            ),
+            adapter_tier=getattr(context.adapter, "tier", None) if context.adapter is not None else None,
+            ctx_window=_window_now or None,
+            tool_set_hash=_v2_tool_set["tool_set_hash"] if _v2_tool_set else None,
+            forced_tool_choice=(
+                str(_choice.get("tool")) if isinstance(_choice, dict)
+                else (_choice if _choice == "required" else None)
+            ),
+            loop_round_id=_run_id if isinstance(_run_id, str) else None,
+            prompt_tokens=usage.input_tokens,
+            completion_tokens=usage.output_tokens,
+        )
+
     for turn in range(context.max_turns):
+        if turn_record is not None:
+            turn_record.round_index = turn
         # MicroCompaction: compact old tool results (free, no LLM calls)
         if turn > 0 and context.microcompact_after_turns > 0:
             _microcompact_old_results(
@@ -1762,10 +2181,18 @@ async def _run_loop(
                     f"the same way."
                 )
                 messages.append(error_msg)
+                if turn_record is not None:
+                    turn_record.stop(_StopReason.CONTEXT_PREFLIGHT)
                 yield AssistantTurnComplete(message=error_msg, usage=usage), usage
                 return
 
-        async for event in stream_round_with_fallback(
+        def _v2_provider_error() -> None:
+            # A round the provider failed: no message, so no seam (audit).
+            _v2_response("error", None)
+            if turn_record is not None:
+                turn_record.stop(_StopReason.PROVIDER_ERROR)
+
+        async for event in _on_stream_error(stream_round_with_fallback(
             envelope=loop_envelope,
             provider=context.provider,
             model=context.model,
@@ -1778,7 +2205,7 @@ async def _run_loop(
             operation="loop_round",
             round_index=turn,
             session_id=rec_sid,
-        ):
+        ), _v2_provider_error):
             if degrade_notice_this_turn and not _degrade_announced:
                 # First event after the swap. on_degrade fires before the fallback streams, so
                 # by now the decision is recorded and the announcement precedes its output.
@@ -1819,6 +2246,9 @@ async def _run_loop(
                 yield AssistantTextDelta(text=_tail), None
 
         if final_message is None:
+            _v2_response("error", None)
+            if turn_record is not None:
+                turn_record.stop(_StopReason.NO_FINAL_MESSAGE)
             raise RuntimeError("Model stream finished without a final message")
 
         # Who served THIS round, for every row it writes from here on (T14):
@@ -1942,6 +2372,8 @@ async def _run_loop(
             and not (final_message.text or "").strip()
             and not final_message.tool_uses
         ):
+            # Retried or ended before the seam: its own responses row.
+            _v2_response(_response_kind(final_message), final_message)
             trip_reason = circuit_breaker.record_error(
                 "_strip_disagreement",
                 "tool-call envelope stripped to nothing (extractor missed)",
@@ -1973,6 +2405,8 @@ async def _run_loop(
                 "raw output is in the daemon log (search: PARSE DISAGREEMENT)."
             )
             messages.append(error_msg)
+            if turn_record is not None:
+                turn_record.stop(_StopReason.CIRCUIT_BREAKER)
             yield AssistantTurnComplete(message=error_msg, usage=usage), usage
             return
 
@@ -1990,6 +2424,8 @@ async def _run_loop(
             and not final_message.tool_uses
             and not dropped_malformed
         ):
+            # Retried or ended before the seam: its own responses row.
+            _v2_response(_response_kind(final_message), final_message)
             if not empty_retried:
                 empty_retried = True
                 pending_empty_nudge = True  # rides the retry REQUEST only (above)
@@ -2005,6 +2441,8 @@ async def _run_loop(
                 "this turn. Please rephrase and try again."
             )
             messages.append(error_msg)
+            if turn_record is not None:
+                turn_record.stop(_StopReason.EMPTY_RESPONSE)
             yield AssistantTurnComplete(message=error_msg, usage=usage), usage
             return
 
@@ -2022,11 +2460,21 @@ async def _run_loop(
                 _forced_name = round_tool_choice.get("tool")
                 _wrong = sorted({t.name for t in final_message.tool_uses if t.name != _forced_name})
                 if _wrong:
+                    # Ended before the seam: its own responses row; none of
+                    # its calls run.
+                    _v2_response(_response_kind(final_message), final_message)
+                    if turn_record is not None:
+                        turn_record.not_run(len(final_message.tool_uses))
+                        turn_record.stop(_StopReason.FORCED_TOOL_NOT_HONORED)
                     raise RuntimeError(
                         f"forced tool_choice {{'tool': {_forced_name!r}}} was not honored — "
                         f"the model called {_wrong} instead. The provider path could not "
                         "enforce the directive; refusing to proceed silently."
                     )
+
+        # Telemetry v2: the after_model_response seam — the message the loop
+        # will act on, before the commit below adds the degrade notice to it.
+        _v2_response(_response_kind(final_message), final_message)
 
         # #65 — TOTAL no-empty-assistant-turn invariant at the commit point.
         # The empty-response guard above retries/surfaces a NON-malformed empty
@@ -2129,6 +2577,8 @@ async def _run_loop(
                     f"The model cannot produce valid tool calls for this request."
                 )
                 messages.append(error_msg)
+                if turn_record is not None:
+                    turn_record.stop(_StopReason.CIRCUIT_BREAKER)
                 yield AssistantTurnComplete(message=error_msg, usage=usage), usage
                 return
 
@@ -2185,6 +2635,8 @@ async def _run_loop(
                 )
                 error_msg = _make_assistant_msg(_boundary_escape_text(escapes))
                 messages.append(error_msg)
+                if turn_record is not None:
+                    turn_record.stop(_StopReason.BOUNDARY_ESCAPE)
                 yield AssistantTurnComplete(message=error_msg, usage=usage), usage
                 return
             return
@@ -2206,6 +2658,9 @@ async def _run_loop(
                 f"Stopping to prevent runaway loops."
             )
             messages.append(error_msg)
+            if turn_record is not None:
+                turn_record.not_run(len(tool_calls))
+                turn_record.stop(_StopReason.ITERATION_LIMIT)
             yield AssistantTurnComplete(message=error_msg, usage=usage), usage
             return
 
@@ -2249,6 +2704,9 @@ async def _run_loop(
                 )
             else:
                 _runnable.append(_tc)
+        if turn_record is not None:
+            turn_record.not_run(len(_blocked))
+            turn_record.ran(_tc.name for _tc in _runnable)
 
         _ran = (
             await _dispatch_tool_calls(
@@ -2420,6 +2878,8 @@ async def _run_loop(
                     messages.append(ConversationMessage(role="user", content=tool_results))
                     error_msg = _make_assistant_msg(recovery.diagnostic_message)
                     messages.append(error_msg)
+                    if turn_record is not None:
+                        turn_record.stop(_StopReason.CIRCUIT_BREAKER)
                     yield AssistantTurnComplete(message=error_msg, usage=usage), usage
                     return
 
@@ -2429,6 +2889,8 @@ async def _run_loop(
                     f"The model cannot produce valid tool calls for this request."
                 )
                 messages.append(error_msg)
+                if turn_record is not None:
+                    turn_record.stop(_StopReason.CIRCUIT_BREAKER)
                 yield AssistantTurnComplete(message=error_msg, usage=usage), usage
                 return
             else:
@@ -2504,6 +2966,8 @@ async def _run_loop(
                     log.debug("repeat_detector: record_run failed", exc_info=True)
             error_msg = _make_assistant_msg(_repeat_trip_text(repeat_trip))
             messages.append(error_msg)
+            if turn_record is not None:
+                turn_record.stop(_StopReason.REPEAT_DETECTOR)
             yield AssistantTurnComplete(message=error_msg, usage=usage), usage
             return
 
@@ -2607,9 +3071,13 @@ async def _run_loop(
                     consecutive_divergence_repetition,
                 ))
                 messages.append(_halt_msg)
+                if turn_record is not None:
+                    turn_record.stop(_StopReason.DIVERGENCE_HALT)
                 yield AssistantTurnComplete(message=_halt_msg, usage=usage), usage
                 return
 
+    if turn_record is not None:
+        turn_record.stop(_StopReason.MAX_TURNS)
     raise RuntimeError(f"Exceeded maximum turn limit ({context.max_turns})")
 
 
@@ -3007,6 +3475,10 @@ def _log_iteration(
     """Log why the agent loop continued (or stopped) on this iteration."""
     log.debug("loop turn=%d iter=%d reason=%s %s", turn, tool_iteration, reason, detail)
     if context.telemetry is not None:
+        # Telemetry v2: the turn and round only. The repair, retry and result
+        # columns stay NULL on a transition row, ALWAYS: several readers tell
+        # transitions apart by exactly those being empty (audit Q6).
+        _turn = _RUN_TURN.get()
         context.telemetry.record(
             model=_serving_model(context),
             tool_name="_loop_transition",
@@ -3014,6 +3486,8 @@ def _log_iteration(
             error_type=reason if reason != _IterationReason.TOOL_SUCCESS else None,
             error_detail=detail or None,
             session_id=_RUN_SESSION.get(),
+            turn_id=_turn.turn_id if _turn is not None else None,
+            round_index=turn if _turn is not None else None,
         )
 
 
@@ -3395,6 +3869,39 @@ def _microcompact_old_results(
                 log.warning("microcompact telemetry write failed", exc_info=True)
 
 
+#: How much of a tool's output is handed to ``record()`` for
+#: ``result_summary``. The tracker redacts, THEN cuts to its 500 characters, so a
+#: cut never splits a token; handing it the whole output (up to
+#: ``tool_result_max``) would redact tens of kilobytes on the event loop to keep
+#: 500. Four times the cut leaves room for redactions to shorten the text.
+_RESULT_SUMMARY_SOURCE_CHARS = 2000
+
+
+def _v2_call(
+    tool_name: str,
+    tool_use_id: str,
+    *,
+    success: bool,
+    repair_log=(),  # noqa: ANN001
+    raw_call: dict | None = None,
+    result_summary: str | None = None,
+) -> dict:
+    """The telemetry v2 ``tool_calls`` columns for one call's row (WP-X.54 T-3).
+
+    They ride on the INSERT that already happens (audit: about 11 sites), not
+    a second statement. ``tool_use_id`` always; the turn's fields when the
+    run is recording a turn. Call it ONCE per row written: it advances the
+    turn's per-tool failure streak that ``retry_index`` reads.
+    """
+    turn = _RUN_TURN.get()
+    if turn is None:
+        return {"tool_use_id": tool_use_id}
+    return {"tool_use_id": tool_use_id, **turn.call_fields(
+        tool_name, success=success, repair_log=repair_log, raw_call=raw_call,
+        result_summary=result_summary,
+    )}
+
+
 async def _safe_execute(
     context: LoopContext,
     tc: object,
@@ -3446,6 +3953,7 @@ async def _safe_execute(
                         effective_session_id if effective_session_id is not None
                         else context.session_id
                     ),
+                    **_v2_call(tc.name, tc.id, success=False),
                 )
             except Exception:  # pragma: no cover - telemetry must not mask result
                 log.debug("telemetry.record failed in _safe_execute", exc_info=True)
@@ -3959,6 +4467,7 @@ async def _execute_tool_call(
                     served_model=served_model,
                     parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
                     session_id=_row_session,
+                    **_v2_call(tool_name, tool_use_id, success=False),
                 )
             return ToolResultBlock(
                 tool_use_id=tool_use_id,
@@ -3977,6 +4486,7 @@ async def _execute_tool_call(
                 served_model=served_model,
                 parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
                 session_id=_row_session,
+                **_v2_call(tool_name, tool_use_id, success=False),
             )
         return ToolResultBlock(
             tool_use_id=tool_use_id,
@@ -3991,6 +4501,9 @@ async def _execute_tool_call(
     # Repair-pair flywheel: the repair return overwrites tool_input, so the
     # as-emitted call must be copied BEFORE validate_and_repair (D4 finding).
     _original_tool_input = dict(tool_input) if isinstance(tool_input, dict) else tool_input
+    # Telemetry v2's raw_before_repair: the call as the model emitted it. Only
+    # written on a row whose call the adapter changed (non-empty repair_log).
+    _raw_call = {"name": _original_tool_name, "input": _original_tool_input}
     _adapter_tier = getattr(context.adapter, "tier", None) if context.adapter else None
     if context.adapter is not None and _adapter_tier != "off":
         try:
@@ -4029,6 +4542,7 @@ async def _execute_tool_call(
                             chosen={"name": tool_name, "input": tool_input},
                             meta={"repair_log": repair_log},
                             telemetry=context.telemetry,
+                            repair_kind=_fold_repair_kinds(repair_log),
                         )
                 except Exception:
                     log.error("pair capture (repair path) failed", exc_info=True)
@@ -4075,6 +4589,9 @@ async def _execute_tool_call(
                     parsed_tool_call=_failed_call,
                     served_model=served_model,
                     session_id=_row_session,
+                    # Nothing was repaired (repair is what failed), so no
+                    # raw_before_repair: parsed_tool_call above IS the raw call.
+                    **_v2_call(tool_name, tool_use_id, success=False),
                 )
 
             # Phase 3: ESCALATE — retries exhausted + router has escalation
@@ -4111,6 +4628,8 @@ async def _execute_tool_call(
                 served_model=served_model,
                 parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
                 session_id=_row_session,
+                **_v2_call(tool_name, tool_use_id, success=False,
+                           repair_log=repair_log, raw_call=_raw_call),
             )
         return ToolResultBlock(
             tool_use_id=tool_use_id,
@@ -4201,6 +4720,8 @@ async def _execute_tool_call(
                 parsed_tool_call=_markup_call,
                 served_model=served_model,
                 session_id=_row_session,
+                **_v2_call(tool_name, tool_use_id, success=False,
+                           repair_log=repair_log, raw_call=_raw_call),
             )
         return ToolResultBlock(
             tool_use_id=tool_use_id,
@@ -4240,6 +4761,7 @@ async def _execute_tool_call(
                         chosen={"name": tool_name, "input": tool_input},
                         meta={"unwrap_log": _unwrap_log},
                         telemetry=context.telemetry,
+                        repair_kind=_fold_repair_kinds(_unwrap_log),
                     )
             except Exception:
                 log.error("pair capture (unwrap path) failed", exc_info=True)
@@ -4275,6 +4797,8 @@ async def _execute_tool_call(
                     parsed_tool_call=_failed_call,
                     served_model=served_model,
                     session_id=_row_session,
+                    **_v2_call(tool_name, tool_use_id, success=False,
+                               repair_log=repair_log, raw_call=_raw_call),
                 )
             return ToolResultBlock(
                 tool_use_id=tool_use_id,
@@ -4489,6 +5013,8 @@ async def _execute_tool_call(
                             served_model=served_model,
                             parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
                             session_id=_row_session,
+                            **_v2_call(tool_name, tool_use_id, success=False,
+                                       repair_log=repair_log, raw_call=_raw_call),
                         )
                     return ToolResultBlock(
                         tool_use_id=tool_use_id,
@@ -4506,6 +5032,8 @@ async def _execute_tool_call(
                         served_model=served_model,
                         parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
                         session_id=_row_session,
+                        **_v2_call(tool_name, tool_use_id, success=False,
+                                   repair_log=repair_log, raw_call=_raw_call),
                     )
                 return ToolResultBlock(
                     tool_use_id=tool_use_id,
@@ -4572,6 +5100,8 @@ async def _execute_tool_call(
                 served_model=served_model,
                 parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
                 session_id=_row_session,
+                **_v2_call(tool_name, tool_use_id, success=False,
+                           repair_log=repair_log, raw_call=_raw_call),
             )
         return ToolResultBlock(
             tool_use_id=tool_use_id,
@@ -4683,6 +5213,18 @@ async def _execute_tool_call(
                 else context.session_id
             ),
             tool_schema=None if ephemeral else _tool_schema_json(context, tool_name),
+            # Telemetry v2. The summary only on success: a failure's output is
+            # already error_detail (spec 4.2, "NULL if the existing row
+            # already stores it"). What the model was given, before the
+            # post-result hooks below; ephemeral nulls it with the rest.
+            **_v2_call(
+                tool_name, tool_use_id, success=not result.is_error,
+                repair_log=repair_log, raw_call=_raw_call,
+                result_summary=(
+                    None if result.is_error
+                    else (final_output or "")[:_RESULT_SUMMARY_SOURCE_CHARS]
+                ),
+            ),
         )
 
     # Repair-pair flywheel: a successful execution completes any pending
@@ -4894,6 +5436,7 @@ class AgentLoop:
         tool_choice: object | None = None,
         record_session_id: str | None = None,
         record_summary: dict | None = None,
+        surface: str | None = None,
     ) -> RunResult:
         """Run the agent loop asynchronously, return a RunResult.
 
@@ -4923,6 +5466,9 @@ class AgentLoop:
         the id a run with no session of its own files its telemetry rows under,
         and extra keys for its tool_advertisement row. ``session_id`` — the
         permission origin and the router's lookup — is unaffected by them.
+
+        ``surface`` (telemetry v2) names the caller's front door for the
+        turn's ``turns``/``responses`` rows; record-only, like the two above.
         """
         if messages is not None:
             messages = list(messages)  # shallow copy — run_loop mutates in place
@@ -4994,6 +5540,7 @@ class AgentLoop:
             # Record-only: see run_loop. POST /api/chat and subagents pass one.
             record_session_id=record_session_id,
             record_summary=record_summary,
+            surface=surface,
         ):
             if isinstance(event, AssistantTurnComplete):
                 last_text = event.message.text
