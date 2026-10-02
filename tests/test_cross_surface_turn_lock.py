@@ -113,7 +113,7 @@ async def test_bridge_turn_waits_for_telegram_turn_on_same_session(monkeypatch):
             return SimpleNamespace(text="reply", messages=list(kw["messages"]))
 
     async def fake_run_loop(context, messages, mode="agent", session_id=None,
-                            tool_choice=None):
+                            tool_choice=None, surface=None):
         order.append("ws:enter")
         order.append("ws:exit")
         if False:  # pragma: no cover — makes this an async generator
@@ -166,7 +166,7 @@ async def test_injected_turn_waits_for_bridge_turn_on_same_session(monkeypatch):
             return SimpleNamespace(text="reply", messages=list(kw["messages"]))
 
     async def fake_run_loop(context, messages, mode="agent", session_id=None,
-                            tool_choice=None):
+                            tool_choice=None, surface=None):
         order.append("ws:enter")
         ws_inside.set()
         await ws_release.wait()
@@ -221,7 +221,7 @@ async def test_different_sessions_stay_concurrent_across_surfaces(monkeypatch):
             return SimpleNamespace(text="reply", messages=list(kw["messages"]))
 
     async def fake_run_loop(context, messages, mode="agent", session_id=None,
-                            tool_choice=None):
+                            tool_choice=None, surface=None):
         order.append(f"ws:exit:{session_id}")
         if False:  # pragma: no cover
             yield

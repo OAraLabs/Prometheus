@@ -382,7 +382,7 @@ class AssistantTextDelta:
     "paperclip._fake_run_loop", replaces="prometheus.engine.agent_loop.run_loop"
 )
 def _make_fake_run_loop(chunks: list[str], usage: Any, error: Exception | None = None):
-    async def fake_run_loop(loop_context, messages, mode="agent", session_id=None, tool_choice=None):
+    async def fake_run_loop(loop_context, messages, mode="agent", session_id=None, tool_choice=None, surface=None):
         for chunk in chunks:
             yield AssistantTextDelta(chunk), usage
         if error is not None:

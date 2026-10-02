@@ -128,7 +128,9 @@ def test_the_route_does_not_pass_a_tools_argument(client_and_loop):
         f"the route still passes tools={loop.calls[0].get('tools')!r}; "
         f"run_async accepts that parameter and never reads it"
     )
-    assert set(loop.calls[0]) == {"system_prompt", "messages", "record_session_id"}
+    assert set(loop.calls[0]) == {"system_prompt", "messages", "record_session_id", "surface"}
+    # Telemetry v2 (WP-X.54 T-3): record-only, like record_session_id.
+    assert loop.calls[0]["surface"] == "rest"
 
 
 def test_the_route_records_its_turns_under_the_conversation(client_and_loop):

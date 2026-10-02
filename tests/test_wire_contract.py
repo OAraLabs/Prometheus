@@ -93,7 +93,8 @@ def test_tool_frames_carry_consistent_call_id(monkeypatch):
     from prometheus.engine import agent_loop as al
 
     async def fake_run_loop(ctx, messages, *, mode="agent", session_id=None, tool_choice=None,
-                            record_session_id=None, record_summary=None):
+                            record_session_id=None, record_summary=None,
+                            surface=None, coding_run_id=None):
         yield ToolExecutionStarted(tool_name="web_search", tool_input={"q": "x"}, tool_use_id="toolu_abc"), None
         yield ToolExecutionCompleted(tool_name="web_search", output="result", is_error=False, tool_use_id="toolu_abc"), None
 
@@ -202,7 +203,8 @@ def test_run_agent_persists_assistant_turn(monkeypatch):
     from prometheus.engine import agent_loop as al
 
     async def fake_run_loop(ctx, messages, *, mode="agent", session_id=None, tool_choice=None,
-                            record_session_id=None, record_summary=None):
+                            record_session_id=None, record_summary=None,
+                            surface=None, coding_run_id=None):
         messages.append(ConversationMessage(role="assistant", content=[TextBlock(text="answer")]))
         if False:
             yield  # make this an async generator
