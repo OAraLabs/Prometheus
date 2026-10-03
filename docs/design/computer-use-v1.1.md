@@ -32,7 +32,86 @@ than quietly designing around it.
 
 ## 0. Summary
 
-<!-- SUMMARY: filled last -->
+**Part 1 — the open questions (§2).**
+
+* **(a) Platform.** The SDK (`cua-driver`, pinned `>=0.28,<1`, locked
+  **0.28.2**) is cross-platform, and so are the adapter's calls. The module
+  is **bound to Linux/X11 + AT-SPI** by two layers in front of the driver:
+  * the preconditions, which want an X socket and ask `gdbus` for the a11y
+    bus, block every macOS and Windows step before the driver is reached
+    (`driver.py:158-362`);
+  * the candidate builder knows only AT-SPI role names (`candidates.py:42-49`).
+
+  The pin is also unsafe: from 0.28.3 our observe call cannot be built (D12).
+* **(b) Events.** The driver pushes only events about **its own** calls
+  (`DriverActivityObserver`, content-free). The human's focus and activation
+  can only be **polled** through Cua (`list_windows` z-order). AT-SPI, AX and
+  UIA do push them, but only to a listener we would write, and every such
+  listener is global.
+* **(c) SkillForgeRecorder** is a macOS menu-bar app that records **screen
+  pixels to MP4** with ScreenCaptureKit. It captures no input events, no
+  accessibility data and no app identity, and it uploads to skillforge.sh.
+  It was never shown to record. Decision 8 holds.
+* **(d) Catalogue.** **51** tools are registered. **12** are sent per turn on
+  a local tier and all 51 on a cloud tier (41,253 schema characters,
+  ≈ 10.3k tokens). The seven `computer_*` verbs would add 11,578 characters,
+  more than the whole local per-turn set; one `computer_task` adds 675. The
+  door, being a command, adds 0.
+
+**Part 2 — overlap (§4).**
+
+* **Use Cua's:** the driver (pinned exactly), its private-worker hosting,
+  bounded trusted sessions as a floor under our gate, the agent cursor (off
+  on X11), Lume for evaluation VMs, Cua Bench for end-to-end evaluation, and
+  the perception extension for the later pixel tier.
+* **Keep ours:** the gate, the extent, the candidate table, `validate_choice`
+  and the loop. Cua's RFC 4268 converged on the same design, and we adopt its
+  rules as data.
+* **Hermes** confirms the `cua:<action>:<mode>` key shape, has no app term,
+  and lets one "always" mint "type anything, anywhere". Its three driver bugs
+  are #52014 (closed, not planned), #32766 (open) and #96328 (fixed by
+  #96341). Each maps to a defect class we fix or cannot hit.
+
+**Part 3 — the design (§5), in six lines.**
+
+1. **The door** is `/computer <goal>` on every chat surface plus a Beacon
+   toggle and composer mode, all funnelled into one `ComputerTaskRunner`.
+   * The first answer to "which app may I use?" becomes a **session binding**
+     that the runner applies as the loop's approver, so **the gate is not
+     changed**.
+   * `list_windows` resolves "my editor" to a window, re-resolved every step.
+   * Nothing is registered; `computer.registered` stays 0.
+2. **The cockpit** runs the task as the session's turn, so both Beacons
+   render it and their existing Stop works today.
+   * A durable `computer_*` stream follows the coding live-stream pattern.
+   * Stop is a cooperative epoch fence built from injected seams; at most one
+     dispatched action can still land, and the UI says so.
+   * Pushes carry no content.
+3. **The driver is an Integration:** an exact pin, a probe forced before
+   every task (telemetry off, version, preconditions, runtime, a real app
+   list), McpRuntime-style lifecycle, and one `computer_use:` config block,
+   default off.
+4. **A fifth extent term, `site`**, lands before the door, while no grants
+   exist. In v1.1 web content is not offered, and browser chrome is
+   approve-once.
+5. **The chooser** is a local Gemma behind the existing protocol, constrained
+   by a per-request one-line GBNF grammar of the table's IDs.
+   * Timeout means abstain.
+   * The pixel fallback is Cua's perception regions as table rows.
+   * It is evaluated offline first, then on a local VM with the real driver,
+     then on Cua Bench.
+6. **Build order:** PRs 1-14 (§6).
+   * **PR 3 (site term + the D1 `/gate off` fix) is a hard precondition for
+     the door.**
+   * **PR 5 widens the registration pin to every `computer_*` path** (⚑).
+
+**Fourteen defects** were found on the way (§3). The two that block the door
+are **D1** (`/gate off` lets every desktop action through) and **D2** (typed
+text goes to whatever has focus, not the field the prompt names).
+
+**Decisions needed: 16** (§8). The ones that block soonest are #1 (the site
+term), #2 (decision 6 under a model chooser), #4 (D2), #9 (the exact pin) and
+#10 (hosting).
 
 ---
 
@@ -1793,4 +1872,25 @@ computer_task    (1, 352, 88)
 
 ## Appendix B — sources
 
-<!-- APPENDIX B -->
+Everything external cited in this document. URLs were fetched, and
+repositories were cloned at the commits named, on 2026-10-03.
+
+| Source | Where |
+|---|---|
+| Installed `cua-driver` 0.28.2 wheel | `.venv/lib/python3.11/site-packages/cua_driver/` (`_native.py`, `_native_contract.py`, `bin/cua-driver`, `libcua_driver_sdk.so`) |
+| Later `cua-driver` wheels (0.28.3 … 0.33.1) | files.pythonhosted.org, via https://pypi.org/pypi/cua-driver/json |
+| `trycua/cua` | github.com/trycua/cua at `0d274d0` (docs, `libs/cua-driver`, `libs/cua-bench`, `libs/lume`, `rfcs/3931…`, `rfcs/4268…`); also at `fbd6f96` (the chooser/eval research) and the `cua-driver-rs-v0.28.2` tag `fc18825` (the site-term research) |
+| PyPI metadata | https://pypi.org/pypi/cua-bench/json, …/cua-agent/json, …/lume/json, …/pylume/json |
+| `NousResearch/hermes-agent` | github.com/NousResearch/hermes-agent at `158fd638` |
+| Hermes issues | https://github.com/NousResearch/hermes-agent/issues/52014, /issues/32766, /pull/33054, /issues/96328, /pull/96341; https://github.com/trycua/cua/issues/2013. The same three numbers under trycua/cua return 404. |
+| llama.cpp | `ggml-org/llama.cpp` at `836d571` (`test-gbnf-validator`, `grammars/README.md`, `tools/server/README.md`) |
+| AT-SPI2 / GTK | `GNOME/at-spi2-core` (`atspi/atspi-event-listener.c`, `registryd/deviceeventcontroller.c`, `xml/Event.xml`); `GNOME/gtk` (`gtk/a11y/gtkatspicontext.c`) |
+| Apple AX / NSWorkspace | developer.apple.com documentation JSON for `AXObserverCreate`, `AXObserverAddNotification`, the `kAX…Notification` constants and `NSWorkspace.didActivateApplicationNotification` |
+| Windows UIA / Win32 | `MicrosoftDocs/sdk-api` and `win32` sources on GitHub (learn.microsoft.com is blocked by this environment's proxy) |
+| Browser a11y URLs | Mozilla `accessible/atk/nsMaiInterfaceDocument.cpp`, `DocAccessible.cpp`; Chromium `ax_platform_node_auralinux.cc`, `ax_platform_node_cocoa.mm`, `ax_platform_node_win.cc`; MDN `document.title`, `history.pushState` |
+| OAraLabs repos (read-only) | `SkillForgeRecorder` at `9bfc86f`, `beacon-desktop` at `0a57da7`, `beacon-ios` at `8c1a383`, `OAra-Brain` at `28ffd86` |
+
+**Not reachable from this environment:** cua.ai documentation, learn.microsoft.com,
+api.github.com for some repositories, huggingface.co, and the tiktoken
+encoding download. Claims that would have needed them are marked *not
+established*.
