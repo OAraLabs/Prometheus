@@ -2398,9 +2398,9 @@
        "prose",
        null,
        null,
-       null,
-       null,
-       null
+       "accepted_user",
+       "user_signal",
+       "<time>"
       ],
       [
        "<turn:4>",

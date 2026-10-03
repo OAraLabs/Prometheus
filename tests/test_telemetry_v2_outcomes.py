@@ -136,6 +136,14 @@ class TestClassifier:
         again = "rename the config loader function to load_settings across the whole package"
         assert classify_next_message(again, PREV) == "user_corrected"
 
+    def test_a_one_word_swap_is_not_a_repeat(self):
+        """A new request that differs by one word (the parity model_switch
+        scenario) overlaps 0.71, but it drops a word of the previous request, so
+        it is not "essentially the same request": NULL, never user_corrected
+        (Will, 2026-10-03)."""
+        prev = "Reply with exactly the word: one"
+        assert classify_next_message("Reply with exactly the word: two", prev) is None
+
     def test_a_repeat_under_four_qualifying_words_is_null(self):
         """Ruling 1c: below 4 words of 3+ letters the overlap measures nothing."""
         assert classify_next_message("fix the bug", "fix the bug") is None

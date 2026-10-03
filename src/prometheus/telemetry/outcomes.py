@@ -192,7 +192,10 @@ def classify_next_message(text: str, previous: str | None) -> str | None:
     * "actually", "wait", "still", "again": a correction only together with a
       correction after them, else None;
     * the same request again: at least ``MIN_QUALIFYING_WORDS`` words of 3+
-      letters and ``REPEAT_OVERLAP`` overlap with ``previous``;
+      letters, ``REPEAT_OVERLAP`` overlap with ``previous``, and every
+      qualifying word of ``previous`` kept. A request that swaps a word ("the
+      word: two" after "the word: one") overlaps just as much, but it may be a
+      new request, so it is None (Will, 2026-10-03);
     * an acknowledgement ("thanks", "perfect", a thumbs-up): accepted;
     * a different request: as many words, overlap at most ``DIFFERENT_OVERLAP``;
     * anything else: None.
@@ -216,8 +219,9 @@ def classify_next_message(text: str, previous: str | None) -> str | None:
     words = _qualifying(t)
     if len(words) < MIN_QUALIFYING_WORDS:
         return None
-    overlap = _overlap(words, _qualifying(_normalize(previous)))
-    if overlap >= REPEAT_OVERLAP:
+    prev_words = _qualifying(_normalize(previous))
+    overlap = _overlap(words, prev_words)
+    if overlap >= REPEAT_OVERLAP and prev_words <= words:
         return "user_corrected"
     if overlap <= DIFFERENT_OVERLAP:
         return "accepted_user"
