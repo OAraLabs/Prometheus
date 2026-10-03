@@ -154,7 +154,12 @@ class ActivityObserver:
                 ))
         else:
             # No gateway — just log it
-            log.info("ActivityObserver: nudge (no gateway): %s", message[:100])
+            # The type and length, never the text: a dream digest is built
+            # from conversations.
+            log.info(
+                "ActivityObserver: nudge '%s' (no gateway; %d chars, text not logged)",
+                nudge_type, len(message),
+            )
             self._last_nudge[nudge_type] = now
 
     # ------------------------------------------------------------------
