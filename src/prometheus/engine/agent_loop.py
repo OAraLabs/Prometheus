@@ -3848,6 +3848,12 @@ def _microcompact_old_results(
             first_line = content.split("\n", 1)[0][:80]
             summary = content[:keep_chars]
             replacement = f"[microcompacted] {first_line}...\n{summary}"
+            # Never longer. A result up to keep_chars long is kept WHOLE in
+            # `summary`, so the wrapper only added 21 + len(first_line) chars:
+            # live, 458 of 1,787 passes grew the history (every 201-500 char
+            # result), each one discarding the prompt cache for nothing.
+            if len(replacement) >= len(content):
+                continue
             msg.content[j] = TRB(
                 tool_use_id=block.tool_use_id,
                 content=replacement,

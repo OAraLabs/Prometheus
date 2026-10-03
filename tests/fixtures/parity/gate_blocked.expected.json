@@ -864,6 +864,14 @@
      ],
      "rows": []
     },
+    "store_marks": {
+     "columns": [
+      "name",
+      "value",
+      "updated_at"
+     ],
+     "rows": []
+    },
     "summaries": {
      "columns": [
       "id",

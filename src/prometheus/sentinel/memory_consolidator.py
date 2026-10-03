@@ -17,6 +17,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: The ``store_marks`` entry holding how far decay has been charged
+#: (wall-clock seconds). See ``MemoryConsolidator._decay_confidence``.
+DECAY_MARK = "decay_charged_through"
+
 
 @dataclass
 class ConsolidationResult:
@@ -111,23 +115,49 @@ class MemoryConsolidator:
         return merged
 
     def _decay_confidence(self) -> int:
-        """Reduce confidence on facts not mentioned recently."""
-        cutoff = time.time() - (self._stale_days * 86400)
+        """Charge confidence decay for the stale time since the last pass.
+
+        A fact is stale once ``stale_days`` pass without a mention. It loses
+        ``decay_rate`` for every 30 days it spends stale, never going below
+        ``min_confidence``. Each pass charges only the stale time since the
+        store's ``decay_charged_through`` mark, then moves the mark to now.
+        So the total does not depend on how often passes run, and a restart
+        (a new consolidator on the same store) never charges a window twice.
+        With no mark yet (a new store, or the first pass after this change)
+        a fact is charged its whole stale time, once.
+
+        This used to subtract ``decay_rate x periods overdue`` from the
+        CURRENT confidence on every pass, so how often AutoDream ran set the
+        speed: at 48 passes a day a fact 90+ days unmentioned lost 0.15 per
+        pass and hit the floor within hours. Live on 2026-10-03, all 2,121
+        stale facts of 2,173 sat at exactly the floor.
+        """
+        now = time.time()
+        charged_through = self._store.get_mark(DECAY_MARK)
+        stale_seconds = self._stale_days * 86400
         memories = self._store.get_all_memories(limit=5000)
         decayed = 0
 
         for mem in memories:
+            if mem["confidence"] <= self._min_confidence:
+                continue
             last = mem.get("last_mentioned", mem.get("timestamp", 0))
-            if last < cutoff and mem["confidence"] > self._min_confidence:
-                # Decay proportional to how many 30-day periods overdue
-                periods = (time.time() - last) / (30 * 86400)
-                new_conf = max(
-                    self._min_confidence,
-                    mem["confidence"] - (self._decay_rate * periods),
-                )
-                if new_conf < mem["confidence"]:
-                    self._store.update_memory(mem["id"], confidence=new_conf)
-                    decayed += 1
+            stale_since = last + stale_seconds
+            start = stale_since if charged_through is None else max(stale_since, charged_through)
+            if now <= start:
+                continue
+            periods = (now - start) / (30 * 86400)
+            new_conf = max(
+                self._min_confidence,
+                mem["confidence"] - (self._decay_rate * periods),
+            )
+            if new_conf < mem["confidence"]:
+                self._store.update_memory(mem["id"], confidence=new_conf)
+                decayed += 1
+
+        # Never rewound: a wall clock stepping back must not re-open a window.
+        if charged_through is None or now > charged_through:
+            self._store.set_mark(DECAY_MARK, now)
         return decayed
 
     def _tombstone(self) -> int:
