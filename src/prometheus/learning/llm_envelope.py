@@ -65,6 +65,7 @@ caller-visible behaviour stays compatible with the legacy contract.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -112,6 +113,16 @@ class LLMCallResult:
     text: str
     error: BaseException | None
     duration_ms: float
+
+
+#: A Stop, not a failure: the task was cancelled (a user's Stop, a shutdown)
+#: or the process was interrupted. Live, 13 of the 849 ``silent_failures`` rows
+#: were exactly this. The round still gets its run row, as ``partial``.
+_CANCELLATION = (asyncio.CancelledError, KeyboardInterrupt)
+
+
+def _cancel_summary(exc: BaseException) -> dict[str, Any]:
+    return {"reason": "cancelled", "exception_type": type(exc).__name__}
 
 
 def _failure_summary(exc: BaseException) -> dict[str, Any]:
@@ -255,12 +266,18 @@ class LLMCallEnvelope:
                     usage = event.usage
         except BaseException as exc:  # noqa: BLE001 — we re-raise per policy
             duration_ms = (time.time() - started) * 1000.0
-            self._record_failure(operation, exc, context, duration_ms, model, provider,
-                                 session_id=session_id)
-            log.exception(
-                "%s.%s: LLM call failed (on_failure=%s)",
-                self._subsystem, operation, self._on_failure,
-            )
+            if isinstance(exc, _CANCELLATION):
+                # A Stop is not a failure: no silent_failures row, no traceback.
+                self._record_cancelled(operation, exc, duration_ms, model, provider,
+                                       session_id=session_id)
+                log.info("%s.%s: LLM call cancelled", self._subsystem, operation)
+            else:
+                self._record_failure(operation, exc, context, duration_ms, model, provider,
+                                     session_id=session_id)
+                log.exception(
+                    "%s.%s: LLM call failed (on_failure=%s)",
+                    self._subsystem, operation, self._on_failure,
+                )
             if self._on_failure == "raise":
                 raise
             if self._on_failure == "return_none":
@@ -306,9 +323,11 @@ class LLMCallEnvelope:
           constructor's ``on_failure`` policy deliberately does not apply
           here. Before re-raising, the failure lands in
           ``telemetry.silent_failures`` + a failed ``subsystem_runs`` row.
-          ``GeneratorExit`` is the one exception NOT recorded as a failure:
-          it is the generator-protocol close signal (consumer stopped
-          iterating), not a model failure.
+          ``GeneratorExit`` is NOT recorded as a failure: it is the
+          generator-protocol close signal (consumer stopped iterating), not a
+          model failure. Neither is a Stop (``CancelledError``,
+          ``KeyboardInterrupt``): no ``silent_failures`` row, and the round's
+          run row is ``partial`` with ``{"reason": "cancelled"}``.
         - A stream that ends without an ``ApiMessageCompleteEvent`` records
           a failed row (``empty_stream``) and returns normally — the loop's
           own "stream finished without a final message" error stays the
@@ -364,6 +383,26 @@ class LLMCallEnvelope:
                 yield event
         except GeneratorExit:
             # Consumer closed the stream — protocol signal, not a failure.
+            raise
+        except _CANCELLATION as exc:
+            # A Stop: the user stopped the turn (the WS interrupt cancels its
+            # task) or the daemon is shutting down. Not a failure, so no
+            # silent_failures row; the round's run row says "partial".
+            self.last_run_id = self._record_usage_row(
+                operation=operation,
+                outcome="partial",
+                duration_ms=(time.time() - started) * 1000.0,
+                summary=_cancel_summary(exc),
+                input_tokens=usage_in,
+                output_tokens=usage_out,
+                cached_input_tokens=usage_cached,
+                cache_write_tokens=usage_cache_write,
+                round_index=round_index,
+                session_id=session_id,
+                model=request.model,
+                thinking=thinking,
+                provider=provider,
+            )
             raise
         except BaseException as exc:  # noqa: BLE001 — observed, then re-raised
             duration_ms = (time.time() - started) * 1000.0
@@ -649,6 +688,39 @@ class LLMCallEnvelope:
                 "LLMCallEnvelope: telemetry write failed for "
                 "%s.%s — failure was still surfaced via on_failure=%s",
                 self._subsystem, operation, self._on_failure,
+                exc_info=True,
+            )
+
+    def _record_cancelled(
+        self,
+        operation: str,
+        exc: BaseException,
+        duration_ms: float,
+        model: str | None = None,
+        provider: object | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> None:
+        """call()'s row for a Stop: a ``partial`` run, no ``silent_failures`` row."""
+        if self._telemetry is None:
+            return
+        billing_mode, billing_marker = self._billing_of(model, provider)
+        try:
+            self._telemetry.record_run(
+                subsystem=self._subsystem,
+                operation=operation,
+                outcome="partial",
+                duration_ms=duration_ms,
+                summary=_cancel_summary(exc),
+                model=model,
+                billing_mode=billing_mode,
+                billing_marker=billing_marker,
+                session_id=session_id,
+            )
+        except Exception:
+            log.debug(
+                "LLMCallEnvelope: cancel telemetry write failed for %s.%s",
+                self._subsystem, operation,
                 exc_info=True,
             )
 
