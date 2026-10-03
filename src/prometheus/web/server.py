@@ -32,6 +32,7 @@ from prometheus.context.environment import (
     deployment_freshness,
     git_head_sha,
 )
+from prometheus.version import package_version
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +278,7 @@ def create_app(
     _api_token = config.get("web", {}).get("api_token") or os.environ.get("PROMETHEUS_API_TOKEN", "")
     app = FastAPI(
         title="Prometheus Mission Control",
-        version="0.1.0",
+        version=package_version(),
         docs_url=None if _api_token else "/docs",
         redoc_url=None if _api_token else "/redoc",
         openapi_url=None if _api_token else "/openapi.json",
@@ -666,7 +667,7 @@ def create_app(
     async def root():
         return {
             "name": "Prometheus Mission Control",
-            "version": "0.1.0",
+            "version": package_version(),
             "endpoints": [
                 "/api/status", "/api/sessions", "/api/telemetry",
                 "/api/cron", "/api/approvals", "/api/chat",

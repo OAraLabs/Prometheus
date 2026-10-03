@@ -15,10 +15,14 @@
 # site also serves cron jobs and other services, so it is left alone here.
 #
 # USAGE
-#   scripts/deploy.sh <ref> [--prepare-only]
+#   scripts/deploy.sh <ref> [--prepare-only] [--reapply-model-choices]
 #     <ref>           a tag or commit on origin/main, e.g. v0.9.2 — deploy
 #                     exactly that, not whatever main is by then
 #     --prepare-only  phase A only: build and gate the venv, touch nothing live
+#     --reapply-model-choices
+#                     B6 re-applies B0's recorded cloud choices instead of
+#                     checking them — the fallback for a daemon that does not
+#                     keep them across a restart (before WP-X.7)
 #
 # SETTINGS (environment; defaults in brackets)
 #   PROMETHEUS_DEPLOY_CLONE   deploy clone           [$HOME/prometheus-deploy]
@@ -41,8 +45,7 @@
 #      G3 the target code imports in the new venv
 #
 # PHASE B — switch.
-#   B0 record every session's model choice (a restart keeps local-backend
-#      overrides; cloud ones like /claude live in memory and are lost)
+#   B0 record every session's model choice
 #   B1 fast-forward the deploy clone to <ref>
 #   B2 point $ROOT/current at the new venv ($ROOT/previous at the old one)
 #   B3 write the unit drop-in: run the venv's python, set PROMETHEUS_VENV so
@@ -50,7 +53,10 @@
 #   B4 restart the unit
 #   B5 verify: running from the venv, nothing from ~/.local, 401 without a
 #      token, 401 for a crafted Host header, 200 with the token
-#   B6 re-apply the recorded cloud model choices
+#   B6 check: since WP-X.7 the daemon stores every choice and restores it
+#      at boot, so each session's live choice must equal B0's record. A match
+#      prints OK; any difference stops the deploy with a list (session id and
+#      model names only). --reapply-model-choices re-applies instead.
 #   If B5 fails the script stops with the rollback commands below.
 #
 # ROLLBACK
@@ -82,9 +88,11 @@ usage() { sed -n '/^# USAGE/,/^# SETTINGS/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2
 
 REF=""
 PREPARE_ONLY=0
+REAPPLY_CHOICES=0
 for arg in "$@"; do
     case "$arg" in
         --prepare-only) PREPARE_ONLY=1 ;;
+        --reapply-model-choices) REAPPLY_CHOICES=1 ;;
         -h|--help) usage; exit 0 ;;
         -*) usage; exit 2 ;;
         *) [ -z "$REF" ] || { usage; exit 2; }; REF="$arg" ;;
@@ -239,8 +247,10 @@ grep -q "$ROOT/$S/" "/proc/$PID/maps" || fail "PID $PID has nothing mapped from 
     || fail "/api/status with the token did not answer 200"
 say "  running from $VENV, 401 bare, 401 crafted Host, 200 with token"
 
-say "B6 re-apply cloud model choices"
-if [ -f "$CHOICES" ]; then
+if [ ! -f "$CHOICES" ]; then
+    say "B6 skipped — B0 recorded nothing, so there is nothing to compare"
+elif [ "$REAPPLY_CHOICES" = 1 ]; then
+    say "B6 re-apply the recorded cloud model choices (--reapply-model-choices)"
     API="$API" TOKEN="$TOKEN" python3 - "$CHOICES" <<'EOF'
 import json, os, sys, urllib.error, urllib.request
 api, token = os.environ["API"], os.environ["TOKEN"]
@@ -260,6 +270,41 @@ for r in json.load(open(sys.argv[1])):
         print(f"deploy:   {sid}: {r['key']} re-applied", file=sys.stderr)
     except urllib.error.HTTPError as exc:
         print(f"deploy:   {sid}: {r['key']} NOT re-applied — {exc.code} {exc.read()[:200]!r}", file=sys.stderr)
+EOF
+else
+    say "B6 check the live model choices against B0's record"
+    API="$API" TOKEN="$TOKEN" python3 - "$CHOICES" <<'EOF' || die "B6: model choices differ from B0's record (listed above). The daemon runs $REF; the record is $CHOICES"
+import json, os, sys, urllib.error, urllib.request
+api, token = os.environ["API"], os.environ["TOKEN"]
+FIELDS = ("key", "provider", "model", "backend", "is_default")
+def live(sid):
+    req = urllib.request.Request(f"{api}/api/sessions/{urllib.request.quote(sid, safe='')}/model",
+                                 headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.load(r)
+def name(row):  # the picker key and the model name; nothing else is printed
+    return f"{row.get('key')} ({row.get('model')})"
+saved = json.load(open(sys.argv[1]))
+diffs = []
+for r in saved:
+    sid = r["session_id"]
+    try:
+        now = live(sid)
+    except urllib.error.HTTPError as exc:
+        diffs.append(f"{sid}: saved {name(r)}, live unreadable (HTTP {exc.code})")
+        continue
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        diffs.append(f"{sid}: saved {name(r)}, live unreadable ({type(exc).__name__})")
+        continue
+    if any(now.get(k) != r.get(k) for k in FIELDS):
+        diffs.append(f"{sid}: saved {name(r)}, live {name(now)}")
+if not diffs:
+    print(f"deploy:   B6 OK — {len(saved)} of {len(saved)} session(s) on their recorded model choice", file=sys.stderr)
+    sys.exit(0)
+print(f"deploy:   B6 MISMATCH — {len(diffs)} of {len(saved)} session(s) differ from B0's record:", file=sys.stderr)
+for line in diffs:
+    print(f"deploy:     {line}", file=sys.stderr)
+sys.exit(1)
 EOF
 fi
 say "done: $UNIT runs $REF (${T:0:12}) from $VENV"
