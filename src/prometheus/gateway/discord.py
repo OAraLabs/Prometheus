@@ -604,8 +604,12 @@ class DiscordAdapter(BasePlatformAdapter):
         session = self.session_manager.get_or_create(session_id)
         # Telemetry v2 outcomes (WP-X.54 T-4): the user's signal on the turn
         # before this message. Queued; never raises.
+        from prometheus.sentinel import activity
         from prometheus.telemetry import outcomes
 
+        # WP-X.56: a person is using Prometheus. The heartbeat ends idle on
+        # its next tick, so AutoDream pauses. Never raises.
+        activity.note_user_activity()
         outcomes.note_user_message(session_id, event.text)
         session.add_user_message(event.text)
         pre_len = len(session.get_messages())

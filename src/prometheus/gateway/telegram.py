@@ -2290,8 +2290,12 @@ class TelegramAdapter(BasePlatformAdapter):
         # message that waits for a running turn must not label it. Human
         # inbound only; inject_turn's machine turns are no signal. Queued;
         # never raises.
+        from prometheus.sentinel import activity
         from prometheus.telemetry import outcomes
 
+        # WP-X.56: a person is using Prometheus. The heartbeat ends idle on
+        # its next tick, so AutoDream pauses. Never raises.
+        activity.note_user_activity()
         outcomes.note_user_message(event.session_key(), event.text)
         # Telegram inbound is a real human: provenance="user", trusted. Routes
         # through the same shared core as inject_turn (the re-engagement path).
