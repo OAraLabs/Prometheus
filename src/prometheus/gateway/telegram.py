@@ -830,16 +830,22 @@ class TelegramAdapter(BasePlatformAdapter):
         if self.config.chat_allowed(chat.id):
             return
         user = update.effective_user
+        # Log the command name only — never the text, which for an
+        # unauthorized sender is untrusted content the operator may read
+        # later in a terminal. A plain message logs its length.
+        text = update.message.text if update.message else None
+        words = (text or "").split()
+        if not text:
+            shown = "<non-text update>"
+        elif words and words[0].startswith("/"):
+            shown = words[0][:32]
+        else:
+            shown = f"<text, {len(text)} chars>"
         logger.warning(
             "Ignoring update from unauthorized chat %d (user %s): %s",
             chat.id,
             getattr(user, "id", "?"),
-            # Log the command name only — never the full text, which for an
-            # unauthorized sender is untrusted content the operator may read
-            # later in a terminal.
-            (update.message.text or "").split()[0][:32]
-            if update.message and update.message.text
-            else "<non-text update>",
+            shown,
         )
         raise ApplicationHandlerStop
 
