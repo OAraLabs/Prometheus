@@ -66,7 +66,8 @@ def cache_sticker_description(
         "cached_at": time.time(),
     }
     _save_cache(cache)
-    logger.debug("Cached sticker %s: %s", file_unique_id, description[:60])
+    # The description stands in for the user's message: log its length only.
+    logger.debug("Cached sticker %s: description of %d chars", file_unique_id, len(description))
 
 
 def build_sticker_injection(description: str, emoji: str = "", set_name: str = "") -> str:

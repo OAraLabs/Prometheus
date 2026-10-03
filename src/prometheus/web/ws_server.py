@@ -19,6 +19,7 @@ import time
 from typing import Any
 
 from prometheus.engine import loop_watchdog as _loop_watchdog
+from prometheus.version import package_version
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +245,7 @@ class WebSocketBridge:
         await self._send_one(websocket, {
             "type": "connected",
             "timestamp": time.time(),
-            "payload": {"version": "0.1.0"},
+            "payload": {"version": package_version()},
         })
 
         try:
