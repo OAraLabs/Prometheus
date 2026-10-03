@@ -84,28 +84,46 @@ that nothing below quietly works around a settled item.
 **Q1. Decision 3 (local only) is not true of the parts we would use, as they
 ship.**
 
-* **cua-driver sends telemetry by default.**
-  * The bundled CLI contains `https://eu.i.posthog.com/capture/`.
+* **cua-driver sends telemetry by default, from the binary, not the library.**
+  * Telemetry is on by default and content-free, sent to PostHog EU. It lives
+    in the CLI **binary** crate (upstream `crates/cua-driver/src/telemetry.rs`).
+  * The bundled `bin/cua-driver` contains `https://eu.i.posthog.com/capture/`.
   * `cua-driver doctor` reports `telemetry: enabled via default`.
-  * Running the CLI here created `~/.cua-driver/.telemetry_id`, and the
-    egress proxy refused its CONNECTs to `eu.i.posthog.com`.
-  * Whether the **in-process SDK** path we use (`CuaDriver.create()`,
-    `cua.py:178`) also sends is *not established*. The `.so` holds only a
-    `CUA_TELEMETRY_EN…` fragment and no PostHog URL.
-  * Nothing in `src/prometheus/computer/` sets the opt-out variables.
-* **Cua Bench sends telemetry by default too**, through cua-core's PostHog
-  client. It is disabled with `CUA_TELEMETRY=0` or `DO_NOT_TRACK=1`.
+  * Running the CLI here created `~/.cua-driver/.telemetry_id`, and the egress
+    proxy refused its CONNECTs to `eu.i.posthog.com`.
+  * **The in-process library we load today** (`CuaDriver.create()`,
+    `cua.py:178`) contains no PostHog URL and no telemetry variable names, in
+    0.28.2 or 0.33.1. That is a strings check, not a packet capture, so it is
+    *probably* clean and *not established*.
+  * **The private worker (§4.1) *is* the binary.** It registers telemetry
+    before it starts, and its environment allowlist passes
+    `CUA_DRIVER_RS_TELEMETRY_ENABLED` but **not** `DO_NOT_TRACK` (upstream
+    `crates/cua-driver-sdk/src/embedded.rs:837-870`, `worker.rs:141-158`).
+  * The update check is separate from telemetry, and unaudited.
+  * Nothing in `src/` sets any opt-out.
+* **Cua Bench and Lume send telemetry by default too.** Cua Bench uses
+  cua-core (`CUA_TELEMETRY=0` or `DO_NOT_TRACK=1`); Lume uses
+  `LUME_TELEMETRY_ENABLED`.
 * **Record a Skill's step verifier can leave the box.**
   * It is built from the top-level `model:`, which may be a cloud provider
     (`web/server.py:4029-4064`).
   * It is on by default (`docs/guide/record-a-skill.md:33-37`).
   * Watch-mode output (§5.6) must not be pointed at it until it is restricted
     to local providers.
-* **APNs leaves the machine by construction.** Any push about a computer task
-  must carry no content.
+* **APNs approval pushes carry the app and the machine today.**
+  * The alert body is `"<tool_name> — <first line of description>"`
+    (`push/dispatcher.py:100-117`).
+  * A computer action's description names the app and the target
+    (`checker.py:1137-1140`).
+  * So with `push.enabled` (off by default), both would pass through Apple.
+    This contradicts the iOS extension's own header ("Apple learns that the
+    daemon had something to say, never what", beacon-ios
+    `NotificationService.swift:4-7`).
+  * Computer pushes must be content-free (§5.2.2).
 
-*Consequence:* the Integration forces the opt-outs before the SDK loads, and
-the health check reports that it did (§5.3). These are a floor, not a config
+*Consequence:* the Integration sets `CUA_DRIVER_RS_TELEMETRY_ENABLED=0` and
+`CUA_TELEMETRY_ENABLED=0` before the SDK loads **and** in the private worker's
+environment, and the health check reports that it did (§5.3). These are a floor, not a config
 key: a key that could turn telemetry on would contradict decision 3.
 
 **Q2. Decision 6 (the toggle IS the grant) has no mechanism today, and needs
@@ -134,15 +152,19 @@ four rulings to be buildable.**
   person picked and for the life of the toggle. It adds the mitigations in
   §5.1.6 rather than reversing the decision. §8 asks for confirmation.
 
-**Q3. Decisions 1 and 2 (one user-started `computer_task`): the pin that
-guards registration would not catch it.**
+**Q3. Decisions 1 and 2 (one user-started `computer_task`): the status block
+would report it; the pin test would not catch it.**
 
-* `test_the_daemon_registers_none_today` greps for the literal
-  `register_computer_tools(` (`tests/test_computer_status_block.py:324-343`).
-* `computer.registered` counts every registry tool whose name starts with
-  `computer_` (`computer/status.py:79,177`).
-* So a `computer_task` tool registered any other way would leave the pin
-  green and make `/api/status` read `registered: 1`.
+* **The status block is correct.** `computer.registered` counts every registry
+  tool whose name starts with `computer_` (`computer/status.py:79,177`). A
+  registered `computer_task` would show as 1, however it got there.
+* **The gap is narrower, and it is in the pin test only.**
+  `test_the_daemon_registers_none_today` looks only for call sites of the
+  literal `register_computer_tools(`
+  (`tests/test_computer_status_block.py:324-343`). Registering `computer_task`
+  any other way would leave that test green.
+* **So the door PR makes the pin cover every `computer_*` registration path**
+  (§6.1), not one function name.
 
 In v1.1 the door is a **command, not a registered tool** (§5.1). Its
 schema is the future tool's schema, so registering it later is a wrapper
@@ -209,6 +231,10 @@ than what it replaces for the web.**
 Separately from the decisions, one measured defect blocks the door outright:
 **under `/gate off` the gate allows every desktop action, and the loop has no
 override** (§3, D1).
+
+Will verified it at `checker.py:1026-1037` on 2026-10-03: the mode returns
+allow before the computer rule. Fixing it is a **hard precondition for the
+door**.
 
 ---
 
@@ -281,11 +307,12 @@ per-platform listener of our own, and every one of them is global.**
 
 **What it means.**
 
-1. **The activity observer belongs in the cockpit, not in watch mode.**
-   Constructing the driver with it gives a push feed of every driver call,
-   which serves as an independent cross-check of the action log (§5.2). Its
-   rows carry no content, so the log itself still comes from our
-   `StepResult`.
+1. **The activity observer is at most a cross-check, never the log, and
+   never watch mode.**
+   * Constructing the driver with it gives a push feed of every driver call.
+   * Its rows carry no content, so the log comes from our `StepResult`.
+   * It is unavailable in the private-worker hosting this design recommends
+     (§4.1, §5.3.3).
 2. **v1.1 watch mode polls.** It uses `list_windows` for open, close, title
    and frontmost, and `get_window_state` on the granted app's frontmost window
    (§5.6).
@@ -417,7 +444,7 @@ measured. Each is assigned to a PR in §6. None is fixed by this document.
 
 | # | Defect | Evidence | Why it matters for v1.1 | Fixed in |
 |---|---|---|---|---|
-| **D1** | **`/gate off` allows every desktop action, and the loop has no override.** In `PermissionMode.AUTONOMOUS` the gate returns ALLOW before reaching the computer rule. `agent_loop` forces a prompt for an *unknown* extent in its own path; `ComputerUseLoop.step` has no such override. | `checker.py:1026-1037` runs before `checker.py:1130-1150`; `engine/agent_loop.py:4991-5008`; `computer/loop.py:173-207`. **Measured:** `SecurityGate(mode=AUTONOMOUS).evaluate(…)` returns `allowed=True, requires_confirmation=False` for both a known and an unknown computer extent; DEFAULT returns `False, True` for both. | A door on today's loop would click and **type** unprompted under `/gate off`. The payload rule would be bypassed too. | PR 3 (blocks the door) |
+| **D1** | **`/gate off` allows every desktop action, and the loop has no override.** In `PermissionMode.AUTONOMOUS` the gate returns ALLOW before reaching the computer rule. `agent_loop` forces a prompt for an *unknown* extent in its own path; `ComputerUseLoop.step` has no such override. | `checker.py:1026-1037` runs before `checker.py:1130-1150`; `engine/agent_loop.py:4991-5008`; `computer/loop.py:173-207`. **Measured:** `SecurityGate(mode=AUTONOMOUS).evaluate(…)` returns `allowed=True, requires_confirmation=False` for both a known and an unknown computer extent; DEFAULT returns `False, True` for both. | A door on today's loop would click and **type** unprompted under `/gate off`. The payload rule would be bypassed too. | PR 3. **Hard precondition for the door** (verified by Will, 2026-10-03). |
 | **D2** | **Typing goes to whatever has focus, not to the element the prompt names.** A `type-N` candidate says "Type the prepared text into the entry 'Search'" and carries that element's token. The typed SDK's `TypeTextInput` takes only an `ActionTarget`, whose variants are `WINDOW` and `DESKTOP`. The adapter drops the token. | `candidates.py:91-107`; `_native_contract.py:1657-1705,5862-5865`; `cua.py:451-455` | The approval sentence describes an action the driver is not asked to perform. That is a consent-honesty defect, not a bug in a corner. | PR 3: type candidates focus-then-verify, or are withheld |
 | **D3** | **Non-click verdicts never raise.** `click` returns `ActionResult`, while `press_key`/`scroll`/`type_text`/`invoke_menu` return `ToolResult`, whose effect sits at `.action.effect` beside `is_error`/`error_code`. `_effect_name` reads only `result.effect`. | `_native.py:5568,5598,5624,5628,5652,4632-4646`; `cua.py:399-403`. **Simulated** with real SDK types: `ToolResult(is_error=True, error_code="background_unavailable", action.effect=SUSPECTED_NOOP)` maps to `UNVERIFIABLE`, `landed=False`, and does **not** raise. | `SUSPECTED_NOOP` was meant to raise (`cua.py:47-63`). On four of five verbs it cannot. | PR 1 |
 | **D4** | **`editable` is always False.** The adapter reads `getattr(e, "editable", False)`, but `WindowElement` has no such field. The test fake supplies one, which hides it. | `cua.py:360`; `_native_contract.py:6101-6117`; `tests/test_cua_adapter.py:148-151` | Type candidates depend on role names alone, which are AT-SPI spellings (§2.1). | PR 1 |
@@ -428,6 +455,9 @@ measured. Each is assigned to a PR in §6. None is fixed by this document.
 | **D9** | **Record a Skill's archive is written unredacted, and its funnel is browser-shaped.** `_archive_upload` writes `events.json` raw and never calls `redact_capture`. **Measured:** three URL-less desktop actions in three apps pass `app_consistency` with "No app data to check", and are titled "Web - Enter Data" with "Captured with the live recorder browser extension". | `learning/live_recorder/service.py:218-238`; `security/log_redaction.py:190-214`; `quality_gate.py:149-150,253`; `synthesizer.py:192-193,219` | Watch mode's producer (plan step 6) would inherit both. | PR 14 |
 | **D10** | **An empty tree still yields three actions.** `observe` treats any snapshot with an id as usable, and `build_candidates` always appends `key-return`, `key-tab` and `key-escape`. A zero-element observation therefore gives a 3-row table, and the loop's "abstained" branch never fires. | `cua.py:245-271`; `candidates.py:109-118`; `loop.py:129-133`. **Measured:** `Observation(elements=(), snapshot_id="snap-1")` → 3 candidates. | With a remembered `…:press_key:background` grant, Return could be pressed into a window we cannot see, unprompted. This is the class behind Hermes #32766 and #52014 (§4). | PR 1 |
 | **D11** | **A failed health check is skipped on the next start.** `start()` keeps `self._driver` set after `is_available()` returns False, so the next `start()` returns early. | `cua.py:168-189`. **Measured** with a fake SDK: the first call raises `DriverUnavailable`, the second returns silently. | Contradicts decision 4's "health known before dispatch". | PR 1 (and PR 2's probe) |
+| **D12** | **The pin admits a driver that breaks observe.** From 0.28.3, `GetWindowStateInput` has a *required* keyword `max_image_dimension`. Our call omits it, so every observe raises `TypeError`, which becomes `DriverUnavailable`. Only `uv.lock` prevents it. A `pip install 'oara-prometheus[computer]'` (the remedy `cua.py:100-103` itself prints) resolves 0.33.1. | `pyproject.toml:105`; `uv.lock:1067-1068`; `cua.py:222-243`. **Measured** by constructing the input with the 0.33.1 bindings. | Any install that is not from the lockfile gets computer use that can never observe. | PR 1 (exact pin) |
+| **D13** | **A driver timeout reports failure for an action that may still land, and the adapter has no lock.** `.result(timeout=60)` does not cancel the SDK coroutine. | `cua.py:162-166,324-332`. **Probed:** `TimeoutError` at 1.9 s; the action landed at 2.7 s. Two concurrent steps on one adapter would interleave on its loop. | A step reported "failed" may have clicked. The stop guarantee (§5.1.7) needs one step at a time. | PR 1: a lock; a timeout reported as "outcome unknown", followed by an observe |
+| **D14** | **Cancelling a task that waits on an approval leaks the pending entry.** No `approval_resolved` is emitted, and a later `/approve` returns True while the entry stays. | `permissions/approval_queue.py:640-659`; the comment at `:645` describes a `finally` that no longer exists. **Probed.** | A stop implemented as a cancel would leave ghost approvals on every surface. | PR 5 |
 | — | `actions.py` says "Nine tools" and lists seven. | `actions.py:30-31` | Cosmetic. | PR 1 |
 
 Already known and still deferred (settled): **hazard (b)**, `_snapshots` is
@@ -456,7 +486,24 @@ close it.
 
 ### 4.1 Cua
 
-<!-- CUA ROWS -->
+**Upstream source:** `trycua/cua` at `0d274d0` (2026-10-03). Wheels 0.28.3
+through 0.33.1 were downloaded and their bindings compared with the installed
+0.28.2.
+
+| Item | What Cua offers now | Prometheus today | Verdict |
+|---|---|---|---|
+| **Driver SDK versions** | **0.33.1** on PyPI (2026-10-03), ten releases after our 0.28.2 (2026-09-15). **0.28.3 adds a required keyword `max_image_dimension` to `GetWindowStateInput`.** Also: perception (typed `parse_visual_regions`, `CAPTURED_COORDINATES`), X11 background/foreground input, time-budgeted walks; `ActionResult.summary/error`; 0.31.0 BREAKING: "snapshot store invalidated on read" (#3873). Unchanged through 0.33.1: no `editable`/`focused` element field; only `ClickInput` takes a delivery mode. (`libs/cua-driver/rust/CHANGELOG.md`; PyPI JSON) | We wrap it. Pin `>=0.28,<1` (`pyproject.toml:105`), lock 0.28.2 (`uv.lock:1067-1068`). **Building our observe input with 0.33.1's bindings raises `TypeError: missing … 'max_image_dimension'`, which `cua.py:239-243` turns into `DriverUnavailable`.** Only the lockfile prevents it (D12). | **Use theirs, pinned exactly** (`==0.28.2`; `~=0.28.2` would still admit the break). Move to ≥ 0.33.1 deliberately, passing `max_image_dimension`/`timeout_ms` explicitly, for perception. |
+| **Hosting modes** | `EMBEDDED` (`create()`, in-process). **`PRIVATE_WORKER`**: "one supervised child runtime over inherited pipes; no listener, closes with its channel", upstream's mode for "native crash containment"; it cannot take host callbacks, so there is no activity observer. `DAEMON` (`connect` to `cua-driver serve`). MCP (`cua-driver mcp`). And `REMOTE` (`connect_remote_channel`). (`docs/…/use-the-sdk.mdx:224-242`; `libs/cua-driver/docs/sdk-first-runtime-north-star.md:101,403,407`; `_native.py:5074-5085`) | `EMBEDDED` only (`cua.py:109-116,178`): no crash isolation. The docstring's "Cua has none" (no remote transport, `cua.py:113-115`) is stale against `REMOTE`. | **Use theirs: `PRIVATE_WORKER`** for the Integration (decision 4's supervision, with real containment), subject to an on-box check on X11 (§8 #10). **Not needed:** `DAEMON` (a shared socket); MCP (raw tools the gate cannot read, `actions.py:8-20`); `REMOTE` (decision 3). |
+| **No-foreground contract** | Background means no window raise, no real pointer move, no frontmost switch. It "never retries in the foreground on its own"; impossibility returns `background_unavailable`. `ActionResult.escalation` is advice to the harness. `delivery.mode` reports what actually happened. The MCP tools accept `delivery_mode` on `type_text`/`press_key`/`scroll` (via `call_tool`); the typed SDK only on click. (`docs/…/how-cua-driver-works.mdx:41-43`; `action-result-contract.md:43-44,127-140`) | The extent's delivery term makes foreground a separate grant (`computer_schema.py:180-187`). Delivery is passed for click only (D5). `_verdict` drops `escalation` and `delivery.mode` (`cua.py:364-403`). | **Use their contract, keep our gate:** the same split. When the extent says background, require `delivery.mode ∈ {BACKGROUND, NOT_APPLICABLE}` and log `escalation` (PR 1). |
+| **Agent cursor** | `set_agent_cursor_enabled/motion/theme`: an overlay with a badge naming the session, delivery mode and target type. "A visual aid, not an authorization signal". On by default; works in background delivery; kept out of captures. On macOS an in-process runtime returns `facility_unavailable` (a worker is needed). (`agent-cursor.mdx:13-80`; `operate.mdx:259-293`) | None. | **Use theirs.** Label the session with the task id so the badge names the task. **Off by default on X11** (§4.2, §5.2.3). |
+| **Authorization layers** | Runtime-side, narrowing only: STANDARD (default; observe and input unprompted), **BOUNDED** (a manifest naming apps by bundle id or executable, a display flag and TTLs; deny by default), UNRESTRICTED. `TrustedSessionOptions` + `create_trusted_session` gives an immutable, connection-bound session; ending it removes its grants. "Code running inside the runtime's process can bypass them." (`permissions.mdx:8-110,180-187,266-279`; `_native.py:2363,3879-3893,7426-7451`) | Absent: `create()` means STANDARD. Our gate is the only control. | **Use theirs as a floor under our gate.** A BOUNDED manifest per task from the picked app: tools = `get_window_state` + our five verbs, TTL = the task budget, `end_session` on stop. It is a real boundary only out of process, which is another reason for `PRIVATE_WORKER`. Our gate stays, because it is the per-action consent. |
+| **Activity observer** | Content-free events of the driver's own calls (§2.2). Unavailable in a private worker. | Absent. | **Keep ours** for the log (`StepResult`). Use the observer only as a cross-check, and only if we stay `EMBEDDED`. |
+| **Telemetry** | cua-driver: on by default, content-free, to PostHog EU. Precedence: `DO_NOT_TRACK`, then `CUA_DRIVER_RS_TELEMETRY_ENABLED`, then `CUA_TELEMETRY_ENABLED`, then config. The update check is separate. The code lives in the **CLI binary crate**; `libcua_driver_sdk.so` has no PostHog strings (strings check only). **The private worker *is* the binary**, and its environment allowlist passes `CUA_DRIVER_RS_TELEMETRY_ENABLED` but not `DO_NOT_TRACK`. cua-bench/cua-agent use cua-core (`CUA_TELEMETRY=0`, `DO_NOT_TRACK=1`). Lume: `LUME_TELEMETRY_ENABLED`. (`operate.mdx:295-319`; `crates/cua-driver/src/telemetry.rs:212-241`; `crates/cua-driver-sdk/src/embedded.rs:837-870`, `worker.rs:141-158`) | No opt-out is set anywhere in `src/`. | **Decision 3 governs.** Set `CUA_DRIVER_RS_TELEMETRY_ENABLED=0` and `CUA_TELEMETRY_ENABLED=0` in the daemon *and* in `PrivateWorkerOptions.environment`, with a test. Audit the update check. Eval rigs run with all of the above plus `LUME_TELEMETRY_ENABLED=0`. |
+| **Lume / Lumier** | Lume 0.6.0 (2026-10-01): Apple Virtualization VMs (macOS and Linux guests) on Apple silicon; CLI, HTTP API and MCP; at most two macOS guests. Lumier 0.1.3: VMs in Docker. (`libs/lume/CHANGELOG.md`; `docs/…/lume/index.mdx`) The PyPI package `lume` is unrelated. | Absent. | **Use theirs, for local evaluation VMs only** (macOS paths: AX roles, cursor, TCC). Never a runtime dependency. |
+| **Cua Bench** | `cua-bench` 0.3.0 (2026-10-01), Python ≥ 3.12. Local gVisor/runc containers or QEMU/Lume VMs. Datasets: `cua-bench-basic` (13), kicad (25), workflows; adapters for OSWorld, ScreenSpot-Pro and others. Output: `result.json`, **ATIF-v1.8 `trajectory.json`**, pass@k. Agents subclass `BaseAgent.perform_task(…, session: DesktopSession, …)`. The sandbox's driver extra pins `cua-driver==0.27.0`. | Absent. The venv is 3.11; `cua.py:178` hard-codes `create()`. | **Use theirs to evaluate the loop** (§5.5.3), in a separate 3.12 venv, `--on local`, telemetry off. Needs a driver-factory seam in the adapter. Watch the 0.27/0.28 skew. |
+| **Trajectory recording / export** | Driver MCP tools `start_recording`/`replay_trajectory` save every action **with arguments and screenshots**; replay re-invokes tool calls. Computer History is a nightly-only, metadata-only preview. Cua Bench writes ATIF. (`trajectories.mdx`; `recording.mdx:13-19,89-94`) | Excluded on purpose: "the recording/replay family" (`actions.py:42-43`). | **Not needed.** Recording persists typed text and frames; replay bypasses the table and the gate. Watch mode replaces it (decision 8). *Later, optional:* export our own log as ATIF for bench scoring. |
+| **Grounding models** | cua-agent 0.9.0 loops for UI-TARS, GTA1, Holo1.5, OpenCUA, composed planner+grounder; `predict_click → (x, y)`; OmniParser via the deprecated AGPL `cua-som`. **`cua-perception` 0.2.1:** local CPU ONNX regions; the icon detector is AGPL-3.0 and PP-OCR is Apache-2.0; about 3.5-4 s per frame on Linux; capture-bound, single-use clicks (60 s expiry), typed from 0.28.3. Typed `WindowStateOutput` has no `capture_id` even in 0.33.1, so it may need `call_tool`. (`perception-extension.mdx`; `rfcs/3931…md:515-519`) | Absent; no screenshots. | **Use theirs for the later pixel tier: the perception extension's regions become table rows** (§5.5.2). The AGPL detector needs a licensing call. **Not needed:** cua-agent grounders as actors, because they emit raw coordinates (an open action space). UI-TARS and GTA1 at most rank, snapped to a region. |
+| **jev-use / RFC 4268 / Cua-S1** | RFC 3931 (boundary) and **RFC 4268 "native accessibility candidates"**, completed 2026-09-29. It is the same design as ours: the chooser sees only `{id, description}`; `reobserve`/`abstain` are required; 2-32 candidates. It adds data we lack: a per-platform **role-class map** (the driver does not normalise roles); **eligibility filters** (enabled, on-screen, labelled, *not `in_web_content`*); **stable IDs** (`ax:<role_class>:<slug>`); **`set_value` by token** for text; **risk tags** (destructive / send / purchase / close_unsaved) removed unless allowed. Cua-S1 (local LoRA on Qwen3.5-4B, ≤ 26 options, research-stage). TypeSafe Jev is hosted. (`rfcs/4268-…md:175-272,421-562`; `examples/jev-use/decision-models.md:86-137`) | Same shape: `types.py:3-8` cites RFC #3931; `chooser_view` (`types.py:118-129`); `validate_choice` (`candidates.py:156-189`). Gaps: IDs are `click-<index>`; AT-SPI roles only; no filters; 40-row cap; D2. | **Keep ours** (core, and upstream converged on it). **Adopt RFC 4268's rules as data:** role map (L5); filters; `set_value` by token (the D2 fix); risk tags as the §5.1.6 list. **Not needed:** TypeSafe Jev (remote). Cua-S1-4B is an optional local comparison arm (§5.5.3). |
 
 ### 4.2 Hermes `computer_use`
 
@@ -522,15 +569,36 @@ class ComputerTaskInput(BaseModel):    # computer/task.py — also the future to
 
 #### 5.1.2 Reachable from any message surface
 
-| Surface | Start | Answer "which app?" | Stop |
-|---|---|---|---|
-| Telegram / Discord / Slack | `/computer <goal>` (`app:` and `text:` optional) through the shared command core in `gateway/commands.py` (51 `cmd_*` functions; `/approve` already uses one core with per-surface projections, `commands.py:2770-2779`) | A numbered list of running apps that have on-screen windows, plus inline buttons where the surface has them | `/computer stop` |
-| Beacon desktop / iOS | The session toggle (pick the app) plus a "Do it on <app>" send mode in the composer → `POST /api/computer/tasks` | The toggle's picker *is* the answer | The ProgressPane Stop (desktop); the existing composer Stop (iOS) |
-| REST | `POST /api/computer/tasks {session_id, goal, app?, text?, target?}` | `409 needs_app` with the candidate list | `POST /api/computer/tasks/{id}/stop` |
+Measured facts that shape this:
+
+* **There is no surface-wide command table.** Each surface registers its own
+  thin handlers around the shared `cmd_*` functions:
+  * Telegram registers one `CommandHandler` per command
+    (`gateway/telegram.py:394-470`);
+  * Slack registers `/prometheus-<name>` (`gateway/slack.py:441-500`);
+  * Discord builds an app-command tree (`gateway/discord.py:969-1062`);
+  * Beacon goes through the web router, which reads `_SESSION_COMMANDS` and
+    `_FORMATTER_COMMANDS` (`commands.py:1848-1872,2060-2076`;
+    `web/slash_router.py:111-119`).
+* **A parity guard covers the three chat surfaces.**
+  `tests/test_gateway_parity.py` (`MANIFEST`, `:184`) requires every command
+  family on Telegram, Slack and Discord, or a stated gap.
+* **No gateway has inline-button callbacks or a message-edit primitive.**
+  There is no `CallbackQueryHandler`, `callback_data` or `edit_message_text`
+  in `src/`.
+* **An answer must itself be a command.** Telegram sends non-command text to
+  the agent as a turn (`telegram.py:496-499`).
+
+| Surface | Start | "Which app may I use?" | Progress | Stop |
+|---|---|---|---|---|
+| Telegram / Slack / Discord | `/computer <goal> [app:<name>] [text:"…"]`. One shared `cmd_computer` core in `commands.py`, registered on each surface, plus a parity `MANIFEST` family. It **returns at once and spawns the task**, as `cmd_gepa` does (`commands.py:2999-3002`): a handler that awaited the task would block PTB's single update fetcher, and with it `/approve` and `/computer stop` (`telegram.py:472-495`). | **One match:** a yes/no `ApprovalQueue` prompt, "May Prometheus use gnome-text-editor for this task?", approve-once. **Several:** a numbered list, answered with `/computer use <n>`. | Milestone messages through the injected `send`: started (app, what is covered, task id); each approval as its own prompt; a "still running" heartbeat (the managed-task pattern, `gateway/heartbeat.py:368-415`); a terminal summary. **Not a message per step**, and no edited status message (no primitive exists; deferred). | `/computer stop [id]`. No stop command exists on these surfaces today. |
+| Beacon desktop / iOS | Toggle on + app picker (the binding), then the composer in a "Do it on <app>" mode → `POST /api/computer/tasks`. A typed `/computer …` also works: unknown names already reach the daemon (beacon-desktop `slash-commands.ts:180`, `ChatShell.tsx:1267`) and route through `_SESSION_COMMANDS["computer"]`, whose `CommandContext` gains a sender and the runner (`commands.py:1643-1683`). | The picker, filled from `GET /api/computer/apps` | §5.2 | The existing chat Stop (§5.1.7) |
+| REST | `POST /api/computer/tasks {session_id, goal, app?, text?, target?}` | `409 needs_app` with the candidate list | `GET /api/computer/tasks/{id}` | `POST /api/computer/tasks/{id}/stop` |
 
 * **Phones are the common case.** Every route accepts a device token, and the
   audit row records the device identity. Only device minting and MCP writes
   require the global token today (`web/server.py:379,2334`).
+* **Both Beacon slash catalogs gain the entry**, for autocomplete only.
 
 #### 5.1.3 Resolving "my editor" to a real window (D8: `list_windows` is uncalled today)
 
@@ -596,7 +664,7 @@ class ComputerTaskInput(BaseModel):    # computer/task.py — also the future to
     `SessionConsent.approve` therefore checks the key argument itself.
 * **What it does not cover, each of which prompts every time:**
   * `type_text` and `invoke_menu` (payload: never rememberable);
-  * any extent whose site is UNKNOWN (web content);
+  * any extent whose site is UNKNOWN (browser chrome in a window with web content; page content itself is not offered in v1.1, §5.4);
   * `foreground` (not in v1);
   * a label on the high-consequence list (§5.1.6).
 * **The sentence the person reads** comes from the same `describe()`
@@ -605,7 +673,7 @@ class ComputerTaskInput(BaseModel):    # computer/task.py — also the future to
   > Prometheus may click, scroll and press Return/Tab/Escape in
   > gnome-text-editor on mini, in the background, and read everything shown
   > in its windows (not just the front one), until you turn this off.
-  > Typing, menus and web pages ask every time.
+  > Typing and menus ask every time. Web page content is not offered yet.
 
 * **Lifetime:** until the toggle goes off, the session ends, or 8 hours pass.
   That ceiling mirrors cua's own absolute grant ceiling.
@@ -614,6 +682,47 @@ class ComputerTaskInput(BaseModel):    # computer/task.py — also the future to
   * A durable table with boot-restore onto a healthy driver (the
     `restore_backend_overrides` pattern, `router/model_router.py:587-628`) is
     a follow-up (§8).
+
+**Approvals have to reach the person who started the task.** Today they
+cannot. Each item below was measured, and each is a PR 5 prerequisite:
+
+1. **The queue exists only with Telegram plus a flag that ships off.** The
+   `ApprovalQueue` is built only when Telegram is configured and
+   `security.approval_queue.enabled` is set (`daemon.py:1496-1529`). With no
+   queue, `gate.request_approval` returns False (`checker.py:1632-1634`) and
+   the loop refuses, so **a Beacon-only install refuses every desktop
+   action**. PR 5 builds the queue whenever `computer_use.enabled` is set,
+   independent of Telegram.
+2. **Prompts always go to the default Telegram chat.** That is
+   `allowed_chat_ids[0]` (`checker.py:1639-1645`; `daemon.py:1506`),
+   whichever surface started the work. PR 5 tags `PendingAction` with
+   `task_id` and `session_id` (`approval_queue.py:54-79,509-517`;
+   `serialize_pending` at `:412-464`) and routes the chat prompt to the
+   starting chat. The tag is carried through `gate.request_approval` and
+   `_call_approve` (`checker.py:1606-1611`; `loop.py:263-282`) by keyword or
+   by a context variable the runner sets.
+3. **`deny_task(task_id)`** resolves every pending approval of one task as
+   denied. That is how stop unwinds a waiting step cleanly (§5.1.7).
+4. **A cancelled waiter leaks its entry (D14).** Cancelling a task that waits
+   on an approval leaves the entry in `pending` with no `approval_resolved`.
+   A later `/approve` on it returns True and the entry still stays
+   (`approval_queue.py:640-659`; the comment at `:645` describes a `finally`
+   that no longer exists). Probed. PR 5 adds the `finally`.
+5. **`/approve all` drains desktop approvals.** It approves every pending
+   entry once, `computer_click`, `computer_type_text` and `bash` alike. So
+   does `POST /api/approvals/all/approve` (`commands.py:2618-2635`;
+   `server.py:4452,4465`). Probed. Excluding them is decision #7.
+6. **iOS cannot show what it is asked to approve.**
+   * `Approval` has no `arguments` field (beacon-ios `Models.swift:446-470`),
+     so the text a `type_text` would type is never shown on a phone.
+   * The lock-screen "Approve once" action is offered even when arguments
+     exist (`NotificationController.swift:113-125`), which is the case desktop
+     deliberately blocks (beacon-desktop `approval-push.ts:142-212`).
+   * PR 6 (server) sends no APPROVAL category for an approval that carries
+     arguments.
+   * PR 8 (iOS) decodes `arguments` and shows a "With:" list.
+   * Until PR 8 lands, a `type_text` approval should not be answerable from
+     iOS (decision #15).
 
 #### 5.1.5 Running a task
 
@@ -641,13 +750,21 @@ class ComputerTaskInput(BaseModel):    # computer/task.py — also the future to
   * wall clock 10 min;
   * approvals per task 10;
   * reobserve streak 3.
-* **D1 is fixed in the loop (PR 3).** When the gate *allows* a computer
-  extent without a matching grant (only AUTONOMOUS does this), the loop routes
-  it to `approve` anyway. This mirrors `agent_loop.py:4991-5008` and extends it
-  to known extents.
-  * **Proposed rule:** computer consent is a floor, like denied paths ("The
-    floor is not a mode", `checker.py:1021-1025`), so `/gate off` does not
-    waive it. Listed in §8.
+* **D1 is fixed in the loop (PR 3).** This is a **hard precondition for
+  the door** (Will verified the finding at `checker.py:1026-1037` on
+  2026-10-03).
+  * **The fix:** when the gate allows a computer extent (known or unknown) at
+    `TrustLevel.AUTONOMOUS` (`checker.py:1037`), the loop routes it to
+    `approve` anyway.
+    * A grant match allows at `TrustLevel.AUTO` (`checker.py:1067-1071`),
+      so it passes through untouched, and no reason strings are parsed.
+    * This mirrors `agent_loop.py:4991-5008` and extends it to known
+      extents.
+  * **Parity:** under `/gate off` the gate never reaches its grants check.
+    So `approve` consults the session binding and the stored grants (same
+    exact match) before prompting. `/gate off` then neither waives nor
+    tightens computer consent: "the floor is not a mode"
+    (`checker.py:1021-1025`).
 
 #### 5.1.6 Mitigations for model-chosen clicks under a binding (Q2)
 
@@ -656,7 +773,7 @@ Inside the picked app, for the life of the toggle, the design accepts it and
 adds these:
 
 1. **Typing and menus always prompt.** This already exists (payload rule).
-2. **Web content always prompts in v1.1** (site UNKNOWN, §5.4).
+2. **Web content is not offered in v1.1** (§5.4), so page-authored labels never reach the chooser's table. Browser chrome prompts.
 3. **High-consequence labels prompt even when covered.** A description
    matching send, delete, remove, pay, transfer, purchase, submit, confirm,
    sign, or the same words in the app's language list, prompts. It is a
@@ -674,40 +791,115 @@ adds these:
 
 #### 5.1.7 What stop guarantees
 
-* **Stop is cooperative, with an epoch fence.** A stop epoch is recorded when
-  a step starts. It is re-checked before observe, after choose, **after the
-  approval wait returns**, and immediately before `driver.act`. An approval
-  that arrives after a stop never acts. This copies the pattern of Hermes's
-  lease-epoch fence (`hermes-agent tools/computer_use/tool.py:333-380`); no
-  code is taken. Today the loop goes from approval straight to act with no
-  check between (`loop.py:183-211`). On stop:
-  * every pending approval of the task is resolved as denied;
-  * the task's asyncio task is cancelled.
-* **One in-flight action can still finish.** Cancelling `await
-  asyncio.to_thread(...)` does not stop the worker thread. The adapter blocks
-  on `run_coroutine_threadsafe(...).result(timeout=60)` (`cua.py:162-166`).
-* **The guarantee is therefore: no new action starts after the stop is
-  acknowledged, and at most one already-dispatched driver call completes.**
-  That call is logged as "completed after stop". The UI says exactly this,
-  not "stopped instantly".
-* **The existing session interrupt also stops the session's task.**
-  * The paths are `interrupt_turn`, the WS `interrupt` frame, and `POST
-    /api/chat/interrupt` (`ws_server.py:487-497,791-804`;
-    `server.py:1242-1272`).
-  * iOS's composer Stop already calls that route (beacon-ios
-    `ChatController.swift:238-245`), so it works with **no client change**.
+**The mechanism is cooperative, and built from the loop's existing seams.**
+The runner hands `ComputerUseLoop` a chooser wrapper and the
+`SessionConsent` approver, and both are injected already (`loop.py:73-92`).
+A stop epoch is checked at four points:
+
+1. by the runner, before each step;
+2. by the chooser wrapper, after the inner chooser returns: if stopped, it
+   answers `abstain`;
+3. by the approver, **after any approval wait returns**: if stopped, it
+   answers False;
+4. by the runner again, after verify.
+
+The only unguarded window is the instant between an *allow* (a grant match,
+which calls no approver) and `driver.act`. Nothing awaits in that window.
+
+This copies the *pattern* of Hermes's lease-epoch fence
+(`H:tools/computer_use/tool.py:333-380`); no code is taken. **No core edit is
+needed.**
+
+**On stop:**
+
+* `deny_task(task_id)` resolves the task's pending approvals. The waiting
+  step then returns `refused` through its normal path (`loop.py:188-194`).
+* `task.cancel()` is **not** the primary mechanism.
+  * Cancelling mid-approval leaks the entry (D14).
+  * Cancelling mid-act skips verify, so no `StepResult` describes the
+    dispatched action (`loop.py:211-223`).
+
+**One dispatched action can still land (probed).**
+
+* The probe used the real `CuaDriverAdapter._await` with a 1-second fake SDK
+  coroutine. Cancelling the step at 0.2 s raises `CancelledError` at once,
+  yet the coroutine on the driver's loop runs to completion and the action
+  lands at 1.0 s.
+* `.result(timeout=…)` does not cancel it either. On timeout `act` raises
+  `DriverUnavailable` while the action lands later: `TimeoutError` at 1.9 s,
+  landed at 2.7 s (`cua.py:162-166,324-332`). That is D13.
+* **The guarantee is therefore:** no new action starts after the stop is
+  acknowledged, and at most one already-dispatched call may land.
+  * That call is reported as "in flight at stop — may have landed", and is
+    checked with one post-stop observe.
+  * This holds only with **one step at a time per adapter**. The adapter has
+    no lock today (D13), so the runner serialises, and PR 1 adds the lock.
+* The UI says exactly this, not "stopped instantly".
+
+**The approval-to-act gap.**
+
+* Up to 1800 s can pass between an approval and the act
+  (`approval_queue.py:44`).
+* The adapter's staleness check compares only with its own last observation
+  (`cua.py:281-308`).
+* So if an approval wait exceeds 30 s (proposed), the approver returns False
+  with "the window may have changed while you decided — looking again". The
+  next step re-observes and asks again. That is fail-closed and stated.
+
+**Every stop control reaches the task.**
+
+* Beacon's existing Stop (`POST /api/chat/interrupt` and the WS `interrupt`
+  frame) cancels only `_turn_tasks[session_id]` (`ws_server.py:487-497,790-805`;
+  `server.py:1242-1272`).
+* The runner registers each task there as the session's running turn, and
+  `interrupt_turn` hands it to the runner's stop path instead of a bare
+  `cancel()`.
+* Both clients' Stop buttons therefore work with **no client change**:
+  desktop `ChatShell.tsx:1238-1253`, iOS `ChatController.swift:238-245`.
+* Chat surfaces get `/computer stop`.
 
 ### 5.2 The cockpit: a live action log and a stop control
 
-The log comes first; the cursor is a nicety (decision 6). The stream copies
-the one pattern this codebase has already debugged twice: the **coding
-live-stream**.
+The log comes first; the cursor is a nicety (decision 6). There are two
+layers. The first needs no client change at all; the second is durable.
 
-#### 5.2.1 The event stream
+#### 5.2.1 Layer 1: the task renders today, as a turn
 
-* **Kinds are declared once, by the emitter.**
-  `computer/livestream.py` declares `COMPUTER_FRAME_KINDS`. `ws_server._on_signal`
-  promotes a kind to a first-class frame type **from that tuple**, exactly as
+Because the runner registers the task as the session's turn (§5.1.7), it can
+emit the frames both clients already render.
+
+* **The task itself:**
+  * `tool_call_start {session_id, call_id, tool_name: "computer_task",
+    inputs: {goal, app, origin: "user_task"}}`;
+  * `tool_call_end {session_id, call_id, tool_name, success, result}`.
+  * iOS requires `call_id`, `tool_name` and `success` (beacon-ios
+    `Frames.swift:125-153`).
+* **Each step:** one nested `tool_call_start`/`tool_call_end` pair.
+  * `call_id = <task_id>:<seq>`, `tool_name = computer_<verb>`;
+  * `inputs = {description, extent}`, redacted;
+  * `result` = the verification line.
+  * Desktop renders these in its chat timeline and Tool feed, and iOS in its
+    ToolStripView (beacon-desktop `ChatShell.tsx:193-215`,
+    `gateway-events.ts:93-128`; beacon-ios `ChatStreamReducer.swift:173-187`).
+* **Liveness:** `agent_progress` every 3 s with `phase: "tool"`
+  (`ws_server.py:1503-1526`). It keeps desktop's activity line, iOS's reply
+  watchdog and the Live Activity alive.
+* **Stop:** `chat_done {interrupted: true}`.
+
+**Costs, stated:**
+
+* `tool_call_*` frames are never persisted (`gateway-events.ts:130-133`), so
+  they vanish on a history reload.
+* They look like model-issued calls. `origin: "user_task"` marks them, and
+  clients ignore extra keys.
+
+Hence layer 2.
+
+#### 5.2.2 Layer 2: the durable log
+
+* **Kinds are declared once, by the emitter.** `computer/livestream.py`
+  declares `COMPUTER_FRAME_KINDS`. `ws_server._on_signal` promotes a kind to
+  a first-class frame type **from that tuple**, exactly as
   `CODING_FRAME_KINDS` is promoted (`coding/livestream.py:44-63`;
   `web/ws_server.py:27-35,1640-1642`).
 * **Why that matters:** a kind left unpromoted ships as a generic
@@ -716,53 +908,79 @@ live-stream**.
   `task_completed`/`task_failed` (`ws_server.py:1626-1660`).
 * **Both pinning tests are copied:** *kinds match every emit site* and
   *every kind is promoted*.
-* **Transport:** frames ride the SignalBus that `ws_server` already fans out
-  to authed clients. There is no new socket.
 
-The envelope is the existing `{type, timestamp, payload}`.
+The envelope is the existing `{type, timestamp, payload}`. Every payload
+carries the **chat `session_id`**, because ProgressPane keys on it
+(beacon-desktop `ProgressPane.tsx:138-162`).
 
 | `type` | When | `payload` |
 |---|---|---|
 | `computer_binding` | Toggle on/off, expiry | `{session_id, state: "on"\|"off", target, app, describes, covers: ["click","scroll","press_key"], asks: ["type_text","invoke_menu","web","high_consequence"], set_by: {surface}, expires_at}` |
-| `computer_task_started` | Task accepted | `{task_id, session_id, target, app, goal, chooser: "rule"\|"gemma", started_by: {surface}, limits: {max_steps, max_seconds, max_approvals}}` |
-| `computer_step` | After every loop step, and on `awaiting_approval` | `{task_id, seq, status: "executed"\|"refused"\|"abstained"\|"reobserve"\|"blocked"\|"awaiting_approval", action: {verb, description, app_text: true}, extent, consent: "binding"\|"grant"\|"prompt"\|null, chooser: {name, confidence, reason}, effect: "CONFIRMED"\|"PARTIAL"\|"UNVERIFIABLE"\|null, verified: true\|null, after_stop: false, candidates_offered, duration_ms, reason}` |
-| `computer_task_ended` | Terminal | `{task_id, outcome: "done"\|"abstained"\|"stopped"\|"refused"\|"failed"\|"limit", reason, steps, approvals, duration_ms, driver_calls}` |
-| `computer_stream_error` | The log itself failed (never the task) | `{task_id, detail}` |
+| `computer_task_started` | Task accepted | `{session_id, task_id, target, app, goal, chooser: "rule"\|"gemma", started_by: {surface}, limits: {max_steps, max_seconds, max_approvals}}` |
+| `computer_step` | After every loop step, and on `awaiting_approval` | `{session_id, task_id, seq, status: "executed"\|"refused"\|"abstained"\|"reobserve"\|"blocked"\|"awaiting_approval", action: {verb, description, app_text: true}, extent, consent: "binding"\|"grant"\|"prompt"\|null, approval_request_id, chooser: {name, confidence, reason}, effect: "CONFIRMED"\|"PARTIAL"\|"UNVERIFIABLE"\|null, verified: true\|null, after_stop: false, candidates_offered, duration_ms, reason}` |
+| `computer_task_ended` | Terminal | `{session_id, task_id, outcome: "done"\|"abstained"\|"stopped"\|"refused"\|"failed"\|"limit", reason, steps, approvals, duration_ms}` |
+| `computer_stream_error` | The log itself failed (never the task) | `{session_id, task_id, detail}` |
 
-* **Approvals reuse `approval_pending` / `approval_resolved`** (promoted at
-  `ws_server.py:1612-1618`). They gain `task_id` and `extent`, so a client can
-  draw the prompt inline in the task's log. Older clients ignore the extra
-  fields.
+* **`seq` is the de-dupe key**, as `seq` is for coding runs (beacon-desktop
+  `coding.ts:339-343`).
+* **Approvals reuse `approval_pending`/`approval_resolved`**, with optional
+  `task_id`, `session_id` and `extent` added.
+  * Both clients ignore extra keys (`approval-push.ts:81-101`; beacon-ios
+    `Models.swift:463-469`).
+  * Never drop or retype `extents` or `created_at`, or iOS drops the frame.
+* **Persistence and backfill reuse what exists.**
+  * Every SignalBus emission is written to `signal_events` before it is
+    broadcast (`sentinel/signals.py:105-120`).
+  * On connect the server replays nothing (`ws_server.py:244-249`).
+  * `GET /api/events/recent` takes only `limit` and a single `type`
+    (`server.py:3178-3202`), although the tracker underneath supports `since`
+    and several types (`telemetry/tracker.py:1598-1605`).
+  * PR 6 passes `since`, `types` and `session_id` through, so a returning
+    phone catches up.
+  * Retention is `computer_use.action_log.keep_per_session`, with the pruner
+    in the same PR.
+* **Older clients are safe, and that has a consequence.**
+  * Desktop shows an unknown kind as a generic "system" row in the Activity
+    feed, **with the whole payload, exportable** (`gateway-events.ts:84,286-287`;
+    `ActivityFeed.tsx:120-162`). So the content policy below governs every
+    field.
+  * iOS decodes an unknown kind to `.unknown` and drops it (beacon-ios
+    `Frames.swift:5-8,296-299`).
+* **The iOS precedent to avoid.** A new kind needs a decoder-list entry *and*
+  a reducer case, or it vanishes silently. `coding_tool`/`coding_acceptance`
+  have been dropped on iOS since #503 (`Frames.swift:230-235`;
+  `CodingRunReducer.swift:119-127`).
+* **Desktop must keep `computer_step` out of the Activity feed,** as it keeps
+  `coding_round` out (`gateway-store.tsx:104`). Otherwise it takes over
+  Mission Control's three-item activity card (`MissionControl.tsx:697-710`).
 * **Content policy, enforced by a test that greps every emitted payload:**
   * **Never on the wire:** element tokens, snapshot ids, pid or window id,
     screenshots, the labels of candidates that were *not* chosen.
-  * **Typed text** appears as `{"text_chars": N}` unless the person asks to
-    reveal it in the prompt that already shows it.
-  * **Descriptions are app text** and are flagged `app_text: true`.
-* **Backfill for phones** (they reconnect constantly):
-  * a per-task ring buffer of frames by `seq`;
-  * `GET /api/computer/tasks/{id}` (status plus `events?since=<seq>`);
-  * a bounded per-session history (`computer_use.action_log.keep_per_session`,
-    pruner in the same PR, per `tests/test_config_drift.py`'s `KNOWN_UNREAD`
-    rule).
-* **Push (APNs) carries no content.** It says only "A computer task needs
-  approval" or "finished", with a task id. The app fetches details over the
-  direct link. Apple is a third party, so this is decision 3 applied.
-* **Driver activity is a cross-check, not the log.**
-  * The Integration constructs the driver with
-    `create_configured_with_activity_observer` (§2.2).
-  * It counts content-free driver events per task and reports
-    `driver_calls` in `computer_task_ended`.
-  * A driver event with no surrounding loop step is a `computer_stream_error`:
-    something called the driver outside the loop.
+  * **Typed text** appears as `{"text_chars": N}`. It reuses
+    `redact_arguments`.
+  * **Descriptions are app text**, flagged `app_text: true`, and capped
+    (§5.1.6).
+* **Push (APNs) carries no content.** Two server-side changes:
+  * **A generic body for computer approvals.** Today the body is
+    `"<tool_name> — <first line of description>"` (`push/dispatcher.py:100-117`).
+    A computer description names the app and the machine
+    (`checker.py:1137-1140`), so both would pass through Apple when
+    `push.enabled` (off by default). The iOS service extension already
+    rewrites the body locally over the tailnet (beacon-ios
+    `BeaconNotify/NotificationService.swift:52-67`).
+  * **No APPROVAL category when the request carries arguments**
+    (§5.1.4, item 6).
+* **Driver activity is a cross-check only when hosted `EMBEDDED`.** The
+  observer is unavailable in a private worker (§4.1). The log never depends on
+  it.
 
-#### 5.2.2 Client → server
+#### 5.2.3 Client → server
 
-* **Stop:** a WS frame `{type: "computer_task_stop", payload: {task_id}}`,
-  acked to the requesting socket as `computer_task_stop_ack {task_id,
-  stopped}`. It mirrors `interrupt`/`interrupt_ack` (`ws_server.py:487-497`).
-  Equivalents: `POST /api/computer/tasks/{id}/stop`, the session interrupt,
-  and `/computer stop`.
+* **Stop:** the existing session interrupt (§5.1.7). Also a WS frame
+  `{type: "computer_task_stop", payload: {task_id}}`, acked to the requesting
+  socket as `computer_task_stop_ack {task_id, stopped}`, mirroring
+  `interrupt`/`interrupt_ack` (`ws_server.py:487-497`). Also `POST
+  /api/computer/tasks/{id}/stop` and `/computer stop`.
 * **Toggle:**
   * `PUT /api/sessions/{id}/computer {target, app}` → `computer_binding on`;
   * `DELETE` → `off`;
@@ -770,27 +988,27 @@ The envelope is the existing `{type, timestamp, payload}`.
 
   This is the `session_workspaces` route shape (`server.py:1672-1734`).
 
-#### 5.2.3 Where it shows
+#### 5.2.4 Where it shows
 
 | | Live log + Stop | Toggle + picker | Health |
 |---|---|---|---|
-| Beacon desktop | The ProgressPane's reserved computer-use section (`ProgressPane.tsx:1-13,237-243`, which today says "Not connected… Nothing else") | Thread header, beside the per-conversation autonomy chip (`ChatShell.tsx:1788-1799`) | The merged Integrations list (§5.3.5) |
-| Beacon iOS | A task strip above the composer: last step plus Stop; tapping opens the full log. The existing Stop also stops the task (§5.1.7). | The model line above the composer (`ChatView.swift:154-170`) | A `computer` row in the Status tab, next to the backend rows (`StatusView.swift:118-140`) |
-| Chat surfaces | One status message, edited in place where the surface allows it; otherwise a message at start, at each approval, and at the end | `/computer` reply | `/computer status` |
+| Beacon desktop | Layer 1 in the chat timeline today. Layer 2 in the ProgressPane's reserved computer-use section (`ProgressPane.tsx:1-13,237-243`, which today reads "Not connected…") through a `reduceCodingRuns`-style reducer. The existing chat Stop. | Thread header, beside the per-conversation autonomy chip (`ChatShell.tsx:1788-1799`) | The merged Integrations list (§5.3.5) |
+| Beacon iOS | Layer 1 in the ToolStripView today. Layer 2 as a COMPUTER section beside Status → CODING (`StatusView.swift:166-253`), plus a task strip above the composer. The existing composer Stop. | The model line above the composer (`ChatView.swift:154-170`) | A `computer` row in the Status tab, next to the backend rows (`StatusView.swift:118-140`) |
+| Chat surfaces | Milestone messages (§5.1.2) | `/computer` reply | `/computer status` |
 
 **The cursor: use theirs, off on X11 by default.**
 
 * cua-driver ships an agent cursor (`set_agent_cursor_enabled`,
-  `set_agent_cursor_motion`, `set_agent_cursor_theme`). Nothing is built for
-  it here.
+  `set_agent_cursor_motion`, `set_agent_cursor_theme`): an overlay whose
+  badge names the session, "a visual aid, not an authorization signal".
+  Nothing is built for it here.
 * Hermes, which uses the same overlay, turns it **off by default on Linux
   X11**: there it is a fullscreen always-on-top window that can stick over
-  every workspace and block desktop input (Hermes issues #28152, #83473;
-  `hermes-agent tools/computer_use/cua_backend.py:45-65` at `158fd638`).
-* X11 is our substrate, so the default is `computer_use.cursor: off`, with
-  `on` as an explicit choice for someone sitting at the machine.
-* Hermes also notes the cursor renders only for a named cua session
-  (`cua_backend.py:300-301`), and our adapter passes none. Not measured here.
+  every workspace and block desktop input (Hermes #28152, #83473;
+  `H:tools/computer_use/cua_backend.py:45-65`).
+* X11 is our substrate, so the default is `computer_use.cursor: off`. `on` is
+  an explicit choice for someone sitting at the machine, with the session
+  labelled by the task id so the badge names the task.
 * The log does not depend on any of this.
 
 ### 5.3 The driver as an Integration
@@ -800,8 +1018,12 @@ The driver is never a builtin (decision 4). Health and refusal mirror
 
 #### 5.3.1 Version pinning
 
-* **The extra becomes an exact pin:** `computer = ["cua-driver==0.28.2"]`
-  (today `>=0.28,<1`, `pyproject.toml:105`).
+* **The extra becomes an exact pin, in PR 1, not later:**
+  `computer = ["cua-driver==0.28.2"]` (today `>=0.28,<1`,
+  `pyproject.toml:105`).
+  * D12 makes this urgent. Any non-lockfile install resolves 0.33.1, whose
+    observe input our adapter cannot build.
+  * `~=0.28.2` would still admit the break (0.28.3).
 * **A code constant names the versions the adapter was validated against.**
   The probe compares it with `cua_driver.__version__`; a mismatch reports
   `down: version-mismatch`. Config cannot widen it, because the input
@@ -809,7 +1031,11 @@ The driver is never a builtin (decision 4). Health and refusal mirror
 * **An upgrade is a PR that carries the on-box outcome check.** The driver
   leg is uncoverable by CI (`cua.py:1-17`).
 * **The next upgrade has a reason:** 0.33.x brings capture-bound clicks for
-  the pixel tier (§5.5.2). It must re-check D2, D3 and D5.
+  the pixel tier (§5.5.2).
+  * It passes `max_image_dimension` and `timeout_ms` explicitly.
+  * It re-checks D2, D3 and D5.
+  * It reads what 0.31.0's "snapshot store invalidated on read" (#3873) means
+    for observe → act → verify.
 
 #### 5.3.2 Health known before every task
 
@@ -817,9 +1043,10 @@ The probe body runs in `to_thread`, under a per-Integration lock, inside
 `wait_for`. Failures are recorded, never raised (`providers/backends.py:386-421`).
 It checks:
 
-1. **The telemetry floor is in place:**
-   `CUA_DRIVER_RS_TELEMETRY_ENABLED=0` and `CUA_TELEMETRY_ENABLED=0` are set
-   **before** `import cua_driver` (`cua.py:94-106`).
+1. **The telemetry floor is in place.** `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`
+   and `CUA_TELEMETRY_ENABLED=0` are set before `import cua_driver`
+   (`cua.py:94-106`), **and** in `PrivateWorkerOptions.environment`.
+   `DO_NOT_TRACK` is not enough there: the worker's allowlist drops it.
 2. **The SDK imports and its version is supported.**
 3. **Platform preconditions both pass** (today's `check_preconditions`,
    `driver.py:158-174`). This step becomes a per-platform provider later
@@ -857,8 +1084,29 @@ When it runs, and what reads it:
     (`lsp/orchestrator.py:59-61,94-96`).
   * `DriverUnavailable` during a task ends the task, marks the Integration
     `degraded`, and never retries the action.
-* **Hosting:** in-process `EMBEDDED` for v1.1 on Linux, as today. Crash
-  isolation (`PRIVATE_WORKER`) and macOS host identity are listed in §8.
+* **Hosting: use Cua's `PRIVATE_WORKER`, subject to one on-box check (§8
+  #10).**
+  * Upstream's mode for "native crash containment": one supervised child
+    runtime over inherited pipes, no listener, and it dies with its host
+    (§4.1).
+  * That is decision 4's "supervised" with a real process boundary. Today a
+    native fault in `libcua_driver_sdk.so` takes the daemon down
+    (`cua.py:109-116`).
+  * It costs the activity observer, which the log never needed (§5.2.2).
+  * `EMBEDDED` stays for the CI translation tests.
+* **A driver-enforced floor under our gate (use theirs).**
+  * Each task opens a cua trusted session (`TrustedSessionOptions`) in
+    **BOUNDED** mode. The manifest names the picked app, allows only
+    `get_window_state` and our five verbs, with `desktop.display: false`, and
+    its TTL is the task budget.
+  * Stop calls `end_session`, which removes the session's driver-side grants.
+  * Upstream notes that code in the runtime's own process can bypass these
+    layers. The floor is real only out of process: another reason for the
+    worker.
+  * Whether bounded sessions work with a private worker is *not
+    established*; the PR 2 on-box check measures it.
+  * Our gate stays: it is the per-action consent, and theirs is
+    per-session scope.
 
 #### 5.3.4 Config: one `computer_use:` block (the `computer:` keys fold into it)
 
@@ -981,7 +1229,7 @@ says **site**.
 | **C. Fold the site into the app term** (`firefox@docs.example.com`) | One site | Prompt | Escaping `@`/`:` (an app named `x@bank` could forge a site-scoped grant: the colon-forging class, `test_computer_use_consent_unit.py:94-101`); grouping becomes substring parsing | None for the count; old `firefox` rows linger, matching nothing | `firefox@…` entries shown as if they were apps |
 | **D1. Exclude browsers; use the browser tool** | n/a | n/a | Refuse web apps | — | The built-in `browser` is headless Chromium with an isolated context (`tools/builtin/browser.py:134,152`). It cannot act in the person's signed-in browser, so this removes a capability rather than moving it. `in_web_content` also catches Electron apps. |
 | **D2. Web content is never rememberable** | Non-web only | Prompt | Small | Same as A if narrowing is wanted later | "Firefox — web pages ask every time" |
-| **E. B's shape now, D2's behaviour until a provider exists** (recommended) | Non-web, or one site once a provider exists | **Not rememberable: approve once** | The 4→5 change, no provider | **None**: adding a provider later needs no migration | "Firefox — app menus and dialogs are covered; web pages ask each time" |
+| **E. B's shape now; no web content until a provider exists** (recommended) | Non-web, or one site once a provider exists | Not rememberable: approve once (browser chrome, e.g. tabs and menus) | The 4→5 change, no provider. In v1.1 `build_candidates` drops `in_web_content` elements, which is Cua RFC 4268's rule (§4.1). | **None**: adding a provider later needs no migration | "Firefox — menus and tabs; page content is not offered yet" |
 
 #### 5.4.3 Recommendation: E
 
@@ -1006,8 +1254,22 @@ says **site**.
 
   Anything else is UNKNOWN. The failure direction is over-prompting, never
   widening.
-* **v1.1 ships with no site provider.** Browser and Electron actions are
-  approve-once, every time. That is honest, and it is visible in the cockpit.
+* **v1.1 ships with no site provider, and offers no web content.**
+  * Elements with `in_web_content` are not built into the table (D6 passes
+    the field through).
+  * Browser chrome in such a window (tabs, toolbar, menus) has site UNKNOWN,
+    so it is approve-once.
+  * This is upstream's own rule: Cua's RFC 4268 leaves web content out of
+    native candidates because "verify_state … treats web-content elements as
+    an untrusted source" (`rfcs/4268-…md:211,470-472`).
+  * It also removes the largest injection surface, page-authored labels,
+    from the chooser's table. And it avoids the approval fatigue that an
+    approve-every-web-click policy would breed under a model chooser (audit
+    §5).
+  * **The alternative (E′):** offer web content, approve-once, every time.
+    It is listed in §8.
+  * Excluding web content is a ◆ core edit to `build_candidates`: a filter,
+    with the IDs and descriptions of everything else unchanged.
 * **A later provider turns on per-site grants with no migration.** Linux
   first: `DocURL`/`URI` on the document node, read by Prometheus over the
   a11y bus.
@@ -1338,14 +1600,14 @@ is the #523 shape.
 | PR | Repo | Plan step | Change | Proves | Tests | Flags |
 |---|---|---|---|---|---|---|
 | **0** | Prometheus | 1 | This document | — | — | — |
-| **1** | Prometheus | 1 | **The adapter tells the truth.** D3: `ToolResult` verdicts raise on `SUSPECTED_NOOP`/`REFUSED`/`is_error`. D4: drop the phantom `editable`. D5: forward delivery where the SDK takes it; document it per verb. D6: pass through `truncated`, `degraded`, `elements_complete`, `window_title`, `in_web_content`, `selected`, `enabled`, `parent_index`, `depth`; `degraded` makes an observation unusable. D10: a zero-element observation is unusable, so no key candidates are offered into an unseen window. D11: a failed availability check resets the driver, so the next start re-checks. Fix the "Nine tools" text. | What the driver reports reaches the loop; a no-op raises for every verb; nothing acts on an empty tree | Translation tests built from **real `cua_driver` types** rather than fakes, so a phantom field cannot hide again. Candidate IDs and descriptions pinned unchanged. | ◆ `types.py` (additive fields) |
-| **2** | Prometheus | 1 | **The driver as an Integration.** `ComputerIntegration` (from_config with no I/O; probe under lock + TTL; telemetry floor; exact pin + version check; activity observer at construction; cached snapshot for `/api/status`; `app.state.computer_targets`). The `computer_use` block with `enabled: false`. `GET /api/integrations/computer`, `/computer status`. | Health is known before dispatch; disabled constructs nothing; telemetry is off before import | The config guards; a probe-state matrix (disabled, version-mismatch, preconditions down, ready) over a fake SDK module; a subprocess test that the env is set before `import cua_driver`; the no-leak test extended; **`registered == 0` by execution with `enabled: true`** | — |
+| **1** | Prometheus | 1 | **The adapter tells the truth.** D3: `ToolResult` verdicts raise on `SUSPECTED_NOOP`/`REFUSED`/`is_error`. D4: drop the phantom `editable`. D5: forward delivery where the SDK takes it; document it per verb. D6: pass through `truncated`, `degraded`, `elements_complete`, `window_title`, `in_web_content`, `selected`, `enabled`, `parent_index`, `depth`; `degraded` makes an observation unusable. D10: a zero-element observation is unusable, so no key candidates are offered into an unseen window. D11: a failed availability check resets the driver, so the next start re-checks. **D12: pin `cua-driver==0.28.2` exactly.** D13: an adapter lock; a timeout reported as "outcome unknown". Honour `delivery.mode` and log `escalation` (§4.1). Fix the "Nine tools" text and the stale "Cua has none" docstring (`cua.py:113-115`). | What the driver reports reaches the loop; a no-op raises for every verb; nothing acts on an empty tree | Translation tests built from **real `cua_driver` types** rather than fakes, so a phantom field cannot hide again. Candidate IDs and descriptions pinned unchanged. | ◆ `types.py` (additive fields) |
+| **2** | Prometheus | 1 | **The driver as an Integration.** `ComputerIntegration` (from_config with no I/O; probe under lock + TTL; telemetry floor, worker environment included; supported-version check; `PRIVATE_WORKER` hosting behind an on-box check, with `EMBEDDED` as the fallback; a BOUNDED trusted session per task; cached snapshot for `/api/status`; `app.state.computer_targets`). The `computer_use` block with `enabled: false`. `GET /api/integrations/computer`, `/computer status`. | Health is known before dispatch; disabled constructs nothing; telemetry is off before import | The config guards; a probe-state matrix (disabled, version-mismatch, preconditions down, ready) over a fake SDK module; a subprocess test that the env is set before `import cua_driver`; the no-leak test extended; **`registered == 0` by execution with `enabled: true`** | — |
 | **3** | Prometheus | 2 | **Consent before the first grant.** The `site` term (§5.4); the D1 floor in the loop; D2 (type candidates withheld unless focus is established); a runbook step to read the live `security.grants` for `computer_action` rows. | No remembered grant can cover web content; `/gate off` cannot bypass computer consent; the prompt describes only what executes | The 27 literals updated. New: unknown site is not rememberable; `derive_grant` returns None; `from_config_dict` refuses four-term and unknown rows; AUTONOMOUS still reaches the approver (`FixtureDriver.dispatched` empty when it declines). | ◆ extent + loop |
 | **4** | Prometheus | 2 | **Discovery.** `Driver` gains `list_apps`/`list_windows` (fixture + adapter); `resolve_app(phrase, aliases)`; frontmost-window choice; per-step re-resolution | "My editor" becomes one window, or a question | 0/1/many matches; never launches; a vanished window ends the task | ◆ `Driver` protocol (additive) |
-| **5** | Prometheus | 2 | **The door.** `ComputerTaskInput` + `ComputerTaskRunner`; `/computer` on every chat surface; REST routes; session binding + `SessionConsent`; ceilings; cooperative stop wired into session interrupt; chat progress. `enabled: false` by default. **The pin is strengthened** (§6.1). | A person can start, consent, follow and stop a task end to end, and nothing is registered | End to end with `FixtureDriver` + real `SecurityGate` + real `ApprovalQueue`. The binding approves only covered extents; `type_text` always prompts; high-consequence labels prompt; stop between steps denies pending approvals; one task per target; `computer.registered == 0`. | ⚑ **ruling** (touches the pin) |
-| **6** | Prometheus | 3 | **The cockpit stream.** `COMPUTER_FRAME_KINDS` + promotion; toggle routes; stop frame; approval `task_id`/`extent`; backfill; content-free push; activity cross-check | Every step is visible on a phone, and stop works from one | The two copied pinning tests; a content-policy grep test (no tokens, pids, typed text); reconnect backfill; stop ack | — |
-| **7** | beacon-desktop | 3 | ProgressPane computer section: log + Stop; thread-header toggle + picker | — | Renderer smoke for every `computer_*` frame | — |
-| **8** | beacon-ios | 3 | Task strip + Stop; picker; Status row; content-free push category | — | Decoder tests for every frame | — |
+| **5** | Prometheus | 2 | **The door.** `ComputerTaskInput` + `ComputerTaskRunner`; `/computer` on every chat surface; REST routes; session binding + `SessionConsent`; ceilings; cooperative stop wired into session interrupt; chat progress. **Approvals that reach the starter (§5.1.4): the queue without Telegram, `task_id`/`session_id` tags, routing to the starting chat, `deny_task`, the D14 `finally`.** The task registered as the session's turn (§5.1.7). `enabled: false` by default. **The pin covers every `computer_*` registration path** (§6.1). **Cannot merge before PR 3's D1 fix.** | A person can start, consent, follow and stop a task end to end, and nothing is registered by any path | End to end with `FixtureDriver` + real `SecurityGate` + real `ApprovalQueue`. The binding approves only covered extents; `type_text` always prompts; high-consequence labels prompt; stop between steps denies pending approvals; one task per target. **The widened pin:** a full boot with shipped config and with `enabled: true`, a spy on `ToolRegistry.register`, and the shared `_TOOL_PREFIX`. | ⚑ **ruling** (touches the pin) |
+| **6** | Prometheus | 3 | **The cockpit stream.** Layer 1 frames (§5.2.1); `COMPUTER_FRAME_KINDS` + promotion; toggle routes; stop frame; approval `task_id`/`extent`; `since`/`types`/`session_id` on `/api/events/recent`; push: a generic body, and no APPROVAL category when arguments are present | Every step is visible on a phone, and stop works from one | The two copied pinning tests; a content-policy grep test (no tokens, pids, typed text); reconnect backfill; stop ack | — |
+| **7** | beacon-desktop | 3 | ProgressPane computer section from a `computer_*` reducer; thread-header toggle + picker; `computer_step` kept out of the Activity feed | — | Renderer smoke for every `computer_*` frame | — |
+| **8** | beacon-ios | 3 | **`Approval.arguments` and a "With:" list** (required before any typing approval from a phone); `computer_*` kinds in the decoder list **and** a reducer; COMPUTER section + task strip; picker; Status row | — | Decoder tests for every frame. Pin the kinds list to the server's tuple, so the #503-style silent drop cannot recur. | — |
 | **9** | beacon-desktop (+ Prometheus `GET /api/integrations`) | decision 7 | Connectors + Integrations merged; the computer row via contract views | — | The smoke's provider-name grep still passes | — |
 | **10** | Prometheus | 4 | **Local chooser.** D7 (`to_thread`), `Choice.reason`, `GemmaChooser`, per-request grammar, boot canary, `chooser.kind: gemma` | The model can only answer with an ID from the table, and a slow model cannot stall the daemon | Grammar builder (one-line form) checked by llama.cpp's validator where available; timeout → abstain with **exactly one** HTTP call; bypass → abstain + `silent_failures`; the canary refuses a non-enforcing backend | ◆ loop (one line), `types.py` |
 | **11** | Prometheus (`gym/`) | 4 | Chooser evaluation, tier a (§5.5.3); runbooks for b0 and b; the Cua Bench adapter in a separate 3.12 venv | Accuracy, unsafe-action rate, invalid-ID = 0, latency → `timeout_s` | The harness's own fixtures | — |
@@ -1371,18 +1633,42 @@ move".
 ### 6.1 The pin, precisely
 
 `test_the_daemon_registers_none_today` (`tests/test_computer_status_block.py:324-343`)
-asserts that no line in `src/` calls `register_computer_tools(`.
+asserts that no line in `src/` calls `register_computer_tools(`. That is one
+registration path out of many.
 
-**What PR 5 does to the pin:**
+The status block already counts every tool named `computer_*`
+(`computer/status.py:79,177`), so its answer is right. The pin is what has to
+widen.
 
-* PR 5 registers nothing, so the pin stays green.
-* PR 5 **adds**, beside it, two of the audit's replacement assertions:
-  * the shipped default for `computer_use.enabled` is off;
-  * a registry built through the real daemon path with the default config
-    holds **zero** tools named `computer_*`, counted by execution. That also
-    catches a `computer_task` registered by any other route (§1.2 Q3).
-* That strengthens the ruling rather than changing it. It still edits the
-  pinned test file, hence the flag.
+**PR 5 requirement (Will, 2026-10-03): the pin covers every `computer_*`
+registration path.** Concretely:
+
+1. **By execution, through the real boot wiring.** The test builds the tool
+   registry the way the daemon does: `build_tool_registry`
+   (`daemon.py:952`), then the post-build registrations (LSP, MCP bootstrap,
+   the SENTINEL re-registration, and whatever PR 2 and PR 5 add for the
+   Integration and the door). It does this twice:
+   * with the shipped config;
+   * with `computer_use.enabled: true`.
+
+   In both cases it asserts that **no tool name starts with `computer_`**.
+2. **A spy on `ToolRegistry.register`** for the duration of that boot. Any
+   `computer_*` registration fails the test with the caller's location,
+   whatever function, wrapper or dynamic name produced it.
+3. **One prefix, shared.** The pin uses `computer.status._TOOL_PREFIX`, the
+   same constant the status block counts with, so the two cannot drift.
+4. **The existing grep stays**, as the cheap static check for the named
+   function.
+5. **The shipped default for `computer_use.enabled` is off**, asserted
+   against `shipped_defaults` (audit §8, assertion 2).
+
+**Effect on the ruling:**
+
+* PR 5 registers nothing, so every assertion is green.
+* This strengthens the ruling rather than changing it. It still edits the
+  pinned test file, hence the ⚑ flag.
+* The test's message keeps its current spirit, naming the path that
+  registered: "That is a deliberate decision; update this test and say so."
 
 **What L1 would do:** change the ruling itself. It replaces the grep with the
 four assertions, keeping the "That is a deliberate decision; update this test
@@ -1416,22 +1702,22 @@ written without the answer.
 
 | # | Decision | Recommendation | Needed before |
 |---|---|---|---|
-| **1** | **The origin term for the extent** (§5.4) | **E:** a fifth term `site` (`target:app:site:verb:delivery`), with UNKNOWN never rememberable, so web content is approve-once until a site provider exists. It is free only while no real grants exist. | PR 3 (and so the door) |
+| **1** | **The origin term for the extent** (§5.4) | **E:** a fifth term `site` (`target:app:site:verb:delivery`). UNKNOWN is never rememberable. In v1.1, web content is **not offered** as candidates (Cua RFC 4268's rule), and browser chrome is approve-once. The alternative is E′: offer web content, approve-once, every time. Either way the term is free only while no real grants exist. | PR 3, and so the door |
 | **2** | **The reading of decision 6 under a model chooser** (Q2) | The binding covers model-chosen clicks, scrolls and Return/Tab/Escape inside the picked app, with the §5.1.6 mitigations. The alternative is the audit's "grants serve script origin only", under which every model-chosen click prompts and the toggle grants little. | PR 5 |
-| **3** | **Does `/gate off` waive computer consent?** (D1) | **No.** Computer consent is a floor, like denied paths. | PR 3 |
-| **4** | **Typing goes to focus, not to the named field** (D2) | Withhold `type-N` candidates in v1.1 unless focus is established. Add a verified click-then-type composite later. | PR 3 |
+| **3** | ~~Does `/gate off` waive computer consent?~~ **Settled by Will (2026-10-03):** the D1 fix is a hard precondition for the door. | **Mechanism:** in the loop, any computer extent the gate allows at `TrustLevel.AUTONOMOUS` (`checker.py:1037`) is routed to `approve`. A grant match allows at `TrustLevel.AUTO` (`checker.py:1067-1071`), so it is unaffected. **Open detail:** `approve` consults stored grants and the binding before prompting, so `/gate off` neither waives nor tightens computer consent. Recommended. | PR 3 |
+| **4** | **Typing goes to focus, not to the named field** (D2) | Use RFC 4268's rule: `set_value` by element token, via `call_tool(name, arguments_json)` (`_native.py:5561`; the typed SDK has no element-targeted text input, `_native_contract.py:1657-1705,5862-5865`). Where that is unavailable, withhold `type-N` candidates. Never let the prompt name a field the driver will not target. | PR 3 |
 | **5** | **Who picked the element: log, or consent term?** | Log only (`chooser: rule\|gemma\|query` in the audit row and the frame), never an extent term. | PR 3 |
 | **6** | **Binding lifetime** | In memory, 8-hour ceiling, re-asked after a daemon restart. A durable binding is a follow-up. | PR 5 |
-| **7** | **`/approve all` and computer approvals** | Exclude them (audit §5). | PR 5 |
-| **8** | **Strengthening the pin in PR 5** (§6.1) | Go. It adds the audit's assertions 2-3 and keeps the grep. | PR 5 ⚑ |
-| **9** | **The driver pin** | Exact `cua-driver==0.28.2`, plus a code-side supported-versions check. Upgrade to 0.33.x deliberately, for the pixel tier. | PR 2 |
-| **10** | **Hosting and crash isolation** (Q4) | In-process `EMBEDDED` on Linux for v1.1, accepting that a native crash takes the daemon down. Evaluate `PRIVATE_WORKER` in PR 2's on-box check, and switch only if it isolates. | PR 2 |
+| **7** | **`/approve all` and computer approvals** | Exclude them, on chat and on `POST /api/approvals/all/approve` (both drain desktop approvals today; probed). | PR 5 |
+| **8** | **Widening the pin in PR 5** (§6.1) | Go. It covers every `computer_*` registration path by execution, with a spy on `ToolRegistry.register`, and keeps the grep. | PR 5 ⚑ |
+| **9** | **The driver pin** | Exact `cua-driver==0.28.2` **in PR 1** (D12), plus a code-side supported-versions check. Upgrade to 0.33.x deliberately, for the pixel tier. | PR 1 |
+| **10** | **Hosting** (Q4) | Cua's `PRIVATE_WORKER`, with a BOUNDED trusted session per task: crash containment, and a driver-side floor. Adopt it if PR 2's on-box check shows that it works on X11 and that the telemetry opt-out reaches the worker. Otherwise stay `EMBEDDED` and accept that a native crash takes the daemon down. | PR 2 |
 | **11** | **App-term spelling on macOS** | `bundle_id`, decided with #1, so the first grants on a Mac are never re-spelled. No effect on Linux. | Before any macOS work (L5) |
 | **12** | **Where the chooser runs** | A dedicated small-Gemma llama-server (E4B first), not the production slot. A shared single slot turns a 5 s timeout into abstains. | PR 10 |
 | **13** | **OS event listeners for watch mode** | Defer. Each is global and would see apps outside the grant. Ask upstream to expose the driver's existing trackers first. | L6 |
 | **14** | **Registering `computer_task`** (model-initiated) | Out of v1.1. Revisit with the audit's §7 list. | L1 ⚑ |
-
-<!-- DECISIONS-OVERLAP: items added from §4 if any -->
+| **15** | **Typing approvals on a phone before iOS can show them** | Until beacon-ios shows `arguments` (PR 8), a `type_text` approval is not answerable from iOS: no lock-screen action, and the card says "open on desktop or Telegram". | PR 6 |
+| **16** | **The AGPL icon detector in `cua-perception`** | Decide before L3 ships. PP-OCR (Apache-2.0) alone is a possible first step. | L3 |
 
 ---
 
