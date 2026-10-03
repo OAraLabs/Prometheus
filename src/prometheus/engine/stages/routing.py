@@ -154,10 +154,12 @@ def route_turn(
                 # override (or task rule, or escalation) was NOT applied and
                 # we silently fell through to primary — that's not something
                 # we should discover by reading source code.
+                # The message's length, never its text: logs outlive the
+                # conversation and get pasted into reports.
                 log.warning(
                     "ModelRouter: route() raised — falling back to primary. "
-                    "session_id=%r, latest_user=%r",
+                    "session_id=%r, latest_user_chars=%d",
                     context.session_id,
-                    (latest_user or "")[:60],
+                    len(latest_user or ""),
                     exc_info=True,
                 )

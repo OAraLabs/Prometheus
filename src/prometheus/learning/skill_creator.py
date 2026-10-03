@@ -381,9 +381,9 @@ class SkillCreator:
         skip_reason = self._parse_skip(content)
         if skip_reason is not None:
             log.info(
-                "SkillCreator: model declined (%s) — task: %.80s",
+                "SkillCreator: model declined (%s) — task of %d chars",
                 skip_reason or "no reason given",
-                task_description,
+                len(task_description),
             )
             return None
 
@@ -731,9 +731,10 @@ class SkillCreator:
 
         The same call SkillRefiner and GEPA make: ``scan_markdown_content``,
         which reads the Python code blocks. SUSPICIOUS findings pass, as they
-        do there. A DANGEROUS verdict is refused with a WARNING naming the
-        trigger and the scanner's reasons, and a ``subsystem_runs`` row
-        (``skill_creator``/``code_scan``). A scanner that fails refuses too
+        do there. A DANGEROUS verdict is refused with a WARNING giving the
+        trigger's length (never its text, which can be the user's message) and
+        the scanner's reasons, and a ``subsystem_runs`` row
+        (``skill_creator``/``code_scan``) that keeps the trigger. A scanner that fails refuses too
         (fail safe, as in SkillRefiner and GEPA): unscanned content is never
         written.
         """
@@ -745,7 +746,7 @@ class SkillCreator:
         except Exception as exc:
             log.exception(
                 "SkillCreator: DangerousCodeScanner failed — refusing to write "
-                "the skill for %r", what,
+                "the skill for a trigger of %d chars", len(trigger or ""),
             )
             self._record_scan_refusal("failed", {
                 "reason": "scanner_failed", "trigger": what,
@@ -757,8 +758,8 @@ class SkillCreator:
         findings = [f"{f.rule} (line {f.line}): {f.detail}"
                     for f in scan.findings if f.severity == "dangerous"][:10]
         log.warning(
-            "SkillCreator: refusing to write the skill for %r — it contains "
-            "dangerous code: %s", what, "; ".join(findings),
+            "SkillCreator: refusing to write the skill for a trigger of %d chars "
+            "— it contains dangerous code: %s", len(trigger or ""), "; ".join(findings),
         )
         self._record_scan_refusal("skipped", {
             "reason": "dangerous_code", "trigger": what, "findings": findings,
