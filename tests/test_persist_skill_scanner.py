@@ -106,7 +106,10 @@ def _assert_refusal_recorded(tmp_path: Path, caplog, trigger_part: str) -> None:
     warnings = [r.getMessage() for r in caplog.records
                 if r.levelno == logging.WARNING and "dangerous code" in r.getMessage()]
     assert len(warnings) == 1
-    assert trigger_part in warnings[0] and "os.system" in warnings[0]
+    # The row keeps the trigger; the WARNING gives only its length, because a
+    # trigger can be the user's own message (test_logs_never_carry_user_text).
+    assert "os.system" in warnings[0] and "chars" in warnings[0]
+    assert trigger_part not in warnings[0]
 
 
 # ---------------------------------------------------------------------------
