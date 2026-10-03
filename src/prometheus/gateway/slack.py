@@ -709,6 +709,11 @@ class SlackAdapter(BasePlatformAdapter):
         if hasattr(self.session_manager, "rehydrate_if_cold"):
             self.session_manager.rehydrate_if_cold(session_id)
         session = self.session_manager.get_or_create(session_id)
+        # Telemetry v2 outcomes (WP-X.54 T-4): the user's signal on the turn
+        # before this message. Queued; never raises.
+        from prometheus.telemetry import outcomes
+
+        outcomes.note_user_message(session_id, text)
         session.add_user_message(text)
         pre_len = len(session.get_messages())
 

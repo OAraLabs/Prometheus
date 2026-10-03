@@ -168,15 +168,17 @@ FIELD_RULES: list[FieldRule] = [
         family="observable",
         replaces="any column/key named timestamp, created_at, updated_at, started_at, "
                  "ended_at, deleted_at, pinned_at, read_at, last_seen_at, last_mentioned, "
-                 "timestamp_iso, mtime, probed_at, ts — including keys inside JSON stored "
-                 "in a text column",
+                 "timestamp_iso, mtime, probed_at, outcome_at, ts — including keys inside "
+                 "JSON stored in a text column",
         why="written from time.time() / datetime.now() (mtime: the harness creates the "
-            "fixture files at run time); differs on every run by construction",
+            "fixture files at run time; outcome_at: the turn's end, a message's arrival "
+            "or an acceptance run, telemetry v2 T-4); differs on every run by construction",
         cost="WHEN a row was written is invisible. Row ORDER is still compared (rows are "
              "dumped in rowid order), and so is whether the field is NULL",
         fields=frozenset({"timestamp", "created_at", "updated_at", "started_at", "ended_at",
                           "deleted_at", "pinned_at", "read_at", "last_seen_at",
-                          "last_mentioned", "timestamp_iso", "mtime", "probed_at", "ts"}),
+                          "last_mentioned", "timestamp_iso", "mtime", "probed_at",
+                          "outcome_at", "ts"}),
         placeholder="<time>",
     ),
     FieldRule(

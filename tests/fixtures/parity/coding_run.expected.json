@@ -2140,9 +2140,9 @@
        "prose",
        null,
        null,
-       null,
-       null,
-       null
+       "accepted_verified",
+       "acceptance_command",
+       "<time>"
       ]
      ]
     }

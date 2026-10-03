@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from prometheus.config.paths import get_config_dir
 from prometheus.context.environment import git_head_sha
 from prometheus.gateway.cron_service import load_cron_jobs, validate_cron_expression
+from prometheus.telemetry.outcomes import sweep_abandoned
 
 if TYPE_CHECKING:
     from prometheus.gateway.platform_base import BasePlatformAdapter
@@ -27,6 +28,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_INTERVAL = 30  # seconds
 DEFAULT_IDLE_THRESHOLD = 900  # 15 minutes
 DEFAULT_TASK_PROGRESS_INTERVAL = 600  # 10 minutes between "still running" pings
+# Telemetry v2 outcomes (WP-X.54 T-4): how often the `abandoned` sweep runs.
+# Its window is 30 minutes, so every 20th tick is plenty.
+OUTCOME_SWEEP_INTERVAL = 600  # seconds
 
 # Background-task statuses that mean the task has stopped running.
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "killed"})
@@ -47,6 +51,7 @@ class Heartbeat:
         task_progress_interval: int = DEFAULT_TASK_PROGRESS_INTERVAL,
         boot_sha: str | None = None,
         maintenance_db: str | None = None,
+        telemetry: Any = None,
     ) -> None:
         self.interval = interval
         self.gateway = gateway
@@ -90,6 +95,12 @@ class Heartbeat:
         # suppressed. The merge->restart gap is exactly when drift is EXPECTED,
         # and every deploy was generating a nudge there.
         self._maintenance_db = maintenance_db or None
+
+        # Telemetry v2 outcomes (WP-X.54 T-4): the daemon's tracker, for the
+        # sweep that marks turns no message followed as `abandoned`. None
+        # (telemetry off, or a caller that never passed it) = no sweep.
+        self._telemetry = telemetry
+        self._outcome_sweep_last: float | None = None
 
     @property
     def signal_bus(self) -> SignalBus | None:
@@ -200,6 +211,9 @@ class Heartbeat:
                     # Boot-SHA staleness nudge (merged-but-dark detector)
                     await self._check_staleness()
 
+                    # Telemetry v2: label turns no message followed (T-4)
+                    await self._sweep_outcomes()
+
                 except Exception as exc:
                     logger.error("Heartbeat check failed: %s", exc)
 
@@ -295,6 +309,20 @@ class Heartbeat:
             f"⚠️ Running {self._boot_sha[:8]}, tree is {tree_head[:8]} — new code "
             f"on disk this process isn't executing. Restart to go live."
         )
+
+    async def _sweep_outcomes(self) -> None:
+        """Queue the telemetry v2 ``abandoned`` sweep, at most every
+        ``OUTCOME_SWEEP_INTERVAL`` seconds. It runs on the telemetry writer's
+        thread in a bounded batch, so this tick never waits on the database,
+        and ``sweep_abandoned`` never raises."""
+        if self._telemetry is None:
+            return
+        now = time.monotonic()
+        if (self._outcome_sweep_last is not None
+                and now - self._outcome_sweep_last < OUTCOME_SWEEP_INTERVAL):
+            return
+        self._outcome_sweep_last = now
+        sweep_abandoned(self._telemetry)
 
     async def _check_idle(self) -> None:
         """Emit idle_start / idle_end signals on the bus."""

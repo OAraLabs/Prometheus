@@ -1760,6 +1760,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
         task_manager=task_manager,
         notify_chat_id=_notify_chat,
         boot_sha=boot_sha,
+        # Telemetry v2 outcomes (WP-X.54 T-4): the `abandoned` sweep. None when
+        # telemetry is off, and then there is no sweep.
+        telemetry=telemetry,
         # Optional: suppress the merged-but-dark nudge inside an operator-armed
         # maintenance window. Empty by default (feature off).
         maintenance_db=(config.get("heartbeat", {}) or {}).get("maintenance_db", ""),

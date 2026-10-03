@@ -2285,6 +2285,14 @@ class TelegramAdapter(BasePlatformAdapter):
         if hasattr(self.session_manager, "rehydrate_if_cold"):
             self.session_manager.rehydrate_if_cold(event.session_key())
         session = self.session_manager.get_or_create(event.session_key())
+        # Telemetry v2 outcomes (WP-X.54 T-4): the user's signal on the turn
+        # before this message. HERE, on arrival, not inside the turn lock: a
+        # message that waits for a running turn must not label it. Human
+        # inbound only; inject_turn's machine turns are no signal. Queued;
+        # never raises.
+        from prometheus.telemetry import outcomes
+
+        outcomes.note_user_message(event.session_key(), event.text)
         # Telegram inbound is a real human: provenance="user", trusted. Routes
         # through the same shared core as inject_turn (the re-engagement path).
         # The typing indicator runs for the WHOLE turn (see _keep_typing) —
