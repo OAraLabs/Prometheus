@@ -19,6 +19,7 @@ import time
 from typing import Any
 
 from prometheus.engine import loop_watchdog as _loop_watchdog
+from prometheus.version import package_version
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +245,7 @@ class WebSocketBridge:
         await self._send_one(websocket, {
             "type": "connected",
             "timestamp": time.time(),
-            "payload": {"version": "0.1.0"},
+            "payload": {"version": package_version()},
         })
 
         try:
@@ -941,8 +942,12 @@ class WebSocketBridge:
         # signal on the turn before it. HERE, on arrival and before the turn
         # lock, so a message sent mid-turn is seen as mid-turn and never labels
         # the running turn. Queued; never raises.
+        from prometheus.sentinel import activity
         from prometheus.telemetry import outcomes
 
+        # WP-X.56: a person is using Prometheus. The heartbeat ends idle on
+        # its next tick, so AutoDream pauses. Never raises.
+        activity.note_user_activity()
         outcomes.note_user_message(session_id, content)
         if blocks:
             turn_index = session.add_user_message(content, blocks=blocks)

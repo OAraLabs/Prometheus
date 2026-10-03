@@ -208,6 +208,18 @@ class MemoryStore:
                 updated_at  REAL NOT NULL
             );
 
+            -- Named marks a maintenance pass keeps about THIS store. First
+            -- user: the MemoryConsolidator's ``decay_charged_through``, the
+            -- wall-clock time up to which confidence decay has been charged,
+            -- so decay goes by elapsed time and a restart never charges the
+            -- same window twice. It lives with the facts it describes: a
+            -- restored or replaced memory.db carries its own mark.
+            CREATE TABLE IF NOT EXISTS store_marks (
+                name        TEXT PRIMARY KEY,
+                value       REAL NOT NULL,
+                updated_at  REAL NOT NULL
+            );
+
             -- FTS sync triggers (passive-recall sprint). Both FTS tables are
             -- external-content (content=); FTS5 requires index maintenance to
             -- go through the special 'delete' command keyed by the CONTENT
@@ -567,6 +579,25 @@ class MemoryStore:
                 "   last_row_id = MAX(last_row_id, excluded.last_row_id),"
                 "   updated_at = excluded.updated_at",
                 (scope, int(row_id), time.time()),
+            )
+
+        self._write(_op)
+
+    def get_mark(self, name: str) -> float | None:
+        """The value of mark *name* (see ``store_marks``), or None if unset."""
+        row = self._read(lambda conn: conn.execute(
+            "SELECT value FROM store_marks WHERE name = ?", (name,)
+        ).fetchone())
+        return float(row["value"]) if row else None
+
+    def set_mark(self, name: str, value: float) -> None:
+        """Set mark *name* to *value*."""
+        def _op(conn):
+            conn.execute(
+                "INSERT INTO store_marks (name, value, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(name) DO UPDATE SET"
+                "   value = excluded.value, updated_at = excluded.updated_at",
+                (name, float(value), time.time()),
             )
 
         self._write(_op)

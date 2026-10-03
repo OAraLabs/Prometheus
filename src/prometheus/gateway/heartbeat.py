@@ -329,7 +329,17 @@ class Heartbeat:
         if self._signal_bus is None:
             return
 
+        from prometheus.sentinel import activity
         from prometheus.sentinel.signals import ActivitySignal
+
+        # WP-X.56: the ingress points stamp when a person last wrote
+        # (sentinel/activity.py). Nothing else moves _last_activity in the
+        # daemon — the `message_received` signal below is never emitted — so
+        # without this idle started once per boot and never ended, and
+        # AutoDream dreamed around the clock.
+        noted = activity.last_user_activity()
+        if noted is not None and noted > self._last_activity:
+            self._last_activity = noted
 
         idle_seconds = time.time() - self._last_activity
 
