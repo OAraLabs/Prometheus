@@ -684,7 +684,11 @@ class Curator:
     def _apply_auto_transitions(
         self, skills: list[dict[str, Any]], *, dry_run: bool
     ) -> list[dict[str, Any]]:
-        """Flip lifecycle state on the days since the last load (never loaded → active).
+        """Flip lifecycle state on the days since the last load.
+
+        No load data never archives and never revives: a stale label goes back
+        to active (the #591 restore of the mtime-era labels) and an archived one
+        stays archived — see :meth:`_target_state`.
 
         Pinned skills are skipped. State transitions are applied immediately
         to the SkillStateStore unless ``dry_run`` is True.
@@ -696,7 +700,7 @@ class Curator:
             if skill["pinned"]:
                 continue
             current = skill["state"]
-            target = self._target_state(skill["days_ago"])
+            target = self._target_state(skill["days_ago"], current)
             if target == current:
                 continue
             transitions.append({
@@ -716,10 +720,19 @@ class Curator:
                     )
         return transitions
 
-    def _target_state(self, days_ago: int | None) -> str:
+    def _target_state(self, days_ago: int | None, current: str = SKILL_STATE_ACTIVE) -> str:
         if days_ago is None:
             # No load recorded: nobody has measured this skill, which is not
-            # evidence that it is unused. Never stale on that basis.
+            # evidence that it is unused. Never stale on that basis — and a
+            # stale label is dropped, since #591 those came from file mtime.
+            #
+            # Nor is it evidence that it IS used, so an archived skill stays
+            # archived. "No load recorded" is also what telemetry off, a fresh
+            # or --reset-telemetry'd telemetry.db, and empty stats all look
+            # like; sending archived to active here revived every unpinned
+            # archived skill on the next pass (ruled 2026-10-02).
+            if current == SKILL_STATE_ARCHIVED:
+                return SKILL_STATE_ARCHIVED
             return SKILL_STATE_ACTIVE
         if days_ago >= self._archive_after_days:
             return SKILL_STATE_ARCHIVED

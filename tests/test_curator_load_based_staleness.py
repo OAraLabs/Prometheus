@@ -128,6 +128,15 @@ class TestNoLoadDataIsNeverStale:
             (SKILL_STATE_STALE, SKILL_STATE_ACTIVE)]
         assert store.get_skill("was-stale").state == SKILL_STATE_ACTIVE
 
+    def test_a_legacy_stale_skill_with_no_load_data_goes_active_in_a_full_run(
+        self, tmp_path, monkeypatch,
+    ):
+        curator, auto, store = _curator(tmp_path, {})
+        _skill(auto, "was-stale", age_days=45)
+        store.upsert_skill("was-stale", SkillRecord(state=SKILL_STATE_STALE))
+        _run_without_review(curator, monkeypatch)
+        assert store.get_skill("was-stale").state == SKILL_STATE_ACTIVE
+
     def test_without_telemetry_there_is_no_load_data(self, tmp_path):
         curator, auto, _ = _curator(tmp_path, None)
         _skill(auto, "x", age_days=400)
@@ -142,6 +151,107 @@ class TestNoLoadDataIsNeverStale:
         assert "last_used_days_ago: never (no load recorded)" in text
         assert "last_used_days_ago: 3" in text
         assert "last_used_days_ago: 90" not in text
+
+
+def _run_without_review(curator: Curator, monkeypatch) -> object:
+    """One real run_once pass; the model proposes nothing."""
+    async def fake_call_model(self, prompt):
+        return "```yaml\nconsolidations: []\nprunings: []\n```"
+
+    monkeypatch.setattr(Curator, "_call_model", fake_call_model)
+    return asyncio.run(curator.run_once())
+
+
+def _real_telemetry(path: Path):
+    from prometheus.telemetry.tracker import ToolCallTelemetry
+
+    return ToolCallTelemetry(db_path=path)
+
+
+def _record_load(tel, skill: str) -> None:
+    """The row tools/builtin/skill.py writes for a successful load."""
+    from prometheus.telemetry.tracker import SKILL_LOAD_OPERATION, SKILL_LOAD_SUBSYSTEM
+
+    tel.record_run(SKILL_LOAD_SUBSYSTEM, SKILL_LOAD_OPERATION, "success",
+                   summary={"skill": skill, "source": "auto", "file": skill})
+
+
+class TestNoLoadDataNeverRevivesAnArchivedSkill:
+    """Absence of load data is not evidence of USE either (ruled 2026-10-02).
+
+    #591 made "no load data" mean "never stale", and sent every such skill to
+    active — on purpose, to undo the mtime-era stale labels. But the same path
+    revived ARCHIVED skills: with no tracker (telemetry off), a fresh or
+    `--reset-telemetry`'d telemetry.db, or empty stats, every unpinned archived
+    skill went back to active on the next pass, and stayed there after the data
+    came back. The ruling keeps the legacy stale→active restore and stops the
+    revive: with no load data an archived skill stays archived.
+    """
+
+    def _archived(self, tmp_path: Path, telemetry) -> tuple[Curator, Path, SkillStateStore]:
+        auto = tmp_path / "auto"
+        auto.mkdir(exist_ok=True)
+        store = SkillStateStore(tmp_path / "state.json")
+        curator = Curator(
+            MagicMock(), state_store=store, auto_dir=auto, reports_dir=tmp_path / "reports",
+            telemetry=telemetry,
+        )
+        _skill(auto, "retired", age_days=200)
+        store.upsert_skill("retired", SkillRecord(state=SKILL_STATE_ARCHIVED))
+        return curator, auto, store
+
+    def test_no_tracker(self, tmp_path, monkeypatch):
+        curator, _, store = self._archived(tmp_path, None)
+        run = _run_without_review(curator, monkeypatch)
+        assert store.get_skill("retired").state == SKILL_STATE_ARCHIVED
+        assert run.auto_transitions == []
+
+    def test_empty_stats(self, tmp_path, monkeypatch):
+        curator, _, store = self._archived(tmp_path, _Telemetry({}))
+        _run_without_review(curator, monkeypatch)
+        assert store.get_skill("retired").state == SKILL_STATE_ARCHIVED
+
+    def test_a_fresh_telemetry_db(self, tmp_path, monkeypatch):
+        tel = _real_telemetry(tmp_path / "telemetry.db")
+        try:
+            curator, _, store = self._archived(tmp_path, tel)
+            _run_without_review(curator, monkeypatch)
+            assert store.get_skill("retired").state == SKILL_STATE_ARCHIVED
+        finally:
+            tel.close()
+
+    def test_a_reset_telemetry_db_with_other_skills_loaded_since(self, tmp_path, monkeypatch):
+        """`--reset-telemetry` deletes the file; the next tracker starts empty and
+        the skills people still use start loading again. The archived one has no
+        rows any more — and must not be revived for it."""
+        db = tmp_path / "telemetry.db"
+        before = _real_telemetry(db)
+        _record_load(before, "retired")
+        before.close()
+        for leftover in tmp_path.glob("telemetry.db*"):
+            leftover.unlink()  # what --reset-telemetry does
+        tel = _real_telemetry(db)
+        try:
+            curator, auto, store = self._archived(tmp_path, tel)
+            _skill(auto, "in-use")
+            _record_load(tel, "in-use")
+            assert set(tel.skill_load_stats()) == {"in-use"}
+            _run_without_review(curator, monkeypatch)
+            assert store.get_skill("retired").state == SKILL_STATE_ARCHIVED
+            assert store.get_skill("in-use").state == SKILL_STATE_ACTIVE
+        finally:
+            tel.close()
+
+    def test_a_real_load_still_brings_an_archived_skill_back(self, tmp_path, monkeypatch):
+        """Data that SAYS it is in use still counts: a load revives it."""
+        tel = _real_telemetry(tmp_path / "telemetry.db")
+        try:
+            curator, _, store = self._archived(tmp_path, tel)
+            _record_load(tel, "retired")
+            _run_without_review(curator, monkeypatch)
+            assert store.get_skill("retired").state == SKILL_STATE_ACTIVE
+        finally:
+            tel.close()
 
 
 class TestPruning:

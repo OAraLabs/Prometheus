@@ -326,7 +326,11 @@ class UsageRecord:
 class CostTracker:
     """Track token usage and costs across a session."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, unavailable_reason: str | None = None) -> None:
+        # Set when nothing can feed this tracker (telemetry off: its usage seam
+        # is the only feed). report() then says so instead of a $0.00 that
+        # would read as "no cloud usage".
+        self._unavailable_reason = unavailable_reason
         self._records: list[UsageRecord] = []
         self._total_cost: float = 0.0
         self._total_input: int = 0
@@ -440,6 +444,8 @@ class CostTracker:
         /api/usage was fixed to stop telling, so the unpriced share is stated
         inline rather than left for a log line nobody is tailing.
         """
+        if self._unavailable_reason:
+            return f"Cost: unavailable ({self._unavailable_reason})"
         if not self._records:
             return "Cost: $0.00 (no cloud API usage)"
 

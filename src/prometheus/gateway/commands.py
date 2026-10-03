@@ -1260,10 +1260,16 @@ def cmd_events(arg: str = "") -> str:
     Reads from telemetry.signal_events — the durable tail. Survives daemon
     restart, unlike the in-memory ``SignalBus.recent`` deque.
     """
-    from prometheus.telemetry.tracker import get_telemetry_handle
+    from prometheus.telemetry.tracker import (
+        TELEMETRY_OFF_NOTE,
+        get_telemetry_handle,
+        telemetry_is_off,
+    )
 
     tel = get_telemetry_handle()
     if tel is None:
+        if telemetry_is_off():
+            return f"📡 /events: {TELEMETRY_OFF_NOTE} — nothing is recorded to report."
         return (
             "📡 /events: telemetry not wired.\n"
             "(daemon hasn't called set_telemetry_handle — restart required)"
@@ -1429,10 +1435,16 @@ def cmd_health(verbose: bool = False, since_hours: float = 24.0) -> str:
     """
     import time as _time
     from datetime import datetime
-    from prometheus.telemetry.tracker import get_telemetry_handle
+    from prometheus.telemetry.tracker import (
+        TELEMETRY_OFF_NOTE,
+        get_telemetry_handle,
+        telemetry_is_off,
+    )
 
     tel = get_telemetry_handle()
     if tel is None:
+        if telemetry_is_off():
+            return f"🩺 Health: {TELEMETRY_OFF_NOTE} — nothing is recorded to report."
         return (
             "🩺 Health: telemetry not wired.\n"
             "(daemon hasn't called set_telemetry_handle — restart required)"
