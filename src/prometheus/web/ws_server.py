@@ -937,6 +937,13 @@ class WebSocketBridge:
         # Before this they were attached AFTER the persist, so the durable
         # row never knew an image existed. The kwarg rides only when blocks
         # exist — duck-typed session fakes predate it.
+        # Telemetry v2 outcomes (WP-X.54 T-4): this message is the user's
+        # signal on the turn before it. HERE, on arrival and before the turn
+        # lock, so a message sent mid-turn is seen as mid-turn and never labels
+        # the running turn. Queued; never raises.
+        from prometheus.telemetry import outcomes
+
+        outcomes.note_user_message(session_id, content)
         if blocks:
             turn_index = session.add_user_message(content, blocks=blocks)
         else:

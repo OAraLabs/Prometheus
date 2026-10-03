@@ -253,6 +253,13 @@ class CodingSession:
                 # Observation must never break the run — same posture as the
                 # terminal record_run below.
                 log.exception("coding_mode: acceptance telemetry write failed")
+        # Telemetry v2 outcomes (WP-X.54 T-4, rulings 3 and 4): the verdict
+        # lands on the episode it judged, the run's latest. Queued, and it
+        # never raises.
+        if self._telemetry is not None:
+            from prometheus.telemetry import outcomes
+
+            outcomes.coding_acceptance(self._telemetry, self._coding_run_id, exit_code)
         return exit_code, result.output
 
     # ------------------------------------------------------------------

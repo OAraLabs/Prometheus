@@ -1181,9 +1181,10 @@ class _TurnRecord:
                 self.stop(_StopReason.ERROR)
         self._release_held(keep_prose=True)
         import json as _json
+        ended_at = time.time()
         self._write("upsert", "turns", {
             **self._identity(),
-            "ended_at": time.time(),
+            "ended_at": ended_at,
             "rounds": self.rounds,
             "total_prompt_tokens": self.prompt_tokens,
             "total_completion_tokens": self.completion_tokens,
@@ -1194,6 +1195,28 @@ class _TurnRecord:
             "terminal_kind": self.terminal_kind,
             "forced_stop_reason": self.forced_stop_reason,
         }, key="turn_id")
+        self._stamp_outcome(ended_at)
+
+    def _stamp_outcome(self, ended_at: float) -> None:
+        """T-4: the daemon's outcome, when the loop (not the model) ended the turn.
+
+        ``forced_stop`` or ``error_terminal`` from this turn's own stop reason
+        (telemetry/outcomes.py has the split), at ``ended_at``, queued after the
+        end upsert so it lands on the row. A model that chose to stop leaves
+        the outcome to the user's next message. Never raises, like ``record()``:
+        a telemetry failure is a WARNING, never the end of a turn.
+        """
+        if self._writer is None:
+            return
+        try:
+            from prometheus.telemetry import outcomes
+
+            outcome = outcomes.turn_end_outcome(self.forced_stop_reason, self.terminal_kind)
+            if outcome is not None:
+                outcomes.stamp_turn_end(self._writer, self.turn_id, outcome, ended_at)
+        except Exception:
+            log.warning("telemetry v2: turn-end outcome for %s failed", self.turn_id,
+                        exc_info=True)
 
 
 def _serving_model(context: "LoopContext") -> str:

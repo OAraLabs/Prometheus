@@ -4564,6 +4564,12 @@ def create_app(
         if hasattr(session_mgr, "rehydrate_if_cold"):
             session_mgr.rehydrate_if_cold(f"web:{session_id}")
         session = session_mgr.get_or_create(f"web:{session_id}")
+        # Telemetry v2 outcomes (WP-X.54 T-4): the user's signal on the turn
+        # before this message, under the id the turn is recorded as (web:<id>,
+        # record_session_id below). Queued; never raises.
+        from prometheus.telemetry import outcomes
+
+        outcomes.note_user_message(f"web:{session_id}", content)
         session.add_user_message(content)
         # pre_len AFTER the user append — the index in result.messages where
         # the loop's new content starts, same as every gateway adapter. The

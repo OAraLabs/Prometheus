@@ -10,7 +10,9 @@ bounded queue drained by ONE thread with its OWN WAL connection. The caller
 puts a row on the queue and returns.
 
 WHAT IT WRITES. The new tables only (``V2_TABLES``), plus the write-once
-``telemetry_v2_capture_since`` stamp in ``schema_meta`` (``stamp_meta``). The existing INSERTs stay
+``telemetry_v2_capture_since`` stamp in ``schema_meta`` (``stamp_meta``), plus
+``call``: a function run on the writer thread, in queue order, for the
+conditional updates T-4's outcomes need. The existing INSERTs stay
 synchronous (ruling 6): the Beacon coding live stream, the context meter and
 the parity runner read those rows back immediately, and a queue would make
 them late.
@@ -110,6 +112,12 @@ class _Write:
 
 
 @dataclass
+class _Call:
+    label: str                    # names it in a silent_failures row
+    fn: Callable[[sqlite3.Connection], Any]
+
+
+@dataclass
 class _Marker:
     done: threading.Event = field(default_factory=threading.Event)
 
@@ -191,6 +199,22 @@ class TelemetryV2Writer:
         return self._enqueue(_Write(_META_TABLE, {"key": key, "value": str(self._clock())},
                                     "insert_or_ignore"))
 
+    def call(self, label: str, fn: Callable[[sqlite3.Connection], Any]) -> bool:
+        """Queue ``fn(conn)`` to run on the writer thread, in its own transaction.
+
+        For writes an INSERT or an upsert cannot say: T-4's outcomes are
+        conditional UPDATEs ("only while ``outcome`` IS NULL") that must run
+        AFTER the turn rows queued before them, which the one queue gives for
+        free. ``fn`` gets the writer's connection and must touch only
+        ``V2_TABLES``; it is committed when it returns. One that raises is
+        rolled back and becomes a WARNING plus a ``silent_failures`` row named
+        ``label``, and the rows queued after it still land. Returns False if it
+        was dropped (and counted), like a row.
+        """
+        if not _IDENT.match(label):
+            raise ValueError(f"not a call label: {label!r}")
+        return self._enqueue(_Call(label, fn))
+
     def flush(self, timeout: float = 5.0) -> bool:
         """Wait until everything queued so far is written. True if it was."""
         if self._closed:
@@ -232,7 +256,7 @@ class TelemetryV2Writer:
             write.row[stamp] = self._clock()
         return self._enqueue(write)
 
-    def _enqueue(self, write: _Write) -> bool:
+    def _enqueue(self, write: _Write | _Call) -> bool:
         # Check and put under the lock close() takes, so no row can land
         # behind the stop sentinel and be lost without being counted.
         with self._lock:
@@ -243,7 +267,7 @@ class TelemetryV2Writer:
                 except queue.Full:
                     why = "queue full"
         if why is not None:
-            self._count_drop(write.table, why)
+            self._count_drop(write.table if isinstance(write, _Write) else write.label, why)
             return False
         return True
 
@@ -285,6 +309,10 @@ class TelemetryV2Writer:
                         self._write_all(conn, writes)
                         writes = []
                         it.done.set()
+                    elif isinstance(it, _Call):
+                        self._write_all(conn, writes)
+                        writes = []
+                        self._run_call(conn, it)
                     else:
                         writes.append(it)
                 self._write_all(conn, writes)
@@ -325,6 +353,15 @@ class TelemetryV2Writer:
                 log.warning("telemetry v2 writer: %s into %s failed", w.verb, w.table,
                             exc_info=True)
                 self._silent_failure(conn, "write", exc, {"table": w.table, "verb": w.verb})
+
+    def _run_call(self, conn: sqlite3.Connection, call: _Call) -> None:
+        try:
+            call.fn(conn)
+            conn.commit()
+        except Exception as exc:
+            _rollback(conn)
+            log.warning("telemetry v2 writer: %s failed", call.label, exc_info=True)
+            self._silent_failure(conn, call.label, exc, {})
 
     def _report_drops(self, conn: sqlite3.Connection) -> None:
         with self._lock:
