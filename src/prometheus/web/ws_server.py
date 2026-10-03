@@ -1437,9 +1437,18 @@ class WebSocketBridge:
                 session_id, mode, discarded, e,
             )
             try:
-                from prometheus.telemetry.tracker import get_telemetry_handle
+                from prometheus.telemetry.tracker import (
+                    get_telemetry_handle,
+                    silent_failure_recorded,
+                )
                 handle = get_telemetry_handle()
-                if handle is not None and hasattr(handle, "record_silent_failure"):
+                # Each failure once. A provider error already has its row from
+                # the loop's envelope (agent_loop/loop_round), and this used to
+                # write it again: 92 of 95 web_bridge rows were such pairs. A
+                # failure nothing recorded yet (the loop's own errors, a wiring
+                # TypeError) is still written here.
+                if (handle is not None and hasattr(handle, "record_silent_failure")
+                        and not silent_failure_recorded(e)):
                     handle.record_silent_failure(
                         "web_bridge", "_run_agent", e, context={"session_id": session_id, "mode": mode}
                     )
