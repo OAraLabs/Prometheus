@@ -303,11 +303,110 @@ per-platform listener of our own, and every one of them is global.**
 input events and no accessibility data, and it uploads to a cloud endpoint.
 Prometheus derives nothing from it. That supports decision 8.**
 
-<!-- 2.3 DETAIL: filled from the 1c report -->
+The repo has one commit, `9bfc86f` (2026-02-19). Paths below are under
+`skillforgerecorder/SkillForgeRecorder/`.
+
+| | Finding | Evidence |
+|---|---|---|
+| **What** | A macOS 14 menu-bar app (`LSUIElement`) that records **screen pixels** to MP4: H.264 High plus AAC, 60 fps / 10 Mbps by default. A JSON sidecar of file-level stats goes alongside. | `Services/ScreenRecorder.swift:67-95`; `Models/Preferences.swift:20-34,62`; `App/Info.plist:25-26`; `project.pbxproj:404,460` |
+| **How** | ScreenCaptureKit `SCStream` → `AVAssetWriter`. It always uses the first display. Nothing is excluded from capture, so the app's own HUD ends up in the video. | `ScreenRecorder.swift:1-4,27-60,217-246` |
+| **Modes** | Full screen; region (a drag overlay); window. Window mode has **no picker**: it takes `content.windows.first(where: isOnScreen)`. OCR throws `invalidMode`. Webcam and microphone toggles only set metadata flags; nothing captures from either device. | `ScreenRecorder.swift:36-47,84,191-192`; `Models/RecordingMode.swift:3-7` |
+| **Hotkeys** | Carbon `RegisterEventHotKey`, fixed ⌘⇧ R/W/F/T/O/S/P | `Services/HotkeyManager.swift:29-41,53,62,91` |
+| **Not captured** | **No input events.** 0 hits for `CGEvent`, `NSEvent`, `addGlobalMonitor`, `IOHID`. **No accessibility.** 0 hits for `AXUIElement`, `AXObserver`, `AXIsProcessTrusted`. **No app or window identity** (`frontmostApplication`, `CGWindowList` absent). No per-step timestamps. Accessibility and Input Monitoring are never requested. | grep over all 26 `.swift` files; `Services/PermissionManager.swift` |
+| **Sidecar** | `SkillForgeMetadata`: id, file, duration (whole seconds), resolution (`"0x0"` outside region mode), codec (hard-coded), fps, `capturedAt` (taken at **stop**), mode, flags, `tags: []`, `notes: nil` | `Models/CaptureItem.swift:43-57`; `ScreenRecorder.swift:179-203` |
+| **Where it goes** | Manual "Forge Skill" button. A Supabase password-grant JWT, then a multipart `POST {apiURL}/api/upload` with **the MP4 only** (the sidecar is not sent), to skillforge.sh. Config lives in a gitignored `Constants.swift` (from `Constants.swift.template`), so a fresh clone does not build. App sandbox is off. | `Services/SkillForgeIntegration.swift:59-95,139-169`; `App/SkillForgeRecorder.entitlements:5-16`; `README.md:15-28` |
+| **Maturity** | Trim, export conversion, OCR, webcam, HUD stats and auto-upload are stubs (for example, trim's `onApply` discards both times). The vault says it was never used to make a recording; the raw chat shows it launched once, then looped on the screen-recording permission. SkillForge itself was deferred on 2026-04-17. | `Views/PostRecording/PostRecordingPreview.swift:46-47`; oara-brain `wiki/sources/projects/SkillForgeRecorder.md:22`; `raw/claude-chats/2026-02-14-…:4784-4940`; `wiki/sources/projects/SkillForge.md:109-114` |
+| **Prometheus use** | **None as a format.** No hit for its file naming or sidecar fields in `src/`, `docs/` or `tests/`. Its MP4 would go through the generic `learning/video_ingest` path like any recording (that path came from the SkillForge *engine*, not this app). | `src/prometheus/learning/video_ingest/__init__.py:1-21`; `pipeline.py:59-66` |
+
+**Implication for v1.1 (decision 8: confirmed, with one qualification).**
+
+* There is nothing to port. It is macOS-only and pixel-only, it captures no
+  cause data, and it ships its one output to a cloud endpoint (decision 3).
+* Watch mode on our own observe replaces it as a desktop **step** producer.
+* It does not replace it as a **pixel or narration** source, and nothing in
+  v1.1 needs one. If that changes, an OS-native recording fed to
+  `video_ingest` (drafts tier) serves without reviving this app.
 
 ### 2.4 (d) The tool catalogue the anti-bloat rule is calibrated against (plan open question 4)
 
-<!-- 2.4: filled from the 1d measurement -->
+**Answer: 51 tools registered. 12 are sent to the model each turn on a local
+tier, and all 51 on a cloud tier. Seven computer verbs would add as much
+schema as the whole local per-turn set; one `computer_task` adds about 6%.
+In v1.1 the door adds zero, because it is a command, not a tool.**
+
+The rule's own text is not in the repo. Here is the catalogue, measured **by
+execution** at `856ebb8`.
+
+* **How the measurement mirrors the daemon:**
+  * it builds the registry the way the daemon does
+    (`build_tool_registry`, `daemon.py:952` → `__main__.py:137-396`);
+  * it applies `DynamicToolLoader` (`daemon.py:956`;
+    `context/dynamic_tools.py:206-245`) and the profile filter
+    (`engine/agent_loop.py:1609-1656`);
+  * config is the shipped template, with no MCP servers and LSP off.
+* A no-config run gives the same 51 and the same 12 names.
+* The script is in Appendix A.
+
+| Set | Tools | Schema chars (compact JSON) | ≈ tokens (chars/4) |
+|---|---|---|---|
+| Registered | **51** | 41,253 | 10,313 |
+| Sent per turn, **local** tier (deferral `auto` → on) | **12** | 11,306 | 2,826 |
+| Sent per turn, **cloud** tier (deferral `auto` → off) | 51 | 41,253 | 10,313 |
+| Deferred when on (`tool_search` / exact name) | 39 | 29,948 | 7,487 |
+| *+ the 7 `computer_*` tools* | 7 | **11,578** | 2,894 |
+| *+ one `computer_task(goal, app?, text?)`* | 1 | **675** | 169 |
+
+* **The 12 sent on a local tier:** `bash`, `task_create`, `read_file`,
+  `write_file`, `edit_file`, `grep`, `glob`, `tool_search`, `skill`,
+  `web_search`, `web_fetch`, `memory` (`config/shipped_defaults.py:44-61`).
+  They are pinned to follow the default by
+  `tests/test_always_loaded_follows_the_default.py`.
+* **Token counts are chars/4 only.** `tiktoken` is not installed, and the
+  proxy refused its encoding download.
+
+**What the increment means:**
+
+* **Seven verbs:**
+  * They come to 11,578 characters, which is *larger than the entire local
+    per-turn set*.
+  * If they were always loaded, a local turn's catalogue would grow by 102%.
+  * On a cloud tier they add 28% whether or not they are marked deferred,
+    because `auto` sends everything to cloud tiers
+    (`dynamic_tools.py:229-230,243-245`).
+  * `computer_type_text` alone (2,168 characters) would be the third-largest
+    schema in the catalogue.
+* **One `computer_task`:**
+  * It is 675 characters: +6.0% of the local per-turn set if always loaded,
+    and +1.6% of the full catalogue.
+  * Decision 2 is about 17× smaller in schema terms, besides keeping the
+    table and `validate_choice` in the path.
+  * When L1 registers it, it should be **deferred** (reachable by
+    `tool_search`), not always loaded. That costs 0 per local turn and 675
+    characters per cloud turn.
+
+**What the rule was calibrated against: "was" figures stated in the tree,
+vs now.**
+
+| Stated | Where (date) | Now |
+|---|---|---|
+| "advertises 8 of 51 tools" | `tests/test_tool_advertisement.py:4` (2026-08-11) | 12 of 51 (`skill` added in #593, 2026-09-26) |
+| "offered 11 tools" | `daemon.py:984` (2026-08-12) | 12 |
+| "49 schemas, ~9.6k tokens, 60.7% of round 0" | `engine/agent_loop.py:1589-1590` (2026-07-31) | 51 schemas, ≈10.3k tokens |
+| "all 55 schemas … 34,020-token request … 40 withheld" (live box) | `engine/agent_loop.py:1580-1582` (2026-09-11) | Shipped default 51/39. The live box adds MCP and other tools; not re-measured. |
+| Advertised set "~74% below the full catalog" | `config/prometheus.yaml.default:231-236` (2026-08-11) | 72.6% below (by characters) |
+| Deferral drops "~8k tokens" | `context/dynamic_tools.py:221`; `README.md:153` | ≈7.5k |
+| Banner "37 tools" | `setup_wizard.py:282` (2026-04-20) | 51 |
+
+**No numeric cap exists anywhere.**
+
+* `AgentProfile.max_tool_schemas` exists (`config/profiles.py:36,273-274`),
+  but no built-in profile sets it.
+* `tool_search` returns a top 5 (`tools/tool_search.py:237`).
+* The only enforced rule is a process rule. `tests/test_tool_advertisement.py`
+  requires every tool to be advertised or to have a tested discovery path.
+
+**If the anti-bloat rule is a number, it is calibrated on an 8-of-51 or
+11-tool advertised set and a 49-55-schema catalogue. Today it is 12 of 51.**
 
 ---
 
@@ -327,6 +426,8 @@ measured. Each is assigned to a PR in §6. None is fixed by this document.
 | **D7** | **The chooser is called synchronously inside an async step.** | `loop.py:136-137`, next to the stall comment at `loop.py:118-122` | Harmless for `RuleChooser`. A network chooser would stall the daemon loop for up to its timeout: the #416 shape. One-line fix, core but additive. | PR 10 |
 | **D8** | **No discovery path.** `list_windows` and `list_apps` exist in the SDK and nothing calls them; callers must already know pid and window id. | `cua.py:147-157`; `_native.py:5602,5618` | The door has to resolve "my editor" to a window. | PR 4 |
 | **D9** | **Record a Skill's archive is written unredacted, and its funnel is browser-shaped.** `_archive_upload` writes `events.json` raw and never calls `redact_capture`. **Measured:** three URL-less desktop actions in three apps pass `app_consistency` with "No app data to check", and are titled "Web - Enter Data" with "Captured with the live recorder browser extension". | `learning/live_recorder/service.py:218-238`; `security/log_redaction.py:190-214`; `quality_gate.py:149-150,253`; `synthesizer.py:192-193,219` | Watch mode's producer (plan step 6) would inherit both. | PR 14 |
+| **D10** | **An empty tree still yields three actions.** `observe` treats any snapshot with an id as usable, and `build_candidates` always appends `key-return`, `key-tab` and `key-escape`. A zero-element observation therefore gives a 3-row table, and the loop's "abstained" branch never fires. | `cua.py:245-271`; `candidates.py:109-118`; `loop.py:129-133`. **Measured:** `Observation(elements=(), snapshot_id="snap-1")` → 3 candidates. | With a remembered `…:press_key:background` grant, Return could be pressed into a window we cannot see, unprompted. This is the class behind Hermes #32766 and #52014 (§4). | PR 1 |
+| **D11** | **A failed health check is skipped on the next start.** `start()` keeps `self._driver` set after `is_available()` returns False, so the next `start()` returns early. | `cua.py:168-189`. **Measured** with a fake SDK: the first call raises `DriverUnavailable`, the second returns silently. | Contradicts decision 4's "health known before dispatch". | PR 1 (and PR 2's probe) |
 | — | `actions.py` says "Nine tools" and lists seven. | `actions.py:30-31` | Cosmetic. | PR 1 |
 
 Already known and still deferred (settled): **hazard (b)**, `_snapshots` is
@@ -338,7 +439,40 @@ close it.
 
 ## 4. Part 2 — overlap with Cua and Hermes
 
-<!-- OVERLAP -->
+**The rule (settled):**
+
+* We don't rebuild anything Cua ships: driver, cursor, VMs, benchmarks.
+* We keep the consent gate, the candidate table, `validate_choice` and the
+  loop.
+
+**Sources:**
+
+* **Cua:** the installed `cua-driver` 0.28.2 wheel, PyPI, and the upstream
+  `trycua/cua` repository at the commit named in each row.
+* **Hermes:** a clone of `NousResearch/hermes-agent` at `158fd638`
+  (2026-10-03, MIT), cited as `H:path:line`, plus the GitHub issue pages.
+  Some Cua doc hosts (`cua.ai`) are blocked by this environment's egress
+  proxy; rows that depend on them say so.
+
+### 4.1 Cua
+
+<!-- CUA ROWS -->
+
+### 4.2 Hermes `computer_use`
+
+| Item | What Hermes does now | Prometheus today | Verdict |
+|---|---|---|---|
+| **Tool shape** | **One** model-facing tool, `computer_use(action=…)`, with 14 actions: capture, click, double/right/middle click, drag, scroll, type, key, set_value, wait, list_apps, list_windows, focus_app. It takes raw coordinates, arbitrary key combos (`cmd+s`), drag and free text. The model sees a screenshot with numbered boxes plus an element list (index, role, label ≤ 120 chars, bounds); element tokens stay in the backend. It talks **MCP over stdio** to `cua-driver mcp`, with the lock pinning `cua-driver-rs` 0.21.0 (floor 0.20). Platforms: darwin, win32, linux. (`H:tools/computer_use/schema.py:17-185`; `tool.py:561-584,692-700`; `cua_backend.py:1-7`; `pm/lock.json`) | No model-facing tool (decision 1). A candidate table built from an in-process observe with no screenshot; the chooser returns an ID; `validate_choice` resolves it (`candidates.py:156-189`). Closed key set, no modifiers (`actions.py:217-220`). | **Keep ours.** A raw coordinate/key/text surface cannot pass through a candidate table and `validate_choice`, which are core (decision 5). **Borrow** the 120-char label cap (§5.1.6). |
+| **Approval key** | **Confirmed:** `cua:<action>:<background\|foreground>` (`H:tool.py:395-398`), plus `cua:bring_to_front:<mode>` (`tool.py:345-349`). No app term, no machine term, no payload term. The prompt does not name the app (`tool.py:396-399,455-458`). | `target:app:verb:delivery`, exact whole-value match (`computer_extent.py:65-68`; `checker.py:391-409`). `computer_schema.py:32` describes the Hermes shape correctly. | **Keep ours.** The app and target terms are what make a grant refusable. Both keep foreground out of a background grant. |
+| **Approval modes** | `approvals.mode` = manual \| smart \| off, plus `--yolo`/`/yolo`. Choices are once / session / always. "Session" is a real per-session set; "always" writes `command_allowlist`. Computer use never consults the "smart" LLM guardian and **fails closed with no human** (`H:tools/approval.py:250-253,286-292,381-393,793-866,973-1020`; `tool.py:403-405`). | Scopes are `until_restart` (process-wide) and `persistent`; there is no per-session scope (`checker.py:333-345`). No approver means refuse (`loop.py:195-206`). | **Keep ours.** Hermes's per-session store is the *shape* our toggle needs. It is built in our runner (§5.1.4), not ported, because theirs is keyed on their pattern strings. |
+| **Typed text** | "Always" is offered for `type`, `key`, `set_value` and `drag`. One "always" on `type "hello"` stores `cua:type:background`: **any text, any app, permanently**. Typed text is screened by a shell-pattern denylist (`H:tool.py:42-69,343-344,475-476`). | Payload verbs are never rememberable (`computer_extent.py:70-78`; `approval_queue.py:193-194`). **Our gap is D2:** the text goes to focus, not to the named field. | **Keep ours**, and fix D2. Hermes is honest that its `type` has no element (`H:cua_backend_input.py:148-151`). |
+| **Overlay cursor** | Cua's own overlay; Hermes builds none. It is **off by default** on macOS, headless Linux, WSL and **Linux X11**, where the always-on-top overlay can stick and block input (`H:cua_backend.py:45-65`; Hermes #28152, #83473). | None. | **Use Cua's**, and copy Hermes's X11-off default (§5.2.3). |
+| **Driver bug #52014** | NousResearch/hermes-agent#52014, *"Windows computer_use reaches cua-driver, but capture returns only explorer.exe desktop layer"*. **Closed, not planned.** Upstream cause: trycua/cua#2013 (Windows Graphics Capture). `trycua/cua/issues/52014` is 404. | The Windows form cannot reach us (X11, explicit pid/window). **The class does:** a plausible but empty tree is treated as usable (D10). | **Keep ours.** The gate fails safe on a wrong app, because the extent will not match. **Fix D10.** |
+| **Driver bug #32766** | NousResearch/hermes-agent#32766, *"computer_use (cua-driver backend) is too fragile and breaks auxiliary vision routing"*. **Open.** `list_windows(on_screen_only=true)` returning empty gives a 0×0 capture and can leave the backend broken. The fix, PR #33054 (fallback without the filter), is **open**, with changes requested. `trycua/cua/issues/32766` is 404. | We do not call `list_windows` yet. PR 4 will, and it must handle an empty on-screen list explicitly (ask, never guess). The "backend left broken" analogue is D11. | **Keep ours.** Fix D11. Build PR 4's empty-list case as a test. |
+| **Driver bug #96328** | NousResearch/hermes-agent#96328, *"macOS computer_use rejects current notarised CUA Driver and misses symlinked app path"*. **Closed**, fixed by PR #96341, merged 2026-08-27 (realpath before the bundle search; a second signing team ID). `trycua/cua/issues/96328` is 404. | It cannot reach us: we never launch the app bundle. `create()` "never launches `cua-driver` and never opens daemon IPC" (`_native.py:5702-5706`). | **Not needed.** It informs L5 (macOS host identity): Hermes attaches TCC grants to `com.trycua.driver` (`H:tools/computer_use/permissions.py:1-6,21`). |
+| **Surfaces** | `computer_use` is in every chat toolset, Telegram included, and is **model-started** mid-turn (`H:toolsets.py:12-41,217`). Approvals are chat buttons. Stop is the generic `/stop`. There is no per-action log. "Bot Screen" streams an Xvnc desktop to Hermes Desktop with Take over / Hand back, and a **lease-epoch fence** voids results produced across a takeover (`H:tool.py:333-380`; `bot-screen.md:122-176`). | Nothing yet. The loop goes from approval straight to act (`loop.py:183-211`). | **Keep ours** (user-started, consented app, per-action log). **Copy the epoch-fence pattern** (§5.1.7). A VNC live view is **not needed**: the machine is the person's own, and the log comes first (decision 6). |
+| **Trajectory** | Nothing specific to computer use. Generic ShareGPT JSONL is off by default (`H:agent/trajectory.py:37-40`). | None. | **Not needed.** |
+| **Local only** | **No.** Screenshots go to the main or auxiliary vision model (`H:tool.py:692-700,869-946`). It does set `CUA_DRIVER_RS_TELEMETRY_ENABLED=0` on every driver process and strips provider keys from the driver's environment (`H:cua_backend.py:33-34,68-70,137-180`). | No frames are taken (`cua.py:229-233`). **No telemetry opt-out is set anywhere in `src/`.** | **Keep ours. Use their telemetry practice** (Q1, §5.3.2). |
 
 ---
 
@@ -529,7 +663,10 @@ adds these:
    denylist on app-supplied strings, so it is a **mitigation and not a
    control** (audit §1, direction 3).
 4. **The prompt and the log mark descriptions as app-supplied text** (audit
-   §1, direction 2).
+   §1, direction 2). Labels are capped, for example at 120 characters as
+   Hermes does (`hermes-agent tools/computer_use/tool.py:561-563`).
+   `Element.describe()` is unbounded today (`types.py:59-66`), and it reaches
+   the chooser, the prompt and the audit reason.
 5. **Per-task approval ceiling, and computer approvals excluded from
    `/approve all`** (audit §5).
 6. **The binding is per session and per app, never `until_restart`.**
@@ -537,8 +674,13 @@ adds these:
 
 #### 5.1.7 What stop guarantees
 
-* **Stop is cooperative.** A flag is checked before observe, choose, approve
-  and act. On stop:
+* **Stop is cooperative, with an epoch fence.** A stop epoch is recorded when
+  a step starts. It is re-checked before observe, after choose, **after the
+  approval wait returns**, and immediately before `driver.act`. An approval
+  that arrives after a stop never acts. This copies the pattern of Hermes's
+  lease-epoch fence (`hermes-agent tools/computer_use/tool.py:333-380`); no
+  code is taken. Today the loop goes from approval straight to act with no
+  check between (`loop.py:183-211`). On stop:
   * every pending approval of the task is resolved as denied;
   * the task's asyncio task is cancelled.
 * **One in-flight action can still finish.** Cancelling `await
@@ -636,10 +778,20 @@ The envelope is the existing `{type, timestamp, payload}`.
 | Beacon iOS | A task strip above the composer: last step plus Stop; tapping opens the full log. The existing Stop also stops the task (§5.1.7). | The model line above the composer (`ChatView.swift:154-170`) | A `computer` row in the Status tab, next to the backend rows (`StatusView.swift:118-140`) |
 | Chat surfaces | One status message, edited in place where the surface allows it; otherwise a message at start, at each approval, and at the end | `/computer` reply | `/computer status` |
 
-**The cursor: use theirs.** cua-driver's agent cursor
-(`set_agent_cursor_enabled`, `set_agent_cursor_motion`,
-`set_agent_cursor_theme`) is on when someone is at the machine
-(`computer_use.cursor: auto`). Nothing is built for it.
+**The cursor: use theirs, off on X11 by default.**
+
+* cua-driver ships an agent cursor (`set_agent_cursor_enabled`,
+  `set_agent_cursor_motion`, `set_agent_cursor_theme`). Nothing is built for
+  it here.
+* Hermes, which uses the same overlay, turns it **off by default on Linux
+  X11**: there it is a fullscreen always-on-top window that can stick over
+  every workspace and block desktop input (Hermes issues #28152, #83473;
+  `hermes-agent tools/computer_use/cua_backend.py:45-65` at `158fd638`).
+* X11 is our substrate, so the default is `computer_use.cursor: off`, with
+  `on` as an explicit choice for someone sitting at the machine.
+* Hermes also notes the cursor renders only for a named cua session
+  (`cua_backend.py:300-301`), and our adapter passes none. Not measured here.
+* The log does not depend on any of this.
 
 ### 5.3 The driver as an Integration
 
@@ -724,7 +876,7 @@ When it runs, and what reads it:
 | `computer_use.chooser.kind` | `rule` | **Closed set** `{rule, gemma}`. An unknown value is a config error and the Integration reports down; there is no silent fallback. |
 | `computer_use.chooser.backend` / `timeout_s` | — / `5` | The backend is a **name** in `backends:`, never a URL (`providers/backends.py:16-17`). |
 | `computer_use.probe.ttl_s` / `timeout_s` | `60` / `5.0` | As `backend_probe` (`config/prometheus.yaml.default:1216-1220`). |
-| `computer_use.cursor` | `auto` | `auto` \| `on` \| `off`. |
+| `computer_use.cursor` | `off` | `on` \| `off`. Off on X11 by default (§5.2.3). |
 | `computer_use.action_log.keep_per_session` | `200` | The pruner ships in the same PR. |
 | `computer_use.watch.*` | (§5.6) | Lands with watch mode. |
 
@@ -1186,7 +1338,7 @@ is the #523 shape.
 | PR | Repo | Plan step | Change | Proves | Tests | Flags |
 |---|---|---|---|---|---|---|
 | **0** | Prometheus | 1 | This document | — | — | — |
-| **1** | Prometheus | 1 | **The adapter tells the truth.** D3: `ToolResult` verdicts raise on `SUSPECTED_NOOP`/`REFUSED`/`is_error`. D4: drop the phantom `editable`. D5: forward delivery where the SDK takes it; document it per verb. D6: pass through `truncated`, `degraded`, `elements_complete`, `window_title`, `in_web_content`, `selected`, `enabled`, `parent_index`, `depth`; `degraded` makes an observation unusable. Fix the "Nine tools" text. | What the driver reports reaches the loop; a no-op raises for every verb | Translation tests built from **real `cua_driver` types** rather than fakes, so a phantom field cannot hide again. Candidate IDs and descriptions pinned unchanged. | ◆ `types.py` (additive fields) |
+| **1** | Prometheus | 1 | **The adapter tells the truth.** D3: `ToolResult` verdicts raise on `SUSPECTED_NOOP`/`REFUSED`/`is_error`. D4: drop the phantom `editable`. D5: forward delivery where the SDK takes it; document it per verb. D6: pass through `truncated`, `degraded`, `elements_complete`, `window_title`, `in_web_content`, `selected`, `enabled`, `parent_index`, `depth`; `degraded` makes an observation unusable. D10: a zero-element observation is unusable, so no key candidates are offered into an unseen window. D11: a failed availability check resets the driver, so the next start re-checks. Fix the "Nine tools" text. | What the driver reports reaches the loop; a no-op raises for every verb; nothing acts on an empty tree | Translation tests built from **real `cua_driver` types** rather than fakes, so a phantom field cannot hide again. Candidate IDs and descriptions pinned unchanged. | ◆ `types.py` (additive fields) |
 | **2** | Prometheus | 1 | **The driver as an Integration.** `ComputerIntegration` (from_config with no I/O; probe under lock + TTL; telemetry floor; exact pin + version check; activity observer at construction; cached snapshot for `/api/status`; `app.state.computer_targets`). The `computer_use` block with `enabled: false`. `GET /api/integrations/computer`, `/computer status`. | Health is known before dispatch; disabled constructs nothing; telemetry is off before import | The config guards; a probe-state matrix (disabled, version-mismatch, preconditions down, ready) over a fake SDK module; a subprocess test that the env is set before `import cua_driver`; the no-leak test extended; **`registered == 0` by execution with `enabled: true`** | — |
 | **3** | Prometheus | 2 | **Consent before the first grant.** The `site` term (§5.4); the D1 floor in the loop; D2 (type candidates withheld unless focus is established); a runbook step to read the live `security.grants` for `computer_action` rows. | No remembered grant can cover web content; `/gate off` cannot bypass computer consent; the prompt describes only what executes | The 27 literals updated. New: unknown site is not rememberable; `derive_grant` returns None; `from_config_dict` refuses four-term and unknown rows; AUTONOMOUS still reaches the approver (`FixtureDriver.dispatched` empty when it declines). | ◆ extent + loop |
 | **4** | Prometheus | 2 | **Discovery.** `Driver` gains `list_apps`/`list_windows` (fixture + adapter); `resolve_app(phrase, aliases)`; frontmost-window choice; per-step re-resolution | "My editor" becomes one window, or a question | 0/1/many matches; never launches; a vanished window ends the task | ◆ `Driver` protocol (additive) |
@@ -1285,7 +1437,73 @@ written without the answer.
 
 ## Appendix A — measuring the tool catalogue
 
-<!-- APPENDIX A -->
+Run from the repo root with `uv run python measure_catalogue.py`. It is
+read-only: config and data directories point at a temp dir. Measured at
+`856ebb86437971d36ffedd90e9bc1970913057f3`.
+
+```python
+"""Measure the tool catalogue the daemon advertises at the checked-out commit.
+
+Mirrors daemon.py: build_tool_registry(security_cfg=config["security"])
+(daemon.py:952 -> daemon.py:222-232 -> __main__.create_tool_registry), then
+DynamicToolLoader(registry, config["tools"]["deferred_loading"]) (daemon.py:956),
+then schemas_for_run(deferred) as agent_loop.py:1595-1599 does, then the
+profile filter (agent_loop.py:1641-1643). Config = the shipped template.
+No MCP servers, lsp.enabled false, no SENTINEL re-registration.
+"""
+import json, os, tempfile
+from pathlib import Path
+
+SCRATCH = Path(tempfile.mkdtemp(prefix="promcfg-"))
+for var in ("PROMETHEUS_CONFIG_DIR", "PROMETHEUS_DATA_DIR",
+            "PROMETHEUS_LOGS_DIR", "PROMETHEUS_WORKSPACE_DIR"):
+    os.environ.setdefault(var, str(SCRATCH / var.lower()))
+
+import yaml
+cfg = yaml.safe_load(Path("config/prometheus.yaml.default").read_text())
+
+from prometheus.daemon import build_tool_registry
+from prometheus.context.dynamic_tools import DynamicToolLoader
+from prometheus.computer.tools import build_computer_tools   # NOT registered: sized only
+
+def wire(s):
+    return json.dumps(s, separators=(",", ":"), ensure_ascii=False)
+
+def size(schemas):
+    s = "[" + ",".join(wire(x) for x in schemas) + "]"
+    return len(schemas), len(s), round(len(s) / 4)
+
+registry = build_tool_registry(security_cfg=cfg.get("security", {}))
+loader = DynamicToolLoader(registry, cfg.get("tools", {}).get("deferred_loading"))
+print("registered      ", size(loader.schemas_for_run(False)))
+print("advertised local", size(loader.schemas_for_run(True)))
+print("7 computer_*    ", size([t.to_api_schema() for t in build_computer_tools(None)]))
+print("computer_task   ", size([{
+    "name": "computer_task",
+    "description": "Hand a desktop goal to the computer-use subagent, which observes the "
+                   "screen and drives the app step by step. Returns what it did and the final state.",
+    "input_schema": {"type": "object", "required": ["goal"], "properties": {
+        "goal": {"type": "string"}, "app": {"type": ["string", "null"]},
+        "text": {"type": ["string", "null"]}}}}]))
+```
+
+Output of the script above at `856ebb8` (re-run for this document):
+
+```
+registered       (51, 41253, 10313)
+advertised local (12, 11306, 2826)
+7 computer_*     (7, 11578, 2894)
+computer_task    (1, 352, 88)
+```
+
+* **The two `computer_task` figures.** The bare hand-written schema here is
+  352 characters. The 675-character figure in §2.4 is the fuller
+  pydantic-generated schema, with field descriptions, titles and `anyOf`
+  nulls, that a real `BaseModel` input would emit. §2.4 uses the larger,
+  realistic number.
+* **The fuller run** adds the per-tool, per-category and per-profile
+  breakdowns (profiles on a local tier: full 12, coder 7, research 3,
+  assistant 2, minimal 2, symbiote 6). That run is not reproduced here.
 
 ## Appendix B — sources
 
