@@ -42,6 +42,7 @@ async def launch_web(
     local_model: str | None = None,
     detected_kv_cache: dict[str, Any] | None = None,
     backend_registry: Any | None = None,
+    computer_integration: Any | None = None,
     origin_fetcher: Any | None = None,
     api_host: str = "0.0.0.0",
     api_port: int = 8005,
@@ -101,6 +102,7 @@ async def launch_web(
         local_model=local_model,
         detected_kv_cache=detected_kv_cache,
         backend_registry=backend_registry,
+        computer_integration=computer_integration,
     )
 
     # Wire agent state ref into the app
