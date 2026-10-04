@@ -264,6 +264,7 @@ def create_app(
     detected_kv_cache: dict[str, Any] | None = None,
     backend_registry: Any | None = None,
     computer_integration: Any | None = None,
+    computer_runner: Any | None = None,
 ) -> FastAPI:
     """Create the FastAPI application with all routes.
 
@@ -401,6 +402,8 @@ def create_app(
     async def list_devices(request: Request):
         identity = getattr(request.state, "device_identity", None)
         self_id = identity.id if identity is not None else ""
+        _store = _devices_or_create()
+        _marked = _store.computer_device_ids()
         return [{
             "id": d.id, "name": d.name, "platform": d.platform,
             "created_at": d.created_at, "last_seen_at": d.last_seen_at,
@@ -409,7 +412,10 @@ def create_app(
             # this there was no way to tell that from a working push path.
             "last_push_at": d.last_push_at, "last_push_status": d.last_push_status,
             "revoked_at": d.revoked_at, "is_self": d.id == self_id,
-        } for d in _devices_or_create().list_devices()]
+            # Computer use v1.1 (W3): a PERSON marked this device. Only a
+            # marked device may start a desktop task or answer its prompts.
+            "computer": d.id in _marked,
+        } for d in _store.list_devices()]
 
     def _may_manage_push(request: Request, device_id: str):
         """Push/activity registration is the device's own business (or the
@@ -537,6 +543,19 @@ def create_app(
     # distinguishable from "declared, nothing bound".
     app.state.computer_integration = computer_integration
     app.state.computer_targets = getattr(computer_integration, "targets", None)
+    # The door (computer-use v1.1 PR 5): the task runner, or None while
+    # computer use is off — then every door route answers 404 and the
+    # approval surface is exactly the queue it was before.
+    app.state.computer_runner = computer_runner
+    if computer_runner is not None:
+        from prometheus.permissions.approval_queue import ApprovalQueues
+
+        _channel = getattr(computer_runner, "channel", None)
+        _current = app.state.approval_queue
+        if _channel is not None and not (
+            isinstance(_current, ApprovalQueues) and _channel in _current.queues
+        ):
+            app.state.approval_queue = ApprovalQueues(_current, _channel)
 
     def _resolved_context_limit(
         model: str | None = None,
@@ -4464,6 +4483,15 @@ def create_app(
             )
         from prometheus.gateway import commands as _cmds
 
+        # A DESKTOP TASK'S PROMPT (computer-use v1.1): approve-once, only a
+        # person, and only a client that can SHOW what it approves.
+        _pending = getattr(queue, "pending", {}) or {}
+        _desk = _pending.get(request_id) if request_id != "all" else None
+        if _desk is not None and getattr(_desk, "task_id", None) is not None:
+            refusal = _desktop_approve_refusal(request, _desk, scope)
+            if refusal is not None:
+                return refusal
+
         arg_text = request_id if scope == "once" else f"{scope} {request_id}"
         # STRUCTURED, NOT INFERRED FROM THE PROSE. This was
         # `ok = not text.startswith("No pending request")`, which reported
@@ -4489,7 +4517,56 @@ def create_app(
             "remembered": outcome.remembered,
             "grant_id": outcome.grant_id,
             "message": outcome.message,
+            # Desktop prompts an "all" left alone (each is answered on its own).
+            "skipped": outcome.skipped,
         }
+
+    def _desktop_approve_refusal(request: Request, action: Any, scope: str):
+        """Why a desktop prompt may not be approved by THIS request, or None.
+
+        * scope: once only — the binding is the lasting consent (W2);
+        * credential: a person's (W3) — the API token gets 401;
+        * client: an iOS build that cannot show the arguments may not approve
+          one that carries them (the text to be typed) — 409, "open it on
+          desktop or Telegram". Builds that can say so in X-Beacon-Caps.
+        """
+        from prometheus.permissions import approver as _approver
+
+        if scope != "once":
+            return JSONResponse(status_code=409, content={
+                "error": "A desktop request can only be approved once.",
+                "code": "once_only"})
+        runner = getattr(app.state, "computer_runner", None)
+        people = getattr(runner, "people", None)
+        by = _approver.from_request(request)
+        if people is None:
+            return JSONResponse(status_code=401, content={
+                "error": "Computer use is off; nobody may approve this.",
+                "code": "not_a_person"})
+        ok, why = people.check(by)
+        if not ok:
+            return JSONResponse(status_code=401, content={
+                "error": f"Only a person may approve a desktop request: {why}.",
+                "code": "not_a_person"})
+        identity = getattr(request.state, "device_identity", None)
+        platform = ""
+        if identity is not None and not getattr(identity, "is_global", False):
+            try:
+                row = next((d for d in _devices_or_create().list_devices()
+                            if d.id == identity.id), None)
+                platform = (row.platform if row is not None else "") or ""
+            except Exception:  # noqa: BLE001
+                platform = ""
+        caps = {c.strip().lower() for c in
+                request.headers.get("x-beacon-caps", "").split(",")}
+        if (platform == "ios" and action.arguments
+                and "approval-arguments" not in caps):
+            return JSONResponse(status_code=409, content={
+                "error": ("This build cannot show what it would approve "
+                          "(the text to be typed) — open it on desktop or "
+                          "Telegram."),
+                "code": "cannot_show_arguments"})
+        return None
 
     @app.get("/api/approvals/grants")
     async def list_grants():
@@ -4888,6 +4965,170 @@ def create_app(
                 "error": "computer-use integration unavailable — the daemon "
                          "booted without one"})
         return await integration.probe(force=True)
+
+    # ── the door: computer-use v1.1 PR 5 (design §5.1, §5.2.3) ────────────
+    #
+    # Starting a task, binding an app and marking a device need a PERSON's
+    # credential: an enrolled device a person marked for computer use. The
+    # API token gets 401 on every one of them (W3) — a model can read it.
+    # Stopping, unbinding and reading status are never refused: they can only
+    # end or describe something. Off (no runner) → 404 everywhere.
+
+    def _door_runner():
+        runner = getattr(app.state, "computer_runner", None)
+        if runner is None:
+            return None, JSONResponse(status_code=404, content={
+                "error": "computer_use_off",
+                "detail": "Computer use is off on this daemon."})
+        return runner, None
+
+    def _door_person(request: Request, runner: Any):
+        from prometheus.permissions import approver as _approver
+
+        by = _approver.from_request(request)
+        ok, why = runner.people.check(by)
+        if not ok:
+            return by, JSONResponse(status_code=401, content={
+                "error": "not_a_person", "detail": f"Only a person may: {why}."})
+        return by, None
+
+    def _door_refusal(exc: Exception) -> JSONResponse:
+        return JSONResponse(status_code=getattr(exc, "status", 400),
+                            content=exc.as_dict())
+
+    async def _door_body(request: Request) -> dict:
+        try:
+            body = await request.json()
+        except Exception:
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    @app.get("/api/computer/apps")
+    async def computer_apps(request: Request):
+        """Running apps with an on-screen window — the picker's rows."""
+        runner, err = _door_runner()
+        if err is not None:
+            return err
+        _, err = _door_person(request, runner)
+        if err is not None:
+            return err
+        from prometheus.computer.door import DoorRefused
+
+        try:
+            return {"apps": await runner.app_names()}
+        except DoorRefused as exc:
+            return _door_refusal(exc)
+
+    @app.get("/api/sessions/{session_id}/computer")
+    async def computer_binding_get(session_id: str):
+        runner, err = _door_runner()
+        if err is not None:
+            return err
+        binding = runner.binding_for(session_id)
+        return binding.as_dict() if binding is not None else {
+            "state": "off", "session_id": session_id}
+
+    @app.put("/api/sessions/{session_id}/computer")
+    async def computer_binding_put(session_id: str, request: Request):
+        """The toggle: a person picks the app, and the pick is the consent.
+        Lasts for the session, at most 8 hours, until DELETE."""
+        runner, err = _door_runner()
+        if err is not None:
+            return err
+        by, err = _door_person(request, runner)
+        if err is not None:
+            return err
+        body = await _door_body(request)
+        app_name = str(body.get("app") or "").strip()
+        if not app_name:
+            return JSONResponse(status_code=400, content={"error": "app is required"})
+        from prometheus.computer.door import DoorRefused
+
+        try:
+            binding = await runner.bind(session_id, app_name, scope="session",
+                                        by=by, surface="beacon")
+        except DoorRefused as exc:
+            return _door_refusal(exc)
+        return binding.as_dict()
+
+    @app.delete("/api/sessions/{session_id}/computer")
+    async def computer_binding_delete(session_id: str):
+        runner, err = _door_runner()
+        if err is not None:
+            return err
+        runner.unbind(session_id)
+        runner.stop_session(session_id)
+        return {"state": "off", "session_id": session_id}
+
+    @app.post("/api/computer/tasks", status_code=202)
+    async def computer_task_start(request: Request):
+        runner, err = _door_runner()
+        if err is not None:
+            return err
+        by, err = _door_person(request, runner)
+        if err is not None:
+            return err
+        body = await _door_body(request)
+        session_id = str(body.get("session_id") or "").strip()
+        goal = str(body.get("goal") or "").strip()
+        if not session_id or not goal:
+            return JSONResponse(status_code=400, content={
+                "error": "session_id and goal are required"})
+        for key in ("app", "text", "target"):
+            if body.get(key) is not None and not isinstance(body.get(key), str):
+                return JSONResponse(status_code=400, content={
+                    "error": f"{key} must be a string"})
+        from prometheus.computer.door import DoorRefused
+        from prometheus.computer.task import ComputerTaskInput
+
+        try:
+            task = await runner.start(
+                ComputerTaskInput(goal=goal, app=body.get("app") or None,
+                                  text=body.get("text"),
+                                  target=body.get("target") or None),
+                session_id=session_id, surface="beacon", by=by)
+        except DoorRefused as exc:
+            return _door_refusal(exc)
+        return JSONResponse(status_code=202, content={
+            "task_id": task.task_id, "status": task.status,
+            "app": task.app, "session_id": task.session_id})
+
+    @app.get("/api/computer/tasks/{task_id}")
+    async def computer_task_get(task_id: str):
+        runner, err = _door_runner()
+        if err is not None:
+            return err
+        task = runner.get(task_id)
+        if task is None:
+            return JSONResponse(status_code=404, content={"error": "no such task"})
+        return task.as_dict()
+
+    @app.post("/api/computer/tasks/{task_id}/stop")
+    async def computer_task_stop(task_id: str):
+        """Never refused to any authenticated caller: a stop can only end a
+        task. No new action starts after it; one in flight may still land."""
+        runner, err = _door_runner()
+        if err is not None:
+            return err
+        if runner.get(task_id) is None:
+            return JSONResponse(status_code=404, content={"error": "no such task"})
+        return {"task_id": task_id, "stopped": runner.stop(task_id)}
+
+    @app.put("/api/devices/{device_id}/computer")
+    async def computer_device_mark(device_id: str, request: Request):
+        """Mark a device for computer use. Only a person: a device that is
+        itself marked (the first mark comes from Telegram: /computer allow)."""
+        runner, err = _door_runner()
+        if err is not None:
+            return err
+        by, err = _door_person(request, runner)
+        if err is not None:
+            return err
+        body = await _door_body(request)
+        on = body.get("computer") is True
+        if not _devices_or_create().set_computer(device_id, on, by=by.label):
+            return JSONResponse(status_code=404, content={"error": "no live device"})
+        return {"id": device_id, "computer": on}
 
     # The catalog is a list of DEFAULTS, not the set of models this daemon can
     # run. The model string in prometheus.yaml is free-form — only the PROVIDER

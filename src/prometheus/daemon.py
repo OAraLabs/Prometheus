@@ -1032,6 +1032,19 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Phase 2: router now requires primary provider + adapter + model built first.
     adapter = create_adapter(model_config, config.get("adapter"), template=tool_template)
     security_gate = create_security_gate(security_config, getattr(args, "config", None))
+    # The door (computer-use v1.1 PR 5): the computer approval channel and the
+    # task runner, built ONLY when computer_use.enabled is a literal true.
+    # Off, `computer.runner` is None and nothing below changes. Registers
+    # NOTHING either way (tests/test_computer_registration_pin.py).
+    from prometheus.computer.wiring import wire_computer_use
+    from prometheus.config.shipped_defaults import (
+        resolve_allowed_chat_ids as _computer_people,
+    )
+    computer = wire_computer_use(
+        config, gate=security_gate, registry=registry,
+        telegram_user_ids=_computer_people(gateway_config),
+        integration=computer_integration,
+    )
     model_router = create_model_router(config, provider, adapter, model_name)
     # Phase 3: wire the router back into the adapter's RetryEngine so it can
     # consult router.config.escalation_enabled at tool-retry exhaustion and
@@ -1561,6 +1574,16 @@ async def run_daemon(args: argparse.Namespace) -> None:
             security_gate._approval_queue = approval_queue
             gateway_registry.attach("_approval_queue", approval_queue)
             logger.info("Approval queue wired to gateway adapters")
+
+    if computer.runner is not None:
+        # Desktop prompts go to the chat that started the task, and /approve
+        # on every gateway sees them alongside the gate-wide queue (which may
+        # not exist: it ships off). Off, none of this runs.
+        computer.attach_telegram(telegram)
+        gateway_registry.attach(
+            "_approval_queue",
+            computer.approvals_for(approval_queue if "approval_queue" in dir() else None))
+        logger.info("Computer use: /computer wired to the gateways")
 
     # WEAVE-PRESS: Printing Press CLI registry
     press_cfg = config.get("printing_press", {}) or {}
@@ -2161,6 +2184,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
             # (config gate) — guard like the other late wires.
             if "approval_queue" in dir() and approval_queue is not None:
                 approval_queue.signal_bus = signal_bus
+            # Desktop prompts reach Beacon the same way (computer-use v1.1).
+            computer.attach_signal_bus(signal_bus)
             if "skill_refiner" in dir() and skill_refiner is not None:
                 skill_refiner.signal_bus = signal_bus
             # SPRINT-TEACHER-ESCALATION: golden traces + escalation events
@@ -2830,6 +2855,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     detected_kv_cache=detected_kv_cache,
                     backend_registry=backend_registry,
                     computer_integration=computer_integration,
+                    computer_runner=computer.runner,
                     api_port=api_port,
                     ws_port=ws_port,
                 ))
@@ -2863,7 +2889,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
     if mcp_runtime is not None:
         await mcp_runtime.close()
 
-    computer_integration.close()
+    computer.close()
 
     if telegram:
         await telegram.stop()

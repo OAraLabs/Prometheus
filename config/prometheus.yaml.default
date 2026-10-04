@@ -1237,8 +1237,17 @@ backend_probe:
 # Computer use — the desktop driver (cua-driver, `uv sync --extra computer`)
 # as an Integration: its health is probed and known before any task, and it
 # is OFF unless this says `enabled: true` (a literal true; a quoted "true" is
-# not enough). Off means the driver is never constructed. Enabling it
-# registers no tool. Telemetry is forced off; no key turns it back on.
+# not enough). Off means the driver is never constructed, the Cua runtime is
+# never started, and scripts/deploy.sh does not install the `computer` extra.
+# Telemetry is forced off; no key turns it back on.
+#
+# On, it opens THE DOOR: a PERSON starts a desktop task — `/computer <goal>`
+# from Telegram (your own Telegram id on gateway.allowed_chat_ids), or Beacon
+# on a device marked for computer use (`/computer allow <device-id>`). The
+# API token can never start one: a model can read it. Picking the app is the
+# consent; it covers clicks and Tab/Escape in that app only — Return, typing,
+# menus, Send/Delete/Pay-type buttons and anything on a web page ask every
+# time, once each. Enabling it registers NO tool: a model cannot call it.
 computer_use:
   enabled: false
   # Named machines — the first term of every desktop grant. Local only (the
@@ -1249,6 +1258,16 @@ computer_use:
   probe:
     ttl_s: 60          # a read older than this re-probes; POST .../probe forces it
     timeout_s: 5.0     # bounds one health probe; a hung driver costs one timeout
+  apps:
+    # Words a person may use for an app, e.g. {editor: [gnome-text-editor]}.
+    # Otherwise the app's own name, bundle id or launch-path basename.
+    aliases: {}
+  # Ceilings for one desktop task. Each ends the task when reached.
+  task:
+    max_steps: 20        # actions dispatched
+    max_seconds: 600     # wall clock
+    max_approvals: 10    # prompts a task may ask; past it, nothing more is asked
+    max_reobserve: 3     # "look again" answers in a row
 
 anatomy:
   enabled: true

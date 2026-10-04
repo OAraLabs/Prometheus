@@ -1036,6 +1036,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._register(ops, "audit", self._app_audit, "Web capability audit: run | <category>")
         self._register(ops, "press", self._app_press, "CLI library: list | search | install | …")
         self._register(ops, "escalations", self._app_escalations, "Teacher-escalation counters")
+        self._register(ops, "computer", self._app_computer, "Desktop tasks (Telegram and Beacon only in v1.1)")
 
         # -- provider --------------------------------------------------------
         self._register(provider, "claude", self._app_claude, "Route this channel via Anthropic Claude")
@@ -1328,6 +1329,15 @@ class DiscordAdapter(BasePlatformAdapter):
             await self._respond(interaction, text)
         _handler.__name__ = f"_app_backend_{name}"
         return _handler
+
+    async def _app_computer(self, interaction: Any, args: str) -> None:
+        from prometheus.gateway.commands import cmd_computer
+        from prometheus.permissions import approver as _approver
+
+        await self._defer(interaction)
+        await self._respond(interaction, await cmd_computer(
+            None, args, by=_approver.discord(interaction), surface="discord",
+            session_id=""))
 
     async def _app_backends(self, interaction: Any, args: str) -> None:
         from prometheus.gateway.commands import cmd_backends

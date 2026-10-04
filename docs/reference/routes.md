@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 102 paths
+## Daemon app — 108 paths
 
 | Path | Methods |
 |---|---|
@@ -35,6 +35,10 @@ one is the explanation.
 | `/api/code/{task_id}/pause` | POST |
 | `/api/code/{task_id}/resume` | POST |
 | `/api/code/{task_id}/stop` | POST |
+| `/api/computer/apps` | GET |
+| `/api/computer/tasks` | POST |
+| `/api/computer/tasks/{task_id}` | GET |
+| `/api/computer/tasks/{task_id}/stop` | POST |
 | `/api/config` | GET |
 | `/api/cron` | GET, POST |
 | `/api/cron/{name}` | DELETE, PUT |
@@ -42,6 +46,7 @@ one is the explanation.
 | `/api/devices` | GET, POST |
 | `/api/devices/{device_id}` | DELETE |
 | `/api/devices/{device_id}/activity` | DELETE, POST |
+| `/api/devices/{device_id}/computer` | PUT |
 | `/api/devices/{device_id}/push` | DELETE, PUT |
 | `/api/documents` | GET |
 | `/api/documents/content` | GET, PUT |
@@ -83,6 +88,7 @@ one is the explanation.
 | `/api/sessions/{session_id}/checkpoints` | GET |
 | `/api/sessions/{session_id}/checkpoints/{checkpoint_id}` | GET |
 | `/api/sessions/{session_id}/checkpoints/{checkpoint_id}/restore` | POST |
+| `/api/sessions/{session_id}/computer` | DELETE, GET, PUT |
 | `/api/sessions/{session_id}/fork` | GET, POST |
 | `/api/sessions/{session_id}/messages` | GET |
 | `/api/sessions/{session_id}/model` | DELETE, GET, POST |

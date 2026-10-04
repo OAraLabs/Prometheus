@@ -95,6 +95,17 @@ STATE_NOT_PROBED = "unknown"
 _CUA_DRIVER_NAMES = ("cua-driver", "cua_driver")
 
 
+def computer_use_enabled(config: Mapping[str, Any] | None) -> bool:
+    """THE switch: ``computer_use.enabled`` is a literal ``true``.
+
+    One reader for the daemon, the door's wiring and deploy.sh's choice of
+    extras. ``bool(value)`` would let a quoted "false" — or any non-empty
+    string — switch on desktop control; this does not.
+    """
+    block = (config or {}).get("computer_use") if isinstance(config, Mapping) else None
+    return isinstance(block, Mapping) and block.get("enabled", False) is True
+
+
 def apply_telemetry_floor(env: MutableMapping[str, str] | None = None) -> None:
     """Force cua-driver's telemetry opt-outs off in *env* (default: os.environ)."""
     target = os.environ if env is None else env
@@ -215,9 +226,8 @@ class ComputerIntegration:
         block = (config or {}).get("computer_use") or {}
         if not isinstance(block, Mapping):
             block = {}
-        # ONLY A LITERAL TRUE. `bool(value)` would let a quoted "false" — or
-        # any non-empty string — switch on desktop control.
-        enabled = block.get("enabled", False) is True
+        # ONLY A LITERAL TRUE (computer_use_enabled).
+        enabled = computer_use_enabled(config)
         errors: list[str] = []
         probe = block.get("probe") or {}
         if not isinstance(probe, Mapping):
@@ -408,6 +418,10 @@ class ComputerIntegration:
                 f"cua-driver-also-configured-as-mcp: {', '.join(hits)} — its "
                 f"raw tools bypass the candidate table (they still prompt)"))
         return Check("mcp", OK)
+
+    def local_target(self) -> str | None:
+        """The declared local target's name, or None."""
+        return self._local_target_name()
 
     def _local_target_name(self) -> str | None:
         if self.targets is None:

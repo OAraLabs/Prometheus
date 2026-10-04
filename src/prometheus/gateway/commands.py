@@ -1682,6 +1682,11 @@ class CommandContext:
     # Same two values create_app() receives; one detection, one resolution.
     local_model: str | None = None
     detected_limit: int | None = None
+    # Computer use (v1.1, the door): the task runner, or None when computer
+    # use is off. Only /computer reads it. The web chat path carries no
+    # person credential yet, so there /computer answers status and stop and
+    # refuses to start.
+    computer_runner: Any = None
 
 
 async def _fc_help(ctx: CommandContext, args: str) -> str:
@@ -2058,6 +2063,26 @@ async def _sc_clearsteers(ctx: CommandContext, args: str) -> str:
 
 
 # command name -> async handler(ctx, args) -> str
+
+async def _sc_computer(ctx: CommandContext, args: str) -> str:
+    """/computer on the web chat path: status and stop; never a start."""
+    runner = ctx.computer_runner
+    head = (args or "").strip().split(" ", 1)[0].lower()
+    if head == "status":
+        if runner is None:
+            return "Computer use is off on this daemon."
+        return runner.status_text()
+    if head == "stop":
+        if runner is None:
+            return "Computer use is off on this daemon."
+        return ("Stopped the desktop task." if runner.stop_session(ctx.session_id)
+                else "No desktop task is running in this chat.")
+    return ("A desktop task can only be started by a person: from Telegram "
+            "(/computer <goal>), or from Beacon's computer toggle on a device "
+            "marked for computer use. This chat path cannot show the daemon "
+            "who typed the command yet. /computer status and /computer stop "
+            "work here.")
+
 _SESSION_COMMANDS: dict[str, Any] = {
     "steer": _sc_steer,
     "queue": _sc_queue,
@@ -2074,6 +2099,10 @@ _SESSION_COMMANDS: dict[str, Any] = {
     "workspace": _sc_workspace,
     "revoke": _sc_revoke,
     "gate": _sc_gate,
+    # Computer use v1.1 (the door). Status and stop only on this path: it
+    # cannot show the daemon WHO typed the command yet, and only a person
+    # may start a desktop task (W3).
+    "computer": _sc_computer,
 }
 
 
@@ -2588,6 +2617,9 @@ class ApproveOutcome:
     #: The grant's stable handle, so a client can show or revoke what it just
     #: created. Present exactly when remembered.
     grant_id: str | None = None
+    #: Desktop-task prompts an "approve all" left alone (computer-use v1.1:
+    #: each is answered on its own).
+    skipped: int = 0
 
 
 async def approve_detail(
@@ -2622,17 +2654,30 @@ async def approve_detail(
         pending = _pending_actions(queue)
         if not pending:
             return ApproveOutcome("No pending approval requests.")
+        from prometheus.permissions.approval_queue import is_desktop_request
+
+        # A DESKTOP TASK'S PROMPT IS NEVER PART OF "ALL" (computer-use v1.1,
+        # W2). Draining a backlog must not approve "Set the field to <text>"
+        # or "Click 'Send'" sight unseen; each is answered on its own.
+        skipped = [a for a in pending if is_desktop_request(a)]
         approved: list[str] = []
         for act in pending:
+            if is_desktop_request(act):
+                continue
             rid = getattr(act, "request_id", "")
             if rid and await queue.approve(rid, by=by):
                 approved.append(rid)
+        note = (f" — skipped {len(skipped)} desktop request(s); answer each "
+                f"with {prefix}approve <id>" if skipped else "")
         if not approved:
+            if skipped:
+                return ApproveOutcome(
+                    f"Approved nothing{note}.", skipped=len(skipped))
             return ApproveOutcome("No pending approval requests.")
         return ApproveOutcome(
             f"Approved {len(approved)} request(s), once each: "
-            + ", ".join(approved),
-            resolved=True,
+            + ", ".join(approved) + note,
+            resolved=True, skipped=len(skipped),
         )
 
     # SPRINT-CONSENT scope verbs, resolved through the ONE definition in
@@ -2727,7 +2772,14 @@ async def approve_detail(
         else None
     )
 
-    ok = await queue.approve(request_id, scope=scope, grant=grant, by=by)
+    try:
+        ok = await queue.approve(request_id, scope=scope, grant=grant, by=by)
+    except Exception as exc:  # noqa: BLE001 - the door's refusals, said plainly
+        from prometheus.computer.door import DoorRefused
+
+        if isinstance(exc, DoorRefused):
+            return ApproveOutcome(f"Not approved: {exc}")
+        raise
     if not ok:
         return ApproveOutcome(f"No pending request: {request_id}")
     if scope == "once" or action is None:
@@ -4321,3 +4373,225 @@ def cmd_gate(gate: Any, arg: str = "") -> str:
         "/gate on  — default\n"
         "/gate strict — extra-cautious"
     )
+
+
+# ===========================================================================
+# /computer — the door (computer-use v1.1 PR 5, design §5.1.2)
+# ===========================================================================
+#
+# One shared core for every chat surface. It RETURNS AT ONCE: the task runs
+# in the background (ComputerTaskRunner.start spawns it), because awaiting it
+# would block the gateway's update handling — and with it /approve and
+# /computer stop.
+#
+# Only a person may start one (W3); Slack and Discord refuse in v1.1 because
+# desktop approvals reach only Telegram and Beacon (W5). Progress on chat is
+# counts only; the approval prompts (sent by the computer approval channel)
+# carry what will be acted on and the text to be typed.
+
+_COMPUTER_PROPOSAL_TTL_S = 600.0
+
+_COMPUTER_SURFACES_V11 = ("telegram",)
+
+
+@dataclass
+class _ComputerProposal:
+    goal: str
+    text: str | None
+    app: str | None
+    options: list[str]
+    by_label: str
+    created_at: float
+
+
+def _computer_usage(prefix: str = "/") -> str:
+    p = f"{prefix}computer"
+    return "\n".join([
+        "Desktop tasks — a person starts them, and picking the app is the consent.",
+        f"  {p} <goal> [app:<name>] [text:\"…\"] — start one (asks which app first)",
+        f"  {p} yes | no — answer that question",
+        f"  {p} use <n> — pick an app from the list",
+        f"  {p} stop [id] — stop the running task",
+        f"  {p} status — driver health and running tasks",
+        f"  {p} devices | allow <device-id> | disallow <device-id> — Beacon "
+        f"devices that may start tasks",
+    ])
+
+
+_QUOTES = "\"'“”‘’"
+
+
+def _computer_parse(text: str) -> tuple[str, str | None, str | None]:
+    """``<goal> [app:<name>] [text:"…"]`` → (goal, app, text)."""
+    import re as _re
+
+    typed = None
+    m = _re.search(r'text:\s*[' + _QUOTES + r'](.*?)[' + _QUOTES + r']', text,
+                   _re.S)
+    if m:
+        typed = m.group(1)
+        text = text[:m.start()] + text[m.end():]
+    app = None
+    m = _re.search(r'app:\s*(?:[' + _QUOTES + r'](.*?)[' + _QUOTES + r']|(\S+))',
+                   text)
+    if m:
+        app = (m.group(1) or m.group(2) or "").strip() or None
+        text = text[:m.start()] + text[m.end():]
+    return " ".join(text.split()), app, typed
+
+
+async def cmd_computer(
+    runner: Any,
+    arg_text: str,
+    *,
+    by: Approver,
+    surface: str,
+    session_id: str,
+    chat_id: int | None = None,
+    notify: Any = None,
+    prefix: str = "/",
+) -> str:
+    """The /computer family (shared core). See the block comment above."""
+    from prometheus.computer.door import DoorRefused, NeedsConsent
+
+    if surface not in _COMPUTER_SURFACES_V11:
+        return ("Desktop tasks run from Telegram and Beacon in v1.1 — desktop "
+                "approvals reach only those two, so a task started here could "
+                "not ask you anything. Use /computer on Telegram, or Beacon's "
+                "computer toggle.")
+    if runner is None:
+        return ("Computer use is off on this daemon (computer_use.enabled is "
+                "not true in prometheus.yaml).")
+    text = (arg_text or "").strip()
+    if not text:
+        return _computer_usage(prefix)
+    head, _, rest = text.partition(" ")
+    head_l = head.lower()
+    key = (surface, session_id)
+    try:
+        if head_l == "status":
+            return runner.status_text()
+        if head_l == "stop":
+            return _computer_stop(runner, rest.strip(), session_id)
+        if head_l in ("devices", "allow", "disallow"):
+            return _computer_devices(runner, head_l, rest.strip(), by)
+        if head_l == "no":
+            return ("Cancelled — nothing was started."
+                    if runner.proposals.pop(key, None) else
+                    "Nothing was waiting for an answer.")
+        if head_l in ("yes", "use"):
+            proposal = runner.proposals.get(key)
+            if proposal is None or (time.time() - proposal.created_at
+                                    > _COMPUTER_PROPOSAL_TTL_S):
+                runner.proposals.pop(key, None)
+                return (f"Nothing is waiting for an answer. Start with "
+                        f"{prefix}computer <goal>.")
+            if proposal.by_label != by.label:
+                return "Only the person who asked can answer this."
+            if head_l == "yes":
+                if proposal.app is None:
+                    return (f"Pick one first: {prefix}computer use <n>.")
+                app = proposal.app
+            else:
+                try:
+                    n = int(rest.strip())
+                    if n < 1:
+                        raise IndexError
+                    app = proposal.options[n - 1]
+                except (ValueError, IndexError):
+                    return (f"Pick a number from 1 to {len(proposal.options)}: "
+                            f"{prefix}computer use <n>.")
+            return await _computer_go(runner, proposal, app, by=by,
+                                      surface=surface, session_id=session_id,
+                                      chat_id=chat_id, notify=notify,
+                                      prefix=prefix)
+        # A new goal. Only a person gets as far as a question.
+        runner.people.require(by)
+        goal, app_phrase, typed = _computer_parse(text)
+        if not goal:
+            return _computer_usage(prefix)
+        app, options = await runner.propose(app_phrase)
+        runner.proposals[key] = _ComputerProposal(
+            goal=goal, text=typed, app=app, options=options,
+            by_label=by.label, created_at=time.time())
+        from prometheus.computer.task import SCOPE_TASK, binding_sentence
+
+        target = runner.integration.local_target() or "this machine"
+        typing = (f"\nIt may type the text you gave ({len(typed)} characters) "
+                  f"— and asks you each time, showing it." if typed else "")
+        if app is not None:
+            return "\n".join([
+                f"Desktop task: {goal}",
+                binding_sentence(app, target, SCOPE_TASK) + typing,
+                "",
+                f"Reply {prefix}computer yes to start, or {prefix}computer no.",
+            ])
+        if not options:
+            return ("No running app has a window on screen. Nothing is ever "
+                    "launched — open the app, then ask again.")
+        lines = [
+            f"Desktop task: {goal}",
+            "Which app may it use? Picking one is the consent:",
+            binding_sentence("<the app you pick>", target, SCOPE_TASK) + typing,
+            "",
+        ]
+        lines += [f"  {i}. {name}" for i, name in enumerate(options, 1)]
+        lines += ["", f"Reply {prefix}computer use <n>, or {prefix}computer no."]
+        return "\n".join(lines)
+    except NeedsConsent as exc:
+        listed = "".join(f"\n  - {o}" for o in exc.options)
+        return f"{exc}{listed}"
+    except DoorRefused as exc:
+        return str(exc)
+
+
+async def _computer_go(runner: Any, proposal: Any, app: str, *, by: Approver,
+                       surface: str, session_id: str, chat_id: int | None,
+                       notify: Any, prefix: str) -> str:
+    from prometheus.computer.task import SCOPE_TASK, ComputerTaskInput
+
+    await runner.bind(session_id, app, scope=SCOPE_TASK, by=by, surface=surface)
+    task = await runner.start(
+        ComputerTaskInput(goal=proposal.goal, app=app, text=proposal.text),
+        session_id=session_id, surface=surface, by=by, notify=notify,
+        chat_id=chat_id)
+    runner.proposals.pop((surface, session_id), None)
+    return (f"Started desktop task {task.task_id} in {task.app} — up to "
+            f"{runner.limits.max_steps} steps. Anything your pick does not "
+            f"cover asks here first. {prefix}computer stop to stop it.")
+
+
+def _computer_stop(runner: Any, task_id: str, session_id: str) -> str:
+    """Never refused: a stop can only end something."""
+    if task_id:
+        if runner.stop(task_id):
+            return (f"Stopped desktop task {task_id}. No new action starts; one "
+                    f"already in flight may still land.")
+        return f"No running desktop task {task_id}."
+    if runner.stop_session(session_id):
+        return ("Stopped the desktop task. No new action starts; one already "
+                "in flight may still land.")
+    return "No desktop task is running here."
+
+
+def _computer_devices(runner: Any, verb: str, device_id: str, by: Approver) -> str:
+    store = getattr(runner.people, "devices", None)
+    if store is None:
+        return "No device store on this daemon."
+    if verb == "devices":
+        rows = store.list_devices()
+        marked = store.computer_device_ids()
+        live = [d for d in rows if d.revoked_at is None]
+        if not live:
+            return "No Beacon device is enrolled."
+        return "\n".join(
+            ["Beacon devices (✓ = may start desktop tasks):"]
+            + [f"  {'✓' if d.id in marked else '·'} {d.id}  {d.name} ({d.platform})"
+               for d in live])
+    runner.people.require(by)
+    if not device_id:
+        return f"Name the device: /computer {verb} <device-id>."
+    if not store.set_computer(device_id, verb == "allow", by=by.label):
+        return f"No live device {device_id}."
+    return (f"Device {device_id} may now start desktop tasks." if verb == "allow"
+            else f"Device {device_id} may no longer start desktop tasks.")

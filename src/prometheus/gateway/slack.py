@@ -495,6 +495,9 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-local")(self._slash_local)
         self._app.command("/prometheus-route")(self._slash_route)
         self._app.command("/prometheus-backends")(self._slash_backends)
+        # Registered and platform-honest: desktop tasks need Telegram or
+        # Beacon in v1.1 (computer-use W5; recorded as a parity gap).
+        self._app.command("/prometheus-computer")(self._slash_computer)
         from prometheus.router.model_router import backend_command_names
         for _backend_name in backend_command_names(self._prometheus_config):
             self._app.command(f"/prometheus-{_backend_name}")(self._make_backend_slash(_backend_name))
@@ -821,6 +824,7 @@ class SlackAdapter(BasePlatformAdapter):
             "  /prometheus-local          — back to primary",
             "  /prometheus-route          — current routing (primary vs override)",
             "  /prometheus-backends       — what each local inference box is serving",
+            "  /prometheus-computer       — desktop tasks (Telegram and Beacon only in v1.1)",
             "",
             "Approvals & autonomy:",
             "  /prometheus-approve <id>   — approve a pending tool request",
@@ -1327,6 +1331,15 @@ class SlackAdapter(BasePlatformAdapter):
             await respond(text=text)
         _handler.__name__ = f"_slash_backend_{name}"
         return _handler
+
+    async def _slash_computer(self, ack: Any, command: Any, respond: Any) -> None:
+        await ack()
+        from prometheus.gateway.commands import cmd_computer
+        from prometheus.permissions import approver as _approver
+
+        await respond(text=await cmd_computer(
+            None, self._cmd_text(command), by=_approver.slack(command),
+            surface="slack", session_id=""))
 
     async def _slash_backends(self, ack: Any, command: Any, respond: Any) -> None:
         await ack()

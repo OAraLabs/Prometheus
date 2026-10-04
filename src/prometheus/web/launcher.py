@@ -43,6 +43,7 @@ async def launch_web(
     detected_kv_cache: dict[str, Any] | None = None,
     backend_registry: Any | None = None,
     computer_integration: Any | None = None,
+    computer_runner: Any | None = None,
     origin_fetcher: Any | None = None,
     api_host: str = "0.0.0.0",
     api_port: int = 8005,
@@ -78,6 +79,15 @@ async def launch_web(
     from prometheus.config.device_store import DeviceStore
 
     device_store = DeviceStore()
+    # Computer use v1.1 (the door): a device counts as a person only once
+    # marked, and the marks live in THIS store — the one the middleware reads.
+    # Desktop prompts are answered through the same surfaces as every other
+    # approval, so the web gets both queues.
+    if computer_runner is not None:
+        computer_runner.people.bind_device_store(device_store)
+        from prometheus.permissions.approval_queue import ApprovalQueues
+
+        approval_queue = ApprovalQueues(approval_queue, computer_runner.channel)
 
     # Create FastAPI app
     app = create_app(
@@ -103,6 +113,7 @@ async def launch_web(
         detected_kv_cache=detected_kv_cache,
         backend_registry=backend_registry,
         computer_integration=computer_integration,
+        computer_runner=computer_runner,
     )
 
     # Wire agent state ref into the app
@@ -154,6 +165,9 @@ async def launch_web(
     # POST /api/chat/send) can dispatch user messages through the same flow
     # the WebSocket uses, without duplicating the session+agent plumbing.
     app.state.ws_bridge = bridge
+    # The chat Stop (WS interrupt / POST /api/chat/interrupt) stops a
+    # session's desktop tasks first (computer-use v1.1 §5.1.7).
+    bridge.computer_runner = computer_runner
 
     # GRAFT Piece 2: APNs push. Enabled-but-broken fails the BOOT, loudly —
     # a missing key or missing deps must not degrade to silent no-pushes
