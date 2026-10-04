@@ -114,14 +114,61 @@ def _output(task) -> str:
     return get_task_manager().read_task_output(task.id)
 
 
-async def _run_cron(command: str, cwd: Path) -> dict:
+async def _model_cron_job(command: str, cwd: Path, *, name: str | None = None,
+                          extra: dict | None = None) -> dict:
+    """Create a cron job the way a MODEL does — the cron_create TOOL — and
+    return it as stored. ``extra`` is merged into the raw tool arguments, so a
+    test can try to smuggle a field past the tool's schema."""
+    from prometheus.gateway.cron_service import get_cron_job
+    from prometheus.tools.builtin.cron_create import (
+        CronCreateTool,
+        CronCreateToolInput,
+    )
+
+    name = name or f"floor-probe-{uuid.uuid4().hex[:6]}"
+    args = {"name": name, "schedule": "0 0 1 1 *", "command": command,
+            "cwd": str(cwd), **(extra or {})}
+    res = await CronCreateTool().execute(
+        CronCreateToolInput.model_validate(args),
+        ToolExecutionContext(cwd=cwd, metadata={}),
+    )
+    assert not res.is_error, res.output
+    job = get_cron_job(name)
+    assert job is not None
+    return job
+
+
+def _operator_cron_job(command: str, cwd: Path, *, name: str | None = None) -> dict:
+    """Create a cron job the way the OPERATOR does — ``POST /api/cron`` — and
+    return it as stored."""
+    from fastapi.testclient import TestClient
+
+    from prometheus.gateway.cron_service import get_cron_job
+    from prometheus.web.server import create_app
+
+    name = name or f"operator-{uuid.uuid4().hex[:6]}"
+    token = os.environ.get(SECRET_NAME, "")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    res = TestClient(create_app({})).post(
+        "/api/cron", headers=headers,
+        json={"name": name, "schedule": "0 0 1 1 *", "command": command,
+              "cwd": str(cwd)},
+    )
+    assert res.status_code == 201, res.text
+    job = get_cron_job(name)
+    assert job is not None
+    return job
+
+
+async def _run_job(job: dict) -> dict:
     from prometheus.gateway.cron_scheduler import execute_job
 
-    return await execute_job({
-        "name": f"floor-probe-{uuid.uuid4().hex[:6]}",
-        "command": command,
-        "cwd": str(cwd),
-    })
+    return await execute_job(job)
+
+
+async def _run_cron(command: str, cwd: Path) -> dict:
+    """A cron job the MODEL created, run by the scheduler."""
+    return await _run_job(await _model_cron_job(command, cwd))
 
 
 def _coding_sandbox(root: Path):
@@ -464,6 +511,154 @@ class TestDaemonAuthoredCommandsAreNotFloored:
             await asyncio.sleep(0.05)
         out = manager.read_task_output(task.id)
         assert "RAN" in out and secret in out, out
+
+
+@pytest.fixture()
+def tokens(monkeypatch, secret):
+    """Two ``*_TOKEN`` variables in the daemon's environment."""
+    bot = f"bot-{uuid.uuid4().hex}"
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", bot)
+    return (secret, bot)
+
+
+#: Prints every *_TOKEN variable the shell can see, or NO_TOKENS.
+PRINT_TOKENS = 'echo RAN; env | grep "_TOKEN=" || echo NO_TOKENS'
+
+
+def _api():
+    from fastapi.testclient import TestClient
+
+    from prometheus.web.server import create_app
+
+    token = os.environ.get(SECRET_NAME, "")
+    return (TestClient(create_app({})),
+            {"Authorization": f"Bearer {token}"} if token else {})
+
+
+class TestCronIsFlooredByProvenance:
+    """A cron job is floored by WHO WROTE IT, not because it is a cron job.
+
+    The operator's own jobs need what the floor removes — a briefing reads its
+    Telegram token from the environment, watcher and vault jobs write outside
+    the workspace — so only a job the MODEL created (the cron_create tool)
+    runs floored and scrubbed. It is stored with ``origin: "model"``.
+
+    * no ``origin`` (every job stored before this) and the operator's path
+      (``POST /api/cron``): today's behaviour, unchanged;
+    * the model's tool always writes ``origin: "model"`` and has no way to
+      say anything else;
+    * a model edit of an operator job (cron_create replaces by name) makes it
+      the model's; an operator edit (``PUT``) never makes a model job the
+      operator's.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_job_the_model_creates_is_stored_as_the_models(self, tmp_path):
+        _configure()
+        job = await _model_cron_job("true", tmp_path)
+        assert job.get("origin") == "model", job
+
+    @pytest.mark.asyncio
+    async def test_the_model_cannot_choose_its_jobs_origin(self, tmp_path):
+        from prometheus.tools.builtin.cron_create import CronCreateToolInput
+
+        assert "origin" not in CronCreateToolInput.model_fields
+        _configure()
+        job = await _model_cron_job(
+            "true", tmp_path, extra={"origin": "operator"})
+        assert job.get("origin") == "model", job
+
+    @pytest.mark.asyncio
+    async def test_a_model_job_has_no_token_in_its_environment(self, tmp_path, tokens):
+        _configure()
+        entry = await _run_cron(PRINT_TOKENS, tmp_path)
+        out = entry["stdout"] + entry["stderr"]
+        assert "RAN" in out, entry
+        assert "NO_TOKENS" in entry["stdout"], entry
+        for value in tokens:
+            assert value not in out, "a model-created cron job saw a *_TOKEN"
+
+    @pytest.mark.asyncio
+    async def test_an_operator_job_keeps_its_environment(self, tmp_path, tokens):
+        _configure()
+        job = _operator_cron_job(PRINT_TOKENS, tmp_path)
+        assert "origin" not in job, job
+        entry = await _run_job(job)
+        for value in tokens:
+            assert value in entry["stdout"], (
+                "the operator's cron job lost its environment", entry)
+
+    @pytest.mark.asyncio
+    async def test_an_operator_job_is_not_floored(
+        self, tmp_path, read_floor_unavailable,
+    ):
+        """``required`` and unavailable refuses a model job; the operator's
+        job runs exactly as it did."""
+        _configure(read="required")
+        entry = await _run_job(_operator_cron_job("echo OPERATOR_RAN", tmp_path))
+        assert entry["status"] == "success", entry
+        assert "OPERATOR_RAN" in entry["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_a_job_stored_before_origin_existed_is_unchanged(
+        self, tmp_path, tokens, read_floor_unavailable,
+    ):
+        from prometheus.gateway.cron_service import get_cron_job, upsert_cron_job
+
+        _configure(read="required")
+        upsert_cron_job({"name": "legacy", "schedule": "0 0 1 1 *",
+                         "command": PRINT_TOKENS, "cwd": str(tmp_path)})
+        entry = await _run_job(get_cron_job("legacy"))
+        assert entry["status"] == "success", entry
+        for value in tokens:
+            assert value in entry["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_a_model_edit_of_an_operator_job_makes_it_the_models(
+        self, tmp_path, tokens,
+    ):
+        _configure()
+        _operator_cron_job("echo OPERATOR", tmp_path, name="briefing")
+        job = await _model_cron_job(PRINT_TOKENS, tmp_path, name="briefing")
+        assert job.get("origin") == "model", job
+        entry = await _run_job(job)
+        assert "NO_TOKENS" in entry["stdout"], entry
+
+    @pytest.mark.asyncio
+    async def test_a_model_edit_of_an_operator_job_is_floored(
+        self, tmp_path, read_floor_unavailable,
+    ):
+        _configure(read="required")
+        _operator_cron_job("echo OPERATOR", tmp_path, name="vault")
+        job = await _model_cron_job("echo I_RAN_UNCONFINED", tmp_path, name="vault")
+        entry = await _run_job(job)
+        assert entry["status"] == "blocked", entry
+        assert "I_RAN_UNCONFINED" not in entry["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_an_operator_edit_does_not_unfloor_a_models_job(
+        self, tmp_path, tokens,
+    ):
+        from prometheus.gateway.cron_service import get_cron_job
+
+        _configure()
+        await _model_cron_job("echo A", tmp_path, name="m1")
+        client, headers = _api()
+        res = client.put("/api/cron/m1", headers=headers,
+                         json={"command": PRINT_TOKENS, "origin": "operator"})
+        assert res.status_code == 200, res.text
+        job = get_cron_job("m1")
+        assert job.get("origin") == "model", job
+        entry = await _run_job(job)
+        assert "NO_TOKENS" in entry["stdout"], entry
+
+    def test_the_operator_path_writes_no_origin(self, tmp_path):
+        client, headers = _api()
+        res = client.post("/api/cron", headers=headers, json={
+            "name": "op", "schedule": "0 0 1 1 *", "command": "true",
+            "cwd": str(tmp_path), "origin": "model"})
+        assert res.status_code == 201, res.text
+        assert "origin" not in res.json()["job"]
 
 
 class TestOneFloorForEveryDoor:
