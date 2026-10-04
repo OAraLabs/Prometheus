@@ -112,7 +112,15 @@ _DELIVERY_IN_INPUT: frozenset[str] = frozenset({"click"})
 
 
 def _require_sdk() -> Any:
-    """Import the SDK, or fail with something an operator can act on."""
+    """Import the SDK, or fail with something an operator can act on.
+
+    ⚠ THE TELEMETRY FLOOR GOES FIRST. cua-driver reports usage by default and
+    reads its opt-outs when it loads, so they are forced off BEFORE the import
+    — after it would be too late (computer/integration.py, design Q1).
+    """
+    from prometheus.computer.integration import apply_telemetry_floor
+
+    apply_telemetry_floor()
     try:
         import cua_driver
     except ImportError as exc:
