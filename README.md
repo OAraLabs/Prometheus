@@ -134,7 +134,7 @@ Prometheus is built for local inference. That's the whole point — sovereignty,
 - Anthropic (Claude)
 - Google Gemini (Flash, Pro)
 - xAI (Grok) — via API key **or** by signing in with a SuperGrok subscription (OAuth device flow; no key needed)
-- DeepSeek, Kimi (Moonshot), GLM (Z.ai), MiMo (Xiaomi)
+- DeepSeek, Kimi (Moonshot), GLM (Z.ai), MiMo (Xiaomi) (provider classes ship; not yet exercised)
 - Any OpenAI-compatible endpoint (vLLM, LiteLLM, Together, etc.)
 
 Switch any single chat with a slash command — `/claude`, `/gpt`, `/gemini`, `/xai`, `/deepseek`, `/kimi`, `/glm`, `/mimo` — and `/local` to come home. Keys are managed from Beacon's Models tab (paste once, live immediately, no restart) or the env file. The adapter layer adjusts its strictness automatically: full validation for open models, passthrough for APIs that already handle tool calling well.
@@ -178,14 +178,14 @@ Three commitments run through everything below:
 
 **Opt-in.** `coding.enabled` ships `false`: until you set it to `true`, `oara code` exits non-zero and `POST /api/code` returns 403. Coding runs execute model-authored commands against a clone of your repo, so you turn them on deliberately.
 
-Point the agent at a repo, a task, and an acceptance command. It clones the repo into a sandbox (cwd jail, env-scrubbed so your provider keys never reach the subprocess), works in rounds until the acceptance command exits 0, and leaves a reviewable branch. **"Done" is a verdict, not a claim** — the session re-runs your acceptance command itself and rejects no-evidence turns. Mid-run supervision (pause / inject / resume) rides a control channel the run polls between episodes. Rounds stream live to Beacon.
+Point the agent at a repo, a task, and an acceptance command. It clones the repo into a sandbox (cwd jail, env-scrubbed so your provider keys never reach the subprocess), works in rounds until the acceptance command exits 0, and leaves a reviewable branch. **"Done" is a verdict, not a claim** — the session re-runs your acceptance command itself and rejects no-evidence turns. Mid-run supervision (pause / inject / resume) rides a control channel the run polls between episodes (experimental — not yet working reliably). Rounds stream live to Beacon.
 
 - Supervision is fail-safe by construction: a corrupt or missing control file reads as "not paused", and a run with no control channel is byte-identical to an unsupervised one
 - Repeated failures are caught by fingerprint: the failure output is normalized (timings, addresses) and hashed, so hitting the same wall twice triggers an explicit step-back — and zero-progress runs abort instead of burning rounds
 
 ![A finished coding run in Beacon — Converted ✓, acceptance exit 0, and the reviewable diff](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/run-2-artifact.png)
 
-Beacon's **Loop Manager** turns this into a PM cockpit: register repos, keep a `TASKS.md` board, edit the `LOOP.md` run contract, and fire — Autonomous, Composed, or Supervised. Kanban stories can be dispatched straight into coding runs. See the [Coding Mode guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/coding-mode.md).
+Beacon's **Loop Manager** turns this into a PM cockpit: register repos, keep a `TASKS.md` board, edit the `LOOP.md` run contract, and fire — Autonomous, Composed, or Supervised (the Beacon UI doesn't call pause/inject/resume yet). Kanban stories can be dispatched straight into coding runs. See the [Coding Mode guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/coding-mode.md).
 
 ### Skills
 
@@ -247,7 +247,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 - Durable background tasks (`tasks.db` survives restarts) with an honesty check: "I'll let you know when it's done" must be backed by a real registered task — and tasks orphaned by a restart are marked failed instead of pretending to still run
 - 40+ slash commands on Telegram — including mid-turn `/steer`, `/queue`, and per-chat provider overrides
 - **Paperclip fleet gateway** (experimental, off by default) — Prometheus as a hireable agent: a fleet manager wakes it over HTTP, it checks out an issue, works a turn, reports back, and bills from real token usage
-- **A mobile-ready control plane** — per-device tokens (mint, verify, revoke), APNs push with Live Activity, message pagination (`?limit=` / `?before=`), a WebSocket `subscribe` that is a real session filter, and auto-titled sessions; the iOS client is built on nothing the desktop doesn't also use
+- **A mobile-ready control plane** — per-device tokens (mint, verify, revoke), APNs push support for the iOS client (not yet verified on a physical iPhone), message pagination (`?limit=` / `?before=`), a WebSocket `subscribe` that is a real session filter, and auto-titled sessions; the iOS client is built on nothing the desktop doesn't also use
 
 ### Sessions that behave like sessions
 
