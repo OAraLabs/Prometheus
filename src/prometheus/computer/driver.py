@@ -51,6 +51,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from prometheus.computer.discovery import AppRecord, WindowRecord
 from prometheus.computer.types import Observation
 
 
@@ -398,6 +399,16 @@ class Driver(Protocol):
         """Dispatch one complete bounded action. Raises ``StaleSnapshot``."""
         ...
 
+    def list_apps(self) -> list[AppRecord]:
+        """The applications the driver can see (D8). Never launches one."""
+        ...
+
+    def list_windows(
+        self, pid: int | None = None, on_screen_only: bool = True
+    ) -> list[WindowRecord]:
+        """Windows, for one pid or all. On-screen only unless asked (D8)."""
+        ...
+
 
 class StaleSnapshot(RuntimeError):
     """The action's snapshot has been superseded. Never retried silently."""
@@ -405,6 +416,25 @@ class StaleSnapshot(RuntimeError):
 
 class DriverUnavailable(RuntimeError):
     """The driver cannot act — preconditions failed, or it is not installed."""
+
+
+class DriverBusy(DriverUnavailable):
+    """An earlier driver call has not finished, so this one was NOT sent.
+
+    A subclass of ``DriverUnavailable`` so every existing refusal path still
+    catches it. Distinct so a caller can tell "refused before dispatch" from
+    "dispatched and failed": nothing reached the driver.
+    """
+
+
+class ActionOutcomeUnknown(DriverUnavailable):
+    """The driver did not answer in time, and the action MAY STILL LAND.
+
+    Not "failed". A timeout stops the caller waiting; it does not stop the
+    action (probed: the wait gave up at 1.9 s and the click landed at 2.7 s).
+    The snapshot the action was built from can no longer be vouched for, so
+    the only honest next step is a fresh observation.
+    """
 
 
 class FixtureDriver:
@@ -424,9 +454,18 @@ class FixtureDriver:
     said ok" measures prose. ``dispatched`` is what actually happened.
     """
 
-    def __init__(self, observations: list[Observation]) -> None:
+    def __init__(
+        self,
+        observations: list[Observation],
+        apps: list[AppRecord] | None = None,
+        windows: list[WindowRecord] | None = None,
+    ) -> None:
         if not observations:
             raise ValueError("FixtureDriver needs at least one observation")
+        #: What discovery sees. Plain lists, so a test can close a window
+        #: between steps and watch re-resolution notice.
+        self.apps: list[AppRecord] = list(apps or [])
+        self.windows: list[WindowRecord] = list(windows or [])
         self._observations = list(observations)
         self._cursor = 0
         # Primed to the FIRST observation rather than None. A FixtureDriver is
@@ -466,3 +505,13 @@ class FixtureDriver:
             )
         self.dispatched.append((verb, dict(arguments)))
         return {"ok": True, "verb": verb}
+
+    def list_apps(self) -> list[AppRecord]:
+        return list(self.apps)
+
+    def list_windows(
+        self, pid: int | None = None, on_screen_only: bool = True
+    ) -> list[WindowRecord]:
+        return [w for w in self.windows
+                if (pid is None or w.pid == pid)
+                and (w.is_on_screen or not on_screen_only)]

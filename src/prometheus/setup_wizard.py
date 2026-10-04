@@ -969,18 +969,18 @@ Run this wizard again after you're ready:
         gateways_active: list[str] = []
         if gw.get("telegram_enabled"):
             token = gw.get("telegram_token", "")
-            masked = f"{token[:4]}...{token[-4:]}" if len(token) > 8 else "****"
+            masked = f"...{token[-4:]}" if len(token) > 8 else "****"
             print(f"  + Gateway: Telegram (token: {masked})")
             gateways_active.append("telegram")
         if gw.get("slack_enabled"):
             token = gw.get("slack_bot_token", "")
-            masked = f"{token[:4]}...{token[-4:]}" if len(token) > 8 else "****"
+            masked = f"...{token[-4:]}" if len(token) > 8 else "****"
             print(f"  + Gateway: Slack (bot token: {masked})")
             gateways_active.append("slack")
         discord_cfg = gw.get("discord") if isinstance(gw.get("discord"), dict) else {}
         if (discord_cfg or {}).get("enabled"):
             token = (discord_cfg or {}).get("token", "")
-            masked = f"{token[:4]}...{token[-4:]}" if len(token) > 8 else "****"
+            masked = f"...{token[-4:]}" if len(token) > 8 else "****"
             print(f"  + Gateway: Discord (token: {masked})")
             gateways_active.append("discord")
         if not gateways_active:

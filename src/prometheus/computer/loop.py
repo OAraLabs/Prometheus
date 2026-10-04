@@ -22,6 +22,7 @@ the divergence is in one function and one test pins it
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
@@ -35,9 +36,13 @@ from prometheus.computer.candidates import (
     build_choice_request,
     validate_choice,
 )
+from prometheus.computer.discovery import same_app
 from prometheus.computer.driver import Driver, StaleSnapshot, check_preconditions
 from prometheus.computer.types import Candidate
-from prometheus.permissions.computer_extent import computer_extent_for
+from prometheus.permissions.computer_extent import (
+    ComputerExtent,
+    computer_extent_for,
+)
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +52,9 @@ TOOL_NAME_FOR_VERB: dict[str, str] = {
     verb: f"computer_{verb}" for verb in ACTION_MODELS
 }
 VERB_FOR_TOOL_NAME: dict[str, str] = {v: k for k, v in TOOL_NAME_FOR_VERB.items()}
+
+#: ``before_act(candidate, extent, decision) -> bool``. See ``ComputerUseLoop``.
+BeforeAct = Callable[[Candidate, "ComputerExtent | None", Any], bool]
 
 
 @dataclass
@@ -79,12 +87,36 @@ class ComputerUseLoop:
         approve: Callable[..., Awaitable[bool]] | None = None,
         origin: str = "system",
         skip_preconditions: bool = False,
+        before_act: BeforeAct | None = None,
     ) -> None:
+        """``before_act`` — the last word before a dispatch.
+
+        Called with the candidate, its extent and the gate's decision, on
+        EVERY path that is about to dispatch: a stored grant that allowed it,
+        a prompt somebody approved. It exists for the per-action checks a
+        caller must keep even when no approver is ever asked — a stop, a
+        high-consequence label, a ceiling — so a remembered grant cannot route
+        around them. False refuses; an exception refuses.
+
+        ⚠ SYNCHRONOUS, ON PURPOSE. Nothing is awaited between its answer and
+        the dispatch, so a stop that lands while it runs cannot be overtaken.
+        An async callable is refused here rather than silently never awaited.
+        """
+        if before_act is not None and (
+            inspect.iscoroutinefunction(before_act)
+            or inspect.iscoroutinefunction(
+                getattr(before_act, "__call__", None))
+        ):
+            raise TypeError(
+                "before_act must be synchronous: nothing may be awaited "
+                "between the check and the dispatch"
+            )
         self._driver = driver
         self._chooser = chooser
         self._gate = gate
         self._approve = approve
         self._origin = origin
+        self._before_act = before_act
         # Only a FixtureDriver legitimately skips the substrate check — it has
         # no substrate. A real driver that skipped it is the silent-failure
         # shape this whole check exists to refuse, so the flag is explicit
@@ -120,6 +152,29 @@ class ComputerUseLoop:
         # the event loop thread is what stalled every other task on it.
         observation = await asyncio.to_thread(
             self._driver.observe, target, app, pid, window_id)
+
+        # 1b. WHOSE WINDOW IS THIS — THE DRIVER'S ANSWER, NEVER OURS (D19) ---
+        # The extent's app term comes from the observation. If the driver
+        # named no app, or named another one, nothing here can establish
+        # what a grant or an approval would be FOR, so the window is refused
+        # rather than labelled with the caller's claim.
+        if not observation.unusable_reason:
+            reported = str(observation.app or "").strip()
+            if not reported:
+                return StepResult(
+                    status="blocked",
+                    reason=("the driver reported no application for this "
+                            "window, so the consent term cannot be "
+                            "established — refusing rather than taking the "
+                            "caller's word for it"),
+                )
+            if not same_app(reported, app):
+                return StepResult(
+                    status="blocked",
+                    reason=(f"the driver says this window belongs to "
+                            f"{reported!r}, not {app!r} — refusing to act in "
+                            f"an app nobody asked for"),
+                )
 
         # 2. BUILD -----------------------------------------------------------
         try:
@@ -201,6 +256,29 @@ class ComputerUseLoop:
                         decision.reason
                         or f"permission denied for {candidate.tool_name}"
                     ),
+                    candidate=candidate, extent=extent_value,
+                    candidates_offered=len(candidates),
+                )
+
+        # 5b. BEFORE_ACT — no await between this answer and the dispatch ----
+        if self._before_act is not None:
+            try:
+                go = bool(self._before_act(candidate, extent, decision))
+            except Exception as exc:  # noqa: BLE001 - a broken check refuses
+                log.warning("computer-use: before_act raised — refusing",
+                            exc_info=True)
+                return StepResult(
+                    status="refused",
+                    reason=(f"the before_act check failed "
+                            f"({exc.__class__.__name__}) — refusing rather "
+                            f"than acting unchecked"),
+                    candidate=candidate, extent=extent_value,
+                    candidates_offered=len(candidates),
+                )
+            if not go:
+                return StepResult(
+                    status="refused",
+                    reason="refused by the before_act check",
                     candidate=candidate, extent=extent_value,
                     candidates_offered=len(candidates),
                 )

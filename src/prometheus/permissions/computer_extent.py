@@ -19,34 +19,45 @@ it is deliberately blunt about width::
 Not "grant computer_click on firefox:click:background". If the honest sentence
 reads too wide to accept, the answer is to refuse it and approve once — which
 is precisely the judgement the sentence exists to enable. The extent value
-(``firefox:click:background``) is the machine half; ``describe()`` is the
+(``mini:firefox:-:click:background``) is the machine half; ``describe()`` is the
 half a human rules on, and they are produced from the same object so they
 cannot drift (Standing-Principles §17).
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from prometheus.permissions.computer_schema import (
     DELIVERY_BACKGROUND,
     DELIVERY_MODES,
+    SITE_NONE,
+    SITE_UNKNOWN,
     declared_app_param,
     declared_computer_verb,
     declared_delivery_param,
     declared_payload_params,
+    declared_site_param,
     declared_target_param,
 )
 
 #: Grant kind. Parallel to "path_prefix" / "command_prefix".
 COMPUTER_ACTION_KIND = "computer_action"
 
-#: Terms in an extent value: target:app:verb:delivery. Asserted rather than
-#: assumed wherever a stored value is parsed — a three-term value is a
-#: pre-target record whose machine is unknowable, and guessing one is the
-#: widening this term exists to prevent.
-EXTENT_TERMS = 4
+#: Terms in an extent value: target:app:site:verb:delivery. Asserted rather
+#: than assumed wherever a stored value is parsed — a three-term value is a
+#: pre-target record whose machine is unknowable, a four-term one predates the
+#: site, and guessing either missing term is the widening it exists to prevent.
+EXTENT_TERMS = 5
+
+#: Position of the site term in a value. Named, because "is this stored
+#: value's site UNKNOWN?" is asked in more than one place.
+SITE_TERM_INDEX = 2
+
+#: An origin, lower-cased: scheme://host[:port], nothing after the authority.
+_ORIGIN_RE = re.compile(r"^[a-z][a-z0-9+.-]*://[^/:?#\s@]+(?::[0-9]{1,5})?$")
 
 
 @dataclass(frozen=True)
@@ -61,11 +72,16 @@ class ComputerExtent:
     delivery: str
     #: Arguments the extent cannot describe. Non-empty => not rememberable.
     payload_params: tuple[str, ...] = ()
+    #: The ENCODED site term: an origin (``https%3A//host``), ``-`` for
+    #: positively no web content, or ``?`` (UNKNOWN). Defaults to UNKNOWN so
+    #: an extent built without one can never be remembered.
+    site: str = SITE_UNKNOWN
 
     @property
     def value(self) -> str:
-        """The grant value: ``target:app:verb:delivery``."""
-        return f"{self.target}:{self.app}:{self.verb}:{self.delivery}"
+        """The grant value: ``target:app:site:verb:delivery``."""
+        return (f"{self.target}:{self.app}:{self.site}:{self.verb}:"
+                f"{self.delivery}")
 
     @property
     def rememberable(self) -> bool:
@@ -75,8 +91,11 @@ class ComputerExtent:
         ``computer_schema``'s docstring: the alternative is a grant meaning
         "type anything into this app, forever" minted from a prompt that
         showed one string.
+
+        And False whenever the SITE is unknown: "click anything in Firefox"
+        minted while a bank tab was open is consent to every site in it.
         """
-        return not self.payload_params
+        return not self.payload_params and self.site != SITE_UNKNOWN
 
     def describe(self) -> str:
         """The refusable sentence. Wide grants must READ wide."""
@@ -87,17 +106,27 @@ class ComputerExtent:
         )
         return (
             f"Prometheus may {_verb_phrase(self.verb)} in {self.app} "
-            f"on {self.target}, {where}"
+            f"({_site_phrase(self.site)}) on {self.target}, {where}"
         )
 
     def why_not_rememberable(self) -> str:
         """Operator-facing reason a lasting grant is not on offer."""
-        args = ", ".join(self.payload_params)
+        reasons = []
+        if self.payload_params:
+            args = ", ".join(self.payload_params)
+            reasons.append(
+                f"the value of {args} cannot be part of a remembered grant, "
+                f"so remembering this would mean "
+                f"'{_verb_phrase(self.verb)} in {self.app} on {self.target}'"
+            )
+        if self.site == SITE_UNKNOWN:
+            reasons.append(
+                f"whether this reaches web content in {self.app} could not "
+                f"be established, so remembering it could cover any site"
+            )
         return (
-            f"no lasting grant is offered: the value of {args} cannot be part "
-            f"of a remembered grant, so remembering this would mean "
-            f"'{_verb_phrase(self.verb)} in {self.app} on {self.target}' — "
-            f"approve it once instead, each time"
+            "no lasting grant is offered: " + "; and ".join(reasons)
+            + " — approve it once instead, each time"
         )
 
 
@@ -117,6 +146,39 @@ _VERB_PHRASES: dict[str, str] = {
 
 def _verb_phrase(verb: str) -> str:
     return _VERB_PHRASES.get(verb, f"perform {verb}")
+
+
+def _site_phrase(site: str) -> str:
+    if site == SITE_NONE:
+        return "no web content"
+    if site == SITE_UNKNOWN:
+        return "whether this reaches a web page could not be established"
+    return f"the site {decode_site(site)}"
+
+
+def encode_site(raw: Any) -> str:
+    """One site term from whatever a call carried. UNKNOWN unless proven.
+
+    ``-`` passes through; an origin is lower-cased and its colons are
+    percent-encoded (``https://h:8443`` -> ``https%3A//h%3A8443``) so it
+    cannot add terms to a colon-delimited value; ANYTHING else — absent,
+    empty, a path, a URL with more than an authority — is UNKNOWN. The
+    failure direction is over-prompting, never widening.
+    """
+    if raw is None:
+        return SITE_UNKNOWN
+    text = str(raw).strip()
+    if text == SITE_NONE:
+        return SITE_NONE
+    origin = text.lower()
+    if not _ORIGIN_RE.match(origin):
+        return SITE_UNKNOWN
+    return origin.replace("%", "%25").replace(":", "%3A")
+
+
+def decode_site(site: str) -> str:
+    """The origin a stored site term names, for the sentence a person reads."""
+    return site.replace("%3A", ":").replace("%25", "%")
 
 
 def computer_extent_for(
@@ -146,7 +208,7 @@ def computer_extent_for(
         return None, None  # an ordinary tool; nothing to say
 
     # TARGET FIRST, and an absent one is UNKNOWN rather than blank. A blank
-    # term would render as ``:firefox:click:background`` — still four
+    # term would render as ``:firefox:-:click:background`` — still five
     # segments, still a valid-looking grant, and it would match any other
     # call that also failed to name a machine. "Which machine" resolving to
     # the empty string is precisely the cross-machine grant the term exists
@@ -198,6 +260,13 @@ def computer_extent_for(
             f"{delivery!r} — the security gate cannot rule on it"
         )
 
+    # SITE: never a reason to refuse to rule — an absent or unrecognised
+    # site is UNKNOWN, which the gate prompts for and nothing can remember.
+    # A tool that declares no site param gets UNKNOWN for the same reason.
+    site_param = declared_site_param(schema)
+    site = encode_site(
+        tool_input.get(site_param) if site_param is not None else None)
+
     return (
         ComputerExtent(
             target=_normalise_term(target),
@@ -205,6 +274,7 @@ def computer_extent_for(
             verb=verb,
             delivery=delivery,
             payload_params=declared_payload_params(schema),
+            site=site,
         ),
         None,
     )
@@ -223,3 +293,8 @@ def _normalise_term(term: str) -> str:
     is a small thing here and a real one the moment two machines exist.
     """
     return term.replace(":", "_").strip().lower()
+
+
+#: The ONE spelling rule for an extent term, public so a caller comparing an
+#: app name against the extent's app term folds both the same way.
+normalise_term = _normalise_term
