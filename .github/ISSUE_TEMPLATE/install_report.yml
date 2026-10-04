@@ -1,0 +1,92 @@
+name: Install report
+description: Tell us how installing Prometheus went on your machine — worked, worked with workarounds, or broke.
+title: "Install report: "
+labels: ["install-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Install reports tell us which machines and install paths actually work. A clean "it just worked" report is as useful as a broken one.
+
+        **Issues and GitHub handles are public.** Leave out API keys, tokens, chat IDs, host names and IP addresses. For private contact, email support@oara.ai.
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: How did it go?
+      options:
+        - Worked first time
+        - Worked, with workarounds
+        - Did not work
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and version
+      placeholder: macOS 15.5 / Ubuntu 24.04 / Debian 12 / ...
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware
+      description: CPU or chip, RAM, and GPU with its VRAM, if any.
+      placeholder: |
+        Apple M2 Pro, 32 GB
+        or: Ryzen 7 7700, 64 GB RAM, RTX 3090 24 GB
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install path
+      options:
+        - pip install 'oara-prometheus[full]' (PyPI)
+        - pip install oara-prometheus (PyPI, no extras)
+        - brew install oaralabs/tap/oara (Homebrew)
+        - uv tool / pipx from Git
+        - git checkout (pip install -e)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: "`python3 --version`, or \"Homebrew-managed\" for a brew install."
+      placeholder: Python 3.12.7
+  - type: input
+    id: version
+    attributes:
+      label: Prometheus version
+      description: "`oara --version`, if you got that far."
+      placeholder: Prometheus 0.9.7
+  - type: input
+    id: backend
+    attributes:
+      label: Model backend
+      placeholder: llama.cpp / Ollama / LM Studio / vLLM / cloud API only / none yet
+  - type: input
+    id: elapsed
+    attributes:
+      label: Elapsed time
+      description: Roughly how long from starting the install to a first reply from `oara` (or to giving up).
+      placeholder: about 6 minutes
+    validations:
+      required: true
+  - type: textarea
+    id: what-broke
+    attributes:
+      label: What broke, and what you did about it
+      description: The step that failed, the error (redacted), and any workaround. Leave blank if nothing broke.
+      render: shell
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?
+      description: Something confusing in the docs, a step you skipped, a warning you didn't expect.
+  - type: input
+    id: heard-from
+    attributes:
+      label: Where did you hear about us? (optional)
+      placeholder: Hacker News / Reddit / a friend / ...

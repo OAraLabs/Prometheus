@@ -1,0 +1,80 @@
+name: Bug report
+description: Something in Prometheus doesn't work the way the docs say it does.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        **Issues and GitHub handles are public.** Remove API keys, tokens, chat IDs, host names and IP addresses from anything you paste. For private contact, email support@oara.ai. Security problems go through [private vulnerability reporting](https://github.com/OAraLabs/Prometheus/security/advisories/new), never an issue.
+
+        Before filing, it is worth a look at the [known limits](https://oara.ai/docs/limits/): some rough edges are already written down.
+  - type: input
+    id: version
+    attributes:
+      label: Prometheus version
+      description: The output of `oara --version`.
+      placeholder: Prometheus 0.9.7
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - pip install 'oara-prometheus[full]' (PyPI)
+        - pip install oara-prometheus (PyPI, no extras)
+        - brew install oaralabs/tap/oara (Homebrew)
+        - uv tool / pipx from Git
+        - git checkout (pip install -e)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: macOS 15.5 on Apple Silicon / Ubuntu 24.04 / ...
+    validations:
+      required: true
+  - type: input
+    id: backend
+    attributes:
+      label: Model backend and model
+      description: The inference server and the model it was serving, if the bug involves the model.
+      placeholder: llama.cpp + Qwen3.5-9B Q4_K_M / Ollama + qwen2.5:7b-instruct / Anthropic API / ...
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. oara setup --fast
+        2. oara daemon
+        3. ...
+  - type: textarea
+    id: doctor
+    attributes:
+      label: oara doctor output (redacted)
+      description: Run `oara doctor` and paste the output. It can show backend URLs — replace host names and IP addresses with placeholders like `<gpu-host>` before pasting.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines (redacted)
+      description: From `~/.prometheus/logs/` or the terminal. The logs redact known token shapes, but check before pasting.
+      render: shell
+  - type: input
+    id: heard-from
+    attributes:
+      label: Where did you hear about us? (optional)
+      placeholder: Hacker News / Reddit / a friend / ...
