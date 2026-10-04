@@ -106,8 +106,8 @@ class TestTheQueueNamesWhoAnswered:
         _pending(queue)
         _pending(queue, rid="def67890")
         assert await queue.approve(RID, by=Approver("telegram", "456", "will"))
-        assert await queue.deny("def67890", by=Approver("device", "d1", "iPhone"))
-        assert _answered_by(queue) == ["telegram:456", "device:d1"]
+        assert await queue.deny("def67890", by=Approver("device-token", "d1", "iPhone"))
+        assert _answered_by(queue) == ["telegram:456", "device-token:d1"]
 
     @pytest.mark.asyncio
     async def test_the_resolved_signal_names_the_approver(self, tmp_path):
@@ -132,13 +132,13 @@ class TestTheQueueNamesWhoAnswered:
 
         queue = _queue(tmp_path)
         _pending(queue, grant_file_path="/tmp/target.txt")
-        who = Approver("device", "d1", "iPhone")
+        who = Approver("device-token", "d1", "iPhone")
         await cmd_approve(queue, f"always {RID}", by=who)
         (grant,) = queue._security_gate.list_grants()
         assert grant.granted_by == who.to_record()
         # And it survives prometheus.yaml: plain data, read back as written.
         row = grant.to_config_dict()
-        assert row["granted_by"] == {"kind": "device", "id": "d1", "name": "iPhone"}
+        assert row["granted_by"] == {"kind": "device-token", "id": "d1", "name": "iPhone"}
         assert Grant.from_config_dict(row).granted_by == row["granted_by"]
 
     def test_a_grant_stored_before_this_change_still_loads(self):
@@ -187,7 +187,7 @@ class TestRestRecordsTheCredential:
         res = client.post(f"/api/approvals/{RID}/approve", json={"scope": "once"},
                           headers={"Authorization": f"Bearer {device['token']}"})
         assert res.json()["ok"] is True, res.text
-        assert _answered_by(queue) == [f"device:{device['id']}"]
+        assert _answered_by(queue) == [f"device-token:{device['id']}"]
 
     def test_a_deny_with_a_device_token_is_recorded(self, tmp_path, monkeypatch):
         queue = _queue(tmp_path)
@@ -197,7 +197,7 @@ class TestRestRecordsTheCredential:
         res = client.post(f"/api/approvals/{RID}/deny",
                           headers={"Authorization": f"Bearer {device['token']}"})
         assert res.json()["ok"] is True, res.text
-        assert _answered_by(queue) == [f"device:{device['id']}"]
+        assert _answered_by(queue) == [f"device-token:{device['id']}"]
 
     def test_open_mode_is_recorded_as_open_and_still_works(
         self, tmp_path, monkeypatch,

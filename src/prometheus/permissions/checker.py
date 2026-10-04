@@ -380,6 +380,11 @@ class Grant:
     # now set at construction by ``derive_grant``; neither is a caller's
     # responsibility.
     widened: bool | None = None
+    # WHO granted it (W4, record step): the approver's plain record
+    # ({kind, id, name}) — never the dataclass, because prometheus.yaml is
+    # written with yaml.dump and re-read with safe_load. None on grants made
+    # before this existed, and on grants built outside an approval.
+    granted_by: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         # Generated here rather than at the call site so EVERY construction
@@ -457,6 +462,9 @@ class Grant:
             # their shape when there is nothing to say.
             **({"widened": self.widened}
                if self.widened is not None else {}),
+            # Same rule: written only when known.
+            **({"granted_by": dict(self.granted_by)}
+               if self.granted_by is not None else {}),
         }
 
     @classmethod
@@ -514,6 +522,10 @@ class Grant:
             # relabel every pre-existing directory grant as an exact-file one.
             widened=(
                 bool(d["widened"]) if "widened" in d else None
+            ),
+            granted_by=(
+                {str(k): str(v) for k, v in d["granted_by"].items()}
+                if isinstance(d.get("granted_by"), dict) else None
             ),
         )
 
@@ -1414,6 +1426,8 @@ class SecurityGate:
                     # Adopt the newer request as the provenance for the
                     # upgrade — it is the approval that widened the duration.
                     existing.request_id = grant.request_id or existing.request_id
+                    # ...and the person who gave it, for the same reason.
+                    existing.granted_by = grant.granted_by or existing.granted_by
                 return existing
         self._grants.append(grant)
         return grant

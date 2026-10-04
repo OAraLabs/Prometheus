@@ -2565,7 +2565,12 @@ class TelegramAdapter(BasePlatformAdapter):
         # parses the scope verb itself.
         arg_text = " ".join(args[1:]) if len(args) >= 2 else ""
         queue = getattr(self, "_approval_queue", None)
-        text = await _cmds.cmd_approve(queue, arg_text)
+        from prometheus.permissions import approver as _approver
+
+        # The SENDER, not the chat: an allowed group chat has many members
+        # (W4 — recorded now, checked later).
+        text = await _cmds.cmd_approve(
+            queue, arg_text, by=_approver.telegram(update.effective_user))
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
     def _registered_commands(self) -> list[str]:
@@ -2637,7 +2642,10 @@ class TelegramAdapter(BasePlatformAdapter):
         args = (update.message.text or "").split()
         request_id = args[1] if len(args) >= 2 else ""
         queue = getattr(self, "_approval_queue", None)
-        text = await _cmds.cmd_deny(queue, request_id)
+        from prometheus.permissions import approver as _approver
+
+        text = await _cmds.cmd_deny(
+            queue, request_id, by=_approver.telegram(update.effective_user))
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_pending(

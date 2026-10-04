@@ -31,6 +31,10 @@ from prometheus.permissions.approval_queue import (
     approve_verbs, normalise_scope)
 from prometheus.permissions.audit import AuditDecision, AuditLogger
 from prometheus.permissions.checker import SecurityGate
+from prometheus.permissions.approver import in_process
+
+#: Who answers in these tests: an in-process caller (W4 records it).
+BY = in_process("test")
 
 
 @pytest.fixture
@@ -86,7 +90,7 @@ async def test_approval_writes_a_confirm_approved_row(queue, tmp_path):
     rid = await _request(queue, grant_file_path=str(target))
     assert _rows(queue, AuditDecision.CONFIRM_APPROVED) == []
 
-    await cmds.cmd_approve(queue, f"always {rid}")
+    await cmds.cmd_approve(queue, f"always {rid}", by=BY)
 
     rows = _rows(queue, AuditDecision.CONFIRM_APPROVED)
     assert len(rows) == 1, "no confirm_approved row — the resolution half is silent again"
@@ -100,7 +104,7 @@ async def test_approval_writes_a_confirm_approved_row(queue, tmp_path):
 @pytest.mark.asyncio
 async def test_denial_writes_a_confirm_rejected_row(queue):
     rid = await _request(queue)
-    await queue.deny(rid)
+    await queue.deny(rid, by=BY)
     rows = _rows(queue, AuditDecision.CONFIRM_REJECTED)
     assert len(rows) == 1, "a denial left no record"
     assert f"request={rid}" in rows[0][2]
@@ -133,7 +137,7 @@ async def test_scope_distinguishes_always_that_wrote_no_grant(queue):
     indistinguishable in the store from `always` never having been invoked —
     and telling those apart cost a live probe."""
     rid = await _request(queue)  # no target -> rule 4 -> no grant
-    await cmds.cmd_approve(queue, f"always {rid}")
+    await cmds.cmd_approve(queue, f"always {rid}", by=BY)
 
     rows = _rows(queue, AuditDecision.CONFIRM_APPROVED)
     assert len(rows) == 1
@@ -223,7 +227,7 @@ async def test_every_offered_verb_is_accepted_by_the_rest_validator(queue, tmp_p
             f"the prompt offers {verb!r} and the shared validator rejects it "
             f"— the vocabularies have drifted again"
         )
-    await queue.deny(rid)
+    await queue.deny(rid, by=BY)
 
 
 def test_unknown_verbs_are_still_rejected():

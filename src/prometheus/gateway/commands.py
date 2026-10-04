@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from prometheus.config.paths import get_wiki_root
+from prometheus.permissions.approver import Approver
 
 if TYPE_CHECKING:
     from prometheus.tools.base import ToolRegistry
@@ -2590,7 +2591,7 @@ class ApproveOutcome:
 
 
 async def approve_detail(
-    queue: Any, arg_text: str, *, prefix: str = "/"
+    queue: Any, arg_text: str, *, by: Approver, prefix: str = "/"
 ) -> ApproveOutcome:
     """Approve a pending tool request (shared /approve core).
 
@@ -2624,7 +2625,7 @@ async def approve_detail(
         approved: list[str] = []
         for act in pending:
             rid = getattr(act, "request_id", "")
-            if rid and await queue.approve(rid):
+            if rid and await queue.approve(rid, by=by):
                 approved.append(rid)
         if not approved:
             return ApproveOutcome("No pending approval requests.")
@@ -2721,12 +2722,12 @@ async def approve_detail(
     # wrote no grant apart from an "always" that was never invoked.
     # SPRINT-CONSENT: `widen` is the opt-in directory semantic ("always here").
     grant = (
-        derive_grant(action, verb=scope)
+        derive_grant(action, verb=scope, granted_by=by.to_record())
         if action is not None and scope != "once" and gate is not None
         else None
     )
 
-    ok = await queue.approve(request_id, scope=scope, grant=grant)
+    ok = await queue.approve(request_id, scope=scope, grant=grant, by=by)
     if not ok:
         return ApproveOutcome(f"No pending request: {request_id}")
     if scope == "once" or action is None:
@@ -2767,7 +2768,9 @@ async def approve_detail(
         grant_id=effective.grant_id,
     )
 
-async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
+async def cmd_approve(
+    queue: Any, arg_text: str, *, by: Approver, prefix: str = "/",
+) -> str:
     """Approve a pending tool request (shared /approve core) — prose only.
 
     The chat gateways want a string and nothing else, so this projection keeps
@@ -2776,7 +2779,7 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     second implementation is exactly what drifted the verb list from the REST
     validator the day #232 landed.
     """
-    return (await approve_detail(queue, arg_text, prefix=prefix)).message
+    return (await approve_detail(queue, arg_text, by=by, prefix=prefix)).message
 
 
 
@@ -2837,7 +2840,9 @@ def cmd_revoke(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     return f"Failed to revoke {token}."
 
 
-async def cmd_deny(queue: Any, request_id: str, *, prefix: str = "/") -> str:
+async def cmd_deny(
+    queue: Any, request_id: str, *, by: Approver, prefix: str = "/",
+) -> str:
     """Deny a pending tool request (shared /deny core).
 
     The id is optional on the same terms as :func:`cmd_approve` — resolved
@@ -2864,7 +2869,7 @@ async def cmd_deny(queue: Any, request_id: str, *, prefix: str = "/") -> str:
         request_id = getattr(pending[0], "request_id", "")
         if not request_id:
             return f"Usage: {prefix}deny [id]"
-    ok = await queue.deny(request_id)
+    ok = await queue.deny(request_id, by=by)
     if ok:
         return f"Denied: {request_id}"
     return f"No pending request: {request_id}"

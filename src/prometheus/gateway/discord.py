@@ -1572,10 +1572,13 @@ class DiscordAdapter(BasePlatformAdapter):
     async def _app_approve(self, interaction: Any, args: str) -> None:
         from prometheus.gateway import commands as _cmds
 
-        # Full args text — cmd_approve parses the scope verb itself.
+        from prometheus.permissions import approver as _approver
+
+        # Full args text — cmd_approve parses the scope verb itself. The
+        # invoking USER is recorded, not the channel (W4).
         text = await _cmds.cmd_approve(
             getattr(self, "_approval_queue", None), args,
-            prefix=OPS_PREFIX,
+            by=_approver.discord(interaction), prefix=OPS_PREFIX,
         )
         await self._respond(interaction, text)
 
@@ -1592,9 +1595,11 @@ class DiscordAdapter(BasePlatformAdapter):
         from prometheus.gateway import commands as _cmds
 
         request_id = args.split()[0] if args else ""
+        from prometheus.permissions import approver as _approver
+
         text = await _cmds.cmd_deny(
             getattr(self, "_approval_queue", None), request_id,
-            prefix=OPS_PREFIX,
+            by=_approver.discord(interaction), prefix=OPS_PREFIX,
         )
         await self._respond(interaction, text)
 

@@ -4415,7 +4415,9 @@ def create_app(
         return [queue.serialize_pending(a) for a in queue.list_pending()]
 
     @app.post("/api/approvals/{request_id}/approve")
-    async def approve_action(request_id: str, body: dict | None = None):
+    async def approve_action(
+        request_id: str, request: Request, body: dict | None = None,
+    ):
         """Approve a pending request.
 
         Body (optional): ``{"scope": <verb>}`` where <verb> is one of
@@ -4475,7 +4477,13 @@ def create_app(
         # body only on the HTTP-error path, and beacon-ios decodes {ok} alone,
         # discards it, and labels the row from the scope the operator ASKED
         # for. See ApproveOutcome for why this is a shape and not a wording.
-        outcome = await _cmds.approve_detail(queue, arg_text)
+        # WHO answered — the credential the auth middleware resolved: a
+        # device, the API token, or none at all (open mode). Recorded, never
+        # refused, in this step (W4, docs/design/approver-credential.md).
+        from prometheus.permissions import approver as _approver
+
+        outcome = await _cmds.approve_detail(
+            queue, arg_text, by=_approver.from_request(request))
         return {
             "ok": outcome.resolved,
             "remembered": outcome.remembered,
@@ -4545,11 +4553,13 @@ def create_app(
         return {"ok": True, "id": grant_id, "revoked": described}
 
     @app.post("/api/approvals/{request_id}/deny")
-    async def deny_action(request_id: str):
+    async def deny_action(request_id: str, request: Request):
         queue = app.state.approval_queue
         if not queue:
             return JSONResponse(status_code=404, content={"error": "approval queue not enabled"})
-        ok = await queue.deny(request_id)
+        from prometheus.permissions import approver as _approver
+
+        ok = await queue.deny(request_id, by=_approver.from_request(request))
         return {"ok": ok}
 
     # ── Chat ───────────────────────────────────────────────────────

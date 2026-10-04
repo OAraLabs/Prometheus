@@ -66,11 +66,13 @@ class _CapturingAudit:
     def __init__(self) -> None:
         self.rows: list[dict] = []
 
-    def log(self, *, tool_name, decision, trust_level, reason, tool_input=None):
+    def log(self, *, tool_name, decision, trust_level, reason, tool_input=None,
+            user_id=None):
         self.rows.append({
             "tool": tool_name,
             "decision": getattr(decision, "value", str(decision)),
             "reason": reason,
+            "user_id": user_id,
         })
 
 
@@ -115,7 +117,10 @@ async def _probe(ctx, queue, audit, label, tool, args, *, scope):
     reply = None
     if rid is not None:
         arg_text = rid if scope == "once" else f"{scope} {rid}"
-        reply = await cmd_approve(queue, arg_text)
+        from prometheus.permissions.approver import in_process
+
+        reply = await cmd_approve(queue, arg_text,
+                                  by=in_process("computer_use_grant_probe"))
     result = await call
     return {
         "label": label,
