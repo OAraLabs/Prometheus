@@ -514,6 +514,10 @@ class ComputerTaskRunner:
         self.proposals: dict[tuple[str, str], Any] = {}
         #: The cockpit's action log (computer.livestream), or None.
         self.live: Any = None
+        #: Fire-and-forget work (a stop's prompt denials). Held here because
+        #: the event loop keeps only a WEAK reference to a task: one nobody
+        #: holds can be collected before it runs.
+        self._background: set[asyncio.Task] = set()
 
     # ── health and discovery ────────────────────────────────────────────
 
@@ -611,9 +615,8 @@ class ComputerTaskRunner:
         binding = self._bindings.pop(session_id, None)
         if binding is None:
             return False
-        loop = _running_loop()
-        if self.live is not None and loop is not None:
-            loop.create_task(self.live.binding(binding, "off"))
+        if self.live is not None:
+            self._spawn(self.live.binding(binding, "off"))
         return True
 
     # ── tasks ───────────────────────────────────────────────────────────
@@ -700,11 +703,18 @@ class ComputerTaskRunner:
         if task is None or task.status != "running":
             return False
         task.stop_requested = True
-        loop = _running_loop()
-        if loop is not None:
-            loop.create_task(self.channel.deny_task(
-                task_id, by=in_process("computer-stop")))
+        self._spawn(self.channel.deny_task(task_id,
+                                           by=in_process("computer-stop")))
         return True
+
+    def _spawn(self, coro: Any) -> None:
+        loop = _running_loop()
+        if loop is None:
+            coro.close()
+            return
+        job = loop.create_task(coro)
+        self._background.add(job)
+        job.add_done_callback(self._background.discard)
 
     def stop_session(self, session_id: str) -> bool:
         """Stop every running task in a chat session (the chat Stop)."""
