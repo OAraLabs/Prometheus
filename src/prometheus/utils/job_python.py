@@ -1,4 +1,4 @@
-"""A daemon-run job's ``python3`` is the daemon's own interpreter.
+"""A cron job's ``python3`` is the daemon's own interpreter.
 
 WHY. The deployed daemon runs from a venv built from ``uv.lock``, and its
 systemd drop-in sets ``PYTHONNOUSERSITE=1`` (``scripts/deploy.sh`` B3, gate G1:
@@ -19,10 +19,23 @@ wherever it says ``python3``: ``cd x && python3``, ``timeout 60 python3``,
 ``env python3``. An absolute interpreter path is the job author's choice and
 is left alone.
 
-Used by the cron scheduler (``gateway/cron_scheduler.execute_job``) and the
-background-task manager (``tasks/manager._start_process``), the two places the
-daemon runs job commands. The command is vetted, logged and recorded as
-written; only the shell that runs it is changed.
+CRON ONLY (Will, 2026-10-04). Used by the cron scheduler
+(``gateway/cron_scheduler.execute_job``) and nowhere else. The command is
+vetted, logged and recorded as written; only the shell that runs it changes.
+
+* NOT background tasks (``tasks/manager``). The model can start those, and
+  model-run code must never get the daemon's own venv interpreter: a
+  ``python3 -m pip install`` would install into the production venv. A task's
+  ``python3`` stays whatever its PATH finds.
+* NOT the agent's ``bash`` tool, for the same reason; it is not a job.
+
+ACCEPTED TRADE-OFF (Will, 2026-10-04). A cron job that needs a package
+installed only for the SYSTEM Python (an apt ``python3-*`` package) and not in
+the venv will no longer find it under bare ``python3``. Such a job names its
+interpreter with an absolute path (``/usr/bin/python3``), which this leaves
+alone. The alternative, giving cron children back the user site, would put the
+user-site packages that sit below the repo's security floors (the reason for
+gate G1) back under every job.
 """
 
 from __future__ import annotations
@@ -46,7 +59,7 @@ _SHIM_DIR = "job-python"
 def _wrapper(interpreter: str) -> str:
     return (
         "#!/bin/sh\n"
-        "# Written by Prometheus (utils/job_python.py): in a daemon-run job,\n"
+        "# Written by Prometheus (utils/job_python.py): in a cron job,\n"
         "# `python3` is the daemon's own interpreter. Rewritten when it changes.\n"
         f"exec {shlex.quote(interpreter)} \"$@\"\n"
     )
@@ -77,7 +90,7 @@ def ensure_python_shims() -> Path:
 
 
 def job_shell_command(command: str) -> str:
-    """The script a job's ``bash -lc`` runs: ``command``, with ``python3`` = the daemon's.
+    """The script a cron job's ``bash -lc`` runs: ``command``, with ``python3`` = the daemon's.
 
     If the wrappers cannot be written the command runs unchanged and the miss
     is a WARNING: a job is never refused over this.

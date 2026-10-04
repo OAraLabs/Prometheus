@@ -1,4 +1,4 @@
-"""A daemon-run job's `python3` is the daemon's own interpreter.
+"""A cron job's `python3` is the daemon's own interpreter; a task's is not.
 
 THE DEFECT (found 2026-10-03). Since the venv deploys (``scripts/deploy.sh``),
 the daemon's systemd drop-in sets ``PYTHONNOUSERSITE=1`` so the daemon reads
@@ -8,14 +8,19 @@ were in the user site the flag switches off. ``daily_news_briefing_pm``
 (``python3 -m prometheus.jobs.daily_briefing``) then died on
 ``No module named 'pydantic'`` every night from 2026-09-24 to 2026-10-03.
 
-THE FIX. The cron scheduler and the background-task manager run every job
-command with ``python3`` and ``python`` resolving to the daemon's own
-interpreter (``sys.executable``: the deployed venv), through wrapper scripts on
-PATH that the job's login shell cannot shadow. An absolute interpreter path in
-a command is the job author's choice and is left alone.
+THE FIX. The cron scheduler runs every job command with ``python3`` and
+``python`` resolving to the daemon's own interpreter (``sys.executable``: the
+deployed venv), through wrapper scripts on PATH that the job's login shell
+cannot shadow. An absolute interpreter path in a command is the job author's
+choice and is left alone.
+
+CRON ONLY (Will, 2026-10-04). Background tasks can be started by the model,
+and model-run code must never get the daemon's own venv interpreter (a
+``python3 -m pip install`` would target the production venv), so a task's
+``python3`` is exactly what a plain shell finds.
 
 These tests drive real ``/bin/bash -lc`` shells, the real ``execute_job`` and
-the real ``BackgroundTaskManager``, and read what the job actually ran.
+the real ``BackgroundTaskManager``, and read what each actually ran.
 """
 
 from __future__ import annotations
@@ -154,18 +159,24 @@ class TestCronJob:
         assert entry["command"] == job["command"], "history keeps the command as written"
 
 
-class TestBackgroundTask:
+class TestBackgroundTaskIsUnchanged:
 
-    async def test_a_python3_task_runs_in_the_daemon_interpreter(self, tmp_path):
+    async def test_a_python3_task_gets_what_a_plain_shell_finds(self, tmp_path):
+        """Never the daemon's venv: the model can start tasks (Will, 2026-10-04)."""
         from prometheus.tasks.manager import BackgroundTaskManager
         from prometheus.tasks.store import TaskStore
         from tests.test_managed_tasks import AllowGate, _wait_terminal
 
+        command = f'python3 -c "{PROBE}"; echo "PATH=$PATH"'
+        plain = _bash(command)
         mgr = BackgroundTaskManager(store=TaskStore(), security_gate=AllowGate())
-        rec = await mgr.create_shell_task(
-            command=f'python3 -c "import pydantic; {PROBE}"', description="py task",
-            cwd=str(tmp_path))
+        rec = await mgr.create_shell_task(command=command, description="py task",
+                                          cwd=str(tmp_path))
         done = await _wait_terminal(mgr, rec.id)
         output = Path(done.output_file).read_text()
         assert done.return_code == 0, output
-        assert output.strip().splitlines()[-1] == sys.executable
+        task_python, task_path = output.strip().splitlines()[-2:]
+        assert task_python == plain.stdout.strip().splitlines()[0], \
+            "a task's python3 is exactly what a plain login shell finds"
+        assert task_python != sys.executable, "never the daemon's own interpreter"
+        assert "job-python" not in task_path, "the cron wrappers are not on a task's PATH"
