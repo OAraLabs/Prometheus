@@ -160,6 +160,27 @@ class TestCronJob:
         assert entry["stdout"].strip() == sys.executable
         assert entry["command"] == job["command"], "history keeps the command as written"
 
+    async def test_a_cron_job_the_model_created_keeps_its_own_python3(self, tmp_path,
+                                                                      monkeypatch):
+        """Model-run code never gets the daemon's venv interpreter (Will,
+        2026-10-04) — the reason tasks don't. A job cron_create stored
+        (origin "model", #659) is model-run code, so it doesn't either."""
+        from prometheus.gateway import cron_scheduler as cs
+
+        monkeypatch.setattr(cs, "vet_cron_command", lambda command, cwd=None: (True, ""))
+        monkeypatch.setattr(cs, "mark_job_run", lambda *a, **k: None)
+        command = f'python3 -c "{PROBE}"; echo "PATH=$PATH"'
+        plain = _bash(command)
+        job = {"name": "model-job", "command": command, "cwd": str(tmp_path),
+               "enabled": True, "origin": "model"}
+        entry = await cs.execute_job(job)
+        assert entry["returncode"] == 0, entry["stderr"]
+        job_python, job_path = entry["stdout"].strip().splitlines()[-2:]
+        assert job_python == plain.stdout.strip().splitlines()[0], \
+            "a model job's python3 is exactly what a plain login shell finds"
+        assert job_python != sys.executable, "never the daemon's own interpreter"
+        assert "job-python" not in job_path, "the cron wrappers are not on its PATH"
+
 
 class TestBackgroundTaskIsUnchanged:
 

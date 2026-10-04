@@ -28,6 +28,11 @@ vetted, logged and recorded as written; only the shell that runs it changes.
   ``python3 -m pip install`` would install into the production venv. A task's
   ``python3`` stays whatever its PATH finds.
 * NOT the agent's ``bash`` tool, for the same reason; it is not a job.
+* NOT a cron job the MODEL created (``cron_create`` stores ``origin:
+  "model"``; see ``cron_service.is_model_job``), for the same reason again:
+  it is model-run code, and it runs behind the shell floor instead. Only the
+  operator's jobs — created through ``POST /api/cron``, or stored before jobs
+  recorded who wrote them — get the daemon's interpreter.
 
 ACCEPTED TRADE-OFF (Will, 2026-10-04). A cron job that needs a package
 installed only for the SYSTEM Python (an apt ``python3-*`` package) and not in
