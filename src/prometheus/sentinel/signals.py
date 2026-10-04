@@ -103,6 +103,28 @@ class SignalBus:
         except Exception:
             return None
 
+    @staticmethod
+    def at_rest(signal: ActivitySignal) -> ActivitySignal:
+        """The copy that is STORED (``signal_events``) and kept for hot
+        reads — never what goes out live.
+
+        A desktop task's ``approval_pending`` must show the text it would
+        type, live, for consent to mean anything (computer-use v1.1 §5.2.2).
+        That is the one carve-out, and it ends at the wire: the stored copy
+        carries ``text_chars`` and no arguments, so no backfill can ever
+        return them.
+        """
+        payload = signal.payload
+        if (signal.kind == "approval_pending" and isinstance(payload, dict)
+                and payload.get("task_id") is not None
+                and payload.get("arguments") is not None):
+            stored = dict(payload)
+            stored["arguments"] = None
+            return ActivitySignal(kind=signal.kind, payload=stored,
+                                  source=signal.source,
+                                  timestamp=signal.timestamp)
+        return signal
+
     async def emit(self, signal: ActivitySignal) -> None:
         """Broadcast *signal* to matching subscribers and wildcards.
 
@@ -112,16 +134,17 @@ class SignalBus:
         """
         # ── Persist first (cold tail / restart-durable) ──────────────
         tel = self._resolve_telemetry()
+        stored = self.at_rest(signal)
         if tel is not None:
             tel.record_signal_event(
-                signal_type=signal.kind,
-                payload=signal.payload,
-                source_subsystem=signal.source,
-                timestamp_iso=_signal_to_iso(signal.timestamp),
+                signal_type=stored.kind,
+                payload=stored.payload,
+                source_subsystem=stored.source,
+                timestamp_iso=_signal_to_iso(stored.timestamp),
             )
 
         # ── Then hot cache + broadcast (existing behaviour) ──────────
-        self._history.append(signal)
+        self._history.append(stored)
 
         targets = list(self._subscribers.get(signal.kind, []))
         targets.extend(self._subscribers.get("*", []))

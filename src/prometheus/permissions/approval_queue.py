@@ -86,6 +86,10 @@ class PendingAction:
     #: is the lasting consent; ``prospective_extents`` offers nothing and the
     #: channel refuses any scope but once.
     once_only: bool = False
+    #: The length of the text a desktop action would type, counted from the
+    #: RAW text. What a stored or backfilled copy carries instead of the text
+    #: itself (computer-use v1.1 §5.2.2).
+    text_chars: int | None = None
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _result: ApprovalResult = ApprovalResult.TIMEOUT
 
@@ -483,7 +487,10 @@ class ApprovalQueue:
             # that it is approve-once. ABSENT for every other request, so no
             # existing payload changes shape.
             **({"task_id": action.task_id, "session_id": action.session_id,
-                "once_only": True}
+                "once_only": True, "text_chars": action.text_chars,
+                "extent": (action.grant_computer_action.value
+                           if action.grant_computer_action is not None
+                           else None)}
                if action.task_id is not None else {}),
         }
 

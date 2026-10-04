@@ -3207,7 +3207,10 @@ def create_app(
     # ── Events (SignalBus Persistence sprint) ──────────────────────
 
     @app.get("/api/events/recent")
-    async def get_events_recent(limit: int = 50, type: str | None = None):
+    async def get_events_recent(
+        limit: int = 50, type: str | None = None, types: str | None = None,
+        since: str | None = None, session_id: str | None = None,
+    ):
         """Hydrate Beacon's activity feed from the durable signal_events tail.
 
         Closes the "blank activity feed until something happens" UX gap:
@@ -3218,6 +3221,12 @@ def create_app(
           - limit (int, default 50, capped to 500): max rows.
           - type (str, optional): single signal_type filter
             (``skill_created``, ``memory_updated``, …).
+          - types (str, optional): several, comma-separated; wins over type.
+          - since (ISO8601, optional): only rows at or after it.
+          - session_id (str, optional): only rows whose payload names that
+            chat session — a reconnecting Beacon backfills one
+            conversation's desktop action log with
+            ``types=computer_step,computer_task_ended&session_id=…&since=…``.
         """
         from prometheus.telemetry.tracker import get_telemetry_handle
 
@@ -3225,9 +3234,13 @@ def create_app(
         if tel is None:
             return []
         capped_limit = max(1, min(int(limit), 500))
+        wanted = [t.strip() for t in (types or "").split(",") if t.strip()]
         rows = tel.signal_events_since(
+            since,
             signal_type=type,
+            signal_types=wanted or None,
             limit=capped_limit,
+            session_id=session_id or None,
         )
         # Already shaped as the spec expects (dicts with id, timestamp,
         # signal_type, payload, source_subsystem). Return as-is.

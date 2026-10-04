@@ -1595,6 +1595,29 @@ class ToolCallTelemetry:
                 pass
             return None
 
+    def prune_signal_events(
+        self, *, kinds: tuple[str, ...] | list[str], session_id: str, keep: int,
+    ) -> int:
+        """Keep the newest *keep* rows of *kinds* for one chat session; delete
+        the rest. Returns how many were deleted. Other sessions and other
+        kinds are untouched. (computer-use v1.1: the desktop action log's
+        ``computer_use.action_log.keep_per_session``.)"""
+        if not kinds or not session_id or keep <= 0:
+            return 0
+        marks = ",".join("?" * len(kinds))
+        scope = (f"signal_type IN ({marks}) AND "
+                 f"json_extract(payload, '$.session_id') = ?")
+        try:
+            cur = self._conn.execute(
+                f"DELETE FROM signal_events WHERE {scope} AND id NOT IN ("
+                f"SELECT id FROM signal_events WHERE {scope} "
+                f"ORDER BY timestamp DESC, id DESC LIMIT ?)",
+                (*kinds, session_id, *kinds, session_id, int(keep)))
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+        except sqlite3.DatabaseError:
+            return 0
+
     def signal_events_since(
         self,
         since: str | None = None,
@@ -1602,6 +1625,7 @@ class ToolCallTelemetry:
         signal_type: str | None = None,
         signal_types: list[str] | None = None,
         limit: int = 100,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return ``signal_events`` rows, newest first.
 
@@ -1611,6 +1635,9 @@ class ToolCallTelemetry:
             signal_types: multi-type filter; takes precedence over
                 ``signal_type`` if both are supplied.
             limit: max rows to return.
+            session_id: only rows whose payload names this chat session
+                (``payload.session_id``) — how a reconnecting Beacon backfills
+                one conversation's desktop action log.
 
         The composite index ``idx_signal_events_type_time`` makes the
         single-type + ``ORDER BY timestamp DESC`` path index-only.
@@ -1631,9 +1658,12 @@ class ToolCallTelemetry:
         elif signal_type is not None:
             where.append("signal_type = ?")
             params.append(signal_type)
+        if session_id is not None:
+            where.append("json_extract(payload, '$.session_id') = ?")
+            params.append(session_id)
         if where:
             query_parts.append("WHERE " + " AND ".join(where))
-        query_parts.append("ORDER BY timestamp DESC LIMIT ?")
+        query_parts.append("ORDER BY timestamp DESC, id DESC LIMIT ?")
         params.append(max(1, int(limit)))
         query = " ".join(query_parts)
 
