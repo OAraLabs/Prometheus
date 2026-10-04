@@ -329,6 +329,27 @@ def test_a_probe_that_raises_is_recorded_never_raised():
     assert "probe exploded" in str(snap["checks"])
 
 
+def test_an_unexpected_error_after_start_releases_the_runtime():
+    """Whatever breaks mid-probe, a started runtime is not left running
+    unbound behind a "down" answer."""
+    integ, made, _ = _make()
+
+    def broken():
+        raise ValueError("driver returned garbage")
+    real_factory = integ._adapter_factory
+
+    def factory(target):
+        adapter = real_factory(target)
+        adapter.list_apps = broken
+        return adapter
+    integ._adapter_factory = factory
+    snap = _probe(integ)
+    assert snap["state"] == "down"
+    assert "driver returned garbage" in str(snap["checks"])
+    assert made[0].started == 1 and made[0].shut == 1
+    assert integ.driver() is None
+
+
 def test_a_hung_probe_is_bounded(monkeypatch):
     import time as _time
 

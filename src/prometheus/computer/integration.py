@@ -309,7 +309,11 @@ class ComputerIntegration:
         no point starting a runtime on a dead display — but the MCP check is
         independent and always runs."""
         with self._run_lock:
-            checks = self._chain()
+            try:
+                checks = self._chain()
+            except Exception as exc:  # noqa: BLE001 — recorded, never raised
+                checks = [Check("probe", DOWN,
+                                f"{exc.__class__.__name__}: {exc}")]
             checks.append(self._mcp_check())
             if any(c.state == DOWN for c in checks):
                 # A runtime that failed its probe is not kept, and nothing is
