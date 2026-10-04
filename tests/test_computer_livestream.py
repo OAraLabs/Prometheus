@@ -28,13 +28,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.test_computer_door import (
+from tests.test_computer_door import (  # noqa: F401 - _linux_site_rule is an autouse fixture
     APP,
     PERSON,
     SESSION,
     TYPED,
     _answer,
     _bind,
+    _linux_site_rule,
     _next_pending,
     _rig,
     _start,
