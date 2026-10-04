@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
+from prometheus.permissions.approver import Approver
 from prometheus.permissions.argument_view import (
     format_arguments,
     redact_arguments,
@@ -152,6 +153,7 @@ def stored_scope_for(verb: str) -> str:
 def derive_grant(
     action: PendingAction, root: str | None = None, *,
     verb: str = SCOPE_ONCE,
+    granted_by: dict[str, str] | None = None,
 ):
     """Build the Grant a scoped approval would remember, or None.
 
@@ -202,6 +204,7 @@ def derive_grant(
             value=extent.value,
             tool_name=action.tool_name,
             request_id=action.request_id,
+            granted_by=granted_by,
             # An app:verb:delivery extent covers exactly itself. There is no
             # wider version of it to opt into, so `… here` cannot widen it.
             widened=False,
@@ -214,6 +217,7 @@ def derive_grant(
             value=str(_Path(root).expanduser().resolve()),
             tool_name=action.tool_name,
             request_id=action.request_id,
+            granted_by=granted_by,
             # A root IS a subtree by construction — that is what a root means.
             widened=True,
             scope=stored_scope_for(verb),
@@ -245,6 +249,7 @@ def derive_grant(
             value=value,
             tool_name=action.tool_name,
             request_id=action.request_id,
+            granted_by=granted_by,
             # The one place that KNOWS. describe() used to rediscover this
             # with a stat and got it wrong whenever the directory did not
             # exist yet — which, for a widening approval, is the usual case,
@@ -259,6 +264,7 @@ def derive_grant(
             value=action.grant_command,
             tool_name="bash",
             request_id=action.request_id,
+            granted_by=granted_by,
             scope=stored_scope_for(verb),
         )
     # SPRINT-CONSENT Phase 1 — RULE 4 PRODUCES NO GRANT.
@@ -685,6 +691,7 @@ class ApprovalQueue:
         *,
         scope: str | None = None,
         grant=None,
+        by=None,
     ) -> None:
         """Write the resolution row. SPRINT-CONSENT Phase 3.
 
@@ -723,14 +730,23 @@ class ApprovalQueue:
                 trust_level=getattr(gate, "_mode_trust_level", lambda: 0)(),
                 reason=f"{decision.value}: " + ", ".join(bits),
                 tool_input=target or None,
+                # WHO answered (W4, record step). The column existed all
+                # along and this row never filled it. None only on expiry,
+                # where nobody answered.
+                user_id=by.label if by is not None else None,
             )
         except Exception:  # pragma: no cover - audit must not mask a decision
             logger.debug("approval audit write failed", exc_info=True)
 
     async def approve(
-        self, request_id: str, *, scope: str | None = None, grant=None
+        self, request_id: str, *, by: Approver,
+        scope: str | None = None, grant=None,
     ) -> bool:
-        """Approve a pending action. Returns True if found and approved."""
+        """Approve a pending action. Returns True if found and approved.
+
+        ``by`` is REQUIRED: every answer records who gave it (W4). Nothing is
+        refused on its account in this step — see permissions/approver.py.
+        """
         from prometheus.permissions.audit import AuditDecision
 
         # BEFORE any mutation, so a raise leaves the request PENDING and it
@@ -754,15 +770,20 @@ class ApprovalQueue:
         action._result = ApprovalResult.APPROVED
         action._event.set()
         self._audit_resolution(
-            action, AuditDecision.CONFIRM_APPROVED, scope=scope, grant=grant
+            action, AuditDecision.CONFIRM_APPROVED, scope=scope, grant=grant,
+            by=by,
         )
         await self._emit("approval_resolved", {
             "request_id": request_id, "resolution": "approved", "scope": scope,
+            "approved_by": by.to_record(),
         })
         return True
 
-    async def deny(self, request_id: str) -> bool:
-        """Deny a pending action. Returns True if found and denied."""
+    async def deny(self, request_id: str, *, by: Approver) -> bool:
+        """Deny a pending action. Returns True if found and denied.
+
+        ``by`` is REQUIRED, as for :meth:`approve`.
+        """
         from prometheus.permissions.audit import AuditDecision
 
         action = self.pending.get(request_id)
@@ -770,9 +791,10 @@ class ApprovalQueue:
             return False
         action._result = ApprovalResult.DENIED
         action._event.set()
-        self._audit_resolution(action, AuditDecision.CONFIRM_REJECTED)
+        self._audit_resolution(action, AuditDecision.CONFIRM_REJECTED, by=by)
         await self._emit("approval_resolved", {
             "request_id": request_id, "resolution": "denied",
+            "denied_by": by.to_record(),
         })
         return True
 

@@ -28,6 +28,10 @@ from prometheus.gateway import commands as cmds
 from prometheus.permissions.approval_queue import (
     ApprovalQueue, PendingAction, derive_grant, prospective_extents)
 from prometheus.permissions.checker import Grant, SecurityGate
+from prometheus.permissions.approver import in_process
+
+#: Who answers in these tests: an in-process caller (W4 records it).
+BY = in_process("test")
 
 
 @pytest.fixture
@@ -74,7 +78,7 @@ async def test_persist_grant_actually_writes_to_the_config_file(config, tmp_path
     rid = await _request(q, grant_file_path=str(target))
 
     assert _disk_grants(config) == [], "config had grants before we made any"
-    await cmds.cmd_approve(q, f"always {rid}")
+    await cmds.cmd_approve(q, f"always {rid}", by=BY)
 
     on_disk = _disk_grants(config)
     assert len(on_disk) == 1, (
@@ -130,7 +134,7 @@ async def test_extent_shown_equals_extent_granted(config, tmp_path):
     action = q.pending[rid]
     shown = prospective_extents(action)["always"]
 
-    await cmds.cmd_approve(q, f"always {rid}")
+    await cmds.cmd_approve(q, f"always {rid}", by=BY)
     created = q._security_gate.list_grants()[0]
 
     assert created.describe() == shown, (
@@ -148,7 +152,7 @@ async def test_default_grants_the_exact_file_not_its_parent(config, tmp_path):
     target.write_text("x")
     q = _queue(config)
     rid = await _request(q, grant_file_path=str(target))
-    await cmds.cmd_approve(q, f"always {rid}")
+    await cmds.cmd_approve(q, f"always {rid}", by=BY)
 
     g = q._security_gate.list_grants()[0]
     assert g.value == str(target), f"expected the exact file, got {g.value!r}"
@@ -164,7 +168,7 @@ async def test_here_opts_in_to_the_directory_grant(config, tmp_path):
     target.write_text("x")
     q = _queue(config)
     rid = await _request(q, grant_file_path=str(target))
-    await cmds.cmd_approve(q, f"always here {rid}")
+    await cmds.cmd_approve(q, f"always here {rid}", by=BY)
 
     g = q._security_gate.list_grants()[0]
     assert g.value == str(target.parent), f"'here' did not widen; got {g.value!r}"
@@ -180,7 +184,7 @@ async def test_no_target_creates_no_persistent_grant(config):
     from the case carrying the least information."""
     q = _queue(config)
     rid = await _request(q)  # no grant_file_path, no grant_command
-    text = await cmds.cmd_approve(q, f"always {rid}")
+    text = await cmds.cmd_approve(q, f"always {rid}", by=BY)
 
     assert q._security_gate.list_grants() == [], "a grant was created from no target"
     assert _disk_grants(config) == [], "a grant reached the config from no target"
@@ -204,7 +208,7 @@ async def test_revocation_clears_memory_and_disk_and_survives_reload(config, tmp
     target.write_text("x")
     q = _queue(config)
     rid = await _request(q, grant_file_path=str(target))
-    await cmds.cmd_approve(q, f"always {rid}")
+    await cmds.cmd_approve(q, f"always {rid}", by=BY)
 
     gate = q._security_gate
     gid = gate.list_grants()[0].grant_id

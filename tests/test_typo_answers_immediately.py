@@ -30,6 +30,10 @@ from __future__ import annotations
 import pytest
 
 from prometheus.gateway import commands as cmds
+from prometheus.permissions.approver import in_process
+
+#: Who answers in these tests: an in-process caller (W4 records it).
+BY = in_process("test")
 
 
 class _Queue:
@@ -37,7 +41,7 @@ class _Queue:
 
     pending: dict = {}
 
-    async def approve(self, request_id, scope="once", grant=None) -> bool:
+    async def approve(self, request_id, *, by, scope="once", grant=None) -> bool:
         # Nothing pending, so a well-formed id legitimately finds no request.
         return False
 
@@ -47,7 +51,7 @@ class _Queue:
 @pytest.mark.asyncio
 async def test_bare_mistyped_scope_is_caught_not_looked_up_as_an_id():
     """THE ONE FROM THE FIELD. ``/approve awlways``, no id after it."""
-    out = await cmds.cmd_approve(_Queue(), "awlways")
+    out = await cmds.cmd_approve(_Queue(), "awlways", by=BY)
     assert "No pending request" not in out, (
         "a mistyped scope was looked up as a request id — the exact reply "
         "Will got at 01:14 for a command sent at 00:08"
@@ -60,7 +64,7 @@ async def test_bare_mistyped_scope_is_caught_not_looked_up_as_an_id():
 @pytest.mark.asyncio
 async def test_the_guard_still_fires_with_an_id_after_the_typo():
     """The case the old guard DID cover must keep working."""
-    out = await cmds.cmd_approve(_Queue(), "forever a1b2c3d4")
+    out = await cmds.cmd_approve(_Queue(), "forever a1b2c3d4", by=BY)
     assert "No pending request" not in out
 
 
@@ -71,20 +75,20 @@ async def test_the_guard_still_fires_with_an_id_after_the_typo():
     ("untl-restart", "until-restart"),
 ])
 async def test_near_misses_are_suggested(typo, expected):
-    out = await cmds.cmd_approve(_Queue(), typo)
+    out = await cmds.cmd_approve(_Queue(), typo, by=BY)
     assert expected in out, f"{typo!r} did not suggest {expected!r}: {out!r}"
 
 
 @pytest.mark.asyncio
 async def test_a_real_request_id_is_still_treated_as_an_id():
     """8-hex ids must not be mistaken for typo'd scopes."""
-    out = await cmds.cmd_approve(_Queue(), "a1b2c3d4")
+    out = await cmds.cmd_approve(_Queue(), "a1b2c3d4", by=BY)
     assert "Did you mean" not in out
 
 
 @pytest.mark.asyncio
 async def test_gibberish_falls_back_to_usage_rather_than_guessing():
-    out = await cmds.cmd_approve(_Queue(), "zzzqqqxxx")
+    out = await cmds.cmd_approve(_Queue(), "zzzqqqxxx", by=BY)
     assert "Usage" in out or "usage" in out
 
 

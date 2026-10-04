@@ -1415,9 +1415,12 @@ class SlackAdapter(BasePlatformAdapter):
 
         # Full text arg — cmd_approve parses the scope verb itself.
         text_arg = self._cmd_text(command)
+        from prometheus.permissions import approver as _approver
+
+        # The SENDER (the payload's user_id), not the channel (W4).
         text = await _cmds.cmd_approve(
             getattr(self, "_approval_queue", None), text_arg,
-            prefix=SLACK_COMMAND_PREFIX,
+            by=_approver.slack(command), prefix=SLACK_COMMAND_PREFIX,
         )
         await respond(text=text)
 
@@ -1439,9 +1442,11 @@ class SlackAdapter(BasePlatformAdapter):
 
         text_arg = self._cmd_text(command)
         request_id = text_arg.split()[0] if text_arg else ""
+        from prometheus.permissions import approver as _approver
+
         text = await _cmds.cmd_deny(
             getattr(self, "_approval_queue", None), request_id,
-            prefix=SLACK_COMMAND_PREFIX,
+            by=_approver.slack(command), prefix=SLACK_COMMAND_PREFIX,
         )
         await respond(text=text)
 

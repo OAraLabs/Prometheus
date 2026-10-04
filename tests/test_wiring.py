@@ -42,6 +42,10 @@ from prometheus.providers.base import (
 from prometheus.telemetry.tracker import ToolCallTelemetry
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolRegistry, ToolResult
 from prometheus.permissions.checker import SecurityGate
+from prometheus.permissions.approver import in_process
+
+#: Who answers in these tests: an in-process caller (W4 records it).
+BY = in_process("test")
 
 pytestmark = pytest.mark.integration
 
@@ -1319,7 +1323,7 @@ class TestSprint15cApprovalQueue:
             await asyncio.sleep(0.05)
             pending = queue.list_pending()
             assert len(pending) == 1
-            await queue.approve(pending[0].request_id)
+            await queue.approve(pending[0].request_id, by=BY)
             return await task
 
         result = asyncio.run(_test())

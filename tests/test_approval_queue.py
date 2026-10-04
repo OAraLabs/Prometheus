@@ -13,6 +13,10 @@ from prometheus.permissions.approval_queue import (
     PendingAction,
 )
 from prometheus.permissions.checker import SecurityGate
+from prometheus.permissions.approver import in_process
+
+#: Who answers in these tests: an in-process caller (W4 records it).
+BY = in_process("test")
 
 
 class TestApprovalQueue:
@@ -49,7 +53,7 @@ class TestApprovalQueue:
             assert len(pending) == 1
             request_id = pending[0].request_id
 
-            ok = await queue.approve(request_id)
+            ok = await queue.approve(request_id, by=BY)
             assert ok
 
             result = await task
@@ -68,7 +72,7 @@ class TestApprovalQueue:
             pending = queue.list_pending()
             request_id = pending[0].request_id
 
-            ok = await queue.deny(request_id)
+            ok = await queue.deny(request_id, by=BY)
             assert ok
 
             result = await task
@@ -89,7 +93,7 @@ class TestApprovalQueue:
         queue = ApprovalQueue(security_gate=SecurityGate())
 
         async def _test():
-            ok = await queue.approve("nonexistent")
+            ok = await queue.approve("nonexistent", by=BY)
             assert not ok
 
         asyncio.run(_test())

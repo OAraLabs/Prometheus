@@ -14,6 +14,10 @@ import asyncio
 
 import pytest
 from prometheus.permissions.checker import SecurityGate
+from prometheus.permissions.approver import in_process
+
+#: Who answers in these tests: an in-process caller (W4 records it).
+BY = in_process("test")
 
 
 class _Bus:
@@ -71,7 +75,7 @@ def test_approve_emits_resolved(tmp_path):
         task = asyncio.create_task(q.request_approval("bash", "rm -r /tmp/x"))
         await asyncio.sleep(0.05)
         rid = next(iter(q.pending))
-        ok = await q.approve(rid, scope="once")
+        ok = await q.approve(rid, scope="once", by=BY)
         await asyncio.wait_for(task, timeout=2)
         return ok, task.result(), rid
 
@@ -82,7 +86,8 @@ def test_approve_emits_resolved(tmp_path):
     assert result == ApprovalResult.APPROVED
     resolved = [(k, p) for k, p in bus.emitted if k == "approval_resolved"]
     assert len(resolved) == 1
-    assert resolved[0][1] == {"request_id": rid, "resolution": "approved", "scope": "once"}
+    assert resolved[0][1] == {"request_id": rid, "resolution": "approved",
+                              "scope": "once", "approved_by": BY.to_record()}
 
 
 def test_deny_emits_resolved(tmp_path):
@@ -92,7 +97,7 @@ def test_deny_emits_resolved(tmp_path):
         task = asyncio.create_task(q.request_approval("bash", "curl example.com"))
         await asyncio.sleep(0.05)
         rid = next(iter(q.pending))
-        ok = await q.deny(rid)
+        ok = await q.deny(rid, by=BY)
         await asyncio.wait_for(task, timeout=2)
         return ok, rid
 
@@ -100,7 +105,8 @@ def test_deny_emits_resolved(tmp_path):
     assert ok is True
     resolved = [(k, p) for k, p in bus.emitted if k == "approval_resolved"]
     assert len(resolved) == 1
-    assert resolved[0][1] == {"request_id": rid, "resolution": "denied"}
+    assert resolved[0][1] == {"request_id": rid, "resolution": "denied",
+                              "denied_by": BY.to_record()}
 
 
 def test_expiry_emits_resolved(tmp_path):
@@ -130,7 +136,7 @@ def test_no_bus_is_pre_push_behavior(tmp_path):
         task = asyncio.create_task(q.request_approval("bash", "ls"))
         await asyncio.sleep(0.05)
         rid = next(iter(q.pending))
-        ok = await q.approve(rid)
+        ok = await q.approve(rid, by=BY)
         await asyncio.wait_for(task, timeout=2)
         return ok
 
@@ -164,7 +170,7 @@ def test_broken_bus_warns_and_approval_still_resolves(tmp_path, caplog):
         task = asyncio.create_task(q.request_approval("bash", "ls"))
         await asyncio.sleep(0.05)
         rid = next(iter(q.pending))
-        ok = await q.approve(rid)
+        ok = await q.approve(rid, by=BY)
         await asyncio.wait_for(task, timeout=2)
         return ok
 
