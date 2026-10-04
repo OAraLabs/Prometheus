@@ -37,7 +37,10 @@ from prometheus.computer.candidates import (
 )
 from prometheus.computer.driver import Driver, StaleSnapshot, check_preconditions
 from prometheus.computer.types import Candidate
-from prometheus.permissions.computer_extent import computer_extent_for
+from prometheus.permissions.computer_extent import (
+    computer_extent_for,
+    normalise_term,
+)
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +123,29 @@ class ComputerUseLoop:
         # the event loop thread is what stalled every other task on it.
         observation = await asyncio.to_thread(
             self._driver.observe, target, app, pid, window_id)
+
+        # 1b. WHOSE WINDOW IS THIS — THE DRIVER'S ANSWER, NEVER OURS (D19) ---
+        # The extent's app term comes from the observation. If the driver
+        # named no app, or named another one, nothing here can establish
+        # what a grant or an approval would be FOR, so the window is refused
+        # rather than labelled with the caller's claim.
+        if not observation.unusable_reason:
+            reported = str(observation.app or "").strip()
+            if not reported:
+                return StepResult(
+                    status="blocked",
+                    reason=("the driver reported no application for this "
+                            "window, so the consent term cannot be "
+                            "established — refusing rather than taking the "
+                            "caller's word for it"),
+                )
+            if normalise_term(reported) != normalise_term(app):
+                return StepResult(
+                    status="blocked",
+                    reason=(f"the driver says this window belongs to "
+                            f"{reported!r}, not {app!r} — refusing to act in "
+                            f"an app nobody asked for"),
+                )
 
         # 2. BUILD -----------------------------------------------------------
         try:

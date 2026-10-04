@@ -223,3 +223,8 @@ def _normalise_term(term: str) -> str:
     is a small thing here and a real one the moment two machines exist.
     """
     return term.replace(":", "_").strip().lower()
+
+
+#: The ONE spelling rule for an extent term, public so a caller comparing an
+#: app name against the extent's app term folds both the same way.
+normalise_term = _normalise_term

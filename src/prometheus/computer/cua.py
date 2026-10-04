@@ -65,6 +65,7 @@ import logging
 import threading
 from typing import Any
 
+from prometheus.computer.discovery import AppRecord, WindowRecord
 from prometheus.computer.driver import DriverUnavailable, StaleSnapshot
 from prometheus.computer.types import Element, Observation
 
@@ -209,6 +210,36 @@ class CuaDriverAdapter:
     def __exit__(self, *exc: object) -> None:
         self.shutdown()
 
+    # ── discovery (D8) ─────────────────────────────────────────────────
+    #
+    # Read-only, and the ONLY two discovery calls: there is no launch path
+    # here, so "my editor" can resolve to a running window or to a question,
+    # never to a process this adapter started.
+
+    def list_apps(self) -> list[AppRecord]:
+        self.start()
+        try:
+            out = self._await(self._driver.list_apps(
+                _list_apps_input(self._sdk)))
+        except Exception as exc:  # noqa: BLE001
+            raise DriverUnavailable(
+                f"list_apps failed: {exc.__class__.__name__}: {exc}") from exc
+        return [_app_record(a) for a in (getattr(out, "apps", None) or [])]
+
+    def list_windows(
+        self, pid: int | None = None, on_screen_only: bool = True
+    ) -> list[WindowRecord]:
+        self.start()
+        try:
+            out = self._await(self._driver.list_windows(_list_windows_input(
+                self._sdk, pid=pid, on_screen_only=on_screen_only)))
+        except Exception as exc:  # noqa: BLE001
+            raise DriverUnavailable(
+                f"list_windows failed: {exc.__class__.__name__}: {exc}"
+            ) from exc
+        return [_window_record(w)
+                for w in (getattr(out, "windows", None) or [])]
+
     # ── the Driver Protocol ────────────────────────────────────────────
 
     def observe(
@@ -262,7 +293,11 @@ class CuaDriverAdapter:
         self._snapshots[(pid, window_id)] = snapshot_id
         return Observation(
             target=target,
-            app=getattr(out, "app_name", None) or app,
+            # ⚠ THE DRIVER'S ANSWER OR NONE (D19). This was
+            # `out.app_name or app`: with no app name from the driver, the
+            # consent term became whatever the CALLER claimed. Empty here
+            # makes the extent unknown and the loop refuse the window.
+            app=str(getattr(out, "app_name", None) or ""),
             pid=pid,
             window_id=window_id,
             snapshot_id=snapshot_id,
@@ -471,3 +506,42 @@ _BUILDERS: dict[str, tuple[str, Any]] = {
     "type_text": ("type_text", _type_text_input),
     "invoke_menu": ("invoke_menu", _invoke_menu_input),
 }
+
+
+# ── discovery inputs and records (D8) ──────────────────────────────────────
+
+
+def _list_apps_input(sdk: Any) -> Any:
+    return sdk.ListAppsInput()
+
+
+def _list_windows_input(
+    sdk: Any, *, pid: int | None, on_screen_only: bool
+) -> Any:
+    return sdk.ListWindowsInput(pid=pid, on_screen_only=on_screen_only)
+
+
+def _app_record(a: Any) -> AppRecord:
+    return AppRecord(
+        pid=int(getattr(a, "pid", 0)),
+        name=str(getattr(a, "name", "") or ""),
+        running=bool(getattr(a, "running", False)),
+        active=bool(getattr(a, "active", False)),
+        bundle_id=getattr(a, "bundle_id", None),
+        launch_path=getattr(a, "launch_path", None),
+    )
+
+
+def _window_record(w: Any) -> WindowRecord:
+    pid = getattr(w, "pid", None)
+    z_index = getattr(w, "z_index", None)
+    minimized = getattr(w, "minimized", None)
+    return WindowRecord(
+        window_id=int(getattr(w, "window_id", 0)),
+        pid=None if pid is None else int(pid),
+        app_name=str(getattr(w, "app_name", "") or ""),
+        title=str(getattr(w, "title", "") or ""),
+        is_on_screen=bool(getattr(w, "is_on_screen", False)),
+        z_index=None if z_index is None else int(z_index),
+        minimized=None if minimized is None else bool(minimized),
+    )
