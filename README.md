@@ -306,7 +306,7 @@ Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, a
 - Python 3.11+
 - llama.cpp or Ollama running with any model loaded (or a cloud API key)
 - A Telegram bot token (from @BotFather) — optional, CLI works without it
-- `bubblewrap` or Docker — optional, only for coding mode's stronger sandbox backends (`coding.sandbox_type: bwrap | docker`). The default `process` backend needs neither; `oara doctor` reports which backend you have configured and whether it can actually start.
+- `bubblewrap` or Docker — optional, only for coding mode's stronger sandbox backends (`coding.sandbox_type: bwrap | docker`; the Docker backend is experimental, and no test runs a coding task on it). The default `process` backend needs neither; `oara doctor` reports which backend you have configured and whether it can actually start.
 
 ### Install
 
@@ -653,7 +653,7 @@ prometheus/
 - [x] xAI SuperGrok subscription OAuth
 - [x] Model router with fallback chains + divergence detection
 - [x] Evaluation framework with local LLM judge + fine-tuning gym (dual scoring)
-- [x] LSP integration, MCP integration, migration tool (Hermes/OpenClaw)
+- [x] LSP integration, MCP integration, migration tool (Hermes/OpenClaw) — *the migration tool is not re-tested against a real Hermes or OpenClaw install since it shipped*
 - [x] Durable sessions, turn interrupt, liveness pulse, artifact outbox
 - [x] Record a Skill — daemon side: the DOM-trace pipeline + video/YouTube ingestion — *the browser recorder extension is not distributed yet*
 - [x] Vision — images reach the model as images, stored by reference, served over `/api/media`
