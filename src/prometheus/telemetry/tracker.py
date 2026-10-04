@@ -1383,6 +1383,7 @@ class ToolCallTelemetry:
         try:
             insert_silent_failure(self._conn, subsystem, operation, exc, context)
             self._conn.commit()
+            _mark_recorded(exc)
         except Exception:
             # A refused INSERT aborts the statement, not the implicit
             # transaction: without this the connection keeps the write lock
@@ -2653,6 +2654,30 @@ def set_telemetry_handle(tel: "ToolCallTelemetry | None") -> None:
 def get_telemetry_handle() -> "ToolCallTelemetry | None":
     """Return the registered telemetry handle (None if not wired)."""
     return _telemetry_singleton
+
+
+# ---------------------------------------------------------------------------
+# Each failure once — the "already on file" mark.
+# ---------------------------------------------------------------------------
+
+#: Set on an exception once ``record_silent_failure`` has WRITTEN a row for it
+#: (after the commit, so a refused write leaves no mark). A handler further up
+#: the stack that records failures too checks it and skips: live, 92 of 95
+#: ``web_bridge`` rows were a provider error the loop's envelope had already
+#: written, recorded again by the WS bridge.
+_RECORDED_MARK = "_prometheus_silent_failure_recorded"
+
+
+def _mark_recorded(exc: BaseException) -> None:
+    try:
+        setattr(exc, _RECORDED_MARK, True)
+    except Exception:  # an exception type that refuses attributes: no mark
+        pass
+
+
+def silent_failure_recorded(exc: BaseException) -> bool:
+    """True once a ``silent_failures`` row has been written for this exception object."""
+    return getattr(exc, _RECORDED_MARK, False) is True
 
 
 # ---------------------------------------------------------------------------

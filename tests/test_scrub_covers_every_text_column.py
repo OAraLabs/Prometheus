@@ -184,6 +184,8 @@ _n = {
     ("memory.db", "summaries", "id"): ROW_ID,
     ("memory.db", "summaries", "source_message_ids"): ID_LIST,
     ("memory.db", "extractor_cursors", "scope"): "a cursor scope NAME the extractor defines",
+    ("memory.db", "store_marks", "name"): (
+        "a mark NAME the code defines (decay_charged_through); the value is a timestamp"),
 }
 NOT_SCRUBBED: dict[tuple[str, str, str], str] = _n
 
