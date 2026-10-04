@@ -67,15 +67,15 @@ Each step is a small PR (§6):
 9. **PRs 12-13:** watch mode and replay.
 10. **PR 14:** the Record a Skill split.
 
-### Decisions I need from you
+### Your decisions (answered 2026-10-04)
 
-| | Decision | My recommendation | Before |
+| | Decision | Decided | Before |
 |---|---|---|---|
-| **W1** | Browsers and Electron apps: how does consent tell a bank tab from a docs tab? | Add a `site` term now, while no grants exist, and offer **no web page content** in v1.1. Browser menus and tabs ask every time. | PR 3 |
-| **W2** | When a model picks the clicks, what does "I picked this app" cover? | Clicks and Tab/Escape in that app only. Return, typing, menus and "Send/Delete/Pay"-type buttons always ask. Prompts never offer "always". The pick lasts for the Beacon session (8 h at most), or for one task on chat. | PR 5 |
-| **W3** | Who may start computer use? ⚑ | Only a person: an allowed chat user, or a Beacon device you have marked for computer use. Never the API token, which a model can read. | PR 5 |
-| **W4** | Close D15 for *every* tool? | Yes: approvals need a person's credential everywhere. Scripts that approve through REST move to a device token. | Before enabling on a box |
-| **W5** | What may Telegram carry? | Consent sentences and approval prompts (including the text to be typed), as it does for every tool today. Progress carries counts only. Slack and Discord wait. | PR 5 |
+| **W1** | Browsers and Electron apps: how does consent tell a bank tab from a docs tab? | **Agreed.** Add a `site` term now, while no grants exist, and offer **no web page content** in v1.1. Browser menus and tabs ask every time. | PR 3 |
+| **W2** | When a model picks the clicks, what does "I picked this app" cover? | **Agreed.** Clicks and Tab/Escape in that app only. Return, typing, menus and "Send/Delete/Pay"-type buttons always ask. Prompts never offer "always". The pick lasts for the Beacon session (8 h at most), or for one task on chat. | PR 5 |
+| **W3** | Who may start computer use? ⚑ | **Agreed.** Only a person: an allowed chat user, or a Beacon device you have marked for computer use. Never the API token, which a model can read. | PR 5 |
+| **W4** | Close D15 for *every* tool? | **Accepted, separate WP.** Agreed in principle but out of scope for computer use: it becomes its own work package once D15 is verified on the live daemon. The door keeps its own W3 guard regardless. | Not a v1.1 gate |
+| **W5** | What may Telegram carry? | **Agreed.** Consent sentences and approval prompts (including the text to be typed), as it does for every tool today. Progress carries counts only. Slack and Discord wait. | PR 5 |
 
 **Decided for you unless you object (Appendix A):**
 
@@ -107,8 +107,8 @@ is still 0.
     available to the author; §1 quotes the summary.
   * **Measured / read:** a `path:line`, a path in the `cua-driver` 0.28.2
     wheel, or a fetched URL.
-  * **Proposed:** marked. Will's five open decisions are in §8; the rest are
-    decided by recommendation in Appendix A.
+  * **Proposed:** marked. Will answered the five decisions in §8 on
+    2026-10-04; the rest are decided by recommendation in Appendix A.
 * **Review.** It was checked by three citation critics, a security
   adversary and a completeness editor before publication.
 
@@ -202,8 +202,10 @@ is still 0.
 * **D2:** typed text goes to focus, not to the field named in the prompt.
 * **D15:** the global token, which a model can read, answers any approval.
 
-**Decisions for Will: 5** (§8). Everything else is decided by recommendation
-in Appendix A, and can be revisited there.
+**Decisions for Will: 5, answered 2026-10-04** (§8). W1, W2, W3 and W5 are
+agreed. W4 is accepted as a separate work package, outside computer use.
+Everything else is decided by recommendation in Appendix A, and can be
+revisited there.
 
 ---
 
@@ -305,8 +307,8 @@ ship.**
 * Under a model chooser, every covered click is chosen from app text, which
   the 2026-09-20 audit advised against (`COMPUTER-USE-REGISTRATION.md:79-83`).
 * This design reads decision 6 as accepting that risk inside the one picked
-  app. It applies the binding as the loop's approver (§5.1.4), adds §5.1.6,
-  and asks in §8 W2.
+  app. It applies the binding as the loop's approver (§5.1.4) and adds
+  §5.1.6. Will agreed (§8 W2).
 
 **Q3. Decisions 1 and 2: "user-started" needs a credential, and the pin is
 narrow.**
@@ -563,7 +565,7 @@ fixed by this document.
 | **D12** | **The pin admits a driver that breaks observe.** From 0.28.3, `GetWindowStateInput` has a *required* keyword `max_image_dimension`. Our call omits it, so every observe raises `TypeError`, which becomes `DriverUnavailable`. Only `uv.lock` prevents it. A `pip install 'oara-prometheus[computer]'` (the remedy `cua.py:100-103` itself prints) resolves 0.33.1. | `pyproject.toml:105`; `uv.lock:1067-1068`; `cua.py:222-243`. **Measured** by constructing the input with the 0.33.1 bindings. | Any install that is not from the lockfile gets computer use that can never observe. | PR 1 (exact pin) |
 | **D13** | **A driver timeout reports failure for an action that may still land, and the adapter has no lock.** `.result(timeout=60)` does not cancel the SDK coroutine. | `cua.py:162-166,324-332`. **Probed:** `TimeoutError` at 1.9 s; the action landed at 2.7 s. Two concurrent steps on one adapter would interleave on its loop. | A step reported "failed" may have clicked. The stop guarantee (§5.1.7) needs one step at a time. | PR 1: a lock; a timeout reported as "outcome unknown", followed by an observe |
 | **D14** | **Cancelling a task that waits on an approval leaks the pending entry.** No `approval_resolved` is emitted, and a later `/approve` returns True while the entry stays. | `permissions/approval_queue.py:640-659`; the comment at `:645` describes a `finally` that no longer exists. **Probed.** | A stop implemented as a cancel would leave ghost approvals on every surface. | PR 5 |
-| **D15** | **A model can answer any approval with the global API token, and could open any door that accepts it.** The token is persisted in plaintext to `~/.config/prometheus/env`, and `bash` (always loaded) is not path-floored, so `cat` reads it. The approval routes accept it. | `config/api_token.py:1-12`; `checker.py:984-992` (documents that `cat ~/.gnupg/x` is ALLOWed at user origin); the auth middleware accepts the global token on every `/api/` route (`server.py:357-372`), including `POST /api/approvals/{id}/approve` (`:4404`). Device enrolment needs only the global token (`server.py:377-385`). | Pre-existing, and it affects every tool's prompts. For the door it would make "user-started" meaningless. | PR 5 for computer routes and computer approvals (§5.1.1). The general fix is §8 W4. |
+| **D15** | **A model can answer any approval with the global API token, and could open any door that accepts it.** The token is persisted in plaintext to `~/.config/prometheus/env`, and `bash` (always loaded) is not path-floored, so `cat` reads it. The approval routes accept it. | `config/api_token.py:1-12`; `checker.py:984-992` (documents that `cat ~/.gnupg/x` is ALLOWed at user origin); the auth middleware accepts the global token on every `/api/` route (`server.py:357-372`), including `POST /api/approvals/{id}/approve` (`:4404`). Device enrolment needs only the global token (`server.py:377-385`). | Pre-existing, and it affects every tool's prompts. For the door it would make "user-started" meaningless. | PR 5 for computer routes and computer approvals (§5.1.1), whatever happens to the general fix. The general fix is its own work package once D15 is verified on the live daemon (§8 W4). |
 | **D16** | **A click prompt does not say what will be clicked.** The prompt reason is `ComputerExtent.describe()` (app, machine, delivery). `element_token` is hidden as noise, and `Candidate.target_description` ("kept for … the prompt") is read nowhere. | `checker.py:1137-1140`; `permissions/argument_view.py:62-66`; `types.py:114-116` | Under a model chooser, the person approving cannot see the element the model picked. | PR 5 |
 | **D17** | **The wrapped-tool path skips preconditions.** `_ComputerTool.execute` calls `driver.act` directly; only the loop checks the substrate. `computer_use_grant_probe.py` drives that path. | `computer/tools.py:57-95`; `scripts/computer_use_grant_probe.py:171-183` | Any registration that wraps the verbs, not the loop, would act on a dead display. | L1 (register `computer_task`, which runs the loop, never the verbs) |
 | **D18** | **A legacy `tool` grant naming a computer tool matches every call of it.** It matches any app, any site, and even unassembled extents, because grants are checked before the computer rule. `from_config_dict` still loads `tool` rows. | `checker.py:398-399,452-455,1050-1071` | "No remembered grant can cover web content" is false while such a row exists. | PR 3 (◆ gate) |
@@ -1371,7 +1373,8 @@ sessions included.
     carry page-authored text (titles, history items), so those rows prompt.
   * **Consequence:** Electron apps (VS Code, Slack, Discord, Obsidian) offer
     only approve-once rows in v1.1.
-  * The alternative E′ (offer web content, approve-once each time) is §8 W1.
+  * The alternative E′ (offer web content, approve-once each time) was not
+    chosen (§8 W1).
 * **A later provider turns on per-site grants with no migration** (Linux
   first: `DocURL`/`URI` on the document node, over the a11y bus).
 * **Encoding and act-time checks:**
@@ -1417,7 +1420,7 @@ sessions included.
 
 **Who picked the element is logged, not keyed.** The audit row and frame
 record `chooser.name` (`rule|gemma|query`). The audit's "grants serve script
-origin only" alternative is §8 W2.
+origin only" alternative was not chosen (§8 W2).
 
 ### 5.5 The chooser: a local model picking from the table, pixels later
 
@@ -1714,17 +1717,18 @@ v1.1 does none of the following:
 ## 8. Decisions for Will
 
 These five are product choices, security trade-offs, or touch the ruling.
+**Will answered all five on 2026-10-04** (the "Will's answer" column).
 Everything else is decided by recommendation in Appendix A, and can be
 revisited there. Settled already: the D1 fix is a hard precondition for the
 door, and the pin is widened in the door PR (Will, 2026-10-03).
 
-| # | Decision | Recommendation | Must precede |
-|---|---|---|---|
-| **W1** | **The origin term for browsers and Electron apps** (§5.4) | **E:** a fifth extent term `site`, decided now while no grants exist. `-` (no web content) only on positive evidence. **v1.1 offers no web page content**; browser chrome is approve-once; Electron apps (VS Code, Slack) are limited to approve-once rows. The alternative E′ offers page content, approve-once every time: more capability, more injection surface and prompt fatigue. | PR 3 |
-| **W2** | **What the app pick covers when a model chooses the clicks** (decision 6 + step 4; Q2) | The binding covers clicks and Tab/Escape in the picked app. Return, typing, menus, web content, high-consequence labels and anything past the ceiling prompt every time. Door prompts are approve-once, so a task never mints a lasting grant. Beacon binding: the session, at most 8 h; chat binding: the one task. The alternative ("grants serve script origin only") makes every model-chosen click prompt, and the toggle grants little. | PR 5 |
-| **W3** | **Who may start computer use** (Q3; ⚑) | Only a person's credential: an allowed chat user, or a Beacon device a person marked `computer: true` from Telegram or an existing device. The global API token is refused with 401, because a model can read it with `bash`; device enrolment alone also needs only that token. `ComputerTaskRunner.start` refuses inside tool execution. | PR 5 |
-| **W4** | **Close D15 for every tool, not just computer use** | Yes: approval answers require a person's credential for all tools, in a small PR outside the v1.1 numbering. Today a model holding the global token can approve its own `bash`/`write_file` prompts. The cost is that anything approving through REST with the global token (scripts) must move to a device token. | Before `computer_use.enabled: true` on a real box |
-| **W5** | **What chat surfaces may carry** (decision 3; Q1) | Telegram carries the consent sentence and approval prompts, including the text to be typed, as it already does for every tool's approvals. Milestones carry only the task id, app and counts, with no per-step log. Slack and Discord refuse `/computer` in v1.1. The stricter alternative: no content on chat at all, with Beacon as the only cockpit. | PR 5 |
+| # | Decision | Recommendation | Will's answer (2026-10-04) | Must precede |
+|---|---|---|---|---|
+| **W1** | **The origin term for browsers and Electron apps** (§5.4) | **E:** a fifth extent term `site`, decided now while no grants exist. `-` (no web content) only on positive evidence. **v1.1 offers no web page content**; browser chrome is approve-once; Electron apps (VS Code, Slack) are limited to approve-once rows. The alternative E′ offers page content, approve-once every time: more capability, more injection surface and prompt fatigue. | **Agreed:** the site term now, no web content in v1.1. | PR 3 |
+| **W2** | **What the app pick covers when a model chooses the clicks** (decision 6 + step 4; Q2) | The binding covers clicks and Tab/Escape in the picked app. Return, typing, menus, web content, high-consequence labels and anything past the ceiling prompt every time. Door prompts are approve-once, so a task never mints a lasting grant. Beacon binding: the session, at most 8 h; chat binding: the one task. The alternative ("grants serve script origin only") makes every model-chosen click prompt, and the toggle grants little. | **Agreed.** | PR 5 |
+| **W3** | **Who may start computer use** (Q3; ⚑) | Only a person's credential: an allowed chat user, or a Beacon device a person marked `computer: true` from Telegram or an existing device. The global API token is refused with 401, because a model can read it with `bash`; device enrolment alone also needs only that token. `ComputerTaskRunner.start` refuses inside tool execution. | **Agreed.** | PR 5 |
+| **W4** | **Close D15 for every tool, not just computer use** | Yes: approval answers require a person's credential for all tools, in a small PR outside the v1.1 numbering. Today a model holding the global token can approve its own `bash`/`write_file` prompts. The cost is that anything approving through REST with the global token (scripts) must move to a device token. | **Accepted, separate WP.** Agreed in principle, but out of scope for computer use. It becomes its own work package after D15 is verified on the live daemon. The door's own W3 guard (person-only credentials on computer routes and computer approvals, PR 5) stays regardless. | Not a v1.1 gate; its own WP |
+| **W5** | **What chat surfaces may carry** (decision 3; Q1) | Telegram carries the consent sentence and approval prompts, including the text to be typed, as it already does for every tool's approvals. Milestones carry only the task id, app and counts, with no per-step log. Slack and Discord refuse `/computer` in v1.1. The stricter alternative: no content on chat at all, with Beacon as the only cockpit. | **Agreed.** | PR 5 |
 
 
 ---
