@@ -495,6 +495,10 @@ class ComputerTaskRunner:
         self._tasks: dict[str, ComputerTask] = {}
         #: Telegram's pending "which app?" questions (see gateway.commands).
         self.proposals: dict[tuple[str, str], Any] = {}
+        #: Fire-and-forget work (a stop's prompt denials). Held here because
+        #: the event loop keeps only a WEAK reference to a task: one nobody
+        #: holds can be collected before it runs.
+        self._background: set[asyncio.Task] = set()
 
     # ── health and discovery ────────────────────────────────────────────
 
@@ -668,11 +672,18 @@ class ComputerTaskRunner:
         if task is None or task.status != "running":
             return False
         task.stop_requested = True
-        loop = _running_loop()
-        if loop is not None:
-            loop.create_task(self.channel.deny_task(
-                task_id, by=in_process("computer-stop")))
+        self._spawn(self.channel.deny_task(task_id,
+                                           by=in_process("computer-stop")))
         return True
+
+    def _spawn(self, coro: Any) -> None:
+        loop = _running_loop()
+        if loop is None:
+            coro.close()
+            return
+        job = loop.create_task(coro)
+        self._background.add(job)
+        job.add_done_callback(self._background.discard)
 
     def stop_session(self, session_id: str) -> bool:
         """Stop every running task in a chat session (the chat Stop)."""

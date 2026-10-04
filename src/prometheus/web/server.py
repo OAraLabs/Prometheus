@@ -5074,6 +5074,10 @@ def create_app(
         if not session_id or not goal:
             return JSONResponse(status_code=400, content={
                 "error": "session_id and goal are required"})
+        for key in ("app", "text", "target"):
+            if body.get(key) is not None and not isinstance(body.get(key), str):
+                return JSONResponse(status_code=400, content={
+                    "error": f"{key} must be a string"})
         from prometheus.computer.door import DoorRefused
         from prometheus.computer.task import ComputerTaskInput
 
