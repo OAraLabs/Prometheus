@@ -817,11 +817,14 @@ class BackgroundTaskManager:
         # only ever holds what this process was given.
         overlay = self._task_env.get(task_id)
         env = {**os.environ, **overlay} if overlay else None
+        # `python3` in the task is the daemon's own interpreter, as in cron
+        # (utils/job_python.py). The command is vetted and stored as written.
+        from prometheus.utils.job_python import job_shell_command
 
         process = await asyncio.create_subprocess_exec(
             "/bin/bash",
             "-lc",
-            task.command,
+            job_shell_command(task.command),
             cwd=task.cwd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,

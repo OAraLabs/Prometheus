@@ -545,11 +545,16 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
         return entry
 
     logger.info("Executing cron job %r: %s", name, command)
+    # `python3` in the job is the daemon's own interpreter (utils/job_python.py):
+    # bare python3 under the daemon's inherited PYTHONNOUSERSITE=1 is the system
+    # interpreter without its packages. Vetted, logged and recorded as written.
+    from prometheus.utils.job_python import job_shell_command
+
     try:
         process = await asyncio.create_subprocess_exec(
             "/bin/bash",
             "-lc",
-            command,
+            job_shell_command(command),
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
