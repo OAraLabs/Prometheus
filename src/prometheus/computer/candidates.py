@@ -89,19 +89,23 @@ def build_candidates(
                 target_description=el.describe(),
             ))
         if text_to_type is not None and (el.editable or role in _EDITABLE_ROLES):
+            # SET THE FIELD BY ITS TOKEN, never type at focus (D2). A `type-N`
+            # row named this field while `type_text` sent the text wherever
+            # focus was — 0.28.2's TypeTextInput cannot be aimed at an
+            # element. So the table offers only what the driver will target.
             out.append(Candidate(
-                candidate_id=f"type-{el.element_index}",
-                tool_name="computer_type_text",
+                candidate_id=f"set-{el.element_index}",
+                tool_name="computer_set_value",
                 arguments={
                     **base,
                     "element_token": el.element_token,
                     "text": text_to_type,
                 },
-                # The text is NAMED in the description so a human reviewing
-                # the table sees it. The chooser sees this description too —
-                # which is fine: it is the caller's own string, already known
-                # to the caller. What the chooser never sees is the arguments.
-                description=f"Type the prepared text into the {el.describe()}",
+                # The text is REFERRED TO, not quoted, so the chooser — which
+                # sees this description — never sees the caller's string. What
+                # the chooser never sees is the arguments.
+                description=(f"Set the {el.describe()} to the prepared text, "
+                             f"replacing what it holds"),
                 snapshot_id=observation.snapshot_id,
                 target_description=el.describe(),
             ))

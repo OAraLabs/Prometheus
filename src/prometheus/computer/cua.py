@@ -61,6 +61,7 @@ either.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from typing import Any
@@ -322,7 +323,8 @@ class CuaDriverAdapter:
             )
         method_name, make_input = builder
         try:
-            result = self._await(getattr(self._driver, method_name)(
+            result = self._await(_dispatch(
+                self._driver, method_name,
                 make_input(self._sdk, arguments, self._session)))
         except Exception as exc:  # noqa: BLE001
             text = f"{exc}".lower()
@@ -462,12 +464,48 @@ def _invoke_menu_input(sdk: Any, a: dict[str, Any], session: str | None) -> Any:
     )
 
 
+def _set_value_call(sdk: Any, a: dict[str, Any],
+                    session: str | None) -> tuple[str, str]:
+    """``set_value`` by ELEMENT TOKEN (D2), through ``call_tool``.
+
+    0.28.2 has no typed method for it; the generic surface reaches the same
+    driver tool, whose schema (platform-linux/src/tools/impl_.rs:5480-5490 at
+    the 0.28.2 tag) takes the token, the snapshot and the value, with
+    ``additionalProperties: false``. A missing token is a KeyError HERE,
+    before anything is sent — an untargeted set would be the defect again.
+    """
+    del sdk
+    payload: dict[str, Any] = {
+        "pid": int(a["pid"]),
+        "window_id": int(a["window_id"]),
+        "element_token": str(a["element_token"]),
+        "snapshot_id": a.get("snapshot_id"),
+        "value": str(a["text"]),
+    }
+    if session:
+        payload["session"] = session
+    return "set_value", json.dumps(
+        {k: v for k, v in payload.items() if v is not None})
+
+
+def _dispatch(driver: Any, method_name: str, built: Any) -> Any:
+    """The SDK coroutine for one built input. ``call_tool`` is the one method
+    that takes ``(name, arguments_json)`` rather than a typed input."""
+    if method_name == "call_tool":
+        name, arguments_json = built
+        return driver.call_tool(name, arguments_json)
+    return getattr(driver, method_name)(built)
+
+
 #: verb -> (SDK method, input builder). The IMPLEMENTED SET, and `act`
 #: refuses anything absent from it rather than dispatching generically.
+#: ``set_value`` goes through ``call_tool`` by NAME, and only by this name —
+#: the generic surface is not a passthrough for anything else.
 _BUILDERS: dict[str, tuple[str, Any]] = {
     "click": ("click", _click_input),
     "press_key": ("press_key", _press_key_input),
     "scroll": ("scroll", _scroll_input),
     "type_text": ("type_text", _type_text_input),
+    "set_value": ("call_tool", _set_value_call),
     "invoke_menu": ("invoke_menu", _invoke_menu_input),
 }

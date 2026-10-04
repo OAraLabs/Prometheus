@@ -339,8 +339,13 @@ def test_an_unimplemented_verb_is_refused_not_dispatched(adapter):
 
 
 def test_the_implemented_set_is_exactly_the_v1_verbs():
+    # set_value joined in v1.1 (D2): the one verb that can aim text at an
+    # element. It is reached through call_tool BY NAME, and only by name.
     assert set(cua._BUILDERS) == {
-        "click", "press_key", "scroll", "type_text", "invoke_menu"}
+        "click", "press_key", "scroll", "type_text", "set_value",
+        "invoke_menu"}
+    assert [v for v, (m, _) in cua._BUILDERS.items() if m == "call_tool"] == [
+        "set_value"]
 
 
 def test_a_driver_stale_error_maps_onto_our_exception(adapter):
