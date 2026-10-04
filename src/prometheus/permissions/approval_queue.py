@@ -76,6 +76,16 @@ class PendingAction:
     #: mapping rather than pre-rendered text so each surface (Telegram prose,
     #: Beacon's card) formats it for its own width.
     arguments: "dict[str, Any] | None" = None
+    #: A desktop task's prompt (computer-use v1.1, the door): which task and
+    #: which chat session asked. None for every other tool's request.
+    task_id: str | None = None
+    session_id: str | None = None
+    #: APPROVE-ONCE ONLY. A door prompt never offers a lasting scope: one
+    #: "always" on "Click the push button 'Send'" would mint a grant for every
+    #: session, surface and origin, and outlive the binding (W2). The binding
+    #: is the lasting consent; ``prospective_extents`` offers nothing and the
+    #: channel refuses any scope but once.
+    once_only: bool = False
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _result: ApprovalResult = ApprovalResult.TIMEOUT
 
@@ -320,6 +330,8 @@ def prospective_extents(action: PendingAction) -> dict[str, str]:
     Keys are the scope verbs; a verb is ABSENT when it would create no grant.
     """
     out: dict[str, str] = {}
+    if getattr(action, "once_only", False):
+        return out  # a door prompt offers no lasting scope (W2)
     if derive_grant(action) is None:
         return out
     # Derived from GRANT_SCOPES, never hand-listed — a verb added there is
@@ -467,6 +479,12 @@ class ApprovalQueue:
             # None means "this call had no arguments worth showing", which is
             # different from {} and Beacon may render the difference.
             "arguments": action.arguments,
+            # A desktop task's prompt says which task and session asked, and
+            # that it is approve-once. ABSENT for every other request, so no
+            # existing payload changes shape.
+            **({"task_id": action.task_id, "session_id": action.session_id,
+                "once_only": True}
+               if action.task_id is not None else {}),
         }
 
     async def _emit(self, kind: str, payload: dict) -> None:
@@ -641,7 +659,18 @@ class ApprovalQueue:
             except Exception as exc:
                 logger.warning("Failed to send approval request: %s", exc)
 
-        # Wait for response or timeout
+        # Wait for response or timeout. The pop is in a FINALLY (D14): a
+        # caller cancelled while it waited — a stopped desktop task, a
+        # shut-down turn — used to leave its request pending forever, still
+        # answerable, with nothing waiting on the answer.
+        try:
+            await self._wait_for_answer(action, request_id, target_chat)
+        finally:
+            self.pending.pop(request_id, None)
+        return action._result
+
+    async def _wait_for_answer(self, action: PendingAction, request_id: str,
+                               target_chat) -> None:
         try:
             await asyncio.wait_for(action._event.wait(), timeout=self._timeout)
         except asyncio.TimeoutError:
@@ -660,10 +689,6 @@ class ApprovalQueue:
             await self._emit("approval_resolved", {
                 "request_id": request_id, "resolution": "expired",
             })
-
-        # Clean up
-        self.pending.pop(request_id, None)
-        return action._result
 
     async def _notify_expiry(self, action: PendingAction, chat_id) -> None:
         """Tell the operator the window closed, and what it was for."""
@@ -801,3 +826,86 @@ class ApprovalQueue:
     def list_pending(self) -> list[PendingAction]:
         """Return all pending approval requests."""
         return list(self.pending.values())
+
+
+class ApprovalQueues:
+    """Two queues, one answer surface (computer-use v1.1, the door).
+
+    Desktop prompts live in their own queue — the computer approval channel
+    (``computer/approvals.py``) — so the operator's
+    ``security.approval_queue.enabled`` keeps its meaning for every other
+    tool. But a person answers both from the same ``/approve``, ``/deny``,
+    ``/pending`` and ``POST /api/approvals/{id}/...``, so the surfaces are
+    handed this instead of either queue: it shows both queues' pending
+    requests and sends each answer to the queue that holds it.
+
+    Built ONLY when computer use is on. Off, every surface gets exactly the
+    queue it had before.
+
+    ``pending`` is a merged SNAPSHOT (a plain dict, as readers expect); write
+    to the owning queue, never to it.
+    """
+
+    def __init__(self, *queues: Any) -> None:
+        self._queues = [q for q in queues if q is not None]
+        if not self._queues:
+            raise ValueError("ApprovalQueues needs at least one queue")
+
+    @property
+    def queues(self) -> list[Any]:
+        return list(self._queues)
+
+    @property
+    def pending(self) -> dict[str, PendingAction]:
+        merged: dict[str, PendingAction] = {}
+        for q in self._queues:
+            merged.update(getattr(q, "pending", {}) or {})
+        return merged
+
+    def owner_of(self, request_id: str) -> Any | None:
+        for q in self._queues:
+            if request_id in (getattr(q, "pending", {}) or {}):
+                return q
+        return None
+
+    def list_pending(self) -> list[PendingAction]:
+        return list(self.pending.values())
+
+    @property
+    def _security_gate(self) -> Any:
+        return getattr(self._queues[0], "_security_gate", None)
+
+    @property
+    def signal_bus(self) -> Any:
+        return getattr(self._queues[0], "signal_bus", None)
+
+    @property
+    def timeout_seconds(self) -> float:
+        return self._queues[0].timeout_seconds
+
+    def _for(self, action: PendingAction) -> Any:
+        return self.owner_of(action.request_id) or self._queues[0]
+
+    def serialize_pending(self, action: PendingAction) -> dict:
+        return self._for(action).serialize_pending(action)
+
+    def expires_at(self, action: PendingAction) -> float:
+        return self._for(action).expires_at(action)
+
+    async def approve(self, request_id: str, *, by: Approver,
+                      scope: str | None = None, grant=None) -> bool:
+        owner = self.owner_of(request_id)
+        if owner is None:
+            return False
+        return await owner.approve(request_id, by=by, scope=scope, grant=grant)
+
+    async def deny(self, request_id: str, *, by: Approver) -> bool:
+        owner = self.owner_of(request_id)
+        if owner is None:
+            return False
+        return await owner.deny(request_id, by=by)
+
+
+def is_desktop_request(action: Any) -> bool:
+    """A desktop task's prompt — skipped by every "approve all" (W2)."""
+    return getattr(action, "task_id", None) is not None

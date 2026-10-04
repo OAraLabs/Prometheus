@@ -2588,6 +2588,9 @@ class ApproveOutcome:
     #: The grant's stable handle, so a client can show or revoke what it just
     #: created. Present exactly when remembered.
     grant_id: str | None = None
+    #: Desktop-task prompts an "approve all" left alone (computer-use v1.1:
+    #: each is answered on its own).
+    skipped: int = 0
 
 
 async def approve_detail(
@@ -2622,17 +2625,30 @@ async def approve_detail(
         pending = _pending_actions(queue)
         if not pending:
             return ApproveOutcome("No pending approval requests.")
+        from prometheus.permissions.approval_queue import is_desktop_request
+
+        # A DESKTOP TASK'S PROMPT IS NEVER PART OF "ALL" (computer-use v1.1,
+        # W2). Draining a backlog must not approve "Set the field to <text>"
+        # or "Click 'Send'" sight unseen; each is answered on its own.
+        skipped = [a for a in pending if is_desktop_request(a)]
         approved: list[str] = []
         for act in pending:
+            if is_desktop_request(act):
+                continue
             rid = getattr(act, "request_id", "")
             if rid and await queue.approve(rid, by=by):
                 approved.append(rid)
+        note = (f" — skipped {len(skipped)} desktop request(s); answer each "
+                f"with {prefix}approve <id>" if skipped else "")
         if not approved:
+            if skipped:
+                return ApproveOutcome(
+                    f"Approved nothing{note}.", skipped=len(skipped))
             return ApproveOutcome("No pending approval requests.")
         return ApproveOutcome(
             f"Approved {len(approved)} request(s), once each: "
-            + ", ".join(approved),
-            resolved=True,
+            + ", ".join(approved) + note,
+            resolved=True, skipped=len(skipped),
         )
 
     # SPRINT-CONSENT scope verbs, resolved through the ONE definition in
@@ -2727,7 +2743,14 @@ async def approve_detail(
         else None
     )
 
-    ok = await queue.approve(request_id, scope=scope, grant=grant, by=by)
+    try:
+        ok = await queue.approve(request_id, scope=scope, grant=grant, by=by)
+    except Exception as exc:  # noqa: BLE001 - the door's refusals, said plainly
+        from prometheus.computer.door import DoorRefused
+
+        if isinstance(exc, DoorRefused):
+            return ApproveOutcome(f"Not approved: {exc}")
+        raise
     if not ok:
         return ApproveOutcome(f"No pending request: {request_id}")
     if scope == "once" or action is None:

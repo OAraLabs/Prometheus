@@ -288,6 +288,69 @@ class DeviceStore:
                  r["activity_token"]) for r in rows]
 
     # ------------------------------------------------------------------
+    # Computer use: which devices a PERSON marked (computer-use v1.1, W3)
+    # ------------------------------------------------------------------
+    #
+    # Its own table, created on the FIRST mark rather than at open: enrolment
+    # needs only the global token (POST /api/devices), which a model can
+    # read, so a device token alone is not a person — a person has to mark
+    # it. A box that never uses computer use never grows the table (and the
+    # parity fixtures, which record every table in this file, stay as they
+    # are).
+
+    def _has_computer_table(self) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='computer_devices'").fetchone() is not None
+
+    def set_computer(self, device_id: str, on: bool, *, by: str) -> bool:
+        """Mark (or unmark) a LIVE device for computer use. ``by`` names who
+        did it (an approver label). False for an unknown or revoked id."""
+        live = self._conn.execute(
+            "SELECT 1 FROM api_devices WHERE id = ? AND revoked_at IS NULL",
+            (device_id,)).fetchone()
+        if live is None:
+            return False
+        if not on:
+            if self._has_computer_table():
+                self._conn.execute(
+                    "DELETE FROM computer_devices WHERE device_id = ?",
+                    (device_id,))
+                self._conn.commit()
+            return True
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS computer_devices (
+              device_id  TEXT PRIMARY KEY,
+              marked_at  REAL NOT NULL,
+              marked_by  TEXT NOT NULL
+            );
+        """)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO computer_devices (device_id, marked_at, "
+            "marked_by) VALUES (?, ?, ?)", (device_id, time.time(), by))
+        self._conn.commit()
+        return True
+
+    def computer_allowed(self, device_id: str) -> bool:
+        """Is this LIVE device marked for computer use? A revoked device
+        never is, whatever its mark says."""
+        if not self._has_computer_table():
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM computer_devices c JOIN api_devices d "
+            "ON d.id = c.device_id WHERE c.device_id = ? "
+            "AND d.revoked_at IS NULL", (device_id,)).fetchone()
+        return row is not None
+
+    def computer_device_ids(self) -> set[str]:
+        if not self._has_computer_table():
+            return set()
+        rows = self._conn.execute(
+            "SELECT c.device_id FROM computer_devices c JOIN api_devices d "
+            "ON d.id = c.device_id WHERE d.revoked_at IS NULL").fetchall()
+        return {r["device_id"] for r in rows}
+
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _row(row: sqlite3.Row) -> DeviceRow:

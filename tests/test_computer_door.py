@@ -372,7 +372,7 @@ async def test_the_agent_loop_marks_tool_execution(tmp_path):
     from pydantic import BaseModel
 
     from prometheus.engine.agent_loop import LoopContext, _execute_tool_call
-    from prometheus.engine.model_adapter import ModelAdapter
+    from prometheus.adapter import ModelAdapter
     from prometheus.engine.tool_context import in_tool_execution
     from prometheus.telemetry.tracker import ToolCallTelemetry
     from prometheus.tools.base import BaseTool, ToolRegistry, ToolResult
@@ -410,10 +410,42 @@ async def test_the_agent_loop_marks_tool_execution(tmp_path):
 
 # ── STOP: HALTS BEFORE THE NEXT ACTION ──────────────────────────────────────
 
-async def test_a_stop_mid_task_halts_at_the_before_act_fence(tmp_path):
-    """A stored grant means no approver is ever asked — the before_act fence
-    is the ONLY check between a stop and the next dispatch. The stop lands
-    while step 2 is observing (in its worker thread, as a real one would)."""
+def _grant_clicks(rig):
+    rig.gate.add_grant(Grant(kind="computer_action",
+                             value=f"{TARGET}:{APP}:-:click:background",
+                             tool_name="computer_click"))
+
+
+async def test_a_stop_at_the_last_instant_is_caught_by_the_before_act_fence(tmp_path):
+    """THE FENCE ITSELF. A stored grant means no approver is ever asked, so
+    nothing between the gate's ruling and the dispatch awaits. The stop lands
+    at the last possible instant — after the chooser has answered and while
+    the gate rules on step 2 (as a stop from another thread could) — and the
+    synchronous before_act check is what refuses it."""
+    rig = _rig(tmp_path, ["click-0", "click-0", "click-0"])
+    _grant_clicks(rig)
+    await _bind(rig)
+    task = await _start(rig)
+    real_evaluate = rig.gate.evaluate
+    rulings = []
+
+    def evaluate(*a, **k):
+        rulings.append(k.get("computer_action"))
+        if len(rulings) == 2:
+            task.stop_requested = True   # lands mid-ruling, no await
+        return real_evaluate(*a, **k)
+
+    rig.gate.evaluate = evaluate
+    done = await rig.runner.wait(task.task_id, timeout=10)
+    assert len(rulings) == 2, "the chooser had answered and the gate ruled"
+    assert _verbs(rig.driver) == [("click", "tok-save")], (
+        "exactly the action before the stop, and nothing after it")
+    assert done.outcome == "stopped"
+
+
+async def test_a_stop_mid_task_halts_before_the_next_action(tmp_path):
+    """The realistic race: the stop lands while step 2 is observing, in its
+    worker thread, as a person's Stop would. Nothing after it dispatches."""
     rig = _rig(tmp_path, ["click-0", "click-0", "click-0"])
     rig.gate.add_grant(Grant(kind="computer_action",
                              value=f"{TARGET}:{APP}:-:click:background",
@@ -574,7 +606,7 @@ async def test_approve_all_skips_desktop_entries(tmp_path):
     outcome = await approve_detail(router, "all", by=PERSON)
     assert plain._result is ApprovalResult.APPROVED
     assert desk._result is not ApprovalResult.APPROVED
-    assert "skipped 1 desktop" in outcome.text
+    assert "skipped 1 desktop" in outcome.message
 
 
 # ── TELEGRAM: THE /computer FAMILY ──────────────────────────────────────────

@@ -5095,6 +5095,11 @@ async def _execute_tool_call(
     _tool_override = getattr(tool, "execution_timeout_seconds", None)
     _timeout = _tool_override if _tool_override is not None else context.tool_timeout_seconds
     _t0 = time.monotonic()
+    # Marks the span as a tool call for the one reader that must know: the
+    # desktop door refuses to start from inside one (W3; engine/tool_context).
+    # Set BEFORE wait_for so the task it creates inherits it.
+    from prometheus.engine.tool_context import TOOL_EXECUTION as _TOOL_EXECUTION
+    _tool_ctx_token = _TOOL_EXECUTION.set(tool_name or "?")
     try:
         result = await asyncio.wait_for(
             tool.execute(
@@ -5158,6 +5163,8 @@ async def _execute_tool_call(
             ),
             is_error=True,
         )
+    finally:
+        _TOOL_EXECUTION.reset(_tool_ctx_token)
     _latency_ms = (time.monotonic() - _t0) * 1000.0
 
     # WEAVE-PRESS: when a user-initiated bash command fails with
