@@ -193,7 +193,10 @@ def test_one_action_goes_through_the_whole_path():
     assert result.candidate is not None
     assert "Send" in result.candidate.description
     assert prompted, "the action executed without ever reaching the gate"
-    assert result.extent == "box:scratchapp:click:background"
+    # Site UNKNOWN (`?`): this fixture carries none of the completeness
+    # evidence `-` needs (candidates.site_of), so the extent is gated and
+    # never rememberable — exactly as for a real window we cannot vouch for.
+    assert result.extent == "box:scratchapp:?:click:background"
     assert driver.dispatched, "nothing reached the driver"
     verb, args = driver.dispatched[0]
     assert verb == "click"
