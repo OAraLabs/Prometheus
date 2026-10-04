@@ -39,6 +39,9 @@ These must be fixed before anyone uses computer use for real.
     a proper action log.
   * Stop works from the phone. It says honestly that one click already in
     flight may still land.
+  * After each action, a thumbnail of the approved window goes straight to
+    your Beacon. It is kept in memory only, and skipped when a password field
+    is showing.
 * **The driver as an Integration.**
   * An exact pin, and a health check before every task.
   * Telemetry forced off.
@@ -60,7 +63,8 @@ Each step is a small PR (§6):
 3. **PR 3:** consent fixes: `site`, `/gate off`, typing.
 4. **PR 4:** finding the app's window.
 5. **PR 5:** **the door** (⚑, including the widened pin you asked for).
-6. **PRs 6-8:** the cockpit (daemon, desktop, iOS). **Only after these is it
+6. **PRs 6-8, with 6b:** the cockpit (daemon; per-step thumbnails of the
+   approved window; desktop; iOS). **Only after these is it
    enabled on a real box.**
 7. **PR 9:** Connectors and Integrations merged.
 8. **PRs 10-11:** the Gemma chooser and its evaluation.
@@ -1047,7 +1051,9 @@ carries the chat `session_id` (ProgressPane keys on it, beacon-desktop
 * **Content policy.** It is enforced by a test over every emitted *and
   persisted* payload and over the backfill responses:
   * **Never:** element tokens, snapshot ids, pid or window id, screenshots,
-    the labels of candidates *not* chosen.
+    the labels of candidates *not* chosen. (The per-step thumbnail of
+    §5.2.5 is not an exception: it never enters this stream. It is a
+    direct-only frame, sent to a device and never persisted or backfilled.)
   * **Typed text** is `{"text_chars": N}`, computed by the emitter.
     `redact_arguments` alone would render it
     (`permissions/argument_view.py:51,69-101`).
@@ -1114,6 +1120,139 @@ carries the chat `session_id` (ProgressPane keys on it, beacon-desktop
   task id.
 * This narrows the brief's "the driver's own cursor when you're at the
   machine" to opt-in (Appendix A).
+
+#### 5.2.5 Cockpit level 2: a thumbnail of the approved window after each step
+
+Asked for by Will, 2026-10-04. Level 1 is the log and Stop above (both of
+its layers). Level 2 adds one picture after each action, for the person
+watching from a phone. Level 3, a live view, is later (L7) and has no
+design yet.
+
+**What is captured: the approved window, and nothing else.**
+
+* **The window:** the bound app's frontmost on-screen window, re-resolved
+  as before every step (§5.1.3) and confirmed by the driver's own
+  `app_name` at capture time (D19). If it vanished or now belongs to
+  another app, nothing is captured.
+* **Never** the desktop, a display or another app's window. Nothing calls
+  `get_desktop_state` or a screen-capture verb.
+* **How:** one window-scoped `get_window_state` call with
+  `include_screenshot=True`, `include_accessibility_tree=True`,
+  `screenshot_out_file=None` and `max_dimension` set to the thumbnail size.
+  * The driver scales the image and returns it inline
+    (`WindowStateOutput.images`, `SnapshotImage{mime_type, data_base64}`;
+    `screenshot_width`/`screenshot_height`), so no image library is added.
+  * The password check below reads the tree from **the same call**, so the
+    check and the pixels describe the same moment.
+* **Not established on 0.28.2, measured on the box:** whether an X11 window
+  capture can contain other windows' pixels (an overlapping window, a
+  notification). If the driver reports `screenshot_frame_valid: false`, or
+  the on-box check shows overlap is possible, the capture is skipped.
+* **When:** after each **executed** step, once that step's verification is
+  done.
+  * Not after a refused, abstained or blocked step.
+  * Not while an approval is pending.
+  * Not for the call that was in flight at a stop.
+* **Size:** longest edge ≤ 480 px. A frame over 256 KB is skipped
+  (`too_large`), never sent in pieces.
+* **It never reaches a model.** Not the chooser, the step history, a
+  prompt or the audit row. The capture ruling stays true for every decision
+  path: `observe` still asks for no screenshot (`cua.py:229-233`). This is a
+  picture for a person.
+
+**Redaction: skip, never blur.**
+
+* **No thumbnail when the window shows a password field.** That means any
+  node of the **whole** walk, tokenless ones included (as for
+  `web_content_seen`), whose role contains `password` (AT-SPI
+  `password text`).
+* **Positive evidence, as for the site term.** If the walk is degraded or
+  truncated, a password field can't be ruled out, so there is no
+  thumbnail.
+* **A skip is visible.** The step frame says so, with a reason:
+  * `password_field`;
+  * `incomplete_walk`;
+  * `window_changed`;
+  * `capture_failed`;
+  * `frame_invalid`;
+  * `too_large`;
+  * `no_viewer`.
+* **Nothing is blurred or partly sent.** A masked image still shows the
+  layout around a secret, and a blur only promises the pixels underneath
+  are gone.
+* **The limit:** it can't see a secret shown outside a password field (a
+  token in a text box, a document). The thumbnail shows what a person
+  sitting at the machine would see in the app they picked.
+
+**Where it goes: straight to the device, over the existing WS.**
+
+* **Who receives it:** the runner sends it directly to WS connections that
+  meet three conditions:
+  1. they authenticated with the device token of a device marked
+     `computer: true` (§5.1.1, W3);
+  2. they declare the `computer-thumbnails` capability;
+  3. they are attached to the task's session.
+* **It uses identity the bridge already keeps** per connection
+  (`ws_server.py:328-332`; `DeviceIdentity.is_global`).
+* **A global-token connection never receives one,** so a model holding that
+  token can't watch the screen through it (D15).
+* **The capability matters for older clients.** An old desktop renders an
+  unknown kind's whole payload into its exportable Activity feed
+  (`gateway-events.ts:84,286-287`), so a client that doesn't declare the
+  capability is never sent the frame.
+* **Not through SignalBus.** SignalBus persists every signal to
+  `signal_events` (`sentinel/signals.py:105-120`), and a thumbnail must not
+  be. So `computer_step_thumbnail` is a **direct-only** kind: it is outside
+  `COMPUTER_FRAME_KINDS`, never promoted, never in `/api/events/recent`,
+  never in a backfill.
+* **Never** push notifications (APNs), Telegram, Slack or Discord, logs or
+  telemetry.
+* **No viewer, no capture.** If no eligible device is connected, nothing is
+  captured (`no_viewer`). The picture exists only to be watched.
+
+**Retention: memory only, unless Will opts in.**
+
+* **By default** the frame is built, sent and dropped.
+  * The runner keeps only the latest thumbnail of each running task in
+    memory, so a device that reconnects mid-task gets the current picture
+    once.
+  * It is discarded when the task ends.
+* **Opt-in:** `computer_use.thumbnails.persist: true` (default `false`).
+  * Each sent thumbnail is written to
+    `<data>/computer/thumbnails/<task_id>/<seq>.<ext>`, owner-only (0600).
+  * It is pruned with the action log (`action_log.keep_per_session`).
+  * Even then, no route serves them in v1.1, and they never enter
+    `signal_events`.
+
+**The frame.**
+
+```
+{"type": "computer_step_thumbnail", "timestamp": "...", "payload": {
+  "session_id": "...", "task_id": "...",
+  "seq": 7,                      # the computer_step it follows
+  "app": "gedit",                # the bound app, as the extent names it
+  "mime_type": "image/png",      # as the driver returned it
+  "width": 480, "height": 300,   # after the driver's scaling
+  "data_base64": "...",
+  "captured_at": "2026-10-04T12:00:00Z"}}
+```
+
+* **Excluded:** pid, window id, window title, snapshot id and element data.
+  The title is left out on purpose: in a browser it is page-authored text.
+* **`computer_step` gains two fields:** `thumbnail: "sent" | "skipped" |
+  null` and `thumbnail_skip_reason`. Those go through the ordinary
+  persisted stream; the image never does.
+* **Config, in `computer_use:`:**
+  * `thumbnails.enabled` (`true`);
+  * `thumbnails.max_dimension` (`480`);
+  * `thumbnails.persist` (`false`).
+  * The 256 KB cap and the password skip are floors, not keys.
+* **Clients:**
+  * desktop shows the latest thumbnail at the head of the ProgressPane's
+    computer section;
+  * iOS shows it in the COMPUTER section and the task strip;
+  * both add the kind to their decoder lists (the iOS trap above) and send
+    the capability.
 * The log does not depend on it.
 
 ### 5.3 The driver as an Integration
@@ -1228,6 +1367,7 @@ When it runs, and what reads it:
 | `computer_use.probe.ttl_s` / `timeout_s` | `60` / `5.0` | As `backend_probe` (`config/prometheus.yaml.default:1216-1220`). |
 | `computer_use.cursor` | `off` | `on` \| `off` (§5.2.4). |
 | `computer_use.action_log.keep_per_session` | `200` | The pruner ships in the same PR. |
+| `computer_use.thumbnails.enabled` / `max_dimension` / `persist` | `true` / `480` / `false` | §5.2.5. `persist` is the only way a thumbnail reaches disk; the 256 KB cap and the password skip are floors. |
 | `computer_use.watch.*` | (§5.6) | Lands with watch mode. |
 
 * **Floors, deliberately not keys:**
@@ -1636,8 +1776,9 @@ own output (the #523 shape). The driver leg is uncoverable by CI
 | **4** | Prometheus | 2 | **Discovery:** `Driver.list_apps`/`list_windows` (fixture + adapter); `resolve_app`; frontmost window; per-step re-resolution; the D19 `app_name` rule | "My editor" becomes one window or a question; a window with no driver-reported app never acts | 0/1/many matches; never launches; an empty on-screen list asks; `app_name` None or mismatched is blocked | ◆ `Driver` protocol (additive) |
 | **5** | Prometheus | 2 | **The door** (§5.1): runner; `/computer` (Telegram; Slack/Discord refuse, recorded as a parity gap; web table); REST; **person-only credentials**; binding + `SessionConsent`; the computer approval channel; §5.1.4 items 1-7; §5.1.6 mitigations; ceilings; cooperative stop wired into `interrupt_turn`; `/computer status`. **The widened pin** (§6.1). Cannot merge before PR 3. | A person can start, consent, follow and stop a task end to end. Nothing a model holds can start one. No `computer_*` tool is registered by any path. | End to end (`FixtureDriver`, real gate, real channel): the binding approves only covered extents; Return, `type_text` and high-consequence rows prompt; door prompts offer no lasting scope; `/approve all` skips computer entries; global token → 401 on every door route; a start from a tool context raises; stop denies pending approvals; a concurrent chat turn plus Stop still stops the task; an old-iOS approve of `type_text` → 409 | ⚑ **ruling** (pin; who may start); ◆ gate (request tag), loop (`_call_approve`) |
 | **6** | Prometheus | 3 | **The cockpit stream** (§5.2): layer-1 frames; `COMPUTER_FRAME_KINDS` + promotion; toggle and stop routes; approval tags; redacted persistence of `approval_pending`; `since`/`types`/`session_id` on `/api/events/recent`; `action_log.keep_per_session` + pruner; content-free push | Every step is visible on a phone, and nothing on the wire or at rest carries tokens, pids or typed text outside the live approval | The two copied pinning tests; the content-policy test over emitted, persisted and backfilled payloads; reconnect backfill; stop ack; the narrow-push test | — |
-| **7** | beacon-desktop | 3 | Device enrolment; ProgressPane computer section from a `computer_*` reducer; thread-header toggle + picker; `computer_step` kept out of the Activity feed | Every `computer_*` frame renders; a reload backfills; Mission Control's card stays readable | Renderer smoke for every frame | — |
-| **8** | beacon-ios | 3 | `Approval.arguments` + a "With:" list, and the capability header; `computer_*` kinds in the decoder list **and** a reducer; COMPUTER section + task strip; picker; Status row | A phone shows the typed text before approving it, and no `computer_*` kind is silently dropped | Decoder tests pinned to the server's tuple | — |
+| **6b** | Prometheus | 3 | **Cockpit level 2: per-step thumbnails** (§5.2.5, Will 2026-10-04): after each executed step, one window-scoped `get_window_state` with the screenshot and the tree; the whole-walk password skip and the incomplete-walk skip; the direct-only `computer_step_thumbnail` frame sent only to `computer: true` device connections that declare `computer-thumbnails`; `thumbnail`/`thumbnail_skip_reason` on `computer_step`; the latest frame per task in memory; `thumbnails.*` keys, with `persist` off by default | A phone sees the approved window after each action. Nothing else on the desktop is captured. No frame is stored (unless `persist` is on), backfilled, pushed or sent to a chat. A password field means no picture. | A password role anywhere in the walk, including a tokenless node, skips; a degraded or truncated walk skips; the payload's exact keys (no pid, window id, title or snapshot id); a SignalBus spy sees no thumbnail, and `signal_events` and `/api/events/recent` hold none; global-token and capability-less connections get nothing; no eligible viewer means no capture call; the 256 KB cap; `persist` off writes no file, `persist` on writes 0600 and is pruned; nothing is captured for the call in flight at a stop. On-box: the capture holds only the approved window | ◆ `Driver` protocol (additive capture) |
+| **7** | beacon-desktop | 3 | Device enrolment; ProgressPane computer section from a `computer_*` reducer; thread-header toggle + picker; `computer_step` kept out of the Activity feed; the 6b thumbnail at the head of the section, declaring `computer-thumbnails` | Every `computer_*` frame renders; a reload backfills; Mission Control's card stays readable | Renderer smoke for every frame | — |
+| **8** | beacon-ios | 3 | `Approval.arguments` + a "With:" list, and the capability header; `computer_*` kinds in the decoder list **and** a reducer; COMPUTER section + task strip; picker; Status row; the 6b thumbnail in the section and the strip, declaring `computer-thumbnails` | A phone shows the typed text before approving it, and no `computer_*` kind is silently dropped | Decoder tests pinned to the server's tuple | — |
 | **9** | beacon-desktop (+ Prometheus `GET /api/integrations`) | decision 7 | Connectors + Integrations merged; the computer row via contract views | One list and one health vocabulary; no integration-specific renderer | The provider-name smoke grep still passes | — |
 | **10** | Prometheus | 4 | **Local chooser** (§5.5): D7, `Choice.reason`, `GemmaChooser`, per-request grammar, boot canary | The model can only answer with a table ID, and a slow model cannot stall the daemon or slip past stop | One-line grammar checked by llama.cpp's validator; timeout → abstain with exactly one HTTP call; bypass → abstain + `silent_failures`; a non-enforcing backend refused; a stop while the chooser thread finishes dispatches nothing | ◆ loop (one line), `types.py` |
 | **11** | Prometheus (`gym/`) | 4 | Chooser evaluation tier a; runbooks for b0 and b; the Cua Bench adapter in a separate 3.12 venv | Accuracy, unsafe-action rate, invalid-ID = 0, latency → `timeout_s` | The harness's own fixtures | — |
@@ -1658,6 +1799,8 @@ own output (the #523 shape). The driver leg is uncoverable by CI
   * **L4:** per-run perception metrics.
   * **L5:** macOS and Windows (§2.1).
   * **L6:** OS focus and activation listeners (§2.2).
+  * **L7:** cockpit level 3, a live view of the approved window. No design
+    yet (Will, 2026-10-04).
 
 ### 6.1 The pin, precisely
 
@@ -1706,7 +1849,9 @@ v1.1 does none of the following:
 * register anything (decision 1);
 * foreground delivery, remote targets, `browser_*`, clipboard, launching
   apps, or recording/replay (`actions.py:33-49`);
-* screenshots (L3);
+* screenshots for any decision: the pixel tier is L3. The only capture is
+  the per-step thumbnail for the person watching (§5.2.5), and a live view
+  is L7;
 * web content (§5.4.3);
 * cloud models or services anywhere in the path (decision 3; Q1);
 * macOS or Windows (L5);
