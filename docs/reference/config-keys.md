@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **405** of
+Every key in `config/prometheus.yaml.default` — **411** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -378,6 +378,12 @@ none either — the key is documented so its absence is visible.
 | `backend_probe` | *(section)* |
 | `backend_probe.ttl_s` | `60` |
 | `backend_probe.timeout_s` | `5.0` |
+| `computer_use` | *(section)* |
+| `computer_use.enabled` | `False` |
+| `computer_use.targets` | `{}` *(open map)* |
+| `computer_use.probe` | *(section)* |
+| `computer_use.probe.ttl_s` | `60` |
+| `computer_use.probe.timeout_s` | `5.0` |
 | `anatomy` | *(section)* |
 | `anatomy.enabled` | `True` |
 | `anatomy.scan_on_startup` | `True` |

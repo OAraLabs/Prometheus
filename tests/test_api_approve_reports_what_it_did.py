@@ -121,7 +121,8 @@ class TestRemembered:
         _pending(
             queue, tool_name="computer_click",
             grant_computer_action=ComputerExtent(
-                target="mini", app="firefox", verb="click", delivery="background"),
+                target="mini", app="gedit", verb="click", delivery="background",
+                site="-"),
         )
         body = _approve(queue)
         assert body["remembered"] is True

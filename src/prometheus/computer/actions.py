@@ -29,7 +29,9 @@ gate's computer rule. The two declarations ship together or not at all.
 WHAT IS IN v1, AND WHAT IS DELIBERATELY NOT
 --------------------------------------------
 In: observe, click, scroll, press_key, type_text, invoke_menu, verify.
-Nine tools, all background-delivered, all snapshot-bound.
+Seven tools, all snapshot-bound, all requesting background delivery. Only
+``click``'s driver input can carry that request in cua-driver 0.28.2; for the
+other verbs the driver decides, and the adapter reports what it says it did.
 
 OUT, each for a reason rather than for scope:
 
@@ -44,6 +46,16 @@ OUT, each for a reason rather than for scope:
 * ``foreground`` delivery. Background only in v1 — the extent keeps the two
   distinguishable so foreground can be added later WITHOUT inheriting the
   grants background already earned.
+
+SETTING A FIELD, NOT TYPING AT FOCUS (computer-use v1.1, D2)
+-------------------------------------------------------------
+``set_value`` puts text into ONE element, addressed by its token, replacing
+what it holds. It exists because ``type_text`` cannot be aimed: cua-driver
+0.28.2's ``TypeTextInput`` takes only a window or the desktop, so typed text
+lands wherever focus is — while the candidate's sentence named a field. The
+candidate table offers ``set_value`` and no longer offers ``type_text``;
+``type_text`` stays a declared verb so its schema and gate rule keep their
+tests, and so nothing that calls it by name changes meaning.
 """
 
 from __future__ import annotations
@@ -56,9 +68,11 @@ from prometheus.permissions.computer_schema import (
     COMPUTER_APP_FIELD,
     COMPUTER_DELIVERY_FIELD,
     COMPUTER_PAYLOAD_FIELD,
+    COMPUTER_SITE_FIELD,
     COMPUTER_WINDOW_FIELD,
     COMPUTER_TARGET_FIELD,
     DELIVERY_BACKGROUND,
+    SITE_UNKNOWN,
     computer_verb,
 )
 
@@ -78,6 +92,21 @@ from prometheus.permissions.computer_schema import (
 # ---------------------------------------------------------------------------
 
 
+#: The ``site`` field every model declares. NOT required, unlike ``target``
+#: and ``app``: an action that cannot name its site still has a rulable
+#: extent — it is UNKNOWN, which prompts and can never be remembered. The
+#: default IS that answer, so a caller that says nothing gets the safe one.
+def _site_field() -> Any:
+    return Field(
+        SITE_UNKNOWN,
+        description=(
+            "The web origin this action can reach, '-' for positively none, "
+            "or '?' when that could not be established (consent term)."
+        ),
+        json_schema_extra=COMPUTER_SITE_FIELD,
+    )
+
+
 class _ActionBase(BaseModel):
     """Fields every desktop action carries."""
 
@@ -94,6 +123,7 @@ class _ActionBase(BaseModel):
         description="Target application (the consent term).",
         json_schema_extra=COMPUTER_APP_FIELD,
     )
+    site: str = _site_field()
     pid: int = Field(
         ..., description="Target process id.",
         json_schema_extra=COMPUTER_WINDOW_FIELD,
@@ -123,6 +153,7 @@ class ObserveInput(BaseModel):
 
     target: str = Field(..., json_schema_extra=COMPUTER_TARGET_FIELD)
     app: str = Field(..., json_schema_extra=COMPUTER_APP_FIELD)
+    site: str = _site_field()
     pid: int = Field(..., json_schema_extra=COMPUTER_WINDOW_FIELD)
     window_id: int = Field(..., json_schema_extra=COMPUTER_WINDOW_FIELD)
 
@@ -162,7 +193,7 @@ class TypeTextInput(_ActionBase):
 
     ⚠ ``text`` IS DECLARED AS A PAYLOAD, and that declaration is the whole
     safety property of this tool. It makes the call NOT REMEMBERABLE: the
-    extent ``target:app:verb:delivery`` has no term for a string, so a
+    extent ``target:app:site:verb:delivery`` has no term for a string, so a
     remembered grant would mean "type ANY text into this app on this machine,
     forever" — minted from a prompt that showed one string. See
     permissions/computer_schema.py.
@@ -176,6 +207,25 @@ class TypeTextInput(_ActionBase):
         json_schema_extra=COMPUTER_PAYLOAD_FIELD,
     )
     element_token: str = Field(..., description="Target element from the observation.")
+
+
+class SetValueInput(_ActionBase):
+    """Set ONE element's text, addressed by its token, replacing its contents.
+
+    ⚠ ``text`` IS A PAYLOAD, exactly as in ``TypeTextInput``: never
+    rememberable, approve-once every time. What differs is WHERE it lands —
+    the element the prompt names, not whatever has focus (D2).
+    """
+
+    model_config = ConfigDict(json_schema_extra=computer_verb("set_value"))
+
+    text: str = Field(
+        ...,
+        description="The text the element will hold.",
+        json_schema_extra=COMPUTER_PAYLOAD_FIELD,
+    )
+    element_token: str = Field(
+        ..., description="The element to set, from the observation.")
 
 
 class InvokeMenuInput(_ActionBase):
@@ -204,6 +254,7 @@ class VerifyInput(BaseModel):
 
     target: str = Field(..., json_schema_extra=COMPUTER_TARGET_FIELD)
     app: str = Field(..., json_schema_extra=COMPUTER_APP_FIELD)
+    site: str = _site_field()
     pid: int = Field(..., json_schema_extra=COMPUTER_WINDOW_FIELD)
     window_id: int = Field(..., json_schema_extra=COMPUTER_WINDOW_FIELD)
     expect_role: str | None = None
@@ -227,6 +278,7 @@ ACTION_MODELS: dict[str, type[BaseModel]] = {
     "scroll": ScrollInput,
     "press_key": PressKeyInput,
     "type_text": TypeTextInput,
+    "set_value": SetValueInput,
     "invoke_menu": InvokeMenuInput,
     "verify": VerifyInput,
 }

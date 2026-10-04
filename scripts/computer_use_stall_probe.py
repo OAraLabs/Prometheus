@@ -94,6 +94,10 @@ class _LoopOwningDriver:
             target=target, app=app, pid=pid, window_id=window_id,
             snapshot_id=f"snap-{self._n}",
             elements=(Element(0, f"tok-{self._n}", "push button", "Send"),),
+            # Full evidence of no web content, so the table's site is `-` and
+            # the pre-granted extent below matches (candidates.site_of).
+            total_element_count=1, returned_element_count=1,
+            web_content_seen=False,
         )
 
     def act(self, verb, arguments) -> dict:
@@ -155,7 +159,7 @@ def _gate() -> SecurityGate:
     gate = SecurityGate(mode=PermissionMode.DEFAULT, audit_logger=None)
     gate.add_grant(Grant(
         kind=COMPUTER_ACTION_KIND,
-        value=f"{TARGET}:{APP}:click:background",
+        value=f"{TARGET}:{APP}:-:click:background",
         tool_name="computer_click",
     ))
     return gate
