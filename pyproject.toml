@@ -102,7 +102,14 @@ browser = ["playwright>=1.40"]
 # be exercised without a display, so installing it in CI would buy nothing
 # and would imply coverage that does not exist. See
 # computer/cua.py's module docstring.
-computer = ["cua-driver>=0.28,<1"]
+#
+# ⚠ AN EXACT PIN, ON PURPOSE (computer-use v1.1, D12). `>=0.28,<1` admitted
+# 0.28.3, where `GetWindowStateInput` gained a REQUIRED keyword our observe
+# call does not pass — every observation on such an install raises. The lock
+# was the only guard, and `pip install 'oara-prometheus[computer]'` ignores
+# it. Upgrading is a deliberate change: bump this, re-run the real-SDK half of
+# tests/test_cua_adapter.py against the new wheel, and run the on-box check.
+computer = ["cua-driver==0.28.2"]
 # Onboarding Phase 0 papercut: whisper STT was used for voice input but
 # never declared anywhere. The faster-whisper python API is the pip-
 # installable engine; the whisper/faster-whisper-xxl CLIs also work.

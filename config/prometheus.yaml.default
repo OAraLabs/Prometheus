@@ -1219,6 +1219,22 @@ backend_probe:
   ttl_s: 60          # a read older than this re-probes; /backends refresh forces it
   timeout_s: 5.0     # per backend; a dead box costs one timeout, never a hang
 
+# Computer use — the desktop driver (cua-driver, `uv sync --extra computer`)
+# as an Integration: its health is probed and known before any task, and it
+# is OFF unless this says `enabled: true` (a literal true; a quoted "true" is
+# not enough). Off means the driver is never constructed. Enabling it
+# registers no tool. Telemetry is forced off; no key turns it back on.
+computer_use:
+  enabled: false
+  # Named machines — the first term of every desktop grant. Local only (the
+  # local-only ruling); none is implied, so enabling needs one, e.g.
+  #   targets:
+  #     local: {kind: local, description: this machine's desktop}
+  targets: {}
+  probe:
+    ttl_s: 60          # a read older than this re-probes; POST .../probe forces it
+    timeout_s: 5.0     # bounds one health probe; a hung driver costs one timeout
+
 anatomy:
   enabled: true
   scan_on_startup: true

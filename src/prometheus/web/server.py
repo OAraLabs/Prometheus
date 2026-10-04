@@ -263,6 +263,7 @@ def create_app(
     local_model: str | None = None,
     detected_kv_cache: dict[str, Any] | None = None,
     backend_registry: Any | None = None,
+    computer_integration: Any | None = None,
 ) -> FastAPI:
     """Create the FastAPI application with all routes.
 
@@ -530,6 +531,12 @@ def create_app(
     # /api/status renders its cache. None on a bare create_app() — the routes
     # then say so rather than inventing an empty fleet.
     app.state.backend_registry = backend_registry
+    # The desktop driver as an Integration (computer/integration.py): health
+    # known before dispatch, nothing constructed while it is off. Its target
+    # registry is the one /api/status reports — None while disabled, which is
+    # distinguishable from "declared, nothing bound".
+    app.state.computer_integration = computer_integration
+    app.state.computer_targets = getattr(computer_integration, "targets", None)
 
     def _resolved_context_limit(
         model: str | None = None,
@@ -830,10 +837,11 @@ def create_app(
         _bridge = getattr(app.state, "ws_bridge", None)
         _ctx = getattr(_bridge, "loop_context", None) if _bridge else None
         tool_registry = getattr(_ctx, "tool_registry", None)
-        # No target registry is constructed on the daemon yet — nothing
-        # wires one. `None` says exactly that, and is distinguishable from
-        # `[]` ("a registry exists and declares no target").
+        # The integration's target registry, or None when computer use is off
+        # or not wired — distinguishable from `[]` ("a registry exists and
+        # declares no target").
         target_registry = getattr(app.state, "computer_targets", None)
+        integration = getattr(app.state, "computer_integration", None)
         try:
             substrate = await asyncio.to_thread(_cstatus.substrate_block)
         except Exception as exc:  # noqa: BLE001 — status must still render
@@ -844,6 +852,11 @@ def create_app(
             "registered": _cstatus._registered_count(tool_registry),
             "targets": _cstatus._targets(target_registry),
             "substrate": substrate,
+            # The driver Integration, from its CACHE — a status read never
+            # probes it (GET /api/integrations/computer does, through the TTL).
+            # None when no integration is wired.
+            "driver": (integration.status_view()
+                       if integration is not None else None),
         }
 
     def _registry() -> Any | None:
@@ -4836,6 +4849,35 @@ def create_app(
                 "error": f"unknown backend {name!r}; known: {list(reg.names())}"})
         st = await reg.probe(name, force=True)
         return st.as_dict(stale=reg.is_stale(name))
+
+    # ── Integrations: the desktop driver ──────────────────────────────
+    #
+    # GET probes through the TTL, POST /probe forces — the /api/backends
+    # pattern. Both are bounded by the integration's probe timeout and record
+    # failures rather than raising. 503 when the daemon booted without one;
+    # a DISABLED integration answers 200 with state "disabled" and probes
+    # nothing.
+
+    def _computer_integration() -> Any | None:
+        return getattr(app.state, "computer_integration", None)
+
+    @app.get("/api/integrations/computer")
+    async def computer_integration_status(refresh: int = 0):
+        integration = _computer_integration()
+        if integration is None:
+            return JSONResponse(status_code=503, content={
+                "error": "computer-use integration unavailable — the daemon "
+                         "booted without one"})
+        return await integration.probe(force=bool(refresh))
+
+    @app.post("/api/integrations/computer/probe")
+    async def computer_integration_probe():
+        integration = _computer_integration()
+        if integration is None:
+            return JSONResponse(status_code=503, content={
+                "error": "computer-use integration unavailable — the daemon "
+                         "booted without one"})
+        return await integration.probe(force=True)
 
     # The catalog is a list of DEFAULTS, not the set of models this daemon can
     # run. The model string in prometheus.yaml is free-form — only the PROVIDER

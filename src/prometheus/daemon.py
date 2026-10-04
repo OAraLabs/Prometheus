@@ -973,6 +973,28 @@ async def run_daemon(args: argparse.Namespace) -> None:
         mcp_runtime = await create_mcp_runtime(
             config, registry, tool_loader=tool_loader
         )
+
+    # Computer use — the desktop driver as an Integration (computer-use v1.1).
+    # OFF by default: disabled constructs no driver and probes nothing. When
+    # enabled, one bounded boot probe records its health (a failure is a
+    # recorded state, never a boot failure). It is built AFTER the MCP config
+    # is known so the probe can say when an MCP server also runs cua-driver.
+    # It registers NOTHING: computer.registered stays 0.
+    from prometheus.computer.integration import ComputerIntegration
+    computer_integration = ComputerIntegration.from_config(
+        config,
+        mcp_servers=merged_server_configs(config, McpServerStore()),
+    )
+    if computer_integration.enabled:
+        try:
+            await asyncio.wait_for(
+                computer_integration.probe(force=True),
+                timeout=computer_integration.timeout_s + 2.0,
+            )
+        except Exception as exc:  # noqa: BLE001 — recorded, not fatal
+            logger.warning("Computer use: boot probe did not finish: %s", exc)
+        logger.info("Computer use: integration %s",
+                    computer_integration.snapshot()["state"])
     # FIRSTLIGHT FL-2b: the advertised baseline gets ONE visible line at
     # boot. Before this, a config with no tools: section advertised zero
     # tools and nothing anywhere said so — the only traces were telemetry
@@ -2795,6 +2817,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     local_model=model_name,
                     detected_kv_cache=detected_kv_cache,
                     backend_registry=backend_registry,
+                    computer_integration=computer_integration,
                     api_port=api_port,
                     ws_port=ws_port,
                 ))
@@ -2827,6 +2850,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     if mcp_runtime is not None:
         await mcp_runtime.close()
+
+    computer_integration.close()
 
     if telegram:
         await telegram.stop()
