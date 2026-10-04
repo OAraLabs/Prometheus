@@ -532,9 +532,9 @@ rebase.
 | rung | model (quant) | served on | server | tier |
 |---|---|---|---|---|
 | `r27b` | Qwen3.8-27B (Unsloth UD-Q4_K_XL, the 08-14 upload) | the 4090, **production, untouched** — run 06:31–06:36, llama-server PID, uptime and VRAM identical before and after | llama.cpp `9d57ce456` (production's own) | light |
-| `r27b-pq2` | Ternary Bonsai 2 27B (PrismML PQ2_0), the same Qwen3.8-27B checkpoint | the mini's 3090 Ti | PrismML fork `prism-b10735` (the Zen 4 load fix) | full (daemon's pick) |
+| `r27b-pq2` | Ternary Bonsai 2 27B (PrismML PQ2_0), the same Qwen3.8-27B checkpoint | the mini's 3090 Ti | PrismML fork `prism-b10735` (the Zen 4 load fix) | full (the daemon's pick at `27399d4`; `light` since #583) |
 | `r08b` | Qwen3.5-9B (Unsloth UD-Q4_K_XL, -MTP build) | the mini's 3090 Ti | llama.cpp `9d57ce456`, built on the mini for sm_86 | light |
-| `r09b-ornith` | Ornith-1.5-9B (official Q4_K_M), Qwen3.5-9B base, agentic RL | the mini's 3090 Ti | llama.cpp `9d57ce456`, built on the mini | full (daemon's pick) |
+| `r09b-ornith` | Ornith-1.5-9B (official Q4_K_M), Qwen3.5-9B base, agentic RL | the mini's 3090 Ti | llama.cpp `9d57ce456`, built on the mini | full (the daemon's pick at `27399d4`; `light` since #583) |
 
 Each mini server ran with production's flags, `--temp 1.0 --top-k 20 --top-p 0.95 --min-p 0.05`
 (production's effective sampler, confirmed from every server's `/props`), no vision projector,
@@ -619,16 +619,21 @@ Paired by task (mean per-task difference in task success, 95% bootstrap interval
   (−0.30): it writes the most XML-markup turns (2.51 per run vs 1.34) and the most format misses
   (15 vs 2). Its agentic training leans harder on the trained call format, which tier full broke
   before #582.
-  Confounds, labelled: the quantizer (official Q4_K_M vs Unsloth UD-Q4_K_XL), and the tier — the
-  daemon gives Ornith `full` by default because its file name matches no registry entry.
+  Confounds, labelled: the quantizer (official Q4_K_M vs Unsloth UD-Q4_K_XL), and the tier of the
+  rung smokes — at the measured commit the daemon gave Ornith `full`, because its file name matches
+  no registry entry, while the 9B got `light`. Since #583 the daemon reads the served chat template,
+  and a native-tool template like Ornith's resolves to `light`.
 - **Evidence for WP-X.28, not changed here.** Qwen3.8 derivatives (Bonsai 2 27B included) and
   Qwen3.5 derivatives (Ornith) behave like tier-light models — native XML tool calls, off ≈ light,
-  full much worse — but the daemon puts both at `full` because their file names do not contain
-  `qwen3`. `config/model_registry.yaml` and the adapter are untouched in this work package.
-  #582 (WP-X.28 PR 1) has since made `full` read the XML; it does not change which tier these
-  models get. A re-sweep on main would measure what #582 recovers — not run here.
+  full much worse. At the measured commit the daemon put both at `full`, because their file names
+  match no `config/model_registry.yaml` entry (neither contains `qwen3`); this work package changed
+  neither the registry nor the adapter. Two later changes act on that: #582 (WP-X.28 PR 1) made
+  `full` read the XML, and #583 (WP-X.28 PR 2) decides the tier from the served chat template when
+  the registry does not list a model, so both now resolve to `light` from a native-tool template
+  (pinned by `tests/test_adapter_tier_wiring.py`). A re-sweep on main would measure what #582 recovers — not
+  run here.
 - **The 4-rung comparison therefore reads at light**: the 27B and the 9B ran their rung smokes at
-  light; Bonsai's and Ornith's rung smokes ran at the daemon's pick (full), and their sweeps give
+  light; Bonsai's and Ornith's rung smokes ran at the daemon's pick at the time (full), and their sweeps give
   the light numbers for the three tool-using classes.
 
 ### Not controlled, and not measured
