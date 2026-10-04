@@ -47,7 +47,16 @@ class _FakeTelegram:
         self.sent.append(text)
 
 
-async def _prompt(queue: ApprovalQueue, **kw) -> str:
+async def _prompt(queue: ApprovalQueue, *, keep_waiting: bool = False,
+                  **kw) -> str:
+    """Raise one prompt and return its text.
+
+    ``keep_waiting`` leaves the request waiting (its pending entry intact)
+    for a test that answers or inspects it; the task is parked on the queue
+    and :func:`_release` cancels it. Cancelling the waiter used to leave the
+    entry behind — that leak was D14, fixed with a ``finally`` (computer-use
+    v1.1) — so a test that reads the entry must keep the request alive.
+    """
     task = asyncio.create_task(
         queue.request_approval("write_file", f"write {PATH}",
                                grant_file_path=PATH, **kw)
@@ -56,11 +65,22 @@ async def _prompt(queue: ApprovalQueue, **kw) -> str:
         await asyncio.sleep(0.005)
         if queue._telegram.sent:
             break
-    task.cancel()
-    with contextlib.suppress(BaseException):
-        await task
+    if keep_waiting:
+        queue._parked_task = task  # type: ignore[attr-defined]
+    else:
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
     assert queue._telegram.sent, "no prompt was sent"
     return queue._telegram.sent[0]
+
+
+async def _release(queue: ApprovalQueue) -> None:
+    task = getattr(queue, "_parked_task", None)
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
 
 
 def _queue(extra_pending: int = 0) -> ApprovalQueue:
@@ -94,11 +114,12 @@ async def test_prompt_no_longer_carries_the_four_extent_lines():
 async def test_remember_reproduces_every_extent_the_prompt_used_to_carry():
     """Nothing is lost by the move — only relocated."""
     q = _queue()
-    await _prompt(q)
+    await _prompt(q, keep_waiting=True)
     rid = next(a.request_id for a in q.pending.values()
                if a.tool_name == "write_file")
     action = q.pending[rid]
     out = await cmds.cmd_remember(q, rid)
+    await _release(q)
 
     extents = prospective_extents(action)
     assert extents, "fixture should have derivable extents"
@@ -118,10 +139,11 @@ async def test_remember_keeps_verb_and_extent_on_one_line():
     description wearing a new shape.
     """
     q = _queue()
-    await _prompt(q)
+    await _prompt(q, keep_waiting=True)
     rid = next(a.request_id for a in q.pending.values()
                if a.tool_name == "write_file")
     out = await cmds.cmd_remember(q, rid)
+    await _release(q)
 
     for line in out.splitlines():
         if "/approve " in line and "—" in line:

@@ -25,12 +25,20 @@ EXTRA = "computer"
 
 
 def _load(path: str | Path) -> Any:
+    """The live config, or {} — said out loud: "I could not read your
+    configuration" and "you did not configure anything" are different facts,
+    and both mean OFF here (the safe direction for a desktop driver)."""
     import yaml
 
     try:
         return yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
-    except Exception:  # noqa: BLE001 - unreadable or invalid means off
-        return {}
+    except OSError as exc:
+        print(f"deploy:   cannot read {path} ({exc.__class__.__name__}: {exc}) — "
+              f"treating computer use as off (no computer extra)", file=sys.stderr)
+    except yaml.YAMLError as exc:
+        print(f"deploy:   {path} is not valid YAML ({exc.__class__.__name__}) — "
+              f"treating computer use as off (no computer extra)", file=sys.stderr)
+    return {}
 
 
 def computer_extra_wanted(path: str | Path) -> bool:
