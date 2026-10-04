@@ -68,11 +68,6 @@ def _computer_schemas(registry) -> list[str]:
     return hits
 
 
-class _NoDriverIntegration:
-    """``wire_computer_use`` probes nothing here: the pin is about the
-    REGISTRY, and a boot probe on a CI box has no display to find."""
-
-
 @pytest.mark.parametrize("config", [_shipped(), _enabled()],
                          ids=["shipped", "enabled"])
 def test_boot_wiring_registers_no_computer_tool(config, tmp_path):
@@ -86,7 +81,7 @@ def test_boot_wiring_registers_no_computer_tool(config, tmp_path):
                         audit_logger=AuditLogger(tmp_path / "audit"))
     wiring = wire_computer_use(config, gate=gate, registry=registry,
                                device_store=None, telegram_adapter=None,
-                               telegram_user_ids=(), probe_at_boot=False)
+                               telegram_user_ids=())
     try:
         assert _computer_named(registry) == []
         assert _computer_schemas(registry) == []
@@ -111,7 +106,7 @@ def test_off_constructs_no_driver_and_starts_no_runtime(tmp_path):
                         audit_logger=AuditLogger(tmp_path / "audit"))
     wiring = wire_computer_use(
         _shipped(), gate=gate, registry=ToolRegistry(), device_store=None,
-        telegram_adapter=None, telegram_user_ids=(), probe_at_boot=False,
+        telegram_adapter=None, telegram_user_ids=(),
         adapter_factory=lambda target: built.append(target))
     assert wiring.integration.driver() is None
     assert wiring.channel is None and wiring.runner is None

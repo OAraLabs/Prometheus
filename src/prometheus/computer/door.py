@@ -115,6 +115,12 @@ class PersonCheck:
         self._devices = device_store
         self._telegram = {str(u) for u in telegram_user_ids}
 
+    def bind_device_store(self, store: Any) -> None:
+        """The web launcher's ONE device store (the REST middleware's), so a
+        mark or a revocation is seen by both at once."""
+        if store is not None:
+            self._devices = store
+
     @property
     def devices(self) -> Any:
         """The device store the marks live in (None when there is none)."""

@@ -12,7 +12,7 @@ Enumerating the registry is deliberate: grepping for an expected
 name once produced a false finding, because Slack's registrations
 carry the `/prometheus-` prefix and the bare name matched nothing.
 
-## By gateway — 55 distinct commands
+## By gateway — 56 distinct commands
 
 The three gateways spell the same command differently. Telegram
 uses the bare name, Slack prefixes every one with `/prometheus-`,
@@ -32,6 +32,7 @@ reason.
 | `/claude` | `/claude` | `/prometheus-claude` | `/prometheus provider claude` |
 | `/clear` | `/clear` | — | `/prometheus core clear` |
 | `/clearsteers` | `/clearsteers` | `/prometheus-clearsteers` | `/prometheus session clearsteers` |
+| `/computer` | `/computer` | `/prometheus-computer` | `/prometheus ops computer` |
 | `/context` | `/context` | `/prometheus-context` | `/prometheus core context` |
 | `/curator` | `/curator` | `/prometheus-curator` | `/prometheus core curator` |
 | `/deepseek` | `/deepseek` | `/prometheus-deepseek` | `/prometheus provider deepseek` |
