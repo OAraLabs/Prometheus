@@ -168,6 +168,18 @@ async def launch_web(
     # The chat Stop (WS interrupt / POST /api/chat/interrupt) stops a
     # session's desktop tasks first (computer-use v1.1 §5.1.7).
     bridge.computer_runner = computer_runner
+    # The cockpit (computer-use v1.1 PR 6): the desktop action log goes out
+    # on the SignalBus (durable, backfilled, promoted to computer_* frames)
+    # and, for clients without its decoders, as chat-timeline frames.
+    if computer_runner is not None and signal_bus is not None:
+        from prometheus.computer.livestream import (
+            ComputerLiveStream,
+            keep_per_session_from,
+        )
+
+        computer_runner.live = ComputerLiveStream(
+            signal_bus, bridge=bridge, telemetry=telemetry,
+            keep_per_session=keep_per_session_from(config))
 
     # GRAFT Piece 2: APNs push. Enabled-but-broken fails the BOOT, loudly —
     # a missing key or missing deps must not degrade to silent no-pushes

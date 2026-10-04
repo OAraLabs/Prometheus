@@ -358,11 +358,15 @@ class SessionConsent:
         self.limit_hit = False
         self.fence_reason = ""
         self.dispatching = False
+        #: How this step's action was consented to: "binding" | "prompt" |
+        #: None (then a stored grant allowed it, or nothing did).
+        self.consent: str | None = None
 
     def begin_step(self) -> None:
         self._prompted = None
         self.stale_approval = False
         self.fence_reason = ""
+        self.consent = None
 
     @staticmethod
     def _key(arguments: Mapping[str, Any]) -> tuple[str, str]:
@@ -394,6 +398,7 @@ class SessionConsent:
                 and self._binding.covers(extent, arguments)
                 and not self._label_asks(element)):
             self._runner._audit_binding(tool_name, self._binding, extent)
+            self.consent = "binding"
             return True
 
         # It has to ask. The ceiling first — past it, nothing more is asked.
@@ -407,10 +412,21 @@ class SessionConsent:
         description = f"{what} — {reason}" if reason else what
         shown = {k: arguments[k] for k in ("text", "key") if k in arguments}
         started = self._runner._clock()
+        live = self._runner.live
+
+        async def waiting(action: Any) -> None:
+            if live is not None:
+                await live.step(
+                    self._task, status="awaiting_approval", verb=verb,
+                    description=what,
+                    extent=extent.value if extent is not None else "",
+                    approval_request_id=action.request_id)
+
         result = await self._runner.channel.request_for_task(
             tool_name=tool_name, description=description, extent=extent,
             arguments=shown or None, task_id=self._task.task_id,
-            session_id=self._task.session_id, chat_id=self._task.chat_id)
+            session_id=self._task.session_id, chat_id=self._task.chat_id,
+            on_pending=waiting)
         waited = self._runner._clock() - started
         if self._stopped():
             return False
@@ -422,6 +438,7 @@ class SessionConsent:
             self.stale_approval = True
             return False
         self._prompted = self._key(arguments)
+        self.consent = "prompt"
         return True
 
     def _label_asks(self, element: Any) -> bool:
@@ -495,6 +512,8 @@ class ComputerTaskRunner:
         self._tasks: dict[str, ComputerTask] = {}
         #: Telegram's pending "which app?" questions (see gateway.commands).
         self.proposals: dict[tuple[str, str], Any] = {}
+        #: The cockpit's action log (computer.livestream), or None.
+        self.live: Any = None
 
     # ── health and discovery ────────────────────────────────────────────
 
@@ -577,6 +596,8 @@ class ComputerTaskRunner:
         self._bindings[session_id] = binding
         self._audit_note(by, f"computer binding {binding.binding_id} on: "
                              f"{binding.app} ({scope}) for {session_id}")
+        if self.live is not None:
+            await self.live.binding(binding, "on")
         return binding
 
     def binding_for(self, session_id: str) -> Binding | None:
@@ -587,7 +608,13 @@ class ComputerTaskRunner:
         return binding
 
     def unbind(self, session_id: str) -> bool:
-        return self._bindings.pop(session_id, None) is not None
+        binding = self._bindings.pop(session_id, None)
+        if binding is None:
+            return False
+        loop = _running_loop()
+        if self.live is not None and loop is not None:
+            loop.create_task(self.live.binding(binding, "off"))
+        return True
 
     # ── tasks ───────────────────────────────────────────────────────────
 
@@ -638,8 +665,13 @@ class ComputerTaskRunner:
         self._tasks[task.task_id] = task
         self._audit_note(by, f"computer task {task.task_id} started in "
                              f"{task.app} for {session_id} ({surface})")
+        chooser = self._chooser_factory()
+        if self.live is not None:
+            await self.live.task_started(
+                task, limits=self.limits,
+                chooser=str(getattr(chooser, "name", "rule")))
         task._handle = asyncio.create_task(
-            self._run(task, driver, binding, res.app.pid, notify),
+            self._run(task, driver, binding, res.app.pid, notify, chooser),
             name=f"computer-task-{task.task_id}")
         return task
 
@@ -685,11 +717,12 @@ class ComputerTaskRunner:
     # ── the run ─────────────────────────────────────────────────────────
 
     async def _run(self, task: ComputerTask, driver: Any, binding: Binding,
-                   pid: int, notify) -> None:
+                   pid: int, notify, chooser: Any = None) -> None:
         seeing = _SeeingDriver(driver)
         consent = SessionConsent(self, task, binding, seeing)
+        picker = _StopAwareChooser(chooser or self._chooser_factory(), task)
         loop = ComputerUseLoop(
-            seeing, _StopAwareChooser(self._chooser_factory(), task),
+            seeing, picker,
             self.gate, approve=consent.approve, origin="user",
             skip_preconditions=self._skip_preconditions,
             before_act=consent.before_act)
@@ -719,14 +752,21 @@ class ComputerTaskRunner:
                     break
                 consent.begin_step()
                 consent.dispatching = False
+                step_started = self._clock()
                 result = await loop.step(
                     task.goal, task.target, task.app, pid, window.window_id,
                     text_to_type=task.text, history=history)
+                after_stop = (result.status == "executed"
+                              and task.stop_requested)
+                if self.live is not None:
+                    await self._log_step(task, result, consent, picker,
+                                         after_stop=after_stop,
+                                         started=step_started)
                 if result.status == "executed":
                     task.steps += 1
                     history = list(result.history)
                     reobserve = 0
-                    if task.stop_requested:
+                    if after_stop:
                         task.in_flight_at_stop = True
                     continue
                 if result.status == "reobserve":
@@ -781,8 +821,38 @@ class ComputerTaskRunner:
             self._audit_note(task.started_by,
                              f"computer task {task.task_id} ended: {outcome} "
                              f"({task.steps} steps, {task.approvals} approvals)")
+            if self.live is not None:
+                try:
+                    await self.live.task_ended(task, summary=end_message(task))
+                    if binding.scope == SCOPE_TASK:
+                        await self.live.binding(binding, "off")
+                except Exception:  # noqa: BLE001 - the log never ends a task
+                    logger.debug("action log at task end failed", exc_info=True)
             if notify is not None:
                 await _quiet(notify, end_message(task))
+
+    async def _log_step(self, task: ComputerTask, result: Any,
+                        consent: SessionConsent, picker: _StopAwareChooser,
+                        *, after_stop: bool, started: float) -> None:
+        candidate = result.candidate
+        verb = (VERB_FOR_TOOL_NAME.get(candidate.tool_name)
+                if candidate is not None else None)
+        how = consent.consent
+        if how is None and result.status == "executed":
+            how = "grant"  # the gate allowed it from a remembered grant
+        status = "in_flight_at_stop" if after_stop else result.status
+        try:
+            await self.live.step(
+                task, status=status, verb=verb,
+                description=candidate.description if candidate else None,
+                extent=result.extent, consent=how,
+                chooser=picker.last_view(),
+                verified=result.verified, after_stop=after_stop,
+                candidates_offered=result.candidates_offered,
+                duration_ms=int((self._clock() - started) * 1000),
+                reason=consent.fence_reason or result.reason)
+        except Exception:  # noqa: BLE001 - the log never ends a task
+            logger.debug("action log step failed", exc_info=True)
 
     async def _heartbeat(self, task: ComputerTask, notify) -> None:
         while True:
@@ -857,6 +927,7 @@ class _StopAwareChooser:
         self._chooser = chooser
         self._task = task
         self.name = getattr(chooser, "name", "rule")
+        self._last: Any = None
 
     def choose(self, request):
         from prometheus.computer.types import CANDIDATE_ABSTAIN, Choice
@@ -864,9 +935,19 @@ class _StopAwareChooser:
         if self._task.stop_requested:
             return Choice(CANDIDATE_ABSTAIN, source=self.name)
         choice = self._chooser.choose(request)
+        self._last = choice
         if self._task.stop_requested:
             return Choice(CANDIDATE_ABSTAIN, source=self.name)
         return choice
+
+    def last_view(self) -> dict[str, Any]:
+        """Who picked, how sure, and why — never the table it picked from."""
+        choice = self._last
+        return {
+            "name": self.name,
+            "confidence": getattr(choice, "confidence", None),
+            "reason": getattr(choice, "reason", None),
+        }
 
 
 def end_message(task: ComputerTask) -> str:

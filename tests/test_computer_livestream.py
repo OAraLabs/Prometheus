@@ -41,8 +41,10 @@ from tests.test_computer_door import (
 )
 
 FORBIDDEN_KEYS = {"element_token", "snapshot_id", "pid", "window_id"}
-#: Labels of rows the scripted chooser never picks in these runs.
-UNCHOSEN = ("Send", "File")
+#: Labels of rows the scripted chooser never picks in these runs, as app
+#: text renders (``Element.describe`` quotes the label). The binding sentence
+#: names "Send" in its OWN words, which is not app text.
+UNCHOSEN = ("'Send'", "'File'")
 
 
 def _bus(tmp_path):

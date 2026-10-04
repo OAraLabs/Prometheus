@@ -37,6 +37,16 @@ def _coding_frame_kinds() -> tuple[str, ...]:
 
     return CODING_FRAME_KINDS
 
+def _computer_frame_kinds() -> tuple[str, ...]:
+    """The desktop action log's own declaration of every kind it emits
+    (computer-use v1.1 PR 6). Promoted from the emitter's tuple for the same
+    reason as the coding kinds: a copied list here is how a kind ends up
+    shipped as ``sentinel_signal`` and silently dropped by every client."""
+    from prometheus.computer.livestream import COMPUTER_FRAME_KINDS
+
+    return COMPUTER_FRAME_KINDS
+
+
 # Close code for an unauthenticated / failed-auth WebSocket. 4000–4999 is the
 # application-private range; 4401 mirrors HTTP 401 for "unauthorized". Beacon
 # and the static UI key their auth-failure UX off this exact code.
@@ -498,6 +508,20 @@ class WebSocketBridge:
                 "type": "interrupt_ack",
                 "timestamp": time.time(),
                 "payload": {"session_id": session_id, "stopped": stopped},
+            })
+
+        elif cmd_type == "computer_task_stop":
+            # Stop ONE desktop task: { type: "computer_task_stop", payload:
+            # { task_id } } -> computer_task_stop_ack { task_id, stopped }.
+            # Never refused to an authenticated socket: a stop can only end a
+            # task. No new action starts after it; one in flight may land.
+            task_id = str(payload.get("task_id") or "")
+            runner = getattr(self, "computer_runner", None)
+            stopped = bool(runner.stop(task_id)) if (runner and task_id) else False
+            await self._send_one(websocket, {
+                "type": "computer_task_stop_ack",
+                "timestamp": time.time(),
+                "payload": {"task_id": task_id, "stopped": stopped},
             })
 
     async def _handle_file_upload(
@@ -1653,6 +1677,11 @@ class WebSocketBridge:
         # task_completed/task_failed, sitting one screen above it the whole time. A hardcoded list
         # here can drift from its producer; CODING_FRAME_KINDS cannot.
         elif signal.kind in _coding_frame_kinds():
+            event["type"] = signal.kind
+            event["payload"] = signal.payload
+        # The desktop action log (computer-use v1.1 PR 6), from the emitter's
+        # own declaration. Each payload carries the chat session_id.
+        elif signal.kind in _computer_frame_kinds():
             event["type"] = signal.kind
             event["payload"] = signal.payload
         # Background-task lifecycle (audit P9.7 / Beacon#128). The manager HAS emitted these since

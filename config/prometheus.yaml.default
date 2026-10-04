@@ -1268,6 +1268,12 @@ computer_use:
     max_seconds: 600     # wall clock
     max_approvals: 10    # prompts a task may ask; past it, nothing more is asked
     max_reobserve: 3     # "look again" answers in a row
+  # The cockpit's action log (computer_* events): what each Beacon shows live
+  # and backfills on reconnect. Kept per chat session; older rows are pruned
+  # when a task or binding ends. No element token, pid, window id or typed
+  # text is ever stored — the text is a character count.
+  action_log:
+    keep_per_session: 200
 
 anatomy:
   enabled: true

@@ -77,9 +77,15 @@ class ComputerApprovalChannel(ApprovalQueue):
         task_id: str,
         session_id: str,
         chat_id: int | None = None,
+        on_pending: Any = None,
     ) -> ApprovalResult:
-        """Ask the person, tagged with the task. Waits for the answer."""
+        """Ask the person, tagged with the task. Waits for the answer.
+
+        ``on_pending(action)`` runs once the request exists — the action log
+        uses it to say the step is waiting, with the request's id.
+        """
         request_id = uuid4().hex[:8]
+        raw_text = (arguments or {}).get("text")
         action = PendingAction(
             request_id=request_id,
             tool_name=tool_name,
@@ -89,9 +95,15 @@ class ComputerApprovalChannel(ApprovalQueue):
             task_id=task_id,
             session_id=session_id,
             once_only=True,
+            text_chars=len(raw_text) if isinstance(raw_text, str) else None,
         )
         self.pending[request_id] = action
         await self._emit("approval_pending", self.serialize_pending(action))
+        if on_pending is not None:
+            try:
+                await on_pending(action)
+            except Exception:  # noqa: BLE001 - the log never blocks consent
+                logger.debug("on_pending failed", exc_info=True)
         if self._telegram and chat_id:
             lines = [
                 f"Desktop task {task_id} asks:",
