@@ -313,6 +313,11 @@ async def test_layer_one_renders_the_task_in_the_chat_timeline(tmp_path):
     for e in ends:
         assert {"call_id", "tool_name", "success"} <= set(e), "iOS requires these"
     assert "chat_done" in live.rec.types(), "no chat turn was live"
+    done = next(f["payload"] for f in live.rec.frames if f["type"] == "chat_done")
+    assert done["message_id"] == f"computer:{task.task_id}", (
+        "iOS's ChatDonePayload requires message_id; without it the frame is "
+        "undecodable and dropped")
+    assert isinstance(done["session_id"], str) and done["interrupted"] is False
     assert "turn_completed" not in live.rec.types(), "never a turn summary push"
 
 

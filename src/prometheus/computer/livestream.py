@@ -291,6 +291,11 @@ class ComputerLiveStream:
         if not self._chat_turn_live(task.session_id):
             await self._frame("chat_done", {
                 "session_id": task.session_id,
+                # A HANDLE, not a rowid: iOS's ChatDonePayload requires
+                # message_id, and a frame it cannot decode is dropped — the
+                # very failure this module exists to prevent. No turn was
+                # persisted, so there is no rowid (and no row_id key).
+                "message_id": f"computer:{task.task_id}",
                 "interrupted": task.outcome == "stopped",
                 "origin": "user_task",
             })
