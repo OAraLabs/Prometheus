@@ -11,7 +11,7 @@ branches on which.
 THE NAME IS THE CONSENT TERM, AND THAT CONSTRAINS WHAT A NAME MAY BE
 ---------------------------------------------------------------------
 ``Target.name`` is the first term of every computer-use grant
-(``target:app:verb:delivery``). Consequences, each load-bearing:
+(``target:app:site:verb:delivery``). Consequences, each load-bearing:
 
 * **Operator-declared, never derived.** A name comes from config. It is never
   a hostname, an address, or anything read off the connection. Grants are
@@ -149,7 +149,7 @@ def registry_from_config(config: dict[str, Any] | None) -> TargetRegistry:
     because constructing a driver may connect to something and this function
     must not. A config with no targets yields an EMPTY registry, not an
     implicit local one: an implicit target is a machine nobody named, and its
-    grants would read ``:firefox:click:background``.
+    grants would read ``:firefox:-:click:background``.
     """
     registry = TargetRegistry()
     block = (config or {}).get("targets") or {}
