@@ -319,6 +319,12 @@ MANIFEST: tuple[Family, ...] = (
     Family("local", ("cmd_local_override",), _cmds("local", "prometheus-local", "local")),
     Family("route", ("cmd_route",), _cmds("route", "prometheus-route", "route")),
     Family("backends", ("cmd_backends",), _cmds("backends", "prometheus-backends", "backends")),
+    # Computer use v1.1 (the door). Registered on every surface; on Slack
+    # and Discord it refuses with the reason — desktop approvals reach only
+    # Telegram and Beacon (W5), so a task started there could not ask. That
+    # is the recorded parity gap. On the web chat path it answers status and
+    # stop and refuses to start: that path carries no person credential yet.
+    Family("computer", ("cmd_computer",), _cmds("computer", "prometheus-computer", "computer")),
 )
 
 

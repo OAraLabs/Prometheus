@@ -458,6 +458,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("local", self._cmd_local))
         self._app.add_handler(CommandHandler("route", self._cmd_route))
         self._app.add_handler(CommandHandler("backends", self._cmd_backends))
+        # Computer use v1.1 — the door. A person starts a desktop task here.
+        self._app.add_handler(CommandHandler("computer", self._cmd_computer))
         # One command per configured local backend (`/4090`, `/mini`) — the
         # names come from the registry, so the command set follows the config.
         from prometheus.router.model_router import backend_command_names
@@ -2572,6 +2574,34 @@ class TelegramAdapter(BasePlatformAdapter):
         text = await _cmds.cmd_approve(
             queue, arg_text, by=_approver.telegram(update.effective_user))
         await self.send(update.effective_chat.id, text, parse_mode=None)
+
+    async def _cmd_computer(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/computer — start, answer, follow and stop a desktop task.
+
+        The shared core returns at once; the task runs in the background and
+        reports milestones (counts only) to THIS chat. Who may start one is
+        the SENDER, not the chat (W3): their own id must be on the allowlist.
+        """
+        if not update.message or not update.effective_chat:
+            return
+        from prometheus.gateway import commands as _cmds
+        from prometheus.permissions import approver as _approver
+
+        parts = (update.message.text or "").split(maxsplit=1)
+        arg_text = parts[1] if len(parts) > 1 else ""
+        chat_id = update.effective_chat.id
+
+        async def notify(text: str) -> None:
+            await self.send(chat_id, text, parse_mode=None)
+
+        reply = await _cmds.cmd_computer(
+            getattr(self, "_computer_runner", None), arg_text,
+            by=_approver.telegram(update.effective_user), surface="telegram",
+            session_id=f"{Platform.TELEGRAM.value}:{chat_id}", chat_id=chat_id,
+            notify=notify)
+        await self.send(chat_id, reply, parse_mode=None)
 
     def _registered_commands(self) -> list[str]:
         """Every command name PTB actually has a handler for.

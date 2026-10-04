@@ -115,6 +115,11 @@ class PersonCheck:
         self._devices = device_store
         self._telegram = {str(u) for u in telegram_user_ids}
 
+    @property
+    def devices(self) -> Any:
+        """The device store the marks live in (None when there is none)."""
+        return self._devices
+
     def check(self, by: _approver.Approver | None) -> tuple[bool, str]:
         if by is None:
             return False, "no credential was presented"

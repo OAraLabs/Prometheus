@@ -119,6 +119,10 @@ class WebSocketBridge:
         # it (app.state.approval_queue); the bridge never did, which is one
         # reason those commands were never dispatched here.
         self.approval_queue = approval_queue
+        # Computer use v1.1 (the door): the desktop task runner, late-wired by
+        # the daemon; None while computer use is off. interrupt_turn stops a
+        # session's desktop tasks through it before any chat turn.
+        self.computer_runner: Any = None
         # Same secret the REST middleware uses (config.web.api_token /
         # PROMETHEUS_API_TOKEN). Empty/None => auth DISABLED, exactly like
         # the REST side, so dev/no-token setups (and the tokenless static UI)
@@ -796,9 +800,19 @@ class WebSocketBridge:
         Returns False when no turn is running (idempotent — stopping a quiet
         session is not an error, the caller just gets ``stopped: false``).
         """
+        # A DESKTOP TASK FIRST (computer-use v1.1 §5.1.7). It does not own
+        # the chat turn's slot, so a chat message sent during a task neither
+        # hides the task from Stop nor gets cancelled in its place: both stop.
+        stopped_task = False
+        runner = getattr(self, "computer_runner", None)
+        if runner is not None:
+            try:
+                stopped_task = bool(runner.stop_session(session_id))
+            except Exception:  # noqa: BLE001 - a broken runner must not block Stop
+                logger.warning("desktop task stop failed", exc_info=True)
         task = self._turn_tasks.get(session_id)
         if task is None or task.done():
-            return False
+            return stopped_task
         self._interrupted.add(session_id)
         task.cancel()
         return True
@@ -894,6 +908,7 @@ class WebSocketBridge:
                     local_model=self.local_model,
                     detected_limit=self.detected_context_size,
                     session_manager=self.session_mgr,
+                    computer_runner=self.computer_runner,
                 ),
             )
         if outcome is not None and outcome.handled:
