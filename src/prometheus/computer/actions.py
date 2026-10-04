@@ -46,6 +46,16 @@ OUT, each for a reason rather than for scope:
 * ``foreground`` delivery. Background only in v1 — the extent keeps the two
   distinguishable so foreground can be added later WITHOUT inheriting the
   grants background already earned.
+
+SETTING A FIELD, NOT TYPING AT FOCUS (computer-use v1.1, D2)
+-------------------------------------------------------------
+``set_value`` puts text into ONE element, addressed by its token, replacing
+what it holds. It exists because ``type_text`` cannot be aimed: cua-driver
+0.28.2's ``TypeTextInput`` takes only a window or the desktop, so typed text
+lands wherever focus is — while the candidate's sentence named a field. The
+candidate table offers ``set_value`` and no longer offers ``type_text``;
+``type_text`` stays a declared verb so its schema and gate rule keep their
+tests, and so nothing that calls it by name changes meaning.
 """
 
 from __future__ import annotations
@@ -199,6 +209,25 @@ class TypeTextInput(_ActionBase):
     element_token: str = Field(..., description="Target element from the observation.")
 
 
+class SetValueInput(_ActionBase):
+    """Set ONE element's text, addressed by its token, replacing its contents.
+
+    ⚠ ``text`` IS A PAYLOAD, exactly as in ``TypeTextInput``: never
+    rememberable, approve-once every time. What differs is WHERE it lands —
+    the element the prompt names, not whatever has focus (D2).
+    """
+
+    model_config = ConfigDict(json_schema_extra=computer_verb("set_value"))
+
+    text: str = Field(
+        ...,
+        description="The text the element will hold.",
+        json_schema_extra=COMPUTER_PAYLOAD_FIELD,
+    )
+    element_token: str = Field(
+        ..., description="The element to set, from the observation.")
+
+
 class InvokeMenuInput(_ActionBase):
     """Invoke a menu path.
 
@@ -249,6 +278,7 @@ ACTION_MODELS: dict[str, type[BaseModel]] = {
     "scroll": ScrollInput,
     "press_key": PressKeyInput,
     "type_text": TypeTextInput,
+    "set_value": SetValueInput,
     "invoke_menu": InvokeMenuInput,
     "verify": VerifyInput,
 }

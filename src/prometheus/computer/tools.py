@@ -28,6 +28,7 @@ from prometheus.computer.actions import (
     ObserveInput,
     PressKeyInput,
     ScrollInput,
+    SetValueInput,
     TypeTextInput,
     VerifyInput,
 )
@@ -132,6 +133,13 @@ class ComputerTypeTextTool(_ComputerTool):
     input_model = TypeTextInput
 
 
+class ComputerSetValueTool(_ComputerTool):
+    """Set one element's text by its token. Never remembered — a payload."""
+
+    verb = "set_value"
+    input_model = SetValueInput
+
+
 class ComputerInvokeMenuTool(_ComputerTool):
     """Invoke a menu path."""
 
@@ -155,6 +163,7 @@ TOOL_CLASSES: dict[str, type[_ComputerTool]] = {
     "scroll": ComputerScrollTool,
     "press_key": ComputerPressKeyTool,
     "type_text": ComputerTypeTextTool,
+    "set_value": ComputerSetValueTool,
     "invoke_menu": ComputerInvokeMenuTool,
     "verify": ComputerVerifyTool,
 }
