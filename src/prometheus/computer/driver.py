@@ -51,6 +51,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from prometheus.computer.discovery import AppRecord, WindowRecord
 from prometheus.computer.types import Observation
 
 
@@ -398,6 +399,16 @@ class Driver(Protocol):
         """Dispatch one complete bounded action. Raises ``StaleSnapshot``."""
         ...
 
+    def list_apps(self) -> list[AppRecord]:
+        """The applications the driver can see (D8). Never launches one."""
+        ...
+
+    def list_windows(
+        self, pid: int | None = None, on_screen_only: bool = True
+    ) -> list[WindowRecord]:
+        """Windows, for one pid or all. On-screen only unless asked (D8)."""
+        ...
+
 
 class StaleSnapshot(RuntimeError):
     """The action's snapshot has been superseded. Never retried silently."""
@@ -443,9 +454,18 @@ class FixtureDriver:
     said ok" measures prose. ``dispatched`` is what actually happened.
     """
 
-    def __init__(self, observations: list[Observation]) -> None:
+    def __init__(
+        self,
+        observations: list[Observation],
+        apps: list[AppRecord] | None = None,
+        windows: list[WindowRecord] | None = None,
+    ) -> None:
         if not observations:
             raise ValueError("FixtureDriver needs at least one observation")
+        #: What discovery sees. Plain lists, so a test can close a window
+        #: between steps and watch re-resolution notice.
+        self.apps: list[AppRecord] = list(apps or [])
+        self.windows: list[WindowRecord] = list(windows or [])
         self._observations = list(observations)
         self._cursor = 0
         # Primed to the FIRST observation rather than None. A FixtureDriver is
@@ -485,3 +505,13 @@ class FixtureDriver:
             )
         self.dispatched.append((verb, dict(arguments)))
         return {"ok": True, "verb": verb}
+
+    def list_apps(self) -> list[AppRecord]:
+        return list(self.apps)
+
+    def list_windows(
+        self, pid: int | None = None, on_screen_only: bool = True
+    ) -> list[WindowRecord]:
+        return [w for w in self.windows
+                if (pid is None or w.pid == pid)
+                and (w.is_on_screen or not on_screen_only)]
