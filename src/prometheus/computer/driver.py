@@ -407,6 +407,25 @@ class DriverUnavailable(RuntimeError):
     """The driver cannot act — preconditions failed, or it is not installed."""
 
 
+class DriverBusy(DriverUnavailable):
+    """An earlier driver call has not finished, so this one was NOT sent.
+
+    A subclass of ``DriverUnavailable`` so every existing refusal path still
+    catches it. Distinct so a caller can tell "refused before dispatch" from
+    "dispatched and failed": nothing reached the driver.
+    """
+
+
+class ActionOutcomeUnknown(DriverUnavailable):
+    """The driver did not answer in time, and the action MAY STILL LAND.
+
+    Not "failed". A timeout stops the caller waiting; it does not stop the
+    action (probed: the wait gave up at 1.9 s and the click landed at 2.7 s).
+    The snapshot the action was built from can no longer be vouched for, so
+    the only honest next step is a fresh observation.
+    """
+
+
 class FixtureDriver:
     """A Driver backed by recorded observations. No display, no Cua, no network.
 

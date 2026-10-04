@@ -56,6 +56,13 @@ trust-the-success-message shape at the one place we were warned about it. So:
 only ``CONFIRMED`` and ``PARTIAL`` are effects; ``SUSPECTED_NOOP`` and
 ``REFUSED`` raise, and ``UNVERIFIABLE`` is reported as such rather than as
 either.
+
+⚠ AND THE EFFECT IS NOT IN THE SAME PLACE FOR EVERY VERB. ``click`` returns an
+``ActionResult`` (effect at the top). ``press_key``, ``scroll``, ``type_text``
+and ``invoke_menu`` return a ``ToolResult``: the effect sits at
+``.action.effect``, beside ``is_error`` and ``error_code``. Reading only the
+top level made every non-click no-op UNVERIFIABLE, so on four verbs of five the
+rule above could not fire (computer-use v1.1, D3). ``_verdict`` reads both.
 """
 
 from __future__ import annotations
@@ -65,8 +72,14 @@ import logging
 import threading
 from typing import Any
 
-from prometheus.computer.driver import DriverUnavailable, StaleSnapshot
+from prometheus.computer.driver import (
+    ActionOutcomeUnknown,
+    DriverBusy,
+    DriverUnavailable,
+    StaleSnapshot,
+)
 from prometheus.computer.types import Element, Observation
+from prometheus.permissions.computer_schema import DELIVERY_BACKGROUND
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +103,13 @@ MAX_ELEMENTS = 200
 #: the loop's existing refusal path fires rather than a generic failure.
 _STALE_MARKERS = ("stale", "snapshot_id_required", "superseded")
 
+#: Verbs whose 0.28.2 input type can CARRY a delivery mode. Only
+#: ``ClickInput`` takes one; for the others the driver decides, so the
+#: extent's ``:background`` term names a request the driver was never sent.
+#: The result says which it was rather than letting the extent assert it
+#: (computer-use v1.1, D5).
+_DELIVERY_IN_INPUT: frozenset[str] = frozenset({"click"})
+
 
 def _require_sdk() -> Any:
     """Import the SDK, or fail with something an operator can act on."""
@@ -110,9 +130,11 @@ class CuaDriverAdapter:
     """A ``Driver`` over the in-process Cua SDK. Local target only.
 
     ``CuaDriver.create()`` loads the runtime in THIS process — no daemon, no
-    socket, no network. That is the only hosting mode used here: ``connect()``
-    and ``create_private_worker()`` exist, and neither is a remote transport
-    (Cua has none), so neither buys anything a local target needs.
+    socket, no network. That is the only hosting mode used here. Cua does
+    offer others — a supervised private worker process (its mode for crash
+    containment), a daemon, MCP, and a remote transport — and choosing among
+    them belongs to the driver's Integration (computer-use v1.1 §5.3), not to
+    this adapter. A remote transport is out under the local-only ruling.
     """
 
     def __init__(self, target: str, session: str | None = None) -> None:
@@ -156,14 +178,43 @@ class CuaDriverAdapter:
         #:    failure is loud rather than silent — which is why this is a gap
         #:    and not a defect.
         self._snapshots: dict[tuple[int, int], str] = {}
+        #: Windows whose CURRENT snapshot was unusable (empty or degraded),
+        #: and why. ``act`` refuses them: the wrapped-tool path reaches
+        #: ``act`` without a candidate table, so the refusal cannot live only
+        #: in ``build_candidates``.
+        self._unusable: dict[tuple[int, int], str] = {}
+        #: ONE SDK CALL AT A TIME — see ``_await``.
+        self._call_lock = threading.Lock()
 
     # ── lifecycle ──────────────────────────────────────────────────────
 
     def _await(self, coro: Any) -> Any:
-        """Run one SDK coroutine on the adapter's own loop and block."""
+        """Run one SDK coroutine on the adapter's own loop and block.
+
+        ⚠ ONE CALL AT A TIME, AND THE LOCK OUTLIVES THE WAIT (D13). Two steps
+        sharing an adapter would otherwise interleave on its loop. The lock is
+        released when the coroutine FINISHES, not when this caller stops
+        waiting: ``.result(timeout=…)`` does not cancel the SDK call, so a
+        timed-out action is still in flight, and the next call must not
+        overtake it. A caller that cannot get in within the timeout is
+        refused with ``DriverBusy`` — nothing is sent.
+        """
         assert self._loop is not None
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(
-            timeout=OPERATION_TIMEOUT_SECONDS)
+        lock = self._call_lock
+        if not lock.acquire(timeout=OPERATION_TIMEOUT_SECONDS):
+            coro.close()
+            raise DriverBusy(
+                "an earlier driver call has not finished, so this one was "
+                "not sent — the driver handles one call at a time"
+            )
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        except BaseException:
+            lock.release()
+            coro.close()
+            raise
+        future.add_done_callback(lambda _f: lock.release())
+        return future.result(timeout=OPERATION_TIMEOUT_SECONDS)
 
     def start(self) -> None:
         if self._driver is not None:
@@ -175,18 +226,29 @@ class CuaDriverAdapter:
                 name="cua-driver-loop")
             self._thread.start()
         try:
-            self._driver = self._sdk.CuaDriver.create()
+            driver = self._sdk.CuaDriver.create()
         except Exception as exc:  # noqa: BLE001 - surfaced, never swallowed
             raise DriverUnavailable(
                 f"the Cua runtime could not start: "
                 f"{exc.__class__.__name__}: {exc}"
             ) from exc
-        if not self._driver.is_available():
+        if not driver.is_available():
+            # ⚠ NOT KEPT (D11). This assigned the driver first and checked it
+            # second, so a runtime that reported itself unavailable stayed
+            # assigned — and the NEXT start() returned early on
+            # `self._driver is not None`, reporting nothing. A failed health
+            # check must fail every time it is asked.
+            try:
+                self._await(driver.shutdown())
+            except Exception:  # noqa: BLE001
+                logger.warning("Cua driver shutdown after a failed health "
+                               "check failed", exc_info=True)
             raise DriverUnavailable(
                 "the Cua runtime started but reports itself unavailable — "
                 "on Linux this usually means no reachable display or no "
                 "accessibility bus. Check /api/status's computer.substrate."
             )
+        self._driver = driver
 
     def shutdown(self) -> None:
         driver, self._driver = self._driver, None
@@ -201,6 +263,9 @@ class CuaDriverAdapter:
             if self._thread is not None:
                 self._thread.join(timeout=5)
             self._thread = None
+        # A call still in flight on the stopped loop will never finish, so its
+        # lock would never be released. The next start() gets a fresh one.
+        self._call_lock = threading.Lock()
 
     def __enter__(self) -> CuaDriverAdapter:
         self.start()
@@ -217,40 +282,30 @@ class CuaDriverAdapter:
         """One fresh snapshot, translated into our Observation."""
         self._assert_target(target)
         self.start()
-        sdk = self._sdk
+        key = (pid, window_id)
         try:
             out = self._await(self._driver.get_window_state(
-                sdk.GetWindowStateInput(
-                pid=pid,
-                window_id=window_id,
-                session=self._session,
-                query=None,
-                include_accessibility_tree=True,
-                # ⚠ FALSE, deliberately. A screenshot is not needed to build
-                # a candidate table, it is the expensive half of the call,
-                # and a frame we do not need is a frame that could end up
-                # somewhere it should not be (see the capture ruling).
-                include_screenshot=False,
-                screenshot_out_file=None,
-                max_elements=MAX_ELEMENTS,
-                max_depth=None,
-                max_dimension=None,
-            )))
+                _window_state_input(
+                    self._sdk, pid=pid, window_id=window_id,
+                    session=self._session)))
+        except DriverUnavailable:
+            raise  # DriverBusy: nothing was sent, nothing to forget
         except Exception as exc:  # noqa: BLE001
+            # A call that failed or timed out may still have minted a new
+            # snapshot on the driver side, invalidating the tokens we hold
+            # for this window. The record can no longer be vouched for.
+            self._forget(key)
             raise DriverUnavailable(
                 f"observation failed on {target}: "
                 f"{exc.__class__.__name__}: {exc}"
             ) from exc
 
         snapshot_id = getattr(out, "snapshot_id", None)
-        elements = tuple(
-            _element(e) for e in (getattr(out, "elements", None) or [])
-            if getattr(e, "element_token", None)
-        )
         if not snapshot_id:
             # No snapshot id means no element can be safely addressed later.
             # UNUSABLE, not empty — the loop must refuse rather than build a
             # table whose tokens it cannot bind.
+            self._forget(key)
             return Observation(
                 target=target, app=app, pid=pid, window_id=window_id,
                 snapshot_id="", elements=(),
@@ -259,7 +314,36 @@ class CuaDriverAdapter:
                     "could not be bound to an observation"
                 ),
             )
-        self._snapshots[(pid, window_id)] = snapshot_id
+
+        raw = list(getattr(out, "elements", None) or [])
+        elements = tuple(
+            _element(e) for e in raw if getattr(e, "element_token", None)
+        )
+        degraded = bool(getattr(out, "degraded", False))
+        degraded_reason = _opt_str(getattr(out, "degraded_reason", None))
+        unusable: str | None = None
+        if degraded:
+            unusable = (
+                "the driver reported this tree as degraded"
+                + (f" ({degraded_reason})" if degraded_reason else "")
+                + " — it may be missing elements that are on screen, so it "
+                "is refused rather than built into actions"
+            )
+        elif not elements:
+            # D10. An empty tree and an idle window are the same shape; acting
+            # on one is the "reports success and does nothing" failure.
+            unusable = (
+                "the driver returned no elements with a token for this window "
+                "— an empty tree is refused, never read as an idle window"
+            )
+
+        # The NEW snapshot is current whether or not it is usable: the driver
+        # has invalidated every earlier token for this window either way.
+        self._snapshots[key] = snapshot_id
+        if unusable:
+            self._unusable[key] = unusable
+        else:
+            self._unusable.pop(key, None)
         return Observation(
             target=target,
             app=getattr(out, "app_name", None) or app,
@@ -267,7 +351,19 @@ class CuaDriverAdapter:
             window_id=window_id,
             snapshot_id=snapshot_id,
             elements=elements,
-            unusable_reason=None,
+            unusable_reason=unusable,
+            degraded=degraded,
+            degraded_reason=degraded_reason,
+            truncated=bool(getattr(out, "truncated", False)),
+            truncation_reason=_opt_str(getattr(out, "truncation_reason", None)),
+            elements_complete=_opt_bool(getattr(out, "elements_complete", None)),
+            total_element_count=_opt_int(
+                getattr(out, "total_element_count", None)),
+            returned_element_count=_opt_int(
+                getattr(out, "returned_element_count", None)),
+            # Over the WHOLE walk, before the token filter above.
+            web_content_seen=(
+                any(_is_web_or_document(e) for e in raw) if raw else None),
         )
 
     def act(self, verb: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -275,6 +371,7 @@ class CuaDriverAdapter:
         self._assert_target(arguments.get("target", self._target))
         pid = int(arguments["pid"])
         window_id = int(arguments["window_id"])
+        key = (pid, window_id)
 
         # ⚠ OUR OWN STALENESS CHECK, BEFORE THE DRIVER'S. The loop already
         # validates the candidate against the live observation; this is the
@@ -284,7 +381,7 @@ class CuaDriverAdapter:
         # ⚠ AND BEFORE start(), so a call that was always going to be refused
         # does not spin up the Cua runtime on its way to being refused.
         snapshot = arguments.get("snapshot_id")
-        current = self._snapshots.get((pid, window_id))
+        current = self._snapshots.get(key)
         if snapshot and current is None:
             # NO RECORD IS "CANNOT DETERMINE", NOT "FRESH". This read
             # `if snapshot and current and ...`, so a missing record made the
@@ -310,6 +407,12 @@ class CuaDriverAdapter:
                 f"snapshot {snapshot!r} has been superseded by {current!r} "
                 f"— re-observe before acting"
             )
+        unusable = self._unusable.get(key)
+        if unusable:
+            raise DriverUnavailable(
+                f"refusing to {verb} in pid {pid} window {window_id}: its "
+                f"latest observation is unusable — {unusable}"
+            )
         self.start()
 
         builder = _BUILDERS.get(verb)
@@ -324,6 +427,19 @@ class CuaDriverAdapter:
         try:
             result = self._await(getattr(self._driver, method_name)(
                 make_input(self._sdk, arguments, self._session)))
+        except TimeoutError as exc:
+            # ⚠ NOT "FAILED" (D13). The wait gave up; the action did not.
+            # Forget the snapshot so nothing can act on this window again
+            # until a fresh observation says what actually happened.
+            self._forget(key)
+            raise ActionOutcomeUnknown(
+                f"{verb} in pid {pid} window {window_id} did not answer "
+                f"within {OPERATION_TIMEOUT_SECONDS}s. It was dispatched and "
+                f"may still land — observe again before deciding what "
+                f"happened"
+            ) from exc
+        except DriverUnavailable:
+            raise  # DriverBusy: refused before anything was sent
         except Exception as exc:  # noqa: BLE001
             text = f"{exc}".lower()
             if any(m in text for m in _STALE_MARKERS):
@@ -331,9 +447,15 @@ class CuaDriverAdapter:
             raise DriverUnavailable(
                 f"{verb} failed: {exc.__class__.__name__}: {exc}") from exc
 
-        return _verdict(verb, result)
+        return _verdict(verb, result, arguments)
 
     # ── internals ──────────────────────────────────────────────────────
+
+    def _forget(self, key: tuple[int, int]) -> None:
+        """Drop what we know about a window's snapshot: it cannot be vouched
+        for, so ``act`` refuses until the next ``observe``."""
+        self._snapshots.pop(key, None)
+        self._unusable.pop(key, None)
 
     def _assert_target(self, target: str) -> None:
         """Refuse an action labelled for another machine.
@@ -349,7 +471,56 @@ class CuaDriverAdapter:
             )
 
 
+def _window_state_input(
+    sdk: Any, *, pid: int, window_id: int, session: str | None
+) -> Any:
+    """The observe call's input. A function so the real-SDK tests can build it
+    with the PINNED types — from 0.28.3 it gains a required keyword this
+    call does not pass, which is what the exact pin exists to keep out."""
+    return sdk.GetWindowStateInput(
+        pid=pid,
+        window_id=window_id,
+        session=session,
+        query=None,
+        include_accessibility_tree=True,
+        # ⚠ FALSE, deliberately. A screenshot is not needed to build a
+        # candidate table, it is the expensive half of the call, and a frame
+        # we do not need is a frame that could end up somewhere it should not
+        # be (see the capture ruling).
+        include_screenshot=False,
+        screenshot_out_file=None,
+        max_elements=MAX_ELEMENTS,
+        max_depth=None,
+        max_dimension=None,
+    )
+
+
+def _is_web_or_document(e: Any) -> bool:
+    """Web content, or a node that hosts documents (a browser page, an
+    Electron view, an embedded frame). Over-matching only ever means more
+    prompts; under-matching would let a page pass as a plain app."""
+    if getattr(e, "in_web_content", None) is True:
+        return True
+    role = str(getattr(e, "role", "") or "").lower()
+    return "document" in role or role == "embedded"
+
+
+def _opt_bool(value: Any) -> bool | None:
+    return None if value is None else bool(value)
+
+
+def _opt_int(value: Any) -> int | None:
+    return None if value is None else int(value)
+
+
+def _opt_str(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
 def _element(e: Any) -> Element:
+    # ``editable`` is NOT read: 0.28.2's ``WindowElement`` has no such field,
+    # so reading it could only ever return the default (D4). It stays a
+    # fixture-only field on ``Element``.
     return Element(
         element_index=int(getattr(e, "element_index", 0)),
         element_token=str(getattr(e, "element_token", "")),
@@ -357,24 +528,58 @@ def _element(e: Any) -> Element:
         label=str(getattr(e, "label", "") or ""),
         value=getattr(e, "value", None),
         actions=tuple(getattr(e, "actions", None) or ()),
-        editable=bool(getattr(e, "editable", False)),
+        enabled=_opt_bool(getattr(e, "enabled", None)),
+        selected=_opt_bool(getattr(e, "selected", None)),
+        in_web_content=_opt_bool(getattr(e, "in_web_content", None)),
+        parent_index=_opt_int(getattr(e, "parent_index", None)),
     )
 
 
-def _verdict(verb: str, result: Any) -> dict[str, Any]:
+def _verdict(verb: str, result: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     """Turn an SDK result into an outcome — or raise when it did not land.
 
     ⚠ THE POINT OF THIS FUNCTION. `SUSPECTED_NOOP` is upstream telling us
     the action appears to have done nothing. Returning success on it would be
     trusting the success message at the one place this whole subsystem was
     built to distrust.
+
+    Both result shapes are read (see the module docstring): an
+    ``ActionResult`` carries the effect itself; a ``ToolResult`` carries it at
+    ``.action`` and may instead state an error outright with ``is_error``.
     """
-    effect = _effect_name(result)
+    if getattr(result, "is_error", False):
+        code = getattr(result, "error_code", None) or "unspecified"
+        text = str(getattr(result, "text", "") or "").strip()
+        detail = f"{code}: {text}" if text else str(code)
+        if any(m in detail.lower() for m in _STALE_MARKERS):
+            raise StaleSnapshot(f"{verb}: {detail}")
+        raise DriverUnavailable(
+            f"{verb} did not land: the driver reported an error ({detail})"
+        )
+    action = _action_of(result)
+    effect = _effect_name(action)
     if effect in _EFFECT_BAD:
         raise DriverUnavailable(
             f"{verb} did not land: the driver reported {effect} — the action "
             f"was dispatched and there is no evidence it took effect"
         )
+    requested = str(arguments.get("delivery_mode", DELIVERY_BACKGROUND)).lower()
+    reported = _delivery_reported(action)
+    matches = (
+        None if reported in (None, "unknown", "not_applicable")
+        else reported == requested
+    )
+    escalation = _escalation_text(action)
+    if matches is False:
+        # The extent the operator consented to names the REQUESTED delivery.
+        # When the driver did something else, that must be visible.
+        logger.warning(
+            "%s: asked for %s delivery, the driver reports %s%s",
+            verb, requested, reported,
+            f" (escalation: {escalation})" if escalation else "",
+        )
+    elif escalation:
+        logger.info("%s: the driver advises escalation: %s", verb, escalation)
     # ⚠ NO KEY CALLED "ok" HERE, DELIBERATELY. `StepResult.ok` already means
     # "the step executed", and a second `ok` in the driver's own result
     # meaning "the driver confirmed the effect" is two fields with one name
@@ -393,14 +598,48 @@ def _verdict(verb: str, result: Any) -> dict[str, Any]:
         # is what ComputerUseLoop._verify does.
         "confirmed_by_driver": effect == "CONFIRMED",
         "landed": effect in _EFFECT_OK,
+        # What was asked, what the driver says it did, and whether the input
+        # could even carry the request (D5).
+        "delivery_requested": requested,
+        "delivery_reported": reported,
+        "delivery_matches": matches,
+        "delivery_enforced": verb in _DELIVERY_IN_INPUT,
+        "escalation": escalation,
     }
 
 
-def _effect_name(result: Any) -> str:
-    effect = getattr(result, "effect", None)
+def _action_of(result: Any) -> Any:
+    """The ``ActionResult`` inside *result*, wherever this verb puts it."""
+    if result is None or hasattr(result, "effect"):
+        return result
+    return getattr(result, "action", None)
+
+
+def _effect_name(action: Any) -> str:
+    effect = getattr(action, "effect", None)
     if effect is None:
         return "UNVERIFIABLE"
     return str(getattr(effect, "name", effect)).upper()
+
+
+def _delivery_reported(action: Any) -> str | None:
+    mode = getattr(getattr(action, "delivery", None), "mode", None)
+    if mode is None:
+        return None
+    return str(getattr(mode, "name", mode)).lower()
+
+
+def _escalation_text(action: Any) -> str | None:
+    escalation = getattr(action, "escalation", None)
+    if escalation is None:
+        return None
+    parts = [
+        str(getattr(term, "name", term)).lower()
+        for term in (getattr(escalation, "target", None),
+                     getattr(escalation, "reason", None))
+        if term is not None
+    ]
+    return ": ".join(parts) or None
 
 
 # ── per-verb input builders ────────────────────────────────────────────

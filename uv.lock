@@ -2900,7 +2900,7 @@ requires-dist = [
     { name = "croniter", specifier = ">=2.0" },
     { name = "cryptography", specifier = ">=42" },
     { name = "cryptography", marker = "extra == 'push'", specifier = ">=42" },
-    { name = "cua-driver", marker = "extra == 'computer'", specifier = ">=0.28,<1" },
+    { name = "cua-driver", marker = "extra == 'computer'", specifier = "==0.28.2" },
     { name = "deepeval", marker = "extra == 'evals'", specifier = ">=2.0" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.3.0" },
     { name = "discord-py", marker = "extra == 'full'", specifier = ">=2.3.0" },
