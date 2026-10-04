@@ -29,7 +29,9 @@ gate's computer rule. The two declarations ship together or not at all.
 WHAT IS IN v1, AND WHAT IS DELIBERATELY NOT
 --------------------------------------------
 In: observe, click, scroll, press_key, type_text, invoke_menu, verify.
-Nine tools, all background-delivered, all snapshot-bound.
+Seven tools, all snapshot-bound, all requesting background delivery. Only
+``click``'s driver input can carry that request in cua-driver 0.28.2; for the
+other verbs the driver decides, and the adapter reports what it says it did.
 
 OUT, each for a reason rather than for scope:
 
@@ -66,9 +68,11 @@ from prometheus.permissions.computer_schema import (
     COMPUTER_APP_FIELD,
     COMPUTER_DELIVERY_FIELD,
     COMPUTER_PAYLOAD_FIELD,
+    COMPUTER_SITE_FIELD,
     COMPUTER_WINDOW_FIELD,
     COMPUTER_TARGET_FIELD,
     DELIVERY_BACKGROUND,
+    SITE_UNKNOWN,
     computer_verb,
 )
 
@@ -88,6 +92,21 @@ from prometheus.permissions.computer_schema import (
 # ---------------------------------------------------------------------------
 
 
+#: The ``site`` field every model declares. NOT required, unlike ``target``
+#: and ``app``: an action that cannot name its site still has a rulable
+#: extent — it is UNKNOWN, which prompts and can never be remembered. The
+#: default IS that answer, so a caller that says nothing gets the safe one.
+def _site_field() -> Any:
+    return Field(
+        SITE_UNKNOWN,
+        description=(
+            "The web origin this action can reach, '-' for positively none, "
+            "or '?' when that could not be established (consent term)."
+        ),
+        json_schema_extra=COMPUTER_SITE_FIELD,
+    )
+
+
 class _ActionBase(BaseModel):
     """Fields every desktop action carries."""
 
@@ -104,6 +123,7 @@ class _ActionBase(BaseModel):
         description="Target application (the consent term).",
         json_schema_extra=COMPUTER_APP_FIELD,
     )
+    site: str = _site_field()
     pid: int = Field(
         ..., description="Target process id.",
         json_schema_extra=COMPUTER_WINDOW_FIELD,
@@ -133,6 +153,7 @@ class ObserveInput(BaseModel):
 
     target: str = Field(..., json_schema_extra=COMPUTER_TARGET_FIELD)
     app: str = Field(..., json_schema_extra=COMPUTER_APP_FIELD)
+    site: str = _site_field()
     pid: int = Field(..., json_schema_extra=COMPUTER_WINDOW_FIELD)
     window_id: int = Field(..., json_schema_extra=COMPUTER_WINDOW_FIELD)
 
@@ -172,7 +193,7 @@ class TypeTextInput(_ActionBase):
 
     ⚠ ``text`` IS DECLARED AS A PAYLOAD, and that declaration is the whole
     safety property of this tool. It makes the call NOT REMEMBERABLE: the
-    extent ``target:app:verb:delivery`` has no term for a string, so a
+    extent ``target:app:site:verb:delivery`` has no term for a string, so a
     remembered grant would mean "type ANY text into this app on this machine,
     forever" — minted from a prompt that showed one string. See
     permissions/computer_schema.py.
@@ -233,6 +254,7 @@ class VerifyInput(BaseModel):
 
     target: str = Field(..., json_schema_extra=COMPUTER_TARGET_FIELD)
     app: str = Field(..., json_schema_extra=COMPUTER_APP_FIELD)
+    site: str = _site_field()
     pid: int = Field(..., json_schema_extra=COMPUTER_WINDOW_FIELD)
     window_id: int = Field(..., json_schema_extra=COMPUTER_WINDOW_FIELD)
     expect_role: str | None = None

@@ -16,6 +16,8 @@ loop that shrugs at "no candidates" would report success having done nothing.
 
 from __future__ import annotations
 
+import re
+import sys
 from typing import Any
 
 from prometheus.computer.actions import ALLOWED_KEYS
@@ -23,9 +25,14 @@ from prometheus.computer.types import (
     RESERVED_CANDIDATE_IDS,
     Candidate,
     ChoiceRequest,
+    Element,
     Observation,
 )
-from prometheus.permissions.computer_schema import DELIVERY_BACKGROUND
+from prometheus.permissions.computer_schema import (
+    DELIVERY_BACKGROUND,
+    SITE_NONE,
+    SITE_UNKNOWN,
+)
 
 
 class UnusableObservation(RuntimeError):
@@ -48,6 +55,105 @@ _EDITABLE_ROLES: frozenset[str] = frozenset({
     "text", "entry", "password text", "paragraph", "document text",
 })
 
+#: Words in an app's name that mark it as a browser, an Electron app or a
+#: WebView host. A FLOOR, NOT A CONFIG KEY (computer-use v1.1 §5.4.3): on
+#: Linux the web-content flag only ever arrives as true, so a browser that has
+#: not exposed its page shows only unflagged chrome and would otherwise pass as
+#: a plain app. Matched per WORD of the name, so "Google Chrome" and
+#: "chromium-browser" both hit. Over-matching costs a prompt; under-matching
+#: would let a page pass as "no web content".
+_WEB_HOST_WORDS: frozenset[str] = frozenset({
+    # browsers
+    "browser", "web", "firefox", "librewolf", "waterfox", "floorp",
+    "chromium", "chrome", "brave", "edge", "msedge", "opera", "vivaldi",
+    "epiphany", "falkon", "konqueror", "qutebrowser", "midori", "safari",
+    # Electron and other embedded-web apps
+    "electron", "code", "vscode", "vscodium", "codium", "cursor", "slack",
+    "discord", "obsidian", "signal", "teams", "notion", "figma", "postman",
+    "spotify", "1password", "bitwarden", "whatsapp", "element", "joplin",
+    "logseq", "mattermost", "skype", "zoom",
+    # WebView hosts
+    "webkit", "webview", "evolution", "geary", "thunderbird", "yelp",
+    "steam",
+})
+
+#: Platforms whose accessibility path can flag web content at all. Elsewhere
+#: (the upstream Windows MSAA fallback, for one) the absence of a flag proves
+#: nothing, so nothing there is ever "no web content".
+_PLATFORMS_THAT_FLAG_WEB: tuple[str, ...] = ("linux",)
+
+
+def site_of(observation: Observation, *, platform: str | None = None) -> str:
+    """The ``site`` term for every action built from *observation*.
+
+    ``-`` (positively no web content) ONLY on positive evidence; UNKNOWN
+    otherwise. v1.1 never yields an origin — no provider reads one yet — so
+    the answer is ``-`` or UNKNOWN. All of these must hold for ``-``:
+
+    1. the walk is complete by OUR OWN evidence — not degraded, not
+       truncated, and every node the driver counted was returned. Not the
+       driver's ``elements_complete``: 0.28.2 hard-codes it false on Linux,
+       and relying on it would make every site UNKNOWN;
+    2. no node of the WHOLE walk is web content or document-family
+       (``Observation.web_content_seen is False`` — None is no evidence);
+    3. the app is not a browser, Electron or WebView host;
+    4. the platform can flag web content at all.
+    """
+    plat = sys.platform if platform is None else platform
+    if not plat.startswith(_PLATFORMS_THAT_FLAG_WEB):
+        return SITE_UNKNOWN
+    if observation.unusable_reason or observation.degraded:
+        return SITE_UNKNOWN
+    if observation.truncated:
+        return SITE_UNKNOWN
+    total = observation.total_element_count
+    returned = observation.returned_element_count
+    if total is None or returned is None or total != returned:
+        return SITE_UNKNOWN
+    if observation.web_content_seen is not False:
+        return SITE_UNKNOWN
+    if any(_is_web_or_document(el) for el in observation.elements):
+        return SITE_UNKNOWN
+    if _is_web_host(observation.app):
+        return SITE_UNKNOWN
+    return SITE_NONE
+
+
+def _is_web_host(app: str) -> bool:
+    words = {w for w in re.split(r"[^a-z0-9]+", app.lower()) if w}
+    return bool(words & _WEB_HOST_WORDS)
+
+
+def _is_document_role(role: str) -> bool:
+    role = role.lower()
+    return "document" in role or role == "embedded"
+
+
+def _is_web_or_document(el: Element) -> bool:
+    return el.in_web_content is True or _is_document_role(el.role)
+
+
+def _inside_web_content(el: Element, by_index: dict[int, Element]) -> bool:
+    """Flagged as web content, or under a document-family node we can see.
+
+    Cua RFC 4268's rule: web content is an untrusted source. v1.1 offers none
+    of it — page-authored labels never reach the chooser, and no page
+    element can be clicked on the strength of an app-level answer.
+    """
+    if el.in_web_content is True:
+        return True
+    seen: set[int] = set()
+    parent = el.parent_index
+    while parent is not None and parent not in seen:
+        seen.add(parent)
+        node = by_index.get(parent)
+        if node is None:
+            return False
+        if _is_document_role(node.role):
+            return True
+        parent = node.parent_index
+    return False
+
 
 def build_candidates(
     observation: Observation,
@@ -64,20 +170,35 @@ def build_candidates(
     """
     if observation.unusable_reason:
         raise UnusableObservation(observation.unusable_reason)
+    if not observation.elements:
+        # ⚠ NOT "NOTHING TO DO". The key rows below are appended whatever the
+        # tree holds, so an empty observation used to become a 3-row table —
+        # Return, Tab and Escape aimed at a window nobody could see — and the
+        # loop's "abstained" branch never fired (computer-use v1.1, D10).
+        raise UnusableObservation(
+            "the observation holds no elements, so there is nothing to build "
+            "a bounded action from — an empty tree is not an idle window"
+        )
 
     base = {
         "target": observation.target,
         "app": observation.app,
+        # The WINDOW's site, on every row — keys and text go to focus, so a
+        # key press is no narrower than the window it lands in.
+        "site": site_of(observation),
         "pid": observation.pid,
         "window_id": observation.window_id,
         "snapshot_id": observation.snapshot_id,
         "delivery_mode": DELIVERY_BACKGROUND,
     }
     out: list[Candidate] = []
+    by_index = {el.element_index: el for el in observation.elements}
 
     for el in observation.elements:
         if len(out) >= max_candidates:
             break
+        if _inside_web_content(el, by_index):
+            continue  # v1.1 offers no web content (§5.4.3)
         role = el.role.lower()
         if role in _CLICKABLE_ROLES:
             out.append(Candidate(
