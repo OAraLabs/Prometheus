@@ -79,6 +79,33 @@ def test_an_unusable_observation_refuses_rather_than_returning_nothing():
         build_candidates(dead)
 
 
+def test_an_empty_tree_is_unusable_not_three_keys():
+    """D10. An observation with a snapshot id and no elements used to yield
+    ``key-return``/``key-tab``/``key-escape`` — a 3-row table aimed at a
+    window nobody could see, and the loop's "abstained" branch never fired.
+    """
+    empty = Observation(
+        target="box", app="a", pid=1, window_id=2, snapshot_id="s1",
+    )
+    with pytest.raises(UnusableObservation) as exc:
+        build_candidates(empty)
+    assert "no elements" in str(exc.value)
+
+
+def test_candidate_ids_and_descriptions_are_pinned():
+    """PR 1 changes what the adapter REPORTS, never what the table OFFERS.
+    A chooser, a recorded skill or a test written against these strings must
+    not drift because the observation grew fields."""
+    cands = build_candidates(_obs())
+    assert [(c.candidate_id, c.description) for c in cands] == [
+        ("click-0", "Click the push button 'Send'"),
+        ("click-1", "Click the push button 'Cancel'"),
+        ("key-return", "Press return"),
+        ("key-tab", "Press tab"),
+        ("key-escape", "Press escape"),
+    ]
+
+
 def test_duplicate_candidate_ids_are_refused_at_build_time():
     from prometheus.computer.candidates import _assert_unique_ids
     from prometheus.computer.types import Candidate
@@ -214,6 +241,21 @@ def test_a_chooser_that_matches_nothing_abstains_rather_than_guessing():
         f"the chooser guessed instead of abstaining: {result.status}"
     )
     assert driver.dispatched == []
+
+
+def test_nothing_acts_on_an_empty_tree_even_when_the_operator_approves():
+    """D10, end to end. Before, the empty window offered Return; a chooser
+    picked it, the operator approved, and the key reached the driver."""
+    empty = Observation(
+        target="box", app="scratchapp", pid=1, window_id=2,
+        snapshot_id="s1",
+    )
+    loop, driver, prompted = _loop(
+        ScriptedChooser(["key-return"]), driver=FixtureDriver([empty]))
+    result = _run(loop, goal="press return")
+    assert result.status == "blocked"
+    assert driver.dispatched == []
+    assert not prompted
 
 
 def test_the_driver_refuses_a_stale_snapshot_even_if_everything_else_passes():
