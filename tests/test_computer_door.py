@@ -53,6 +53,23 @@ PERSON = Approver("telegram", "456", "will")
 MODEL = Approver("global-token", "global", "API token")
 
 
+@pytest.fixture(autouse=True)
+def _linux_site_rule(monkeypatch):
+    """These tests are about what a BINDING covers, which needs site ``-``
+    (positively no web content). v1.1 drives Linux only (L5 is macOS and
+    Windows): only a platform whose accessibility path can flag web content
+    may ever answer ``-``, so on macOS every extent is UNKNOWN and a binding
+    covers NOTHING. That floor is pinned on its own by
+    ``test_off_linux_a_binding_covers_nothing``; here the Linux rule is
+    applied so the same tests mean the same thing on the macOS CI runner."""
+    import sys
+
+    from prometheus.computer import candidates
+
+    monkeypatch.setattr(candidates, "_PLATFORMS_THAT_FLAG_WEB",
+                        ("linux", sys.platform))
+
+
 def _elements():
     return (
         Element(0, "tok-save", "push button", "Save"),
@@ -918,3 +935,20 @@ async def test_a_cancelled_wait_leaves_no_pending_request(tmp_path):
     with pytest.raises(asyncio.CancelledError):
         await waiter
     assert queue.pending == {}, "a cancelled wait must not leak its request"
+
+
+async def test_off_linux_a_binding_covers_nothing(tmp_path, monkeypatch):
+    """Where the platform cannot flag web content (macOS, Windows — L5), no
+    extent is ever site ``-``, so the app pick covers nothing: even a plain
+    click asks. The floor, not a missing feature."""
+    from prometheus.computer import candidates
+
+    monkeypatch.setattr(candidates, "_PLATFORMS_THAT_FLAG_WEB", ())
+    rig = _rig(tmp_path, ["click-0"])
+    await _bind(rig)
+    task = await _start(rig)
+    answered = await _answer(rig, ["deny"])
+    done = await rig.runner.wait(task.task_id, timeout=10)
+    assert answered[0].tool_name == "computer_click"
+    assert rig.driver.dispatched == []
+    assert done.outcome == "refused"
