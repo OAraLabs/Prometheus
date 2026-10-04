@@ -31,12 +31,15 @@ a computer action now.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
 from prometheus.computer.actions import schema_for
+from prometheus.computer.candidates import action_arguments, build_candidates
 from prometheus.computer.chooser import RuleChooser, ScriptedChooser
 from prometheus.computer.driver import FixtureDriver
 from prometheus.computer.loop import ComputerUseLoop
@@ -91,11 +94,20 @@ def test_autonomous_still_waives_the_ordinary_approval_tiers():
 # ── 2. A COMPUTER ACTION'S CONSENT IS NOT A MODE ────────────────────────────
 
 def _extent(verb: str, **over):
+    # `site` is carried for the five-term extent (computer-use v1.1 PR 3b);
+    # where the schema does not declare it yet, it is ignored. Grant values
+    # below are DERIVED from the extent rather than written out, so these
+    # tests hold whichever order the v1.1 PRs land in.
     args = {"target": "box", "app": "scratchapp", "pid": 1, "window_id": 2,
             "snapshot_id": "s1", "delivery_mode": "background",
-            "element_token": "tok"}
+            "element_token": "tok", "site": "-"}
     args.update(over)
     return computer_extent_for(f"computer_{verb}", args, schema=schema_for(verb))
+
+
+def _click_grant() -> Grant:
+    return Grant(kind=COMPUTER_ACTION_KIND, value=_extent("click")[0].value,
+                 tool_name="computer_click")
 
 
 def _evaluate(gate: SecurityGate, verb: str, origin: str = "user", **over):
@@ -154,9 +166,7 @@ def test_computer_decisions_are_identical_in_every_mode(verb, over, origin):
 def test_a_stored_computer_grant_still_allows_under_autonomous():
     """`/gate off` neither waives NOR tightens: a remembered exact grant
     allows, as it does in DEFAULT — at the grant's level, not AUTONOMOUS."""
-    grant = Grant(kind=COMPUTER_ACTION_KIND,
-                  value="box:scratchapp:click:background",
-                  tool_name="computer_click")
+    grant = _click_grant()
     for mode in MODES:
         gate = SecurityGate(mode=mode, audit_logger=None, grants=[grant])
         d = _evaluate(gate, "click")
@@ -171,7 +181,7 @@ def test_the_approve_target_is_recorded_so_approve_always_works():
     d = _evaluate(gate, "click")
     target = gate.approve_target_for(d.reason)
     assert target["computer_action"] is not None
-    assert target["computer_action"].value == "box:scratchapp:click:background"
+    assert target["computer_action"].value == _extent("click")[0].value
 
 
 # ── 3. D18: A LEGACY `tool` GRANT DOES NOT COVER A DESKTOP ACTION ───────────
@@ -189,12 +199,40 @@ def test_a_tool_grant_naming_a_computer_tool_allows_nothing(mode, over):
 
 # ── 4. THE LOOP: AUTONOMOUS REACHES THE APPROVER, OR REFUSES ────────────────
 
+#: Completeness evidence, passed where ``Observation`` has the fields (PR 1
+#: and PR 3b add them): with it, the site term is "no web content" and a
+#: stored grant can match; without it the site would be UNKNOWN and no grant
+#: could. Filtered, so this file runs unchanged on either side of those PRs.
+_EVIDENCE = {"total_element_count": 1, "returned_element_count": 1,
+             "web_content_seen": False}
+
+
 def _obs(snapshot: str) -> Observation:
+    have = {f.name for f in dataclasses.fields(Observation)}
     return Observation(
         target="box", app="scratchapp", pid=1, window_id=2,
         snapshot_id=snapshot,
         elements=(Element(0, f"tok-send-{snapshot}", "push button", "Send"),),
+        **{k: v for k, v in _EVIDENCE.items() if k in have},
     )
+
+
+def _loop_grant() -> Grant:
+    """A stored grant for exactly the extent the loop will compute."""
+    cand = build_candidates(_obs("s1"))[0]
+    extent, _ = computer_extent_for(cand.tool_name, action_arguments(cand),
+                                    schema=schema_for("click"))
+    assert extent is not None and extent.rememberable, extent
+    return Grant(kind=COMPUTER_ACTION_KIND, value=extent.value,
+                 tool_name="computer_click")
+
+
+@pytest.fixture(autouse=True)
+def _a_platform_that_can_flag_web_content(monkeypatch):
+    """The site evidence rule (PR 3b) only ever yields "no web content" on a
+    platform whose accessibility path can flag web content. Pinned so these
+    tests mean the same on CI's macOS leg."""
+    monkeypatch.setattr(sys, "platform", "linux")
 
 
 def _loop(mode, *, approve=True, with_approver=True, grants=(),
@@ -245,10 +283,8 @@ def test_under_autonomous_with_no_approver_the_action_is_refused():
 
 
 def test_under_autonomous_a_stored_grant_still_acts_without_a_prompt():
-    grant = Grant(kind=COMPUTER_ACTION_KIND,
-                  value="box:scratchapp:click:background",
-                  tool_name="computer_click")
-    loop, driver, prompted = _loop(PermissionMode.AUTONOMOUS, grants=[grant])
+    loop, driver, prompted = _loop(PermissionMode.AUTONOMOUS,
+                                   grants=[_loop_grant()])
     result = _step(loop)
     assert result.ok and driver.dispatched
     assert not prompted
@@ -266,17 +302,12 @@ def test_before_act_runs_on_every_path_that_dispatches(path):
         calls.append((candidate.candidate_id, extent.value, decision.allowed))
         return True
 
-    grants = []
-    if path == "grant":
-        grants = [Grant(kind=COMPUTER_ACTION_KIND,
-                        value="box:scratchapp:click:background",
-                        tool_name="computer_click")]
+    grants = [_loop_grant()] if path == "grant" else []
     loop, driver, _ = _loop(PermissionMode.DEFAULT, grants=grants,
                             before_act=before_act)
     result = _step(loop)
     assert result.ok and driver.dispatched
-    assert calls == [("click-0", "box:scratchapp:click:background",
-                      path == "grant")]
+    assert calls == [("click-0", _loop_grant().value, path == "grant")]
 
 
 def test_before_act_saying_no_dispatches_nothing():
