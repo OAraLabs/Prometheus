@@ -63,13 +63,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from prometheus.computer.discovery import AppRecord, WindowRecord
 from prometheus.computer.driver import DriverUnavailable, StaleSnapshot
 from prometheus.computer.types import Element, Observation
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from prometheus.computer.discovery import AppRecord, WindowRecord
 
 #: Effects that mean the action landed. Everything else is not success.
 _EFFECT_OK = frozenset({"CONFIRMED", "PARTIAL"})
@@ -522,6 +524,8 @@ def _list_windows_input(
 
 
 def _app_record(a: Any) -> AppRecord:
+    from prometheus.computer.discovery import AppRecord
+
     return AppRecord(
         pid=int(getattr(a, "pid", 0)),
         name=str(getattr(a, "name", "") or ""),
@@ -533,6 +537,8 @@ def _app_record(a: Any) -> AppRecord:
 
 
 def _window_record(w: Any) -> WindowRecord:
+    from prometheus.computer.discovery import WindowRecord
+
     pid = getattr(w, "pid", None)
     z_index = getattr(w, "z_index", None)
     minimized = getattr(w, "minimized", None)

@@ -35,12 +35,10 @@ from prometheus.computer.candidates import (
     build_choice_request,
     validate_choice,
 )
+from prometheus.computer.discovery import same_app
 from prometheus.computer.driver import Driver, StaleSnapshot, check_preconditions
 from prometheus.computer.types import Candidate
-from prometheus.permissions.computer_extent import (
-    computer_extent_for,
-    normalise_term,
-)
+from prometheus.permissions.computer_extent import computer_extent_for
 
 log = logging.getLogger(__name__)
 
@@ -139,7 +137,7 @@ class ComputerUseLoop:
                             "established — refusing rather than taking the "
                             "caller's word for it"),
                 )
-            if normalise_term(reported) != normalise_term(app):
+            if not same_app(reported, app):
                 return StepResult(
                     status="blocked",
                     reason=(f"the driver says this window belongs to "

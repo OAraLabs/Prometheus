@@ -33,6 +33,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Mapping, Protocol, Sequence
 
+from prometheus.permissions.computer_extent import normalise_term
+
 RESOLVED = "match"
 ASK = "ask"
 
@@ -92,6 +94,17 @@ def _keys_of(app: AppRecord) -> set[str]:
     if app.launch_path:
         keys.add(_fold(os.path.basename(app.launch_path)))
     return keys - {""}
+
+
+def same_app(reported: str | None, wanted: str) -> bool:
+    """Is the app the DRIVER reported the app we were asked to act in?
+
+    Folded with the extent's own spelling rule, so "GEdit" and "gedit" are
+    one app here exactly as they are one grant. An empty report is never a
+    match: the consent term cannot come from the caller (D19).
+    """
+    reported = str(reported or "").strip()
+    return bool(reported) and normalise_term(reported) == normalise_term(wanted)
 
 
 def frontmost_window(
