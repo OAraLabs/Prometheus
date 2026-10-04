@@ -107,6 +107,11 @@ class TargetRegistry:
             raise UnknownTarget(name)
         self._drivers[name] = driver
 
+    def unbind(self, name: str) -> None:
+        """Detach whatever driver is bound to *name* (a no-op if none). The
+        target stays declared; ``resolve`` then refuses it, never falls back."""
+        self._drivers.pop(name, None)
+
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._targets))
 

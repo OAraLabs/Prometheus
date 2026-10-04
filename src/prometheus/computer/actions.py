@@ -29,7 +29,9 @@ gate's computer rule. The two declarations ship together or not at all.
 WHAT IS IN v1, AND WHAT IS DELIBERATELY NOT
 --------------------------------------------
 In: observe, click, scroll, press_key, type_text, invoke_menu, verify.
-Nine tools, all background-delivered, all snapshot-bound.
+Seven tools, all snapshot-bound, all requesting background delivery. Only
+``click``'s driver input can carry that request in cua-driver 0.28.2; for the
+other verbs the driver decides, and the adapter reports what it says it did.
 
 OUT, each for a reason rather than for scope:
 

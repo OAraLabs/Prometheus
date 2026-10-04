@@ -1020,6 +1020,9 @@ class SecurityGate:
         globs, ``sh -c``.
         """
         is_user = (origin == ORIGIN_USER)
+        # A DESKTOP ACTION is recognised by its schema (the caller passes the
+        # extent it assembled, or the reason it could not), never by its name.
+        is_computer = computer_action is not None or bool(computer_unknown)
 
         # Sprint 11: exfiltration check (system origin only — when the user
         # is not in the loop, network+sensitive-file combos are still blocked.
@@ -1046,7 +1049,17 @@ class SecurityGate:
         # deliberately still `_is_always_blocked` here, not
         # `_check_blocked_command`, so denied_commands stays a policy the mode
         # can waive while the always-blocked patterns cannot be.
-        if self._mode == PermissionMode.AUTONOMOUS:
+        #
+        # ⚠ AND IT DOES NOT WAIVE DESKTOP CONSENT (computer-use v1.1, D1).
+        # This branch used to return ALLOW before the computer rule below was
+        # reached, so under `/gate off` a known extent and an unknown one were
+        # both allowed — clicks AND typed text, unprompted, with the payload
+        # rule never consulted. A computer action's consent is not a mode: it
+        # falls through to the same grants check and the same computer rule
+        # as in DEFAULT, so `/gate off` neither waives nor tightens it.
+        # Ordinary tools are untouched — tests/test_gate_computer_floor.py
+        # holds them to a golden table captured before this line existed.
+        if self._mode == PermissionMode.AUTONOMOUS and not is_computer:
             if command and self._is_always_blocked(command):
                 reason = f"Blocked command pattern: {command!r}"
                 self._audit_log(tool_name, AuditDecision.DENY, reason, command)
@@ -1078,10 +1091,16 @@ class SecurityGate:
         # every DENY-tier check, before the APPROVE tier — a grant can silence
         # a prompt, never resurrect a block.
         if self._grants:
+            # ⚠ ONLY AN EXACT `computer_action` GRANT MAY SILENCE A DESKTOP
+            # ACTION (D18). A legacy `tool` grant naming a computer tool —
+            # `security.grants` still loads `kind: tool` rows — matched EVERY
+            # call of it by name: any app, and even an extent this gate could
+            # not assemble. For an ordinary tool nothing changes.
             matched = next(
                 (g for g in self._grants
-                 if g.matches(tool_name, file_path, command,
-                              computer_action.value if computer_action else None)),
+                 if (not is_computer or g.kind == COMPUTER_ACTION_KIND)
+                 and g.matches(tool_name, file_path, command,
+                               computer_action.value if computer_action else None)),
                 None,
             )
             if matched is not None:

@@ -170,6 +170,15 @@ def build_candidates(
     """
     if observation.unusable_reason:
         raise UnusableObservation(observation.unusable_reason)
+    if not observation.elements:
+        # ⚠ NOT "NOTHING TO DO". The key rows below are appended whatever the
+        # tree holds, so an empty observation used to become a 3-row table —
+        # Return, Tab and Escape aimed at a window nobody could see — and the
+        # loop's "abstained" branch never fired (computer-use v1.1, D10).
+        raise UnusableObservation(
+            "the observation holds no elements, so there is nothing to build "
+            "a bounded action from — an empty tree is not an idle window"
+        )
 
     base = {
         "target": observation.target,
