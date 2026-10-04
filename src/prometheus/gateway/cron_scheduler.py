@@ -544,13 +544,59 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
         await _maybe_notify_failure(entry)
         return entry
 
+    # THE SHELL FLOOR, BY PROVENANCE. A job the MODEL created (cron_create
+    # stores origin "model") runs behind the bash tool's read and write floors
+    # with its scrubbed environment (security/shell_floor.py); a required
+    # floor that is unavailable refuses the run like the gate does. Every
+    # other job — the operator's, and every job stored before origin existed —
+    # runs exactly as before: the operator's jobs need the environment and
+    # the writes the floor removes.
+    #
+    # `python3` in an OPERATOR's job is the daemon's own interpreter
+    # (utils/job_python.py): bare python3 under the daemon's inherited
+    # PYTHONNOUSERSITE=1 is the system interpreter without its packages.
+    # NOT in a model's job: that is model-run code, and model-run code never
+    # gets the daemon's venv interpreter (Will, 2026-10-04 — the reason
+    # background tasks don't get it either: `python3 -m pip install` would
+    # land in the production venv). Vetted, logged and recorded as written.
+    from prometheus.gateway.cron_service import is_model_job
+    from prometheus.security.shell_floor import (
+        ShellFloorRefused,
+        floored_argv,
+        model_shell_env,
+    )
+    from prometheus.utils.job_python import job_shell_command
+
+    env: dict[str, str] | None = None
+    try:
+        if is_model_job(job):
+            argv, _floors = floored_argv(command, cwd=resolved_cwd)
+            env = model_shell_env()
+        else:
+            argv = ["/bin/bash", "-lc", job_shell_command(command)]
+    except ShellFloorRefused as exc:
+        logger.warning("Cron job %r REFUSED by the shell floor: %s", name, exc)
+        entry = {
+            "name": name,
+            "command": command,
+            "cwd": resolved_cwd,
+            "started_at": started_at.isoformat(),
+            "ended_at": datetime.now(timezone.utc).isoformat(),
+            "returncode": 126,
+            "status": "blocked",
+            "stdout": "",
+            "stderr": str(exc),
+        }
+        _record_run(name, success=False, entry=entry)
+        await _maybe_notify_failure(entry)
+        return entry
+
     logger.info("Executing cron job %r: %s", name, command)
     try:
         process = await asyncio.create_subprocess_exec(
-            "/bin/bash",
-            "-lc",
-            command,
+            *argv,
             cwd=str(cwd),
+            env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

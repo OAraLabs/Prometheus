@@ -191,12 +191,13 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     # the task manager) so a missing optional dep degrades gracefully rather than
     # breaking the whole registry build.
     from prometheus.tools.registration import try_register
-    # security.bash_confinement gates the kernel floor for bash. Default
-    # "off": Prometheus runs on hosts without AppArmor, and defaulting to
-    # "required" would refuse every bash call on them. That means the floor
-    # is NOT in force until an operator turns it on — stated plainly here
-    # because a security control that looks default-on and isn't is the
-    # false assurance this whole line of work exists to remove.
+    # security.bash_confinement gates the kernel READ floor for bash. Default
+    # "auto": where the AppArmor profile verifies it is "required"; where it
+    # does not, bash runs without it and that is said at boot (ERROR, with
+    # the fix — shell_floor.announce), in /api/status ("dark"), in doctor and
+    # in every call's metadata. Never "required" by default: Prometheus runs
+    # on hosts without AppArmor, where that would refuse every bash call. An
+    # explicit "off" stays off.
     # security.bash_write_confinement gates the kernel WRITE floor. Default
     # "auto" — unlike the read floor above, this one is attempted by default,
     # because bubblewrap needs no root and the hole it closes is live: the
@@ -204,9 +205,17 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     # "auto" cannot brick a host that has no bubblewrap (macOS has none); it
     # degrades to the previous behaviour and says so, at ERROR, once per
     # process and in each call's result metadata. "required" refuses instead.
+    #
+    # The SAME floors go to every other door that runs a model-written shell
+    # (task_create's shell and poll tasks, cron jobs): they read what is wired
+    # here, so the bash tool and those doors cannot be configured apart.
+    # PROCESS-WIDE: pass the process's real security section, never a
+    # placeholder — the last registry built is the floor every door uses.
+    from prometheus.security.shell_floor import ShellFloor, set_shell_floor
+    set_shell_floor(ShellFloor.from_security_config(security_cfg))
     registry.register(BashTool(
         workspace=workspace,
-        confinement=security_cfg.get("bash_confinement", "off"),
+        confinement=security_cfg.get("bash_confinement", "auto"),
         write_confinement=security_cfg.get("bash_write_confinement", "auto"),
         write_allow=security_cfg.get("bash_write_allow") or (),
         # Resource ceilings, set in the parent before exec. Defaults chosen
@@ -1175,6 +1184,11 @@ def run_coding_task(args) -> int:
     # threaded to this call is a setting that silently does nothing.
     coding_cfg = config.get("coding", {}) or {}
     sandbox_backend = str(coding_cfg.get("sandbox_type", "process"))
+    # The model's commands in this run (code_run, and the acceptance command
+    # that runs its code) go behind the bash tool's floors — the security
+    # section of THIS config, not whatever a default path search finds.
+    from prometheus.security.shell_floor import ShellFloor, set_shell_floor
+    set_shell_floor(ShellFloor.from_security_config(config.get("security")))
     try:
         sandbox = clone_repo_for_sandbox(
             args.repo,

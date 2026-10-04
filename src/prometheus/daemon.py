@@ -951,6 +951,18 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Tool registry — same tools as CLI mode
     registry = build_tool_registry(security_cfg=security_config)
 
+    # The read floor's state, said ONCE at boot. security.bash_confinement
+    # ships "auto", so a host where the AppArmor profile did not verify runs
+    # every model-written shell without it — the operator hears that now, at
+    # ERROR with the fix, rather than discovering it. The probes are
+    # subprocesses, so off the loop; a failure here never stops the boot.
+    try:
+        from prometheus.security.shell_floor import announce as _announce_floor
+
+        await asyncio.to_thread(_announce_floor)
+    except Exception:
+        logger.warning("could not report the shell floors at boot", exc_info=True)
+
     # DynamicToolLoader — deferred loading support
     from prometheus.context.dynamic_tools import DynamicToolLoader
     tool_loader = DynamicToolLoader(registry, config.get("tools", {}).get("deferred_loading"))

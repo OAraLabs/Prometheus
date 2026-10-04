@@ -11,7 +11,12 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from prometheus.gateway.cron_scheduler import normalize_and_vet_cron_job
-from prometheus.gateway.cron_service import upsert_cron_job, validate_cron_expression
+from prometheus.gateway.cron_service import (
+    ORIGIN_KEY,
+    ORIGIN_MODEL,
+    upsert_cron_job,
+    validate_cron_expression,
+)
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from prometheus.tools.builtin.cron_nl import (
     ParsedSchedule,
@@ -103,6 +108,10 @@ class CronCreateTool(BaseTool):
                 # different process cwd, so create and execute could disagree.
                 "cwd": resolved_cwd,
                 "enabled": arguments.enabled,
+                # PROVENANCE, set here and never read from the arguments: the
+                # model wrote this command, so it runs behind the shell floor.
+                # Replacing an operator's job by name makes it the model's.
+                ORIGIN_KEY: ORIGIN_MODEL,
             }
         )
         status = "enabled" if arguments.enabled else "disabled"

@@ -622,7 +622,11 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
         from prometheus.context.dynamic_tools import DynamicToolLoader
 
         deferred = (config.get("tools", {}) or {}).get("deferred_loading")
-        registry = create_tool_registry({})
+        # The REAL security section, not {}: create_tool_registry also wires
+        # the process-wide shell floor (security/shell_floor.py), and a
+        # registry built from an empty section would wire the shipped defaults
+        # over the operator's in any process that later runs a model shell.
+        registry = create_tool_registry(config.get("security") or {})
         loader = DynamicToolLoader(registry, deferred)
         advertised = sorted(
             s.get("name") for s in loader.schemas_for_run(True)
@@ -935,7 +939,7 @@ def check_bash_floors(config: dict[str, Any]) -> list[DiagnosticCheck]:
     # None path, which is the defect it was written to close.
     roots = resolve_workspace_root(sec)
     rep = C.floor_report(
-        read_mode=sec.get("bash_confinement", "off"),
+        read_mode=sec.get("bash_confinement", "auto"),
         write_mode=sec.get("bash_write_confinement", "auto"),
         has_workspace=bool(roots),
     )
@@ -952,6 +956,15 @@ def check_bash_floors(config: dict[str, Any]) -> list[DiagnosticCheck]:
             return DiagnosticCheck(
                 name=name, category="platform", status="info",
                 message=f"mode 'off' — {off_message}",
+            )
+        if state == C.STATE_UNSUPPORTED:
+            # "auto" on a platform with no AppArmor (macOS). INFO, not a
+            # warning, and no fix: there is nothing to load, and a row nobody
+            # can clear is how a report gets ignored. Said, not alarmed.
+            return DiagnosticCheck(
+                name=name, category="platform", status="info",
+                message=f"mode {mode!r} — unsupported on this platform (no "
+                        f"AppArmor). {off_message}",
             )
         if state == C.STATE_NO_WORKSPACE:
             return DiagnosticCheck(
@@ -1016,15 +1029,16 @@ def check_bash_floors(config: dict[str, Any]) -> list[DiagnosticCheck]:
 
     rows = [read_row, write_row]
     # Said once, on its own row, because it is the limit most likely to be
-    # over-read from two green lines above: cron jobs, background tasks,
-    # watch_dir predicates and command hooks each spawn /bin/bash at their
-    # own call sites, and NEITHER floor reaches them.
+    # over-read from two green lines above. The floors reach every shell a
+    # MODEL writes; the operator's own shells are deliberately left alone.
     if any(r.status == "ok" for r in rows):
         rows.append(DiagnosticCheck(
             name="Bash floor scope", category="platform", status="info",
-            message="the floors wrap the bash TOOL only — cron jobs, "
-                    "background tasks, watch_dir predicates and command "
-                    "hooks spawn their own shells and are not covered",
+            message="the floors wrap every shell a model writes — the bash "
+                    "tool, background shell tasks and poll predicates, cron "
+                    "jobs the model created, and coding runs. Not your own "
+                    "cron jobs (no origin, or created through /api/cron) "
+                    "and not command hooks: those run as before",
         ))
     return rows
 
