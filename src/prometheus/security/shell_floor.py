@@ -76,7 +76,7 @@ class ShellFloorRefused(RuntimeError):
 class ShellFloor:
     """The configured floors, resolved. No probing happens here."""
 
-    read_mode: str = _CONFINE.MODE_OFF
+    read_mode: str = _CONFINE.MODE_AUTO
     write_mode: str = _CONFINE.WRITE_MODE_AUTO
     workspaces: tuple[Path, ...] = ()
     write_allow: tuple[str, ...] = field(default=())
@@ -92,7 +92,7 @@ class ShellFloor:
         if isinstance(roots, str):
             roots = [roots]
         return cls(
-            read_mode=_CONFINE.normalise_mode(sec.get("bash_confinement", "off")),
+            read_mode=_CONFINE.normalise_mode(sec.get("bash_confinement", "auto")),
             write_mode=_CONFINE.normalise_write_mode(
                 sec.get("bash_write_confinement", "auto")),
             workspaces=tuple(
@@ -151,8 +151,9 @@ def floored_argv(
     workspaces: Iterable[Path | str] | None = None,
     shell: Sequence[str] = LOGIN_SHELL,
     floor: ShellFloor | None = None,
-) -> tuple[list[str], str]:
-    """The argv that runs *command* behind the floors, and the write-floor state.
+) -> tuple[list[str], _CONFINE.FloorResult]:
+    """The argv that runs *command* behind the floors, and what each floor did
+    (``.read_floor``, ``.write_floor``) — for the call's own record.
 
     *workspaces* replaces the configured roots for this call — a session with a
     workspace of its own, or a coding run whose root is its clone — exactly as
@@ -176,7 +177,7 @@ def floored_argv(
     )
     if result.refusal is not None:
         raise ShellFloorRefused(result.refusal, result.write_floor)
-    return list(result.argv), result.write_floor
+    return list(result.argv), result
 
 
 def model_shell_env(overlay: dict[str, str] | None = None) -> dict[str, str]:
@@ -192,3 +193,51 @@ def model_shell_env(overlay: dict[str, str] | None = None) -> dict[str, str]:
         env.update(overlay)
     return env
 
+
+def announce(floor: ShellFloor | None = None) -> dict[str, object]:
+    """Say ONCE, at boot, what the read floor of every model-written shell is.
+
+    The loud half of "auto": a host where the profile did not verify runs
+    every model shell without the read floor, and an operator must not have to
+    infer that from a missing line. ERROR with the one-line fix when it is not
+    in force on Linux; one WARNING on a platform with no AppArmor; INFO when it
+    is active or deliberately off. Returns the report it logged from.
+    """
+    floor = floor or current_shell_floor()
+    rep = _CONFINE.floor_report(
+        read_mode=floor.read_mode,
+        write_mode=floor.write_mode,
+        has_workspace=bool(floor.workspaces),
+    )
+    read = rep["bash_read_floor"]
+    assert isinstance(read, dict)
+    state, detail = read["state"], read["detail"]
+    fix = (f"sudo apparmor_parser -r -W /etc/apparmor.d/{_CONFINE.PROFILE} "
+           f"— or set security.bash_confinement: off to run without it "
+           f"knowingly")
+    exposed = ("every model-written shell (bash, background tasks, poll "
+               "predicates, model-created cron jobs, coding runs) can read "
+               "~/.ssh, ~/.gnupg and ~/.config/*/*env")
+    if state == _CONFINE.STATE_DARK:
+        log.error(
+            "the READ floor is NOT in force: security.bash_confinement is %r and the "
+            "AppArmor profile did not verify (%s), so %s. Fix: %s.",
+            floor.read_mode, detail, exposed, fix,
+        )
+    elif state == _CONFINE.STATE_REFUSING:
+        log.error(
+            "READ FLOOR REQUIRED BUT UNAVAILABLE (%s): every model-written "
+            "shell will be REFUSED until it is. Fix: %s.", detail, fix,
+        )
+    elif state == _CONFINE.STATE_UNSUPPORTED:
+        log.warning(
+            "read floor unsupported on this platform (no AppArmor): %s. The "
+            "denied_paths list protects the path-declaring tools only.",
+            exposed,
+        )
+    elif state == _CONFINE.STATE_ACTIVE:
+        log.info("read floor ACTIVE for every model-written shell (%s)", detail)
+    else:
+        log.info("read floor %s (security.bash_confinement: %r)",
+                 state, floor.read_mode)
+    return rep

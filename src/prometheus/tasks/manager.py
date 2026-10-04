@@ -883,11 +883,13 @@ class BackgroundTaskManager:
             # is spawned when a required floor is unavailable.
             from prometheus.security.shell_floor import floored_argv, model_shell_env
 
-            argv, write_floor = floored_argv(
+            argv, floors = floored_argv(
                 task.command, cwd=task.cwd,
                 workspaces=self._task_roots.get(task_id))
             env = model_shell_env(overlay)
-            task.metadata["write_floor"] = write_floor
+            # Per task, so one that ran WITHOUT a floor says so where it ran.
+            task.metadata["read_floor"] = floors.read_floor
+            task.metadata["write_floor"] = floors.write_floor
 
         process = await asyncio.create_subprocess_exec(
             *argv,

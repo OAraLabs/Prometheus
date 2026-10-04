@@ -157,7 +157,7 @@ async def _run_predicate(
     """
     from prometheus.security.shell_floor import floored_argv, model_shell_env
 
-    argv, _write_floor = floored_argv(command, cwd=cwd, workspaces=workspaces)
+    argv, _floors = floored_argv(command, cwd=cwd, workspaces=workspaces)
     env = model_shell_env()
     try:
         proc = await asyncio.create_subprocess_exec(

@@ -86,7 +86,7 @@ none either — the key is documented so its absence is visible.
 | `security.dashboard_tool_bind_host` | `127.0.0.1` |
 | `security.denied_commands` | `['DROP TABLE']` |
 | `security.denied_paths` | `['/etc', '/sys', '/boot', '/*/.ssh', '/*/.gnupg', '/*/.config/*/*env']` |
-| `security.bash_confinement` | `off` |
+| `security.bash_confinement` | `auto` |
 | `security.bash_write_confinement` | `auto` |
 | `security.bash_write_allow` | `[]` |
 | `security.bash_max_file_gb` | `8` |

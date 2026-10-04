@@ -786,7 +786,7 @@ def create_app(
         # hardcoded so this cannot drift if that ever changes.
         roots = resolve_workspace_root(sec)
         kwargs = {
-            "read_mode": sec.get("bash_confinement", "off"),
+            "read_mode": sec.get("bash_confinement", "auto"),
             "write_mode": sec.get("bash_write_confinement", "auto"),
             "has_workspace": bool(roots),
         }

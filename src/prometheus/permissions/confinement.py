@@ -55,6 +55,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 from collections.abc import Iterable, Sequence
@@ -67,13 +68,36 @@ logger = logging.getLogger(__name__)
 PROFILE: Final[str] = "prometheus-bash"
 
 MODE_OFF: Final[str] = "off"
+MODE_AUTO: Final[str] = "auto"
 MODE_REQUIRED: Final[str] = "required"
-VALID_MODES: Final[tuple[str, ...]] = (MODE_OFF, MODE_REQUIRED)
+VALID_MODES: Final[tuple[str, ...]] = (MODE_OFF, MODE_AUTO, MODE_REQUIRED)
 
-# No "preferred"/"best-effort" mode, deliberately. A mode that falls back to
-# unconfined execution when the profile is missing is precisely the silent
-# degradation this module exists to prevent, and it would be indistinguishable
-# from a working floor in every log line.
+# "auto" — THE SHIPPED DEFAULT — AND WHY IT IS NOT A SILENT FALLBACK.
+#
+# This module refused a fallback mode for a long time: one that runs
+# unconfined when the profile is missing "would be indistinguishable from a
+# working floor in every log line". That objection was right, and "auto" is
+# shipped only because it is now answered rather than ignored:
+#
+#   * VERIFIED (preflight, by outcome): auto IS required for the life of the
+#     process. The success is cached and the shell keeps going through
+#     aa-exec, which refuses to run without the profile — so a profile lost
+#     after a verified start fails CLOSED. auto never quietly degrades.
+#   * UNVERIFIED on Linux: the shell runs without the read floor, and that is
+#     said in four places — an ERROR at boot naming the fix
+#     (security/shell_floor.announce), `dark` in /api/status (floor_report),
+#     a WARN row in `oara doctor`, and `read_floor: unavailable` in each
+#     call's metadata.
+#   * NO APPARMOR ON THIS PLATFORM (macOS): its own state, "unsupported". No
+#     probe, one line, no fix offered — there is none to offer.
+#
+# "required" remains for an operator who wants refusal, and an explicit "off"
+# stays off: only a config with no key at all changes meaning.
+
+#: The per-call state of the read floor, as each call's metadata reports it.
+READ_ACTIVE: Final[str] = "active"
+READ_UNAVAILABLE: Final[str] = "unavailable"
+READ_UNSUPPORTED: Final[str] = "unsupported"
 
 _preflight_cache: dict[str, tuple[bool, str]] = {}
 
@@ -83,7 +107,9 @@ def normalise_mode(value: object) -> str:
 
     An unrecognised mode returns ``off`` rather than ``required`` so a typo
     cannot brick every bash call, but it is logged at WARNING so it cannot
-    pass unnoticed either.
+    pass unnoticed either. ``None`` (a key written with no value) is also
+    ``off``; an ABSENT key never reaches here as None — readers pass the
+    shipped default, ``"auto"``.
     """
     text = str(value or MODE_OFF).strip().lower()
     if text in VALID_MODES:
@@ -97,6 +123,16 @@ def normalise_mode(value: object) -> str:
         "The bash floor is NOT in force.", value, list(VALID_MODES), MODE_OFF,
     )
     return MODE_OFF
+
+
+def apparmor_possible() -> bool:
+    """Can AppArmor exist on this platform at all? Linux only.
+
+    Where it cannot (macOS), "auto" reports ``unsupported`` without probing:
+    there is no profile to load, so a probe would only produce an ERROR line
+    and a fix that cannot be applied.
+    """
+    return sys.platform.startswith("linux")
 
 
 def _probe_label(profile: str) -> tuple[bool, str]:
@@ -509,10 +545,12 @@ def write_refusal_message(detail: str) -> str:
 #
 #   off       no floor asked for.
 #   active    asked for AND verified working, by outcome.
-#   dark      asked for, NOT working, and bash runs anyway. Only the write
-#             floor's "auto" can reach this — it is the documented
-#             degradation, and it is the state that most needs saying out
-#             loud, because nothing else about it is visible.
+#   dark      asked for, NOT working, and bash runs anyway. Only "auto" can
+#             reach this — either floor's, both of them shipped defaults — it
+#             is the documented degradation, and it is the state that most
+#             needs saying out loud, because nothing else about it is visible.
+#   unsupported  the read floor in "auto" on a platform with no AppArmor
+#             (macOS). Nothing that could exist is missing, so not dark.
 #   refusing  asked for as "required", NOT working, so every bash call now
 #             fails. Loud by construction, but an operator staring at a wall
 #             of refusals should find the reason here.
@@ -524,6 +562,9 @@ STATE_ACTIVE: Final[str] = "active"
 STATE_DARK: Final[str] = "dark"
 STATE_REFUSING: Final[str] = "refusing"
 STATE_NO_WORKSPACE: Final[str] = "no-workspace"
+#: The read floor in "auto" on a platform with no AppArmor at all (macOS).
+#: Not dark: nothing that could exist is missing. Reported, never alerted on.
+STATE_UNSUPPORTED: Final[str] = READ_UNSUPPORTED
 
 
 def floor_report(
@@ -555,15 +596,19 @@ def floor_report(
     read_ok: bool | None = None
     read_detail = "not probed"
     inner_prefix: list[str] = []
-    if read == MODE_REQUIRED:
+    unsupported = read == MODE_AUTO and not apparmor_possible()
+    if unsupported:
+        read_detail = "this platform has no AppArmor"
+    elif read in (MODE_REQUIRED, MODE_AUTO):
         if probe:
             read_ok, read_detail = preflight()
         elif PROFILE in _preflight_cache:
             read_ok, read_detail = _preflight_cache[PROFILE]
-        # The tool wraps with aa-exec whenever the read floor is required, so
-        # the write probe must carry it whether or not it verified — that is
-        # the argv the next call gets.
-        inner_prefix = wrap_argv([], PROFILE)
+        # The tool wraps with aa-exec whenever the read floor is required —
+        # and in auto, once it verified — so the write probe carries the same
+        # prefix: that is the argv the next call gets.
+        if read == MODE_REQUIRED or read_ok:
+            inner_prefix = wrap_argv([], PROFILE)
 
     write_ok: bool | None = None
     write_detail = "not probed"
@@ -586,7 +631,8 @@ def floor_report(
             return STATE_ACTIVE
         return STATE_REFUSING if mode == refusing_mode else STATE_DARK
 
-    read_state = _state(read, read_ok, refusing_mode=MODE_REQUIRED)
+    read_state = (STATE_UNSUPPORTED if unsupported
+                  else _state(read, read_ok, refusing_mode=MODE_REQUIRED))
     if write == WRITE_MODE_OFF:
         write_state = STATE_OFF
     elif not has_workspace:
@@ -631,9 +677,10 @@ def floor_report(
 #: command to a shell, all of them through :func:`apply_floors`.
 SHELL_FLOOR_SCOPE: Final[str] = (
     "every shell a model writes: the bash tool, background shell tasks and "
-    "poll predicates (task_create), cron jobs (cron_create), and a coding "
-    "run's commands (process backend). Not command hooks: those run the "
-    "operator's own command from prometheus.yaml"
+    "poll predicates (task_create), cron jobs the model created (cron_create, "
+    "origin \"model\"), and a coding run's commands (process backend). Not "
+    "command hooks, and not the operator's own cron jobs: those run the "
+    "operator's own commands as before"
 )
 
 
@@ -663,6 +710,9 @@ class FloorResult:
     argv: tuple[str, ...]
     write_floor: str
     refusal: str | None = None
+    #: ``off``, ``active``, ``unavailable`` (auto, unverified), ``unsupported``
+    #: (auto, no AppArmor on this platform) or ``refused`` (required).
+    read_floor: str = MODE_OFF
 
 
 def apply_floors(
@@ -694,14 +744,25 @@ def apply_floors(
     out = list(argv)
 
     aa_prefix: list[str] = []
-    if read == MODE_REQUIRED:
+    read_floor = MODE_OFF
+    if read == MODE_AUTO and not apparmor_possible():
+        read_floor = READ_UNSUPPORTED
+    elif read in (MODE_REQUIRED, MODE_AUTO):
         ok, detail = preflight(profile)
-        if not ok:
-            return FloorResult((), "not-reached", refusal_message(profile, detail))
-        # Kept as a PREFIX rather than applied once, so the write floor below
-        # can probe the composed stack as the stack it will be.
-        aa_prefix = wrap_argv([], profile)
-        out = [*aa_prefix, *out]
+        if ok:
+            # Kept as a PREFIX rather than applied once, so the write floor
+            # below can probe the composed stack as the stack it will be.
+            aa_prefix = wrap_argv([], profile)
+            out = [*aa_prefix, *out]
+            read_floor = READ_ACTIVE
+        elif read == MODE_REQUIRED:
+            return FloorResult((), "not-reached", refusal_message(profile, detail),
+                               read_floor="refused")
+        else:
+            # auto, unverified: run without the read floor. preflight() has
+            # logged why at ERROR, once; announce() said it at boot with the
+            # fix; this records it on the call that ran without it.
+            read_floor = READ_UNAVAILABLE
 
     write_floor = WRITE_MODE_OFF
     if write != WRITE_MODE_OFF:
@@ -719,11 +780,12 @@ def apply_floors(
                 out = write_wrap_argv(out, writable=writable, cwd=cwd)
                 write_floor = STATE_ACTIVE
             elif write == WRITE_MODE_REQUIRED:
-                return FloorResult((), "refused", write_refusal_message(detail))
+                return FloorResult((), "refused", write_refusal_message(detail),
+                                   read_floor=read_floor)
             else:
                 # "auto" degrades to the unfloored shell. write_preflight()
                 # has logged the reason at ERROR, once; the per-call state
                 # records it as well, so a floor that is not there is legible
                 # from the call that ran without it.
                 write_floor = "unavailable"
-    return FloorResult(tuple(out), write_floor)
+    return FloorResult(tuple(out), write_floor, read_floor=read_floor)

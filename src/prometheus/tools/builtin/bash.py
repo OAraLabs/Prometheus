@@ -169,10 +169,14 @@ class BashTool(BaseTool):
             return ToolResult(
                 output=floored.refusal,
                 is_error=True,
-                metadata={"write_floor": floored.write_floor},
+                metadata={"write_floor": floored.write_floor,
+                          "read_floor": floored.read_floor},
             )
         argv = list(floored.argv)
         write_floor = floored.write_floor
+        # Per call, so a shell that ran WITHOUT the read floor ("auto" on a
+        # host where the profile did not verify) says so where it ran.
+        read_floor = floored.read_floor
 
         # Strip secret-shaped variables before the child inherits the daemon's
         # environment. Without this, ``env`` / ``printenv`` / ``echo
@@ -206,7 +210,7 @@ class BashTool(BaseTool):
             return ToolResult(
                 output=f"Command timed out after {arguments.timeout_seconds} seconds",
                 is_error=True,
-                metadata={"write_floor": write_floor},
+                metadata={"write_floor": write_floor, "read_floor": read_floor},
             )
         except asyncio.CancelledError:
             # The agent loop wraps tool.execute() in its own (longer) timeout;
@@ -237,6 +241,7 @@ class BashTool(BaseTool):
             metadata={
                 "returncode": process.returncode,
                 "write_floor": write_floor,
+                "read_floor": read_floor,
                 "refused_by": _refused_by(process.returncode, text, write_floor),
             },
         )

@@ -544,19 +544,27 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
         await _maybe_notify_failure(entry)
         return entry
 
-    # THE SHELL FLOOR. A cron job's command may be the model's (cron_create)
-    # or the operator's (POST /api/cron), and a stored job does not say which,
-    # so every job runs behind the bash tool's read and write floors with its
-    # scrubbed environment (security/shell_floor.py). A required floor that is
-    # unavailable refuses the run like the gate does: nothing is started.
+    # THE SHELL FLOOR, BY PROVENANCE. A job the MODEL created (cron_create
+    # stores origin "model") runs behind the bash tool's read and write floors
+    # with its scrubbed environment (security/shell_floor.py); a required
+    # floor that is unavailable refuses the run like the gate does. Every
+    # other job — the operator's, and every job stored before origin existed —
+    # runs exactly as before: the operator's jobs need the environment and
+    # the writes the floor removes.
+    from prometheus.gateway.cron_service import is_model_job
     from prometheus.security.shell_floor import (
         ShellFloorRefused,
         floored_argv,
         model_shell_env,
     )
 
+    env: dict[str, str] | None = None
     try:
-        argv, _write_floor = floored_argv(command, cwd=resolved_cwd)
+        if is_model_job(job):
+            argv, _floors = floored_argv(command, cwd=resolved_cwd)
+            env = model_shell_env()
+        else:
+            argv = ["/bin/bash", "-lc", command]
     except ShellFloorRefused as exc:
         logger.warning("Cron job %r REFUSED by the shell floor: %s", name, exc)
         entry = {
@@ -579,7 +587,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
         process = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd),
-            env=model_shell_env(),
+            env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

@@ -390,24 +390,33 @@ security:
   # $HOME indirection, globs, sh -c), so the floor for bash is enforced by the
   # kernel instead:
   #
-  #   off       (default) no kernel floor for bash. The three patterns above
-  #             protect the path-declaring tools ONLY.
+  #   auto      (default) the floor wherever the profile is loaded. At boot
+  #             the profile is verified BY OUTCOME; verified, auto behaves
+  #             exactly like required for the life of the process (a profile
+  #             removed later fails closed). Not verified on Linux: bash runs
+  #             WITHOUT the floor and says so — an ERROR at boot naming the
+  #             fix, "dark" in /api/status, a WARN row in `oara doctor`, and
+  #             read_floor: unavailable in each call's metadata. On a
+  #             platform with no AppArmor (macOS) it reports "unsupported".
   #   required  every bash call execs through `aa-exec -p prometheus-bash`.
   #             If the profile is not loaded, or aa-exec is missing, or the
   #             transition does not happen, bash REFUSES TO RUN and says so —
   #             it never silently falls back to an unconfined shell.
+  #   off       no kernel floor for bash. The three patterns above protect the
+  #             path-declaring tools ONLY. An explicit off stays off.
   #
-  # Default is off because Prometheus runs on hosts without AppArmor, where
-  # "required" would refuse every bash call. Turning it on is a deliberate act.
+  # Not "required" by default because Prometheus runs on hosts without
+  # AppArmor, where that would refuse every bash call.
   # Profile ships at deploy/apparmor/prometheus-bash; load it with:
   #   sudo apparmor_parser -r -W /etc/apparmor.d/prometheus-bash
   #
   # SCOPE: "bash" in this key and the two below means EVERY shell a model
   # writes, not only the bash tool. task_create's shell and poll tasks, cron
-  # jobs and a coding run's commands run behind the same floors and the same
-  # environment scrub (security/shell_floor.py). Command hooks run your own
-  # command from this file and are not floored.
-  bash_confinement: "off"
+  # jobs the model created and a coding run's commands run behind the same
+  # floors and the same environment scrub (security/shell_floor.py). Not
+  # floored: command hooks, and your own cron jobs (created through /api/cron,
+  # or stored before cron jobs recorded who wrote them).
+  bash_confinement: "auto"
   # THE ABOVE IS A READ FLOOR. It says nothing about WRITES, and the
   # outside-workspace approval does not cover bash either: SecurityGate
   # raises it by reading a tool's file_path, and bash has a command string.

@@ -233,7 +233,7 @@ class ProcessSandbox(Sandbox):
         # anything starts when a required floor is unavailable.
         from prometheus.security.shell_floor import floored_argv
 
-        argv, _write_floor = floored_argv(
+        argv, _floors = floored_argv(
             command, cwd=self.root, workspaces=(self.root,),
             shell=("/bin/sh", "-c"))
         proc = await asyncio.create_subprocess_exec(
