@@ -54,7 +54,18 @@ class Element:
     label: str = ""
     value: str | None = None
     actions: tuple[str, ...] = ()
+    #: ⚠ NOT REPORTED BY THE DRIVER. cua-driver 0.28.2's ``WindowElement`` has
+    #: no such field, so the adapter never sets it; only fixtures do. Type
+    #: candidates fall back on the role (``candidates._EDITABLE_ROLES``).
     editable: bool = False
+    #: As the driver reports them (``WindowElement``). None means the driver
+    #: did not say — never "false".
+    enabled: bool | None = None
+    selected: bool | None = None
+    #: The element sits inside a web page. The signal the ``site`` consent
+    #: term needs (computer-use v1.1 §5.4); carried here, not yet ruled on.
+    in_web_content: bool | None = None
+    parent_index: int | None = None
 
     def describe(self) -> str:
         """How this element reads to a human — and to the chooser.
@@ -84,9 +95,33 @@ class Observation:
     snapshot_id: str
     elements: tuple[Element, ...] = ()
     #: Set when the observation could not be trusted (no display, empty tree,
-    #: a stale session). An observation carrying this must NOT be built into
-    #: candidates — see ``candidates.build_candidates``.
+    #: a degraded walk, a stale session). An observation carrying this must
+    #: NOT be built into candidates — see ``candidates.build_candidates``.
     unusable_reason: str | None = None
+    #: The driver's OWN report on this snapshot (``WindowStateOutput``). They
+    #: were dropped, so a truncated or degraded tree read as a complete one —
+    #: the "shaped like success" failure this module exists to refuse.
+    #:
+    #: ``degraded`` makes the observation unusable. ``truncated`` does not: a
+    #: big app truncates at the adapter's element cap and must still work,
+    #: but nothing may treat a truncated tree as the whole window.
+    #: ``elements_complete`` is carried and NOT relied on: 0.28.2 hard-codes
+    #: it false on Linux.
+    degraded: bool = False
+    degraded_reason: str | None = None
+    truncated: bool = False
+    truncation_reason: str | None = None
+    elements_complete: bool | None = None
+    total_element_count: int | None = None
+    returned_element_count: int | None = None
+    #: True when ANY node of the walk — tokenless ones included — is flagged
+    #: ``in_web_content`` or has a document-family role (role contains
+    #: "document", or is "embedded"). ``elements`` holds only ADDRESSABLE
+    #: nodes, so a tokenless document node would otherwise be invisible to
+    #: anything asking "is there web content in this window?" — the question
+    #: the ``site`` consent term turns on (computer-use v1.1 §5.4). None means
+    #: the driver returned no nodes to judge by: no evidence either way.
+    web_content_seen: bool | None = None
 
     def element_by_index(self, index: int) -> Element | None:
         for el in self.elements:
