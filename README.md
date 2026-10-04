@@ -5,7 +5,7 @@ Not a local model. A local agent.
 
 Pre-1.0 · known limits: [oara.ai/docs/limits/](https://oara.ai/docs/limits/)
 
-Prometheus is an AI agent daemon: always on, on hardware you own. It remembers, keeps its own schedule, reaches you on Telegram and Beacon, and makes open models reliable at using tools.
+Prometheus is an AI agent daemon: always on, on hardware you own. It remembers, keeps its own schedule, reaches you on Telegram and Beacon, and helps open models use tools reliably.
 
 ![Beacon's Mission home — the Armilla telemetry sphere beside Mission Control: agent state, scheduled jobs, local backends, and tool-call telemetry](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/panel-mission-home.png)
 
@@ -14,7 +14,7 @@ Prometheus is an AI agent daemon: always on, on hardware you own. It remembers, 
 Prometheus is two pieces that pair with a 6-digit code:
 
 - **The daemon** — an always-on Python agent runtime: agent loop + Model Adapter Layer, a registry of every local inference box you own, chat gateways (Telegram, plus Slack and Discord gateways on the same command layer, not yet run in production; all off until a token is added), lossless memory, opt-in coding runs in a sandboxed clone, cron, a security gate, and a bearer-token REST + WebSocket control plane — plus an OpenAI-compatible `/v1` surface so anything that already speaks OpenAI can talk to it.
-- **[Beacon](https://oara.ai/beacon)** — free to use, closed source, in beta. Its native desktop cockpit (macOS / Linux): chat with live tool timelines and `@`-references, Mission Control, a Loop Manager for coding runs, per-turn file checkpoints you can restore, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management. [Beacon for iOS](https://oara.ai/beacon-ios) rides the same control plane (per-device tokens, push, pagination); it is a private beta — request access at [support@oara.ai](mailto:support@oara.ai?subject=Beacon%20iOS) with the subject "Beacon iOS".
+- **[Beacon](https://oara.ai/beacon)** — free to use, closed source, in beta. Its native desktop cockpit (macOS / Linux): chat with live tool timelines and `@`-references, Mission Control, a Loop Manager for coding runs, per-turn file checkpoints you can restore, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management. [Beacon for iOS](https://oara.ai/beacon-ios) rides the same control plane (per-device tokens, pagination); it is a private beta — request access at [support@oara.ai](mailto:support@oara.ai?subject=Beacon%20iOS) with the subject "Beacon iOS".
 
 ```bash
 pip install 'oara-prometheus[full]'   # Python 3.11+
@@ -153,7 +153,7 @@ Three commitments run through everything below:
 
 **Survives you, restarts, and itself.** Sessions, background tasks, and message ids are durable contracts that outlive daemon restarts. The memory store heals itself — search-index rebuilds, snapshot backups before every migration, writes that either commit or raise. Signals persist before they broadcast, so a crash can never have told you something the disk doesn't know.
 
-**Secure by construction, not by policy.** Keys are stripped from the agent's shell environment, and the key file is on a hard deny list for file tools. The audit log redacts secrets before writing, outbound fetches resolve-and-block private address space, cron passes the same security gate at creation and at execution and fails closed, self-modification is gated behind a dangerous-code scanner, and agent deliverables are served by content id rather than by path.
+**Guards in code, not in policy.** Keys are stripped from the agent's shell environment, and the key file is on a hard deny list for file tools. The audit log redacts secrets before writing, outbound fetches resolve-and-block private address space, cron passes the same security gate at creation and at execution and fails closed, self-modification is gated behind a dangerous-code scanner, and agent deliverables are served by content id rather than by path.
 
 ### Model Independence
 
@@ -635,39 +635,6 @@ prometheus/
 ## Tests
 
 9,786 tests passed in CI on the v0.9.5 release commit ([run 36461450849](https://github.com/OAraLabs/Prometheus/actions/runs/36461450849), Linux, Python 3.11–3.13).
-
-## Roadmap
-
-- [x] Core agent loop with Model Adapter Layer (validation, repair, GBNF, retry, telemetry)
-- [x] Lossless Context Management (DAG compression, FTS5 search) + passive recall
-- [x] Security (4-level trust, audit, exfiltration, approval queue)
-- [x] Telegram gateway — commands, media, mid-turn `/steer` and `/queue`
-- [ ] Slack + Discord gateways — *one shared command layer, CI-enforced at parity; neither has ever run in production*
-- [x] Wiki knowledge system (Karpathy-inspired, Obsidian-compatible)
-- [x] SENTINEL proactive layer (observer + AutoDream) — *opt-in, ships off*
-- [x] Coding Mode v2 — iterate-to-green in a sandboxed clone + live streaming — *opt-in (`coding.enabled`)*
-- [ ] Coding-mode mid-run supervision (pause / inject / resume) — *6 control events ever, all failed, 2026-06; nothing since*
-- [x] Beacon desktop app — pairing wizard, Mission Control, Loop Manager, Documents, Kanban
-- [x] WAN image generation
-- [ ] Cloud expansion — DeepSeek / Kimi / GLM / MiMo + Kling video — *provider classes ship and register at boot; none has ever been invoked*
-- [x] xAI SuperGrok subscription OAuth
-- [x] Model router with fallback chains + divergence detection
-- [x] Evaluation framework with local LLM judge + fine-tuning gym (dual scoring)
-- [x] LSP integration, MCP integration, migration tool (Hermes/OpenClaw) — *the migration tool is not re-tested against a real Hermes or OpenClaw install since it shipped*
-- [x] Durable sessions, turn interrupt, liveness pulse, artifact outbox
-- [x] Record a Skill — daemon side: the DOM-trace pipeline + video/YouTube ingestion — *the browser recorder extension is not distributed yet*
-- [x] Vision — images reach the model as images, stored by reference, served over `/api/media`
-- [x] Mobile control plane — per-device tokens, APNs push, pagination, session filters (iOS client)
-- [x] Foundation — node/instance identity, vault marker, gated MCP, the pack contract
-- [x] Loud provider fallback + self-halting loop + honest context accounting
-- [x] Per-conversation workspace, per-turn file checkpoints, `@`-references, project-instruction discovery
-- [x] OpenAI-compatible `/v1` surface; `oara` console script
-- [x] Multi-backend — a registry of every local inference box, `/4090`-style per-chat switching with probe-before-switch, per-backend context windows, Beacon desktop + iOS pickers
-- [ ] Beacon: attach to running coding runs, pause/inject/resume from the UI — *the daemon endpoints exist; the UI does not call them*
-- [x] Secrets redacted at every log handler and at capture time; logs rotate
-- [ ] Fine-tuning flywheel (LoRA on collected traces) — *capture/export pipeline shipped; training loop pending*
-- [x] PyPI release — [`oara-prometheus`](https://pypi.org/project/oara-prometheus/), from 0.9.0
-- [ ] Published Beacon builds — *every tag drafts a dmg, an AppImage and a deb; they are published when Beacon leaves beta*
 
 ## License
 
