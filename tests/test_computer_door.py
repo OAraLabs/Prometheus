@@ -896,3 +896,25 @@ async def test_the_chat_stop_stops_a_task_even_with_a_chat_turn_running(tmp_path
     await asyncio.sleep(0)
     assert chat_turn.cancelled() or chat_turn.cancelling()
     assert rig.driver.dispatched == []
+
+
+# ── D14: A CANCELLED WAIT LEAVES NOTHING BEHIND ─────────────────────────────
+
+async def test_a_cancelled_wait_leaves_no_pending_request(tmp_path):
+    """The pop used to run only when the wait finished. A waiter cancelled
+    mid-wait — a stopped task, a shut-down turn — left its request pending
+    and answerable forever, with nothing waiting on the answer (D14)."""
+    from prometheus.permissions.approval_queue import ApprovalQueue
+
+    rig = _rig(tmp_path, [])
+    queue = ApprovalQueue(security_gate=rig.gate)
+    waiter = asyncio.create_task(queue.request_approval("bash", "ls"))
+    for _ in range(200):
+        await asyncio.sleep(0.005)
+        if queue.pending:
+            break
+    assert queue.pending, "the request exists while it waits"
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert queue.pending == {}, "a cancelled wait must not leak its request"
