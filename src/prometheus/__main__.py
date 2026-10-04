@@ -204,6 +204,14 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     # "auto" cannot brick a host that has no bubblewrap (macOS has none); it
     # degrades to the previous behaviour and says so, at ERROR, once per
     # process and in each call's result metadata. "required" refuses instead.
+    #
+    # The SAME floors go to every other door that runs a model-written shell
+    # (task_create's shell and poll tasks, cron jobs): they read what is wired
+    # here, so the bash tool and those doors cannot be configured apart.
+    # PROCESS-WIDE: pass the process's real security section, never a
+    # placeholder — the last registry built is the floor every door uses.
+    from prometheus.security.shell_floor import ShellFloor, set_shell_floor
+    set_shell_floor(ShellFloor.from_security_config(security_cfg))
     registry.register(BashTool(
         workspace=workspace,
         confinement=security_cfg.get("bash_confinement", "off"),
@@ -1175,6 +1183,11 @@ def run_coding_task(args) -> int:
     # threaded to this call is a setting that silently does nothing.
     coding_cfg = config.get("coding", {}) or {}
     sandbox_backend = str(coding_cfg.get("sandbox_type", "process"))
+    # The model's commands in this run (code_run, and the acceptance command
+    # that runs its code) go behind the bash tool's floors — the security
+    # section of THIS config, not whatever a default path search finds.
+    from prometheus.security.shell_floor import ShellFloor, set_shell_floor
+    set_shell_floor(ShellFloor.from_security_config(config.get("security")))
     try:
         sandbox = clone_repo_for_sandbox(
             args.repo,

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 from watchdog.events import PatternMatchingEventHandler
@@ -114,19 +115,25 @@ async def poll_until(
     timeout_seconds: float | None,
     initial_interval: float,
     max_interval: float,
+    workspaces: Sequence[str] | None = None,
 ) -> bool:
     """Run *predicate_cmd* on exponential backoff until it exits 0, or timeout.
 
     Fallback detector ONLY. Returns True on success, False on timeout. The
     command is assumed already vetted by the supervisor's SecurityGate at
     registration — this function does not gate.
+
+    It DOES floor: the predicate is the model's command, so every run goes
+    behind the bash tool's read and write floors with its scrubbed
+    environment. A floor that is required and unavailable raises
+    ``ShellFloorRefused`` out of here — it is not a predicate that failed.
     """
     loop = asyncio.get_running_loop()
     deadline = (loop.time() + timeout_seconds) if timeout_seconds else None
     interval = max(0.5, float(initial_interval))
 
     while True:
-        if await _run_predicate(predicate_cmd, cwd) == 0:
+        if await _run_predicate(predicate_cmd, cwd, workspaces) == 0:
             return True
         now = loop.time()
         if deadline is not None and now >= deadline:
@@ -140,12 +147,23 @@ async def poll_until(
         interval = min(interval * 2, float(max_interval))
 
 
-async def _run_predicate(command: str, cwd: str) -> int:
-    """Run *command* in bash, discard output, return its exit code (1 on error)."""
+async def _run_predicate(
+    command: str, cwd: str, workspaces: Sequence[str] | None = None,
+) -> int:
+    """Run *command* in bash, discard output, return its exit code (1 on error).
+
+    The argv and environment are built OUTSIDE the try below, so a refusal by
+    the floor propagates instead of being counted as one more failed poll.
+    """
+    from prometheus.security.shell_floor import floored_argv, model_shell_env
+
+    argv, _write_floor = floored_argv(command, cwd=cwd, workspaces=workspaces)
+    env = model_shell_env()
     try:
         proc = await asyncio.create_subprocess_exec(
-            "/bin/bash", "-lc", command,
+            *argv,
             cwd=cwd,
+            env=env,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )

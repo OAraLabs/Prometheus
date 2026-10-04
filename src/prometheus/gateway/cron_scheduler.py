@@ -544,13 +544,42 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
         await _maybe_notify_failure(entry)
         return entry
 
+    # THE SHELL FLOOR. A cron job's command may be the model's (cron_create)
+    # or the operator's (POST /api/cron), and a stored job does not say which,
+    # so every job runs behind the bash tool's read and write floors with its
+    # scrubbed environment (security/shell_floor.py). A required floor that is
+    # unavailable refuses the run like the gate does: nothing is started.
+    from prometheus.security.shell_floor import (
+        ShellFloorRefused,
+        floored_argv,
+        model_shell_env,
+    )
+
+    try:
+        argv, _write_floor = floored_argv(command, cwd=resolved_cwd)
+    except ShellFloorRefused as exc:
+        logger.warning("Cron job %r REFUSED by the shell floor: %s", name, exc)
+        entry = {
+            "name": name,
+            "command": command,
+            "cwd": resolved_cwd,
+            "started_at": started_at.isoformat(),
+            "ended_at": datetime.now(timezone.utc).isoformat(),
+            "returncode": 126,
+            "status": "blocked",
+            "stdout": "",
+            "stderr": str(exc),
+        }
+        _record_run(name, success=False, entry=entry)
+        await _maybe_notify_failure(entry)
+        return entry
+
     logger.info("Executing cron job %r: %s", name, command)
     try:
         process = await asyncio.create_subprocess_exec(
-            "/bin/bash",
-            "-lc",
-            command,
+            *argv,
             cwd=str(cwd),
+            env=model_shell_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

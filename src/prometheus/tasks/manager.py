@@ -29,7 +29,7 @@ import signal
 import sys
 import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -157,6 +157,16 @@ class BackgroundTaskManager:
         # the perimeter — not a redaction pass over a field that holds the
         # secret, but a shape in which the secret is never in that field.
         self._task_env: dict[str, dict[str, str]] = {}
+        # Tasks whose command the DAEMON built (a sub-agent launch, a coding
+        # run's launcher) and which therefore run WITHOUT the shell floor. In
+        # memory only, and the default is the other way round: a task id that
+        # is not here is floored, so a lost entry costs a refused launch, never
+        # an unfloored model command. See security/shell_floor.py.
+        self._unfloored: set[str] = set()
+        # A session's own workspace roots, per task, for the write floor —
+        # the same "session roots replace the configured ones" rule the bash
+        # tool applies (item W). Absent = the configured roots.
+        self._task_roots: dict[str, tuple[str, ...]] = {}
         self._generations: dict[str, int] = {}
         self._emitted: set[str] = set()
 
@@ -193,6 +203,8 @@ class BackgroundTaskManager:
         reengage_prompt: str | None = None,
         timeout_seconds: int | None = None,
         env_overlay: Mapping[str, str] | None = None,
+        workspace_roots: Sequence[str | Path] | None = None,
+        floored: bool = True,
     ) -> TaskRecord:
         """Start a background shell command and return its TaskRecord.
 
@@ -206,6 +218,13 @@ class BackgroundTaskManager:
         in memory only. It is never written to the TaskRecord, never persisted,
         never serialised to REST, and never rendered into model context — which
         is the whole reason it exists. See ``create_agent_task``.
+
+        ``floored`` (default True) runs the command behind the bash tool's
+        read and write floors with its scrubbed environment
+        (security/shell_floor.py) — every command a model wrote. Only a
+        command the DAEMON built passes False. A floor that is required and
+        unavailable yields a ``blocked`` record and no process, exactly like a
+        gate refusal: nothing ran.
         """
         blocked = self._vet_command(command)
         record = self._new_record(
@@ -236,8 +255,22 @@ class BackgroundTaskManager:
         # writes the record, which deliberately has nowhere to put this.
         if env_overlay:
             self._task_env[record.id] = dict(env_overlay)
+        if not floored:
+            self._unfloored.add(record.id)
+        if workspace_roots:
+            self._task_roots[record.id] = tuple(str(r) for r in workspace_roots)
         self._persist(record)
-        await self._start_process(record.id)
+        from prometheus.security.shell_floor import ShellFloorRefused
+
+        try:
+            await self._start_process(record.id)
+        except ShellFloorRefused as exc:
+            record.status = "blocked"
+            record.error = f"blocked: {exc}"
+            record.ended_at = time.time()
+            self._persist(record)
+            log.warning("Task %s refused by the shell floor: %s", record.id,
+                        exc.write_floor)
         return record
 
     async def create_agent_task(
@@ -308,10 +341,15 @@ class BackgroundTaskManager:
                 cmd.extend(["--model", model])
             command = " ".join(shlex.quote(part) for part in cmd)
             env_overlay = {"ANTHROPIC_API_KEY": effective_api_key}
+            # The daemon built this command; nothing in it is the model's.
+            # The sub-agent's own bash tool carries the floor.
+            floored = False
         else:
             # An explicit command override is the caller's own string; it gets
             # no credential injected into it, and inherits os.environ as before.
+            # Whose string it is cannot be known here, so it is floored.
             env_overlay = None
+            floored = True
 
         record = await self.create_shell_task(
             command=command,
@@ -324,6 +362,7 @@ class BackgroundTaskManager:
             reengage_prompt=reengage_prompt,
             timeout_seconds=timeout_seconds,
             env_overlay=env_overlay,
+            floored=floored,
         )
         # A refusal ("blocked") or a launch that failed outright — either way no
         # process is attached, so there is no stdin to write the prompt to.
@@ -386,9 +425,26 @@ class BackgroundTaskManager:
         on_complete: OnComplete = "notify",
         reengage_prompt: str | None = None,
         timeout_seconds: int | None = None,
+        workspace_roots: Sequence[str | Path] | None = None,
     ) -> TaskRecord:
-        """Poll *poll_predicate* (a shell command) until it exits 0, or timeout."""
+        """Poll *poll_predicate* (a shell command) until it exits 0, or timeout.
+
+        The predicate is always the model's, so it always runs behind the
+        shell floor. The floor is checked HERE as well as on every run, so a
+        required-but-unavailable floor refuses at register — where the model
+        is told — rather than failing silently on each poll until timeout.
+        """
         blocked = self._vet_command(poll_predicate)
+        if blocked is None:
+            from prometheus.security.shell_floor import (
+                ShellFloorRefused,
+                floored_argv,
+            )
+
+            try:
+                floored_argv(poll_predicate, cwd=cwd, workspaces=workspace_roots)
+            except ShellFloorRefused as exc:
+                blocked = f"blocked: {exc}"
         record = self._new_record(
             task_type="poll",
             description=description,
@@ -410,6 +466,8 @@ class BackgroundTaskManager:
             return record
         record.output_file.write_text("", encoding="utf-8")
         self._tasks[record.id] = record
+        if workspace_roots:
+            self._task_roots[record.id] = tuple(str(r) for r in workspace_roots)
         self._persist(record)
         self._waiters[record.id] = asyncio.create_task(self._run_poll(record.id))
         return record
@@ -816,12 +874,23 @@ class BackgroundTaskManager:
         # place. Nothing silently swaps one credential for another: the overlay
         # only ever holds what this process was given.
         overlay = self._task_env.get(task_id)
-        env = {**os.environ, **overlay} if overlay else None
+        if task_id in self._unfloored:
+            argv = ["/bin/bash", "-lc", task.command]
+            env = {**os.environ, **overlay} if overlay else None
+        else:
+            # A model-written command: the bash tool's read floor, write floor
+            # and environment scrub. Raises ShellFloorRefused BEFORE anything
+            # is spawned when a required floor is unavailable.
+            from prometheus.security.shell_floor import floored_argv, model_shell_env
+
+            argv, write_floor = floored_argv(
+                task.command, cwd=task.cwd,
+                workspaces=self._task_roots.get(task_id))
+            env = model_shell_env(overlay)
+            task.metadata["write_floor"] = write_floor
 
         process = await asyncio.create_subprocess_exec(
-            "/bin/bash",
-            "-lc",
-            task.command,
+            *argv,
             cwd=task.cwd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -900,6 +969,9 @@ class BackgroundTaskManager:
     async def _run_poll(self, task_id: str) -> None:
         task = self._tasks[task_id]
         predicate = task.spec.get("predicate_cmd", "")
+        from prometheus.security.shell_floor import ShellFloorRefused
+
+        refused = False
         try:
             ok = await poll_until(
                 predicate,
@@ -907,9 +979,15 @@ class BackgroundTaskManager:
                 timeout_seconds=task.timeout_seconds,
                 initial_interval=self.poll_initial_interval,
                 max_interval=self.poll_max_interval,
+                workspaces=self._task_roots.get(task_id),
             )
         except asyncio.CancelledError:
             raise
+        except ShellFloorRefused as exc:
+            # The floor was there at register and is gone now (a profile
+            # unloaded, a resumed task on a host without it). Nothing ran.
+            ok, refused = False, True
+            task.error = f"blocked: {exc}"
         except Exception as exc:  # noqa: BLE001
             ok = False
             task.error = f"poll error: {exc}"
@@ -917,6 +995,8 @@ class BackgroundTaskManager:
             return
         if ok:
             task.status = "completed"
+        elif refused:
+            task.status = "blocked"
         else:
             task.status = "failed"
             if task.error is None:
