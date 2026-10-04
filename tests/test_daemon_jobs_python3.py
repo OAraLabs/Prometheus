@@ -77,7 +77,9 @@ class TestJobShellCommand:
         "python3 -V",
         "python -V",
         "cd / && python3 -V",
-        "timeout 5 python3 -V",
+        # A program that runs python3 by PATH lookup (`timeout` would do, but
+        # macOS has none; `nice` is POSIX and exists on both).
+        "nice python3 -V",
         "env python3 -V",
         "true; python3 -V | cat",
     ])
