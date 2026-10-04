@@ -58,6 +58,7 @@ import subprocess
 import tempfile
 import uuid
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -618,8 +619,111 @@ def floor_report(
         # SEPARATE from dark on purpose: this is loud (every bash call fails),
         # so it needs an explanation, not an alert.
         "refusing": read_state == STATE_REFUSING or write_state == STATE_REFUSING,
-        # Only bash. Named so a reader does not generalise it: cron jobs,
-        # background tasks, watch_dir predicates and command hooks each spawn
-        # /bin/bash at their own call sites and NEITHER floor reaches them.
-        "scope": "bash tool only",
+        # Named so a reader does not generalise it. Every shell a MODEL wrote
+        # goes through apply_floors below; command hooks are the operator's
+        # own commands from prometheus.yaml and are deliberately not floored
+        # (their environment is allowlisted instead, hooks/executor.py).
+        "scope": SHELL_FLOOR_SCOPE,
     }
+
+
+#: Which shells the two floors reach — the doors that hand a model-written
+#: command to a shell, all of them through :func:`apply_floors`.
+SHELL_FLOOR_SCOPE: Final[str] = (
+    "every shell a model writes: the bash tool, background shell tasks and "
+    "poll predicates (task_create), cron jobs (cron_create), and a coding "
+    "run's commands (process backend). Not command hooks: those run the "
+    "operator's own command from prometheus.yaml"
+)
+
+
+# =========================================================================== #
+# ONE COMPOSITION FOR EVERY MODEL-WRITTEN SHELL
+# =========================================================================== #
+#
+# The bash tool built this stack inline, so it was the only door that had it.
+# A background task, a poll predicate, a cron job and a coding run's code_run
+# each take a command string from the model and start a shell at their own
+# call site, and the floor that keeps bash out of ~/.ssh was one task_create
+# away from not existing. The stack now lives here, once, and every one of
+# those sites calls it — so a fix to the composition (an ordering bug, a new
+# refusal) lands at every door at the same time instead of at one.
+
+
+@dataclass(frozen=True)
+class FloorResult:
+    """What :func:`apply_floors` decided for one shell call.
+
+    ``argv`` is what to exec when ``refusal`` is None. ``write_floor`` is the
+    per-call state the bash tool already reports in its result metadata:
+    ``off``, ``active``, ``unavailable`` (auto, degraded), ``no-workspace``,
+    ``refused`` or ``not-reached`` (the read floor refused first).
+    """
+
+    argv: tuple[str, ...]
+    write_floor: str
+    refusal: str | None = None
+
+
+def apply_floors(
+    argv: Sequence[str],
+    *,
+    read_mode: object,
+    write_mode: object,
+    writable: Sequence[Path],
+    cwd: Path | str | None,
+    profile: str = PROFILE,
+) -> FloorResult:
+    """Wrap a shell argv in the read floor (inside) and write floor (outside).
+
+    Moved here verbatim from ``BashTool.execute`` so every model-written
+    shell gets the same stack and the same failure policy:
+
+    * READ floor required and unavailable -> REFUSE. Never fall through to an
+      unconfined shell; that removes the floor rather than degrading it.
+    * WRITE floor: ``required`` refuses when unavailable, ``auto`` degrades to
+      no floor and says so (``unavailable``), and with no writable root there
+      is no boundary to enforce (``no-workspace``, logged).
+
+    Ordering: the write floor goes OUTSIDE the AppArmor transition, so aa-exec
+    runs inside the mount namespace, and the write probe is run against that
+    composed stack — a stack that does not compose fails closed.
+    """
+    read = normalise_mode(read_mode)
+    write = normalise_write_mode(write_mode)
+    out = list(argv)
+
+    aa_prefix: list[str] = []
+    if read == MODE_REQUIRED:
+        ok, detail = preflight(profile)
+        if not ok:
+            return FloorResult((), "not-reached", refusal_message(profile, detail))
+        # Kept as a PREFIX rather than applied once, so the write floor below
+        # can probe the composed stack as the stack it will be.
+        aa_prefix = wrap_argv([], profile)
+        out = [*aa_prefix, *out]
+
+    write_floor = WRITE_MODE_OFF
+    if write != WRITE_MODE_OFF:
+        if not writable:
+            # Loud, not silent: a floor asked for with no root to bound.
+            write_floor = STATE_NO_WORKSPACE
+            logger.warning(
+                "the shell write floor is %r but no workspace root is "
+                "configured — there is no boundary to enforce and the "
+                "command may write anywhere.", write,
+            )
+        else:
+            ok, detail = write_preflight(inner_prefix=aa_prefix)
+            if ok:
+                out = write_wrap_argv(out, writable=writable, cwd=cwd)
+                write_floor = STATE_ACTIVE
+            elif write == WRITE_MODE_REQUIRED:
+                return FloorResult((), "refused", write_refusal_message(detail))
+            else:
+                # "auto" degrades to the unfloored shell. write_preflight()
+                # has logged the reason at ERROR, once; the per-call state
+                # records it as well, so a floor that is not there is legible
+                # from the call that ran without it.
+                write_floor = "unavailable"
+    return FloorResult(tuple(out), write_floor)

@@ -622,7 +622,11 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
         from prometheus.context.dynamic_tools import DynamicToolLoader
 
         deferred = (config.get("tools", {}) or {}).get("deferred_loading")
-        registry = create_tool_registry({})
+        # The REAL security section, not {}: create_tool_registry also wires
+        # the process-wide shell floor (security/shell_floor.py), and a
+        # registry built from an empty section would wire the shipped defaults
+        # over the operator's in any process that later runs a model shell.
+        registry = create_tool_registry(config.get("security") or {})
         loader = DynamicToolLoader(registry, deferred)
         advertised = sorted(
             s.get("name") for s in loader.schemas_for_run(True)

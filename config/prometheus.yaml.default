@@ -401,6 +401,12 @@ security:
   # "required" would refuse every bash call. Turning it on is a deliberate act.
   # Profile ships at deploy/apparmor/prometheus-bash; load it with:
   #   sudo apparmor_parser -r -W /etc/apparmor.d/prometheus-bash
+  #
+  # SCOPE: "bash" in this key and the two below means EVERY shell a model
+  # writes, not only the bash tool. task_create's shell and poll tasks, cron
+  # jobs and a coding run's commands run behind the same floors and the same
+  # environment scrub (security/shell_floor.py). Command hooks run your own
+  # command from this file and are not floored.
   bash_confinement: "off"
   # THE ABOVE IS A READ FLOOR. It says nothing about WRITES, and the
   # outside-workspace approval does not cover bash either: SecurityGate

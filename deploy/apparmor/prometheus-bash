@@ -1,7 +1,9 @@
 # /etc/apparmor.d/prometheus-bash
 #
-# Confines the bash subprocess Prometheus spawns at
-# src/prometheus/tools/builtin/bash.py:107 (asyncio.create_subprocess_exec).
+# Confines every shell Prometheus starts for a command a MODEL wrote: the bash
+# tool, task_create's shell and poll tasks, cron jobs, and a coding run's
+# commands. All of them exec through `aa-exec -p prometheus-bash`, built in one
+# place: src/prometheus/permissions/confinement.py (apply_floors).
 #
 # ---------------------------------------------------------------------------
 # WHAT THIS IS, AND WHAT IT IS NOT

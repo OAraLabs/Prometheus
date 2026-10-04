@@ -83,6 +83,19 @@ def _isolated_state_dirs(tmp_path, monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _unwired_shell_floor():
+    """``create_tool_registry`` wires a PROCESS-WIDE shell floor
+    (security/shell_floor.py). One test's security section must not floor the
+    next test's background tasks and cron jobs, so each test starts unwired —
+    which means "read the floor from the (isolated) config", not "no floor"."""
+    from prometheus.security.shell_floor import set_shell_floor
+
+    set_shell_floor(None)
+    yield
+    set_shell_floor(None)
+
+
 def _validated_allowance(marker: pytest.Mark) -> set[str]:
     allow = marker.kwargs.get("allow_doubles", [])
     if isinstance(allow, str) or not isinstance(allow, (list, tuple, set)):
