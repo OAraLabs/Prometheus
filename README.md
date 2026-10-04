@@ -3,21 +3,36 @@
 **A fire you own doesn't go out.**\
 Not a local model. A local agent.
 
-Prometheus is an AI agent daemon: always on, on hardware you own. It remembers, keeps its own schedule, reaches you on Telegram, Slack, Discord and Beacon, and makes open models reliable at using tools.
+Pre-1.0 · known limits: [oara.ai/docs/limits/](https://oara.ai/docs/limits/)
+
+Prometheus is an AI agent daemon: always on, on hardware you own. It remembers, keeps its own schedule, reaches you on Telegram and Beacon, and makes open models reliable at using tools.
 
 ![Beacon's Mission home — the Armilla telemetry sphere beside Mission Control: agent state, scheduled jobs, local backends, and tool-call telemetry](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/panel-mission-home.png)
 
+*The counters in this screenshot are one rig's, not a benchmark. SENTINEL shows as active because that rig turned it on; it ships off.*
+
 Prometheus is two pieces that pair with a 6-digit code:
 
-- **The daemon** — an always-on Python agent runtime: agent loop + Model Adapter Layer, a registry of every local inference box you own, three chat gateways (Telegram / Slack / Discord), lossless memory, sandboxed coding runs, cron, a security gate, and a bearer-token REST + WebSocket control plane — plus an OpenAI-compatible `/v1` surface so anything that already speaks OpenAI can talk to it.
-- **[Beacon](https://oara.ai/beacon)** — its native desktop cockpit (macOS / Linux): chat with live tool timelines, `@`-references and hands-free voice, Mission Control, a Loop Manager for coding runs, per-turn file checkpoints you can restore, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management. An [iOS client](https://oara.ai/beacon-ios) rides the same control plane (per-device tokens, push, pagination).
+- **The daemon** — an always-on Python agent runtime: agent loop + Model Adapter Layer, a registry of every local inference box you own, chat gateways (Telegram, plus Slack and Discord gateways on the same command layer, not yet run in production; all off until a token is added), lossless memory, opt-in coding runs in a sandboxed clone, cron, a security gate, and a bearer-token REST + WebSocket control plane — plus an OpenAI-compatible `/v1` surface so anything that already speaks OpenAI can talk to it.
+- **[Beacon](https://oara.ai/beacon)** — free to use, closed source, in beta. Its native desktop cockpit (macOS / Linux): chat with live tool timelines and `@`-references, Mission Control, a Loop Manager for coding runs, per-turn file checkpoints you can restore, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management. [Beacon for iOS](https://oara.ai/beacon-ios) rides the same control plane (per-device tokens, push, pagination); it is a private beta — request access at [support@oara.ai](mailto:support@oara.ai?subject=Beacon%20iOS) with the subject "Beacon iOS".
+
+```bash
+pip install 'oara-prometheus[full]'   # Python 3.11+
+# or, on Apple Silicon Macs only:
+brew install oaralabs/tap/oara
+
+oara setup          # auto-detects llama.cpp / Ollama / LM Studio / vLLM
+oara                # chat in the CLI
+oara daemon         # always-on: web API + gateways + cron + background layer
+```
+
+> **Use the full names.** `pip install oara` installs a 0.0.0 placeholder that only reserves the name, and a bare `brew install oara` fails — the tap prefix is required.
+
+To read, change, or test the code, install from a checkout instead:
 
 ```bash
 git clone https://github.com/OAraLabs/Prometheus.git && cd Prometheus
 pip install -e '.[full]'
-oara setup          # auto-detects llama.cpp / Ollama / LM Studio / vLLM
-oara                # chat in the CLI
-oara daemon         # always-on: web API + gateways + cron + background layer
 ```
 
 (`prometheus …` still works as an alias for now; only the command name changed — the package and its paths did not.)
@@ -32,20 +47,20 @@ That is the environment the CI test job runs in, so a local run exercises the sa
 
 `oara setup` probes for a running local inference server, generates your agent's identity, writes a working config with the web API enabled, and smoke-tests the loop. In a hurry? `oara setup --fast` (or `--noninteractive`) is the three-question version. On first daemon start a web API token is minted and printed once — `oara token show` re-prints it. If anything misbehaves: `oara doctor`.
 
-> `pip install 'oara-prometheus[full]'` is the packaged path, live on [PyPI](https://pypi.org/project/oara-prometheus/) since 0.9.0. The checkout above is the path for reading, changing, or testing the code — every way to install, Homebrew included, is under [Install](#install).
+> [`oara-prometheus`](https://pypi.org/project/oara-prometheus/) has been on PyPI since 0.9.0. Every way to install, `uv tool` / `pipx` from Git included, is under [Install](#install).
 
 **What it gives you:**
 
-- **Reliable tool calls on open models** — a Model Adapter Layer validates every call, auto-repairs common errors (fuzzy names, JSON inside markdown fences, type coercion), and enforces output schemas at the token level via GBNF for llama.cpp.
-- **Always-on gateways** — Telegram, Slack, and Discord at parity (one shared command layer), with mid-turn `/steer` and `/queue` for durability while the agent is mid-task.
+- **Reliable tool calls on open models** — a Model Adapter Layer validates every call and auto-repairs common errors (fuzzy names, JSON inside markdown fences, type coercion). On llama.cpp, when the server isn't parsing a model's tool calls natively, Prometheus supplies a GBNF grammar, so tool calls are constrained while the model is still generating.
+- **Always-on gateways** — Telegram, plus Slack and Discord gateways on the same command layer (not yet run in production). All off until a token is added. Mid-turn `/steer` and `/queue` let you redirect or line up work while the agent is mid-task.
 - **Visible memory that rides every prompt** — `MEMORY.md` and `USER.md` you can read, structured facts mined from conversations every 30 minutes, and passive recall that FTS-matches each message against the memory store and injects what's relevant.
-- **Lossless context** — DAG-based compression with full-text search so long sessions don't drop facts; originals are always recoverable.
-- **Sandboxed coding runs** — point it at a repo and an acceptance command; it iterates to green in a clone and hands you a reviewable branch. Never merges, never pushes.
+- **Lossless context** — older turns are summarized in the live window; the originals stay in SQLite, full-text searchable, and the stored summaries expand back to them, until you purge the session.
+- **Coding Mode (opt-in)** — point it at a repo and an acceptance command; it iterates to green in a sandboxed clone and hands you a reviewable branch. Never merges, never pushes. Off until you set `coding.enabled: true`.
 - **A working directory per conversation, with undo** — `/workspace <path>` points a chat at a repo; the security gate follows it, project instructions (`PROMETHEUS.md`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`…) load from it, and every turn takes a file checkpoint first so a bad edit is one REST call (or one Beacon click) from undone.
 - **Sees what you show it** — images reach a vision-capable model as images, not paraphrases; stored by reference so the bytes never bloat the transcript. `@file`, `@diff` and `@url` in the composer resolve on the daemon, scoped to the conversation's workspace.
 - **Every GPU box you own, one table** — name your inference boxes under `backends:` and each becomes a slash command and a row in the model picker: `/4090`, `/mini`, `/mini qwen2.5:7b-instruct`. The daemon probes each box (served model, reported context window, detected vision, latency), refuses to switch a chat to a box that is down and says why, budgets the conversation at *that* box's window, and remembers the choice across restarts. `/backends` shows the table; `/local` brings a chat home.
-- **Telemetry that stays home** — every tool call, repair, and token count logged to SQLite on your own disk and sent nowhere. It's the raw material for tuning the adapter and fine-tuning your own model: the data big labs keep for themselves, kept by you instead.
-- **A desktop cockpit** — Beacon pairs to the daemon over your LAN or tailnet and gives every subsystem a native surface; the model picker groups your own boxes above the cloud presets with each box's health, and on OAra Voice it also talks back — phrase-by-phrase streaming TTS and a hands-free mode with barge-in.
+- **Telemetry that stays home** — every tool call, repair, and token count logged to SQLite on your own disk and sent nowhere. It's the raw material for tuning the adapter, and the capture/export half of a fine-tuning loop (the training half is not built): the data big labs keep for themselves, kept by you instead.
+- **A desktop cockpit** — Beacon (free to use, closed source, in beta) pairs to the daemon over your LAN or tailnet and gives every subsystem a native surface; the model picker groups your own boxes above the cloud presets with each box's health.
 
 > **Status:** Active development. Expect rough edges. Fixes land weekly. Feedback welcome.
 
@@ -59,7 +74,7 @@ That is the environment the CI test job runs in, so a local run exercises the sa
 The interesting work is original:
 
 - **Model Adapter Layer** — the gap between Claude-quality tool-calling and what open models actually produce. Validates, auto-repairs, enforces output schemas, retries with specific error context.
-- **SENTINEL** — a proactive layer that watches for idle time and acts, instead of only reacting to prompts. Nudges, dreams, synthesizes.
+- **SENTINEL** — a proactive layer that watches for idle time and acts, instead of only reacting to prompts. Nudges, dreams, synthesizes. Opt-in: it ships off.
 - **Wiki Knowledge System** — turns every conversation into a compounding knowledge base that cross-references itself over time.
 - **The coding engine's iterate-to-green policy** — "done" is a verdict, not a claim: sandboxed rounds until the acceptance command exits 0, with failure-fingerprint step-back and zero-progress aborts.
 - **The fine-tuning gym** — frozen task-sets, dual scoring (raw emission vs post-repair execution), and a refusal to declare winners it can't statistically back.
@@ -81,13 +96,11 @@ A passing test proves the code runs. It does not prove anything calls it. Every 
 
 The last one is there because its absence shipped: a control suite whose every case asked "does disabling this let something bad through?" and none asked "does this let the permitted things through?" went green while the document surface silently degraded to PDF-only — 19 of 20 advertised types refused, including two the allowlist explicitly permitted. Over-refusal looks exactly like the control working.
 
-## The Problem Nobody Else Solves
+## Why a Model Adapter Layer
 
-Open models are getting good at conversation. They're still terrible at *doing things*. Ask Qwen to call a tool and it hallucinates the tool name. Ask Gemma to return JSON and it wraps it in markdown. Ask Llama to chain three tool calls and it drops a required parameter on the second one.
+Open models are getting good at conversation. They're still uneven at *doing things*. Ask one to call a tool and it may invent the tool name. Ask for JSON and it may wrap it in markdown. Ask it to chain three tool calls and it may drop a required parameter on the second one.
 
-Agent harnesses like LangChain, CrewAI and AutoGen assume the model will get tool calls right. That works fine when you're paying OpenAI. It falls apart the moment you point it at a local model.
-
-Prometheus fixes this with a Model Adapter Layer that sits between your agent loop and whatever LLM you're running. Every tool call gets validated before execution, common errors get auto-repaired (fuzzy name matching, JSON extraction from markdown fences, type coercion), and when something still fails, the model gets specific error feedback with the actual schema — not a generic "try again." For llama.cpp, it goes further: tool calls are constrained at the decode layer rather than validated after the fact — Prometheus supplies GBNF grammar where the server doesn't enforce its own.
+Prometheus handles this with a Model Adapter Layer that sits between your agent loop and whatever LLM you're running. Every tool call gets validated before execution, common errors get auto-repaired (fuzzy name matching, JSON extraction from markdown fences, type coercion), and when something still fails, the model gets specific error feedback with the actual schema — not a generic "try again." On llama.cpp, when the server isn't parsing a model's tool calls natively, Prometheus supplies a GBNF grammar, so tool calls are constrained while the model is still generating rather than validated after the fact.
 
 The design philosophy behind it: **The model is the agent. The harness is the vehicle.**
 
@@ -97,13 +110,13 @@ The result: open models that reliably call tools, chain multi-step tasks, and ru
 
 ## What Makes This Different
 
-Prometheus isn't a wrapper around `ollama.chat()`. It's a complete agent operating system with novel systems that agent harnesses don't have:
+Prometheus isn't a wrapper around `ollama.chat()`. These are the systems built around the loop:
 
-**The Model Adapter Layer is what makes local models work in a tool loop.** Four cascading extraction strategies handle whatever mess the model produces. A retry engine feeds specific schema errors back to the model. Grammar-constrained decoding at the llama.cpp level makes invalid JSON structurally impossible, with Prometheus supplying the grammar on paths the server doesn't cover. Telemetry tracks success rates per model per tool so you know exactly where your model struggles. It is tier-selected: `strictness: NONE` switches it off for cloud APIs that already emit clean tool calls, so the repair path is exercised exactly where it is needed.
+**The Model Adapter Layer is what makes local models work in a tool loop.** Four cascading extraction strategies handle whatever mess the model produces. A retry engine feeds specific schema errors back to the model. On llama.cpp, when the server isn't parsing a model's tool calls natively, Prometheus supplies a GBNF grammar, so tool calls are constrained while the model is still generating. Telemetry tracks success rates per model per tool so you know exactly where your model struggles. It is tier-selected: `strictness: NONE` switches it off for cloud APIs that already emit clean tool calls, so the repair path is exercised exactly where it is needed.
 
-**Lossless Context Management means your agent never forgets.** Every message is persisted to SQLite. When context fills up, a two-tier compression system kicks in: Tier 1 strips `tool_result` content from old messages (free — the output was already acted on). Tier 2 uses LLM-powered batch summarization when pruning alone isn't enough. But the originals are always recoverable — old messages get summarized into a DAG structure, and the agent can expand any summary back to full detail on demand. Full-text search across your entire conversation history. And memory isn't just storage: extracted facts ride back into each turn via passive recall, matched against what you just said.
+**Lossless Context Management keeps the originals.** Every message is persisted to SQLite. Older turns are summarized in the live window; the originals stay in SQLite, and the stored summaries (a DAG the agent can walk with `lcm_expand`) expand back to them on demand, until you purge the session. Full-text search covers your entire conversation history. And memory isn't just storage: extracted facts ride back into each turn via passive recall, matched against what you just said.
 
-**SENTINEL transforms the agent from reactive to proactive.** Most agents sit idle until you talk to them. Prometheus has a background intelligence layer that watches tool performance patterns, consolidates memory, lints its own knowledge base, and discovers cross-entity insights — all while you're away. Three of four phases use zero LLM calls. The fourth is budget-capped at 2,000 tokens. It nudges you via Telegram when it finds something interesting but never acts without permission.
+**SENTINEL makes the agent proactive (opt-in; it ships off).** Most agents sit idle until you talk to them. Prometheus has a background intelligence layer that watches tool performance patterns, consolidates memory, lints its own knowledge base, and discovers cross-entity insights — all while you're away. Three of four phases use zero LLM calls. The fourth is budget-capped at 2,000 tokens. It nudges you via Telegram when it finds something interesting but never acts without permission.
 
 **A compounding knowledge base inspired by Karpathy's LLM Wiki concept.** Every 30 minutes, a Memory Extractor pulls structured facts from your conversations, and the wiki recompiles the affected entity pages automatically — extraction and compilation are one loop, not a manual step. The wiki then maintains itself: SENTINEL's zero-LLM linter patrols for orphans, broken links, and stale pages; dedup gates keep repeated insights from piling up; and passive recall feeds the accumulated facts back into every turn. Point Obsidian at the markdown files and the graph view lights up.
 
@@ -140,7 +153,7 @@ Three commitments run through everything below:
 
 **Survives you, restarts, and itself.** Sessions, background tasks, and message ids are durable contracts that outlive daemon restarts. The memory store heals itself — search-index rebuilds, snapshot backups before every migration, writes that either commit or raise. Signals persist before they broadcast, so a crash can never have told you something the disk doesn't know.
 
-**Secure by construction, not by policy.** Tool sandboxes strip API keys from the environment — the agent cannot read its own credentials. The audit log redacts secrets before writing, outbound fetches resolve-and-block private address space, cron passes the same security gate at creation and at execution and fails closed, self-modification is gated behind a dangerous-code scanner, and agent deliverables are served by content id rather than by path.
+**Secure by construction, not by policy.** Keys are stripped from the agent's shell environment, and the key file is on a hard deny list for file tools. The audit log redacts secrets before writing, outbound fetches resolve-and-block private address space, cron passes the same security gate at creation and at execution and fails closed, self-modification is gated behind a dangerous-code scanner, and agent deliverables are served by content id rather than by path.
 
 ### Model Independence
 
@@ -153,7 +166,7 @@ Three commitments run through everything below:
 - Deferred tool loading (tri-state, default `auto`): cloud models get the full tool catalog; local models get a compact deferred catalog that hands back roughly 8K tokens of context on a 32K window
 - Cache-shaped context: the tool catalog is frozen at run start, any history rewrite is flagged, and mid-run compaction stays off on cloud providers — your prompt prefix is treated as a cache asset
 - Fallback chains that **degrade loudly**: when a provider fails terminally the turn moves to the configured fallback and says so — a `provider_degraded` frame on the wire, a line in history, and a named reason when a fallback *declines* (the context doesn't fit, the key is missing) instead of silence
-- The loop stops itself: a hard iteration ceiling per turn (500 by default for both local and cloud, the live value reported on `/api/status`), plus a self-halt on unproductive repetition — the same call six times adjacent, or three consecutive divergent rounds — so a flailing model ends the turn instead of burning the budget
+- The loop stops itself: 3 identical calls in a 10-call window that return nothing new, or 6 adjacent calls to the same read-only tool that return nothing new, halts the turn; a 500-call ceiling is the backstop (the same for local and cloud, the live value reported on `/api/status`) — so a flailing model ends the turn instead of burning the budget
 - Thinking blocks persist and round-trip across providers with one wire vocabulary, so a reasoning model's traces survive a restart and a client switch
 - A **backend registry** owns "which local boxes exist and what each is serving" — the model picker, the per-chat override, the fallback chain, Anatomy and `/api/status` all read it, so no two surfaces can disagree about a box. It reports; it never restarts a server (llama-server is one model per process, and swapping it is that box's business)
 
@@ -162,6 +175,8 @@ Three commitments run through everything below:
 `bash`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`, `web_search`, `web_fetch`, `youtube_transcript`, `download_file`, `browser` (Playwright), `image_generate`, `video_generate`, `tts`, `message`, `dashboard`, `notebook_edit`, `cron_create/delete/list`, `task_create/get/list/update/stop/output`, `todo_write`, `skill`, `agent` (subagent spawning), `ask_user`, `sessions_list/send/spawn`, `lcm_grep/expand/describe/expand_query`, `wiki_compile/query/lint`, `sentinel_status`, `audit_query`, `anatomy`, `lsp` (7 actions; when enabled), plus dynamic MCP tools (`mcp__{server}__{tool}`).
 
 ### Coding Mode — iterate to green
+
+**Opt-in.** `coding.enabled` ships `false`: until you set it to `true`, `oara code` exits non-zero and `POST /api/code` returns 403. Coding runs execute model-authored commands against a clone of your repo, so you turn them on deliberately.
 
 Point the agent at a repo, a task, and an acceptance command. It clones the repo into a sandbox (cwd jail, env-scrubbed so your provider keys never reach the subprocess), works in rounds until the acceptance command exits 0, and leaves a reviewable branch. **"Done" is a verdict, not a claim** — the session re-runs your acceptance command itself and rejects no-evidence turns. Mid-run supervision (pause / inject / resume) rides a control channel the run polls between episodes. Rounds stream live to Beacon.
 
@@ -183,7 +198,7 @@ Show the agent a workflow instead of describing it. Two capture paths, two trust
 - **Live DOM recording** — record a browser workflow; a deterministic pipeline (no model calls) turns the event trace into a skill, runs it through a five-check quality gate, and auto-persists it to `skills/auto/`
 - **Video / YouTube ingestion** — screen recordings and videos are transcribed and vision-digested into skill drafts that **never** auto-persist: they wait in Beacon for human accept or reject
 
-Ground-truth DOM traces earn autonomy; lossy vision output stays human-reviewed. Full walkthrough: [Record a Skill guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/record-a-skill.md).
+Ground-truth DOM traces earn autonomy; lossy vision output stays human-reviewed. What ships in this repo is the daemon side — the DOM-trace pipeline, its upload endpoint, and video ingestion (off by default). The browser recorder extension that captures a live DOM trace is not distributed yet. Full walkthrough: [Record a Skill guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/record-a-skill.md).
 
 Why this only works here: a screen recording of you doing your job is among the most revealing data you own, and every frame of it stays on your disk. A hosted product can't offer the same feature, because shipping your screen to someone else's server *is* the feature — and the problem.
 
@@ -209,7 +224,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 ### Security
 
 - 4-level trust model (BLOCKED → APPROVE → AUTO → AUTONOMOUS), origin-aware: background work (SENTINEL, cron, gym) faces stricter gates than what you ask for directly
-- 8 always-blocked command patterns plus configurable deny lists and bash intent analysis, plus a workspace boundary on `write_file` / `edit_file` — **a speed bump, not confinement**: `bash` is gated on the command string, not on the paths a command writes to, so a shell redirect goes anywhere. `denied_paths` is the hard stop, a turn-end check detects writes that landed outside the permitted area — after the fact — and for a conversation with a workspace every turn takes a file checkpoint first, so its writes can be undone over REST or from Beacon. With bubblewrap available, the **bash write floor** makes the boundary real in the kernel: the filesystem is mounted read-only except the workspace, and the gate follows the conversation's `/workspace`. [What each one actually catches](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/features.md#security--permissions)
+- A small hardcoded floor no mode can waive — a recursive `rm` aimed at `/`, `~`, `~/.prometheus` or a workspace root is refused, and file tools can never touch `~/.ssh`, `~/.gnupg` or a `~/.config/*/…env` file — plus configurable deny lists (`security.denied_commands`, `security.denied_paths`), bash intent analysis, and a workspace boundary on `write_file` / `edit_file` — **a speed bump, not confinement**: `bash` is gated on the command string, not on the paths a command writes to, so a shell redirect goes anywhere. `denied_paths` is the hard stop, a turn-end check detects writes that landed outside the permitted area — after the fact — and for a conversation with a workspace every turn takes a file checkpoint first, so its writes can be undone over REST or from Beacon. With bubblewrap available, the **bash write floor** makes the boundary real in the kernel: the filesystem is mounted read-only except the workspace, and the gate follows the conversation's `/workspace`. [What each one actually catches](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/features.md#security--permissions)
 - Untrusted-input fencing: every message carries a provenance tag, and content from cron jobs, task output, and files is wrapped as data — not instructions — before it reaches the model
 - Secrets structurally absent: tool sandboxes strip key/token/secret variables from the environment (the agent can't `env` its own keys), key updates reject control characters, and key reads return booleans — never values
 - **Secrets do not survive into logs or kept data**: every log handler redacts token shapes (Telegram `bot<token>`, Bearer headers, `?token=` query values, private-key blocks, and the GitHub/`sk-`/AWS/GitLab/Hugging Face/Stripe/JWT/Slack/Discord and other vendor key families) before a line is written — including the web server's own request log — and `daemon.log`/`cli.log` rotate. The same redactor runs before anything is kept (conversation history and its summaries, memory facts, telemetry, training pairs, trajectory exports) and on every prompt the learning loop sends to a model; the live conversation is left alone, so a token you hand the agent still works in that session. `oara scrub` cleans what was written before it existed (a dry run unless `--apply`). Not config-gated, on purpose
@@ -227,8 +242,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 ### Always-On
 
 - Telegram gateway with photo (real vision when the served model can see; captioning when it can't), voice (Whisper STT), document (20+ formats), and sticker handling — and control-plane commands (`/steer`, `/approve`, `/status`) answer **mid-turn**, because the data plane no longer holds the fetcher
-- Slack gateway (Socket Mode) at Telegram parity: 45 slash commands, thread-based long replies, channel whitelists
-- Discord gateway at the same parity: `/prometheus` app commands, DM + guild/channel whitelists
+- Slack and Discord gateways on the same command layer as Telegram (not yet run in production): Slack over Socket Mode with thread-based long replies and channel whitelists; Discord with `/prometheus` app commands and DM + guild/channel whitelists. All three gateways are off until a token is added
 - Cron scheduler (natural-language scheduling supported), heartbeat monitoring, systemd service
 - Durable background tasks (`tasks.db` survives restarts) with an honesty check: "I'll let you know when it's done" must be backed by a real registered task — and tasks orphaned by a restart are marked failed instead of pretending to still run
 - 40+ slash commands on Telegram — including mid-turn `/steer`, `/queue`, and per-chat provider overrides
@@ -268,7 +282,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 
 ### Observability
 
-**Telemetry that stays home.** Local-first people rightly refuse telemetry — because it usually means someone else's server. Prometheus inverts it: every tool call, repair, token count, and failure is recorded to SQLite on your own disk and sent nowhere — the telemetry module contains no network code at all, and the optional tracing exporter is off by default and points at localhost. It exists so *you* hold the data the big labs keep for themselves: the per-model success rates that tune the adapter, the golden traces that become your fine-tuning corpus, and the receipts for what your model actually did. And it's neither slow nor bloated — WAL-mode appends cost sub-milliseconds next to tool calls that take seconds, and months of heavy daily use produce a database around 11 MB. Don't want it anyway? `infrastructure.telemetry_enabled: false` is one line, and `prometheus --reset-telemetry` wipes the slate whenever you like.
+**Telemetry that stays home.** Local-first people rightly refuse telemetry — because it usually means someone else's server. Prometheus inverts it: every tool call, repair, token count, and failure is recorded to SQLite on your own disk and sent nowhere — the telemetry module contains no network code at all, and the optional tracing exporter is off by default and points at localhost. It exists so *you* hold the data the big labs keep for themselves: the per-model success rates that tune the adapter, the golden traces a fine-tuning loop would learn from (capture and export exist; training is not built), and the receipts for what your model actually did. And it's neither slow nor bloated — WAL-mode appends cost sub-milliseconds next to tool calls that take seconds, and months of heavy daily use produce a database around 11 MB. Don't want it anyway? `infrastructure.telemetry_enabled: false` turns it off (from v0.9.7), and `prometheus --reset-telemetry` wipes the slate whenever you like.
 
 - Tool-call telemetry (SQLite) — success rates per model per tool, surfaced in Beacon's Tool Feed and `/health` — with honest denominators: a correctly executed command whose task fails (pytest exit 1) is not counted against the model
 - Every claimed file mutation is verified against disk — created / modified / deleted / **no change** — and "CLAIMED but NO CHANGE ON DISK" goes back to the model on its next turn
@@ -283,7 +297,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 
 ### On by default vs opt-in
 
-Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, and the web API are on out of the box. The bigger autonomous subsystems — SENTINEL dreaming, the router's autonomous half (task classification and fallback chains — its per-chat `/claude`-style overrides ship **on**), LSP, GEPA, escalation-to-teacher, SYMBIOTE (GitHub research → license gate → AST scan → safe graft → blue-green hot swap with auto-rollback; experimental), the Paperclip gateway, and Record-a-Skill's video ingestion — ship **off by default** and are one config flag away when you want them. The [feature reference](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/features.md) marks every subsystem's default.
+Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, and the web API are on out of the box. Coding Mode and the chat gateways ship off (`oara setup` turns a gateway on when you add its token). The bigger autonomous subsystems — SENTINEL dreaming, the router's autonomous half (task classification and fallback chains — its per-chat `/claude`-style overrides ship **on**), LSP, GEPA, escalation-to-teacher, SYMBIOTE (GitHub research → license gate → AST scan → safe graft → blue-green hot swap with auto-rollback; experimental), the Paperclip gateway, and Record-a-Skill's video ingestion — ship **off by default** and are one config flag away when you want them. The [feature reference](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/features.md) marks every subsystem's default.
 
 ## Quick Start
 
@@ -385,7 +399,7 @@ Exit code is nonzero when anything is broken, so it also works in scripts.
 
 ### Get Beacon
 
-Beacon is free to use but not open source, and it is in beta: builds — macOS dmg, Linux AppImage/deb — are published when Beacon leaves beta, and until then early users get draft builds ([oara.ai/beacon](https://oara.ai/beacon)). Beacon iOS isn't on the App Store yet — TestFlight access is by request ([oara.ai/beacon-ios](https://oara.ai/beacon-ios)). First launch walks you through pairing — the full flow with screenshots is in the [install guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/install.md), and the app tour is in the [Beacon guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/beacon.md).
+Beacon — free to use, closed source, in beta. Builds — macOS dmg, Linux AppImage/deb — are published when Beacon leaves beta, and until then early users get draft builds ([oara.ai/beacon](https://oara.ai/beacon)). Beacon for iOS: private beta — request access at [support@oara.ai](mailto:support@oara.ai?subject=Beacon%20iOS) with the subject "Beacon iOS" ([oara.ai/beacon-ios](https://oara.ai/beacon-ios)). First launch walks you through pairing — the full flow with screenshots is in the [install guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/install.md), and the app tour is in the [Beacon guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/beacon.md).
 
 ![Beacon's setup wizard pairing with a daemon](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/install-2-pairing.png)
 
@@ -542,7 +556,7 @@ backend_probe:
 
 ## Gateways
 
-Three messaging gateways, all first-class: every onboarding surface (`oara setup`, the fast path, the remote setup API, and Beacon's wizard) can enable any subset, and `oara doctor` reports each one's state.
+Telegram, plus Slack and Discord gateways on the same command layer (not yet run in production). All off until a token is added: every onboarding surface (`oara setup`, the fast path, the remote setup API, and Beacon's wizard) can enable any subset, and `oara doctor` reports each one's state.
 
 | Gateway | What you need | Env vars | Extra |
 |---------|---------------|----------|-------|
@@ -574,20 +588,7 @@ Cloud slash-commands are configurable per command (provider, key env, model) in 
 
 ## Benchmarks
 
-```bash
-python -m prometheus.benchmarks.runner --model gemma4-26b --tier 1
-```
-
-Results from a 2026-06 run — Gemma 4 26B on an RTX 4090:
-
-```
-Tasks: 19  |  OK: 19  |  Errors: 0
-Avg latency: 1.4s  |  Total: 27s
-
-Tool Usage      : 97.4%
-Task Completion : 100%
-No Hallucination: 84.7%
-```
+Measured results — per-model task success with 95% intervals, and what each adapter tier adds or costs on the same model — are in [docs/MODEL-LADDER.md](https://github.com/OAraLabs/Prometheus/blob/main/docs/MODEL-LADDER.md), with every rung pinned by revision and SHA-256 and the per-rung reports committed under [`gym/results/ladder/`](https://github.com/OAraLabs/Prometheus/tree/main/gym/results/ladder).
 
 All evaluation runs locally — the LLM judge uses constrained decoding on your own hardware. The shipped config gives the judge its own endpoint and pins the grading model (`judge_base_url` + `evals.judge_model`); leave `judge_base_url` blank and the judge falls back to the endpoint under test, i.e. the model grades itself. Each score carries its judge's provenance, so two runs can be compared — or refused comparison.
 
@@ -623,7 +624,7 @@ prometheus/
 │   └── config/          # Settings, paths, env overrides, profiles
 ├── templates/           # Identity templates (no personal data)
 ├── skills/              # 103-file skill library (.md, opt-in)
-├── tests/               # 6,700+ tests across 403 files
+├── tests/               # pytest suite (see Tests below)
 ├── docs/                # Guides, architecture, sprint reports
 │   └── guide/           # Install · features · Beacon · coding · skills · memory · providers · API
 ├── gym/                 # Frozen task-sets, harvest corpus
@@ -631,15 +632,9 @@ prometheus/
 └── PROMETHEUS.md        # Agent instructions (CLAUDE.md, AGENTS.md, GEMINI.md… also read)
 ```
 
-## Stats
+## Tests
 
-- ~107,000 lines of production Python
-- 6,700+ tests across 403 test files
-- 50+ builtin tools registered by default (54 on the reference install, two of them MCP) + config-gated LSP and vision/STT tools
-- 103-file skill library + self-authored skills
-- 10+ model providers (local and cloud)
-- 127 REST routes (120 on the main API, 2 on the OpenAI-compatible `/v1` surface, 5 on the setup-mode pairing server) + an authenticated WebSocket event bridge
-- A native desktop cockpit with 18 views, and an iOS client on the same control plane
+9,786 tests passed in CI on the v0.9.5 release commit ([run 36461450849](https://github.com/OAraLabs/Prometheus/actions/runs/36461450849), Linux, Python 3.11–3.13).
 
 ## Roadmap
 
@@ -649,8 +644,8 @@ prometheus/
 - [x] Telegram gateway — commands, media, mid-turn `/steer` and `/queue`
 - [ ] Slack + Discord gateways — *one shared command layer, CI-enforced at parity; neither has ever run in production*
 - [x] Wiki knowledge system (Karpathy-inspired, Obsidian-compatible)
-- [x] SENTINEL proactive layer (observer + AutoDream)
-- [x] Coding Mode v2 — sandboxed iterate-to-green (Docker) + live streaming
+- [x] SENTINEL proactive layer (observer + AutoDream) — *opt-in, ships off*
+- [x] Coding Mode v2 — iterate-to-green in a sandboxed clone + live streaming — *opt-in (`coding.enabled`)*
 - [ ] Coding-mode mid-run supervision (pause / inject / resume) — *6 control events ever, all failed, 2026-06; nothing since*
 - [x] Beacon desktop app — pairing wizard, Mission Control, Loop Manager, Documents, Kanban
 - [x] WAN image generation
@@ -660,21 +655,19 @@ prometheus/
 - [x] Evaluation framework with local LLM judge + fine-tuning gym (dual scoring)
 - [x] LSP integration, MCP integration, migration tool (Hermes/OpenClaw)
 - [x] Durable sessions, turn interrupt, liveness pulse, artifact outbox
-- [x] Record a Skill — live DOM demonstration capture + video/YouTube ingestion
+- [x] Record a Skill — daemon side: the DOM-trace pipeline + video/YouTube ingestion — *the browser recorder extension is not distributed yet*
 - [x] Vision — images reach the model as images, stored by reference, served over `/api/media`
 - [x] Mobile control plane — per-device tokens, APNs push, pagination, session filters (iOS client)
 - [x] Foundation — node/instance identity, vault marker, gated MCP, the pack contract
 - [x] Loud provider fallback + self-halting loop + honest context accounting
 - [x] Per-conversation workspace, per-turn file checkpoints, `@`-references, project-instruction discovery
 - [x] OpenAI-compatible `/v1` surface; `oara` console script
-- [x] Streaming TTS + hands-free voice (OAra Voice bridge + Beacon)
 - [x] Multi-backend — a registry of every local inference box, `/4090`-style per-chat switching with probe-before-switch, per-backend context windows, Beacon desktop + iOS pickers
 - [ ] Beacon: attach to running coding runs, pause/inject/resume from the UI — *the daemon endpoints exist; the UI does not call them*
 - [x] Secrets redacted at every log handler and at capture time; logs rotate
 - [ ] Fine-tuning flywheel (LoRA on collected traces) — *capture/export pipeline shipped; training loop pending*
 - [x] PyPI release — [`oara-prometheus`](https://pypi.org/project/oara-prometheus/), from 0.9.0
 - [ ] Published Beacon builds — *every tag drafts a dmg, an AppImage and a deb; they are published when Beacon leaves beta*
-- [ ] Wake word for hands-free (an in-renderer model under the app's CSP — a decision, not a build)
 
 ## License
 
