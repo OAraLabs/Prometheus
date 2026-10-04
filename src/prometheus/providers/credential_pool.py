@@ -13,6 +13,16 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 
+def _tail(key: str) -> str:
+    """How a key appears in a log: its last 4 characters, never its head.
+
+    The head of a key is often its least random part (a vendor prefix, or a
+    Telegram bot id), and with the tail it narrows the secret. A key of 8
+    characters or fewer shows nothing of itself.
+    """
+    return f"...{key[-4:]}" if len(key) > 8 else "****"
+
+
 @dataclass
 class KeyStats:
     """Usage statistics for a single API key."""
@@ -99,18 +109,18 @@ class CredentialPool:
         if status_code in (401, 403):
             self._dead_keys[key] = time.time()
             logger.warning(
-                "API key marked dead (HTTP %d): %s...%s",
-                status_code, key[:8], key[-4:],
+                "API key marked dead (HTTP %d): %s",
+                status_code, _tail(key),
             )
         elif status_code == 429:
             logger.info(
-                "Rate limited (HTTP 429) — rotating to next key: %s...%s",
-                key[:8], key[-4:],
+                "Rate limited (HTTP 429) — rotating to next key: %s",
+                _tail(key),
             )
         else:
             logger.warning(
-                "API error (HTTP %d) on key %s...%s",
-                status_code, key[:8], key[-4:],
+                "API error (HTTP %d) on key %s",
+                status_code, _tail(key),
             )
 
     def _revive_expired(self) -> None:
@@ -122,4 +132,4 @@ class CredentialPool:
         ]
         for k in revived:
             del self._dead_keys[k]
-            logger.info("Revived API key after cooldown: %s...%s", k[:8], k[-4:])
+            logger.info("Revived API key after cooldown: %s", _tail(k))
