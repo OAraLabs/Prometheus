@@ -3,7 +3,8 @@
 The `web_search` tool runs a chain of search backends and stops at the first
 one that answers. With no configuration it uses DuckDuckGo and needs no key
 and no setup. A self-hosted SearXNG or a Brave Search key puts a more reliable
-backend in front of it.
+backend in front of it. A separate tool, `web_discover`, does neural search
+through Exa when you give it a key.
 
 [← README](../../README.md)
 
@@ -13,6 +14,11 @@ backend in front of it.
 |---|---|---|---|
 | Zero setup | `web_search` → DuckDuckGo | none | a fresh install; works out of the box |
 | Your own backends | `web_search` → SearXNG and/or Brave, then DuckDuckGo | `oara search setup` (SearXNG in Docker), or `BRAVE_API_KEY` in the env file | search that does not depend on DuckDuckGo tolerating you |
+| Discovery | `web_discover` → Exa | `EXA_API_KEY` in the env file | companies, people, papers or pages *like* a description or a URL |
+
+`web_search` answers "what is true right now": facts, versions, news, docs.
+`web_discover` answers "what is like this". It is not a fallback for the other,
+and the model is told which to use for what.
 
 ## How the chain works
 
@@ -188,9 +194,58 @@ Then set `web_search.searxng_url: http://127.0.0.1:8888` in `prometheus.yaml`
 and restart the daemon. The boot log names the chain:
 `web_search: backends searxng -> duckduckgo`.
 
-## What is recorded
+## `web_discover` (Exa)
 
-Each call writes one `subsystem_runs` row in `telemetry.db`, with
+`web_discover` is a tool of its own, not a `web_search` backend. Its
+description reads: *"Find companies, people, papers or pages similar to a
+description or URL (neural search). Not for facts or news; use web_search for
+those."*
+
+**It exists only with a key.** Put the key in the env file and restart:
+
+```bash
+echo 'EXA_API_KEY=<your key>' >> ~/.config/prometheus/env
+```
+
+Without `EXA_API_KEY` in the environment or the env file, the tool is not
+registered at all. The model never sees it, `tool_search` cannot find it, and
+the advertised tool set is exactly the shipped default. A key in
+`prometheus.yaml` does nothing.
+
+With a key it is registered, and it is advertised like the default tools when
+your `tools.deferred_loading.always_loaded` follows the shipped default (absent,
+or a list Prometheus shipped). If you pinned your own list, that list is used
+exactly as written: add `web_discover` to it to advertise it, or leave it out
+to keep it reachable through `tool_search` only.
+
+One call does one of two things:
+
+| argument | what Exa does |
+|---|---|
+| `query` | neural search for a description: "startups building open-source vector databases" (`POST /search`) |
+| `url` | pages similar to that one, other sites only (`POST /findSimilar`) |
+
+Optional `category` (`company`, `people` or `publication` for research
+papers) focuses the search. `num_results` is 1–10 (default 5). Each result is a
+title, a URL and Exa's summary, cut to 300 characters.
+
+Exa's spec marks `/findSimilar` as deprecated in favour of a descriptive
+`/search` query, but it still serves it. If it is withdrawn, the `url` mode
+reports Exa's HTTP error, and a `query` describing the page does the same job.
+
+- The key travels only in the `x-api-key` header. It never appears in a URL,
+  a result or the result metadata.
+- `web_discover` refuses to send a private or local URL (`localhost`, `*.local`,
+  a name without a dot, private and tailnet IP literals) to Exa. That would
+  tell a third party the shape of your network, and Exa cannot read those
+  pages anyway.
+- It is a read-only tool and goes through the security gate like any other.
+- Failures are said: a rejected key (401/403), no credits (402), a rate limit
+  (429), a timeout, or no results.
+
+## What `web_search` records
+
+Each `web_search` call writes one `subsystem_runs` row in `telemetry.db`, with
 `subsystem = 'web_search'` and `operation = 'search'`:
 
 | outcome | meaning |
@@ -211,3 +266,6 @@ SELECT outcome, json_extract(summary_json, '$.backend') AS backend, COUNT(*)
 FROM subsystem_runs WHERE subsystem = 'web_search'
 GROUP BY 1, 2;
 ```
+
+`web_discover` adds no row of its own; its calls are in `tool_calls` like any
+other tool's.

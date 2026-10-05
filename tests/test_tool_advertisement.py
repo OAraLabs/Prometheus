@@ -140,6 +140,18 @@ def test_every_registered_tool_is_classified():
     )
 
 
+def test_a_tool_registered_only_with_a_key_is_classified_too(monkeypatch):
+    """The guard above runs keyless, so a tool that exists only on the
+    operator's say-so (web_discover, with an EXA_API_KEY) never meets it. With
+    the key it must be advertised (``advertise_when_registered``) or deferred
+    by design, like every other tool."""
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    registered = registered_names()
+    assert "web_discover" in registered
+    unclassified = sorted(registered - advertised_names() - set(DEFERRED_BY_DESIGN))
+    assert not unclassified, f"registered with a key but invisible: {unclassified}"
+
+
 def test_the_classification_is_honest():
     """A stale entry masks real drift — same discipline as KNOWN_UNVERIFIED_DRIFT."""
     registered = registered_names()
