@@ -22,7 +22,10 @@ WHAT THE APP PICK COVERS (W2)
 The answer to "which app may I use?" is a :class:`Binding` — and it is the
 consent. It covers ``click`` and ``press_key`` with Tab or Escape, in that
 app, on that target, in the background, with positively NO web content
-(site ``-``). Everything else asks every time, approve-once:
+(site ``-``). "That app" is the app under any name it was resolved by when
+the person picked it ("Text Editor" is also ``gnome-text-editor``), never
+under a launcher many apps share (``python3``, ``flatpak``). Everything else
+asks every time, approve-once:
 
 * Return (it activates whatever has focus, a default "Send" included);
 * setting or typing text, and menus — a menu verb, or a click on a menu item;
@@ -71,8 +74,10 @@ from prometheus.computer.actions import schema_for
 from prometheus.computer.chooser import RuleChooser
 from prometheus.computer.discovery import (
     RESOLVED,
+    AppIdentity,
     AppRecord,
     WindowRecord,
+    is_shared_launcher,
     resolve_app,
     resolve_window,
 )
@@ -223,9 +228,28 @@ class Binding:
     created_at: float
     expires_at: float
     task_id: str | None = None
+    #: The app as it was resolved when the person picked it: every name it
+    #: goes by. Not shown anywhere — the person reads ``app``.
+    identity: AppIdentity | None = None
 
     def expired(self, now: float) -> bool:
         return now >= self.expires_at
+
+    def _app_names(self) -> set[str]:
+        """The app terms this pick covers: the name the person picked, and
+        the app's other names — except a launcher many apps share.
+
+        ⚠ THE SAME APP, NOT A WIDER ONE. The driver may name a window's app
+        by its executable (``gnome-text-editor``) where the person picked its
+        display name ("Text Editor"); without this, every click and Tab in the
+        picked app asked. A shared launcher (``python3``, ``flatpak``) is not
+        accepted: there is no pid here, so it would cover every app started
+        the same way."""
+        names = {normalise_term(self.app)}
+        if self.identity is not None:
+            names |= {normalise_term(n) for n in self.identity.names
+                      if not is_shared_launcher(n)}
+        return names
 
     def covers(self, extent: Any, arguments: Mapping[str, Any]) -> bool:
         """Does THIS answer cover THIS extent? Anything not positively
@@ -234,7 +258,7 @@ class Binding:
             return False
         if extent.target != self.target:
             return False
-        if normalise_term(extent.app) != normalise_term(self.app):
+        if normalise_term(extent.app) not in self._app_names():
             return False
         if extent.site != SITE_NONE or extent.delivery != DELIVERY_BACKGROUND:
             return False
@@ -597,7 +621,8 @@ class ComputerTaskRunner:
             binding_id=uuid.uuid4().hex[:8], session_id=session_id,
             target=target, app=res.app.name, scope=scope,
             set_by={"surface": surface, "by": by.label},
-            created_at=now, expires_at=now + MAX_BINDING_SECONDS)
+            created_at=now, expires_at=now + MAX_BINDING_SECONDS,
+            identity=AppIdentity.of(res.app))
         self._bindings[session_id] = binding
         self._audit_note(by, f"computer binding {binding.binding_id} on: "
                              f"{binding.app} ({scope}) for {session_id}")
@@ -675,7 +700,8 @@ class ComputerTaskRunner:
                 task, limits=self.limits,
                 chooser=str(getattr(chooser, "name", "rule")))
         task._handle = asyncio.create_task(
-            self._run(task, driver, binding, res.app.pid, notify, chooser),
+            self._run(task, driver, binding, res.app.pid, notify, chooser,
+                      identity=AppIdentity.of(res.app)),
             name=f"computer-task-{task.task_id}")
         return task
 
@@ -728,7 +754,8 @@ class ComputerTaskRunner:
     # ── the run ─────────────────────────────────────────────────────────
 
     async def _run(self, task: ComputerTask, driver: Any, binding: Binding,
-                   pid: int, notify, chooser: Any = None) -> None:
+                   pid: int, notify, chooser: Any = None, *,
+                   identity: AppIdentity | None = None) -> None:
         seeing = _SeeingDriver(driver)
         consent = SessionConsent(self, task, binding, seeing)
         picker = _StopAwareChooser(chooser or self._chooser_factory(), task)
@@ -766,7 +793,8 @@ class ComputerTaskRunner:
                 step_started = self._clock()
                 result = await loop.step(
                     task.goal, task.target, task.app, pid, window.window_id,
-                    text_to_type=task.text, history=history)
+                    text_to_type=task.text, history=history,
+                    identity=identity)
                 after_stop = (result.status == "executed"
                               and task.stop_requested)
                 if self.live is not None:

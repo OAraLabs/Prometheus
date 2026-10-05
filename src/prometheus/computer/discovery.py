@@ -30,6 +30,7 @@ page-authored text.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Mapping, Protocol, Sequence
 
@@ -87,13 +88,94 @@ def _fold(text: str | None) -> str:
     return str(text or "").strip().lower()
 
 
+#: Launchers many apps share: an interpreter, a runtime, a sandbox, a shell.
+#: Such a basename says HOW an app was started, not WHICH app — every Python
+#: GUI is ``python3`` to its launch path. A binding has no pid to tell two of
+#: them apart, so it never accepts one (``Binding.covers``); check 1b still
+#: does, because it also matches the pid.
+_SHARED_LAUNCHERS: frozenset[str] = frozenset({
+    # shells and exec wrappers
+    "sh", "bash", "dash", "zsh", "fish", "ksh", "csh", "tcsh", "busybox",
+    "env", "exec", "nohup", "setsid", "sudo", "pkexec", "systemd-run",
+    "dbus-run-session", "dbus-launch", "xdg-open", "gio",
+    # sandboxes and package runtimes
+    "flatpak", "flatpak-spawn", "snap", "bwrap", "firejail",
+    "appimagelauncher", "steam",
+    # interpreters and language runtimes
+    "python", "pypy", "java", "javaw", "electron", "node", "nodejs", "deno",
+    "bun", "gjs", "mono", "dotnet", "wine", "wine64", "wine-preloader",
+    "wine64-preloader", "perl", "ruby", "php", "lua", "luajit", "tclsh",
+    "wish", "julia", "guile", "rscript",
+})
+
+#: The same launchers with a version: python3, python3.12, electron28, ...
+_VERSIONED_LAUNCHER = re.compile(
+    r"^(python|pypy|java|electron|node|nodejs|ruby|perl|php|lua|luajit|wine"
+    r"|mono|dotnet|bash|tclsh|wish|julia)[0-9][0-9._-]*$")
+
+
+def is_shared_launcher(name: str | None) -> bool:
+    """Is *name* a launcher basename many apps share (see above)?"""
+    folded = _fold(name)
+    return folded in _SHARED_LAUNCHERS or bool(_VERSIONED_LAUNCHER.match(folded))
+
+
+def _identifiers(app: AppRecord) -> tuple[str, ...]:
+    """The app's own names, as the driver spells them: its display name, its
+    bundle/desktop id and its launch-path basename. Each once, in that
+    order, and never an empty one."""
+    raw = [app.name, app.bundle_id or "",
+           os.path.basename(app.launch_path) if app.launch_path else ""]
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in (str(n).strip() for n in raw):
+        if name and _fold(name) not in seen:
+            seen.add(_fold(name))
+            out.append(name)
+    return tuple(out)
+
+
 def _keys_of(app: AppRecord) -> set[str]:
-    keys = {_fold(app.name)}
-    if app.bundle_id:
-        keys.add(_fold(app.bundle_id))
-    if app.launch_path:
-        keys.add(_fold(os.path.basename(app.launch_path)))
-    return keys - {""}
+    return {_fold(name) for name in _identifiers(app)}
+
+
+@dataclass(frozen=True)
+class AppIdentity:
+    """The app the door resolved: every identifier it is known by, and its
+    pid where known. What check 1b compares the driver's report against.
+
+    ⚠ WHY MORE THAN ONE NAME. The door resolves a phrase through ANY of an
+    app's identifiers, and the driver names a window's app its own way. On
+    GNOME, ``list_apps`` calls it "Text Editor" (the ``.desktop`` name) while
+    the window's state calls it ``gnome-text-editor``; keeping only the
+    display name refused the very app the person picked (task 36ed5742).
+
+    ⚠ ONLY THE APP'S OWN NAMES. An operator alias, or the phrase a person
+    typed, is how the app was FOUND, not what it is called; neither is
+    recorded. The extent's app term is still the driver's report. A binding
+    carries the identity from the person's pick and covers the app under
+    these names — never under a shared launcher's (``Binding.covers``).
+    """
+
+    names: tuple[str, ...]
+    pid: int | None = None
+
+    @classmethod
+    def of(cls, app: AppRecord) -> AppIdentity:
+        return cls(names=_identifiers(app),
+                   pid=app.pid if app.pid and app.pid > 0 else None)
+
+    def matches(self, reported: str | None, reported_pid: int | None) -> bool:
+        """The driver's report is this app: it names it by one of its
+        identifiers, and — when both pids are known — in the same process."""
+        if not any(same_app(reported, name) for name in self.names):
+            return False
+        return not self.pid_differs(reported_pid)
+
+    def pid_differs(self, reported_pid: int | None) -> bool:
+        """Both pids known, and not the same process."""
+        known = reported_pid is not None and reported_pid > 0
+        return self.pid is not None and known and reported_pid != self.pid
 
 
 def same_app(reported: str | None, wanted: str) -> bool:
