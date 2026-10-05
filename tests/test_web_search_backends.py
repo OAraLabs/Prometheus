@@ -639,3 +639,111 @@ def test_the_daemon_and_the_cli_hand_their_config_section_over() -> None:
 
     assert 'web_search_cfg=config.get("web_search")' in inspect.getsource(daemon)
     assert 'web_search_cfg=config.get("web_search")' in inspect.getsource(cli)
+
+
+# ---------------------------------------------------------------------------
+# The chain has a wall-clock budget
+#
+# httpx's timeout=15 is per phase (connect, write, pool) and per READ: a server
+# that trickles a byte every few seconds, or a chain of redirects (each hop
+# gets fresh timeouts), never trips it. So the per-backend timeouts alone left
+# the chain's worst case unbounded, and the agent loop's tool timeout would
+# cancel the call: a generic "timed out" for the model, and no telemetry row.
+# ---------------------------------------------------------------------------
+
+
+async def _hang(request: httpx.Request) -> httpx.Response:
+    await asyncio.sleep(3600)
+    raise AssertionError("unreachable")
+
+
+def _trickle(request: httpx.Request) -> httpx.Response:
+    async def drip():
+        while True:
+            await asyncio.sleep(0.02)
+            yield b" "
+
+    return httpx.Response(200, content=drip())
+
+
+@pytest.fixture
+def small_budget(monkeypatch: pytest.MonkeyPatch) -> float:
+    """The real arithmetic, scaled down 100x so the tests take under a second."""
+    monkeypatch.setattr(wsb, "CHAIN_BUDGET_SECONDS", 0.6)
+    monkeypatch.setattr(wsb, "ATTEMPT_LIMITS",
+                        {"searxng": 0.15, "brave": 0.15, "duckduckgo": 0.2})
+    monkeypatch.setattr(wsb, "FINAL_RESERVE_SECONDS", 0.3)
+    return 0.6
+
+
+def _timed(tool: WebSearchTool, **meta: Any) -> tuple[ToolResult, float]:
+    import time
+
+    started = time.monotonic()
+    result = _run(tool, **meta)
+    return result, time.monotonic() - started
+
+
+class TestTheChainBudget:
+    def test_the_budget_fits_inside_every_timeout_that_runs_web_search(self) -> None:
+        from dataclasses import fields
+
+        from prometheus.engine.agent_loop import LoopContext
+        from prometheus.gym.ladder.runner import TOOL_TIMEOUT_CAP_S
+
+        loop_default = next(
+            f.default for f in fields(LoopContext) if f.name == "tool_timeout_seconds"
+        )
+        # No per-tool override, so the loop's default is what applies.
+        assert WebSearchTool.execution_timeout_seconds is None
+        assert wsb.CHAIN_BUDGET_SECONDS < TOOL_TIMEOUT_CAP_S <= loop_default
+        # Every backend before DuckDuckGo together still leaves its reserve,
+        # and the reserve covers at least one DuckDuckGo endpoint.
+        assert (wsb.ATTEMPT_LIMITS["searxng"] + wsb.ATTEMPT_LIMITS["brave"]
+                + wsb.FINAL_RESERVE_SECONDS) <= wsb.CHAIN_BUDGET_SECONDS
+        assert wsb.FINAL_RESERVE_SECONDS >= wsb.ATTEMPT_LIMITS["duckduckgo"]
+
+    def test_hung_backends_cannot_outlast_the_budget(
+        self, small_budget: float, brave_key: str, telemetry: Any,
+    ) -> None:
+        web = FakeWeb(searx=_hang, brave=_hang, ddg_html=_hang, ddg_lite=_hang)
+        result, elapsed = _timed(_tool(web, searxng_url=SEARX_URL))
+        assert elapsed < small_budget + 0.5, f"took {elapsed:.2f}s"
+        assert result.is_error
+        assert result.output.startswith("web search failed:")
+        assert [(s["backend"], s["kind"]) for s in result.metadata["skipped"]] == [
+            ("searxng", "timeout"), ("brave", "timeout"),
+        ]
+        # The call ended inside the tool, so its telemetry row was written.
+        [(outcome, _session, summary)] = _rows(telemetry)
+        assert outcome == "failed"
+
+    def test_a_trickling_server_is_cut_and_duckduckgo_still_answers(
+        self, small_budget: float,
+    ) -> None:
+        web = FakeWeb(searx=_trickle, ddg_html=_html("ddg_html_results.html"))
+        result, elapsed = _timed(_tool(web, searxng_url=SEARX_URL))
+        assert not result.is_error, result.output
+        assert result.metadata["backend"] == "duckduckgo"
+        skipped = result.metadata["skipped"][0]
+        assert (skipped["backend"], skipped["kind"]) == ("searxng", "timeout")
+        assert "took longer than" in skipped["reason"]
+        assert elapsed < small_budget + 0.5
+
+    def test_duckduckgo_keeps_its_reserve(
+        self, small_budget: float, brave_key: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An earlier backend allowed more than budget - reserve is cut at that,
+        and one that finds no time left is skipped without being asked."""
+        monkeypatch.setattr(wsb, "ATTEMPT_LIMITS",
+                            {"searxng": 0.5, "brave": 0.15, "duckduckgo": 0.2})
+        web = FakeWeb(searx=_hang, brave=_hang, ddg_html=_hang,
+                      ddg_lite=_html("ddg_lite_results.html"))
+        result, elapsed = _timed(_tool(web, searxng_url=SEARX_URL))
+        assert not result.is_error, result.output
+        assert result.metadata["endpoint"] == "lite"
+        assert BRAVE not in web.hosts
+        brave = next(s for s in result.metadata["skipped"] if s["backend"] == "brave")
+        assert brave["kind"] == "timeout"
+        assert "no time left" in brave["reason"]
+        assert elapsed < small_budget + 0.5

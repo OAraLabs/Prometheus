@@ -363,8 +363,13 @@ def _wait_for_json(
     from prometheus.tools.builtin import web_search_backends as wsb
 
     async def probe() -> None:
+        # Wall clock, not just httpx's timeout, which is per read: a server
+        # trickling bytes would otherwise hold one probe, and the wait, forever.
         async with httpx.AsyncClient(transport=transport) as client:
-            await wsb.fetch_searxng_json(client, url, "test", timeout=PROBE_TIMEOUT)
+            await wsb.bounded(
+                wsb.fetch_searxng_json(client, url, "test", timeout=PROBE_TIMEOUT),
+                PROBE_TIMEOUT,
+            )
 
     started = clock()
     last = "no answer yet"
