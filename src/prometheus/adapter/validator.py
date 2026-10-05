@@ -7,7 +7,10 @@ Strictness levels (policy — how aggressively to validate/repair):
   STRICT — MEDIUM + aggressive coercion + unknown-param rejection
 
 Invariants run at every level: strictness governs repair aggressiveness,
-never whether structural sanity is checked.
+never whether structural sanity is checked. So does one repair: a ``null``
+for an optional parameter the schema refuses is dropped, so its default
+applies (``null_drop``). It guesses nothing — absent and null both mean
+"not given" — so no level has a reason to refuse it.
 """
 
 from __future__ import annotations
@@ -71,6 +74,7 @@ class ValidationResult:
 REPAIR_KINDS: tuple[str, ...] = (
     "fuzzy_name",     # tool name fuzzy-matched to a registered one
     "json_extract",   # arguments pulled out of a text/markdown string
+    "null_drop",      # a null for an optional param dropped, so its default applies
     "type_coerce",    # an argument coerced to its schema type
     "strip_params",   # unknown parameters dropped
     "dict_unwrap",    # phantom dict nesting removed (adapter/unwrap.py)
@@ -165,8 +169,58 @@ def _find_json_in_text(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _drop_optional_nulls(
+    input_model: Any, tool_input: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Drop each optional parameter sent as ``null`` that the schema refuses.
+
+    Small local models write ``"limit": null`` for a parameter they mean to
+    leave unset. qwen2.5:7b did it on read_file (2026-10-05): two
+    input_validation failures, and then a README it had never read, invented
+    in its reply. The key's absence already says "unset", so the null is
+    dropped and the field's default applies.
+
+    Only a null that pydantic itself refuses, on a parameter the schema does
+    not require. A null that an ``Optional`` field accepts is a value, so it
+    stays. A null for a required parameter also stays, to be refused:
+    dropping it would only turn "wrong type" into "missing".
+    """
+    if not any(value is None for value in tool_input.values()):
+        return tool_input, []
+    try:
+        input_model.model_validate(tool_input)
+        return tool_input, []
+    except ValidationError as exc:
+        refused = {err["loc"][0] for err in exc.errors() if err.get("loc")}
+    except Exception:
+        # A tool's own validator raising something else is not this step's
+        # business: leave the call as it came, for the loop's own check.
+        return tool_input, []
+    try:
+        schema = input_model.model_json_schema()
+    except Exception:
+        return tool_input, []
+    optional = set(schema.get("properties", {})) - set(schema.get("required", []))
+    dropped = [
+        name for name, value in tool_input.items()
+        if value is None and name in refused and name in optional
+    ]
+    if not dropped:
+        return tool_input, []
+    kept = {name: value for name, value in tool_input.items() if name not in dropped}
+    return kept, [
+        RepairNote(f"dropped null {name}: optional, its default applies", "null_drop")
+        for name in dropped
+    ]
+
+
 def _coerce_value(value: Any, target_type: str) -> Any:
     """Coerce a value to the target JSON schema type."""
+    # A null is never coerced. An optional param's null was already dropped
+    # (null_drop), and a required one's stays, to be refused. Before this,
+    # str(None) made a null path the file "None", and bool(None) made False.
+    if value is None:
+        return value
     if target_type == "integer":
         try:
             return int(float(str(value)))
@@ -306,6 +360,26 @@ class ToolCallValidator:
 
         return ValidationResult(valid=True)
 
+    def drop_optional_nulls(
+        self,
+        tool_name: str,
+        tool_input: Any,
+        tool_registry: Any,
+    ) -> tuple[Any, list[str]]:
+        """Drop the nulls an optional parameter's schema refuses, at every strictness.
+
+        The adapter runs this BEFORE ``validate``. At ``NONE`` (tier light)
+        ``validate`` never reads the schema, so a null there would never reach
+        ``repair``; the loop's own pydantic check would refuse it instead.
+        Returns the input unchanged, and no notes, when the tool is unknown or
+        the input is not a dict: ``repair`` runs this step again once it has
+        a tool and a dict.
+        """
+        tool = tool_registry.get(tool_name) if tool_name else None
+        if tool is None or not isinstance(tool_input, dict):
+            return tool_input, []
+        return _drop_optional_nulls(tool.input_model, tool_input)
+
     def repair(
         self,
         tool_name: str,
@@ -318,7 +392,8 @@ class ToolCallValidator:
         Strategies applied in order:
         1. Fuzzy-match tool name (Levenshtein ≤ 3)
         2. Extract JSON from markdown code blocks or mixed text
-        3. Coerce types per schema (string "5" → int 5)
+        2b. Drop a null for an optional param, so its default applies (every level)
+        3. Coerce types per schema (string "5" → int 5) (MEDIUM+)
         4. Strip unknown parameters (MEDIUM+)
         """
         repairs: list[str] = []
@@ -379,6 +454,12 @@ class ToolCallValidator:
                 tool_input={},
                 error=f"Tool input is not a dict: {type(tool_input).__name__}",
             )
+
+        # --- 2b. Null for an optional param → its default (every strictness) ---
+        # A no-op after the adapter's own pre-pass, except where this call
+        # only now has a tool (a fuzzy-matched name) or a dict (extracted JSON).
+        tool_input, null_notes = _drop_optional_nulls(tool.input_model, tool_input)
+        repairs.extend(null_notes)
 
         schema = tool.input_model.model_json_schema()
         properties = schema.get("properties", {})
