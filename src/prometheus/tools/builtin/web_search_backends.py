@@ -33,19 +33,24 @@ own empty-result page counts as an empty result.
 
 from __future__ import annotations
 
+import asyncio
 import html as html_mod
+import inspect
 import json
 import logging
 import os
 import re
-from collections.abc import Mapping
+import time
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
 log = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 SEARXNG = "searxng"
 BRAVE = "brave"
@@ -67,11 +72,26 @@ DDG_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
 DDG_LITE_ENDPOINT = "https://lite.duckduckgo.com/lite/"
 USER_AGENT = "Prometheus/0.1"
 
-#: Per-request timeouts. DuckDuckGo keeps the 20 s web_search always had; the
-#: others are shorter because a slow one only delays the next backend.
+#: httpx timeouts per request. DuckDuckGo keeps the 20 s web_search always
+#: had; the others are shorter because a slow one only delays the next backend.
+#: ⚠ These are PER PHASE (connect, write, pool) and PER READ, not totals: a
+#: server that trickles bytes, or a chain of redirects (each hop gets fresh
+#: timeouts), never trips them. The wall-clock limits below are what bound a call.
 SEARXNG_TIMEOUT = 15.0
 BRAVE_TIMEOUT = 15.0
 DDG_TIMEOUT = 20.0
+
+#: Wall-clock budget for one web_search call, every backend included. Well
+#: inside the agent loop's tool timeout (LoopContext.tool_timeout_seconds, 300 s,
+#: engine/agent_loop.py) and the ladder's cap (TOOL_TIMEOUT_CAP_S, 120 s,
+#: gym/ladder/runner.py), so the chain always ends inside the tool, with its own
+#: message and its telemetry row, instead of being cancelled by the loop.
+CHAIN_BUDGET_SECONDS = 60.0
+#: Wall-clock limit per attempt; DuckDuckGo's is per endpoint (html, then lite).
+ATTEMPT_LIMITS: dict[str, float] = {SEARXNG: 15.0, BRAVE: 15.0, DUCKDUCKGO: 20.0}
+#: What the backends before DuckDuckGo must leave of the budget, so the
+#: fallback that needs no setup always gets its turn: html in full, and lite.
+FINAL_RESERVE_SECONDS = 30.0
 
 #: One subsystem_runs row per call (no new table: the parity harness dumps
 #: every table, so a new one would move every golden).
@@ -106,6 +126,29 @@ class BackendFailure(Exception):
         super().__init__(f"{kind}: {reason}")
         self.kind = kind
         self.reason = reason
+
+
+def attempt_limit(name: str, deadline: float, *, now: float | None = None) -> float:
+    """Seconds the next attempt at ``name`` may take: its own limit, cut to what
+    is left before ``deadline`` (a ``time.monotonic()`` value) and, for every
+    backend but the last, to what is left after DuckDuckGo's reserve."""
+    remaining = deadline - (time.monotonic() if now is None else now)
+    if name != FINAL_BACKEND:
+        remaining -= FINAL_RESERVE_SECONDS
+    return max(0.0, min(ATTEMPT_LIMITS[name], remaining))
+
+
+async def bounded(awaitable: Awaitable[T], seconds: float) -> T:
+    """``awaitable``, or BackendFailure(KIND_TIMEOUT) once ``seconds`` of wall
+    clock have passed, whatever the transport is doing."""
+    if seconds <= 0:
+        if inspect.iscoroutine(awaitable):
+            awaitable.close()
+        raise BackendFailure(KIND_TIMEOUT, "no time left in the search's budget")
+    try:
+        return await asyncio.wait_for(awaitable, timeout=seconds)
+    except asyncio.TimeoutError as exc:
+        raise BackendFailure(KIND_TIMEOUT, f"took longer than {seconds:.3g}s") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -364,20 +407,26 @@ class DdgAnswer:
 
 
 async def search_duckduckgo(
-    client: httpx.AsyncClient, query: str, limit: int,
+    client: httpx.AsyncClient, query: str, limit: int, *, deadline: float | None = None,
 ) -> DdgAnswer:
     """html, then lite. Returns hits, or an empty list on DuckDuckGo's own
     no-results page. Raises KIND_BLOCKED when it turned us away, KIND_ERROR
-    (or KIND_TIMEOUT) when neither endpoint could be reached."""
+    (or KIND_TIMEOUT) when neither endpoint could be reached. With a
+    ``deadline`` (``time.monotonic()``), each endpoint gets at most
+    ``ATTEMPT_LIMITS[duckduckgo]`` of what is left."""
     failures: list[BackendFailure] = []
     for endpoint, url in (("html", DDG_HTML_ENDPOINT), ("lite", DDG_LITE_ENDPOINT)):
+        seconds = (
+            attempt_limit(DUCKDUCKGO, deadline) if deadline is not None
+            else ATTEMPT_LIMITS[DUCKDUCKGO]
+        )
         try:
-            response = await _get(
+            response = await bounded(_get(
                 client, url, DUCKDUCKGO,
                 params={"q": query},
                 headers={"User-Agent": USER_AGENT},
                 timeout=DDG_TIMEOUT,
-            )
+            ), seconds)
             hits = classify_ddg_page(
                 response.status_code, response.text, str(response.url), limit=limit,
             )

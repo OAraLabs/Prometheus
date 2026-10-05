@@ -26,8 +26,15 @@ web_search:
   Brave needs `BRAVE_API_KEY` in `~/.config/prometheus/env` or the
   environment. DuckDuckGo always runs.
 - Each backend gets one try per search. One that errors, times out
-  (15 s for SearXNG and Brave, 20 s per DuckDuckGo endpoint), is rate-limited,
-  answers with a CAPTCHA or finds nothing falls through to the next.
+  (15 s for SearXNG and Brave, 20 s per DuckDuckGo endpoint, wall clock), is
+  rate-limited, answers with a CAPTCHA or finds nothing falls through to the
+  next.
+- **The whole search has a 60 s budget.** The backends before DuckDuckGo must
+  leave it 30 s, so it always gets its turn. The worst case, every backend
+  hanging, ends at 60 s with a message naming each one. That is well inside
+  the agent loop's 300 s tool timeout, so the loop never has to cancel a
+  search. (httpx's own timeouts are per phase and per read, so a server that
+  trickles bytes never trips them; the wall-clock limits are what stop it.)
 - **DuckDuckGo is always last.** If you leave it out of `backends`, or list it
   earlier, it is moved to the end and a WARNING says so. It is the fallback
   that needs no setup, so search keeps working when everything else is down.

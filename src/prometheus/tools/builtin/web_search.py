@@ -83,6 +83,7 @@ class WebSearchTool(BaseTool):
         context: ToolExecutionContext,
     ) -> ToolResult:
         started = time.monotonic()
+        deadline = started + wsb.CHAIN_BUDGET_SECONDS
         plan = self._current_plan()
         skipped: list[dict[str, str]] = []
         backend: str | None = None
@@ -95,7 +96,7 @@ class WebSearchTool(BaseTool):
         ) as client:
             for name in plan.active:
                 try:
-                    found, where = await self._ask(client, name, plan, arguments)
+                    found, where = await self._ask(client, name, plan, arguments, deadline)
                 except wsb.BackendFailure as exc:
                     last = exc
                     if name != wsb.FINAL_BACKEND:
@@ -129,17 +130,20 @@ class WebSearchTool(BaseTool):
     @staticmethod
     async def _ask(
         client: httpx.AsyncClient, name: str, plan: wsb.BackendPlan,
-        arguments: WebSearchInput,
+        arguments: WebSearchInput, deadline: float,
     ) -> tuple[list[wsb.SearchHit], str | None]:
+        """One backend, held to its wall-clock share of the chain's budget."""
         if name == wsb.SEARXNG:
-            return await wsb.search_searxng(
+            return await wsb.bounded(wsb.search_searxng(
                 client, plan.searxng_url, arguments.query, arguments.max_results,
-            ), None
+            ), wsb.attempt_limit(name, deadline)), None
         if name == wsb.BRAVE:
-            return await wsb.search_brave(
+            return await wsb.bounded(wsb.search_brave(
                 client, wsb.resolve_brave_key(), arguments.query, arguments.max_results,
-            ), None
-        answer = await wsb.search_duckduckgo(client, arguments.query, arguments.max_results)
+            ), wsb.attempt_limit(name, deadline)), None
+        answer = await wsb.search_duckduckgo(
+            client, arguments.query, arguments.max_results, deadline=deadline,
+        )
         return answer.hits, answer.endpoint
 
 
