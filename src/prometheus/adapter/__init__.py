@@ -185,6 +185,13 @@ class ModelAdapter:
         tool_registry: Any,
     ) -> tuple[str, dict[str, Any], list[str]]:
         """Internal validate + repair logic."""
+        # A null for an optional param means "not given" at EVERY strictness,
+        # so it is dropped before validation. Validating first would miss it at
+        # NONE (tier light), where validate never reads the schema and so never
+        # sends a schema fault to repair. It is recorded as a repair either way.
+        tool_input, null_notes = self.validator.drop_optional_nulls(
+            tool_name, tool_input, tool_registry
+        )
         result = self.validator.validate(tool_name, tool_input, tool_registry)
         if result.valid:
             self.record_tool_call(tool_name, success=True)
@@ -193,13 +200,13 @@ class ModelAdapter:
             # attempted name (== the RetryEngine key), so a repaired misname
             # resets its own counter on the repair-success path below.
             self.retry.reset(tool_name)
-            return tool_name, tool_input, []
+            return tool_name, tool_input, null_notes
 
         repair = self.validator.repair(tool_name, tool_input, result.error, tool_registry)
         if repair.repaired:
             self.record_tool_call(tool_name, success=True)
             self.retry.reset(tool_name)  # H5: clear the failure streak on success
-            return repair.tool_name, repair.tool_input, repair.repairs_made
+            return repair.tool_name, repair.tool_input, null_notes + repair.repairs_made
 
         self.record_tool_call(tool_name, success=False)
         raise ValueError(
