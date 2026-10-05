@@ -17,8 +17,9 @@ THE RULES PINNED HERE:
   right kind matches, the chooser abstains.
 * Words match whole, and filler words (``the``, ``in``, ``at``, …) never
   score, so "Click the …" does not match every goal.
-* With no recognised verb, a tie between rows of DIFFERENT kinds is not
-  broken by list order: the chooser abstains.
+* A tie at the top is never broken by list order — between rows of
+  different kinds, or between rows of the same kind (two buttons that match
+  equally): the chooser abstains, unless a prefer term picks one.
 
 The kind comes from the description's own first word ("Click …", "Press …",
 "Set …", written by candidates.py), so the chooser still sees only IDs and
@@ -126,6 +127,37 @@ class TestNoVerbNoGuess:
     def test_a_clear_winner_still_wins_without_a_verb(self):
         assert choose("save", [OPEN, {"id": "click-6", "description": "Click the button 'Save'"},
                                *KEYS]) == "click-6"
+
+
+class TestNoGuessWithinAKind:
+    """A tie at the top between rows of the SAME kind abstains too, unless a
+    prefer term broke it. Clicks are covered by the app pick, so a click
+    chosen by list order would run with no prompt — Sunday's failure mode."""
+
+    SAVE = {"id": "click-0", "description": "Click the button 'Save'"}
+    SAVE_AS = {"id": "click-4", "description": "Click the button 'Save as'"}
+    SAVE_MENU = {"id": "click-6", "description": "Click the menu item 'Save'"}
+
+    def test_two_clicks_that_tie_abstain(self):
+        assert choose("click save", [self.SAVE, self.SAVE_AS]) == CANDIDATE_ABSTAIN
+        assert choose("click save", [self.SAVE_AS, self.SAVE]) == CANDIDATE_ABSTAIN
+
+    def test_a_tie_with_no_verb_abstains_too(self):
+        assert choose("save", [self.SAVE, self.SAVE_MENU, *KEYS]) == CANDIDATE_ABSTAIN
+
+    def test_a_prefer_term_that_picks_one_breaks_the_tie(self):
+        assert choose("click save", [self.SAVE, self.SAVE_MENU],
+                      RuleChooser(prefer=("menu item",))) == "click-6"
+        assert choose("click save", [self.SAVE_MENU, self.SAVE],
+                      RuleChooser(prefer=("button",))) == "click-0"
+
+    def test_a_prefer_term_that_matches_both_does_not(self):
+        assert choose("click save", [self.SAVE, self.SAVE_AS],
+                      RuleChooser(prefer=("button",))) == CANDIDATE_ABSTAIN
+
+    def test_a_better_match_is_not_a_tie(self):
+        """'save as' matches 'Save as' twice and 'Save' once: a clear winner."""
+        assert choose("click save as", [self.SAVE, self.SAVE_AS]) == "click-4"
 
 
 class TestPreferStillApplies:

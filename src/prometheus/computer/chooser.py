@@ -158,14 +158,17 @@ class RuleChooser:
        tab" button five times before this.)
     2. **Words match whole, and filler words never score.** "tab" is not in
        "Table", and "the" is in every "Click the …".
-    3. **No verb, no guess between kinds.** With no recognised verb, a tie at
-       the top between rows of different kinds abstains; list order (clicks
-       are built first) must not decide.
+    3. **No guess by position.** A tie at the top abstains — between kinds
+       (clicks are built first) and between rows of the same kind (two
+       buttons that match equally). Clicks are covered by the app pick, so a
+       click chosen by list order would run with no prompt. A ``prefer`` term
+       that matches one of the tied rows breaks the tie; one that matches
+       them all does not.
     4. **Never the step it just took** (#668). If the best row is the last
        executed step in ``request.history``, abstain — do not fall back to
-       the runner-up, which the goal did not ask for. A goal that really
-       needs the same action twice is beyond a rule chooser; the abstain
-       ends the task ``done`` instead of repeating to ``max_steps``.
+       the runner-up, which the goal did not ask for. This is the RULE
+       chooser's rule, not the task loop's: a future model chooser may need
+       to repeat a step, and the loop lets it.
 
     ``prefer`` substrings still dominate, in the order given — but only
     among the rows the goal's kind allows.
@@ -196,16 +199,20 @@ class RuleChooser:
             # NO GUESS. An abstain that says "nothing matched" is a usable
             # signal; a lowest-scoring pick dressed as a decision is not.
             return Choice(CANDIDATE_ABSTAIN, confidence=0.0, source=self.name)
-        top = [(k, e) for s, k, e in scored if s == best_score]
-        if len({k for k, _ in top}) > 1:
-            # Rule 3: a tie between kinds is not decided by build order.
+        top = [e for s, _, e in scored if s == best_score]
+        if len(top) > 1:
+            # Rule 3: a tie at the top is never decided by build order — not
+            # between kinds, and not between two clicks either: clicks are
+            # covered by the app pick, so a click chosen by position would
+            # run with no prompt. A prefer term that separates the rows has
+            # already raised one score, so it is not a tie by here.
             return Choice(CANDIDATE_ABSTAIN, confidence=0.0, source=self.name)
         last = request.history[-1] if request.history else None
-        if last is not None and top[0][1].get("description") == last:
+        if last is not None and top[0].get("description") == last:
             # Rule 4: never the step just taken; nothing more serves the goal.
             return Choice(CANDIDATE_ABSTAIN, confidence=0.0, source=self.name)
         return Choice(
-            top[0][1]["id"],
+            top[0]["id"],
             confidence=min(1.0, best_score / 10.0),
             source=self.name,
         )
