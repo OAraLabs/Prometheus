@@ -76,8 +76,10 @@ from prometheus.computer.chooser import (
     KIND_KEY,
     KIND_SET,
     RuleChooser,
+    goal_key,
     goal_kind_and_words,
     is_single_action_goal,
+    normalise_key,
 )
 from prometheus.computer.discovery import (
     RESOLVED,
@@ -156,6 +158,22 @@ _KIND_OF_TOOL = {
     "computer_press_key": KIND_KEY,
     "computer_set_value": KIND_SET,
 }
+
+def _ran_the_goals_action(candidate: Any, goal_kind: str | None,
+                          named_key: str | None) -> bool:
+    """Did the step that just ran perform the one action the goal named (#668)?
+
+    The step's kind must be the goal's kind: a click does not complete a fill.
+    A key goal needs the SAME key: "press tab" is met by a Tab press, not an
+    Escape press. Click and set goals are met by any step of their kind.
+    """
+    if candidate is None or _KIND_OF_TOOL.get(candidate.tool_name) != goal_kind:
+        return False
+    if goal_kind == KIND_KEY:
+        pressed = normalise_key(str((candidate.arguments or {}).get("key", "")))
+        return named_key is not None and pressed == named_key
+    return True
+
 
 OUTCOMES = ("done", "abstained", "stopped", "refused", "failed", "limit")
 
@@ -786,11 +804,12 @@ class ComputerTaskRunner:
         reobserve = 0
         outcome, reason = "failed", ""
         # #668: a goal that names one action ("press tab", "click save") is
-        # done once an action OF THAT KIND runs. Without this the loop had no
-        # notion of a finished goal and repeated the step to max_steps. A step
-        # of another kind (a click before a fill) does not end it.
+        # done once THAT action runs. Without this the loop had no notion of a
+        # finished goal and repeated the step to max_steps. "Met" means the
+        # action ran, not that its effect was verified.
         single_action = is_single_action_goal(task.goal)
         goal_kind = goal_kind_and_words(task.goal)[0]
+        named_key = goal_key(task.goal)
         try:
             while True:
                 if task.stop_requested:
@@ -828,8 +847,8 @@ class ComputerTaskRunner:
                     reobserve = 0
                     if after_stop:
                         task.in_flight_at_stop = True
-                    elif single_action and result.candidate is not None and \
-                            _KIND_OF_TOOL.get(result.candidate.tool_name) == goal_kind:
+                    elif single_action and _ran_the_goals_action(
+                            result.candidate, goal_kind, named_key):
                         outcome, reason = "done", "the goal's one action ran"
                         break
                     continue

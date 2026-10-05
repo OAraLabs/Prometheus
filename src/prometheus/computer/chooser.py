@@ -128,6 +128,28 @@ def goal_kind_and_words(goal: str) -> tuple[str | None, set[str]]:
     return kind, content
 
 
+def normalise_key(name: str) -> str:
+    """A key name as the candidate table spells it ("enter" → "return")."""
+    key = str(name or "").strip().lower()
+    return _KEY_ALIASES.get(key, key)
+
+
+def goal_key(goal: str) -> str | None:
+    """The key a key goal names ("press Tab in the editor" → "tab"), or None.
+
+    None for any goal that is not ``press``/``hit`` + an allowed key: a click
+    or set goal, a button press ("press send"), or no verb at all.
+    """
+    words = _words(goal)
+    while words and words[0] == "please":
+        words = words[1:]
+    if not words or words[0] not in _PRESS_VERBS:
+        return None
+    rest = [w for w in words[1:] if w not in _FILLER]
+    key = normalise_key(rest[0]) if rest else ""
+    return key if key in ALLOWED_KEYS else None
+
+
 def is_single_action_goal(goal: str) -> bool:
     """Does the goal name exactly one action, which the task can end after (#668)?
 

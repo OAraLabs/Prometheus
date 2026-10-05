@@ -28,7 +28,7 @@ dispatched and how the task ended.
 
 from __future__ import annotations
 
-from prometheus.computer.chooser import RuleChooser, is_single_action_goal
+from prometheus.computer.chooser import RuleChooser, goal_key, is_single_action_goal
 from prometheus.computer.types import CANDIDATE_ABSTAIN, ChoiceRequest
 from tests.test_computer_door import _answer, _bind, _rig, _start, _verbs
 
@@ -124,6 +124,14 @@ class TestSingleActionGoals:
         for goal in ("save", "save it", "press tab then press escape", "press tab twice",
                      "click next again", "click save and send", "", "zzz"):
             assert not is_single_action_goal(goal), goal
+
+
+    def test_the_key_a_goal_names(self):
+        assert goal_key("press Tab in the editor") == "tab"
+        assert goal_key("press Enter") == "return"
+        assert goal_key("hit Esc") == "escape"
+        for goal in ("press send", "click tab", "type tab", "save", ""):
+            assert goal_key(goal) is None, goal
 
 
 # --------------------------------------------------------------------------- #
