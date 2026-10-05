@@ -76,6 +76,7 @@ from typing import TYPE_CHECKING, Any
 from prometheus.computer.driver import (
     ActionOutcomeUnknown,
     DriverBusy,
+    DriverSessionEnded,
     DriverUnavailable,
     StaleSnapshot,
 )
@@ -106,6 +107,10 @@ MAX_ELEMENTS = 200
 #: returns an explicit stale error; this maps it onto our own exception so
 #: the loop's existing refusal path fires rather than a generic failure.
 _STALE_MARKERS = ("stale", "snapshot_id_required", "superseded")
+
+#: The SDK's ``error_code`` for a driver whose session Cua has ended (idle or
+#: absolute expiry). Read off the exception's attribute, never its text.
+_SESSION_ENDED = "session_ended"
 
 #: Verbs whose 0.28.2 input type can CARRY a delivery mode. Only
 #: ``ClickInput`` takes one; for the others the driver decides, so the
@@ -298,6 +303,14 @@ class CuaDriverAdapter:
             out = self._await(self._driver.list_apps(
                 _list_apps_input(self._sdk)))
         except Exception as exc:  # noqa: BLE001
+            # ⚠ AN ENDED SESSION IS NAMED, BY THE SDK'S OWN CODE. ``start()``
+            # keeps this driver, and once Cua has ended its session every call
+            # answers ``session_ended``. The probe replaces the driver once on
+            # exactly this (integration._run_checks); the text is not read.
+            if getattr(exc, "error_code", None) == _SESSION_ENDED:
+                raise DriverSessionEnded(
+                    f"list_apps failed: the driver session ended "
+                    f"({exc.__class__.__name__}: {exc})") from exc
             raise DriverUnavailable(
                 f"list_apps failed: {exc.__class__.__name__}: {exc}") from exc
         return [_app_record(a) for a in (getattr(out, "apps", None) or [])]
