@@ -172,7 +172,7 @@ def _render(
         if blocked:
             text = (
                 f"web search is blocked right now: duckduckgo {reason}. This is not "
-                f"an empty result; no search ran."
+                f"an empty result: no backend could run the search."
             )
         else:
             text = f"web search failed: duckduckgo {reason}."

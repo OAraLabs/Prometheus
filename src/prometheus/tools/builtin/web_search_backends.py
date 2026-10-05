@@ -285,7 +285,16 @@ async def search_brave(
             "User-Agent": USER_AGENT,
         },
         timeout=BRAVE_TIMEOUT,
+        # httpx strips Authorization on a cross-origin redirect but not this
+        # header, so a followed redirect would hand the key to wherever it led.
+        follow_redirects=False,
     )
+    if 300 <= response.status_code < 400:
+        raise BackendFailure(
+            KIND_ERROR,
+            f"redirected (HTTP {response.status_code}); not followed, so the key "
+            f"goes nowhere but Brave",
+        )
     if response.status_code == 429:
         raise BackendFailure(KIND_RATE_LIMITED, "rate limited (HTTP 429)")
     if response.status_code in (401, 403):
@@ -371,24 +380,35 @@ async def search_duckduckgo(
 
 
 def classify_ddg_page(status: int, body: str, final_url: str, *, limit: int) -> list[SearchHit]:
-    """Results, [] for DuckDuckGo's own empty page, or BackendFailure(KIND_BLOCKED)."""
+    """Results, [] for DuckDuckGo's own empty page, or BackendFailure(KIND_BLOCKED).
+
+    Results are parsed BEFORE looking for the challenge: a search about
+    DuckDuckGo's bot check returns snippets that name its markers, and the
+    challenge page has no result links. Only the URL's PATH is checked for
+    "anomaly"; the query string carries the user's words.
+    """
     lowered = body.lower()
-    challenge = "anomaly" in final_url or any(m in lowered for m in _DDG_CHALLENGE_MARKERS)
     if status in _DDG_REFUSAL_STATUSES:
-        what = "bot challenge (CAPTCHA)" if challenge else "turned away"
+        what = "bot challenge (CAPTCHA)" if _is_challenge(lowered, final_url) else "turned away"
         raise BackendFailure(KIND_BLOCKED, f"{what}, HTTP {status}")
-    if challenge:
-        raise BackendFailure(KIND_BLOCKED, f"bot challenge (CAPTCHA) served as HTTP {status}")
     if status >= 400:
         raise BackendFailure(KIND_ERROR, f"HTTP {status}")
     hits = parse_ddg_results(body, limit=limit)
     if hits:
         return hits
+    if _is_challenge(lowered, final_url):
+        raise BackendFailure(KIND_BLOCKED, f"bot challenge (CAPTCHA) served as HTTP {status}")
     if any(m in lowered for m in _DDG_EMPTY_MARKERS):
         return []
     raise BackendFailure(
         KIND_BLOCKED,
         f"HTTP {status} with no results and no 'no results' marker (a soft block)",
+    )
+
+
+def _is_challenge(lowered_body: str, final_url: str) -> bool:
+    return "anomaly" in urlparse(final_url).path.lower() or any(
+        m in lowered_body for m in _DDG_CHALLENGE_MARKERS
     )
 
 
@@ -455,11 +475,15 @@ def _is_duckduckgo_url(url: str) -> bool:
 async def _get(
     client: httpx.AsyncClient, url: str, backend: str, *,
     params: dict[str, Any], headers: dict[str, str], timeout: float,
+    follow_redirects: bool = True,
 ) -> httpx.Response:
     """GET, turning transport failures into BackendFailure. Never names the
     request's headers, which is where a key travels."""
     try:
-        return await client.get(url, params=params, headers=headers, timeout=timeout)
+        return await client.get(
+            url, params=params, headers=headers, timeout=timeout,
+            follow_redirects=follow_redirects,
+        )
     except httpx.TimeoutException as exc:
         raise BackendFailure(KIND_TIMEOUT, f"timed out after {timeout:.0f}s") from exc
     except httpx.HTTPError as exc:

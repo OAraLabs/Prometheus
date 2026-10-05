@@ -269,6 +269,19 @@ class TestFallthrough:
         assert brave_key not in result.output
         assert "<strong>" not in result.output  # Brave marks matches in HTML
 
+    def test_brave_never_follows_a_redirect_with_the_key(self, brave_key: str) -> None:
+        """httpx strips Authorization on a cross-origin redirect, but not
+        X-Subscription-Token: following one would hand the key to that host."""
+        web = FakeWeb(
+            brave=lambda r: httpx.Response(302, headers={"location": "https://evil.test/x"}),
+            ddg_html=_html("ddg_html_results.html"),
+        )
+        result = _run(_tool(web))
+        assert "evil.test" not in web.hosts
+        assert web.hosts == [BRAVE, DDG_HTML]
+        assert result.metadata["skipped"][0]["backend"] == "brave"
+        assert "302" in result.metadata["skipped"][0]["reason"]
+
     def test_a_rejected_brave_key_falls_through_without_echoing_it(self, brave_key: str) -> None:
         web = FakeWeb(brave=_status(401, '{"error": "invalid token"}'),
                       ddg_html=_html("ddg_html_results.html"))
@@ -350,6 +363,27 @@ class TestDuckDuckGo:
         assert result.output.startswith("No search results found")
         assert "blocked" not in result.output
         assert web.hosts == [DDG_HTML]
+        assert result.metadata["blocked"] is False
+
+    def test_results_that_mention_the_challenge_are_still_results(self) -> None:
+        """A search ABOUT DuckDuckGo's bot check returns snippets that name it."""
+        page = _fx("ddg_html_results.html").replace(
+            "LLM inference in C/C++.",
+            "Unfortunately, bots use DuckDuckGo too: the anomaly-modal and "
+            "challenge-form served from anomaly.js.", 1,
+        )
+        assert "bots use DuckDuckGo too" in page
+        web = FakeWeb(ddg_html=lambda r: httpx.Response(200, text=page))
+        result = _run(_tool(web), query="duckduckgo anomaly.js challenge-form")
+        assert not result.is_error, result.output
+        assert result.metadata["endpoint"] == "html"
+
+    def test_a_query_about_anomalies_with_no_results_is_not_a_captcha(self) -> None:
+        """The final URL carries the query; "anomaly" in it is not a challenge."""
+        web = FakeWeb(ddg_html=_html("ddg_html_no_results.html"))
+        result = _run(_tool(web), query="anomaly detection qzxv")
+        assert web.calls[0].url.params["q"] == "anomaly detection qzxv"
+        assert result.output.startswith("No search results found")
         assert result.metadata["blocked"] is False
 
     def test_a_dead_html_endpoint_falls_back_to_lite(self) -> None:

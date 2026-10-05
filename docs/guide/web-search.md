@@ -82,7 +82,8 @@ echo 'BRAVE_API_KEY=<your key>' >> ~/.config/prometheus/env
 
 Restart the daemon. A key written into `prometheus.yaml` is ignored, with a
 WARNING saying where it belongs. The key travels only in Brave's
-`X-Subscription-Token` header; it is never in a URL, a result or telemetry.
+`X-Subscription-Token` header; it is never in a URL, a result or telemetry,
+and that request never follows a redirect (httpx would carry the header along).
 A rejected key (401/403) falls through to the next backend.
 
 ## SearXNG
