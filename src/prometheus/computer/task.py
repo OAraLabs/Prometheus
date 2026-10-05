@@ -70,6 +70,7 @@ from prometheus.computer.actions import schema_for
 from prometheus.computer.chooser import RuleChooser
 from prometheus.computer.discovery import (
     RESOLVED,
+    AppIdentity,
     AppRecord,
     WindowRecord,
     resolve_app,
@@ -674,7 +675,8 @@ class ComputerTaskRunner:
                 task, limits=self.limits,
                 chooser=str(getattr(chooser, "name", "rule")))
         task._handle = asyncio.create_task(
-            self._run(task, driver, binding, res.app.pid, notify, chooser),
+            self._run(task, driver, binding, res.app.pid, notify, chooser,
+                      identity=AppIdentity.of(res.app)),
             name=f"computer-task-{task.task_id}")
         return task
 
@@ -727,7 +729,8 @@ class ComputerTaskRunner:
     # ── the run ─────────────────────────────────────────────────────────
 
     async def _run(self, task: ComputerTask, driver: Any, binding: Binding,
-                   pid: int, notify, chooser: Any = None) -> None:
+                   pid: int, notify, chooser: Any = None, *,
+                   identity: AppIdentity | None = None) -> None:
         seeing = _SeeingDriver(driver)
         consent = SessionConsent(self, task, binding, seeing)
         picker = _StopAwareChooser(chooser or self._chooser_factory(), task)
@@ -765,7 +768,8 @@ class ComputerTaskRunner:
                 step_started = self._clock()
                 result = await loop.step(
                     task.goal, task.target, task.app, pid, window.window_id,
-                    text_to_type=task.text, history=history)
+                    text_to_type=task.text, history=history,
+                    identity=identity)
                 after_stop = (result.status == "executed"
                               and task.stop_requested)
                 if self.live is not None:

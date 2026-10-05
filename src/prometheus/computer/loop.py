@@ -36,7 +36,7 @@ from prometheus.computer.candidates import (
     build_choice_request,
     validate_choice,
 )
-from prometheus.computer.discovery import same_app
+from prometheus.computer.discovery import AppIdentity
 from prometheus.computer.driver import Driver, StaleSnapshot, check_preconditions
 from prometheus.computer.types import Candidate
 from prometheus.permissions.computer_extent import (
@@ -133,7 +133,13 @@ class ComputerUseLoop:
         *,
         text_to_type: str | None = None,
         history: list[str] | None = None,
+        identity: AppIdentity | None = None,
     ) -> StepResult:
+        """One step. ``identity`` is the app as the door resolved it (every
+        identifier, and the pid); without one, check 1b compares the driver's
+        report against ``app`` alone, with no pid."""
+        if identity is None:
+            identity = AppIdentity(names=(app,))
         if not self._skip_preconditions:
             # OFF THE LOOP. This is not a cheap predicate: it opens a unix
             # socket to the X display and shells out to gdbus, and both block
@@ -158,6 +164,13 @@ class ComputerUseLoop:
         # named no app, or named another one, nothing here can establish
         # what a grant or an approval would be FOR, so the window is refused
         # rather than labelled with the caller's claim.
+        #
+        # "Another one" means: not ANY identifier the door resolved the app
+        # by, or — when both pids are known — another process. The driver
+        # may name the app by its executable while the door showed its
+        # display name (task 36ed5742); that is the same app. This decides
+        # only WHETHER to act here: the extent's app term below is still the
+        # driver's report, so no consent is widened by it.
         if not observation.unusable_reason:
             reported = str(observation.app or "").strip()
             if not reported:
@@ -168,12 +181,14 @@ class ComputerUseLoop:
                             "established — refusing rather than taking the "
                             "caller's word for it"),
                 )
-            if not same_app(reported, app):
+            if not identity.matches(reported, observation.pid):
+                whose = (f" (pid {observation.pid}, not pid {identity.pid})"
+                         if identity.pid_differs(observation.pid) else "")
                 return StepResult(
                     status="blocked",
                     reason=(f"the driver says this window belongs to "
-                            f"{reported!r}, not {app!r} — refusing to act in "
-                            f"an app nobody asked for"),
+                            f"{reported!r}{whose}, not {app!r} — refusing to "
+                            f"act in an app nobody asked for"),
                 )
 
         # 2. BUILD -----------------------------------------------------------
