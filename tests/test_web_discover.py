@@ -364,3 +364,38 @@ class TestTheGate:
         assert [name for name, _ in seen] == ["web_discover"]
         assert seen[0][1]["is_read_only"] is True
         assert len(exa.calls) == 1
+
+
+class TestTheCallIsBounded:
+    def test_a_trickling_answer_ends_at_the_tools_own_limit(
+        self, exa_key: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """httpx's timeout is per read; a trickle never trips it. The call has a
+        wall-clock limit, so it ends with its own message instead of being
+        cancelled by the agent loop's 300 s tool timeout."""
+        async def drip():
+            while True:
+                await asyncio.sleep(0.02)
+                yield b" "
+
+        monkeypatch.setattr(wd, "TIMEOUT", 0.2)
+        tool = WebDiscoverTool(
+            transport=FakeExa(lambda r: httpx.Response(200, content=drip())).transport,
+        )
+        ctx = ToolExecutionContext(cwd=Path.cwd())
+        result = asyncio.run(asyncio.wait_for(
+            tool.execute(WebDiscoverInput(query="x"), ctx), timeout=5,
+        ))
+        assert result.is_error
+        assert result.output == "web_discover failed: Exa took longer than 0.2s"
+
+    def test_the_limit_is_inside_the_loops_tool_timeout(self) -> None:
+        from dataclasses import fields
+
+        from prometheus.engine.agent_loop import LoopContext
+
+        loop_default = next(
+            f.default for f in fields(LoopContext) if f.name == "tool_timeout_seconds"
+        )
+        assert WebDiscoverTool.execution_timeout_seconds is None
+        assert wd.TIMEOUT < loop_default

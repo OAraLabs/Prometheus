@@ -21,6 +21,7 @@ to Exa: that would hand a third party the shape of the operator's network.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Literal
@@ -38,6 +39,8 @@ EXA_BASE = "https://api.exa.ai"
 MAX_RESULTS = 10
 DEFAULT_RESULTS = 5
 SUMMARY_CHARS = 300
+#: Seconds for the one Exa request: httpx's per-phase timeout AND a wall-clock
+#: limit (asyncio.wait_for), well inside the agent loop's 300 s tool timeout.
 TIMEOUT = 30.0
 #: Guides Exa's per-result summary toward one or two sentences.
 SUMMARY_QUERY = "In one or two sentences: what is this, and what does it do or study?"
@@ -146,10 +149,15 @@ class WebDiscoverTool(BaseTool):
 
         try:
             async with httpx.AsyncClient(transport=self._transport) as client:
-                response = await client.post(
+                # Wall clock as well as httpx's timeout, which is per read: a
+                # trickling answer would otherwise run on until the agent loop's
+                # tool timeout cancelled the call.
+                response = await asyncio.wait_for(client.post(
                     EXA_BASE + endpoint, json=body, timeout=TIMEOUT,
                     headers={"x-api-key": key, "Content-Type": "application/json"},
-                )
+                ), timeout=TIMEOUT)
+        except asyncio.TimeoutError:
+            return _failed(f"Exa took longer than {TIMEOUT:.3g}s")
         except httpx.TimeoutException:
             return _failed(f"Exa timed out after {TIMEOUT:.0f}s")
         except httpx.HTTPError as exc:
