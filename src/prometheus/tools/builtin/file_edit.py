@@ -38,7 +38,7 @@ class FileEditTool(BaseTool):
     name = "edit_file"
     description = "Edit an existing file by replacing a string."
     input_model = FileEditToolInput
-    example_call = {"file_path": "/path/to/file", "old_string": "before", "new_string": "after"}
+    example_call = {"path": "/path/to/file", "old_str": "before", "new_str": "after"}
 
     async def execute(
         self,
