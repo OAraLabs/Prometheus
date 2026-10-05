@@ -404,6 +404,76 @@ class TestRedaction:
 
 
 # --------------------------------------------------------------------------- #
+# A repaired call that is then refused counts its repairs
+# --------------------------------------------------------------------------- #
+
+
+def _repairs(call: sqlite3.Row) -> tuple:
+    return call["error_type"], call["tool_name"], call["repairs"], call["repair_kind"]
+
+
+class TestRepairsOnRefusedCalls:
+    """``repairs`` and ``repair_kind`` describe the same repair log.
+
+    The refusals written after the adapter changed a call carried the kind and
+    the raw call but left ``repairs`` at its default 0, so a row could say
+    ``repair_kind='fuzzy_name'`` with ``repairs=0``.
+    """
+
+    def test_a_repaired_call_that_then_fails_input_validation(self, tmp_path):
+        from prometheus.adapter import ModelAdapter
+        from prometheus.adapter.validator import RepairNote
+
+        class _RepairsWithoutRechecking(ModelAdapter):
+            # The stock validator re-validates the input after a repair, so a
+            # misnamed call with a bad input fails INSIDE the adapter (the next
+            # test). A repair that does not re-check hands the loop a repaired
+            # call that the loop's own pydantic check is the first to refuse.
+            def validate_and_repair(self, tool_name, tool_input, tool_registry):  # noqa: ANN001
+                name, _ = self.validator._fuzzy_match_tool_name(tool_name, tool_registry)
+                return name, tool_input, [RepairNote(f"{tool_name!r} → {name!r}", "fuzzy_name")]
+
+        db = _run(tmp_path, [_call("count_tol", "r1", count="lots"), _prose("done")],
+                  adapter=_RepairsWithoutRechecking(tier=ModelAdapter.TIER_LIGHT))
+        [call] = _calls(db)
+        assert _repairs(call) == ("input_validation", "count_tool", 1, "fuzzy_name")
+        assert call["success"] == 0
+        assert json.loads(call["raw_before_repair"])["name"] == "count_tol"
+
+    def test_a_call_the_adapter_could_not_repair_counts_none(self, tmp_path):
+        from prometheus.adapter import ModelAdapter
+
+        db = _run(tmp_path, [_call("count_tol", "v1", count="lots"), _prose("done")],
+                  adapter=ModelAdapter(tier=ModelAdapter.TIER_LIGHT))
+        [call] = _calls(db)
+        # The repair as a whole failed, so nothing was applied to the call.
+        assert _repairs(call) == ("validation_failed", "count_tol", 0, None)
+        assert call["raw_before_repair"] is None
+
+    def test_a_repaired_call_refused_for_template_markup(self, tmp_path):
+        from prometheus.adapter import ModelAdapter
+
+        leaked = "<|tool_response>call:[]<tool_call|>"  # two markers: markup_guard.REJECT_AT
+        db = _run(tmp_path, [_call("count_tol", "m1", count=1, note=leaked), _prose("done")],
+                  adapter=ModelAdapter(tier=ModelAdapter.TIER_LIGHT))
+        [call] = _calls(db)
+        assert _repairs(call) == ("template_markup", "count_tool", 1, "fuzzy_name")
+
+    def test_a_repaired_call_the_gate_denies(self, tmp_path):
+        from prometheus.adapter import ModelAdapter
+        from prometheus.permissions.checker import PermissionDecision
+
+        class _DenyAll:
+            def evaluate(self, tool_name, **_kw):  # noqa: ANN001
+                return PermissionDecision.deny(f"{tool_name} is not allowed here")
+
+        db = _run(tmp_path, [_call("count_tol", "d1", count=1), _prose("done")],
+                  adapter=ModelAdapter(tier=ModelAdapter.TIER_LIGHT), permission_checker=_DenyAll())
+        [call] = _calls(db)
+        assert _repairs(call) == ("permission_denied", "count_tool", 1, "fuzzy_name")
+
+
+# --------------------------------------------------------------------------- #
 # training_pairs carry the turn and round they were captured in (Will, 10-02)
 # --------------------------------------------------------------------------- #
 

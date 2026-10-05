@@ -4557,7 +4557,8 @@ async def _execute_tool_call(
             # M2: a name-changing repair (fuzzy match) silently executes a
             # DIFFERENT tool than the model named — for a mutating tool that's a
             # real surprise. Surface it; the repair count reaches telemetry on
-            # the success record() below.
+            # every row written for this call from here on, the refusals
+            # included: `repairs` and `repair_kind` describe the same log.
             if repair_log and tool_name != _original_tool_name:
                 log.warning(
                     "Adapter repaired tool name %r → %r before execution: %s",
@@ -4670,6 +4671,7 @@ async def _execute_tool_call(
                 success=False,
                 error_type="unknown_tool",
                 error_detail=f"Unknown tool: {tool_name}",
+                repairs=len(repair_log),
                 served_model=served_model,
                 parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
                 session_id=_row_session,
@@ -4763,6 +4765,7 @@ async def _execute_tool_call(
                 error_type="template_markup",
                 error_detail=markup_guard.describe(_markup),
                 parsed_tool_call=_markup_call,
+                repairs=len(repair_log),
                 served_model=served_model,
                 session_id=_row_session,
                 **_v2_call(tool_name, tool_use_id, success=False,
@@ -4841,6 +4844,7 @@ async def _execute_tool_call(
                     # forensics + future mining (input_validation rows had
                     # 0/21 parsed_tool_call coverage in all history)
                     parsed_tool_call=_failed_call,
+                    repairs=len(repair_log),
                     served_model=served_model,
                     session_id=_row_session,
                     **_v2_call(tool_name, tool_use_id, success=False,
@@ -5056,6 +5060,7 @@ async def _execute_tool_call(
                             success=False,
                             error_type="permission_denied",
                             error_detail=f"User denied permission for {tool_name}",
+                            repairs=len(repair_log),
                             served_model=served_model,
                             parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
                             session_id=_row_session,
@@ -5075,6 +5080,7 @@ async def _execute_tool_call(
                         success=False,
                         error_type="permission_denied",
                         error_detail=decision.reason or f"Permission denied for {tool_name}",
+                        repairs=len(repair_log),
                         served_model=served_model,
                         parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
                         session_id=_row_session,
