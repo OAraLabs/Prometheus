@@ -47,12 +47,13 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, MutableMapping
 
 from prometheus.computer.driver import (
     STATE_UNKNOWN,
     Driver,
+    DriverSessionEnded,
     DriverUnavailable,
     PreconditionResult,
     check_preconditions,
@@ -152,6 +153,9 @@ class Check:
     name: str
     state: str
     detail: str = ""
+    #: The observe step failed because the driver's session had ended — the
+    #: one cause the probe answers with a fresh driver. Not reported.
+    session_ended: bool = False
 
     def as_dict(self) -> dict[str, str]:
         return {"name": self.name, "state": self.state, "detail": self.detail}
@@ -317,13 +321,23 @@ class ComputerIntegration:
     def _run_checks(self) -> list[Check]:
         """The ordered checks. Stops at the first DOWN in the chain — there is
         no point starting a runtime on a dead display — but the MCP check is
-        independent and always runs."""
+        independent and always runs.
+
+        ⚠ ONE RETRY, FOR ONE CAUSE. The adapter keeps its first driver, and
+        Cua ends an idle driver session on its own; from then on that driver
+        answers ``session_ended`` to everything. When that is the ONLY thing
+        wrong — every other check ok, the observe step down for that reason —
+        the dead driver is released and the chain runs once more on a fresh
+        one. A second ``session_ended``, or any other failure, is recorded
+        and fails closed as before: no loop, and no retry of anything that
+        could have acted."""
         with self._run_lock:
-            try:
-                checks = self._chain()
-            except Exception as exc:  # noqa: BLE001 — recorded, never raised
-                checks = [Check("probe", DOWN,
-                                f"{exc.__class__.__name__}: {exc}")]
+            checks = self._chain_recorded()
+            if _only_the_session_ended(checks):
+                logger.info("computer-use: the driver session had ended; "
+                            "starting a fresh driver and probing once more")
+                self._release()
+                checks = _after_a_fresh_driver(self._chain_recorded())
             checks.append(self._mcp_check())
             if any(c.state == DOWN for c in checks):
                 # A runtime that failed its probe is not kept, and nothing is
@@ -331,6 +345,12 @@ class ComputerIntegration:
                 # found it — never by a caller that merely stopped waiting.
                 self._release()
             return checks
+
+    def _chain_recorded(self) -> list[Check]:
+        try:
+            return self._chain()
+        except Exception as exc:  # noqa: BLE001 — recorded, never raised
+            return [Check("probe", DOWN, f"{exc.__class__.__name__}: {exc}")]
 
     def _chain(self) -> list[Check]:
         out: list[Check] = []
@@ -395,6 +415,10 @@ class ComputerIntegration:
         else:
             try:
                 apps = list_apps()
+            except DriverSessionEnded as exc:
+                out.append(Check("observe", DOWN, str(exc),
+                                 session_ended=True))
+                return out
             except DriverUnavailable as exc:
                 out.append(Check("observe", DOWN, str(exc)))
                 return out
@@ -448,6 +472,27 @@ class ComputerIntegration:
     def close(self) -> None:
         """Daemon shutdown: stop the runtime and unbind the target."""
         self._release()
+
+
+def _only_the_session_ended(checks: list[Check]) -> bool:
+    """Every check ok except the observe step, which failed only because the
+    driver's session had ended."""
+    if not checks:
+        return False
+    *rest, last = checks
+    return (last.name == "observe" and last.state == DOWN
+            and last.session_ended and all(c.state == OK for c in rest))
+
+
+def _after_a_fresh_driver(checks: list[Check]) -> list[Check]:
+    """The retry's checks, with the observe step saying it ran on a
+    replacement driver — so a reader can tell this answer from a first try."""
+    note = "on a fresh driver; the previous driver's session had ended"
+    return [
+        replace(c, detail=f"{c.detail} ({note})" if c.detail else note)
+        if c.name == "observe" else c
+        for c in checks
+    ]
 
 
 def _default_adapter(target: str) -> Any:
