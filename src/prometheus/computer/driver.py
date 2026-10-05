@@ -427,6 +427,18 @@ class DriverBusy(DriverUnavailable):
     """
 
 
+class DriverSessionEnded(DriverUnavailable):
+    """The driver's session has ended, so this driver refuses every call.
+
+    Cua ends an idle session on its own and then answers ``session_ended``
+    to everything sent to that driver; only a fresh driver gets a new one.
+    A subclass of ``DriverUnavailable`` so every existing refusal path still
+    catches it. Distinct so the probe can replace the driver ONCE
+    (``ComputerIntegration._run_checks``) — it is never a reason to retry an
+    action.
+    """
+
+
 class ActionOutcomeUnknown(DriverUnavailable):
     """The driver did not answer in time, and the action MAY STILL LAND.
 

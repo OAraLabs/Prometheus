@@ -60,6 +60,7 @@ task says so ("in flight at stop") rather than claiming an instant stop.
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import logging
 import re
 import time
@@ -941,8 +942,12 @@ class ComputerTaskRunner:
             snap = self.integration.snapshot()
         except Exception:  # noqa: BLE001
             pass
+        # ⚠ THE CACHE, AND ITS AGE. A status read never probes, so the answer
+        # can be minutes old; it says so. A task does not read this — `_driver`
+        # forces a fresh probe before anything starts.
         lines = [f"Computer use: on — driver {snap.get('state', 'unknown')}"
-                 + (f" (cua-driver {snap['version']})" if snap.get("version") else "")]
+                 + (f" (cua-driver {snap['version']})" if snap.get("version") else "")
+                 + f", {_checked(snap.get('checked_at'), self._wall())}"]
         for check in snap.get("checks") or []:
             if check.get("state") != "ok":
                 lines.append(f"  {check.get('name')}: {check.get('state')} — "
@@ -1007,6 +1012,21 @@ def end_message(task: ComputerTask) -> str:
 
 def _n(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _checked(checked_at: Any, now: float) -> str:
+    """How old the cached probe is: "checked 4m ago", or "not checked yet"."""
+    if not checked_at:
+        return "not checked yet"
+    try:
+        at = _dt.datetime.fromisoformat(str(checked_at)).timestamp()
+    except ValueError:
+        return f"checked at {checked_at}"
+    age = max(0, int(now - at))
+    for unit, seconds in (("d", 86400), ("h", 3600), ("m", 60)):
+        if age >= seconds:
+            return f"checked {age // seconds}{unit} ago"
+    return f"checked {age}s ago"
 
 
 def _same(a: str, b: str, aliases: Mapping[str, Any]) -> bool:
