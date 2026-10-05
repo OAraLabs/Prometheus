@@ -169,8 +169,8 @@ class ComputerUseLoop:
         # by, or — when both pids are known — another process. The driver
         # may name the app by its executable while the door showed its
         # display name (task 36ed5742); that is the same app. This decides
-        # only WHETHER to act here: the extent's app term below is still the
-        # driver's report, so no consent is widened by it.
+        # only WHETHER to act here. The extent's app term below is still the
+        # driver's report; what a person's pick covers is `Binding.covers`.
         if not observation.unusable_reason:
             reported = str(observation.app or "").strip()
             if not reported:
