@@ -219,32 +219,7 @@ def plan_backends(cfg: Mapping[str, Any] | None) -> BackendPlan:
 async def search_searxng(
     client: httpx.AsyncClient, base_url: str, query: str, limit: int,
 ) -> list[SearchHit]:
-    url = base_url.rstrip("/") + "/search"
-    response = await _get(
-        client, url, SEARXNG,
-        params={"q": query, "format": "json"},
-        headers={"Accept": "application/json", "User-Agent": USER_AGENT},
-        timeout=SEARXNG_TIMEOUT,
-    )
-    if response.status_code == 403:
-        raise BackendFailure(KIND_JSON_DISABLED, f"{SEARXNG_JSON_DISABLED} (it answered HTTP 403)")
-    if response.status_code == 429:
-        raise BackendFailure(KIND_RATE_LIMITED, "rate limited (HTTP 429; is its limiter on?)")
-    if response.status_code >= 400:
-        raise BackendFailure(KIND_ERROR, f"HTTP {response.status_code}")
-    try:
-        data = json.loads(response.text)
-    except ValueError:
-        data = None
-    if not isinstance(data, dict):
-        title = _page_title(response.text)
-        shown = f" ({title!r})" if title else ""
-        raise BackendFailure(
-            KIND_JSON_DISABLED,
-            f"{SEARXNG_JSON_DISABLED} (it answered "
-            f"{response.headers.get('content-type', 'something').split(';')[0]}"
-            f"{shown}, not JSON)",
-        )
+    data = await fetch_searxng_json(client, base_url, query)
     hits = [
         SearchHit(
             title=_clean_text(str(item.get("title") or "")),
@@ -266,6 +241,46 @@ async def search_searxng(
             )
         raise BackendFailure(KIND_NO_RESULTS, "no results")
     return hits
+
+
+async def fetch_searxng_json(
+    client: httpx.AsyncClient, base_url: str, query: str, *,
+    timeout: float = SEARXNG_TIMEOUT,
+) -> dict[str, Any]:
+    """SearXNG's JSON answer for ``query``, or BackendFailure saying why not.
+
+    A 403 or an answer that is not JSON is KIND_JSON_DISABLED: that is what a
+    stock instance (``search.formats`` without json) and a public instance with
+    a browser check in front of its API both return. ``oara search setup``
+    waits on this same function, so the two cannot disagree about "answers JSON".
+    """
+    url = base_url.rstrip("/") + "/search"
+    response = await _get(
+        client, url, SEARXNG,
+        params={"q": query, "format": "json"},
+        headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+        timeout=timeout,
+    )
+    if response.status_code == 403:
+        raise BackendFailure(KIND_JSON_DISABLED, f"{SEARXNG_JSON_DISABLED} (it answered HTTP 403)")
+    if response.status_code == 429:
+        raise BackendFailure(KIND_RATE_LIMITED, "rate limited (HTTP 429; is its limiter on?)")
+    if response.status_code >= 400:
+        raise BackendFailure(KIND_ERROR, f"HTTP {response.status_code}")
+    try:
+        data = json.loads(response.text)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        title = _page_title(response.text)
+        shown = f" ({title!r})" if title else ""
+        raise BackendFailure(
+            KIND_JSON_DISABLED,
+            f"{SEARXNG_JSON_DISABLED} (it answered "
+            f"{response.headers.get('content-type', 'something').split(';')[0]}"
+            f"{shown}, not JSON)",
+        )
+    return data
 
 
 # ---------------------------------------------------------------------------

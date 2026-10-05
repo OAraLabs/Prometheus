@@ -1503,6 +1503,7 @@ def main() -> None:
     from prometheus.cli.gepa import add_gepa_subparser
     from prometheus.cli.retention import add_retention_subparser
     from prometheus.cli.scrub import add_scrub_subparser
+    from prometheus.cli.search import add_search_subparser
     from prometheus.cli.service import add_install_service_subparser
     from prometheus.cli.setup import add_setup_subparser
     from prometheus.cli.token import add_token_subparser
@@ -1513,6 +1514,7 @@ def main() -> None:
     add_install_service_subparser(subparsers)
     add_gepa_subparser(subparsers)
     add_scrub_subparser(subparsers)
+    add_search_subparser(subparsers)
 
     daemon_parser = subparsers.add_parser("daemon", help="Start always-on daemon")
     daemon_parser.add_argument(
@@ -1914,6 +1916,11 @@ def main() -> None:
     if args.command == "scrub":
         from prometheus.cli.scrub import run_scrub
         sys.exit(run_scrub(args))
+
+    # `oara search setup` — SearXNG in Docker for web_search. No model needed.
+    if args.command == "search":
+        from prometheus.cli.search import run_search_command
+        sys.exit(run_search_command(args))
 
     # Migration subcommand — runs pre-agent, no model needed
     if args.command == "retention":
