@@ -71,7 +71,14 @@ from typing import Any, Awaitable, Callable, Mapping
 from pydantic import BaseModel
 
 from prometheus.computer.actions import schema_for
-from prometheus.computer.chooser import RuleChooser
+from prometheus.computer.chooser import (
+    KIND_CLICK,
+    KIND_KEY,
+    KIND_SET,
+    RuleChooser,
+    goal_kind_and_words,
+    is_single_action_goal,
+)
 from prometheus.computer.discovery import (
     RESOLVED,
     AppIdentity,
@@ -141,6 +148,14 @@ _ALWAYS_ASK_VERBS: frozenset[str] = frozenset({"type_text", "set_value",
 
 SCOPE_SESSION = "session"
 SCOPE_TASK = "task"
+
+#: The action kind each desktop tool performs, matched against the kind a
+#: single-action goal asks for (#668). The chooser never sees these names.
+_KIND_OF_TOOL = {
+    "computer_click": KIND_CLICK,
+    "computer_press_key": KIND_KEY,
+    "computer_set_value": KIND_SET,
+}
 
 OUTCOMES = ("done", "abstained", "stopped", "refused", "failed", "limit")
 
@@ -770,6 +785,12 @@ class ComputerTaskRunner:
         history: list[str] = []
         reobserve = 0
         outcome, reason = "failed", ""
+        # #668: a goal that names one action ("press tab", "click save") is
+        # done once an action OF THAT KIND runs. Without this the loop had no
+        # notion of a finished goal and repeated the step to max_steps. A step
+        # of another kind (a click before a fill) does not end it.
+        single_action = is_single_action_goal(task.goal)
+        goal_kind = goal_kind_and_words(task.goal)[0]
         try:
             while True:
                 if task.stop_requested:
@@ -807,6 +828,10 @@ class ComputerTaskRunner:
                     reobserve = 0
                     if after_stop:
                         task.in_flight_at_stop = True
+                    elif single_action and result.candidate is not None and \
+                            _KIND_OF_TOOL.get(result.candidate.tool_name) == goal_kind:
+                        outcome, reason = "done", "the goal's one action ran"
+                        break
                     continue
                 if result.status == "reobserve":
                     reobserve += 1
