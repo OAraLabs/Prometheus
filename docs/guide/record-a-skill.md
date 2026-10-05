@@ -17,6 +17,11 @@ Config→Skills tab pick new skills up with no extra wiring, and the live
 
 ## The Live DOM path (phase 1)
 
+> **Not distributed yet:** this repository ships the daemon side of this
+> path — the pipeline below and its upload endpoint. The browser recorder
+> extension that captures the DOM trace is not published, so step 1 is
+> not something you can do from a public install today.
+
 1. Install the recorder extension (SkillForge Live, `chrome://extensions`
    → Load unpacked). Its upload endpoint defaults to the local daemon:
    `http://127.0.0.1:8005/api/learning/live-upload`. If your daemon has a
@@ -100,8 +105,9 @@ skill on its own.
 ## The new-VLM ritual: bakeoff before enablement
 
 Before pointing video ingestion at a new vision model, score it against
-the annotated session corpus (videos + hand-written golden SKILL.md
-files; the SkillForge corpus lives at `oara-4090:~/projects/skillforge`):
+an annotated session corpus (videos + hand-written golden SKILL.md
+files; the SkillForge corpus is not published, so point `--corpus` at
+your own):
 
 ```bash
 oara bakeoff-vlm \
