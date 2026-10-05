@@ -13,8 +13,11 @@ THE RULES PINNED HERE:
 * A single-action goal ends once its OWN action runs. A goal whose leading verb
   names one action (``press tab``, ``click save``, ``type …``), with no
   sequencing word (``then``, ``twice``, …), is ``done`` after the first executed
-  step of that kind (a click does not complete a fill).
-* The rule chooser never repeats the step it just took. If its best row is
+  step of that kind (a click does not complete a fill). A key goal needs the
+  SAME key it named: ``press tab`` is met by a Tab press, not an Escape press.
+  "Met" means the action RAN; its effect is not verified.
+* The RULE chooser never repeats the step it just took (the task loop does
+  not forbid repeats; a future model chooser may need one). If its best row is
   the last executed step, it abstains (it does not fall back to the next
   row), so the task ends ``done``: nothing more serves the goal.
 
@@ -67,6 +70,25 @@ class TestSingleActionGoals:
         done = await rig.runner.wait(task.task_id, timeout=10)
         assert _verbs(rig.driver) == [("press_key", "tab")]
         assert (done.outcome, done.steps, done.approvals) == ("done", 1, 0)
+
+    async def test_a_key_goal_is_met_only_by_the_key_it_named(self, tmp_path):
+        """'press tab' is not met by an Escape press: that ran, the task goes
+        on, and the Tab press that follows ends it."""
+        rig = _rig(tmp_path, ["key-escape", "key-tab", "key-tab"])
+        await _bind(rig)
+        task = await _start(rig, goal="press tab")
+        done = await rig.runner.wait(task.task_id, timeout=10)
+        assert _verbs(rig.driver) == [("press_key", "escape"), ("press_key", "tab")]
+        assert (done.outcome, done.steps) == ("done", 2)
+
+    async def test_a_key_alias_names_the_same_key(self, tmp_path):
+        """'press Esc' is met by the escape press the table offers."""
+        rig = _rig(tmp_path, ["key-escape", "key-escape"])
+        await _bind(rig)
+        task = await _start(rig, goal="press Esc")
+        done = await rig.runner.wait(task.task_id, timeout=10)
+        assert _verbs(rig.driver) == [("press_key", "escape")]
+        assert (done.outcome, done.steps) == ("done", 1)
 
     async def test_a_step_of_another_kind_does_not_end_the_goal(self, tmp_path):
         """A click is not the fill a 'fill' goal asked for: the task goes on
@@ -130,6 +152,27 @@ class TestNoRepeat:
     def test_an_earlier_step_does_not_block_a_row(self):
         assert _choose("save", [SAVE], ["Click the button 'Save'", "Press tab"]) == "click-0"
         assert _choose("save", [SAVE], []) == "click-0"
+
+    async def test_the_task_loop_itself_does_not_block_a_repeat(self, tmp_path):
+        """'Never repeat the last step' is the RULE chooser's rule, not the
+        loop's: a chooser that repeats (a future model chooser may need to)
+        gets its repeat."""
+        rig = _rig(tmp_path, ["click-0", "click-0"])
+        await _bind(rig)
+        task = await _start(rig, goal="save it")
+        done = await rig.runner.wait(task.task_id, timeout=10)
+        assert _verbs(rig.driver) == [("click", "tok-save"), ("click", "tok-save")]
+        assert done.steps == 2
+
+    async def test_a_sequenced_goal_abstains_under_the_rule_chooser(self, tmp_path):
+        """The rule chooser cannot sequence: 'Press tab' and 'Press escape'
+        tie, and a tie is never broken by position (#672), so nothing runs."""
+        rig = _with_rule_chooser(_rig(tmp_path, []))
+        await _bind(rig)
+        task = await _start(rig, goal="press tab then press escape")
+        done = await rig.runner.wait(task.task_id, timeout=10)
+        assert _verbs(rig.driver) == []
+        assert (done.outcome, done.steps) == ("abstained", 0)
 
     async def test_a_no_verb_goal_ends_done_after_one_click(self, tmp_path):
         rig = _with_rule_chooser(_rig(tmp_path, []))
