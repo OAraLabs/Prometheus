@@ -515,3 +515,35 @@ class TestTheRealWrapper:
         assert "127.0.0.1:8901" in out
         assert config.read_text() == CONFIG_TEXT
         assert all(entry[0] in ("info", "container") for entry in self._log(fake_docker))
+
+
+class TestTheProbeIsBounded:
+    def test_a_trickling_answer_cannot_stall_the_wait(
+        self, config: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """httpx's timeouts are per read, so a server trickling bytes never trips
+        them; each probe has a wall-clock limit, and the wait still ends."""
+        import asyncio
+        import threading
+
+        async def drip():
+            while True:
+                await asyncio.sleep(0.02)
+                yield b" "
+
+        transport = httpx.MockTransport(lambda r: httpx.Response(200, content=drip()))
+        monkeypatch.setattr(search, "PROBE_TIMEOUT", 0.2)
+        outcome: list[tuple[int, str]] = []
+        worker = threading.Thread(
+            target=lambda: outcome.append(
+                _setup(config, FakeDocker(container=_container()), transport, timeout=4.0)
+            ),
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=10)
+        assert not worker.is_alive(), "the readiness wait never ended"
+        code, out = outcome[0]
+        assert code == 1
+        assert "did not answer" in out and "took longer than" in out
+        assert config.read_text() == CONFIG_TEXT
