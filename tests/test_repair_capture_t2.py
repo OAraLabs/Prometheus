@@ -14,7 +14,7 @@ REPAIR KINDS
 ------------
 The adapter's repairs were known only as free text in `repair_log`. Each
 entry now also carries a structured kind (fuzzy_name / json_extract /
-type_coerce / strip_params / dict_unwrap / other). The entries are still the
+null_drop / type_coerce / strip_params / dict_unwrap / other). The entries are still the
 same strings, so what the adapter returns, and everything that joins, counts
 or stores `repair_log`, is unchanged. T-3 reads the kinds in the loop.
 """
@@ -267,8 +267,8 @@ class TestRepairKinds:
     def test_the_vocabulary(self):
         from prometheus.adapter.validator import REPAIR_KINDS
         assert REPAIR_KINDS == (
-            "fuzzy_name", "json_extract", "type_coerce", "strip_params",
-            "dict_unwrap", "other",
+            "fuzzy_name", "json_extract", "null_drop", "type_coerce",
+            "strip_params", "dict_unwrap", "other",
         )
 
     def test_fuzzy_name(self):
