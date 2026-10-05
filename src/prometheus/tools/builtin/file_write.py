@@ -42,7 +42,7 @@ class FileWriteTool(BaseTool):
         "(e.g. pandoc, python-docx, libreoffice) — do not refuse these formats."
     )
     input_model = FileWriteToolInput
-    example_call = {"file_path": "/path/to/file", "content": "file contents"}
+    example_call = {"path": "/path/to/file", "content": "file contents"}
 
     async def execute(
         self,
