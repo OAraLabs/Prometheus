@@ -1,0 +1,33 @@
+{
+  "type": "search",
+  "query": {"original": "llama.cpp grammar", "more_results_available": true},
+  "mixed": {"type": "mixed", "main": [{"type": "web", "index": 0, "all": false}]},
+  "web": {
+    "type": "search",
+    "family_friendly": true,
+    "results": [
+      {
+        "type": "search_result",
+        "title": "llama.cpp/grammars/README.md at master · ggml-org/llama.cpp",
+        "url": "https://github.com/ggml-org/llama.cpp/blob/master/grammars/README.md",
+        "is_source_local": false,
+        "is_source_both": false,
+        "description": "<strong>GBNF</strong> (GGML BNF) is a format for defining formal grammars to constrain model outputs in <strong>llama.cpp</strong>.",
+        "language": "en",
+        "family_friendly": true,
+        "meta_url": {"scheme": "https", "netloc": "github.com", "hostname": "github.com", "path": "› ggml-org › llama.cpp › blob › master › grammars › README.md"}
+      },
+      {
+        "type": "search_result",
+        "title": "Grammar and Structured Output | ggml-org/llama.cpp | DeepWiki",
+        "url": "https://deepwiki.com/ggml-org/llama.cpp/8.1-grammar-and-structured-output",
+        "is_source_local": false,
+        "is_source_both": false,
+        "description": "How <strong>llama.cpp</strong> constrains sampling with GBNF grammars and JSON schemas.",
+        "language": "en",
+        "family_friendly": true,
+        "meta_url": {"scheme": "https", "netloc": "deepwiki.com", "hostname": "deepwiki.com", "path": "› ggml-org › llama.cpp"}
+      }
+    ]
+  }
+}

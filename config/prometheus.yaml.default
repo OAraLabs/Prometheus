@@ -1181,6 +1181,20 @@ web_tools:
   download_max_mb: 100                      # download_file size cap (MB)
   youtube_transcript_language: "en"         # youtube_transcript default language code
 
+# web_search backends, tried in order (docs/guide/web-search.md). One that
+# errors, times out, is rate-limited or answers with a CAPTCHA falls through to
+# the next, and the result names the backend that answered and what was skipped.
+#   searxng    — runs when searxng_url is set; `oara search setup` starts one in
+#                Docker and writes the URL here. Needs JSON output enabled.
+#   brave      — runs when BRAVE_API_KEY is in ~/.config/prometheus/env (or the
+#                environment). Never put the key in this file; it is ignored here.
+#   duckduckgo — no key, no setup. ALWAYS the final fallback: left out or listed
+#                earlier, it is moved to the end (with a WARNING).
+# With neither searxng_url nor a Brave key, web_search runs DuckDuckGo alone.
+web_search:
+  backends: [searxng, brave, duckduckgo]
+  searxng_url: ""
+
 # Printing Press CLI library — discover and install Go-based service CLIs
 # from a local clone of github.com/mvanhorn/printing-press-library
 printing_press:

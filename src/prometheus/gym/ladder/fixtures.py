@@ -360,7 +360,10 @@ def fixture_web_tools(web: FixtureWeb) -> list[Any]:
                     lines.append(f"   {snippet}")
             return ToolResult(output="\n".join(lines))
 
-    return [FixtureWebFetch(), FixtureWebSearch()]
+    # DuckDuckGo alone, whatever keys the host has: the fixture answers every
+    # search itself, and a Brave key in the env file would otherwise change the
+    # description this tool advertises from one ladder host to the next.
+    return [FixtureWebFetch(), FixtureWebSearch(config={"backends": ["duckduckgo"]})]
 
 
 # ---------------------------------------------------------------------------
