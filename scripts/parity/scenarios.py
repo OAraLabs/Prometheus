@@ -161,6 +161,28 @@ def _req_checkpoint(ev: Evidence) -> list[str]:
 COMPACTION_WORDS = ("amber", "birch", "cobalt")
 
 
+# microcompaction: a chain of ledgers, each naming the next on its LAST line, so
+# the model has to read them one round at a time. Each is long enough (well
+# past the 500 characters microcompaction keeps) that cutting it down to an
+# excerpt is a real trim, and the line that matters sits past that excerpt.
+def _ledger(name: str, carry: int, nxt: str | None) -> str:
+    lines = [f"Ledger {name}. Audit notes, one per line; the last line is the one that counts."]
+    lines += [f"note {i:02d}: entry checked against the source, nothing to carry here."
+              for i in range(1, 31)]
+    tail = f"next ledger: ledger-{nxt}.txt" if nxt else "end of chain"
+    lines.append(f"carry: {carry}. {tail}")
+    return "\n".join(lines) + "\n"
+
+
+LEDGERS = {
+    "ledger-a.txt": _ledger("A", 7, "b"),
+    "ledger-b.txt": _ledger("B", 12, "c"),
+    "ledger-c.txt": _ledger("C", 23, None),
+}
+LEDGER_SUM = "42"
+TRIMMED = "[microcompacted]"
+
+
 def _req_compaction(ev: Evidence) -> list[str]:
     sig = [r for r in ev.rows("telemetry.db", "signal_events")
            if str(r.get("signal_type", "")).startswith("context_compaction")]
@@ -197,6 +219,23 @@ def _req_compaction(ev: Evidence) -> list[str]:
             + _need(not claimed, f"the final reply claims what never happened: {claimed}")
             + _need(len(lines) <= 2, f"the final reply is not one line ({len(lines)} lines)")
             + _need(not hedges, f"the final reply hedges: {hedges}"))
+
+
+def _req_microcompact(ev: Evidence) -> list[str]:
+    runs = [r for r in ev.rows("telemetry.db", "subsystem_runs")
+            if r.get("subsystem") == "agent_loop" and r.get("operation") == "microcompact"]
+    reads = [r for r in ev.tool_rows()
+             if r.get("tool_name") == "read_file" and r.get("success") == 1]
+    sent_trimmed = any(TRIMMED in json.dumps(req, default=str) for req in ev.requests)
+    stored = [r for r in ev.rows("lcm.db", "lcm_messages")
+              if TRIMMED in f"{r.get('content') or ''}{r.get('content_json') or ''}"]
+    return (_need(bool(runs), "microcompaction never ran")
+            + _need(sent_trimmed, "no request carried a trimmed tool result")
+            + _need(len(reads) >= 3, f"expected the 3 ledgers read, got {len(reads)} reads")
+            + _need(not stored, f"lcm.db stored {len(stored)} trimmed result(s): the excerpt "
+                                "replaced the record")
+            + _need(LEDGER_SUM in _final_reply(ev),
+                    f"the reply does not give the carry total ({LEDGER_SUM})"))
 
 
 # A pydantic validation error quoted into a tool result carries the offending
@@ -474,6 +513,20 @@ SCENARIOS: list[Scenario] = [
              "message": "What were the three words, in order? Answer in one line."},
         ],
         require=_req_compaction,
+    ),
+    Scenario(
+        name="microcompaction",
+        covers="microcompaction cuts old tool results down mid-run on a local tier (forced "
+               "to every round), and lcm.db still stores each result whole",
+        files={"cwd": LEDGERS},
+        config={"context": {"microcompact_after_turns": 1}},
+        steps=[{"op": "chat", "session": "desktop:parity-microcompact",
+                "message": "Use your tools, one file per step. Read ledger-a.txt with "
+                           "read_file. Its last line gives a carry value and names the next "
+                           "ledger: read that one, and keep going until a ledger says 'end "
+                           "of chain'. Then reply with the sum of all the carry values, as a "
+                           "number."}],
+        require=_req_microcompact,
     ),
     Scenario(
         name="coding_run",
