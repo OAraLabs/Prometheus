@@ -161,16 +161,18 @@ def _req_checkpoint(ev: Evidence) -> list[str]:
 COMPACTION_WORDS = ("amber", "birch", "cobalt")
 
 
-# microcompaction: a chain of ledgers, each naming the next on its LAST line, so
-# the model has to read them one round at a time. Each is long enough (well
-# past the 500 characters microcompaction keeps) that cutting it down to an
-# excerpt is a real trim, and the line that matters sits past that excerpt.
+# microcompaction: a chain of ledgers, each naming the next, so the model has to
+# read them one round at a time. Each is long enough (well past the 500
+# characters microcompaction keeps) that cutting it down to an excerpt is a real
+# trim. The line that matters comes FIRST, inside the excerpt: when it sat at
+# the end, the first live sample lost each carry to the trim and re-read the
+# ledgers for 13 rounds, two of them in one round, whose telemetry rows then
+# finished in a different order on replay.
 def _ledger(name: str, carry: int, nxt: str | None) -> str:
-    lines = [f"Ledger {name}. Audit notes, one per line; the last line is the one that counts."]
+    tail = f"next ledger: ledger-{nxt}.txt" if nxt else "end of chain"
+    lines = [f"Ledger {name}. carry: {carry}. {tail}"]
     lines += [f"note {i:02d}: entry checked against the source, nothing to carry here."
               for i in range(1, 31)]
-    tail = f"next ledger: ledger-{nxt}.txt" if nxt else "end of chain"
-    lines.append(f"carry: {carry}. {tail}")
     return "\n".join(lines) + "\n"
 
 
@@ -231,7 +233,9 @@ def _req_microcompact(ev: Evidence) -> list[str]:
               if TRIMMED in f"{r.get('content') or ''}{r.get('content_json') or ''}"]
     return (_need(bool(runs), "microcompaction never ran")
             + _need(sent_trimmed, "no request carried a trimmed tool result")
-            + _need(len(reads) >= 3, f"expected the 3 ledgers read, got {len(reads)} reads")
+            # Exactly three: one read per round. A re-read can share a round with
+            # the next read, and two calls in a round finish in either order.
+            + _need(len(reads) == 3, f"expected the 3 ledgers read once each, got {len(reads)} reads")
             + _need(not stored, f"lcm.db stored {len(stored)} trimmed result(s): the excerpt "
                                 "replaced the record")
             + _need(LEDGER_SUM in _final_reply(ev),
@@ -522,10 +526,10 @@ SCENARIOS: list[Scenario] = [
         config={"context": {"microcompact_after_turns": 1}},
         steps=[{"op": "chat", "session": "desktop:parity-microcompact",
                 "message": "Use your tools, one file per step. Read ledger-a.txt with "
-                           "read_file. Its last line gives a carry value and names the next "
+                           "read_file. Its first line gives a carry value and names the next "
                            "ledger: read that one, and keep going until a ledger says 'end "
-                           "of chain'. Then reply with the sum of all the carry values, as a "
-                           "number."}],
+                           "of chain'. Read each ledger once. Then reply with the sum of all "
+                           "the carry values, as a number."}],
         require=_req_microcompact,
     ),
     Scenario(
