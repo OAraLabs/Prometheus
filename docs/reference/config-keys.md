@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **420** of
+Every key in `config/prometheus.yaml.default` — **423** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -361,6 +361,9 @@ none either — the key is documented so its absence is visible.
 | `web_tools.download_dir` | `~/.prometheus/downloads` |
 | `web_tools.download_max_mb` | `100` |
 | `web_tools.youtube_transcript_language` | `en` |
+| `web_search` | *(section)* |
+| `web_search.backends` | `['searxng', 'brave', 'duckduckgo']` |
+| `web_search.searxng_url` | `` |
 | `printing_press` | *(section)* |
 | `printing_press.enabled` | `False` |
 | `printing_press.library_path` | *(empty — no code default)* |

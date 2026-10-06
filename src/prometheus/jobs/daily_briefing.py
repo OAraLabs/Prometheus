@@ -211,7 +211,10 @@ async def _main_async() -> None:
     # Bridge: MessageTool's Telegram path reads the token only from this env var.
     os.environ["TELEGRAM_BOT_TOKEN"] = token
     logger.info("Bridged Telegram token into TELEGRAM_BOT_TOKEN for MessageTool")
-    await run_briefing(provider=provider, model=model, chat_id=chat_id)
+    await run_briefing(
+        provider=provider, model=model, chat_id=chat_id,
+        web_search=WebSearchTool(config=config.get("web_search")),
+    )
 
 
 def main() -> int:

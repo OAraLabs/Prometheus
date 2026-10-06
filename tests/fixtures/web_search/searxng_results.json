@@ -1,0 +1,47 @@
+{
+  "query": "llama.cpp grammar",
+  "number_of_results": 0,
+  "results": [
+    {
+      "url": "https://github.com/ggml-org/llama.cpp/blob/master/grammars/README.md",
+      "title": "llama.cpp/grammars/README.md at master · ggml-org/llama.cpp",
+      "content": "GBNF (GGML BNF) is a format for defining formal grammars to constrain model outputs in llama.cpp.",
+      "engine": "duckduckgo",
+      "template": "default.html",
+      "parsed_url": ["https", "github.com", "/ggml-org/llama.cpp/blob/master/grammars/README.md", "", "", ""],
+      "engines": ["duckduckgo", "brave"],
+      "positions": [1, 2],
+      "score": 3.0,
+      "category": "general"
+    },
+    {
+      "url": "https://til.simonwillison.net/llms/llama-cpp-python-grammars",
+      "title": "Using llama-cpp-python grammars to generate JSON",
+      "content": "llama.cpp recently added the ability to control the output of any model using a grammar.",
+      "engine": "brave",
+      "template": "default.html",
+      "parsed_url": ["https", "til.simonwillison.net", "/llms/llama-cpp-python-grammars", "", "", ""],
+      "engines": ["brave"],
+      "positions": [3],
+      "score": 0.33,
+      "category": "general"
+    },
+    {
+      "url": "https://www.imaurer.com/writing/llama-cpp-grammars/",
+      "title": "Using grammars to constrain llama.cpp output · Ian Maurer",
+      "content": "",
+      "engine": "duckduckgo",
+      "template": "default.html",
+      "parsed_url": ["https", "www.imaurer.com", "/writing/llama-cpp-grammars/", "", "", ""],
+      "engines": ["duckduckgo"],
+      "positions": [4],
+      "score": 0.25,
+      "category": "general"
+    }
+  ],
+  "answers": [],
+  "corrections": [],
+  "infoboxes": [],
+  "suggestions": ["llama.cpp gbnf", "llama.cpp json schema"],
+  "unresponsive_engines": []
+}

@@ -200,3 +200,29 @@ def test_main_returns_nonzero_on_failure(monkeypatch) -> None:
 
     monkeypatch.setattr(jb, "_main_async", _boom)
     assert jb.main() == 1
+
+
+def test_the_briefing_searches_through_the_configured_backends(monkeypatch) -> None:
+    """The cron job loads the config; its search must use the config's chain,
+    or a DuckDuckGo block kills the briefing while SearXNG sits unused."""
+    monkeypatch.setattr(jb, "_load_config", lambda: {
+        "web_search": {"searxng_url": "http://searx.test:8888"},
+    })
+    monkeypatch.setattr(jb, "_build_provider", lambda config: object())
+
+    async def _model(provider, config):  # noqa: ANN001
+        return "m"
+
+    monkeypatch.setattr(jb, "_resolve_model", _model)
+    monkeypatch.setattr(jb, "resolve_telegram_token", lambda config: "t")
+    monkeypatch.setattr(jb, "resolve_chat_id", lambda config: "1")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    seen: dict = {}
+
+    async def _capture(**kwargs):  # noqa: ANN003
+        seen.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(jb, "run_briefing", _capture)
+    asyncio.run(jb._main_async())
+    assert seen["web_search"].plan.active == ("searxng", "duckduckgo")

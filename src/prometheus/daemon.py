@@ -219,7 +219,10 @@ def _warn_absent_gating_keys(config: dict[str, Any]) -> None:
             )
 
 
-def build_tool_registry(security_cfg: dict[str, Any] | None = None) -> ToolRegistry:
+def build_tool_registry(
+    security_cfg: dict[str, Any] | None = None, *,
+    web_search_cfg: dict[str, Any] | None = None,
+) -> ToolRegistry:
     """Create the tool registry with all builtin tools (same as CLI).
 
     Reuses create_tool_registry() from __main__ so daemon and CLI
@@ -229,7 +232,7 @@ def build_tool_registry(security_cfg: dict[str, Any] | None = None) -> ToolRegis
     """
     if security_cfg is None:
         security_cfg = {}
-    return create_tool_registry(security_cfg)
+    return create_tool_registry(security_cfg, web_search_cfg=web_search_cfg)
 
 
 async def _detect_loaded_model_with_retry(
@@ -949,7 +952,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
         )
 
     # Tool registry — same tools as CLI mode
-    registry = build_tool_registry(security_cfg=security_config)
+    registry = build_tool_registry(
+        security_cfg=security_config, web_search_cfg=config.get("web_search"),
+    )
 
     # The read floor's state, said ONCE at boot. security.bash_confinement
     # ships "auto", so a host where the AppArmor profile did not verify runs

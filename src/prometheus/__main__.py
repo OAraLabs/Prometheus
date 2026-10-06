@@ -134,8 +134,16 @@ def create_provider(model_cfg: dict[str, Any]) -> tuple[ModelProvider, str]:
 # Tool registry factory
 # ---------------------------------------------------------------------------
 
-def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> Any:
-    """Build the default tool registry with all builtin tools."""
+def create_tool_registry(
+    security_cfg: dict[str, Any], security_gate=None, *,
+    web_search_cfg: dict[str, Any] | None = None,
+) -> Any:
+    """Build the default tool registry with all builtin tools.
+
+    ``web_search_cfg`` is the config's ``web_search`` section: the backend
+    chain (SearXNG, Brave, DuckDuckGo). None is a fresh install, DuckDuckGo
+    alone — what every caller that passes nothing gets.
+    """
     from prometheus.tools.base import ToolRegistry
     from prometheus.tools.builtin import (
         AgentTool,
@@ -256,7 +264,7 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
         LCMGrepTool(),
         LCMExpandQueryTool(),
         # Web + messaging
-        WebSearchTool(),
+        WebSearchTool(config=web_search_cfg),
         WebFetchTool(),
         YouTubeTranscriptTool(),
         DownloadFileTool(),
@@ -2006,7 +2014,10 @@ def main() -> None:
         model_cfg["model"] = model_name
 
     security_gate = create_security_gate(security_cfg, getattr(args, "config", None))
-    registry = create_tool_registry(security_cfg, security_gate=security_gate)
+    registry = create_tool_registry(
+        security_cfg, security_gate=security_gate,
+        web_search_cfg=config.get("web_search"),
+    )
     # The served chat template decides the tier for a model the registry does
     # not list (WP-X.28); read the same way the daemon reads it at boot.
     adapter = create_adapter(

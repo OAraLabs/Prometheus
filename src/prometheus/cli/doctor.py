@@ -626,7 +626,9 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
         # the process-wide shell floor (security/shell_floor.py), and a
         # registry built from an empty section would wire the shipped defaults
         # over the operator's in any process that later runs a model shell.
-        registry = create_tool_registry(config.get("security") or {})
+        registry = create_tool_registry(
+            config.get("security") or {}, web_search_cfg=config.get("web_search"),
+        )
         loader = DynamicToolLoader(registry, deferred)
         advertised = sorted(
             s.get("name") for s in loader.schemas_for_run(True)

@@ -1,20 +1,44 @@
 # Provenance: HKUDS/OpenHarness (https://github.com/HKUDS/OpenHarness)
 # Original: src/openharness/tools/web_search_tool.py
 # License: MIT
-# Modified: Adapted as Prometheus BaseTool
+# Modified: Adapted as Prometheus BaseTool; a backend chain (SearXNG, Brave,
+#           DuckDuckGo html then lite) with block detection, in
+#           web_search_backends.py
 
-"""Web search via DuckDuckGo HTML — no API key required."""
+"""Web search through a backend chain that ends in DuckDuckGo (no key required).
+
+The backends, the chain and the block detection are in
+:mod:`prometheus.tools.builtin.web_search_backends`. This module runs the chain,
+says which backend answered and which were skipped, and writes one telemetry
+row per call.
+"""
 
 from __future__ import annotations
 
-import html as html_mod
-import re
-from urllib.parse import parse_qs, unquote, urlparse
+import logging
+import time
+from collections.abc import Mapping
+from typing import Any
 
 import httpx
 from pydantic import BaseModel, Field
 
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
+from prometheus.tools.builtin import web_search_backends as wsb
+
+log = logging.getLogger(__name__)
+
+#: The fresh-install description, byte for byte what every parity golden
+#: recorded. Only the first sentence changes when other backends are active.
+_DEFAULT_DESCRIPTION = (
+    "Search the web via DuckDuckGo and return top results with titles, "
+    "URLs, and snippets. Use this when you don't know a specific URL: "
+    "finding documentation, looking up current facts (versions, prices, "
+    "news), discovering libraries or repositories, comparing options, or "
+    "researching unfamiliar topics. Once you have a URL from search "
+    "results, use web_fetch to read its full content. No API key required."
+)
+_DEFAULT_LEAD = "Search the web via DuckDuckGo"
 
 
 class WebSearchInput(BaseModel):
@@ -27,18 +51,28 @@ class WebSearchInput(BaseModel):
 
 
 class WebSearchTool(BaseTool):
-    """Search the web via DuckDuckGo and return top results."""
+    """Search the web through the configured backends and return top results."""
 
     name = "web_search"
-    description = (
-        "Search the web via DuckDuckGo and return top results with titles, "
-        "URLs, and snippets. Use this when you don't know a specific URL: "
-        "finding documentation, looking up current facts (versions, prices, "
-        "news), discovering libraries or repositories, comparing options, or "
-        "researching unfamiliar topics. Once you have a URL from search "
-        "results, use web_fetch to read its full content. No API key required."
-    )
+    description = _DEFAULT_DESCRIPTION
     input_model = WebSearchInput
+
+    def __init__(
+        self,
+        config: Mapping[str, Any] | None = None,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        """``config`` is the ``web_search`` section (None = a fresh install).
+        ``transport`` is for tests; production uses httpx's own."""
+        self.plan = wsb.plan_backends(config)
+        self._transport = transport
+        if not self.plan.is_fresh_install:
+            self.description = describe(self.plan.active)
+            log.info(
+                "web_search: backends %s%s", " -> ".join(self.plan.active),
+                "".join(f"; {n} inactive ({why})" for n, why in self.plan.inactive.items()),
+            )
 
     def is_read_only(self, arguments: WebSearchInput) -> bool:
         return True
@@ -48,85 +82,158 @@ class WebSearchTool(BaseTool):
         arguments: WebSearchInput,
         context: ToolExecutionContext,
     ) -> ToolResult:
-        endpoint = "https://html.duckduckgo.com/html/"
-        try:
-            async with httpx.AsyncClient(
-                follow_redirects=True, timeout=20.0
-            ) as client:
-                response = await client.get(
-                    endpoint,
-                    params={"q": arguments.query},
-                    headers={"User-Agent": "Prometheus/0.1"},
-                )
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            return ToolResult(output=f"web_search failed: {exc}", is_error=True)
+        started = time.monotonic()
+        deadline = started + wsb.CHAIN_BUDGET_SECONDS
+        plan = self._current_plan()
+        skipped: list[dict[str, str]] = []
+        backend: str | None = None
+        endpoint: str | None = None
+        hits: list[wsb.SearchHit] = []
+        last: wsb.BackendFailure | None = None
 
-        results = _parse_search_results(response.text, limit=arguments.max_results)
-        if not results:
-            return ToolResult(output="No search results found.", is_error=True)
+        async with httpx.AsyncClient(
+            follow_redirects=True, transport=self._transport,
+        ) as client:
+            for name in plan.active:
+                try:
+                    found, where = await self._ask(client, name, plan, arguments, deadline)
+                except wsb.BackendFailure as exc:
+                    last = exc
+                    if name != wsb.FINAL_BACKEND:
+                        skipped.append({"backend": name, "kind": exc.kind, "reason": exc.reason})
+                    continue
+                backend, endpoint, hits = name, where, found
+                break
 
-        lines = [f"Search results for: {arguments.query}"]
-        for index, result in enumerate(results, start=1):
-            lines.append(f"{index}. {result['title']}")
-            lines.append(f"   URL: {result['url']}")
-            if result["snippet"]:
-                lines.append(f"   {result['snippet']}")
-        return ToolResult(output="\n".join(lines))
+        blocked = backend is None and last is not None and last.kind == wsb.KIND_BLOCKED
+        result = _render(arguments.query, backend, endpoint, hits, skipped, last, blocked)
+        metadata = {
+            "backend": backend,
+            "endpoint": endpoint,
+            "skipped": skipped,
+            "inactive": dict(plan.inactive),
+            "blocked": blocked,
+        }
+        _record(context, metadata, len(hits), (time.monotonic() - started) * 1000.0)
+        return ToolResult(output=result[0], is_error=result[1], metadata=metadata)
 
+    def _current_plan(self) -> wsb.BackendPlan:
+        """The construction-time order, with Brave dropped if its key has gone
+        since (a key added later needs a restart, like every other key)."""
+        if wsb.BRAVE in self.plan.active and not wsb.resolve_brave_key():
+            active = tuple(n for n in self.plan.active if n != wsb.BRAVE)
+            inactive = {**self.plan.inactive,
+                        wsb.BRAVE: f"no {wsb.BRAVE_KEY_ENV} in the environment or the env file"}
+            return wsb.BackendPlan(active, inactive, self.plan.searxng_url)
+        return self.plan
 
-# ---------------------------------------------------------------------------
-# HTML parsing helpers
-# ---------------------------------------------------------------------------
-
-def _parse_search_results(body: str, *, limit: int) -> list[dict[str, str]]:
-    snippets = [
-        _clean_html(m.group("snippet"))
-        for m in re.finditer(
-            r'<(?:a|div|span)[^>]+class="[^"]*(?:result__snippet|result-snippet)[^"]*"[^>]*>'
-            r"(?P<snippet>.*?)</(?:a|div|span)>",
-            body,
-            flags=re.IGNORECASE | re.DOTALL,
+    @staticmethod
+    async def _ask(
+        client: httpx.AsyncClient, name: str, plan: wsb.BackendPlan,
+        arguments: WebSearchInput, deadline: float,
+    ) -> tuple[list[wsb.SearchHit], str | None]:
+        """One backend, held to its wall-clock share of the chain's budget."""
+        if name == wsb.SEARXNG:
+            return await wsb.bounded(wsb.search_searxng(
+                client, plan.searxng_url, arguments.query, arguments.max_results,
+            ), wsb.attempt_limit(name, deadline)), None
+        if name == wsb.BRAVE:
+            return await wsb.bounded(wsb.search_brave(
+                client, wsb.resolve_brave_key(), arguments.query, arguments.max_results,
+            ), wsb.attempt_limit(name, deadline)), None
+        answer = await wsb.search_duckduckgo(
+            client, arguments.query, arguments.max_results, deadline=deadline,
         )
-    ]
+        return answer.hits, answer.endpoint
 
-    results: list[dict[str, str]] = []
-    for idx, match in enumerate(
-        re.finditer(
-            r"<a(?P<attrs>[^>]+)>(?P<title>.*?)</a>",
-            body,
-            flags=re.IGNORECASE | re.DOTALL,
+
+def describe(active: tuple[str, ...]) -> str:
+    """The tool description for a chain. A fresh install's is the default."""
+    if active == (wsb.FINAL_BACKEND,):
+        return _DEFAULT_DESCRIPTION
+    names = [wsb.DISPLAY_NAMES[n] for n in active]
+    lead = f"Search the web via {names[0]} (falling back to {', then '.join(names[1:])})"
+    return lead + _DEFAULT_DESCRIPTION[len(_DEFAULT_LEAD):]
+
+
+def _render(
+    query: str,
+    backend: str | None,
+    endpoint: str | None,
+    hits: list[wsb.SearchHit],
+    skipped: list[dict[str, str]],
+    last: wsb.BackendFailure | None,
+    blocked: bool,
+) -> tuple[str, bool]:
+    """(output, is_error)."""
+    skipped_line = (
+        "Skipped: " + "; ".join(f"{s['backend']} ({s['reason']})" for s in skipped)
+        if skipped else ""
+    )
+    if backend is None:
+        # Every backend failed. The last is DuckDuckGo, whose reason leads.
+        reason = last.reason if last is not None else "no backend is active"
+        if blocked:
+            text = (
+                f"web search is blocked right now: duckduckgo {reason}. This is not "
+                f"an empty result: no backend could run the search."
+            )
+        else:
+            text = f"web search failed: duckduckgo {reason}."
+        return (text + (f" {skipped_line}." if skipped_line else ""), True)
+
+    if not hits:
+        text = f"No search results found for: {query} (via {backend})."
+        return (text + (f"\n{skipped_line}" if skipped_line else ""), True)
+
+    lines = [f"Search results for: {query} (via {backend})"]
+    if skipped_line:
+        lines.append(skipped_line)
+    for index, hit in enumerate(hits, start=1):
+        lines.append(f"{index}. {hit.title}")
+        lines.append(f"   URL: {hit.url}")
+        if hit.snippet:
+            lines.append(f"   {hit.snippet}")
+    return ("\n".join(lines), False)
+
+
+def _record(
+    context: ToolExecutionContext, metadata: dict[str, Any], results: int,
+    duration_ms: float,
+) -> None:
+    """One subsystem_runs row per call: which backend answered, what was skipped.
+
+    No query and no reason text (a reason can carry the SearXNG URL): kinds and
+    backend names only. Best-effort — telemetry never costs the model its search.
+    """
+    from prometheus.telemetry.tracker import get_telemetry_handle
+
+    telemetry = get_telemetry_handle()
+    if telemetry is None:
+        return
+    meta = context.metadata or {}
+    session_id = None if meta.get("ephemeral") else (
+        meta.get("effective_session_id") or meta.get("session_id")
+    )
+    if metadata["backend"] is None:
+        outcome = "failed"
+    elif metadata["skipped"]:
+        outcome = "partial"
+    else:
+        outcome = "success"
+    summary = {
+        "backend": metadata["backend"],
+        "endpoint": metadata["endpoint"],
+        "results": results,
+        "skipped": [{"backend": s["backend"], "kind": s["kind"]} for s in metadata["skipped"]],
+        "inactive": list(metadata["inactive"]),
+        "blocked": metadata["blocked"],
+    }
+    try:
+        telemetry.record_run(
+            wsb.WEB_SEARCH_SUBSYSTEM, wsb.WEB_SEARCH_OPERATION, outcome,
+            duration_ms=duration_ms, summary=summary, session_id=session_id,
         )
-    ):
-        attrs = match.group("attrs")
-        cls = re.search(r'class="(?P<c>[^"]+)"', attrs, re.IGNORECASE)
-        if cls is None:
-            continue
-        names = cls.group("c")
-        if "result__a" not in names and "result-link" not in names:
-            continue
-        href = re.search(r'href="(?P<h>[^"]+)"', attrs, re.IGNORECASE)
-        if href is None:
-            continue
-        title = _clean_html(match.group("title"))
-        url = _normalize_result_url(href.group("h"))
-        snippet = snippets[idx] if idx < len(snippets) else ""
-        if title and url:
-            results.append({"title": title, "url": url, "snippet": snippet})
-        if len(results) >= limit:
-            break
-    return results
+    except Exception:
+        log.debug("web_search telemetry write failed", exc_info=True)
 
-
-def _normalize_result_url(raw_url: str) -> str:
-    parsed = urlparse(raw_url)
-    if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
-        target = parse_qs(parsed.query).get("uddg", [""])[0]
-        return unquote(target) if target else raw_url
-    return raw_url
-
-
-def _clean_html(fragment: str) -> str:
-    text = re.sub(r"(?s)<[^>]+>", " ", fragment)
-    text = html_mod.unescape(text)
-    return re.sub(r"\s+", " ", text).strip()

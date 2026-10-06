@@ -71,7 +71,7 @@ The engine that drives everything: streaming deltas and tool events, a circuit b
 
 **File & shell:** `bash`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`, `notebook_edit`
 
-**Web & media:** `web_search`, `web_fetch`, `youtube_transcript`, `download_file`, `browser` (Playwright), `message` (send to Telegram/Slack), `tts` (Piper text-to-speech), `image_generate` (Pollinations free / ComfyUI local / WAN 2.5 paid), `video_generate` (Kling 3.0, paid), `dashboard` (serve a live HTML dashboard over your LAN or tailnet)
+**Web & media:** `web_search` (DuckDuckGo with no setup, or SearXNG / Brave in front of it — see [Web search](web-search.md)), `web_fetch`, `youtube_transcript`, `download_file`, `browser` (Playwright), `message` (send to Telegram/Slack), `tts` (Piper text-to-speech), `image_generate` (Pollinations free / ComfyUI local / WAN 2.5 paid), `video_generate` (Kling 3.0, paid), `dashboard` (serve a live HTML dashboard over your LAN or tailnet)
 
 **Memory & knowledge:** `lcm_grep`, `lcm_expand`, `lcm_expand_query`, `lcm_describe`, `wiki_compile`, `wiki_query`, `wiki_lint`, `sentinel_status`, `audit_query`, the file-memory tool (MEMORY.md / USER.md), `todo_write`, `skill`, `anatomy`
 

@@ -211,6 +211,9 @@ def _hermetic_prometheus_env(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("QWEN_API_KEY", raising=False)
     monkeypatch.delenv("QWEN_BASE_URL", raising=False)
+    # A search key activates a web_search backend and changes the advertised
+    # description, so one in the developer's shell would move schema tests.
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
 
 
 # ── the gate manifest (#479) ───────────────────────────────────────────────
