@@ -1,0 +1,2493 @@
+{
+ "steps": [
+  {
+   "end": "chat_done",
+   "error_event": null,
+   "messages": [
+    {
+     "content": "Use your tools, one file per step. Read ledger-a.txt with read_file. Its first line gives a carry value and names the next ledger: read that one, and keep going until a ledger says 'end of chain'. Read each ledger once. Then reply with the sum of all the carry values, as a number.",
+     "content_json": {
+      "$json": [
+       {
+        "text": "Use your tools, one file per step. Read ledger-a.txt with read_file. Its first line gives a carry value and names the next ledger: read that one, and keep going until a ledger says 'end of chain'. Read each ledger once. Then reply with the sum of all the carry values, as a number.",
+        "type": "text"
+       }
+      ]
+     },
+     "is_trusted": true,
+     "provenance": "user",
+     "role": "user"
+    },
+    {
+     "content": "",
+     "content_json": {
+      "$json": [
+       {
+        "id": "H5IhDoxY5yckvpF0yULkyeOlDgZJhfmv",
+        "input": {
+         "path": "ledger-a.txt"
+        },
+        "name": "read_file",
+        "type": "tool_use"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "assistant"
+    },
+    {
+     "content": "",
+     "content_json": {
+      "$json": [
+       {
+        "content": "     1\tLedger A. carry: 7. next ledger: ledger-b.txt\n     2\tnote 01: entry checked against the source, nothing to carry here.\n     3\tnote 02: entry checked against the source, nothing to carry here.\n     4\tnote 03: entry checked against the source, nothing to carry here.\n     5\tnote 04: entry checked against the source, nothing to carry here.\n     6\tnote 05: entry checked against the source, nothing to carry here.\n     7\tnote 06: entry checked against the source, nothing to carry here.\n     8\tnote 07: entry checked against the source, nothing to carry here.\n     9\tnote 08: entry checked against the source, nothing to carry here.\n    10\tnote 09: entry checked against the source, nothing to carry here.\n    11\tnote 10: entry checked against the source, nothing to carry here.\n    12\tnote 11: entry checked against the source, nothing to carry here.\n    13\tnote 12: entry checked against the source, nothing to carry here.\n    14\tnote 13: entry checked against the source, nothing to carry here.\n    15\tnote 14: entry checked against the source, nothing to carry here.\n    16\tnote 15: entry checked against the source, nothing to carry here.\n    17\tnote 16: entry checked against the source, nothing to carry here.\n    18\tnote 17: entry checked against the source, nothing to carry here.\n    19\tnote 18: entry checked against the source, nothing to carry here.\n    20\tnote 19: entry checked against the source, nothing to carry here.\n    21\tnote 20: entry checked against the source, nothing to carry here.\n    22\tnote 21: entry checked against the source, nothing to carry here.\n    23\tnote 22: entry checked against the source, nothing to carry here.\n    24\tnote 23: entry checked against the source, nothing to carry here.\n    25\tnote 24: entry checked against the source, nothing to carry here.\n    26\tnote 25: entry checked against the source, nothing to carry here.\n    27\tnote 26: entry checked against the source, nothing to carry here.\n    28\tnote 27: entry checked against the source, nothing to carry here.\n    29\tnote 28: entry checked against the source, nothing to carry here.\n    30\tnote 29: entry checked against the source, nothing to carry here.\n    31\tnote 30: entry checked against the source, nothing to carry here.",
+        "is_error": false,
+        "tool_use_id": "H5IhDoxY5yckvpF0yULkyeOlDgZJhfmv",
+        "type": "tool_result"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "user"
+    },
+    {
+     "content": "",
+     "content_json": {
+      "$json": [
+       {
+        "id": "qCfQFM2kM79uEBVYrttbvHVDO8J0tz0Y",
+        "input": {
+         "path": "ledger-b.txt"
+        },
+        "name": "read_file",
+        "type": "tool_use"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "assistant"
+    },
+    {
+     "content": "",
+     "content_json": {
+      "$json": [
+       {
+        "content": "     1\tLedger B. carry: 12. next ledger: ledger-c.txt\n     2\tnote 01: entry checked against the source, nothing to carry here.\n     3\tnote 02: entry checked against the source, nothing to carry here.\n     4\tnote 03: entry checked against the source, nothing to carry here.\n     5\tnote 04: entry checked against the source, nothing to carry here.\n     6\tnote 05: entry checked against the source, nothing to carry here.\n     7\tnote 06: entry checked against the source, nothing to carry here.\n     8\tnote 07: entry checked against the source, nothing to carry here.\n     9\tnote 08: entry checked against the source, nothing to carry here.\n    10\tnote 09: entry checked against the source, nothing to carry here.\n    11\tnote 10: entry checked against the source, nothing to carry here.\n    12\tnote 11: entry checked against the source, nothing to carry here.\n    13\tnote 12: entry checked against the source, nothing to carry here.\n    14\tnote 13: entry checked against the source, nothing to carry here.\n    15\tnote 14: entry checked against the source, nothing to carry here.\n    16\tnote 15: entry checked against the source, nothing to carry here.\n    17\tnote 16: entry checked against the source, nothing to carry here.\n    18\tnote 17: entry checked against the source, nothing to carry here.\n    19\tnote 18: entry checked against the source, nothing to carry here.\n    20\tnote 19: entry checked against the source, nothing to carry here.\n    21\tnote 20: entry checked against the source, nothing to carry here.\n    22\tnote 21: entry checked against the source, nothing to carry here.\n    23\tnote 22: entry checked against the source, nothing to carry here.\n    24\tnote 23: entry checked against the source, nothing to carry here.\n    25\tnote 24: entry checked against the source, nothing to carry here.\n    26\tnote 25: entry checked against the source, nothing to carry here.\n    27\tnote 26: entry checked against the source, nothing to carry here.\n    28\tnote 27: entry checked against the source, nothing to carry here.\n    29\tnote 28: entry checked against the source, nothing to carry here.\n    30\tnote 29: entry checked against the source, nothing to carry here.\n    31\tnote 30: entry checked against the source, nothing to carry here.",
+        "is_error": false,
+        "tool_use_id": "qCfQFM2kM79uEBVYrttbvHVDO8J0tz0Y",
+        "type": "tool_result"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "user"
+    },
+    {
+     "content": "",
+     "content_json": {
+      "$json": [
+       {
+        "id": "fNRVrGbDkChduk4B239sHyajGhhaxwcc",
+        "input": {
+         "path": "ledger-c.txt"
+        },
+        "name": "read_file",
+        "type": "tool_use"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "assistant"
+    },
+    {
+     "content": "",
+     "content_json": {
+      "$json": [
+       {
+        "content": "     1\tLedger C. carry: 23. end of chain\n     2\tnote 01: entry checked against the source, nothing to carry here.\n     3\tnote 02: entry checked against the source, nothing to carry here.\n     4\tnote 03: entry checked against the source, nothing to carry here.\n     5\tnote 04: entry checked against the source, nothing to carry here.\n     6\tnote 05: entry checked against the source, nothing to carry here.\n     7\tnote 06: entry checked against the source, nothing to carry here.\n     8\tnote 07: entry checked against the source, nothing to carry here.\n     9\tnote 08: entry checked against the source, nothing to carry here.\n    10\tnote 09: entry checked against the source, nothing to carry here.\n    11\tnote 10: entry checked against the source, nothing to carry here.\n    12\tnote 11: entry checked against the source, nothing to carry here.\n    13\tnote 12: entry checked against the source, nothing to carry here.\n    14\tnote 13: entry checked against the source, nothing to carry here.\n    15\tnote 14: entry checked against the source, nothing to carry here.\n    16\tnote 15: entry checked against the source, nothing to carry here.\n    17\tnote 16: entry checked against the source, nothing to carry here.\n    18\tnote 17: entry checked against the source, nothing to carry here.\n    19\tnote 18: entry checked against the source, nothing to carry here.\n    20\tnote 19: entry checked against the source, nothing to carry here.\n    21\tnote 20: entry checked against the source, nothing to carry here.\n    22\tnote 21: entry checked against the source, nothing to carry here.\n    23\tnote 22: entry checked against the source, nothing to carry here.\n    24\tnote 23: entry checked against the source, nothing to carry here.\n    25\tnote 24: entry checked against the source, nothing to carry here.\n    26\tnote 25: entry checked against the source, nothing to carry here.\n    27\tnote 26: entry checked against the source, nothing to carry here.\n    28\tnote 27: entry checked against the source, nothing to carry here.\n    29\tnote 28: entry checked against the source, nothing to carry here.\n    30\tnote 29: entry checked against the source, nothing to carry here.\n    31\tnote 30: entry checked against the source, nothing to carry here.",
+        "is_error": false,
+        "tool_use_id": "fNRVrGbDkChduk4B239sHyajGhhaxwcc",
+        "type": "tool_result"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "user"
+    },
+    {
+     "content": "Chain: Ledger A (carry 7) → Ledger B (carry 12) → Ledger C (carry 23, end of chain).\n\n7 + 12 + 23 = **42**",
+     "content_json": {
+      "$json": [
+       {
+        "text": "Chain: Ledger A (carry 7) → Ledger B (carry 12) → Ledger C (carry 23, end of chain).\n\n7 + 12 + 23 = **42**",
+        "type": "text"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "assistant"
+    }
+   ],
+   "op": "chat",
+   "reply": "Chain: Ledger A (carry 7) → Ledger B (carry 12) → Ledger C (carry 23, end of chain).\n\n7 + 12 + 23 = **42**",
+   "session": "desktop:parity-microcompact"
+  }
+ ],
+ "stores": {
+  "cwd/ledger-a.txt": {
+   "text": "Ledger A. carry: 7. next ledger: ledger-b.txt\nnote 01: entry checked against the source, nothing to carry here.\nnote 02: entry checked against the source, nothing to carry here.\nnote 03: entry checked against the source, nothing to carry here.\nnote 04: entry checked against the source, nothing to carry here.\nnote 05: entry checked against the source, nothing to carry here.\nnote 06: entry checked against the source, nothing to carry here.\nnote 07: entry checked against the source, nothing to carry here.\nnote 08: entry checked against the source, nothing to carry here.\nnote 09: entry checked against the source, nothing to carry here.\nnote 10: entry checked against the source, nothing to carry here.\nnote 11: entry checked against the source, nothing to carry here.\nnote 12: entry checked against the source, nothing to carry here.\nnote 13: entry checked against the source, nothing to carry here.\nnote 14: entry checked against the source, nothing to carry here.\nnote 15: entry checked against the source, nothing to carry here.\nnote 16: entry checked against the source, nothing to carry here.\nnote 17: entry checked against the source, nothing to carry here.\nnote 18: entry checked against the source, nothing to carry here.\nnote 19: entry checked against the source, nothing to carry here.\nnote 20: entry checked against the source, nothing to carry here.\nnote 21: entry checked against the source, nothing to carry here.\nnote 22: entry checked against the source, nothing to carry here.\nnote 23: entry checked against the source, nothing to carry here.\nnote 24: entry checked against the source, nothing to carry here.\nnote 25: entry checked against the source, nothing to carry here.\nnote 26: entry checked against the source, nothing to carry here.\nnote 27: entry checked against the source, nothing to carry here.\nnote 28: entry checked against the source, nothing to carry here.\nnote 29: entry checked against the source, nothing to carry here.\nnote 30: entry checked against the source, nothing to carry here.\n"
+  },
+  "cwd/ledger-b.txt": {
+   "text": "Ledger B. carry: 12. next ledger: ledger-c.txt\nnote 01: entry checked against the source, nothing to carry here.\nnote 02: entry checked against the source, nothing to carry here.\nnote 03: entry checked against the source, nothing to carry here.\nnote 04: entry checked against the source, nothing to carry here.\nnote 05: entry checked against the source, nothing to carry here.\nnote 06: entry checked against the source, nothing to carry here.\nnote 07: entry checked against the source, nothing to carry here.\nnote 08: entry checked against the source, nothing to carry here.\nnote 09: entry checked against the source, nothing to carry here.\nnote 10: entry checked against the source, nothing to carry here.\nnote 11: entry checked against the source, nothing to carry here.\nnote 12: entry checked against the source, nothing to carry here.\nnote 13: entry checked against the source, nothing to carry here.\nnote 14: entry checked against the source, nothing to carry here.\nnote 15: entry checked against the source, nothing to carry here.\nnote 16: entry checked against the source, nothing to carry here.\nnote 17: entry checked against the source, nothing to carry here.\nnote 18: entry checked against the source, nothing to carry here.\nnote 19: entry checked against the source, nothing to carry here.\nnote 20: entry checked against the source, nothing to carry here.\nnote 21: entry checked against the source, nothing to carry here.\nnote 22: entry checked against the source, nothing to carry here.\nnote 23: entry checked against the source, nothing to carry here.\nnote 24: entry checked against the source, nothing to carry here.\nnote 25: entry checked against the source, nothing to carry here.\nnote 26: entry checked against the source, nothing to carry here.\nnote 27: entry checked against the source, nothing to carry here.\nnote 28: entry checked against the source, nothing to carry here.\nnote 29: entry checked against the source, nothing to carry here.\nnote 30: entry checked against the source, nothing to carry here.\n"
+  },
+  "cwd/ledger-c.txt": {
+   "text": "Ledger C. carry: 23. end of chain\nnote 01: entry checked against the source, nothing to carry here.\nnote 02: entry checked against the source, nothing to carry here.\nnote 03: entry checked against the source, nothing to carry here.\nnote 04: entry checked against the source, nothing to carry here.\nnote 05: entry checked against the source, nothing to carry here.\nnote 06: entry checked against the source, nothing to carry here.\nnote 07: entry checked against the source, nothing to carry here.\nnote 08: entry checked against the source, nothing to carry here.\nnote 09: entry checked against the source, nothing to carry here.\nnote 10: entry checked against the source, nothing to carry here.\nnote 11: entry checked against the source, nothing to carry here.\nnote 12: entry checked against the source, nothing to carry here.\nnote 13: entry checked against the source, nothing to carry here.\nnote 14: entry checked against the source, nothing to carry here.\nnote 15: entry checked against the source, nothing to carry here.\nnote 16: entry checked against the source, nothing to carry here.\nnote 17: entry checked against the source, nothing to carry here.\nnote 18: entry checked against the source, nothing to carry here.\nnote 19: entry checked against the source, nothing to carry here.\nnote 20: entry checked against the source, nothing to carry here.\nnote 21: entry checked against the source, nothing to carry here.\nnote 22: entry checked against the source, nothing to carry here.\nnote 23: entry checked against the source, nothing to carry here.\nnote 24: entry checked against the source, nothing to carry here.\nnote 25: entry checked against the source, nothing to carry here.\nnote 26: entry checked against the source, nothing to carry here.\nnote 27: entry checked against the source, nothing to carry here.\nnote 28: entry checked against the source, nothing to carry here.\nnote 29: entry checked against the source, nothing to carry here.\nnote 30: entry checked against the source, nothing to carry here.\n"
+  },
+  "home/.prometheus/.daemon_started": {
+   "replaced": "<boot-specific>"
+  },
+  "home/.prometheus/MEMORY.md": {
+   "text": ""
+  },
+  "home/.prometheus/USER.md": {
+   "text": ""
+  },
+  "home/.prometheus/checkpoints/checkpoints.db": {
+   "sqlite": {
+    "checkpoint_files": {
+     "columns": [
+      "checkpoint_id",
+      "rel_path",
+      "sha256",
+      "size",
+      "mtime",
+      "mode"
+     ],
+     "rows": []
+    },
+    "checkpoint_skipped": {
+     "columns": [
+      "checkpoint_id",
+      "rel_path",
+      "reason"
+     ],
+     "rows": []
+    },
+    "checkpoints": {
+     "columns": [
+      "id",
+      "session_id",
+      "workspace",
+      "label",
+      "created_at",
+      "files",
+      "bytes",
+      "skipped"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/data/archive.jsonl": {
+   "jsonl": [
+    {
+     "data": {
+      "args": {
+       "config": "/tmp/prometheus-parity/home/.prometheus/prometheus.yaml",
+       "debug": false,
+       "telegram_only": false
+      }
+     },
+     "timestamp": "<time>",
+     "type": "daemon_start"
+    },
+    {
+     "data": {},
+     "timestamp": "<time>",
+     "type": "daemon_shutdown"
+    }
+   ]
+  },
+  "home/.prometheus/data/devices.db": {
+   "sqlite": {
+    "activity_tokens": {
+     "columns": [
+      "device_id",
+      "session_id",
+      "activity_token",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "api_devices": {
+     "columns": [
+      "id",
+      "name",
+      "platform",
+      "token_sha256",
+      "created_at",
+      "last_seen_at",
+      "revoked_at",
+      "apns_token",
+      "apns_environment",
+      "apns_bundle_id",
+      "push_failures",
+      "last_push_at",
+      "last_push_status"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/data/lcm.db": {
+   "sqlite": {
+    "checkpoints": {
+     "columns": [
+      "id",
+      "task_id",
+      "step_number",
+      "goal_hash",
+      "goal_description",
+      "messages_json",
+      "tool_calls_json",
+      "divergence_score",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "lcm_messages": {
+     "columns": [
+      "id",
+      "session_id",
+      "turn_index",
+      "role",
+      "content",
+      "content_json",
+      "token_count",
+      "timestamp",
+      "compacted",
+      "provenance",
+      "is_trusted"
+     ],
+     "rows": [
+      [
+       "<uuid:1>",
+       "desktop:parity-microcompact",
+       0,
+       "user",
+       "Use your tools, one file per step. Read ledger-a.txt with read_file. Its first line gives a carry value and names the next ledger: read that one, and keep going until a ledger says 'end of chain'. Read each ledger once. Then reply with the sum of all the carry values, as a number.",
+       {
+        "$json": [
+         {
+          "text": "Use your tools, one file per step. Read ledger-a.txt with read_file. Its first line gives a carry value and names the next ledger: read that one, and keep going until a ledger says 'end of chain'. Read each ledger once. Then reply with the sum of all the carry values, as a number.",
+          "type": "text"
+         }
+        ]
+       },
+       70,
+       "<time>",
+       0,
+       "user",
+       1
+      ],
+      [
+       "<uuid:2>",
+       "desktop:parity-microcompact",
+       1,
+       "assistant",
+       "",
+       {
+        "$json": [
+         {
+          "id": "H5IhDoxY5yckvpF0yULkyeOlDgZJhfmv",
+          "input": {
+           "path": "ledger-a.txt"
+          },
+          "name": "read_file",
+          "type": "tool_use"
+         }
+        ]
+       },
+       0,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:3>",
+       "desktop:parity-microcompact",
+       2,
+       "user",
+       "",
+       {
+        "$json": [
+         {
+          "content": "     1\tLedger A. carry: 7. next ledger: ledger-b.txt\n     2\tnote 01: entry checked against the source, nothing to carry here.\n     3\tnote 02: entry checked against the source, nothing to carry here.\n     4\tnote 03: entry checked against the source, nothing to carry here.\n     5\tnote 04: entry checked against the source, nothing to carry here.\n     6\tnote 05: entry checked against the source, nothing to carry here.\n     7\tnote 06: entry checked against the source, nothing to carry here.\n     8\tnote 07: entry checked against the source, nothing to carry here.\n     9\tnote 08: entry checked against the source, nothing to carry here.\n    10\tnote 09: entry checked against the source, nothing to carry here.\n    11\tnote 10: entry checked against the source, nothing to carry here.\n    12\tnote 11: entry checked against the source, nothing to carry here.\n    13\tnote 12: entry checked against the source, nothing to carry here.\n    14\tnote 13: entry checked against the source, nothing to carry here.\n    15\tnote 14: entry checked against the source, nothing to carry here.\n    16\tnote 15: entry checked against the source, nothing to carry here.\n    17\tnote 16: entry checked against the source, nothing to carry here.\n    18\tnote 17: entry checked against the source, nothing to carry here.\n    19\tnote 18: entry checked against the source, nothing to carry here.\n    20\tnote 19: entry checked against the source, nothing to carry here.\n    21\tnote 20: entry checked against the source, nothing to carry here.\n    22\tnote 21: entry checked against the source, nothing to carry here.\n    23\tnote 22: entry checked against the source, nothing to carry here.\n    24\tnote 23: entry checked against the source, nothing to carry here.\n    25\tnote 24: entry checked against the source, nothing to carry here.\n    26\tnote 25: entry checked against the source, nothing to carry here.\n    27\tnote 26: entry checked against the source, nothing to carry here.\n    28\tnote 27: entry checked against the source, nothing to carry here.\n    29\tnote 28: entry checked against the source, nothing to carry here.\n    30\tnote 29: entry checked against the source, nothing to carry here.\n    31\tnote 30: entry checked against the source, nothing to carry here.",
+          "is_error": false,
+          "tool_use_id": "H5IhDoxY5yckvpF0yULkyeOlDgZJhfmv",
+          "type": "tool_result"
+         }
+        ]
+       },
+       0,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:4>",
+       "desktop:parity-microcompact",
+       3,
+       "assistant",
+       "",
+       {
+        "$json": [
+         {
+          "id": "qCfQFM2kM79uEBVYrttbvHVDO8J0tz0Y",
+          "input": {
+           "path": "ledger-b.txt"
+          },
+          "name": "read_file",
+          "type": "tool_use"
+         }
+        ]
+       },
+       0,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:5>",
+       "desktop:parity-microcompact",
+       4,
+       "user",
+       "",
+       {
+        "$json": [
+         {
+          "content": "     1\tLedger B. carry: 12. next ledger: ledger-c.txt\n     2\tnote 01: entry checked against the source, nothing to carry here.\n     3\tnote 02: entry checked against the source, nothing to carry here.\n     4\tnote 03: entry checked against the source, nothing to carry here.\n     5\tnote 04: entry checked against the source, nothing to carry here.\n     6\tnote 05: entry checked against the source, nothing to carry here.\n     7\tnote 06: entry checked against the source, nothing to carry here.\n     8\tnote 07: entry checked against the source, nothing to carry here.\n     9\tnote 08: entry checked against the source, nothing to carry here.\n    10\tnote 09: entry checked against the source, nothing to carry here.\n    11\tnote 10: entry checked against the source, nothing to carry here.\n    12\tnote 11: entry checked against the source, nothing to carry here.\n    13\tnote 12: entry checked against the source, nothing to carry here.\n    14\tnote 13: entry checked against the source, nothing to carry here.\n    15\tnote 14: entry checked against the source, nothing to carry here.\n    16\tnote 15: entry checked against the source, nothing to carry here.\n    17\tnote 16: entry checked against the source, nothing to carry here.\n    18\tnote 17: entry checked against the source, nothing to carry here.\n    19\tnote 18: entry checked against the source, nothing to carry here.\n    20\tnote 19: entry checked against the source, nothing to carry here.\n    21\tnote 20: entry checked against the source, nothing to carry here.\n    22\tnote 21: entry checked against the source, nothing to carry here.\n    23\tnote 22: entry checked against the source, nothing to carry here.\n    24\tnote 23: entry checked against the source, nothing to carry here.\n    25\tnote 24: entry checked against the source, nothing to carry here.\n    26\tnote 25: entry checked against the source, nothing to carry here.\n    27\tnote 26: entry checked against the source, nothing to carry here.\n    28\tnote 27: entry checked against the source, nothing to carry here.\n    29\tnote 28: entry checked against the source, nothing to carry here.\n    30\tnote 29: entry checked against the source, nothing to carry here.\n    31\tnote 30: entry checked against the source, nothing to carry here.",
+          "is_error": false,
+          "tool_use_id": "qCfQFM2kM79uEBVYrttbvHVDO8J0tz0Y",
+          "type": "tool_result"
+         }
+        ]
+       },
+       0,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:6>",
+       "desktop:parity-microcompact",
+       5,
+       "assistant",
+       "",
+       {
+        "$json": [
+         {
+          "id": "fNRVrGbDkChduk4B239sHyajGhhaxwcc",
+          "input": {
+           "path": "ledger-c.txt"
+          },
+          "name": "read_file",
+          "type": "tool_use"
+         }
+        ]
+       },
+       0,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:7>",
+       "desktop:parity-microcompact",
+       6,
+       "user",
+       "",
+       {
+        "$json": [
+         {
+          "content": "     1\tLedger C. carry: 23. end of chain\n     2\tnote 01: entry checked against the source, nothing to carry here.\n     3\tnote 02: entry checked against the source, nothing to carry here.\n     4\tnote 03: entry checked against the source, nothing to carry here.\n     5\tnote 04: entry checked against the source, nothing to carry here.\n     6\tnote 05: entry checked against the source, nothing to carry here.\n     7\tnote 06: entry checked against the source, nothing to carry here.\n     8\tnote 07: entry checked against the source, nothing to carry here.\n     9\tnote 08: entry checked against the source, nothing to carry here.\n    10\tnote 09: entry checked against the source, nothing to carry here.\n    11\tnote 10: entry checked against the source, nothing to carry here.\n    12\tnote 11: entry checked against the source, nothing to carry here.\n    13\tnote 12: entry checked against the source, nothing to carry here.\n    14\tnote 13: entry checked against the source, nothing to carry here.\n    15\tnote 14: entry checked against the source, nothing to carry here.\n    16\tnote 15: entry checked against the source, nothing to carry here.\n    17\tnote 16: entry checked against the source, nothing to carry here.\n    18\tnote 17: entry checked against the source, nothing to carry here.\n    19\tnote 18: entry checked against the source, nothing to carry here.\n    20\tnote 19: entry checked against the source, nothing to carry here.\n    21\tnote 20: entry checked against the source, nothing to carry here.\n    22\tnote 21: entry checked against the source, nothing to carry here.\n    23\tnote 22: entry checked against the source, nothing to carry here.\n    24\tnote 23: entry checked against the source, nothing to carry here.\n    25\tnote 24: entry checked against the source, nothing to carry here.\n    26\tnote 25: entry checked against the source, nothing to carry here.\n    27\tnote 26: entry checked against the source, nothing to carry here.\n    28\tnote 27: entry checked against the source, nothing to carry here.\n    29\tnote 28: entry checked against the source, nothing to carry here.\n    30\tnote 29: entry checked against the source, nothing to carry here.\n    31\tnote 30: entry checked against the source, nothing to carry here.",
+          "is_error": false,
+          "tool_use_id": "fNRVrGbDkChduk4B239sHyajGhhaxwcc",
+          "type": "tool_result"
+         }
+        ]
+       },
+       0,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:8>",
+       "desktop:parity-microcompact",
+       7,
+       "assistant",
+       "Chain: Ledger A (carry 7) → Ledger B (carry 12) → Ledger C (carry 23, end of chain).\n\n7 + 12 + 23 = **42**",
+       {
+        "$json": [
+         {
+          "text": "Chain: Ledger A (carry 7) → Ledger B (carry 12) → Ledger C (carry 23, end of chain).\n\n7 + 12 + 23 = **42**",
+          "type": "text"
+         }
+        ]
+       },
+       26,
+       "<time>",
+       0,
+       "user",
+       0
+      ]
+     ]
+    },
+    "lcm_messages_fts": {
+     "columns": [
+      "content"
+     ],
+     "rows": [
+      [
+       "Use your tools, one file per step. Read ledger-a.txt with read_file. Its first line gives a carry value and names the next ledger: read that one, and keep going until a ledger says 'end of chain'. Read each ledger once. Then reply with the sum of all the carry values, as a number."
+      ],
+      [
+       ""
+      ],
+      [
+       ""
+      ],
+      [
+       ""
+      ],
+      [
+       ""
+      ],
+      [
+       ""
+      ],
+      [
+       ""
+      ],
+      [
+       "Chain: Ledger A (carry 7) → Ledger B (carry 12) → Ledger C (carry 23, end of chain).\n\n7 + 12 + 23 = **42**"
+      ]
+     ]
+    },
+    "lcm_messages_fts_config": {
+     "columns": [
+      "k",
+      "v"
+     ],
+     "rows": [
+      [
+       "version",
+       4
+      ]
+     ]
+    },
+    "lcm_messages_fts_data": {
+     "columns": [
+      "id",
+      "block"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "9826ad44549992c3",
+        "len": 2
+       }
+      ],
+      [
+       10,
+       {
+        "$bytes_sha256": "e3375560c1eb04e1",
+        "len": 15
+       }
+      ],
+      [
+       137438953473,
+       {
+        "$bytes_sha256": "aa7da9a28143bbb7",
+        "len": 379
+       }
+      ],
+      [
+       274877906945,
+       {
+        "$bytes_sha256": "5afa7864b41c048d",
+        "len": 113
+       }
+      ]
+     ]
+    },
+    "lcm_messages_fts_docsize": {
+     "columns": [
+      "id",
+      "sz"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "2c624232cdd22177",
+        "len": 1
+       }
+      ],
+      [
+       2,
+       {
+        "$bytes_sha256": "6e340b9cffb37a98",
+        "len": 1
+       }
+      ],
+      [
+       3,
+       {
+        "$bytes_sha256": "6e340b9cffb37a98",
+        "len": 1
+       }
+      ],
+      [
+       4,
+       {
+        "$bytes_sha256": "6e340b9cffb37a98",
+        "len": 1
+       }
+      ],
+      [
+       5,
+       {
+        "$bytes_sha256": "6e340b9cffb37a98",
+        "len": 1
+       }
+      ],
+      [
+       6,
+       {
+        "$bytes_sha256": "6e340b9cffb37a98",
+        "len": 1
+       }
+      ],
+      [
+       7,
+       {
+        "$bytes_sha256": "6e340b9cffb37a98",
+        "len": 1
+       }
+      ],
+      [
+       8,
+       {
+        "$bytes_sha256": "83891d7fe85c33e5",
+        "len": 1
+       }
+      ]
+     ]
+    },
+    "lcm_messages_fts_idx": {
+     "columns": [
+      "segid",
+      "term",
+      "pgno"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "e3b0c44298fc1c14",
+        "len": 0
+       },
+       2
+      ],
+      [
+       2,
+       {
+        "$bytes_sha256": "e3b0c44298fc1c14",
+        "len": 0
+       },
+       2
+      ]
+     ]
+    },
+    "lcm_summaries": {
+     "columns": [
+      "id",
+      "session_id",
+      "parent_ids",
+      "source_message_ids",
+      "summary_text",
+      "depth",
+      "token_count",
+      "created_at",
+      "is_leaf"
+     ],
+     "rows": []
+    },
+    "lcm_summaries_fts": {
+     "columns": [
+      "summary_text"
+     ],
+     "rows": []
+    },
+    "lcm_summaries_fts_config": {
+     "columns": [
+      "k",
+      "v"
+     ],
+     "rows": [
+      [
+       "version",
+       4
+      ]
+     ]
+    },
+    "lcm_summaries_fts_data": {
+     "columns": [
+      "id",
+      "block"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "e3b0c44298fc1c14",
+        "len": 0
+       }
+      ],
+      [
+       10,
+       {
+        "$bytes_sha256": "837885c8f8091aea",
+        "len": 7
+       }
+      ]
+     ]
+    },
+    "lcm_summaries_fts_docsize": {
+     "columns": [
+      "id",
+      "sz"
+     ],
+     "rows": []
+    },
+    "lcm_summaries_fts_idx": {
+     "columns": [
+      "segid",
+      "term",
+      "pgno"
+     ],
+     "rows": []
+    },
+    "message_client_ids": {
+     "columns": [
+      "session_id",
+      "row_id",
+      "client_msg_id",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "session_backends": {
+     "columns": [
+      "session_id",
+      "key",
+      "set_by",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "session_forks": {
+     "columns": [
+      "session_id",
+      "origin_session",
+      "origin_rowid",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "session_pins": {
+     "columns": [
+      "session_id",
+      "pinned_at"
+     ],
+     "rows": []
+    },
+    "session_profiles": {
+     "columns": [
+      "session_id",
+      "profile",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "session_titles": {
+     "columns": [
+      "session_id",
+      "title",
+      "updated_at"
+     ],
+     "rows": [
+      [
+       "desktop:parity-microcompact",
+       "Summing Ledger Carry Values",
+       "<time>"
+      ]
+     ]
+    },
+    "session_tombstones": {
+     "columns": [
+      "session_id",
+      "deleted_at"
+     ],
+     "rows": []
+    },
+    "session_workspaces": {
+     "columns": [
+      "session_id",
+      "path",
+      "set_by",
+      "updated_at"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/data/security/audit.db": {
+   "sqlite": {
+    "permission_audit": {
+     "columns": [
+      "id",
+      "timestamp",
+      "tool_name",
+      "decision",
+      "trust_level",
+      "reason",
+      "tool_input_summary",
+      "user_id",
+      "session_id"
+     ],
+     "rows": [
+      [
+       1,
+       "<time>",
+       "read_file",
+       "allow",
+       2,
+       "Auto-allowed (user-initiated)",
+       "",
+       null,
+       null
+      ],
+      [
+       2,
+       "<time>",
+       "read_file",
+       "allow",
+       2,
+       "Auto-allowed (user-initiated)",
+       "",
+       null,
+       null
+      ],
+      [
+       3,
+       "<time>",
+       "read_file",
+       "allow",
+       2,
+       "Auto-allowed (user-initiated)",
+       "",
+       null,
+       null
+      ]
+     ]
+    }
+   }
+  },
+  "home/.prometheus/data/security/permission_audit.jsonl": {
+   "jsonl": [
+    {
+     "decision": "allow",
+     "reason": "Auto-allowed (user-initiated)",
+     "session_id": null,
+     "timestamp": "<time>",
+     "timestamp_iso": "<time>",
+     "tool_input_summary": "",
+     "tool_name": "read_file",
+     "trust_level": 2,
+     "user_id": null
+    },
+    {
+     "decision": "allow",
+     "reason": "Auto-allowed (user-initiated)",
+     "session_id": null,
+     "timestamp": "<time>",
+     "timestamp_iso": "<time>",
+     "tool_input_summary": "",
+     "tool_name": "read_file",
+     "trust_level": 2,
+     "user_id": null
+    },
+    {
+     "decision": "allow",
+     "reason": "Auto-allowed (user-initiated)",
+     "session_id": null,
+     "timestamp": "<time>",
+     "timestamp_iso": "<time>",
+     "tool_input_summary": "",
+     "tool_name": "read_file",
+     "trust_level": 2,
+     "user_id": null
+    }
+   ]
+  },
+  "home/.prometheus/data/tasks.db": {
+   "sqlite": {
+    "tasks": {
+     "columns": [
+      "id",
+      "type",
+      "status",
+      "description",
+      "cwd",
+      "output_file",
+      "command",
+      "prompt",
+      "created_at",
+      "started_at",
+      "ended_at",
+      "return_code",
+      "metadata",
+      "session_id",
+      "notify_target",
+      "on_complete",
+      "reengage_prompt",
+      "timeout_seconds",
+      "artifact_path",
+      "error",
+      "spec"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/data/training.db": {
+   "sqlite": {
+    "training_pairs": {
+     "columns": [
+      "id",
+      "timestamp",
+      "pair_source",
+      "model_id",
+      "tool_name",
+      "context",
+      "rejected",
+      "chosen",
+      "meta",
+      "context_hash",
+      "turn_id",
+      "round_index",
+      "repair_kind",
+      "outcome"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/memory.db": {
+   "sqlite": {
+    "extractor_cursors": {
+     "columns": [
+      "scope",
+      "last_row_id",
+      "updated_at"
+     ],
+     "rows": [
+      [
+       "*",
+       0,
+       "<time>"
+      ]
+     ]
+    },
+    "memories": {
+     "columns": [
+      "id",
+      "entity_type",
+      "entity_name",
+      "relationship",
+      "fact",
+      "confidence",
+      "source_event_ids",
+      "last_mentioned",
+      "mention_count",
+      "tags",
+      "timestamp",
+      "manual"
+     ],
+     "rows": []
+    },
+    "memories_fts": {
+     "columns": [
+      "id",
+      "entity_name",
+      "fact"
+     ],
+     "rows": []
+    },
+    "memories_fts_config": {
+     "columns": [
+      "k",
+      "v"
+     ],
+     "rows": [
+      [
+       "version",
+       4
+      ]
+     ]
+    },
+    "memories_fts_data": {
+     "columns": [
+      "id",
+      "block"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "df3f619804a92fdb",
+        "len": 4
+       }
+      ],
+      [
+       10,
+       {
+        "$bytes_sha256": "837885c8f8091aea",
+        "len": 7
+       }
+      ]
+     ]
+    },
+    "memories_fts_docsize": {
+     "columns": [
+      "id",
+      "sz"
+     ],
+     "rows": []
+    },
+    "memories_fts_idx": {
+     "columns": [
+      "segid",
+      "term",
+      "pgno"
+     ],
+     "rows": []
+    },
+    "messages": {
+     "columns": [
+      "id",
+      "session_id",
+      "role",
+      "content",
+      "timestamp",
+      "compressed"
+     ],
+     "rows": []
+    },
+    "messages_fts": {
+     "columns": [
+      "id",
+      "content"
+     ],
+     "rows": []
+    },
+    "messages_fts_config": {
+     "columns": [
+      "k",
+      "v"
+     ],
+     "rows": [
+      [
+       "version",
+       4
+      ]
+     ]
+    },
+    "messages_fts_data": {
+     "columns": [
+      "id",
+      "block"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "709e80c88487a241",
+        "len": 3
+       }
+      ],
+      [
+       10,
+       {
+        "$bytes_sha256": "837885c8f8091aea",
+        "len": 7
+       }
+      ]
+     ]
+    },
+    "messages_fts_docsize": {
+     "columns": [
+      "id",
+      "sz"
+     ],
+     "rows": []
+    },
+    "messages_fts_idx": {
+     "columns": [
+      "segid",
+      "term",
+      "pgno"
+     ],
+     "rows": []
+    },
+    "store_marks": {
+     "columns": [
+      "name",
+      "value",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "summaries": {
+     "columns": [
+      "id",
+      "source_message_ids",
+      "summary_text",
+      "level",
+      "timestamp"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/node/node.key": {
+   "replaced": "<boot-specific>"
+  },
+  "home/.prometheus/node/node.pub": {
+   "replaced": "<boot-specific>"
+  },
+  "home/.prometheus/prometheus.yaml": {
+   "replaced": "<harness-input>"
+  },
+  "home/.prometheus/telemetry.db": {
+   "sqlite": {
+    "circuit_breaker_diagnostics": {
+     "columns": [
+      "id",
+      "timestamp",
+      "model_id",
+      "adapter_tier",
+      "tool_name",
+      "failure_category",
+      "config_drift",
+      "raw_sample",
+      "recovered",
+      "recovery_method",
+      "golden_reference"
+     ],
+     "rows": []
+    },
+    "responses": {
+     "columns": [
+      "id",
+      "ts",
+      "session_id",
+      "turn_id",
+      "round_index",
+      "loop_round_id",
+      "provider",
+      "adapter_tier",
+      "ctx_window",
+      "tool_set_hash",
+      "response_kind",
+      "tool_call_count",
+      "prose_chars",
+      "prose",
+      "mode",
+      "surface",
+      "forced_tool_choice"
+     ],
+     "rows": [
+      [
+       1,
+       "<time>",
+       "desktop:parity-microcompact",
+       "<turn:1>",
+       0,
+       "<uuid:9>",
+       "llama_cpp",
+       "light",
+       32768,
+       "0ac69752b6f71969",
+       "tool_call",
+       1,
+       0,
+       null,
+       "agent",
+       "beacon",
+       null
+      ],
+      [
+       2,
+       "<time>",
+       "desktop:parity-microcompact",
+       "<turn:1>",
+       1,
+       "<uuid:10>",
+       "llama_cpp",
+       "light",
+       32768,
+       "0ac69752b6f71969",
+       "tool_call",
+       1,
+       0,
+       null,
+       "agent",
+       "beacon",
+       null
+      ],
+      [
+       3,
+       "<time>",
+       "desktop:parity-microcompact",
+       "<turn:1>",
+       2,
+       "<uuid:11>",
+       "llama_cpp",
+       "light",
+       32768,
+       "0ac69752b6f71969",
+       "tool_call",
+       1,
+       0,
+       null,
+       "agent",
+       "beacon",
+       null
+      ],
+      [
+       4,
+       "<time>",
+       "desktop:parity-microcompact",
+       "<turn:1>",
+       3,
+       "<uuid:12>",
+       "llama_cpp",
+       "light",
+       32768,
+       "0ac69752b6f71969",
+       "prose",
+       0,
+       106,
+       "Chain: Ledger A (carry 7) → Ledger B (carry 12) → Ledger C (carry 23, end of chain).\n\n7 + 12 + 23 = **42**",
+       "agent",
+       "beacon",
+       null
+      ]
+     ]
+    },
+    "schema_meta": {
+     "columns": [
+      "key",
+      "value"
+     ],
+     "rows": [
+      [
+       "latency_nullable_since",
+       "0.0"
+      ],
+      [
+       "billing_recorded_since",
+       "<time>"
+      ],
+      [
+       "telemetry_v2_since",
+       "<time>"
+      ],
+      [
+       "created_at",
+       "<time>"
+      ],
+      [
+       "created_by",
+       "prometheus telemetry v3"
+      ],
+      [
+       "schema_version",
+       "3"
+      ],
+      [
+       "telemetry_v2_capture_since",
+       "<time>"
+      ]
+     ]
+    },
+    "signal_events": {
+     "columns": [
+      "id",
+      "timestamp",
+      "signal_type",
+      "payload",
+      "source_subsystem",
+      "read_at"
+     ],
+     "rows": []
+    },
+    "silent_failures": {
+     "columns": [
+      "id",
+      "timestamp",
+      "subsystem",
+      "operation",
+      "exception_type",
+      "exception_msg",
+      "traceback",
+      "context",
+      "response_body"
+     ],
+     "rows": []
+    },
+    "subsystem_runs": {
+     "columns": [
+      "id",
+      "timestamp",
+      "subsystem",
+      "operation",
+      "duration_ms",
+      "outcome",
+      "summary_json",
+      "input_tokens",
+      "output_tokens",
+      "round_index",
+      "session_id",
+      "model",
+      "thinking",
+      "cached_input_tokens",
+      "cache_write_tokens",
+      "node_id",
+      "billing_mode",
+      "billing_marker"
+     ],
+     "rows": [
+      [
+       "<uuid:13>",
+       "<time>",
+       "tool_registration",
+       "TaskCreateTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskCreateTool",
+         "module_path": "prometheus.tools.builtin.task_create"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:14>",
+       "<time>",
+       "tool_registration",
+       "GitHubSearchTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "GitHubSearchTool",
+         "module_path": "prometheus.symbiote.github_search"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:15>",
+       "<time>",
+       "tool_registration",
+       "SymbioteScoutTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SymbioteScoutTool",
+         "module_path": "prometheus.tools.builtin.symbiote_scout"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:16>",
+       "<time>",
+       "tool_registration",
+       "SymbioteHarvestTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SymbioteHarvestTool",
+         "module_path": "prometheus.tools.builtin.symbiote_harvest"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:17>",
+       "<time>",
+       "tool_registration",
+       "SymbioteGraftTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SymbioteGraftTool",
+         "module_path": "prometheus.tools.builtin.symbiote_graft"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:18>",
+       "<time>",
+       "tool_registration",
+       "SymbioteStatusTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SymbioteStatusTool",
+         "module_path": "prometheus.tools.builtin.symbiote_status"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:19>",
+       "<time>",
+       "tool_registration",
+       "SkillTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SkillTool",
+         "module_path": "prometheus.tools.builtin.skill"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:20>",
+       "<time>",
+       "tool_registration",
+       "MemoryTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "MemoryTool",
+         "module_path": "prometheus.memory.hermes_memory_tool"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:21>",
+       "<time>",
+       "tool_registration",
+       "TodoWriteTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TodoWriteTool",
+         "module_path": "prometheus.tools.builtin.todo_write"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:22>",
+       "<time>",
+       "tool_registration",
+       "VaultSearchTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "VaultSearchTool",
+         "module_path": "prometheus.tools.builtin.vault"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:23>",
+       "<time>",
+       "tool_registration",
+       "VaultReadTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "VaultReadTool",
+         "module_path": "prometheus.tools.builtin.vault"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:24>",
+       "<time>",
+       "tool_registration",
+       "AnatomyTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "AnatomyTool",
+         "module_path": "prometheus.tools.builtin.anatomy"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:25>",
+       "<time>",
+       "tool_registration",
+       "BrowserTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "BrowserTool",
+         "module_path": "prometheus.tools.builtin.browser"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:26>",
+       "<time>",
+       "tool_registration",
+       "SessionsListTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SessionsListTool",
+         "module_path": "prometheus.tools.builtin.sessions_list"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:27>",
+       "<time>",
+       "tool_registration",
+       "SessionsSendTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SessionsSendTool",
+         "module_path": "prometheus.tools.builtin.sessions_send"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:28>",
+       "<time>",
+       "tool_registration",
+       "SessionsSpawnTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SessionsSpawnTool",
+         "module_path": "prometheus.tools.builtin.sessions_spawn"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:29>",
+       "<time>",
+       "tool_registration",
+       "TaskGetTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskGetTool",
+         "module_path": "prometheus.tools.builtin.task_get"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:30>",
+       "<time>",
+       "tool_registration",
+       "TaskListTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskListTool",
+         "module_path": "prometheus.tools.builtin.task_list"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:31>",
+       "<time>",
+       "tool_registration",
+       "TaskUpdateTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskUpdateTool",
+         "module_path": "prometheus.tools.builtin.task_update"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:32>",
+       "<time>",
+       "tool_registration",
+       "TaskStopTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskStopTool",
+         "module_path": "prometheus.tools.builtin.task_stop"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:33>",
+       "<time>",
+       "tool_registration",
+       "TaskOutputTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskOutputTool",
+         "module_path": "prometheus.tools.builtin.task_output"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:34>",
+       "<time>",
+       "tool_registration",
+       "ImageGenerateTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "ImageGenerateTool",
+         "module_path": "prometheus.tools.builtin.image_generate"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:35>",
+       "<time>",
+       "tool_registration",
+       "KlingVideoTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "KlingVideoTool",
+         "module_path": "prometheus.tools.builtin.video_generate"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:36>",
+       "<time>",
+       "agent_loop",
+       "tool_advertisement",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "advertised": 12,
+         "deferred_active": true,
+         "profile": "full",
+         "registered_total": 51,
+         "source": "auto → enabled (local provider, tier light)"
+        }
+       },
+       null,
+       null,
+       null,
+       "desktop:parity-microcompact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:9>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "tool_calls"
+        }
+       },
+       6229,
+       27,
+       0,
+       "desktop:parity-microcompact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       4176,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:10>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "tool_calls"
+        }
+       },
+       6942,
+       27,
+       1,
+       "desktop:parity-microcompact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       6255,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:37>",
+       "<time>",
+       "agent_loop",
+       "microcompact",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "cache_prefix_invalidated": true,
+         "chars_after": 573,
+         "chars_before": 2242,
+         "chars_dropped": 1669,
+         "results_compacted": 1
+        }
+       },
+       null,
+       null,
+       2,
+       "desktop:parity-microcompact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:11>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "tool_calls"
+        }
+       },
+       7163,
+       27,
+       2,
+       "desktop:parity-microcompact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       6255,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:38>",
+       "<time>",
+       "agent_loop",
+       "microcompact",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "cache_prefix_invalidated": true,
+         "chars_after": 574,
+         "chars_before": 2243,
+         "chars_dropped": 1669,
+         "results_compacted": 1
+        }
+       },
+       null,
+       null,
+       3,
+       "desktop:parity-microcompact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:12>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       7382,
+       47,
+       3,
+       "desktop:parity-microcompact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       6255,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:39>",
+       "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       173,
+       6,
+       null,
+       "desktop:parity-microcompact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       15,
+       null,
+       "<node>",
+       "local",
+       null
+      ]
+     ]
+    },
+    "tool_calls": {
+     "columns": [
+      "id",
+      "timestamp",
+      "model",
+      "tool_name",
+      "success",
+      "retries",
+      "latency_ms",
+      "error_type",
+      "error_detail",
+      "raw_model_output",
+      "parsed_tool_call",
+      "is_golden",
+      "repairs",
+      "served_model",
+      "session_id",
+      "tool_schema",
+      "node_id",
+      "turn_id",
+      "round_index",
+      "tool_use_id",
+      "repair_kind",
+      "raw_before_repair",
+      "retry_index",
+      "result_summary"
+     ],
+     "rows": [
+      [
+       "<uuid:40>",
+       "<time>",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "read_file",
+       1,
+       0,
+       "<ms>",
+       null,
+       null,
+       "",
+       {
+        "$json": {
+         "input": {
+          "path": "ledger-a.txt"
+         },
+         "name": "read_file"
+        }
+       },
+       0,
+       0,
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "desktop:parity-microcompact",
+       {
+        "$json": {
+         "description": "Read a text file from the local repository.",
+         "name": "read_file",
+         "parameters": {
+          "description": "Arguments for the file read tool.",
+          "properties": {
+           "limit": {
+            "default": 200,
+            "description": "Number of lines to return",
+            "maximum": 2000,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+           },
+           "offset": {
+            "default": 0,
+            "description": "Zero-based starting line",
+            "minimum": 0,
+            "title": "Offset",
+            "type": "integer"
+           },
+           "path": {
+            "description": "Path of the file to read",
+            "title": "Path",
+            "type": "string",
+            "x-prometheus-path": "file",
+            "x-prometheus-path-access": "read"
+           }
+          },
+          "required": [
+           "path"
+          ],
+          "title": "FileReadToolInput",
+          "type": "object"
+         }
+        }
+       },
+       "<node>",
+       "<turn:1>",
+       0,
+       "H5IhDoxY5yckvpF0yULkyeOlDgZJhfmv",
+       null,
+       null,
+       0,
+       "     1\tLedger A. carry: 7. next ledger: ledger-b.txt\n     2\tnote 01: entry checked against the source, nothing to carry here.\n     3\tnote 02: entry checked against the source, nothing to carry here.\n     4\tnote 03: entry checked against the source, nothing to carry here.\n     5\tnote 04: entry checked against the source, nothing to carry here.\n     6\tnote 05: entry checked against the source, nothing to carry here.\n     7\tnote 06: entry checked against the source, nothing to carry here.\n     8\tno"
+      ],
+      [
+       "<uuid:41>",
+       "<time>",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "_loop_transition",
+       1,
+       0,
+       null,
+       null,
+       null,
+       null,
+       null,
+       0,
+       0,
+       null,
+       "desktop:parity-microcompact",
+       null,
+       "<node>",
+       "<turn:1>",
+       0,
+       null,
+       null,
+       null,
+       null,
+       null
+      ],
+      [
+       "<uuid:42>",
+       "<time>",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "read_file",
+       1,
+       0,
+       "<ms>",
+       null,
+       null,
+       "",
+       {
+        "$json": {
+         "input": {
+          "path": "ledger-b.txt"
+         },
+         "name": "read_file"
+        }
+       },
+       0,
+       0,
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "desktop:parity-microcompact",
+       {
+        "$json": {
+         "description": "Read a text file from the local repository.",
+         "name": "read_file",
+         "parameters": {
+          "description": "Arguments for the file read tool.",
+          "properties": {
+           "limit": {
+            "default": 200,
+            "description": "Number of lines to return",
+            "maximum": 2000,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+           },
+           "offset": {
+            "default": 0,
+            "description": "Zero-based starting line",
+            "minimum": 0,
+            "title": "Offset",
+            "type": "integer"
+           },
+           "path": {
+            "description": "Path of the file to read",
+            "title": "Path",
+            "type": "string",
+            "x-prometheus-path": "file",
+            "x-prometheus-path-access": "read"
+           }
+          },
+          "required": [
+           "path"
+          ],
+          "title": "FileReadToolInput",
+          "type": "object"
+         }
+        }
+       },
+       "<node>",
+       "<turn:1>",
+       1,
+       "qCfQFM2kM79uEBVYrttbvHVDO8J0tz0Y",
+       null,
+       null,
+       0,
+       "     1\tLedger B. carry: 12. next ledger: ledger-c.txt\n     2\tnote 01: entry checked against the source, nothing to carry here.\n     3\tnote 02: entry checked against the source, nothing to carry here.\n     4\tnote 03: entry checked against the source, nothing to carry here.\n     5\tnote 04: entry checked against the source, nothing to carry here.\n     6\tnote 05: entry checked against the source, nothing to carry here.\n     7\tnote 06: entry checked against the source, nothing to carry here.\n     8\tn"
+      ],
+      [
+       "<uuid:43>",
+       "<time>",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "_loop_transition",
+       1,
+       0,
+       null,
+       null,
+       null,
+       null,
+       null,
+       0,
+       0,
+       null,
+       "desktop:parity-microcompact",
+       null,
+       "<node>",
+       "<turn:1>",
+       1,
+       null,
+       null,
+       null,
+       null,
+       null
+      ],
+      [
+       "<uuid:44>",
+       "<time>",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "read_file",
+       1,
+       0,
+       "<ms>",
+       null,
+       null,
+       "",
+       {
+        "$json": {
+         "input": {
+          "path": "ledger-c.txt"
+         },
+         "name": "read_file"
+        }
+       },
+       0,
+       0,
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "desktop:parity-microcompact",
+       {
+        "$json": {
+         "description": "Read a text file from the local repository.",
+         "name": "read_file",
+         "parameters": {
+          "description": "Arguments for the file read tool.",
+          "properties": {
+           "limit": {
+            "default": 200,
+            "description": "Number of lines to return",
+            "maximum": 2000,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+           },
+           "offset": {
+            "default": 0,
+            "description": "Zero-based starting line",
+            "minimum": 0,
+            "title": "Offset",
+            "type": "integer"
+           },
+           "path": {
+            "description": "Path of the file to read",
+            "title": "Path",
+            "type": "string",
+            "x-prometheus-path": "file",
+            "x-prometheus-path-access": "read"
+           }
+          },
+          "required": [
+           "path"
+          ],
+          "title": "FileReadToolInput",
+          "type": "object"
+         }
+        }
+       },
+       "<node>",
+       "<turn:1>",
+       2,
+       "fNRVrGbDkChduk4B239sHyajGhhaxwcc",
+       null,
+       null,
+       0,
+       "     1\tLedger C. carry: 23. end of chain\n     2\tnote 01: entry checked against the source, nothing to carry here.\n     3\tnote 02: entry checked against the source, nothing to carry here.\n     4\tnote 03: entry checked against the source, nothing to carry here.\n     5\tnote 04: entry checked against the source, nothing to carry here.\n     6\tnote 05: entry checked against the source, nothing to carry here.\n     7\tnote 06: entry checked against the source, nothing to carry here.\n     8\tnote 07: entry"
+      ],
+      [
+       "<uuid:45>",
+       "<time>",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "_loop_transition",
+       1,
+       0,
+       null,
+       null,
+       null,
+       null,
+       null,
+       0,
+       0,
+       null,
+       "desktop:parity-microcompact",
+       null,
+       "<node>",
+       "<turn:1>",
+       2,
+       null,
+       null,
+       null,
+       null,
+       null
+      ]
+     ]
+    },
+    "tool_sets": {
+     "columns": [
+      "tool_set_hash",
+      "tool_names",
+      "tool_count",
+      "created_at"
+     ],
+     "rows": [
+      [
+       "0ac69752b6f71969",
+       {
+        "$json": [
+         "bash",
+         "edit_file",
+         "glob",
+         "grep",
+         "memory",
+         "read_file",
+         "skill",
+         "task_create",
+         "tool_search",
+         "web_fetch",
+         "web_search",
+         "write_file"
+        ]
+       },
+       12,
+       "<time>"
+      ]
+     ]
+    },
+    "turns": {
+     "columns": [
+      "turn_id",
+      "session_id",
+      "coding_run_id",
+      "surface",
+      "mode",
+      "started_at",
+      "ended_at",
+      "rounds",
+      "total_prompt_tokens",
+      "total_completion_tokens",
+      "models_used",
+      "tools_used",
+      "not_run_calls",
+      "first_prose_round",
+      "terminal_kind",
+      "forced_stop_reason",
+      "task_class",
+      "outcome",
+      "outcome_source",
+      "outcome_at"
+     ],
+     "rows": [
+      [
+       "<turn:1>",
+       "desktop:parity-microcompact",
+       null,
+       "beacon",
+       "agent",
+       "<time>",
+       "<time>",
+       4,
+       27716,
+       128,
+       {
+        "$json": [
+         "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
+        ]
+       },
+       {
+        "$json": [
+         "read_file"
+        ]
+       },
+       0,
+       3,
+       "prose",
+       null,
+       null,
+       null,
+       null,
+       null
+      ]
+     ]
+    }
+   }
+  }
+ }
+}

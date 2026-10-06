@@ -505,6 +505,18 @@ GATE = {**_tel(tool_calls=(["tool_name", "error_type"], [["read_file", "permissi
         "home/.prometheus/data/security/audit.db": {"sqlite": {"permission_audit": {
             "columns": ["decision"], "rows": [["DENY"]]}}}}
 COMPACTED = _tel(subsystem_runs=(["subsystem"], [["context_compactor"]]))
+# microcompaction's shape: the trim ran, three ledger reads, and lcm.db holding
+# each result whole (or, refused, holding the excerpt).
+_MC_RUNS = ("subsystem_runs", (["subsystem", "operation"], [["agent_loop", "microcompact"]]))
+def _mc_stores(*, ran: bool = True, reads: int = 3,
+               stored: str = '[{"content": "carry: 7. next ledger"}]') -> dict:
+    mc_reads = ("tool_calls", (["tool_name", "success"], [["read_file", 1]] * reads))
+    tables = dict([_MC_RUNS, mc_reads]) if ran else dict([mc_reads])
+    return {**_tel(**tables), "home/.prometheus/data/lcm.db": {"sqlite": {"lcm_messages": {
+        "columns": ["content", "content_json"], "rows": [["", stored]]}}}}
+
+
+MC_SENT = [{"messages": [{"role": "user", "content": "[microcompacted] 1\tLedger A..."}]}]
 # checkpoint_undo's shape: the turn adds greeting.txt and rewrites inventory.txt;
 # the undo deletes the one and restores the other.
 _START = {"inventory.txt": "19d70ba9"}
@@ -613,6 +625,14 @@ RECORDING_RULES = [
      [(_ev(steps=_undo("")), "no final reply"),
       (_ev(steps=_undo("Done.", after_undo=UNDO_LEFT_A_CHANGE)), "state before the turn"),
       (_ev(steps=_undo("Done.", after_undo=UNDO_LEFT_A_FILE)), "state before the turn")]),
+    ("microcompaction", _ev(stores=_mc_stores(), requests=MC_SENT, steps=[_chat("**42**")]),
+     [(_ev(stores=_mc_stores(ran=False), requests=MC_SENT, steps=[_chat("42")]), "never ran"),
+      (_ev(stores=_mc_stores(), steps=[_chat("42")]), "no request carried"),
+      (_ev(stores=_mc_stores(stored='[{"content": "[microcompacted] 1\\tLedger A"}]'),
+           requests=MC_SENT, steps=[_chat("42")]), "replaced the record"),
+      (_ev(stores=_mc_stores(), requests=MC_SENT, steps=[_chat("The total is 41.")]),
+       "carry total"),
+      (_ev(stores=_mc_stores(reads=4), requests=MC_SENT, steps=[_chat("42")]), "once each")]),
     ("compaction", _ev(stores=COMPACTED, steps=[_chat("noted")] * 3 + [_chat("amber, birch, cobalt")]),
      [(_ev(stores=COMPACTED, steps=[_chat("noted")] * 3
            + [_chat("I can't be certain, but: amber, birch, cobalt")]), "hedges"),
