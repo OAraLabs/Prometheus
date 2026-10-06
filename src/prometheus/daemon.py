@@ -1251,6 +1251,17 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     _boot_project_prompt = _project_files_section(config, str(Path.cwd()))
 
+    # File memory (MEMORY.md + USER.md): run_loop re-reads it every run and
+    # swaps the boot "# Memory" section by exact substring, so a memory-tool
+    # write or a Beacon edit reaches the next turn without a restart. Read
+    # ONCE here and passed to every boot prompt build below, so the section
+    # both loops are told to look for is the one the prompt carries.
+    from prometheus.context.prompt_assembler import _load_memory_and_user
+    from prometheus.context.prompt_assembler import memory_section as _memory_section
+
+    _boot_memory_content = _load_memory_and_user()
+    _boot_memory_prompt = _memory_section(_boot_memory_content)
+
     # Item 4: per-turn file checkpoints for sessions with a workspace.
     checkpoint_store = None
     from prometheus.checkpoints import FileCheckpointStore, resolve_checkpoints_config
@@ -1273,6 +1284,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
         workspace_resolver=_session_workspace,
         boot_project_prompt=_boot_project_prompt,
         project_prompt_builder=_project_prompt_for,
+        boot_memory_prompt=_boot_memory_prompt,
+        memory_prompt_builder=_memory_section,
         checkpoint_store=checkpoint_store,
         # Without this the fallback is INERT: the loop reads context.fallback and nothing
         # ever set it, so every terminal provider failure ended the turn exactly as before.
@@ -1511,6 +1524,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
             system_prompt = build_runtime_system_prompt(
                 cwd=str(Path.cwd()), config=config,
                 skills=skills_for_prompt(),
+                memory_content=_boot_memory_content,
             )
             telegram = TelegramAdapter(
                 config=tg_config,
@@ -1678,6 +1692,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 system_prompt = build_runtime_system_prompt(
                     cwd=str(Path.cwd()), config=config,
                     skills=skills_for_prompt(),
+                    memory_content=_boot_memory_content,
                 )
             slack_adapter = SlackAdapter(
                 config=slack_config,
@@ -1748,6 +1763,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 system_prompt = build_runtime_system_prompt(
                     cwd=str(Path.cwd()), config=config,
                     skills=skills_for_prompt(),
+                    memory_content=_boot_memory_content,
                 )
             discord_adapter = DiscordAdapter(
                 config=discord_config,
@@ -2583,6 +2599,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 system_prompt = build_runtime_system_prompt(
                     cwd=str(Path.cwd()), config=config,
                     skills=skills_for_prompt(),
+                    memory_content=_boot_memory_content,
                 )
 
             loop_context = LoopContext(
@@ -2653,6 +2670,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 workspace_resolver=_session_workspace,
                 boot_project_prompt=_boot_project_prompt,
                 project_prompt_builder=_project_prompt_for,
+                boot_memory_prompt=_boot_memory_prompt,
+                memory_prompt_builder=_memory_section,
                 checkpoint_store=checkpoint_store,
                 # THE SAME LESSON, THIRD TIME (2026-07-31). Everything below is
                 # config that AgentLoop threads for telegram/CLI and that this
