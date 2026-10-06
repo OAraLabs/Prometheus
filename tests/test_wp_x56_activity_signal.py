@@ -212,11 +212,12 @@ class TestIngress:
         from prometheus.engine.session import SessionManager
         from prometheus.skills.registry import SkillRegistry
         from prometheus.web.server import create_app
-        from tests.test_api_chat_reaches_the_model import _RecordingLoop
+        from tests.test_api_chat_reaches_the_model import _RecordingLoop, wire_runtime_prompt
 
         monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path))
-        app = create_app({"gateway": {"system_prompt": "sys"}}, session_mgr=SessionManager(),
-                         skill_registry=SkillRegistry(), agent_loop=_RecordingLoop())
+        app = wire_runtime_prompt(create_app({}, session_mgr=SessionManager(),
+                                             skill_registry=SkillRegistry(),
+                                             agent_loop=_RecordingLoop()))
         r = TestClient(app).post("/api/chat", json={"session_id": "abc", "content": "hello there"})
         assert r.status_code == 200, r.text
         assert activity.last_user_activity() is not None
