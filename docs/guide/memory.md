@@ -10,7 +10,7 @@ Prometheus remembers in layers. Every message you exchange is persisted to SQLit
 |---|---|---|
 | LCM | Persists every message to SQLite and summarizes older stretches into a searchable DAG | On (no switch) |
 | Context compactor | Summarizes the oldest turns of the request sent to the model when it nears the context window | On in the shipped config (`compaction.enabled: true`) |
-| File memory | `MEMORY.md` + `USER.md` ride every system prompt, as read when the daemon starts; the agent edits them | On |
+| File memory | `MEMORY.md` + `USER.md` ride every system prompt, read again each turn; the agent edits them | On |
 | Memory extractor | Mines conversations into structured facts every ~30 minutes | On |
 | Passive recall | Injects relevant stored facts into each turn's system prompt | On |
 | Wiki | Compiles facts into cross-linked entity pages, browsable in Obsidian | On (pages recompile after each extraction pass) |
@@ -64,11 +64,9 @@ Two plain markdown files ride every system prompt:
 
 The agent reads and edits these itself over time. You can inspect them at any point with the `/memory` command, or in Beacon under **Config → Memory**.
 
-**The prompt carries a copy taken when the daemon starts.** The daemon builds its system prompt once, at startup, with both files read into it. Edits made after that — the agent's own `memory` tool calls, or yours through Beacon or the API — land on disk straight away and show in `/memory`, but the copy in the system prompt stays as it was until the daemon restarts. Within a conversation, the agent still has its own edits in front of it, as the `memory` calls it made.
+**Edits reach the next turn.** Both files are read again at the start of every turn, so a change reaches the model on your next message with no restart. That holds whether the agent made it with its `memory` tool, you made it in Beacon or through the API, or you edited the file by hand. A change made partway through a turn applies from the next turn. If neither file changed, the system prompt is byte-for-byte the same, so a provider's prompt cache is not disturbed.
 
 **A full file drops its oldest entries, silently.** Each line is one entry. When the agent's add or replace would push a file past its limit, the oldest entries are removed until it fits, and nothing reports it. (A single entry bigger than the whole limit is refused instead.) Keeping the files curated is the only way to keep old notes from falling off the top.
-
-Both files are read again at the start of every turn, so a change reaches the model on your next message with no restart. That holds whether the agent made it, you made it in Beacon, or you edited the file by hand. A change made partway through a turn applies from the next turn. If neither file changed, the system prompt is byte-for-byte the same, so a provider's prompt cache is not disturbed.
 
 ### Editing memory remotely
 
@@ -78,7 +76,7 @@ You can also edit both files yourself, from anywhere the API reaches — `PUT /a
 - **Every edit is reversible.** The previous content is snapshotted to `~/.prometheus/memory-history/` before each write.
 - **Optional optimistic concurrency.** Send `base_memory`/`base_user` (the content you loaded) alongside your edit; if the agent moved the file in the meantime, the write is refused with a **409 that returns the current truth**, so your editor can rebase the draft instead of silently clobbering the agent's changes. Omit the base fields and you get plain last-writer-wins.
 
-Like the agent's edits, yours reach the system prompt at the next daemon restart.
+Like the agent's edits, yours reach the model on the next turn.
 
 ## Memory extractor
 
