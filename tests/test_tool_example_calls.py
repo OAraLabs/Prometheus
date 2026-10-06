@@ -54,6 +54,9 @@ def served_tools(tmp_path, monkeypatch) -> list[tuple[str, BaseTool]]:
     monkeypatch.setenv("HOME", str(home))
     box = tmp_path / "box"
     box.mkdir()
+    # web_discover is served by the default registry only when an Exa key is
+    # configured; a fake one makes the walk reach it.
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
 
     tools = [("default", t) for t in create_tool_registry({}).list_tools()]
     tools += [

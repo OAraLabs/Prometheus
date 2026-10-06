@@ -402,6 +402,17 @@ def create_tool_registry(
     try_register(registry, "ImageGenerateTool",
                  "prometheus.tools.builtin.image_generate", "ImageGenerateTool")
 
+    # web_discover — Exa neural search. EXISTS ONLY WITH A KEY: without
+    # EXA_API_KEY (environment or env file; never prometheus.yaml) it is not
+    # registered at all, so a fresh install's tool set and every parity golden
+    # are unchanged. With one it is advertised (advertise_when_registered).
+    from prometheus.tools.builtin.web_search_backends import read_secret
+    if read_secret("EXA_API_KEY"):
+        try_register(registry, "WebDiscoverTool",
+                     "prometheus.tools.builtin.web_discover", "WebDiscoverTool")
+    else:
+        log.debug("web_discover: not registered (no EXA_API_KEY)")
+
     # Video generation — Kling 3.0 (CLOUD EXPANSION 2026-07). PAID +
     # dormant-until-keyed: registration is unconditional (same pattern as
     # image_generate — this is the single registry both the CLI and the

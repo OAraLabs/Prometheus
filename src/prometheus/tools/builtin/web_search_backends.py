@@ -171,10 +171,12 @@ class BackendPlan:
 
 def resolve_brave_key() -> str:
     """The Brave key from the environment, then the env file; "" when neither has it."""
-    return _secret(BRAVE_KEY_ENV)
+    return read_secret(BRAVE_KEY_ENV)
 
 
-def _secret(name: str) -> str:
+def read_secret(name: str) -> str:
+    """A key from the environment, then the env file (``config/env_file.py``).
+    Never prometheus.yaml. "" when neither has it."""
     value = os.environ.get(name, "").strip()
     if value:
         return value

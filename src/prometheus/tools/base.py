@@ -45,6 +45,11 @@ class BaseTool(ABC):
     # "use LoopContext.tool_timeout_seconds". Tools that legitimately run longer
     # than the global default (e.g. a full test run) set a larger value here.
     execution_timeout_seconds: float | None = None
+    # Advertised even under deferred loading, when the config follows the
+    # shipped always_loaded default (a pinned list is used as written). For a
+    # tool create_tool_registry registers only on the operator's say-so, such
+    # as web_discover with an EXA_API_KEY: being registered is the opt-in.
+    advertise_when_registered: bool = False
 
     @abstractmethod
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:

@@ -1,0 +1,25 @@
+{
+  "requestId": "e1f0a8c2d7b94a6f8b3c5d2e9a7f1b04",
+  "results": [
+    {
+      "id": "https://arxiv.org/abs/2310.11511",
+      "title": "Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection",
+      "url": "https://arxiv.org/abs/2310.11511",
+      "publishedDate": "2023-10-17",
+      "author": "Akari Asai",
+      "score": 0.88,
+      "summary": "Introduces Self-RAG, which trains a language model to retrieve on demand and to critique its own generations with reflection tokens."
+    },
+    {
+      "id": "https://arxiv.org/abs/2401.15884",
+      "title": "Corrective Retrieval Augmented Generation",
+      "url": "https://arxiv.org/abs/2401.15884",
+      "publishedDate": "2024-01-29",
+      "author": "Shi-Qi Yan",
+      "score": 0.86,
+      "summary": "Proposes CRAG, which scores retrieved documents and falls back to web search when retrieval is judged unreliable."
+    }
+  ],
+  "costDollars": {"total": 0.007},
+  "searchTime": 640.1
+}

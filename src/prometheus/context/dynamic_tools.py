@@ -16,7 +16,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from prometheus.config.shipped_defaults import resolve_always_loaded
+from prometheus.config.shipped_defaults import (
+    ALWAYS_LOADED_PINNED,
+    always_loaded_origin,
+    resolve_always_loaded,
+)
 from prometheus.tools.base import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -139,6 +143,14 @@ class DynamicToolLoader:
         self._dynamic_names: frozenset[str] = frozenset()
         self._always_loaded: frozenset[str] = frozenset(
             resolve_always_loaded(self._deferred)
+        )
+        # A config that follows the shipped default also advertises the tools
+        # that exist only on the operator's say-so (``advertise_when_registered``:
+        # web_discover, registered only with an EXA_API_KEY). Without one the
+        # tool is not registered, so the shipped set is unchanged. A pinned list
+        # is the operator's and is used exactly as written.
+        self._follows_shipped_default: bool = (
+            always_loaded_origin(self._deferred) != ALWAYS_LOADED_PINNED
         )
 
     def add_always_loaded(self, names: list[str] | set[str]) -> None:
@@ -304,10 +316,15 @@ class DynamicToolLoader:
     # advertised catalog.
 
     def _deferred_schemas(self) -> list[dict[str, Any]]:
-        """Return only schemas for always_loaded tools (deferred mode)."""
+        """Return only schemas for always_loaded tools (deferred mode), plus the
+        registered ``advertise_when_registered`` tools when the config follows
+        the shipped default."""
         schemas = []
         for tool in self._registry.list_tools():
-            if tool.name in self._always_loaded:
+            if tool.name in self._always_loaded or (
+                self._follows_shipped_default
+                and getattr(tool, "advertise_when_registered", False)
+            ):
                 schemas.append(tool.to_api_schema())
         return schemas
 
@@ -317,8 +334,7 @@ class DynamicToolLoader:
         if not self._deferred_enabled:
             return 0
         total = len(self._registry.list_tools())
-        loaded = len(self._always_loaded)
-        return max(0, total - loaded)
+        return max(0, total - len(self._deferred_schemas()))
 
     def all_schemas(self) -> list[dict[str, Any]]:
         """Return schemas for every registered tool."""

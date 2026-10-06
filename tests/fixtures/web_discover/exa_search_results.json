@@ -1,0 +1,42 @@
+{
+  "requestId": "b5947044c4b78efa9552a7c89b306d95",
+  "results": [
+    {
+      "id": "https://qdrant.tech/",
+      "title": "Qdrant - Vector Database",
+      "url": "https://qdrant.tech/",
+      "publishedDate": "2025-11-03",
+      "author": null,
+      "score": 0.41,
+      "summary": "Qdrant is an open-source vector database and similarity search engine written in Rust, offered self-hosted or as a managed cloud service."
+    },
+    {
+      "id": "https://weaviate.io/",
+      "title": "Weaviate: The AI-native database developers love",
+      "url": "https://weaviate.io/",
+      "publishedDate": "2026-02-17",
+      "author": null,
+      "score": 0.39,
+      "summary": "Weaviate is an open-source vector database that stores objects and vectors together and supports hybrid keyword and vector search."
+    },
+    {
+      "id": "https://milvus.io/",
+      "title": "Milvus | High-Performance Vector Database Built for Scale",
+      "url": "https://milvus.io/",
+      "publishedDate": null,
+      "author": null,
+      "score": 0.37,
+      "summary": "Milvus is an open-source vector database built for scalable similarity search over billions of vectors, maintained under the LF AI & Data Foundation. It offers distributed deployment, GPU indexing, and many index types, and has a managed service called Zilliz Cloud. This sentence is here so the summary runs past the tool's cap and the test can see it cut."
+    },
+    {
+      "id": "https://www.trychroma.com/",
+      "title": "Chroma",
+      "url": "https://www.trychroma.com/",
+      "publishedDate": null,
+      "author": null,
+      "score": 0.35
+    }
+  ],
+  "costDollars": {"total": 0.01, "search": {"neural": 0.005}, "contents": {"summary": 0.004}},
+  "searchTime": 812.5
+}
