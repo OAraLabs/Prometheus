@@ -12,7 +12,7 @@ backend in front of it.
 | Lane | What runs | Setup | Use it for |
 |---|---|---|---|
 | Zero setup | `web_search` → DuckDuckGo | none | a fresh install; works out of the box |
-| Your own backends | `web_search` → SearXNG and/or Brave, then DuckDuckGo | `web_search.searxng_url`, or `BRAVE_API_KEY` in the env file | search that does not depend on DuckDuckGo tolerating you |
+| Your own backends | `web_search` → SearXNG and/or Brave, then DuckDuckGo | `oara search setup` (SearXNG in Docker), or `BRAVE_API_KEY` in the env file | search that does not depend on DuckDuckGo tolerating you |
 
 ## How the chain works
 
@@ -120,9 +120,51 @@ search:
     - json
 ```
 
+### `oara search setup`
+
+Most public instances disable JSON or rate-limit API clients, so run your own.
+One command does it, given Docker:
+
+```bash
+oara search setup --dry-run   # what it would do; changes nothing
+oara search setup             # do it (default port 8888)
+oara search setup --port 8890
+```
+
+(`prometheus search setup` is the same command under the old name.) In order:
+
+1. It finds the config file the daemon reads. With none it stops and says to
+   run `oara setup` first.
+2. It checks for Docker and that its daemon answers. Without Docker it says
+   so, points here for the manual route, and **changes nothing**.
+3. It looks for a container named `searxng` (`--name` to change it). A running
+   one is reused and a stopped one is started. A container of that name running
+   some other image is refused. With none, it writes
+   `~/.prometheus/searxng/settings.yml` (JSON output on, the limiter off, a
+   random `secret_key`) and runs `searxng/searxng` with
+   `--restart unless-stopped`, published on `127.0.0.1:<port>` only.
+4. It waits (up to `--timeout`, default 90 s) until
+   `/search?q=test&format=json` answers JSON. It uses the same check as
+   web_search, so a 403 or an HTML answer gets the JSON-disabled message above.
+5. It backs up `prometheus.yaml` (`prometheus.yaml.bak`, or `.bak.1`, `.bak.2`,
+   … so no earlier backup is overwritten) and sets
+   `web_search.searxng_url: "http://127.0.0.1:<port>"`. Only that key changes.
+   Comments and every other key stay as they were, and the edit is checked by
+   re-parsing before it is written.
+
+Running it again is safe. It finds the container, sees the URL is already set,
+and changes nothing. If something fails on the way, the config is left alone.
+Restart the daemon afterwards; its boot log then names the chain.
+
+The container gets `FORCE_OWNERSHIP=false`. Without it, the image's entrypoint
+(running as root) `chown`s the mounted `/etc/searxng` to its own user. On Linux
+that would leave `~/.prometheus/searxng` owned by a uid you don't have. The
+settings file is written world-readable (0644) instead, so the container can
+read it without owning it.
+
 ### Running one by hand with Docker
 
-Most public instances disable JSON or rate-limit API clients. Run your own:
+Without `oara search setup`, the same thing by hand:
 
 ```bash
 mkdir -p ~/.config/searxng
@@ -138,6 +180,7 @@ search:
 EOF
 docker run -d --name searxng --restart unless-stopped \
   -p 127.0.0.1:8888:8080 \
+  -e FORCE_OWNERSHIP=false \
   -v ~/.config/searxng:/etc/searxng \
   searxng/searxng
 ```
