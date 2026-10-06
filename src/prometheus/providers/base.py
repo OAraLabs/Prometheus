@@ -6,6 +6,7 @@ anthropic.AsyncAnthropic) with a proper ABC that any provider can implement.
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
@@ -66,9 +67,39 @@ class ApiMessageCompleteEvent:
     # string that stopped matching reality when the server was swapped.
     # None for providers that do not echo one; callers must tolerate that.
     served_model: str | None = None
+    # Ids of the tool_use blocks the output limit cut off: the reply stopped
+    # at max_tokens while that call's arguments were still streaming, so they
+    # could not be read and the block carries ``{}`` in their place. The loop
+    # never runs these; it answers each with an error that says the call was
+    # cut (see :func:`cut_by_output_limit`).
+    truncated_tool_calls: tuple[str, ...] = ()
 
 
 ApiStreamEvent = ApiTextDeltaEvent | ApiMessageCompleteEvent
+
+# What each wire calls a reply the output limit stopped: OpenAI-shape servers
+# (the compatible clouds, llama.cpp, Ollama) say "length", Anthropic says
+# "max_tokens".
+OUTPUT_LIMIT_STOPS = frozenset({"length", "max_tokens"})
+
+
+def cut_by_output_limit(stop_reason: str | None, raw_arguments: str | None) -> bool:
+    """Did the output limit cut off the call whose arguments streamed as
+    ``raw_arguments``?
+
+    Ask it about a reply's LAST tool call only: calls stream in order, so no
+    other can be in progress when the limit stops the reply. True when the
+    reply stopped at the limit and the arguments do not read as a JSON object.
+    Empty counts, because a finished call with no arguments still carries
+    ``{}``. Unreadable arguments in a reply the model ended itself are a
+    malformed call, not a cut one, and stay out of this.
+    """
+    if stop_reason not in OUTPUT_LIMIT_STOPS:
+        return False
+    try:
+        return not isinstance(json.loads(raw_arguments or ""), dict)
+    except json.JSONDecodeError:
+        return True
 
 
 class ModelProvider(ABC):

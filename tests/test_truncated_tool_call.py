@@ -317,11 +317,14 @@ def test_the_loop_answers_a_cut_call_with_a_truncation_error_and_never_runs_it(
     assert results["call_1"] == "3"
     _assert_says_cut(results["call_2"])
 
-    assert [(r["tool_name"], r["success"], r["error_type"], r["tool_use_id"]) for r in rows] == [
-        ("lookup", 1, None, "call_1"),
-        ("write", 0, "truncated_at_output_limit", "call_2"),
-    ]
-    assert "length" in rows[1]["error_detail"]
+    by_call = {r["tool_use_id"]: r for r in rows}
+    assert sorted(by_call) == ["call_1", "call_2"], "one row per call, the cut one included"
+    assert (by_call["call_1"]["tool_name"], by_call["call_1"]["success"]) == ("lookup", 1)
+    cut = by_call["call_2"]
+    assert (cut["tool_name"], cut["success"], cut["error_type"]) == (
+        "write", 0, "truncated_at_output_limit")
+    assert "stop_reason=length" in cut["error_detail"]
+    assert "max_tokens=256" in cut["error_detail"]
 
 
 def test_the_loop_answers_an_anthropic_cut_call_the_same_way(tmp_path, monkeypatch):

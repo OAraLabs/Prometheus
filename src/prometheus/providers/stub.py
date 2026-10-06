@@ -30,6 +30,7 @@ from prometheus.providers.base import (
     ApiStreamEvent,
     ApiTextDeltaEvent,
     ModelProvider,
+    cut_by_output_limit,
 )
 
 log = logging.getLogger(__name__)
@@ -281,6 +282,30 @@ def _parse_assistant_message(
     return ConversationMessage(role="assistant", content=content_blocks), dropped
 
 
+def _truncated_call_ids(
+    tool_calls: list[dict[str, Any]], finish_reason: str | None
+) -> tuple[str, ...]:
+    """``ApiMessageCompleteEvent.truncated_tool_calls`` for an OpenAI-shape
+    reply: the id of its last call when the output limit cut that call off
+    (:func:`cut_by_output_limit`), else ``()``.
+
+    ``tool_calls`` are the accumulated entries in stream order, the same dicts
+    :func:`_parse_assistant_message` builds the blocks from, so the id is the
+    block's. A last entry with no name names nothing: the parser drops it as
+    malformed, so there is no block to answer.
+    """
+    if not tool_calls:
+        return ()
+    last = tool_calls[-1]
+    fn = last.get("function", {})
+    name = fn.get("name", "")
+    if not isinstance(name, str) or not name.strip():
+        return ()
+    if cut_by_output_limit(finish_reason, fn.get("arguments")):
+        return (last.get("id", ""),)
+    return ()
+
+
 class StubProvider(ModelProvider):
     """OpenAI-compatible provider for llama.cpp / Ollama.
 
@@ -432,4 +457,7 @@ class StubProvider(ModelProvider):
             ),
             stop_reason=finish_reason,
             dropped_malformed=dropped_malformed,
+            truncated_tool_calls=_truncated_call_ids(
+                list(accumulated_tool_calls.values()), finish_reason
+            ),
         )

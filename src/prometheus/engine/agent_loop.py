@@ -26,6 +26,7 @@ from prometheus.adapter import markup_guard
 from prometheus.engine.messages import (
     ConversationMessage,
     ToolResultBlock,
+    ToolUseBlock,
     render_messages_for_model,
 )
 from prometheus.engine.stream_events import (
@@ -1912,6 +1913,10 @@ async def _run_loop(
         # provider drop and hand the model the wrong instruction.
         stripped_to_empty = 0
         stripped_samples: list[str] = []
+        # The calls the output limit cut off this round, and the stop that cut
+        # them (ApiMessageCompleteEvent.truncated_tool_calls). Never run.
+        truncated_calls: frozenset[str] = frozenset()
+        round_stop_reason: str | None = None
         served_model_this_turn: str | None = None
         # Per-TURN, like served_model above. A list rather than a plain name because the
         # on_degrade callback below is a closure, and rebinding through it would need nonlocal.
@@ -2257,6 +2262,8 @@ async def _run_loop(
                 # provider dropped at parse time (empty function name).
                 # getattr for providers predating the field.
                 dropped_malformed = getattr(event, "dropped_malformed", 0)
+                truncated_calls = frozenset(getattr(event, "truncated_tool_calls", ()))
+                round_stop_reason = event.stop_reason
                 # Per-TURN, never stored on the shared LoopContext: concurrent
                 # turns would cross-talk (the per-message `mode` precedent).
                 # Threaded as a parameter exactly like raw_model_output.
@@ -2706,10 +2713,22 @@ async def _run_loop(
         # again. The blocked result carries a directive telling the model to
         # change approach; the circuit breaker below still sees it as an error
         # and trips, but we no longer pay the tool timeout on every retry.
+        # A call the output limit cut off is refused the same way, ahead of
+        # the repeat guard: its arguments never finished arriving.
         _blocked: dict[int, ToolResultBlock] = {}
         _runnable: list = []
         for _i, _tc in enumerate(tool_calls):
-            if failed_call_signatures.get(_tool_call_signature(_tc), 0) >= _REPEAT_FAIL_LIMIT:
+            if _tc.id in truncated_calls:
+                _blocked[_i] = _refuse_truncated_call(
+                    context, _tc,
+                    stop_reason=round_stop_reason,
+                    output_tokens=usage.output_tokens,
+                    served_model=served_model_this_turn,
+                    session_id=None if ephemeral else (
+                        rec_sid if rec_sid is not None else context.session_id
+                    ),
+                )
+            elif failed_call_signatures.get(_tool_call_signature(_tc), 0) >= _REPEAT_FAIL_LIMIT:
                 _n = failed_call_signatures[_tool_call_signature(_tc)]
                 _blocked[_i] = ToolResultBlock(
                     tool_use_id=_tc.id,
@@ -2757,6 +2776,8 @@ async def _run_loop(
         # Update the per-turn failure tally: a fresh failure increments its
         # signature; any success clears it (so a flaky-then-fixed call recovers).
         for _tc, _r in zip(tool_calls, tool_results):
+            if _tc.id in truncated_calls:
+                continue  # its {} is not the call the model sent
             _sig = _tool_call_signature(_tc)
             if _r.is_error:
                 failed_call_signatures[_sig] = failed_call_signatures.get(_sig, 0) + 1
@@ -3325,6 +3346,59 @@ def _malformed_retry_feedback(context: LoopContext, dropped: int) -> str:
     if names:
         parts.append(f"Available tools: {names}.")
     return " ".join(parts)
+
+
+def _refuse_truncated_call(
+    context: LoopContext,
+    tc: ToolUseBlock,
+    *,
+    stop_reason: str | None,
+    output_tokens: int,
+    served_model: str | None,
+    session_id: str | None,
+) -> ToolResultBlock:
+    """The answer to a call the output limit cut off, and its telemetry row.
+
+    The provider named the call on ``truncated_tool_calls``: the reply hit
+    ``max_tokens`` while the call's arguments were still streaming, so the
+    ``{}`` it carries is not what the model meant to send. It is not run. The
+    old path passed it to the tool, which refused the empty call ("Field
+    required"), and the model, never told it had run out of room, sent the
+    same oversized call again. This result says what happened and what to do
+    instead.
+    """
+    limit = context.max_tokens
+    log.warning(
+        "Tool call %s (%s) was cut off at the output limit (stop_reason=%s, "
+        "max_tokens=%d, output_tokens=%d); not run",
+        tc.name, tc.id, stop_reason, limit, output_tokens,
+    )
+    if context.telemetry is not None:
+        context.telemetry.record(
+            model=_serving_model(context),
+            tool_name=tc.name,
+            success=False,
+            error_type="truncated_at_output_limit",
+            error_detail=(
+                f"stop_reason={stop_reason} max_tokens={limit} "
+                f"output_tokens={output_tokens}"
+            ),
+            served_model=served_model,
+            session_id=session_id,
+            **_v2_call(tc.name, tc.id, success=False),
+        )
+    return ToolResultBlock(
+        tool_use_id=tc.id,
+        content=(
+            f"Your {tc.name} call was cut off: the reply reached the output limit "
+            f"({limit} tokens) before the call's arguments were complete, so they "
+            f"could not be read and the tool was not run. Nothing was changed. "
+            f"Send it again in smaller pieces so each reply stays under the limit: "
+            f"split the content across several calls (for a long file, write the "
+            f"first part, then add the rest in further calls), or shorten it."
+        ),
+        is_error=True,
+    )
 
 
 # ---------------------------------------------------------------------------
