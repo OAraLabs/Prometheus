@@ -840,7 +840,7 @@ slash_commands:
   mimo:
     provider: mimo
     api_key_env: MIMO_API_KEY
-    model: mimo-v2.5-pro
+    model: mimo-v2.6-pro       # mimo-v2.5-pro is retired 2026-10-21
   # /qwen — Alibaba Model Studio. The default base URL is the INTERNATIONAL
   # pay-as-you-go endpoint; the subscription plans (Token Plan, Coding Plan)
   # are separate hosts with separate keys that must be used in matching pairs,
