@@ -898,8 +898,13 @@ def create_lcm_engine(provider: ModelProvider):
 # System prompt
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(config: dict[str, Any]) -> str:
-    """Assemble the full system prompt."""
+def build_system_prompt(config: dict[str, Any], memory_content: str | None = None) -> str:
+    """Assemble the full system prompt.
+
+    *memory_content* is the file memory to render (None reads it now); the
+    REPL passes what it read so run_loop can find that section and refresh it
+    every turn.
+    """
     try:
         from prometheus.context.prompt_assembler import build_runtime_system_prompt
         skills_list = None
@@ -910,7 +915,9 @@ def build_system_prompt(config: dict[str, Any]) -> str:
                 skills_list = [{"name": s.name, "description": s.description} for s in sr.list_skills()]
         except Exception:
             pass
-        return build_runtime_system_prompt(cwd=str(Path.cwd()), config=config, skills=skills_list)
+        return build_runtime_system_prompt(
+            cwd=str(Path.cwd()), config=config, skills=skills_list, memory_content=memory_content,
+        )
     except Exception:
         return config.get("gateway", {}).get(
             "system_prompt",
@@ -2013,7 +2020,11 @@ def main() -> None:
         model_cfg, config.get("adapter"), template=_detect_tool_template_or_none(model_cfg),
     )
     lcm_engine = create_lcm_engine(provider)
-    system_prompt = build_system_prompt(config)
+    # File memory is re-read every turn (LoopContext.memory_prompt_builder);
+    # one read here so the boot section run_loop looks for is the one built in.
+    from prometheus.context.prompt_assembler import _load_memory_and_user, memory_section
+    boot_memory_content = _load_memory_and_user()
+    system_prompt = build_system_prompt(config, memory_content=boot_memory_content)
 
     # Telemetry (optional)
     from prometheus.telemetry.tracker import telemetry_enabled
@@ -2119,6 +2130,8 @@ def main() -> None:
         # turns into it, and the microcompactor checks it; None if unavailable.
         lcm_engine=lcm_engine,
         profile_resolver=profile_resolver,
+        boot_memory_prompt=memory_section(boot_memory_content),
+        memory_prompt_builder=memory_section,
     )
 
     async def _async_main() -> None:
