@@ -41,7 +41,11 @@ import yaml
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from prometheus.context.prompt_assembler import build_runtime_system_prompt  # noqa: E402
+from prometheus.context.prompt_assembler import (  # noqa: E402
+    _load_memory_and_user,
+    build_runtime_system_prompt,
+    memory_section,
+)
 from prometheus.context.system_prompt import SYSTEM_PROMPT_DYNAMIC_BOUNDARY  # noqa: E402
 from prometheus.engine.agent_loop import AgentLoop, LoopContext, run_loop  # noqa: E402
 from prometheus.engine.messages import ConversationMessage, TextBlock  # noqa: E402
@@ -153,6 +157,48 @@ def test_the_two_chat_routes_send_the_same_prompt(runtime_prompt: str) -> None:
     assert len(provider.requests) == 2
     via_api_chat, via_bridge = (r.system_prompt for r in provider.requests)
     assert via_api_chat == via_bridge
+
+
+def test_a_memory_edit_reaches_the_next_api_chat_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-run memory refresh (#679) reaches this route now that it sends
+    the runtime prompt. Wired as daemon.py wires it: the files are read ONCE,
+    the boot prompt is built from that read, and the daemon's AgentLoop is
+    told the section to swap. Before this PR the route's prompt held no
+    "# Memory" section, so the refresh had nothing to replace."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(config_dir))
+    (config_dir / "MEMORY.md").write_text("boot-fact: the box is lantern\n", encoding="utf-8")
+    boot_content = _load_memory_and_user()
+    runtime = build_runtime_system_prompt(
+        cwd=str(tmp_path), config={}, memory_content=boot_content,
+    )
+    provider = _RecordingProvider()
+    app = create_app(
+        {},
+        session_mgr=SessionManager(),
+        agent_loop=AgentLoop(
+            provider=provider, model="test", max_tokens=256,
+            boot_memory_prompt=memory_section(boot_content),
+            memory_prompt_builder=memory_section,
+        ),
+    )
+    app.state.ws_bridge = SimpleNamespace(loop_context=LoopContext(
+        provider=provider, model="test", system_prompt=runtime, max_tokens=256,
+        session_id="web",
+    ))
+    client = TestClient(app)
+
+    assert client.post("/api/chat", json={"session_id": "s1", "content": "a"}).status_code == 200
+    assert "boot-fact: the box is lantern" in provider.requests[-1].system_prompt
+
+    (config_dir / "MEMORY.md").write_text("later-fact: the box is beacon\n", encoding="utf-8")
+    assert client.post("/api/chat", json={"session_id": "s1", "content": "b"}).status_code == 200
+    second = provider.requests[-1].system_prompt
+    assert "later-fact: the box is beacon" in second
+    assert "boot-fact" not in second
 
 
 def test_no_bridge_is_a_503_not_a_made_up_prompt(

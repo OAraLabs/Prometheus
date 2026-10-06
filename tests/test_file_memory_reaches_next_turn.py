@@ -17,8 +17,8 @@ by exact substring (the item W project-section pattern). The contract here:
 - memory that was empty at boot appears without a restart;
 - nothing changes within a run, and unchanged files give a byte-identical
   prompt, so a provider's cached prefix survives every run that wrote nothing;
-- a caller's own prompt (POST /api/chat sends ``gateway.system_prompt``) is
-  left alone, and a read error keeps the prompt it had;
+- a caller's own prompt (the gateways' ``/benchmark`` sends a fixed one-liner)
+  is left alone, and a read error keeps the prompt it had;
 - the daemon and the CLI actually wire it (AST), from ONE read of the files.
 """
 
@@ -240,16 +240,19 @@ def test_cleared_files_drop_the_section(home, tmp_path) -> None:
 
 
 def test_a_callers_own_prompt_is_left_alone(home, tmp_path) -> None:
-    """POST /api/chat passes gateway.system_prompt, which never carried memory.
-    Whether memory was empty at boot or not, that prompt is not edited."""
+    """``/benchmark`` on Telegram, Slack and Discord runs the daemon's loop with
+    its own one-liner, which never carried memory. Whether memory was empty at
+    boot or not, that prompt is not edited. (POST /api/chat sends the runtime
+    prompt, so it gets the refresh: tests/test_api_chat_runtime_prompt.py.)"""
+    own_prompt = "You are a helpful assistant. Be concise."
     for boot_memory in ("", "BOOT-FACT\n"):
         (home / "MEMORY.md").write_text(boot_memory, encoding="utf-8")
         _, boot_section = _daemon_boot(tmp_path)
         (home / "MEMORY.md").write_text("LATER-FACT\n", encoding="utf-8")
         provider = _Scripted()
         loop = _gateway_loop(provider, tmp_path, boot_section)
-        asyncio.run(loop.run_async(system_prompt="You are Prometheus.", user_message="hi"))
-        assert provider.requests[-1].system_prompt == "You are Prometheus."
+        asyncio.run(loop.run_async(system_prompt=own_prompt, user_message="hi"))
+        assert provider.requests[-1].system_prompt == own_prompt
 
 
 def test_a_read_error_keeps_the_prompt(home, tmp_path) -> None:
