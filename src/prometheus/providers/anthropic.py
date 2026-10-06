@@ -35,6 +35,7 @@ from prometheus.providers.base import (
     ApiStreamEvent,
     ApiTextDeltaEvent,
     ModelProvider,
+    cut_by_output_limit,
 )
 
 log = logging.getLogger(__name__)
@@ -380,7 +381,8 @@ class AnthropicProvider(ModelProvider):
 
         # Build final ConversationMessage from collected blocks
         msg_content: list[Any] = []
-        for block in content_blocks:
+        truncated: list[str] = []
+        for position, block in enumerate(content_blocks):
             btype = block.get("type", "")
             if btype == "thinking":
                 # #333: persist the span (content_json carries it to every
@@ -427,9 +429,18 @@ class AnthropicProvider(ModelProvider):
                     raw_input = block.get("input") or {}
                     if not isinstance(raw_input, dict):
                         raw_input = {}
+                tool_use_id = block.get("id", f"toolu_{uuid4().hex}")
+                # The {} above, when max_tokens stopped the reply inside this
+                # call, is not what the model meant to send: it never finished
+                # sending it. Named so the loop does not run it. Only the last
+                # block can be in progress at the cut.
+                if position == len(content_blocks) - 1 and cut_by_output_limit(
+                    stop_reason, partial
+                ):
+                    truncated.append(tool_use_id)
                 msg_content.append(
                     ToolUseBlock(
-                        id=block.get("id", f"toolu_{uuid4().hex}"),
+                        id=tool_use_id,
                         name=block.get("name", ""),
                         input=raw_input,
                     )
@@ -446,6 +457,7 @@ class AnthropicProvider(ModelProvider):
             ),
             stop_reason=stop_reason,
             served_model=served_model,
+            truncated_tool_calls=tuple(truncated),
         )
 
 

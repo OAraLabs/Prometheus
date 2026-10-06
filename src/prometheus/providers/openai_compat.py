@@ -32,6 +32,7 @@ from prometheus.providers.stub import (
     RETRYABLE_STATUS_CODES,
     _build_openai_messages,
     _parse_assistant_message,
+    _truncated_call_ids,
 )
 
 log = logging.getLogger(__name__)
@@ -405,5 +406,8 @@ class OpenAICompatProvider(ModelProvider):
             ),
             stop_reason=finish_reason,
             dropped_malformed=dropped_malformed,
+            truncated_tool_calls=_truncated_call_ids(
+                list(accumulated_tool_calls.values()), finish_reason
+            ),
             served_model=served_model,
         )
