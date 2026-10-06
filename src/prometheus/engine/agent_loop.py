@@ -1262,8 +1262,9 @@ def _refresh_memory_section(
       so memory that was empty at boot (a fresh install) appears without a
       restart. Not appended at the end: the OpenAI-compatible route appends a
       client's own system text there, and memory must not read as the client's.
-    - Otherwise the prompt is a caller's own (POST /api/chat sends
-      ``gateway.system_prompt``), which never carried memory: left alone.
+    - Otherwise the prompt is a caller's own (``/benchmark`` on Telegram,
+      Slack and Discord sends a fixed one-liner through the daemon's loop),
+      which never carried memory: left alone.
 
     Fail-open: if the read raises, the run keeps the prompt it had.
     """
