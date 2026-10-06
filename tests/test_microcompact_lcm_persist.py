@@ -59,11 +59,15 @@ class _Read(BaseTool):
     description = "returns a long chunk"
     input_model = _NInput
 
+    def __init__(self, body=_body) -> None:  # noqa: ANN001
+        super().__init__()
+        self._make = body
+
     def is_read_only(self, arguments) -> bool:  # noqa: ANN001
         return True
 
     async def execute(self, arguments, context):  # noqa: ANN001
-        return ToolResult(output=_body(arguments.n), is_error=False)
+        return ToolResult(output=self._make(arguments.n), is_error=False)
 
 
 class _Reads(ModelProvider):
@@ -73,8 +77,10 @@ class _Reads(ModelProvider):
         self.rounds = rounds
         self.first = first
         self.calls = 0
+        self.requests: list = []
 
     async def stream_message(self, request):  # noqa: ANN001
+        self.requests.append(request)
         k = self.calls
         self.calls += 1
         if k < self.rounds:
@@ -89,9 +95,9 @@ class _Reads(ModelProvider):
         )
 
 
-def _registry() -> ToolRegistry:
+def _registry(body=_body) -> ToolRegistry:  # noqa: ANN001
     registry = ToolRegistry()
-    registry.register(_Read())
+    registry.register(_Read(body))
     return registry
 
 
@@ -115,14 +121,15 @@ def _stored(engine: LCMEngine, session_id: str) -> str:
     return "\n".join(f"{r.content}\n{r.content_json or ''}" for r in rows)
 
 
-def _ws_turn(engine, session, *, rounds, first=0, tier="light") -> None:
+def _ws_turn(engine, session, *, rounds, first=0, tier="light", body=_body) -> _Reads:  # noqa: ANN001
     """The WS bridge's shape: run_loop over the session's own list, then persist."""
+    provider = _Reads(rounds, first)
     ctx = LoopContext(
-        provider=_Reads(rounds, first),
+        provider=provider,
         model="stub-model",
         system_prompt="",
         max_tokens=128,
-        tool_registry=_registry(),
+        tool_registry=_registry(body),
         adapter=ModelAdapter(tier=tier),
         lcm_engine=engine,
         session_id="web",
@@ -137,15 +144,17 @@ def _ws_turn(engine, session, *, rounds, first=0, tier="light") -> None:
         session.persist_loop_result(original_len)
 
     asyncio.run(go())
+    return provider
 
 
-def _gateway_turn(engine, session, *, rounds, first=0, tier="light") -> None:
+def _gateway_turn(engine, session, *, rounds, first=0, tier="light", body=_body) -> _Reads:  # noqa: ANN001
     """The Telegram/Slack/Discord shape: run_async, then add_result_messages."""
+    provider = _Reads(rounds, first)
     loop = AgentLoop(
-        _Reads(rounds, first),
+        provider,
         model="stub-model",
         max_tokens=128,
-        tool_registry=_registry(),
+        tool_registry=_registry(body),
         adapter=ModelAdapter(tier=tier),
         lcm_engine=engine,
     )
@@ -162,6 +171,7 @@ def _gateway_turn(engine, session, *, rounds, first=0, tier="light") -> None:
         session.add_result_messages(result.messages, pre_len)
 
     asyncio.run(go())
+    return provider
 
 
 ROUNDS = 6  # with after_turns=3, the earliest results are trimmed before the run ends
@@ -214,3 +224,142 @@ def test_a_later_turn_trimming_older_results_leaves_their_rows_alone(tmp_path, t
     )
     stored = _stored(engine, session.session_id)
     assert "read 0 ends" in stored and "read 1 ends" in stored
+
+
+# ── the full text rides the lcm.db write and nothing else ──────────────────
+
+
+def _trimmed_ids(text: str) -> list[int]:
+    return [n for n in range(200) if f"{TRIMMED} read {n} begins" in text]
+
+
+def _request_wire(request) -> str:  # noqa: ANN001
+    """Every serialization a provider builds from a request, as one string."""
+    import json
+
+    from prometheus.engine.messages import render_messages_for_model
+    from prometheus.providers.anthropic import _build_anthropic_messages
+    from prometheus.providers.llama_cpp import LlamaCppProvider
+
+    rendered = render_messages_for_model(request.messages)
+    parts = [
+        json.dumps(LlamaCppProvider()._build_request_payload(request), default=str),
+        json.dumps(_build_anthropic_messages(rendered), default=str),
+        json.dumps([m.to_openai_param() for m in rendered], default=str),
+        "\n".join(m.model_dump_json() for m in request.messages),
+        "\n".join(m.content_json for m in request.messages),
+        "\n".join(repr(m) + str(m.content) for m in request.messages),
+    ]
+    return "\n".join(parts)
+
+
+def test_a_trimmed_results_full_text_reaches_no_request_and_no_frame(tmp_path):
+    """Condition 2 of the fix: the full text exists only for the lcm.db write.
+
+    Every request the provider received is serialized the ways the providers
+    serialize it (llama.cpp payload, Anthropic messages, OpenAI params, the
+    pydantic dumps, repr). Once a result has been cut down, none of them may
+    carry its full text. Then the WS ``switch_session`` frames — the one place
+    a client is sent in-memory history — are checked the same way.
+    """
+    import json
+
+    from prometheus.engine.session import SessionManager
+    from prometheus.web.ws_server import WebSocketBridge
+
+    engine = _engine(tmp_path)
+    mgr = SessionManager()
+    mgr.lcm_engine = engine
+    session = mgr.get_or_create("web:conv-1")
+    provider = _ws_turn(engine, session, rounds=ROUNDS)
+
+    trimmed_any = False
+    for request in provider.requests:
+        wire = _request_wire(request)
+        for n in _trimmed_ids(wire):
+            trimmed_any = True
+            assert f"read {n} ends" not in wire, (
+                f"the full text of trimmed result {n} reached a provider request"
+            )
+    assert trimmed_any, "harness: no request ever carried a trimmed result"
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.frames: list[dict] = []
+
+        async def send(self, raw: str) -> None:
+            self.frames.append(json.loads(raw))
+
+    ws = _Recorder()
+    bridge = WebSocketBridge(session_mgr=mgr)
+    asyncio.run(bridge._handle_client_message(
+        ws, json.dumps({"type": "switch_session", "payload": {"session_id": "web:conv-1"}})
+    ))
+    frames = json.dumps(ws.frames)
+    cut = _trimmed_ids(frames)
+    assert cut, "harness: the history frames carried no trimmed result"
+    assert all(f"read {n} ends" not in frames for n in cut), (
+        "the full text of a trimmed result reached a switch_session frame"
+    )
+
+
+# ── redaction still applies to the full text ──────────────────────────────
+
+
+def _token() -> str:
+    # Built at runtime: a GitHub classic token shape the store redacts. Never a
+    # literal, so the pre-commit secret scanner has nothing to find here.
+    return "gh" + "p_" + ("aB3xY9" * 6)[:36]
+
+
+def _body_with_secret(n: int) -> str:
+    lines = [f"read {n} begins"]
+    lines += [f"line {i} of read {n}: the quick brown fox jumps" for i in range(30)]
+    lines.append(f"config dump: GITHUB_TOKEN={_token()}")  # far past the 500-char excerpt
+    lines += [f"line {i} of read {n}: the quick brown fox jumps" for i in range(30, 60)]
+    lines.append(f"read {n} ends")
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("turn", [_ws_turn, _gateway_turn], ids=["ws_bridge", "gateway"])
+def test_a_secret_in_a_trimmed_result_is_stored_redacted(tmp_path, turn):
+    from prometheus.security.log_redaction import REDACTED
+
+    engine = _engine(tmp_path)
+    session = ChatSession("web:conv-1", lcm_engine=engine)
+    turn(engine, session, rounds=ROUNDS, body=_body_with_secret)
+
+    assert TRIMMED in _in_memory(session), "harness: microcompaction never fired"
+    stored = _stored(engine, session.session_id)
+    assert all(f"read {n} ends" in stored for n in range(ROUNDS)), (
+        "the full text of a trimmed result did not reach lcm.db"
+    )
+    assert _token() not in stored, "a secret in a trimmed result reached lcm.db unredacted"
+    assert stored.count(f"GITHUB_TOKEN={REDACTED}") >= ROUNDS
+
+
+# ── what a restart restores ───────────────────────────────────────────────
+
+
+def test_a_rehydrated_session_gets_the_full_result_back(tmp_path):
+    """Deliberate, and the one request-side effect of storing the full text.
+
+    With ``sessions.rehydrate`` on (off in the shipped config), a cold session
+    is rebuilt from lcm.db after a restart. A result trimmed in its last run
+    used to come back as the excerpt, because that was all lcm.db held. It now
+    comes back whole (or shortened at restart, inside the restore budget).
+    """
+    from prometheus.engine.session import SessionManager
+
+    engine = _engine(tmp_path)
+    before = SessionManager()
+    before.lcm_engine = engine
+    _ws_turn(engine, before.get_or_create("web:conv-1"), rounds=ROUNDS)
+
+    after = SessionManager()  # the restart
+    after.lcm_engine = engine
+    after.rehydrate_enabled = True
+    assert after.rehydrate_if_cold("web:conv-1") > 0
+    restored = _in_memory(after.get_or_create("web:conv-1"))
+    assert TRIMMED not in restored
+    assert "read 0 ends" in restored or "shortened at restart" in restored
