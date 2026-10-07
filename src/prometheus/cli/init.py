@@ -329,7 +329,7 @@ _CLOUD_FAST_PROVIDERS: dict[str, tuple[str, str, int]] = {
     "deepseek": ("DEEPSEEK_API_KEY", "deepseek-flash", 64000),
     "kimi": ("MOONSHOT_API_KEY", "kimi-k2.6", 64000),
     "glm": ("ZAI_API_KEY", "glm-5.3", 64000),
-    "mimo": ("MIMO_API_KEY", "mimo-v2.5-pro", 64000),
+    "mimo": ("MIMO_API_KEY", "mimo-v2.6-pro", 64000),
     "qwen": ("QWEN_API_KEY", "qwen3.8-max", 64000),
 }
 

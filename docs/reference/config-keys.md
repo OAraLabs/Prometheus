@@ -211,7 +211,7 @@ none either — the key is documented so its absence is visible.
 | `slash_commands.mimo` | *(section)* |
 | `slash_commands.mimo.provider` | `mimo` |
 | `slash_commands.mimo.api_key_env` | `MIMO_API_KEY` |
-| `slash_commands.mimo.model` | `mimo-v2.5-pro` |
+| `slash_commands.mimo.model` | `mimo-v2.6-pro` |
 | `slash_commands.qwen` | *(section)* |
 | `slash_commands.qwen.provider` | `qwen` |
 | `slash_commands.qwen.api_key_env` | `QWEN_API_KEY` |
