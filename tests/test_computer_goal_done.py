@@ -28,9 +28,29 @@ dispatched and how the task ended.
 
 from __future__ import annotations
 
+import pytest
+
 from prometheus.computer.chooser import RuleChooser, goal_key, is_single_action_goal
 from prometheus.computer.types import CANDIDATE_ABSTAIN, ChoiceRequest
 from tests.test_computer_door import _answer, _bind, _rig, _start, _verbs
+
+
+@pytest.fixture(autouse=True)
+def _linux_site_rule(monkeypatch):
+    """Apply the Linux site rule on every runner, as test_computer_door.py does.
+
+    These tasks rely on the binding covering their clicks and key presses,
+    which needs site ``-``. On macOS no extent can be ``-`` (v1.1 drives Linux
+    only), so a binding covers nothing, every action waits for an approval
+    nobody answers, and the task times out: the 10 failures on CI's
+    test-macos (3.14). The rig is borrowed from the door tests; its autouse
+    fixture is not, so it is repeated here.
+    """
+    import sys
+
+    from prometheus.computer import candidates
+
+    monkeypatch.setattr(candidates, "_PLATFORMS_THAT_FLAG_WEB", ("linux", sys.platform))
 
 
 def _with_rule_chooser(rig):
