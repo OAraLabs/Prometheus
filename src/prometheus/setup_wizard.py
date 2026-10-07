@@ -59,7 +59,9 @@ CLOUD_PROVIDER_MODELS: dict[str, list[tuple[str, str, str]]] = {
     "openai": [
         ("gpt-5.6-luna", "Fast + cheap", "$0.20/$1.20 per 1M tokens"),
         ("gpt-5.6-terra", "Balanced", "$2/$12 per 1M tokens"),
-        ("gpt-6-astra", "Flagship", "$10/$50 per 1M tokens"),
+        # OpenAI: "GPT-6 Astra ... support Chat Completions, but tool calling
+        # requires Responses", and Prometheus speaks Chat Completions.
+        ("gpt-6-astra", "Flagship; no tool calls", "$10/$50 per 1M tokens"),
     ],
     "anthropic": [
         ("claude-sonnet-5", "Best value", "$2/$10 per 1M tokens"),
@@ -95,7 +97,10 @@ CLOUD_PROVIDER_MODELS: dict[str, list[tuple[str, str, str]]] = {
         ("glm-5.3-flash", "Fast + cheap", "$0.15/$0.50 per 1M tokens"),
     ],
     "mimo": [
-        ("mimo-v2.5-pro", "Flagship", "$0.435/$0.87 per 1M tokens"),
+        # mimo-v2.5-pro and mimo-v2.5 stop working 2026-10-21 10:00 Beijing time,
+        # with no automatic replacement; Xiaomi recommends the v2.6 models.
+        ("mimo-v2.6-pro", "Flagship", "$0.435/$0.87 per 1M tokens"),
+        ("mimo-v2.6-flash", "Fast + cheap", "$0.14/$0.28 per 1M tokens"),
     ],
     "qwen": [
         # International pay-as-you-go endpoint. The Alibaba subscription plans

@@ -45,7 +45,10 @@ from prometheus.providers.base import (
     ApiTextDeltaEvent,
     ModelProvider,
 )
-from prometheus.context.system_prompt import rewrite_model_identity
+from prometheus.context.system_prompt import (
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    rewrite_model_identity,
+)
 from prometheus.engine.fallback import stream_round_with_fallback
 from prometheus.engine.stages.routing import route_turn
 
@@ -733,6 +736,15 @@ class LoopContext:
     # (config, cwd) -> the section text for a workspace. Set by the daemon to
     # prompt_assembler.project_files_section bound to its config.
     project_prompt_builder: object | None = None
+    # File memory (MEMORY.md + USER.md), re-read once per run. The boot prompt
+    # carries the "# Memory" section as it was at startup, and the memory tool
+    # and PUT /api/memory/current write the files at once, so without this the
+    # model saw the boot copy until a restart. boot_memory_prompt is the exact
+    # section text the boot prompt carries (None = it had none);
+    # memory_prompt_builder is a zero-arg callable returning the current
+    # section (prompt_assembler.memory_section). None = no refresh.
+    boot_memory_prompt: str | None = None
+    memory_prompt_builder: Callable[[], str | None] | None = None
     # Item 4: per-turn file checkpoints (prometheus.checkpoints.FileCheckpointStore).
     # Used only when the run has a session workspace — that is the write
     # domain the bwrap floor bounds, so it is the domain a checkpoint can
@@ -1229,6 +1241,50 @@ def _serving_provider_name(context: "LoopContext") -> str:
     """The provider name to RECORD (it decides ``is_golden``) for the round in progress."""
     serving = _ROUND_SERVING.get()
     return serving[1] if serving is not None else _provider_name_for_telemetry(context.provider)
+
+
+def _refresh_memory_section(
+    prompt: str, boot: str | None, builder: Callable[[], str | None],
+) -> str:
+    """*prompt* with its "# Memory" section as MEMORY.md + USER.md read NOW.
+
+    Exact substring, like the item W project swap: *boot* is the section the
+    boot prompt was built with, so it is found verbatim or not at all. Files
+    that have not changed give a byte-identical prompt, so a provider's cached
+    prefix (Anthropic cache_control, llama.cpp's KV reuse) survives every run
+    that wrote no memory. A write misses the cache once, on the next run: the
+    price of the model seeing it.
+
+    - The boot section is present: replaced by the current one, or dropped with
+      its separator if the files are now empty.
+    - There was none at boot and this is an assembled prompt (it carries the
+      dynamic boundary): the current section goes first in the dynamic part,
+      so memory that was empty at boot (a fresh install) appears without a
+      restart. Not appended at the end: the OpenAI-compatible route appends a
+      client's own system text there, and memory must not read as the client's.
+    - Otherwise the prompt is a caller's own (``/benchmark`` on Telegram,
+      Slack and Discord sends a fixed one-liner through the daemon's loop),
+      which never carried memory: left alone.
+
+    Fail-open: if the read raises, the run keeps the prompt it had.
+    """
+    try:
+        current = builder() or ""
+    except Exception:
+        log.warning("memory_prompt_builder failed; this run keeps the boot memory section",
+                    exc_info=True)
+        return prompt
+    if boot:
+        if boot not in prompt:
+            return prompt
+        if current:
+            return prompt.replace(boot, current, 1)
+        with_sep = f"\n\n{boot}"
+        return prompt.replace(with_sep if with_sep in prompt else boot, "", 1)
+    dynamic_start = f"{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\n"
+    if current and current not in prompt and dynamic_start in prompt:
+        return prompt.replace(dynamic_start, f"{dynamic_start}{current}\n\n", 1)
+    return prompt
 
 
 async def run_loop(
@@ -1733,6 +1789,10 @@ async def _run_loop(
             effective_session_id, session_workspace,
             "loaded" if session_section else "none found",
             len(session_section or ""), "replacing" if swapped else "appended after",
+        )
+    if context.memory_prompt_builder is not None:
+        active_system_prompt = _refresh_memory_section(
+            active_system_prompt, context.boot_memory_prompt, context.memory_prompt_builder,
         )
     # The base prompt for THIS run — workspace-swapped when the session has
     # one. The adapter's format_request (below, and again on model fallback
@@ -5395,6 +5455,8 @@ class AgentLoop:
         workspace_resolver: object | None = None,
         boot_project_prompt: str | None = None,
         project_prompt_builder: object | None = None,
+        boot_memory_prompt: str | None = None,
+        memory_prompt_builder: Callable[[], str | None] | None = None,
         checkpoint_store: object | None = None,
         fallback: object | None = None,
     ) -> None:
@@ -5418,6 +5480,8 @@ class AgentLoop:
         self._workspace_resolver = workspace_resolver
         self._boot_project_prompt = boot_project_prompt
         self._project_prompt_builder = project_prompt_builder
+        self._boot_memory_prompt = boot_memory_prompt
+        self._memory_prompt_builder = memory_prompt_builder
         self._checkpoint_store = checkpoint_store
         self._max_tokens = max_tokens
         self._max_turns = max_turns
@@ -5575,6 +5639,8 @@ class AgentLoop:
             workspace_resolver=self._workspace_resolver,
             boot_project_prompt=self._boot_project_prompt,
             project_prompt_builder=self._project_prompt_builder,
+            boot_memory_prompt=self._boot_memory_prompt,
+            memory_prompt_builder=self._memory_prompt_builder,
             checkpoint_store=self._checkpoint_store,
             # The nudge USED to be injected below, in the `async for` body.
             # That made it AgentLoop-only, so no web / Beacon / Bridge turn

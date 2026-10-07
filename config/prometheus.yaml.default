@@ -673,7 +673,10 @@ gateway:
     timeout_seconds: 30               # per Paperclip API call
     comment_max_chars: 4000           # cap on posted progress comments
 
-  # Placeholder only — the real prompt lives in the live config. See docs.
+  # Read only by the CLI, as its whole prompt when the runtime prompt fails
+  # to build. No daemon surface sends it: Telegram, Slack, Discord, the web
+  # bridge and POST /api/chat all send the runtime prompt (SOUL.md, AGENTS.md,
+  # environment, skills, project files, MEMORY.md + USER.md).
   system_prompt: "# see docs; overridden in live config"
   briefing_chat_id: ""
   voice:
@@ -840,7 +843,7 @@ slash_commands:
   mimo:
     provider: mimo
     api_key_env: MIMO_API_KEY
-    model: mimo-v2.5-pro
+    model: mimo-v2.6-pro       # mimo-v2.5-pro is retired 2026-10-21
   # /qwen — Alibaba Model Studio. The default base URL is the INTERNATIONAL
   # pay-as-you-go endpoint; the subscription plans (Token Plan, Coding Plan)
   # are separate hosts with separate keys that must be used in matching pairs,

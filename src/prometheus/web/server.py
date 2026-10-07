@@ -4656,7 +4656,12 @@ def create_app(
 
     @app.post("/api/chat")
     async def post_chat(body: dict):
-        """Send a message to the agent — mirrors Telegram dispatch.
+        """Send a message to the agent and wait for the reply.
+
+        The synchronous sibling of ``/api/chat/send``: it runs the turn
+        through ``AgentLoop.run_async``, as Telegram does, and returns the
+        text instead of streaming it over the bridge. Both routes start from
+        the same system prompt (see below).
 
         Named for its route. It was a second `send_chat` 3000 lines below the
         `/api/chat/send` handler of the same name: both routes worked, because
@@ -4672,6 +4677,20 @@ def create_app(
             return JSONResponse(status_code=503, content={"error": "agent loop not available"})
         if not session_mgr:
             return JSONResponse(status_code=503, content={"error": "session manager not available"})
+        # The daemon's runtime prompt (SOUL.md, AGENTS.md, environment,
+        # skills, project files, the "# Memory" section), read from the shared
+        # web LoopContext that /api/chat/send runs on, so the two routes start
+        # from one prompt. This used to be `config["gateway"]["system_prompt"]`
+        # (a placeholder in the shipped template), or failing that the CLI's
+        # last-resort one-liner: the model got none of the runtime prompt.
+        # No bridge, no prompt: refuse rather than invent one.
+        _bridge = getattr(app.state, "ws_bridge", None)
+        system_prompt = getattr(getattr(_bridge, "loop_context", None), "system_prompt", None)
+        if not system_prompt:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "system prompt unavailable — ws_bridge not wired"},
+            )
 
         # Restore a cold session's recent conversation first, as every send
         # path does, or the model answers blind after a restart.
@@ -4697,10 +4716,6 @@ def create_app(
         pre_len = len(session.get_messages())
 
         try:
-            system_prompt = config.get("gateway", {}).get(
-                "system_prompt",
-                "You are Prometheus, a sovereign AI agent. Be concise and helpful.",
-            )
             # NO `tools=` ARGUMENT. This line used to read
             #
             #     tools=app.state.skill_registry.list_schemas() if ... else None
