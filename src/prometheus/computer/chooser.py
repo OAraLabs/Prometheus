@@ -84,6 +84,14 @@ _SET_VERBS = frozenset({"type", "fill", "set", "write", "input"})
 _KEY_ALIASES = {"enter": "return", "esc": "escape"}
 
 
+#: Words that make a goal more than one action ("press tab then escape",
+#: "click next again"). A goal holding one is not ended after its first step.
+_SEQUENCING = frozenset({
+    "then", "and", "after", "before", "again", "twice", "thrice", "times",
+    "each", "every", "until", "while",
+})
+
+
 def _words(text: str) -> list[str]:
     return _WORD.findall(str(text or "").lower())
 
@@ -120,6 +128,41 @@ def goal_kind_and_words(goal: str) -> tuple[str | None, set[str]]:
     return kind, content
 
 
+def normalise_key(name: str) -> str:
+    """A key name as the candidate table spells it ("enter" → "return")."""
+    key = str(name or "").strip().lower()
+    return _KEY_ALIASES.get(key, key)
+
+
+def goal_key(goal: str) -> str | None:
+    """The key a key goal names ("press Tab in the editor" → "tab"), or None.
+
+    None for any goal that is not ``press``/``hit`` + an allowed key: a click
+    or set goal, a button press ("press send"), or no verb at all.
+    """
+    words = _words(goal)
+    while words and words[0] == "please":
+        words = words[1:]
+    if not words or words[0] not in _PRESS_VERBS:
+        return None
+    rest = [w for w in words[1:] if w not in _FILLER]
+    key = normalise_key(rest[0]) if rest else ""
+    return key if key in ALLOWED_KEYS else None
+
+
+def is_single_action_goal(goal: str) -> bool:
+    """Does the goal name exactly one action, which the task can end after (#668)?
+
+    True when its leading verb is one this module recognises (press/hit,
+    click/tap/select, type/fill/set) and nothing in it sequences actions
+    ("then", "again", "twice", "and", …). "save" or "save it" (no verb) is
+    not: the task cannot tell when such a goal is met, so it runs until the
+    chooser has nothing more to do.
+    """
+    kind, _ = goal_kind_and_words(goal)
+    return kind is not None and not (_SEQUENCING & set(_words(goal)))
+
+
 class RuleChooser:
     """Deterministic, local, credential-free. The milestone-1 chooser.
 
@@ -143,6 +186,11 @@ class RuleChooser:
        click chosen by list order would run with no prompt. A ``prefer`` term
        that matches one of the tied rows breaks the tie; one that matches
        them all does not.
+    4. **Never the step it just took** (#668). If the best row is the last
+       executed step in ``request.history``, abstain — do not fall back to
+       the runner-up, which the goal did not ask for. This is the RULE
+       chooser's rule, not the task loop's: a future model chooser may need
+       to repeat a step, and the loop lets it.
 
     ``prefer`` substrings still dominate, in the order given — but only
     among the rows the goal's kind allows.
@@ -180,6 +228,10 @@ class RuleChooser:
             # covered by the app pick, so a click chosen by position would
             # run with no prompt. A prefer term that separates the rows has
             # already raised one score, so it is not a tie by here.
+            return Choice(CANDIDATE_ABSTAIN, confidence=0.0, source=self.name)
+        last = request.history[-1] if request.history else None
+        if last is not None and top[0].get("description") == last:
+            # Rule 4: never the step just taken; nothing more serves the goal.
             return Choice(CANDIDATE_ABSTAIN, confidence=0.0, source=self.name)
         return Choice(
             top[0]["id"],
