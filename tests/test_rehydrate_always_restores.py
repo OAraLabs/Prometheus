@@ -233,6 +233,7 @@ class TestSendPaths:
 
         from prometheus.skills.registry import SkillRegistry
         from prometheus.web.server import create_app
+        from tests.test_api_chat_reaches_the_model import wire_runtime_prompt
 
         monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path))
         engine = _engine(tmp_path)
@@ -245,8 +246,8 @@ class TestSendPaths:
                 return SimpleNamespace(text="ok", turns=1, messages=[],
                                        usage=SimpleNamespace(input_tokens=1, output_tokens=1))
 
-        app = create_app({"gateway": {"system_prompt": "sys"}}, session_mgr=_manager(engine),
-                         skill_registry=SkillRegistry(), agent_loop=_Loop())
+        app = wire_runtime_prompt(create_app({}, session_mgr=_manager(engine),
+                                             skill_registry=SkillRegistry(), agent_loop=_Loop()))
         TestClient(app).post("/api/chat", json={"session_id": "s1", "content": "and now?"})
 
         assert seen and seen[0][-1] == "and now?"

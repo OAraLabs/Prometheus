@@ -94,7 +94,7 @@ Every cloud provider except Anthropic rides the same OpenAI-compatible wire form
 | DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-flash` |
 | Kimi (Moonshot) | `kimi` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
 | GLM (Z.ai / Zhipu) | `glm` | `ZAI_API_KEY` | `glm-5.3` |
-| MiMo (Xiaomi) | `mimo` | `MIMO_API_KEY` | `mimo-v2.5-pro` |
+| MiMo (Xiaomi) | `mimo` | `MIMO_API_KEY` | `mimo-v2.6-pro` |
 | Qwen (Alibaba Model Studio) | `qwen` | `QWEN_API_KEY` | `qwen3.8-max` |
 
 The defaults live in `src/prometheus/providers/registry.py` (`CLOUD_DEFAULTS`) and carry some hard-won footnotes:
@@ -168,7 +168,7 @@ slash_commands:
   mimo:
     provider: mimo
     api_key_env: MIMO_API_KEY
-    model: mimo-v2.5-pro
+    model: mimo-v2.6-pro
   qwen:
     provider: qwen
     api_key_env: QWEN_API_KEY
