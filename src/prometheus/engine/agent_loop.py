@@ -3914,11 +3914,16 @@ def _microcompact_old_results(
             # result), each one discarding the prompt cache for nothing.
             if len(replacement) >= len(content):
                 continue
-            msg.content[j] = TRB(
+            trimmed = TRB(
                 tool_use_id=block.tool_use_id,
                 content=replacement,
                 is_error=False,
             )
+            # The model sees the excerpt from here on, but this message may
+            # not be in lcm.db yet: a run's new messages are persisted when it
+            # ends, so without this the store kept the excerpt as the record.
+            trimmed._full_content = content
+            msg.content[j] = trimmed
             compacted += 1
             chars_before += len(content)
             chars_after += len(replacement)

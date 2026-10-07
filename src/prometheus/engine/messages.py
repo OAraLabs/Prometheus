@@ -13,7 +13,7 @@ import logging
 from typing import Any, Annotated, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, Field, PrivateAttr, TypeAdapter
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +59,11 @@ class ToolResultBlock(BaseModel):
     tool_use_id: str
     content: str
     is_error: bool = False
+    # The whole result, once microcompaction has cut ``content`` down to an
+    # excerpt for the model. Private, so no dump, repr or provider payload
+    # carries it: only ConversationMessage.durable_content_json reads it, for
+    # the lcm.db write.
+    _full_content: str | None = PrivateAttr(default=None)
 
 
 class ImageBlock(BaseModel):
@@ -233,10 +238,18 @@ class ConversationMessage(BaseModel):
         ``MessagePart.content_json`` so structured turns survive the LCM round-trip; round-trips
         back via ``ConversationMessage(role=..., content=json.loads(...))``.
         """
-        return json.dumps([
-            block.for_storage() if isinstance(block, ImageBlock) else block.model_dump(mode="json")
-            for block in self.content
-        ])
+        return json.dumps([_block_json(block) for block in self.content])
+
+    @property
+    def durable_content_json(self) -> str:
+        """:attr:`content_json` as the conversation store (lcm.db) keeps it.
+
+        The same, except that a tool result microcompaction cut down for the
+        model is written whole. ONLY ``ChatSession._persist_to_lcm`` reads
+        this; requests, WS frames and REST bodies use :attr:`content_json` or
+        the blocks, which carry the excerpt.
+        """
+        return json.dumps([_block_json(block, durable=True) for block in self.content])
 
     @property
     def tool_uses(self) -> list[ToolUseBlock]:
@@ -341,6 +354,16 @@ class ConversationMessage(BaseModel):
     def to_api_param(self) -> dict[str, Any]:
         """Convert the message into provider wire format (OpenAI-compatible)."""
         return self.to_openai_param()
+
+
+def _block_json(block: ContentBlock, *, durable: bool = False) -> dict[str, Any]:
+    """One block of :attr:`ConversationMessage.content_json`."""
+    if isinstance(block, ImageBlock):
+        return block.for_storage()
+    data = block.model_dump(mode="json")
+    if durable and isinstance(block, ToolResultBlock) and block._full_content is not None:
+        data["content"] = block._full_content
+    return data
 
 
 def serialize_content_block(block: ContentBlock) -> dict[str, Any]:
