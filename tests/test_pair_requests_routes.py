@@ -19,14 +19,10 @@ from __future__ import annotations
 
 import logging
 import re
-import secrets
-import sqlite3
 import time
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
@@ -34,81 +30,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from prometheus.config import instance_key, pair_seal  # noqa: E402
 from prometheus.config.device_store import DeviceStore  # noqa: E402
 from prometheus.web.server import create_app  # noqa: E402
-
-GLOBAL = "pair-test-global-" + secrets.token_hex(8)
-T0 = 1_760_000_000.0
-LOW_ORDER = pair_seal.b64url_encode(bytes(32))
-
-
-class Clock:
-    def __init__(self, now: float = T0) -> None:
-        self.now = now
-
-    def __call__(self) -> float:
-        return self.now
-
-
-class Requester:
-    def __init__(self) -> None:
-        self.private = X25519PrivateKey.generate()
-        self.public = self.private.public_key().public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-        self.public_b64 = pair_seal.b64url_encode(self.public)
-
-    def unseal(self, request_id: str, sealed: dict) -> dict:
-        return pair_seal.unseal_token(private_key=self.private, request_id=request_id, sealed=sealed)
-
-
-class World:
-    """A daemon with an owner device and a scoped device, a fake clock, and a recording notifier."""
-
-    def __init__(self, tmp_path, **pairing) -> None:
-        self.path = tmp_path / "devices.db"
-        self.devices = DeviceStore(self.path)
-        config = {"web": {"api_token": GLOBAL}}
-        if pairing:
-            config["pairing"] = pairing
-        self.app = create_app(config, device_store=self.devices)
-        self.clock = Clock()
-        self.runtime = self.app.state.pairing
-        self.runtime.clock = self.clock
-        self.events: list[tuple[str, dict]] = []
-        self.runtime.notifier.subscribe(lambda kind, payload: self.events.append((kind, payload)) or True)
-        self.der = instance_key.ensure_instance_key()      # the daemon makes this at boot
-        self.owner = self.devices.mint_owner("Beacon on this Mac", "macos", by="same-mac-pairing")
-        self.scoped = self.devices.mint("a scoped phone", "ios")
-        self.client = TestClient(self.app)
-
-    def hdr(self, who: str) -> dict:
-        token = {"global": GLOBAL, "owner": self.owner["token"], "scoped": self.scoped["token"]}.get(who, who)
-        return {"Authorization": f"Bearer {token}"}
-
-    def as_(self, who: str, method: str, url: str, **kw):
-        headers = {**self.hdr(who), **kw.pop("headers", {})}
-        return self.client.request(method, url, headers=headers, **kw)
-
-    def request(self, requester=None, *, source="192.0.2.10", **body):
-        requester = requester or Requester()
-        payload = {"device_name": "Jennifer's MacBook", "platform": "macos", "public_key": requester.public_b64}
-        payload.update(body)
-        client = TestClient(self.app, client=(source, 50000))
-        return client.post("/api/pair/requests", json=payload), requester, client
-
-    def created(self, **kw):
-        response, requester, client = self.request(**kw)
-        assert response.status_code == 201, response.text
-        return response.json(), requester, client
-
-    def poll(self, created, client=None, secret=None, headers=None):
-        merged = {"X-Pairing-Secret": secret if secret is not None else created["poll_secret"], **(headers or {})}
-        return (client or self.client).get(f"/api/pair/requests/{created['request_id']}", headers=merged)
-
-    def approve(self, created, who="global", **body):
-        return self.as_(who, "POST", f"/api/pair/requests/{created['request_id']}/approve", json=body or None)
-
-    def tables(self) -> set[str]:
-        with sqlite3.connect(self.path) as conn:
-            return {row[0] for row in conn.execute("select name from sqlite_master where type='table'")}
+from tests.support.pairing_world import LOW_ORDER, T0, Requester, World  # noqa: E402
 
 
 @pytest.fixture
