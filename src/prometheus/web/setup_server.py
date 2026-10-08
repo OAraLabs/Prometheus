@@ -691,6 +691,7 @@ def create_setup_app(
     flag: the real route surface must be unreachable in setup mode, so
     it simply is not mounted. Routes:
 
+    - ``GET  /api/hello``           → (public) the six-field "is there a Prometheus here"
     - ``GET  /api/setup/status``    → mode + pairing availability + configured
     - ``POST /api/setup/pair``      → code → real API token
     - ``GET  /api/setup/detect``    → (authed) probe inference backends
@@ -705,6 +706,7 @@ def create_setup_app(
     :class:`~prometheus.web.bind.BindError`.
     """
     from prometheus import __version__
+    from prometheus.web import hello as hello_mod
 
     api_port = api_port if api_port is not None else resolve_setup_port()
     ws_port = ws_port if ws_port is not None else resolve_setup_ws_port()
@@ -718,6 +720,15 @@ def create_setup_app(
     # Same fail-closed rule as the main app: a mistyped query parameter is an error, not a
     # right-looking answer. Set before any route is registered. See web/strict_query.py.
     app.router.route_class = StrictQueryRoute
+
+    # Public like the pairing routes below, and there is no bearer gate here to refuse a browser or
+    # limit a peer, so the shared route does both itself (web/hello.py).
+    _hello_limiter = hello_mod.new_limiter()
+
+    @app.get("/api/hello")
+    async def hello(request: Request) -> JSONResponse:
+        return hello_mod.hello_response(
+            request, _hello_limiter, lambda: hello_mod.build_hello(None, setup_mode=True))
 
     @app.get("/api/setup/status")
     async def setup_status() -> dict[str, Any]:

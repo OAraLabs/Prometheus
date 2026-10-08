@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from prometheus.web import hello as hello_mod
 from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import guard_if_loopback, is_loopback_host_header, is_loopback_peer
 from prometheus.web.public_routes import is_public_route
@@ -841,6 +842,17 @@ def create_app(
             getattr(app.state, "boot_sha", "unknown"),
             fetch_state=getattr(fetcher, "state", None),
         )
+
+    # ── Hello (unauthenticated: a device with no address or token asks this first) ──
+    # A public route (web/public_routes.py), so the bearer gate does not apply and the route does its own
+    # checking: no browsers, a per-peer limit, no CORS, no disk writes. Contract: docs/PAIRING-APPROVAL-API.md.
+    _hello_limiter = hello_mod.new_limiter()
+
+    @app.get("/api/hello")
+    async def hello(request: Request):
+        return hello_mod.hello_response(
+            request, _hello_limiter,
+            lambda: hello_mod.build_hello(config, auth_on=bool(_api_token)))
 
     # ── Root ────────────────────────────────────────────────────────
 

@@ -1161,6 +1161,17 @@ web:
   api_token:            # required — no code default
   dashboard_port: 3002
 
+# Pairing — how a new device finds this Prometheus and joins it
+# (docs/PAIRING-APPROVAL-API.md). Only the keys the daemon reads today are
+# listed; the rest of the section arrives with the routes that read it.
+pairing:
+  # The name shown to devices that are not paired yet: in GET /api/hello (which
+  # anyone who can reach the port can call), in the local-network
+  # advertisement, and on the Approve prompt. Empty = this computer's own name
+  # (macOS ComputerName, else the host name). At most 64 characters; control
+  # characters are removed.
+  display_name: ""
+
 # APNs push to enrolled devices (GRAFT-MOBILE-BRIDGE 2). Disabled by default:
 # enabling requires the `push` extra (pip install 'oara-prometheus[push]')
 # and an Apple p8 signing key — an enabled-but-broken block FAILS THE BOOT
