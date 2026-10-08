@@ -27,6 +27,7 @@ from prometheus.engine import loop_watchdog as _loop_watchdog
 from prometheus.version import package_version
 from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import is_loopback_address, is_loopback_host_header
+from prometheus.web.session_scope import Scope, SessionAccess, scope_for, session_exists
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,11 @@ class WebSocketBridge:
         # can only ask "is ANY client connected", and a desktop being open
         # would silently suppress the phone's push.
         self._ws_identity: dict[Any, Any] = {}
+        # Device scoping: the SAME ownership rule the REST layer applies
+        # (web/session_scope.py). A device socket sees and drives only the
+        # sessions its device owns; the global token's socket is the firehose,
+        # exactly as before. See docs/contracts/device-scoping.md.
+        self._access = SessionAccess(lambda: self._device_store, self._session_exists)
         # GRAFT Piece 2: set by the launcher when push.enabled. The bridge
         # feeds it agent_progress pulses and chat_done (Live Activity source);
         # bus signals reach it via its own subscription.
@@ -248,6 +254,32 @@ class WebSocketBridge:
         from prometheus.config.api_token import verify_token
 
         return verify_token(token, self._api_token, self._device_store)
+
+    def _session_exists(self, session_id: str) -> bool:
+        """Is there already a session by this id — live, or with durable rows?"""
+        mgr = self.session_mgr
+        if mgr is None or not hasattr(mgr, "get"):
+            return False
+        engine = getattr(mgr, "lcm_engine", None)
+        return session_exists(mgr, getattr(engine, "conversation_store", None), session_id)
+
+    def _scope(self, websocket: Any) -> Scope:
+        """Whose sessions this socket may touch. Fails CLOSED: with auth on, a socket
+        whose identity was never recorded owns nothing."""
+        return scope_for(self._ws_identity.get(websocket), auth_required=self.auth_required)
+
+    async def _refuse_session(self, websocket: Any, session_id: str) -> None:
+        """The one answer a device gets for a session that is not its own — the same whether
+        the session exists or not, so the frame is no oracle for session ids."""
+        await self._send_one(websocket, {
+            "type": "error",
+            "timestamp": time.time(),
+            "payload": {
+                "session_id": session_id,
+                "message": "unknown session",
+                "kind": "not_found",
+            },
+        })
 
     def _token_ok(self, raw: str) -> bool:
         """Boolean form of :meth:`_auth_identity` (kept for callers and tests
@@ -439,6 +471,13 @@ class WebSocketBridge:
         elif cmd_type == "send_message":
             session_id = payload.get("session_id", "")
             content = payload.get("content", "")
+            # Device scoping, before anything resolves against the session (references
+            # read its workspace; the message is written into it). A brand-new id is
+            # claimed by the sender; one that is not the device's is refused.
+            if session_id and content and not self._access.admit(
+                    self._scope(websocket), session_id):
+                await self._refuse_session(websocket, session_id)
+                return
             # GRAFT-MOBILE-BRIDGE 8: the correlation handle for the sender's
             # optimistic row. _handle_send_message has echoed it on the user
             # chat_message frame all along (the REST path passes it through);
@@ -519,6 +558,10 @@ class WebSocketBridge:
             content_b64 = payload.get("content_base64", "")
             mime_type = payload.get("mime_type", "")
             caption = payload.get("caption", "")
+            if session_id and content_b64 and not self._access.admit(
+                    self._scope(websocket), session_id):
+                await self._refuse_session(websocket, session_id)
+                return
             if session_id and content_b64:
                 await self._handle_file_upload(
                     session_id, filename, content_b64, mime_type, caption
@@ -527,6 +570,11 @@ class WebSocketBridge:
         elif cmd_type == "switch_session":
             session_id = payload.get("session_id", "")
             if session_id and self.session_mgr:
+                # Replays the session's whole history to this socket — so it is the
+                # owner's (or the operator's), or a brand-new id the device now owns.
+                if not self._access.admit(self._scope(websocket), session_id):
+                    await self._refuse_session(websocket, session_id)
+                    return
                 session = self.session_mgr.get_or_create(session_id)
                 # Send existing messages for the session
                 messages = session.get_messages()
@@ -548,7 +596,9 @@ class WebSocketBridge:
             # Ack goes to the REQUESTING socket only; every client learns the
             # outcome from the broadcast chat_done{interrupted:true} frame.
             session_id = payload.get("session_id", "")
-            stopped = self.interrupt_turn(session_id) if session_id else False
+            # Not the caller's session → the answer a quiet session gives, and nothing stops.
+            mine = bool(session_id) and self._access.owns(self._scope(websocket), session_id)
+            stopped = self.interrupt_turn(session_id) if mine else False
             await self._send_one(websocket, {
                 "type": "interrupt_ack",
                 "timestamp": time.time(),
@@ -1799,6 +1849,19 @@ class WebSocketBridge:
         No filter (the default, and `sessions: []`) → everything, today's
         firehose. A frame outside _SESSION_SCOPED_TYPES, or one carrying no
         session_id, is always delivered."""
+        # Ownership comes first and is not the client's to widen: a device socket
+        # receives a frame that names a session only if its device owns that session
+        # (any frame type, flat or nested — see event_session_id), whatever it
+        # subscribed to. The operator's socket passes unchanged.
+        try:
+            if not self._access.frame_visible(self._scope(ws), event):
+                return False
+        except Exception:
+            # Fail CLOSED, and never raise: this runs inside broadcast(), and an exception
+            # here would unwind into the agent turn that emitted the frame.
+            logger.warning("device scoping could not decide a frame for %s — withheld",
+                           _client_label(ws), exc_info=True)
+            return False
         sessions = self._ws_filters.get(ws)
         if not sessions:
             return True
