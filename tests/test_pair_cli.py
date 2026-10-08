@@ -142,6 +142,19 @@ def test_deny(world):
     assert world.poll(created).json() == {"status": "denied"}
 
 
+def test_a_whole_id_still_shows_the_name_when_it_is_waiting(world):
+    created, _, _ = world.created()
+    code, out = run(world, "deny", created["request_id"])
+    assert code == 0 and "Jennifer's MacBook" in out
+
+
+def test_a_whole_id_that_is_no_longer_waiting_is_denied_by_the_daemon_not_by_us(world):
+    created, _, _ = world.created()
+    world.as_("global", "POST", f"/api/pair/requests/{created['request_id']}/deny")
+    code, out = run(world, "approve", created["request_id"])
+    assert code == 1 and "no longer waiting" in out and "denied" in out
+
+
 def test_it_says_it_is_the_terminal(world):
     created, _, _ = world.created()               # the world already records what the channels are told
     run(world, "approve", created["request_id"])

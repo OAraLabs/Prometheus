@@ -1247,10 +1247,11 @@ def check_pairing_telegram(config: dict[str, Any]) -> DiagnosticCheck | None:
     (a positive id; a group is never used) is in ``gateway.allowed_chat_ids``, and the owner who asked for
     prompts needs to be told that rather than discover it when a device is waiting.
     """
-    section = config.get("pairing") or {}
-    if not isinstance(section, dict) or section.get("telegram_prompts") is not True:
-        return None
+    from prometheus.config.pair_requests import PairingSettings
     from prometheus.config.shipped_defaults import resolve_allowed_chat_ids, resolve_telegram_enabled
+
+    if not PairingSettings.from_config(config).telegram_prompts:       # the one reader of the key
+        return None
 
     gw = config.get("gateway", {}) or {}
     name = "Pairing prompts (Telegram)"

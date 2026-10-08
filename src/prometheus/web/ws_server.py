@@ -136,6 +136,10 @@ def _loopback_process_request(connection: Any, request: Any) -> Any:
 class WebSocketBridge:
     """Bridges SignalBus events to WebSocket clients."""
 
+    # The pairing runtime, set by attach_pairing. A class-level default so a bridge built without __init__
+    # (some tests do) is simply "not attached" rather than missing the attribute.
+    _pairing: Any = None
+
     def __init__(
         self,
         signal_bus: Any | None = None,

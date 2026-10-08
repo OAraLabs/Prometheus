@@ -14,7 +14,9 @@ import time
 
 import pytest
 
-from prometheus.web.pairing_routes import PairingNotifier
+pytest.importorskip("fastapi")
+
+from prometheus.web.pairing_routes import PairingNotifier  # noqa: E402
 
 
 @pytest.mark.asyncio

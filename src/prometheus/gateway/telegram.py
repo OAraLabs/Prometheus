@@ -819,11 +819,6 @@ class TelegramAdapter(BasePlatformAdapter):
     # `config.parse_mode` (MarkdownV2 on a default install), which would let text a stranger typed be
     # formatted. These pass `parse_mode=None` to the bot API explicitly, which means "no formatting".
 
-    @property
-    def running(self) -> bool:
-        """Whether the bot application exists (the adapter has started)."""
-        return self._app is not None
-
     def add_handler(self, handler: Any, group: int = 0) -> bool:
         """Register an extra handler after start-up. Runs behind the group -1 authorisation like any other."""
         if self._app is None:

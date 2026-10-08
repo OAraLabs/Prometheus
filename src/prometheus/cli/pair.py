@@ -87,6 +87,15 @@ def run_pair_command(
             client.close()
 
 
+def _waiting_quietly(client: Any, headers: dict[str, str]) -> list[dict[str, Any]]:
+    """The waiting list for a name to show, or nothing: the decision itself reports any real failure."""
+    try:
+        response = client.get("/api/pair/requests", headers=headers)
+        return response.json().get("requests", []) if response.status_code == 200 else []
+    except (httpx.TransportError, ValueError):
+        return []
+
+
 def _waiting(client: Any, headers: dict[str, str], out: Callable[[str], None]) -> list[dict[str, Any]] | None:
     response = client.get("/api/pair/requests", headers=headers)
     if response.status_code == 401:
@@ -104,7 +113,10 @@ def _run(action: str, args: argparse.Namespace, client: Any, headers: dict[str, 
     if full_id:
         # A whole id goes straight to the daemon, which knows the truth: a request someone else already
         # decided is not in the waiting list, and "no match" would hide that it was approved a moment ago.
-        target = {"request_id": args.request.lower(), "device_name": "that device"}
+        request_id = args.request.lower()
+        known = _waiting_quietly(client, headers)
+        target = next((r for r in known if r["request_id"] == request_id),
+                      {"request_id": request_id, "device_name": None})
         return _decide(action, args, target, client, headers, out)
     waiting = _waiting(client, headers, out)
     if waiting is None:
@@ -146,7 +158,8 @@ def _report(action: str, target: dict[str, Any], response: Any, out: Callable[[s
             out(f"Approved {body['name']!r}. It is now a device on this Prometheus (id {body['device_id'][:8]}), "
                 "scoped to its own conversations. Its token went to the device, sealed; nothing is shown here.")
         else:
-            out(f"Denied {target['device_name']!r}.")
+            name = target.get("device_name")
+            out(f"Denied {name!r}." if name else "Denied that device.")
         return 0
     if status == 422:
         out("The code does not match the one on this request. Nothing was decided: check the new device's screen.")
