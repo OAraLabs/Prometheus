@@ -226,13 +226,23 @@ func status() -> Outcome {
 
 // MARK: - The one-time pairing secret
 
+/// The user's home directory, resolved the way the daemon resolves it (Python's Path.home() reads $HOME).
+/// The launcher and the daemon must agree on this or they would look for the pairing secret and the logs in
+/// different places; FileManager's own answer comes from the password database and ignores $HOME. For a
+/// person's login the two are the same directory, so this changes nothing in production and lets a test run
+/// the real launcher against an isolated home.
+func homeDirectory() -> URL {
+    if let home = ProcessInfo.processInfo.environment["HOME"], home.hasPrefix("/"), home.count > 1 {
+        return URL(fileURLWithPath: home, isDirectory: true)
+    }
+    return FileManager.default.homeDirectoryForCurrentUser
+}
+
 /// ~/Library/Application Support/Prometheus/pairing/pair.secret: 32 random bytes, base64url, one line.
 /// The directory is 0700 and the file 0600. Beacon reads it and posts it to the daemon's loopback
 /// pairing route; the daemon compares against this file on every attempt and deletes it on first use.
 func pairingDirectory() -> URL {
-    let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-    return support.appendingPathComponent("Prometheus/pairing", isDirectory: true)
+    homeDirectory().appendingPathComponent("Library/Application Support/Prometheus/pairing", isDirectory: true)
 }
 
 func randomSecret() -> String? {
@@ -296,7 +306,7 @@ func removeIfPresent(_ url: URL, removed: inout [String], failed: inout [String]
 @available(macOS 13.0, *)
 func uninstall(purgeData: Bool) -> Outcome {
     let fileManager = FileManager.default
-    let home = fileManager.homeDirectoryForCurrentUser
+    let home = homeDirectory()
     var removed: [String] = []
     var failed: [String] = []
     var kept: [String] = []
@@ -343,7 +353,7 @@ func uninstall(purgeData: Bool) -> Outcome {
 /// The bundled plist is static, so per-user paths (logs, working directory) are set here.
 func run() -> Never {
     let fileManager = FileManager.default
-    let home = fileManager.homeDirectoryForCurrentUser
+    let home = homeDirectory()
     let resources = Bundle.main.resourceURL ?? home
     let python = resources.appendingPathComponent("python/bin/python3.12").path
 
@@ -356,6 +366,13 @@ func run() -> Never {
     let logDir = home.appendingPathComponent("Library/Logs/Prometheus")
     try? fileManager.createDirectory(at: logDir, withIntermediateDirectories: true)
     let errLog = logDir.appendingPathComponent("launchd.err.log").path
+    // A crash loop (KeepAlive restarts every ten seconds) would grow this file without bound. Keep at most
+    // two files of 5 MiB: when the live one is over the cap at start, it becomes launchd.err.log.1.
+    if let size = (try? fileManager.attributesOfItem(atPath: errLog))?[.size] as? Int, size > 5 * 1024 * 1024 {
+        let previous = errLog + ".1"
+        try? fileManager.removeItem(atPath: previous)
+        try? fileManager.moveItem(atPath: errLog, toPath: previous)
+    }
     let errFd = open(errLog, O_WRONLY | O_CREAT | O_APPEND, 0o600)
     if errFd >= 0 { dup2(errFd, STDERR_FILENO) }
     let nullFd = open("/dev/null", O_WRONLY)
