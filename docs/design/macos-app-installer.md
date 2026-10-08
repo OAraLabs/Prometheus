@@ -170,7 +170,11 @@ safety property.
 A `web.bind` setting, `--bind` on `oara daemon` and `PROMETHEUS_WEB_BIND` (setup mode has no config to
 read). Routed through REST, the WebSocket bridge, the setup server, and every other listener found by
 inventory. `POST /api/setup/configure` persists it. A config with no `web.bind` keeps `0.0.0.0`, so
-your Mac mini reached over Tailscale does not change. When bound to loopback the server refuses a
+your Mac mini reached over Tailscale does not change. A NEW config, from `oara setup`, the wizard or
+`configure`, is written with `web.bind: 127.0.0.1`; a rerun never changes an existing config, and
+`configure` writes an address someone chose with `--bind` or the variable as chosen. A headless box set
+up remotely through setup mode therefore ends up loopback-only until its owner sets the bind.
+`oara doctor` warns only about an UNSET bind that resolves to every interface. When bound to loopback the server refuses a
 `Host` header that is not `localhost`, `127.0.0.1` or `[::1]` (DNS rebinding). The app's launcher
 passes `--bind 127.0.0.1`. The "let my other devices connect" API is a separate later change.
 
