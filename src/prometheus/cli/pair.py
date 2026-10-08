@@ -19,13 +19,16 @@ Source: novel code for Prometheus, 2026-10-08.
 from __future__ import annotations
 
 import argparse
+import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import httpx
 
 from prometheus.config.api_token import resolve_api_token
+from prometheus.config.env_file import parse_env_file
+from prometheus.web.bind import BindError, format_host_port, is_all_interfaces, resolve_bind
 
 MIN_PREFIX = 6
 _TIMEOUT_SECONDS = 10.0
@@ -51,6 +54,27 @@ def _port(config: dict[str, Any] | None) -> int:
         return 8005
 
 
+def daemon_base_url(config: dict[str, Any] | None, env: Mapping[str, str] | None = None) -> str:
+    """Where this machine reaches the daemon: the address it listens on, or loopback when that is every interface.
+
+    A daemon bound to ONE address (a LAN or tailnet address, how an owner narrows a headless box) does not
+    answer on 127.0.0.1, so the terminal route used to report "could not reach the daemon" about a daemon that
+    was running. The address is resolved the way the daemon resolves it (``PROMETHEUS_WEB_BIND``, from the
+    environment or the env file the daemon loads, then ``web.bind``). A ``--bind`` flag given to a running
+    daemon cannot be seen from here, which is why an unreachable daemon is reported with the address tried.
+    A bind that cannot be honoured is the daemon's complaint (it refuses to start); here it falls back to
+    loopback.
+    """
+    environment = {**parse_env_file(), **os.environ} if env is None else env
+    try:
+        address = resolve_bind(config, env=environment).address
+    except BindError:
+        address = "127.0.0.1"
+    if is_all_interfaces(address):
+        address = "::1" if ":" in address else "127.0.0.1"
+    return f"http://{format_host_port(address, _port(config))}"
+
+
 def run_pair_command(
     args: argparse.Namespace,
     config: dict[str, Any] | None = None,
@@ -72,15 +96,17 @@ def run_pair_command(
         out("There is no web API token, so this daemon has no way to pair a new device: no web API token is set "
             "(the API is open).\nSet one with: oara token rotate")
         return 1
-    port = _port(config)
+    base_url = daemon_base_url(config)
     own = client is None
     if own:
-        client = httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=_TIMEOUT_SECONDS)
+        client = httpx.Client(base_url=base_url, timeout=_TIMEOUT_SECONDS)
     headers = {"Authorization": f"Bearer {token}", "X-Pairing-Via": "cli"}
     try:
         return _run(action, args, client, headers, out)
     except httpx.TransportError:
-        out(f"Could not reach the daemon at http://127.0.0.1:{port}. Is it running? (start it with: oara daemon)")
+        out(f"Could not reach the daemon at {base_url}. Is it running? (start it with: oara daemon)\n"
+            "If it was started with --bind ADDRESS, that address is not visible from here: run this with "
+            "PROMETHEUS_WEB_BIND=ADDRESS set.")
         return 1
     finally:
         if own:

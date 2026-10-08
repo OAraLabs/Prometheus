@@ -98,12 +98,33 @@ class PairingNotifier:
 
     def __init__(self) -> None:
         self._listeners: list[Callable[[str, dict[str, Any]], Any]] = []
+        self._audiences: list[Callable[[], bool]] = []
 
-    def subscribe(self, listener: Callable[[str, dict[str, Any]], Any]) -> None:
+    def subscribe(self, listener: Callable[[str, dict[str, Any]], Any], *,
+                  audience: Callable[[], bool] | None = None) -> None:
+        """Add a listener. *audience*, if given, answers "is someone who can act on this reachable right now".
+
+        Only a channel that can ANSWER that gives one (the Beacon bridge: an operator socket is open). Telegram
+        sends its prompt once and cannot be asked afterwards, so it has none and is remembered per request
+        instead (:meth:`PairingRuntime.mark_notified`).
+        """
         self._listeners.append(listener)
+        if audience is not None:
+            self._audiences.append(audience)
 
     def clear(self) -> None:
         self._listeners.clear()
+        self._audiences.clear()
+
+    def audience(self) -> bool:
+        """True when some channel's probe says an operator is reachable now. A probe that fails says no."""
+        for probe in tuple(self._audiences):
+            try:
+                if probe():
+                    return True
+            except Exception:
+                logger.warning("a pairing audience probe failed; counting it as nobody", exc_info=True)
+        return False
 
     async def emit(self, kind: str, payload: dict[str, Any]) -> bool:
         listeners = tuple(self._listeners)
@@ -143,6 +164,7 @@ class PairingRuntime:
         self._devices = devices
         self._store: PairRequestStore | None = None
         self._last_poll: OrderedDict[str, float] = OrderedDict()
+        self._told: OrderedDict[str, None] = OrderedDict()
         self._sweeper: asyncio.Task | None = None
 
     def store(self) -> PairRequestStore:
@@ -201,6 +223,27 @@ class PairingRuntime:
         if self._sweeper is not None:
             self._sweeper.cancel()
             self._sweeper = None
+
+    # -- who was told ------------------------------------------------------
+
+    #: How many requests' "someone was told" are remembered. It is in memory (a request lives five minutes), so
+    #: a restart forgets it and the poll then answers from the live probe alone.
+    TOLD_REMEMBERED = 256
+
+    def mark_notified(self, request_id: str) -> None:
+        """Remember that a channel took this request's event when it was created (Telegram cannot be asked later)."""
+        self._told[request_id] = None
+        self._told.move_to_end(request_id)
+        while len(self._told) > self.TOLD_REMEMBERED:
+            self._told.popitem(last=False)
+
+    def is_notified(self, request_id: str) -> bool:
+        """Whether someone who can approve has been told, or is reachable now and will be.
+
+        Told at creation (remembered) OR an operator is connected (a socket that connects later is told what is
+        waiting, so connected means it will have been told). It only goes false to true during a request's life.
+        """
+        return request_id in self._told or self.notifier.audience()
 
     # -- polling ----------------------------------------------------------
 
@@ -415,6 +458,8 @@ def register_pairing_routes(
         req = created.request
         notified = await runtime.notifier.emit(
             "pending", _pending_payload(req, runtime.settings.request_ttl_seconds))
+        if notified:
+            runtime.mark_notified(req.id)
         return _json(201, {
             "request_id": req.id, "poll_secret": created.poll_secret, "match_code": req.match_code,
             "instance_public_key": pair_seal.b64url_encode(instance_key),
@@ -436,7 +481,8 @@ def register_pairing_routes(
         if wait:
             return _rate_limited("poll_too_fast", wait)
         if req.state == PENDING:
-            return _json(200, {"status": PENDING, "expires_at": int(req.expires_at)})
+            return _json(200, {"status": PENDING, "expires_at": int(req.expires_at),
+                               "notified": runtime.is_notified(req.id)})
         if req.state == APPROVED:
             sealed = runtime.store().sealed_blob(req.id)
             if sealed is not None:

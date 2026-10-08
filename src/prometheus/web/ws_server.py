@@ -303,7 +303,7 @@ class WebSocketBridge:
         told what is still waiting (:meth:`_backfill_pairing`).
         """
         self._pairing = runtime
-        runtime.notifier.subscribe(self._on_pairing_event)
+        runtime.notifier.subscribe(self._on_pairing_event, audience=lambda: bool(self.operator_sockets()))
 
     def operator_sockets(self) -> list[Any]:
         """Sockets whose identity is an operator: the global token or an OWNER device (``is_operator``).

@@ -202,7 +202,8 @@ def test_a_pending_request_polls_as_pending(world):
     created, _, _ = world.created()
     response = world.poll(created)
     assert response.status_code == 200 and response.json() == {
-        "status": "pending", "expires_at": int(T0) + 300, "notified": False}
+        "status": "pending", "expires_at": int(T0) + 300,
+        "notified": True}                       # this world's recording listener took the event at creation
     assert response.headers["cache-control"] == "no-store" and _no_cors(response)
 
 

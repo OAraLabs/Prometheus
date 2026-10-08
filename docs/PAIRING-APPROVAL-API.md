@@ -227,10 +227,12 @@ A pairing request is not a device and touches no conversation: until it is appro
 
 `notified` is true when at least one operator channel took the prompt (a connected operator Beacon, or, if the owner opted in, a Telegram message that sent). When false the request is still valid; the new device can say "nobody is watching Will's Mac mini; open Beacon there". That reveals that no operator is online, which is information a LAN neighbour could already infer.
 
+**`notified` on the pending poll is current.** The 201 says it once, as of creation, so a requester whose owner opened Beacon a moment later would keep saying "nobody is watching". The pending poll therefore carries `notified` too (added after Beacon's review of PR 3; additive, no other shape moved), and it only ever goes false to true during a request's life. It is true when a channel took the event at creation (remembered per request in memory, up to 256 requests, because Telegram sends its prompt once and cannot be asked later) **or** an operator socket is connected now (the global token or an owner device, never a scoped one). A socket that connects later is sent what is waiting, so connected means "will have been told". Only a `pending` answer carries it; every other status keeps its exact shape. A restart forgets the remembered part, and the poll then answers from the live socket alone.
+
 **`GET /api/pair/requests/{request_id}`** with header `X-Pairing-Secret: <poll_secret>`
 
 ```json
-{"status": "pending", "expires_at": 1760000300}
+{"status": "pending", "expires_at": 1760000300, "notified": false}
 {"status": "denied"}      {"status": "expired"}      {"status": "canceled"}      {"status": "delivered"}
 {
   "status": "approved",
@@ -407,7 +409,7 @@ The name is typed on the new device and is not checked. Approve only if the code
 
 ### 5.3 Terminal
 
-`oara pair list | approve <id> [--name N] [--code NNNN] | deny <id>` call the same routes with the global token, read the way `oara token show` reads it, and send `X-Pairing-Via: cli` so the owner's other screens say "approved in the terminal". This is the route for a headless box with no Beacon open and no Telegram. An id may be a unique prefix of at least 6 characters; an ambiguous or unknown prefix is refused, never guessed. A whole 32-character id goes straight to the daemon, which knows a request someone else already decided (`no longer waiting: already approved`), where the waiting list no longer does. It prints no token (the approve response has none) and no poll secret (the list has none). It does not build its own decision: every channel calls `PairingRuntime.approve` / `deny`.
+`oara pair list | approve <id> [--name N] [--code NNNN] | deny <id>` call the same routes with the global token, read the way `oara token show` reads it, and send `X-Pairing-Via: cli` so the owner's other screens say "approved in the terminal". This is the route for a headless box with no Beacon open and no Telegram. It reaches the daemon where it listens: `PROMETHEUS_WEB_BIND` (from the environment, else the env file the daemon loads), else `web.bind`, with every-interface binds reached over loopback and one specific address reached at that address (a daemon bound to one LAN or tailnet address does not answer on 127.0.0.1, which the first version assumed). A `--bind` flag given to a running daemon cannot be seen from the CLI, so an unreachable daemon is reported with the address that was tried and the way to set it. An id may be a unique prefix of at least 6 characters; an ambiguous or unknown prefix is refused, never guessed. A whole 32-character id goes straight to the daemon, which knows a request someone else already decided (`no longer waiting: already approved`), where the waiting list no longer does. It prints no token (the approve response has none) and no poll secret (the list has none). It does not build its own decision: every channel calls `PairingRuntime.approve` / `deny`.
 
 ### 5.4 Races and reachability
 
