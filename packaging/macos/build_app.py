@@ -42,7 +42,7 @@ import sys
 import tarfile
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -572,21 +572,62 @@ def assemble(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover - 
     }
 
 
-def notarize(bundle: Path, profile: str, work: Path, runner: Runner = subprocess.run) -> None:  # pragma: no cover
-    """Submit, wait, staple, validate. A stalled notary is reported, never worked around."""
-    if not profile:
-        raise BuildError("--notarize needs --notary-profile (xcrun notarytool store-credentials ...)")
+def notarytool_credential_args(profile: str, env: Mapping[str, str]) -> list[str]:
+    """How notarytool is told who is asking. A keychain profile wins: the password then never appears
+    in argv (this Mac, run by a person). The Apple ID trio is the CI shape, on a throwaway runner whose
+    log masks secrets."""
+    if profile:
+        return ["--keychain-profile", profile]
+    names = ("APPLE_ID", "APPLE_APP_SPECIFIC_PASSWORD", "APPLE_TEAM_ID")
+    values = {name: (env.get(name) or "").strip() for name in names}
+    missing = [name for name, value in values.items() if not value]
+    if len(missing) == len(names):
+        raise BuildError(
+            "no notarization credential: pass --notary-profile NAME (xcrun notarytool store-credentials NAME "
+            "--apple-id ... --team-id ...), or set APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID"
+        )
+    if missing:
+        raise BuildError("notarization credential is incomplete; missing " + ", ".join(missing))
+    return ["--apple-id", values["APPLE_ID"], "--password", values["APPLE_APP_SPECIFIC_PASSWORD"],
+            "--team-id", values["APPLE_TEAM_ID"]]
+
+
+def _redact(text: str, secrets_: Iterable[str]) -> str:
+    for value in secrets_:
+        if value:
+            text = text.replace(value, "***")
+    return text
+
+
+# How long to wait for Apple. Past this the step FAILS and a person decides; the timeout is never raised
+# to make a slow notary look like success. Apple keeps processing after notarytool gives up.
+NOTARY_WAIT = "40m"
+
+
+def notarize(
+    bundle: Path, profile: str, work: Path, runner: Runner = subprocess.run, env: Mapping[str, str] | None = None,
+) -> None:
+    """Submit, wait, staple, validate. A stalled or refused notarization is reported, never worked around,
+    and the password never appears in what is reported."""
+    environment = os.environ if env is None else env
+    credentials = notarytool_credential_args(profile, environment)
+    password = (environment.get("APPLE_APP_SPECIFIC_PASSWORD") or "").strip()
     submit_zip = work / f"{bundle.stem}-submit.zip"
-    submit_zip.unlink(missing_ok=True)
-    _run(["ditto", "-c", "-k", "--keepParent", bundle, submit_zip], runner)
-    result = _run(["xcrun", "notarytool", "submit", submit_zip, "--keychain-profile", profile, "--wait",
-                   "--output-format", "json"], runner)
-    info = json.loads(result)
-    if info.get("status") != "Accepted":
-        log = _run(["xcrun", "notarytool", "log", info.get("id", ""), "--keychain-profile", profile], runner)
-        raise BuildError(f"notarization {info.get('status')}: {log[-1500:]}")
-    _run(["xcrun", "stapler", "staple", bundle], runner)
-    _run(["xcrun", "stapler", "validate", bundle], runner)
+    try:
+        submit_zip.unlink(missing_ok=True)
+        _run(["ditto", "-c", "-k", "--keepParent", bundle, submit_zip], runner)
+        result = _run(["xcrun", "notarytool", "submit", submit_zip, *credentials, "--wait", "--timeout", NOTARY_WAIT,
+                       "--output-format", "json"], runner)
+        info = json.loads(result)
+        if info.get("status") != "Accepted":
+            log = _run(["xcrun", "notarytool", "log", info.get("id", ""), *credentials], runner)
+            raise BuildError(f"notarization {info.get('status')}: {log[-1500:]}")
+        _run(["xcrun", "stapler", "staple", bundle], runner)
+        _run(["xcrun", "stapler", "validate", bundle], runner)
+    except BuildError as exc:
+        raise BuildError(_redact(str(exc), [password])) from None
+    finally:
+        submit_zip.unlink(missing_ok=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - needs a Mac
