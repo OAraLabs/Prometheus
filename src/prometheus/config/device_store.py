@@ -351,6 +351,78 @@ class DeviceStore:
         return {r["device_id"] for r in rows}
 
     # ------------------------------------------------------------------
+    # Session ownership: which device brought a session into existence
+    # ------------------------------------------------------------------
+    #
+    # A device token sees and manages only the sessions it owns; the operator's
+    # global token sees all (web/session_scope.py is the policy, this is the
+    # record). A session with no row here belongs to the operator — a Telegram
+    # chat, or anything that predates device scoping.
+    #
+    # One row per session, first writer wins, never reassigned and never
+    # deleted: ownership must not change under a session that is mid-turn, and
+    # a purged or revoked-device session must not become claimable by someone
+    # else. Revoking a device leaves its rows; the operator still reads them.
+    # Anything that adds a way to REASSIGN a session (approve-to-pair handing
+    # one over) must do it here, in one UPDATE, and nowhere else.
+    #
+    # Its own table, created on the FIRST claim rather than at open, like
+    # computer_devices above: a daemon with no device activity never grows it,
+    # and the parity fixtures, which record every table in this file, stay as
+    # they are.
+
+    def claim_session(self, session_id: str, device_id: str) -> bool:
+        """Record *device_id* as the owner of *session_id*, if nobody owns it.
+
+        True when the device owns the session afterwards (it already did, or this
+        call took it); False when another device owns it or *device_id* is not a
+        live device. Check that the session does not exist elsewhere BEFORE
+        calling — this only arbitrates between devices; it cannot know that a
+        Telegram chat already holds the id.
+        """
+        live = self._conn.execute(
+            "SELECT 1 FROM api_devices WHERE id = ? AND revoked_at IS NULL",
+            (device_id,)).fetchone()
+        if live is None or not session_id:
+            return False
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS device_sessions (
+              session_id TEXT PRIMARY KEY,
+              device_id  TEXT NOT NULL,
+              claimed_at REAL NOT NULL
+            );
+        """)
+        self._conn.execute(
+            "INSERT OR IGNORE INTO device_sessions (session_id, device_id, claimed_at)"
+            " VALUES (?, ?, ?)", (session_id, device_id, time.time()))
+        self._conn.commit()
+        return self.session_owner(session_id) == device_id
+
+    def session_owner(self, session_id: str) -> str | None:
+        """The device id that owns *session_id*, or None (the operator's)."""
+        try:
+            row = self._conn.execute(
+                "SELECT device_id FROM device_sessions WHERE session_id = ?",
+                (session_id,)).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):  # a lock or I/O error is not "unowned"
+                raise
+            return None  # nothing was ever claimed
+        return row["device_id"] if row else None
+
+    def owned_session_ids(self, device_id: str) -> set[str]:
+        """Every session id *device_id* owns."""
+        try:
+            rows = self._conn.execute(
+                "SELECT session_id FROM device_sessions WHERE device_id = ?",
+                (device_id,)).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            return set()
+        return {r["session_id"] for r in rows}
+
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _row(row: sqlite3.Row) -> DeviceRow:
