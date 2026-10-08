@@ -6,7 +6,7 @@ Run alongside the main Prometheus process, not as a replacement.
 Usage:
     from prometheus.web.server import create_app, start_web
     app = create_app(config, signal_bus, session_mgr, telemetry, ...)
-    await start_web(app, host="0.0.0.0", port=8005)
+    await start_web(app, host="127.0.0.1", port=8005)
 """
 
 from __future__ import annotations
@@ -23,8 +23,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from prometheus.web.bind import DEFAULT_BIND
+from prometheus.web.loopback import guard_if_loopback, is_loopback_host_header, is_loopback_peer
+from prometheus.web.public_routes import is_public_route
 from prometheus.web.strict_query import StrictQueryRoute
 
+from prometheus.config import api_token as api_token_module
+from prometheus.config import local_pairing
 from prometheus.config.node_identity import get_instance_id, get_node_pubkey
 from prometheus.config.paths import get_wiki_root
 from prometheus.context.environment import (
@@ -353,6 +358,16 @@ def create_app(
                     return JSONResponse(status_code=413, content={"error": "request body too large"})
             except ValueError:
                 return JSONResponse(status_code=400, content={"error": "invalid Content-Length"})
+        # The EXACT list of routes that answer without a token (web/public_routes.py); each does its own
+        # checks, because this gate no longer does. A request from a browser (an Origin header) is refused
+        # first: these routes are for apps on this machine, never for a web page. The refusal is returned
+        # from here, which wraps the CORS layer, so it carries no CORS headers.
+        if is_public_route(request.method, path):
+            if request.headers.get("origin"):
+                return JSONResponse(status_code=400, content={
+                    "error": "browser_not_allowed",
+                    "detail": "this route is for the app on this Mac, not for a web page"})
+            return await call_next(request)
         # /v1 is the OpenAI-compatible surface (web/openai_api.py): same
         # bearer, same device tokens. A route prefix outside this tuple is
         # an UNAUTHENTICATED route — widen here, never elsewhere.
@@ -372,6 +387,43 @@ def create_app(
                 return JSONResponse(status_code=401, content={"error": "unauthorized — set Authorization: Bearer <token>"})
             request.state.device_identity = identity
         return await call_next(request)
+
+    # ── /api/pair/local — same-Mac pairing with the one-time file secret ─────
+    #
+    # The one route that answers without a bearer (web/public_routes.py). It exists only on the app install
+    # (PROMETHEUS_INSTALL_KIND=app), where Beacon on the SAME Mac has no other way to get a credential after
+    # a reinstall: the secret is written by `Prometheus --pair` into a file only this user can read. It
+    # requires a loopback peer AND a loopback Host header (DNS rebinding), refuses a browser (done by the
+    # middleware above), compares the secret in constant time, and uses it exactly once. Wrong guesses never
+    # lock anything: a 256-bit secret cannot be guessed, and a lockout here would only let another local
+    # process stop the real client from pairing.
+    @app.post("/api/pair/local")
+    async def pair_local(request: Request):
+        if not local_pairing.enabled():
+            return JSONResponse(status_code=404, content={"error": "not_found"})
+        if not (is_loopback_peer(request) and is_loopback_host_header(request.headers.get("host"))):
+            logger.warning("Same-Mac pairing refused: the request did not come from this Mac")
+            return JSONResponse(status_code=403, content={
+                "error": "not_loopback",
+                "detail": "this pairing secret is only accepted from this Mac, over localhost"})
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if not isinstance(body, dict) or not str(body.get("code") or "").strip():
+            return JSONResponse(status_code=400, content={
+                "error": "bad_request", "detail": 'expected a JSON body: {"code": "<secret>"}'})
+        if not local_pairing.consume_if_matches(str(body["code"]).strip()):
+            logger.warning("Same-Mac pairing attempt failed (wrong or already-used secret)")
+            return JSONResponse(status_code=401, content={
+                "error": "invalid_code", "detail": "wrong or already-used pairing secret"})
+        web_cfg = config.get("web") or {}
+        logger.info("Same-Mac pairing successful (secret consumed; credential value never logged)")
+        return {
+            "token": api_token_module.issue_owner_credential(config),
+            "api_base_port": int(web_cfg.get("api_port", 8005) or 8005),
+            "ws_port": int(web_cfg.get("ws_port", 8010) or 8010),
+        }
 
     # ── /api/devices — enrolment, listing, revocation (GRAFT 1) ─────
 
@@ -6071,8 +6123,13 @@ def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
-async def start_web(app: FastAPI, host: str = "0.0.0.0", port: int = 8005) -> None:
-    """Start the FastAPI server using uvicorn.
+async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005) -> None:
+    """Start the FastAPI server using uvicorn, listening on *host*.
+
+    *host* is whatever the daemon resolved from ``--bind`` /
+    ``PROMETHEUS_WEB_BIND`` / ``web.bind`` (web/bind.py). A loopback *host* also
+    puts the Host-header check in front of the app (DNS rebinding, see
+    web/loopback.py); any other host is left unrestricted, as before.
 
     FIRSTLIGHT FL-1 note, verified by mutation: uvicorn's
     ``capture_signals()`` looks like it steals SIGTERM/SIGINT from the
@@ -6090,7 +6147,7 @@ async def start_web(app: FastAPI, host: str = "0.0.0.0", port: int = 8005) -> No
     component of the chain, this one included.
     """
     import uvicorn
-    config = uvicorn.Config(app, host=host, port=port, log_level="info",
+    config = uvicorn.Config(guard_if_loopback(app, host), host=host, port=port, log_level="info",
                             # log_config=None: uvicorn must NOT install its own handlers.
                             # Its default config gives uvicorn.access/uvicorn.error handlers
                             # with propagate=False — a path around the root handlers, i.e.
