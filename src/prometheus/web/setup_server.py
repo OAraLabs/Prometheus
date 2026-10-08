@@ -64,12 +64,15 @@ the config/identity files that call exists to write. Port:
 that's the point).
 
 Listen address: ``--bind`` > ``PROMETHEUS_WEB_BIND`` (process environment, then
-the env file) > ``0.0.0.0`` — :func:`resolve_setup_bind`, one resolver with the
+the env file) > ``0.0.0.0`` — :func:`resolve_setup_choice`, one resolver with the
 real daemon (web/bind.py), minus the config tier that does not exist yet. On a
 loopback address the Host-header check (web/loopback.py) also runs in front of
-every route, the unauthenticated pairing endpoint included. ``configure`` pins
-a non-default address into the new config as ``web.bind``, so the real daemon
-(same process or after a restart) listens where setup mode did.
+every route, the unauthenticated pairing endpoint included. ``configure`` writes
+``web.bind`` into the new config: the address somebody CHOSE (``--bind`` or the
+variable, ``0.0.0.0`` included) so the real daemon (same process or after a
+restart) listens where setup mode did, and ``127.0.0.1`` when nobody chose one,
+because a fresh install listens on this machine only. A box set up from another
+machine therefore ends up loopback-only until its owner sets ``web.bind``.
 """
 
 from __future__ import annotations
@@ -90,7 +93,9 @@ from prometheus.config.defaults import config_search_paths
 from prometheus.web.bind import (
     BIND_ENV_VAR,
     DEFAULT_BIND,
+    FRESH_INSTALL_BIND,
     BindError,
+    ResolvedBind,
     all_interfaces_warning,
     format_host_port,
     parse_bind,
@@ -166,12 +171,14 @@ def resolve_setup_ws_port() -> int:
         return DEFAULT_WS_PORT
 
 
-def resolve_setup_bind(flag: str | None = None) -> str:
-    """The address setup mode listens on: ``--bind`` > ``PROMETHEUS_WEB_BIND`` > 0.0.0.0.
+def resolve_setup_choice(flag: str | None = None) -> ResolvedBind:
+    """The address setup mode listens on, and what decided it: ``--bind`` > ``PROMETHEUS_WEB_BIND`` > 0.0.0.0.
 
     There is no config yet, so no ``web.bind`` tier. The variable is read from
     the process environment first and then from the env file, the same two
     places the real daemon reads it from (it loads that file before resolving).
+    ``source`` is ``"default"`` only when nobody chose an address; ``configure``
+    needs that to tell a chosen ``0.0.0.0`` from an unspecified one.
     Raises :class:`~prometheus.web.bind.BindError` on an invalid value — and also
     when the env file exists but cannot be read, because then we cannot tell
     whether the operator pinned an address, and guessing wide is the one wrong
@@ -192,7 +199,26 @@ def resolve_setup_bind(flag: str | None = None) -> str:
             ) from exc
         if BIND_ENV_VAR in from_file:
             env[BIND_ENV_VAR] = from_file[BIND_ENV_VAR]
-    return resolve_bind(None, flag=flag, env=env).address
+    return resolve_bind(None, flag=flag, env=env)
+
+
+def resolve_setup_bind(flag: str | None = None) -> str:
+    """The address alone, for callers that do not need to know what chose it."""
+    return resolve_setup_choice(flag).address
+
+
+def _as_resolved(bind: "str | ResolvedBind | None") -> ResolvedBind:
+    """One resolved choice from whatever a caller holds.
+
+    ``None`` resolves from the environment; a :class:`ResolvedBind` is used as it is
+    (the daemon resolved it already and knows what chose it); a plain string is an
+    address the caller named, so it counts as chosen, validated like any other.
+    """
+    if bind is None:
+        return resolve_setup_choice()
+    if isinstance(bind, ResolvedBind):
+        return bind
+    return ResolvedBind(parse_bind(bind, "bind"), "flag")
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +412,7 @@ def _apply_configure(
     api_port: int,
     ws_port: int,
     bind: str = DEFAULT_BIND,
+    bind_source: str = "default",
     state: SetupModeState,
 ) -> "JSONResponse":
     """The blocking core of ``POST /api/setup/configure``.
@@ -539,12 +566,22 @@ def _apply_configure(
     # working after the flip. Defaults (8005/8010) are unchanged.
     config["web"]["api_port"] = api_port
     config["web"]["ws_port"] = ws_port
-    # Same for the interface: a client that reached setup mode on loopback must
-    # find the real daemon on loopback, not on every interface. The default is
-    # NOT written: an absent web.bind already means 0.0.0.0, and leaving it out
-    # keeps this file identical to what `oara setup --fast` writes.
-    if bind != DEFAULT_BIND:
-        config["web"]["bind"] = bind
+    # Same for the interface: an address somebody CHOSE (--bind or the variable, 0.0.0.0
+    # included) is written as chosen, so the real daemon listens where setup mode did. When
+    # nobody chose one, setup mode is merely listening on the default, and a fresh install
+    # listens on this machine only: the file says so, exactly as `oara setup --fast` writes it.
+    if bind_source == "default":
+        written_bind = FRESH_INSTALL_BIND
+        if not is_loopback_address(bind):
+            logger.warning(
+                "Setup mode was reached on %s, but a fresh install listens on this machine "
+                "only: web.bind: %s is written. Once setup completes this box stops "
+                "answering the network; its owner sets web.bind (or starts the daemon with "
+                "--bind) to listen anywhere else.", bind, written_bind,
+            )
+    else:
+        written_bind = bind
+    config["web"]["bind"] = written_bind
     if agent_name:
         config["system"]["name"] = agent_name
 
@@ -630,7 +667,7 @@ def _apply_configure(
             "enabled": True,
             "api_port": api_port,
             "ws_port": ws_port,
-            "bind": bind,
+            "bind": written_bind,
         },
     })
 
@@ -701,14 +738,15 @@ def create_setup_app(
     ``on_complete`` is called (after the /complete response is sent) to
     stop the serve loop; tests leave it None. ``bind`` is the address the
     server is (or will be) listening on — ``configure`` pins it into the config;
-    it defaults to :func:`resolve_setup_bind`, and an invalid one raises
+    it defaults to :func:`resolve_setup_choice`, and an invalid one raises
     :class:`~prometheus.web.bind.BindError`.
     """
     from prometheus import __version__
 
     api_port = api_port if api_port is not None else resolve_setup_port()
     ws_port = ws_port if ws_port is not None else resolve_setup_ws_port()
-    bind = parse_bind(bind, "bind") if bind is not None else resolve_setup_bind()
+    resolved_bind = _as_resolved(bind)
+    bind = resolved_bind.address
     state = state if state is not None else SetupModeState()
 
     app = FastAPI(
@@ -862,7 +900,7 @@ def create_setup_app(
         # Blocking work (backend re-probe, file writes) off the event loop.
         return await asyncio.to_thread(
             _apply_configure, body, api_port=api_port, ws_port=ws_port,
-            bind=bind, state=state,
+            bind=bind, bind_source=resolved_bind.source, state=state,
         )
 
     @app.post("/api/setup/complete")
@@ -980,16 +1018,18 @@ def format_pairing_banner(code: str, api_port: int, bind: str | None = None) -> 
 
 async def _serve_setup_mode(
     pairing: PairingState, state: SetupModeState, api_port: int,
-    bind: str | None = None,
+    bind: "str | ResolvedBind | None" = None,
 ) -> None:
     """Run uvicorn until SIGTERM/SIGINT or setup-complete; exits cleanly.
 
-    *bind* is the listen address (default: :func:`resolve_setup_bind`). On a
+    *bind* is the listen address (default: :func:`resolve_setup_choice`), as an
+    address or the :class:`ResolvedBind` that says what chose it. On a
     loopback address the Host-header check sits in front of the whole app.
     """
     import uvicorn
 
-    address = parse_bind(bind, "bind") if bind is not None else resolve_setup_bind()
+    resolved = _as_resolved(bind)
+    address = resolved.address
     server_box: dict[str, Any] = {}
 
     def stop_server() -> None:
@@ -998,7 +1038,7 @@ async def _serve_setup_mode(
             srv.should_exit = True
 
     app = create_setup_app(
-        pairing, api_port=api_port, bind=address, state=state, on_complete=stop_server,
+        pairing, api_port=api_port, bind=resolved, state=state, on_complete=stop_server,
     )
     config = uvicorn.Config(guard_if_loopback(app, address), host=address, port=api_port,
                             log_level="info",
@@ -1032,12 +1072,12 @@ def missing_web_stack() -> list[str]:
     return missing
 
 
-def run_setup_mode(bind: str | None = None) -> int | str:
+def run_setup_mode(bind: "str | ResolvedBind | None" = None) -> int | str:
     """Entry point: `oara daemon` found no config.
 
     *bind* is the listen address the caller already resolved (``--bind`` >
-    ``PROMETHEUS_WEB_BIND`` > 0.0.0.0, see :func:`resolve_setup_bind`); when
-    omitted it is resolved here from the environment.
+    ``PROMETHEUS_WEB_BIND`` > 0.0.0.0, see :func:`resolve_setup_choice`, which
+    also says what chose it); when omitted it is resolved here from the environment.
 
     Boots the pairing-only server, prints the pairing code banner ONCE,
     serves until SIGTERM/SIGINT — or until a paired client finishes
@@ -1061,7 +1101,8 @@ def run_setup_mode(bind: str | None = None) -> int | str:
         return 1
 
     api_port = resolve_setup_port()
-    address = parse_bind(bind, "bind") if bind is not None else resolve_setup_bind()
+    resolved = _as_resolved(bind)
+    address = resolved.address
     pairing = PairingState()
     state = SetupModeState()
 
@@ -1088,7 +1129,7 @@ def run_setup_mode(bind: str | None = None) -> int | str:
     print(format_pairing_banner(pairing.code, api_port, address), flush=True)
 
     try:
-        asyncio.run(_serve_setup_mode(pairing, state, api_port, address))
+        asyncio.run(_serve_setup_mode(pairing, state, api_port, resolved))
     except KeyboardInterrupt:  # pragma: no cover — belt and braces
         pass
     if state.restart_requested:
