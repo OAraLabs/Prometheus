@@ -49,7 +49,7 @@ from prometheus.infra.doctor import (
     check_router,
     yaml_error_summary,
 )
-from prometheus.web.bind import BindError, all_interfaces_warning, resolve_bind
+from prometheus.web.bind import BindError, is_all_interfaces, resolve_bind
 from prometheus.web.loopback import is_loopback_address
 
 import logging
@@ -396,16 +396,27 @@ def check_web_bind(
                 "(and check PROMETHEUS_WEB_BIND).",
         )
     address = resolved.address
-    if all_interfaces_warning(address):
+    if is_all_interfaces(address):
+        if resolved.source == "default":
+            # Nobody chose this: web.bind is unset (a deployment that predates the
+            # loopback default for new installs) and --bind/the environment did not ask.
+            return DiagnosticCheck(
+                name="Web bind", category="connectivity", status="warning",
+                message=f"web.bind is not set, so the web API will listen on all interfaces "
+                        f"({address}) over plain HTTP (no TLS) — anyone who can reach this "
+                        "machine's network address can reach it; the bearer token is the only "
+                        "access control (a daemon started with --bind overrides this)",
+                fix="Set web.bind: 127.0.0.1 in prometheus.yaml to listen on this machine "
+                    "only, or a specific interface address (a tailnet address, say) to narrow "
+                    "it; set web.bind: 0.0.0.0 to keep every interface on purpose.",
+            )
+        # Somebody asked for every interface: that is a decision, not a finding. Still say
+        # what it is, so the row never reads as if the exposure were smaller than it is.
         return DiagnosticCheck(
-            name="Web bind", category="connectivity", status="warning",
-            message=f"web API will listen on all interfaces ({address}) over plain "
-                    "HTTP (no TLS) — anyone who can reach this machine's network "
-                    "address can reach it; the bearer token is the only access "
-                    "control (a daemon started with --bind overrides this)",
-            fix="Set web.bind: 127.0.0.1 in prometheus.yaml to listen on this "
-                "machine only, or a specific interface address (a tailnet "
-                "address, say) to narrow it.",
+            name="Web bind", category="connectivity", status="ok",
+            message=f"web API listens on all interfaces, {resolved.describe()}, over plain "
+                    "HTTP (no TLS) — anyone who can reach this machine's network address "
+                    "can reach it; the bearer token is the only access control",
         )
     if is_loopback_address(address):
         return DiagnosticCheck(

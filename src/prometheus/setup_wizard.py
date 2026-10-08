@@ -27,6 +27,7 @@ import yaml
 
 from prometheus.config.paths import get_config_dir, get_wiki_root
 from prometheus.providers.registry import CLOUD_DEFAULTS, ProviderRegistry
+from prometheus.web.bind import FRESH_INSTALL_BIND
 
 import logging
 
@@ -864,11 +865,18 @@ Run this wizard again after you're ready:
         """Write a fresh config, preserving defaults from the template."""
         print(f"\nWriting config to {self._config_path}...")
 
+        # A NEW install listens on this machine only. A config that is already there is never
+        # flipped (an unset web.bind means every interface, and a remote deployment depends on it),
+        # so the bind is decided by whether the FILE existed, not by whether it had a bind.
+        is_new_install = not self._config_path.exists()
+
         # Load template defaults
         base = self._load_existing_config() or {}
 
         # Update wizard-touched fields
         self._apply_wizard_fields(base)
+        if is_new_install:
+            base["web"]["bind"] = FRESH_INSTALL_BIND
 
         self._save_config(base)
 
