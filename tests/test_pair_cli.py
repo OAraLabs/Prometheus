@@ -16,7 +16,8 @@ import argparse
 import httpx
 import pytest
 
-from prometheus.cli.pair import add_pair_subparser, run_pair_command
+from prometheus.cli import pair as pair_cli
+from prometheus.cli.pair import add_pair_subparser, daemon_base_url, run_pair_command
 from tests.support.pairing_world import GLOBAL, World
 
 CONFIG = {"web": {"api_token": GLOBAL, "api_port": 8005}}
@@ -194,3 +195,89 @@ def test_a_wrong_token_points_at_oara_token_show(world):
     code, out = run(world, "list", config={"web": {"api_token": "not-the-token", "api_port": 8005}})
     assert code == 1 and "oara token show" in out
 
+
+
+# ── where the daemon is ──────────────────────────────────────────────────────
+# `oara pair` used to knock on http://127.0.0.1:<port> whatever the daemon listened on. A daemon bound to one
+# address (a LAN or tailnet address, the way an owner narrows a headless box) does not answer on loopback, so
+# the terminal route for exactly that box said "could not reach the daemon" about a daemon that was running.
+
+LAN = "192.0.2.20"
+
+
+@pytest.mark.parametrize("config, expected", [
+    ({}, "http://127.0.0.1:8005"),
+    ({"web": {"api_port": 9001}}, "http://127.0.0.1:9001"),
+    ({"web": {"api_port": "not a port"}}, "http://127.0.0.1:8005"),
+    ({"web": {"bind": "0.0.0.0"}}, "http://127.0.0.1:8005"),        # every interface includes loopback
+    ({"web": {"bind": "127.0.0.1"}}, "http://127.0.0.1:8005"),
+    ({"web": {"bind": "localhost"}}, "http://127.0.0.1:8005"),
+    ({"web": {"bind": "::"}}, "http://[::1]:8005"),                  # every interface, IPv6: bracketed in a URL
+    ({"web": {"bind": "::1"}}, "http://[::1]:8005"),
+    ({"web": {"bind": LAN}}, f"http://{LAN}:8005"),                  # one address: ONLY that one answers
+    ({"web": {"bind": LAN, "api_port": 9001}}, f"http://{LAN}:9001"),
+    ({"web": {"bind": "fe80::1"}}, "http://[fe80::1]:8005"),
+])
+def test_the_daemon_is_reached_where_it_listens(config, expected):
+    assert daemon_base_url(config, env={}) == expected
+
+
+def test_the_environment_outranks_the_config_the_way_it_does_for_the_daemon():
+    config = {"web": {"bind": "127.0.0.1"}}
+    assert daemon_base_url(config, env={"PROMETHEUS_WEB_BIND": LAN}) == f"http://{LAN}:8005"
+
+
+def test_a_bind_that_cannot_be_honoured_falls_back_to_loopback_and_leaves_the_complaint_to_the_daemon():
+    """The daemon refuses to start on it; the CLI's job is only to try somewhere sensible and say what it tried."""
+    assert daemon_base_url({"web": {"bind": "not an address"}}, env={}) == "http://127.0.0.1:8005"
+
+
+@pytest.fixture
+def isolated_env(monkeypatch):
+    monkeypatch.delenv("PROMETHEUS_WEB_BIND", raising=False)
+    monkeypatch.setattr(pair_cli, "parse_env_file", lambda: {})
+
+
+def _recording_client(monkeypatch, handler):
+    seen: dict = {}
+    real = httpx.Client
+
+    def factory(**kw):
+        seen.update(kw)
+        return real(transport=httpx.MockTransport(handler), **kw)
+
+    monkeypatch.setattr(pair_cli.httpx, "Client", factory)
+    return seen
+
+
+def test_the_client_it_builds_talks_to_that_address(monkeypatch, isolated_env):
+    seen = _recording_client(monkeypatch, lambda request: httpx.Response(200, json={"requests": []}))
+    lines: list[str] = []
+    config = {"web": {"api_token": GLOBAL, "bind": LAN, "api_port": 8123}}
+    assert run_pair_command(_args("list"), config, out=lines.append) == 0
+    assert seen["base_url"] == f"http://{LAN}:8123", "it used to be http://127.0.0.1:8123 whatever the bind"
+
+
+def test_the_bind_in_the_env_file_counts_when_the_environment_does_not_say(monkeypatch):
+    """The daemon loads ~/.config/prometheus/env itself; the terminal route must read the same address."""
+    monkeypatch.delenv("PROMETHEUS_WEB_BIND", raising=False)
+    monkeypatch.setattr(pair_cli, "parse_env_file", lambda: {"PROMETHEUS_WEB_BIND": LAN})
+    seen = _recording_client(monkeypatch, lambda request: httpx.Response(200, json={"requests": []}))
+    run_pair_command(_args("list"), {"web": {"api_token": GLOBAL, "bind": "127.0.0.1"}}, out=lambda _: None)
+    assert seen["base_url"] == f"http://{LAN}:8005"
+    monkeypatch.setenv("PROMETHEUS_WEB_BIND", "127.0.0.1")           # the real environment wins over the file
+    run_pair_command(_args("list"), {"web": {"api_token": GLOBAL}}, out=lambda _: None)
+    assert seen["base_url"] == "http://127.0.0.1:8005"
+
+
+def test_an_unreachable_daemon_names_the_address_it_tried_and_the_ways_to_change_it(monkeypatch, isolated_env):
+    def refuse(request):
+        raise httpx.ConnectError("refused")
+
+    _recording_client(monkeypatch, refuse)
+    lines: list[str] = []
+    config = {"web": {"api_token": GLOBAL, "bind": LAN, "api_port": 8123}}
+    assert run_pair_command(_args("list"), config, out=lines.append) == 1
+    text = "\n".join(lines)
+    assert f"http://{LAN}:8123" in text and "oara daemon" in text
+    assert "--bind" in text and "PROMETHEUS_WEB_BIND" in text, "a --bind given to a running daemon is invisible here"
