@@ -27,6 +27,12 @@ SKIP_SUFFIXES = (
     ".log",                       # process logs: interleaving is scheduling, not behavior
     ".pid", ".lock",              # process bookkeeping
     ".pyc",
+    # The pairing instance key (config/instance_key.py): made at boot, random, whatever the scenario does,
+    # so the goldens (recorded before it existed) could never match a daemon that makes it. Its creation is
+    # pinned by tests/test_instance_key.py, and skipping it keeps a private key's text out of every
+    # snapshot and CI log. The node keys are NOT skipped: node/node.key keeps its content-normalised,
+    # existence-compared rule (normalize.py: boot-stamps).
+    "node/instance.key",
 )
 SKIP_NAMES = {".parity-root"}      # the harness's own marker, not a daemon write
 SKIP_PARTS = {
