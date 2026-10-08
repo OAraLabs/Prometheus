@@ -30,7 +30,7 @@ thinned to arm64 and precompiled.
 
 **The real build, notarized** (the recommended bundle without PyMuPDF, signed with the Developer ID,
 notarized by Apple and stapled; about 2.5 minutes on this Mac including Apple's wait): zip
-**63,432,230 bytes (60.5 MiB)**, 150 MiB installed, 9,573 files, 30 Mach-O. Leaving PyMuPDF out is
+**63,432,262 bytes (60.5 MiB)**, 150 MiB installed, 9,573 files, 30 Mach-O. Leaving PyMuPDF out is
 24 MB off the download. (With PyMuPDF the same build was 87.7 MB.)
 
 For scale, Beacon's dmg is 186 MB. The recommended bundle is inside the 120 MB target. Biggest
