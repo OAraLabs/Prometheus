@@ -193,7 +193,11 @@ Settled with Beacon's side in writing, apart from the items marked as your call.
    the sessions it owns, and sessions that predate scoping belong to the operator. The first Beacon on the
    Mac is the person's own cockpit, so the credential it receives must be operator-equivalent for scoping
    (owner and approver), not an ordinary scoped device, or it would open to an empty session list. Approvals
-   are not scoped by #692 either, so "approver" is its own piece of work.
+   are not scoped by #692 either, so "approver" is its own piece of work. The hook is `scope_for()` in
+   `web/session_scope.py` (on #692), which returns the operator scope only for the global token today; an
+   owner exemption is one change there plus a durable marker on the device row, with a test that an owner
+   device lists the operator's Telegram and CLI sessions. Until that exists the same-Mac Beacon keeps
+   receiving the global token, as #694 does.
 7. A running daemon accepts the same secret at `POST /api/pair/local` so a Beacon reinstall is not a
    dead end. It is written by `--pair`. The route name is chosen to sit beside the other `/api/pair/*`
    routes planned for new devices. A configured daemon has no unauthenticated route today (the bearer
