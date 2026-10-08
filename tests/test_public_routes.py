@@ -138,3 +138,8 @@ def test_the_middleware_and_the_list_agree_on_what_is_open(monkeypatch):
     # Hello is the other public route: it answers with no token, and its neighbours are still gated.
     assert client.get("/api/hello").status_code == 200
     assert client.get("/api/hello/extra").status_code == 401
+    # The pairing request routes: the requester's three are public, the operator's are not.
+    assert client.post("/api/pair/requests", json={}).status_code == 400            # reached, and refused by itself
+    assert client.get("/api/pair/requests").status_code == 401                      # the operator's list
+    assert client.post(f"/api/pair/requests/{'a' * 32}/approve").status_code == 401
+    assert client.get(f"/api/pair/requests/{'a' * 32}").status_code == 404          # reached: 404, not the gate's 401

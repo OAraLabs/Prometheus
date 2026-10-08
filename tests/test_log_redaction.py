@@ -70,6 +70,29 @@ def test_redacts_the_exact_incident_line():
     assert "getUpdates" in out and "200 OK" in out
 
 
+@pytest.mark.parametrize("line", [
+    "X-Pairing-Secret: {s}",
+    "x-pairing-secret={s}",
+    "headers={{'x-pairing-secret': '{s}', 'host': 'a'}}",
+    'headers = {{"X-Pairing-Secret": "{s}"}}',
+])
+def test_redacts_the_pairing_poll_secret_beside_its_header_name(line):
+    """The poll secret is the one credential a stranger-facing route accepts; a header dump must not keep it."""
+    import secrets
+
+    poll_secret = secrets.token_urlsafe(32)                   # 43 base64url characters, like the real one
+    out = redact_secrets(line.format(s=poll_secret))
+    assert poll_secret not in out and REDACTED in out
+
+
+def test_the_pairing_header_pattern_is_anchored_on_its_name_not_on_the_shape():
+    """A 43-character base64url run is also a SHA-256 digest or an id; only the labelled one is a secret."""
+    import hashlib
+
+    text = "digest " + hashlib.sha256(b"x").digest().hex()[:43] + " stays"
+    assert redact_secrets(text) == text
+
+
 def test_redacts_the_slashless_bot_prefix_form():
     """The shape that actually appears in captured tool output.
 
