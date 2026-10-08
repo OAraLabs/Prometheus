@@ -148,3 +148,10 @@ def test_no_step_swallows_its_own_failure(wf):
 def test_a_published_release_is_never_modified(wf):
     attach = next(s for s in _steps(wf) if "gh release" in s.get("run", ""))
     assert "isDraft" in attach["run"], "check the release is still a draft before replacing assets"
+
+
+def test_the_release_build_cannot_include_pymupdf(wf):
+    """PyMuPDF is AGPL-3.0; the app ships without it by default. CI must not opt back in."""
+    build = next(s for s in _steps(wf) if "build_app.py" in s.get("run", ""))
+    assert "--include-pymupdf" not in build["run"]
+    assert "--without" not in build["run"] or "pymupdf" in build["run"]

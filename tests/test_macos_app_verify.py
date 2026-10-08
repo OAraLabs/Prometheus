@@ -245,3 +245,23 @@ def test_plists_round_trip_through_the_reader(verify, tmp_path):
     p = tmp_path / "x.plist"
     p.write_bytes(plistlib.dumps(AGENT))
     assert verify.read_plist(p) == AGENT
+
+
+# ── the icon ─────────────────────────────────────────────────────────────────
+
+def test_a_bundle_whose_info_plist_names_an_icon_must_contain_it(verify, tmp_path):
+    (tmp_path / "Contents" / "Resources").mkdir(parents=True)
+    info = {"CFBundleIconFile": "Prometheus"}
+    assert any("Prometheus.icns" in p for p in verify.icon_problems(tmp_path, info))
+    (tmp_path / "Contents" / "Resources" / "Prometheus.icns").write_bytes(b"icns" + b"\x00" * 32)
+    assert verify.icon_problems(tmp_path, info) == []
+
+
+def test_an_info_plist_with_no_icon_is_a_problem(verify, tmp_path):
+    assert any("CFBundleIconFile" in p for p in verify.icon_problems(tmp_path, {}))
+
+
+def test_a_file_that_is_not_an_icns_is_a_problem(verify, tmp_path):
+    (tmp_path / "Contents" / "Resources").mkdir(parents=True)
+    (tmp_path / "Contents" / "Resources" / "Prometheus.icns").write_bytes(b"not an icon at all")
+    assert any("icns" in p for p in verify.icon_problems(tmp_path, {"CFBundleIconFile": "Prometheus"}))

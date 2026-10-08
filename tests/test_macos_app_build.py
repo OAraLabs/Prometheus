@@ -404,3 +404,51 @@ def test_a_failed_submission_never_echoes_the_password(app, tmp_path):
     with pytest.raises(app.BuildError) as excinfo:
         app.notarize(tmp_path / "Prometheus.app", "", tmp_path, runner=runner, env=env)
     assert password not in str(excinfo.value)
+
+
+# ── what the release leaves out, and what it looks like ──────────────────────
+
+def test_pymupdf_is_left_out_unless_someone_asks_for_it(app):
+    """PyMuPDF is AGPL-3.0. Will's call (2026-10-08): the app ships without it. Leaving it out is the default,
+    so a release built by CI or by hand cannot include it by forgetting a flag."""
+    assert app.DEFAULT_WITHOUT == ("pymupdf",)
+    assert app.parse_args(["--identity", FINGERPRINT]).without == ("pymupdf",)
+    assert app.parse_args(["--identity", FINGERPRINT, "--include-pymupdf"]).without == ()
+    assert app.parse_args(["--identity", FINGERPRINT, "--without", "pymupdf,lxml"]).without == ("pymupdf", "lxml")
+
+
+def test_the_manifest_says_what_the_default_build_left_out(app):
+    ns = app.parse_args(["--identity", FINGERPRINT])
+    m = app.manifest(version="1.2.3", asset="a.zip", sha256="00" * 32, size=1, extras=ns.extras,
+                     lock_sha256="11" * 32, without=ns.without)
+    assert m["without"] == ["pymupdf"]
+
+
+def test_the_bundle_names_its_icon(app):
+    assert app.info_plist("1.2.3")["CFBundleIconFile"] == "Prometheus"
+
+
+def test_the_iconset_never_asks_for_more_pixels_than_the_artwork_has(app):
+    sizes = app.ICONSET
+    assert sizes["icon_16x16.png"] == 16 and sizes["icon_16x16@2x.png"] == 32
+    assert sizes["icon_128x128.png"] == 128 and sizes["icon_128x128@2x.png"] == 256
+    assert sizes["icon_512x512.png"] == 512
+    # The source mark is 512 px. A 1024 px slot would be an upscale, so it is not produced.
+    assert "icon_512x512@2x.png" not in sizes
+    assert max(sizes.values()) <= app.ICON_SOURCE_PIXELS == 512
+    for name, pixels in sizes.items():
+        base = int(name.split("_")[1].split("x")[0])
+        assert pixels == base * (2 if "@2x" in name else 1), name
+
+
+def test_the_icon_comes_from_the_checked_in_mark_and_ends_as_an_icns(app, tmp_path):
+    runner = _Runner()
+    out = app.build_icon(tmp_path, runner=runner)
+    assert out == tmp_path / "Prometheus.icns"
+    joined = [" ".join(c) for c in runner.calls]
+    assert any("make_iconset.swift" in c and "mark-512.png" in c for c in joined), joined
+    converts = [c for c in runner.calls if c[0] == "iconutil"]
+    assert len(converts) == 1, joined
+    assert converts[0][1:3] == ["-c", "icns"] and converts[0][-1] == str(tmp_path / "Prometheus.icns"), converts
+    assert (Path(app.__file__).parent / "icon" / "mark-512.png").is_file()
+    assert (Path(app.__file__).parent / "icon" / "make_iconset.swift").is_file()
