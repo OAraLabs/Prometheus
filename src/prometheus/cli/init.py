@@ -37,6 +37,7 @@ import yaml
 
 from prometheus.config.paths import get_config_dir
 from prometheus.config.shipped_defaults import SHIPPED_MAX_TOOL_ITERATIONS
+from prometheus.web.bind import FRESH_INSTALL_BIND
 
 # ---------------------------------------------------------------------------
 # Local inference-server detection
@@ -345,6 +346,28 @@ def _cloud_default_config(provider: str, api_key_env: str, model: str) -> dict[s
     }
     config["context"]["effective_limit"] = _CLOUD_FAST_PROVIDERS[provider][2]
     return config
+
+
+def apply_web_bind_policy(config: dict[str, Any], target_path: Path) -> None:
+    """Decide ``web.bind`` for a config about to be written over *target_path*.
+
+    A NEW install listens on this machine only (``web.bind: 127.0.0.1``). A config that is already
+    there is never flipped: its ``web.bind`` is carried over as it was, and left absent if it was absent,
+    because an unset bind means every interface and a remote deployment (a Mac mini over Tailscale)
+    depends on that. ``--fast`` replaces the whole file, so without the carry-over a rerun would also
+    drop a bind its owner had chosen.
+    """
+    web = config.setdefault("web", {})
+    if not target_path.exists():
+        web["bind"] = FRESH_INSTALL_BIND
+        return
+    try:
+        prior = yaml.safe_load(target_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return  # unreadable: nothing to carry, and not ours to guess a bind for
+    prior_web = prior.get("web") if isinstance(prior, dict) else None
+    if isinstance(prior_web, dict) and prior_web.get("bind") is not None:
+        web["bind"] = prior_web["bind"]
 
 
 def write_config(
@@ -786,6 +809,9 @@ def run_init(
         config["gateway"]["slack"]["enabled"] = True
     if gateway_choice in ("discord", "all"):
         config["gateway"]["discord"]["enabled"] = True
+
+    # New install: this machine only. Existing config: its web.bind is carried over, never flipped.
+    apply_web_bind_policy(config, cfg_path)
 
     # Backup existing config if present
     backup = write_config(config, cfg_path, backup_existing=True)

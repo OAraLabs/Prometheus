@@ -3026,10 +3026,10 @@ def main() -> None:
         install_log_redaction()
         # Setup mode has no config, so no web.bind: --bind > PROMETHEUS_WEB_BIND >
         # 0.0.0.0. Resolved BEFORE the server exists; a bad value never listens.
-        from prometheus.web.setup_server import resolve_setup_bind
+        from prometheus.web.setup_server import resolve_setup_choice
 
         try:
-            setup_bind = resolve_setup_bind(args.bind)
+            setup_bind = resolve_setup_choice(args.bind)
         except BindError as exc:
             print(f"{exc}", file=sys.stderr)
             sys.exit(2)

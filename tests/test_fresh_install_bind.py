@@ -20,24 +20,31 @@ on purpose. That is the documented consequence of making the safe choice the def
 
 from __future__ import annotations
 
+import pytest
 import yaml
 
 import prometheus.setup_wizard as wizard_mod
 from prometheus.cli.init import run_init
 
-CANDIDATE = [{"name": "llama.cpp", "url": "http://127.0.0.1:1", "models_path": "/v1/models",
-              "provider": "llama_cpp"}]
 MINI = {"web": {"enabled": True, "api_port": 8005, "ws_port": 8010}}   # a deployment that predates D10
 
 
+@pytest.fixture(autouse=True)
+def _cloud_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key-for-tests")
+
+
 def _fast_setup(target):
-    run_init(noninteractive=True, target_dir=target, candidates=CANDIDATE, probe_url=None)
+    """The real `oara setup --noninteractive --provider openai`; asserts it WROTE, so no test here is vacuous."""
+    result = run_init(noninteractive=True, target_dir=target, timeout=0.1, candidates=[], provider="openai")
+    assert result is not None, "setup wrote nothing"
     return yaml.safe_load((target / "prometheus.yaml").read_text(encoding="utf-8"))
 
 
 def _existing(target, web):
     target.mkdir(parents=True, exist_ok=True)
-    (target / "prometheus.yaml").write_text(yaml.safe_dump({"web": web}), encoding="utf-8")
+    (target / "prometheus.yaml").write_text(yaml.safe_dump({"web": web, "system": {"name": "Mini"}}),
+                                            encoding="utf-8")
 
 
 # ── oara setup (the fast path) ───────────────────────────────────────────────
@@ -46,17 +53,37 @@ def test_a_new_config_from_oara_setup_listens_on_this_machine_only(tmp_path):
     assert _fast_setup(tmp_path / "new")["web"]["bind"] == "127.0.0.1"
 
 
+def test_a_new_config_for_a_local_server_listens_on_this_machine_only(tmp_path):
+    from tests.test_setup_api_phase2 import _FakeLlamaCppHandler, _serve
+
+    with _serve(_FakeLlamaCppHandler) as url:
+        cand = [{"name": "llama.cpp", "url": url, "models_path": "/v1/models", "provider": "llama_cpp"}]
+        assert run_init(noninteractive=True, target_dir=tmp_path, timeout=1.0, candidates=cand) is not None
+    cfg = yaml.safe_load((tmp_path / "prometheus.yaml").read_text(encoding="utf-8"))
+    assert cfg["model"]["provider"] == "llama_cpp" and cfg["web"]["bind"] == "127.0.0.1"
+
+
 def test_rerunning_oara_setup_on_a_config_with_no_bind_does_not_add_one(tmp_path):
     _existing(tmp_path, MINI["web"])
     cfg = _fast_setup(tmp_path)
+    assert cfg["system"]["name"] == "Prometheus", "the rerun really did rewrite the file"
     assert "bind" not in cfg["web"], "the rerun flipped a deployment that had never set web.bind"
+    assert list(tmp_path.glob("prometheus.yaml.backup-*")), "the replaced config was backed up"
 
 
 def test_rerunning_oara_setup_keeps_a_bind_that_was_chosen(tmp_path):
     for chosen in ("0.0.0.0", "192.0.2.10", "127.0.0.1", "::1"):
         target = tmp_path / chosen.replace(":", "_")
         _existing(target, {**MINI["web"], "bind": chosen})
-        assert _fast_setup(target)["web"]["bind"] == chosen
+        cfg = _fast_setup(target)
+        assert cfg["system"]["name"] == "Prometheus"
+        assert cfg["web"]["bind"] == chosen
+
+
+def test_an_existing_config_that_will_not_parse_is_not_given_a_bind(tmp_path):
+    (tmp_path).mkdir(exist_ok=True)
+    (tmp_path / "prometheus.yaml").write_text("web: [unclosed\n", encoding="utf-8")
+    assert "bind" not in _fast_setup(tmp_path)["web"]
 
 
 def test_the_fast_path_still_writes_the_ports(tmp_path):
