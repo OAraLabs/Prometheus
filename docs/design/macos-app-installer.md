@@ -253,6 +253,14 @@ behaviour is written and run first, and its red output kept.
 - `--pair` writes a `0600` file in a `0700` directory, 43 base64url characters, replaced atomically.
   `--uninstall` removes the pairing directory and the app (moving the app it is running from to the
   Trash works) and leaves `~/.prometheus` untouched.
+- **The whole path, with the real signed app and the real daemon** (the launcher's `--run`, in an isolated
+  home, not under launchd): setup mode answers in 1.4 s on `127.0.0.1:8005` only, and a connection to the
+  Mac's LAN address is refused; a foreign `Host` gets 403 and a browser `Origin` 400; a wrong secret gets
+  401 and a right one 200, once; `configure` pins `bind: 127.0.0.1`; `complete` turns the same process
+  into the configured daemon on `127.0.0.1:8005` and `:8010` only (authenticated `/api/status` in 1.1 s);
+  then `--pair` and `POST /api/pair/local` return the daemon's token and consume the secret. Running it
+  also showed the launcher and the daemon disagreed about the home directory (FileManager versus `$HOME`);
+  the launcher now uses `$HOME`, like the daemon.
 
 **Not proven yet:**
 
@@ -261,7 +269,8 @@ behaviour is written and run first, and its red output kept.
 - That Login Items shows "Prometheus" for the real app (the BTM record was read for the dev-test app).
 - Notarization, stapling and Gatekeeper's first assessment (no credentials on this Mac).
 - Anything on a clean machine, and the installed time end to end.
-- The daemon under the real agent: `--run` passes `--bind 127.0.0.1`, which the bind change adds.
+- The daemon started BY LAUNCHD through `SMAppService` (the end-to-end above ran `--run` directly, to keep
+  it away from a real home directory). That needs a clean user or VM.
 - Reproducibility across two build machines. The build pins the python-build-standalone release and
   sha256, installs from `uv export --hashes` with `--require-hashes --only-binary`, and records the lock's
   hash in the manifest; two runs have not yet been compared.
