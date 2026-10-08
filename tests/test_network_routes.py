@@ -178,7 +178,7 @@ def test_home_network_does_not_widen_a_specific_address_the_owner_chose(tmp_path
     assert saved(world)["web"]["bind"] == TAILNET
 
 
-@pytest.mark.parametrize("source", ["flag", "env"])
+@pytest.mark.parametrize("source", ["flag", "env", "caller"])   # "caller": launch_web was handed an address and no source
 def test_a_bind_pinned_by_the_command_line_or_environment_is_not_pretended_changeable(tmp_path, source):
     world = make(tmp_path, bind="127.0.0.1", source=source,
                  file_text='network:\n  allow_plaintext_lan: true\n')
