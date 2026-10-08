@@ -456,10 +456,12 @@ func showWindow() -> Never {
                 ? "Ready. Open Beacon and choose \"Connect to Prometheus on this Mac\"."
                 : "Could not prepare pairing: \(result.detail)"
         case 2:
+            // Cancel is added FIRST, so it is the default button: a stray Return (or anything that answers
+            // the dialog for a person) cancels instead of uninstalling.
             let confirm = alert("Uninstall Prometheus?",
                                 "This stops Prometheus and moves the app to the Trash. Your conversations, memory and keys in ~/.prometheus are kept.",
-                                buttons: ["Uninstall", "Cancel"], style: .warning)
-            if confirm == 0 {
+                                buttons: ["Cancel", "Uninstall"], style: .warning)
+            if confirm == 1 {
                 let result = uninstall(purgeData: false)
                 _ = alert(result.ok ? "Prometheus is uninstalled." : "Uninstall did not finish.",
                           result.ok ? "Your data is still in ~/.prometheus." : result.detail, buttons: ["OK"])
