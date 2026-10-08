@@ -78,8 +78,9 @@ enum PortState {
 }
 
 /// One short HTTP probe of 127.0.0.1:<daemonPort>. A refused connection is "free". A Prometheus is
-/// recognised the way a client can recognise one today: setup mode answers /api/setup/status with a mode
-/// field, and a configured daemon answers any /api/ path with 401 and an "unauthorized" JSON error.
+/// recognised the way a client can recognise one today: setup mode answers /api/setup/status with
+/// {"setup_mode": true, ...}, and a configured daemon answers any /api/ path with 401 and a JSON error that
+/// names both "unauthorized" and "Bearer".
 func probeDaemonPort() -> PortState {
     func fetch(_ path: String) -> (status: Int, body: Data)? {
         guard let url = URL(string: "http://127.0.0.1:\(daemonPort)\(path)") else { return nil }
@@ -104,7 +105,7 @@ func probeDaemonPort() -> PortState {
     if first.status == -1 { return .free }
     if first.status == 200,
        let json = try? JSONSerialization.jsonObject(with: first.body) as? [String: Any],
-       json["mode"] != nil || json["setup_mode"] != nil {
+       (json["setup_mode"] as? Bool) == true {
         return .prometheus
     }
     // A configured daemon has no /api/setup/*: any /api/ path answers the bearer middleware's 401,
