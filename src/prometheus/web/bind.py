@@ -45,6 +45,11 @@ from typing import Any
 #: The address used when nothing asks for another one. Every interface.
 DEFAULT_BIND = "0.0.0.0"
 
+#: What a NEW config is written with (``oara setup``, the wizard, setup mode's ``configure``): this
+#: machine only. It is written, never defaulted to: an UNSET ``web.bind`` still means every interface, so a
+#: deployment set up before this existed (a Mac mini reached over Tailscale) keeps working untouched.
+FRESH_INSTALL_BIND = "127.0.0.1"
+
 #: The environment variable (also honoured from the env file).
 BIND_ENV_VAR = "PROMETHEUS_WEB_BIND"
 

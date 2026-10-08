@@ -459,16 +459,28 @@ class TestConfigurePinsTheBind:
         got = _bind().resolve_bind(cfg, env={})
         assert (got.address, got.source) == ("127.0.0.1", "config")
 
-    def test_a_default_setup_mode_keeps_the_default_and_the_response_says_so(
+    def test_a_default_setup_mode_writes_loopback_explicitly_and_the_response_says_so(
         self, setup_env,
     ):
-        """Serving on the default needs no pin: an absent key IS 0.0.0.0. Leaving it
-        out also keeps this file byte-identical to what `oara setup --fast`
-        writes (test_setup_api_phase2::test_writes_the_same_yaml_as_the_cli_wizard)."""
+        """D10: a fresh install listens on this machine only. Setup mode that was reached on the unspecified
+        DEFAULT (nobody chose 0.0.0.0) writes `web.bind: 127.0.0.1`, so a box set up from another machine
+        is loopback-only afterwards until its owner sets the bind on purpose. This also keeps the file
+        byte-identical to what `oara setup --fast` writes."""
         body, cfg = _configure(setup_env)
-        assert "bind" not in cfg["web"]
-        assert body["web"]["bind"] == "0.0.0.0"
-        assert _bind().resolve_bind(cfg, env={}).address == "0.0.0.0"
+        assert cfg["web"]["bind"] == "127.0.0.1"
+        assert body["web"]["bind"] == "127.0.0.1"
+        got = _bind().resolve_bind(cfg, env={})
+        assert (got.address, got.source) == ("127.0.0.1", "config")
+
+    def test_a_wide_bind_somebody_chose_is_kept(self, setup_env, monkeypatch):
+        """Only the unspecified DEFAULT becomes loopback. `--bind 0.0.0.0` or the environment variable is the
+        owner asking for every interface, and configure must not undo it."""
+        body, cfg = _configure(setup_env, bind="0.0.0.0")
+        assert cfg["web"]["bind"] == "0.0.0.0" and body["web"]["bind"] == "0.0.0.0"
+
+    def test_a_wide_bind_chosen_in_the_environment_is_kept(self, setup_env, monkeypatch):
+        body, cfg = _configure(setup_env, env_bind="0.0.0.0", monkeypatch=monkeypatch)
+        assert cfg["web"]["bind"] == "0.0.0.0" and body["web"]["bind"] == "0.0.0.0"
 
     def test_an_invalid_address_never_builds_a_setup_app(self, setup_env):
         pytest.importorskip("fastapi")
@@ -589,11 +601,25 @@ class TestDoctorBindRow:
         for phrase in ("encrypted", "https", "tls enabled", "tls is enabled"):
             assert phrase not in text
 
-    def test_an_explicit_wide_bind_also_warns(self):
+    def test_an_explicit_wide_bind_does_not_warn_but_says_what_it_is(self):
+        """D10: the warning is for an UNSET bind, the default nobody chose. A deliberate 0.0.0.0 (the Mac mini
+        over Tailscale) is an owner's decision; it is still described honestly as plain HTTP on every interface."""
         for cfg in ({"web": {"enabled": True, "bind": "0.0.0.0"}},
                     {"web": {"enabled": True, "bind": "::"}}):
             row = self._check(cfg)
-            assert row is not None and row.status == "warning"
+            assert row is not None and row.status == "ok"
+            assert "all interfaces" in row.message and "no TLS" in row.message
+            assert "web.bind" in row.message          # says where the choice was made
+
+    def test_a_wide_bind_chosen_in_the_environment_does_not_warn(self):
+        row = self._check({"web": {"enabled": True}}, env={BIND_ENV: "0.0.0.0"})
+        assert row is not None and row.status == "ok" and "all interfaces" in row.message
+
+    def test_the_unset_warning_tells_an_owner_how_to_choose(self):
+        row = self._check({"web": {"enabled": True}})
+        assert row.status == "warning"
+        assert "not set" in row.message
+        assert "127.0.0.1" in row.fix and "0.0.0.0" in row.fix, "narrow it, or keep it wide on purpose"
 
     def test_loopback_is_ok_and_says_so(self):
         row = self._check({"web": {"enabled": True, "bind": "127.0.0.1"}})
