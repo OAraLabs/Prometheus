@@ -124,6 +124,12 @@ def issue_owner_credential(config: dict[str, Any] | None = None) -> str:
     with an approver role, revocable on its own) replace the global token by changing this body and
     nothing else. Until then every device paired this way holds the master key; the macOS app's public
     release is gated on that change.
+
+    **The OWNER tier only.** This is for the person's own app on this Mac, proven by a one-time secret in a
+    file only that user can read. A device that someone approves from another device (a phone, a second
+    computer) must NOT get this credential: it needs an ordinary device token with no approver rights,
+    from its own mint path (``DeviceStore.mint``). Two mint paths on purpose, and the tier is not a
+    parameter a caller can widen. Do not route an approval flow through this function.
     """
     token, _minted = ensure_api_token(config)
     return token
