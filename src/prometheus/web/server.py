@@ -474,12 +474,24 @@ def create_app(
             return JSONResponse(status_code=401, content={
                 "error": "invalid_code", "detail": "wrong or already-used pairing secret"})
         web_cfg = config.get("web") or {}
+        # The credential is a token for THIS device alone (an owner device in the shared registry), not the
+        # daemon's API token; the client may name it, and nothing else in the body changes what is issued.
+        issued = api_token_module.issue_owner_credential(
+            config, devices=_devices_or_create(),
+            name=_clean_device_name(body.get("name"), api_token_module.DEFAULT_OWNER_DEVICE_NAME))
         logger.info("Same-Mac pairing successful (secret consumed; credential value never logged)")
         return {
-            "token": api_token_module.issue_owner_credential(config),
+            "token": issued.token,
+            # Additive: how many earlier owner credentials of this Mac this pairing replaced.
+            "revoked_previous": issued.revoked_previous,
             "api_base_port": int(web_cfg.get("api_port", 8005) or 8005),
             "ws_port": int(web_cfg.get("ws_port", 8010) or 8010),
         }
+
+    def _clean_device_name(raw: Any, default: str) -> str:
+        """A device name the person will read in a list: printable, trimmed, at most 64 characters."""
+        text = "".join(ch for ch in str(raw or "") if ch.isprintable()).strip()
+        return text[:64].strip() or default
 
     # ── /api/devices — enrolment, listing, revocation (GRAFT 1) ─────
 
@@ -502,8 +514,28 @@ def create_app(
         platform = str(body.get("platform") or "").strip().lower()
         if platform not in ("ios", "macos"):
             platform = "other"
+        owner = body.get("owner", False)
+        if not isinstance(owner, bool):
+            return JSONResponse(status_code=400, content={"error": "owner must be true or false"})
         # The response is the ONLY copy of the plaintext token that will ever
         # exist — the store keeps a SHA-256.
+        if owner:
+            from prometheus.permissions import approver as _approver
+
+            # The global token minting an OWNER device — the person's own cockpit trading the setup-mode
+            # token for one of its own. Global-only (checked above), so a device can never grant the tier.
+            # From THIS Mac's loopback address it is this Mac's cockpit: it carries the same-Mac source and
+            # replaces the earlier same-Mac credentials, exactly as a re-pairing does. From anywhere else
+            # it is another computer's: it keeps the minting credential's label as its source, replaces
+            # nothing, and is never replaced by this Mac's re-pairing.
+            if is_loopback_peer(request):
+                source = api_token_module.OWNER_SOURCE_SAME_MAC_MINT
+                replaces = api_token_module.SAME_MAC_OWNER_SOURCES
+            else:
+                source, replaces = _approver.from_request(request).label, ()
+            minted = _devices_or_create().mint_owner(name, platform, by=source, replaces=replaces)
+            minted["revoked_previous"] = len(minted["revoked_previous"])
+            return minted
         return _devices_or_create().mint(name, platform)
 
     @app.get("/api/devices")
@@ -512,6 +544,7 @@ def create_app(
         self_id = identity.id if identity is not None else ""
         _store = _devices_or_create()
         _marked = _store.computer_device_ids()
+        _owners = _store.owner_sources(include_revoked=True)  # a tombstone keeps its history
         return [{
             "id": d.id, "name": d.name, "platform": d.platform,
             "created_at": d.created_at, "last_seen_at": d.last_seen_at,
@@ -523,6 +556,11 @@ def create_app(
             # Computer use v1.1 (W3): a PERSON marked this device. Only a
             # marked device may start a desktop task or answer its prompts.
             "computer": d.id in _marked,
+            # P2: the person's OWN device (operator-equivalent for sessions and devices, not root),
+            # and the route that issued it ("same-mac-pairing", "global-token"), so a standing owner
+            # credential is visible and revocable rather than something nobody can see.
+            "owner": d.id in _owners,
+            "owner_source": _owners.get(d.id),
         } for d in _store.list_devices()]
 
     def _may_manage_push(request: Request, device_id: str):
@@ -594,8 +632,9 @@ def create_app(
 
     @app.delete("/api/devices/{device_id}")
     async def revoke_device(device_id: str, request: Request):
-        # A device revokes ITSELF (a phone on "Sign out"); the global token
-        # revokes any device. A device naming another is refused BEFORE the
+        # A device revokes ITSELF (a phone on "Sign out"); the global token and an
+        # OWNER device (the person's own — operator-equivalent) revoke any device.
+        # A device naming another is refused BEFORE the
         # lookup, so an unknown id and somebody else's get the same answer.
         # 403, not 401: the token is valid — it is the target that is not its
         # to revoke, and a client that read 401 as "my token died" would

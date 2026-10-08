@@ -1,6 +1,6 @@
 # Device scoping contract, v1
 
-**Contract id:** `device-scoping/1`
+**Contract id:** `device-scoping/1` (section 6, the owner tier, is `device-scoping/1.1`)
 **Scope:** What a *device token* may see and do with chat sessions, over REST and the WebSocket bridge. Code: `web/session_scope.py` (the rule), `config/device_store.py` (the record), `web/server.py` and `web/ws_server.py` (the enforcement points).
 **Written for:** whoever builds on the device model next (approve-to-pair): section 2 is what changed in it, and section 2.3 is what to keep true.
 
@@ -14,7 +14,7 @@ A **device token** (`POST /api/devices`, one row in `devices.db`) sees and manag
 2. A device cannot take an id in a namespace the daemon writes into itself (`telegram:`, `slack:`, `discord:`, `cli:`, `api:`, `coding:`, and the bare id `system`). Otherwise it could send to `telegram:<chat id>` before the operator's chat existed, and own it.
 3. A session nobody claimed belongs to the operator: a Telegram chat, a cron run, anything that predates this contract. A device sees none of them.
 4. To a device, **"not yours" is the same as "not there"**: a 404 `{"error": "unknown session"}` over REST, an `error` frame with `kind: "not_found"` over the socket. The answer must not tell it whether an id exists.
-5. A device can **revoke only itself** (`DELETE /api/devices/{its own id}`). Another id is a 403, before any lookup, so an unknown id and someone else's get the same answer. The global token revokes any device.
+5. A device can **revoke only itself** (`DELETE /api/devices/{its own id}`). Another id is a 403, before any lookup, so an unknown id and someone else's get the same answer. The global token and an **owner device** (section 6) revoke any device.
 
 Ownership is first-writer-wins, never reassigned and never deleted. Revoking a device leaves its sessions owned by it, readable by the operator and claimable by no one.
 
@@ -40,14 +40,14 @@ Three methods on `DeviceStore`:
 
 ### 2.2 What did not change
 
-`DeviceIdentity`, token minting, hashing, verification, revocation, `last_seen_at`, the `api_devices` schema, push registration, the computer-use mark, and every `/api/devices` route's shape. The one behavioural change on those routes is the revoke rule in section 1.
+Token hashing, verification, `last_seen_at`, the `api_devices` schema, push registration and the computer-use mark. The behavioural changes on the `/api/devices` routes are the revoke rule in section 1 and the owner tier in section 6 (`DeviceIdentity.owner`, `owner`/`owner_source` on the list, `owner: true` on enrolment).
 
 ### 2.3 What approve-to-pair must keep true
 
 - **A device id is the owner key.** Mint through `DeviceStore.mint`. A newly paired device owns nothing; it starts from an empty list.
 - **A pairing request is not a device.** Until it is approved there is no token and no identity, so there is nothing to scope. A pairing endpoint must not read, list or create sessions.
 - **Handing a session to another device** (if pairing wants it) is one `UPDATE device_sessions` in `DeviceStore`, written there and nowhere else, and mind that a turn in flight keeps streaming: its remaining frames follow the new owner. No such method exists yet. Do not delete rows, and do not add a second table that also says who owns a session.
-- **A new route keyed by a device id** needs the same self-or-global check as revoke (`_scope(request)` in `server.py`), or it reintroduces the hole this contract closes.
+- **A new route keyed by a device id** needs the same self-or-operator check as revoke (`_scope(request)` in `server.py`), or it reintroduces the hole this contract closes.
 - **A new route keyed by a session id** must name the path parameter `session_id`. The router-level guard keys on that name; `test_no_route_names_its_session_parameter_anything_but_session_id` fails the build otherwise. A session id in a body or query is the route's own job: `_access.admit` (may create) or `_access.owns` (may not).
 
 ## 3. Where it is enforced
@@ -64,7 +64,7 @@ Three methods on `DeviceStore`:
 | WS `switch_session`, `send_message`, `chat_upload` | Admitted like the REST equivalents; otherwise the `not_found` error frame and nothing happens. |
 | WS broadcast | `WebSocketBridge._wants` drops, for a device socket, every frame that names a session the device does not own, **whatever it subscribed to**. The session id is found flat (`payload.session_id`) or nested (`payload.payload.session_id`, the `sentinel_signal` wrapper). A frame naming no session reaches everyone. The operator's socket is the firehose it always was. |
 
-A socket whose identity was never recorded, on a daemon with auth on, owns nothing (fail closed).
+A socket whose identity was never recorded, on a daemon with auth on, owns nothing (fail closed). A socket dies with its token: revoking a device (the route, or an owner mint replacing earlier ones) detaches its open sockets at once and closes them 4401, through a listener on the registry (`DeviceStore.add_revoke_listener`), so no revocation path can forget to.
 
 ## 4. What this does not cover
 
@@ -84,4 +84,36 @@ Stated so nobody reads "device scoping" as more than it is. None of these change
 
 ## 5. Upgrading
 
-Sessions that existed before this change are **unowned, so operator-only**. A device that used sessions before the upgrade no longer sees them over REST or the socket until the operator gets them back to it: there is no reassignment tool yet. New sessions are scoped from the first message.
+Sessions that existed before this change are **unowned, so operator-only**. A device that used sessions before the upgrade no longer sees them over REST or the socket until the operator gets them back to it: there is no reassignment tool yet. New sessions are scoped from the first message. An **owner device** (section 6) sees them all, which is how the person's own cockpit keeps its history; a device already enrolled with an ordinary token stays scoped until it is paired again as an owner.
+
+## 6. The owner tier (`device-scoping/1.1`)
+
+The person's **own** device is not a guest. Same-Mac pairing used to hand Beacon the daemon's API token (the master key); a device approved from Telegram or by another device is scoped by sections 1 to 5, and would leave the person's own Beacon with an empty session list. The owner tier is the third thing: a token of its own, revocable alone, that is operator-equivalent where the person needs it to be.
+
+### 6.1 What an owner device is
+
+- **Marker:** a row in `owner_devices (device_id PRIMARY KEY, marked_at, marked_by)`, created on the first owner mint (so `api_devices` and the parity goldens keep their schema), written in the same transaction as the device row. `marked_by` is the route that issued it. `DeviceIdentity.owner` is read from it at every authentication, never from anything the caller sends. `DeviceIdentity.is_operator` = global token or owner device; pairing-approval's "approver" test is exactly that predicate.
+- **Two mint paths, and the tier is not a parameter on either.** `DeviceStore.mint(name, platform)` makes an ordinary scoped device (an approved device gets this). `DeviceStore.mint_owner(name, platform, by=, replaces=)` makes an owner device. `api_token.issue_owner_credential(config, *, devices, ...)` is the only caller on the pairing path; it needs the registry and has no fallback to the global token.
+- **Who can mint one:** same-Mac pairing (`POST /api/pair/local`, the file secret), or the global token (`POST /api/devices` with `{"owner": true}`). Never a request that merely asks, and never a device: an owner device cannot enrol another.
+
+### 6.2 What "operator-equivalent" covers — and what it does not
+
+| Operator-equivalent | Still the global token's alone |
+|---|---|
+| Session scoping: sees, reads, drives and searches every session, including the operator's Telegram and CLI chats, and receives every frame (`scope_for` returns the operator scope for it). | `POST /api/devices`: a stolen owner device must not be able to enrol an attacker device without the physical-code step. |
+| Device management: lists and revokes any device. | Defining an MCP server (`POST/PATCH/DELETE /api/mcp/servers`): it spawns a process as the daemon user. |
+| The approver tier for pairing decisions and `pairing_*` frames (`is_operator`). | Anything else that tests `is_global`. |
+
+Approvals of tool calls are still open to every valid token (section 4): "approver" here is a tier pairing-approval can test, not a restriction this change adds.
+
+### 6.3 Two setups, one rule for re-pairing
+
+- **A running daemon** (an existing install, or after setup): `POST /api/pair/local` returns the owner device's own token. The response keeps `token`, `api_base_port` and `ws_port` and adds `revoked_previous`, an integer.
+- **Setup mode** (a fresh install): setup mutations authenticate with the global token only, and setup mode creates no `~/.prometheus` state (`devices.db` lives there), so `POST /api/setup/pair` still returns the global token (`issue_setup_credential`, named for what it is). After `POST /api/setup/complete` the client trades it with `POST /api/devices` and `{"owner": true, "name": ...}` and keeps only the owner token.
+
+Minting an owner device **for this Mac** replaces the earlier owner credentials of this Mac. "This Mac" is a source: `same-mac-pairing` (`/api/pair/local`) and `same-mac-mint` (`POST /api/devices` with `owner: true` from a loopback peer address). The revocations and the new row are one transaction (a crash leaves neither zero owners nor two), go through the registry's normal revoke (so the old token answers 401 and its open socket is closed 4401), never touch the new device, an ordinary device, or an owner device minted from a non-loopback address (another computer's). A listener that fails cannot undo the mint. The loopback test is the peer address, so a reverse proxy on this machine makes a remote mint look local; the only cost is that it replaces this Mac's own owner credential, and `Prometheus --pair` restores it.
+
+### 6.4 What this does not fix
+
+The global token stays valid and stays in `~/.config/prometheus/env`, where the bash tool can read it, and macOS has no shell floor. This change stops a paired **device** from holding the master key. It does not stop a **model** from reading it; that needs the restrictive default permission mode, which is separate work.
+
