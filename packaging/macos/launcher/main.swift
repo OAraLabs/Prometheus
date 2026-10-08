@@ -304,6 +304,9 @@ func uninstall(purgeData: Bool) -> Outcome {
     if !stopped.ok { failed.append("unregister: \(stopped.detail)") }
 
     removeIfPresent(pairingDirectory(), removed: &removed, failed: &failed)
+    // Leave no empty "Prometheus" folder behind. rmdir only removes an empty directory, so anything
+    // else the person put there survives.
+    rmdir(pairingDirectory().deletingLastPathComponent().path)
 
     let data = [
         home.appendingPathComponent(".prometheus"),
