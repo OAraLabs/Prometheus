@@ -218,6 +218,56 @@ The first release is built and notarized on this Mac; a `macos-latest` CI job fo
 secrets as Beacon's release job. If Apple's notary stalls past the job timeout I stop and tell you; I
 do not raise the timeout.
 
+## The contract for a client that installs and pairs the app (Beacon)
+
+What a client may rely on, as built and run. Anything not listed here is not promised.
+
+**Files and names.** Bundle id `com.oaralabs.prometheus`, signed by team 53JM8W47RL (a client should pin a
+list of team ids). Launcher: `Prometheus.app/Contents/MacOS/Prometheus`. Agent label
+`com.oaralabs.prometheus.daemon`. Release assets: `Prometheus-<version>-arm64.zip`, the stable alias
+`Prometheus-mac-arm64.zip`, and `prometheus-mac.json` (version, sha256, size, team id, bundle id, minimum
+macOS, the interpreter pin and the lock's hash). The zip is made with `ditto -c -k --keepParent`, holds one
+`Prometheus.app`, and the app is stapled. Check, in this order, before moving it anywhere:
+`codesign --verify --deep --strict`, the bundle id and team, `xcrun stapler validate`, and
+`syspolicy_check distribution`. Do not use `spctl -t exec` on nested executables.
+
+**Launcher modes** (run the executable directly; each prints one JSON line with `ok`, `state`, `detail`,
+`agent`, `app_version`, and exits with the code shown):
+
+| Mode | `state` | Exit |
+|---|---|---|
+| `--register` | `registered`, `already_registered` | 0 |
+| | `requires_approval` (the person switched it off in Login Items; the launcher opens that pane) | 10 |
+| | `already_running` (a Prometheus that is not ours answers on 127.0.0.1:8005) | 11 |
+| | `port_busy` (something else holds 8005) | 12 |
+| | `registration_failed` (`detail` says why) | 13 |
+| | `unsupported_os` (before macOS 13) | 14 |
+| `--unregister` | `not_registered` | 0 (13 on failure). Stops the agent: the first step of swapping the app for an update |
+| `--status` | `not_registered`, `not_found` (never registered yet: treat the same), `registered`, `requires_approval`, `running` | 0 |
+| `--pair` | `pair_secret_written` (adds `path`) | 0 (13 on failure) |
+| `--uninstall [--purge-data]` | `uninstalled`, `uninstall_incomplete`; adds `removed`, `kept`, `failed` | 0 or 13. Moves the running app to the Trash; keeps `~/.prometheus` unless `--purge-data` |
+
+**Is a Prometheus already there?** `GET http://127.0.0.1:8005/api/setup/status` answers
+`{"setup_mode": true, "configured": false, "pairing": ..., "version": ...}` in setup mode, with no
+authentication. A configured daemon has no unauthenticated route today and answers every `/api/` path with
+401 and a JSON `error` that contains both "unauthorized" and "Bearer"; keep both words if that is ever
+reworded. A `GET /api/hello` is planned by the pairing-approval work and is not built.
+
+**Pairing, fresh install** (no `~/.prometheus` config, so the daemon starts in setup mode): read
+`~/Library/Application Support/Prometheus/pairing/pair.secret` and `POST /api/setup/pair` with
+`{"code": "<secret>"}` from the same Mac, over `127.0.0.1` with a loopback `Host` and no `Origin` header.
+The answer is `{"token", "api_base_port", "ws_port"}`, the same shape as pairing with the six-digit code.
+The secret is used once and deleted. Then drive setup with `/api/setup/*` and finish with
+`POST /api/setup/complete`: the same process becomes the configured daemon.
+
+**Pairing, existing install** (`~/.prometheus` already has a config, so there is no setup mode and no
+secret at first start): run `Prometheus --pair`, read the file it names, and `POST /api/pair/local` with
+`{"code": "<secret>"}`; same conditions, same answer. The route answers 404 unless this is the app install.
+
+**What is not true yet.** The `token` returned is the daemon's one API token, not a token for this device
+alone (per-device credentials do not exist yet; `issue_owner_credential` is the one place that changes).
+Requires-approval, `/Applications`, ad-hoc signing and logout/login are unproven (see below).
+
 ## Order of work
 
 Each is a draft PR, not merged, Auto-fix off. Where it can be tested, the test that fails on today's
