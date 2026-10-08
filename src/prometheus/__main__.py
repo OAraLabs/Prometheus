@@ -1518,6 +1518,14 @@ def main() -> None:
         "--telegram-only", action="store_true",
         help="Only start Telegram adapter",
     )
+    daemon_parser.add_argument(
+        "--bind", metavar="ADDRESS", default=None,
+        help="Address the web API and WebSocket bridge listen on (also in "
+             "setup mode): 127.0.0.1 for this machine only, or an IPv4/IPv6 "
+             "address, or 0.0.0.0 for every interface (the default). Overrides "
+             "PROMETHEUS_WEB_BIND and web.bind in prometheus.yaml. An invalid "
+             "value refuses to start.",
+    )
 
     identity_parser = subparsers.add_parser(
         "identity", help="Manage identity files (SOUL.md, AGENTS.md)",
@@ -1981,6 +1989,8 @@ def main() -> None:
             sys.argv.append("--telegram-only")
         if args.debug:
             sys.argv.append("--debug")
+        if args.bind is not None:  # "" is a value (and an invalid one), not absence
+            sys.argv.extend(["--bind", args.bind])
         daemon_main()
         return
 

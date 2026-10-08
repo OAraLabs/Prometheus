@@ -217,6 +217,8 @@ The daemon doesn't have to be on the same machine as Beacon. If both are on your
 
 Nothing but the daemon's address and the token leave your machine, and the token is stored in the OS keychain — it never reaches Beacon's renderer process again after you save it.
 
+That reach exists because the daemon listens on **every interface** by default, over plain HTTP — there is no TLS, so the bearer token is the only access control between the API and whoever can route to the machine. If you only ever use the daemon from the machine it runs on, say so: `oara daemon --bind 127.0.0.1`, or `web.bind: 127.0.0.1` in `prometheus.yaml`, or `PROMETHEUS_WEB_BIND=127.0.0.1` in the environment (highest first). The flag also covers setup mode, whose pairing endpoint is reachable for up to 15 minutes. `oara doctor` warns while the daemon is set to listen on all interfaces. The full rules are in [the API guide](api.md#listening-on-this-machine-only).
+
 ## Troubleshooting
 
 - **Something's broken and you don't know what** — `oara doctor`. It checks every subsystem and prints a fix hint per failure; nonzero exit when anything fails.

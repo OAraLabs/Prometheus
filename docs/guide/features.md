@@ -18,7 +18,7 @@ This page is the complete map of what Prometheus can do: every entry point, tool
 | `--model` / `--provider` / `--config` / `--debug` | Per-run overrides |
 | `--reset-telemetry` / `--reset-data` | Wipe the telemetry database, or all user data |
 | `oara setup [--fast\|--noninteractive\|--gateway-only]` | First-run wizard: probes llama.cpp / Ollama / LM Studio / vLLM, generates your agent's identity, writes a working config, smoke-tests the loop, and mints the web API token |
-| `oara daemon [--telegram-only]` | Start the always-on daemon: web API and WebSocket, gateways, cron, heartbeat, SENTINEL (if enabled), memory extractor |
+| `oara daemon [--telegram-only] [--bind ADDRESS]` | Start the always-on daemon: web API and WebSocket, gateways, cron, heartbeat, SENTINEL (if enabled), memory extractor. `--bind 127.0.0.1` listens on this machine only (default: every interface, plain HTTP); see [Ports & remote access](api.md#ports--remote-access) |
 | `oara doctor` | Diagnostics with one fix hint per failure; exits nonzero when anything is broken, so it works in scripts |
 | `oara token show \| rotate` | Re-print the web API bearer token, or invalidate it and mint a new one |
 | `oara install-service [--force]` | Write and enable a systemd **user** unit |

@@ -25,6 +25,7 @@ import os
 import re
 import socket
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,8 @@ from prometheus.infra.doctor import (
     check_router,
     yaml_error_summary,
 )
+from prometheus.web.bind import BindError, all_interfaces_warning, resolve_bind
+from prometheus.web.loopback import is_loopback_address
 
 import logging
 
@@ -366,6 +369,54 @@ def check_web_port(config: dict[str, Any], timeout: float = 3.0) -> DiagnosticCh
         name="Web", category="connectivity", status="error",
         message=f"port {port} is in use by something that isn't Prometheus",
         fix=f"Free port {port} or change web.api_port in prometheus.yaml.",
+    )
+
+
+def check_web_bind(
+    config: dict[str, Any], *, env: Mapping[str, str] | None = None,
+) -> DiagnosticCheck | None:
+    """Which interface will the web API listen on, and is that plain HTTP on all of them?
+
+    Resolves ``PROMETHEUS_WEB_BIND`` > ``web.bind`` > ``0.0.0.0`` exactly as the
+    daemon does (:func:`prometheus.web.bind.resolve_bind`). It cannot see a
+    ``--bind`` flag given to a daemon that is already running, so the warning
+    says what the CONFIGURATION asks for and notes that a flag overrides it.
+    Returns ``None`` when the web API is off (the Web row already says so).
+    """
+    web_cfg = config.get("web", {}) or {}
+    if not web_cfg.get("enabled", False):
+        return None
+    try:
+        resolved = resolve_bind(config, env=env)
+    except BindError as exc:
+        return DiagnosticCheck(
+            name="Web bind", category="connectivity", status="error",
+            message=f"{exc} The daemon will refuse to start.",
+            fix="Set web.bind to an IPv4/IPv6 address or localhost, or remove it "
+                "(and check PROMETHEUS_WEB_BIND).",
+        )
+    address = resolved.address
+    if all_interfaces_warning(address):
+        return DiagnosticCheck(
+            name="Web bind", category="connectivity", status="warning",
+            message=f"web API will listen on all interfaces ({address}) over plain "
+                    "HTTP (no TLS) — anyone who can reach this machine's network "
+                    "address can reach it; the bearer token is the only access "
+                    "control (a daemon started with --bind overrides this)",
+            fix="Set web.bind: 127.0.0.1 in prometheus.yaml to listen on this "
+                "machine only, or a specific interface address (a tailnet "
+                "address, say) to narrow it.",
+        )
+    if is_loopback_address(address):
+        return DiagnosticCheck(
+            name="Web bind", category="connectivity", status="ok",
+            message=f"web API listens on {address} — this machine only "
+                    f"(from {resolved.source})",
+        )
+    return DiagnosticCheck(
+        name="Web bind", category="connectivity", status="ok",
+        message=f"web API listens on {address} only, over plain HTTP (no TLS) "
+                f"(from {resolved.source})",
     )
 
 
@@ -1201,6 +1252,7 @@ def run_extended_checks(
     """The Phase 0 onboarding checks (config check computed by the caller)."""
     reach, model = check_inference(config, timeout=timeout)
     router = check_router(config)
+    bind_row = check_web_bind(config)
     return [
         config_check,
         *([router] if router is not None else []),
@@ -1208,6 +1260,7 @@ def run_extended_checks(
         reach,
         model,
         check_web_port(config),
+        *([bind_row] if bind_row is not None else []),
         check_token(config),
         *check_gateways(config),
         check_advertised_tools(config),
