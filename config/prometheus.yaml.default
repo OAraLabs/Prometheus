@@ -1124,7 +1124,9 @@ web:
   #
   #   (unset)       0.0.0.0, every interface. What the daemon has always done,
   #                 and what reaching it from another machine over Tailscale
-  #                 or a LAN needs. Leave it unset to keep that.
+  #                 or a LAN needs. A config that predates the loopback default
+  #                 and leaves it unset keeps that; `oara doctor` warns about it.
+  #   "0.0.0.0"     the same, chosen on purpose (doctor does not warn).
   #   "127.0.0.1"   this machine only. Other machines cannot connect at all, and
   #                 a request whose Host header is not localhost, 127.0.0.1 or
   #                 [::1] is refused (a defence against DNS rebinding).
@@ -1143,7 +1145,10 @@ web:
   #
   # Shipped EMPTY (= unset = 0.0.0.0), not commented out, so the key shows in
   # docs/reference/config-keys.md and a config that sets it is not flagged as
-  # drift. Uncomment the example to narrow it.
+  # drift. This file is a reference, not what setup writes: `oara setup`, the
+  # wizard and setup mode write `bind: 127.0.0.1` into a NEW prometheus.yaml and
+  # never change an existing one. A headless box set up from another machine is
+  # therefore loopback-only afterwards until its owner sets the bind here.
   bind:                  # e.g. "127.0.0.1"
 
 # Image generation — the image_generate tool's backend selection + per-backend
