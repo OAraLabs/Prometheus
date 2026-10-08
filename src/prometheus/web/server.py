@@ -6,7 +6,7 @@ Run alongside the main Prometheus process, not as a replacement.
 Usage:
     from prometheus.web.server import create_app, start_web
     app = create_app(config, signal_bus, session_mgr, telemetry, ...)
-    await start_web(app, host="0.0.0.0", port=8005)
+    await start_web(app, host="127.0.0.1", port=8005)
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from prometheus.web.bind import DEFAULT_BIND
+from prometheus.web.loopback import guard_if_loopback
 from prometheus.web.strict_query import StrictQueryRoute
 
 from prometheus.config.node_identity import get_instance_id, get_node_pubkey
@@ -6071,8 +6073,13 @@ def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
-async def start_web(app: FastAPI, host: str = "0.0.0.0", port: int = 8005) -> None:
-    """Start the FastAPI server using uvicorn.
+async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005) -> None:
+    """Start the FastAPI server using uvicorn, listening on *host*.
+
+    *host* is whatever the daemon resolved from ``--bind`` /
+    ``PROMETHEUS_WEB_BIND`` / ``web.bind`` (web/bind.py). A loopback *host* also
+    puts the Host-header check in front of the app (DNS rebinding, see
+    web/loopback.py); any other host is left unrestricted, as before.
 
     FIRSTLIGHT FL-1 note, verified by mutation: uvicorn's
     ``capture_signals()`` looks like it steals SIGTERM/SIGINT from the
@@ -6090,7 +6097,7 @@ async def start_web(app: FastAPI, host: str = "0.0.0.0", port: int = 8005) -> No
     component of the chain, this one included.
     """
     import uvicorn
-    config = uvicorn.Config(app, host=host, port=port, log_level="info",
+    config = uvicorn.Config(guard_if_loopback(app, host), host=host, port=port, log_level="info",
                             # log_config=None: uvicorn must NOT install its own handlers.
                             # Its default config gives uvicorn.access/uvicorn.error handlers
                             # with propagate=False — a path around the root handlers, i.e.

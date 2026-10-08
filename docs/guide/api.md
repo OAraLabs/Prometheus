@@ -364,6 +364,24 @@ The sync contract is deliberately simple: **`message_id` is the durable LCM rowi
 
 ## Ports & remote access
 
-- REST: **:8005** (bound `0.0.0.0`). WebSocket: **:8010** (bound `0.0.0.0`).
+- REST: **:8005**. WebSocket: **:8010**. Both listen on the address `web.bind` names — **every interface (`0.0.0.0`) unless you set it**, which is what reaching the daemon over Tailscale or a LAN needs.
 - Beacon expects exactly these two ports on the daemon host — they are not currently negotiated.
 - Both are reachable over Tailscale, which is the intended remote-access path (e.g. Beacon Desktop on a laptop talking to the daemon box); the bearer token and WS first-frame auth are what stand between the ports and the tailnet.
+- **There is no TLS.** The traffic is plain HTTP and `ws://` on whichever interface you name. On `0.0.0.0` the bearer token is the only access control for everyone who can reach the machine's network address. `oara doctor` and the daemon's startup log say so (once) when it is listening on every interface.
+
+### Listening on this machine only
+
+One setting covers all three listeners — the REST API, the WebSocket bridge, and the setup-mode server (whose pairing endpoint is reachable, protected only by the one-time code, for up to 15 minutes):
+
+| Source | Example |
+|---|---|
+| `oara daemon --bind ADDRESS` | `oara daemon --bind 127.0.0.1` |
+| `PROMETHEUS_WEB_BIND` (process environment, or the env file) | `PROMETHEUS_WEB_BIND=127.0.0.1` |
+| `web.bind` in `prometheus.yaml` | `web: {bind: "127.0.0.1"}` |
+| *(none of the above)* | `0.0.0.0` — unchanged |
+
+Highest wins, in that order. Setup mode has no config yet, so it honours the flag and the environment; `POST /api/setup/configure` then writes the address it was serving on into the new config as `web.bind` (when it is not the default), so the real daemon — in the same process or after a restart — listens where setup mode did.
+
+An address is an IPv4 literal, an IPv6 literal (`::1`), or `localhost` (which means `127.0.0.1`; spell `::1` for IPv6 loopback). Anything else — a host name, a port, a mask — makes the daemon **refuse to start** with a message naming the setting; it never falls back to a wider address.
+
+On a loopback address the daemon also refuses any request whose `Host` header is not `localhost`, `127.0.0.1` or `[::1]` (any port), on the REST API, on the WebSocket handshake and on the setup server. That closes DNS rebinding, where a web page in your own browser reaches a loopback-only service under an attacker's host name. Reach it as `http://localhost:8005`, not by the machine's name; a local reverse proxy in front of it must forward `Host: localhost`. A wide or specific-interface bind has no Host restriction.

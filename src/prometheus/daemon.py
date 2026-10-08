@@ -54,6 +54,7 @@ from prometheus.__main__ import (
 )
 from prometheus.telemetry.tracker import TELEMETRY_OFF_NOTE, ToolCallTelemetry
 from prometheus.tools.base import ToolRegistry
+from prometheus.web.bind import BindError, resolve_bind
 from prometheus.engine.fallback import build_fallback_target
 
 logger = logging.getLogger("prometheus.daemon")
@@ -635,6 +636,16 @@ async def run_daemon(args: argparse.Namespace) -> None:
         logger.info(
             "Loaded %d variable(s) from %s", _env_loaded, get_env_file_path()
         )
+
+    # ── Listen address (--bind > PROMETHEUS_WEB_BIND > web.bind > 0.0.0.0) ──
+    # Resolved here, after the env file is loaded (so a PROMETHEUS_WEB_BIND kept
+    # there counts) and BEFORE anything is started or bound. An invalid value
+    # raises BindError and refuses the boot: it must never degrade to a wider
+    # address. Deliberately outside the try/except that guards the web bridge
+    # below — that block turns a failure into "Web bridge not available" and
+    # carries on, which for a bad bind would be exactly the wrong answer.
+    # `getattr`: callers that build their own Namespace predate the flag.
+    web_bind = resolve_bind(config, flag=getattr(args, "bind", None))
 
     # ── Wiki root ───────────────────────────────────────────────────────
     # Resolved ONCE here and pinned process-wide; every consumer reads it back
@@ -2875,12 +2886,16 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     backend_registry=backend_registry,
                     computer_integration=computer_integration,
                     computer_runner=computer.runner,
+                    bind=web_bind.address,
                     api_port=api_port,
                     ws_port=ws_port,
                 ))
             if web_task is not None:
                 tasks.append(web_task)
-                logger.info("Web bridge started (REST :%d, WS :%d)", api_port, ws_port)
+                logger.info(
+                    "Web bridge started (REST :%d, WS :%d, listening on %s)",
+                    api_port, ws_port, web_bind.describe(),
+                )
         except Exception as exc:
             logger.warning("Web bridge not available: %s", exc)
 
@@ -2950,6 +2965,14 @@ def main() -> None:
     parser.add_argument(
         "--debug", action="store_true", help="Enable debug logging"
     )
+    parser.add_argument(
+        "--bind", metavar="ADDRESS", default=None,
+        help="Address the web API and WebSocket bridge listen on (also in "
+             "setup mode): 127.0.0.1 for this machine only, or an IPv4/IPv6 "
+             "address, or 0.0.0.0 for every interface (the default). Overrides "
+             "PROMETHEUS_WEB_BIND and web.bind in prometheus.yaml. An invalid "
+             "value refuses to start.",
+    )
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.debug else logging.INFO
@@ -2981,7 +3004,16 @@ def main() -> None:
             handlers=[logging.StreamHandler(sys.stdout)],
         )
         install_log_redaction()
-        result = run_setup_mode()
+        # Setup mode has no config, so no web.bind: --bind > PROMETHEUS_WEB_BIND >
+        # 0.0.0.0. Resolved BEFORE the server exists; a bad value never listens.
+        from prometheus.web.setup_server import resolve_setup_bind
+
+        try:
+            setup_bind = resolve_setup_bind(args.bind)
+        except BindError as exc:
+            print(f"{exc}", file=sys.stderr)
+            sys.exit(2)
+        result = run_setup_mode(bind=setup_bind)
         # Phase 2: POST /api/setup/complete exits the serve loop with a
         # restart sentinel. RE-CHECK for config — present now → fall
         # through into the normal daemon boot IN THIS SAME PROCESS (no
@@ -3048,6 +3080,11 @@ def main() -> None:
     except ConfigReadError as exc:
         print(f"{exc}", file=sys.stderr)
         sys.exit(1)
+    except BindError as exc:
+        # An address we cannot honour is a refusal, not a fallback. Exit 2, like
+        # an argparse usage error: the invocation or the config is wrong.
+        print(f"{exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":
