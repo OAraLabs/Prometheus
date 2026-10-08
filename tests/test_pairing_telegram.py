@@ -205,6 +205,9 @@ def test_the_callback_pattern_matches_only_our_own_data():
     for bad in (f"pair:x:{rid}", f"pair:a:{'A' * 32}", f"pair:a:{'a' * 31}", f"pair:a:{'a' * 33}",
                 f"pair:a:{rid}\n", f"xpair:a:{rid}", f"pair:a:{rid}x", "", "approve:abc"):
         assert not CALLBACK_PATTERN.fullmatch(bad), bad
+        # python-telegram-bot's CallbackQueryHandler calls .match(), not .fullmatch(): a `$` anchor would
+        # let a trailing newline through its filter.
+        assert CALLBACK_PATTERN.match(bad) is None, bad
 
 
 # ── a tap ────────────────────────────────────────────────────────────────────

@@ -171,11 +171,14 @@ async def test_denial_cancellation_and_expiry_are_announced_too(world):
 
 @pytest.mark.asyncio
 async def test_a_dead_operator_socket_cannot_break_a_request(world):
-    attach(world, "op", broken=True)
+    dead = attach(world, "op", broken=True)
     live = attach(world, "owner")
     response, _, _ = world.request()
     assert response.status_code == 201
     assert live.types() == ["pairing_pending"], "the healthy operator still heard"
+    assert dead not in world.bridge._clients, "a socket whose send failed is dropped, as broadcast drops it"
+    stats = world.bridge.delivery_stats()
+    assert stats["frames_dropped"] == 1 and stats["clients_discarded"] == 1, "and it is counted, not silent"
 
 
 # ── connecting later ─────────────────────────────────────────────────────────
