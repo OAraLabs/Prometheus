@@ -31,14 +31,18 @@ def test_it_admits_up_to_the_limit_and_then_refuses():
 
 
 def test_a_refusal_does_not_spend_budget():
+    """Refusals are spread across the window: a limiter that counted them would stay full."""
     clock = _Clock()
     limiter = SourceLimiter(2, 60.0, clock=clock)
-    assert limiter.check("a").allowed and limiter.check("a").allowed
-    for _ in range(50):
+    assert limiter.check("a").allowed          # t=0, leaves the window at t=60
+    clock.now += 1
+    assert limiter.check("a").allowed          # t=1
+    for _ in range(50):                        # refused at t=2 .. t=51
+        clock.now += 1
         assert not limiter.check("a").allowed
-    clock.now += 60.01  # the two real hits leave the window; the fifty refusals left nothing behind
-    assert limiter.check("a").allowed and limiter.check("a").allowed
-    assert not limiter.check("a").allowed
+    clock.now = 1000.0 + 60.01                 # the first real hit leaves; the refusals are not hits
+    assert limiter.check("a").allowed          # one slot is free
+    assert not limiter.check("a").allowed      # and only one: the t=1 hit and the new one fill it
 
 
 def test_the_retry_hint_is_the_time_until_the_oldest_hit_leaves():
