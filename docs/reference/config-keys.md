@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **430** of
+Every key in `config/prometheus.yaml.default` — **435** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -340,6 +340,11 @@ none either — the key is documented so its absence is visible.
 | `pairing.max_pending_per_source` | `1` |
 | `pairing.max_requests_per_source_per_hour` | `10` |
 | `pairing.telegram_prompts` | `False` |
+| `network` | *(section)* |
+| `network.home_network` | `False` |
+| `network.allow_plaintext_lan` | `False` |
+| `discovery` | *(section)* |
+| `discovery.mdns` | `True` |
 | `push` | *(section)* |
 | `push.enabled` | `False` |
 | `push.apns` | *(section)* |

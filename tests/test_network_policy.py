@@ -154,6 +154,52 @@ def test_the_shipped_template_keeps_every_comment(tmp_path):
     assert saved["web"]["bind"] == "0.0.0.0" and saved["network"]["home_network"] is True
 
 
+def test_a_web_section_with_no_bind_gets_one_inside_it_not_at_the_end_of_the_file(tmp_path):
+    """The usual older install: ``web:`` is there, ``bind`` is not, and other sections follow."""
+    path = _config(tmp_path, "web:\n  api_port: 8005\nmodel:\n  name: x\n")
+    persist_choice(path, HOME, current_bind="127.0.0.1")
+    saved = yaml.safe_load(path.read_text())
+    assert saved["web"] == {"api_port": 8005, "bind": "0.0.0.0"}, "the new line belongs to web, not to model"
+    assert saved["model"] == {"name": "x"} and saved["network"]["home_network"] is True
+
+
+def test_a_network_section_with_no_switch_gets_it_inside_it(tmp_path):
+    path = _config(tmp_path, 'web:\n  bind: "127.0.0.1"\nnetwork:\n  allow_plaintext_lan: true\nmodel:\n  name: x\n')
+    persist_choice(path, HOME, current_bind="127.0.0.1")
+    saved = yaml.safe_load(path.read_text())
+    assert saved["network"] == {"allow_plaintext_lan": True, "home_network": True}
+    assert saved["model"] == {"name": "x"}
+
+
+def test_a_line_added_to_a_section_keeps_the_blank_line_and_comment_that_open_the_next_one(tmp_path):
+    original = "web:\n  api_port: 8005\n\n# the model\nmodel:\n  name: x\n"
+    path = _config(tmp_path, original)
+    persist_choice(path, HOME, current_bind="127.0.0.1")
+    text = path.read_text()
+    assert "\n\n# the model\nmodel:\n" in text, "the gap and the comment still sit directly above model:"
+    assert text.index("bind:") < text.index("# the model")
+
+
+def test_what_is_already_saved_is_not_rewritten(tmp_path):
+    path = _config(tmp_path, "web:\n  bind: 127.0.0.1\nnetwork:\n  home_network: false\n")   # unquoted on purpose
+    before = path.stat().st_mtime_ns
+    assert persist_choice(path, THIS_MAC, current_bind="127.0.0.1") is False
+    assert path.read_text() == "web:\n  bind: 127.0.0.1\nnetwork:\n  home_network: false\n"
+    assert path.stat().st_mtime_ns == before
+
+
+def test_a_change_reports_that_it_wrote(tmp_path):
+    path = _config(tmp_path, 'web:\n  bind: "127.0.0.1"\n')
+    assert persist_choice(path, HOME, current_bind="127.0.0.1") is True
+
+
+def test_home_network_pins_a_specific_address_the_daemon_is_running_on_when_the_file_names_none(tmp_path):
+    """Bound to one address by the environment, the owner turns the switch on: the file must not come back wide."""
+    path = _config(tmp_path, "web:\n  api_port: 8005\n")
+    persist_choice(path, HOME, current_bind=TAILNET)
+    assert yaml.safe_load(path.read_text())["web"]["bind"] == TAILNET
+
+
 def test_a_config_with_no_web_section_gets_one(tmp_path):
     path = _config(tmp_path, "model:\n  name: x\n")
     persist_choice(path, HOME, current_bind="0.0.0.0")
@@ -194,8 +240,40 @@ def test_the_write_is_atomic_so_a_crash_cannot_leave_half_a_config(tmp_path, mon
     assert network  # the module under test is the one whose os.replace was broken
 
 
-def test_the_files_mode_is_kept(tmp_path):
+@pytest.mark.parametrize("mode", [0o600, 0o640, 0o644])
+def test_the_files_mode_is_kept(tmp_path, mode):
     path = _config(tmp_path, 'web:\n  bind: "127.0.0.1"\n')
-    path.chmod(0o600)
+    path.chmod(mode)
     persist_choice(path, HOME, current_bind="127.0.0.1")
-    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.stat().st_mode & 0o777 == mode
+
+
+def test_a_symlinked_config_is_edited_where_it_lives(tmp_path):
+    real = tmp_path / "real" / "prometheus.yaml"
+    real.parent.mkdir()
+    real.write_text('web:\n  bind: "127.0.0.1"\n', encoding="utf-8")
+    link = tmp_path / "prometheus.yaml"
+    link.symlink_to(real)
+    persist_choice(link, HOME, current_bind="127.0.0.1")
+    assert link.is_symlink() and yaml.safe_load(real.read_text())["web"]["bind"] == "0.0.0.0"
+
+
+def test_a_crlf_file_keeps_its_line_endings_on_the_lines_it_did_not_touch(tmp_path):
+    path = tmp_path / "prometheus.yaml"
+    path.write_bytes(b'model:\r\n  name: x\r\nweb:\r\n  bind: "127.0.0.1"\r\n')
+    persist_choice(path, HOME, current_bind="127.0.0.1")
+    assert path.read_bytes().startswith(b"model:\r\n  name: x\r\nweb:\r\n")
+
+
+def test_a_file_that_is_not_yaml_is_refused_untouched(tmp_path):
+    original = "web: [unclosed\n"
+    path = _config(tmp_path, original)
+    with pytest.raises(PersistError, match="not valid YAML"):
+        persist_choice(path, HOME, current_bind="0.0.0.0")
+    assert path.read_text() == original
+
+
+def test_only_this_mac_and_home_network_can_be_saved(tmp_path):
+    path = _config(tmp_path, 'web:\n  bind: "127.0.0.1"\n')
+    with pytest.raises(PersistError):
+        persist_choice(path, OPEN, current_bind="0.0.0.0")

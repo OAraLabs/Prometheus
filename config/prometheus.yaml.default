@@ -1210,6 +1210,38 @@ pairing:
   # told either way. The device's name is sent as plain text, never formatted.
   telegram_prompts: false
 
+# Network mode — how far this Prometheus is meant to be reachable, and whether
+# it announces itself on the local network (docs/PAIRING-APPROVAL-API.md, 2.1).
+# The mode is not a setting of its own: it is what web.bind and the switches
+# below mean together. this_mac = a loopback bind. home_network = a bind that
+# reaches the LAN, home_network: true, and a way to run it safely. open = any
+# other bind that reaches the LAN, which is what an install that predates this
+# setting is. Beacon can switch between this_mac and home_network (PUT
+# /api/network); the choice is saved into this file and applies when the
+# daemon restarts.
+network:
+  # Be reachable from other devices on your home network, and announce this
+  # Prometheus there (see discovery.mdns). Needs a web.bind that reaches the
+  # LAN; the switch in Beacon sets both. Without TLS (not built yet) it also
+  # needs allow_plaintext_lan below, or the daemon reports `open` and says why.
+  home_network: false
+
+  # Accept home network mode over plain HTTP: a device's token and everything
+  # it sends cross your Wi-Fi unencrypted, readable by anyone on that network.
+  # Only for a network you trust. There is no TLS yet to make this unnecessary,
+  # so it stays off until you decide.
+  allow_plaintext_lan: false
+
+discovery:
+  # Announce this Prometheus over mDNS (_prometheus._tcp) so a phone on the
+  # same Wi-Fi finds it without an address. Needs the optional extra:
+  #   pip install 'oara-prometheus[discovery]'
+  # Without it the daemon runs exactly as before and says so once in the log.
+  # It announces ONLY in home network mode, and only on private addresses; the
+  # announcement carries what GET /api/hello says (name, version, how to pair),
+  # never a credential.
+  mdns: true
+
 # APNs push to enrolled devices (GRAFT-MOBILE-BRIDGE 2). Disabled by default:
 # enabling requires the `push` extra (pip install 'oara-prometheus[push]')
 # and an Apple p8 signing key — an enabled-but-broken block FAILS THE BOOT

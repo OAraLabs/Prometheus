@@ -63,7 +63,9 @@ def test_a_public_cgnat_loopback_or_multicast_address_never_is(addr):
 
 
 @pytest.mark.parametrize("name", ["utun3", "tun0", "tap1", "wg0", "tailscale0", "docker0", "br-1a2b3c", "veth12",
-                                  "virbr0", "awdl0", "llw0", "lo0", "zt0abc"])
+                                  "virbr0", "awdl0", "llw0", "lo0", "zt0abc", "bridge100", "vmnet8", "vboxnet0",
+                                  "gif0", "ppp0", "ipsec0", "vEthernet (WSL)", "anpi0", "ap1", "cni0", "flannel.1",
+                                  "cali1234", "kube-ipvs0", "stf0"])
 def test_a_tunnel_or_container_interface_is_skipped_however_private_its_address(name):
     assert eligible_addresses([adapter(name, ip("10.9.8.7"))], bind="0.0.0.0") == []
 
