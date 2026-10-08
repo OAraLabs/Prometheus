@@ -186,18 +186,14 @@ Settled with Beacon's side in writing, apart from the items marked as your call.
    7), and deleted. Wrong attempts on the six-digit path never lock the secret path, and the secret path
    has no global lockout.
 5. It is never logged.
-6. The credential returned comes from one function. Today it is the global token, exactly what
-   `/api/setup/pair` returns now. When per-device credentials land it becomes the owner device token
-   with approver rights, with no change for Beacon. **That swap is the release gate in finding 2.**
-   One requirement for whoever builds it, from the device-scoping change (#692): a device token sees only
-   the sessions it owns, and sessions that predate scoping belong to the operator. The first Beacon on the
-   Mac is the person's own cockpit, so the credential it receives must be operator-equivalent for scoping
-   (owner and approver), not an ordinary scoped device, or it would open to an empty session list. Approvals
-   are not scoped by #692 either, so "approver" is its own piece of work. The hook is `scope_for()` in
-   `web/session_scope.py` (on #692), which returns the operator scope only for the global token today; an
-   owner exemption is one change there plus a durable marker on the device row, with a test that an owner
-   device lists the operator's Telegram and CLI sessions. Until that exists the same-Mac Beacon keeps
-   receiving the global token, as #694 does.
+6. The credential returned comes from one function. In this PR it is the global token, exactly what
+   `/api/setup/pair` returns now. Per-device owner credentials (#696) change that function, not the routes:
+   `/api/pair/local` then returns an owner device token, while setup mode keeps returning the global token
+   (it can create no device). The credential is the OWNER tier only: a device approved from another device
+   gets an ordinary token from its own mint path, never this one. **The swap is the release gate in finding 2.**
+   One requirement from device scoping (#692): a device token sees only the sessions it owns, so the first
+   Beacon on the Mac must be an owner device, operator-equivalent for scoping, or it would open to an empty
+   session list. Approvals are not scoped by #692 either, so "approver" is its own piece of work.
 7. A running daemon accepts the same secret at `POST /api/pair/local` so a Beacon reinstall is not a
    dead end. It is written by `--pair`. The route name is chosen to sit beside the other `/api/pair/*`
    routes planned for new devices. A configured daemon has no unauthenticated route today (the bearer
@@ -262,20 +258,46 @@ authentication. A configured daemon has no unauthenticated route today and answe
 401 and a JSON `error` that contains both "unauthorized" and "Bearer"; keep both words if that is ever
 reworded. A `GET /api/hello` is planned by the pairing-approval work and is not built.
 
+**Credentials.** Written against per-device owner credentials, PR #696 (stacked on the pairing PR, not
+merged yet); what is marked *today* below holds without it.
+
 **Pairing, fresh install** (no `~/.prometheus` config, so the daemon starts in setup mode): read
 `~/Library/Application Support/Prometheus/pairing/pair.secret` and `POST /api/setup/pair` with
 `{"code": "<secret>"}` from the same Mac, over `127.0.0.1` with a loopback `Host` and no `Origin` header.
-The answer is `{"token", "api_base_port", "ws_port"}`, the same shape as pairing with the six-digit code.
-The secret is used once and deleted. Then drive setup with `/api/setup/*` and finish with
-`POST /api/setup/complete`: the same process becomes the configured daemon.
+The answer is `{"token", "api_base_port", "ws_port"}`, the same shape as pairing with the six-digit code,
+and the token is the daemon's **global** token: setup mode authenticates its mutations against that token
+alone and must create no `~/.prometheus` state, so it cannot mint a device. The secret is used once and
+deleted. Then drive setup with `/api/setup/*` and finish with `POST /api/setup/complete`: the same process
+becomes the configured daemon. **Then trade the global token for an owner device token** (#696): from a
+loopback address, `POST /api/devices` with the global token and `{"owner": true, "name": "..."}` answers
+201 `{id, name, platform, token, created_at, owner: true, revoked_previous}`. Keep ONLY that owner token and
+drop the global one. *Today* (before #696) there is no such route option and the client keeps the global token.
 
 **Pairing, existing install** (`~/.prometheus` already has a config, so there is no setup mode and no
 secret at first start): run `Prometheus --pair`, read the file it names, and `POST /api/pair/local` with
-`{"code": "<secret>"}`; same conditions, same answer. The route answers 404 unless this is the app install.
+`{"code": "<secret>", "name": "..."}` (`name` optional, default "Beacon on this Mac", clipped to 64
+printable characters); same conditions. With #696 the answer is
+`{"token", "api_base_port", "ws_port", "revoked_previous"}` and the token is an **owner device token**,
+never the global one; `revoked_previous` is an integer. The route answers 404 unless this is the app install.
 
-**What is not true yet.** The `token` returned is the daemon's one API token, not a token for this device
-alone (per-device credentials do not exist yet; `issue_owner_credential` is the one place that changes).
-Requires-approval, `/Applications`, ad-hoc signing and logout/login are unproven (see below).
+**Re-pairing revokes the old install's credentials.** Minting an owner device for this Mac revokes the
+earlier owner devices minted for this Mac, in the same transaction (those minted by `POST /api/pair/local`
+or by `POST /api/devices` with `owner: true` from a loopback peer). An owner device minted from a
+non-loopback address, ordinary devices, and the new device are untouched. So an OLD Beacon install's token
+now answers 401 and its open WebSocket is closed with code 4401: **treat 401 or 4401 as "re-pair with
+`Prometheus --pair`".**
+
+**What an owner device is.** Operator-equivalent for conversation scoping (sees every session, including
+older ones and Telegram and CLI sessions), may list and revoke any device. Not root: it cannot enrol other
+devices (`POST /api/devices` stays global-token-only) or define MCP servers. A device someone approves from
+another device is an ordinary scoped device, minted by a different path, and never gets this credential.
+
+**What is not true yet.** The global token stays valid and stays in `~/.config/prometheus/env`, where the
+agent's own bash tool can read it, and on macOS the daemon has neither shell floor. Owner credentials stop a
+paired *device* from holding the master key; they do not stop *the agent* from reading it. That is a
+separate follow-up (design: keep the master key out of the agent's reach), and the app's release stays
+gated on it and on a restrictive default permission mode. Requires-approval, `/Applications`, ad-hoc
+signing and logout/login are unproven (see below).
 
 ## Order of work
 
