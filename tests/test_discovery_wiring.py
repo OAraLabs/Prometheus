@@ -144,6 +144,22 @@ def test_the_switch_on_a_loopback_bind_is_called_out():
     assert row.status == "warning" and "127.0.0.1" in row.message
 
 
+def test_the_row_is_part_of_the_extended_checks(monkeypatch):
+    from prometheus.cli import doctor
+
+    ok = doctor.DiagnosticCheck
+    monkeypatch.setattr(doctor, "check_inference", lambda *a, **k: (ok("Inference", "connectivity", "ok", "x"),
+                                                                    ok("Model", "model", "ok", "x")))
+    monkeypatch.setattr(doctor, "check_web_port", lambda *a, **k: ok("Web", "connectivity", "ok", "x"))
+    monkeypatch.delenv("PROMETHEUS_WEB_BIND", raising=False)
+    config_check = ok("Config", "platform", "ok", "x")
+    asked = doctor.run_extended_checks(
+        {"web": {"enabled": True, "bind": "0.0.0.0"}, "network": {"home_network": True}}, config_check=config_check)
+    assert [c.name for c in asked].count("Home network") == 1
+    quiet = doctor.run_extended_checks({"web": {"enabled": True, "bind": "0.0.0.0"}}, config_check=config_check)
+    assert "Home network" not in [c.name for c in quiet], "a machine that never asked gets no row"
+
+
 @pytest.mark.asyncio
 async def test_starting_the_advertiser_never_holds_up_startup(no_zeroconf):
     advertiser = Advertiser(

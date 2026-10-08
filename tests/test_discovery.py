@@ -70,6 +70,15 @@ def test_a_tunnel_or_container_interface_is_skipped_however_private_its_address(
     assert eligible_addresses([adapter(name, ip("10.9.8.7"))], bind="0.0.0.0") == []
 
 
+def test_a_windows_adapter_is_judged_by_its_friendly_name_too():
+    """On Windows ``name`` is a GUID and only ``nice_name`` says what the interface is."""
+    guid = SimpleNamespace(name="{3D0C5B7E-0000-4C1E-9A55-7A1B2C3D4E5F}", nice_name="vEthernet (WSL)",
+                           ips=[ip("172.20.0.1")])
+    assert eligible_addresses([guid], bind="0.0.0.0") == []
+    wifi = SimpleNamespace(name="{9F1A2B3C-0000-4C1E-9A55-7A1B2C3D4E5F}", nice_name="Wi-Fi", ips=[ip("192.168.1.20")])
+    assert eligible_addresses([wifi], bind="0.0.0.0") == ["192.168.1.20"]
+
+
 def test_ipv6_is_not_advertised():
     assert eligible_addresses([adapter("en0", ip6("fe80::1"), ip("192.168.1.2"))], bind="0.0.0.0") == ["192.168.1.2"]
 
@@ -230,6 +239,22 @@ async def test_a_missing_library_is_a_loud_status_and_never_an_exception(caplog)
     assert "zeroconf is not installed" in advertiser.status.reason and "[discovery]" in advertiser.status.reason
     warnings = [r for r in caplog.records if "zeroconf" in r.getMessage()]
     assert len(warnings) == 1, "said once, not once a minute"
+    await advertiser.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_missing_library_is_not_looked_for_again_every_evaluation():
+    calls: list[int] = []
+
+    def no_zeroconf(addresses):
+        calls.append(1)
+        raise ImportError("No module named 'zeroconf'")
+
+    advertiser, _, _, _ = rig(factory=no_zeroconf)
+    await advertiser.start()
+    for _ in range(3):
+        await advertiser.refresh()
+    assert len(calls) == 1, "the library does not appear mid-run; trying again every 30 s is only a cost"
     await advertiser.stop()
 
 

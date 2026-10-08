@@ -377,7 +377,6 @@ class Advertiser:
 
     async def _withdraw(self) -> None:
         backend, self._backend = self._backend, None
-        self._addresses, self._name, self._properties = (), "", {}
         if backend is None:
             return
         for step in (backend.unregister, backend.close):
