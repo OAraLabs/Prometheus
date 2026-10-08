@@ -224,6 +224,19 @@ def test_an_edit_that_does_not_verify_leaves_the_file_exactly_as_it_was(tmp_path
     assert path.read_text() == original
 
 
+def test_an_edit_that_keeps_the_data_but_loses_a_comment_is_refused(tmp_path, monkeypatch):
+    """The data reads back right and a comment is gone: the owner's notes are not ours to drop."""
+    original = '# why loopback\nweb:\n  bind: "127.0.0.1"\n'
+    path = _config(tmp_path, original)
+    import prometheus.web.network as network
+
+    real = network._edit_text
+    monkeypatch.setattr(network, "_edit_text", lambda text, edits: real(text, edits).replace("# why loopback\n", ""))
+    with pytest.raises(PersistError, match="did not verify"):
+        persist_choice(path, HOME, current_bind="127.0.0.1")
+    assert path.read_text() == original
+
+
 def test_the_write_is_atomic_so_a_crash_cannot_leave_half_a_config(tmp_path, monkeypatch):
     original = 'web:\n  bind: "127.0.0.1"\n'
     path = _config(tmp_path, original)

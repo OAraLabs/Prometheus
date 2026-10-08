@@ -114,6 +114,15 @@ def test_a_choice_waiting_for_a_restart_is_visible_before_it_happens(tmp_path):
     assert body["applied"] == "on_restart" and body["pending_mode"] == "home_network", "and what it will come back as"
 
 
+def test_a_pinned_bind_outranks_what_the_file_says_about_the_next_start(tmp_path):
+    """--bind / PROMETHEUS_WEB_BIND win over web.bind, so a file that says 0.0.0.0 promises nothing."""
+    world = make(tmp_path, bind="127.0.0.1", source="env",
+                 file_text='web:\n  bind: "0.0.0.0"\nnetwork:\n  home_network: true\n  allow_plaintext_lan: true\n')
+    body = world.as_("global", "GET", "/api/network").json()
+    assert body["bind"] == "127.0.0.1" and body["bind_source"] == "env"
+    assert body["applied"] == "live" and "pending_mode" not in body, "the environment still decides the address"
+
+
 # ── the owner's switch ───────────────────────────────────────────────────────
 
 def test_a_scoped_device_may_not_change_it_and_is_told_403_not_401(tmp_path):
