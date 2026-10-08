@@ -1151,6 +1151,16 @@ web:
   # therefore loopback-only afterwards until its owner sets the bind here.
   bind:                  # e.g. "127.0.0.1"
 
+  # Reverse proxies whose X-Forwarded-For / X-Forwarded-Proto headers are
+  # believed: addresses or networks, e.g. ["127.0.0.1"] for a tunnel or
+  # `tailscale serve` on this machine, or ["10.0.0.0/8"]. Empty (the default)
+  # believes NO forwarded header: the address every rate limit and every
+  # same-machine check uses is the TCP peer, so a client cannot choose its own
+  # by sending a header. An entry that would believe everyone (`*`, 0.0.0.0/0)
+  # is ignored with a warning. If a proxy on this machine fronts the daemon and
+  # is not named here, every request looks like it comes from 127.0.0.1.
+  trusted_proxies: []
+
 # Image generation — the image_generate tool's backend selection + per-backend
 # settings. CLOUD EXPANSION (2026-07) adds the PAID DashScope backend (WAN 2.5).
 #

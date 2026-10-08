@@ -192,3 +192,12 @@ def test_no_server_in_the_web_package_builds_its_own_uvicorn_config():
                     and node.func.attr == "Config" and getattr(node.func.value, "id", "") == "uvicorn"):
                 offenders.append(f"{path.name}:{node.lineno}")
     assert offenders == [], f"build it with web.serving.serve_config instead: {offenders}"
+
+
+def test_the_launcher_hands_the_config_to_start_web_so_trusted_proxies_is_not_dead_config():
+    """``web.trusted_proxies`` is read only through ``start_web(config=...)``; if the launcher stops passing it,
+    the setting would parse, document itself, and do nothing."""
+    tree = ast.parse((SRC / "web" / "launcher.py").read_text(encoding="utf-8"))
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "start_web"]
+    assert calls, "the launcher no longer calls start_web"
+    assert all("config" in {kw.arg for kw in call.keywords} for call in calls)

@@ -102,7 +102,6 @@ from prometheus.web.bind import (
     resolve_bind,
 )
 from prometheus.web.loopback import (
-    guard_if_loopback,
     is_loopback_address,
     is_loopback_host_header,
     is_loopback_peer,
@@ -1060,14 +1059,11 @@ async def _serve_setup_mode(
     app = create_setup_app(
         pairing, api_port=api_port, bind=resolved, state=state, on_complete=stop_server,
     )
-    config = uvicorn.Config(guard_if_loopback(app, address), host=address, port=api_port,
-                            log_level="info",
-                            # log_config=None: uvicorn must NOT install its own handlers.
-                            # Its default config gives uvicorn.access/uvicorn.error handlers
-                            # with propagate=False — a path around the root handlers, i.e.
-                            # around log redaction (security/log_redaction.py) and rotation.
-                            log_config=None)
-    server = uvicorn.Server(config)
+    # Built where the daemon builds its own, so setup mode gets the same answer about whose forwarded
+    # headers to believe (nobody's: there is no config yet to name a proxy). web/serving.py says why.
+    from prometheus.web.serving import serve_config
+
+    server = uvicorn.Server(serve_config(app, address, api_port))
     server_box["server"] = server
 
     loop = asyncio.get_running_loop()

@@ -290,16 +290,24 @@ def register_pairing_routes(
         return None
 
     def verified(request: Request, request_id: str) -> PairRequest | JSONResponse:
-        """The request for a valid poll secret, or the one answer a stranger ever gets."""
+        """The request for a valid poll secret, or the one answer a stranger ever gets.
+
+        The secret is checked FIRST and the failure budget second. The budget counts wrong guesses per
+        SOURCE (the TCP peer), and it only decides what a wrong guess is told: 404 while the source has
+        budget, 429 once it is spent. It never refuses the right secret. If it did, anyone who shared the
+        requester's source (one NAT, one proxy, one machine) and knew the request id could kill a legitimate
+        pairing with five guesses. A 256-bit secret cannot be found by guessing however many tries there
+        are, so checking before limiting costs the limit nothing it was protecting.
+        """
         source = _peer(request)
+        req = runtime.store().verify(request_id, request.headers.get("x-pairing-secret", ""))
+        if req is not None:
+            return req
         blocked = runtime.bad_secret.peek(source)
         if not blocked.allowed:
             return _rate_limited("bad_secret", blocked.retry_after)
-        req = runtime.store().verify(request_id, request.headers.get("x-pairing-secret", ""))
-        if req is None:
-            runtime.bad_secret.check(source)
-            return _json(404, _UNKNOWN)
-        return req
+        runtime.bad_secret.check(source)
+        return _json(404, _UNKNOWN)
 
     # ── requester: ask to join ───────────────────────────────────────────
 
