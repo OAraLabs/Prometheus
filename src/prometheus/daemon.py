@@ -748,7 +748,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     # Archive writer
     archive = ArchiveWriter()
-    archive.archive_event("daemon_start", {"args": vars(args)})
+    archive.archive_event("daemon_start", {"args": daemon_start_args(args)})
 
     # Write daemon start time for uptime tracking
     import time as _time
@@ -2951,8 +2951,8 @@ _LOG_MAX_BYTES = 64 * 1024 * 1024
 _LOG_BACKUPS = 5
 
 
-def main() -> None:
-    """CLI entry point."""
+def build_parser() -> argparse.ArgumentParser:
+    """The daemon's command line. A function so a test can hold it against what the parity traces recorded."""
     parser = argparse.ArgumentParser(description="Prometheus daemon")
     parser.add_argument(
         "--config", type=str, default=None, help="Path to prometheus.yaml"
@@ -2973,6 +2973,26 @@ def main() -> None:
              "PROMETHEUS_WEB_BIND and web.bind in prometheus.yaml. An invalid "
              "value refuses to start.",
     )
+    return parser
+
+
+def daemon_start_args(args: argparse.Namespace) -> dict[str, Any]:
+    """The arguments the ``daemon_start`` archive event records: ``vars(args)``, except an unset ``--bind``.
+
+    The 12 parity traces record this dict and the CI replay compares the daemon's whole archive against them.
+    Adding ``--bind`` added ``bind: null`` to every run, so every trace "changed" while nothing the daemon
+    does had. An option that was not given has nothing to record. An explicit ``--bind`` is a fact about the
+    run and stays. Every other argument is recorded as it always was, null or not.
+    """
+    recorded = dict(vars(args))
+    if recorded.get("bind") is None:
+        recorded.pop("bind", None)
+    return recorded
+
+
+def main() -> None:
+    """CLI entry point."""
+    parser = build_parser()
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.debug else logging.INFO
