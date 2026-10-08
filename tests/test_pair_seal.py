@@ -15,7 +15,6 @@ implement the other half, and it is pinned three ways:
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 from pathlib import Path
@@ -77,7 +76,7 @@ def test_the_match_code_is_the_documented_hash():
 
 def test_the_match_code_is_four_digits_and_zero_padded():
     instance = bytes.fromhex(VECTORS["instance_public_key_der_hex"])
-    codes = {ps.match_code(bytes([n]) * 32, instance, f"{n:032x}") for n in range(300)}
+    codes = {ps.match_code(n.to_bytes(32, "big"), instance, f"{n:032x}") for n in range(300)}
     assert all(len(code) == 4 and code.isdigit() for code in codes)
     assert any(code.startswith("0") for code in codes), "zero padding is exercised by 300 samples"
 

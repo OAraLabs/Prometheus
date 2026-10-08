@@ -175,7 +175,7 @@ Rate limit: 60 per minute per source, then `429`.
 
 ## 4. Pairing requests
 
-Approve-to-pair is for the **second and later** devices. A fresh install has no operator who could approve the first one; that is setup-mode pairing (same-Mac, #694, or the 6-digit code). `POST /api/pair/requests` answers `403 pairing_unavailable` in setup mode, when `pairing.requests_enabled` is false, and when the daemon runs with auth off (no global token: device tokens are unused, so minting one would hand out a credential that opens nothing).
+Approve-to-pair is for the **second and later** devices. A fresh install has no operator who could approve the first one; that is setup-mode pairing (same-Mac, #694, or the 6-digit code). `POST /api/pair/requests` answers `403 pairing_unavailable` in setup mode, when `pairing.requests_enabled` is false, and when the daemon runs with auth off (no global token: device tokens are unused, so minting one would hand out a credential that opens nothing). The setup app serves that one route for the purpose, so a client sees the same refusal whichever case it hit.
 
 A pairing request is not a device and touches no conversation: until it is approved there is no token and no identity, so there is nothing for #692's scoping to scope. No pairing route reads, lists or creates a session.
 
@@ -274,7 +274,7 @@ POST /api/pair/requests/{request_id}/deny        body: none or {}
 
 * `approve` accepts **exactly** `name` (renames; the typed name is unverified) and `match_code` (the optional typed confirmation, 5.1). **Any other key is `400 invalid_request`**, `owner`, `scope` and `tier` included, so no client can believe it granted more than an ordinary scoped device.
 * Errors: `401` no valid token; `403 operator_only` a valid scoped device; `404 unknown_request`; `409 not_pending` with the winner's `status`; `410 expired`; `422 code_mismatch`. The operator is authenticated, so a 404 here is not an oracle.
-* Every decision is also announced as a `pairing_resolved` frame and, if Telegram is on, an edit to its message (5).
+* Every decision is also announced as a `pairing_resolved` frame and, if Telegram is on, an edit to its message (5). In the implementation the announcement goes through `PairingNotifier` (`web/pairing_routes.py`), the seam the Beacon sockets and Telegram subscribe to; `notified` on the 201 is true when a listener took the `pending` event.
 
 ### 4.3 Sealing the token
 
@@ -347,7 +347,8 @@ pending --approve--> approved --DELETE or 5 min--> delivered
 * Every transition is one SQLite statement guarded by the current state (`UPDATE ... WHERE state='pending' AND expires_at > now`, check the row count). Nothing here relies on a file delete succeeding as an exactly-once claim: building #694 showed concurrent `unlink()` of one path letting up to 7 of 8 callers "succeed" on APFS. Two operators tapping at once: one wins, the other gets `409 not_pending` with the winner's status. An approve that arrives after the TTL gets `410 expired`.
 * Rows live in a `pair_requests` table in the existing `devices.db`, **created on first use** (the way `computer_devices`, `device_sessions` and `owner_devices` are), so a box that never pairs a device grows no table and the parity fixtures, which record every table in that file, do not change. The table is not `device_sessions` or `owner_devices`, and approval writes to neither: #692 forbids a second table that says who owns a session.
 * Stored: id, SHA-256 of the poll secret (never the secret), name, platform, requester public key, source address, match code, state, timestamps, deciding channel and identity, device id, sealed blob until delivery. Never stored: the plaintext token, the poll secret.
-* Terminal rows are deleted after 7 days.
+* Terminal rows are deleted 7 days after they finished (`finished_at`). A request past its TTL is `expired` whether or not the sweep has recorded it yet, so a late decision is always `410`, never `409`. An approval nobody collected reads as `expired` to the requester; a later decision on it is `409 not_pending` with `status: approved`, because someone did approve it.
+* The sweep runs at the start of every pairing request and on a 30-second timer, so an uncollected device is revoked within about 30 seconds of its window closing even when no one is asking.
 
 ### 4.8 Audit
 
@@ -371,7 +372,7 @@ Two frame types, sent **only to sockets whose identity has `is_operator`** (the 
  "payload": {"request_id": "...", "resolution": "approved", "by": "telegram", "resolved_at": 1760000042}}
 ```
 
-`resolution` is `approved`, `denied`, `expired` or `canceled`. `by` is `beacon`, `telegram`, `cli` or `system`.
+`resolution` is `approved`, `denied`, `expired` or `canceled`. `by` is `beacon`, `telegram`, `cli`, `requester` (the new device withdrew its own request) or `system` (the TTL). A REST decision is `beacon` unless the caller sends `X-Pairing-Via: cli` (the terminal route does): display only, it carries no authority, and no other value is believed. The audit line always records the real identity.
 
 * A connecting operator is **backfilled** with one `pairing_pending` per live request, so opening Beacon after the request arrived still shows it. The same list is `GET /api/pair/requests`.
 * The frames go straight to those sockets through a **new targeted send on the bridge** (`send_to_operators(frame)`: iterate `_ws_identity`, keep `identity.is_operator`), **not through the SignalBus and not through `broadcast`.** The SignalBus tail is durable and replayed to any authenticated client by the activity feed. And #692's `_wants` filter drops a frame for a device socket only when the frame *names a session it does not own*; a pairing frame names none, so `broadcast` would deliver it, source address and code included, to every scoped device. A test connects a scoped device and an owner device and requires the first to receive nothing.
@@ -541,6 +542,7 @@ All JSON bodies are `{"error": "<code>", ...}`.
 | 409 | `tls_unavailable` | `PUT /api/network` to `home_network` with no TLS and no `allow_plaintext_lan` |
 | 410 | `expired` | decision arrived after the TTL |
 | 413 | `too_large` | body over 4 KiB |
+| 503 | `identity_unavailable` | `POST /api/pair/requests` and the daemon has no readable instance key (it is made at boot, never on a request); nothing is created |
 | 422 | `code_mismatch` | optional `match_code` on approve differs |
 | 429 | `rate_limited` | see 4.5 (`reason`, `retry_after_seconds`, `Retry-After`) |
 

@@ -254,6 +254,29 @@ def test_deciding_after_the_ttl_is_expired_not_a_quiet_success(store, clock, dev
     assert devices.list_devices() == []
 
 
+def test_a_decision_after_the_sweep_recorded_the_expiry_is_still_expired_not_somebody_elses(store, clock):
+    """The sweep runs at the start of every request, so it usually records the expiry before the decision
+    arrives; the answer must not change from 'too late' (410) to 'someone decided first' (409)."""
+    created, _ = _create(store)
+    clock.now += 301
+    store.sweep()
+    assert store.get(created.request.id).state == "expired"
+    with pytest.raises(pr.RequestExpired):
+        store.approve(created.request.id, name=None, decided_by="beacon:x")
+    with pytest.raises(pr.RequestExpired):
+        store.deny(created.request.id, decided_by="beacon:x")
+
+
+def test_deciding_a_request_whose_device_was_revoked_for_going_uncollected_says_it_was_approved(store, clock):
+    created, _ = _create(store)
+    store.approve(created.request.id, name=None, decided_by="beacon:x")
+    clock.now += 301
+    store.sweep()
+    with pytest.raises(pr.NotPending) as caught:
+        store.approve(created.request.id, name=None, decided_by="telegram:1")
+    assert caught.value.status == "approved"
+
+
 def test_the_sweep_records_expiry_and_says_which_requests(store, clock):
     created, _ = _create(store)
     clock.now += 301

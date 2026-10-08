@@ -1172,6 +1172,22 @@ pairing:
   # characters are removed.
   display_name: ""
 
+  # Whether a new device may ask to join at all (POST /api/pair/requests). The
+  # owner then approves it on a device they already use. false = only pasting
+  # the API token pairs a device; GET /api/hello then says pair: token.
+  requests_enabled: true
+
+  # How long a request waits for the owner, in seconds. Allowed 60 to 900; a
+  # value outside that is clamped, with a warning in the log.
+  request_ttl_seconds: 300
+
+  # Limits on strangers asking, counted by TCP peer address. At most this many
+  # requests waiting overall, and per source address; and per source address
+  # in any hour. Over a limit the answer is 429 with a Retry-After.
+  max_pending: 3
+  max_pending_per_source: 1
+  max_requests_per_source_per_hour: 10
+
 # APNs push to enrolled devices (GRAFT-MOBILE-BRIDGE 2). Disabled by default:
 # enabling requires the `push` extra (pip install 'oara-prometheus[push]')
 # and an Apple p8 signing key — an enabled-but-broken block FAILS THE BOOT

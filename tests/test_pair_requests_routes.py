@@ -99,10 +99,9 @@ class World:
         assert response.status_code == 201, response.text
         return response.json(), requester, client
 
-    def poll(self, created, client=None, secret=None, **kw):
-        return (client or self.client).get(
-            f"/api/pair/requests/{created['request_id']}",
-            headers={"X-Pairing-Secret": secret if secret is not None else created["poll_secret"]}, **kw)
+    def poll(self, created, client=None, secret=None, headers=None):
+        merged = {"X-Pairing-Secret": secret if secret is not None else created["poll_secret"], **(headers or {})}
+        return (client or self.client).get(f"/api/pair/requests/{created['request_id']}", headers=merged)
 
     def approve(self, created, who="global", **body):
         return self.as_(who, "POST", f"/api/pair/requests/{created['request_id']}/approve", json=body or None)
@@ -138,6 +137,8 @@ def test_a_stranger_can_ask_to_join_and_gets_what_the_contract_says(world):
 
 
 def test_notified_says_whether_anyone_took_the_prompt(tmp_path):
+    (tmp_path / "quiet").mkdir()
+    (tmp_path / "loud").mkdir()
     quiet = World(tmp_path / "quiet")
     quiet.runtime.notifier.clear()
     assert quiet.created()[0]["notified"] is False
@@ -196,9 +197,9 @@ def test_unknown_keys_are_ignored_for_forward_compatibility(world):
 
 
 @pytest.mark.parametrize("kwargs", [
-    {"data": "not json", "headers": {"Content-Type": "application/json"}},
-    {"data": "[1, 2]", "headers": {"Content-Type": "application/json"}},
-    {"data": "{}", "headers": {"Content-Type": "text/plain"}},
+    {"content": "not json", "headers": {"Content-Type": "application/json"}},
+    {"content": "[1, 2]", "headers": {"Content-Type": "application/json"}},
+    {"content": "{}", "headers": {"Content-Type": "text/plain"}},
 ], ids=["not json", "not an object", "wrong content type"])
 def test_a_body_that_is_not_a_json_object_is_a_400(world, kwargs):
     response = world.client.post("/api/pair/requests", **kwargs)
@@ -207,7 +208,7 @@ def test_a_body_that_is_not_a_json_object_is_a_400(world, kwargs):
 
 def test_a_body_over_4_kib_is_a_413(world):
     big = '{"device_name": "' + "x" * 5000 + '"}'
-    response = world.client.post("/api/pair/requests", data=big, headers={"Content-Type": "application/json"})
+    response = world.client.post("/api/pair/requests", content=big, headers={"Content-Type": "application/json"})
     assert response.status_code == 413 and response.json()["error"] == "too_large"
 
 

@@ -37,6 +37,7 @@ from prometheus.web.strict_query import StrictQueryRoute
 
 from prometheus.config import api_token as api_token_module
 from prometheus.config import local_pairing
+from prometheus.config.device_store import registry_platform
 from prometheus.config.node_identity import get_instance_id, get_node_pubkey
 from prometheus.config.paths import get_wiki_root
 from prometheus.context.environment import (
@@ -512,9 +513,7 @@ def create_app(
         name = str(body.get("name") or "").strip()
         if not name:
             return JSONResponse(status_code=400, content={"error": "name is required"})
-        platform = str(body.get("platform") or "").strip().lower()
-        if platform not in ("ios", "macos"):
-            platform = "other"
+        platform = registry_platform(body.get("platform"))
         owner = body.get("owner", False)
         if not isinstance(owner, bool):
             return JSONResponse(status_code=400, content={"error": "owner must be true or false"})
@@ -852,7 +851,9 @@ def create_app(
     async def hello(request: Request):
         return hello_mod.hello_response(
             request, _hello_limiter,
-            lambda: hello_mod.build_hello(config, auth_on=bool(_api_token)))
+            lambda: hello_mod.build_hello(
+                config, auth_on=bool(_api_token),
+                approval=app.state.pairing.settings.requests_enabled))
 
     # ── Root ────────────────────────────────────────────────────────
 
@@ -6140,6 +6141,14 @@ def create_app(
         model_catalog=_model_catalog,
         resolve_model_target=lambda key: _resolve_model_target(key, config),
     )
+
+    # ── Pairing requests (docs/PAIRING-APPROVAL-API.md) ────────────────────
+    # A new device asks to join, the owner approves, a scoped token arrives sealed. Registered BEFORE the
+    # static catch-all, like every route; three of the six are public (web/public_routes.py).
+    from prometheus.web.pairing_routes import register_pairing_routes
+
+    register_pairing_routes(
+        app, config=config, devices=_devices_or_create, auth_on=lambda: bool(_api_token))
 
     # ── Static files (must be last — catch-all) ─────────────────────
 

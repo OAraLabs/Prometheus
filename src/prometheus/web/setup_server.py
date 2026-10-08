@@ -730,6 +730,15 @@ def create_setup_app(
         return hello_mod.hello_response(
             request, _hello_limiter, lambda: hello_mod.build_hello(None, setup_mode=True))
 
+    # A request to join needs an operator who could approve it, and a fresh install has none: the first
+    # device pairs with the six-digit code or the same-Mac secret below. Said in the contract's words, so
+    # a client sees the same refusal here as on a daemon that has turned requests off.
+    @app.post("/api/pair/requests")
+    async def pair_requests_unavailable() -> JSONResponse:
+        return JSONResponse(status_code=403, content={
+            "error": "pairing_unavailable",
+            "detail": "this daemon is in setup mode: pair with the six-digit code, or finish setup first"})
+
     @app.get("/api/setup/status")
     async def setup_status() -> dict[str, Any]:
         return {
