@@ -75,7 +75,7 @@ What the unauthenticated surface can be used to do, and what stops it:
 | Read the token off the Wi-Fi at pairing | Token sealed to the requester's key (4.3). |
 | Read the bearer token off the Wi-Fi afterwards | TLS with a pinned certificate (section 7). **Sealing alone does not help here.** |
 | Browser page posts to `localhost` or a LAN address | No CORS headers on these routes, any request carrying `Origin` is refused, and the loopback Host guard from #693. |
-| Guess a request id or poll secret | 128-bit id, 256-bit secret, constant-time compare, unknown id and wrong secret answer identically, wrong-secret attempts rate limited. |
+| Guess a request id or poll secret | 128-bit id, 256-bit secret, constant-time compare, unknown id and wrong secret answer identically, wrong guesses rate limited per source (and the right secret is never refused for them, so a neighbour who knows an id cannot kill a pairing). |
 | An approved device approves or enrols another (a chain from one stolen phone) | `is_operator` is false for any device `mint` makes; the decision routes answer 403. `POST /api/devices` stays global-token-only. Nothing on the approval path can create an owner device. |
 | Active attacker relaying the first contact | Not fully stopped. Section 7.5. |
 
@@ -305,7 +305,7 @@ The server returns it in the `201` and shows it to the operator. The requester *
 
 ### 4.5 Limits
 
-Keyed on the TCP peer address. `X-Forwarded-For` is never read on these routes (an unauthenticated caller controls it).
+Keyed on the TCP peer address. `X-Forwarded-For` is never believed (an unauthenticated caller controls it) unless the TCP peer is a proxy named in `web.trusted_proxies`, which is empty by default: the daemon builds its uvicorn configuration in `web/serving.py` with forwarded headers off, because uvicorn's default believes them from anything on 127.0.0.1 and let a local client pick its own source and rotate it past every limit here (found by the Beacon session against the real daemon; a test client cannot see it, so the tests serve the app through `start_web` on a real socket).
 
 | Limit | Default | Config key | On breach |
 |---|---|---|---|
@@ -313,7 +313,7 @@ Keyed on the TCP peer address. `X-Forwarded-For` is never read on these routes (
 | Pending requests overall | 3 | `pairing.max_pending` | `429`, `reason: pending_full` |
 | Requests per source per hour | 10 | `pairing.max_requests_per_source_per_hour` | `429`, `reason: hourly` |
 | Poll interval | 1 s minimum | (fixed) | `429`, `reason: poll_too_fast` |
-| Wrong poll secret per source | 5 per minute | (fixed) | `429`, `reason: bad_secret` |
+| Wrong poll secrets per source | 5 per minute | (fixed) | `429`, `reason: bad_secret` for the next wrong guess. **The right secret is checked first and is never refused for the budget**: an exhausted source is told 429 instead of 404 for a wrong guess, nothing more. The secret is 256 bits, so checking before limiting costs the limit nothing it was protecting. |
 | Body size | 4 KiB | (fixed) | `413` |
 
 Every `429` carries `Retry-After` and `{"error": "rate_limited", "reason": "...", "retry_after_seconds": n}`. Over loopback every caller shares one source, so the per-source and overall limits coincide; that path is the installer's `POST /api/pair/local`, not this one.
@@ -329,7 +329,7 @@ What the new device therefore is, by #692 and #696, with nothing special-cased h
 * **It owns no conversations.** It sees only the sessions it creates (`device_sessions`, #692). Conversations that predate #692 are operator-only. The first thing Jennifer's Mac shows is an empty list, which is correct, and clients should say so rather than show an error.
 * **It is not an operator.** `is_operator` is false, so it cannot approve or deny, cannot list or revoke other devices, and receives no `pairing_*` frame. It can revoke itself (`DELETE /api/devices/{its own id}`).
 * **Still the global token's alone:** `POST /api/devices` and defining an MCP server. An owner device cannot do those either (#696).
-* It appears in `GET /api/devices` (not `owner`), and an operator revokes it with the existing `DELETE /api/devices/{id}`; the socket closes at once (4401).
+* It appears in an operator's `GET /api/devices` (not `owner`), and an operator revokes it with the existing `DELETE /api/devices/{id}`; the socket closes at once (4401). **It lists only itself**: `GET /api/devices` from a scoped device returns its own row (`is_self: true`) and nothing about who else is enrolled, which an approved device used to be handed (found by the Beacon session).
 * **What scoping does not cover (#692 section 4)** still applies to it: the agent runs with the operator's tools, slash commands read daemon-wide state, and push and tool-approval routes are open to any valid token. The prompt does not promise isolation beyond conversations.
 
 An operator may rename at approval, because the typed name is unverified.
@@ -426,6 +426,7 @@ Beacon, Telegram and the CLI can all answer. The first decision wins; every othe
 | `POST /api/pair/requests/{id}/approve` and `/deny` | no | 403 | yes | yes |
 | `GET /api/network` | no | yes (read) | yes | yes |
 | `PUT /api/network` | no | 403 | yes | yes |
+| `GET /api/devices` | no | **its own row only** | all | all |
 | `POST /api/devices`, MCP-server definition (unchanged, #696) | no | 401 | 401 | yes |
 | `pairing_*` WebSocket frames | n/a | not sent | sent | sent |
 

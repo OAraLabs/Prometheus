@@ -329,6 +329,7 @@ none either — the key is documented so its absence is visible.
 | `web.api_port` | `8005` |
 | `web.ws_port` | `8010` |
 | `web.bind` | *(empty — no code default)* |
+| `web.trusted_proxies` | `[]` |
 | `web.api_token` | *(empty — no code default)* |
 | `web.dashboard_port` | `3002` |
 | `pairing` | *(section)* |

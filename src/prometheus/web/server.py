@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 from prometheus.web import hello as hello_mod
 from prometheus.web.bind import DEFAULT_BIND
-from prometheus.web.loopback import guard_if_loopback, is_loopback_host_header, is_loopback_peer
+from prometheus.web.loopback import is_loopback_host_header, is_loopback_peer
 from prometheus.web.public_routes import is_public_route
 from prometheus.web.session_scope import (
     Scope,
@@ -545,6 +545,11 @@ def create_app(
         _store = _devices_or_create()
         _marked = _store.computer_device_ids()
         _owners = _store.owner_sources(include_revoked=True)  # a tombstone keeps its history
+        # An operator (the global token or an owner device) sees every device. A SCOPED device sees itself:
+        # a client still finds its own row (is_self, its id, its push state), and learns nothing about who
+        # else is enrolled (names, platforms, last seen, the owner flag), which an approved device is
+        # otherwise handed. With auth off everyone is the operator.
+        _everyone = not _api_token or (identity is not None and identity.is_operator)
         return [{
             "id": d.id, "name": d.name, "platform": d.platform,
             "created_at": d.created_at, "last_seen_at": d.last_seen_at,
@@ -561,7 +566,7 @@ def create_app(
             # credential is visible and revocable rather than something nobody can see.
             "owner": d.id in _owners,
             "owner_source": _owners.get(d.id),
-        } for d in _store.list_devices()]
+        } for d in _store.list_devices() if _everyone or d.id == self_id]
 
     def _may_manage_push(request: Request, device_id: str):
         """Push/activity registration is the device's own business (or the
@@ -6314,13 +6319,18 @@ def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
-async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005) -> None:
+async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005,
+                    config: dict[str, Any] | None = None) -> None:
     """Start the FastAPI server using uvicorn, listening on *host*.
 
     *host* is whatever the daemon resolved from ``--bind`` /
     ``PROMETHEUS_WEB_BIND`` / ``web.bind`` (web/bind.py). A loopback *host* also
     puts the Host-header check in front of the app (DNS rebinding, see
     web/loopback.py); any other host is left unrestricted, as before.
+
+    *config* is the daemon's configuration, read only for ``web.trusted_proxies``: forwarded headers are
+    ignored unless a proxy is named there (web/serving.py says why). The server is published as
+    ``app.state.http_server`` so a caller that needs to stop it cleanly can.
 
     FIRSTLIGHT FL-1 note, verified by mutation: uvicorn's
     ``capture_signals()`` looks like it steals SIGTERM/SIGINT from the
@@ -6338,11 +6348,9 @@ async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005) ->
     component of the chain, this one included.
     """
     import uvicorn
-    config = uvicorn.Config(guard_if_loopback(app, host), host=host, port=port, log_level="info",
-                            # log_config=None: uvicorn must NOT install its own handlers.
-                            # Its default config gives uvicorn.access/uvicorn.error handlers
-                            # with propagate=False — a path around the root handlers, i.e.
-                            # around log redaction (security/log_redaction.py) and rotation.
-                            log_config=None)
-    server = uvicorn.Server(config)
+
+    from prometheus.web.serving import serve_config
+
+    server = uvicorn.Server(serve_config(app, host, port, config))
+    app.state.http_server = server
     await server.serve()

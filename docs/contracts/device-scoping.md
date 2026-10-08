@@ -79,7 +79,7 @@ Stated so nobody reads "device scoping" as more than it is. None of these change
 - **`/api/media?path=`** serves any cached image to whoever holds the path (`img_<uuid>`); a capability, not a listing.
 - **Operator-wide resources**: config, skills, memory, wiki, files, artifacts, cron, providers. Not sessions.
 - **Push notifications** (`push/dispatcher.py`): `turn_completed`, `task_*` and approval pushes go to every registered device, whoever owns the session. A product decision, not a bug fix.
-- **`GET /api/devices`** still lists every enrolled device (name, platform, last seen, push status).
+- **`GET /api/devices`**: an operator (the global token or an owner device) lists every enrolled device; a **scoped device lists only itself** (its own row, `is_self: true`), so it can still find its id and push state without learning who else is enrolled. This was open until the pairing work made approved devices common: an approved device could read every other device's name, platform, last-seen time, push status and owner flag. Changed by the pairing stack (#698).
 - **An id-existence oracle remains** for ids outside the daemon namespaces: a device that sends to a guessed id learns whether it existed, and takes it if not. Real ids are `<gateway>:<uuid4>`.
 
 ## 5. Upgrading

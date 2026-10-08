@@ -268,6 +268,6 @@ async def launch_web(
 
     # Run both servers concurrently
     await asyncio.gather(
-        start_web(app, host=api_host, port=api_port),
+        start_web(app, host=api_host, port=api_port, config=config),
         bridge.start(host=ws_host, port=ws_port),
     )
