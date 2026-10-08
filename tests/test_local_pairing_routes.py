@@ -108,7 +108,9 @@ class TestSetupModePairing:
         assert (pairing_dir / "pair.secret").exists()
 
     def test_ipv6_loopback_is_loopback(self, env_file, secret):
-        resp = _client(_setup_app(), peer="::1", host="[::1]:8123").post("/api/setup/pair", json={"code": secret})
+        # Starlette's TestClient cannot parse an IPv6 base_url, so the Host header is sent explicitly.
+        resp = _client(_setup_app(), peer="::1").post(
+            "/api/setup/pair", json={"code": secret}, headers={"Host": "[::1]:8123"})
         assert resp.status_code == 200
 
     def test_a_browser_request_is_refused(self, env_file, secret, pairing_dir):
