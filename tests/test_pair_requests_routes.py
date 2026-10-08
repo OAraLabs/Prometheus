@@ -19,14 +19,10 @@ from __future__ import annotations
 
 import logging
 import re
-import secrets
-import sqlite3
 import time
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
@@ -34,81 +30,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from prometheus.config import instance_key, pair_seal  # noqa: E402
 from prometheus.config.device_store import DeviceStore  # noqa: E402
 from prometheus.web.server import create_app  # noqa: E402
-
-GLOBAL = "pair-test-global-" + secrets.token_hex(8)
-T0 = 1_760_000_000.0
-LOW_ORDER = pair_seal.b64url_encode(bytes(32))
-
-
-class Clock:
-    def __init__(self, now: float = T0) -> None:
-        self.now = now
-
-    def __call__(self) -> float:
-        return self.now
-
-
-class Requester:
-    def __init__(self) -> None:
-        self.private = X25519PrivateKey.generate()
-        self.public = self.private.public_key().public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-        self.public_b64 = pair_seal.b64url_encode(self.public)
-
-    def unseal(self, request_id: str, sealed: dict) -> dict:
-        return pair_seal.unseal_token(private_key=self.private, request_id=request_id, sealed=sealed)
-
-
-class World:
-    """A daemon with an owner device and a scoped device, a fake clock, and a recording notifier."""
-
-    def __init__(self, tmp_path, **pairing) -> None:
-        self.path = tmp_path / "devices.db"
-        self.devices = DeviceStore(self.path)
-        config = {"web": {"api_token": GLOBAL}}
-        if pairing:
-            config["pairing"] = pairing
-        self.app = create_app(config, device_store=self.devices)
-        self.clock = Clock()
-        self.runtime = self.app.state.pairing
-        self.runtime.clock = self.clock
-        self.events: list[tuple[str, dict]] = []
-        self.runtime.notifier.subscribe(lambda kind, payload: self.events.append((kind, payload)) or True)
-        self.der = instance_key.ensure_instance_key()      # the daemon makes this at boot
-        self.owner = self.devices.mint_owner("Beacon on this Mac", "macos", by="same-mac-pairing")
-        self.scoped = self.devices.mint("a scoped phone", "ios")
-        self.client = TestClient(self.app)
-
-    def hdr(self, who: str) -> dict:
-        token = {"global": GLOBAL, "owner": self.owner["token"], "scoped": self.scoped["token"]}.get(who, who)
-        return {"Authorization": f"Bearer {token}"}
-
-    def as_(self, who: str, method: str, url: str, **kw):
-        headers = {**self.hdr(who), **kw.pop("headers", {})}
-        return self.client.request(method, url, headers=headers, **kw)
-
-    def request(self, requester=None, *, source="192.0.2.10", **body):
-        requester = requester or Requester()
-        payload = {"device_name": "Jennifer's MacBook", "platform": "macos", "public_key": requester.public_b64}
-        payload.update(body)
-        client = TestClient(self.app, client=(source, 50000))
-        return client.post("/api/pair/requests", json=payload), requester, client
-
-    def created(self, **kw):
-        response, requester, client = self.request(**kw)
-        assert response.status_code == 201, response.text
-        return response.json(), requester, client
-
-    def poll(self, created, client=None, secret=None, headers=None):
-        merged = {"X-Pairing-Secret": secret if secret is not None else created["poll_secret"], **(headers or {})}
-        return (client or self.client).get(f"/api/pair/requests/{created['request_id']}", headers=merged)
-
-    def approve(self, created, who="global", **body):
-        return self.as_(who, "POST", f"/api/pair/requests/{created['request_id']}/approve", json=body or None)
-
-    def tables(self) -> set[str]:
-        with sqlite3.connect(self.path) as conn:
-            return {row[0] for row in conn.execute("select name from sqlite_master where type='table'")}
+from tests.support.pairing_world import LOW_ORDER, T0, Requester, World  # noqa: E402
 
 
 @pytest.fixture
@@ -311,17 +233,46 @@ def test_polling_faster_than_once_a_second_is_refused(world):
     assert world.poll(created).status_code == 200
 
 
-def test_five_wrong_secrets_a_minute_lock_that_source_out_and_only_that_source(world):
+def test_wrong_secrets_are_limited_but_the_right_one_always_gets_through(world):
+    """Five wrong secrets a minute from a source exhaust ITS budget for wrong guesses. They must not lock out
+    the correct secret: anyone who can share the requester's source (one NAT, one proxy, one loopback) and
+    knows the request id could otherwise kill a legitimate pairing with five guesses."""
     created, _, client = world.created(source="192.0.2.10")
     for _ in range(5):
         assert world.poll(created, client, secret="x" * 43).status_code == 404
         world.clock.now += 1.1
-    blocked = world.poll(created, client)
-    assert blocked.status_code == 429 and blocked.json()["reason"] == "bad_secret"
-    other = TestClient(world.app, client=("192.0.2.77", 1))
-    assert world.poll(created, other).status_code == 200
-    world.clock.now += 61
+    sixth = world.poll(created, client, secret="x" * 43)
+    assert sixth.status_code == 429 and sixth.json()["reason"] == "bad_secret", "the budget is spent"
+    right = world.poll(created, client)
+    assert right.status_code == 200 and right.json()["status"] == "pending", "but the right secret is never refused for it"
+
+
+def test_a_flood_of_wrong_secrets_stays_cheap_and_stays_a_429(world):
+    created, _, client = world.created(source="192.0.2.10")
+    answers = {world.poll(created, client, secret=f"{n:043d}").status_code for n in range(40)}
+    assert answers == {404, 429}
+    world.clock.now += 1.1
     assert world.poll(created, client).status_code == 200
+
+
+def test_someone_who_knows_the_request_id_cannot_lock_the_requester_out_from_elsewhere(world):
+    created, _, requester_client = world.created(source="192.0.2.10")
+    attacker = TestClient(world.app, client=("192.0.2.99", 40000))
+    for n in range(30):
+        world.poll(created, attacker, secret=f"{n:043d}")
+    assert world.poll(created, attacker, secret="y" * 43).status_code == 429, "the attacker spent its OWN budget"
+    assert world.poll(created, requester_client).status_code == 200
+
+
+def test_the_wrong_secret_budget_is_per_source_across_requests_not_per_request(world):
+    one, _, source = world.created(source="192.0.2.10")
+    two, _, other_source = world.created(source="192.0.2.11")
+    for n in range(5):                                       # five wrong guesses at ONE request from one source
+        world.poll(one, source, secret=f"{n:043d}")
+    # the same source guessing at a DIFFERENT request is out of budget too: the count is the source's
+    assert world.poll(two, source, secret="z" * 43).status_code == 429
+    # while a different source guessing at the first request has its own budget
+    assert world.poll(one, other_source, secret="z" * 43).status_code == 404
 
 
 def test_a_request_expires_at_its_ttl(world):
