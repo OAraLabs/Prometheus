@@ -201,7 +201,8 @@ def test_the_hourly_limit_is_enforced(tmp_path):
 def test_a_pending_request_polls_as_pending(world):
     created, _, _ = world.created()
     response = world.poll(created)
-    assert response.status_code == 200 and response.json() == {"status": "pending", "expires_at": int(T0) + 300}
+    assert response.status_code == 200 and response.json() == {
+        "status": "pending", "expires_at": int(T0) + 300, "notified": False}
     assert response.headers["cache-control"] == "no-store" and _no_cors(response)
 
 
