@@ -377,3 +377,31 @@ def test_the_index_text_names_the_copyleft_ones_first(app, tmp_path):
     text = app.license_index_text(app.license_index(tmp_path))
     assert text.index("PyMuPDF") < text.index("httpx")
     assert "Copyleft" in text
+
+
+# ── notarization credentials ─────────────────────────────────────────────────
+
+def test_notarytool_takes_a_keychain_profile_or_the_apple_id_trio(app):
+    assert app.notarytool_credential_args("prometheus", {}) == ["--keychain-profile", "prometheus"]
+    env = {"APPLE_ID": " me@example.com ", "APPLE_APP_SPECIFIC_PASSWORD": "abcd-efgh-ijkl-mnop\n",
+           "APPLE_TEAM_ID": "53JM8W47RL"}
+    assert app.notarytool_credential_args("", env) == [
+        "--apple-id", "me@example.com", "--password", "abcd-efgh-ijkl-mnop", "--team-id", "53JM8W47RL"]
+    # A profile wins: it keeps the password out of argv, which is why the local route uses one.
+    assert app.notarytool_credential_args("prometheus", env) == ["--keychain-profile", "prometheus"]
+
+
+def test_missing_notarization_credentials_say_which_are_missing(app):
+    with pytest.raises(app.BuildError, match="APPLE_APP_SPECIFIC_PASSWORD"):
+        app.notarytool_credential_args("", {"APPLE_ID": "me@example.com", "APPLE_TEAM_ID": "53JM8W47RL"})
+    with pytest.raises(app.BuildError, match="credential"):
+        app.notarytool_credential_args("", {})
+
+
+def test_a_failed_submission_never_echoes_the_password(app, tmp_path):
+    password = "abcd-efgh-ijkl-mnop"
+    env = {"APPLE_ID": "me@example.com", "APPLE_APP_SPECIFIC_PASSWORD": password, "APPLE_TEAM_ID": "53JM8W47RL"}
+    runner = _Runner([(("xcrun", "notarytool", "submit"), 1, f"Error: invalid credentials {password}")])
+    with pytest.raises(app.BuildError) as excinfo:
+        app.notarize(tmp_path / "Prometheus.app", "", tmp_path, runner=runner, env=env)
+    assert password not in str(excinfo.value)
