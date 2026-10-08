@@ -103,7 +103,11 @@ curl -H "Authorization: Bearer $(oara token show | head -1)" http://localhost:80
 
 Secrets never go in the yaml config — they live in that env file, which both `oara daemon` and the systemd unit load.
 
-## Run as a systemd service (Linux)
+## Run as a service (Linux and macOS)
+
+`oara install-service` installs the daemon as a user service for the system you are on: a systemd user unit on Linux, a LaunchAgent on macOS.
+
+**Linux**
 
 ```bash
 oara install-service          # writes ~/.config/systemd/user/prometheus.service
@@ -111,7 +115,34 @@ systemctl --user start prometheus
 journalctl --user -u prometheus -f  # follow the logs
 ```
 
-`install-service` also does the `daemon-reload` and `enable` for you. Useful flags: `--now` (start immediately after enabling), `--force` (overwrite an existing unit, backing it up first), and `--systemd-dir` to target a nonstandard directory.
+It also does the `daemon-reload` and `enable` for you.
+
+**macOS** has no systemd, so it writes a LaunchAgent instead:
+
+```bash
+oara install-service          # writes ~/Library/LaunchAgents/com.oaralabs.prometheus.daemon.plist
+oara install-service --now    # also loads it now (launchctl enable, then bootstrap)
+```
+
+Without `--now` it only writes the plist, and says so: launchd loads the plists in `~/Library/LaunchAgents` at your next login, which is the macOS equivalent of `systemctl enable`. Like the Linux unit, the LaunchAgent restarts the daemon when it exits with an error (never more often than every ten seconds) and leaves it stopped after a clean exit. launchd keeps the daemon's stderr in `~/Library/Logs/Prometheus/launchd.err.log`; the daemon's own log is still `~/.prometheus/logs/daemon.log`. The daemon reads its secrets from the same env file as before, so the plist carries none.
+
+If something else has already registered that job label with launchd (for example an app that supervises the daemon, or a plist you wrote by hand) and this command has not written a plist of its own, `install-service` stops and changes nothing. Two supervisors for one daemon is a bug, and `--force` does not override it: `--force` only replaces the plist this command wrote.
+
+**Flags and exit codes**
+
+- `--now` starts the service immediately (Linux: `systemctl start`; macOS: `launchctl enable` then `bootstrap`).
+- `--force` replaces an existing unit or plist that differs from what would be written, saving the old one as `.bak` first. Without it, a differing file is left alone.
+- `--systemd-dir` (Linux) and `--launch-agents-dir` (macOS) choose a nonstandard target directory. Each is rejected on the other system.
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | Installed, or already installed and up to date (nothing was touched) |
+| `1` | Not done: a differing unit or plist was refused without `--force`, another supervisor owns the macOS job, or `systemctl` / `launchctl` is missing or failed |
+| `2` | An option that does not apply on this system (`--systemd-dir` on macOS, `--launch-agents-dir` on Linux) |
+
+A missing `systemctl` or `launchctl` is exit `1`, not a warning, so a script never mistakes a service that was never enabled for a success. Any unit or plist already written stays in place, and the message says where.
 
 ## When something is off: `oara doctor`
 
