@@ -204,3 +204,22 @@ def test_no_secret_is_ever_logged(directory, caplog):
     lp.read_secret(directory)
     joined = "\n".join(r.getMessage() for r in caplog.records)
     assert secret not in joined and "A" * 43 not in joined
+
+
+def test_a_secret_replaced_between_the_check_and_the_claim_is_not_consumed(directory, monkeypatch):
+    """`Prometheus --pair` may write a fresh secret in the instant after a caller's check passed. The caller
+    must not consume the NEW secret on the strength of the old one: it is put back."""
+    old = lp.mint_secret(directory)
+    new = lp.replace_secret(directory)
+    assert old != new
+    monkeypatch.setattr(lp, "check_secret", lambda presented, d=None: True)      # the stale check passed
+    assert lp.consume_if_matches(old, directory) is False
+    monkeypatch.undo()
+    assert lp.check_secret(new, directory) is True, "the fresh secret survived"
+    assert sorted(p.name for p in directory.iterdir()) == ["pair.secret"], "no claimed file left behind"
+
+
+def test_a_losing_claim_leaves_no_litter(directory):
+    secret = lp.mint_secret(directory)
+    assert lp.consume_if_matches(secret, directory) is True
+    assert list(directory.iterdir()) == []
