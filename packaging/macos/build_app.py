@@ -67,6 +67,23 @@ PBS_URL = (
 )
 
 DEFAULT_EXTRAS = ("anthropic", "mcp", "slack", "discord")
+# Left out of the app unless someone opts back in with --include-pymupdf. PyMuPDF is AGPL-3.0 (or Artifex
+# commercial); Will's call, 2026-10-08, is that the app ships without it. What degrades without it: PDF text
+# extraction (utils/file_extract.py answers "[PDF file: name ... install PyMuPDF to extract text]") and the
+# downscaling of large images before they are sent to a model (gateway/image_prep.py sends the original bytes).
+DEFAULT_WITHOUT = ("pymupdf",)
+
+# The icon: the OAra "O." mark, 512 px, drawn into macOS's icon shape at each size macOS asks for. No 1024 px
+# slot (icon_512x512@2x): the source has 512 px, and that slot would be an upscale.
+ICON_SOURCE_PIXELS = 512
+ICON_DIR = Path(__file__).resolve().parent / "icon"
+ICONSET = {
+    "icon_16x16.png": 16, "icon_16x16@2x.png": 32,
+    "icon_32x32.png": 32, "icon_32x32@2x.png": 64,
+    "icon_128x128.png": 128, "icon_128x128@2x.png": 256,
+    "icon_256x256.png": 256, "icon_256x256@2x.png": 512,
+    "icon_512x512.png": 512,
+}
 # Paths that decide whether a tree is "the commit being released".
 SOURCE_PATHSPECS = ("src", "config", "templates", "pyproject.toml", "uv.lock", "README.md", "packaging/macos")
 
@@ -113,6 +130,7 @@ def info_plist(version: str, build: str | None = None) -> dict[str, Any]:
         "CFBundleName": APP_NAME,
         "CFBundleDisplayName": APP_NAME,
         "CFBundleExecutable": APP_NAME,
+        "CFBundleIconFile": APP_NAME,   # Contents/Resources/Prometheus.icns
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": version,
         "CFBundleVersion": build or version,
@@ -474,6 +492,19 @@ def license_index_text(rows: Sequence[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def build_icon(work: Path, runner: Runner = subprocess.run) -> Path:
+    """Render the iconset from the checked-in mark and turn it into ``Prometheus.icns``."""
+    iconset = work / f"{APP_NAME}.iconset"
+    shutil.rmtree(iconset, ignore_errors=True)
+    iconset.mkdir(parents=True)
+    _run(["xcrun", "swift", ICON_DIR / "make_iconset.swift", ICON_DIR / "mark-512.png", iconset,
+          *[f"{name}:{pixels}" for name, pixels in ICONSET.items()]], runner)
+    icns = work / f"{APP_NAME}.icns"
+    icns.unlink(missing_ok=True)
+    _run(["iconutil", "-c", "icns", iconset, "-o", icns], runner)
+    return icns
+
+
 # ── orchestration (verified by running it) ───────────────────────────────────
 
 def _extras_args(extras: Iterable[str]) -> list[str]:
@@ -541,6 +572,7 @@ def assemble(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover - 
 
     with (bundle / "Contents" / "Info.plist").open("wb") as handle:
         plistlib.dump(info_plist(version), handle)
+    shutil.copy2(build_icon(work), bundle / "Contents" / "Resources" / f"{APP_NAME}.icns")
     launchd = _launchd()
     (bundle / "Contents" / "Library" / "LaunchAgents" / f"{launchd.LABEL}.plist").write_bytes(agent_plist())
     for name in ("LICENSE", "NOTICE"):
@@ -630,18 +662,31 @@ def notarize(
         submit_zip.unlink(missing_ok=True)
 
 
-def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - needs a Mac
+def _csv(text: str) -> tuple[str, ...]:
+    return tuple(x for x in text.split(",") if x)
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build Prometheus.app (arm64).")
     parser.add_argument("--identity", required=True, help="SHA-1 fingerprint of the Developer ID Application certificate")
-    parser.add_argument("--extras", default=",".join(DEFAULT_EXTRAS), type=lambda s: tuple(x for x in s.split(",") if x))
-    parser.add_argument("--without", default="", type=lambda s: tuple(x for x in s.split(",") if x),
-                        help="distributions to leave out of the bundle (e.g. pymupdf)")
+    parser.add_argument("--extras", default=DEFAULT_EXTRAS, type=_csv)
+    parser.add_argument("--without", default=DEFAULT_WITHOUT, type=_csv,
+                        help="distributions to leave out of the bundle (default: pymupdf, which is AGPL-3.0)")
+    parser.add_argument("--include-pymupdf", action="store_true",
+                        help="ship PyMuPDF too (AGPL-3.0: only after the licensing decision says so)")
     parser.add_argument("--work", default=str(REPO / "dist" / "macos" / "work"))
     parser.add_argument("--out", default=str(REPO / "dist" / "macos"))
     parser.add_argument("--notarize", action="store_true")
     parser.add_argument("--notary-profile", default="")
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
+    if args.include_pymupdf:
+        args.without = tuple(x for x in args.without if x != "pymupdf")
+    return args
+
+
+def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - needs a Mac
+    args = parse_args(argv)
     try:
         summary = assemble(args)
     except BuildError as exc:

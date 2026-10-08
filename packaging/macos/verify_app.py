@@ -132,6 +132,21 @@ def metadata_problems(
     return problems
 
 
+def icon_problems(app: Path, info: dict[str, Any]) -> list[str]:
+    """The Info.plist names an icon, and the bundle holds a real .icns of that name."""
+    name = info.get("CFBundleIconFile")
+    if not name:
+        return ["Info.plist has no CFBundleIconFile: Login Items and notifications would show a generic icon"]
+    path = app / "Contents" / "Resources" / (name if str(name).endswith(".icns") else f"{name}.icns")
+    if not path.is_file():
+        return [f"{path.relative_to(app)} is missing (CFBundleIconFile is {name})"]
+    with path.open("rb") as handle:
+        magic = handle.read(4)
+    if magic != b"icns":
+        return [f"{path.relative_to(app)} is not an icns file"]
+    return []
+
+
 # ── the zip Beacon downloads ─────────────────────────────────────────────────
 
 def zip_problems(names: Sequence[str]) -> list[str]:
@@ -189,6 +204,8 @@ def verify_app(
         problems.append(f"the agent plist {agent_name or '(PrometheusAgentPlist unset)'} is not in Contents/Library/LaunchAgents")
     else:
         problems += metadata_problems(info, read_plist(agent_path), bundle_id=bundle_id)
+
+    problems += icon_problems(app, info)
 
     launcher = app / "Contents" / "MacOS" / str(info.get("CFBundleExecutable", ""))
     interpreter = app / "Contents" / "Resources" / "python" / "bin" / "python3.12"
