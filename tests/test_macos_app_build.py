@@ -12,7 +12,6 @@ runner, and the tests assert on the argv it received.
 
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import plistlib
 import subprocess
