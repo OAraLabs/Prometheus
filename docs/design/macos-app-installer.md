@@ -1,8 +1,10 @@
 # Prometheus for Mac: a signed, notarized Prometheus.app
 
-**Status: design and prototype measurements only.** Nothing is built, nothing is registered with
-macOS, nothing is published. Numbers below come from a throwaway prototype (see "How the numbers were
-taken"), not from a release build.
+**Status: the build exists and has been run; nothing is published.** The launcher, the assembler, the
+verifier and the release workflow are written, tested, and were run for real: a signed build was made
+and verified on this Mac. Not done yet: notarization (no credentials on this Mac), the bind and pairing
+changes the app depends on (separate PRs), and a run on a clean machine. Boot and unzip timings below are
+from a prototype; the size row is from the real build.
 
 ## For Will (one page)
 
@@ -25,6 +27,11 @@ thinned to arm64 and precompiled.
 | **base** (what `pip install oara-prometheus` gives) | 187 MiB | **69 MiB** | 5,865 | 27 |
 | **base + anthropic, mcp, slack, discord** (recommended) | 224 MiB | **81 MiB** | 9,700 | 37 |
 | `[full]` (adds Playwright, voice output) | 591 MiB | 195 MiB | 15,093 | 178 |
+
+**The real build** (recommended bundle, signed with the Developer ID, 31 s on this Mac): zip
+**87,717,565 bytes (83.7 MiB)**, 205 MiB installed, 9,693 files, 34 Mach-O. That is 2.7 MiB more
+download and 19 MiB less installed than the prototype: signatures and timestamps add, and the real build
+prunes Tcl/Tk and headers harder.
 
 For scale, Beacon's dmg is 186 MB. The recommended bundle is inside the 120 MB target. Biggest
 parts: PyMuPDF 52 MB, the interpreter about 50 MB before pruning, lxml about 11 MB (after thinning; it
@@ -72,33 +79,36 @@ cross-volume move. Those need the real build and a clean machine.
 6. **A separate bug, not mine:** the startup Doctor reports `config/prometheus.yaml not found` on every
    installed daemon, because it looks under a "repo root" that is the Python lib directory outside a
    checkout. Flagged as its own task.
+7. **`unlink` is not an exactly-once claim on APFS.** Measured on macOS 15.6: with eight threads
+   unlinking one path, up to seven calls returned success in a single trial. `rename` and
+   `open(O_CREAT|O_EXCL)` gave exactly one winner in 300 of 300. "Delete the secret to use it once"
+   would have let one secret be used several times; the pairing code claims by rename.
+8. **A distributed bundle carries licence obligations a `pip install` does not put on us.** PyMuPDF is
+   AGPL-3.0 (or Artifex commercial), python-telegram-bot is LGPL-3.0, certifi is MPL-2.0. PyMuPDF is
+   optional at runtime (PDF text extraction and image downscaling degrade without it), so the build
+   takes `--without pymupdf`. Whether it ships is a licensing decision, not a build one. The bundle carries
+   an index of every dependency's licence (`THIRD-PARTY-LICENSES.txt`) and each package's own text.
 
-### Calls I need from you
+### Decisions (Will, 2026-10-07: take the recommended option on each)
 
-1. **Pre-release.** Every Prometheus release so far (v0.9.0 to v0.9.6) is a Pre-release, so GitHub's
-   `releases/latest` resolves to nothing. The first release that carries the app should be a normal
-   release for `https://github.com/OAraLabs/Prometheus/releases/latest/download/Prometheus-mac-arm64.zip`
-   to work. Otherwise Beacon and the site list releases through the API and take the newest with the
-   asset (a second host, `api.github.com`, for Beacon's license wording).
-2. **Notarization credentials.** There is no `notarytool` keychain profile on this Mac. You run
-   `xcrun notarytool store-credentials prometheus --apple-id <id> --team-id 53JM8W47RL`; it prompts
-   you for the app-specific password and I never see it. CI needs the same five secrets Beacon's
-   release job uses, added to this repo.
-3. **A clean machine.** Acceptance needs a Mac with no Homebrew, Xcode tools or Python, a second
-   machine to prove 8005 and 8010 refuse remote connections, and screenshots of Login Items. Options:
-   a fresh user account you create, a Tart macOS VM (about 20 GB; this Mac has 48 GiB free, tight), or a
-   spare Mac.
-4. **Scope of the stack below.** Beacon's plan splits this into four tasks (bind, same-Mac pairing,
-   the app, and service management). I found no PR or branch for any of them. I propose I take all
-   four, in the order below, as separate draft PRs. Per-device credentials and conversation scoping
-   stay separate, and the pairing-approval API is another session's.
-5. **Service management.** Do you want `oara service status | start | stop | uninstall`, doctor
-   reporting service state, and the owner-only "start at login" API in the first stack, or after the
-   app? The install-service fix itself is in the first PR either way.
-6. **Phones.** A loopback-only daemon means the iPhone pairing link Beacon mints will not reach it
-   until there is an explicit "let my other devices connect" step. I would leave that out of v1.
-7. **Extras.** 81 MiB (anthropic, mcp, slack, discord) or 69 MiB (base)? Base runs OpenAI-compatible
-   providers; the Anthropic provider is the extra. I recommend 81.
+1. **Pre-release.** The first release carrying the app is published as a normal release, so
+   `https://github.com/OAraLabs/Prometheus/releases/latest/download/Prometheus-mac-arm64.zip` resolves
+   (every release so far is a Pre-release, which `releases/latest` skips). Publishing is Will's, and it
+   waits until per-device credentials and a restrictive default permission mode have landed.
+2. **Notarization credentials.** Will runs `xcrun notarytool store-credentials prometheus --apple-id <id>
+   --team-id 53JM8W47RL` (it prompts for the app-specific password; it is never seen here). CI needs five
+   repository secrets, listed in the header of `release-macos.yml`. Neither exists yet.
+3. **A clean machine.** A Tart macOS VM at the acceptance step. The exact image and size are shown and
+   Will is asked before it is pulled (about 20 GB of the 48 GiB free).
+4. **Scope.** Bind, same-Mac pairing, the app and `install-service` as separate draft PRs. Per-device
+   credentials, conversation scoping and the pairing-approval API stay separate.
+5. **Service management.** Only the `install-service` fix now. `oara service ...`, doctor reporting
+   service state and the "start at login" API come after the app.
+6. **Phones.** Left out of v1. Loopback only, and no widening API in this stack.
+7. **Extras.** The 81 MiB bundle: base plus anthropic, mcp, slack and discord.
+
+**Still open and Will's:** whether PyMuPDF ships in the app (AGPL-3.0, below); whether the OAra "O."
+mark is the app icon (there is no icon yet); and the signing-team plan around 2027-02-01.
 
 ## Shape
 
@@ -172,8 +182,9 @@ Settled with Beacon's side in writing, apart from the items marked as your call.
    response shape (`token`, `api_base_port`, `ws_port`) does not change.
 3. The secret is accepted only when the peer address is loopback **and** the `Host` header is loopback.
 4. It stays valid until its first successful use, even if Beacon opens an hour after install, and
-   survives a daemon restart. It is deleted on success. Wrong attempts on the six-digit path never
-   lock the secret path, and the secret path has no global lockout.
+   survives a daemon restart. It is used exactly once, claimed by an atomic rename (not `unlink`, finding
+   7), and deleted. Wrong attempts on the six-digit path never lock the secret path, and the secret path
+   has no global lockout.
 5. It is never logged.
 6. The credential returned comes from one function. Today it is the global token, exactly what
    `/api/setup/pair` returns now. When per-device credentials land it becomes the owner device token
@@ -182,7 +193,9 @@ Settled with Beacon's side in writing, apart from the items marked as your call.
    dead end. It is written by `--pair`. The route name is chosen to sit beside the other `/api/pair/*`
    routes planned for new devices. A configured daemon has no unauthenticated route today (the bearer
    middleware covers every `/api/` and `/v1/` path), so this route is a deliberate, tested exemption
-   with its own loopback checks. For the same reason Beacon's "is there already a Prometheus here"
+   with its own loopback checks and an Origin refusal. Exemptions live in one exact allowlist,
+   `web/public_routes.py`, shared with the pairing-approval API: a method and a path pattern, never a
+   prefix, and a test that fails if any other route answers without a bearer. For the same reason Beacon's "is there already a Prometheus here"
    probe gets a 401 from a configured daemon until a discovery route exists.
 
 ### Signing and release
@@ -222,22 +235,39 @@ behaviour is written and run first, and its red output kept.
    against fixtures; the launcher is Swift and is checked by a real signed run on a Mac.
 5. **oara.ai button and redirect**, after your OK on the page.
 
-## Not verified yet
+## What has been proven, and what has not
 
-- `SMAppService` registering an agent when the launcher is exec'd directly (Beacon wants an exit code,
-  not a LaunchServices round trip), and when the app sits in `~/Applications`. Fallback if either
-  fails: a plist in `~/Library/LaunchAgents` bootstrapped with `launchctl`.
-- Hardened runtime with no entitlements: Python, `ctypes`/libffi closures, PyMuPDF, cryptography.
-- The Login Items entry actually reads "Prometheus", and the "requires approval" case.
-- `--uninstall` moving the app it is running from to the Trash.
-- Logout and login brings it back; `--unregister` leaves no agent behind.
-- Timing on a clean machine, Gatekeeper's first assessment, and verify time on ~10,000 files.
-- Reproducibility: the prototype exported requirements without hashes. The build uses
-  `uv export --hashes`, pins the python-build-standalone release (uv's latest 3.12 is 3.12.13; CI
-  tests 3.12.14), and records both in the manifest.
+**Proven by running it (2026-10-07):**
+
+- A real signed build from a clean tree passes `verify_app.py`: every Mach-O is Developer ID signed with
+  the hardened runtime and a secure timestamp, arm64 only, no entitlements.
+- **The hardened runtime needs no entitlements.** The signed interpreter loads all 24 modules tried
+  (including `slack_bolt`, `discord`, `anthropic`, `mcp`), runs a `ctypes` callback (libffi closures),
+  renders with PyMuPDF and parses with lxml.
+- **`SMAppService.register()` works when the launcher is exec'd directly**, from `~/Applications`, signed:
+  idempotent, `KeepAlive` restarts a SIGTERMed agent after the throttle, `--unregister` leaves nothing
+  behind (no launchd job, no process, no Login Items record). The agent row in Login Items is named after
+  its PROGRAM file, which is why the agent runs the launcher.
+- `--register` refuses correctly: 11 against a real setup-mode Prometheus, 12 against a plain HTTP server
+  and against a look-alike login wall that says "unauthorized" without "Bearer".
+- `--pair` writes a `0600` file in a `0700` directory, 43 base64url characters, replaced atomically.
+  `--uninstall` removes the pairing directory and the app (moving the app it is running from to the
+  Trash works) and leaves `~/.prometheus` untouched.
+
+**Not proven yet:**
+
+- The `requires_approval` path (it needs the item switched off in System Settings), registration from
+  `/Applications`, ad-hoc signed builds, and surviving a logout and login.
+- That Login Items shows "Prometheus" for the real app (the BTM record was read for the dev-test app).
+- Notarization, stapling and Gatekeeper's first assessment (no credentials on this Mac).
+- Anything on a clean machine, and the installed time end to end.
+- The daemon under the real agent: `--run` passes `--bind 127.0.0.1`, which the bind change adds.
+- Reproducibility across two build machines. The build pins the python-build-standalone release and
+  sha256, installs from `uv export --hashes` with `--require-hashes --only-binary`, and records the lock's
+  hash in the manifest; two runs have not yet been compared.
 - The signing certificate that CI holds expires 2027-02-01, and Beacon expects a move to an OAra Labs
-  certificate before then. A new team id would break Beacon's pin unless that list is updatable in a
-  Beacon release first. Existing timestamped signatures stay valid.
+  certificate before then. Beacon pins a list of team ids, so a new team can be added in a Beacon release
+  before builds signed with it ship. Existing timestamped signatures stay valid.
 
 ## One installer for both ("OAra for Mac")
 
