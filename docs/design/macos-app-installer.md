@@ -28,10 +28,10 @@ thinned to arm64 and precompiled.
 | **base + anthropic, mcp, slack, discord** (recommended) | 224 MiB | **81 MiB** | 9,700 | 37 |
 | `[full]` (adds Playwright, voice output) | 591 MiB | 195 MiB | 15,093 | 178 |
 
-**The real build** (recommended bundle, signed with the Developer ID, 31 s on this Mac): zip
-**87,717,565 bytes (83.7 MiB)**, 205 MiB installed, 9,693 files, 34 Mach-O. That is 2.7 MiB more
-download and 19 MiB less installed than the prototype: signatures and timestamps add, and the real build
-prunes Tcl/Tk and headers harder.
+**The real build, notarized** (the recommended bundle without PyMuPDF, signed with the Developer ID,
+notarized by Apple and stapled; about 2.5 minutes on this Mac including Apple's wait): zip
+**63,432,230 bytes (60.5 MiB)**, 150 MiB installed, 9,573 files, 30 Mach-O. Leaving PyMuPDF out is
+24 MB off the download. (With PyMuPDF the same build was 87.7 MB.)
 
 For scale, Beacon's dmg is 186 MB. The recommended bundle is inside the 120 MB target. Biggest
 parts: PyMuPDF 52 MB, the interpreter about 50 MB before pruning, lxml about 11 MB (after thinning; it
@@ -84,10 +84,13 @@ cross-volume move. Those need the real build and a clean machine.
    `open(O_CREAT|O_EXCL)` gave exactly one winner in 300 of 300. "Delete the secret to use it once"
    would have let one secret be used several times; the pairing code claims by rename.
 8. **A distributed bundle carries licence obligations a `pip install` does not put on us.** PyMuPDF is
-   AGPL-3.0 (or Artifex commercial), python-telegram-bot is LGPL-3.0, certifi is MPL-2.0. PyMuPDF is
-   optional at runtime (PDF text extraction and image downscaling degrade without it), so the build
-   takes `--without pymupdf`. Whether it ships is a licensing decision, not a build one. The bundle carries
-   an index of every dependency's licence (`THIRD-PARTY-LICENSES.txt`) and each package's own text.
+   AGPL-3.0 (or Artifex commercial), python-telegram-bot is LGPL-3.0, certifi is MPL-2.0. **The app ships
+   without PyMuPDF** (the default; `--include-pymupdf` opts back in; the manifest says what was left out).
+   Without it two things degrade, measured on the notarized bundle: PDF text extraction returns the
+   placeholder `[PDF file: name.pdf — install PyMuPDF to extract text]` instead of the text (which tells the
+   user to install something an app user cannot install), and large images are sent to the model at full
+   size instead of being shrunk first. Word and Excel files are unaffected. LGPL and MPL remain, with
+   their texts in the bundle (`THIRD-PARTY-LICENSES.txt` and each package's own licence file)
 
 ### Decisions (Will, 2026-10-07: take the recommended option on each)
 
@@ -107,8 +110,9 @@ cross-volume move. Those need the real build and a clean machine.
 6. **Phones.** Left out of v1. Loopback only, and no widening API in this stack.
 7. **Extras.** The 81 MiB bundle: base plus anthropic, mcp, slack and discord.
 
-**Still open and Will's:** whether PyMuPDF ships in the app (AGPL-3.0, below); whether the OAra "O."
-mark is the app icon (there is no icon yet); and the signing-team plan around 2027-02-01.
+**Decided since (Will, 2026-10-08):** PyMuPDF is left out of the app (below). The icon is the OAra "O."
+mark. The clean-machine test is on a real MacBook, not a VM. **Still open:** the signing-team plan around
+2027-02-01, and the release gates in the pull request.
 
 ## Shape
 
@@ -343,12 +347,22 @@ behaviour is written and run first, and its red output kept.
   also showed the launcher and the daemon disagreed about the home directory (FileManager versus `$HOME`);
   the launcher now uses `$HOME`, like the daemon.
 
+- **Notarized, stapled and accepted by Apple, 2026-10-08.** The `prometheus` keychain profile submitted the
+  signed app and Apple accepted it on the first submission. On the zip: `verify_app.py --notarized` passes
+  (signature, hardened runtime, timestamp, no entitlements, arm64, icon, stapled ticket); `stapler validate`
+  "worked"; `syspolicy_check distribution` "passed all pre-distribution checks"; `spctl -a -t exec -vv`
+  says `accepted, source=Notarized Developer ID, origin=Developer ID Application: William Hieber`, both
+  without the downloaded-file flag (how Beacon's own download looks) and with the quarantine attribute set
+  on every file (what a browser or AirDrop adds). `codesign` reports `Notarization Ticket=stapled`.
+- The notarized build, run end to end in an isolated home, behaves exactly like the unnotarized one above.
+
 **Not proven yet:**
 
 - The `requires_approval` path (it needs the item switched off in System Settings), registration from
   `/Applications`, ad-hoc signed builds, and surviving a logout and login.
 - That Login Items shows "Prometheus" for the real app (the BTM record was read for the dev-test app).
-- Notarization, stapling and Gatekeeper's first assessment (no credentials on this Mac).
+- A real double-click launch of a quarantined, notarized copy (this is the clean-machine test); everything
+  short of the launch was checked (below).
 - Anything on a clean machine, and the installed time end to end.
 - The daemon started BY LAUNCHD through `SMAppService` (the end-to-end above ran `--run` directly, to keep
   it away from a real home directory). That needs a clean user or VM.
