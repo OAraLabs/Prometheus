@@ -609,6 +609,15 @@ Every PR: red tests first with the failing output kept, a **draft** PR, Auto-fix
 
 Other tests every PR keeps green: the full suite on the project venv (system `python3` fails at collection), the parity goldens, and `ruff` on `src/`.
 
+
+### Backlog (decided against for v0.4; **not built**)
+
+* **No 6-digit-code route in v0.4 (P4, Will 2026-10-08).** A Prometheus that is already set up and has no operator connected is joined by one of: Beacon on the Prometheus Mac (path A, `/api/pair/local`, **app installs only**: `local_pairing.enabled()` needs `PROMETHEUS_INSTALL_KIND=app`), `oara pair approve` at the machine (the device gets scoped access), or pasting the API token (the global token is an operator). A terminal-installed Mac has no path A.
+* **`oara pair this-mac`: not built.** The gap it would close: a terminal-installed Prometheus whose owner wants the Beacon on that same Mac to be an owner device. Design if it is ever wanted: the command writes the same one-time same-Mac secret file the app launcher writes (`config/local_pairing.py`) and records an opt-in in `prometheus.yaml` that `local_pairing.enabled()` reads, so `/api/pair/local` is served on a terminal install only after the owner asked for it from the terminal, and the existing loopback-peer, loopback-Host, no-`Origin` and one-use rules apply unchanged. It adds no route and no new credential type.
+* **`oara network show | this-mac | home`: not built.** Beacon's switch and a hand edit are the two ways in; the CLI can call `persist_choice` (`web/network.py`).
+* **The app launcher stops pinning `--bind 127.0.0.1` (#695's file).** Until then `PUT /api/network` from the app is a 409 `bind_overridden` (the flag outranks the file). A follow-up for #695, not a blocker for v0.4.
+* **Live rebind**, **a pairing window (D4)**, **pairing push notifications** (until the dispatcher can target operators only).
+
 ---
 
 ## 13. What I have not verified
