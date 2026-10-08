@@ -520,20 +520,20 @@ def create_app(
         # The response is the ONLY copy of the plaintext token that will ever
         # exist — the store keeps a SHA-256.
         if owner:
-            from prometheus.permissions import approver as _approver
-
-            # The global token minting an OWNER device — the person's own cockpit trading the setup-mode
-            # token for one of its own. Global-only (checked above), so a device can never grant the tier.
-            # From THIS Mac's loopback address it is this Mac's cockpit: it carries the same-Mac source and
-            # replaces the earlier same-Mac credentials, exactly as a re-pairing does. From anywhere else
-            # it is another computer's: it keeps the minting credential's label as its source, replaces
-            # nothing, and is never replaced by this Mac's re-pairing.
-            if is_loopback_peer(request):
-                source = api_token_module.OWNER_SOURCE_SAME_MAC_MINT
-                replaces = api_token_module.SAME_MAC_OWNER_SOURCES
-            else:
-                source, replaces = _approver.from_request(request).label, ()
-            minted = _devices_or_create().mint_owner(name, platform, by=source, replaces=replaces)
+            # The global token minting an OWNER device — the person's own cockpit on THIS Mac trading the
+            # setup-mode token for one of its own. Owner tokens come only from same-Mac pairing (Will,
+            # 2026-10-08): from any other address this is refused, and the other computer is enrolled as an
+            # ordinary, scoped device like every approved one. From this Mac's loopback address it carries the
+            # same-Mac source and replaces the earlier same-Mac credentials, exactly as a re-pairing does.
+            # (The test is the peer address; a reverse proxy on this machine makes a remote request look
+            # local, which can only cost this Mac its own owner credential — `Prometheus --pair` restores it.)
+            if not is_loopback_peer(request):
+                return JSONResponse(status_code=403, content={
+                    "error": "owner devices are issued only for this Mac, from this Mac; enrol another "
+                             "computer without owner (an ordinary, scoped device)"})
+            minted = _devices_or_create().mint_owner(
+                name, platform, by=api_token_module.OWNER_SOURCE_SAME_MAC_MINT,
+                replaces=api_token_module.SAME_MAC_OWNER_SOURCES)
             minted["revoked_previous"] = len(minted["revoked_previous"])
             return minted
         return _devices_or_create().mint(name, platform)

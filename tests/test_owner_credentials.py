@@ -166,26 +166,25 @@ def test_pairing_again_revokes_the_owner_devices_the_same_route_issued_before(wo
     assert len(live_owners) == 1
 
 
-def test_pairing_again_touches_only_owner_devices_the_same_route_issued(world, secret):
-    """Another owner device (minted by the global token, a different source), an ordinary device and the
+def test_pairing_again_touches_only_owner_devices_of_the_sources_it_replaces(world, secret):
+    """Another source's owner device (only the store API can make one now), an ordinary device and the
     global token are all untouched."""
-    elsewhere = call(world, GLOBAL, "POST", "/api/devices",
-                     json={"name": "Beacon, exchanged", "platform": "macos", "owner": True}).json()
+    elsewhere = world.devices.mint_owner("some other source", "macos", by="some-other-source")
     token = pair_local(world, secret)["token"]
 
-    assert call(world, elsewhere["token"], "GET", "/api/sessions").status_code == 200
-    assert call(world, world.a["token"], "GET", "/api/sessions").status_code == 200
-    assert call(world, GLOBAL, "GET", "/api/sessions").status_code == 200
-    assert call(world, token, "GET", "/api/sessions").status_code == 200
+    assert sessions_status(world, elsewhere["token"]) == 200
+    assert sessions_status(world, world.a["token"]) == 200
+    assert sessions_status(world, GLOBAL) == 200
+    assert sessions_status(world, token) == 200
 
 
 def test_the_device_list_says_where_each_owner_device_came_from(world, secret):
     pair_local(world, secret)
-    call(world, GLOBAL, "POST", "/api/devices", json={"name": "exchanged", "platform": "macos", "owner": True})
+    mint_owner_via_api(world, name="exchanged")
     call(world, GLOBAL, "POST", "/api/devices", json={"name": "phone", "platform": "ios"})
     by_name = {d["name"]: d for d in call(world, GLOBAL, "GET", "/api/devices").json()}
     assert by_name["Beacon on this Mac"]["owner_source"] == "same-mac-pairing"
-    assert by_name["exchanged"]["owner_source"] == "global-token"
+    assert by_name["exchanged"]["owner_source"] == "same-mac-mint"
     assert by_name["phone"]["owner_source"] is None and by_name["phone"]["owner"] is False
 
 
@@ -300,16 +299,28 @@ def test_an_owner_device_cannot_define_an_mcp_server(world):
     assert r.status_code == 401
 
 
-def test_the_global_token_can_mint_an_owner_device_and_the_default_is_ordinary(world):
+def test_the_global_token_can_mint_an_owner_device_from_this_mac_and_the_default_is_ordinary(world):
     plain = call(world, GLOBAL, "POST", "/api/devices", json={"name": "phone", "platform": "ios"})
-    owner = call(world, GLOBAL, "POST", "/api/devices",
-                 json={"name": "Beacon on this Mac", "platform": "macos", "owner": True})
+    owner = mint_owner_via_api(world, name="Beacon on this Mac")
     assert plain.status_code == owner.status_code == 201
     rows = {d["id"]: d for d in call(world, GLOBAL, "GET", "/api/devices").json()}
     assert rows[plain.json()["id"]]["owner"] is False
     assert rows[owner.json()["id"]]["owner"] is True
     # and the minted owner token really is operator-equivalent
     assert call(world, owner.json()["token"], "GET", "/api/sessions").status_code == 200
+
+
+def test_owner_devices_come_only_from_this_mac(world):
+    """Will, 2026-10-08: owner tokens come only from same-Mac pairing. Another computer is enrolled as an
+    ordinary, scoped device — even by the global token."""
+    before = len(world.devices.list_devices())
+    refused = mint_owner_via_api(world, peer="192.168.1.20", name="Jennifer's Mac")
+    assert refused.status_code == 403 and "this Mac" in refused.json()["error"]
+    assert len(world.devices.list_devices()) == before, "a refused owner mint created a device"
+    # the ordinary route from the same address is fine, and is scoped
+    plain = call(world, GLOBAL, "POST", "/api/devices", json={"name": "Jennifer's Mac", "platform": "macos"})
+    assert plain.status_code == 201
+    assert verify_token(plain.json()["token"], GLOBAL, world.devices).is_operator is False
 
 
 def test_owner_must_be_a_real_boolean(world):
@@ -446,18 +457,13 @@ def test_pairing_replaces_what_an_explicit_mint_from_this_mac_issued(world, secr
     assert sessions_status(world, paired["token"]) == 200
 
 
-def test_an_owner_device_minted_for_another_computer_is_never_revoked(world, secret):
-    """The global token minting an owner device from another machine's address is a different
-    computer's cockpit, not this Mac's."""
-    elsewhere = mint_owner_via_api(world, peer="192.168.1.20", name="Will's laptop")
-    assert elsewhere.status_code == 201 and elsewhere.json()["revoked_previous"] == 0
-    pair_local(world, secret)
-    mint_owner_via_api(world)
-    assert sessions_status(world, elsewhere.json()["token"]) == 200
-    # …and a mint for another computer revokes nothing of this Mac's.
-    here = mint_owner_via_api(world, name="this Mac").json()["token"]
-    mint_owner_via_api(world, peer="192.168.1.21", name="a third computer")
-    assert sessions_status(world, here) == 200
+def test_a_replacement_only_touches_the_sources_it_names(tmp_path):
+    store = DeviceStore(tmp_path / "devices.db")
+    other = store.mint_owner("other", "macos", by="some-other-source")
+    first = store.mint_owner("first", "macos", by="same-mac-pairing")
+    second = store.mint_owner("second", "macos", by="same-mac-pairing", replaces=("same-mac-pairing",))
+    assert second["revoked_previous"] == [first["id"]]
+    assert store.is_owner(other["id"]) and store.is_owner(second["id"]) and not store.is_owner(first["id"])
 
 
 def test_the_new_credential_and_non_owner_devices_are_never_among_those_revoked(world, secret, pairing_dir):
