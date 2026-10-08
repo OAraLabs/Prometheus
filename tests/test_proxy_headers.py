@@ -201,3 +201,25 @@ def test_the_launcher_hands_the_config_to_start_web_so_trusted_proxies_is_not_de
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "start_web"]
     assert calls, "the launcher no longer calls start_web"
     assert all("config" in {kw.arg for kw in call.keywords} for call in calls)
+
+
+def test_the_builder_keeps_the_loopback_host_guard_on_a_loopback_bind_and_only_there():
+    """The Host-header check (DNS rebinding, web/loopback.py) used to be built beside the uvicorn config; it
+    moved into the builder with it, and must still be exactly where it was."""
+    from prometheus.web.loopback import LoopbackHostGuard
+    from prometheus.web.serving import serve_config
+
+    app = lambda scope, receive, send: None  # noqa: E731
+    assert isinstance(serve_config(app, "127.0.0.1", 8005).app, LoopbackHostGuard)
+    assert isinstance(serve_config(app, "::1", 8005).app, LoopbackHostGuard)
+    assert serve_config(app, "0.0.0.0", 8005).app is app
+
+
+def test_start_web_publishes_its_server_so_a_caller_can_stop_it_cleanly(tmp_path):
+    import uvicorn
+
+    world = World(tmp_path)
+    with serving(world.app) as url:
+        server = world.app.state.http_server
+        assert isinstance(server, uvicorn.Server) and server.started
+        assert httpx.get(f"{url}/api/hello").status_code == 200
