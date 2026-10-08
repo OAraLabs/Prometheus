@@ -77,6 +77,8 @@ A device with no token asks to join, and the owner approves it on a device they 
 | POST | `/api/pair/requests/{id}/approve` | Operator. Optional `{name, match_code}` and **nothing else**: any other key, `owner` included, is a 400, so no client can believe it granted more than an ordinary scoped device. A retyped `match_code` that differs is 422 `code_mismatch`; 409 `not_pending` names the winner; 410 `expired`. The response carries no token. |
 | POST | `/api/pair/requests/{id}/deny` | Operator. |
 
+The owner hears about a request in Beacon (the `pairing_pending` frame below), in the terminal (`oara pair list | approve <id> | deny <id>`, which uses these routes with the global token), and in Telegram only if `pairing.telegram_prompts` is on (off by default; plain text with Approve and Deny buttons, private chats only). The first decision wins on every channel; the others are told.
+
 The token is **sealed** to the key the device sent (X25519, HKDF-SHA256 with the request id as salt, ChaCha20-Poly1305 with the request id as associated data), so it is never in clear on the wire or at rest; `tests/vectors/pairing_seal_v1.json` holds bytes to check a client against. A retried poll returns the same sealed blob until the device acknowledges or five minutes pass, and a device nobody collects within five minutes of approval is revoked. An approved device is an ordinary, **scoped** one: it owns no conversations and sees none of the operator's.
 
 ### Chat
@@ -375,6 +377,13 @@ SignalBus fan-out (broadcast to all authed clients; payloads carry `session_id` 
 | `memory_updated` | Memory file changes |
 | `curator_report` | Weekly curator consolidation report |
 | `coding_round` / `coding_tool` / `coding_acceptance` / `coding_complete` / `coding_stream_error` | Coding-run live stream: per-round progress (with a run-unique `seq` — `round_index` restarts per episode), per-tool-call detail attributed to its round, the ground-truth acceptance verdict per episode, terminal verdict, non-fatal stream interruption |
+
+Pairing requests, sent **only to operator sockets** (the global token or an owner device; never to a scoped device, and never through the SignalBus), because they carry a source address and a match code. They name no session, so a plain broadcast would reach every device: the bridge sends them with a targeted send instead.
+
+| Type | Purpose |
+|---|---|
+| `pairing_pending` | A device is asking to join. `payload`: `request_id`, `device_name` (render as text, never markup), `platform`, `source_ip`, `match_code`, `created_at`, `expires_at`, `ttl_seconds`. A socket that connects later is sent one per request still waiting, oldest first, right after `connected`; a frame can arrive twice if a request lands mid-connect, so key on `request_id`. |
+| `pairing_resolved` | It was decided, withdrawn or ran out. `payload`: `request_id`, `resolution` (`approved`, `denied`, `expired`, `canceled`), `by` (`beacon`, `telegram`, `cli`, `requester`, `system`), `resolved_at`. Retract the prompt. |
 
 Skill-draft lifecycle events (`skill_draft_created` / `skill_draft_accepted` / `skill_draft_rejected` / `video_ingest_failed`) ride the `sentinel_signal` channel — watch its `kind` field.
 

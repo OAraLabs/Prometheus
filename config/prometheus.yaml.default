@@ -1188,6 +1188,13 @@ pairing:
   max_pending_per_source: 1
   max_requests_per_source_per_hour: 10
 
+  # Opt-in. Approve / Deny buttons in your PRIVATE Telegram chats (the positive
+  # ids in gateway.allowed_chat_ids; a group in that list is never used) when a
+  # new device asks to join. Off by default: Telegram is a third-party relay,
+  # and the message carries the device's address and a match code. Beacon is
+  # told either way. The device's name is sent as plain text, never formatted.
+  telegram_prompts: false
+
 # APNs push to enrolled devices (GRAFT-MOBILE-BRIDGE 2). Disabled by default:
 # enabling requires the `push` extra (pip install 'oara-prometheus[push]')
 # and an Apple p8 signing key — an enabled-but-broken block FAILS THE BOOT

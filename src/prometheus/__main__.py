@@ -1500,6 +1500,7 @@ def main() -> None:
     # Onboarding Phase 0: the canonical setup/diagnostics surface.
     from prometheus.cli.doctor import add_doctor_subparser
     from prometheus.cli.gepa import add_gepa_subparser
+    from prometheus.cli.pair import add_pair_subparser
     from prometheus.cli.retention import add_retention_subparser
     from prometheus.cli.scrub import add_scrub_subparser
     from prometheus.cli.service import add_install_service_subparser
@@ -1507,6 +1508,7 @@ def main() -> None:
     from prometheus.cli.token import add_token_subparser
     add_setup_subparser(subparsers)
     add_token_subparser(subparsers)
+    add_pair_subparser(subparsers)
     add_doctor_subparser(subparsers)
     add_retention_subparser(subparsers)
     add_install_service_subparser(subparsers)
@@ -1821,6 +1823,11 @@ def main() -> None:
     if args.command == "token":
         from prometheus.cli.token import run_token_command
         sys.exit(run_token_command(args, load_config(args.config)))
+
+    # `oara pair list|approve|deny` — decide the devices asking to join (the terminal route).
+    if args.command == "pair":
+        from prometheus.cli.pair import run_pair_command
+        sys.exit(run_pair_command(args, load_config(args.config)))
 
     # `oara doctor` — install diagnostics (exit nonzero on errors).
     if args.command == "doctor":

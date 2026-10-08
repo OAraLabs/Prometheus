@@ -80,10 +80,10 @@ def test_approve_by_full_id_mints_a_scoped_device_and_prints_no_token(world):
     created, requester, _ = world.created()
     code, out = run(world, "approve", created["request_id"])
     assert code == 0 and "Approved" in out and "Jennifer's MacBook" in out
-    sealed = world.poll(created).json()["sealed"]
-    token = requester.unseal(created["request_id"], sealed)["token"]
+    polled = world.poll(created).json()          # once: a second poll in the same second is refused
+    token = requester.unseal(created["request_id"], polled["sealed"])["token"]
     assert token not in out and created["poll_secret"] not in out
-    assert world.devices.is_owner(world.poll(created).json()["device_id"]) is False
+    assert world.devices.is_owner(polled["device_id"]) is False
 
 
 def test_approve_by_a_unique_prefix(world):
@@ -95,16 +95,17 @@ def test_approve_by_a_unique_prefix(world):
 def test_a_prefix_that_matches_two_is_refused_not_guessed(world):
     a, _, _ = world.created(source="192.0.2.1")
     b, _, _ = world.created(source="192.0.2.2")
-    shared = ""
-    for x, y in zip(a["request_id"], b["request_id"], strict=False):
-        if x != y:
-            break
-        shared += x
-    if not shared:
-        pytest.skip("two random ids with no common first character: nothing ambiguous to test")
-    code, out = run(world, "approve", shared)
+    # Ids are random, so give the two rows ids that share a prefix: the ambiguity is the thing under test.
+    one, two = "abc123" + "0" * 26, "abc123" + "1" * 26
+    conn = world.devices.connection
+    conn.execute("UPDATE pair_requests SET id = ? WHERE id = ?", (one, a["request_id"]))
+    conn.execute("UPDATE pair_requests SET id = ? WHERE id = ?", (two, b["request_id"]))
+    conn.commit()
+    code, out = run(world, "approve", "abc123")
     assert code == 1 and "more than one" in out
-    assert world.poll(a).json()["status"] == "pending"
+    assert len(world.devices.list_devices()) == 2, "nothing decided: only the world's own two devices"
+    code, out = run(world, "deny", "abc1230")           # one more character makes it unique
+    assert code == 0 and "Denied" in out
 
 
 def test_a_too_short_prefix_is_refused(world):
@@ -142,8 +143,7 @@ def test_deny(world):
 
 
 def test_it_says_it_is_the_terminal(world):
-    world.runtime.notifier.subscribe(lambda kind, payload: world.events.append((kind, payload)) or True)
-    created, _, _ = world.created()
+    created, _, _ = world.created()               # the world already records what the channels are told
     run(world, "approve", created["request_id"])
     resolved = [p for k, p in world.events if k == "resolved"]
     assert [p["by"] for p in resolved] == ["cli"]

@@ -137,6 +137,9 @@ class PairingSettings:
     max_pending: int = 3
     max_pending_per_source: int = 1
     max_requests_per_source_per_hour: int = 10
+    #: Opt-in: Approve/Deny buttons in the owner's private Telegram chats. Off by default: Telegram is a
+    #: third-party relay for a message that carries a source address and a match code.
+    telegram_prompts: bool = False
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any] | None) -> PairingSettings:
@@ -147,8 +150,13 @@ class PairingSettings:
         if enabled is not None and not isinstance(enabled, bool):
             logger.warning("pairing.requests_enabled must be true or false, got %r — using true", enabled)
             enabled = None
+        telegram = section.get("telegram_prompts")
+        if telegram is not None and not isinstance(telegram, bool):
+            logger.warning("pairing.telegram_prompts must be true or false, got %r — using false", telegram)
+            telegram = None
         return cls(
             requests_enabled=True if enabled is None else enabled,
+            telegram_prompts=bool(telegram),
             request_ttl_seconds=_ttl(section),
             max_pending=_whole(section, "max_pending", 3),
             max_pending_per_source=_whole(section, "max_pending_per_source", 1),
@@ -176,6 +184,10 @@ class NotPending(PairError):
     def __init__(self, status: str) -> None:
         super().__init__(status)
         self.status = status
+
+
+class CodeMismatch(PairError):
+    """The operator retyped a match code that differs from the one the request carries."""
 
 
 class LimitExceeded(PairError):

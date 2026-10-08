@@ -21,6 +21,7 @@ This page is the complete map of what Prometheus can do: every entry point, tool
 | `oara daemon [--telegram-only] [--bind ADDRESS]` | Start the always-on daemon: web API and WebSocket, gateways, cron, heartbeat, SENTINEL (if enabled), memory extractor. `--bind 127.0.0.1` listens on this machine only (default: every interface, plain HTTP); see [Ports & remote access](api.md#ports--remote-access) |
 | `oara doctor` | Diagnostics with one fix hint per failure; exits nonzero when anything is broken, so it works in scripts |
 | `oara token show \| rotate` | Re-print the web API bearer token, or invalidate it and mint a new one |
+| `oara pair list \| approve <id> \| deny <id>` | See and decide the devices asking to join this Prometheus (an id may be a unique prefix of 6+ characters; `approve` takes `--name` and `--code`). Uses the global token against the local daemon |
 | `oara install-service [--force]` | Write and enable a systemd **user** unit |
 | `oara identity --show \| --regenerate` | Manage the SOUL.md / AGENTS.md identity files |
 | `oara migrate --from hermes\|openclaw [--dry-run]` | Import config, identity, memory, and skills from `~/.hermes`, `~/.openclaw`, or `~/.clawdbot` |

@@ -193,6 +193,9 @@ class WebSocketBridge:
         # sessions its device owns; the global token's socket is the firehose,
         # exactly as before. See docs/contracts/device-scoping.md.
         self._access = SessionAccess(lambda: self._device_store, self._session_exists)
+        # Pairing requests (web/pairing_routes.py): set by attach_pairing. Their frames go to OPERATOR
+        # sockets only, through send_to_operators and never broadcast (see there for why).
+        self._pairing: Any = None
         # A token's sockets die with the token. Authentication happens once, at connect, so without
         # this a revoked device kept its open socket — and, for an owner device, every session's frames.
         add_listener = getattr(device_store, "add_revoke_listener", None)
@@ -286,6 +289,69 @@ class WebSocketBridge:
             },
         })
 
+    # -- pairing requests ----------------------------------------------------
+
+    def attach_pairing(self, runtime: Any) -> None:
+        """Connect the pairing runtime: its events become frames for the owner's sockets.
+
+        ``pairing_pending`` when a new device asks to join, ``pairing_resolved`` when it is decided,
+        withdrawn or runs out (docs/PAIRING-APPROVAL-API.md, 5.1). A connection that arrives later is
+        told what is still waiting (:meth:`_backfill_pairing`).
+        """
+        self._pairing = runtime
+        runtime.notifier.subscribe(self._on_pairing_event)
+
+    def operator_sockets(self) -> list[Any]:
+        """Sockets whose identity is an operator: the global token or an OWNER device (``is_operator``).
+
+        A socket with no recorded identity is not one, even on a daemon with auth on: it fails closed.
+        """
+        return [ws for ws in tuple(self._clients) if getattr(self._ws_identity.get(ws), "is_operator", False)]
+
+    async def send_to_operators(self, event: dict[str, Any]) -> int:
+        """Send *event* to operator sockets only. Returns how many took it.
+
+        NOT ``broadcast``: ``_wants`` only holds back a frame that names a session a device does not
+        own, and a pairing frame names none, so a broadcast would put a source address and a match code in
+        front of every scoped device on the daemon. And not the SignalBus, whose tail is durable and is
+        replayed to any authenticated client. A send that fails drops that socket, as ``broadcast`` does.
+        """
+        raw = json.dumps(event)
+        sent = 0
+        for ws in self.operator_sockets():
+            try:
+                await ws.send(raw)
+                sent += 1
+            except Exception as exc:
+                self._frames_dropped += 1
+                self._clients.discard(ws)
+                self._clients_discarded += 1
+                logger.warning("WS frame DROPPED for client %s (type=%s): %s: %s",
+                               _client_label(ws), event.get("type", "?"), type(exc).__name__, exc)
+        return sent
+
+    async def _on_pairing_event(self, kind: str, payload: dict[str, Any]) -> bool:
+        frame_type = {"pending": "pairing_pending", "resolved": "pairing_resolved"}.get(kind)
+        if frame_type is None:
+            return False
+        sent = await self.send_to_operators({"type": frame_type, "timestamp": time.time(), "payload": payload})
+        return sent > 0
+
+    async def _backfill_pairing(self, websocket: Any) -> None:
+        """Tell a newly connected operator what is still waiting, oldest first, so opening Beacon after the
+        request arrived still shows it. A frame can arrive twice if a request lands mid-connect: clients
+        key on ``request_id``."""
+        identity = self._ws_identity.get(websocket)
+        if self._pairing is None or not getattr(identity, "is_operator", False):
+            return
+        try:
+            await self._pairing.sweep()
+            for payload in self._pairing.pending_payloads():
+                await self._send_one(websocket, {"type": "pairing_pending", "timestamp": time.time(),
+                                                 "payload": payload})
+        except Exception:
+            logger.warning("could not backfill pairing requests to %s", _client_label(websocket), exc_info=True)
+
     def _on_devices_revoked(self, device_ids: list[str]) -> None:
         """The registry's word that these devices were just revoked (after the commit is durable).
 
@@ -375,6 +441,7 @@ class WebSocketBridge:
             "timestamp": time.time(),
             "payload": {"version": package_version()},
         })
+        await self._backfill_pairing(websocket)
 
         try:
             async for raw in websocket:

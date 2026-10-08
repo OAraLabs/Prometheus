@@ -20,8 +20,11 @@ A public route is outside the bearer gate, so each of these does its own checkin
 another request's secret are ONE identical 404, and wrong secrets from a source are limited, so a stranger
 learns nothing and cannot guess.
 
-What the operator's channels (Beacon, Telegram, the terminal) are told goes through ``PairingNotifier``, a
-seam this module owns and later changes subscribe to. A listener that fails cannot break a request.
+What the operator's channels (Beacon, Telegram) are told goes through ``PairingNotifier``, the seam they
+subscribe to (``WebSocketBridge.attach_pairing``, ``gateway/telegram_pairing.py``). ``emit`` is AWAITED, so
+a frame has been sent, or has failed, before the request that caused it returns; a listener that fails or
+stalls cannot break or hold up a request. A decision is made by ``PairingRuntime.approve`` / ``deny``,
+whichever channel it came through, so Beacon, Telegram and the terminal cannot diverge.
 
 Source: novel code for Prometheus, 2026-10-08.
 """
@@ -30,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import inspect
 import json
 import logging
 import math
@@ -49,9 +53,12 @@ from prometheus.config.instance_key import instance_public_key_der
 from prometheus.config.pair_requests import (
     APPROVED,
     CANCELED,
+    DENIED,
     EXPIRED,
     PENDING,
     UNCOLLECTED,
+    Approved,
+    CodeMismatch,
     LimitExceeded,
     NotPending,
     PairRequest,
@@ -79,11 +86,15 @@ _UNKNOWN = {"error": "unknown_request"}
 
 
 class PairingNotifier:
-    """Who hears about a request. Later changes subscribe here: the Beacon sockets, Telegram.
+    """Who hears about a request: the Beacon sockets, Telegram. Each subscribes a listener.
 
-    ``emit(kind, payload)`` returns True when at least one listener took it (that is what the 201's
-    ``notified`` says). A listener that raises is logged and skipped.
+    A listener is ``(kind, payload) -> bool | None``, plain or ``async``; ``kind`` is ``"pending"`` or
+    ``"resolved"``. ``await emit(...)`` runs them side by side, each cut off after
+    ``LISTENER_TIMEOUT_SECONDS``, and is True when at least one took the event (that is what the 201's
+    ``notified`` says). One that raises or stalls is logged and counts as not having taken it.
     """
+
+    LISTENER_TIMEOUT_SECONDS = 3.0
 
     def __init__(self) -> None:
         self._listeners: list[Callable[[str, dict[str, Any]], Any]] = []
@@ -94,14 +105,25 @@ class PairingNotifier:
     def clear(self) -> None:
         self._listeners.clear()
 
-    def emit(self, kind: str, payload: dict[str, Any]) -> bool:
-        taken = False
-        for listener in tuple(self._listeners):
-            try:
-                taken = bool(listener(kind, dict(payload))) or taken
-            except Exception:
-                logger.warning("a pairing listener failed; the request is unaffected", exc_info=True)
-        return taken
+    async def emit(self, kind: str, payload: dict[str, Any]) -> bool:
+        listeners = tuple(self._listeners)
+        if not listeners:
+            return False
+        results = await asyncio.gather(*(self._call(fn, kind, dict(payload)) for fn in listeners))
+        return any(results)
+
+    async def _call(self, listener: Callable[[str, dict[str, Any]], Any], kind: str, payload: dict[str, Any]) -> bool:
+        try:
+            result = listener(kind, payload)
+            if inspect.isawaitable(result):
+                result = await asyncio.wait_for(result, timeout=self.LISTENER_TIMEOUT_SECONDS)
+            return bool(result)
+        except asyncio.TimeoutError:
+            logger.warning("a pairing listener did not answer within %.1fs; the request is unaffected",
+                           self.LISTENER_TIMEOUT_SECONDS)
+        except Exception:
+            logger.warning("a pairing listener failed; the request is unaffected", exc_info=True)
+        return False
 
 
 class PairingRuntime:
@@ -131,16 +153,43 @@ class PairingRuntime:
 
     # -- sweeping ---------------------------------------------------------
 
-    def sweep(self) -> None:
+    async def sweep(self) -> None:
         """Expire, revoke the uncollected, purge. Announces expiries. Safe to call on every request."""
         for req in self.store().sweep().expired:
-            self.notifier.emit("resolved", _resolved(req.id, "expired", "system", self.clock()))
+            await self.notifier.emit("resolved", _resolved(req.id, EXPIRED, "system", self.clock()))
+
+    def pending_payloads(self) -> list[dict[str, Any]]:
+        """What is waiting, oldest first, as the ``pending`` event carries it. Reads; creates nothing."""
+        ttl = self.settings.request_ttl_seconds
+        return [_pending_payload(req, ttl) for req in reversed(self.store().pending())]
+
+    async def approve(self, request_id: str, *, name: str | None = None, typed_code: str | None = None,
+                      via: str = "beacon", decided_by: str) -> Approved:
+        """THE approval, for every channel: REST, Telegram and the terminal all come here.
+
+        Raises ``UnknownRequest``, ``CodeMismatch``, ``NotPending`` or ``RequestExpired``; on success the
+        device exists, its token is sealed, and every channel has been told.
+        """
+        store = self.store()
+        req = store.get(request_id)
+        if req is None:
+            raise UnknownRequest(request_id)
+        if typed_code is not None and not hmac.compare_digest(typed_code, req.match_code):
+            raise CodeMismatch(request_id)
+        approved = store.approve(request_id, name=name, decided_by=decided_by)
+        await self.notifier.emit("resolved", _resolved(approved.request.id, APPROVED, via, self.clock()))
+        return approved
+
+    async def deny(self, request_id: str, *, via: str = "beacon", decided_by: str) -> PairRequest:
+        denied = self.store().deny(request_id, decided_by=decided_by)
+        await self.notifier.emit("resolved", _resolved(denied.id, DENIED, via, self.clock()))
+        return denied
 
     async def _sweep_loop(self) -> None:
         while True:
             await asyncio.sleep(self.sweep_interval)
             try:
-                self.sweep()
+                await self.sweep()
             except Exception:
                 logger.warning("pairing: the background sweep failed; it will try again", exc_info=True)
 
@@ -347,7 +396,7 @@ def register_pairing_routes(
             logger.warning("pairing: a request was refused because this daemon has no readable instance key")
             return _json(503, {"error": "identity_unavailable",
                                "detail": "this daemon has no instance key yet; restart it"})
-        runtime.sweep()
+        await runtime.sweep()
         try:
             created = runtime.store().create(
                 device_name=name, platform=platform, public_key=public_key,
@@ -356,7 +405,8 @@ def register_pairing_routes(
             logger.info("pairing: refused source=%s reason=%s", _peer(request), exc.reason)
             return _rate_limited(exc.reason, exc.retry_after)
         req = created.request
-        notified = runtime.notifier.emit("pending", _pending_payload(req, runtime.settings.request_ttl_seconds))
+        notified = await runtime.notifier.emit(
+            "pending", _pending_payload(req, runtime.settings.request_ttl_seconds))
         return _json(201, {
             "request_id": req.id, "poll_secret": created.poll_secret, "match_code": req.match_code,
             "instance_public_key": pair_seal.b64url_encode(instance_key),
@@ -370,7 +420,7 @@ def register_pairing_routes(
     async def poll_request(request_id: str, request: Request):
         if (refusal := _browser_refusal(request)) is not None:
             return refusal
-        runtime.sweep()
+        await runtime.sweep()
         req = verified(request, request_id)
         if isinstance(req, JSONResponse):
             return req
@@ -395,13 +445,13 @@ def register_pairing_routes(
     async def finish_request(request_id: str, request: Request):
         if (refusal := _browser_refusal(request)) is not None:
             return refusal
-        runtime.sweep()
+        await runtime.sweep()
         req = verified(request, request_id)
         if isinstance(req, JSONResponse):
             return req
         store = runtime.store()
         if store.cancel(req.id) is not None:
-            runtime.notifier.emit("resolved", _resolved(req.id, CANCELED, "requester", runtime.clock()))
+            await runtime.notifier.emit("resolved", _resolved(req.id, CANCELED, "requester", runtime.clock()))
         else:
             store.acknowledge(req.id)
         return Response(status_code=204, headers=_NO_STORE)
@@ -412,7 +462,7 @@ def register_pairing_routes(
     async def list_requests(request: Request):
         if (refusal := operator_only(request)) is not None:
             return refusal
-        runtime.sweep()
+        await runtime.sweep()
         ttl = runtime.settings.request_ttl_seconds
         return _json(200, {"requests": [_pending_payload(r, ttl) for r in runtime.store().pending()]})
 
@@ -437,6 +487,8 @@ def register_pairing_routes(
             return _json(404, _UNKNOWN)
         if isinstance(exc, RequestExpired):
             return _json(410, {"error": "expired"})
+        if isinstance(exc, CodeMismatch):
+            return _json(422, {"error": "code_mismatch"})
         assert isinstance(exc, NotPending)
         return _json(409, {"error": "not_pending", "status": exc.status})
 
@@ -444,7 +496,7 @@ def register_pairing_routes(
     async def approve_request(request_id: str, request: Request):
         if (refusal := operator_only(request)) is not None:
             return refusal
-        runtime.sweep()
+        await runtime.sweep()
         try:
             raw = await _read_limited(request)
         except _TooLarge:
@@ -460,19 +512,12 @@ def register_pairing_routes(
         typed = body.get("match_code")
         if "match_code" in body and not (isinstance(typed, str) and _MATCH_CODE_RE.fullmatch(typed)):
             return _json(400, {"error": "invalid_request", "fields": ["match_code"]})
-        store = runtime.store()
-        req = store.get(request_id)
-        if req is None:
-            return _json(404, _UNKNOWN)
-        if typed is not None:
-            if not hmac.compare_digest(typed, req.match_code):
-                return _json(422, {"error": "code_mismatch"})
         via = _via(request)
         try:
-            approved = store.approve(request_id, name=name, decided_by=_decider(request, via))
-        except (UnknownRequest, RequestExpired, NotPending) as exc:
+            approved = await runtime.approve(
+                request_id, name=name, typed_code=typed, via=via, decided_by=_decider(request, via))
+        except (UnknownRequest, CodeMismatch, RequestExpired, NotPending) as exc:
             return refusal_for(exc)
-        runtime.notifier.emit("resolved", _resolved(approved.request.id, APPROVED, via, runtime.clock()))
         return _json(200, {"request_id": approved.request.id, "status": APPROVED,
                            "device_id": approved.device_id, "name": approved.name,
                            "platform": approved.request.platform})
@@ -481,13 +526,12 @@ def register_pairing_routes(
     async def deny_request(request_id: str, request: Request):
         if (refusal := operator_only(request)) is not None:
             return refusal
-        runtime.sweep()
+        await runtime.sweep()
         via = _via(request)
         try:
-            denied = runtime.store().deny(request_id, decided_by=_decider(request, via))
+            denied = await runtime.deny(request_id, via=via, decided_by=_decider(request, via))
         except (UnknownRequest, RequestExpired, NotPending) as exc:
             return refusal_for(exc)
-        runtime.notifier.emit("resolved", _resolved(denied.id, "denied", via, runtime.clock()))
-        return _json(200, {"request_id": denied.id, "status": "denied"})
+        return _json(200, {"request_id": denied.id, "status": DENIED})
 
     return runtime
