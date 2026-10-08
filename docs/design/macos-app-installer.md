@@ -189,6 +189,11 @@ Settled with Beacon's side in writing, apart from the items marked as your call.
 6. The credential returned comes from one function. Today it is the global token, exactly what
    `/api/setup/pair` returns now. When per-device credentials land it becomes the owner device token
    with approver rights, with no change for Beacon. **That swap is the release gate in finding 2.**
+   One requirement for whoever builds it, from the device-scoping change (#692): a device token sees only
+   the sessions it owns, and sessions that predate scoping belong to the operator. The first Beacon on the
+   Mac is the person's own cockpit, so the credential it receives must be operator-equivalent for scoping
+   (owner and approver), not an ordinary scoped device, or it would open to an empty session list. Approvals
+   are not scoped by #692 either, so "approver" is its own piece of work.
 7. A running daemon accepts the same secret at `POST /api/pair/local` so a Beacon reinstall is not a
    dead end. It is written by `--pair`. The route name is chosen to sit beside the other `/api/pair/*`
    routes planned for new devices. A configured daemon has no unauthenticated route today (the bearer
