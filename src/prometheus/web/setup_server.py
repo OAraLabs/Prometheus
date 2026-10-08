@@ -77,7 +77,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from prometheus.config import local_pairing
 from prometheus.config.defaults import config_search_paths
+from prometheus.web.loopback import is_loopback_host_header, is_loopback_peer
 
 logger = logging.getLogger("prometheus.setup_mode")
 
@@ -574,6 +576,44 @@ def _apply_configure(
     })
 
 
+def _pair_with_local_secret(
+    request: Request, code: str, pairing: PairingState, api_port: int, ws_port: int,
+) -> JSONResponse:
+    """Same-Mac pairing: the one-time secret from ``config/local_pairing.py``.
+
+    Order matters. A browser, then a non-loopback peer or Host, is refused BEFORE the secret is compared
+    or consumed, so a refused request leaves the secret for the real client. The peer must be loopback
+    and so must the Host header: the first stops another machine, the second stops DNS rebinding.
+    """
+    from prometheus.config import api_token as api_token_module
+
+    if request.headers.get("origin"):
+        return JSONResponse(status_code=400, content={
+            "error": "browser_not_allowed",
+            "detail": "this route is for the app on this Mac, not for a web page",
+        })
+    if not (is_loopback_peer(request) and is_loopback_host_header(request.headers.get("host"))):
+        logger.warning("Same-Mac pairing refused: the request did not come from this Mac")
+        return JSONResponse(status_code=403, content={
+            "error": "not_loopback",
+            "detail": "this pairing secret is only accepted from this Mac, over localhost",
+        })
+    if not local_pairing.consume_if_matches(code):
+        logger.warning("Same-Mac pairing attempt failed (wrong or already-used secret)")
+        return JSONResponse(status_code=401, content={
+            "error": "invalid_code",
+            "attempts_remaining": pairing.attempts_remaining,
+            "detail": "wrong or already-used pairing secret",
+        })
+    token = api_token_module.issue_owner_credential(None)
+    logger.info("Same-Mac pairing successful (secret consumed; credential value never logged)")
+    return JSONResponse(status_code=200, content={
+        "token": token,
+        "api_base_port": api_port,
+        "ws_port": ws_port,
+    })
+
+
 def create_setup_app(
     pairing: PairingState,
     *,
@@ -632,7 +672,13 @@ def create_setup_app(
                 "error": "bad_request",
                 "detail": 'expected a JSON body: {"code": "<6 digits>"}',
             })
-        ok, reason = pairing.attempt(str(body["code"]).strip())
+        code = str(body["code"]).strip()
+        # A same-Mac client (Beacon, on the app install) sends the one-time FILE secret here instead of the
+        # six-digit code. It never goes through ``pairing.attempt``: a wrong secret must not burn the
+        # six-digit code's attempts, and the six-digit lockout or expiry must not block the secret.
+        if local_pairing.enabled() and local_pairing.is_secret_shaped(code):
+            return _pair_with_local_secret(request, code, pairing, api_port, ws_port)
+        ok, reason = pairing.attempt(code)
         if ok:
             from prometheus.config.api_token import ensure_api_token
             from prometheus.config.env_file import get_env_file_path
@@ -925,6 +971,16 @@ def run_setup_mode() -> int | str:
     api_port = resolve_setup_port()
     pairing = PairingState()
     state = SetupModeState()
+
+    # The app install starts under launchd, so nobody sees the banner below. A one-time secret in a file
+    # only this user can read is how Beacon on the same Mac pairs. Minted idempotently: a restart before
+    # Beacon has paired keeps the same secret. A failure here costs only the automatic path.
+    if local_pairing.enabled():
+        try:
+            local_pairing.mint_secret()
+        except (local_pairing.PairingFileError, OSError) as exc:
+            logger.error("could not prepare the same-Mac pairing secret (%s); "
+                         "pair with the six-digit code instead", exc)
 
     logger.warning(
         "No prometheus.yaml found — starting in SETUP MODE (pairing-only "

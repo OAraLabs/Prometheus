@@ -115,6 +115,20 @@ def ensure_api_token(config: dict[str, Any] | None = None) -> tuple[str, bool]:
     return token, True
 
 
+def issue_owner_credential(config: dict[str, Any] | None = None) -> str:
+    """The credential a successful same-Mac pairing hands back to the client that paired.
+
+    Today that is the daemon's one API token, exactly what ``POST /api/setup/pair`` has always returned,
+    so nothing changes for a client already paired this way. It is a function, and the ONLY place a
+    pairing route obtains its credential, so that per-device credentials (a token for this device alone,
+    with an approver role, revocable on its own) replace the global token by changing this body and
+    nothing else. Until then every device paired this way holds the master key; the macOS app's public
+    release is gated on that change.
+    """
+    token, _minted = ensure_api_token(config)
+    return token
+
+
 def web_refused_on_bootstrap_failure(
     config: dict[str, Any] | None,
     *,
