@@ -47,6 +47,17 @@ import logging
 import time
 from typing import Any
 
+from prometheus.computer.thumbnails import (
+    CAPTURE,
+    NONE,
+    NO_SINK,
+    SKIP,
+    ThumbnailConfig,
+    build_frame,
+    capture_plan,
+    decide_capture,
+)
+
 logger = logging.getLogger(__name__)
 
 #: Every SignalBus kind this module emits — THE declaration ws_server promotes.
@@ -92,6 +103,9 @@ class ComputerLiveStream:
         telemetry: Any = None,
         keep_per_session: int = DEFAULT_KEEP_PER_SESSION,
         progress_s: float = 3.0,
+        thumbnail_sink: Any = None,
+        thumb_config: Any = None,
+        thumbnail_data_dir: str | None = None,
     ) -> None:
         self._bus = bus
         self._bridge = bridge
@@ -100,6 +114,16 @@ class ComputerLiveStream:
         self._progress_s = progress_s
         self._seq: dict[str, int] = {}
         self._tickers: dict[str, asyncio.Task] = {}
+        #: PR 6b. The sink is the WS bridge (it implements viewer_count /
+        #: send_thumbnail); NO_SINK means nobody is ever watching. Config and
+        #: data_dir drive the thumbnails.* keys and the opt-in persist path.
+        self._thumb_sink = thumbnail_sink if thumbnail_sink is not None else NO_SINK
+        self._thumb_config = thumb_config or ThumbnailConfig()
+        self._thumb_data_dir = thumbnail_data_dir
+        #: The latest sent frame per running task, in memory only, so a device
+        #: that reconnects mid-task gets the current picture once. Discarded
+        #: when the task ends — never persisted, never a cache that outlives it.
+        self._last_thumbnail: dict[str, dict[str, Any]] = {}
 
     # ── plumbing ────────────────────────────────────────────────────────
 
@@ -130,6 +154,96 @@ class ComputerLiveStream:
                                     "payload": payload})
         except Exception:  # noqa: BLE001
             logger.debug("computer layer-1 frame not sent", exc_info=True)
+
+    # ── PR 6b: the thumbnail path ────────────────────────────────────────
+
+    def thumbnail_viewers(self, session_id: str) -> int:
+        """Eligible viewers for this session, or 0.
+
+        The runner asks this BEFORE calling the driver, so a task nobody is
+        watching never captures at all. Returns 0 when the feature is off, so
+        one check covers both.
+        """
+        if not self._thumb_config.enabled:
+            return 0
+        try:
+            return int(self._thumb_sink.viewer_count(session_id))
+        except Exception:  # noqa: BLE001 - fail closed: no viewers, no capture
+            logger.debug("thumbnail viewer_count failed", exc_info=True)
+            return 0
+
+    def thumbnail_plan(self, session_id: str, *, status: str,
+                       after_stop: bool) -> tuple[str, str | None]:
+        """The pre-capture decision for one step: (CAPTURE|SKIP|NONE, reason).
+
+        The runner calls this INSTEAD of writing its own status/enabled/viewer
+        test, so the tri-state lives in one tested place (thumbnails.py) rather
+        than being duplicated at the call site where nothing checks it.
+
+        ``after_stop`` is answered here, before the generic plan: the call that
+        was in flight at a stop is NONE, not a skip — its outcome is unknown
+        and the person asked us to stop, so no thumbnail decision was made.
+        """
+        if after_stop:
+            return NONE, None
+        return capture_plan(status=status,
+                            enabled=self._thumb_config.enabled,
+                            viewers=self.thumbnail_viewers(session_id))
+
+    async def _send_thumbnail(self, task_id: str,
+                              frame: dict[str, Any]) -> bool:
+        """Direct-only send. True when the sink accepted it.
+
+        Never broadcast, never SignalBus: the sink decides eligibility per
+        socket and a failure here is a dropped picture, not a task error.
+        """
+        try:
+            await self._thumb_sink.send_thumbnail(frame["session_id"], frame)
+            return True
+        except Exception:  # noqa: BLE001 - the picture never ends a task
+            logger.debug("thumbnail send failed", exc_info=True)
+            return False
+
+    def _persist_thumbnail(self, task_id: str, seq: int,
+                           frame: dict[str, Any]) -> None:
+        """The opt-in write. Off by default, and off is the default for a
+        reason: this is the one path where a desktop screenshot touches disk.
+
+        0600, under the thumbnails tree, pruned with the action log. Even
+        when on, no route serves these in v1.1 and they never enter
+        signal_events.
+        """
+        if not self._thumb_config.persist or not self._thumb_data_dir:
+            return
+        try:
+            import base64
+            import os
+
+            from prometheus.computer.thumbnails import persist_path
+
+            path = persist_path(self._thumb_data_dir, task_id, seq,
+                                frame.get("mime_type") or "")
+            if path is None:
+                return
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            data = base64.b64decode(frame.get("data_base64") or "",
+                                    validate=True)
+            # 0600 before the write, not after: a file created with the
+            # umask's mode is briefly readable by more than the owner.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(data)
+            except Exception:
+                os.close(fd)
+                raise
+        except Exception:  # noqa: BLE001 - losing a picture is not a failure
+            logger.debug("thumbnail persist failed", exc_info=True)
+
+    def last_thumbnail(self, task_id: str) -> dict[str, Any] | None:
+        """The latest sent frame for a running task, for a device that
+        reconnects mid-task. Memory only, dropped when the task ends."""
+        return self._last_thumbnail.get(task_id)
 
     def _chat_turn_live(self, session_id: str) -> bool:
         turns = getattr(self._bridge, "_turn_tasks", None) or {}
@@ -225,6 +339,9 @@ class ComputerLiveStream:
         candidates_offered: int = 0,
         duration_ms: int = 0,
         reason: str = "",
+        capture: Any = None,
+        capture_app_names: Any = (),
+        thumbnail_skip: str | None = None,
     ) -> None:
         seq = self._next_seq(task.task_id)
         executed = status in ("executed", "in_flight_at_stop")
@@ -232,6 +349,41 @@ class ComputerLiveStream:
                   if executed else None)
         action = ({"verb": verb, "description": _cap(description, 120),
                    "app_text": True} if verb else None)
+
+        # ── PR 6b: the thumbnail decision, BEFORE the step frame ──────────
+        # The step frame reports the OUTCOME, so it is decided first. Three
+        # inputs, mutually exclusive:
+        #   thumbnail_skip — the runner already knew not to capture (no
+        #     viewer, not executed, feature off); a reason, or None for the
+        #     no-decision case;
+        #   capture — a WindowCapture the runner took; decide_capture rules on
+        #     it here, where the seq to send it under is known;
+        #   neither — no thumbnail applies, and the step says so with null.
+        thumbnail: str | None = None
+        thumbnail_skip_reason: str | None = None
+        if thumbnail_skip is not None:
+            thumbnail, thumbnail_skip_reason = "skipped", thumbnail_skip
+        elif capture is not None:
+            skip, image = decide_capture(
+                capture, app_names=capture_app_names)
+            if skip is not None:
+                thumbnail, thumbnail_skip_reason = "skipped", skip
+            else:
+                frame = build_frame(
+                    session_id=task.session_id, task_id=task.task_id, seq=seq,
+                    app=str(task.app), image=image,
+                    captured_at=time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                              time.gmtime()))
+                if await self._send_thumbnail(task.task_id, frame):
+                    thumbnail = "sent"
+                    self._last_thumbnail[task.task_id] = frame
+                    self._persist_thumbnail(task.task_id, seq, frame)
+                else:
+                    # A viewer left between the runner's count and this send.
+                    # The picture is dropped, not queued — it existed only to
+                    # be watched, and nobody is watching now.
+                    thumbnail, thumbnail_skip_reason = "skipped", "no_viewer"
+
         await self._emit("computer_step", {
             "session_id": task.session_id,
             "task_id": task.task_id,
@@ -248,6 +400,13 @@ class ComputerLiveStream:
             "candidates_offered": candidates_offered,
             "duration_ms": duration_ms,
             "reason": _cap(reason, _REASON_CAP),
+            # PR 6b: the OUTCOME of the thumbnail decision, never the picture.
+            # "sent" | "skipped" | None — and None means no decision was made
+            # (feature off, or the step did not execute), which is not the same
+            # as a skip. The image itself goes direct-only through the sink;
+            # this frame is persisted and must stay content-free.
+            "thumbnail": thumbnail,
+            "thumbnail_skip_reason": thumbnail_skip_reason,
         })
         if verb and status != "awaiting_approval":
             call_id = f"{task.task_id}:{seq}"
@@ -272,6 +431,11 @@ class ComputerLiveStream:
         ticker = self._tickers.pop(task.task_id, None)
         if ticker is not None:
             ticker.cancel()
+        # PR 6b: the in-memory last thumbnail is dropped with the task. It is
+        # held only so a reconnecting device sees the current picture once;
+        # keeping it past the end would be a cache of desktop pixels that
+        # outlives the thing that justified capturing them.
+        self._last_thumbnail.pop(task.task_id, None)
         duration_ms = int(((task.ended_at or time.time()) - task.started_at) * 1000)
         await self._emit("computer_task_ended", {
             "session_id": task.session_id,
