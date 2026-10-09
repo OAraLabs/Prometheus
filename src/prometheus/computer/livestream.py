@@ -48,10 +48,8 @@ import time
 from typing import Any
 
 from prometheus.computer.thumbnails import (
-    CAPTURE,
     NONE,
     NO_SINK,
-    SKIP,
     ThumbnailConfig,
     build_frame,
     capture_plan,
@@ -366,8 +364,12 @@ class ComputerLiveStream:
         elif capture is not None:
             skip, image = decide_capture(
                 capture, app_names=capture_app_names)
-            if skip is not None:
-                thumbnail, thumbnail_skip_reason = "skipped", skip
+            if skip is not None or image is None:
+                # The two are set together by decide_capture; naming both
+                # keeps the contract visible to the type checker rather than
+                # relying on a narrowing it cannot see.
+                thumbnail = "skipped"
+                thumbnail_skip_reason = skip or "capture_failed"
             else:
                 frame = build_frame(
                     session_id=task.session_id, task_id=task.task_id, seq=seq,
