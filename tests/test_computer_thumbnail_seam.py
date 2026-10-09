@@ -364,6 +364,78 @@ async def test_persist_needs_both_the_flag_and_a_data_dir(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_persisted_thumbnails_are_pruned_when_the_task_ends(tmp_path):
+    """THE claim the docstring made and the code did not keep. A screenshot
+    that outlives the log entry that justified capturing it is a desktop
+    picture on disk with nothing tracking it — so the files must go when the
+    task's log goes."""
+    data = tmp_path / "data"
+    _bus, live = _stream(
+        tmp_path, config=ThumbnailConfig(persist=True), data_dir=data)
+    await _step(live, _task(), capture=_capture(), capture_app_names=NAMES)
+
+    task_dir = data / "computer" / "thumbnails" / TASK
+    assert task_dir.exists() and list(task_dir.iterdir()), "a file was written"
+
+    await live.task_ended(_ended_task(), summary="done")
+    assert not task_dir.exists(), "the task's thumbnails outlived its log"
+
+
+@pytest.mark.asyncio
+async def test_prune_removes_only_the_sessions_own_tasks(tmp_path):
+    """A prune deletes what THIS process recorded — never a scan of the tree,
+    so a foreign or stale directory is not deleted by inference."""
+    data = tmp_path / "data"
+    _bus, live = _stream(
+        tmp_path, config=ThumbnailConfig(persist=True), data_dir=data)
+    await _step(live, _task(), capture=_capture(), capture_app_names=NAMES)
+
+    other = data / "computer" / "thumbnails" / "ffff9999"
+    other.mkdir(parents=True, exist_ok=True)
+    (other / "1.png").write_bytes(b"someone else's")
+
+    await live.task_ended(_ended_task(), summary="done")
+    assert not (data / "computer" / "thumbnails" / TASK).exists()
+    assert (other / "1.png").exists(), "a task this stream never wrote was deleted"
+
+
+@pytest.mark.asyncio
+async def test_prune_with_persist_off_writes_and_deletes_nothing(tmp_path):
+    data = tmp_path / "data"
+    _bus, live = _stream(tmp_path, data_dir=data)
+    await _step(live, _task(), capture=_capture(), capture_app_names=NAMES)
+    await live.task_ended(_ended_task(), summary="done")
+    assert not data.exists(), "nothing was written, so nothing to prune"
+
+
+@pytest.mark.asyncio
+async def test_prune_survives_a_task_it_never_wrote(tmp_path):
+    """A task that ended with no thumbnails (feature off mid-run, or every
+    step skipped) must not raise in the prune path."""
+    data = tmp_path / "data"
+    _bus, live = _stream(
+        tmp_path, config=ThumbnailConfig(persist=True), data_dir=data)
+    await live.task_ended(_ended_task(task_id="never-wrote"), summary="done")
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_task_id_cannot_prune_outside_the_tree(tmp_path):
+    """Belt and braces: the recorded id goes back through persist_path, which
+    validates it, so a traversal id cannot point the rmtree at a parent."""
+    from prometheus.computer.thumbnails import persist_path
+    assert persist_path(str(tmp_path), "../../etc", 1, "image/png") is None
+
+
+def _ended_task(task_id=TASK, **over):
+    t = _task(task_id=task_id, outcome="done",
+              reason="the goal's one action ran", steps=1, approvals=0,
+              in_flight_at_stop=False, started_at=0.0, ended_at=1.0)
+    for k, v in over.items():
+        setattr(t, k, v)
+    return t
+
+
+@pytest.mark.asyncio
 async def test_a_persist_failure_does_not_stop_the_live_send(tmp_path):
     """Losing the archived copy is not losing the feature. The live picture
     is the point; the file is an opt-in extra."""

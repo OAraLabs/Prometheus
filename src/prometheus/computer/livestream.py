@@ -122,6 +122,10 @@ class ComputerLiveStream:
         #: that reconnects mid-task gets the current picture once. Discarded
         #: when the task ends — never persisted, never a cache that outlives it.
         self._last_thumbnail: dict[str, dict[str, Any]] = {}
+        #: session_id → task_ids whose thumbnails were written to disk, so the
+        #: opt-in files can be pruned with the action log. Only populated when
+        #: ``thumbnails.persist`` is on; without it there is nothing to prune.
+        self._persisted_tasks: dict[str, set[str]] = {}
 
     # ── plumbing ────────────────────────────────────────────────────────
 
@@ -235,6 +239,11 @@ class ComputerLiveStream:
             except Exception:
                 os.close(fd)
                 raise
+            # Recorded only AFTER the file exists, so the prune list never
+            # names a directory that is not there.
+            sid = str(frame.get("session_id") or "")
+            if sid:
+                self._persisted_tasks.setdefault(sid, set()).add(task_id)
         except Exception:  # noqa: BLE001 - losing a picture is not a failure
             logger.debug("thumbnail persist failed", exc_info=True)
 
@@ -253,6 +262,11 @@ class ComputerLiveStream:
         return self._seq[task_id]
 
     def _prune(self, session_id: str) -> None:
+        # The opt-in FILES are pruned first and unconditionally: they are
+        # deleted whether or not telemetry is wired, because a screenshot that
+        # outlives the log entry that justified capturing it is a desktop
+        # picture on disk with nothing tracking it.
+        self._prune_thumbnails(session_id)
         tel = self._telemetry
         if tel is None or not session_id or self.keep_per_session <= 0:
             return
@@ -262,6 +276,35 @@ class ComputerLiveStream:
                                     keep=self.keep_per_session)
         except Exception:  # noqa: BLE001
             logger.debug("computer action log prune failed", exc_info=True)
+
+    def _prune_thumbnails(self, session_id: str) -> None:
+        """Delete the opt-in thumbnail files of one session's tasks.
+
+        Only the task directories THIS process recorded are touched — never a
+        scan of the tree, so a stale or foreign directory is not deleted by
+        inference. ``persist_path`` re-validates each task id on the way, so a
+        recorded id that somehow held a traversal still cannot reach outside
+        the thumbnails tree.
+        """
+        if not self._thumb_data_dir:
+            return
+        tasks = self._persisted_tasks.pop(session_id, None)
+        if not tasks:
+            return
+        try:
+            import os
+            import shutil
+
+            from prometheus.computer.thumbnails import persist_path
+
+            for task_id in tasks:
+                sample = persist_path(self._thumb_data_dir, task_id, 0,
+                                      "image/png")
+                if sample is None:
+                    continue
+                shutil.rmtree(os.path.dirname(sample), ignore_errors=True)
+        except Exception:  # noqa: BLE001 - losing the archive is not a failure
+            logger.debug("thumbnail prune failed", exc_info=True)
 
     # ── the binding ─────────────────────────────────────────────────────
 
