@@ -265,3 +265,68 @@ def test_a_file_that_is_not_an_icns_is_a_problem(verify, tmp_path):
     (tmp_path / "Contents" / "Resources").mkdir(parents=True)
     (tmp_path / "Contents" / "Resources" / "Prometheus.icns").write_bytes(b"not an icon at all")
     assert any("icns" in p for p in verify.icon_problems(tmp_path, {"CFBundleIconFile": "Prometheus"}))
+
+
+# ── zip-slip: nothing lands outside the directory the zip is unpacked into ───
+
+def test_an_entry_that_is_absolute_or_climbs_out_is_refused(verify):
+    ok = [("Prometheus.app/Contents/Info.plist", None),
+          ("Prometheus.app/Contents/Resources/python/bin/python3", "python3.12")]
+    assert verify.entry_problems(ok) == []
+    for bad in ("../evil", "Prometheus.app/../../evil", "/etc/evil", "Prometheus.app/Contents/..\\..\\evil",
+                "C:/evil", "\\evil"):
+        assert verify.entry_problems([(bad, None)]), bad
+
+
+def test_a_symlink_that_points_outside_the_archive_is_refused(verify):
+    for target in ("/etc", "../../..", "../../../outside", "../Contents/../../.."):
+        assert verify.entry_problems([("Prometheus.app/Contents/link", target)]), target
+    assert verify.entry_problems([("Prometheus.app/Contents/Resources/link", "../MacOS/Prometheus")]) == []
+
+
+def _zip(path, entries):
+    import stat
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, link in entries:
+            if link is None:
+                archive.writestr(name, "x")
+            else:
+                info = zipfile.ZipInfo(name)
+                info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                archive.writestr(info, link)
+    return path
+
+
+def test_a_slipping_zip_is_refused_before_anything_is_extracted(verify, tmp_path, monkeypatch):
+    extracted = []
+    monkeypatch.setattr(verify.subprocess, "run", lambda argv, **kw: extracted.append(argv))
+    app = "Prometheus.app/Contents/Info.plist"
+    for name, entries in {
+        "climb": [(app, None), ("../evil", None)],
+        "absolute": [(app, None), ("/tmp/evil", None)],
+        "link": [(app, None), ("Prometheus.app/Contents/escape", "/etc")],
+    }.items():
+        problems = verify.verify_zip(_zip(tmp_path / f"{name}.zip", entries))
+        assert any("outside" in p or "absolute" in p for p in problems), (name, problems)
+    assert extracted == [], "ditto ran on a zip that was refused"
+
+
+# ── the signature is OURS, not merely valid ──────────────────────────────────
+
+TEAM_REQUIREMENT = '-R=anchor apple generic and certificate leaf[subject.OU] = "53JM8W47RL"'
+
+
+def test_the_bundle_must_satisfy_a_requirement_that_names_our_team(verify):
+    runner = _Runner({})
+    assert verify.codesign_problems(APP, team_id="53JM8W47RL", runner=runner) == []
+    assert ["codesign", "--verify", "--deep", "--strict", TEAM_REQUIREMENT, str(APP)] in runner.calls
+
+
+def test_a_valid_signature_by_another_team_fails_the_requirement(verify):
+    # Real: `codesign --verify --strict -R=<this requirement> /bin/ls` on this Mac (Apple-signed, not our team).
+    runner = _Runner({("codesign", "--verify", "--deep", "--strict", TEAM_REQUIREMENT):
+                      (3, "", "test-requirement: code failed to satisfy specified code requirement(s)\n")})
+    problems = verify.codesign_problems(APP, team_id="53JM8W47RL", runner=runner)
+    assert len(problems) == 1 and "53JM8W47RL" in problems[0] and "requirement" in problems[0], problems

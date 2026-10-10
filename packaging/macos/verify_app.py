@@ -6,7 +6,8 @@
 Beacon downloads the app with Node, so the file carries no quarantine flag and Gatekeeper never
 assesses it: Beacon's own checks are the only gate. These are the same questions, asked at build time:
 
-* codesign --verify --deep --strict passes;
+* codesign --verify --deep --strict passes, and the bundle satisfies the requirement
+  ``anchor apple generic and certificate leaf[subject.OU] = "<team>"``: valid is not enough, it must be OURS;
 * the bundle and EVERY Mach-O inside it: Developer ID Application, the team, hardened runtime, a secure
   timestamp, arm64 only, and no entitlements (until a failing run proves one is needed);
 * the Info.plist and the bundled LaunchAgent plist agree, and the agent runs the launcher;
@@ -24,7 +25,9 @@ from __future__ import annotations
 
 import argparse
 import plistlib
+import posixpath
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -162,6 +165,33 @@ def zip_problems(names: Sequence[str]) -> list[str]:
     return problems
 
 
+def _escapes(path: str) -> bool:
+    """Absolute (in either separator, or with a drive), or climbing out through a ``..`` component."""
+    normal = path.replace("\\", "/")
+    return normal.startswith("/") or re.match(r"^[A-Za-z]:", normal) is not None or ".." in normal.split("/")
+
+
+def entry_problems(entries: Iterable[tuple[str, str | None]]) -> list[str]:
+    """Zip-slip. Each entry is ``(name, symlink target or None)``: a name, or a symlink's target, that would land
+    outside the directory the zip is unpacked into. ``ditto`` restores symlinks, so a link to ``/etc`` followed by
+    a file "inside" it would write anywhere; links inside the bundle (``python3 -> python3.12``) are fine."""
+    problems: list[str] = []
+    for name, link in entries:
+        if _escapes(name):
+            problems.append(f"unsafe entry, absolute or climbing out of the archive: {name!r}")
+        elif link is not None:
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(name), link.replace("\\", "/")))
+            if link.startswith(("/", "\\")) or target == ".." or target.startswith("../"):
+                problems.append(f"symlink {name!r} points outside the archive: {link!r}")
+    return problems
+
+
+def _link_target(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> str | None:
+    if not stat.S_ISLNK(info.external_attr >> 16):
+        return None
+    return archive.read(info)[:4096].decode("utf-8", errors="replace")
+
+
 # ── notarization ─────────────────────────────────────────────────────────────
 
 def _capture(argv: Sequence[str | Path], runner: Runner) -> tuple[int, str]:
@@ -184,6 +214,27 @@ def notarization_problems(app: Path, *, runner: Runner = subprocess.run) -> list
     code, out = _capture(["spctl", "--assess", "--type", "execute", "--verbose=4", app], runner)
     if code != 0 or "source=Notarized Developer ID" not in out:
         problems.append(f"spctl does not accept the app as Notarized Developer ID (exit {code}): {out.strip()[-200:]}")
+    return problems
+
+
+# ── whose signature ──────────────────────────────────────────────────────────
+
+def team_requirement(team_id: str) -> str:
+    """Apple's chain AND a leaf certificate issued to this team. A Developer ID signature by anyone else verifies
+    as valid; only a requirement says whose it is, and codesign checks it against the signature itself."""
+    return f'anchor apple generic and certificate leaf[subject.OU] = "{team_id}"'
+
+
+def codesign_problems(app: Path, *, team_id: str, runner: Runner = subprocess.run) -> list[str]:
+    problems: list[str] = []
+    code, out = _capture(["codesign", "--verify", "--deep", "--strict", "--verbose=2", app], runner)
+    if code != 0:
+        problems.append(f"codesign --verify --deep --strict failed (exit {code}): {out.strip()[-300:]}")
+    # `-R=<text>`: codesign reads a requirement that starts with "=" as text, not as a file.
+    requirement = team_requirement(team_id)
+    code, out = _capture(["codesign", "--verify", "--deep", "--strict", f"-R={requirement}", app], runner)
+    if code != 0:
+        problems.append(f"the bundle does not satisfy the requirement {requirement} (exit {code}): {out.strip()[-200:]}")
     return problems
 
 
@@ -213,9 +264,7 @@ def verify_app(
         if not path.is_file():
             problems.append(f"missing {path.relative_to(app)}")
 
-    code, out = _capture(["codesign", "--verify", "--deep", "--strict", "--verbose=2", app], runner)
-    if code != 0:
-        problems.append(f"codesign --verify --deep --strict failed (exit {code}): {out.strip()[-300:]}")
+    problems += codesign_problems(app, team_id=team_id, runner=runner)
     _code, display = _capture(["codesign", "-dvv", app], runner)
     problems += [f"bundle: {p}" for p in signature_problems(
         parse_codesign_display(display), team_id=team_id, identifier=bundle_id)]
@@ -243,8 +292,11 @@ def verify_app(
 
 
 def verify_zip(zip_path: Path, **kwargs: Any) -> list[str]:
+    """Every entry is checked BEFORE anything is extracted: a zip that would write outside its directory is
+    refused unopened."""
     with zipfile.ZipFile(zip_path) as archive:
-        problems = zip_problems(archive.namelist())
+        entries = [(info.filename, _link_target(archive, info)) for info in archive.infolist()]
+    problems = entry_problems(entries) or zip_problems([name for name, _link in entries])
     if problems:
         return problems
     with tempfile.TemporaryDirectory(prefix="verify-app-") as temp:
