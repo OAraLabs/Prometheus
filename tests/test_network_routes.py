@@ -1,8 +1,9 @@
 """``GET /api/network`` and ``PUT /api/network`` — what the daemon is listening for, and the owner's switch.
 
-Contract: docs/PAIRING-APPROVAL-API.md, 2.2. Anyone with a valid token may READ it (a client wants to know
-which network mode it is talking to and whether the daemon is discoverable); only an operator
-(``identity.is_operator``) may change it, and a scoped device is a 403 ``operator_only``, not a 401.
+Contract: docs/PAIRING-APPROVAL-API.md, 2.2. Both methods are the OPERATOR's (``identity.is_operator``): a scoped
+device is default-deny (``web/route_access.py``), so it gets a 403 ``operator_only`` on reading as well as on
+changing, never a 401 (its token is valid). Reading used to be open to any valid token; an approved phone has no
+need of the daemon's bind address and its warnings.
 
 What the owner's switch can and cannot do is stated, not implied:
 
@@ -61,10 +62,11 @@ def make(tmp_path, *, bind="0.0.0.0", source="default", file_text: str | None = 
     return world
 
 
-def remote(world: World, who: str, method: str, url: str, peer: str = "192.0.2.10", **kw):
+def remote(world: World, who: str, method: str, url: str, peer: str = "192.0.2.10", headers: dict | None = None,
+           **kw):
     """The same call from another machine: the TCP peer is what `would_lock_out` looks at."""
     client = TestClient(world.app, client=(peer, 50000))
-    return client.request(method, url, headers=world.hdr(who), **kw)
+    return client.request(method, url, headers={**world.hdr(who), **(headers or {})}, **kw)
 
 
 def saved(world: World) -> dict:
@@ -115,11 +117,14 @@ def test_with_no_advertiser_in_this_process_it_says_so(tmp_path):
     assert "not running" in body["advertising_reason"]["message"]
 
 
-def test_reading_needs_a_token_but_not_a_particular_one(tmp_path):
+def test_reading_needs_an_operator(tmp_path):
     world = make(tmp_path)
     assert world.client.get("/api/network").status_code == 401
-    for who in ("global", "owner", "scoped"):
+    for who in ("global", "owner"):
         assert world.as_(who, "GET", "/api/network").status_code == 200, who
+    refused = world.as_("scoped", "GET", "/api/network")
+    assert (refused.status_code, refused.json()["error"]) == (403, "operator_only"), \
+        "an approved phone is a chat client: the bind address and warnings are the owner's"
 
 
 def test_a_choice_waiting_for_a_restart_is_visible_before_it_happens(tmp_path):
@@ -176,10 +181,15 @@ def test_the_advertising_reason_is_null_while_advertising_and_coded_otherwise(tm
 
 # ── can_change: should the client show the control at all ────────────────────
 
-@pytest.mark.parametrize("who, expected", [("global", True), ("owner", True), ("scoped", False)])
-def test_only_an_operator_can_change_it(tmp_path, who, expected):
-    body = make(tmp_path, source="config").as_(who, "GET", "/api/network").json()
-    assert body["can_change"] is expected
+@pytest.mark.parametrize("who", ["global", "owner"])
+def test_an_operator_can_change_it_when_nothing_outside_the_file_fixes_the_bind(tmp_path, who):
+    assert make(tmp_path, source="config").as_(who, "GET", "/api/network").json()["can_change"] is True
+
+
+def test_a_scoped_device_never_gets_far_enough_to_see_can_change(tmp_path):
+    """can_change is for deciding whether to show the control. A scoped device is refused the route outright,
+    so a client treats a 403 as 'no control'; the operator check inside can_change is defence in depth."""
+    assert make(tmp_path, source="config").as_("scoped", "GET", "/api/network").status_code == 403
 
 
 @pytest.mark.parametrize("source, expected", [("config", True), ("default", True), ("flag", False),
@@ -197,7 +207,7 @@ def test_with_the_token_off_everyone_is_the_operator(tmp_path):
 def test_can_change_agrees_with_what_a_put_would_do(tmp_path):
     """The flag is the answer to 'would the control work', so a false one must not be a 403 or a pin 409 in disguise."""
     scoped = make(tmp_path, source="config")
-    assert scoped.as_("scoped", "GET", "/api/network").json()["can_change"] is False
+    assert scoped.as_("scoped", "GET", "/api/network").status_code == 403
     assert scoped.as_("scoped", "PUT", "/api/network", json={"mode": "this_mac"}).status_code == 403
     pinned = make(tmp_path, bind="127.0.0.1", source="env", file_text='network:\n  allow_plaintext_lan: true\n')
     assert pinned.as_("global", "GET", "/api/network").json()["can_change"] is False
@@ -213,6 +223,18 @@ def test_this_mac_from_another_machine_is_refused_because_it_would_cut_that_call
     assert response.status_code == 409 and response.json()["error"] == "would_lock_out"
     detail = response.json()["detail"]
     assert "web.bind: 127.0.0.1" in detail and "Beacon" in detail, "it says where and how this CAN be done"
+    assert world.cfg_path.read_text() == before
+
+
+@pytest.mark.parametrize("header", [{"X-Forwarded-For": "203.0.113.9"}, {"Forwarded": "for=203.0.113.9"}])
+def test_a_relayed_request_is_not_this_machine_even_from_a_loopback_peer(tmp_path, header):
+    """`tailscale serve` or cloudflared on this Mac connects from 127.0.0.1 and relays a remote caller. Turning the
+    daemon loopback-only would cut that caller off, so it is the same lockout (web.loopback.is_same_machine)."""
+    world = make(tmp_path, file_text='web:\n  bind: "0.0.0.0"\n')
+    before = world.cfg_path.read_text()
+    response = remote(world, "global", "PUT", "/api/network", peer="127.0.0.1", headers=header,
+                      json={"mode": "this_mac"})
+    assert response.status_code == 409 and response.json()["error"] == "would_lock_out"
     assert world.cfg_path.read_text() == before
 
 
