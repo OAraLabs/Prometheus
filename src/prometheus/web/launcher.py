@@ -198,13 +198,19 @@ async def launch_web(
     from prometheus.web.discovery import Advertiser
     from prometheus.web.network import ALL_INTERFACES, NetworkSettings, describe
 
+    from prometheus.web.tls import advertised_endpoint
+
     network_settings = NetworkSettings.from_config(config)       # says once if a switch is not a boolean
-    network_state = describe(address, resolved.source, network_settings)
+    # Home network over TLS (pairing PR 5): the mode is home_network because TLS serves the LAN, and mDNS
+    # announces the TLS REST port with tls=1 (the TXT record is hello for THAT port).
+    app.state.lan_tls = lan_tls
+    network_state = describe(address, resolved.source, network_settings, tls=lan_tls is not None)
+    advertised_port, advertised_tls = advertised_endpoint(lan_tls, api_port)
     advertiser = Advertiser(
         state=network_state,
         settings=network_settings,
-        port=api_port,
-        hello=app.state.hello_payload,
+        port=advertised_port,
+        hello=lambda: app.state.hello_payload(tls=advertised_tls),
         display_name=lambda: display_name(config),
     )
     app.state.advertiser = advertiser

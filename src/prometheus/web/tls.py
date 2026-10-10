@@ -5,8 +5,7 @@ own ports only in home-network mode: ``network.home_network: true`` and a bind t
 HTTP then stays on loopback (127.0.0.1, the existing ports), so this Mac's own clients (Beacon here, the app's
 launcher, ``oara doctor``, curl) are unchanged, and nothing on the LAN is ever plain.
 
-``network.home_network`` is #700's setting; its ``NetworkSettings`` becomes the one reader when it lands. Until then
-this module reads that one key with #700's rule: ``true`` or ``false``, anything else is off.
+``network.home_network`` is #700's setting, read here through its ``NetworkSettings`` (the one reader).
 
 Source: novel code for Prometheus, 2026-10-10.
 """
@@ -43,14 +42,11 @@ class LanTlsPlan:
 
 
 def _home_network(config: Mapping[str, Any]) -> bool:
-    network = config.get("network") if isinstance(config, Mapping) else None
-    value = network.get("home_network") if isinstance(network, Mapping) else None
-    if value is None:
-        return False
-    if not isinstance(value, bool):
-        logger.warning("network.home_network must be true or false, got %r: treated as false (no TLS)", value)
-        return False
-    return value
+    """``network.home_network``, read by #700's ``NetworkSettings``, the one reader (quiet: the daemon says once at
+    boot when the switch is not a boolean)."""
+    from prometheus.web.network import NetworkSettings
+
+    return NetworkSettings.from_config(config, quiet=True).home_network
 
 
 def _port(web: Mapping[str, Any], key: str, default: int) -> int:
@@ -94,3 +90,41 @@ def server_ssl_context(plan: LanTlsPlan) -> ssl.SSLContext:
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certfile=str(plan.certfile), keyfile=str(plan.keyfile))
     return context
+
+
+def advertised_endpoint(plan: LanTlsPlan | None, api_port: int) -> tuple[int, bool]:
+    """``(port, tls)`` for the mDNS record: the TLS REST port with ``tls=1`` while TLS serves the LAN."""
+    return (plan.api_port, True) if plan is not None else (api_port, False)
+
+
+def tls_ready() -> bool:
+    """Whether this daemon can serve TLS after a restart: an instance key it can read (the certificate is made
+    over it at boot). Read-only: creates nothing."""
+    from prometheus.config.instance_key import instance_public_key_der
+
+    return instance_public_key_der() is not None
+
+
+@dataclass(frozen=True)
+class LanDecision:
+    """What the listeners do with the home network. *loopback_only*: home network asked for and impossible, so
+    nothing is served on the LAN. *plaintext_lan*: the owner's explicit opt-out, plain HTTP on the LAN."""
+
+    plan: LanTlsPlan | None
+    loopback_only: bool = False
+    plaintext_lan: bool = False
+
+
+def decide_lan(config: Mapping[str, Any], address: str, *, cert_ok: bool) -> LanDecision:
+    """TLS on the LAN when it can be had; never plain HTTP in its place unless the owner asked for exactly that."""
+    plan = lan_tls_plan(config, address)
+    if plan is None:
+        return LanDecision(None)
+    if cert_ok:
+        return LanDecision(plan)
+    from prometheus.web.network import NetworkSettings
+
+    if NetworkSettings.from_config(config, quiet=True).allow_plaintext_lan:
+        return LanDecision(None, plaintext_lan=True)
+    return LanDecision(None, loopback_only=True)
+

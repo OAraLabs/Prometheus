@@ -69,6 +69,15 @@ def remote(world: World, who: str, method: str, url: str, peer: str = "192.0.2.1
     return client.request(method, url, headers={**world.hdr(who), **(headers or {})}, **kw)
 
 
+def no_tls() -> None:
+    """Make TLS impossible for this daemon: no instance key to make the certificate over (the pairing World makes
+    one, as the daemon does at boot). Since pairing PR 5, "without TLS" has to be arranged."""
+    from prometheus.config.instance_key import INSTANCE_KEY_FILENAME
+    from prometheus.config.paths import node_dir_path
+
+    (node_dir_path() / INSTANCE_KEY_FILENAME).unlink(missing_ok=True)
+
+
 def saved(world: World) -> dict:
     return yaml.safe_load(world.cfg_path.read_text()) or {}  # type: ignore[attr-defined]
 
@@ -301,6 +310,7 @@ def test_this_mac_is_saved_and_answers_on_restart(tmp_path):
 
 def test_home_network_is_refused_without_tls_or_the_opt_out_and_nothing_is_written(tmp_path):
     world = make(tmp_path, bind="127.0.0.1", source="config", file_text='web:\n  bind: "127.0.0.1"\n')
+    no_tls()
     before = world.cfg_path.read_text()
     response = world.as_("global", "PUT", "/api/network", json={"mode": "home_network"})
     assert response.status_code == 409 and response.json()["error"] == "tls_unavailable"
@@ -310,6 +320,7 @@ def test_home_network_is_refused_without_tls_or_the_opt_out_and_nothing_is_writt
 def test_home_network_with_the_explicit_opt_out_is_saved_with_the_plaintext_warning(tmp_path):
     world = make(tmp_path, bind="127.0.0.1", source="config",
                  file_text='web:\n  bind: "127.0.0.1"\nnetwork:\n  allow_plaintext_lan: true\n')
+    no_tls()
     response = world.as_("global", "PUT", "/api/network", json={"mode": "home_network"})
     assert response.status_code == 200
     body = response.json()

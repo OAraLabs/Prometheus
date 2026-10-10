@@ -31,6 +31,7 @@ Source: novel code for Prometheus, 2026-10-08.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -55,6 +56,7 @@ from prometheus.web.network import (
     persist_choice,
 )
 from prometheus.web.pairing_routes import operator_refusal
+from prometheus.web.tls import lan_tls_plan, tls_ready
 
 logger = logging.getLogger("prometheus.network")
 
@@ -73,9 +75,16 @@ def _json(status: int, content: dict[str, Any]) -> JSONResponse:
     return JSONResponse(status_code=status, content=content, headers=_NO_STORE)
 
 
-def _tls_block() -> dict[str, Any]:
-    """The TLS listener's state. There is none yet (a later change); the shape is the contract's."""
-    return {"enabled": False, "spki_sha256": None}
+def _tls_block(request: Request | None = None) -> dict[str, Any]:
+    """The TLS listener's state: ``enabled`` while it serves the LAN (pairing PR 5), and the full pin then, the
+    SHA-256 of the instance key's SPKI (the certificate is made over that key; hello's fp is its prefix)."""
+    live = request is not None and getattr(request.app.state, "lan_tls", None) is not None
+    if not live:
+        return {"enabled": False, "spki_sha256": None}
+    from prometheus.config.instance_key import instance_public_key_der
+
+    der = instance_public_key_der()            # read-only: a GET writes nothing
+    return {"enabled": True, "spki_sha256": hashlib.sha256(der).hexdigest() if der else None}
 
 
 def _read_file(path: str | None) -> dict[str, Any] | None:
@@ -93,17 +102,24 @@ def _read_file(path: str | None) -> dict[str, Any] | None:
     return document
 
 
+def _tls_after_restart(document: Mapping[str, Any], address: str) -> bool:
+    """Whether a restart with this file would bring the TLS listener up: home network on a LAN bind, and an
+    instance key the certificate can be made over."""
+    return lan_tls_plan(document, address) is not None and tls_ready()
+
+
 def _state_from_file(resolved: ResolvedBind, document: Mapping[str, Any]) -> NetworkState | None:
     """What the daemon will be after a restart, from the file and whatever outranks it. ``None`` if unknowable."""
     settings = NetworkSettings.from_config(document, quiet=True)
     if resolved.source not in _FILE_DECIDES:
-        return describe(resolved.address, resolved.source, settings)
+        return describe(resolved.address, resolved.source, settings, tls=_tls_after_restart(document, resolved.address))
     web = document.get("web")
     raw = web.get("bind") if isinstance(web, Mapping) else None
     if raw is None:
-        return describe(DEFAULT_BIND, "default", settings)
+        return describe(DEFAULT_BIND, "default", settings, tls=_tls_after_restart(document, DEFAULT_BIND))
     try:
-        return describe(parse_bind(raw, "web.bind"), "config", settings)
+        address = parse_bind(raw, "web.bind")
+        return describe(address, "config", settings, tls=_tls_after_restart(document, address))
     except BindError:
         return None                                    # the daemon would refuse to start; nothing to promise
 
@@ -125,7 +141,9 @@ def register_network_routes(app: Any, *, auth_on: Callable[[], bool]) -> None:
                 resolved = resolve_bind(config)
             except BindError:
                 resolved = ResolvedBind(DEFAULT_BIND, "default")
-        return resolved, describe(resolved.address, resolved.source, NetworkSettings.from_config(config, quiet=True))
+        # TLS: the listener set pairing PR 5 starts in home-network mode, published by the launcher.
+        return resolved, describe(resolved.address, resolved.source, NetworkSettings.from_config(config, quiet=True),
+                                  tls=getattr(state, "lan_tls", None) is not None)
 
     def advertising(request: Request) -> tuple[bool, dict[str, str] | None]:
         advertiser = getattr(request.app.state, "advertiser", None)
@@ -151,7 +169,7 @@ def register_network_routes(app: Any, *, auth_on: Callable[[], bool]) -> None:
             "mode": shown.mode,
             "bind": shown.bind,
             "bind_source": shown.bind_source,
-            "tls": _tls_block(),
+            "tls": _tls_block(request),
             "advertising": on,
             "advertising_reason": why,
             "applied": applied,
@@ -224,12 +242,14 @@ def register_network_routes(app: Any, *, auth_on: Callable[[], bool]) -> None:
                 return _json(409, {"error": "no_config_file",
                                    "detail": "the daemon was not started from a config file, so there is nowhere "
                                              "to save this. Nothing was written"})
-            if mode == HOME and not NetworkSettings.from_config(document, quiet=True).allow_plaintext_lan:
+            if (mode == HOME and not tls_ready()
+                    and not NetworkSettings.from_config(document, quiet=True).allow_plaintext_lan):
                 return _json(409, {
                     "error": "tls_unavailable",
-                    "detail": "home network mode needs TLS, which this daemon does not have yet, or the owner's "
-                              "explicit opt-in to plain HTTP (network.allow_plaintext_lan: true in the config "
-                              "file). Nothing was written"})
+                    "detail": "home network mode needs TLS, and this daemon has no instance key to make its "
+                              "certificate over (node/instance.key could not be read), or the owner's explicit "
+                              "opt-in to plain HTTP (network.allow_plaintext_lan: true in the config file). "
+                              "Nothing was written"})
             changed = persist_choice(path, mode, resolved.address)
             saved = _read_file(path)
         except PersistError as exc:

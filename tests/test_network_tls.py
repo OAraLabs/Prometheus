@@ -23,7 +23,7 @@ pytest.importorskip("fastapi")
 from prometheus.config.instance_cert import ensure_instance_certificate  # noqa: E402
 from prometheus.config.instance_key import ensure_instance_key  # noqa: E402
 from prometheus.web import tls as T  # noqa: E402
-from tests.test_network_routes import make, saved  # noqa: E402
+from tests.test_network_routes import make, no_tls, saved  # noqa: E402
 
 HOME = {"network": {"home_network": True}}
 
@@ -63,14 +63,16 @@ def test_home_network_is_accepted_when_this_daemon_can_serve_tls_after_the_resta
     response = world.as_("global", "PUT", "/api/network", json={"mode": "home_network"})
     assert response.status_code == 200, response.text
     body = response.json()
-    assert (body["applied"], body["pending_mode"]) == ("on_restart", "home_network")
+    assert (body["mode"], body["applied"]) == ("home_network", "on_restart"), body
     assert not any(w["code"] == "plain_http_on_lan" for w in body["warnings"]), body["warnings"]
+    assert world.as_("global", "GET", "/api/network").json()["pending_mode"] == "home_network"
     written = saved(world).get("network") or {}
     assert written.get("home_network") is True and not written.get("allow_plaintext_lan"), written
 
 
 def test_with_no_usable_instance_key_and_no_opt_out_it_is_still_refused(tmp_path, node):
     world = make(tmp_path, bind="127.0.0.1", source="config", file_text='web:\n  bind: "127.0.0.1"\n')
+    no_tls()
     before = world.cfg_path.read_text()
     response = world.as_("global", "PUT", "/api/network", json={"mode": "home_network"})
     assert response.status_code == 409 and response.json()["error"] == "tls_unavailable"
