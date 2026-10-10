@@ -27,7 +27,7 @@ from prometheus.engine import loop_watchdog as _loop_watchdog
 from prometheus.version import package_version
 from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import is_loopback_address, is_loopback_host_header
-from prometheus.web.session_scope import Scope, SessionAccess, scope_for, session_exists
+from prometheus.web.session_scope import Scope, SessionAccess, event_session_id, scope_for, session_exists
 
 logger = logging.getLogger(__name__)
 
@@ -1948,7 +1948,8 @@ class WebSocketBridge:
         try:
             if not self._access.frame_visible(self._scope(ws), event):
                 return False
-            if event.get("type") in _APPROVAL_FRAMES and not self._approval_frame_visible(ws, event):
+            if (event.get("type") in _APPROVAL_FRAMES and event_session_id(event) is None
+                    and not self._approval_frame_visible(ws, event)):
                 return False
         except Exception:
             # Fail CLOSED, and never raise: this runs inside broadcast(), and an exception

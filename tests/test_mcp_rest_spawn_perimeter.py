@@ -162,8 +162,9 @@ class TestWhoMaySpawn:
         resp = client.post("/api/mcp/servers", json=DEFINITION,
                            headers=_auth(rig.device_token))
 
-        assert resp.status_code == 401, resp.text
-        assert "global token" in resp.json()["error"]
+        # 403 from the route gate (web/route_access.py): a scoped device is denied by default, and the token is
+        # valid, so "not yours" and not "your token is dead". It used to be the handler's 401.
+        assert resp.status_code == 403 and resp.json()["error"] == "operator_only", resp.text
         # The REFUSAL is not the claim — the absence of the side effect is.
         # A 401 with the server stored anyway would still have spawned it.
         assert McpServerStore().load() == {}, (
@@ -182,7 +183,7 @@ class TestWhoMaySpawn:
         delete = client.delete("/api/mcp/servers/docs",
                                headers=_auth(rig.device_token))
 
-        assert (patch.status_code, delete.status_code) == (401, 401)
+        assert (patch.status_code, delete.status_code) == (403, 403)
         # Contents, not existence: a PATCH that 401s but rewrote `command`
         # would be the whole defect wearing a 401.
         assert McpServerStore().load() == before, (
@@ -196,13 +197,24 @@ class TestWhoMaySpawn:
         assert resp.json()["applies"] == "live"
         assert McpServerStore().load()["docs"]["command"] == "npx"
 
-    def test_reading_is_deliberately_not_narrowed(self, rig) -> None:
-        """A phone may SEE the connectors; the read exposes no credential."""
+    def test_a_scoped_device_no_longer_reads_the_connectors_either(self, rig) -> None:
+        """This used to be "reading is deliberately not narrowed": a phone could SEE the connectors. A scoped
+        device is default-deny now (web/route_access.py), so the listing is the operator's. Re-allowing it for
+        a phone is one line in SCOPED_ALLOWED and one in tests/test_route_access.py."""
         client = rig.build()
         client.post("/api/mcp/servers", json=DEFINITION,
                     headers=_auth(GLOBAL_TOKEN))
 
-        listing = client.get("/api/mcp/servers", headers=_auth(rig.device_token))
+        refused = client.get("/api/mcp/servers", headers=_auth(rig.device_token))
+        assert refused.status_code == 403 and refused.json()["error"] == "operator_only"
+
+    def test_the_listing_the_operator_gets_exposes_no_credential(self, rig) -> None:
+        """What the old test also pinned, and still true: the read carries names, never values."""
+        client = rig.build()
+        client.post("/api/mcp/servers", json=DEFINITION,
+                    headers=_auth(GLOBAL_TOKEN))
+
+        listing = client.get("/api/mcp/servers", headers=_auth(GLOBAL_TOKEN))
         assert listing.status_code == 200, listing.text
         card = {s["name"]: s for s in listing.json()["servers"]}["docs"]
         assert card["env_names"] == ["DOCS_ENDPOINT", "DOCS_TOKEN"]
