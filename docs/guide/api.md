@@ -61,6 +61,7 @@ Session semantics worth knowing:
 - **`GET /api/sessions` enumerates from the durable LCM store first**, then overlays the in-memory working set. Each row carries a `live` field: `live: true` means the session has an in-memory working set right now; `live: false` means it was restored from durable history after a restart — its full history is still servable via the messages route, but the working context starts fresh on the next message.
 - **`DELETE` writes a durable tombstone**, not just an in-memory clear: the session disappears from the index and stays hidden across restarts, but the append-only LCM rows are left intact — and **newer activity revives it** (a stable gateway id that speaks again resurfaces).
 - **`POST /api/sessions` stamps the origin gateway into the id.** Session ids follow the `<gateway>:<id>` convention (`telegram:123`, `desktop:<uuid>`); this route defaults to `desktop` and accepts an optional `{"gateway": "..."}` body key — 1–32 chars of `[A-Za-z0-9_-]`, no colons. A present-but-empty `gateway` is a 400, not a silent default.
+- **A device token sees only its own sessions.** The global token (`PROMETHEUS_API_TOKEN`) sees and manages every session; a per-device token (`POST /api/devices`) sees and manages the sessions that device created — through `POST /api/sessions`, or by being first to send to, upload into, or switch to an id that exists nowhere — and nothing else. That covers the session list, history, search, `/api/events/recent`, every `/api/sessions/{id}/…` route, and the WebSocket (`switch_session`, `send_message`, and which frames a socket receives, whatever it subscribed to). A session that is not the device's answers `404 {"error": "unknown session"}`, exactly as a missing one does. A device cannot take an id in a namespace the daemon writes into (`telegram:…`, `slack:…`, `discord:…`, `cli:…`, `api:…`, `coding:…`). A device can revoke only itself (`DELETE /api/devices/{its own id}`; another id is a 403). Sessions that existed before this rule belong to the operator. What it does not cover is listed in [docs/contracts/device-scoping.md](../contracts/device-scoping.md).
 
 ### Chat
 
@@ -364,6 +365,28 @@ The sync contract is deliberately simple: **`message_id` is the durable LCM rowi
 
 ## Ports & remote access
 
-- REST: **:8005** (bound `0.0.0.0`). WebSocket: **:8010** (bound `0.0.0.0`).
+- REST: **:8005**. WebSocket: **:8010**. Both listen on the address `web.bind` names. **A new install writes `web.bind: 127.0.0.1`, this machine only.** A config with no `web.bind` listens on **every interface (`0.0.0.0`)**, which is what reaching the daemon over Tailscale or a LAN needs, so an existing install is never changed for you.
 - Beacon expects exactly these two ports on the daemon host — they are not currently negotiated.
 - Both are reachable over Tailscale, which is the intended remote-access path (e.g. Beacon Desktop on a laptop talking to the daemon box); the bearer token and WS first-frame auth are what stand between the ports and the tailnet.
+- **There is no TLS.** The traffic is plain HTTP and `ws://` on whichever interface you name. On `0.0.0.0` the bearer token is the only access control for everyone who can reach the machine's network address. The daemon's startup log says so (once) when it is listening on every interface, and `oara doctor` warns when `web.bind` is **unset** and the daemon would listen on every interface. A `0.0.0.0` you set yourself is your decision: doctor reports it as plain HTTP on all interfaces and does not warn.
+
+### Listening on this machine only
+
+One setting covers all three listeners — the REST API, the WebSocket bridge, and the setup-mode server (whose pairing endpoint is reachable, protected only by the one-time code, for up to 15 minutes):
+
+| Source | Example |
+|---|---|
+| `oara daemon --bind ADDRESS` | `oara daemon --bind 127.0.0.1` |
+| `PROMETHEUS_WEB_BIND` (process environment, or the env file) | `PROMETHEUS_WEB_BIND=127.0.0.1` |
+| `web.bind` in `prometheus.yaml` | `web: {bind: "127.0.0.1"}` |
+| *(none of the above)* | `0.0.0.0` — what a config with no `web.bind` has always done |
+
+Highest wins, in that order. Setup mode has no config yet, so it honours the flag and the environment; `POST /api/setup/configure` then writes `web.bind` into the new config: the address you chose with `--bind` or `PROMETHEUS_WEB_BIND` (`0.0.0.0` included), so the real daemon — in the same process or after a restart — listens where setup mode did, and `127.0.0.1` when you chose none.
+
+**New installs, existing installs.** `oara setup` (fast path and wizard) and setup mode's `configure` write `web.bind: 127.0.0.1` into a config that is **new**. A rerun on a config that already exists never changes it: an unset `web.bind` stays unset, a chosen one is kept. `oara setup` replaces the file, so it carries your `web.bind` across; the wizard edits the file in place.
+
+**A headless box set up remotely.** Setup mode listens on every interface, so Beacon on another machine can pair and configure it. When nobody chose an address with `--bind` or `PROMETHEUS_WEB_BIND`, `configure` still writes `web.bind: 127.0.0.1`, so once setup finishes the box answers only on itself, until its owner sets the bind on purpose (`web.bind: 0.0.0.0`, or a tailnet address) and restarts the daemon. To keep it reachable straight through setup, start it with `--bind 0.0.0.0` (or the environment variable): a chosen address is written as chosen.
+
+An address is an IPv4 literal, an IPv6 literal (`::1`), or `localhost` (which means `127.0.0.1`; spell `::1` for IPv6 loopback). Anything else — a host name, a port, a mask — makes the daemon **refuse to start** with a message naming the setting; it never falls back to a wider address.
+
+On a loopback address the daemon also refuses any request whose `Host` header is not `localhost`, `127.0.0.1` or `[::1]` (any port), on the REST API, on the WebSocket handshake and on the setup server. That closes DNS rebinding, where a web page in your own browser reaches a loopback-only service under an attacker's host name. Reach it as `http://localhost:8005`, not by the machine's name; a local reverse proxy in front of it must forward `Host: localhost`. A wide or specific-interface bind has no Host restriction.

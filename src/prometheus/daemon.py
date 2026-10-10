@@ -54,6 +54,7 @@ from prometheus.__main__ import (
 )
 from prometheus.telemetry.tracker import TELEMETRY_OFF_NOTE, ToolCallTelemetry
 from prometheus.tools.base import ToolRegistry
+from prometheus.web.bind import BindError, resolve_bind
 from prometheus.engine.fallback import build_fallback_target
 
 logger = logging.getLogger("prometheus.daemon")
@@ -636,6 +637,16 @@ async def run_daemon(args: argparse.Namespace) -> None:
             "Loaded %d variable(s) from %s", _env_loaded, get_env_file_path()
         )
 
+    # ── Listen address (--bind > PROMETHEUS_WEB_BIND > web.bind > 0.0.0.0) ──
+    # Resolved here, after the env file is loaded (so a PROMETHEUS_WEB_BIND kept
+    # there counts) and BEFORE anything is started or bound. An invalid value
+    # raises BindError and refuses the boot: it must never degrade to a wider
+    # address. Deliberately outside the try/except that guards the web bridge
+    # below — that block turns a failure into "Web bridge not available" and
+    # carries on, which for a bad bind would be exactly the wrong answer.
+    # `getattr`: callers that build their own Namespace predate the flag.
+    web_bind = resolve_bind(config, flag=getattr(args, "bind", None))
+
     # ── Wiki root ───────────────────────────────────────────────────────
     # Resolved ONCE here and pinned process-wide; every consumer reads it back
     # through get_wiki_root() and none keeps a fallback. Before this, nine
@@ -737,7 +748,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     # Archive writer
     archive = ArchiveWriter()
-    archive.archive_event("daemon_start", {"args": vars(args)})
+    archive.archive_event("daemon_start", {"args": daemon_start_args(args)})
 
     # Write daemon start time for uptime tracking
     import time as _time
@@ -2875,12 +2886,16 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     backend_registry=backend_registry,
                     computer_integration=computer_integration,
                     computer_runner=computer.runner,
+                    bind=web_bind.address,
                     api_port=api_port,
                     ws_port=ws_port,
                 ))
             if web_task is not None:
                 tasks.append(web_task)
-                logger.info("Web bridge started (REST :%d, WS :%d)", api_port, ws_port)
+                logger.info(
+                    "Web bridge started (REST :%d, WS :%d, listening on %s)",
+                    api_port, ws_port, web_bind.describe(),
+                )
         except Exception as exc:
             logger.warning("Web bridge not available: %s", exc)
 
@@ -2936,8 +2951,8 @@ _LOG_MAX_BYTES = 64 * 1024 * 1024
 _LOG_BACKUPS = 5
 
 
-def main() -> None:
-    """CLI entry point."""
+def build_parser() -> argparse.ArgumentParser:
+    """The daemon's command line. A function so a test can hold it against what the parity traces recorded."""
     parser = argparse.ArgumentParser(description="Prometheus daemon")
     parser.add_argument(
         "--config", type=str, default=None, help="Path to prometheus.yaml"
@@ -2950,6 +2965,34 @@ def main() -> None:
     parser.add_argument(
         "--debug", action="store_true", help="Enable debug logging"
     )
+    parser.add_argument(
+        "--bind", metavar="ADDRESS", default=None,
+        help="Address the web API and WebSocket bridge listen on (also in "
+             "setup mode): 127.0.0.1 for this machine only, or an IPv4/IPv6 "
+             "address, or 0.0.0.0 for every interface (the default). Overrides "
+             "PROMETHEUS_WEB_BIND and web.bind in prometheus.yaml. An invalid "
+             "value refuses to start.",
+    )
+    return parser
+
+
+def daemon_start_args(args: argparse.Namespace) -> dict[str, Any]:
+    """The arguments the ``daemon_start`` archive event records: ``vars(args)``, except an unset ``--bind``.
+
+    The 12 parity traces record this dict and the CI replay compares the daemon's whole archive against them.
+    Adding ``--bind`` added ``bind: null`` to every run, so every trace "changed" while nothing the daemon
+    does had. An option that was not given has nothing to record. An explicit ``--bind`` is a fact about the
+    run and stays. Every other argument is recorded as it always was, null or not.
+    """
+    recorded = dict(vars(args))
+    if recorded.get("bind") is None:
+        recorded.pop("bind", None)
+    return recorded
+
+
+def main() -> None:
+    """CLI entry point."""
+    parser = build_parser()
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.debug else logging.INFO
@@ -2981,7 +3024,16 @@ def main() -> None:
             handlers=[logging.StreamHandler(sys.stdout)],
         )
         install_log_redaction()
-        result = run_setup_mode()
+        # Setup mode has no config, so no web.bind: --bind > PROMETHEUS_WEB_BIND >
+        # 0.0.0.0. Resolved BEFORE the server exists; a bad value never listens.
+        from prometheus.web.setup_server import resolve_setup_choice
+
+        try:
+            setup_bind = resolve_setup_choice(args.bind)
+        except BindError as exc:
+            print(f"{exc}", file=sys.stderr)
+            sys.exit(2)
+        result = run_setup_mode(bind=setup_bind)
         # Phase 2: POST /api/setup/complete exits the serve loop with a
         # restart sentinel. RE-CHECK for config — present now → fall
         # through into the normal daemon boot IN THIS SAME PROCESS (no
@@ -3048,6 +3100,11 @@ def main() -> None:
     except ConfigReadError as exc:
         print(f"{exc}", file=sys.stderr)
         sys.exit(1)
+    except BindError as exc:
+        # An address we cannot honour is a refusal, not a fallback. Exit 2, like
+        # an argparse usage error: the invocation or the config is wrong.
+        print(f"{exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

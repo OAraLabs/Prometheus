@@ -65,6 +65,10 @@ def _isolated_state_dirs(tmp_path, monkeypatch):
     # never pointed at tmp, so any data-dir-backed store written by a test
     # (mcp_servers.json being the first heavy one) landed on the live box.
     monkeypatch.setenv("PROMETHEUS_DATA_DIR", str(tmp_path / "prom-data"))
+    # A developer who exports PROMETHEUS_WEB_BIND (the listen address) must not
+    # change which interface a test's server binds, or which Host header the
+    # TestClient's "testserver" is allowed to use.
+    monkeypatch.delenv("PROMETHEUS_WEB_BIND", raising=False)
     # The developer's OWN checkout config is a live-state root too, and it
     # only became reachable when `config.defaults` stopped naming a path one
     # directory above the repo root. `config/prometheus.yaml` is gitignored,
