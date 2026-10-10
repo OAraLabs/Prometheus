@@ -3,7 +3,9 @@
 TWO FLOORS, TWO MECHANISMS, ONE DOCTRINE
 ----------------------------------------
 * The READ floor (AppArmor, ``aa-exec -p prometheus-bash``) keeps bash out
-  of three secret path families. Needs root to load a profile.
+  of three secret path families. Needs root to load a profile. On macOS the
+  same floor is a Seatbelt profile run through ``sandbox-exec`` (no root, no
+  profile to load); see "THE READ FLOOR ON macOS" below.
 * The WRITE floor (bubblewrap) keeps bash's writes inside the workspace.
   Needs no root, and is the second half of this file.
 
@@ -224,6 +226,166 @@ def refusal_message(profile: str, detail: str) -> str:
         "or set security.bash_confinement: off to run without the floor, "
         "knowingly."
     )
+
+
+# --------------------------------------------------------------------------- #
+# THE READ FLOOR ON macOS: SEATBELT
+# --------------------------------------------------------------------------- #
+#
+# There is no AppArmor on a Mac, and ``auto`` used to report "unsupported" there,
+# so every model-written shell could read ~/.config/prometheus/env (the master
+# key, the provider keys, the bot tokens), ~/.ssh and ~/.gnupg. The same floor,
+# with the same three families, modes and doctrine, is a Seatbelt profile run
+# through ``sandbox-exec``. It allows everything, then denies reads and writes of
+# those families. It is unprivileged, every child inherits it, and it is verified
+# BY OUTCOME at boot against a scratch home. ``sandbox-exec`` is deprecated by
+# Apple and still ships: if it goes, ``auto`` says so loudly and ``required``
+# refuses, as with a missing AppArmor profile.
+# docs/design/master-key-out-of-agent-shell.md.
+
+SANDBOX_EXEC: Final[str] = "/usr/bin/sandbox-exec"
+MECHANISM_APPARMOR: Final[str] = "apparmor"
+MECHANISM_SEATBELT: Final[str] = "seatbelt"
+_SEATBELT_CACHE_KEY: Final[str] = "seatbelt:sandbox-exec"
+
+def seatbelt_possible() -> bool:
+    """A Mac with ``sandbox-exec``. Nothing to load: the profile travels on each command line."""
+    return sys.platform == "darwin" and os.path.exists(SANDBOX_EXEC)
+
+
+def read_floor_mechanism() -> str | None:
+    """``apparmor`` on Linux, ``seatbelt`` on a Mac with sandbox-exec, None where neither can exist."""
+    if apparmor_possible():
+        return MECHANISM_APPARMOR
+    if seatbelt_possible():
+        return MECHANISM_SEATBELT
+    return None
+
+
+def _sb_string(text: str) -> str:
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def seatbelt_profile(home: str | os.PathLike[str] | None = None) -> str:
+    """The Seatbelt profile: everything allowed except reading or writing the three families
+    ``deploy/apparmor/prometheus-bash`` denies, ``~/.ssh``, ``~/.gnupg`` and ``~/.config/*/*env``.
+
+    *home* defaults to ``Path.home()`` (``$HOME``, as the daemon and the app's launcher resolve it), resolved,
+    because Seatbelt matches the real path a file is opened at.
+
+    The home path only ever appears inside ordinary string literals, where ``\\"`` escapes a quote. It is never
+    put inside the regex literal (``#"..."``): there a quote ends the literal whatever precedes it, so a home
+    containing one would break the profile (measured: ``unbound variable``, rc 65). ``~/.config/*/*env`` is
+    therefore "under ~/.config" AND "ends in /.config/<one segment>/<name>env", the AppArmor ``*`` that does not
+    cross ``/``.
+    """
+    base = _sb_string(os.path.realpath(os.fspath(home) if home is not None else str(Path.home())))
+    return (
+        "(version 1)\n"
+        "(allow default)\n"
+        "(deny file-read* file-write*\n"
+        f'  (subpath "{base}/.ssh")\n'
+        f'  (subpath "{base}/.gnupg")\n'
+        f'  (require-all (subpath "{base}/.config") (regex #"/\\.config/[^/]+/[^/]*env$")))\n'
+    )
+
+
+def _probe_seatbelt() -> tuple[bool, str]:
+    """Run a shell under the profile against a scratch home and see what it could read.
+
+    Verified BY OUTCOME, as the AppArmor probe is: an ordinary file must be readable and both a ``.ssh`` file
+    and a ``.config/*/env`` file must be refused. ``sandbox-exec`` exiting 0 alone proves only that it ran.
+    """
+    if not os.path.exists(SANDBOX_EXEC):
+        return False, f"{SANDBOX_EXEC} is not on this Mac"
+    script = ('cat "$1/ordinary" >/dev/null || exit 3; '
+              'cat "$1/.ssh/probe" >/dev/null 2>&1 && exit 4; '
+              'cat "$1/.config/prometheus/env" >/dev/null 2>&1 && exit 5; '
+              'echo FLOOR_HELD')
+    try:
+        with tempfile.TemporaryDirectory(prefix="prometheus-read-floor-") as tmp:
+            home = Path(tmp).resolve()
+            (home / ".ssh").mkdir()
+            (home / ".ssh" / "probe").write_text("x\n")
+            (home / ".config" / "prometheus").mkdir(parents=True)
+            (home / ".config" / "prometheus" / "env").write_text("x\n")
+            (home / "ordinary").write_text("x\n")
+            proc = subprocess.run(
+                [SANDBOX_EXEC, "-p", seatbelt_profile(home), "/bin/sh", "-c", script, "probe", str(home)],
+                capture_output=True, text=True, timeout=15,
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"sandbox-exec could not be run: {exc}"
+    if proc.returncode == 0 and "FLOOR_HELD" in (proc.stdout or ""):
+        return True, "seatbelt via sandbox-exec: ~/.ssh and ~/.config/*/*env refused, ordinary reads allowed"
+    why = {
+        3: "an ordinary file could not be read under the profile",
+        4: "~/.ssh stayed readable under the profile",
+        5: "~/.config/*/*env stayed readable under the profile",
+    }.get(proc.returncode)
+    return False, why or (f"sandbox-exec did not run the probe (rc={proc.returncode})"
+                          + (f": {(proc.stderr or '').strip()[:200]}" if (proc.stderr or "").strip() else ""))
+
+
+def seatbelt_preflight(*, force: bool = False) -> tuple[bool, str]:
+    """Cached per-process check that the Seatbelt floor genuinely holds (see :func:`preflight`)."""
+    if force or _SEATBELT_CACHE_KEY not in _preflight_cache:
+        ok, detail = _probe_seatbelt()
+        _preflight_cache[_SEATBELT_CACHE_KEY] = (ok, detail)
+        if ok:
+            logger.info("bash confinement ACTIVE: %s", detail)
+        else:
+            logger.error("bash confinement UNAVAILABLE: %s", detail)
+    return _preflight_cache[_SEATBELT_CACHE_KEY]
+
+
+def seatbelt_refusal_message(detail: str) -> str:
+    """What the operator sees instead of an unconfined shell, on a Mac."""
+    return (
+        "bash REFUSED: the read floor is required but unavailable.\n"
+        f"Reason: {detail}\n"
+        f"Mechanism: Seatbelt ({SANDBOX_EXEC})\n"
+        "\n"
+        "The command was NOT run. The floor is what keeps bash out of ~/.ssh, ~/.gnupg and ~/.config/*/*env "
+        "(the master key, the provider keys and the bot tokens live in ~/.config/prometheus/env). The permission "
+        "gate cannot reach those paths for bash, so running unconfined would remove the floor entirely rather "
+        "than degrade it.\n"
+        "\n"
+        "sandbox-exec ships with macOS and needs nothing loaded. If it is missing or no longer holds, set "
+        "security.bash_confinement: auto (runs without the floor and says so) or off, knowingly."
+    )
+
+
+def _read_preflight(profile: str) -> tuple[bool, str]:
+    mechanism = read_floor_mechanism()
+    if mechanism == MECHANISM_SEATBELT:
+        return seatbelt_preflight()
+    if mechanism is None:
+        return False, "this platform has neither AppArmor (Linux) nor sandbox-exec (macOS)"
+    return preflight(profile)
+
+
+def _read_cache_key(profile: str) -> str:
+    return _SEATBELT_CACHE_KEY if read_floor_mechanism() == MECHANISM_SEATBELT else profile
+
+
+def _read_prefix(profile: str) -> list[str]:
+    if read_floor_mechanism() == MECHANISM_SEATBELT:
+        return [SANDBOX_EXEC, "-p", seatbelt_profile()]
+    return wrap_argv([], profile)
+
+
+def _read_refusal(profile: str, detail: str) -> str:
+    if read_floor_mechanism() == MECHANISM_SEATBELT:
+        return seatbelt_refusal_message(detail)
+    return refusal_message(profile, detail)
+
+
+def read_mechanism_label(profile: str = PROFILE) -> str:
+    """The mechanism as /api/status and ``oara doctor`` name it."""
+    if read_floor_mechanism() == MECHANISM_SEATBELT:
+        return _SEATBELT_CACHE_KEY
+    return f"apparmor:{profile}"
 
 
 # =========================================================================== #
@@ -562,7 +724,7 @@ STATE_ACTIVE: Final[str] = "active"
 STATE_DARK: Final[str] = "dark"
 STATE_REFUSING: Final[str] = "refusing"
 STATE_NO_WORKSPACE: Final[str] = "no-workspace"
-#: The read floor in "auto" on a platform with no AppArmor at all (macOS).
+#: The read floor in "auto" on a platform with neither AppArmor nor sandbox-exec.
 #: Not dark: nothing that could exist is missing. Reported, never alerted on.
 STATE_UNSUPPORTED: Final[str] = READ_UNSUPPORTED
 
@@ -596,19 +758,20 @@ def floor_report(
     read_ok: bool | None = None
     read_detail = "not probed"
     inner_prefix: list[str] = []
-    unsupported = read == MODE_AUTO and not apparmor_possible()
+    unsupported = read == MODE_AUTO and read_floor_mechanism() is None
     if unsupported:
-        read_detail = "this platform has no AppArmor"
+        read_detail = "this platform has neither AppArmor nor sandbox-exec"
     elif read in (MODE_REQUIRED, MODE_AUTO):
+        key = _read_cache_key(PROFILE)
         if probe:
-            read_ok, read_detail = preflight()
-        elif PROFILE in _preflight_cache:
-            read_ok, read_detail = _preflight_cache[PROFILE]
-        # The tool wraps with aa-exec whenever the read floor is required —
-        # and in auto, once it verified — so the write probe carries the same
-        # prefix: that is the argv the next call gets.
+            read_ok, read_detail = _read_preflight(PROFILE)
+        elif key in _preflight_cache:
+            read_ok, read_detail = _preflight_cache[key]
+        # The tool wraps with the read floor (aa-exec, or sandbox-exec on a Mac)
+        # whenever it is required, and in auto once it verified, so the write
+        # probe carries the same prefix: that is the argv the next call gets.
         if read == MODE_REQUIRED or read_ok:
-            inner_prefix = wrap_argv([], PROFILE)
+            inner_prefix = _read_prefix(PROFILE)
 
     write_ok: bool | None = None
     write_detail = "not probed"
@@ -646,7 +809,7 @@ def floor_report(
             "state": read_state,
             "available": read_ok,
             "detail": read_detail,
-            "mechanism": f"apparmor:{PROFILE}",
+            "mechanism": read_mechanism_label(PROFILE),
             "covers": "reads of ~/.ssh, ~/.gnupg, ~/.config/*/*env",
         },
         "bash_write_floor": {
@@ -711,7 +874,7 @@ class FloorResult:
     write_floor: str
     refusal: str | None = None
     #: ``off``, ``active``, ``unavailable`` (auto, unverified), ``unsupported``
-    #: (auto, no AppArmor on this platform) or ``refused`` (required).
+    #: (auto, neither AppArmor nor sandbox-exec here) or ``refused`` (required).
     read_floor: str = MODE_OFF
 
 
@@ -745,18 +908,19 @@ def apply_floors(
 
     aa_prefix: list[str] = []
     read_floor = MODE_OFF
-    if read == MODE_AUTO and not apparmor_possible():
+    if read == MODE_AUTO and read_floor_mechanism() is None:
         read_floor = READ_UNSUPPORTED
     elif read in (MODE_REQUIRED, MODE_AUTO):
-        ok, detail = preflight(profile)
+        ok, detail = _read_preflight(profile)
         if ok:
             # Kept as a PREFIX rather than applied once, so the write floor
             # below can probe the composed stack as the stack it will be.
-            aa_prefix = wrap_argv([], profile)
+            # AppArmor's aa-exec on Linux, Seatbelt's sandbox-exec on a Mac.
+            aa_prefix = _read_prefix(profile)
             out = [*aa_prefix, *out]
             read_floor = READ_ACTIVE
         elif read == MODE_REQUIRED:
-            return FloorResult((), "not-reached", refusal_message(profile, detail),
+            return FloorResult((), "not-reached", _read_refusal(profile, detail),
                                read_floor="refused")
         else:
             # auto, unverified: run without the read floor. preflight() has

@@ -396,9 +396,12 @@ security:
   #             removed later fails closed). Not verified on Linux: bash runs
   #             WITHOUT the floor and says so — an ERROR at boot naming the
   #             fix, "dark" in /api/status, a WARN row in `oara doctor`, and
-  #             read_floor: unavailable in each call's metadata. On a
-  #             platform with no AppArmor (macOS) it reports "unsupported".
-  #   required  every bash call execs through `aa-exec -p prometheus-bash`.
+  #             read_floor: unavailable in each call's metadata. On macOS the
+  #             same floor is a Seatbelt profile run through
+  #             /usr/bin/sandbox-exec (no root, nothing to load), verified
+  #             the same way; "unsupported" only where neither exists.
+  #   required  every bash call execs through `aa-exec -p prometheus-bash`
+  #             (on macOS, `sandbox-exec -p <the profile>`).
   #             If the profile is not loaded, or aa-exec is missing, or the
   #             transition does not happen, bash REFUSES TO RUN and says so —
   #             it never silently falls back to an unconfined shell.

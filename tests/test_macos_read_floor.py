@@ -56,14 +56,15 @@ def test_the_profile_denies_the_three_families_apparmor_denies_and_allows_the_re
     assert "(allow default)" in profile
     assert '(subpath "/Users/someone/.ssh")' in profile
     assert '(subpath "/Users/someone/.gnupg")' in profile
-    assert r'(regex #"^/Users/someone/\.config/[^/]+/[^/]*env$")' in profile
+    assert r'(require-all (subpath "/Users/someone/.config") (regex #"/\.config/[^/]+/[^/]*env$"))' in profile
     assert "file-read*" in profile and "file-write*" in profile
 
 
 def test_a_home_path_cannot_break_out_of_the_profile():
     profile = C.seatbelt_profile('/Users/odd "name" (x)')
     assert '(subpath "/Users/odd \\"name\\" (x)/.ssh")' in profile
-    assert r'^/Users/odd \"name\" \(x\)/\.config/' in profile, "a quote would end the regex literal"
+    # The home never enters the regex literal, where a quote would end it whatever escapes it.
+    assert profile.count('#"') == 1 and r'#"/\.config/[^/]+/[^/]*env$"' in profile
 
 
 # ── apply_floors and floor_report on a Mac ───────────────────────────────────
@@ -156,6 +157,21 @@ def test_the_real_floor_refuses_the_env_file_and_ssh_however_they_are_reached(tm
         done = _sh(home, script)
         assert "master" not in done.stdout and "PRIVATE" not in done.stdout and done.returncode != 0, script
     assert not (home / ".ssh" / "authorized_keys").exists()
+
+
+@real
+@pytest.mark.parametrize("name", ['quote "q"', 'mixed "a" (b) [c] {d}+e', "plain"])
+def test_the_real_floor_holds_for_a_home_path_with_awkward_characters(tmp_path, name):
+    home = (tmp_path.resolve() / name)
+    (home / ".config" / "prometheus").mkdir(parents=True)
+    (home / ".config" / "prometheus" / "env").write_text("PROMETHEUS_API_TOKEN=master\n")
+    (home / ".config" / "prometheus" / "settings.yaml").write_text("not a secret\n")
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id").write_text("PRIVATE\n")
+    done = _sh(home, 'cat "$HOME/.config/prometheus/env" "$HOME/.ssh/id" 2>/dev/null; '
+                     'cat "$HOME/.config/prometheus/settings.yaml"')
+    assert "master" not in done.stdout and "PRIVATE" not in done.stdout, done.stdout
+    assert "not a secret" in done.stdout, ("the profile did not parse, or denied too much", done.stderr[-300:])
 
 
 @real
