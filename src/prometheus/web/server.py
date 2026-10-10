@@ -5488,8 +5488,8 @@ def create_app(
             if not on and not (by.kind == _approver.DEVICE and by.id == device_id):
                 return JSONResponse(status_code=403, content={
                     "error": "only_own_mark",
-                    "detail": ("A device may remove only its own computer-use mark. Removing another "
-                               "device's takes Telegram (/computer disallow <device id>) or the API token.")})
+                    "detail": ("A device may remove only its own computer-use mark. Removing another device's "
+                               "mark takes Telegram (/computer disallow <device id>) or the API token.")})
         if not _devices_or_create().set_computer(device_id, on, by=by.label):
             return JSONResponse(status_code=404, content={"error": "no live device"})
         return {"id": device_id, "computer": on}
