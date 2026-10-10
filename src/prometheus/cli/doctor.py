@@ -1250,6 +1250,44 @@ def check_whisper(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+def check_pairing_telegram(config: dict[str, Any]) -> DiagnosticCheck | None:
+    """Telegram prompts for pairing requests are opt-in; say so when they are on but nothing could get one.
+
+    ``None`` (no row) while ``pairing.telegram_prompts`` is off, which is the default: a feature that is
+    off needs no line. On, the daemon would send nothing when the Telegram gateway is off or no private chat
+    (a positive id; a group is never used) is in ``gateway.allowed_chat_ids``, and the owner who asked for
+    prompts needs to be told that rather than discover it when a device is waiting.
+    """
+    from prometheus.config.pair_requests import PairingSettings
+    from prometheus.config.shipped_defaults import resolve_allowed_chat_ids, resolve_telegram_enabled
+
+    if not PairingSettings.from_config(config).telegram_prompts:       # the one reader of the key
+        return None
+
+    gw = config.get("gateway", {}) or {}
+    name = "Pairing prompts (Telegram)"
+    if not resolve_telegram_enabled(gw):
+        return DiagnosticCheck(
+            name=name, category="connectivity", status="warning",
+            message="pairing.telegram_prompts is on, but the Telegram gateway is not enabled, so no pairing "
+                    "prompt will be sent",
+            fix="Set gateway.telegram_enabled: true (and a bot token), or set pairing.telegram_prompts: false.",
+        )
+    private = [chat for chat in resolve_allowed_chat_ids(gw) if chat > 0]
+    if not private:
+        return DiagnosticCheck(
+            name=name, category="connectivity", status="warning",
+            message="pairing.telegram_prompts is on, but gateway.allowed_chat_ids has no private chat (a "
+                    "positive id; a group is never used), so no pairing prompt will be sent",
+            fix="Add your own chat id to gateway.allowed_chat_ids (get it from @userinfobot).",
+        )
+    return DiagnosticCheck(
+        name=name, category="connectivity", status="ok",
+        message=f"a device asking to join is sent to {len(private)} private chat"
+                f"{'' if len(private) == 1 else 's'}, as plain text with Approve / Deny buttons",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -1264,6 +1302,7 @@ def run_extended_checks(
     reach, model = check_inference(config, timeout=timeout)
     router = check_router(config)
     bind_row = check_web_bind(config)
+    pairing_row = check_pairing_telegram(config)
     return [
         config_check,
         *([router] if router is not None else []),
@@ -1272,6 +1311,7 @@ def run_extended_checks(
         model,
         check_web_port(config),
         *([bind_row] if bind_row is not None else []),
+        *([pairing_row] if pairing_row is not None else []),
         check_token(config),
         *check_gateways(config),
         check_advertised_tools(config),

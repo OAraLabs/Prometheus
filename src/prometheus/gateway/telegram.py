@@ -813,6 +813,43 @@ class TelegramAdapter(BasePlatformAdapter):
 
         return SendResult(success=True, message_id=last_message_id)
 
+    # -- helpers for other subsystems (pairing prompts) ------------------------
+    #
+    # `send` cannot do these: it has no `reply_markup`, and a `parse_mode` of None there falls back to
+    # `config.parse_mode` (MarkdownV2 on a default install), which would let text a stranger typed be
+    # formatted. These pass `parse_mode=None` to the bot API explicitly, which means "no formatting".
+
+    def add_handler(self, handler: Any, group: int = 0) -> bool:
+        """Register an extra handler after start-up. Runs behind the group -1 authorisation like any other."""
+        if self._app is None:
+            return False
+        self._app.add_handler(handler, group)
+        return True
+
+    async def send_prompt(self, chat_id: int, text: str, keyboard: Any | None = None) -> int | None:
+        """Send PLAIN text, optionally with an inline keyboard. The message id, or None if it did not go."""
+        if self._app is None:
+            return None
+        try:
+            msg = await self._app.bot.send_message(
+                chat_id=chat_id, text=text, parse_mode=None, reply_markup=keyboard)
+        except Exception as exc:
+            logger.error("Failed to send a prompt to chat %d: %s", chat_id, exc)
+            return None
+        return msg.message_id
+
+    async def edit_prompt(self, chat_id: int, message_id: int, text: str) -> bool:
+        """Replace a message with PLAIN text and remove its buttons. False if Telegram would not."""
+        if self._app is None:
+            return False
+        try:
+            await self._app.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id, text=text, parse_mode=None, reply_markup=None)
+        except Exception as exc:
+            logger.info("Could not edit message %s in chat %d: %s", message_id, chat_id, exc)
+            return False
+        return True
+
     async def _authorize_update(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
