@@ -2061,6 +2061,9 @@ def main() -> None:
         except WorkerRouteRefused as exc:
             print(f"error: route {args.route!r}: {exc}", file=sys.stderr)
             sys.exit(2)
+        # A worker runs on its route or fails, plainly: no provider fallback
+        # to another model, the way an operator turns it off.
+        model_cfg["fallback"] = {"enabled": False}
         config["model"] = model_cfg
         # `4090:qwen2.5:7b` names its model; `4090` and `local` serve whatever
         # their box serves, which detection reads below.
@@ -2195,11 +2198,8 @@ def main() -> None:
         log.warning("profile store unavailable — advertisement unfiltered", exc_info=True)
 
     context = LoopContext(
-        # None on a pinned route: a worker runs on its route or fails, plainly.
-        fallback=(
-            None if pinned_route
-            else build_fallback_target(model_cfg, detected_model=model_name)
-        ),
+        # None on a pinned route (its model_cfg disables it, above).
+        fallback=build_fallback_target(model_cfg, detected_model=model_name),
         provider=provider,
         model=model_name,
         system_prompt=system_prompt,
