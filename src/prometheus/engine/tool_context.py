@@ -25,6 +25,15 @@ from typing import Iterator
 TOOL_EXECUTION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "prometheus_tool_execution", default=None)
 
+#: The conversation the agent run in progress is recorded under: set by the agent loop around a run, None on an
+#: ephemeral turn and outside any run. It lives here, not in ``agent_loop``, so the approval queue can read it
+#: without importing the loop. Two readers: the loop's telemetry rows (descriptive), and the approval queue,
+#: which stamps every pending request with the session that raised it so a SCOPED device is shown, and may answer,
+#: only the tool calls of its own sessions (``web/route_access.py``). The read-only calls of a round run under
+#: ``gather`` in tasks that copy the context, so they see it too.
+RUN_SESSION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "prometheus_run_session", default=None)
+
 
 def in_tool_execution() -> bool:
     """True inside any tool call the agent loop is running."""

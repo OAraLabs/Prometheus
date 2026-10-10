@@ -139,7 +139,7 @@ def _mint_owner(client, **headers):
 
 def test_an_owner_device_is_minted_from_this_machine():
     response = _mint_owner(_client(_daemon()))
-    assert response.status_code == 200 and response.json().get("token")
+    assert response.status_code == 201 and response.json().get("token")
 
 
 @pytest.mark.parametrize("header", [{"X-Forwarded-For": REMOTE}, {"Forwarded": f"for={REMOTE}"}])
@@ -153,4 +153,4 @@ def test_an_ordinary_scoped_device_can_still_be_enrolled_through_a_relay():
     response = _client(_daemon()).post(
         "/api/devices", json={"name": "Other computer"},
         headers={"Authorization": f"Bearer {TOKEN}", "X-Forwarded-For": REMOTE})
-    assert response.status_code == 200
+    assert response.status_code == 201

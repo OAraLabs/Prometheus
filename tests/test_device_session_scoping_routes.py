@@ -147,16 +147,22 @@ def _story(world: World) -> str:
                       json={"story_id": "US-1", "title": "Land the eagle"}).json()["story"]["id"]
 
 
-def test_a_device_cannot_dispatch_a_story_into_another_devices_session(world):
+def test_a_device_cannot_dispatch_a_story_into_another_devices_session(world, monkeypatch):
     sid_a = world.device_session("a")
     pk = _story(world)
     before = world.lcm.count_all(sid_a)
 
+    # Stories are the operator's (web/route_access.py): a scoped device is stopped at the gate.
+    r = world.call("b", "POST", f"/api/stories/{pk}/dispatch", json={"session_key": sid_a})
+    assert r.status_code == 403 and r.json()["error"] == "operator_only"
+    assert world.lcm.count_all(sid_a) == before
+
+    # Defence in depth: the session guard behind the gate is still there. Open the gate and device b is
+    # refused all the same, as before; its own session (or a brand-new id) is fine; so is the operator.
+    monkeypatch.setattr("prometheus.web.server.is_scoped_allowed", lambda *a, **k: True)
     r = world.call("b", "POST", f"/api/stories/{pk}/dispatch", json={"session_key": sid_a})
     assert r.status_code == 404
     assert world.lcm.count_all(sid_a) == before
-
-    # Its own session (or a brand-new id) is fine; so is the operator, anywhere.
     assert world.call("a", "POST", f"/api/stories/{pk}/dispatch",
                       json={"session_key": sid_a}).status_code == 200
     assert world.call("op", "POST", f"/api/stories/{pk}/dispatch",
@@ -194,9 +200,17 @@ class _Runner:
         return True
 
 
+def _mark(world, *names):
+    """An operator marked these devices for computer use: they are people, so the computer routes are theirs to
+    reach. (An unmarked scoped device is stopped at the gate; tests/test_scoped_devices_default_deny.py.)"""
+    for name in names:
+        assert world.devices.set_computer(getattr(world, name)["id"], True, by="test")
+
+
 def test_a_device_cannot_start_or_read_a_desktop_task_in_another_devices_session(world):
     runner = _Runner()
     world.app.state.computer_runner = runner
+    _mark(world, "a", "b")
     sid_a = world.device_session("a")
 
     started = world.call("b", "POST", "/api/computer/tasks",
@@ -217,6 +231,7 @@ def test_stopping_a_desktop_task_stays_open_to_every_valid_token(world):
     """Deliberate and pinned: a stop can only end a task (computer-use door design)."""
     runner = _Runner()
     world.app.state.computer_runner = runner
+    _mark(world, "a")                      # b is NOT marked: the stop is open to it all the same
     sid_a = world.device_session("a")
     tid = world.call("a", "POST", "/api/computer/tasks",
                      json={"session_id": sid_a, "goal": "x"}).json()["task_id"]

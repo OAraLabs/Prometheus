@@ -172,6 +172,35 @@ def is_loopback_peer(request_or_scope: Any) -> bool:
     return ip is not None and _is_loopback_ip(ip)
 
 
+#: Headers a relay adds to say who it is acting for. A request that carries either was relayed by something, so it
+#: did not come from "this machine" even when the relay is on it.
+_RELAY_HEADERS = frozenset({b"x-forwarded-for", b"forwarded"})
+
+
+def is_same_machine(request_or_scope: Any) -> bool:
+    """True when the request came from THIS machine: a loopback TCP peer that relayed nothing.
+
+    Stricter than :func:`is_loopback_peer` on purpose, and the one to use before an action that is only meant for
+    the person at this machine (same-Mac pairing, minting an owner device). Two ways a loopback peer lies:
+
+    * a reverse proxy on this machine (``tailscale serve``, ``cloudflared``, nginx) connects from 127.0.0.1 and
+      relays a request from anywhere, so a remote request has a loopback peer;
+    * uvicorn REWRITES ``scope["client"]`` from ``X-Forwarded-For`` when the peer is in ``web.trusted_proxies``, so
+      a range that is too wide lets a forged header make a remote caller read as 127.0.0.1.
+
+    Both relay with ``X-Forwarded-For`` or ``Forwarded``, so a request carrying either is not this machine,
+    whatever its peer says. (A relay that strips both is still stopped by the Host-header test the secret routes
+    also make.) Anything that does not clearly say "loopback, no relay" is False.
+    """
+    scope = getattr(request_or_scope, "scope", request_or_scope)
+    if not is_loopback_peer(scope):
+        return False
+    for name, _value in scope.get("headers") or ():
+        if isinstance(name, (bytes, bytearray)) and bytes(name).lower() in _RELAY_HEADERS:
+            return False
+    return True
+
+
 def _single_host_header(scope: Scope) -> str | None:
     """The one Host header of an ASGI scope; ``None`` for none or for several."""
     values = [

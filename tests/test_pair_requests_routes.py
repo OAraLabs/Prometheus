@@ -491,7 +491,7 @@ def test_an_approved_device_is_scoped_and_cannot_do_what_a_stolen_phone_must_not
     assert mine("GET", "/api/pair/requests").status_code == 403
     assert mine("POST", f"/api/pair/requests/{nxt['request_id']}/approve").status_code == 403
     # Not root: it cannot enrol another device.
-    assert mine("POST", "/api/devices", json={"name": "attacker"}).status_code == 401
+    assert mine("POST", "/api/devices", json={"name": "attacker"}).status_code == 403
     # It owns nothing: it sees none of the operator's conversations, and cannot revoke another device.
     assert mine("GET", "/api/sessions").json() == []
     assert mine("DELETE", f"/api/devices/{other['id']}").status_code == 403

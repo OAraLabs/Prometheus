@@ -51,11 +51,26 @@ EXPECTED_SCOPED_ALLOWED = {
     ("GET", "/api/sessions/{session_id}/fork"),
     ("POST", "/api/sessions/{session_id}/fork"),
     ("GET", "/api/events/recent"),
+    ("GET", "/api/activity/recent"),
     ("POST", "/api/search"),
+    # the one desktop route open to every valid token: a stop can only end a task
+    ("POST", "/api/computer/tasks/{task_id}/stop"),
     # the tool calls of its own sessions: once or until-restart, enforced in the handlers
     ("GET", "/api/approvals"),
     ("POST", "/api/approvals/{request_id}/approve"),
     ("POST", "/api/approvals/{request_id}/deny"),
+}
+
+
+#: What a device an operator MARKED for computer use may additionally do (the door's W3 ruling).
+EXPECTED_MARKED_DEVICE_ALLOWED = {
+    ("GET", "/api/computer/apps"),
+    ("POST", "/api/computer/tasks"),
+    ("GET", "/api/computer/tasks/{task_id}"),
+    ("GET", "/api/sessions/{session_id}/computer"),
+    ("PUT", "/api/sessions/{session_id}/computer"),
+    ("DELETE", "/api/sessions/{session_id}/computer"),
+    ("PUT", "/api/devices/{device_id}/computer"),
 }
 
 
@@ -111,10 +126,49 @@ def test_nothing_unknown_is_allowed():
 
 def test_the_allowlist_is_exactly_what_this_file_says():
     assert route_access.SCOPED_ALLOWED == EXPECTED_SCOPED_ALLOWED
+    assert route_access.MARKED_DEVICE_ALLOWED == EXPECTED_MARKED_DEVICE_ALLOWED
+
+
+# ── the marked tier ──────────────────────────────────────────────────────────
+
+def test_a_marked_route_needs_the_mark_and_an_unmarked_device_does_not_have_it():
+    for method, pattern in route_access.MARKED_DEVICE_ALLOWED:
+        path = _filled(pattern)
+        assert route_access.is_scoped_allowed(method, path) is False, (method, pattern)
+        assert route_access.is_scoped_allowed(method, path, marked=lambda: False) is False, (method, pattern)
+        assert route_access.is_scoped_allowed(method, path, marked=lambda: True) is True, (method, pattern)
+
+
+def test_the_mark_is_asked_only_for_a_marked_route():
+    asked = []
+
+    def marked() -> bool:
+        asked.append(1)
+        return True
+
+    assert route_access.is_scoped_allowed("GET", "/api/sessions", marked=marked) is True      # allowed outright
+    assert route_access.is_scoped_allowed("GET", "/api/cron", marked=marked) is False         # operator-only
+    assert asked == [], "no registry lookup for a route the mark cannot change"
+    assert route_access.is_scoped_allowed("POST", "/api/computer/tasks", marked=marked) is True
+    assert asked == [1]
+
+
+def test_a_mark_that_cannot_be_read_is_no_mark():
+    def broken() -> bool:
+        raise RuntimeError("the registry is unavailable")
+
+    assert route_access.is_scoped_allowed("POST", "/api/computer/tasks", marked=broken) is False
+
+
+def test_the_mark_does_not_widen_anything_outside_its_list():
+    assert route_access.is_scoped_allowed("POST", "/api/cron", marked=lambda: True) is False
+    assert route_access.is_scoped_allowed("PUT", "/api/providers/keys/x", marked=lambda: True) is False
+    assert route_access.is_scoped_allowed("GET", "/api/approvals/grants", marked=lambda: True) is False
 
 
 def test_the_tables_are_frozen_and_exact():
-    for table in (route_access.SCOPED_ALLOWED, route_access.OPERATOR_ONLY, route_access.OUTSIDE_THE_GATE):
+    for table in (route_access.SCOPED_ALLOWED, route_access.MARKED_DEVICE_ALLOWED, route_access.OPERATOR_ONLY,
+                  route_access.OUTSIDE_THE_GATE):
         assert isinstance(table, frozenset)
         for method, pattern in table:
             assert method == method.upper() and method.isalpha(), method
@@ -129,6 +183,7 @@ def test_every_registered_route_is_classified_exactly_once():
     classes = {
         "public": set(PUBLIC_ROUTES) | set(route_access.OUTSIDE_THE_GATE),
         "scoped-allowed": set(route_access.SCOPED_ALLOWED),
+        "marked-device": set(route_access.MARKED_DEVICE_ALLOWED),
         "operator-only": set(route_access.OPERATOR_ONLY),
     }
     everything = set().union(*classes.values())
@@ -160,6 +215,16 @@ def world(tmp_path):
     return TestClient(app, client=("127.0.0.1", 50123)), {"Authorization": f"Bearer {scoped['token']}"}
 
 
+@pytest.fixture
+def marked_world(tmp_path):
+    """The same, with an operator's mark on the device: it is a person (the computer-use door)."""
+    devices = DeviceStore(tmp_path / "devices.db")
+    app = create_app({"web": {"api_token": GLOBAL}}, device_store=devices)
+    person = devices.mint("a marked phone", "ios")
+    assert devices.set_computer(person["id"], True, by="test")
+    return TestClient(app, client=("127.0.0.1", 50123)), {"Authorization": f"Bearer {person['token']}"}
+
+
 @pytest.mark.parametrize("method, pattern", sorted(route_access.OPERATOR_ONLY))
 def test_a_scoped_device_is_denied_every_operator_only_route(world, method, pattern):
     client, headers = world
@@ -174,3 +239,27 @@ def test_a_scoped_device_gets_past_the_gate_on_every_allowed_route(world, method
     response = client.request(method, _filled(pattern), headers=headers, json={} if method != "GET" else None)
     denied = response.status_code == 403 and response.json().get("error") == "operator_only"
     assert not denied, (method, pattern, response.status_code, response.text[:100])
+
+
+@pytest.mark.parametrize("method, pattern", sorted(route_access.MARKED_DEVICE_ALLOWED))
+def test_an_unmarked_scoped_device_is_denied_every_marked_route(world, method, pattern):
+    client, headers = world
+    response = client.request(method, _filled(pattern), headers=headers, json={} if method != "GET" else None)
+    assert response.status_code == 403 and response.json().get("error") == "operator_only", (
+        method, pattern, response.status_code, response.text[:100])
+
+
+@pytest.mark.parametrize("method, pattern", sorted(route_access.MARKED_DEVICE_ALLOWED))
+def test_a_marked_device_gets_past_the_gate_on_every_marked_route(marked_world, method, pattern):
+    client, headers = marked_world
+    response = client.request(method, _filled(pattern), headers=headers, json={} if method != "GET" else None)
+    denied = response.status_code == 403 and response.json().get("error") == "operator_only"
+    assert not denied, (method, pattern, response.status_code, response.text[:100])
+
+
+def test_a_marked_device_is_still_denied_everything_the_mark_does_not_cover(marked_world):
+    client, headers = marked_world
+    for method, path in (("POST", "/api/cron"), ("PUT", "/api/providers/keys/x"), ("GET", "/api/approvals/grants"),
+                         ("GET", "/api/config"), ("POST", "/api/devices")):
+        response = client.request(method, path, headers=headers, json={})
+        assert response.status_code == 403 and response.json().get("error") == "operator_only", (method, path)

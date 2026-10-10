@@ -227,7 +227,7 @@ def test_a_scoped_device_may_approve_its_own_sessions_tool_call_once_or_until_re
     action = d.pend("aaaa0001", session=ALICE_SESSION)
     response = d.as_("alice", "POST", "/api/approvals/aaaa0001/approve", json={"scope": scope})
     assert response.status_code == 200 and response.json()["ok"] is True, response.text
-    assert d.waiting() == set() and action._result == ApprovalResult.APPROVED
+    assert action._result == ApprovalResult.APPROVED and action._event.is_set(), "it was answered"
 
 
 def test_the_default_scope_is_once(d):
@@ -261,11 +261,34 @@ def test_grants_belong_to_the_operator(d):
 
 
 def test_the_operator_keeps_every_scope_and_every_request(d):
-    d.pend("bbbb0001", session=BOB_SESSION)
-    d.pend("cccc0001", session=None)
+    foreign = d.pend("bbbb0001", session=BOB_SESSION)
+    nobodys = d.pend("cccc0001", session=None)
     assert d.as_("global", "POST", "/api/approvals/bbbb0001/approve", json={"scope": "always"}).status_code == 200
     assert d.as_("owner", "POST", "/api/approvals/cccc0001/approve", json={"scope": "once"}).status_code == 200
-    assert d.waiting() == set()
+    assert foreign._result == ApprovalResult.APPROVED and nobodys._result == ApprovalResult.APPROVED
+
+
+# ── a desktop prompt is answered by a person: a device an operator MARKED ────
+
+def test_a_marked_device_sees_desktop_prompts_and_an_unmarked_one_does_not(d):
+    """The door's W3 ruling: a marked device is a person, and a desktop prompt is a person's to answer. The
+    door still refuses an unmarked device, a lasting scope and a client that cannot show the arguments."""
+    action = PendingAction(request_id="eeee0001", tool_name="computer", description="click Send",
+                           task_id="t1", session_id=BOB_SESSION, once_only=True)
+    d.queue.pending["eeee0001"] = action
+    assert d.as_("alice", "GET", "/api/approvals").json() == []
+    assert d.as_("alice", "POST", "/api/approvals/eeee0001/approve", json={"scope": "once"}).status_code == 404
+    assert d.devices.set_computer(d.alice["id"], True, by="test")
+    assert [a["request_id"] for a in d.as_("alice", "GET", "/api/approvals").json()] == ["eeee0001"]
+    answered = d.as_("alice", "POST", "/api/approvals/eeee0001/approve", json={"scope": "once"})
+    assert answered.status_code != 404, "past the ownership filter; the door decides from here"
+
+
+def test_a_mark_does_not_show_a_marked_device_other_sessions_ordinary_tool_calls(d):
+    d.pend("bbbb0001", session=BOB_SESSION)
+    assert d.devices.set_computer(d.alice["id"], True, by="test")
+    assert d.as_("alice", "GET", "/api/approvals").json() == []
+    assert d.as_("alice", "POST", "/api/approvals/bbbb0001/approve", json={}).status_code == 404
 
 
 # ── the link a request needs to have: which session raised it ────────────────

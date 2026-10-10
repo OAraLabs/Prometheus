@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
+from prometheus.engine.tool_context import RUN_SESSION
 from prometheus.permissions.approver import Approver
 from prometheus.permissions.argument_view import (
     format_arguments,
@@ -77,8 +78,13 @@ class PendingAction:
     #: Beacon's card) formats it for its own width.
     arguments: "dict[str, Any] | None" = None
     #: A desktop task's prompt (computer-use v1.1, the door): which task and
-    #: which chat session asked. None for every other tool's request.
+    #: which chat session asked. None for a request raised outside any task.
     task_id: str | None = None
+    #: The conversation that raised this request: a desktop prompt names it, and
+    #: every other request is stamped at creation with the run in progress
+    #: (``engine.tool_context.RUN_SESSION``), None outside a run. It is NOT on the
+    #: wire (``serialize_pending`` still adds it only for a desktop prompt): it is
+    #: how a scoped device is shown, and may answer, only its own sessions' calls.
     session_id: str | None = None
     #: APPROVE-ONCE ONLY. A door prompt never offers a lasting scope: one
     #: "always" on "Click the push button 'Send'" would mint a grant for every
@@ -592,6 +598,7 @@ class ApprovalQueue:
             # forget to scrub. Storing the raw dict and scrubbing per surface
             # is how one surface ends up echoing a secret.
             arguments=redact_arguments(arguments),
+            session_id=RUN_SESSION.get(),
         )
         self.pending[request_id] = action
         await self._emit("approval_pending", self.serialize_pending(action))
