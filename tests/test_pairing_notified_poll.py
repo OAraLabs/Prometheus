@@ -4,13 +4,18 @@ The 201 says ``notified`` once, as of the moment the request was created. A requ
 Beacon a moment later kept reading "no one is connected" from its own copy of that answer. The pending poll
 now carries a current ``notified``, so the requester's screen can change its mind.
 
-It only ever goes false -> true during a request's life, because both of its reasons stay true:
+It only ever goes false -> true during a request's life. Both of its reasons are REMEMBERED for that request
+the moment they happen, so neither can lapse:
 
-* **the live reason**: an operator socket is connected (the global token or an OWNER device, never a scoped
-  device), and a connection that arrives later is told what is waiting (the backfill), so true here means
-  "will have been told", not merely "is online";
-* **the sticky reason**: some channel took the event when the request was created (Telegram sends its prompt
-  once and does not re-send one later, so it cannot be probed, only remembered).
+* **an operator was connected**: a socket whose identity is an operator (the global token or an OWNER device,
+  never a scoped device) was open while the request waited. A connection that arrives later is sent what is
+  waiting (the backfill), and that send is what marks each request, so it counts even if the socket is gone
+  before the requester's next poll; a poll that finds one connected marks it too;
+* **a channel took the event** when the request was created (Telegram sends its prompt once and does not
+  re-send one later, so it cannot be probed, only remembered).
+
+Beacon found the bug this file used to contain: it read the live connection only, so an owner who connected and
+then left turned the answer back to false, and a test here asserted exactly that.
 
 Only a PENDING answer carries it; every other status keeps its exact shape.
 """
@@ -22,15 +27,33 @@ import json
 import pytest
 
 from prometheus.config.api_token import GLOBAL_IDENTITY, DeviceIdentity
-from tests.support.pairing_world import World
+from tests.support.pairing_world import GLOBAL, World
 
 
 class Sock:
-    def __init__(self) -> None:
+    """A fake WebSocket. With a token it plays the client side of the handshake for the bridge's own handler."""
+
+    def __init__(self, token: str | None = None, *, broken: bool = False) -> None:
         self.frames: list[dict] = []
+        self._token = token
+        self._broken = broken
+
+    async def recv(self) -> str:
+        return json.dumps({"type": "auth", "token": self._token})
 
     async def send(self, raw: str) -> None:
+        if self._broken:
+            raise ConnectionError("the peer went away")
         self.frames.append(json.loads(raw))
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration                      # the client sends nothing more and disconnects
+
+    async def close(self, code=None, reason=None) -> None:
+        pass
 
 
 @pytest.fixture
@@ -46,6 +69,13 @@ def attach(world: World, who: str) -> Sock:
         "owner": DeviceIdentity(id=world.owner["id"], name="Beacon on this Mac", platform="macos", owner=True),
         "scoped": DeviceIdentity(id=world.scoped["id"], name="a scoped phone", platform="ios"),
     }[who]
+    return ws
+
+
+async def connect(world: World, token: str | None, **kw) -> Sock:
+    """A whole connection through the bridge's own handler: auth, welcome, the backfill, disconnect."""
+    ws = Sock(token, **kw)
+    await world.bridge._handler(ws)
     return ws
 
 
@@ -77,12 +107,65 @@ def test_a_scoped_device_never_counts(world):
     assert poll(world, created)["notified"] is False, "a scoped phone cannot approve, so it is not 'someone to ask'"
 
 
-def test_it_follows_the_live_connection_when_nothing_was_sent_at_creation(world):
+def test_once_an_operator_has_been_connected_it_stays_true_after_they_leave(world):
+    """Beacon's bug: true while the owner was connected, false again the poll after they disconnected."""
     created, _, _ = world.created()
     ws = attach(world, "owner")
     assert poll(world, created)["notified"] is True
     world.bridge._clients.discard(ws)
+    assert poll(world, created)["notified"] is True, "they were told; leaving does not un-tell them"
+
+
+def test_it_never_goes_back_to_false_whatever_connects_and_disconnects(world):
+    created, _, _ = world.created()
+    seen = [poll(world, created)["notified"]]
+    ws = attach(world, "owner")
+    seen.append(poll(world, created)["notified"])
+    world.bridge._clients.discard(ws)
+    seen.append(poll(world, created)["notified"])
+    ws2 = attach(world, "op")
+    seen.append(poll(world, created)["notified"])
+    world.bridge._clients.discard(ws2)
+    seen.append(poll(world, created)["notified"])
+    assert seen == [False, True, True, True, True], "false -> true only, as the contract says"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token_of", [lambda w: GLOBAL, lambda w: w.owner["token"]], ids=["global", "owner"])
+async def test_an_operator_who_connects_and_leaves_between_two_polls_still_counts(world, token_of):
+    """The whole connection happens between two polls: no poll ever sees the socket open. The backfill is what tells
+    the requester someone was shown the request."""
+    created, _, _ = world.created()
     assert poll(world, created)["notified"] is False
+    ws = await connect(world, token_of(world))
+    assert [f["type"] for f in ws.frames if f["type"] == "pairing_pending"] == ["pairing_pending"], "they were shown it"
+    assert world.bridge.operator_sockets() == [], "and they are gone"
+    assert poll(world, created)["notified"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_scoped_device_that_connects_and_leaves_tells_nobody(world):
+    created, _, _ = world.created()
+    ws = await connect(world, world.scoped["token"])
+    assert not [f for f in ws.frames if f["type"] == "pairing_pending"]
+    assert poll(world, created)["notified"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_backfill_that_could_not_be_sent_tells_nobody(world):
+    created, _, _ = world.created()
+    await connect(world, GLOBAL, broken=True)
+    assert poll(world, created)["notified"] is False
+
+
+@pytest.mark.asyncio
+async def test_what_an_operator_saw_belongs_to_the_requests_that_were_waiting(world):
+    first, _, _ = world.created(source="192.0.2.10")
+    await connect(world, GLOBAL)                       # saw the first, then left
+    second, _, _ = world.created(source="192.0.2.11")  # arrived after they left
+    assert second["notified"] is False
+    assert poll(world, first)["notified"] is True
+    assert poll(world, second)["notified"] is False, "nobody has been shown the second"
 
 
 def test_a_request_that_reached_a_channel_at_creation_stays_told(tmp_path):
