@@ -177,6 +177,11 @@ def test_a_non_1009_exception_is_logged_not_swallowed(caplog):
     bridge._clients = set()
     bridge._ws_identity = {}
     bridge._ws_filters = {}
+    # PR 6b added a fourth per-socket map. _handler's finally pops all four, so
+    # a bridge built this way (bypassing __init__) must declare each one it
+    # exercises — an unset attribute raises INSIDE the finally and would mask
+    # the very exception this test asserts on.
+    bridge._ws_caps = {}
     bridge._api_token = ""  # auth_required -> False, so _handler runs straight through
 
     boom = ValueError("a command handler blew up")

@@ -246,10 +246,30 @@ async def launch_web(
             ComputerLiveStream,
             keep_per_session_from,
         )
+        from prometheus.computer.thumbnails import ThumbnailConfig
+        from prometheus.config.paths import data_dir_path
+
+        # PR 6b: the bridge IS the ThumbnailSink — it holds the per-socket
+        # identity and capability maps, so it is the only place that can
+        # answer "which sockets may receive a desktop picture". Its
+        # send_thumbnail/viewer_count gate on all four conditions; a
+        # global-token connection is never eligible.
+        #
+        # A malformed thumbnails block is logged, not swallowed: the
+        # config-dark law says a subsystem that is expected-enabled but dark
+        # is a failure state. Note the defaults are themselves fail-safe —
+        # `persist` parses to OFF on any bad value, so a typo cannot turn on
+        # the one path that writes desktop pixels to disk.
+        thumb_errors: list[str] = []
+        thumb_config = ThumbnailConfig.from_config(config, thumb_errors)
+        for err in thumb_errors:
+            logger.warning("computer_use.thumbnails: %s", err)
 
         computer_runner.live = ComputerLiveStream(
             signal_bus, bridge=bridge, telemetry=telemetry,
-            keep_per_session=keep_per_session_from(config))
+            keep_per_session=keep_per_session_from(config),
+            thumbnail_sink=bridge, thumb_config=thumb_config,
+            thumbnail_data_dir=str(data_dir_path()))
 
     # GRAFT Piece 2: APNs push. Enabled-but-broken fails the BOOT, loudly —
     # a missing key or missing deps must not degrade to silent no-pushes

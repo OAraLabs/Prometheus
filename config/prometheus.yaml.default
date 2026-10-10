@@ -1384,6 +1384,25 @@ computer_use:
   # text is ever stored — the text is a character count.
   action_log:
     keep_per_session: 200
+  # Cockpit level 2 (v1.1 PR 6b): a thumbnail of the APPROVED WINDOW after
+  # each executed step, for a person watching from a phone. It never reaches
+  # a model, a chat, a push, a log or telemetry, and it is never stored by
+  # default. Only sockets that authenticated with a DEVICE token marked for
+  # computer use, that declared the `computer-thumbnails` capability, and
+  # that are on this session receive it — never the global token.
+  #
+  # The 256 KB frame cap and the password-field skip are FLOORS in code, not
+  # keys: a misconfiguration cannot lift them. Any doubt skips the picture
+  # and says why on the step (window_changed, incomplete_walk,
+  # password_field, frame_invalid, capture_failed, too_large, no_viewer).
+  thumbnails:
+    enabled: true
+    max_dimension: 480     # longest edge, px; scaled by the driver, not here
+    # OPT-IN, and the one key whose wrong answer writes desktop pixels to
+    # disk — so a malformed value parses to false, never to true. When on:
+    # <data>/computer/thumbnails/<task_id>/<seq>.<ext>, mode 0600, pruned
+    # with the action log. No route serves these in v1.1.
+    persist: false
 
 anatomy:
   enabled: true
