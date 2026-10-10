@@ -33,10 +33,12 @@ from tests.support.pairing_world import GLOBAL, World
 class Sock:
     """A fake WebSocket. With a token it plays the client side of the handshake for the bridge's own handler."""
 
-    def __init__(self, token: str | None = None, *, broken: bool = False) -> None:
+    def __init__(self, token: str | None = None, *, broken: bool = False, die_on_pending: int | None = None) -> None:
         self.frames: list[dict] = []
         self._token = token
         self._broken = broken
+        self._die_on_pending = die_on_pending           # fail the Nth pairing_pending frame, and everything after
+        self._pending_seen = 0
 
     async def recv(self) -> str:
         return json.dumps({"type": "auth", "token": self._token})
@@ -44,7 +46,13 @@ class Sock:
     async def send(self, raw: str) -> None:
         if self._broken:
             raise ConnectionError("the peer went away")
-        self.frames.append(json.loads(raw))
+        frame = json.loads(raw)
+        if self._die_on_pending is not None and frame.get("type") == "pairing_pending":
+            self._pending_seen += 1
+            if self._pending_seen >= self._die_on_pending:
+                self._broken = True
+                raise ConnectionError("the peer went away mid-backfill")
+        self.frames.append(frame)
 
     def __aiter__(self):
         return self
@@ -91,6 +99,7 @@ def test_the_poll_says_nobody_is_there_when_nobody_is(world):
     assert created["notified"] is False
     assert poll(world, created) == {"status": "pending", "expires_at": int(world.clock.now - 2) + 300,
                                     "notified": False}
+    assert [poll(world, created)["notified"] for _ in range(3)] == [False] * 3, "asking does not make it true"
 
 
 @pytest.mark.parametrize("who", ["owner", "op"])
@@ -156,6 +165,16 @@ async def test_a_backfill_that_could_not_be_sent_tells_nobody(world):
     created, _, _ = world.created()
     await connect(world, GLOBAL, broken=True)
     assert poll(world, created)["notified"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_socket_that_dies_mid_backfill_counts_only_for_the_frames_it_took(world):
+    first, _, _ = world.created(source="192.0.2.10")
+    second, _, _ = world.created(source="192.0.2.11")
+    ws = await connect(world, GLOBAL, die_on_pending=2)
+    assert [f["payload"]["request_id"] for f in ws.frames if f["type"] == "pairing_pending"] == [first["request_id"]]
+    assert poll(world, first)["notified"] is True, "the first reached them"
+    assert poll(world, second)["notified"] is False, "the second never did"
 
 
 @pytest.mark.asyncio
