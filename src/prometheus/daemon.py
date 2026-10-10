@@ -702,6 +702,20 @@ async def run_daemon(args: argparse.Namespace) -> None:
         import platform as _platform
         enroll_node(vault_root, _node.pubkey, label=_platform.node() or "node")
 
+    # ── Instance key (pairing contract, section 7.3) ─────────────────────
+    # The P-256 key beside the node key that GET /api/hello fingerprints and a later TLS
+    # certificate is made from. Made here, never on a request: hello is unauthenticated and
+    # a GET must not write to disk. A file that cannot be loaded is reported and left alone;
+    # hello then advertises no fingerprint rather than the daemon refusing to start.
+    from prometheus.config.instance_key import ensure_instance_key, fingerprint_of
+    try:
+        logger.info("Instance key: fp %s", fingerprint_of(ensure_instance_key()))
+    except Exception:
+        logger.warning(
+            "Instance key unavailable: GET /api/hello will advertise no fingerprint until "
+            "node/instance.key is a loadable P-256 key (it is never regenerated in place)",
+            exc_info=True)
+
     # ── Boot-SHA staleness signal ───────────────────────────────────────
     # The repo HEAD at process start is the identity of the code THIS process
     # loaded. /api/status, /health, and the heartbeat compare it against the

@@ -102,10 +102,9 @@ from prometheus.web.bind import (
     resolve_bind,
 )
 from prometheus.web.loopback import (
-    guard_if_loopback,
     is_loopback_address,
     is_loopback_host_header,
-    is_loopback_peer,
+    is_same_machine,
 )
 
 logger = logging.getLogger("prometheus.setup_mode")
@@ -688,7 +687,7 @@ def _pair_with_local_secret(
             "error": "browser_not_allowed",
             "detail": "this route is for the app on this Mac, not for a web page",
         })
-    if not (is_loopback_peer(request) and is_loopback_host_header(request.headers.get("host"))):
+    if not (is_same_machine(request) and is_loopback_host_header(request.headers.get("host"))):
         logger.warning("Same-Mac pairing refused: the request did not come from this Mac")
         return JSONResponse(status_code=403, content={
             "error": "not_loopback",
@@ -728,6 +727,7 @@ def create_setup_app(
     flag: the real route surface must be unreachable in setup mode, so
     it simply is not mounted. Routes:
 
+    - ``GET  /api/hello``           → (public) the six-field "is there a Prometheus here"
     - ``GET  /api/setup/status``    → mode + pairing availability + configured
     - ``POST /api/setup/pair``      → code → real API token
     - ``GET  /api/setup/detect``    → (authed) probe inference backends
@@ -742,6 +742,7 @@ def create_setup_app(
     :class:`~prometheus.web.bind.BindError`.
     """
     from prometheus import __version__
+    from prometheus.web import hello as hello_mod
 
     api_port = api_port if api_port is not None else resolve_setup_port()
     ws_port = ws_port if ws_port is not None else resolve_setup_ws_port()
@@ -756,6 +757,24 @@ def create_setup_app(
     # Same fail-closed rule as the main app: a mistyped query parameter is an error, not a
     # right-looking answer. Set before any route is registered. See web/strict_query.py.
     app.router.route_class = StrictQueryRoute
+
+    # Public like the pairing routes below, and there is no bearer gate here to refuse a browser or
+    # limit a peer, so the shared route does both itself (web/hello.py).
+    _hello_limiter = hello_mod.new_limiter()
+
+    @app.get("/api/hello")
+    async def hello(request: Request) -> JSONResponse:
+        return hello_mod.hello_response(
+            request, _hello_limiter, lambda: hello_mod.build_hello(None, setup_mode=True))
+
+    # A request to join needs an operator who could approve it, and a fresh install has none: the first
+    # device pairs with the six-digit code or the same-Mac secret below. Said in the contract's words, so
+    # a client sees the same refusal here as on a daemon that has turned requests off.
+    @app.post("/api/pair/requests")
+    async def pair_requests_unavailable() -> JSONResponse:
+        return JSONResponse(status_code=403, content={
+            "error": "pairing_unavailable",
+            "detail": "this daemon is in setup mode: pair with the six-digit code, or finish setup first"})
 
     @app.get("/api/setup/status")
     async def setup_status() -> dict[str, Any]:
@@ -1040,14 +1059,11 @@ async def _serve_setup_mode(
     app = create_setup_app(
         pairing, api_port=api_port, bind=resolved, state=state, on_complete=stop_server,
     )
-    config = uvicorn.Config(guard_if_loopback(app, address), host=address, port=api_port,
-                            log_level="info",
-                            # log_config=None: uvicorn must NOT install its own handlers.
-                            # Its default config gives uvicorn.access/uvicorn.error handlers
-                            # with propagate=False — a path around the root handlers, i.e.
-                            # around log redaction (security/log_redaction.py) and rotation.
-                            log_config=None)
-    server = uvicorn.Server(config)
+    # Built where the daemon builds its own, so setup mode gets the same answer about whose forwarded
+    # headers to believe (nobody's: there is no config yet to name a proxy). web/serving.py says why.
+    from prometheus.web.serving import serve_config
+
+    server = uvicorn.Server(serve_config(app, address, api_port))
     server_box["server"] = server
 
     loop = asyncio.get_running_loop()

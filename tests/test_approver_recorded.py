@@ -184,6 +184,9 @@ class TestRestRecordsTheCredential:
         _pending(queue)
         client, store = _app(queue, monkeypatch, tmp_path)
         device = store.mint("Will's iPhone", "ios")
+        # A device answers the tool calls of ITS OWN sessions (web/route_access.py): this one raised the request.
+        store.claim_session("web:phone", device["id"])
+        queue.pending[RID].session_id = "web:phone"
         res = client.post(f"/api/approvals/{RID}/approve", json={"scope": "once"},
                           headers={"Authorization": f"Bearer {device['token']}"})
         assert res.json()["ok"] is True, res.text
@@ -194,6 +197,8 @@ class TestRestRecordsTheCredential:
         _pending(queue)
         client, store = _app(queue, monkeypatch, tmp_path)
         device = store.mint("desk", "macos")
+        store.claim_session("web:desk", device["id"])
+        queue.pending[RID].session_id = "web:desk"
         res = client.post(f"/api/approvals/{RID}/deny",
                           headers={"Authorization": f"Bearer {device['token']}"})
         assert res.json()["ok"] is True, res.text

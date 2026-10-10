@@ -261,6 +261,17 @@ def get_workspace_dir() -> Path:
     return workspace_dir
 
 
+def node_dir_path() -> Path:
+    """Where the node-identity directory IS. Creates nothing.
+
+    ``PROMETHEUS_NODE_DIR``, else ``<config dir>/node``. Use this for QUESTIONS ("is there a key
+    yet?"), and :func:`get_node_dir` only when about to write: an unauthenticated request that asks
+    where a key lives must not create the directory it lives in.
+    """
+    env_dir = os.environ.get("PROMETHEUS_NODE_DIR")
+    return Path(env_dir) if env_dir else config_dir_path() / "node"
+
+
 def get_node_dir() -> Path:
     """Return the node-identity directory (~/.prometheus/node), mode 0700.
 
@@ -273,11 +284,7 @@ def get_node_dir() -> Path:
     0700 because it holds private-key material; the mode is enforced only
     at creation (a deliberate later chmod by the operator is theirs to own).
     """
-    env_dir = os.environ.get("PROMETHEUS_NODE_DIR")
-    if env_dir:
-        node_dir = Path(env_dir)
-    else:
-        node_dir = get_config_dir() / "node"
+    node_dir = node_dir_path()
 
     if not node_dir.exists():
         node_dir.mkdir(parents=True)

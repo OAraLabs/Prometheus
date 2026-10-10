@@ -919,8 +919,10 @@ _ROUND_SERVING: contextvars.ContextVar = contextvars.ContextVar("prometheus_roun
 # The session the run's rows are recorded under (WP-X.21 T3): the recorded id
 # (the turn's conversation, or a record-only run's own id), None on an
 # ephemeral turn. For _log_iteration, whose 14 call sites have no session in
-# scope; a ContextVar for _RUN_PATHS's reason. Descriptive only.
-_RUN_SESSION: contextvars.ContextVar = contextvars.ContextVar("prometheus_run_session", default=None)
+# scope; a ContextVar for _RUN_PATHS's reason. The variable itself lives in
+# engine/tool_context.py so the approval queue can read it too (it stamps each
+# pending request with the session that raised it); this is that same object.
+from prometheus.engine.tool_context import RUN_SESSION as _RUN_SESSION  # noqa: E402
 
 # The turn the run is recording into telemetry v2 (WP-X.54 T-3): a _TurnRecord,
 # or None when the run has no telemetry. Beside _RUN_SESSION for the same

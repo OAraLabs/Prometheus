@@ -34,6 +34,15 @@ def test_the_installers_route_is_public_and_only_as_a_post():
     assert is_public_route("DELETE", "/api/pair/local") is False
 
 
+def test_hello_is_public_and_only_as_a_get():
+    assert ("GET", "/api/hello") in PUBLIC_ROUTES
+    assert is_public_route("GET", "/api/hello") is True
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        assert is_public_route(method, "/api/hello") is False, method
+    for neighbour in ("/api/hello/", "/api/hello/x", "/api/hellos", "/api/hello?x=1", "/api/hello%2Fx"):
+        assert is_public_route("GET", neighbour) is False, neighbour
+
+
 def test_a_method_is_matched_whole_and_case_insensitively():
     assert is_public_route("post", "/api/pair/local") is True
     assert is_public_route("POSTX", "/api/pair/local") is False
@@ -126,3 +135,11 @@ def test_the_middleware_and_the_list_agree_on_what_is_open(monkeypatch):
     reached = client.post("/api/pair/local", json={"code": "x" * 43})
     assert reached.status_code == 404
     assert "Bearer" not in reached.text
+    # Hello is the other public route: it answers with no token, and its neighbours are still gated.
+    assert client.get("/api/hello").status_code == 200
+    assert client.get("/api/hello/extra").status_code == 401
+    # The pairing request routes: the requester's three are public, the operator's are not.
+    assert client.post("/api/pair/requests", json={}).status_code == 400            # reached, and refused by itself
+    assert client.get("/api/pair/requests").status_code == 401                      # the operator's list
+    assert client.post(f"/api/pair/requests/{'a' * 32}/approve").status_code == 401
+    assert client.get(f"/api/pair/requests/{'a' * 32}").status_code == 404          # reached: 404, not the gate's 401

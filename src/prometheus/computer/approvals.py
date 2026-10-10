@@ -97,7 +97,7 @@ class ComputerApprovalChannel(ApprovalQueue):
             once_only=True,
             text_chars=len(raw_text) if isinstance(raw_text, str) else None,
         )
-        self.pending[request_id] = action
+        self._register(action)
         await self._emit("approval_pending", self.serialize_pending(action))
         if on_pending is not None:
             try:

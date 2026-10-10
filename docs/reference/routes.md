@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 109 paths
+## Daemon app — 114 paths
 
 | Path | Methods |
 |---|---|
@@ -55,6 +55,7 @@ one is the explanation.
 | `/api/events/recent` | GET |
 | `/api/files` | GET |
 | `/api/files/read` | GET |
+| `/api/hello` | GET |
 | `/api/integrations/computer` | GET |
 | `/api/integrations/computer/probe` | POST |
 | `/api/lcm/{session_id}` | GET |
@@ -71,6 +72,10 @@ one is the explanation.
 | `/api/models` | GET |
 | `/api/packs` | GET |
 | `/api/pair/local` | POST |
+| `/api/pair/requests` | GET, POST |
+| `/api/pair/requests/{request_id}` | DELETE, GET |
+| `/api/pair/requests/{request_id}/approve` | POST |
+| `/api/pair/requests/{request_id}/deny` | POST |
 | `/api/pairs` | GET |
 | `/api/paperclip/wake` | POST |
 | `/api/profiles` | GET |
@@ -123,7 +128,7 @@ one is the explanation.
 | `/v1/chat/completions` | POST |
 | `/v1/models` | GET |
 
-## Setup app — 6 paths
+## Setup app — 8 paths
 
 A separate FastAPI app (`web/setup_server.py`), not the daemon app
 behind a flag: the real route surface is deliberately never mounted
@@ -131,6 +136,8 @@ in setup mode.
 
 | Path | Methods |
 |---|---|
+| `/api/hello` | GET |
+| `/api/pair/requests` | POST |
 | `/api/setup/complete` | POST |
 | `/api/setup/configure` | POST |
 | `/api/setup/detect` | GET |

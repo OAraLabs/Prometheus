@@ -1151,6 +1151,16 @@ web:
   # therefore loopback-only afterwards until its owner sets the bind here.
   bind:                  # e.g. "127.0.0.1"
 
+  # Reverse proxies whose X-Forwarded-For / X-Forwarded-Proto headers are
+  # believed: addresses or networks, e.g. ["127.0.0.1"] for a tunnel or
+  # `tailscale serve` on this machine, or ["10.0.0.0/8"]. Empty (the default)
+  # believes NO forwarded header: the address every rate limit and every
+  # same-machine check uses is the TCP peer, so a client cannot choose its own
+  # by sending a header. An entry that would believe everyone (`*`, 0.0.0.0/0)
+  # is ignored with a warning. If a proxy on this machine fronts the daemon and
+  # is not named here, every request looks like it comes from 127.0.0.1.
+  trusted_proxies: []
+
 # Image generation — the image_generate tool's backend selection + per-backend
 # settings. CLOUD EXPANSION (2026-07) adds the PAID DashScope backend (WAN 2.5).
 #
@@ -1165,6 +1175,40 @@ web:
   #    Pinned equal to the readers by tests/test_config_defaults_equality.
   api_token:            # required — no code default
   dashboard_port: 3002
+
+# Pairing — how a new device finds this Prometheus and joins it
+# (docs/PAIRING-APPROVAL-API.md). Only the keys the daemon reads today are
+# listed; the rest of the section arrives with the routes that read it.
+pairing:
+  # The name shown to devices that are not paired yet: in GET /api/hello (which
+  # anyone who can reach the port can call), in the local-network
+  # advertisement, and on the Approve prompt. Empty = this computer's own name
+  # (macOS ComputerName, else the host name). At most 64 characters; control
+  # characters are removed.
+  display_name: ""
+
+  # Whether a new device may ask to join at all (POST /api/pair/requests). The
+  # owner then approves it on a device they already use. false = only pasting
+  # the API token pairs a device; GET /api/hello then says pair: token.
+  requests_enabled: true
+
+  # How long a request waits for the owner, in seconds. Allowed 60 to 900; a
+  # value outside that is clamped, with a warning in the log.
+  request_ttl_seconds: 300
+
+  # Limits on strangers asking, counted by TCP peer address. At most this many
+  # requests waiting overall, and per source address; and per source address
+  # in any hour. Over a limit the answer is 429 with a Retry-After.
+  max_pending: 3
+  max_pending_per_source: 1
+  max_requests_per_source_per_hour: 10
+
+  # Opt-in. Approve / Deny buttons in your PRIVATE Telegram chats (the positive
+  # ids in gateway.allowed_chat_ids; a group in that list is never used) when a
+  # new device asks to join. Off by default: Telegram is a third-party relay,
+  # and the message carries the device's address and a match code. Beacon is
+  # told either way. The device's name is sent as plain text, never formatted.
+  telegram_prompts: false
 
 # APNs push to enrolled devices (GRAFT-MOBILE-BRIDGE 2). Disabled by default:
 # enabling requires the `push` extra (pip install 'oara-prometheus[push]')

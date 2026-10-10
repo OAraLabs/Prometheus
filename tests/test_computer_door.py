@@ -786,11 +786,14 @@ def test_the_global_token_gets_401_on_every_door_route(rest):
         assert res.status_code == 401, (method, path, res.status_code, res.text)
 
 
-def test_a_device_not_marked_for_computer_use_gets_401(rest):
+def test_a_device_not_marked_for_computer_use_is_refused_at_the_gate(rest):
+    """It used to reach the door and get its 401. A scoped device is now denied the computer routes before the
+    door is asked (web/route_access.MARKED_DEVICE_ALLOWED): 403, because the token is valid and the route is not
+    its to use. The door's own refusal is unchanged for everyone who gets past the gate."""
     res = rest.client.post("/api/computer/tasks",
                            json={"session_id": "web:abc", "goal": "x"},
                            headers=_h(rest.other["token"]))
-    assert res.status_code == 401, res.text
+    assert res.status_code == 403 and res.json()["error"] == "operator_only", res.text
 
 
 def test_rest_first_use_asks_then_the_pick_is_the_consent(rest):
@@ -824,7 +827,7 @@ def test_only_a_marked_device_may_mark_another(rest):
     c = rest.client
     res = c.put(f"/api/devices/{rest.other['id']}/computer",
                 json={"computer": True}, headers=_h(rest.other["token"]))
-    assert res.status_code == 401
+    assert res.status_code == 403 and res.json()["error"] == "operator_only"
     res = c.put(f"/api/devices/{rest.other['id']}/computer",
                 json={"computer": True}, headers=_h(rest.phone["token"]))
     assert res.status_code == 200, res.text
@@ -875,8 +878,10 @@ def test_rest_approve_all_skips_desktop_prompts(rest):
     from prometheus.permissions.approval_queue import ApprovalResult
 
     action = _desk_prompt(rest, arguments=None)
-    res = rest.client.post("/api/approvals/all/approve", json={"scope": "once"},
-                           headers=_h(rest.phone["token"]))
+    # "all" is the operator's: a scoped device (even a marked one) answers a request by its own id, and "all"
+    # across every session is refused it (tests/test_scoped_devices_default_deny.py). The queue's own rule, that
+    # "all" leaves desktop prompts alone, is exercised with the master token.
+    res = rest.client.post("/api/approvals/all/approve", json={"scope": "once"}, headers=_h(TOKEN))
     assert res.status_code == 200, res.text
     assert res.json().get("skipped") == 1
     assert action._result is not ApprovalResult.APPROVED
