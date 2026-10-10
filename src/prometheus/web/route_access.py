@@ -111,7 +111,7 @@ MARKED_DEVICE_ALLOWED: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/sessions/{session_id}/computer"),
     ("PUT", "/api/sessions/{session_id}/computer"),
     ("DELETE", "/api/sessions/{session_id}/computer"),
-    ("PUT", "/api/devices/{device_id}/computer"),          # only a person marks another
+    ("PUT", "/api/devices/{device_id}/computer"),          # a person marks; a device un-marks only itself
 })
 
 #: The slash commands a scoped device may type. A message that is a command is not a conversation turn and runs

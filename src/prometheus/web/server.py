@@ -5459,16 +5459,31 @@ def create_app(
 
     @app.put("/api/devices/{device_id}/computer")
     async def computer_device_mark(device_id: str, request: Request):
-        """Mark a device for computer use. Only a person: a device that is
-        itself marked (the first mark comes from Telegram: /computer allow)."""
+        """Mark a device for computer use, or remove a mark.
+
+        Marking is a person's act (W3): a device that is itself marked; the
+        first mark comes from Telegram (/computer allow). Removing a mark never
+        grants anything, but a device marked a minute ago must not strip the
+        owner's: a device removes only its OWN mark, and anyone else's takes
+        Telegram (/computer disallow) or the daemon's API token. The token may
+        remove a mark and never set one (a model can read it)."""
+        from prometheus.permissions import approver as _approver
+
         runner, err = _door_runner()
-        if err is not None:
-            return err
-        by, err = _door_person(request, runner)
         if err is not None:
             return err
         body = await _door_body(request)
         on = body.get("computer") is True
+        by = _approver.from_request(request)
+        if on or by.kind != _approver.GLOBAL_TOKEN:
+            by, err = _door_person(request, runner)
+            if err is not None:
+                return err
+            if not on and not (by.kind == _approver.DEVICE and by.id == device_id):
+                return JSONResponse(status_code=403, content={
+                    "error": "only_own_mark",
+                    "detail": ("A device may remove only its own computer-use mark. Removing another "
+                               "device's takes Telegram (/computer disallow <device id>) or the API token.")})
         if not _devices_or_create().set_computer(device_id, on, by=by.label):
             return JSONResponse(status_code=404, content={"error": "no live device"})
         return {"id": device_id, "computer": on}
