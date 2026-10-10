@@ -23,6 +23,7 @@ from __future__ import annotations
 # into a prefix.
 PUBLIC_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/api/pair/local"),   # same-Mac pairing with the one-time file secret (config/local_pairing.py)
+    ("GET", "/api/hello"),         # "is there a Prometheus here": six fields, no credentials (web/hello.py)
 })
 
 

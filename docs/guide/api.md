@@ -15,7 +15,7 @@ Authorization: Bearer $PROMETHEUS_API_TOKEN
 - The token is minted automatically on first daemon start (or by the setup wizard) and stored in `~/.config/prometheus/env`.
 - Retrieve or invalidate it with the CLI: `oara token show` | `oara token rotate`.
 - Requests with a missing or wrong token get a `401 {"error": "unauthorized — set Authorization: Bearer <token>"}`.
-- `GET /health` is the only unauthenticated API endpoint — it lives outside `/api/` precisely so external monitors can poll it without credentials. (The JSON API index served at `/` is likewise outside the bearer gate.)
+- Two routes under `/api/` answer without a token, by design, and each does its own checking: `GET /api/hello` (below) and, on the Mac app install only, `POST /api/pair/local` (same-Mac pairing; it is a 404 anywhere else). The exact list is `web/public_routes.py`, and a test fails if any other route answers without a token. `GET /health` lives outside `/api/` precisely so external monitors can poll it without credentials, and the JSON API index served at `/` is likewise outside the bearer gate.
 
 Example:
 
@@ -39,6 +39,7 @@ app and kept current by CI, see
 |---|---|---|
 | GET | `/` | Unauthenticated JSON API index (service name, version, endpoint list) |
 | GET | `/health` | Unauthenticated liveness/staleness probe |
+| GET | `/api/hello` | Unauthenticated "is there a Prometheus here" for a device that has no address or token yet. Exactly six fields and nothing else: `v` (version), `name` (what this Prometheus calls itself: `pairing.display_name`, else the computer's name), `agent` (the assistant's name), `fp` (first 16 hex characters of the SHA-256 of the instance key's public half; empty until the key exists, a display hint and never a trust anchor), `pair` (how a client can join: `token`, `code` in setup mode, `none` when the daemon has no token) and `tls` (`false` until the home-network listener exists). No CORS headers; a request with an `Origin` header (a web page) is refused with `400 browser_not_allowed`; 60 requests a minute per peer address (never `X-Forwarded-For`), then `429` with `Retry-After`; never cached. Served in setup mode too. Contract: `docs/PAIRING-APPROVAL-API.md`. |
 | GET | `/api/status` | Model, uptime, tools, memory, subsystem states — plus `node_pub` (the node's Ed25519 public key) and `instance_id` (the vault's UUID), both `null` until identity exists. Bearer-gated deliberately; `/health` never carries identity |
 | GET | `/api/packs` | Discovered packs with load/refuse state, refusal reasons, quarantined-draft ids, and panel declarations. `wired: false` means the pack loader didn't run this boot (the bare `web` entrypoint), distinct from "no packs installed" |
 | GET | `/api/mcp/servers` | MCP server cards: transport summary, **probed** health (a dead subprocess reads unhealthy, never as empty success), tool inventory, `allowed_tools`, `env_names`, `header_names`. Credential values (`env`, `headers`) never appear — write-only, the provider-keys stance |
@@ -254,10 +255,11 @@ Artifacts are **content-addressed**: ids are a sha256 prefix of the file bytes, 
 
 ## Setup-mode API
 
-When the daemon starts with **no config file**, it boots a minimal setup server (`src/prometheus/web/setup_server.py`) instead of the full API. Only five routes exist in this mode:
+When the daemon starts with **no config file**, it boots a minimal setup server (`src/prometheus/web/setup_server.py`) instead of the full API. Only these routes exist in this mode:
 
 | Method | Path | Purpose |
 |---|---|---|
+| GET | `/api/hello` | The same six-field answer as the configured daemon; `pair` is `code` here, and `fp` is empty (setup mode creates no state) |
 | GET | `/api/setup/status` | Setup progress / pairing window state |
 | POST | `/api/setup/pair` | Exchange the 6-digit pairing code for an API token |
 | GET | `/api/setup/detect` | Probe for local backends (llama.cpp, Ollama, LM Studio, vLLM); also lists the cloud presets (`cloud_providers`: name, key env var, default model, whether the daemon already holds the key — never the value) |
