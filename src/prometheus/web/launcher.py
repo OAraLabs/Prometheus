@@ -197,9 +197,9 @@ async def launch_web(
     # (POST /api/workers/approvals, loopback only).
     from prometheus.tasks.manager import get_task_manager
 
-    _host = api_host if api_host not in (None, "", "0.0.0.0", "::") else "127.0.0.1"
-    get_task_manager().worker_approval_url = (
-        f"http://{_host}:{api_port}/api/workers/approvals")
+    from prometheus.tasks.worker_auth import worker_approval_url
+
+    get_task_manager().worker_approval_url = worker_approval_url(api_host, api_port)
     # Pairing requests (docs/PAIRING-APPROVAL-API.md): the owner's Beacon sockets hear about a new device
     # asking to join, and a socket that connects later is told what is still waiting. Telegram prompts
     # are OPT-IN (pairing.telegram_prompts, off by default): attach() does nothing unless it is on.

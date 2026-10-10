@@ -382,15 +382,16 @@ class BackgroundTaskManager:
             # A key the caller passed still travels only in the environment.
             env_overlay = {"ANTHROPIC_API_KEY": api_key} if api_key else None
             if worker and self.worker_approval_url:
-                # The worker asks its parent conversation for approval with
-                # a token minted here and held in memory only (PR-6, #704).
+                # The worker asks its parent conversation for approval with a
+                # token minted here and held in memory only (PR-6, #704). It
+                # goes to the worker on STDIN, never in its environment, which
+                # /proc/<pid>/environ would show to the model's shell
+                # (tasks/worker_auth.py). The id and URL are not secrets.
                 worker_task_id = _task_id(task_type)
-                token = secrets.token_urlsafe(32)
-                self._worker_tokens[worker_task_id] = token
+                self._mint_worker_token(worker_task_id)
                 env_overlay = {
                     **(env_overlay or {}),
                     "PROMETHEUS_WORKER_TASK_ID": worker_task_id,
-                    "PROMETHEUS_WORKER_TOKEN": token,
                     "PROMETHEUS_WORKER_APPROVAL_URL": self.worker_approval_url,
                 }
             # The daemon built this command; nothing in it is the model's.
@@ -420,6 +421,8 @@ class BackgroundTaskManager:
         # A refusal ("blocked") or a launch that failed outright — either way no
         # process is attached, so there is no stdin to write the prompt to.
         if record.status in ("blocked", "failed"):
+            if worker_task_id:
+                self._worker_tokens.pop(worker_task_id, None)
             return record
         updated = replace(record, prompt=prompt)
         if metadata:
@@ -651,6 +654,20 @@ class BackgroundTaskManager:
         # _watch_process sees the killed status and emits + persists.
         return task
 
+    def _mint_worker_token(self, task_id: str) -> str:
+        """A fresh approval token for *task_id*, replacing any earlier one."""
+        token = secrets.token_urlsafe(32)
+        self._worker_tokens[task_id] = token
+        return token
+
+    def _worker_stdin_text(self, task_id: str, data: str) -> str:
+        """What a worker's stdin gets: its token line (if it has a token), then *data*."""
+        from prometheus.tasks.worker_auth import token_line
+
+        token = self._worker_tokens.get(task_id)
+        body = data.rstrip("\n") + "\n"
+        return (token_line(token) + body) if token else body
+
     def verify_worker_token(self, task_id: str, token: str) -> TaskRecord | None:
         """The RUNNING worker *task_id* if *token* is its approval token, else None."""
         expected = self._worker_tokens.get(task_id)
@@ -680,14 +697,22 @@ class BackgroundTaskManager:
                     f"more input while it runs. Wait for its result, or stop it and "
                     f"spawn another.")
             process = await self._ensure_writable_process(task)
-            process.stdin.write((data.rstrip("\n") + "\n").encode("utf-8"))
+
+            def _text() -> bytes:
+                # A worker's token line rides ahead of its brief; read per
+                # write, because a restart mints a fresh token.
+                if is_worker:
+                    return self._worker_stdin_text(task_id, data).encode("utf-8")
+                return (data.rstrip("\n") + "\n").encode("utf-8")
+
+            process.stdin.write(_text())
             try:
                 await process.stdin.drain()
             except (BrokenPipeError, ConnectionResetError):
                 if task.type not in {"local_agent", "remote_agent", "in_process_teammate"}:
                     raise ValueError(f"Task {task_id} does not accept input") from None
                 process = await self._restart_agent_task(task)
-                process.stdin.write((data.rstrip("\n") + "\n").encode("utf-8"))
+                process.stdin.write(_text())
                 await process.stdin.drain()
             if is_worker:
                 process.stdin.close()
@@ -947,10 +972,12 @@ class BackgroundTaskManager:
         self._persist(task)
         log.warning("worker %s ran out of context on %s; retrying once on its parent's "
                     "route %s", task.id, current, parent)
+        if self.worker_approval_url:
+            self._mint_worker_token(task.id)  # a new process, a new token
         try:
             process = await self._start_process(task.id)
             assert process.stdin is not None
-            process.stdin.write((task.prompt.rstrip("\n") + "\n").encode("utf-8"))
+            process.stdin.write(self._worker_stdin_text(task.id, task.prompt).encode("utf-8"))
             await process.stdin.drain()
             process.stdin.close()
         except Exception as exc:  # noqa: BLE001 — the retry failed to start; report the first failure
@@ -1201,6 +1228,10 @@ class BackgroundTaskManager:
             await waiter
         restart_count = int(task.metadata.get("restart_count", "0")) + 1
         task.metadata["restart_count"] = str(restart_count)
+        if task.metadata.get("worker") == "1" and self.worker_approval_url:
+            # A relaunched worker is a new process: a fresh token, and the old
+            # one stops working (#720 review).
+            self._mint_worker_token(task.id)
         task.status = "running"
         task.started_at = time.time()
         task.ended_at = None

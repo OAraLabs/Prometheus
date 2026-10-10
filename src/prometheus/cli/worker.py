@@ -80,7 +80,13 @@ async def run_worker_turn(
 
 async def run_worker(context: LoopContext, *, route: str | None) -> int:
     """Read the brief from stdin to EOF, run it, print the result line."""
-    brief = sys.stdin.read()
+    from prometheus.cli.worker_approval import set_worker_token, split_token_line
+
+    # The manager's first line is this worker's approval token, never part of
+    # the brief and never in the environment (tasks/worker_auth.py).
+    token, brief = split_token_line(sys.stdin.read())
+    if token:
+        set_worker_token(token)
     if not brief.strip():
         result: dict[str, Any] = {
             "status": "failed", "reason": "empty_brief", "route": route,

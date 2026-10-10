@@ -978,3 +978,8 @@ class ApprovalQueues:
 def is_desktop_request(action: Any) -> bool:
     """A desktop task's prompt — skipped by every "approve all" (W2)."""
     return getattr(action, "task_id", None) is not None
+
+
+def is_worker_request(action: Any) -> bool:
+    """A spawned worker's request — answered on its own, like a desktop prompt."""
+    return getattr(action, "worker_task_id", None) is not None
