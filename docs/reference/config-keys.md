@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **439** of
+Every key in `config/prometheus.yaml.default` — **441** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -328,6 +328,8 @@ none either — the key is documented so its absence is visible.
 | `web.enabled` | `True` |
 | `web.api_port` | `8005` |
 | `web.ws_port` | `8010` |
+| `web.tls_api_port` | `8006` |
+| `web.tls_ws_port` | `8011` |
 | `web.bind` | *(empty — no code default)* |
 | `web.trusted_proxies` | `[]` |
 | `web.api_token` | *(empty — no code default)* |

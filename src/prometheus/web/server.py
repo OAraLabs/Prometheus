@@ -915,10 +915,12 @@ def create_app(
     # checking: no browsers, a per-peer limit, no CORS, no disk writes. Contract: docs/PAIRING-APPROVAL-API.md.
     _hello_limiter = hello_mod.new_limiter()
 
-    def _hello_payload() -> dict[str, Any]:
+    def _hello_payload(tls: bool = False) -> dict[str, Any]:
+        """*tls*: whether the port being described speaks TLS (the asked port for the route, the advertised
+        port for mDNS)."""
         return hello_mod.build_hello(
             config, auth_on=bool(_api_token),
-            approval=app.state.pairing.settings.requests_enabled)
+            approval=app.state.pairing.settings.requests_enabled, tls=tls)
 
     # ONE builder for the route and for the mDNS TXT record (web/discovery.py reads it from here), so what the
     # daemon announces on the network and what it answers over HTTP cannot drift.
@@ -926,7 +928,9 @@ def create_app(
 
     @app.get("/api/hello")
     async def hello(request: Request):
-        return hello_mod.hello_response(request, _hello_limiter, _hello_payload)
+        # Per listener: the port this request came in on speaks TLS or it does not.
+        tls = request.url.scheme == "https"
+        return hello_mod.hello_response(request, _hello_limiter, lambda: _hello_payload(tls))
 
     # ── Root ────────────────────────────────────────────────────────
 
@@ -6472,7 +6476,7 @@ def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005,
-                    config: dict[str, Any] | None = None) -> None:
+                    config: dict[str, Any] | None = None, *, tls: Any = None) -> None:
     """Start the FastAPI server using uvicorn, listening on *host*.
 
     *host* is whatever the daemon resolved from ``--bind`` /
@@ -6503,6 +6507,11 @@ async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005,
 
     from prometheus.web.serving import serve_config
 
-    server = uvicorn.Server(serve_config(app, host, port, config))
-    app.state.http_server = server
+    server = uvicorn.Server(serve_config(app, host, port, config, tls=tls))
+    # The home-network TLS listener is a second server over the same app (pairing PR 5); it never replaces
+    # the plain one a caller stops or asks for its port.
+    if tls is None:
+        app.state.http_server = server
+    else:
+        app.state.https_server = server
     await server.serve()
