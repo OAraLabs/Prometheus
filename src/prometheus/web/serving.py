@@ -79,8 +79,11 @@ def uvicorn_proxy_options(config: Mapping[str, Any] | None) -> dict[str, Any]:
     return {"proxy_headers": True, "forwarded_allow_ips": ",".join(named)}
 
 
-def serve_config(app: Any, host: str, port: int, config: Mapping[str, Any] | None = None) -> Any:
+def serve_config(app: Any, host: str, port: int, config: Mapping[str, Any] | None = None, *,
+                 tls: Any = None) -> Any:
     """The ``uvicorn.Config`` the daemon (and setup mode) serves *app* with, on *host*.
+
+    *tls* (a ``web.tls.LanTlsPlan``) serves it over TLS with the instance certificate: the home-network listener.
 
     A loopback *host* also puts the Host-header check in front of the app (DNS rebinding; web/loopback.py).
     ``log_config=None``: uvicorn must NOT install its own handlers. Its default config gives
@@ -89,9 +92,11 @@ def serve_config(app: Any, host: str, port: int, config: Mapping[str, Any] | Non
     """
     import uvicorn
 
+    tls_options: dict[str, Any] = (
+        {} if tls is None else {"ssl_certfile": str(tls.certfile), "ssl_keyfile": str(tls.keyfile)})
     return uvicorn.Config(
         guard_if_loopback(app, host), host=host, port=port, log_level="info", log_config=None,
-        **uvicorn_proxy_options(config),
+        **uvicorn_proxy_options(config), **tls_options,
     )
 
 
