@@ -5,6 +5,9 @@ as async tasks. The daemon is the only caller (``oara daemon``, in
 daemon.py); there is no standalone entry point, and no
 ``python -m prometheus.web``.
 
+Both listeners bind the one address resolved by :mod:`prometheus.web.bind`
+(``--bind`` > ``PROMETHEUS_WEB_BIND`` > ``web.bind`` > ``0.0.0.0``).
+
 Usage in daemon.py:
     from prometheus.web.launcher import launch_web
     web_task = asyncio.create_task(launch_web(config=config, session_mgr=mgr, ...))
@@ -45,16 +48,35 @@ async def launch_web(
     computer_integration: Any | None = None,
     computer_runner: Any | None = None,
     origin_fetcher: Any | None = None,
-    api_host: str = "0.0.0.0",
+    bind: str | None = None,
+    api_host: str | None = None,
     api_port: int = 8005,
-    ws_host: str = "0.0.0.0",
+    ws_host: str | None = None,
     ws_port: int = 8010,
 ) -> None:
-    """Start both REST API and WebSocket servers."""
+    """Start both REST API and WebSocket servers.
+
+    *bind* is the already-resolved listen address (the daemon passes the result
+    of ``--bind`` > ``PROMETHEUS_WEB_BIND`` > ``web.bind``); when omitted it is
+    resolved here from the environment and *config*. *api_host* / *ws_host*
+    override it per server and exist for callers that need the two apart. An
+    invalid address raises :class:`~prometheus.web.bind.BindError` before
+    anything is built or bound.
+    """
 
     from pathlib import Path
+    from prometheus.web.bind import (
+        all_interfaces_warning,
+        format_host_port,
+        parse_bind,
+        resolve_bind,
+    )
     from prometheus.web.server import create_app, start_web
     from prometheus.web.ws_server import WebSocketBridge
+
+    address = parse_bind(bind, "bind") if bind is not None else resolve_bind(config).address
+    api_host = address if api_host is None else api_host
+    ws_host = address if ws_host is None else ws_host
 
     # Polish sprint WS2: when no explicit static_dir is passed, fall back to
     # the shipped frontend at <package>/web/static/. Users can override via
@@ -176,10 +198,30 @@ async def launch_web(
             ComputerLiveStream,
             keep_per_session_from,
         )
+        from prometheus.computer.thumbnails import ThumbnailConfig
+        from prometheus.config.paths import data_dir_path
+
+        # PR 6b: the bridge IS the ThumbnailSink — it holds the per-socket
+        # identity and capability maps, so it is the only place that can
+        # answer "which sockets may receive a desktop picture". Its
+        # send_thumbnail/viewer_count gate on all four conditions; a
+        # global-token connection is never eligible.
+        #
+        # A malformed thumbnails block is logged, not swallowed: the
+        # config-dark law says a subsystem that is expected-enabled but dark
+        # is a failure state. Note the defaults are themselves fail-safe —
+        # `persist` parses to OFF on any bad value, so a typo cannot turn on
+        # the one path that writes desktop pixels to disk.
+        thumb_errors: list[str] = []
+        thumb_config = ThumbnailConfig.from_config(config, thumb_errors)
+        for err in thumb_errors:
+            logger.warning("computer_use.thumbnails: %s", err)
 
         computer_runner.live = ComputerLiveStream(
             signal_bus, bridge=bridge, telemetry=telemetry,
-            keep_per_session=keep_per_session_from(config))
+            keep_per_session=keep_per_session_from(config),
+            thumbnail_sink=bridge, thumb_config=thumb_config,
+            thumbnail_data_dir=str(data_dir_path()))
 
     # GRAFT Piece 2: APNs push. Enabled-but-broken fails the BOOT, loudly —
     # a missing key or missing deps must not degrade to silent no-pushes
@@ -223,7 +265,16 @@ async def launch_web(
             paperclip_cfg.get("api_url"),
         )
 
-    logger.info("Starting Mission Control — REST on :%d, WebSocket on :%d", api_port, ws_port)
+    logger.info(
+        "Starting Mission Control — REST on %s, WebSocket on %s",
+        format_host_port(api_host, api_port), format_host_port(ws_host, ws_port),
+    )
+    # One warning per start, not one per listener: it is the same exposure.
+    for wide_host in (api_host, ws_host):
+        warning = all_interfaces_warning(wide_host)
+        if warning:
+            logger.warning(warning)
+            break
 
     # Run both servers concurrently
     await asyncio.gather(

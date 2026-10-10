@@ -100,6 +100,13 @@ from prometheus.computer.door import (
 )
 from prometheus.computer.loop import VERB_FOR_TOOL_NAME, ComputerUseLoop
 from prometheus.computer.types import Observation
+#: PR 6b: the pre-capture tri-state, imported under local names so this module
+#: does not shadow its own `capture` verb.
+from prometheus.computer.thumbnails import (
+    CAPTURE as THUMB_CAPTURE,
+    NONE as THUMB_NONE,
+    SKIP as THUMB_SKIP,
+)
 from prometheus.engine.tool_context import in_tool_execution
 from prometheus.permissions.approval_queue import ApprovalResult
 from prometheus.permissions.approver import Approver, in_process
@@ -838,9 +845,39 @@ class ComputerTaskRunner:
                 after_stop = (result.status == "executed"
                               and task.stop_requested)
                 if self.live is not None:
+                    # PR 6b: the thumbnail capture. It happens AFTER the step
+                    # executed and its verification is done — never for a
+                    # refused or abstained step, never while an approval is
+                    # pending, never for the call in flight at a stop (whose
+                    # outcome is unknown and whose owner asked us to stop).
+                    #
+                    # The pre-capture decision lives in livestream.thumbnail_plan
+                    # (one tested place), which asks viewer_count FIRST so a
+                    # task nobody is watching never captures at all — the
+                    # picture exists only to be watched.
+                    capture = None
+                    capture_app_names: tuple[str, ...] = ()
+                    thumb_skip: str | None = None
+                    plan, plan_reason = self._thumb_plan(
+                        task.session_id, status=result.status,
+                        after_stop=after_stop)
+                    if plan == THUMB_CAPTURE:
+                        capture_app_names = tuple(binding._app_names())
+                        capture = await self._capture(
+                            driver, task, binding, pid, window.window_id)
+                        if capture is None:
+                            # The driver call failed. capture_failed is the
+                            # honest reason — a picture we could not take is
+                            # not a picture we decided against for its content.
+                            thumb_skip = "capture_failed"
+                    elif plan == THUMB_SKIP:
+                        thumb_skip = plan_reason
                     await self._log_step(task, result, consent, picker,
                                          after_stop=after_stop,
-                                         started=step_started)
+                                         started=step_started,
+                                         capture=capture,
+                                         capture_app_names=capture_app_names,
+                                         thumbnail_skip=thumb_skip)
                 if result.status == "executed":
                     task.steps += 1
                     history = list(result.history)
@@ -916,7 +953,10 @@ class ComputerTaskRunner:
 
     async def _log_step(self, task: ComputerTask, result: Any,
                         consent: SessionConsent, picker: _StopAwareChooser,
-                        *, after_stop: bool, started: float) -> None:
+                        *, after_stop: bool, started: float,
+                        capture: Any = None,
+                        capture_app_names: Any = (),
+                        thumbnail_skip: str | None = None) -> None:
         candidate = result.candidate
         verb = (VERB_FOR_TOOL_NAME.get(candidate.tool_name)
                 if candidate is not None else None)
@@ -933,9 +973,53 @@ class ComputerTaskRunner:
                 verified=result.verified, after_stop=after_stop,
                 candidates_offered=result.candidates_offered,
                 duration_ms=int((self._clock() - started) * 1000),
-                reason=consent.fence_reason or result.reason)
+                reason=consent.fence_reason or result.reason,
+                capture=capture, capture_app_names=capture_app_names,
+                thumbnail_skip=thumbnail_skip)
         except Exception:  # noqa: BLE001 - the log never ends a task
             logger.debug("action log step failed", exc_info=True)
+
+    def _thumb_plan(self, session_id: str, *, status: str,
+                    after_stop: bool) -> tuple[str, str | None]:
+        """The pre-capture decision, asked of the action log.
+
+        Falls back to NONE (no thumbnail applies) when the log is not wired or
+        is an older object with no plan method — a missing sink must never
+        crash a desktop task, and "no picture" is the safe answer.
+        """
+        live = self.live
+        if live is None:
+            return THUMB_NONE, None
+        fn = getattr(live, "thumbnail_plan", None)
+        if fn is None:
+            return THUMB_NONE, None
+        try:
+            plan, reason = fn(session_id, status=status, after_stop=after_stop)
+            return plan, reason
+        except Exception:  # noqa: BLE001 - fail closed: no capture
+            logger.debug("thumbnail plan failed", exc_info=True)
+            return THUMB_NONE, None
+
+    async def _capture(self, driver: Any, task: ComputerTask, binding: Binding,
+                       pid: int, window_id: int) -> Any:
+        """One window-scoped capture, or None if the driver could not take it.
+
+        Off the event loop: the driver call is blocking I/O, and the whole
+        task runner is async. A failure is None, never an exception — a
+        thumbnail must not be able to end a desktop task.
+        """
+        try:
+            return await asyncio.to_thread(
+                driver.capture, task.target, binding.app, pid, window_id,
+                max_dimension=self._thumb_max_dimension())
+        except Exception:  # noqa: BLE001 - the picture never ends a task
+            logger.debug("thumbnail capture failed", exc_info=True)
+            return None
+
+    def _thumb_max_dimension(self) -> int:
+        cfg = getattr(self.live, "_thumb_config", None)
+        dim = getattr(cfg, "max_dimension", None)
+        return dim if isinstance(dim, int) and dim > 0 else 480
 
     async def _heartbeat(self, task: ComputerTask, notify) -> None:
         while True:

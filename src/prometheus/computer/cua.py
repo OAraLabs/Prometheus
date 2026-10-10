@@ -80,7 +80,7 @@ from prometheus.computer.driver import (
     DriverUnavailable,
     StaleSnapshot,
 )
-from prometheus.computer.types import Element, Observation
+from prometheus.computer.types import Element, Observation, WindowCapture
 from prometheus.permissions.computer_schema import DELIVERY_BACKGROUND
 
 logger = logging.getLogger(__name__)
@@ -425,6 +425,83 @@ class CuaDriverAdapter:
                 any(_is_web_or_document(e) for e in raw) if raw else None),
         )
 
+    def capture(
+        self, target: str, app: str, pid: int, window_id: int, *,
+        max_dimension: int,
+    ) -> WindowCapture:
+        """One window-scoped snapshot WITH its pixels (PR 6b, design §5.2.5).
+
+        The SAME ``get_window_state`` call ``observe`` makes, with the
+        screenshot turned on — one call, so the tree the password check reads
+        and the pixels a person sees describe the same moment. Two rules make
+        this safe and both are enforced here, not downstream:
+
+        * **The whole walk, tokenless nodes included.** ``observe`` filters to
+          token-bearing elements (only those are addressable); the password
+          check must see nodes a filter would drop, because a password field
+          is exactly such a node. So ``roles`` keeps every node's role.
+        * **It invalidates the snapshot.** This call mints a new snapshot, so
+          every element token the loop holds dies — ``_forget`` it, same as a
+          failed observe. Safe in the run only because a capture happens after
+          the step executed and the next step re-observes; a capture that let
+          the old snapshot stand would arm a stale-token action.
+
+        Returns a ``WindowCapture`` (our type) — the SDK never escapes this
+        method, which is why the whole rule engine in ``thumbnails.py`` is
+        CI-coverable with no SDK installed.
+
+        ⚠ NOT VERIFIED ON 0.28.2: whether ``images`` is populated inline or
+        only ``screenshot_file_path`` is set. We read ``images[0]`` and never
+        the file path — a screenshot on disk is a second copy of the desktop
+        whose lifetime we do not control. If the on-box check shows ``images``
+        empty on 0.28.2, the fix is here and only here.
+        """
+        self._assert_target(target)
+        self.start()
+        key = (pid, window_id)
+        try:
+            out = self._await(self._driver.get_window_state(
+                _window_state_input(
+                    self._sdk, pid=pid, window_id=window_id,
+                    session=self._session,
+                    include_screenshot=True, max_dimension=max_dimension)))
+        except DriverUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # A capture that failed or timed out may still have minted a new
+            # snapshot. Forget it — the record can no longer be vouched for.
+            self._forget(key)
+            raise DriverUnavailable(
+                f"capture failed on {target}: "
+                f"{exc.__class__.__name__}: {exc}"
+            ) from exc
+
+        # Whatever came back, the OLD snapshot is superseded: fail closed.
+        self._forget(key)
+
+        raw = list(getattr(out, "elements", None) or [])
+        images = list(getattr(out, "images", None) or [])
+        first = images[0] if images else None
+        data = getattr(first, "data_base64", None) if first else None
+        mime = getattr(first, "mime_type", None) if first else None
+        return WindowCapture(
+            target=target, app=app, pid=pid, window_id=window_id,
+            # ⚠ THE DRIVER'S ANSWER OR NONE (D19). Never `or app`: an empty
+            # app_name makes the identity gate skip as window_changed, which
+            # is the fail-closed answer, not the caller's claim.
+            app_name=_opt_str(getattr(out, "app_name", None)),
+            # The WHOLE walk's roles, tokenless included — see the docstring.
+            roles=tuple(str(getattr(e, "role", "") or "") for e in raw),
+            degraded=bool(getattr(out, "degraded", False)),
+            truncated=bool(getattr(out, "truncated", False)),
+            frame_valid=_opt_bool(
+                getattr(out, "screenshot_frame_valid", None)),
+            image_mime=_opt_str(mime),
+            image_base64=data if isinstance(data, str) else None,
+            image_width=_opt_int(getattr(out, "screenshot_width", None)),
+            image_height=_opt_int(getattr(out, "screenshot_height", None)),
+        )
+
     def act(self, verb: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Dispatch one bounded action, and rule on what came back."""
         self._assert_target(arguments.get("target", self._target))
@@ -532,11 +609,18 @@ class CuaDriverAdapter:
 
 
 def _window_state_input(
-    sdk: Any, *, pid: int, window_id: int, session: str | None
+    sdk: Any, *, pid: int, window_id: int, session: str | None,
+    include_screenshot: bool = False, max_dimension: int | None = None,
 ) -> Any:
     """The observe call's input. A function so the real-SDK tests can build it
     with the PINNED types — from 0.28.3 it gains a required keyword this
-    call does not pass, which is what the exact pin exists to keep out."""
+    call does not pass, which is what the exact pin exists to keep out.
+
+    ``include_screenshot``/``max_dimension`` are keyword-only and default to
+    observe's values (no picture), so every existing call site and the pin
+    asserting ``include_screenshot is False`` are unchanged. Only PR 6b's
+    capture passes them.
+    """
     return sdk.GetWindowStateInput(
         pid=pid,
         window_id=window_id,
@@ -547,11 +631,11 @@ def _window_state_input(
         # candidate table, it is the expensive half of the call, and a frame
         # we do not need is a frame that could end up somewhere it should not
         # be (see the capture ruling).
-        include_screenshot=False,
+        include_screenshot=include_screenshot,
         screenshot_out_file=None,
         max_elements=MAX_ELEMENTS,
         max_depth=None,
-        max_dimension=None,
+        max_dimension=max_dimension,
     )
 
 

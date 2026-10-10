@@ -7,12 +7,17 @@ client→server commands (send_message, switch_session).
 Usage:
     from prometheus.web.ws_server import WebSocketBridge
     bridge = WebSocketBridge(signal_bus, session_mgr, loop_context)
-    await bridge.start(host="0.0.0.0", port=8010)
+    await bridge.start(host="127.0.0.1", port=8010)
+
+``host`` is whatever the daemon resolved from ``--bind`` / ``PROMETHEUS_WEB_BIND``
+/ ``web.bind`` (web/bind.py). This server binds it itself, separately from the
+REST server: forcing uvicorn to loopback leaves this one on every interface.
 """
 
 from __future__ import annotations
 
 import asyncio
+import http
 import json
 import logging
 import time
@@ -20,6 +25,8 @@ from typing import Any
 
 from prometheus.engine import loop_watchdog as _loop_watchdog
 from prometheus.version import package_version
+from prometheus.web.bind import DEFAULT_BIND
+from prometheus.web.loopback import is_loopback_address, is_loopback_host_header
 from prometheus.web.session_scope import Scope, SessionAccess, scope_for, session_exists
 
 logger = logging.getLogger(__name__)
@@ -93,6 +100,39 @@ def _client_label(ws: Any) -> str:
     return f"id={id(ws):x}"
 
 
+def _loopback_process_request(connection: Any, request: Any) -> Any:
+    """Refuse a WebSocket handshake whose Host header is not a loopback name.
+
+    Installed only when the bridge is bound to a loopback address (DNS-rebinding
+    defence, see web/loopback.py). Runs before the upgrade, so a refused client
+    gets an HTTP 403 and never reaches ``_handler``.
+
+    Two library generations call a ``process_request`` hook differently. The
+    asyncio implementation (``websockets.serve`` from 14, and
+    ``websockets.asyncio.server``) passes ``(connection, request)`` and wants a
+    response built with ``connection.respond``; the legacy one (12, 13) passes
+    ``(path, request_headers)`` and wants a ``(status, headers, body)`` tuple.
+    Both are handled so the guard does not depend on which one is installed.
+    """
+    headers = getattr(request, "headers", request)
+    try:
+        hosts = list(headers.get_all("Host"))
+    except Exception:  # unreadable headers: refuse, never guess
+        hosts = []
+    if len(hosts) == 1 and is_loopback_host_header(hosts[0]):
+        return None
+    shown = hosts[0] if len(hosts) == 1 else f"{len(hosts)} Host headers"
+    logger.warning(
+        "refused a WebSocket handshake: its Host header %r is not a loopback "
+        "name, and the bridge is bound to a loopback address (see web.bind)",
+        shown if len(str(shown)) <= 100 else str(shown)[:100] + "...",
+    )
+    message = "Forbidden: this server only answers requests addressed to localhost\n"
+    if hasattr(connection, "respond"):
+        return connection.respond(http.HTTPStatus.FORBIDDEN, message)
+    return http.HTTPStatus.FORBIDDEN, [("Content-Type", "text/plain")], message.encode()
+
+
 class WebSocketBridge:
     """Bridges SignalBus events to WebSocket clients."""
 
@@ -161,6 +201,14 @@ class WebSocketBridge:
         # firehose (today's behaviour); a set = turn frames for those sessions
         # only. Replaced whole on every subscribe, cleaned up with the socket.
         self._ws_filters: dict[Any, set[str]] = {}
+        # computer-use v1.1 PR 6b: per-socket declared capabilities, from the
+        # same `subscribe` frame. Absent = declares nothing, and a socket that
+        # declares nothing NEVER receives a `computer_step_thumbnail`. That is
+        # the protection the capability exists for: an old client renders an
+        # unknown frame kind's whole payload into its exportable Activity feed
+        # (gateway-events.ts), so a picture of someone's desktop would land in
+        # a file a person can copy off the machine.
+        self._ws_caps: dict[Any, set[str]] = {}
         self._clients: set[Any] = set()
         # Monotonic since boot — see delivery_stats(). A frame that fails to
         # send is gone; these are the only record that it existed.
@@ -246,8 +294,12 @@ class WebSocketBridge:
         that only need pass/fail)."""
         return self._auth_identity(raw) is not None
 
-    async def start(self, host: str = "0.0.0.0", port: int = 8010) -> None:
-        """Start the WebSocket server."""
+    async def start(self, host: str = DEFAULT_BIND, port: int = 8010) -> None:
+        """Start the WebSocket server on *host*.
+
+        A loopback *host* also turns on the Host-header check (DNS rebinding);
+        any other host is left unrestricted, as before.
+        """
         try:
             import websockets
         except ImportError:
@@ -263,6 +315,7 @@ class WebSocketBridge:
             host,
             port,
             max_size=WS_MAX_FRAME_BYTES,
+            process_request=_loopback_process_request if is_loopback_address(host) else None,
         )
         logger.info("WebSocket bridge listening on ws://%s:%d", host, port)
 
@@ -350,6 +403,7 @@ class WebSocketBridge:
             self._clients.discard(websocket)
             self._ws_identity.pop(websocket, None)
             self._ws_filters.pop(websocket, None)
+            self._ws_caps.pop(websocket, None)
             logger.info("Client disconnected (%d remain)", len(self._clients))
 
     async def _authenticate(self, websocket: Any) -> bool:
@@ -413,11 +467,24 @@ class WebSocketBridge:
                 self._ws_filters[websocket] = sessions
             else:
                 self._ws_filters.pop(websocket, None)
+            # PR 6b: capabilities arrive on the same frame. Like the session
+            # filter, a list REPLACES any previous set — re-subscribing is a
+            # restatement of what this client can handle, not an accumulation.
+            # A client that drops `computer-thumbnails` from a later subscribe
+            # stops receiving pictures; that is the point of replacing.
+            raw_caps = payload.get("capabilities")
+            caps = {c for c in raw_caps if isinstance(c, str) and c} \
+                if isinstance(raw_caps, list) else set()
+            if caps:
+                self._ws_caps[websocket] = caps
+            else:
+                self._ws_caps.pop(websocket, None)
             await self._send_one(websocket, {
                 "type": "subscribed",
                 "timestamp": time.time(),
                 "payload": {
                     "sessions": sorted(sessions),
+                    "capabilities": sorted(caps),
                     # Legacy echo — the old ack-only shape some clients read.
                     "channels": payload.get("channels", []),
                 },
@@ -1910,3 +1977,80 @@ class WebSocketBridge:
             await websocket.send(json.dumps(event))
         except Exception:
             self._clients.discard(websocket)
+
+    # ── computer-use v1.1 PR 6b: the ThumbnailSink ────────────────────────
+    # The runner (computer/thumbnails.ThumbnailSink) calls these. They are the
+    # ONLY path a desktop screenshot takes, and that path is deliberately not
+    # broadcast(): every socket is not every ELIGIBLE socket.
+    #
+    # Four conditions, all required, all failing closed:
+    #   1. authenticated with a DEVICE token — never the global token. The
+    #      global secret sits in a plain file the always-loaded bash tool can
+    #      read (D15), so a model holding it must not be able to watch the
+    #      screen through a socket it opened.
+    #   2. that device is marked for computer use — the door's own W3 ruling,
+    #      already in force for starting tasks; watching is the same grant.
+    #   3. it declared `computer-thumbnails` on its subscribe frame. A client
+    #      that did not would render an unknown kind's whole payload into its
+    #      exportable Activity feed — a picture of a desktop in a file a
+    #      person can copy off the machine.
+    #   4. it is attached to this task's session.
+
+    def _thumbnail_eligible(self, ws: Any, session_id: str) -> bool:
+        identity = self._ws_identity.get(ws)
+        if identity is None or getattr(identity, "is_global", True):
+            return False
+        if "computer-thumbnails" not in (self._ws_caps.get(ws) or ()):
+            return False
+        store = self._device_store
+        if store is None:
+            # No device registry means no device was ever marked for computer
+            # use, so there is no eligible viewer. Not an error — an answer.
+            return False
+        try:
+            if not store.computer_allowed(identity.id):
+                return False
+        except Exception:  # noqa: BLE001 - fail closed on any doubt
+            logger.debug("computer thumbnail eligibility check failed",
+                         exc_info=True)
+            return False
+        # Condition 4, done here rather than through _wants: that method
+        # admits any frame whose type is not in _SESSION_SCOPED_TYPES, and
+        # this kind deliberately is not there (it is not a turn frame, and it
+        # never goes through broadcast). Reusing it would have looked like a
+        # session check while always answering True.
+        sessions = self._ws_filters.get(ws)
+        return not sessions or session_id in sessions
+
+    def viewer_count(self, session_id: str) -> int:
+        """How many sockets may receive this session's thumbnails.
+
+        Asked BEFORE the runner captures, so a task nobody is watching never
+        calls the driver at all — the picture exists only to be watched.
+        """
+        return sum(1 for ws in list(self._clients)
+                   if self._thumbnail_eligible(ws, session_id))
+
+    async def send_thumbnail(self, session_id: str,
+                             frame: dict[str, Any]) -> None:
+        """Send one `computer_step_thumbnail` frame to eligible sockets only.
+
+        Direct-only by construction: this kind is outside COMPUTER_FRAME_KINDS,
+        so it never reaches SignalBus, signal_events, /api/events/recent or a
+        backfill. A failed send is a dropped picture, and that is the right
+        cost — never a retry, never a queue, never a reason to end a task.
+        """
+        event = {"type": "computer_step_thumbnail", "timestamp": time.time(),
+                 "payload": frame}
+        # Snapshot: _clients mutates as connections come and go, and awaiting
+        # a send yields to the loop (the RuntimeError broadcast() documents).
+        for ws in list(self._clients):
+            if not self._thumbnail_eligible(ws, session_id):
+                continue
+            try:
+                await ws.send(json.dumps(event))
+            except Exception:
+                self._clients.discard(ws)
+                self._ws_identity.pop(ws, None)
+                self._ws_caps.pop(ws, None)
+                self._frames_dropped += 1
