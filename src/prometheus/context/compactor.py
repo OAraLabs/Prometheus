@@ -414,9 +414,24 @@ class ContextCompactor:
         responses), and budgeting a 1M cloud model at the local GGUF's 28k
         throws away 97% of the window.
         """
+        return self._resolve_limit(model, backend)[0]
+
+    def is_measured(self, model: str | None = None, backend: str | None = None) -> bool:
+        """True when the budget for *model* came from a server's REPORT (n_ctx).
+
+        What the #356 pre-flight is gated on: refusing against a measured
+        window is honest, refusing against a configured floor is a guess. It
+        used to be inferred from the fallback target or a named backend, so a
+        local box with no fallback configured — the CLI's spawned workers
+        among them (#704) — had a measured window and no pre-flight.
+        """
+        return self._resolve_limit(model, backend)[1].startswith("detected")
+
+    def _resolve_limit(self, model: str | None, backend: str | None) -> tuple[int, str]:
         name = model or self._model
         if not name:
-            return int(self._detected_limit or self._effective_limit)
+            return (int(self._detected_limit or self._effective_limit),
+                    "detected" if self._detected_limit else "config")
         # One resolver (context/budget.py) for the reported number AND the
         # enforced one — this method used to restate the precedence by hand,
         # which is how the two could drift. Multi-backend: `backend` selects
@@ -428,7 +443,7 @@ class ContextCompactor:
             "effective_limit": self._effective_limit,
             "cloud_default_limit": self._cloud_default_limit,
         }
-        resolved, _source = resolve_effective_limit(
+        resolved, source = resolve_effective_limit(
             ctx,
             model=name,
             local_model=self._model,
@@ -438,8 +453,9 @@ class ContextCompactor:
             backend_hint=self._backend_hints.get(backend) if backend else None,
         )
         if resolved is None:
-            return int(self._detected_limit or self._effective_limit)
-        return int(resolved)
+            return (int(self._detected_limit or self._effective_limit),
+                    "detected" if self._detected_limit else "config")
+        return int(resolved), source
 
     def _threshold_tokens(self, model: str | None = None) -> int:
         return compaction_threshold(
