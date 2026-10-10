@@ -27,7 +27,7 @@ from prometheus.engine import loop_watchdog as _loop_watchdog
 from prometheus.version import package_version
 from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import is_loopback_address, is_loopback_host_header
-from prometheus.web.session_scope import Scope, SessionAccess, scope_for, session_exists
+from prometheus.web.session_scope import Scope, SessionAccess, event_session_id, scope_for, session_exists
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +131,10 @@ def _loopback_process_request(connection: Any, request: Any) -> Any:
     if hasattr(connection, "respond"):
         return connection.respond(http.HTTPStatus.FORBIDDEN, message)
     return http.HTTPStatus.FORBIDDEN, [("Content-Type", "text/plain")], message.encode()
+
+
+#: The frames that carry a tool call awaiting approval (``serialize_pending`` / its resolution).
+_APPROVAL_FRAMES = frozenset({"approval_pending", "approval_resolved"})
 
 
 class WebSocketBridge:
@@ -607,7 +611,8 @@ class WebSocketBridge:
                     return
             if session_id and content:
                 await self._handle_send_message(session_id, content, client_msg_id=client_msg_id,
-                                                mode=mode, tool_choice=tool_choice, blocks=blocks)
+                                                mode=mode, tool_choice=tool_choice, blocks=blocks,
+                                                **({} if self._scope(websocket).unrestricted else {"operator": False}))
 
         elif cmd_type == "chat_upload":
             # File upload from Beacon: { type: "chat_upload", payload: {
@@ -876,7 +881,7 @@ class WebSocketBridge:
 
     async def dispatch_user_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
-        tool_choice: object | None = None, blocks: list[Any] | None = None
+        tool_choice: object | None = None, blocks: list[Any] | None = None, operator: bool = True
     ) -> None:
         """Public dispatch entry point — kicks off the same flow as a WS-borne
         ``send_message`` command.
@@ -901,6 +906,7 @@ class WebSocketBridge:
         await self._handle_send_message(
             session_id, content, client_msg_id=client_msg_id, mode=mode,
             tool_choice=tool_choice, **({"blocks": blocks} if blocks else {}),
+            **({} if operator else {"operator": False}),
         )
 
     async def resolve_references(self, session_id: str, refs: list[Any]) -> list[Any]:
@@ -1041,9 +1047,13 @@ class WebSocketBridge:
 
     async def _handle_send_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
-        tool_choice: object | None = None, blocks: list[Any] | None = None
+        tool_choice: object | None = None, blocks: list[Any] | None = None, operator: bool = True
     ) -> None:
         """Process a user message — add to session and run agent loop if context available.
+
+        *operator* is False when a SCOPED device typed it: a slash command then runs only if it is one a scoped
+        device may use (``web/route_access.SCOPED_SLASH_COMMANDS``). It defaults to True so every internal
+        caller (notes, uploads, Paperclip) is unchanged.
 
         A leading-slash message is a command (web parity for Telegram's
         CommandHandler): it's handled here and broadcast back, NOT added to the
@@ -1088,6 +1098,8 @@ class WebSocketBridge:
                     session_manager=self.session_mgr,
                     computer_runner=self.computer_runner,
                 ),
+                # Only when False, so a router double that predates the keyword still works.
+                **({} if operator else {"operator": False}),
             )
         if outcome is not None and outcome.handled:
             await self._broadcast_command_reply(
@@ -1902,6 +1914,27 @@ class WebSocketBridge:
         "provider_degraded", "error",
     })
 
+    def _approval_frame_visible(self, ws: Any, event: dict[str, Any]) -> bool:
+        """May this socket be told about this approval request?
+
+        An ordinary approval frame names no session (its shape is Beacon's and does not change), so
+        ``frame_visible`` calls it daemon-level. It is not: it carries a tool call's name, description, extents and
+        arguments. The operator's socket gets every one; a scoped device's socket gets the ones raised in a
+        session it owns. A request the queue does not know, or no queue at all, is withheld from a scoped socket:
+        unknown is not daemon-level. (A desktop prompt does name its session, so ``frame_visible`` has always
+        sent it to that session's owner alone; a mark changes who may ANSWER one, not who is told.)
+        """
+        scope = self._scope(ws)
+        if scope.unrestricted:
+            return True
+        queue = self.approval_queue
+        request_id = (event.get("payload") or {}).get("request_id")
+        origin = queue.origin_of(request_id) if queue is not None and isinstance(request_id, str) else None
+        if origin is None:
+            return False
+        session_id = origin[0]
+        return bool(session_id and self._access.owns(scope, session_id))
+
     def _wants(self, ws: Any, event: dict[str, Any]) -> bool:
         """Does this socket's subscribe filter admit this event?
 
@@ -1914,6 +1947,9 @@ class WebSocketBridge:
         # subscribed to. The operator's socket passes unchanged.
         try:
             if not self._access.frame_visible(self._scope(ws), event):
+                return False
+            if (event.get("type") in _APPROVAL_FRAMES and event_session_id(event) is None
+                    and not self._approval_frame_visible(ws, event)):
                 return False
         except Exception:
             # Fail CLOSED, and never raise: this runs inside broadcast(), and an exception

@@ -86,3 +86,24 @@ def test_an_idle_source_is_forgotten_once_its_window_has_passed():
     for n in range(3):
         limiter.check(f"b{n}")
     assert "a" not in limiter
+
+
+def test_peek_says_whether_a_source_is_at_its_limit_without_spending_anything():
+    """The wrong-secret limit counts only FAILURES, so it must be able to ask before it records."""
+    clock = _Clock()
+    limiter = SourceLimiter(2, 60.0, clock=clock)
+    for _ in range(10):
+        assert limiter.peek("a").allowed
+    limiter.check("a")
+    limiter.check("a")
+    for _ in range(3):
+        assert not limiter.peek("a").allowed
+    assert limiter.peek("a").retry_after == 60
+    clock.now += 60.01
+    assert limiter.peek("a").allowed
+
+
+def test_peeking_never_creates_a_source():
+    limiter = SourceLimiter(2, 60.0, clock=_Clock())
+    assert limiter.peek("never-seen").allowed
+    assert "never-seen" not in limiter and len(limiter) == 0

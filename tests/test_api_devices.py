@@ -135,7 +135,9 @@ def test_device_token_cannot_mint(tmp_path):
                          headers=_auth(GLOBAL)).json()
     r = client.post("/api/devices", json={"name": "attacker", "platform": "other"},
                     headers=_auth(minted["token"]))
-    assert r.status_code == 401
+    # 403 from the route gate (web/route_access.py): a scoped device is denied by default, and the token is
+    # valid, so it is "not yours", not "your token is dead" (it was the handler's 401 before).
+    assert r.status_code == 403 and r.json()["error"] == "operator_only"
 
 
 def test_revoked_device_is_401_and_others_unaffected(tmp_path):

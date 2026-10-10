@@ -1151,6 +1151,16 @@ web:
   # therefore loopback-only afterwards until its owner sets the bind here.
   bind:                  # e.g. "127.0.0.1"
 
+  # Reverse proxies whose X-Forwarded-For / X-Forwarded-Proto headers are
+  # believed: addresses or networks, e.g. ["127.0.0.1"] for a tunnel or
+  # `tailscale serve` on this machine, or ["10.0.0.0/8"]. Empty (the default)
+  # believes NO forwarded header: the address every rate limit and every
+  # same-machine check uses is the TCP peer, so a client cannot choose its own
+  # by sending a header. An entry that would believe everyone (`*`, 0.0.0.0/0)
+  # is ignored with a warning. If a proxy on this machine fronts the daemon and
+  # is not named here, every request looks like it comes from 127.0.0.1.
+  trusted_proxies: []
+
 # Image generation — the image_generate tool's backend selection + per-backend
 # settings. CLOUD EXPANSION (2026-07) adds the PAID DashScope backend (WAN 2.5).
 #
@@ -1176,6 +1186,22 @@ pairing:
   # (macOS ComputerName, else the host name). At most 64 characters; control
   # characters are removed.
   display_name: ""
+
+  # Whether a new device may ask to join at all (POST /api/pair/requests). The
+  # owner then approves it on a device they already use. false = only pasting
+  # the API token pairs a device; GET /api/hello then says pair: token.
+  requests_enabled: true
+
+  # How long a request waits for the owner, in seconds. Allowed 60 to 900; a
+  # value outside that is clamped, with a warning in the log.
+  request_ttl_seconds: 300
+
+  # Limits on strangers asking, counted by TCP peer address. At most this many
+  # requests waiting overall, and per source address; and per source address
+  # in any hour. Over a limit the answer is 429 with a Retry-After.
+  max_pending: 3
+  max_pending_per_source: 1
+  max_requests_per_source_per_hour: 10
 
 # APNs push to enrolled devices (GRAFT-MOBILE-BRIDGE 2). Disabled by default:
 # enabling requires the `push` extra (pip install 'oara-prometheus[push]')

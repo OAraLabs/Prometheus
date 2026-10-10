@@ -1,0 +1,27 @@
+{
+  "contract": "pairing/0.1",
+  "about": "Fixed inputs and the bytes the contract's recipe (docs/PAIRING-APPROVAL-API.md, 4.3 and 4.4) produces, for a client to check its own seal/unseal and match-code code against. Every binary value is lowercase hex unless its name ends in _b64url (unpadded base64url).",
+  "recipe": {
+    "match_code": "d = SHA-256('prometheus-pair-v1' || 0x00 || requester_public_key(32) || instance_public_key_der || ASCII(request_id)); code = (uint32 big-endian of d[0:4]) mod 10000, zero-padded to 4 digits",
+    "seal": "shared = X25519(ephemeral_private, requester_public); key = HKDF-SHA256(shared, salt=ASCII(request_id), info='prometheus-pair-v1/seal', 32 bytes); ciphertext = ChaCha20-Poly1305(key).encrypt(nonce12, plaintext_utf8, aad=ASCII(request_id)) with the 16-byte tag appended",
+    "plaintext": "UTF-8 JSON, keys in the order token, device_id, name, no spaces"
+  },
+  "request_id": "c3f1a9e07b2d4a6831ff09aa5e2b7c44",
+  "requester_private_hex": "c5d6c66e5736b75b0ffc7b348c417a6e9fd3638fa0049a4f675bfab05bb0942b",
+  "requester_public_hex": "276634a23a311b60e02020262b6924d7c80f12b629f36b5c9503520f0426ec23",
+  "requester_public_b64url": "J2Y0ojoxG2DgICAmK2kk18gPErYp82tclQNSDwQm7CM",
+  "instance_public_key_der_hex": "3059301306072a8648ce3d020106082a8648ce3d030107034200048644918889e57a077a34a9c2b5227c8d675447e178bdd8a5dc0b9f6c9b4a021172ccecb756bf7c082f8a3f43af70c078ef55fd600f7c494ad3df07a52b6bc618",
+  "match_code": "5426",
+  "ephemeral_private_hex": "692566424a59703a8f72fd8444dc341a07ffc1dff4d162817c88bd7f867bbde3",
+  "ephemeral_public_hex": "806b43be2cc38c7734183ce2459ea463e298532982fcda37c2431dc9d9f75a48",
+  "nonce_hex": "447508f06a9288dac8a0cdca",
+  "shared_secret_hex": "8947732b295671945a3ca2dcf4581ec11065c60014a48242db75a3bb3ecb9c7b",
+  "derived_key_hex": "d1536f20d3de2dad35333777aa255a25ca7933c673b23eb2274547633c43fbed",
+  "plaintext": "{\"token\":\"tok-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"device_id\":\"9b2e5c7a41d84f0aa13c6e8d2b07f5e9\",\"name\":\"Jennifer's MacBook\"}",
+  "sealed": {
+    "alg": "x25519-hkdf-sha256-chacha20poly1305",
+    "ephemeral_public_key": "gGtDvizDjHc0GDziRZ6kY-KYUymC_No3wkMdydn3Wkg",
+    "nonce": "RHUI8GqSiNrIoM3K",
+    "ciphertext": "YZH1w4ch3QhVLDxtAW0iodiJZGrrVVSLz-RGRKsAM4z7nc0KrRGQJHdMzlu3FInkTl0d0Wa4lWDV92x7wvT3Fdap1lm6Wg1dO24JccNTzOn-vYD0jdBrOA2OosR39oTb2ENdrs-cUF4D2A9OLgycxZQBvjgniv2lkkC2Bjl65jR5u64BBBEyf1skn0ejVOOzGe0"
+  }
+}

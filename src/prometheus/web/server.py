@@ -25,7 +25,8 @@ from fastapi.staticfiles import StaticFiles
 
 from prometheus.web import hello as hello_mod
 from prometheus.web.bind import DEFAULT_BIND
-from prometheus.web.loopback import guard_if_loopback, is_loopback_host_header, is_loopback_peer
+from prometheus.web.loopback import is_loopback_host_header, is_same_machine
+from prometheus.web.route_access import SCOPED_APPROVE_SCOPES, is_scoped_allowed
 from prometheus.web.public_routes import is_public_route
 from prometheus.web.session_scope import (
     Scope,
@@ -37,6 +38,7 @@ from prometheus.web.strict_query import StrictQueryRoute
 
 from prometheus.config import api_token as api_token_module
 from prometheus.config import local_pairing
+from prometheus.config.device_store import registry_platform
 from prometheus.config.node_identity import get_instance_id, get_node_pubkey
 from prometheus.config.paths import get_wiki_root
 from prometheus.context.environment import (
@@ -443,6 +445,16 @@ def create_app(
             if identity is None:
                 return JSONResponse(status_code=401, content={"error": "unauthorized — set Authorization: Bearer <token>"})
             request.state.device_identity = identity
+            # DEFAULT-DENY for a scoped device (web/route_access.py): the global token and an owner device are
+            # the operator, and everyone else holds a token that may use only what that module lists. 403, not
+            # 401: the token is valid, and a client that read 401 as "my token died" would sign itself out.
+            if not identity.is_operator and not is_scoped_allowed(
+                    request.method, path,
+                    marked=lambda: bool(_devices_or_create().computer_allowed(identity.id))):
+                return JSONResponse(status_code=403, content={
+                    "error": "operator_only",
+                    "detail": "this device may chat and manage its own sessions and device; "
+                              "everything else belongs to the owner (the master token or an owner device)"})
         return await call_next(request)
 
     # ── /api/pair/local — same-Mac pairing with the one-time file secret ─────
@@ -458,7 +470,7 @@ def create_app(
     async def pair_local(request: Request):
         if not local_pairing.enabled():
             return JSONResponse(status_code=404, content={"error": "not_found"})
-        if not (is_loopback_peer(request) and is_loopback_host_header(request.headers.get("host"))):
+        if not (is_same_machine(request) and is_loopback_host_header(request.headers.get("host"))):
             logger.warning("Same-Mac pairing refused: the request did not come from this Mac")
             return JSONResponse(status_code=403, content={
                 "error": "not_loopback",
@@ -512,9 +524,7 @@ def create_app(
         name = str(body.get("name") or "").strip()
         if not name:
             return JSONResponse(status_code=400, content={"error": "name is required"})
-        platform = str(body.get("platform") or "").strip().lower()
-        if platform not in ("ios", "macos"):
-            platform = "other"
+        platform = registry_platform(body.get("platform"))
         owner = body.get("owner", False)
         if not isinstance(owner, bool):
             return JSONResponse(status_code=400, content={"error": "owner must be true or false"})
@@ -526,9 +536,10 @@ def create_app(
             # 2026-10-08): from any other address this is refused, and the other computer is enrolled as an
             # ordinary, scoped device like every approved one. From this Mac's loopback address it carries the
             # same-Mac source and replaces the earlier same-Mac credentials, exactly as a re-pairing does.
-            # (The test is the peer address; a reverse proxy on this machine makes a remote request look
-            # local, which can only cost this Mac its own owner credential — `Prometheus --pair` restores it.)
-            if not is_loopback_peer(request):
+            # (The test is `is_same_machine`: a loopback TCP peer AND no X-Forwarded-For or Forwarded header.
+            # A proxy on this machine (`tailscale serve`, cloudflared, nginx) connects from loopback and relays
+            # requests from anywhere; the header it adds is what gives it away.)
+            if not is_same_machine(request):
                 return JSONResponse(status_code=403, content={
                     "error": "owner devices are issued only for this Mac, from this Mac; enrol another "
                              "computer without owner (an ordinary, scoped device)"})
@@ -546,6 +557,11 @@ def create_app(
         _store = _devices_or_create()
         _marked = _store.computer_device_ids()
         _owners = _store.owner_sources(include_revoked=True)  # a tombstone keeps its history
+        # An operator (the global token or an owner device) sees every device. A SCOPED device sees itself:
+        # a client still finds its own row (is_self, its id, its push state), and learns nothing about who
+        # else is enrolled (names, platforms, last seen, the owner flag), which an approved device is
+        # otherwise handed. With auth off everyone is the operator.
+        _everyone = not _api_token or (identity is not None and identity.is_operator)
         return [{
             "id": d.id, "name": d.name, "platform": d.platform,
             "created_at": d.created_at, "last_seen_at": d.last_seen_at,
@@ -562,7 +578,7 @@ def create_app(
             # credential is visible and revocable rather than something nobody can see.
             "owner": d.id in _owners,
             "owner_source": _owners.get(d.id),
-        } for d in _store.list_devices()]
+        } for d in _store.list_devices() if _everyone or d.id == self_id]
 
     def _may_manage_push(request: Request, device_id: str):
         """Push/activity registration is the device's own business (or the
@@ -614,6 +630,10 @@ def create_app(
         if not session_id or not activity_token:
             return JSONResponse(status_code=400, content={
                 "error": "need session_id and activity_token"})
+        # A live activity streams a session's progress to the phone, so a device may register one only for a
+        # session it owns (an operator, for any). Not-yours is the 404 a missing session gets.
+        if not _access.owns(_scope(request), session_id):
+            return _unknown_session()
         _devices_or_create().set_activity_token(device_id, session_id, activity_token)
         return {"ok": True}
 
@@ -852,7 +872,9 @@ def create_app(
     async def hello(request: Request):
         return hello_mod.hello_response(
             request, _hello_limiter,
-            lambda: hello_mod.build_hello(config, auth_on=bool(_api_token)))
+            lambda: hello_mod.build_hello(
+                config, auth_on=bool(_api_token),
+                approval=app.state.pairing.settings.requests_enabled))
 
     # ── Root ────────────────────────────────────────────────────────
 
@@ -1450,6 +1472,9 @@ def create_app(
         await bridge.dispatch_user_message(
             session_id, message, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice,
             **({"blocks": blocks} if blocks else {}),
+            # A scoped device's commands are default-deny (web/route_access.SCOPED_SLASH_COMMANDS). The keyword
+            # rides only when it is False, so a duck-typed bridge that predates it still works.
+            **({} if _scope(request).unrestricted else {"operator": False}),
         )
         return {"run_id": idempotency_key, "status": "sent"}
 
@@ -4641,11 +4666,59 @@ def create_app(
 
     # ── Approvals ──────────────────────────────────────────────────
 
+    def _scoped_pending(request: Request) -> dict[str, Any] | None:
+        """The pending requests THIS caller may see and answer, by id; None for the operator (no restriction).
+
+        A scoped device gets the tool calls raised inside sessions it owns (``PendingAction.session_id``, stamped
+        from the run in progress when the request was created) and nothing else: not another device's, not one
+        raised by Telegram or a cron job, not one raised outside any run. Its id must be exactly a pending id,
+        which also closes the route's other door: the handler builds ``"<scope> <id>"`` for the command parser,
+        so an id with a space in it (``always all``) would otherwise be a second argument.
+        """
+        scope = _scope(request)
+        if scope.unrestricted:
+            return None
+        queue = app.state.approval_queue
+        if not queue:
+            return {}
+        # A device an operator MARKED for computer use is a person (the door's W3 ruling), and a desktop prompt
+        # is answered by a person, so it also sees and may answer those (the door still refuses an unmarked
+        # device, a lasting scope and a client that cannot show the arguments).
+        try:
+            person = bool(scope.device_id) and bool(_devices_or_create().computer_allowed(scope.device_id))
+        except Exception:  # noqa: BLE001 - fail closed on any doubt
+            person = False
+        return {a.request_id: a for a in queue.list_pending()
+                if (a.session_id and _access.owns(scope, a.session_id))
+                or (person and a.task_id is not None)}
+
+    def _not_mine(request: Request, request_id: str) -> JSONResponse | None:
+        """The 404 for a scoped caller naming a request that is not one of its own sessions', else None.
+
+        Not yours looks exactly like not there, the way a session that is not yours does. A helper, not inline,
+        because ``approve_action`` is pinned (tests/test_api_approve_reports_what_it_did.py) to contain no
+        membership test, so that its response flags can never come back to being inferred from the message text.
+        """
+        mine = _scoped_pending(request)
+        if mine is not None and request_id not in mine:
+            return JSONResponse(status_code=404, content={"error": "unknown request"})
+        return None
+
+    def _scope_refusal(request: Request, scope: str) -> JSONResponse | None:
+        """The 403 for a scoped caller asking for a lasting or widened grant, else None."""
+        if _scope(request).unrestricted or scope in SCOPED_APPROVE_SCOPES:
+            return None
+        return JSONResponse(status_code=403, content={
+            "error": "operator_only",
+            "detail": f"a device may approve its own session's tool calls with {list(SCOPED_APPROVE_SCOPES)} "
+                      "only; a lasting or wider grant belongs to the owner"})
+
     @app.get("/api/approvals")
-    async def get_approvals():
+    async def get_approvals(request: Request):
         queue = app.state.approval_queue
         if not queue:
             return []
+        mine = _scoped_pending(request)
         # SPRINT-CONSENT 0e: the payload carries the COMPUTED EXTENT of each
         # scope verb. Beacon renders this field; Telegram formats the same
         # dict into prose. Neither re-derives it — ``prospective_extents``
@@ -4661,7 +4734,8 @@ def create_app(
         # the WS ``approval_pending`` signal returns the SAME dict, so the REST
         # list and the push frame cannot drift. Provenance of the fields lives
         # on the serializer's docstring, where it is actually used.
-        return [queue.serialize_pending(a) for a in queue.list_pending()]
+        return [queue.serialize_pending(a) for a in queue.list_pending()
+                if mine is None or a.request_id in mine]
 
     @app.post("/api/approvals/{request_id}/approve")
     async def approve_action(
@@ -4697,6 +4771,10 @@ def create_app(
         queue = app.state.approval_queue
         if not queue:
             return JSONResponse(status_code=404, content={"error": "approval queue not enabled"})
+        # A scoped device answers only the calls of its own sessions (web/route_access.py). Ownership comes
+        # first, so a request that is not its own is a 404 whatever else is wrong with the call.
+        if (refusal := _not_mine(request, request_id)) is not None:
+            return refusal
         # SPRINT-CONSENT: validated through the ONE definition, not a second
         # hand-written list. The previous literal tuple here asserted the
         # pre-#232 verbs and 400'd "until-restart" and "always here" — the
@@ -4711,6 +4789,10 @@ def create_app(
                 status_code=400,
                 content={"error": f"scope must be one of {list(approve_verbs())}"},
             )
+        # A persistent grant, or the directory-widened form, is the owner's: 403 like every other
+        # operator-only act, and nothing was approved.
+        if (refusal := _scope_refusal(request, scope)) is not None:
+            return refusal
         from prometheus.gateway import commands as _cmds
 
         # A DESKTOP TASK'S PROMPT (computer-use v1.1): approve-once, only a
@@ -4864,6 +4946,8 @@ def create_app(
         queue = app.state.approval_queue
         if not queue:
             return JSONResponse(status_code=404, content={"error": "approval queue not enabled"})
+        if (refusal := _not_mine(request, request_id)) is not None:
+            return refusal
         from prometheus.permissions import approver as _approver
 
         ok = await queue.deny(request_id, by=_approver.from_request(request))
@@ -6141,6 +6225,14 @@ def create_app(
         resolve_model_target=lambda key: _resolve_model_target(key, config),
     )
 
+    # ── Pairing requests (docs/PAIRING-APPROVAL-API.md) ────────────────────
+    # A new device asks to join, the owner approves, a scoped token arrives sealed. Registered BEFORE the
+    # static catch-all, like every route; three of the six are public (web/public_routes.py).
+    from prometheus.web.pairing_routes import register_pairing_routes
+
+    register_pairing_routes(
+        app, config=config, devices=_devices_or_create, auth_on=lambda: bool(_api_token))
+
     # ── Static files (must be last — catch-all) ─────────────────────
 
     if static_dir:
@@ -6305,13 +6397,18 @@ def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
-async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005) -> None:
+async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005,
+                    config: dict[str, Any] | None = None) -> None:
     """Start the FastAPI server using uvicorn, listening on *host*.
 
     *host* is whatever the daemon resolved from ``--bind`` /
     ``PROMETHEUS_WEB_BIND`` / ``web.bind`` (web/bind.py). A loopback *host* also
     puts the Host-header check in front of the app (DNS rebinding, see
     web/loopback.py); any other host is left unrestricted, as before.
+
+    *config* is the daemon's configuration, read only for ``web.trusted_proxies``: forwarded headers are
+    ignored unless a proxy is named there (web/serving.py says why). The server is published as
+    ``app.state.http_server`` so a caller that needs to stop it cleanly can.
 
     FIRSTLIGHT FL-1 note, verified by mutation: uvicorn's
     ``capture_signals()`` looks like it steals SIGTERM/SIGINT from the
@@ -6329,11 +6426,9 @@ async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005) ->
     component of the chain, this one included.
     """
     import uvicorn
-    config = uvicorn.Config(guard_if_loopback(app, host), host=host, port=port, log_level="info",
-                            # log_config=None: uvicorn must NOT install its own handlers.
-                            # Its default config gives uvicorn.access/uvicorn.error handlers
-                            # with propagate=False — a path around the root handlers, i.e.
-                            # around log redaction (security/log_redaction.py) and rotation.
-                            log_config=None)
-    server = uvicorn.Server(config)
+
+    from prometheus.web.serving import serve_config
+
+    server = uvicorn.Server(serve_config(app, host, port, config))
+    app.state.http_server = server
     await server.serve()
