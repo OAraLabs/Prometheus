@@ -360,6 +360,14 @@ class WebSocketBridge:
         )
         logger.info("WebSocket bridge listening on ws://%s:%d", host, port)
 
+    @property
+    def bound_port(self) -> int | None:
+        """The port this bridge is listening on, read from its socket; ``None`` before ``start()`` or after
+        ``stop()``."""
+        from prometheus.web.serving import bound_port
+
+        return bound_port(getattr(self, "_server", None))
+
     async def stop(self) -> None:
         if self._server:
             self._server.close()
