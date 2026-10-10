@@ -27,7 +27,7 @@ from prometheus.engine import loop_watchdog as _loop_watchdog
 from prometheus.version import package_version
 from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import is_loopback_address, is_loopback_host_header
-from prometheus.web.session_scope import Scope, SessionAccess, scope_for, session_exists
+from prometheus.web.session_scope import Scope, SessionAccess, event_session_id, scope_for, session_exists
 
 logger = logging.getLogger(__name__)
 
@@ -133,8 +133,16 @@ def _loopback_process_request(connection: Any, request: Any) -> Any:
     return http.HTTPStatus.FORBIDDEN, [("Content-Type", "text/plain")], message.encode()
 
 
+#: The frames that carry a tool call awaiting approval (``serialize_pending`` / its resolution).
+_APPROVAL_FRAMES = frozenset({"approval_pending", "approval_resolved"})
+
+
 class WebSocketBridge:
     """Bridges SignalBus events to WebSocket clients."""
+
+    # The pairing runtime, set by attach_pairing. A class-level default so a bridge built without __init__
+    # (some tests do) is simply "not attached" rather than missing the attribute.
+    _pairing: Any = None
 
     def __init__(
         self,
@@ -193,6 +201,9 @@ class WebSocketBridge:
         # sessions its device owns; the global token's socket is the firehose,
         # exactly as before. See docs/contracts/device-scoping.md.
         self._access = SessionAccess(lambda: self._device_store, self._session_exists)
+        # Pairing requests (web/pairing_routes.py): set by attach_pairing. Their frames go to OPERATOR
+        # sockets only, through send_to_operators and never broadcast (see there for why).
+        self._pairing: Any = None
         # A token's sockets die with the token. Authentication happens once, at connect, so without
         # this a revoked device kept its open socket — and, for an owner device, every session's frames.
         add_listener = getattr(device_store, "add_revoke_listener", None)
@@ -294,6 +305,72 @@ class WebSocketBridge:
             },
         })
 
+    # -- pairing requests ----------------------------------------------------
+
+    def attach_pairing(self, runtime: Any) -> None:
+        """Connect the pairing runtime: its events become frames for the owner's sockets.
+
+        ``pairing_pending`` when a new device asks to join, ``pairing_resolved`` when it is decided,
+        withdrawn or runs out (docs/PAIRING-APPROVAL-API.md, 5.1). A connection that arrives later is
+        told what is still waiting (:meth:`_backfill_pairing`).
+        """
+        self._pairing = runtime
+        runtime.notifier.subscribe(self._on_pairing_event, audience=lambda: bool(self.operator_sockets()))
+
+    def operator_sockets(self) -> list[Any]:
+        """Sockets whose identity is an operator: the global token or an OWNER device (``is_operator``).
+
+        A socket with no recorded identity is not one, even on a daemon with auth on: it fails closed.
+        """
+        return [ws for ws in tuple(self._clients) if getattr(self._ws_identity.get(ws), "is_operator", False)]
+
+    async def send_to_operators(self, event: dict[str, Any]) -> int:
+        """Send *event* to operator sockets only. Returns how many took it.
+
+        NOT ``broadcast``: ``_wants`` only holds back a frame that names a session a device does not
+        own, and a pairing frame names none, so a broadcast would put a source address and a match code in
+        front of every scoped device on the daemon. And not the SignalBus, whose tail is durable and is
+        replayed to any authenticated client. A send that fails drops that socket, as ``broadcast`` does.
+        """
+        raw = json.dumps(event)
+        sent = 0
+        for ws in self.operator_sockets():
+            try:
+                await ws.send(raw)
+                sent += 1
+            except Exception as exc:
+                self._frames_dropped += 1
+                self._clients.discard(ws)
+                self._clients_discarded += 1
+                logger.warning("WS frame DROPPED for client %s (type=%s): %s: %s",
+                               _client_label(ws), event.get("type", "?"), type(exc).__name__, exc)
+        return sent
+
+    async def _on_pairing_event(self, kind: str, payload: dict[str, Any]) -> bool:
+        frame_type = {"pending": "pairing_pending", "resolved": "pairing_resolved"}.get(kind)
+        if frame_type is None:
+            return False
+        sent = await self.send_to_operators({"type": frame_type, "timestamp": time.time(), "payload": payload})
+        return sent > 0
+
+    async def _backfill_pairing(self, websocket: Any) -> None:
+        """Tell a newly connected operator what is still waiting, oldest first, so opening Beacon after the
+        request arrived still shows it. A frame can arrive twice if a request lands mid-connect: clients
+        key on ``request_id``."""
+        identity = self._ws_identity.get(websocket)
+        if self._pairing is None or not getattr(identity, "is_operator", False):
+            return
+        try:
+            await self._pairing.sweep()
+            for payload in self._pairing.pending_payloads():
+                if await self._send_one(websocket, {"type": "pairing_pending", "timestamp": time.time(),
+                                                    "payload": payload}):
+                    # Shown to an operator, so the requester's `notified` is true for good, even if they are
+                    # gone before its next poll.
+                    self._pairing.mark_notified(payload["request_id"])
+        except Exception:
+            logger.warning("could not backfill pairing requests to %s", _client_label(websocket), exc_info=True)
+
     def _on_devices_revoked(self, device_ids: list[str]) -> None:
         """The registry's word that these devices were just revoked (after the commit is durable).
 
@@ -383,6 +460,7 @@ class WebSocketBridge:
             "timestamp": time.time(),
             "payload": {"version": package_version()},
         })
+        await self._backfill_pairing(websocket)
 
         try:
             async for raw in websocket:
@@ -607,7 +685,8 @@ class WebSocketBridge:
                     return
             if session_id and content:
                 await self._handle_send_message(session_id, content, client_msg_id=client_msg_id,
-                                                mode=mode, tool_choice=tool_choice, blocks=blocks)
+                                                mode=mode, tool_choice=tool_choice, blocks=blocks,
+                                                **({} if self._scope(websocket).unrestricted else {"operator": False}))
 
         elif cmd_type == "chat_upload":
             # File upload from Beacon: { type: "chat_upload", payload: {
@@ -876,7 +955,7 @@ class WebSocketBridge:
 
     async def dispatch_user_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
-        tool_choice: object | None = None, blocks: list[Any] | None = None
+        tool_choice: object | None = None, blocks: list[Any] | None = None, operator: bool = True
     ) -> None:
         """Public dispatch entry point — kicks off the same flow as a WS-borne
         ``send_message`` command.
@@ -901,6 +980,7 @@ class WebSocketBridge:
         await self._handle_send_message(
             session_id, content, client_msg_id=client_msg_id, mode=mode,
             tool_choice=tool_choice, **({"blocks": blocks} if blocks else {}),
+            **({} if operator else {"operator": False}),
         )
 
     async def resolve_references(self, session_id: str, refs: list[Any]) -> list[Any]:
@@ -1041,9 +1121,13 @@ class WebSocketBridge:
 
     async def _handle_send_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
-        tool_choice: object | None = None, blocks: list[Any] | None = None
+        tool_choice: object | None = None, blocks: list[Any] | None = None, operator: bool = True
     ) -> None:
         """Process a user message — add to session and run agent loop if context available.
+
+        *operator* is False when a SCOPED device typed it: a slash command then runs only if it is one a scoped
+        device may use (``web/route_access.SCOPED_SLASH_COMMANDS``). It defaults to True so every internal
+        caller (notes, uploads, Paperclip) is unchanged.
 
         A leading-slash message is a command (web parity for Telegram's
         CommandHandler): it's handled here and broadcast back, NOT added to the
@@ -1088,6 +1172,8 @@ class WebSocketBridge:
                     session_manager=self.session_mgr,
                     computer_runner=self.computer_runner,
                 ),
+                # Only when False, so a router double that predates the keyword still works.
+                **({} if operator else {"operator": False}),
             )
         if outcome is not None and outcome.handled:
             await self._broadcast_command_reply(
@@ -1902,6 +1988,27 @@ class WebSocketBridge:
         "provider_degraded", "error",
     })
 
+    def _approval_frame_visible(self, ws: Any, event: dict[str, Any]) -> bool:
+        """May this socket be told about this approval request?
+
+        An ordinary approval frame names no session (its shape is Beacon's and does not change), so
+        ``frame_visible`` calls it daemon-level. It is not: it carries a tool call's name, description, extents and
+        arguments. The operator's socket gets every one; a scoped device's socket gets the ones raised in a
+        session it owns. A request the queue does not know, or no queue at all, is withheld from a scoped socket:
+        unknown is not daemon-level. (A desktop prompt does name its session, so ``frame_visible`` has always
+        sent it to that session's owner alone; a mark changes who may ANSWER one, not who is told.)
+        """
+        scope = self._scope(ws)
+        if scope.unrestricted:
+            return True
+        queue = self.approval_queue
+        request_id = (event.get("payload") or {}).get("request_id")
+        origin = queue.origin_of(request_id) if queue is not None and isinstance(request_id, str) else None
+        if origin is None:
+            return False
+        session_id = origin[0]
+        return bool(session_id and self._access.owns(scope, session_id))
+
     def _wants(self, ws: Any, event: dict[str, Any]) -> bool:
         """Does this socket's subscribe filter admit this event?
 
@@ -1914,6 +2021,9 @@ class WebSocketBridge:
         # subscribed to. The operator's socket passes unchanged.
         try:
             if not self._access.frame_visible(self._scope(ws), event):
+                return False
+            if (event.get("type") in _APPROVAL_FRAMES and event_session_id(event) is None
+                    and not self._approval_frame_visible(ws, event)):
                 return False
         except Exception:
             # Fail CLOSED, and never raise: this runs inside broadcast(), and an exception
@@ -2009,11 +2119,14 @@ class WebSocketBridge:
             "clients_discarded": self._clients_discarded,
         }
 
-    async def _send_one(self, websocket: Any, event: dict[str, Any]) -> None:
+    async def _send_one(self, websocket: Any, event: dict[str, Any]) -> bool:
+        """Send one event to one socket. True when it went; a socket that cannot take it is dropped."""
         try:
             await websocket.send(json.dumps(event))
         except Exception:
             self._clients.discard(websocket)
+            return False
+        return True
 
     # ── computer-use v1.1 PR 6b: the ThumbnailSink ────────────────────────
     # The runner (computer/thumbnails.ThumbnailSink) calls these. They are the

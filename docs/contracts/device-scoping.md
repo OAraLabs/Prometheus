@@ -71,15 +71,15 @@ A socket whose identity was never recorded, on a daemon with auth on, owns nothi
 Stated so nobody reads "device scoping" as more than it is. None of these changed.
 
 - **The agent.** A device's turn runs the operator's agent with the operator's tools; `lcm_grep` searches every session. This scopes the API, not the model.
-- **Slash commands.** A command typed into a device's own session runs with the operator's authority: `/events` lists recent signals from every session, `/memory`, `/wiki`, `/grants`, `/revoke` and `/gate` read or change daemon-wide state. Their replies reach only the sockets of that session's owner, but what they read is not scoped.
-- **Approvals** (`/api/approvals*`). Ordinary prompts carry no session id, so there is nothing to scope by. Approving another session's prompt, and `grants`, are open to every valid token. Needs the session id plumbed into the queue first.
-- **Background and coding tasks** (`/api/tasks*`, `/api/code*`) are task-id keyed and owned by no device.
+- **Slash commands** (changed, section 7): a scoped device may run only `/help` and the commands that act on its own session; every other known command is refused in the chat. They used to run with the operator's authority, which let a phone type `/gate off`.
+- **Approvals** (changed, section 7): a scoped device sees and answers only the tool calls raised in sessions it owns, with `once` or `until-restart`; grants are the operator's. (`until-restart` is process-wide: the grant a device makes for its own call applies to every matching call until the daemon restarts.)
+- **Background and coding tasks** (`/api/tasks*`, `/api/code*`): task-id keyed and owned by no device, so a scoped device is denied them (section 7).
 - **Stopping a desktop task** stays open to any valid token, by the door's design: a stop can only end a task.
-- **`/api/tools/recent`** returns tool inputs from every session and its rows carry no session id.
+- **`/api/tools/recent`** and **`/api/media?path=`**: denied to a scoped device (section 7); they were open.
 - **`/api/media?path=`** serves any cached image to whoever holds the path (`img_<uuid>`); a capability, not a listing.
-- **Operator-wide resources**: config, skills, memory, wiki, files, artifacts, cron, providers. Not sessions.
+- **Operator-wide resources**: config, skills, memory, wiki, files, artifacts, cron, providers, MCP servers, stories, projects, profiles. Not sessions, and now denied to a scoped device (section 7); they were open to any valid token.
 - **Push notifications** (`push/dispatcher.py`): `turn_completed`, `task_*` and approval pushes go to every registered device, whoever owns the session. A product decision, not a bug fix.
-- **`GET /api/devices`** still lists every enrolled device (name, platform, last seen, push status).
+- **`GET /api/devices`**: an operator (the global token or an owner device) lists every enrolled device; a **scoped device lists only itself** (its own row, `is_self: true`), so it can still find its id and push state without learning who else is enrolled. This was open until the pairing work made approved devices common: an approved device could read every other device's name, platform, last-seen time, push status and owner flag. Changed by the pairing stack (#698).
 - **An id-existence oracle remains** for ids outside the daemon namespaces: a device that sends to a guessed id learns whether it existed, and takes it if not. Real ids are `<gateway>:<uuid4>`.
 
 ## 5. Upgrading
@@ -116,4 +116,22 @@ Minting an owner device **for this Mac** replaces the earlier owner credentials 
 ### 6.4 What this does not fix
 
 The global token stays valid and stays in `~/.config/prometheus/env`, where the bash tool can read it, and macOS has no shell floor. This change stops a paired **device** from holding the master key. It does not stop a **model** from reading it; that needs the restrictive default permission mode, which is separate work.
+
+## 7. Route access: a scoped device is default-deny (`device-scoping/1.2`)
+
+Sections 1 to 6 scoped what a device sees in the SESSION routes and left every other route open to any valid token. Once approve-to-pair made scoped tokens common (a phone on the home network asks, the owner taps Approve), that was a hole an independent review verified: an approved phone could approve any session's tool call with a persistent grant, create and run cron jobs (which run through `/bin/bash` with the daemon's environment), write provider keys, and type `/gate off`.
+
+**The rule.** The bearer middleware answers `403 operator_only` to a scoped token on any route that is not in `web/route_access.py`'s allowlist. Default-deny: a route added tomorrow, an unknown path, a method nobody listed, and `/v1/*` are refused without anyone remembering to refuse them. The code is 403, not 401, because the token is valid.
+
+**What a scoped device may use** (`SCOPED_ALLOWED`): hello; its own device (list itself, sign itself out, its push and live-activity registration, the live activity for a session it owns); chat (`/api/chat`, `/send`, `/interrupt`); its own sessions (list, create, delete, messages, title, pin, fork, `events/recent`, `activity/recent`, search); and approvals, below. Everything else is the operator's: the global token or an owner device.
+
+**Approvals.** A scoped caller sees and answers only the requests raised in a session it owns: the queue stamps each request with the run's session (`engine/tool_context.RUN_SESSION`). The id must be exactly a pending id (no `all`, no scope smuggled through the id), the scope is `once` or `until-restart` (`SCOPED_APPROVE_SCOPES`), and the same filter decides which `approval_pending` / `approval_resolved` frames its socket is sent. A request that is not its own is a 404, like a session that is not its own. The wire shapes did not change.
+
+**Two things are wider on purpose**, both the computer-use door's: the desktop-task stop is open to every valid token (a stop can only end a task), and a device an operator MARKED for computer use is a person, so it additionally reaches the computer routes and may answer a desktop prompt (`MARKED_DEVICE_ALLOWED`). An unmarked device gets neither.
+
+**Slash commands.** A scoped device's chat may run `SCOPED_SLASH_COMMANDS` (`/help` and the commands on its own session) and nothing else; any other known command is refused in the chat and does not run.
+
+**The ratchet.** `tests/test_route_access.py` classifies every route the app registers exactly once (public, scoped-allowed, marked-device or operator-only), pins the allowlists literally, and runs the table through the real middleware. A new route fails it until someone says which.
+
+**Still true.** A scoped device's turn runs the operator's agent with the operator's tools (section 4): the gate and its own `once` approvals are what stand between a phone and a command. That is the product's choice for an approved device.
 

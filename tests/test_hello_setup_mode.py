@@ -80,6 +80,13 @@ def test_it_is_rate_limited_per_peer(monkeypatch):
     assert [client.get("/api/hello").status_code for _ in range(3)] == [200, 200, 429]
 
 
+def test_a_request_to_join_is_refused_in_setup_mode_with_the_contracts_code():
+    """There is no operator yet who could approve the first device: that is setup-mode pairing."""
+    reply = _client().post("/api/pair/requests", json={"device_name": "x", "platform": "ios", "public_key": "A" * 43})
+    assert reply.status_code == 403 and reply.json()["error"] == "pairing_unavailable"
+    assert not (Path(os.environ["PROMETHEUS_CONFIG_DIR"]) / "node").exists()
+
+
 def test_the_rest_of_setup_mode_is_still_closed():
     """Adding hello must not open a neighbour: anything unlisted is still the honest 403."""
     client = _client()

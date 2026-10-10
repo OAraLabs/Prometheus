@@ -73,11 +73,15 @@ def test_the_fields_say_what_they_should():
     assert body["agent"] == "Jarvis"
     assert body["tls"] is False
     assert body["fp"] == ""                       # no instance key has been made yet
-    assert body["pair"] == "token"                # no request route is served, no code route exists
+    assert body["pair"] == "approve"              # the request routes are served
 
 
 def test_the_agent_is_called_prometheus_unless_configured():
     assert _client().get("/api/hello").json()["agent"] == "Prometheus"
+
+
+def test_requests_turned_off_means_only_the_token_pairs_a_device():
+    assert _client(_app(pairing={"requests_enabled": False})).get("/api/hello").json()["pair"] == "token"
 
 
 def test_a_daemon_with_no_token_says_there_is_nothing_to_pair_into():

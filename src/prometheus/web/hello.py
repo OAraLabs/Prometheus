@@ -16,8 +16,8 @@ answer here. What the route does for itself, because it is public and the bearer
 * send ``Cache-Control: no-store``, and never write to disk.
 
 ``fp`` is a display hint and ``pair`` says what a client can really do next, so it is never optimistic:
-``approve`` only when a request route is served (none is yet), ``code`` in setup mode, ``token`` when
-only the API token pairs a device, ``none`` when the daemon has no token at all.
+``approve`` only when the request routes are served, ``code`` in setup mode, ``token`` when only the API
+token pairs a device, ``none`` when the daemon has no token at all.
 
 Contract: docs/PAIRING-APPROVAL-API.md, section 3.2.
 
@@ -53,11 +53,6 @@ def new_limiter() -> SourceLimiter:
     return SourceLimiter(HELLO_PER_MINUTE, _WINDOW_SECONDS)
 
 
-def approval_offered(config: Mapping[str, Any] | None) -> bool:
-    """Whether this daemon serves ``POST /api/pair/requests``. Not yet: no request route exists."""
-    return False
-
-
 def pair_mode(*, setup_mode: bool, auth_on: bool, approval: bool = False, code: bool = False) -> str:
     """What a client can do to join this daemon: ``approve``, ``code``, ``token`` or ``none``."""
     if setup_mode:
@@ -82,16 +77,20 @@ def build_hello(
     *,
     setup_mode: bool = False,
     auth_on: bool = True,
+    approval: bool = False,
     tls: bool = False,
 ) -> dict[str, Any]:
-    """The six fields. *config* is ``None`` in setup mode, where there is none yet."""
+    """The six fields. *config* is ``None`` in setup mode, where there is none yet.
+
+    *approval* is whether this daemon serves ``POST /api/pair/requests``: the caller knows (the route is
+    registered and ``pairing.requests_enabled`` is on), so hello says what is true rather than guessing.
+    """
     return {
         "v": package_version(),
         "name": display_name(dict(config) if isinstance(config, Mapping) else None),
         "agent": _agent_name(config),
         "fp": instance_fingerprint(),
-        "pair": pair_mode(
-            setup_mode=setup_mode, auth_on=auth_on, approval=approval_offered(config)),
+        "pair": pair_mode(setup_mode=setup_mode, auth_on=auth_on, approval=approval),
         "tls": bool(tls),
     }
 

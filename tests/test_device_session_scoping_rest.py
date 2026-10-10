@@ -129,7 +129,11 @@ def test_the_session_route_sweep_finds_the_routes_we_think_it_does(world):
     assert len(found) >= 20
 
 
-def test_every_session_keyed_route_refuses_a_foreign_device(world):
+def test_every_session_keyed_route_refuses_a_foreign_device(world, monkeypatch):
+    """The session guard, on its own. The route gate (web/route_access.py) now denies a scoped device most of
+    these routes before the guard is asked, which would make this sweep pass for the wrong reason; so the gate
+    is opened for it. Whatever is ever allowed to a scoped device, the guard still answers 404 to a foreign one."""
+    monkeypatch.setattr("prometheus.web.server.is_scoped_allowed", lambda *a, **k: True)
     sid_a = world.device_session("a")
     for method, template in _session_routes(world.app):
         url = _fill(template, sid_a)
@@ -138,6 +142,20 @@ def test_every_session_keyed_route_refuses_a_foreign_device(world):
             f"{method} {template}: device B reached device A's session "
             f"→ {r.status_code} {r.text[:120]}"
         )
+
+
+def test_through_the_real_gate_a_foreign_device_gets_404_on_what_it_may_use_and_403_on_the_rest(world):
+    """Either way it learns nothing about whose session it is: the answer does not depend on the session."""
+    from prometheus.web.route_access import is_scoped_allowed
+
+    sid_a = world.device_session("a")
+    for method, template in _session_routes(world.app):
+        url = _fill(template, sid_a)
+        r = world.call("b", method, url, json={})
+        if is_scoped_allowed(method, template.replace("{session_id}", "x")):
+            assert r.status_code == 404, (method, template, r.status_code)
+        else:
+            assert r.status_code == 403 and r.json()["error"] == "operator_only", (method, template, r.status_code)
 
 
 def test_every_session_keyed_route_still_admits_the_owner(world):
@@ -181,11 +199,17 @@ def test_a_foreign_device_cannot_forget_rename_or_pin_a_session(world):
     assert sid_a in world.mgr._sessions
 
 
-def test_a_foreign_device_cannot_purge_a_session(world):
+def test_a_foreign_device_cannot_purge_a_session(world, monkeypatch):
     sid_a = world.device_session("a")
     before = world.lcm.count_all(sid_a)
     assert before > 0
 
+    # A purge is the operator's now (web/route_access.py): stopped at the gate.
+    r = world.call("b", "POST", f"/api/sessions/{sid_a}/purge", json={"confirm": sid_a})
+    assert r.status_code == 403 and r.json()["error"] == "operator_only"
+    assert world.lcm.count_all(sid_a) == before, "B purged A's rows"
+    # And behind the gate the session guard still refuses it.
+    monkeypatch.setattr("prometheus.web.server.is_scoped_allowed", lambda *a, **k: True)
     r = world.call("b", "POST", f"/api/sessions/{sid_a}/purge", json={"confirm": sid_a})
     assert r.status_code == 404
     assert world.lcm.count_all(sid_a) == before, "B purged A's rows"

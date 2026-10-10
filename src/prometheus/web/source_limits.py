@@ -78,6 +78,22 @@ class SourceLimiter:
             self._hits.popitem(last=False)
         return Decision(True)
 
+    def peek(self, source: str) -> Decision:
+        """Whether *source* is at its limit right now, WITHOUT recording anything or creating the source.
+
+        For a limit that counts only some events (wrong secrets): ask first, then ``check`` when the
+        event that counts actually happens.
+        """
+        now = self._clock()
+        hits = self._hits.get(source)
+        if hits is None:
+            return Decision(True)
+        cutoff = now - self._window
+        live = [t for t in hits if t > cutoff]
+        if len(live) >= self._limit:
+            return Decision(False, max(1, math.ceil(live[0] + self._window - now)))
+        return Decision(True)
+
     def _forget_idle(self, cutoff: float) -> None:
         """Drop the sources whose newest hit has left the window. They sit at the front."""
         while self._hits:

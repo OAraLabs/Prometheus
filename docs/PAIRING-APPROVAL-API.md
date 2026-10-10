@@ -75,7 +75,7 @@ What the unauthenticated surface can be used to do, and what stops it:
 | Read the token off the Wi-Fi at pairing | Token sealed to the requester's key (4.3). |
 | Read the bearer token off the Wi-Fi afterwards | TLS with a pinned certificate (section 7). **Sealing alone does not help here.** |
 | Browser page posts to `localhost` or a LAN address | No CORS headers on these routes, any request carrying `Origin` is refused, and the loopback Host guard from #693. |
-| Guess a request id or poll secret | 128-bit id, 256-bit secret, constant-time compare, unknown id and wrong secret answer identically, wrong-secret attempts rate limited. |
+| Guess a request id or poll secret | 128-bit id, 256-bit secret, constant-time compare, unknown id and wrong secret answer identically, wrong guesses rate limited per source (and the right secret is never refused for them, so a neighbour who knows an id cannot kill a pairing). |
 | An approved device approves or enrols another (a chain from one stolen phone) | `is_operator` is false for any device `mint` makes; the decision routes answer 403. `POST /api/devices` stays global-token-only. Nothing on the approval path can create an owner device. |
 | Active attacker relaying the first contact | Not fully stopped. Section 7.5. |
 
@@ -175,7 +175,7 @@ Rate limit: 60 per minute per source, then `429`.
 
 ## 4. Pairing requests
 
-Approve-to-pair is for the **second and later** devices. A fresh install has no operator who could approve the first one; that is setup-mode pairing (same-Mac, #694, or the 6-digit code). `POST /api/pair/requests` answers `403 pairing_unavailable` in setup mode, when `pairing.requests_enabled` is false, and when the daemon runs with auth off (no global token: device tokens are unused, so minting one would hand out a credential that opens nothing).
+Approve-to-pair is for the **second and later** devices. A fresh install has no operator who could approve the first one; that is setup-mode pairing (same-Mac, #694, or the 6-digit code). `POST /api/pair/requests` answers `403 pairing_unavailable` in setup mode, when `pairing.requests_enabled` is false, and when the daemon runs with auth off (no global token: device tokens are unused, so minting one would hand out a credential that opens nothing). The setup app serves that one route for the purpose, so a client sees the same refusal whichever case it hit.
 
 A pairing request is not a device and touches no conversation: until it is approved there is no token and no identity, so there is nothing for #692's scoping to scope. No pairing route reads, lists or creates a session.
 
@@ -227,10 +227,12 @@ A pairing request is not a device and touches no conversation: until it is appro
 
 `notified` is true when at least one operator channel took the prompt (a connected operator Beacon, or, if the owner opted in, a Telegram message that sent). When false the request is still valid; the new device can say "nobody is watching Will's Mac mini; open Beacon there". That reveals that no operator is online, which is information a LAN neighbour could already infer.
 
+**`notified` on the pending poll is current.** The 201 says it once, as of creation, so a requester whose owner opened Beacon a moment later would keep saying "nobody is watching". The pending poll therefore carries `notified` too (added after Beacon's review of PR 3; additive, no other shape moved), and it **only ever goes false to true** during a request's life: each reason is remembered for that request the moment it happens. It is true once a channel took the event at creation (Telegram sends its prompt once and cannot be asked later) **or** an operator (the global token or an owner device, never a scoped one) has been connected at any point while the request waited. A socket that connects later is sent what is waiting, and that send marks each request it delivers, so an owner who connected and left between two polls still counts; a poll that finds one connected marks it too. The memory is in the daemon, bounded to 256 requests; a restart forgets it, and the poll then answers from the live socket alone until the next operator connects. Only a `pending` answer carries it; every other status keeps its exact shape. (The first version read the live connection alone, so it turned back to false when the owner disconnected; Beacon found that against `9f16284`.)
+
 **`GET /api/pair/requests/{request_id}`** with header `X-Pairing-Secret: <poll_secret>`
 
 ```json
-{"status": "pending", "expires_at": 1760000300}
+{"status": "pending", "expires_at": 1760000300, "notified": false}
 {"status": "denied"}      {"status": "expired"}      {"status": "canceled"}      {"status": "delivered"}
 {
   "status": "approved",
@@ -274,7 +276,7 @@ POST /api/pair/requests/{request_id}/deny        body: none or {}
 
 * `approve` accepts **exactly** `name` (renames; the typed name is unverified) and `match_code` (the optional typed confirmation, 5.1). **Any other key is `400 invalid_request`**, `owner`, `scope` and `tier` included, so no client can believe it granted more than an ordinary scoped device.
 * Errors: `401` no valid token; `403 operator_only` a valid scoped device; `404 unknown_request`; `409 not_pending` with the winner's `status`; `410 expired`; `422 code_mismatch`. The operator is authenticated, so a 404 here is not an oracle.
-* Every decision is also announced as a `pairing_resolved` frame and, if Telegram is on, an edit to its message (5).
+* Every decision is also announced as a `pairing_resolved` frame and, if Telegram is on, an edit to its message (5). In the implementation the announcement goes through `PairingNotifier` (`web/pairing_routes.py`), the seam the Beacon sockets and Telegram subscribe to; `notified` on the 201 is true when a listener took the `pending` event.
 
 ### 4.3 Sealing the token
 
@@ -305,7 +307,7 @@ The server returns it in the `201` and shows it to the operator. The requester *
 
 ### 4.5 Limits
 
-Keyed on the TCP peer address. `X-Forwarded-For` is never read on these routes (an unauthenticated caller controls it).
+Keyed on the TCP peer address. `X-Forwarded-For` is never believed (an unauthenticated caller controls it) unless the TCP peer is a proxy named in `web.trusted_proxies`, which is empty by default: the daemon builds its uvicorn configuration in `web/serving.py` with forwarded headers off, because uvicorn's default believes them from anything on 127.0.0.1 and let a local client pick its own source and rotate it past every limit here (found by the Beacon session against the real daemon; a test client cannot see it, so the tests serve the app through `start_web` on a real socket).
 
 | Limit | Default | Config key | On breach |
 |---|---|---|---|
@@ -313,7 +315,7 @@ Keyed on the TCP peer address. `X-Forwarded-For` is never read on these routes (
 | Pending requests overall | 3 | `pairing.max_pending` | `429`, `reason: pending_full` |
 | Requests per source per hour | 10 | `pairing.max_requests_per_source_per_hour` | `429`, `reason: hourly` |
 | Poll interval | 1 s minimum | (fixed) | `429`, `reason: poll_too_fast` |
-| Wrong poll secret per source | 5 per minute | (fixed) | `429`, `reason: bad_secret` |
+| Wrong poll secrets per source | 5 per minute | (fixed) | `429`, `reason: bad_secret` for the next wrong guess. **The right secret is checked first and is never refused for the budget**: an exhausted source is told 429 instead of 404 for a wrong guess, nothing more. The secret is 256 bits, so checking before limiting costs the limit nothing it was protecting. |
 | Body size | 4 KiB | (fixed) | `413` |
 
 Every `429` carries `Retry-After` and `{"error": "rate_limited", "reason": "...", "retry_after_seconds": n}`. Over loopback every caller shares one source, so the per-source and overall limits coincide; that path is the installer's `POST /api/pair/local`, not this one.
@@ -329,7 +331,7 @@ What the new device therefore is, by #692 and #696, with nothing special-cased h
 * **It owns no conversations.** It sees only the sessions it creates (`device_sessions`, #692). Conversations that predate #692 are operator-only. The first thing Jennifer's Mac shows is an empty list, which is correct, and clients should say so rather than show an error.
 * **It is not an operator.** `is_operator` is false, so it cannot approve or deny, cannot list or revoke other devices, and receives no `pairing_*` frame. It can revoke itself (`DELETE /api/devices/{its own id}`).
 * **Still the global token's alone:** `POST /api/devices` and defining an MCP server. An owner device cannot do those either (#696).
-* It appears in `GET /api/devices` (not `owner`), and an operator revokes it with the existing `DELETE /api/devices/{id}`; the socket closes at once (4401).
+* It appears in an operator's `GET /api/devices` (not `owner`), and an operator revokes it with the existing `DELETE /api/devices/{id}`; the socket closes at once (4401). **It lists only itself**: `GET /api/devices` from a scoped device returns its own row (`is_self: true`) and nothing about who else is enrolled, which an approved device used to be handed (found by the Beacon session).
 * **What scoping does not cover (#692 section 4)** still applies to it: the agent runs with the operator's tools, slash commands read daemon-wide state, and push and tool-approval routes are open to any valid token. The prompt does not promise isolation beyond conversations.
 
 An operator may rename at approval, because the typed name is unverified.
@@ -347,7 +349,8 @@ pending --approve--> approved --DELETE or 5 min--> delivered
 * Every transition is one SQLite statement guarded by the current state (`UPDATE ... WHERE state='pending' AND expires_at > now`, check the row count). Nothing here relies on a file delete succeeding as an exactly-once claim: building #694 showed concurrent `unlink()` of one path letting up to 7 of 8 callers "succeed" on APFS. Two operators tapping at once: one wins, the other gets `409 not_pending` with the winner's status. An approve that arrives after the TTL gets `410 expired`.
 * Rows live in a `pair_requests` table in the existing `devices.db`, **created on first use** (the way `computer_devices`, `device_sessions` and `owner_devices` are), so a box that never pairs a device grows no table and the parity fixtures, which record every table in that file, do not change. The table is not `device_sessions` or `owner_devices`, and approval writes to neither: #692 forbids a second table that says who owns a session.
 * Stored: id, SHA-256 of the poll secret (never the secret), name, platform, requester public key, source address, match code, state, timestamps, deciding channel and identity, device id, sealed blob until delivery. Never stored: the plaintext token, the poll secret.
-* Terminal rows are deleted after 7 days.
+* Terminal rows are deleted 7 days after they finished (`finished_at`). A request past its TTL is `expired` whether or not the sweep has recorded it yet, so a late decision is always `410`, never `409`. An approval nobody collected reads as `expired` to the requester; a later decision on it is `409 not_pending` with `status: approved`, because someone did approve it.
+* The sweep runs at the start of every pairing request and on a 30-second timer, so an uncollected device is revoked within about 30 seconds of its window closing even when no one is asking.
 
 ### 4.8 Audit
 
@@ -371,11 +374,12 @@ Two frame types, sent **only to sockets whose identity has `is_operator`** (the 
  "payload": {"request_id": "...", "resolution": "approved", "by": "telegram", "resolved_at": 1760000042}}
 ```
 
-`resolution` is `approved`, `denied`, `expired` or `canceled`. `by` is `beacon`, `telegram`, `cli` or `system`.
+`resolution` is `approved`, `denied`, `expired` or `canceled`. `by` is `beacon`, `telegram`, `cli`, `requester` (the new device withdrew its own request) or `system` (the TTL). A REST decision is `beacon` unless the caller sends `X-Pairing-Via: cli` (the terminal route does): display only, it carries no authority, and no other value is believed. The audit line always records the real identity.
 
 * A connecting operator is **backfilled** with one `pairing_pending` per live request, so opening Beacon after the request arrived still shows it. The same list is `GET /api/pair/requests`.
 * The frames go straight to those sockets through a **new targeted send on the bridge** (`send_to_operators(frame)`: iterate `_ws_identity`, keep `identity.is_operator`), **not through the SignalBus and not through `broadcast`.** The SignalBus tail is durable and replayed to any authenticated client by the activity feed. And #692's `_wants` filter drops a frame for a device socket only when the frame *names a session it does not own*; a pairing frame names none, so `broadcast` would deliver it, source address and code included, to every scoped device. A test connects a scoped device and an owner device and requires the first to receive nothing.
 * A socket that is revoked mid-request is already detached by #696's listener, so a frame is never sent to a token that no longer exists.
+* The send is awaited inside the request that caused it (`PairingNotifier.emit` runs its listeners side by side, each cut off after 3 s), so a frame has been sent, or has failed, before the requester's 201 returns, and `notified` is the truth: true only if an operator socket (or Telegram) actually took it. A socket whose send fails is dropped, as `broadcast` does.
 * Beacon renders `device_name` as text, never markup. Suggested copy: "**Jennifer's MacBook** wants to connect. Code **4821**" with platform and source address underneath, "Approve" and "Deny".
 * Optionally the operator may type the code instead of just tapping: `approve` accepts `{"match_code": "4821"}` and answers `422 code_mismatch` when it differs. Clients may offer that stronger UX; the API does not require it.
 * Phone push: if APNs push is configured, `pairing_pending` also goes through the existing push dispatcher (alert text only, no code). Today the dispatcher sends to every registered device (#692 lists this under what scoping does not cover), so a scoped device would get the alert; the follow-up must restrict it to operator devices, and **until that exists this contract sends no pairing push** rather than leak the existence of a request. No OAra relay (Will's ruling Q3).
@@ -400,10 +404,12 @@ The name is typed on the new device and is not checked. Approve only if the code
 * Sent only to **private** chats in `allowed_chat_ids`. A group chat in that list gets nothing: group membership is not an identity, and any member could otherwise approve.
 * `callback_data` is `pair:a:<request_id>` or `pair:d:<request_id>` (39 bytes, under Telegram's 64-byte limit). The handler matches `^pair:[ad]:[0-9a-f]{32}$`, runs after the existing `_authorize_update` check (group -1, which covers callback updates because they carry a chat), answers the query, then **edits the message** to its final state ("Approved from Telegram at 14:02", "Denied", "Expired", "Approved on Beacon") and removes the buttons. A tap on an old message answers "already approved" or "expired".
 * One message per request, so at most three outstanding.
+* The final text is `<name> — approved from Telegram at 14:02`, `… approved on Beacon at …`, `… denied in the terminal at …`, `… cancelled by the new device` or `… expired`. The tapped message is edited by the tap itself and every message the daemon remembers is edited by the `resolved` event; the message ids live in memory, so after a daemon restart an old prompt's buttons still work (a tap answers "already approved" or "expired") but a decision made elsewhere no longer edits it.
+* A tap runs `PairingRuntime.approve` / `deny` as `telegram:<chat id>`, the code REST and the terminal run. The handler checks the chat again (private, allowed) rather than rely on the group -1 check.
 
 ### 5.3 Terminal
 
-`oara pair list | approve <id> | deny <id>` call the same routes with the global token read from the env file. This is the route for a headless box with no Beacon open and no Telegram.
+`oara pair list | approve <id> [--name N] [--code NNNN] | deny <id>` call the same routes with the global token, read the way `oara token show` reads it, and send `X-Pairing-Via: cli` so the owner's other screens say "approved in the terminal". This is the route for a headless box with no Beacon open and no Telegram. It reaches the daemon where it listens: `PROMETHEUS_WEB_BIND` (from the environment, else the env file the daemon loads), else `web.bind`, with every-interface binds reached over loopback and one specific address reached at that address (a daemon bound to one LAN or tailnet address does not answer on 127.0.0.1, which the first version assumed). A `--bind` flag given to a running daemon cannot be seen from the CLI, so an unreachable daemon is reported with the address that was tried and the way to set it. An id may be a unique prefix of at least 6 characters; an ambiguous or unknown prefix is refused, never guessed. A whole 32-character id goes straight to the daemon, which knows a request someone else already decided (`no longer waiting: already approved`), where the waiting list no longer does. It prints no token (the approve response has none) and no poll secret (the list has none). It does not build its own decision: every channel calls `PairingRuntime.approve` / `deny`.
 
 ### 5.4 Races and reachability
 
@@ -422,10 +428,12 @@ Beacon, Telegram and the CLI can all answer. The first decision wins; every othe
 | `POST /api/pair/requests/{id}/approve` and `/deny` | no | 403 | yes | yes |
 | `GET /api/network` | no | yes (read) | yes | yes |
 | `PUT /api/network` | no | 403 | yes | yes |
-| `POST /api/devices`, MCP-server definition (unchanged, #696) | no | 401 | 401 | yes |
+| `GET /api/devices` | no | **its own row only** | all | all |
+| `POST /api/devices`, MCP-server definition (#696) | no | **403 `operator_only`** (the gate; it was the handler's 401) | 401 (the handler: not root) | yes |
+| everything not listed in this table and not in `web/route_access.py`'s allowlist (cron, provider keys, config, grants, files, MCP, `/v1/*`...) | no | **403 `operator_only`** | yes | yes |
 | `pairing_*` WebSocket frames | n/a | not sent | sent | sent |
 
-The operator test is `identity.is_operator` (#696), read from `request.state.device_identity` on REST and `bridge._ws_identity[ws]` on the socket; both are set from the registry. With auth off (no global token) #692's `scope_for` treats everyone as the operator; pairing is unavailable there anyway (4). The Telegram button, when enabled, is authorised by `chat_allowed` and a private chat, the same test every Telegram command uses.
+**A scoped device is default-deny** (`web/route_access.py`, `docs/contracts/device-scoping.md` section 7): it may use hello, its own device, chat, its own sessions, and approve or deny the tool calls of its own sessions with `once` or `until-restart`; every other route, and every slash command but `/help` and the commands on its own session, is refused. An approved phone is not a smaller owner; it is a chat client. The operator test is `identity.is_operator` (#696), read from `request.state.device_identity` on REST and `bridge._ws_identity[ws]` on the socket; both are set from the registry. With auth off (no global token) #692's `scope_for` treats everyone as the operator; pairing is unavailable there anyway (4). The Telegram button, when enabled, is authorised by `chat_allowed` and a private chat, the same test every Telegram command uses.
 
 **Status codes.** No token, or a dead one: `401`, from the gate. A live scoped device on an operator route: **`403 operator_only`**. That is #692's answer for a device acting on something it may not (it revokes another device with a 403), and it is deliberate: a client that treats 401 as "this token is dead, re-pair" (the Mac app's contract does) would otherwise throw away a healthy device's credential because it pressed the wrong button. `POST /api/devices` keeps its own 401, which #696 left alone ("the wrong credential for this route, not a lesser one").
 
@@ -541,6 +549,7 @@ All JSON bodies are `{"error": "<code>", ...}`.
 | 409 | `tls_unavailable` | `PUT /api/network` to `home_network` with no TLS and no `allow_plaintext_lan` |
 | 410 | `expired` | decision arrived after the TTL |
 | 413 | `too_large` | body over 4 KiB |
+| 503 | `identity_unavailable` | `POST /api/pair/requests` and the daemon has no readable instance key (it is made at boot, never on a request); nothing is created |
 | 422 | `code_mismatch` | optional `match_code` on approve differs |
 | 429 | `rate_limited` | see 4.5 (`reason`, `retry_after_seconds`, `Retry-After`) |
 
@@ -586,7 +595,7 @@ Other tests every PR keeps green: the full suite on the project venv (system `py
 * **A real cross-device mDNS test.** I can register and browse on this Mac. Seeing the service from an iPhone or a second machine on the same Wi-Fi needs one of those present, and Will's phone is the only one that matters for iOS multicast permissions.
 * **macOS prompts for the app-launched daemon.** I have not run the signed app in `home_network`. Advertising over multicast and accepting LAN connections may each raise a macOS prompt (Local Network, and the application firewall if it is on) attributed to a bundled Python rather than to "Prometheus". If so, the app's `Info.plist` needs `NSLocalNetworkUsageDescription` and `NSBonjourServices` for `_prometheus._tcp`, which is #695's file. PR 4 checks this on the signed build before `home_network` is offered in the app.
 * **`zeroconf`: licence and the app bundle.** LGPL-2.1-or-later from memory; to be checked against the package metadata, and whether the app zip includes it is decided with #695 (it only matters in `home_network`).
-* **Telegram callbacks.** No code path in this repo handles a callback query today; the claim that `_authorize_update` covers them is from the library's `effective_chat` behaviour and gets a test in PR 3.
+* **Telegram, live.** The claim that the adapter's group -1 `_authorize_update` covers a callback query is **verified** (PR 3, real `telegram` `Update` and `CallbackQuery` objects: PTB derives `effective_chat` from the callback's message). What is not verified is any of it against Telegram itself: that `editMessageText` without a `reply_markup` removes the inline keyboard, as the Bot API documents, and that a plain-text message with a `*bold*` name stays unformatted on a default install. I have no bot to try it on. First live use should be watched.
 * **Client pinning on iOS WebSockets.** I believe `URLSessionWebSocketTask` honours the session delegate's trust challenge; Beacon iOS should confirm before PR 5.
 * **Live rebind.** Whether `PUT /api/network` can apply without a restart is #693's call.
 * **Pairing push.** Whether the push dispatcher can be restricted to operator devices cleanly (5.1); until it can, no pairing push is sent.

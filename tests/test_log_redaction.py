@@ -70,6 +70,29 @@ def test_redacts_the_exact_incident_line():
     assert "getUpdates" in out and "200 OK" in out
 
 
+@pytest.mark.parametrize("line", [
+    "X-Pairing-Secret: {s}",
+    "x-pairing-secret={s}",
+    "headers={{'x-pairing-secret': '{s}', 'host': 'a'}}",
+    'headers = {{"X-Pairing-Secret": "{s}"}}',
+])
+def test_redacts_the_pairing_poll_secret_beside_its_header_name(line):
+    """The poll secret is the one credential a stranger-facing route accepts; a header dump must not keep it."""
+    import secrets
+
+    poll_secret = secrets.token_urlsafe(32)                   # 43 base64url characters, like the real one
+    out = redact_secrets(line.format(s=poll_secret))
+    assert poll_secret not in out and REDACTED in out
+
+
+def test_the_pairing_header_pattern_is_anchored_on_its_name_not_on_the_shape():
+    """A 43-character base64url run is also a SHA-256 digest or an id; only the labelled one is a secret."""
+    import hashlib
+
+    text = "digest " + hashlib.sha256(b"x").digest().hex()[:43] + " stays"
+    assert redact_secrets(text) == text
+
+
 def test_redacts_the_slashless_bot_prefix_form():
     """The shape that actually appears in captured tool output.
 
@@ -264,9 +287,17 @@ def test_install_without_a_logger_arms_loggers_that_own_handlers():
 
 
 def test_uvicorn_does_not_install_its_own_handlers():
-    """log_config=None keeps the web server on the process's redacted, rotated logging."""
-    for name in ("web/server.py", "web/setup_server.py"):
-        text = (SRC / name).read_text(encoding="utf-8")
-        for m in re.finditer(r"uvicorn\.Config\((.*?)\)\n", text, re.S):
-            assert "log_config=None" in m.group(1), f"{name}: uvicorn.Config without log_config=None"
-        assert "uvicorn.Config(" in text
+    """log_config=None keeps the web server on the process's redacted, rotated logging.
+
+    Both servers (the daemon's and setup mode's) build their uvicorn configuration in ONE place,
+    ``web/serving.py``; every ``uvicorn.Config(`` anywhere in the web package must carry the setting, and
+    the builder must exist (tests/test_proxy_headers.py pins that nothing else builds its own).
+    """
+    built = 0
+    for path in sorted((SRC / "web").glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for m in re.finditer(r"uvicorn\.Config\((.*?)\n    \)\n|uvicorn\.Config\((.*?)\)\n", text, re.S):
+            body = m.group(1) or m.group(2)
+            assert "log_config=None" in body, f"web/{path.name}: uvicorn.Config without log_config=None"
+            built += 1
+    assert built >= 1 and "uvicorn.Config(" in (SRC / "web" / "serving.py").read_text(encoding="utf-8")

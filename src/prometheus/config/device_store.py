@@ -29,6 +29,16 @@ logger = logging.getLogger(__name__)
 LAST_SEEN_THROTTLE_SECONDS = 60.0
 
 
+def registry_platform(value: object) -> str:
+    """The platform the device registry keeps for a device: ``ios``, ``macos`` or ``other``.
+
+    One narrowing for every enrolment path (``POST /api/devices`` and a pairing approval), so a device
+    called "windows" is ``other`` in the registry however it arrived.
+    """
+    platform = str(value or "").strip().lower()
+    return platform if platform in ("ios", "macos") else "other"
+
+
 def token_digest(token: str) -> str:
     """The stored form of a device token: SHA-256 hex."""
     return hashlib.sha256(token.encode()).hexdigest()
@@ -143,6 +153,26 @@ class DeviceStore:
         )
         return {"id": device_id, "name": name, "platform": platform,
                 "token": token, "created_at": now}
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """The registry's SQLite connection, for a store that must commit TOGETHER with a device row.
+
+        Pairing requests (``config/pair_requests.py``) live in this file and approve in one transaction
+        with the device they mint. Not for general use: anything that writes through it owns the
+        transaction and the lazily created table it writes to.
+        """
+        return self._conn
+
+    def mint_in_transaction(self, name: str, platform: str) -> dict:
+        """Enrol an ORDINARY (scoped) device inside a transaction the CALLER owns and commits.
+
+        The same row ``mint`` writes, without the commit, so an approval can record itself and mint its
+        device atomically: a failure after this rolls the device back, and there is never a live token
+        nobody holds. There is no tier parameter, as with ``mint``: an owner device is only ever
+        ``mint_owner`` (same-Mac pairing), never the product of an approval.
+        """
+        return self._new_device(name, platform)
 
     def lookup(self, digest: str) -> DeviceRow | None:
         """The live (non-revoked) device for a token digest, or None."""

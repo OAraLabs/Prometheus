@@ -104,6 +104,7 @@ def test_activity_token_round_trip(tmp_path):
     d = client.post("/api/devices", json={"name": "phone", "platform": "ios"},
                     headers=_auth(GLOBAL)).json()
     client.put(f"/api/devices/{d['id']}/push", json=_reg(), headers=_auth(d["token"]))
+    store.claim_session("s1", d["id"])       # a device registers a live activity for a session it OWNS
     r = client.post(f"/api/devices/{d['id']}/activity",
                     json={"session_id": "s1", "activity_token": "act-1"},
                     headers=_auth(d["token"]))
