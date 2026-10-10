@@ -1126,6 +1126,10 @@ def run_setup_mode(bind: "str | ResolvedBind | None" = None) -> int | str:
         except (local_pairing.PairingFileError, OSError) as exc:
             logger.error("could not prepare the same-Mac pairing secret (%s); "
                          "pair with the six-digit code instead", exc)
+        # pair.fp says what this hello says: the fingerprint of a key that ALREADY exists, or nothing. Setup mode
+        # makes no key (a key is ~/.prometheus state), so a fresh install has none and an earlier pair.fp goes.
+        from prometheus.config.instance_key import instance_fingerprint
+        local_pairing.publish_fingerprint(instance_fingerprint())
 
     logger.warning(
         "No prometheus.yaml found — starting in SETUP MODE (pairing-only "

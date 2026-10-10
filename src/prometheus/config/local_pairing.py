@@ -16,6 +16,16 @@ the daemon's loopback pairing route; the daemon compares against the file on EVE
 source of truth, so ``Prometheus --pair`` can write a fresh one while the daemon runs) and deletes it on
 first successful use.
 
+The fingerprint beside it
+-------------------------
+``<pairing dir>/pair.fp``: the 16 hex characters this daemon's ``GET /api/hello`` advertises as ``fp``, one
+line, with the secret's protections (0700 directory, 0600 file, never through a link). A client reads it and
+compares it with hello's ``fp`` BEFORE it sends the secret, so a secret is not handed to something else on the
+port. The full daemon writes it at boot from the key it has just made or loaded; setup mode writes it only when
+a key already exists (setup mode creates no ``~/.prometheus`` state, and a key is state), and otherwise REMOVES
+an earlier one, so it never vouches for an identity this daemon does not have. It is not proof: ``fp`` is public,
+and another local account that once read it could serve the same value. Key-backed proof is the TLS change's.
+
 Decisions that look odd and are not
 -----------------------------------
 * **It never expires.** A person may open Beacon an hour, or a day, after installing. Permissions are
@@ -54,11 +64,14 @@ logger = logging.getLogger(__name__)
 ENV_KIND = "PROMETHEUS_INSTALL_KIND"
 ENV_DIR = "PROMETHEUS_LOCAL_PAIRING_DIR"
 SECRET_FILE = "pair.secret"
+FINGERPRINT_FILE = "pair.fp"
 
 # What a minted secret looks like, and the widest shape read back. The width is deliberate slack so a
 # longer secret in a future version is still read by an older daemon rather than silently ignored.
 _SHAPE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 _SIX_DIGITS = re.compile(r"^\d{6}$")
+# config/instance_key.py's fingerprint: the first FINGERPRINT_HEX_CHARS (16) of a lowercase SHA-256 hexdigest.
+_FP_SHAPE = re.compile(r"^[0-9a-f]{16}$")
 _MAX_READ = 256
 
 
@@ -88,6 +101,10 @@ def pairing_dir() -> Path:
 
 def secret_path(directory: Path | None = None) -> Path:
     return (directory or pairing_dir()) / SECRET_FILE
+
+
+def fingerprint_path(directory: Path | None = None) -> Path:
+    return (directory or pairing_dir()) / FINGERPRINT_FILE
 
 
 def is_secret_shaped(value: str) -> bool:
@@ -132,26 +149,26 @@ def _ensure_directory(directory: Path) -> None:
 
 # ── reading ──────────────────────────────────────────────────────────────────
 
-def _read_file(path: Path) -> str | None:
-    """Read and validate one secret file. The file must be regular, ours, closed to others, never a link."""
+def _read_file(path: Path, shape: re.Pattern[str] = _SHAPE) -> str | None:
+    """Read and validate one pairing file. The file must be regular, ours, closed to others, never a link."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
         return None
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            logger.warning("pairing secret file %s is a symlink; ignoring it", path)
+            logger.warning("pairing file %s is a symlink; ignoring it", path)
         return None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or (st.st_mode & 0o077):
-            logger.warning("pairing secret file %s has unsafe ownership or permissions; ignoring it", path)
+            logger.warning("pairing file %s has unsafe ownership or permissions; ignoring it", path)
             return None
         raw = os.read(fd, _MAX_READ)
     finally:
         os.close(fd)
     text = raw.decode("utf-8", errors="replace").strip()
-    return text if _SHAPE.fullmatch(text) else None
+    return text if shape.fullmatch(text) else None
 
 
 def read_secret(directory: Path | None = None) -> str | None:
@@ -175,16 +192,17 @@ def check_secret(presented: object, directory: Path | None = None) -> bool:
 
 # ── writing ──────────────────────────────────────────────────────────────────
 
-def _write(directory: Path, secret: str) -> None:
-    """Write ``secret`` via a private temp file and a rename, so a reader sees all of it or none."""
-    temp = directory / f".{SECRET_FILE}.{os.getpid()}.{secrets.token_hex(4)}"
+def _write(directory: Path, text: str, name: str = SECRET_FILE) -> None:
+    """Write ``text`` to ``name`` via a private temp file and a rename, so a reader sees all of it or none. The
+    rename replaces a symlink at ``name`` rather than writing through it."""
+    temp = directory / f".{name}.{os.getpid()}.{secrets.token_hex(4)}"
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
-        os.write(fd, (secret + "\n").encode())
+        os.write(fd, (text + "\n").encode())
     finally:
         os.close(fd)
     try:
-        os.replace(temp, directory / SECRET_FILE)
+        os.replace(temp, directory / name)
     except OSError:
         temp.unlink(missing_ok=True)
         raise
@@ -244,3 +262,46 @@ def consume_if_matches(presented: object, directory: Path | None = None) -> bool
     finally:
         claimed.unlink(missing_ok=True)
     return won
+
+
+# ── the fingerprint beside it ────────────────────────────────────────────────
+
+def read_fingerprint(directory: Path | None = None) -> str | None:
+    """The fingerprint in ``pair.fp``, or None if there is none or it cannot be trusted. Never raises."""
+    directory = directory or pairing_dir()
+    if not _directory_is_safe(directory):
+        return None
+    return _read_file(directory / FINGERPRINT_FILE, _FP_SHAPE)
+
+
+def write_fingerprint(fp: str, directory: Path | None = None) -> bool:
+    """Make ``pair.fp`` say ``fp``: what this daemon's ``GET /api/hello`` advertises. True if a file is in place.
+
+    ``""`` (no instance key) removes an earlier file and creates nothing. Anything that is not a fingerprint is a
+    ValueError; an untrustworthy directory is a PairingFileError, as for the secret.
+    """
+    directory = directory or pairing_dir()
+    if not fp:
+        if _directory_is_safe(directory):
+            (directory / FINGERPRINT_FILE).unlink(missing_ok=True)
+        return False
+    if not _FP_SHAPE.fullmatch(fp):
+        raise ValueError("not an instance fingerprint (16 lowercase hex characters)")
+    _ensure_directory(directory)
+    _write(directory, fp, FINGERPRINT_FILE)
+    return True
+
+
+def publish_fingerprint(fp: str, directory: Path | None = None) -> None:
+    """The boot step, on the app install only: ``pair.fp`` says ``fp``. Never raises; a failure costs only the
+    client's check before it sends the secret, and says so."""
+    if not enabled():
+        return
+    try:
+        written = write_fingerprint(fp, directory)
+    except (PairingFileError, OSError, ValueError) as exc:
+        logger.warning("could not write %s (%s); a client cannot check this daemon's fingerprint before pairing",
+                       fingerprint_path(directory), exc)
+        return
+    if written:
+        logger.info("pairing fingerprint written to %s", fingerprint_path(directory))

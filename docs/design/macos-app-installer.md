@@ -283,6 +283,16 @@ reworded. A `GET /api/hello` is planned by the pairing-approval work and is not 
 **Credentials.** Written against per-device owner credentials, PR #696 (stacked on the pairing PR, not
 merged yet); what is marked *today* below holds without it.
 
+**Before sending a secret: `pair.fp`.** Beside `pair.secret` the daemon keeps `pair.fp`: the 16 lowercase hex
+characters its `GET /api/hello` advertises as `fp`, one line, `0600` in the same `0700` directory, never
+written through a link. Read the file (absent = empty), ask hello, and compare the two as strings, the empty
+string included: equal, send the secret; different, send nothing, because something other than this Mac's
+daemon answers on the port. Both are in place before the daemon serves: the configured daemon writes `pair.fp`
+at every start from the key it has just made or loaded. Setup mode on a fresh install has no instance key (it
+creates no `~/.prometheus` state), so hello says `"fp": ""` and setup mode removes any earlier `pair.fp`;
+setup mode on a Mac that already has a key writes it like the daemon. A match is not proof: `fp` is public, so
+another account on this Mac that once read it could present it too. Key-backed proof comes with TLS.
+
 **Pairing, fresh install** (no `~/.prometheus` config, so the daemon starts in setup mode): read
 `~/Library/Application Support/Prometheus/pairing/pair.secret` and `POST /api/setup/pair` with
 `{"code": "<secret>"}` from the same Mac, over `127.0.0.1` with a loopback `Host` and no `Origin` header.
