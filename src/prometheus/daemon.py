@@ -707,14 +707,20 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # certificate is made from. Made here, never on a request: hello is unauthenticated and
     # a GET must not write to disk. A file that cannot be loaded is reported and left alone;
     # hello then advertises no fingerprint rather than the daemon refusing to start.
+    from prometheus.config import local_pairing
     from prometheus.config.instance_key import ensure_instance_key, fingerprint_of
+    instance_fp = ""
     try:
-        logger.info("Instance key: fp %s", fingerprint_of(ensure_instance_key()))
+        instance_fp = fingerprint_of(ensure_instance_key())
+        logger.info("Instance key: fp %s", instance_fp)
     except Exception:
         logger.warning(
             "Instance key unavailable: GET /api/hello will advertise no fingerprint until "
             "node/instance.key is a loadable P-256 key (it is never regenerated in place)",
             exc_info=True)
+    # Same-Mac pairing (the app install only): pair.fp beside pair.secret says what hello says, so Beacon can
+    # check it is talking to this daemon before it sends the secret. "" removes an earlier one.
+    local_pairing.publish_fingerprint(instance_fp)
 
     # ── Boot-SHA staleness signal ───────────────────────────────────────
     # The repo HEAD at process start is the identity of the code THIS process
