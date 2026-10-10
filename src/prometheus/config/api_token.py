@@ -13,7 +13,8 @@ in the environment) is respected as "auth OFF" — matching the existing
 REST/WS convention that an empty token disables auth.
 
 A token can also come from a FILE: ``PROMETHEUS_API_TOKEN_FILE`` names it,
-which is how a container secret arrives (``/run/secrets/<name>``). A file
+which is how a container secret arrives (``/run/secrets/<name>``). It
+outranks ``PROMETHEUS_API_TOKEN`` (see :func:`resolve_api_token`). A file
 that gives no token fails closed (:class:`ApiTokenFileError`): the operator
 named that secret, so neither the env file's token nor a freshly minted one
 may stand in for it.
@@ -96,21 +97,27 @@ def resolve_api_token(config: dict[str, Any] | None = None) -> tuple[str, str]:
     """Resolve the effective API token.
 
     Returns ``(token, source)`` where source is one of ``"config"``,
-    ``"env"``, ``"file"``, ``"env-file"``, or ``""`` when no token is set
-    anywhere. Mirrors the precedence the web server/WS bridge use:
-    ``web.api_token`` (config) first, then the environment, then the file
-    ``PROMETHEUS_API_TOKEN_FILE`` names. Raises :class:`ApiTokenFileError`
-    when that variable is set and its file gives no token.
+    ``"file"``, ``"env"``, ``"env-file"``, or ``""`` when no token is set
+    anywhere. ``web.api_token`` (config) first, as the web server/WS bridge
+    read it; then the file ``PROMETHEUS_API_TOKEN_FILE`` names; then the
+    environment; then the env file. Raises :class:`ApiTokenFileError` when
+    that variable is set and its file gives no token.
+
+    The file outranks the variable because by the time a daemon resolves the
+    token, ``run_daemon`` has loaded the env file into the environment: the
+    variable may be a token minted on an earlier start, and a secret the
+    operator named must not lose to it. :func:`ensure_api_token` then exports
+    the winner into the variable the web plane reads.
     """
     cfg_token = ((config or {}).get("web") or {}).get("api_token") or ""
     if cfg_token:
         return str(cfg_token), "config"
-    env_token = os.environ.get(TOKEN_ENV_VAR, "")
-    if env_token:
-        return env_token, "env"
     secret_token = token_from_file()
     if secret_token:
         return secret_token, "file"
+    env_token = os.environ.get(TOKEN_ENV_VAR, "")
+    if env_token:
+        return env_token, "env"
     file_token = parse_env_file().get(TOKEN_ENV_VAR, "")
     if file_token:
         return file_token, "env-file"

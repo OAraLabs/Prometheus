@@ -76,9 +76,9 @@ sudo install -d -o 10001 -g 10001 -m 700 \
 
 Every API call except pairing, `/api/hello` and `/health` needs `Authorization: Bearer <token>`. The token is never in the image; it comes from one of these, in this order (a `web.api_token` in `prometheus.yaml` would win over all three, so leave that unset):
 
-1. **`PROMETHEUS_API_TOKEN`** in the container's environment (`-e` or compose `environment:`). Simple, but `docker inspect` shows it to anyone who can run that.
-2. **`PROMETHEUS_API_TOKEN_FILE`**: the path of a file holding the token, which is how a Docker or compose secret arrives (`/run/secrets/<name>`). The file must be readable by uid 10001 and must not be a symlink. If the variable is set and the file is missing or empty, the daemon **refuses to start** and says why in `docker logs`; it never falls back to another token.
-3. **Minted on first start** when neither is set, saved to `~/.config/prometheus/env` on the home volume, and printed once in the log. `oara token show` prints it again.
+1. **`PROMETHEUS_API_TOKEN_FILE`**: the path of a file holding the token, which is how a Docker or compose secret arrives (`/run/secrets/<name>`). The file must be readable by uid 10001 and must not be a symlink. If the variable is set and the file is missing or empty, the daemon **refuses to start** and says why in `docker logs`; it never falls back to another token.
+2. **`PROMETHEUS_API_TOKEN`** in the container's environment (`-e` or compose `environment:`). Simple, but `docker inspect` shows it to anyone who can run that.
+3. **Minted on first start** when neither is set, saved to `~/.config/prometheus/env` on the home volume, and printed once in the log. `oara token show` prints it again. A secret or a variable added later replaces it at the next start.
 
 For a secret in compose, uncomment the three marked blocks in `compose.yaml`, then:
 

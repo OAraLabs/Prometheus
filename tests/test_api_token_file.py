@@ -7,7 +7,8 @@ way ``PROMETHEUS_TELEGRAM_TOKEN_FILE`` already works for the Telegram token.
 
 What is pinned here:
 
-* precedence: ``web.api_token`` > ``PROMETHEUS_API_TOKEN`` > ``PROMETHEUS_API_TOKEN_FILE`` > the env file;
+* precedence: ``web.api_token`` > ``PROMETHEUS_API_TOKEN_FILE`` > ``PROMETHEUS_API_TOKEN`` > the env file
+  (the file outranks the variable because the daemon loads the env file into the environment at boot);
 * a file that gives no token (missing, empty, a symlink) FAILS CLOSED. It never falls back to the env
   file's token and never mints a fresh one: an operator who named a secret meant that secret, and a
   daemon that quietly served under a different token would leave every client they configured locked
@@ -65,9 +66,37 @@ def test_a_token_file_supplies_the_token(secret_file):
     assert resolve_api_token(None) == (FILE_TOKEN, "file")
 
 
-def test_the_environment_wins_over_the_file(secret_file, monkeypatch):
+def test_the_file_wins_over_the_environment(secret_file, monkeypatch):
+    # Not the other way round: by the time the token is resolved, run_daemon has already loaded the env file
+    # into the environment (see the next test), so a variable may be an earlier start's minted token rather
+    # than anything the operator set. Naming a secret file is the most specific thing an operator can say.
     monkeypatch.setenv(TOKEN_ENV_VAR, "env-token")
-    assert resolve_api_token(None) == ("env-token", "env")
+    assert resolve_api_token(None) == (FILE_TOKEN, "file")
+
+
+def test_a_secret_file_beats_the_minted_token_the_daemon_loads_at_boot(secret_file, monkeypatch):
+    """What the container smoke test caught (#714, S7, both architectures).
+
+    run_daemon calls load_env_file() first, which turns the env file's PROMETHEUS_API_TOKEN, minted on an
+    earlier start, into a process variable. That variable outranked the secret, so the daemon kept serving
+    the old token and refused the one the operator had just mounted.
+    """
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from prometheus.config.env_file import load_env_file
+    from prometheus.web.server import create_app
+
+    get_env_file_path().write_text(f"{TOKEN_ENV_VAR}=minted-on-an-earlier-start\n", encoding="utf-8")
+    load_env_file()
+    assert ensure_api_token({}) == (FILE_TOKEN, False)
+    client = TestClient(create_app({}, session_mgr=None, model_router=None))
+
+    def status(token: str) -> int:
+        return client.get("/api/status", headers={"Authorization": f"Bearer {token}"}).status_code
+
+    assert status(FILE_TOKEN) == 200
+    assert status("minted-on-an-earlier-start") == 401
 
 
 def test_the_config_wins_over_the_file(secret_file):
