@@ -93,3 +93,22 @@ def serve_config(app: Any, host: str, port: int, config: Mapping[str, Any] | Non
         guard_if_loopback(app, host), host=host, port=port, log_level="info", log_config=None,
         **uvicorn_proxy_options(config),
     )
+
+
+def bound_port(server: Any) -> int | None:
+    """The TCP port a RUNNING server is bound to, read from its own socket.
+
+    *server* is a uvicorn ``Server`` (once started, its asyncio servers are in ``.servers``) or anything with
+    ``.sockets`` (an asyncio server, a websockets server). ``None`` when it listens on nothing: not started yet,
+    closed, or an app served without one (Starlette's test client). The port a config names is what was ASKED
+    for; this is what was bound, which differs when the config was edited since or asked for ``0``.
+    """
+    if server is None:
+        return None
+    for listener in getattr(server, "servers", None) or [server]:
+        for sock in getattr(listener, "sockets", None) or ():
+            try:
+                return int(sock.getsockname()[1])
+            except (OSError, IndexError, TypeError, ValueError):
+                continue
+    return None
