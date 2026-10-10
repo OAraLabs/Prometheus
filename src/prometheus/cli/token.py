@@ -12,9 +12,12 @@ import argparse
 
 from prometheus.config.api_token import (
     TOKEN_ENV_VAR,
+    TOKEN_FILE_ENV_VAR,
+    ApiTokenFileError,
     TokenRotationBlocked,
     resolve_api_token,
     rotate_api_token,
+    token_file_path,
 )
 from prometheus.config.env_file import get_env_file_path
 
@@ -27,6 +30,8 @@ def _location_of(source: str) -> str:
         return f"web.api_token in {resolve_config_path()}"
     if source == "env":
         return f"{TOKEN_ENV_VAR} in the process environment"
+    if source == "file":
+        return f"{token_file_path()}, named by {TOKEN_FILE_ENV_VAR}"
     return f"env file: {get_env_file_path()}"
 
 
@@ -34,7 +39,11 @@ def run_token_command(args: argparse.Namespace, config: dict | None = None) -> i
     """Execute ``oara token <show|rotate>``. Returns an exit code."""
     action = getattr(args, "token_action", None)
     if action == "show":
-        token, source = resolve_api_token(config)
+        try:
+            token, source = resolve_api_token(config)
+        except ApiTokenFileError as exc:
+            print(f"No usable web API token: {exc}")
+            return 1
         if not token:
             print("No web API token is set — the web API is OPEN (no auth).")
             print("Set one with: oara token rotate")
@@ -49,6 +58,9 @@ def run_token_command(args: argparse.Namespace, config: dict | None = None) -> i
     if action == "rotate":
         try:
             token = rotate_api_token(config)
+        except ApiTokenFileError as exc:
+            print(f"REFUSING to rotate — {exc}")
+            return 1
         except TokenRotationBlocked as exc:
             # Loud refusal beats a silent no-op: rotating the env file here
             # would report success and leave the live token valid (#320).

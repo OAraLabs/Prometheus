@@ -11,6 +11,12 @@ Deliberately-open remains possible: an explicit empty
 ``PROMETHEUS_API_TOKEN=`` line in the env file (or an empty value already
 in the environment) is respected as "auth OFF" — matching the existing
 REST/WS convention that an empty token disables auth.
+
+A token can also come from a FILE: ``PROMETHEUS_API_TOKEN_FILE`` names it,
+which is how a container secret arrives (``/run/secrets/<name>``). A file
+that gives no token fails closed (:class:`ApiTokenFileError`): the operator
+named that secret, so neither the env file's token nor a freshly minted one
+may stand in for it.
 """
 
 from __future__ import annotations
@@ -31,6 +37,20 @@ from prometheus.config.env_file import (
 logger = logging.getLogger(__name__)
 
 TOKEN_ENV_VAR = "PROMETHEUS_API_TOKEN"
+#: Names a file holding the token: a Docker or compose secret, read with the same
+#: rules as every other ``*_FILE`` secret (config/env_override.py::read_secret_file).
+TOKEN_FILE_ENV_VAR = "PROMETHEUS_API_TOKEN_FILE"
+
+
+class ApiTokenFileError(RuntimeError):
+    """``PROMETHEUS_API_TOKEN_FILE`` names a file that gives no token.
+
+    Raised instead of falling through to the env file or a mint. A container
+    started with a secret its operator named, and then serving under some other
+    token, would lock out every client they configured while printing a token
+    they never asked for. ``oara daemon`` refuses to start on it; a running
+    daemon's token bootstrap raises it and the web plane refuses to serve.
+    """
 
 # Where a new user gets the Beacon desktop client (Onboarding Phase 3): the
 # public product page, not an infra host, so it is safe to print anywhere.
@@ -45,13 +65,42 @@ def mint_api_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def token_file_path() -> str:
+    """The file ``PROMETHEUS_API_TOKEN_FILE`` names, or ``""`` when it is unset."""
+    return os.environ.get(TOKEN_FILE_ENV_VAR, "")
+
+
+def token_from_file() -> str:
+    """The token in the file ``PROMETHEUS_API_TOKEN_FILE`` names; ``""`` when the variable is unset.
+
+    Raises :class:`ApiTokenFileError` when the variable is set and the file is
+    missing, empty, a symlink or over the size limit. Same reader as every
+    other ``*_FILE`` secret, so the rules cannot drift apart.
+    """
+    path = token_file_path()
+    if not path:
+        return ""
+    from prometheus.config.env_override import read_secret_file
+
+    token = read_secret_file(path, "API token")
+    if not token:
+        raise ApiTokenFileError(
+            f"{TOKEN_FILE_ENV_VAR}={path} gives no token: the file is missing, "
+            "empty, a symlink or over 16 KiB. Refusing to fall back to any other "
+            f"token. Put the token in that file, or unset {TOKEN_FILE_ENV_VAR}."
+        )
+    return token
+
+
 def resolve_api_token(config: dict[str, Any] | None = None) -> tuple[str, str]:
     """Resolve the effective API token.
 
     Returns ``(token, source)`` where source is one of ``"config"``,
-    ``"env"``, ``"env-file"``, or ``""`` when no token is set anywhere.
-    Mirrors the precedence the web server/WS bridge use:
-    ``web.api_token`` (config) first, then the environment.
+    ``"env"``, ``"file"``, ``"env-file"``, or ``""`` when no token is set
+    anywhere. Mirrors the precedence the web server/WS bridge use:
+    ``web.api_token`` (config) first, then the environment, then the file
+    ``PROMETHEUS_API_TOKEN_FILE`` names. Raises :class:`ApiTokenFileError`
+    when that variable is set and its file gives no token.
     """
     cfg_token = ((config or {}).get("web") or {}).get("api_token") or ""
     if cfg_token:
@@ -59,6 +108,9 @@ def resolve_api_token(config: dict[str, Any] | None = None) -> tuple[str, str]:
     env_token = os.environ.get(TOKEN_ENV_VAR, "")
     if env_token:
         return env_token, "env"
+    secret_token = token_from_file()
+    if secret_token:
+        return secret_token, "file"
     file_token = parse_env_file().get(TOKEN_ENV_VAR, "")
     if file_token:
         return file_token, "env-file"
@@ -108,7 +160,12 @@ def ensure_api_token(config: dict[str, Any] | None = None) -> tuple[str, bool]:
     if token:
         # Make sure the running process env carries it (web launcher +
         # WS bridge read the environment when config.web.api_token is unset).
-        os.environ.setdefault(TOKEN_ENV_VAR, token)
+        # Not setdefault: an EMPTY PROMETHEUS_API_TOKEN= beside a token file
+        # (or an env-file token) would survive it, and the web plane, which
+        # reads only the variable, would serve open while this function and
+        # the startup log both said a token was in force.
+        if not os.environ.get(TOKEN_ENV_VAR):
+            os.environ[TOKEN_ENV_VAR] = token
         return token, False
     if _deliberately_open(config):
         return "", False
@@ -247,6 +304,17 @@ class TokenRotationBlocked(RuntimeError):
     def __init__(self, source: str, config_path: str | None = None) -> None:
         self.source = source
         self.config_path = config_path or "prometheus.yaml"
+        if source == "file":
+            # A secret the daemon reads but does not own: the new token belongs in that file (or the secret
+            # store behind it), and an env-file line would sit under it unread.
+            super().__init__(
+                f"the active web API token is read from {token_file_path()} "
+                f"({TOKEN_FILE_ENV_VAR}), which the daemon reads BEFORE the env "
+                f"file — writing a new token to {get_env_file_path()} would leave "
+                f"the current one live. Put the new token in that file (or the "
+                f"secret store it comes from) and restart the daemon."
+            )
+            return
         super().__init__(
             f"the active web API token is pinned in {self.config_path} "
             f"(web.api_token), which the daemon reads BEFORE the env file — "
@@ -268,6 +336,8 @@ def rotate_api_token(config: dict[str, Any] | None = None) -> str:
     The returned token is always one the daemon will accept after a restart.
     """
     _token, source = resolve_api_token(config)
+    if source == "file":
+        raise TokenRotationBlocked(source)
     if source == "config":
         from prometheus.config.defaults import resolve_config_path
 

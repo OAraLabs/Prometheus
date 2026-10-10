@@ -92,8 +92,27 @@ def test_a_configured_daemon_is_healthy_when_health_says_ok(tmp_path, monkeypatc
     assert "ok" in capsys.readouterr().out
 
 
+#: What setup mode answers on every path it does not serve, /health included (its catch-all).
+SETUP_CATCH_ALL = (403, {"error": "setup_mode", "detail": "the daemon is in setup mode"})
+
+
+def test_setup_mode_answers_the_way_the_probe_expects():
+    """The fakes below copy these two answers; this pins them against the real setup-mode app."""
+    from fastapi.testclient import TestClient
+
+    from prometheus.web.setup_server import PairingState, create_setup_app
+
+    client = TestClient(create_setup_app(PairingState(code="123456"), api_port=8123, ws_port=8124))
+    health = client.get("/health")
+    assert health.status_code == SETUP_CATCH_ALL[0]
+    assert health.json()["error"] == SETUP_CATCH_ALL[1]["error"]
+    status = client.get("/api/setup/status")
+    assert status.status_code == 200 and status.json()["setup_mode"] is True
+
+
 def test_setup_mode_is_healthy(tmp_path, monkeypatch):
-    with _Server({"/api/setup/status": (200, {"setup_mode": True, "configured": False})}) as srv:
+    with _Server({"/health": SETUP_CATCH_ALL,
+                  "/api/setup/status": (200, {"setup_mode": True, "configured": False})}) as srv:
         monkeypatch.setenv("PROMETHEUS_WEB_API_PORT", str(srv.port))
         assert healthcheck.main([]) == 0
     assert "/api/setup/status" in srv.seen
@@ -102,7 +121,8 @@ def test_setup_mode_is_healthy(tmp_path, monkeypatch):
 def test_setup_completing_in_place_is_still_healthy(tmp_path, monkeypatch):
     # POST /api/setup/complete writes the config, then the same process starts the real daemon on the
     # config's port. Between those two moments the config exists and setup mode is still answering.
-    with _Server({"/api/setup/status": (200, {"setup_mode": True, "configured": True})}) as srv:
+    with _Server({"/health": SETUP_CATCH_ALL,
+                  "/api/setup/status": (200, {"setup_mode": True, "configured": True})}) as srv:
         _write_config(tmp_path, monkeypatch, {"enabled": True, "api_port": srv.port})
         assert healthcheck.main([]) == 0
 
@@ -112,6 +132,7 @@ def test_setup_completing_in_place_is_still_healthy(tmp_path, monkeypatch):
     {"/health": (500, {"detail": "boom"})},
     {"/health": (200, b"not json")},
     {"/api/setup/status": (200, {"setup_mode": False})},
+    {"/health": SETUP_CATCH_ALL, "/api/setup/status": (500, {"detail": "boom"})},
     {},
 ])
 def test_anything_else_is_unhealthy(routes, tmp_path, monkeypatch, capsys):
@@ -183,3 +204,23 @@ def test_it_sends_no_credentials(tmp_path, monkeypatch):
         httpd.shutdown()
         httpd.server_close()
     assert seen_headers and not any("Authorization" in h for h in seen_headers)
+
+
+def test_it_never_goes_through_a_proxy(tmp_path, monkeypatch):
+    # A sandbox that routes egress through a proxy sets HTTP_PROXY; the probe is loopback and must not follow it.
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{_free_port()}")
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{_free_port()}")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    # In a container the variables are set before the probe's process starts, so the module must be loaded
+    # under them: an opener built at import time captures whatever proxies the environment names then.
+    import importlib
+
+    probe = importlib.reload(healthcheck)
+    try:
+        with _Server({"/health": (200, {"status": "ok"})}) as srv:
+            _write_config(tmp_path, monkeypatch, {"enabled": True, "api_port": srv.port})
+            assert probe.main([]) == 0
+    finally:
+        monkeypatch.undo()
+        importlib.reload(healthcheck)

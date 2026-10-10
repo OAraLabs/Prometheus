@@ -166,8 +166,9 @@ def test_no_secret_is_baked_into_the_image(dockerfile):
             for m in re.finditer(r"(\w+)(?:=|\s|$)", rest):
                 name = m.group(1)
                 assert not is_secret_name(name), f"{word} {name}: a secret-shaped name in the image"
-    text = DOCKERFILE.read_text(encoding="utf-8")
-    assert "PROMETHEUS_API_TOKEN" not in text.replace("PROMETHEUS_API_TOKEN_FILE", "")
+    # Instructions only: the header comment explains where the token comes from instead.
+    instructions = " ".join(f"{word} {rest}" for word, rest in dockerfile)
+    assert "PROMETHEUS_API_TOKEN" not in instructions
     for word, rest in dockerfile:
         if word in ("COPY", "ADD"):
             assert not re.search(r"(^|[\s/])\.?env\b|prometheus\.yaml\s", rest), f"{word} {rest}"
@@ -330,10 +331,40 @@ def test_the_image_is_published_by_a_job_that_runs_no_repository_code():
     assert "continue-on-error" not in body
 
 
-def test_a_pre_release_never_moves_latest():
-    body = _text(_jobs(RELEASE)["publish-image"])
-    assert "latest" in body
-    assert re.search(r"(a|b|rc|dev)", body), "the tag step must tell a PEP 440 pre-release from a release"
+def _tags_script() -> str:
+    steps = [s for s in _jobs(RELEASE)["image"]["steps"] if "tags.txt" in s.get("run", "")]
+    assert len(steps) == 1, "exactly one step decides the tags (publish-image only reads them)"
+    script = steps[0]["run"]
+    lines = script.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.strip().startswith("if [["))
+    end = next(i for i, ln in enumerate(lines) if ln.strip() == "fi")
+    return "\n".join(lines[start:end + 1])
+
+
+@pytest.mark.parametrize(("version", "tags"), [
+    ("0.9.7", ["0.9.7", "0.9", "latest"]),
+    ("1.2.0", ["1.2.0", "1.2", "latest"]),
+    ("1.0.0rc1", ["1.0.0rc1"]),
+    ("1.0.0a2", ["1.0.0a2"]),
+    ("1.0.0b3", ["1.0.0b3"]),
+    ("1.0.0.dev4", ["1.0.0.dev4"]),
+])
+def test_a_pre_release_never_moves_latest(version, tags):
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash")
+    out = subprocess.run([bash, "-c", f'version="{version}"\n{_tags_script()}\necho "$tags"'],
+                         capture_output=True, text=True, check=True).stdout.split()
+    assert out == tags
+
+
+def test_the_publish_job_pushes_exactly_the_tags_the_image_job_decided():
+    scripts = " ".join(s.get("run", "") for s in _jobs(RELEASE)["publish-image"]["steps"])
+    assert "tags.txt" in scripts
+    assert not re.search(r":latest\b|\blatest\b", scripts), "the publish job must not add tags of its own"
 
 
 # ── the smoke test and the docs ──────────────────────────────────────────────
