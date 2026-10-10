@@ -115,14 +115,17 @@ async def test_with_no_queue_a_scoped_socket_is_sent_none(w):
 
 
 @pytest.mark.asyncio
-async def test_a_desktop_prompt_goes_to_a_marked_device_a_person_and_to_no_other(w):
+async def test_a_desktop_prompt_goes_to_its_sessions_owner_alone_marked_or_not(w):
+    """It names its session, so the generic session filter (#692) has always done this; the mark decides who may
+    ANSWER a desktop prompt (REST), not who is told."""
     action = raise_request(w, "eeee0001", session=w.sid_b, task="t1")
     a, b = connect(w, "a"), connect(w, "b")
     await announce(w, action)
     assert a.ids("approval_pending") == [] and b.ids("approval_pending") == ["eeee0001"], "b owns the session"
     assert w.devices.set_computer(w.a["id"], True, by="test")
     await announce(w, action)
-    assert a.ids("approval_pending") == ["eeee0001"], "a is marked: a person answers a desktop prompt"
+    assert a.ids("approval_pending") == [], "a mark does not widen who is told"
+    assert b.ids("approval_pending") == ["eeee0001", "eeee0001"]
 
 
 @pytest.mark.asyncio

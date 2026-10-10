@@ -133,6 +133,10 @@ def _loopback_process_request(connection: Any, request: Any) -> Any:
     return http.HTTPStatus.FORBIDDEN, [("Content-Type", "text/plain")], message.encode()
 
 
+#: The frames that carry a tool call awaiting approval (``serialize_pending`` / its resolution).
+_APPROVAL_FRAMES = frozenset({"approval_pending", "approval_resolved"})
+
+
 class WebSocketBridge:
     """Bridges SignalBus events to WebSocket clients."""
 
@@ -1902,6 +1906,27 @@ class WebSocketBridge:
         "provider_degraded", "error",
     })
 
+    def _approval_frame_visible(self, ws: Any, event: dict[str, Any]) -> bool:
+        """May this socket be told about this approval request?
+
+        An ordinary approval frame names no session (its shape is Beacon's and does not change), so
+        ``frame_visible`` calls it daemon-level. It is not: it carries a tool call's name, description, extents and
+        arguments. The operator's socket gets every one; a scoped device's socket gets the ones raised in a
+        session it owns. A request the queue does not know, or no queue at all, is withheld from a scoped socket:
+        unknown is not daemon-level. (A desktop prompt does name its session, so ``frame_visible`` has always
+        sent it to that session's owner alone; a mark changes who may ANSWER one, not who is told.)
+        """
+        scope = self._scope(ws)
+        if scope.unrestricted:
+            return True
+        queue = self.approval_queue
+        request_id = (event.get("payload") or {}).get("request_id")
+        origin = queue.origin_of(request_id) if queue is not None and isinstance(request_id, str) else None
+        if origin is None:
+            return False
+        session_id = origin[0]
+        return bool(session_id and self._access.owns(scope, session_id))
+
     def _wants(self, ws: Any, event: dict[str, Any]) -> bool:
         """Does this socket's subscribe filter admit this event?
 
@@ -1914,6 +1939,8 @@ class WebSocketBridge:
         # subscribed to. The operator's socket passes unchanged.
         try:
             if not self._access.frame_visible(self._scope(ws), event):
+                return False
+            if event.get("type") in _APPROVAL_FRAMES and not self._approval_frame_visible(ws, event):
                 return False
         except Exception:
             # Fail CLOSED, and never raise: this runs inside broadcast(), and an exception
