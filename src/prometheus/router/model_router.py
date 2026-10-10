@@ -197,6 +197,11 @@ class RouteDecision:
     # None for the primary and for cloud overrides. Downstream reads it for the
     # context window (that backend's REPORTED n_ctx) and the identity line.
     backend: str | None = None
+    # The picker key this decision serves (`qwen`, `qwen:qwen3.8-flash`,
+    # `4090`, `local` for the primary), when there is one: what a worker this
+    # turn spawns inherits (tasks/worker_route.py). None for a route the
+    # catalog does not name (a task rule, smart routing, escalation).
+    key: str | None = None
 
 
 @dataclass
@@ -1139,6 +1144,7 @@ class ModelRouter:
             model_name=entry.provider_config.get("model", "unknown"),
             provider_name=entry.provider_config.get("provider", "unknown"),
             backend=entry.provider_config.get("backend"),
+            key=entry.key,
         )
         if not self.config.overrides_sticky:
             # One-shot mode — drop the override so the next message falls
@@ -1316,6 +1322,7 @@ class ModelRouter:
             # "(provider: llama_cpp)" to "(provider: unknown)" on every
             # primary turn — the one route that never had a name to give.
             provider_name=self.primary_provider_name,
+            key="local",
         )
 
     def get_fallback(self, failed_provider_name: str = "") -> RouteDecision | None:

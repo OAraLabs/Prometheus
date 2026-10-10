@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 114 paths
+## Daemon app — 115 paths
 
 | Path | Methods |
 |---|---|
@@ -124,6 +124,7 @@ one is the explanation.
 | `/api/wiki/pages` | GET |
 | `/api/wiki/search` | GET |
 | `/api/wiki/stats` | GET |
+| `/api/workers/model` | GET, PUT |
 | `/health` | GET |
 | `/v1/chat/completions` | POST |
 | `/v1/models` | GET |
