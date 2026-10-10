@@ -209,6 +209,28 @@ def test_requirements_must_carry_hashes(app):
     app.require_hashes(UV_EXPORT)
 
 
+def test_every_uv_pip_install_ignores_the_repos_own_uv_settings(app):
+    """``uv pip`` reads ``[tool.uv]`` from the pyproject.toml in the working directory, which for a build is the
+    repo. Since #702 that holds ``override-dependencies = ["strawberry-graphql>=0.327.2"]``, and
+    ``--require-hashes`` refuses any requirement that is not pinned with ``==``: the first install died with
+    "all requirements must have their versions pinned" and no app was built. The exported file already says
+    exactly what to install, so no install may take its settings from the repo."""
+    import ast
+
+    tree = ast.parse(BUILD_APP.read_text(encoding="utf-8"))
+    argvs = [
+        [e.value for e in node.elts if isinstance(e, ast.Constant)]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.List) and len(node.elts) > 2
+        and [getattr(e, "value", None) for e in node.elts[:2]] == ["uv", "pip"]
+    ]
+    assert argvs, "the build no longer shells out to `uv pip`; delete this test with it"
+    missing = [" ".join(map(str, a[:4])) for a in argvs if "--no-config" not in a]
+    assert not missing, f"uv pip without --no-config: {missing}"
+    hashed = [a for a in argvs if "--require-hashes" in a]
+    assert hashed and all("--no-deps" in a and "--only-binary" in a for a in hashed)
+
+
 # ── a dirty tree does not ship ───────────────────────────────────────────────
 
 def _git(root: Path, *args: str) -> None:

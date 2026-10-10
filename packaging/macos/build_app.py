@@ -538,9 +538,11 @@ def assemble(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover - 
     require_hashes(requirements)
     req_file = work / "requirements.txt"
     req_file.write_text(requirements, encoding="utf-8")
-    _run(["uv", "pip", "install", "--python", py, "--target", site, "--no-deps", "--require-hashes",
+    # --no-config: `uv pip` reads [tool.uv] from the repo's pyproject.toml (the working directory), whose
+    # override-dependencies --require-hashes refuses as unpinned. The exported file is the whole install.
+    _run(["uv", "pip", "install", "--no-config", "--python", py, "--target", site, "--no-deps", "--require-hashes",
           "--only-binary", ":all:", "-r", req_file])
-    _run(["uv", "pip", "install", "--python", py, "--target", site, "--no-deps", wheels[0]])
+    _run(["uv", "pip", "install", "--no-config", "--python", py, "--target", site, "--no-deps", wheels[0]])
     strip_build_traces(site)
 
     prune_python(py_root)
