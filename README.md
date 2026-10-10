@@ -1,9 +1,13 @@
 # Prometheus
 
+[![GitHub stars](https://img.shields.io/github/stars/OAraLabs/Prometheus?style=social)](https://github.com/OAraLabs/Prometheus/stargazers)
+
 **A fire you own doesn't go out.**\
 Not a local model. A local agent.
 
 Prometheus is an AI agent daemon: always on, on hardware you own. It remembers, keeps its own schedule, reaches you on Telegram, Slack, Discord and Beacon, and makes open models reliable at using tools.
+
+> If Prometheus is useful to you, or any of this code helps your own project, a ⭐ on the repo helps other people find it.
 
 ![Beacon's Mission home — the Armilla telemetry sphere beside Mission Control: agent state, scheduled jobs, local backends, and tool-call telemetry](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/panel-mission-home.png)
 
@@ -36,8 +40,8 @@ That is the environment the CI test job runs in, so a local run exercises the sa
 
 **What it gives you:**
 
-- **Reliable tool calls on open models** — a Model Adapter Layer validates every call, auto-repairs common errors (fuzzy names, JSON inside markdown fences, type coercion), and enforces output schemas at the token level via GBNF for llama.cpp.
 - **Always-on gateways** — Telegram, Slack, and Discord at parity (one shared command layer), with mid-turn `/steer` and `/queue` for durability while the agent is mid-task.
+- **Reliable tool calls on open models** — a Model Adapter Layer validates every call, auto-repairs common errors (fuzzy names, JSON inside markdown fences, type coercion), and enforces output schemas at the token level via GBNF for llama.cpp. How much of it runs is a per-model tier; `adapter.model_tiers` pins one by name.
 - **Visible memory that rides every prompt** — `MEMORY.md` and `USER.md` you can read, structured facts mined from conversations every 30 minutes, and passive recall that FTS-matches each message against the memory store and injects what's relevant.
 - **Lossless context** — DAG-based compression with full-text search so long sessions don't drop facts; originals are always recoverable.
 - **Sandboxed coding runs** — point it at a repo and an acceptance command; it iterates to green in a clone and hands you a reviewable branch. Never merges, never pushes.
@@ -99,11 +103,11 @@ The result: open models that reliably call tools, chain multi-step tasks, and ru
 
 Prometheus isn't a wrapper around `ollama.chat()`. It's a complete agent operating system with novel systems that agent harnesses don't have:
 
-**The Model Adapter Layer is what makes local models work in a tool loop.** Four cascading extraction strategies handle whatever mess the model produces. A retry engine feeds specific schema errors back to the model. Grammar-constrained decoding at the llama.cpp level makes invalid JSON structurally impossible, with Prometheus supplying the grammar on paths the server doesn't cover. Telemetry tracks success rates per model per tool so you know exactly where your model struggles. It is tier-selected: `strictness: NONE` switches it off for cloud APIs that already emit clean tool calls, so the repair path is exercised exactly where it is needed.
-
 **Lossless Context Management means your agent never forgets.** Every message is persisted to SQLite. When context fills up, a two-tier compression system kicks in: Tier 1 strips `tool_result` content from old messages (free — the output was already acted on). Tier 2 uses LLM-powered batch summarization when pruning alone isn't enough. But the originals are always recoverable — old messages get summarized into a DAG structure, and the agent can expand any summary back to full detail on demand. Full-text search across your entire conversation history. And memory isn't just storage: extracted facts ride back into each turn via passive recall, matched against what you just said.
 
 **SENTINEL transforms the agent from reactive to proactive.** Most agents sit idle until you talk to them. Prometheus has a background intelligence layer that watches tool performance patterns, consolidates memory, lints its own knowledge base, and discovers cross-entity insights — all while you're away. Three of four phases use zero LLM calls. The fourth is budget-capped at 2,000 tokens. It nudges you via Telegram when it finds something interesting but never acts without permission.
+
+**The Model Adapter Layer is what makes local models work in a tool loop.** Four cascading extraction strategies handle whatever mess the model produces. A retry engine feeds specific schema errors back to the model. Grammar-constrained decoding at the llama.cpp level makes invalid JSON structurally impossible, with Prometheus supplying the grammar on paths the server doesn't cover. Telemetry tracks success rates per model per tool so you know exactly where your model struggles. It is tier-selected: `strictness: NONE` switches it off for cloud APIs that already emit clean tool calls, so the repair path is exercised exactly where it is needed.
 
 **A compounding knowledge base inspired by Karpathy's LLM Wiki concept.** Every 30 minutes, a Memory Extractor pulls structured facts from your conversations, and the wiki recompiles the affected entity pages automatically — extraction and compilation are one loop, not a manual step. The wiki then maintains itself: SENTINEL's zero-LLM linter patrols for orphans, broken links, and stale pages; dedup gates keep repeated insights from piling up; and passive recall feeds the accumulated facts back into every turn. Point Obsidian at the markdown files and the graph view lights up.
 
@@ -640,7 +644,7 @@ prometheus/
 - 50+ builtin tools registered by default (54 on the reference install, two of them MCP) + config-gated LSP and vision/STT tools
 - 103-file skill library + self-authored skills
 - 10+ model providers (local and cloud)
-- 127 REST routes (120 on the main API, 2 on the OpenAI-compatible `/v1` surface, 5 on the setup-mode pairing server) + an authenticated WebSocket event bridge
+- A bearer-token REST + WebSocket control plane — the full path list is generated from the live FastAPI app and pinned by a test, so it cannot drift silently: [`docs/reference/routes.md`](docs/reference/routes.md)
 - A native desktop cockpit with 18 views, and an iOS client on the same control plane
 
 ## Roadmap
@@ -677,6 +681,8 @@ prometheus/
 - [x] PyPI release — [`oara-prometheus`](https://pypi.org/project/oara-prometheus/), from 0.9.0
 - [ ] Published Beacon builds — *every tag drafts a dmg, an AppImage and a deb; they are published when Beacon leaves beta*
 - [ ] Wake word for hands-free (an in-renderer model under the app's CSP — a decision, not a build)
+
+If you build something with Prometheus, we'd love to hear about it. And if it helped, a star goes a long way.
 
 ## License
 

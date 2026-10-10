@@ -191,6 +191,7 @@ OFF_BY_DEFAULT_KEYS = {
     "Printing Press": "printing_press.enabled",
     "tracing": "tracing.enabled",
     "Whisper voice input": "whisper.enabled",
+    "computer use": "computer_use.enabled",
 }
 
 
