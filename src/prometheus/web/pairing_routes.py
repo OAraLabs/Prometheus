@@ -238,12 +238,19 @@ class PairingRuntime:
             self._told.popitem(last=False)
 
     def is_notified(self, request_id: str) -> bool:
-        """Whether someone who can approve has been told, or is reachable now and will be.
+        """Whether someone who can approve has been told, or was reachable at any point while this waited.
 
-        Told at creation (remembered) OR an operator is connected (a socket that connects later is told what is
-        waiting, so connected means it will have been told). It only goes false to true during a request's life.
+        Remembered the moment it happens, so it can only go false to true: told at creation, or shown the request by
+        the backfill of an operator who connected later (``WebSocketBridge._backfill_pairing`` marks each one it
+        sends), or an operator socket is open right now (a poll that sees one marks it, so it is kept after they
+        leave). Reading the live connection alone made it fall back to false when the owner disconnected.
         """
-        return request_id in self._told or self.notifier.audience()
+        if request_id in self._told:
+            return True
+        if self.notifier.audience():
+            self.mark_notified(request_id)
+            return True
+        return False
 
     # -- polling ----------------------------------------------------------
 
