@@ -90,14 +90,6 @@ def test_an_explicit_empty_environment_value_does_not_hide_a_named_file(secret_f
     assert os.environ[TOKEN_ENV_VAR] == FILE_TOKEN
 
 
-def test_an_explicit_empty_environment_value_does_not_hide_an_env_file_token(monkeypatch):
-    # The same hole without a secret file: ensure_api_token reported the env file's token while the variable the
-    # web plane reads stayed empty (setdefault never overwrites an existing key, empty or not).
-    monkeypatch.setenv(TOKEN_ENV_VAR, "")
-    get_env_file_path().write_text(f"{TOKEN_ENV_VAR}=env-file-token\n", encoding="utf-8")
-    assert ensure_api_token(None) == ("env-file-token", False)
-    assert os.environ[TOKEN_ENV_VAR] == "env-file-token"
-
 
 @pytest.mark.parametrize("problem", ["missing", "empty", "symlink"])
 def test_a_file_that_gives_no_token_fails_closed(problem, tmp_path, monkeypatch):

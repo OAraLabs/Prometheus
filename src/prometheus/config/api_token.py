@@ -160,12 +160,13 @@ def ensure_api_token(config: dict[str, Any] | None = None) -> tuple[str, bool]:
     if token:
         # Make sure the running process env carries it (web launcher +
         # WS bridge read the environment when config.web.api_token is unset).
-        # Not setdefault: an EMPTY PROMETHEUS_API_TOKEN= beside a token file
-        # (or an env-file token) would survive it, and the web plane, which
-        # reads only the variable, would serve open while this function and
-        # the startup log both said a token was in force.
-        if not os.environ.get(TOKEN_ENV_VAR):
-            os.environ[TOKEN_ENV_VAR] = token
+        # Assigned, never setdefault: an EMPTY PROMETHEUS_API_TOKEN= (a unit
+        # file, a compose file, a profile) survives setdefault, resolution
+        # skips it for the env file's token, and the web plane, which reads
+        # only the variable, served OPEN while this function and the startup
+        # log both said a token was in force. The variable must carry the
+        # token resolution chose, whatever it held before.
+        os.environ[TOKEN_ENV_VAR] = token
         return token, False
     if _deliberately_open(config):
         return "", False
