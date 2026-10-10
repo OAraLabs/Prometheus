@@ -211,7 +211,8 @@ def test_this_mac_from_another_machine_is_refused_because_it_would_cut_that_call
     before = world.cfg_path.read_text()
     response = remote(world, "global", "PUT", "/api/network", json={"mode": "this_mac"})
     assert response.status_code == 409 and response.json()["error"] == "would_lock_out"
-    assert "this machine" in response.json()["detail"], "it says where this CAN be done"
+    detail = response.json()["detail"]
+    assert "web.bind: 127.0.0.1" in detail and "Beacon" in detail, "it says where and how this CAN be done"
     assert world.cfg_path.read_text() == before
 
 
