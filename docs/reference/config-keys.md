@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **423** of
+Every key in `config/prometheus.yaml.default` — **427** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -396,6 +396,10 @@ none either — the key is documented so its absence is visible.
 | `computer_use.task.max_reobserve` | `3` |
 | `computer_use.action_log` | *(section)* |
 | `computer_use.action_log.keep_per_session` | `200` |
+| `computer_use.thumbnails` | *(section)* |
+| `computer_use.thumbnails.enabled` | `True` |
+| `computer_use.thumbnails.max_dimension` | `480` |
+| `computer_use.thumbnails.persist` | `False` |
 | `anatomy` | *(section)* |
 | `anatomy.enabled` | `True` |
 | `anatomy.scan_on_startup` | `True` |
