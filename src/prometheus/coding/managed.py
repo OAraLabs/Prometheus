@@ -13,12 +13,12 @@ green).
 from __future__ import annotations
 
 import shlex
-import sys
 from pathlib import Path
 from typing import Any
 
 from prometheus.config.paths import get_data_dir
 from prometheus.tasks.types import TaskRecord
+from prometheus.utils.child_python import prometheus_argv
 
 
 def coding_control_dir(task_id: str) -> Path:
@@ -47,7 +47,7 @@ def build_coding_command(
     environment (venv) the daemon runs under.
     """
     parts: list[str] = [
-        sys.executable, "-m", "prometheus", "code",
+        *prometheus_argv("code"),   # -P -s: nothing in the repo shadows a module (utils/child_python.py)
         "--repo", repo,
         "--task", description,
         "--acceptance", acceptance_command,
