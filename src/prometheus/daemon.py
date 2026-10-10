@@ -2284,13 +2284,21 @@ async def run_daemon(args: argparse.Namespace) -> None:
             try:
                 from prometheus.tasks.completion_handler import TaskCompletionHandler
 
+                from prometheus.tasks.reengage import get_reengage_router
+
+                # Re-engagement goes to the conversation's own surface: a
+                # telegram:* chat through Telegram, anything else through the
+                # web bridge (set when the web launcher builds it), with or
+                # without Telegram configured (#704).
+                reengage = get_reengage_router()
+                reengage.telegram = (
+                    getattr(telegram, "inject_turn", None)
+                    if "telegram" in dir() and telegram is not None
+                    else None
+                )
                 task_completion = TaskCompletionHandler(
                     signal_bus=signal_bus,
-                    inject_turn=(
-                        getattr(telegram, "inject_turn", None)
-                        if "telegram" in dir() and telegram is not None
-                        else None
-                    ),
+                    inject_turn=reengage,
                     config=tasks_config,
                 )
                 await task_completion.start()
