@@ -392,3 +392,37 @@ def test_the_docs_page_covers_what_an_operator_needs():
 
 def test_the_install_guide_points_at_the_docker_page():
     assert "docker.md" in (ROOT / "docs" / "guide" / "install.md").read_text(encoding="utf-8")
+
+
+# ── keeping the pins current ─────────────────────────────────────────────────
+
+DEPENDABOT = ROOT / ".github" / "dependabot.yml"
+
+
+def _dependabot_updates() -> dict[str, dict]:
+    assert DEPENDABOT.is_file(), "no .github/dependabot.yml: pinned digests and action SHAs would only ever age"
+    cfg = yaml.safe_load(DEPENDABOT.read_text(encoding="utf-8"))
+    assert cfg.get("version") == 2
+    return {u["package-ecosystem"]: u for u in cfg["updates"]}
+
+
+def test_dependabot_refreshes_the_base_image_digest_without_moving_python():
+    docker = _dependabot_updates().get("docker")
+    assert docker is not None and docker["directory"] == "/", "the Dockerfile is at the repository root"
+    ignored = {i["dependency-name"]: set(i.get("update-types", [])) for i in docker.get("ignore", [])}
+    # The digest is what goes stale (Debian security fixes); the Python minor is a decision, not an update.
+    assert {"version-update:semver-major", "version-update:semver-minor"} <= ignored.get("python", set())
+
+
+def test_dependabot_covers_the_workflow_actions():
+    actions = _dependabot_updates().get("github-actions")
+    assert actions is not None and actions["directory"] == "/"
+
+
+def test_every_from_names_its_base_literally(dockerfile):
+    # Dependabot reads FROM lines as written: a base image behind a build ARG is never updated.
+    for word, rest in dockerfile:
+        if word == "FROM":
+            assert "$" not in rest, f"FROM {rest}: Dependabot cannot follow an ARG"
+    bases = {rest.split()[0] for word, rest in dockerfile if word == "FROM" and "@sha256:" in rest}
+    assert len(bases) == 1, f"both stages must build on the same pinned base: {bases}"

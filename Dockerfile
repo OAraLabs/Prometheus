@@ -23,7 +23,8 @@
 # and every dependency from uv.lock, installed with --require-hashes --only-binary :all: (nothing compiles
 # here, which is also what makes the arm64 build identical in kind to the amd64 one). The one thing taken
 # as current is Debian's package archive for the four OS packages below, so their security fixes land.
-# Bump the digest with: docker buildx imagetools inspect python:3.12-slim-trixie
+# Dependabot refreshes the base digest (.github/dependabot.yml), which is why both FROM lines spell it out:
+# it does not follow a build ARG. Keep the two lines identical.
 #
 # ── CONFIGURATION LIVES IN ENV, NOT IN AN ENTRYPOINT SCRIPT ─────────────────
 #
@@ -32,9 +33,7 @@
 # FROM this one gets the same daemon however it is started. tini is only PID 1's job: reap the orphans of
 # model-written shells and pass SIGTERM on.
 
-ARG PYTHON_IMAGE=python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
-
-FROM ${PYTHON_IMAGE} AS build
+FROM python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS build
 
 # The gateway and provider extras a server wants. Voice (onnxruntime), the browser (Playwright and its
 # browsers) and computer use (a desktop driver) are left out: build with --build-arg to add them.
@@ -66,7 +65,7 @@ RUN set -eu; \
     /opt/prometheus/bin/oara --version
 
 
-FROM ${PYTHON_IMAGE}
+FROM python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
 LABEL org.opencontainers.image.title="Prometheus" \
       org.opencontainers.image.description="An AI agent daemon that runs on hardware you own." \
