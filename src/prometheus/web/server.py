@@ -28,6 +28,7 @@ from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import is_loopback_host_header, is_same_machine
 from prometheus.web.route_access import SCOPED_APPROVE_SCOPES, is_scoped_allowed
 from prometheus.web.public_routes import is_public_route
+from prometheus.web.serving import bound_port
 from prometheus.web.session_scope import (
     Scope,
     SessionAccess,
@@ -493,12 +494,17 @@ def create_app(
             config, devices=_devices_or_create(),
             name=_clean_device_name(body.get("name"), api_token_module.DEFAULT_OWNER_DEVICE_NAME))
         logger.info("Same-Mac pairing successful (secret consumed; credential value never logged)")
+        # The ports this daemon is LISTENING on, read from its own sockets. The config says what was asked for at
+        # start; it may have been edited since, or have asked for 0, and a client told the wrong port pairs and
+        # then cannot connect. The config answers only when no listener can be asked (Starlette's test client).
+        bridge = getattr(request.app.state, "ws_bridge", None)
         return {
             "token": issued.token,
             # Additive: how many earlier owner credentials of this Mac this pairing replaced.
             "revoked_previous": issued.revoked_previous,
-            "api_base_port": int(web_cfg.get("api_port", 8005) or 8005),
-            "ws_port": int(web_cfg.get("ws_port", 8010) or 8010),
+            "api_base_port": bound_port(getattr(request.app.state, "http_server", None))
+                             or int(web_cfg.get("api_port", 8005) or 8005),
+            "ws_port": getattr(bridge, "bound_port", None) or int(web_cfg.get("ws_port", 8010) or 8010),
         }
 
     def _clean_device_name(raw: Any, default: str) -> str:
