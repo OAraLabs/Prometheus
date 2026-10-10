@@ -138,7 +138,7 @@ mode prints **one JSON line** and exits with a distinct code, so Beacon reads st
 | Mode | Does | Exit codes |
 |---|---|---|
 | `--register` | registers the LaunchAgent via `SMAppService`; idempotent | 0 ok (`registered` or `already_registered`), 10 `requires_approval`, 11 `already_running` (a Prometheus answers on 127.0.0.1:8005 that is not ours), 12 `port_busy`, 13 `registration_failed`, 14 `unsupported_os` |
-| `--run` | what launchd starts: sets paths, redirects logs to `~/Library/Logs/Prometheus/`, then `exec`s the bundled Python with `-m prometheus daemon --bind 127.0.0.1` and `PROMETHEUS_INSTALL_KIND=app` | the daemon's |
+| `--run` | what launchd starts: sets paths, redirects logs to `~/Library/Logs/Prometheus/`, then `exec`s the bundled Python with `-I -B -m prometheus daemon --bind 127.0.0.1` and `PROMETHEUS_INSTALL_KIND=app` (`-I`: nothing from the working directory, `PYTHON*` variables or the user site is imported; `-B`: no bytecode is written into the signed bundle) | the daemon's |
 | `--unregister` | stops and unregisters the agent; the way to swap the app for an update | 0 / 13 |
 | `--status` | `not_registered`, `registered`, `requires_approval`, `running` | 0 |
 | `--pair` | writes a fresh pairing secret (re-pair after a Beacon reinstall) | 0 / 13 |

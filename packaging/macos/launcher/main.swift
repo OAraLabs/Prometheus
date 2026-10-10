@@ -386,7 +386,12 @@ func run() -> Never {
     let inheritedPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
     setenv("PATH", "/opt/homebrew/bin:/usr/local/bin:\(home.path)/.local/bin:\(inheritedPath)", 1)
 
-    let arguments = [python, "-m", "prometheus", "daemon", "--bind", "127.0.0.1"]
+    // -I (isolated): under -m, Python puts the working directory, which is the home directory set above, first
+    // on sys.path, so a ~/secrets.py, ~/json.py or ~/prometheus/ would be imported INSIDE the signed app in place
+    // of the real module. -I keeps it off, and also ignores PYTHON* variables and the user site. -B: no bytecode
+    // is written into the signed bundle. The two setenv calls above stay for the daemon's own children, which
+    // inherit the environment but not these flags. tests/test_macos_launcher_run.py reads this line.
+    let arguments = [python, "-I", "-B", "-m", "prometheus", "daemon", "--bind", "127.0.0.1"]
     let cArguments: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) } + [nil]
     execv(python, cArguments)
     // execv only returns on failure.
