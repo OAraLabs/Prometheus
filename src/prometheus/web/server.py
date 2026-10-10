@@ -4803,6 +4803,11 @@ def create_app(
             refusal = _desktop_approve_refusal(request, _desk, scope)
             if refusal is not None:
                 return refusal
+        # Any approve-once request (a spawned worker's, PR-6) refuses a lasting
+        # scope by name, rather than approving once and remembering nothing.
+        if _desk is not None and getattr(_desk, "once_only", False) and scope != "once":
+            return JSONResponse(status_code=409, content={
+                "error": "This request can only be approved once.", "code": "once_only"})
 
         arg_text = request_id if scope == "once" else f"{scope} {request_id}"
         # STRUCTURED, NOT INFERRED FROM THE PROSE. This was
@@ -5554,6 +5559,51 @@ def create_app(
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
         return _worker_model_view()
+
+    # ── A spawned worker asks its parent conversation for approval (PR-6) ──
+    # A public route (web/public_routes.py): a worker has no API token, it has
+    # a per-worker token the task manager minted and holds in memory. The
+    # request is filed in the approval queue under the worker's PARENT
+    # conversation, approve-once, and this waits for a PERSON's answer.
+    # Nothing here approves anything: no queue, a wrong token, a stopped
+    # worker or a remote peer is a refusal.
+    @app.post("/api/workers/approvals")
+    async def worker_approval(request: Request, body: dict):
+        from prometheus.tasks.manager import get_task_manager
+        from prometheus.web.loopback import is_loopback_host_header, is_same_machine
+
+        if not (is_same_machine(request) and is_loopback_host_header(request.headers.get("host"))):
+            return JSONResponse(status_code=403, content={
+                "error": "not_loopback",
+                "detail": "a worker's approval request is only accepted from this machine"})
+        task = get_task_manager().verify_worker_token(
+            str(body.get("task_id") or ""), str(body.get("token") or ""))
+        if task is None:
+            return JSONResponse(status_code=401, content={
+                "error": "unknown_worker",
+                "detail": "no running worker holds that token"})
+        queue = app.state.approval_queue
+        primary = queue.queues[0] if hasattr(queue, "queues") else queue
+        if primary is None or not hasattr(primary, "request_approval"):
+            return {"result": "denied",
+                    "reason": "no approval queue: nobody can approve a worker's request"}
+        session = task.session_id or ""
+        chat_id = None
+        if session.startswith("telegram:") and session.split(":", 1)[1].lstrip("-").isdigit():
+            chat_id = int(session.split(":", 1)[1])
+        tool_name = str(body.get("tool_name") or "?")
+        reason = str(body.get("reason") or "")
+        arguments = body.get("arguments") if isinstance(body.get("arguments"), dict) else None
+        result = await primary.request_approval(
+            tool_name,
+            f"Worker {task.id} ({task.description}) asks: {reason or tool_name}",
+            chat_id=chat_id,
+            arguments=arguments,
+            once_only=True,
+            worker_task_id=task.id,
+            session_id=task.session_id,
+        )
+        return {"result": getattr(result, "value", str(result))}
 
     @app.get("/api/sessions/{session_id}/model")
     async def get_session_model(session_id: str):

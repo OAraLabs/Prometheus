@@ -22,9 +22,11 @@ On top of the original in-memory manager this adds, all backward-compatibly
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
+import secrets
 import shlex
 import signal
 import time
@@ -190,6 +192,14 @@ class BackgroundTaskManager:
         #: starts so the child resolves its route against the SAME config
         #: (tasks/worker_route.py). None outside the daemon: the child searches.
         self.child_config_path: str | None = None
+        #: Where a worker asks for approval (``POST /api/workers/approvals``),
+        #: set by the web launcher. None: a worker has no one to ask, and its
+        #: requests are denied (tasks/worker_approval docs in cli/worker_approval.py).
+        self.worker_approval_url: str | None = None
+        #: Per-worker approval tokens. IN MEMORY ONLY, like ``_task_env``: the
+        #: child gets its token through the environment overlay, and nothing
+        #: durable has a field for it.
+        self._worker_tokens: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Creation
@@ -210,6 +220,7 @@ class BackgroundTaskManager:
         env_overlay: Mapping[str, str] | None = None,
         workspace_roots: Sequence[str | Path] | None = None,
         floored: bool = True,
+        task_id: str | None = None,
     ) -> TaskRecord:
         """Start a background shell command and return its TaskRecord.
 
@@ -242,6 +253,7 @@ class BackgroundTaskManager:
             on_complete=on_complete,
             reengage_prompt=reengage_prompt,
             timeout_seconds=timeout_seconds,
+            task_id=task_id,
         )
         if blocked is not None:
             record.status = "blocked"
@@ -345,6 +357,7 @@ class BackgroundTaskManager:
         fallback source.
         """
         command_was_built = command is None
+        worker_task_id: str | None = None
         if command is None:
             # No credential is required to START a worker: it runs on a route
             # (often a local box) and reads its own credential from the
@@ -368,6 +381,18 @@ class BackgroundTaskManager:
             command = " ".join(shlex.quote(part) for part in cmd)
             # A key the caller passed still travels only in the environment.
             env_overlay = {"ANTHROPIC_API_KEY": api_key} if api_key else None
+            if worker and self.worker_approval_url:
+                # The worker asks its parent conversation for approval with
+                # a token minted here and held in memory only (PR-6, #704).
+                worker_task_id = _task_id(task_type)
+                token = secrets.token_urlsafe(32)
+                self._worker_tokens[worker_task_id] = token
+                env_overlay = {
+                    **(env_overlay or {}),
+                    "PROMETHEUS_WORKER_TASK_ID": worker_task_id,
+                    "PROMETHEUS_WORKER_TOKEN": token,
+                    "PROMETHEUS_WORKER_APPROVAL_URL": self.worker_approval_url,
+                }
             # The daemon built this command; nothing in it is the model's.
             # The sub-agent's own bash tool carries the floor.
             floored = False
@@ -390,6 +415,7 @@ class BackgroundTaskManager:
             timeout_seconds=timeout_seconds,
             env_overlay=env_overlay,
             floored=floored,
+            task_id=worker_task_id,
         )
         # A refusal ("blocked") or a launch that failed outright — either way no
         # process is attached, so there is no stdin to write the prompt to.
@@ -625,6 +651,16 @@ class BackgroundTaskManager:
         # _watch_process sees the killed status and emits + persists.
         return task
 
+    def verify_worker_token(self, task_id: str, token: str) -> TaskRecord | None:
+        """The RUNNING worker *task_id* if *token* is its approval token, else None."""
+        expected = self._worker_tokens.get(task_id)
+        record = self._tasks.get(task_id)
+        if not expected or not token or record is None or record.status != "running":
+            return None
+        if not hmac.compare_digest(expected.encode(), token.encode()):
+            return None
+        return record
+
     async def write_to_task(self, task_id: str, data: str) -> None:
         """Write a line to the task's stdin.
 
@@ -757,8 +793,9 @@ class BackgroundTaskManager:
         reengage_prompt: str | None = None,
         timeout_seconds: int | None = None,
         spec: dict[str, Any] | None = None,
+        task_id: str | None = None,
     ) -> TaskRecord:
-        task_id = _task_id(task_type)
+        task_id = task_id or _task_id(task_type)
         effective_timeout = (
             timeout_seconds if timeout_seconds is not None else self.default_timeout_seconds
         )
@@ -1066,6 +1103,7 @@ class BackgroundTaskManager:
         # After the pops: a retry registers its own process and waiter.
         if task.metadata.get("worker") == "1" and await self._retry_worker_on_parent_route(task):
             return
+        self._worker_tokens.pop(task_id, None)
         self._persist(task)
         await self._emit_completion(task)
 

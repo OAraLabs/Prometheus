@@ -81,6 +81,15 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
 # Provider factory
 # ---------------------------------------------------------------------------
 
+def _worker_permission_prompt(args: Any) -> Any:
+    """A spawned worker's approval channel to its parent conversation, or None."""
+    if not getattr(args, "worker", False):
+        return None
+    from prometheus.cli.worker_approval import approval_prompt_from_env
+
+    return approval_prompt_from_env(os.environ)
+
+
 def _detect_served_model(base_url: str) -> str | None:
     """The model a llama.cpp server reports at /v1/models, or None."""
     import httpx as _httpx
@@ -2197,6 +2206,9 @@ def main() -> None:
         max_tokens=4096,
         tool_registry=registry,
         permission_checker=security_gate,
+        # A worker asks its parent conversation (cli/worker_approval.py);
+        # with nobody to ask, the gate's refusal stands.
+        permission_prompt=_worker_permission_prompt(args),
         hook_executor=hook_executor,
         adapter=adapter,
         telemetry=telemetry,
