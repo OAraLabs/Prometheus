@@ -1,9 +1,13 @@
 # Prometheus
 
+[![GitHub stars](https://img.shields.io/github/stars/OAraLabs/Prometheus?style=social)](https://github.com/OAraLabs/Prometheus/stargazers)
+
 **A fire you own doesn't go out.**\
 Not a local model. A local agent.
 
 Prometheus is an AI agent daemon: always on, on hardware you own. It remembers, keeps its own schedule, reaches you on Telegram, Slack, Discord and Beacon, and makes open models reliable at using tools.
+
+> If Prometheus is useful to you, or any of this code helps your own project, a ⭐ on the repo helps other people find it.
 
 ![Beacon's Mission home — the Armilla telemetry sphere beside Mission Control: agent state, scheduled jobs, local backends, and tool-call telemetry](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/panel-mission-home.png)
 
@@ -677,6 +681,8 @@ prometheus/
 - [x] PyPI release — [`oara-prometheus`](https://pypi.org/project/oara-prometheus/), from 0.9.0
 - [ ] Published Beacon builds — *every tag drafts a dmg, an AppImage and a deb; they are published when Beacon leaves beta*
 - [ ] Wake word for hands-free (an in-renderer model under the app's CSP — a decision, not a build)
+
+If you build something with Prometheus, we'd love to hear about it. And if it helped, a star goes a long way.
 
 ## License
 
