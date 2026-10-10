@@ -2302,7 +2302,7 @@ async def _run_loop(
                 messages.append(error_msg)
                 if turn_record is not None:
                     turn_record.stop(_StopReason.CONTEXT_PREFLIGHT)
-                yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.CONTEXT_PREFLIGHT), usage
                 return
 
         def _v2_provider_error() -> None:
@@ -2526,7 +2526,7 @@ async def _run_loop(
             messages.append(error_msg)
             if turn_record is not None:
                 turn_record.stop(_StopReason.CIRCUIT_BREAKER)
-            yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+            yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.CIRCUIT_BREAKER), usage
             return
 
         # ── Empty-response guard ──
@@ -2562,7 +2562,7 @@ async def _run_loop(
             messages.append(error_msg)
             if turn_record is not None:
                 turn_record.stop(_StopReason.EMPTY_RESPONSE)
-            yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+            yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.EMPTY_RESPONSE), usage
             return
 
         # FIRST-ROUND FORCING: this round produced substance (text or a tool
@@ -2698,7 +2698,7 @@ async def _run_loop(
                 messages.append(error_msg)
                 if turn_record is not None:
                     turn_record.stop(_StopReason.CIRCUIT_BREAKER)
-                yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.CIRCUIT_BREAKER), usage
                 return
 
             # SPRINT-2 WS2: turn ended without further tool calls — drain
@@ -2756,7 +2756,7 @@ async def _run_loop(
                 messages.append(error_msg)
                 if turn_record is not None:
                     turn_record.stop(_StopReason.BOUNDARY_ESCAPE)
-                yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.BOUNDARY_ESCAPE), usage
                 return
             return
 
@@ -2780,7 +2780,7 @@ async def _run_loop(
             if turn_record is not None:
                 turn_record.not_run(len(tool_calls))
                 turn_record.stop(_StopReason.ITERATION_LIMIT)
-            yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+            yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.ITERATION_LIMIT), usage
             return
 
         # SPRINT-2 WS2: snapshot every path the upcoming tool batch may
@@ -3002,7 +3002,7 @@ async def _run_loop(
                     messages.append(error_msg)
                     if turn_record is not None:
                         turn_record.stop(_StopReason.CIRCUIT_BREAKER)
-                    yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                    yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.CIRCUIT_BREAKER), usage
                     return
 
                 messages.append(ConversationMessage(role="user", content=tool_results))
@@ -3013,7 +3013,7 @@ async def _run_loop(
                 messages.append(error_msg)
                 if turn_record is not None:
                     turn_record.stop(_StopReason.CIRCUIT_BREAKER)
-                yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.CIRCUIT_BREAKER), usage
                 return
             else:
                 _log_iteration(context, _IterationReason.TOOL_ERROR_RETRY, turn, tool_iteration)
@@ -3090,7 +3090,7 @@ async def _run_loop(
             messages.append(error_msg)
             if turn_record is not None:
                 turn_record.stop(_StopReason.REPEAT_DETECTOR)
-            yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+            yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.REPEAT_DETECTOR), usage
             return
 
         # Sprint 10 / FL-4 / LONGHAUL-2: checkpoint + divergence evaluation
@@ -3195,7 +3195,7 @@ async def _run_loop(
                 messages.append(_halt_msg)
                 if turn_record is not None:
                     turn_record.stop(_StopReason.DIVERGENCE_HALT)
-                yield AssistantTurnComplete(message=_halt_msg, usage=usage), usage
+                yield AssistantTurnComplete(message=_halt_msg, usage=usage, stop_reason=_StopReason.DIVERGENCE_HALT), usage
                 return
 
     if turn_record is not None:
