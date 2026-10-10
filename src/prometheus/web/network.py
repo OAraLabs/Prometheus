@@ -103,6 +103,28 @@ _PLAINTEXT = (
 )
 
 
+#: Stable codes for every warning. A code is a promise: it does not change when the wording does, and a new
+#: situation gets a new code instead of reusing one. A client writes its own copy from the code; the English
+#: stays as ``message`` for the log, ``oara doctor`` and any client that has no copy yet.
+HOME_ON_LOOPBACK = "home_network_on_loopback"
+PLAIN_HTTP_ON_LAN = "plain_http_on_lan"
+HOME_UNAVAILABLE = "home_network_unavailable"
+ALL_INTERFACES = "listening_on_all_interfaces"
+RESTART_REQUIRED = "restart_required"
+WARNING_CODES = (HOME_ON_LOOPBACK, PLAIN_HTTP_ON_LAN, HOME_UNAVAILABLE, ALL_INTERFACES, RESTART_REQUIRED)
+
+
+@dataclass(frozen=True)
+class Notice:
+    """One thing worth telling a person: a stable *code* and the *message* in English."""
+
+    code: str
+    message: str
+
+    def as_json(self) -> dict[str, str]:
+        return {"code": self.code, "message": self.message}
+
+
 @dataclass(frozen=True)
 class NetworkState:
     """What the daemon is listening for, as one value both the route and the advertiser read."""
@@ -111,31 +133,33 @@ class NetworkState:
     bind: str
     bind_source: str
     tls_enabled: bool
-    warnings: list[str] = field(default_factory=list)
+    warnings: list[Notice] = field(default_factory=list)
 
 
 def describe(bind: str, source: str, settings: NetworkSettings, *, tls: bool = False) -> NetworkState:
     """The mode a listen address and the switches add up to, with every caveat said out loud."""
-    warnings: list[str] = []
+    warnings: list[Notice] = []
     if is_loopback_address(bind):
         if settings.home_network:
-            warnings.append(
+            warnings.append(Notice(
+                HOME_ON_LOOPBACK,
                 f"network.home_network is on, but the daemon listens on {bind}, which is this machine only "
                 "(loopback): nothing on the home network can reach it. Set web.bind to 0.0.0.0 or a LAN "
-                "address, or choose home network from Beacon.")
+                "address, or choose home network from Beacon."))
         return NetworkState(THIS_MAC, bind, source, tls, warnings)
     if settings.home_network and (tls or settings.allow_plaintext_lan):
         if not tls:
-            warnings.append(_PLAINTEXT)
+            warnings.append(Notice(PLAIN_HTTP_ON_LAN, _PLAINTEXT))
         return NetworkState(HOME, bind, source, tls, warnings)
     if settings.home_network:
-        warnings.append(
+        warnings.append(Notice(
+            HOME_UNAVAILABLE,
             "network.home_network is on, but this daemon has no TLS and network.allow_plaintext_lan is off, "
             "so it is reported as open, not as home network, and it does not advertise. To accept plain HTTP "
-            "on a network you trust, set network.allow_plaintext_lan: true.")
+            "on a network you trust, set network.allow_plaintext_lan: true."))
     wide = all_interfaces_warning(bind)
     if wide:
-        warnings.append(wide)
+        warnings.append(Notice(ALL_INTERFACES, wide))
     return NetworkState(OPEN, bind, source, tls, warnings)
 
 

@@ -157,7 +157,8 @@ def test_the_wide_open_install_says_so_with_its_code(tmp_path):
 
 
 def test_a_switch_that_cannot_work_is_coded(tmp_path):
-    loopback = make(tmp_path, bind="127.0.0.1", source="config", config={"network": {"home_network": True}})
+    loopback = make(tmp_path, bind="127.0.0.1", source="config", config={"network": {"home_network": True}},
+                    file_text='web:\n  bind: "127.0.0.1"\nnetwork:\n  home_network: true\n')
     assert [w["code"] for w in loopback.as_("global", "GET", "/api/network").json()["warnings"]] == [
         "home_network_on_loopback"]
     refused = make(tmp_path, config={"network": {"home_network": True}})

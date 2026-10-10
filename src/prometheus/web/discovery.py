@@ -59,6 +59,19 @@ REFRESH_SECONDS = 30.0
 
 _INSTALL_HINT = "pip install 'oara-prometheus[discovery]'"
 
+#: Stable codes for the reason it is not advertising (the English stays as the reason). Same promise as
+#: ``web/network.py``'s warning codes: a code does not change when the wording does.
+NOT_STARTED = "not_started"
+MDNS_OFF = "mdns_disabled"
+THIS_MAC_ONLY = "this_mac_only"
+NOT_HOME_NETWORK = "not_home_network"
+NO_ADDRESS = "no_usable_address"
+LIBRARY_MISSING = "library_missing"
+REGISTRATION_FAILED = "registration_failed"
+STOPPED = "stopped"
+REASON_CODES = (NOT_STARTED, MDNS_OFF, THIS_MAC_ONLY, NOT_HOME_NETWORK, NO_ADDRESS, LIBRARY_MISSING,
+                REGISTRATION_FAILED, STOPPED)
+
 # Interfaces that are tunnels, bridges, containers, VMs or Apple's private links. Their addresses are private
 # by number and wrong by nature: a phone on the Wi-Fi cannot reach them, and an address that reaches somewhere
 # else is not one to announce. Matched case-insensitively on the name AND on Windows' friendly name
@@ -229,8 +242,10 @@ def _default_adapters() -> list[Any]:
 @dataclass(frozen=True)
 class AdvertiserStatus:
     advertising: bool
-    #: Why not, when not. ``None`` while advertising.
+    #: Why not, when not, in English. ``None`` while advertising.
     reason: str | None
+    #: The stable code for *reason* (one of ``REASON_CODES``). ``None`` while advertising.
+    code: str | None = None
 
 
 class Advertiser:
@@ -262,7 +277,7 @@ class Advertiser:
         self._factory: Callable[[Sequence[str]], Backend] = backend_factory or ZeroconfBackend
         self._adapters = adapters or _default_adapters
         self._refresh_seconds = refresh_seconds
-        self._status = AdvertiserStatus(False, "the advertiser has not started")
+        self._status = AdvertiserStatus(False, "the advertiser has not started", NOT_STARTED)
         self._lock = asyncio.Lock()
         self._backend: Backend | None = None
         self._addresses: tuple[str, ...] = ()
@@ -302,10 +317,11 @@ class Advertiser:
             except ImportError as exc:
                 await self._withdraw()
                 self._library_missing = True
-                self._set(False, f"zeroconf is not installed ({_INSTALL_HINT})", warn=True, detail=str(exc))
+                self._set(False, f"zeroconf is not installed ({_INSTALL_HINT})", LIBRARY_MISSING,
+                          warn=True, detail=str(exc))
             except Exception as exc:                   # a status, never a crash; tried again next time
                 await self._withdraw()
-                self._set(False, f"{type(exc).__name__}: {exc}", warn=True)
+                self._set(False, f"{type(exc).__name__}: {exc}", REGISTRATION_FAILED, warn=True)
 
     async def stop(self) -> None:
         """Withdraw the service, close the library and stop following the network. Idempotent."""
@@ -319,21 +335,22 @@ class Advertiser:
         async with self._lock:
             await self._withdraw()
             if self._status.advertising:
-                self._status = AdvertiserStatus(False, "the advertiser was stopped")
+                self._status = AdvertiserStatus(False, "the advertiser was stopped", STOPPED)
 
     # ── internals ────────────────────────────────────────────────────────
 
     def _wants_to_advertise(self) -> bool:
         return self._settings.mdns and self._state.mode == HOME
 
-    def _why_not(self) -> str | None:
+    def _why_not(self) -> tuple[str, str] | None:
+        """``(code, English)`` for why this daemon should not advertise, or ``None`` when it should."""
         if not self._settings.mdns:
-            return "discovery.mdns is off"
+            return MDNS_OFF, "discovery.mdns is off"
         if self._state.mode == THIS_MAC:
-            return "not advertising: the daemon listens on this machine only"
+            return THIS_MAC_ONLY, "not advertising: the daemon listens on this machine only"
         if self._state.mode != HOME:
-            return ("not advertising: the daemon is not in home network mode (it listens beyond this machine "
-                    "without having been set to home network)")
+            return NOT_HOME_NETWORK, ("not advertising: the daemon is not in home network mode (it listens "
+                                      "beyond this machine without having been set to home network)")
         return None
 
     async def _follow_the_network(self) -> None:
@@ -342,15 +359,16 @@ class Advertiser:
             await self.refresh()
 
     async def _reconcile(self) -> None:
-        reason = self._why_not()
-        if reason is not None:
+        why_not = self._why_not()
+        if why_not is not None:
             await self._withdraw()
-            self._set(False, reason)
+            self._set(False, why_not[1], why_not[0])
             return
         addresses = tuple(sorted(eligible_addresses(self._adapters(), bind=self._state.bind)))
         if not addresses:
             await self._withdraw()
-            self._set(False, "no usable address: no private IPv4 address on an interface this daemon listens on")
+            self._set(False, "no usable address: no private IPv4 address on an interface this daemon listens on",
+                      NO_ADDRESS)
             return
         name = instance_name(self._display_name())
         properties = txt_properties(self._hello())
@@ -385,10 +403,10 @@ class Advertiser:
             except Exception:                            # best effort: the service is going away anyway
                 logger.debug("mDNS: %s failed while withdrawing", step.__name__, exc_info=True)
 
-    def _set(self, advertising: bool, reason: str | None, *, announce: str | None = None,
-             warn: bool = False, detail: str | None = None) -> None:
+    def _set(self, advertising: bool, reason: str | None, code: str | None = None, *,
+             announce: str | None = None, warn: bool = False, detail: str | None = None) -> None:
         """Record the status, and say what changed once rather than on every evaluation."""
-        self._status = AdvertiserStatus(advertising, reason)
+        self._status = AdvertiserStatus(advertising, reason, code)
         key = reason if not advertising else announce
         if key == self._logged_reason:
             return

@@ -186,7 +186,7 @@ async def launch_web(
     # It starts and stops with the web server; the TXT record is the same dictionary GET /api/hello answers.
     from prometheus.config.display_name import display_name
     from prometheus.web.discovery import Advertiser
-    from prometheus.web.network import NetworkSettings, describe
+    from prometheus.web.network import ALL_INTERFACES, NetworkSettings, describe
 
     network_settings = NetworkSettings.from_config(config)       # says once if a switch is not a boolean
     network_state = describe(address, resolved.source, network_settings)
@@ -305,9 +305,9 @@ async def launch_web(
             break
     # What the network mode adds: plain HTTP on the home network, a home_network switch that cannot work.
     # (The all-interfaces warning above is already in `warnings` for an open bind; it is not said twice.)
-    for warning in network_state.warnings:
-        if warning != all_interfaces_warning(address):
-            logger.warning("network: %s", warning)
+    for notice in network_state.warnings:
+        if notice.code != ALL_INTERFACES:
+            logger.warning("network: %s", notice.message)
 
     # Run both servers concurrently
     await asyncio.gather(

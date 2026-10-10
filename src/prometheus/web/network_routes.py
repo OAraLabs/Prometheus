@@ -15,6 +15,13 @@ What the owner's switch can and cannot do is stated, not implied:
   ``bind_overridden``, naming the source.
 * **It edits the file's text** (comments and all) and verifies before writing (``web/network.py``); no config
   file is a 409, never a file conjured into existence.
+* **It does not let a caller lock itself out.** ``this_mac`` from a caller that is not on this machine is a 409
+  ``would_lock_out``: after the restart that caller could no longer reach the daemon. The TCP peer decides (the
+  real one; a forwarded header counts only from a ``web.trusted_proxies`` entry), and anything that does not
+  clearly say loopback is not loopback.
+* **It says whether to show the control** (``can_change``: the caller is an operator AND nothing outside the file
+  fixes the bind) and **codes every warning and the advertising reason** (``{"code", "message"}``) so a client
+  writes its own copy and keeps the English as the fallback.
 
 Only ``this_mac`` and ``home_network`` can be asked for. ``open`` is a description of what is running (what
 every install that predates the setting is), not a choice.
@@ -34,13 +41,15 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from prometheus.web.bind import DEFAULT_BIND, BindError, ResolvedBind, parse_bind, resolve_bind
-from prometheus.web.loopback import is_loopback_address
+from prometheus.web.loopback import is_loopback_address, is_loopback_peer
 from prometheus.web.network import (
     CHOOSABLE,
     HOME,
+    RESTART_REQUIRED,
     THIS_MAC,
     NetworkSettings,
     NetworkState,
+    Notice,
     PersistError,
     describe,
     persist_choice,
@@ -55,6 +64,9 @@ _NO_STORE = {"Cache-Control": "no-store"}
 _FILE_DECIDES = ("config", "default")
 
 _PINNED_BY = {"flag": "--bind", "env": "PROMETHEUS_WEB_BIND"}
+
+#: The advertising reason when this process has no advertiser to ask (the other codes are web/discovery.py's).
+ADVERTISER_ABSENT = "advertiser_not_running"
 
 
 def _json(status: int, content: dict[str, Any]) -> JSONResponse:
@@ -115,15 +127,25 @@ def register_network_routes(app: Any, *, auth_on: Callable[[], bool]) -> None:
                 resolved = ResolvedBind(DEFAULT_BIND, "default")
         return resolved, describe(resolved.address, resolved.source, NetworkSettings.from_config(config, quiet=True))
 
-    def advertising(request: Request) -> tuple[bool, str | None]:
+    def advertising(request: Request) -> tuple[bool, dict[str, str] | None]:
         advertiser = getattr(request.app.state, "advertiser", None)
         if advertiser is None:
-            return False, "the advertiser is not running in this process"
+            return False, Notice(ADVERTISER_ABSENT, "the advertiser is not running in this process").as_json()
         status = advertiser.status
-        return bool(status.advertising), status.reason
+        if status.advertising or status.reason is None:
+            return bool(status.advertising), None
+        return False, Notice(status.code or "unknown", status.reason).as_json()
 
-    def body(request: Request, shown: NetworkState, *, applied: str, warnings: list[str],
-             pending: NetworkState | None = None) -> dict[str, Any]:
+    def can_change(request: Request, resolved: ResolvedBind) -> bool:
+        """Whether a control that changes the network mode is worth showing THIS caller.
+
+        An operator, and a bind nothing outside the file fixes. (A PUT can still be refused for another reason: no
+        config file, no TLS or opt-out for home network, or ``would_lock_out``.)
+        """
+        return operator_refusal(request, auth_on()) is None and resolved.source in _FILE_DECIDES
+
+    def body(request: Request, shown: NetworkState, *, applied: str, warnings: list[Notice],
+             resolved: ResolvedBind, pending: NetworkState | None = None) -> dict[str, Any]:
         on, why = advertising(request)
         out: dict[str, Any] = {
             "mode": shown.mode,
@@ -133,7 +155,8 @@ def register_network_routes(app: Any, *, auth_on: Callable[[], bool]) -> None:
             "advertising": on,
             "advertising_reason": why,
             "applied": applied,
-            "warnings": warnings,
+            "warnings": [warning.as_json() for warning in warnings],
+            "can_change": can_change(request, resolved),
         }
         if pending is not None:
             out["pending_mode"] = pending.mode
@@ -157,11 +180,13 @@ def register_network_routes(app: Any, *, auth_on: Callable[[], bool]) -> None:
             pending = _state_from_file(resolved, document)
         warnings = list(now.warnings)
         if pending is not None and (pending.mode, pending.bind) != (now.mode, now.bind):
-            warnings.append(
+            warnings.append(Notice(
+                RESTART_REQUIRED,
                 f"A saved change is waiting for a restart: the daemon will come back as {pending.mode} on "
-                f"{pending.bind}.")
-            return _json(200, body(request, now, applied="on_restart", warnings=warnings, pending=pending))
-        return _json(200, body(request, now, applied="live", warnings=warnings))
+                f"{pending.bind}."))
+            return _json(200, body(request, now, applied="on_restart", warnings=warnings, resolved=resolved,
+                                   pending=pending))
+        return _json(200, body(request, now, applied="live", warnings=warnings, resolved=resolved))
 
     @app.put("/api/network")
     async def put_network(request: Request):
@@ -175,6 +200,14 @@ def register_network_routes(app: Any, *, auth_on: Callable[[], bool]) -> None:
         if not isinstance(mode, str) or mode not in CHOOSABLE:
             return _json(400, {"error": "invalid_request",
                                "detail": 'send {"mode": "this_mac"} or {"mode": "home_network"}, and nothing else'})
+
+        if mode == THIS_MAC and not is_loopback_peer(request):
+            return _json(409, {
+                "error": "would_lock_out",
+                "detail": "this_mac would stop this daemon answering anywhere but on its own machine after the "
+                          "restart, and this request does not come from this machine, so it would cut itself "
+                          "off. Do this from the machine the daemon runs on (Beacon there, or set web.bind: "
+                          "127.0.0.1 in prometheus.yaml). Nothing was written"})
 
         resolved, now = running(request)
         if resolved.source not in _FILE_DECIDES and is_loopback_address(resolved.address) != (mode == THIS_MAC):
@@ -211,8 +244,9 @@ def register_network_routes(app: Any, *, auth_on: Callable[[], bool]) -> None:
                         who(request), mode, path)
         warnings = list(after.warnings)
         if (after.mode, after.bind) == (now.mode, now.bind):
-            return _json(200, body(request, after, applied="live", warnings=warnings))
-        warnings.append(
+            return _json(200, body(request, after, applied="live", warnings=warnings, resolved=resolved))
+        warnings.append(Notice(
+            RESTART_REQUIRED,
             f"Saved. This takes effect when the daemon restarts; until then it is still {now.mode} on "
-            f"{now.bind}.")
-        return _json(200, body(request, after, applied="on_restart", warnings=warnings))
+            f"{now.bind}."))
+        return _json(200, body(request, after, applied="on_restart", warnings=warnings, resolved=resolved))

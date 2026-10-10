@@ -109,24 +109,52 @@ GET /api/network                         (any valid token, scoped devices includ
   "bind_source": "flag" | "env" | "config" | "default" | "caller",
   "tls": {"enabled": false, "spki_sha256": null},     // there is no TLS listener until PR 5
   "advertising": false,
-  "advertising_reason": null,        // e.g. "not advertising: the daemon listens on this machine only",
-                                     // "discovery.mdns is off", "zeroconf is not installed (...)"
+  "advertising_reason": {"code": "this_mac_only", "message": "not advertising: the daemon listens on this machine only"},
+                                     // null while advertising; the code is stable, the English is the fallback
   "applied": "live" | "on_restart",  // "on_restart": the file says something else than what is running
   "pending_mode": "home_network",    // ONLY when applied is "on_restart": what it will come back as
-  "warnings": ["..."]                // plain HTTP on the LAN, a switch that cannot work, a saved change waiting
+  "warnings": [{"code": "plain_http_on_lan", "message": "..."}],   // see the codes below
+  "can_change": true                 // show the control at all? true only for an operator AND an unpinned bind
 }
 
 PUT /api/network   {"mode": "this_mac" | "home_network"}      (operator only; nothing else in the body)
-200 { same eight keys }              // mode, bind, bind_source and warnings describe the SAVED choice (what it
+200 { same nine keys }               // mode, bind, bind_source and warnings describe the SAVED choice (what it
                                      // will be after a restart); advertising* is what is happening now.
                                      // applied is "live" only when the saved choice is what is already running.
 400 {"error": "invalid_request"}     // anything but exactly {"mode": "this_mac" | "home_network"}; "open" is not a choice
 403 {"error": "operator_only"}       // an authenticated scoped device
 409 {"error": "tls_unavailable"}     // home_network without TLS and without network.allow_plaintext_lan in the FILE
+409 {"error": "would_lock_out"}      // this_mac from a caller that is not on this machine: it would cut itself off
 409 {"error": "bind_overridden", "source": "flag"|"env"|"caller"}   // --bind / PROMETHEUS_WEB_BIND outranks the file
 409 {"error": "no_config_file"}      // the daemon was not started from a file; none is created
 500 {"error": "persist_failed"}      // the edit did not verify, or the write failed; the file is exactly as it was
 ```
+
+**Codes.** Every entry in `warnings` and the `advertising_reason` is `{"code", "message"}` so a client writes its own plain-language copy and keeps the English as the fallback (the log, `oara doctor` and a client with no copy for a code use `message`). A code is a promise: it does not change when the wording does, and a new situation gets a new code instead of reusing one. Clients must tolerate a code they do not know.
+
+| `warnings[].code` | When |
+|---|---|
+| `home_network_on_loopback` | `network.home_network` is on but the bind is loopback, so nothing on the home network can reach the daemon |
+| `plain_http_on_lan` | home network mode over plain HTTP (no TLS): a device's token and everything it sends cross the Wi-Fi unencrypted |
+| `home_network_unavailable` | `network.home_network` is on but there is no TLS and no `network.allow_plaintext_lan`, so the daemon is reported `open` and does not advertise |
+| `listening_on_all_interfaces` | `open` on a wildcard bind: plain HTTP, the bearer token is the only access control |
+| `restart_required` | a saved change is waiting for a restart (`GET`), or was just saved (`PUT`) |
+
+| `advertising_reason.code` | When |
+|---|---|
+| `not_started` | the advertiser has not started yet |
+| `mdns_disabled` | `discovery.mdns` is off |
+| `this_mac_only` | the bind is loopback |
+| `not_home_network` | the daemon is not in home network mode (this includes `open`) |
+| `no_usable_address` | no private IPv4 address on an interface the daemon listens on |
+| `library_missing` | advertising is wanted and `zeroconf` is not installed |
+| `registration_failed` | the library refused (the message names the error); retried every 30 s |
+| `stopped` | the advertiser was stopped |
+| `advertiser_not_running` | this process has no advertiser to ask (set by the route, not the advertiser) |
+
+**`can_change`** is for deciding whether to show the control at all. It is true only when the caller is an operator (`identity.is_operator`; with the token off, everyone) **and** nothing outside the config file fixes the bind (`bind_source` is `config` or `default`, not `flag`, `env` or `caller`). A scoped device and a Mac-app install (its launcher pins `--bind 127.0.0.1`) both read `false`. It is not a promise that a `PUT` will succeed: no config file, no TLS or opt-out for `home_network`, and `would_lock_out` can still refuse one.
+
+**`would_lock_out`.** `PUT {"mode": "this_mac"}` from a caller whose TCP peer is not loopback is refused, because after the restart the daemon answers only on its own machine and that caller would lose the connection it just used. The peer is the real one (a forwarded header counts only from a `web.trusted_proxies` entry), and anything that does not clearly say loopback is not loopback. `home_network` from anywhere is not a lockout: opening the daemon up cannot cut the caller off. The remedy is to do it from the machine the daemon runs on (Beacon there, or `web.bind: 127.0.0.1` in `prometheus.yaml`).
 
 **It is saved, not applied.** The listeners are bound when the daemon starts, so `PUT` writes the choice into the config file and answers `applied: "on_restart"`; the daemon keeps listening as before until it restarts, and `GET` shows the running mode next to `pending_mode`. Live rebinding is not built (the first thing it would have to do is close every socket whose peer is not loopback). `PUT` never revokes a device.
 
@@ -566,6 +594,7 @@ All JSON bodies are `{"error": "<code>", ...}`.
 | 404 | `unknown_request` | no such id, wrong secret, or a secret for another request |
 | 409 | `not_pending` | decision on a request that is no longer pending (`status` says which) |
 | 409 | `tls_unavailable` | `PUT /api/network` to `home_network` with no TLS and no `allow_plaintext_lan` |
+| 409 | `would_lock_out` | `PUT /api/network` to `this_mac` from a caller that is not on this machine |
 | 409 | `bind_overridden` | `PUT /api/network` when `--bind` or `PROMETHEUS_WEB_BIND` fixes the address (`source` says which) |
 | 409 | `no_config_file` | `PUT /api/network` and the daemon was not started from a config file |
 | 500 | `persist_failed` | `PUT /api/network`: the edit did not verify or the write failed; the file is untouched |
@@ -614,6 +643,7 @@ Other tests every PR keeps green: the full suite on the project venv (system `py
 
 * **No 6-digit-code route in v0.4 (P4, Will 2026-10-08).** A Prometheus that is already set up and has no operator connected is joined by one of: Beacon on the Prometheus Mac (path A, `/api/pair/local`, **app installs only**: `local_pairing.enabled()` needs `PROMETHEUS_INSTALL_KIND=app`), `oara pair approve` at the machine (the device gets scoped access), or pasting the API token (the global token is an operator). A terminal-installed Mac has no path A.
 * **`oara pair this-mac`: not built.** The gap it would close: a terminal-installed Prometheus whose owner wants the Beacon on that same Mac to be an owner device. Design if it is ever wanted: the command writes the same one-time same-Mac secret file the app launcher writes (`config/local_pairing.py`) and records an opt-in in `prometheus.yaml` that `local_pairing.enabled()` reads, so `/api/pair/local` is served on a terminal install only after the owner asked for it from the terminal, and the existing loopback-peer, loopback-Host, no-`Origin` and one-use rules apply unchanged. It adds no route and no new credential type.
+* **A restart route: not built (Beacon, 2026-10-08).** `PUT /api/network` only saves, so a client cannot apply a saved mode: nothing exposes "restart the daemon". Beacon can show `applied: "on_restart"` and tell the person to restart, but cannot do it for them. Whoever builds it decides how a daemon restarts itself under launchd, systemd and a terminal (the supervisor differs), who may ask for it (operator only, like `PUT`), and what a connected client sees (every socket drops). Until then the person restarts the daemon (`oara daemon`, or the app).
 * **`oara network show | this-mac | home`: not built.** Beacon's switch and a hand edit are the two ways in; the CLI can call `persist_choice` (`web/network.py`).
 * **The app launcher stops pinning `--bind 127.0.0.1` (#695's file).** Until then `PUT /api/network` from the app is a 409 `bind_overridden` (the flag outranks the file). A follow-up for #695, not a blocker for v0.4.
 * **Live rebind**, **a pairing window (D4)**, **pairing push notifications** (until the dispatcher can target operators only).
