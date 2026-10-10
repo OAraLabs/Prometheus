@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from prometheus.computer.discovery import AppRecord, WindowRecord
-from prometheus.computer.types import Observation
+from prometheus.computer.types import Observation, WindowCapture
 
 
 #: Where X11 puts its unix sockets. A named constant rather than a literal
@@ -409,6 +409,24 @@ class Driver(Protocol):
         """Windows, for one pid or all. On-screen only unless asked (D8)."""
         ...
 
+    def capture(
+        self, target: str, app: str, pid: int, window_id: int, *,
+        max_dimension: int,
+    ) -> WindowCapture:
+        """One window-scoped snapshot WITH its pixels (PR 6b, design §5.2.5).
+
+        Additive: ``observe`` still asks for no screenshot, and the capture
+        ruling stays true for every decision path. This exists only to show a
+        person the window they approved, and it is ONE call on purpose — the
+        password check reads the tree from the same call, so the check and the
+        pixels describe the same moment. A separate screenshot plus a separate
+        tree could pass a check made on a screen the picture does not show.
+
+        Never the desktop, a display or another window: there is no
+        screen-capture verb here, and no ``get_desktop_state``.
+        """
+        ...
+
 
 class StaleSnapshot(RuntimeError):
     """The action's snapshot has been superseded. Never retried silently."""
@@ -471,6 +489,7 @@ class FixtureDriver:
         observations: list[Observation],
         apps: list[AppRecord] | None = None,
         windows: list[WindowRecord] | None = None,
+        captures: list[WindowCapture] | None = None,
     ) -> None:
         if not observations:
             raise ValueError("FixtureDriver needs at least one observation")
@@ -480,6 +499,14 @@ class FixtureDriver:
         self.windows: list[WindowRecord] = list(windows or [])
         self._observations = list(observations)
         self._cursor = 0
+        #: Scripted thumbnails (PR 6b), consumed in order and held at the last
+        #: one, mirroring ``observations``.
+        self._captures: list[WindowCapture] = list(captures or [])
+        self._capture_cursor = 0
+        #: Every capture that reached the driver, with its args. Assert on
+        #: THIS to prove a capture was (or was not) attempted — the same
+        #: discipline as ``dispatched`` below.
+        self.capture_calls: list[dict[str, Any]] = []
         # Primed to the FIRST observation rather than None. A FixtureDriver is
         # constructed *from* recorded observations, so "the window as last
         # seen" is the first of them — a driver that treated its own starting
@@ -527,3 +554,34 @@ class FixtureDriver:
         return [w for w in self.windows
                 if (pid is None or w.pid == pid)
                 and (w.is_on_screen or not on_screen_only)]
+
+    def capture(
+        self, target: str, app: str, pid: int, window_id: int, *,
+        max_dimension: int,
+    ) -> WindowCapture:
+        """A scripted capture — and it INVALIDATES the current snapshot.
+
+        That last part is the invariant worth enforcing rather than faking
+        away: the real ``get_window_state`` mints a new snapshot, so every
+        element token the loop is holding dies with it. A fixture that let a
+        capture leave the old snapshot current would let a test pass on a
+        driver behaviour that does not exist, which is the same class of lie
+        the ``observe``/``act`` staleness rule above exists to prevent.
+
+        Safe in the run because a capture happens AFTER the step executed and
+        the next step begins with a fresh ``observe``.
+        """
+        self.capture_calls.append(
+            {"target": target, "app": app, "pid": pid,
+             "window_id": window_id, "max_dimension": max_dimension})
+        self._current_snapshot = f"superseded-by-capture-{len(self.capture_calls)}"
+        if self._captures:
+            cap = self._captures[
+                min(self._capture_cursor, len(self._captures) - 1)]
+            self._capture_cursor += 1
+            return cap
+        # No scripted capture: an honest empty one. Its app_name is None, so
+        # the identity gate skips it as ``window_changed`` rather than a test
+        # silently getting a picture it never set up.
+        return WindowCapture(target=target, app=app, pid=pid,
+                             window_id=window_id, app_name=None)

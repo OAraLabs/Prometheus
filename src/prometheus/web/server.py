@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +26,12 @@ from fastapi.staticfiles import StaticFiles
 from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import guard_if_loopback, is_loopback_host_header, is_loopback_peer
 from prometheus.web.public_routes import is_public_route
+from prometheus.web.session_scope import (
+    Scope,
+    SessionAccess,
+    scope_for,
+    session_exists,
+)
 from prometheus.web.strict_query import StrictQueryRoute
 
 from prometheus.config import api_token as api_token_module
@@ -324,6 +330,56 @@ def create_app(
             _device_store_holder[0] = DeviceStore()
         return _device_store_holder[0]
 
+    # ── Device scoping ───────────────────────────────────────────────
+    # A device token sees and manages only the sessions that device owns; the
+    # global token (and a daemon with auth off) is unrestricted. The rule lives
+    # in web/session_scope.py and is shared with the WebSocket bridge. Here:
+    #   * every route with a {session_id} path parameter is guarded by ONE
+    #     router-level dependency — a session route added tomorrow is covered
+    #     without anyone remembering to;
+    #   * routes that carry a session id in a body or query, or that return
+    #     conversation content across sessions, call _access themselves.
+    # "Not yours" is a 404 identical to "not there": no oracle for session ids.
+    def _conversation_store() -> Any:
+        _lcm = getattr(app.state, "lcm_engine", None)
+        return _lcm.conversation_store if _lcm is not None else None
+
+    _access = SessionAccess(
+        _devices_or_create,
+        lambda sid: session_exists(session_mgr, _conversation_store(), sid),
+    )
+
+    def _scope(request: Request) -> Scope:
+        return scope_for(getattr(request.state, "device_identity", None),
+                         auth_required=bool(_api_token))
+
+    def _unknown_session() -> JSONResponse:
+        return JSONResponse(status_code=404, content={"error": "unknown session"})
+
+    class _SessionNotYours(Exception):
+        """Raised by the path guard; answered with the same 404 as a missing session."""
+
+    @app.exception_handler(_SessionNotYours)
+    async def _answer_session_not_yours(request: Request, exc: _SessionNotYours) -> JSONResponse:
+        return _unknown_session()
+
+    async def _guard_session_path(request: Request) -> None:
+        sid = request.path_params.get("session_id")
+        if sid is None:
+            return
+        # A read never creates anything. A write may bring a brand-new id into
+        # existence (a client that mints its own id and configures it before its
+        # first message) — admit() claims it for the device, on the same terms as
+        # a first send. Everything else is the owner's or the operator's.
+        reads = request.method in ("GET", "HEAD", "OPTIONS")
+        scope = _scope(request)
+        if not (_access.owns(scope, sid) if reads else _access.admit(scope, sid)):
+            raise _SessionNotYours()
+
+    # Must be appended BEFORE the first route is registered: add_api_route copies
+    # the router's dependencies at the moment each route is created.
+    app.router.dependencies.append(Depends(_guard_session_path))
+
     # ── Bearer token auth + body-size guard on /api/* routes ────────
 
     _MAX_BODY_BYTES = 2 * 1024 * 1024  # REST bodies are JSON/text; file uploads use the WS, not /api
@@ -537,10 +593,18 @@ def create_app(
         return {"ok": True}
 
     @app.delete("/api/devices/{device_id}")
-    async def revoke_device(device_id: str):
-        # Deliberately open to ANY valid token: a phone revokes itself on
-        # "Sign out". Revocation is a tombstone; the next request or WS
+    async def revoke_device(device_id: str, request: Request):
+        # A device revokes ITSELF (a phone on "Sign out"); the global token
+        # revokes any device. A device naming another is refused BEFORE the
+        # lookup, so an unknown id and somebody else's get the same answer.
+        # 403, not 401: the token is valid — it is the target that is not its
+        # to revoke, and a client that read 401 as "my token died" would
+        # sign itself out. Revocation is a tombstone; the next request or WS
         # connect with that device's token fails auth.
+        _who = _scope(request)
+        if not _who.unrestricted and _who.device_id != device_id:
+            return JSONResponse(status_code=403, content={
+                "error": "a device may only revoke itself"})
         if not _devices_or_create().revoke(device_id):
             return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
         return {"ok": True, "id": device_id}
@@ -1097,7 +1161,7 @@ def create_app(
     # ── Sessions ────────────────────────────────────────────────────
 
     @app.get("/api/sessions")
-    async def list_sessions():
+    async def list_sessions(request: Request):
         """Durable-first session index (feat/durable-session-index).
 
         Enumerates from the LCM store — so the list SURVIVES a daemon restart —
@@ -1160,6 +1224,11 @@ def create_app(
                     "pinned": store.is_session_pinned(sid) if store is not None else False,
                     "live": True,
                 }
+        # A device sees only the sessions it owns (the durable rows AND the live
+        # overlay are filtered alike); the operator sees them all.
+        _mine = _access.owned_ids(_scope(request))
+        if _mine is not None:
+            by_id = {sid: row for sid, row in by_id.items() if sid in _mine}
         return sorted(
             by_id.values(), key=lambda s: s["last_active"] or 0.0, reverse=True
         )
@@ -1210,6 +1279,10 @@ def create_app(
             )
 
         sid = f"{gateway.lower()}:{uuid.uuid4()}"
+        # A device that mints a session owns it from this moment, before its
+        # first message — nobody else can be handed the id in between.
+        if not _access.mint(_scope(request), sid):
+            return _unknown_session()
         if session_mgr:
             session_mgr.get_or_create(sid)
         return {"session_id": sid, "gateway": gateway.lower()}
@@ -1289,6 +1362,12 @@ def create_app(
             tool_choice = _normalize_tc(_tc_raw, _valid) if _tc_raw is not None else None
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
+        # Device scoping: from here the session is USED (references resolve against
+        # its workspace, then the message is written into it). A device may send to
+        # a session it owns or to a brand-new id — which becomes its own — and to
+        # nothing else. After validation, so a malformed request claims nothing.
+        if not _access.admit(_scope(request), session_id):
+            return _unknown_session()
         # Item 6 @-references: ``references: [{type: file|diff|url, target}]``.
         # Resolved BEFORE dispatch so the caller gets the refusal (4xx + reason)
         # instead of a turn that silently ran with less context than the chips
@@ -1353,6 +1432,11 @@ def create_app(
                 status_code=503,
                 content={"error": "chat interrupt unavailable — ws_bridge not wired"},
             )
+        if not _access.owns(_scope(request), session_id):
+            # Stopping a quiet session is already "stopped: false, not an error", so
+            # a session that is not the caller's gets exactly that answer — and
+            # nothing is stopped.
+            return {"session_id": session_id, "stopped": False}
         return {"session_id": session_id, "stopped": bridge.interrupt_turn(session_id)}
 
     @app.post("/api/paperclip/wake")
@@ -1693,12 +1777,19 @@ def create_app(
         new_id = body.get("session_id")
         if new_id is not None and (not isinstance(new_id, str) or not new_id.strip()):
             return JSONResponse({"error": "session_id must be a non-empty string"}, status_code=400)
-        if not new_id:
+        server_minted = not new_id
+        if server_minted:
             prefix = session_id.split(":", 1)[0] if ":" in session_id else "session"
             new_id = f"{prefix}:{_uuid.uuid4().hex}"
         if new_id == session_id:
             # Forking onto itself would interleave copies with the original's own history.
             return JSONResponse({"error": "a fork cannot target its own origin"}, status_code=400)
+        # The fork copies the origin's history INTO new_id, so new_id must be the caller's
+        # to take: a device may fork into a fresh id (which becomes its own) and never into
+        # a session that already exists — that would write the origin's content into it.
+        _taken = (_access.mint if server_minted else _access.admit)(_scope(request), new_id)
+        if not _taken:
+            return _unknown_session()
 
         try:
             record = store.fork_session(session_id, at_rowid, new_id)
@@ -3112,13 +3203,33 @@ def create_app(
         limit = max(1, min(limit, _SEARCH_MAX_LIMIT))
         return q, session_id or None, scope, limit
 
-    async def _do_search(q, session_id, scope, limit):
+    async def _do_search(q, session_id, scope, limit, who: Scope):
         from datetime import datetime, timezone
 
         try:
             q, session_id, scope, limit = _search_params(q, session_id, scope, limit)
         except ValueError as e:
             return JSONResponse(status_code=400, content={"error": str(e)})
+        # Device scoping. Naming a session you do not own is a 404; naming none
+        # means "every session", which for a device means every session IT owns
+        # (searched one at a time, then merged by score — the store takes a single
+        # session id, and filtering after the fact would let other sessions' hits
+        # use up the limit).
+        _mine = _access.owned_ids(who)
+        if _mine is not None and session_id is not None and session_id not in _mine:
+            return _unknown_session()
+        _targets: list[str | None] = (
+            [session_id] if (session_id is not None or _mine is None) else sorted(_mine)
+        )
+
+        async def _hits(search_fn):
+            found: list[dict] = []
+            for _sid in _targets:
+                found.extend(await asyncio.to_thread(search_fn, q, session_id=_sid, limit=limit))
+            if len(_targets) > 1:  # merged across a device's own sessions: best (lowest) rank first
+                found.sort(key=lambda h: h["score"])
+                found = found[:limit]
+            return found
 
         lcm = getattr(app.state, "lcm_engine", None)
         if lcm is None:
@@ -3131,12 +3242,7 @@ def create_app(
         summaries_out: list[dict] = []
 
         if scope in ("messages", "both"):
-            hits = await asyncio.to_thread(
-                lcm.conversation_store.search_snippets,
-                q,
-                session_id=session_id,
-                limit=limit,
-            )
+            hits = await _hits(lcm.conversation_store.search_snippets)
             messages_out = [
                 {
                     "kind": "message",
@@ -3154,12 +3260,7 @@ def create_app(
             ]
 
         if scope in ("summaries", "both"):
-            hits = await asyncio.to_thread(
-                lcm.summary_store.search_snippets,
-                q,
-                session_id=session_id,
-                limit=limit,
-            )
+            hits = await _hits(lcm.summary_store.search_snippets)
             # One batched UUID→rowid lookup across every hit's anchors: the rowid is
             # the durable scroll cursor (same id space as ?since= / message_id above),
             # which is what lets a client jump to the exact anchored message.
@@ -3214,6 +3315,7 @@ def create_app(
             body.get("session_id"),
             body.get("scope", "both"),
             body.get("limit", _SEARCH_DEFAULT_LIMIT),
+            _scope(request),
         )
 
     # ── SENTINEL ────────────────────────────────────────────────────
@@ -3260,6 +3362,7 @@ def create_app(
 
     @app.get("/api/events/recent")
     async def get_events_recent(
+        request: Request,
         limit: int = 50, type: str | None = None, types: str | None = None,
         since: str | None = None, session_id: str | None = None,
     ):
@@ -3282,6 +3385,11 @@ def create_app(
         """
         from prometheus.telemetry.tracker import get_telemetry_handle
 
+        # Device scoping: another session's events are conversation content (a
+        # teacher escalation carries the user's request and the model's reply).
+        who = _scope(request)
+        if session_id and not _access.owns(who, session_id):
+            return _unknown_session()
         tel = get_telemetry_handle()
         if tel is None:
             return []
@@ -3295,8 +3403,10 @@ def create_app(
             session_id=session_id or None,
         )
         # Already shaped as the spec expects (dicts with id, timestamp,
-        # signal_type, payload, source_subsystem). Return as-is.
-        return rows
+        # signal_type, payload, source_subsystem). A device gets the rows that name
+        # its sessions plus the daemon-level ones that name none, so it can come
+        # back with fewer than `limit` rows.
+        return [r for r in rows if _access.frame_visible(who, {"payload": r.get("payload")})]
 
     # ── Activity feed (Polish sprint WS2) ──────────────────────────
     # Alias for /api/events/recent under the "activity" namespace. The
@@ -3304,7 +3414,7 @@ def create_app(
     # subscribing to the WebSocket.
 
     @app.get("/api/activity/recent")
-    async def get_activity_recent(limit: int = 100, type: str | None = None):
+    async def get_activity_recent(request: Request, limit: int = 100, type: str | None = None):
         """Recent durable signal-bus events, capped at *limit* (max 500)."""
         from prometheus.telemetry.tracker import get_telemetry_handle
 
@@ -3312,7 +3422,11 @@ def create_app(
         if tel is None:
             return []
         capped = max(1, min(int(limit), 500))
-        return tel.signal_events_since(signal_type=type, limit=capped)
+        rows = tel.signal_events_since(signal_type=type, limit=capped)
+        # Same rule as /api/events/recent: a device's feed holds only its own sessions' events
+        # and the daemon-level ones.
+        who = _scope(request)
+        return [r for r in rows if _access.frame_visible(who, {"payload": r.get("payload")})]
 
     # ── Memory (Polish sprint WS2) ─────────────────────────────────
 
@@ -4707,7 +4821,7 @@ def create_app(
     # ── Chat ───────────────────────────────────────────────────────
 
     @app.post("/api/chat")
-    async def post_chat(body: dict):
+    async def post_chat(body: dict, request: Request):
         """Send a message to the agent and wait for the reply.
 
         The synchronous sibling of ``/api/chat/send``: it runs the turn
@@ -4725,6 +4839,12 @@ def create_app(
         content = body.get("content", "")
         if not session_id or not content:
             return JSONResponse(status_code=400, content={"error": "session_id and content required"})
+        # Device scoping. This route keeps its conversation under web:<id> — that
+        # is the session a device must own, whatever it called the id. Refused
+        # before anything else is checked; claimed only where the session is used.
+        _web_sid = f"web:{session_id}"
+        if not _access.may_use(_scope(request), _web_sid):
+            return _unknown_session()
         if not agent_loop:
             return JSONResponse(status_code=503, content={"error": "agent loop not available"})
         if not session_mgr:
@@ -4744,6 +4864,8 @@ def create_app(
                 content={"error": "system prompt unavailable — ws_bridge not wired"},
             )
 
+        if not _access.admit(_scope(request), _web_sid):
+            return _unknown_session()
         # Restore a cold session's recent conversation first, as every send
         # path does, or the model answers blind after a restart.
         if hasattr(session_mgr, "rehydrate_if_cold"):
@@ -5154,6 +5276,10 @@ def create_app(
         if not session_id or not goal:
             return JSONResponse(status_code=400, content={
                 "error": "session_id and goal are required"})
+        # Device scoping: a desktop task runs inside a chat session, so it is the
+        # session's owner who may start one there.
+        if not _access.admit(_scope(request), session_id):
+            return _unknown_session()
         for key in ("app", "text", "target"):
             if body.get(key) is not None and not isinstance(body.get(key), str):
                 return JSONResponse(status_code=400, content={
@@ -5174,12 +5300,14 @@ def create_app(
             "app": task.app, "session_id": task.session_id})
 
     @app.get("/api/computer/tasks/{task_id}")
-    async def computer_task_get(task_id: str):
+    async def computer_task_get(task_id: str, request: Request):
         runner, err = _door_runner()
         if err is not None:
             return err
         task = runner.get(task_id)
-        if task is None:
+        # The task carries its goal text and session id: a device reads only its own.
+        # (STOP below stays open to every valid token on purpose — it can only end a task.)
+        if task is None or not _access.owns(_scope(request), task.session_id):
             return JSONResponse(status_code=404, content={"error": "no such task"})
         return task.as_dict()
 
@@ -5906,7 +6034,7 @@ def create_app(
         return {"ok": True, "count": len(items)}
 
     @app.post("/api/stories/{story_pk}/dispatch")
-    async def dispatch_story(story_pk: str, body: dict):
+    async def dispatch_story(story_pk: str, body: dict, request: Request):
         """Send a story's task to a gateway session, then stamp it in-progress.
 
         Reuses the same ws_bridge path as POST /api/chat/send. Matches the web
@@ -5921,6 +6049,9 @@ def create_app(
         session_key = str(body.get("session_key", "")).strip()
         if not session_key:
             return JSONResponse(status_code=400, content={"error": "session_key is required"})
+        # This writes a user turn into session_key: a device may do that only in its own.
+        if not _access.admit(_scope(request), session_key):
+            return _unknown_session()
 
         bridge = getattr(app.state, "ws_bridge", None)
         if bridge is None or not hasattr(bridge, "dispatch_user_message"):
