@@ -834,6 +834,58 @@ def test_only_a_marked_device_may_mark_another(rest):
     assert rest.store.computer_allowed(rest.other["id"])
 
 
+# ── who may remove a mark ────────────────────────────────────────────────────
+#
+# W3: a person marks, and a person is an allowlisted Telegram sender or a device already marked. Removing a mark
+# never grants anything, but a device marked a minute ago must not be able to strip the owner's: a device removes
+# only its OWN mark; anyone else's takes Telegram (/computer disallow <device id>) or the daemon's API token.
+
+def _put_mark(rest, target, token, on):
+    return rest.client.put(f"/api/devices/{target}/computer", json={"computer": on}, headers=_h(token))
+
+
+def test_a_newly_marked_device_cannot_strip_the_owners_mark(rest):
+    assert _put_mark(rest, rest.other["id"], rest.phone["token"], True).status_code == 200
+    res = _put_mark(rest, rest.phone["id"], rest.other["token"], False)
+    assert res.status_code == 403 and res.json()["error"] == "only_own_mark", res.text
+    assert rest.store.computer_allowed(rest.phone["id"]), "the owner's mark must still be there"
+
+
+def test_a_marked_device_may_remove_its_own_mark(rest):
+    res = _put_mark(rest, rest.phone["id"], rest.phone["token"], False)
+    assert res.status_code == 200 and res.json() == {"id": rest.phone["id"], "computer": False}, res.text
+    assert not rest.store.computer_allowed(rest.phone["id"])
+
+
+def test_the_api_token_may_remove_any_mark_but_never_set_one(rest):
+    res = _put_mark(rest, rest.phone["id"], TOKEN, False)
+    assert res.status_code == 200, res.text
+    assert not rest.store.computer_allowed(rest.phone["id"])
+    res = _put_mark(rest, rest.phone["id"], TOKEN, True)
+    assert res.status_code == 401 and res.json()["error"] == "not_a_person", res.text
+    assert not rest.store.computer_allowed(rest.phone["id"])
+    assert _put_mark(rest, "no-such-device", TOKEN, False).status_code == 404
+
+
+def test_an_unmarked_owner_device_is_not_a_person(rest):
+    """An owner device passes the route gate (it is the operator) and the door still asks for a person: owning
+    the Mac is not the mark."""
+    owner = rest.store.mint_owner("Will's Mac", "macos", by="test")
+    for target, on in ((rest.other["id"], True), (rest.phone["id"], False)):
+        res = _put_mark(rest, target, owner["token"], on)
+        assert res.status_code == 401 and res.json()["error"] == "not_a_person", (on, res.text)
+    assert rest.store.computer_allowed(rest.phone["id"]) and not rest.store.computer_allowed(rest.other["id"])
+
+
+def test_marks_chain_a_device_a_marked_device_marked_may_mark_a_third(rest):
+    """W3 ("from Telegram or an existing device"): a device marked by a marked device is a person too."""
+    third = rest.store.mint("laptop", "macos")
+    assert _put_mark(rest, rest.other["id"], rest.phone["token"], True).status_code == 200
+    res = _put_mark(rest, third["id"], rest.other["token"], True)
+    assert res.status_code == 200, res.text
+    assert rest.store.computer_allowed(third["id"])
+
+
 def _desk_prompt(rest, *, arguments):
     from prometheus.permissions.approval_queue import PendingAction
 
