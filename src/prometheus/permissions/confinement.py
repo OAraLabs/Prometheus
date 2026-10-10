@@ -762,11 +762,11 @@ def floor_report(
     if unsupported:
         read_detail = "this platform has neither AppArmor nor sandbox-exec"
     elif read in (MODE_REQUIRED, MODE_AUTO):
-        key = _read_cache_key(PROFILE)
+        read_key = _read_cache_key(PROFILE)
         if probe:
             read_ok, read_detail = _read_preflight(PROFILE)
-        elif key in _preflight_cache:
-            read_ok, read_detail = _preflight_cache[key]
+        elif read_key in _preflight_cache:
+            read_ok, read_detail = _preflight_cache[read_key]
         # The tool wraps with the read floor (aa-exec, or sandbox-exec on a Mac)
         # whenever it is required, and in auto once it verified, so the write
         # probe carries the same prefix: that is the argv the next call gets.
