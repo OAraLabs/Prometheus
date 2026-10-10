@@ -365,13 +365,15 @@ oara token rotate   # invalidate + mint a new one
 curl -H "Authorization: Bearer $(oara token show | head -1)" http://localhost:8005/api/status
 ```
 
-### Run as a systemd service (Linux)
+### Run as a service (Linux and macOS)
 
 ```bash
-oara install-service          # writes ~/.config/systemd/user/prometheus.service
+oara install-service          # Linux: writes ~/.config/systemd/user/prometheus.service
 systemctl --user start prometheus
 journalctl --user -u prometheus -f
 ```
+
+On macOS the same command writes a LaunchAgent (`~/Library/LaunchAgents/com.oaralabs.prometheus.daemon.plist`) instead; add `--now` to load it immediately, otherwise launchd loads it at your next login. It exits non-zero when it could not install or enable the service (a differing file refused without `--force`, another supervisor already owning the job, or `systemctl` / `launchctl` missing). The [install guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/install.md) has the details.
 
 ### When something is off
 
