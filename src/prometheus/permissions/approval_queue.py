@@ -10,11 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 from uuid import uuid4
 
+from prometheus.engine.tool_context import RUN_SESSION
 from prometheus.permissions.approver import Approver
 from prometheus.permissions.argument_view import (
     format_arguments,
@@ -77,8 +79,13 @@ class PendingAction:
     #: Beacon's card) formats it for its own width.
     arguments: "dict[str, Any] | None" = None
     #: A desktop task's prompt (computer-use v1.1, the door): which task and
-    #: which chat session asked. None for every other tool's request.
+    #: which chat session asked. None for a request raised outside any task.
     task_id: str | None = None
+    #: The conversation that raised this request: a desktop prompt names it, and
+    #: every other request is stamped at creation with the run in progress
+    #: (``engine.tool_context.RUN_SESSION``), None outside a run. It is NOT on the
+    #: wire (``serialize_pending`` still adds it only for a desktop prompt): it is
+    #: how a scoped device is shown, and may answer, only its own sessions' calls.
     session_id: str | None = None
     #: APPROVE-ONCE ONLY. A door prompt never offers a lasting scope: one
     #: "always" on "Click the push button 'Send'" would mint a grant for every
@@ -426,10 +433,34 @@ class ApprovalQueue:
         self._timeout = timeout_seconds
         self._default_chat_id = default_chat_id
         self.pending: dict[str, PendingAction] = {}
+        # Where each request came from, kept after the request leaves ``pending`` so a resolution frame is
+        # routed exactly like the request's: request id -> (session id or None, is a desktop prompt).
+        self._origins: OrderedDict[str, tuple[str | None, bool]] = OrderedDict()
         # Late-wired SignalBus (daemon.py sets it after the bus exists, same
         # pattern as extractor/skill_creator). While None, emission silently
         # skips — behavior identical to pre-push-approval builds.
         self.signal_bus = None
+
+    #: How many requests' origins are remembered. A request lives minutes; this is a ring, not an archive.
+    ORIGINS_REMEMBERED = 512
+
+    def _register(self, action: PendingAction) -> None:
+        """Make *action* pending, and remember where it came from.
+
+        The one place a request becomes pending (the desktop channel, a subclass, uses it too), so the origin
+        log cannot miss one. Who may SEE a request (a scoped device sees its own sessions', over REST and over
+        the WebSocket) is decided from this: ``origin_of``.
+        """
+        self.pending[action.request_id] = action
+        self._origins[action.request_id] = (action.session_id, action.task_id is not None)
+        self._origins.move_to_end(action.request_id)
+        while len(self._origins) > self.ORIGINS_REMEMBERED:
+            self._origins.popitem(last=False)
+
+    def origin_of(self, request_id: str) -> tuple[str | None, bool] | None:
+        """``(session id, is a desktop prompt)`` for a request this queue raised, or None if it never did
+        (or it is older than the log). Outlives the pending entry."""
+        return self._origins.get(request_id)
 
     def serialize_pending(self, action: PendingAction) -> dict:
         """The canonical wire shape of one pending request.
@@ -592,8 +623,9 @@ class ApprovalQueue:
             # forget to scrub. Storing the raw dict and scrubbing per surface
             # is how one surface ends up echoing a secret.
             arguments=redact_arguments(arguments),
+            session_id=RUN_SESSION.get(),
         )
-        self.pending[request_id] = action
+        self._register(action)
         await self._emit("approval_pending", self.serialize_pending(action))
 
         # Send notification via Telegram
@@ -873,6 +905,14 @@ class ApprovalQueues:
         for q in self._queues:
             if request_id in (getattr(q, "pending", {}) or {}):
                 return q
+        return None
+
+    def origin_of(self, request_id: str) -> tuple[str | None, bool] | None:
+        """The first queue that knows where this request came from (see ``ApprovalQueue.origin_of``)."""
+        for q in self._queues:
+            found = getattr(q, "origin_of", lambda _rid: None)(request_id)
+            if found is not None:
+                return found
         return None
 
     def list_pending(self) -> list[PendingAction]:
