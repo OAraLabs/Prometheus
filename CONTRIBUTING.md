@@ -98,7 +98,7 @@ routes) or `gateway/` WS auth — make sure the web stack is installed first.
 
 ## What to Work On
 
-Check the GitHub issues or the roadmap in README.md. Good first contributions:
+Check the GitHub issues. Good first contributions:
 
 - Adding a new gateway adapter (follow the pattern in `gateway/telegram.py`)
 - Adding a new builtin tool (follow the pattern in `tools/builtin/`)
