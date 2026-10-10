@@ -46,6 +46,8 @@ stage_before() {
     info "no quarantine flag: Gatekeeper will not check it at first open (how Beacon's own download behaves)"
   fi
   if codesign --verify --deep --strict "$APP" 2>/dev/null; then pass "signature is intact"; else fail "codesign --verify failed"; fi
+  if codesign --verify --deep --strict '-R=anchor apple generic and certificate leaf[subject.OU] = "53JM8W47RL"' "$APP" 2>/dev/null; then
+    pass "signed by team 53JM8W47RL (code requirement)"; else fail "the signature does not satisfy the 53JM8W47RL requirement"; fi
   codesign -dvv "$APP" 2>&1 | grep -E '^(Identifier|TeamIdentifier|Authority=Developer ID Application|Timestamp)' | sed 's/^/        /' | tee -a "$REPORT"
   verdict="$(spctl -a -t exec -vv "$APP" 2>&1)"; say "        $(printf '%s' "$verdict" | tr '\n' ' ')"
   case "$verdict" in *"source=Notarized Developer ID"*) pass "Gatekeeper accepts it as Notarized Developer ID" ;; *) fail "Gatekeeper does not call it Notarized Developer ID" ;; esac

@@ -219,8 +219,10 @@ Reuses Beacon's approach: sign by SHA-1 fingerprint (two certificates in this ke
 so the name is ambiguous), inside-out, every Mach-O with hardened runtime and a secure timestamp,
 entitlements starting at none and added only when a failing run proves one is needed. Then
 `notarytool submit --wait`, **staple the app**, `ditto -c -k --keepParent`, and verify the *stapled app*
-with `codesign --verify --deep --strict`, `xcrun stapler validate` and `syspolicy_check distribution`.
-Not `spctl -t exec` on nested executables, which gave wrong answers on Beacon's own release.
+with `codesign --verify --deep --strict` and the team requirement, `xcrun stapler validate`,
+`syspolicy_check distribution` and `spctl` on the bundle. `stapler` is for the build machine, which has
+Xcode; a client does not run it (see the contract below). Not `spctl -t exec` on nested executables, which
+gave wrong answers on Beacon's own release.
 
 Assets on the release: `Prometheus-<version>-arm64.zip`, the alias `Prometheus-mac-arm64.zip` (so the
 `latest` URL never changes) and `prometheus-mac.json` (version, sha256, size, team id, bundle id, min
@@ -243,8 +245,18 @@ list of team ids). Launcher: `Prometheus.app/Contents/MacOS/Prometheus`. Agent l
 `Prometheus-mac-arm64.zip`, and `prometheus-mac.json` (version, sha256, size, team id, bundle id, minimum
 macOS, the interpreter pin and the lock's hash). The zip is made with `ditto -c -k --keepParent`, holds one
 `Prometheus.app`, and the app is stapled. Check, in this order, before moving it anywhere:
-`codesign --verify --deep --strict`, the bundle id and team, `xcrun stapler validate`, and
-`syspolicy_check distribution`. Do not use `spctl -t exec` on nested executables.
+
+1. `codesign --verify --deep --strict -R='anchor apple generic and certificate leaf[subject.OU] = "53JM8W47RL"'`
+   on the bundle: the signature is intact AND it is this team's (a valid Developer ID signature by anyone
+   else fails it). A client that pins a list of team ids joins one clause per team with `or`.
+2. The bundle id (`com.oaralabs.prometheus`).
+3. Gatekeeper on the BUNDLE: `spctl -a -t exec -vv` must say `accepted` and `source=Notarized Developer ID`.
+   It answers the same with or without the downloaded-file flag, and it reads the stapled ticket.
+4. On macOS 14 or later, `syspolicy_check distribution` passes.
+
+Not `xcrun stapler validate`: on a Mac without the developer tools `/usr/bin/stapler` is an Xcode shim that
+opens the "install the command line developer tools" dialog. The build machine checks the staple; Gatekeeper's
+answer is the client's. Do not use `spctl -t exec` on nested executables.
 
 **Launcher modes** (run the executable directly; each prints one JSON line with `ok`, `state`, `detail`,
 `agent`, `app_version`, and exits with the code shown):

@@ -4,16 +4,22 @@
     python packaging/macos/verify_app.py dist/macos/Prometheus-0.9.7-arm64.zip --notarized
 
 Beacon downloads the app with Node, so the file carries no quarantine flag and Gatekeeper never
-assesses it: Beacon's own checks are the only gate. These are the same questions, asked at build time:
+assesses it: Beacon's own checks are the only gate. These are the same questions, asked at build time, plus
+the ones only a build machine can ask:
 
 * codesign --verify --deep --strict passes, and the bundle satisfies the requirement
   ``anchor apple generic and certificate leaf[subject.OU] = "<team>"``: valid is not enough, it must be OURS;
 * the bundle and EVERY Mach-O inside it: Developer ID Application, the team, hardened runtime, a secure
   timestamp, arm64 only, and no entitlements (until a failing run proves one is needed);
 * the Info.plist and the bundled LaunchAgent plist agree, and the agent runs the launcher;
-* with --notarized: the ticket is stapled (``stapler validate``), ``syspolicy_check distribution`` passes
-  (it lists the CDHash of every nested item), and ``spctl --assess`` on the BUNDLE says
-  "Notarized Developer ID".
+* with --notarized: ``spctl --assess`` on the BUNDLE says "Notarized Developer ID" and
+  ``syspolicy_check distribution`` passes (it lists the CDHash of every nested item) — the client's questions —
+  and, for the BUILD MACHINE only, the ticket is stapled (``stapler validate``).
+
+A CLIENT never runs ``stapler``: on a Mac without the developer tools ``/usr/bin/stapler`` is an Xcode shim that
+opens the "install the command line developer tools" dialog. The client checks are the codesign requirement,
+Gatekeeper (``spctl -a -t exec`` on the bundle) and ``syspolicy_check`` on macOS 14 or later
+(docs/design/macos-app-installer.md, the contract section; packaging/macos/clean_mac_check.sh runs them).
 
 ``spctl -t exec`` on nested executables is deliberately never asked: on Beacon's own notarized release it
 rejected helpers that Apple had accepted, so its answer is wrong, not strict.
