@@ -8,7 +8,7 @@ Prometheus is built for local inference first — llama.cpp or Ollama on your ow
 
 Prometheus talks to any inference server over HTTP; localhost or remote, it doesn't care.
 
-- **llama.cpp** (`provider: llama_cpp`, default port 8080) — the first-class backend. This is the only backend that gets **GBNF grammar enforcement**: when the model is asked to emit a tool call, Prometheus sends a grammar that makes malformed JSON structurally impossible at the token level. Controlled by `model.grammar_enforcement: true` (the default). The loaded model is auto-detected from the server at startup — swap the GGUF, restart, done.
+- **llama.cpp** (`provider: llama_cpp`, default port 8080) — the first-class backend. This is the only backend that gets **GBNF grammar enforcement**: when the server isn't parsing the model's tool calls natively (adapter tier `full`, or a round that forces a tool), Prometheus sends a grammar, so tool calls are constrained while the model is still generating. Models the server parses natively (tier `light`) send their tools in the request and get no Prometheus grammar. Controlled by `model.grammar_enforcement: true` (the default). The loaded model is auto-detected from the server at startup — swap the GGUF, restart, done.
 - **Ollama** (`provider: ollama`, default port 11434) — fully supported, and the default fallback (`model.fallback_provider`).
 - **LM Studio, vLLM, LiteLLM, Together, …** — anything that serves the OpenAI-compatible chat API works: use `provider: openai` with a `base_url` pointing at it. `oara setup` probes the standard ports for all four local servers (llama.cpp :8080, Ollama :11434, LM Studio :1234, vLLM :8000) and writes the config for whichever it finds.
 
