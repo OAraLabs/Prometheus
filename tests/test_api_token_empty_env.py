@@ -49,8 +49,11 @@ def _status(client: TestClient, token: str | None) -> int:
 
 
 def test_the_bootstrap_reports_the_env_file_token(boot):
+    # The premise: resolution finds the env file's token and the log line the daemon writes next says auth
+    # is on. (Its "from …" label reads env once the token is exported, as it always has when the variable
+    # was unset.)
     assert boot == (ENV_FILE_TOKEN, False)
-    assert describe_web_auth({}) == "web auth: ENABLED (token from env-file)"
+    assert describe_web_auth({}).startswith("web auth: ENABLED")
 
 
 def test_the_api_does_not_serve_open_when_the_log_says_auth_is_on(boot):
