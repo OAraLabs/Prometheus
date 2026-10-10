@@ -611,7 +611,8 @@ class WebSocketBridge:
                     return
             if session_id and content:
                 await self._handle_send_message(session_id, content, client_msg_id=client_msg_id,
-                                                mode=mode, tool_choice=tool_choice, blocks=blocks)
+                                                mode=mode, tool_choice=tool_choice, blocks=blocks,
+                                                **({} if self._scope(websocket).unrestricted else {"operator": False}))
 
         elif cmd_type == "chat_upload":
             # File upload from Beacon: { type: "chat_upload", payload: {
@@ -880,7 +881,7 @@ class WebSocketBridge:
 
     async def dispatch_user_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
-        tool_choice: object | None = None, blocks: list[Any] | None = None
+        tool_choice: object | None = None, blocks: list[Any] | None = None, operator: bool = True
     ) -> None:
         """Public dispatch entry point — kicks off the same flow as a WS-borne
         ``send_message`` command.
@@ -905,6 +906,7 @@ class WebSocketBridge:
         await self._handle_send_message(
             session_id, content, client_msg_id=client_msg_id, mode=mode,
             tool_choice=tool_choice, **({"blocks": blocks} if blocks else {}),
+            **({} if operator else {"operator": False}),
         )
 
     async def resolve_references(self, session_id: str, refs: list[Any]) -> list[Any]:
@@ -1045,9 +1047,13 @@ class WebSocketBridge:
 
     async def _handle_send_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
-        tool_choice: object | None = None, blocks: list[Any] | None = None
+        tool_choice: object | None = None, blocks: list[Any] | None = None, operator: bool = True
     ) -> None:
         """Process a user message — add to session and run agent loop if context available.
+
+        *operator* is False when a SCOPED device typed it: a slash command then runs only if it is one a scoped
+        device may use (``web/route_access.SCOPED_SLASH_COMMANDS``). It defaults to True so every internal
+        caller (notes, uploads, Paperclip) is unchanged.
 
         A leading-slash message is a command (web parity for Telegram's
         CommandHandler): it's handled here and broadcast back, NOT added to the
@@ -1092,6 +1098,8 @@ class WebSocketBridge:
                     session_manager=self.session_mgr,
                     computer_runner=self.computer_runner,
                 ),
+                # Only when False, so a router double that predates the keyword still works.
+                **({} if operator else {"operator": False}),
             )
         if outcome is not None and outcome.handled:
             await self._broadcast_command_reply(

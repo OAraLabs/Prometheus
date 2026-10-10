@@ -1472,6 +1472,9 @@ def create_app(
         await bridge.dispatch_user_message(
             session_id, message, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice,
             **({"blocks": blocks} if blocks else {}),
+            # A scoped device's commands are default-deny (web/route_access.SCOPED_SLASH_COMMANDS). The keyword
+            # rides only when it is False, so a duck-typed bridge that predates it still works.
+            **({} if _scope(request).unrestricted else {"operator": False}),
         )
         return {"run_id": idempotency_key, "status": "sent"}
 

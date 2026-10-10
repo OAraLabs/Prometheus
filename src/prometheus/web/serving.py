@@ -3,7 +3,7 @@
 uvicorn, at its defaults, trusts ``X-Forwarded-For`` (and ``X-Forwarded-Proto``) from any client on
 127.0.0.1 and REWRITES the request's client address from it before the application sees the request.
 Everything in this daemon that keys on "who is this" reads that address: the per-source limits on the
-unauthenticated pairing routes and on hello, and the same-Mac checks (``is_loopback_peer``). So a process on
+unauthenticated pairing routes and on hello, and the same-Mac checks (``is_same_machine``). So a process on
 the machine, or a reverse proxy on it that passes a caller's own header through, could pick its own source
 with one header and rotate it to get a fresh rate-limit budget on every request. The Beacon session found it
 testing against the real daemon; Starlette's test client has no such middleware, so nothing in the suite

@@ -114,6 +114,18 @@ MARKED_DEVICE_ALLOWED: frozenset[tuple[str, str]] = frozenset({
     ("PUT", "/api/devices/{device_id}/computer"),          # only a person marks another
 })
 
+#: The slash commands a scoped device may type. A message that is a command is not a conversation turn and runs
+#: with the OPERATOR's authority (``/gate off`` turns the permission gate off for the whole process, ``/revoke``
+#: removes a grant, and a dozen read daemon-wide state), so a scoped device's chat is default-deny here too: this
+#: is ``/help`` and the commands that act on the device's own session. Any other known command is answered with a
+#: refusal in the chat and does nothing. An unknown ``/word`` is still just text for the agent.
+SCOPED_SLASH_COMMANDS: frozenset[str] = frozenset({
+    "help",
+    "reset", "clear",                        # empty its own session's history
+    "steer", "queue", "unqueue", "clearsteers",
+    "ephemeral",                             # its own session's flag
+})
+
 #: Everything else the app registers: the operator's (the global token or an owner device). Listed so that a
 #: new route cannot arrive unclassified; the middleware denies a scoped device these whether or not they are
 #: listed. Includes the operator halves of the pairing routes, which also check ``is_operator`` themselves.

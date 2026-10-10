@@ -424,10 +424,11 @@ Beacon, Telegram and the CLI can all answer. The first decision wins; every othe
 | `GET /api/network` | no | yes (read) | yes | yes |
 | `PUT /api/network` | no | 403 | yes | yes |
 | `GET /api/devices` | no | **its own row only** | all | all |
-| `POST /api/devices`, MCP-server definition (unchanged, #696) | no | 401 | 401 | yes |
+| `POST /api/devices`, MCP-server definition (#696) | no | **403 `operator_only`** (the gate; it was the handler's 401) | 401 (the handler: not root) | yes |
+| everything not listed in this table and not in `web/route_access.py`'s allowlist (cron, provider keys, config, grants, files, MCP, `/v1/*`...) | no | **403 `operator_only`** | yes | yes |
 | `pairing_*` WebSocket frames | n/a | not sent | sent | sent |
 
-The operator test is `identity.is_operator` (#696), read from `request.state.device_identity` on REST and `bridge._ws_identity[ws]` on the socket; both are set from the registry. With auth off (no global token) #692's `scope_for` treats everyone as the operator; pairing is unavailable there anyway (4). The Telegram button, when enabled, is authorised by `chat_allowed` and a private chat, the same test every Telegram command uses.
+**A scoped device is default-deny** (`web/route_access.py`, `docs/contracts/device-scoping.md` section 7): it may use hello, its own device, chat, its own sessions, and approve or deny the tool calls of its own sessions with `once` or `until-restart`; every other route, and every slash command but `/help` and the commands on its own session, is refused. An approved phone is not a smaller owner; it is a chat client. The operator test is `identity.is_operator` (#696), read from `request.state.device_identity` on REST and `bridge._ws_identity[ws]` on the socket; both are set from the registry. With auth off (no global token) #692's `scope_for` treats everyone as the operator; pairing is unavailable there anyway (4). The Telegram button, when enabled, is authorised by `chat_allowed` and a private chat, the same test every Telegram command uses.
 
 **Status codes.** No token, or a dead one: `401`, from the gate. A live scoped device on an operator route: **`403 operator_only`**. That is #692's answer for a device acting on something it may not (it revokes another device with a 403), and it is deliberate: a client that treats 401 as "this token is dead, re-pair" (the Mac app's contract does) would otherwise throw away a healthy device's credential because it pressed the wrong button. `POST /api/devices` keeps its own 401, which #696 left alone ("the wrong credential for this route, not a lesser one").
 

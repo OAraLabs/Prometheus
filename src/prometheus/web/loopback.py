@@ -35,6 +35,15 @@ THE PUBLIC SURFACE (stable names and signatures; another change imports them)
     that sets forwarded headers, uvicorn's proxy handling reports the forwarded
     client here, so this answers for the real client, not the proxy.
 
+``is_same_machine(request_or_scope) -> bool``
+    Stricter, and the one to use before an action meant only for the person at
+    this machine (same-Mac pairing, minting an owner device): a loopback peer
+    AND no ``X-Forwarded-For`` / ``Forwarded`` header. A local reverse proxy
+    (``tailscale serve``, ``cloudflared``) connects from loopback and relays
+    requests from anywhere, and a ``web.trusted_proxies`` range that is too wide
+    lets a forged header rewrite the client to 127.0.0.1; either way the request
+    was relayed, which the header gives away."
+
 Two further names are internal to the web layer: :class:`LoopbackHostGuard` (an
 ASGI middleware) and :func:`guard_if_loopback`.
 
