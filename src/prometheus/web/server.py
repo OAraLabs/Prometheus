@@ -28,6 +28,7 @@ from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import is_loopback_host_header, is_same_machine
 from prometheus.web.route_access import SCOPED_APPROVE_SCOPES, is_scoped_allowed
 from prometheus.web.public_routes import is_public_route
+from prometheus.web.serving import bound_port
 from prometheus.web.session_scope import (
     Scope,
     SessionAccess,
@@ -534,12 +535,17 @@ def create_app(
             config, devices=_devices_or_create(),
             name=_clean_device_name(body.get("name"), api_token_module.DEFAULT_OWNER_DEVICE_NAME))
         logger.info("Same-Mac pairing successful (secret consumed; credential value never logged)")
+        # The ports this daemon is LISTENING on, read from its own sockets. The config says what was asked for at
+        # start; it may have been edited since, or have asked for 0, and a client told the wrong port pairs and
+        # then cannot connect. The config answers only when no listener can be asked (Starlette's test client).
+        bridge = getattr(request.app.state, "ws_bridge", None)
         return {
             "token": issued.token,
             # Additive: how many earlier owner credentials of this Mac this pairing replaced.
             "revoked_previous": issued.revoked_previous,
-            "api_base_port": int(web_cfg.get("api_port", 8005) or 8005),
-            "ws_port": int(web_cfg.get("ws_port", 8010) or 8010),
+            "api_base_port": bound_port(getattr(request.app.state, "http_server", None))
+                             or int(web_cfg.get("api_port", 8005) or 8005),
+            "ws_port": getattr(bridge, "bound_port", None) or int(web_cfg.get("ws_port", 8010) or 8010),
         }
 
     def _clean_device_name(raw: Any, default: str) -> str:
@@ -5505,16 +5511,31 @@ def create_app(
 
     @app.put("/api/devices/{device_id}/computer")
     async def computer_device_mark(device_id: str, request: Request):
-        """Mark a device for computer use. Only a person: a device that is
-        itself marked (the first mark comes from Telegram: /computer allow)."""
+        """Mark a device for computer use, or remove a mark.
+
+        Marking is a person's act (W3): a device that is itself marked; the
+        first mark comes from Telegram (/computer allow). Removing a mark never
+        grants anything, but a device marked a minute ago must not strip the
+        owner's: a device removes only its OWN mark, and anyone else's takes
+        Telegram (/computer disallow) or the daemon's API token. The token may
+        remove a mark and never set one (a model can read it)."""
+        from prometheus.permissions import approver as _approver
+
         runner, err = _door_runner()
-        if err is not None:
-            return err
-        by, err = _door_person(request, runner)
         if err is not None:
             return err
         body = await _door_body(request)
         on = body.get("computer") is True
+        by = _approver.from_request(request)
+        if on or by.kind != _approver.GLOBAL_TOKEN:
+            by, err = _door_person(request, runner)
+            if err is not None:
+                return err
+            if not on and not (by.kind == _approver.DEVICE and by.id == device_id):
+                return JSONResponse(status_code=403, content={
+                    "error": "only_own_mark",
+                    "detail": ("A device may remove only its own computer-use mark. Removing another device's "
+                               "mark takes Telegram (/computer disallow <device id>) or the API token.")})
         if not _devices_or_create().set_computer(device_id, on, by=by.label):
             return JSONResponse(status_code=404, content={"error": "no live device"})
         return {"id": device_id, "computer": on}

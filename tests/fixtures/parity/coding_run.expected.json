@@ -501,7 +501,7 @@
        "coding task cparity01: calc.add returns the wrong result. Fix add() in calc.py so that it returns the sum. Do not modify test_calc.py.",
        "/tmp/prometheus-parity/home",
        "/tmp/prometheus-parity/home/.prometheus/data/tasks/<task:1>.log",
-       "<python> -m prometheus code --repo /tmp/prometheus-parity/ws/calc --task 'calc.add returns the wrong result. Fix add() in calc.py so that it returns the sum. Do not modify test_calc.py.' --acceptance 'python test_calc.py' --task-id cparity01 --max-rounds 12 --max-wall-seconds 900 --control-dir /tmp/prometheus-parity/home/.prometheus/coding/control/cparity01",
+       "<python> -P -s -m prometheus code --repo /tmp/prometheus-parity/ws/calc --task 'calc.add returns the wrong result. Fix add() in calc.py so that it returns the sum. Do not modify test_calc.py.' --acceptance 'python test_calc.py' --task-id cparity01 --max-rounds 12 --max-wall-seconds 900 --control-dir /tmp/prometheus-parity/home/.prometheus/coding/control/cparity01",
        null,
        "<time>",
        "<time>",

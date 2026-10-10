@@ -26,7 +26,6 @@ import logging
 import os
 import shlex
 import signal
-import sys
 import time
 import weakref
 from collections.abc import Mapping, Sequence
@@ -44,6 +43,7 @@ from prometheus.tasks.types import (
     TaskType,
 )
 from prometheus.tasks.watchers import poll_until, watch_for_file
+from prometheus.utils.child_python import prometheus_argv
 
 if TYPE_CHECKING:
     from prometheus.tasks.store import TaskStore
@@ -335,8 +335,9 @@ class BackgroundTaskManager:
             # A Mac has no `python` at all ("command not found"), and where
             # one exists it is rarely the interpreter Prometheus is installed
             # in (a Homebrew install lives in its own venv), so the child died
-            # before it started: "No module named ..." (WP-X.24).
-            cmd = [sys.executable, "-m", "prometheus"]
+            # before it started: "No module named ..." (WP-X.24). And with -P -s, so a
+            # module in the task's directory never shadows a real one (utils/child_python.py).
+            cmd = prometheus_argv()
             if model:
                 cmd.extend(["--model", model])
             command = " ".join(shlex.quote(part) for part in cmd)
