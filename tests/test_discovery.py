@@ -376,3 +376,56 @@ def test_what_we_advertise_is_acceptable_to_zeroconfs_own_validation():
                             addresses=["192.168.1.20"])
         assert isinstance(info, zeroconf.ServiceInfo) and info.port == 8005
         assert info.type == SERVICE_TYPE and info.name.endswith("." + SERVICE_TYPE)
+
+
+# ── the reason it is not advertising has a stable code next to the English ───
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs, code", [
+    (dict(mode=THIS_MAC, bind="127.0.0.1"), "this_mac_only"),
+    (dict(mode=OPEN, bind="0.0.0.0"), "not_home_network"),
+    (dict(mdns=False), "mdns_disabled"),
+    (dict(adapters=[adapter("utun3", ip("10.9.8.7"))]), "no_usable_address"),
+])
+async def test_not_advertising_has_a_code(kwargs, code):
+    advertiser, _, _, _ = rig(**kwargs)
+    await advertiser.start()
+    assert advertiser.status.advertising is False and advertiser.status.code == code
+    assert advertiser.status.reason, "the English is still there"
+    await advertiser.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_missing_library_and_a_failed_registration_have_codes():
+    def no_zeroconf(addresses):
+        raise ImportError("No module named 'zeroconf'")
+
+    advertiser, _, _, _ = rig(factory=no_zeroconf)
+    await advertiser.start()
+    assert advertiser.status.code == "library_missing"
+    await advertiser.stop()
+
+    def refuses(addresses):
+        return FakeBackend(addresses, [], fail_register=OSError("multicast not permitted"))
+
+    advertiser, _, _, _ = rig(factory=refuses)
+    await advertiser.start()
+    assert advertiser.status.code == "registration_failed" and "OSError" in advertiser.status.reason
+    await advertiser.stop()
+
+
+@pytest.mark.asyncio
+async def test_advertising_has_no_reason_and_no_code_and_a_stop_has_its_own():
+    advertiser, _, _, _ = rig()
+    assert advertiser.status.code == "not_started"
+    await advertiser.start()
+    assert (advertiser.status.advertising, advertiser.status.reason, advertiser.status.code) == (True, None, None)
+    await advertiser.stop()
+    assert advertiser.status.code == "stopped"
+
+
+def test_the_advertiser_codes_are_the_documented_set():
+    from prometheus.web import discovery
+
+    assert set(discovery.REASON_CODES) == {"not_started", "mdns_disabled", "this_mac_only", "not_home_network",
+                                           "no_usable_address", "library_missing", "registration_failed", "stopped"}

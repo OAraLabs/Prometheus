@@ -83,24 +83,24 @@ def test_home_network_needs_the_switch_and_a_way_to_run_it():
     both = NetworkSettings(home_network=True, allow_plaintext_lan=True)
     state = describe("0.0.0.0", "config", both)
     assert state.mode == HOME
-    assert any("plain HTTP" in w for w in state.warnings), "plaintext on the LAN is said out loud, every time"
+    assert any("plain HTTP" in w.message for w in state.warnings), "plaintext on the LAN is said out loud, every time"
 
 
 def test_home_network_without_tls_or_the_opt_out_is_refused_and_reported_open():
     state = describe("0.0.0.0", "config", NetworkSettings(home_network=True))
     assert state.mode == OPEN
-    assert any("allow_plaintext_lan" in w for w in state.warnings)
+    assert any("allow_plaintext_lan" in w.message for w in state.warnings)
 
 
 def test_a_tls_listener_makes_home_network_safe_without_the_opt_out():
     state = describe("0.0.0.0", "config", NetworkSettings(home_network=True), tls=True)
-    assert state.mode == HOME and not any("plain HTTP" in w for w in state.warnings)
+    assert state.mode == HOME and not any("plain HTTP" in w.message for w in state.warnings)
 
 
 def test_the_switch_on_a_loopback_bind_says_it_cannot_work_there():
     state = describe("127.0.0.1", "config", NetworkSettings(home_network=True, allow_plaintext_lan=True))
     assert state.mode == THIS_MAC
-    assert any("loopback" in w or "this machine only" in w for w in state.warnings)
+    assert any("loopback" in w.message or "this machine only" in w.message for w in state.warnings)
 
 
 def test_a_specific_lan_address_counts_as_reaching_the_lan():
@@ -110,6 +110,54 @@ def test_a_specific_lan_address_counts_as_reaching_the_lan():
 def test_the_state_says_where_the_bind_came_from():
     state = describe("127.0.0.1", "flag", NetworkSettings())
     assert (state.bind, state.bind_source) == ("127.0.0.1", "flag")
+
+
+# ── every warning has a stable code next to its English ──────────────────────
+# Beacon writes its own plain-language copy from the code; the English stays as `message` for everything else
+# (the log, `oara doctor`, a client that has no copy yet). A code is a promise: it does not change when the
+# wording does, and a new situation gets a new code rather than reusing one.
+
+def _codes(state) -> set[str]:
+    return {w.code for w in state.warnings}
+
+
+def test_a_notice_is_a_code_and_the_english():
+    from prometheus.web.network import Notice
+
+    notice = Notice("plain_http_on_lan", "some words")
+    assert (notice.code, notice.message) == ("plain_http_on_lan", "some words")
+    assert notice.as_json() == {"code": "plain_http_on_lan", "message": "some words"}
+
+
+@pytest.mark.parametrize("bind, settings, tls, expected", [
+    ("127.0.0.1", NetworkSettings(home_network=True), False, {"home_network_on_loopback"}),
+    ("0.0.0.0", NetworkSettings(home_network=True, allow_plaintext_lan=True), False, {"plain_http_on_lan"}),
+    ("0.0.0.0", NetworkSettings(home_network=True), False, {"home_network_unavailable", "listening_on_all_interfaces"}),
+    ("0.0.0.0", NetworkSettings(), False, {"listening_on_all_interfaces"}),
+    ("192.0.2.20", NetworkSettings(), False, set()),                       # one specific address: no wide-open warning
+    ("127.0.0.1", NetworkSettings(), False, set()),
+    ("0.0.0.0", NetworkSettings(home_network=True), True, set()),         # TLS: safe, nothing to say
+])
+def test_each_situation_has_its_code(bind, settings, tls, expected):
+    assert _codes(describe(bind, "config", settings, tls=tls)) == expected
+
+
+def test_the_codes_are_the_documented_set_and_every_message_is_english_words():
+    from prometheus.web import network
+
+    produced = set()
+    for bind, settings in (("127.0.0.1", NetworkSettings(home_network=True)),
+                           ("0.0.0.0", NetworkSettings(home_network=True, allow_plaintext_lan=True)),
+                           ("0.0.0.0", NetworkSettings(home_network=True)),
+                           ("0.0.0.0", NetworkSettings())):
+        for notice in describe(bind, "config", settings).warnings:
+            assert notice.code == notice.code.lower() and " " not in notice.code
+            assert len(notice.message.split()) > 3, "the English is a sentence, not a repeat of the code"
+            produced.add(notice.code)
+    assert produced <= set(network.WARNING_CODES)
+    assert set(network.WARNING_CODES) == {"home_network_on_loopback", "plain_http_on_lan",
+                                          "home_network_unavailable", "listening_on_all_interfaces",
+                                          "restart_required"}
 
 
 # ── saving a choice ──────────────────────────────────────────────────────────
