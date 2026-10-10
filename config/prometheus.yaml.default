@@ -1166,6 +1166,17 @@ web:
   api_token:            # required — no code default
   dashboard_port: 3002
 
+# Pairing — how a new device finds this Prometheus and joins it
+# (docs/PAIRING-APPROVAL-API.md). Only the keys the daemon reads today are
+# listed; the rest of the section arrives with the routes that read it.
+pairing:
+  # The name shown to devices that are not paired yet: in GET /api/hello (which
+  # anyone who can reach the port can call), in the local-network
+  # advertisement, and on the Approve prompt. Empty = this computer's own name
+  # (macOS ComputerName, else the host name). At most 64 characters; control
+  # characters are removed.
+  display_name: ""
+
 # APNs push to enrolled devices (GRAFT-MOBILE-BRIDGE 2). Disabled by default:
 # enabling requires the `push` extra (pip install 'oara-prometheus[push]')
 # and an Apple p8 signing key — an enabled-but-broken block FAILS THE BOOT
@@ -1308,6 +1319,25 @@ computer_use:
   # text is ever stored — the text is a character count.
   action_log:
     keep_per_session: 200
+  # Cockpit level 2 (v1.1 PR 6b): a thumbnail of the APPROVED WINDOW after
+  # each executed step, for a person watching from a phone. It never reaches
+  # a model, a chat, a push, a log or telemetry, and it is never stored by
+  # default. Only sockets that authenticated with a DEVICE token marked for
+  # computer use, that declared the `computer-thumbnails` capability, and
+  # that are on this session receive it — never the global token.
+  #
+  # The 256 KB frame cap and the password-field skip are FLOORS in code, not
+  # keys: a misconfiguration cannot lift them. Any doubt skips the picture
+  # and says why on the step (window_changed, incomplete_walk,
+  # password_field, frame_invalid, capture_failed, too_large, no_viewer).
+  thumbnails:
+    enabled: true
+    max_dimension: 480     # longest edge, px; scaled by the driver, not here
+    # OPT-IN, and the one key whose wrong answer writes desktop pixels to
+    # disk — so a malformed value parses to false, never to true. When on:
+    # <data>/computer/thumbnails/<task_id>/<seq>.<ext>, mode 0600, pruned
+    # with the action log. No route serves these in v1.1.
+    persist: false
 
 anatomy:
   enabled: true

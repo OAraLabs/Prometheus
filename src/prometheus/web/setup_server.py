@@ -701,7 +701,10 @@ def _pair_with_local_secret(
             "attempts_remaining": pairing.attempts_remaining,
             "detail": "wrong or already-used pairing secret",
         })
-    token = api_token_module.issue_owner_credential(None)
+    # Setup mode has no device registry (setup creates no ~/.prometheus state) and its mutations
+    # authenticate with the global token, so the credential here IS the global token, by name. The
+    # client trades it for an owner device token once the daemon is configured.
+    token = api_token_module.issue_setup_credential(None).token
     logger.info("Same-Mac pairing successful (secret consumed; credential value never logged)")
     return JSONResponse(status_code=200, content={
         "token": token,
@@ -725,6 +728,7 @@ def create_setup_app(
     flag: the real route surface must be unreachable in setup mode, so
     it simply is not mounted. Routes:
 
+    - ``GET  /api/hello``           → (public) the six-field "is there a Prometheus here"
     - ``GET  /api/setup/status``    → mode + pairing availability + configured
     - ``POST /api/setup/pair``      → code → real API token
     - ``GET  /api/setup/detect``    → (authed) probe inference backends
@@ -739,6 +743,7 @@ def create_setup_app(
     :class:`~prometheus.web.bind.BindError`.
     """
     from prometheus import __version__
+    from prometheus.web import hello as hello_mod
 
     api_port = api_port if api_port is not None else resolve_setup_port()
     ws_port = ws_port if ws_port is not None else resolve_setup_ws_port()
@@ -753,6 +758,15 @@ def create_setup_app(
     # Same fail-closed rule as the main app: a mistyped query parameter is an error, not a
     # right-looking answer. Set before any route is registered. See web/strict_query.py.
     app.router.route_class = StrictQueryRoute
+
+    # Public like the pairing routes below, and there is no bearer gate here to refuse a browser or
+    # limit a peer, so the shared route does both itself (web/hello.py).
+    _hello_limiter = hello_mod.new_limiter()
+
+    @app.get("/api/hello")
+    async def hello(request: Request) -> JSONResponse:
+        return hello_mod.hello_response(
+            request, _hello_limiter, lambda: hello_mod.build_hello(None, setup_mode=True))
 
     @app.get("/api/setup/status")
     async def setup_status() -> dict[str, Any]:
