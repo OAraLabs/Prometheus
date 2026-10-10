@@ -1119,6 +1119,37 @@ web:
   enabled: true
   api_port: 8005
   ws_port: 8010
+  # Which network interface the REST API (api_port), the WebSocket bridge
+  # (ws_port) and setup mode listen on. One setting for all three.
+  #
+  #   (unset)       0.0.0.0, every interface. What the daemon has always done,
+  #                 and what reaching it from another machine over Tailscale
+  #                 or a LAN needs. A config that predates the loopback default
+  #                 and leaves it unset keeps that; `oara doctor` warns about it.
+  #   "0.0.0.0"     the same, chosen on purpose (doctor does not warn).
+  #   "127.0.0.1"   this machine only. Other machines cannot connect at all, and
+  #                 a request whose Host header is not localhost, 127.0.0.1 or
+  #                 [::1] is refused (a defence against DNS rebinding).
+  #   "::1"         IPv6 loopback.
+  #   "100.x.y.z"   one specific interface address, e.g. this machine's tailnet
+  #                 address.
+  #
+  # Overridden, highest first, by `oara daemon --bind ADDRESS` and by the
+  # PROMETHEUS_WEB_BIND environment variable (also read from the env file).
+  # Only an IPv4/IPv6 address or "localhost" is accepted; anything else makes
+  # the daemon refuse to start. It never falls back to a wider address.
+  #
+  # There is no TLS: this is plain HTTP and ws:// on whichever interface you
+  # name. On 0.0.0.0 the bearer token is the only access control between the
+  # API and everyone who can reach this machine's network address.
+  #
+  # Shipped EMPTY (= unset = 0.0.0.0), not commented out, so the key shows in
+  # docs/reference/config-keys.md and a config that sets it is not flagged as
+  # drift. This file is a reference, not what setup writes: `oara setup`, the
+  # wizard and setup mode write `bind: 127.0.0.1` into a NEW prometheus.yaml and
+  # never change an existing one. A headless box set up from another machine is
+  # therefore loopback-only afterwards until its owner sets the bind here.
+  bind:                  # e.g. "127.0.0.1"
 
 # Image generation — the image_generate tool's backend selection + per-backend
 # settings. CLOUD EXPANSION (2026-07) adds the PAID DashScope backend (WAN 2.5).

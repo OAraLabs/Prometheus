@@ -7,12 +7,17 @@ client→server commands (send_message, switch_session).
 Usage:
     from prometheus.web.ws_server import WebSocketBridge
     bridge = WebSocketBridge(signal_bus, session_mgr, loop_context)
-    await bridge.start(host="0.0.0.0", port=8010)
+    await bridge.start(host="127.0.0.1", port=8010)
+
+``host`` is whatever the daemon resolved from ``--bind`` / ``PROMETHEUS_WEB_BIND``
+/ ``web.bind`` (web/bind.py). This server binds it itself, separately from the
+REST server: forcing uvicorn to loopback leaves this one on every interface.
 """
 
 from __future__ import annotations
 
 import asyncio
+import http
 import json
 import logging
 import time
@@ -20,6 +25,8 @@ from typing import Any
 
 from prometheus.engine import loop_watchdog as _loop_watchdog
 from prometheus.version import package_version
+from prometheus.web.bind import DEFAULT_BIND
+from prometheus.web.loopback import is_loopback_address, is_loopback_host_header
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +97,39 @@ def _client_label(ws: Any) -> str:
     except Exception:
         pass
     return f"id={id(ws):x}"
+
+
+def _loopback_process_request(connection: Any, request: Any) -> Any:
+    """Refuse a WebSocket handshake whose Host header is not a loopback name.
+
+    Installed only when the bridge is bound to a loopback address (DNS-rebinding
+    defence, see web/loopback.py). Runs before the upgrade, so a refused client
+    gets an HTTP 403 and never reaches ``_handler``.
+
+    Two library generations call a ``process_request`` hook differently. The
+    asyncio implementation (``websockets.serve`` from 14, and
+    ``websockets.asyncio.server``) passes ``(connection, request)`` and wants a
+    response built with ``connection.respond``; the legacy one (12, 13) passes
+    ``(path, request_headers)`` and wants a ``(status, headers, body)`` tuple.
+    Both are handled so the guard does not depend on which one is installed.
+    """
+    headers = getattr(request, "headers", request)
+    try:
+        hosts = list(headers.get_all("Host"))
+    except Exception:  # unreadable headers: refuse, never guess
+        hosts = []
+    if len(hosts) == 1 and is_loopback_host_header(hosts[0]):
+        return None
+    shown = hosts[0] if len(hosts) == 1 else f"{len(hosts)} Host headers"
+    logger.warning(
+        "refused a WebSocket handshake: its Host header %r is not a loopback "
+        "name, and the bridge is bound to a loopback address (see web.bind)",
+        shown if len(str(shown)) <= 100 else str(shown)[:100] + "...",
+    )
+    message = "Forbidden: this server only answers requests addressed to localhost\n"
+    if hasattr(connection, "respond"):
+        return connection.respond(http.HTTPStatus.FORBIDDEN, message)
+    return http.HTTPStatus.FORBIDDEN, [("Content-Type", "text/plain")], message.encode()
 
 
 class WebSocketBridge:
@@ -222,8 +262,12 @@ class WebSocketBridge:
         that only need pass/fail)."""
         return self._auth_identity(raw) is not None
 
-    async def start(self, host: str = "0.0.0.0", port: int = 8010) -> None:
-        """Start the WebSocket server."""
+    async def start(self, host: str = DEFAULT_BIND, port: int = 8010) -> None:
+        """Start the WebSocket server on *host*.
+
+        A loopback *host* also turns on the Host-header check (DNS rebinding);
+        any other host is left unrestricted, as before.
+        """
         try:
             import websockets
         except ImportError:
@@ -239,6 +283,7 @@ class WebSocketBridge:
             host,
             port,
             max_size=WS_MAX_FRAME_BYTES,
+            process_request=_loopback_process_request if is_loopback_address(host) else None,
         )
         logger.info("WebSocket bridge listening on ws://%s:%d", host, port)
 
