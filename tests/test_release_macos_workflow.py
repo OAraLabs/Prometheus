@@ -6,9 +6,14 @@ shape that keeps those secrets where they belong and keeps a quiet failure from 
 
 * it runs on a tag push or a manual dispatch only, never on a pull request;
 * every action is pinned to a commit SHA (the repo's rule, and a signing job is the last place to relax it);
-* the certificate secrets reach ONE step (the keychain import), the notarization secrets reach only the
-  build step, and the mode decision sees booleans, not values;
-* the temporary keychain is deleted even when the build fails;
+* the certificate secrets reach ONE step (the keychain import), the notarization secrets reach ONE step (the
+  one that stores them in a keychain profile, from stdin, never on an argv), and the mode decision sees
+  booleans, not values;
+* the job runs in the ``release`` environment (a required reviewer approves every run before a secret is
+  released to it), and the checkout keeps no git credential;
+* nothing resolves fresh: the tools come from hashed pins, the wheel's build backend too, and the wheel is
+  built BEFORE the certificate is on the runner, so the only fetched code that runs never runs beside it;
+* the temporary keychain and the decoded .p12 are deleted even when the build fails;
 * nothing is published unless the run was signed AND notarized AND verified, and `continue-on-error` is
   not used anywhere (release.yml's header explains what a green job that did nothing costs);
 * the tag must equal the built version, because an asset published under the wrong tag is a release.
@@ -22,7 +27,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release-macos.yml"
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = ROOT / ".github" / "workflows" / "release-macos.yml"
+RELEASE_TOOLS = ROOT / "packaging" / "macos" / "release-tools.txt"
+SECRETS_SCRIPT = ROOT / "packaging" / "macos" / "set_release_secrets.sh"
 SHA = re.compile(r"^[^@\s]+@[0-9a-f]{40}(\s|$)")
 
 
@@ -76,15 +84,83 @@ def test_the_certificate_secrets_reach_exactly_one_step(wf):
         assert "!= ''" in str(value) or "== ''" in str(value), f"the mode step must not hold a secret: {value}"
 
 
-def test_the_notarization_secrets_reach_only_the_build_step(wf):
-    holders = [s for s in _steps(wf) if "secrets.APPLE_" in _text(s)
-               and s.get("id") != "mode"]
-    assert len(holders) == 1
-    assert "build_app.py" in holders[0]["run"] and "--notarize" in holders[0]["run"]
+def test_the_notarization_password_goes_into_a_keychain_profile_from_stdin_and_never_onto_an_argv(wf):
+    """`ps` shows every process's arguments; `notarytool submit --wait` runs for up to 40 minutes."""
+    holders = [s for s in _steps(wf) if "secrets.APPLE_" in _text(s) and s.get("id") != "mode"]
+    assert len(holders) == 1, [h.get("name") for h in holders]
+    store = holders[0]
+    run = store["run"].replace("\\\n", " ")
+    assert re.search(r"printf '%s(\\n)?' \"\$APPLE_APP_SPECIFIC_PASSWORD\"\s*\|\s*xcrun notarytool store-credentials", run), run
+    assert "--keychain" in run
+    build = next(s for s in _steps(wf) if "--notarize" in s.get("run", ""))
+    assert "secrets." not in _text(build), "the build step holds no secret at all"
+    assert "--notary-profile" in build["run"] and "--notary-keychain" in build["run"]
+    for step in _steps(wf):
+        assert "--password" not in step.get("run", ""), step.get("name")
+
+
+def test_the_job_runs_in_the_release_environment(wf):
+    for name, job in wf["jobs"].items():
+        environment = job.get("environment")
+        assert environment == "release" or (isinstance(environment, dict) and environment.get("name") == "release"), name
+
+
+def test_the_checkout_leaves_no_git_credential_behind(wf):
+    checkout = next(s for s in _steps(wf) if "actions/checkout@" in s.get("uses", ""))
+    assert (checkout.get("with") or {}).get("persist-credentials") is False
+
+
+def test_the_tools_are_installed_from_hashed_pins_and_nothing_resolves_fresh(wf):
+    install = [s for s in _steps(wf) if "pip install" in s.get("run", "")]
+    assert len(install) == 1, [s.get("name") for s in install]
+    run = install[0]["run"]
+    assert "--require-hashes" in run and "--only-binary :all:" in run
+    assert "-r packaging/macos/release-tools.txt" in run and "--upgrade" not in run
+    for step in _steps(wf):
+        text = step.get("run", "")
+        assert "uvx" not in text and "--with " not in text, f"{step.get('name')} resolves a package fresh"
+
+
+def test_the_release_tools_are_pinned_and_hashed():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("macos_build_app", ROOT / "packaging" / "macos" / "build_app.py")
+    build_app = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build_app)
+    text = RELEASE_TOOLS.read_text(encoding="utf-8")
+    build_app.require_hashes(text)
+    pins = re.findall(r"^([a-z0-9][a-z0-9._-]*)==([^\s;]+)", text, re.M)
+    assert {name for name, _ in pins} >= {"uv", "packaging"}, pins
+    assert all(not line.strip() or line.lstrip().startswith(("#", "--hash")) or "==" in line
+               for line in text.splitlines()), "every requirement is pinned with =="
+
+
+def test_the_wheel_is_built_before_the_certificate_is_on_the_runner(wf):
+    steps = _steps(wf)
+    wheel = next(i for i, s in enumerate(steps) if "--wheel-only" in s.get("run", ""))
+    keychain = next(i for i, s in enumerate(steps) if "security import" in s.get("run", ""))
+    assert wheel < keychain, [s.get("name") for s in steps]
+    assert "secrets." not in _text(steps[wheel])
+    build = next(s for s in steps if "--notarize" in s.get("run", ""))
+    assert "--wheel " in build["run"], "the signing build installs the wheel built before the import"
+
+
+def test_the_decoded_p12_is_deleted_even_when_a_step_fails(wf):
+    cleanup = [s for s in _steps(wf) if "rm -f" in s.get("run", "") and "prometheus-signing.p12" in s.get("run", "")
+               and "always()" in str(s.get("if"))]
+    assert len(cleanup) == 1
+
+
+def test_the_secrets_script_sets_them_on_the_release_environment():
+    text = SECRETS_SCRIPT.read_text(encoding="utf-8")
+    sets = [line for line in text.splitlines() if "gh secret set" in line and not line.lstrip().startswith("#")]
+    assert sets and all("--env" in line for line in sets), sets
+    assert re.search(r'^ENVIRONMENT="release"', text, re.M)
+    assert "environments/" in text, "it checks the environment exists before setting anything"
 
 
 def test_the_build_signs_by_the_fingerprint_it_found_in_its_own_keychain(wf):
-    build = next(s for s in _steps(wf) if "build_app.py" in s.get("run", ""))
+    build = next(s for s in _steps(wf) if "--notarize" in s.get("run", ""))
     assert "--identity" in build["run"]
     assert "build_app.py" in build["run"] and "PYTHONPATH" in _text(build)
     keychain = next(s for s in _steps(wf) if "security import" in s.get("run", ""))
@@ -152,6 +228,6 @@ def test_a_published_release_is_never_modified(wf):
 
 def test_the_release_build_cannot_include_pymupdf(wf):
     """PyMuPDF is AGPL-3.0; the app ships without it by default. CI must not opt back in."""
-    build = next(s for s in _steps(wf) if "build_app.py" in s.get("run", ""))
+    build = next(s for s in _steps(wf) if "--notarize" in s.get("run", ""))
     assert "--include-pymupdf" not in build["run"]
     assert "--without" not in build["run"] or "pymupdf" in build["run"]

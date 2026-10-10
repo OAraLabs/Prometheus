@@ -100,7 +100,9 @@ cross-volume move. Those need the real build and a clean machine.
    waits until per-device credentials and a restrictive default permission mode have landed.
 2. **Notarization credentials.** Will runs `xcrun notarytool store-credentials prometheus --apple-id <id>
    --team-id 53JM8W47RL` (it prompts for the app-specific password; it is never seen here). CI needs five
-   repository secrets, listed in the header of `release-macos.yml`. Neither exists yet.
+   secrets on the repository's `release` environment (a required reviewer releases them run by run), listed in
+   the header of `release-macos.yml` and set by `packaging/macos/set_release_secrets.sh`; the job stores the
+   notarization ones as a keychain profile from stdin, so no argv ever holds the password. Neither exists yet.
 3. **A clean machine.** A Tart macOS VM at the acceptance step. The exact image and size are shown and
    Will is asked before it is pulled (about 20 GB of the 48 GiB free).
 4. **Scope.** Bind, same-Mac pairing, the app and `install-service` as separate draft PRs. Per-device

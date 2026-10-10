@@ -1,10 +1,15 @@
 #!/bin/bash
-# set_release_secrets.sh: set the five repository secrets .github/workflows/release-macos.yml needs, in one go.
+# set_release_secrets.sh: set the five secrets .github/workflows/release-macos.yml needs, in one go, on the
+# repository's `release` ENVIRONMENT (not as repository secrets).
 #
-#   packaging/macos/set_release_secrets.sh [--repo OAraLabs/Prometheus] [--dry-run]
+#   packaging/macos/set_release_secrets.sh [--repo OAraLabs/Prometheus] [--env release] [--dry-run]
 #
 # It asks for the values and never prints them. They go straight to `gh secret set` on stdin, so they are not
 # in argv, the shell history, or a file.
+#
+# Why an environment: the release job runs in `release`, whose required reviewer approves each run before any
+# of these secrets reaches it. Create the environment first (Settings → Environments → New environment →
+# "release" → Required reviewers); this script stops if it does not exist rather than create an unprotected one.
 #
 # Why per repository: the owner (OAraLabs) is a user account, not an organization, so there are no
 # organization secrets to share, and GitHub never lets a secret be read back. beacon-desktop's copies cannot
@@ -26,24 +31,32 @@
 # different repository; this workflow attaches to a draft release in its own repo with the job's token.
 
 REPO="OAraLabs/Prometheus"; DRY=0
+ENVIRONMENT="release"
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
+    --env) ENVIRONMENT="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
-    *) echo "usage: $0 [--repo OWNER/NAME] [--dry-run]"; exit 2 ;;
+    *) echo "usage: $0 [--repo OWNER/NAME] [--env NAME] [--dry-run]"; exit 2 ;;
   esac
 done
 
 set_secret() {  # name, value (via stdin)
   if [ "$DRY" -eq 1 ]; then
-    n=$(wc -c | tr -d ' '); echo "  [dry run] would set $1 on $REPO ($n bytes)"
+    n=$(wc -c | tr -d ' '); echo "  [dry run] would set $1 on $REPO, environment $ENVIRONMENT ($n bytes)"
   else
-    gh secret set "$1" --repo "$REPO" >/dev/null && echo "  set $1"
+    gh secret set "$1" --env "$ENVIRONMENT" --repo "$REPO" >/dev/null && echo "  set $1"
   fi
 }
 
-[ "$DRY" -eq 1 ] || { gh auth status >/dev/null 2>&1 || { echo "gh is not signed in: run 'gh auth login' first."; exit 1; }; }
-echo "Setting release secrets on $REPO. Values are not shown."
+if [ "$DRY" -eq 0 ]; then
+  gh auth status >/dev/null 2>&1 || { echo "gh is not signed in: run 'gh auth login' first."; exit 1; }
+  gh api "repos/$REPO/environments/$ENVIRONMENT" >/dev/null 2>&1 || {
+    echo "$REPO has no '$ENVIRONMENT' environment. Create it first, with you as a required reviewer:"
+    echo "  Settings → Environments → New environment → $ENVIRONMENT → Required reviewers."
+    echo "Nothing was set."; exit 1; }
+fi
+echo "Setting release secrets on $REPO, environment $ENVIRONMENT. Values are not shown."
 
 read -r -p "Path to the Developer ID Application .p12: " P12
 P12="${P12/#\~/$HOME}"
@@ -73,4 +86,4 @@ printf '%s' "$P12PASS" | set_secret CSC_KEY_PASSWORD
 printf '%s' "$APPLE_ID" | set_secret APPLE_ID
 printf '%s' "$APPLE_PW" | set_secret APPLE_APP_SPECIFIC_PASSWORD
 printf '%s' "$TEAM" | set_secret APPLE_TEAM_ID
-echo "Done. Check names (never values) with: gh secret list --repo $REPO"
+echo "Done. Check names (never values) with: gh secret list --env $ENVIRONMENT --repo $REPO"

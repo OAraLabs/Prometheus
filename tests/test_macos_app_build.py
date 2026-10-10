@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import plistlib
+import re
 import subprocess
 from pathlib import Path
 
@@ -402,30 +403,89 @@ def test_the_index_text_names_the_copyleft_ones_first(app, tmp_path):
 
 # ── notarization credentials ─────────────────────────────────────────────────
 
-def test_notarytool_takes_a_keychain_profile_or_the_apple_id_trio(app):
-    assert app.notarytool_credential_args("prometheus", {}) == ["--keychain-profile", "prometheus"]
-    env = {"APPLE_ID": " me@example.com ", "APPLE_APP_SPECIFIC_PASSWORD": "abcd-efgh-ijkl-mnop\n",
-           "APPLE_TEAM_ID": "53JM8W47RL"}
-    assert app.notarytool_credential_args("", env) == [
-        "--apple-id", "me@example.com", "--password", "abcd-efgh-ijkl-mnop", "--team-id", "53JM8W47RL"]
-    # A profile wins: it keeps the password out of argv, which is why the local route uses one.
-    assert app.notarytool_credential_args("prometheus", env) == ["--keychain-profile", "prometheus"]
+def test_notarytool_is_told_who_asks_by_a_keychain_profile_and_nothing_else(app):
+    assert app.notarytool_credential_args("prometheus") == ["--keychain-profile", "prometheus"]
+    assert app.notarytool_credential_args("prometheus-ci", "/tmp/k.keychain-db") == [
+        "--keychain-profile", "prometheus-ci", "--keychain", "/tmp/k.keychain-db"]
 
 
-def test_missing_notarization_credentials_say_which_are_missing(app):
-    with pytest.raises(app.BuildError, match="APPLE_APP_SPECIFIC_PASSWORD"):
-        app.notarytool_credential_args("", {"APPLE_ID": "me@example.com", "APPLE_TEAM_ID": "53JM8W47RL"})
-    with pytest.raises(app.BuildError, match="credential"):
-        app.notarytool_credential_args("", {})
+def test_without_a_profile_the_error_says_how_to_make_one(app):
+    with pytest.raises(app.BuildError, match="store-credentials"):
+        app.notarytool_credential_args("")
 
 
-def test_a_failed_submission_never_echoes_the_password(app, tmp_path):
-    password = "abcd-efgh-ijkl-mnop"
-    env = {"APPLE_ID": "me@example.com", "APPLE_APP_SPECIFIC_PASSWORD": password, "APPLE_TEAM_ID": "53JM8W47RL"}
-    runner = _Runner([(("xcrun", "notarytool", "submit"), 1, f"Error: invalid credentials {password}")])
-    with pytest.raises(app.BuildError) as excinfo:
-        app.notarize(tmp_path / "Prometheus.app", "", tmp_path, runner=runner, env=env)
-    assert password not in str(excinfo.value)
+def test_no_notarytool_call_ever_carries_a_password_or_an_apple_id(app, tmp_path):
+    """`ps` shows every argument of every process, and `submit --wait` runs for up to 40 minutes."""
+    runner = _Runner([(("xcrun", "notarytool", "submit"), 0, '{"status": "Invalid", "id": "abc"}')])
+    with pytest.raises(app.BuildError, match="Invalid"):
+        app.notarize(tmp_path / "Prometheus.app", "prometheus-ci", tmp_path, runner=runner, keychain="/k.keychain-db")
+    notary = [c for c in runner.calls if c[:2] == ["xcrun", "notarytool"]]
+    assert [c[2] for c in notary] == ["submit", "log"]
+    for call in notary:
+        assert "--password" not in call and "--apple-id" not in call, call
+        assert call[call.index("--keychain-profile") + 1] == "prometheus-ci"
+        assert call[call.index("--keychain") + 1] == "/k.keychain-db"
+
+
+def test_a_notarized_build_without_a_profile_is_refused_before_anything_is_built(app):
+    with pytest.raises(SystemExit):
+        app.parse_args(["--identity", FINGERPRINT, "--notarize"])
+    assert app.parse_args(["--identity", FINGERPRINT, "--notarize", "--notary-profile", "p"]).notary_profile == "p"
+
+
+# ── the wheel ────────────────────────────────────────────────────────────────
+
+def test_the_wheel_is_built_with_its_build_backend_pinned_by_hash(app, tmp_path):
+    argv = [str(a) for a in app.wheel_argv(tmp_path)]
+    assert argv[:3] == ["uv", "build", "--wheel"] and "--require-hashes" in argv
+    constraints = Path(argv[argv.index("--build-constraints") + 1])
+    assert constraints == app.BUILD_CONSTRAINTS and constraints.is_file()
+    app.require_hashes(constraints.read_text(encoding="utf-8"))
+
+
+def test_every_build_requirement_in_pyproject_is_pinned_in_the_constraints(app):
+    import tomllib
+
+    requires = tomllib.loads((BUILD_APP.parents[2] / "pyproject.toml").read_text(encoding="utf-8"))["build-system"]["requires"]
+    text = app.BUILD_CONSTRAINTS.read_text(encoding="utf-8")
+    pinned = {app._normalise(m) for m in re.findall(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==", text, re.M)}
+    for requirement in requires:
+        name = app._normalise(re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", requirement).group(0))
+        assert name in pinned, f"{requirement} is a build requirement with no hashed pin"
+
+
+def _wheel(path: Path, name: str, version: str) -> Path:
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(f"{name.replace('-', '_')}-{version}.dist-info/METADATA",
+                         f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n")
+    return path
+
+
+def test_a_prebuilt_wheel_must_be_this_package_at_this_version(app, tmp_path):
+    good = _wheel(tmp_path / "oara_prometheus-0.9.6-py3-none-any.whl", "oara-prometheus", "0.9.6")
+    assert app.check_wheel(good, "0.9.6") == good.resolve()
+    with pytest.raises(app.BuildError, match="0.9.7"):
+        app.check_wheel(good, "0.9.7")
+    other = _wheel(tmp_path / "other-0.9.6-py3-none-any.whl", "something-else", "0.9.6")
+    with pytest.raises(app.BuildError, match="oara-prometheus"):
+        app.check_wheel(other, "0.9.6")
+    with pytest.raises(app.BuildError, match="no wheel"):
+        app.check_wheel(tmp_path / "missing.whl", "0.9.6")
+    (tmp_path / "junk.whl").write_bytes(b"not a zip")
+    with pytest.raises(app.BuildError, match="not a wheel"):
+        app.check_wheel(tmp_path / "junk.whl", "0.9.6")
+
+
+def test_the_wheel_only_run_needs_no_signing_identity_and_excludes_a_prebuilt_wheel(app):
+    args = app.parse_args(["--wheel-only", "--work", "/w"])
+    assert args.wheel_only and not args.identity
+    with pytest.raises(SystemExit):
+        app.parse_args([])                                     # a full build without --identity
+    with pytest.raises(SystemExit):
+        app.parse_args(["--wheel-only", "--wheel", "x.whl"])
+    assert app.parse_args(["--identity", FINGERPRINT, "--wheel", "x.whl"]).wheel == "x.whl"
 
 
 # ── what the release leaves out, and what it looks like ──────────────────────

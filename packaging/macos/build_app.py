@@ -2,7 +2,9 @@
 """Build Prometheus.app: a relocatable Python, the pinned wheels, a native launcher, signed.
 
     python packaging/macos/build_app.py --identity <SHA-1 of a Developer ID Application cert> \\
-        [--extras anthropic,mcp,slack,discord] [--without pymupdf] [--notarize --notary-profile NAME]
+        [--extras anthropic,mcp,slack,discord] [--without pymupdf] [--wheel PATH]
+        [--notarize --notary-profile NAME [--notary-keychain PATH]]
+    python packaging/macos/build_app.py --wheel-only      # just the wheel, into <work>/wheel
 
 Run it on an Apple-silicon Mac from a CLEAN checkout of the commit being released. The result is
 ``<out>/Prometheus-<version>-arm64.zip`` (a stapled app inside, when notarized), its stable alias
@@ -19,7 +21,12 @@ The decisions worth knowing before changing anything here:
   would make two builds of one commit different programs.
 * Dependencies come from ``uv export --frozen --hashes`` of uv.lock and install with
   ``--require-hashes --only-binary :all:``: nothing compiles on the build machine and nothing is
-  resolved fresh. Prometheus itself is the one wheel built from the checkout.
+  resolved fresh. Prometheus itself is the one wheel built from the checkout, and its build backend is
+  pinned by hash too (build-constraints.txt, ``--require-hashes``). The release job builds that wheel with
+  ``--wheel-only`` BEFORE the signing certificate is imported and hands it to the signing run with
+  ``--wheel``: the only fetched code that runs during a build then never runs beside the certificate.
+* Notarization credentials are a keychain profile and nothing else, so the app-specific password is never in
+  an argv (``ps`` shows every argument of every process, and ``submit --wait`` runs for up to 40 minutes).
 * Bytecode is compiled BEFORE signing, as ``unchecked-hash``: a signed bundle must never be written
   into at runtime, so it cannot cache bytecode itself, and a sealed file's mtime means nothing.
 * Everything is signed by SHA-1 fingerprint, never by name: two Developer ID Application certificates
@@ -42,7 +49,8 @@ import sys
 import tarfile
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterable, Mapping, Sequence
+import zipfile
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +75,10 @@ PBS_URL = (
 )
 
 DEFAULT_EXTRAS = ("anthropic", "mcp", "slack", "discord")
+
+# The wheel's build backend (pyproject.toml [build-system]) and its dependencies, pinned with hashes.
+BUILD_CONSTRAINTS = Path(__file__).resolve().parent / "build-constraints.txt"
+PACKAGE_NAME = "oara-prometheus"
 # Left out of the app unless someone opts back in with --include-pymupdf. PyMuPDF is AGPL-3.0 (or Artifex
 # commercial); Will's call, 2026-10-08, is that the app ships without it. What degrades without it: PDF text
 # extraction (utils/file_extract.py answers "[PDF file: name ... install PyMuPDF to extract text]") and the
@@ -272,6 +284,46 @@ def require_hashes(text: str) -> None:
             continue
         if not any("--hash=" in line for line in block):
             raise BuildError(f"requirement without a hash: {first.strip()[:80]}")
+
+
+# ── the wheel ────────────────────────────────────────────────────────────────
+
+def wheel_argv(out_dir: Path) -> list[str | Path]:
+    """``uv build`` with the build backend pinned by hash. With ``--require-hashes`` an unpinned or unhashed build
+    requirement is refused ("all requirements must be pinned upfront"), never resolved fresh from PyPI."""
+    return ["uv", "build", "--wheel", "--out-dir", out_dir, "--build-constraints", BUILD_CONSTRAINTS, "--require-hashes"]
+
+
+def check_wheel(path: Path, version: str) -> Path:
+    """The wheel the app installs must be THIS package at the version being built, by its own metadata.
+
+    A wheel built in an earlier step (the release job's, before the certificate exists) is accepted only on these
+    terms, so a stale or foreign file in the work directory cannot ship under this version's name.
+    """
+    if not path.is_file():
+        raise BuildError(f"no wheel at {path}: build one from this checkout with --wheel-only")
+    try:
+        with zipfile.ZipFile(path) as archive:
+            metadata = [n for n in archive.namelist() if n.count("/") == 1 and n.endswith(".dist-info/METADATA")]
+            if len(metadata) != 1:
+                raise BuildError(f"{path.name} is not a wheel: {len(metadata)} top-level METADATA files")
+            meta = email.parser.Parser().parsestr(archive.read(metadata[0]).decode("utf-8", errors="replace"))
+    except zipfile.BadZipFile as exc:
+        raise BuildError(f"{path.name} is not a wheel (not a zip)") from exc
+    name, found = (meta.get("Name") or "").strip(), (meta.get("Version") or "").strip()
+    if _normalise(name) != PACKAGE_NAME or found != version:
+        raise BuildError(f"{path.name} is {name or '?'} {found or '?'}, not {PACKAGE_NAME} {version}: "
+                         "build it from this checkout with --wheel-only")
+    return path.resolve()
+
+
+def build_wheel(wheel_dir: Path, version: str, runner: Runner = subprocess.run) -> Path:
+    shutil.rmtree(wheel_dir, ignore_errors=True)
+    _run(wheel_argv(wheel_dir), runner, cwd=REPO)
+    wheels = sorted(wheel_dir.glob("oara_prometheus-*.whl"))
+    if len(wheels) != 1:
+        raise BuildError(f"expected one oara_prometheus wheel in {wheel_dir}, found {len(wheels)}")
+    return check_wheel(wheels[0], version)
 
 
 # ── a dirty tree does not ship ───────────────────────────────────────────────
@@ -524,12 +576,7 @@ def assemble(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover - 
     py = py_root / "bin" / "python3.12"
     site = py_root / "lib" / "python3.12" / "site-packages"
 
-    wheel_dir = work / "wheel"
-    shutil.rmtree(wheel_dir, ignore_errors=True)
-    _run(["uv", "build", "--wheel", "--out-dir", wheel_dir], cwd=REPO)
-    wheels = sorted(wheel_dir.glob("oara_prometheus-*.whl"))
-    if len(wheels) != 1:
-        raise BuildError(f"expected one oara_prometheus wheel in {wheel_dir}, found {len(wheels)}")
+    wheel = check_wheel(Path(args.wheel), version) if args.wheel else build_wheel(work / "wheel", version)
 
     requirements = _run(
         ["uv", "export", "--frozen", "--no-dev", "--no-emit-project", *_extras_args(args.extras)], cwd=REPO,
@@ -542,7 +589,7 @@ def assemble(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover - 
     # override-dependencies --require-hashes refuses as unpinned. The exported file is the whole install.
     _run(["uv", "pip", "install", "--no-config", "--python", py, "--target", site, "--no-deps", "--require-hashes",
           "--only-binary", ":all:", "-r", req_file])
-    _run(["uv", "pip", "install", "--no-config", "--python", py, "--target", site, "--no-deps", wheels[0]])
+    _run(["uv", "pip", "install", "--no-config", "--python", py, "--target", site, "--no-deps", wheel])
     strip_build_traces(site)
 
     prune_python(py_root)
@@ -587,7 +634,7 @@ def assemble(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover - 
 
     asset = f"{APP_NAME}-{version}-arm64.zip"
     if args.notarize:
-        notarize(bundle, args.notary_profile, work)
+        notarize(bundle, args.notary_profile, work, keychain=args.notary_keychain)
     zip_path = out / asset
     zip_path.unlink(missing_ok=True)
     _run(["ditto", "-c", "-k", "--keepParent", bundle, zip_path])
@@ -606,31 +653,22 @@ def assemble(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover - 
     }
 
 
-def notarytool_credential_args(profile: str, env: Mapping[str, str]) -> list[str]:
-    """How notarytool is told who is asking. A keychain profile wins: the password then never appears
-    in argv (this Mac, run by a person). The Apple ID trio is the CI shape, on a throwaway runner whose
-    log masks secrets."""
-    if profile:
-        return ["--keychain-profile", profile]
-    names = ("APPLE_ID", "APPLE_APP_SPECIFIC_PASSWORD", "APPLE_TEAM_ID")
-    values = {name: (env.get(name) or "").strip() for name in names}
-    missing = [name for name, value in values.items() if not value]
-    if len(missing) == len(names):
+def wheel_only(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover - runs uv
+    require_clean_tree(REPO, allow_dirty=args.allow_dirty)
+    return {"wheel": str(build_wheel(Path(args.work).resolve() / "wheel", read_version()))}
+
+
+def notarytool_credential_args(profile: str, keychain: str = "") -> list[str]:
+    """How notarytool is told who is asking: a keychain profile, and nothing else, so the app-specific password is
+    never in an argv. On this Mac the profile is in the login keychain; the release job stores one in its
+    temporary keychain (from stdin) and names that keychain."""
+    if not profile:
         raise BuildError(
-            "no notarization credential: pass --notary-profile NAME (xcrun notarytool store-credentials NAME "
-            "--apple-id ... --team-id ...), or set APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID"
+            "no notarization credential: pass --notary-profile NAME, made once with `xcrun notarytool "
+            "store-credentials NAME --apple-id ... --team-id ...` (it asks for the password itself), and "
+            "--notary-keychain PATH when the profile is not in the default keychain"
         )
-    if missing:
-        raise BuildError("notarization credential is incomplete; missing " + ", ".join(missing))
-    return ["--apple-id", values["APPLE_ID"], "--password", values["APPLE_APP_SPECIFIC_PASSWORD"],
-            "--team-id", values["APPLE_TEAM_ID"]]
-
-
-def _redact(text: str, secrets_: Iterable[str]) -> str:
-    for value in secrets_:
-        if value:
-            text = text.replace(value, "***")
-    return text
+    return ["--keychain-profile", profile, *(["--keychain", keychain] if keychain else [])]
 
 
 # How long to wait for Apple. Past this the step FAILS and a person decides; the timeout is never raised
@@ -639,13 +677,10 @@ NOTARY_WAIT = "40m"
 
 
 def notarize(
-    bundle: Path, profile: str, work: Path, runner: Runner = subprocess.run, env: Mapping[str, str] | None = None,
+    bundle: Path, profile: str, work: Path, runner: Runner = subprocess.run, keychain: str = "",
 ) -> None:
-    """Submit, wait, staple, validate. A stalled or refused notarization is reported, never worked around,
-    and the password never appears in what is reported."""
-    environment = os.environ if env is None else env
-    credentials = notarytool_credential_args(profile, environment)
-    password = (environment.get("APPLE_APP_SPECIFIC_PASSWORD") or "").strip()
+    """Submit, wait, staple, validate. A stalled or refused notarization is reported, never worked around."""
+    credentials = notarytool_credential_args(profile, keychain)
     submit_zip = work / f"{bundle.stem}-submit.zip"
     try:
         submit_zip.unlink(missing_ok=True)
@@ -658,8 +693,6 @@ def notarize(
             raise BuildError(f"notarization {info.get('status')}: {log[-1500:]}")
         _run(["xcrun", "stapler", "staple", bundle], runner)
         _run(["xcrun", "stapler", "validate", bundle], runner)
-    except BuildError as exc:
-        raise BuildError(_redact(str(exc), [password])) from None
     finally:
         submit_zip.unlink(missing_ok=True)
 
@@ -670,7 +703,7 @@ def _csv(text: str) -> tuple[str, ...]:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build Prometheus.app (arm64).")
-    parser.add_argument("--identity", required=True, help="SHA-1 fingerprint of the Developer ID Application certificate")
+    parser.add_argument("--identity", default="", help="SHA-1 fingerprint of the Developer ID Application certificate")
     parser.add_argument("--extras", default=DEFAULT_EXTRAS, type=_csv)
     parser.add_argument("--without", default=DEFAULT_WITHOUT, type=_csv,
                         help="distributions to leave out of the bundle (default: pymupdf, which is AGPL-3.0)")
@@ -679,9 +712,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--work", default=str(REPO / "dist" / "macos" / "work"))
     parser.add_argument("--out", default=str(REPO / "dist" / "macos"))
     parser.add_argument("--notarize", action="store_true")
-    parser.add_argument("--notary-profile", default="")
+    parser.add_argument("--notary-profile", default="", help="a notarytool keychain profile (store-credentials)")
+    parser.add_argument("--notary-keychain", default="", help="the keychain holding that profile, if not the default")
+    wheel = parser.add_mutually_exclusive_group()
+    wheel.add_argument("--wheel", default="", help="install this prebuilt wheel instead of building one")
+    wheel.add_argument("--wheel-only", action="store_true",
+                       help="build the wheel into <work>/wheel and stop (the release job, before the certificate)")
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
+    if not args.wheel_only and not args.identity:
+        parser.error("--identity is required (the SHA-1 fingerprint of the Developer ID Application certificate)")
+    if args.notarize and not args.notary_profile:
+        parser.error("--notarize needs --notary-profile: notarization credentials are a keychain profile only")
     if args.include_pymupdf:
         args.without = tuple(x for x in args.without if x != "pymupdf")
     return args
@@ -690,7 +732,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - needs a Mac
     args = parse_args(argv)
     try:
-        summary = assemble(args)
+        summary = wheel_only(args) if args.wheel_only else assemble(args)
     except BuildError as exc:
         print(f"build_app: {exc}", file=sys.stderr)
         return 1
