@@ -351,8 +351,11 @@ class WebSocketBridge:
         try:
             await self._pairing.sweep()
             for payload in self._pairing.pending_payloads():
-                await self._send_one(websocket, {"type": "pairing_pending", "timestamp": time.time(),
-                                                 "payload": payload})
+                if await self._send_one(websocket, {"type": "pairing_pending", "timestamp": time.time(),
+                                                    "payload": payload}):
+                    # Shown to an operator, so the requester's `notified` is true for good, even if they are
+                    # gone before its next poll.
+                    self._pairing.mark_notified(payload["request_id"])
         except Exception:
             logger.warning("could not backfill pairing requests to %s", _client_label(websocket), exc_info=True)
 
@@ -2058,8 +2061,11 @@ class WebSocketBridge:
             "clients_discarded": self._clients_discarded,
         }
 
-    async def _send_one(self, websocket: Any, event: dict[str, Any]) -> None:
+    async def _send_one(self, websocket: Any, event: dict[str, Any]) -> bool:
+        """Send one event to one socket. True when it went; a socket that cannot take it is dropped."""
         try:
             await websocket.send(json.dumps(event))
         except Exception:
             self._clients.discard(websocket)
+            return False
+        return True
