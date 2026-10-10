@@ -16,7 +16,7 @@
 4. A request lives 5 minutes. Approve, deny, cancel and expiry are one-way and atomic; the first decision wins.
 5. Only four routes are reachable without a bearer token: `GET /api/hello` and the three requester routes under `/api/pair/requests`. They are an exact allowlist, tested.
 6. Discovery is a hint. mDNS TXT records and `/api/hello` are unauthenticated and can be forged; the code, and later the TLS pin, are what establish trust.
-7. The Mac app listens on this Mac only (its launcher passes `--bind 127.0.0.1`); `web.bind` itself still defaults to every interface, so a source or pip install reports `open` until its owner narrows it (D10). "Home network" mode listens on the LAN, and **I recommend it requires TLS with a pinned self-signed certificate** (section 7), because sealing the pairing token does nothing for the bearer token that every later request carries. Section 7 is the plan for that; it is built last, after Beacon confirms it will pin (D5).
+7. The Mac app listens on this Mac only (an app install's unset `web.bind` means `127.0.0.1`; its launcher no longer pins `--bind`, so the owner's switch can change it); `web.bind` itself still defaults to every interface, so a source or pip install reports `open` until its owner narrows it (D10). "Home network" mode listens on the LAN, and **I recommend it requires TLS with a pinned self-signed certificate** (section 7), because sealing the pairing token does nothing for the bearer token that every later request carries. Section 7 is the plan for that; it is built last, after Beacon confirms it will pin (D5).
 
 ### 0.1 Decisions for Will
 
@@ -512,7 +512,7 @@ All keys go in `config/prometheus.yaml.default` with the defaults below, are rea
 
 ```yaml
 web:
-  bind:                    # owned by #693; unset means 0.0.0.0 (D10). The Mac app passes --bind 127.0.0.1
+  bind:                    # owned by #693; unset means 0.0.0.0 (D10), and 127.0.0.1 on the Mac app (PROMETHEUS_INSTALL_KIND=app)
   tls_api_port: 8006
   tls_ws_port: 8011
 network:

@@ -45,6 +45,12 @@ from typing import Any
 #: The address used when nothing asks for another one. Every interface.
 DEFAULT_BIND = "0.0.0.0"
 
+#: The default on the Mac app (``PROMETHEUS_INSTALL_KIND=app``, set by its launcher): this machine only. The
+#: launcher no longer pins ``--bind``, which outranked the config file and so made the owner's network switch
+#: (``PUT /api/network``, which writes ``web.bind``) a dead letter on every app install; the lowest tier keeps
+#: the app on this Mac until its config says otherwise.
+APP_INSTALL_DEFAULT_BIND = "127.0.0.1"
+
 #: What a NEW config is written with (``oara setup``, the wizard, setup mode's ``configure``): this
 #: machine only. It is written, never defaulted to: an UNSET ``web.bind`` still means every interface, so a
 #: deployment set up before this existed (a Mac mini reached over Tailscale) keeps working untouched.
@@ -142,7 +148,13 @@ def resolve_bind(
         configured = web.get("bind")
         if configured is not None:
             return ResolvedBind(parse_bind(configured, _CONFIG_LABEL), "config")
-    return ResolvedBind(DEFAULT_BIND, "default")
+    return ResolvedBind(default_bind(environ), "default")
+
+
+def default_bind(env: Mapping[str, str] | None = None) -> str:
+    """The address when nothing chose one: this Mac only on the app install, every interface elsewhere."""
+    environ = os.environ if env is None else env
+    return APP_INSTALL_DEFAULT_BIND if environ.get("PROMETHEUS_INSTALL_KIND") == "app" else DEFAULT_BIND
 
 
 def is_all_interfaces(address: str) -> bool:
