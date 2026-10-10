@@ -104,7 +104,7 @@ from prometheus.web.bind import (
 from prometheus.web.loopback import (
     is_loopback_address,
     is_loopback_host_header,
-    is_loopback_peer,
+    is_same_machine,
 )
 
 logger = logging.getLogger("prometheus.setup_mode")
@@ -687,7 +687,7 @@ def _pair_with_local_secret(
             "error": "browser_not_allowed",
             "detail": "this route is for the app on this Mac, not for a web page",
         })
-    if not (is_loopback_peer(request) and is_loopback_host_header(request.headers.get("host"))):
+    if not (is_same_machine(request) and is_loopback_host_header(request.headers.get("host"))):
         logger.warning("Same-Mac pairing refused: the request did not come from this Mac")
         return JSONResponse(status_code=403, content={
             "error": "not_loopback",
