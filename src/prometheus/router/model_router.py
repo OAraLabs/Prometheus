@@ -348,7 +348,9 @@ OVERRIDE_PRESETS: dict[str, dict[str, Any]] = {
     "mimo": {
         "provider": "mimo",
         "api_key_env": "MIMO_API_KEY",
-        "model": "mimo-v2.5-pro",
+        # mimo-v2.5-pro is retired 2026-10-21 with no automatic replacement;
+        # v2.6-pro is Xiaomi's recommended model at the same price.
+        "model": "mimo-v2.6-pro",
     },
     "qwen": {
         "provider": "qwen",
@@ -400,6 +402,9 @@ PRESET_MODEL_CHOICES: dict[str, tuple[str, ...]] = {
         "gpt-5.6-luna",
         "gpt-5.6-terra",
         "gpt-5.6-sol",
+        # Answers only: OpenAI allows no tool calls for GPT-6 Astra over Chat
+        # Completions ("tool calling requires Responses"), which is the API
+        # every OpenAI route here speaks. A turn that calls a tool fails.
         "gpt-6-astra",
         "gpt-5-nano",
     ),
@@ -412,7 +417,7 @@ PRESET_MODEL_CHOICES: dict[str, tuple[str, ...]] = {
         "kimi-k2.7-code",
         "kimi-k2.7-code-highspeed",
     ),
-    "mimo": ("mimo-v2.5-pro", "mimo-v2.5"),
+    "mimo": ("mimo-v2.6-pro", "mimo-v2.6-flash"),
     "qwen": (
         # The current commercial text family per Alibaba's own model list
         # (2026-09-21). qwen3.7-max is NOT on it any more — its PRICING row

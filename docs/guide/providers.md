@@ -77,6 +77,8 @@ The Model Adapter Layer validates every tool call before execution and repairs w
 | `MEDIUM` | capable local models (Qwen, Gemma) | validation + repair, standard retries |
 | `NONE` | cloud APIs | passthrough — these providers already handle tool calling well |
 
+One repair runs at every strictness, though not for cloud providers, whose calls skip the adapter entirely: a `null` for an optional parameter is read as "not given", so it is dropped and the parameter's default applies (small local models write `"limit": null` for a parameter they mean to leave unset). It is recorded as a `null_drop` repair. A `null` for a required parameter is still refused.
+
 You normally don't set this by hand: cloud providers get `NONE` automatically, local models get a sensible default. With `adapter.adaptive_strictness: true` (off by default), the adapter tunes per-tool strictness from its own telemetry — if a tool's success rate over the last `strictness_window` calls (default 100) drops below `strictness_threshold` (default 0.8), that tool gets stricter handling.
 
 ## Cloud providers
@@ -92,7 +94,7 @@ Every cloud provider except Anthropic rides the same OpenAI-compatible wire form
 | DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-flash` |
 | Kimi (Moonshot) | `kimi` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
 | GLM (Z.ai / Zhipu) | `glm` | `ZAI_API_KEY` | `glm-5.3` |
-| MiMo (Xiaomi) | `mimo` | `MIMO_API_KEY` | `mimo-v2.5-pro` |
+| MiMo (Xiaomi) | `mimo` | `MIMO_API_KEY` | `mimo-v2.6-pro` |
 | Qwen (Alibaba Model Studio) | `qwen` | `QWEN_API_KEY` | `qwen3.8-max` |
 
 The defaults live in `src/prometheus/providers/registry.py` (`CLOUD_DEFAULTS`) and carry some hard-won footnotes:
@@ -166,7 +168,7 @@ slash_commands:
   mimo:
     provider: mimo
     api_key_env: MIMO_API_KEY
-    model: mimo-v2.5-pro
+    model: mimo-v2.6-pro
   qwen:
     provider: qwen
     api_key_env: QWEN_API_KEY

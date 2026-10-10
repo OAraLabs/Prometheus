@@ -191,12 +191,13 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     # the task manager) so a missing optional dep degrades gracefully rather than
     # breaking the whole registry build.
     from prometheus.tools.registration import try_register
-    # security.bash_confinement gates the kernel floor for bash. Default
-    # "off": Prometheus runs on hosts without AppArmor, and defaulting to
-    # "required" would refuse every bash call on them. That means the floor
-    # is NOT in force until an operator turns it on — stated plainly here
-    # because a security control that looks default-on and isn't is the
-    # false assurance this whole line of work exists to remove.
+    # security.bash_confinement gates the kernel READ floor for bash. Default
+    # "auto": where the AppArmor profile verifies it is "required"; where it
+    # does not, bash runs without it and that is said at boot (ERROR, with
+    # the fix — shell_floor.announce), in /api/status ("dark"), in doctor and
+    # in every call's metadata. Never "required" by default: Prometheus runs
+    # on hosts without AppArmor, where that would refuse every bash call. An
+    # explicit "off" stays off.
     # security.bash_write_confinement gates the kernel WRITE floor. Default
     # "auto" — unlike the read floor above, this one is attempted by default,
     # because bubblewrap needs no root and the hole it closes is live: the
@@ -204,9 +205,17 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     # "auto" cannot brick a host that has no bubblewrap (macOS has none); it
     # degrades to the previous behaviour and says so, at ERROR, once per
     # process and in each call's result metadata. "required" refuses instead.
+    #
+    # The SAME floors go to every other door that runs a model-written shell
+    # (task_create's shell and poll tasks, cron jobs): they read what is wired
+    # here, so the bash tool and those doors cannot be configured apart.
+    # PROCESS-WIDE: pass the process's real security section, never a
+    # placeholder — the last registry built is the floor every door uses.
+    from prometheus.security.shell_floor import ShellFloor, set_shell_floor
+    set_shell_floor(ShellFloor.from_security_config(security_cfg))
     registry.register(BashTool(
         workspace=workspace,
-        confinement=security_cfg.get("bash_confinement", "off"),
+        confinement=security_cfg.get("bash_confinement", "auto"),
         write_confinement=security_cfg.get("bash_write_confinement", "auto"),
         write_allow=security_cfg.get("bash_write_allow") or (),
         # Resource ceilings, set in the parent before exec. Defaults chosen
@@ -889,8 +898,13 @@ def create_lcm_engine(provider: ModelProvider):
 # System prompt
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(config: dict[str, Any]) -> str:
-    """Assemble the full system prompt."""
+def build_system_prompt(config: dict[str, Any], memory_content: str | None = None) -> str:
+    """Assemble the full system prompt.
+
+    *memory_content* is the file memory to render (None reads it now); the
+    REPL passes what it read so run_loop can find that section and refresh it
+    every turn.
+    """
     try:
         from prometheus.context.prompt_assembler import build_runtime_system_prompt
         skills_list = None
@@ -901,7 +915,9 @@ def build_system_prompt(config: dict[str, Any]) -> str:
                 skills_list = [{"name": s.name, "description": s.description} for s in sr.list_skills()]
         except Exception:
             pass
-        return build_runtime_system_prompt(cwd=str(Path.cwd()), config=config, skills=skills_list)
+        return build_runtime_system_prompt(
+            cwd=str(Path.cwd()), config=config, skills=skills_list, memory_content=memory_content,
+        )
     except Exception:
         return config.get("gateway", {}).get(
             "system_prompt",
@@ -1175,6 +1191,11 @@ def run_coding_task(args) -> int:
     # threaded to this call is a setting that silently does nothing.
     coding_cfg = config.get("coding", {}) or {}
     sandbox_backend = str(coding_cfg.get("sandbox_type", "process"))
+    # The model's commands in this run (code_run, and the acceptance command
+    # that runs its code) go behind the bash tool's floors — the security
+    # section of THIS config, not whatever a default path search finds.
+    from prometheus.security.shell_floor import ShellFloor, set_shell_floor
+    set_shell_floor(ShellFloor.from_security_config(config.get("security")))
     try:
         sandbox = clone_repo_for_sandbox(
             args.repo,
@@ -1479,6 +1500,7 @@ def main() -> None:
     # Onboarding Phase 0: the canonical setup/diagnostics surface.
     from prometheus.cli.doctor import add_doctor_subparser
     from prometheus.cli.gepa import add_gepa_subparser
+    from prometheus.cli.pair import add_pair_subparser
     from prometheus.cli.retention import add_retention_subparser
     from prometheus.cli.scrub import add_scrub_subparser
     from prometheus.cli.service import add_install_service_subparser
@@ -1486,6 +1508,7 @@ def main() -> None:
     from prometheus.cli.token import add_token_subparser
     add_setup_subparser(subparsers)
     add_token_subparser(subparsers)
+    add_pair_subparser(subparsers)
     add_doctor_subparser(subparsers)
     add_retention_subparser(subparsers)
     add_install_service_subparser(subparsers)
@@ -1496,6 +1519,14 @@ def main() -> None:
     daemon_parser.add_argument(
         "--telegram-only", action="store_true",
         help="Only start Telegram adapter",
+    )
+    daemon_parser.add_argument(
+        "--bind", metavar="ADDRESS", default=None,
+        help="Address the web API and WebSocket bridge listen on (also in "
+             "setup mode): 127.0.0.1 for this machine only, or an IPv4/IPv6 "
+             "address, or 0.0.0.0 for every interface (the default). Overrides "
+             "PROMETHEUS_WEB_BIND and web.bind in prometheus.yaml. An invalid "
+             "value refuses to start.",
     )
 
     identity_parser = subparsers.add_parser(
@@ -1793,6 +1824,11 @@ def main() -> None:
         from prometheus.cli.token import run_token_command
         sys.exit(run_token_command(args, load_config(args.config)))
 
+    # `oara pair list|approve|deny` — decide the devices asking to join (the terminal route).
+    if args.command == "pair":
+        from prometheus.cli.pair import run_pair_command
+        sys.exit(run_pair_command(args, load_config(args.config)))
+
     # `oara doctor` — install diagnostics (exit nonzero on errors).
     if args.command == "doctor":
         from prometheus.cli.doctor import run_doctor_command
@@ -1960,6 +1996,8 @@ def main() -> None:
             sys.argv.append("--telegram-only")
         if args.debug:
             sys.argv.append("--debug")
+        if args.bind is not None:  # "" is a value (and an invalid one), not absence
+            sys.argv.extend(["--bind", args.bind])
         daemon_main()
         return
 
@@ -1999,7 +2037,11 @@ def main() -> None:
         model_cfg, config.get("adapter"), template=_detect_tool_template_or_none(model_cfg),
     )
     lcm_engine = create_lcm_engine(provider)
-    system_prompt = build_system_prompt(config)
+    # File memory is re-read every turn (LoopContext.memory_prompt_builder);
+    # one read here so the boot section run_loop looks for is the one built in.
+    from prometheus.context.prompt_assembler import _load_memory_and_user, memory_section
+    boot_memory_content = _load_memory_and_user()
+    system_prompt = build_system_prompt(config, memory_content=boot_memory_content)
 
     # Telemetry (optional)
     from prometheus.telemetry.tracker import telemetry_enabled
@@ -2105,6 +2147,8 @@ def main() -> None:
         # turns into it, and the microcompactor checks it; None if unavailable.
         lcm_engine=lcm_engine,
         profile_resolver=profile_resolver,
+        boot_memory_prompt=memory_section(boot_memory_content),
+        memory_prompt_builder=memory_section,
     )
 
     async def _async_main() -> None:

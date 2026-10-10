@@ -79,7 +79,7 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
     "mimo": {
         # Xiaomi MiMo first-party hosted platform.
         "base_url": "https://api.xiaomimimo.com/v1",
-        "model": "mimo-v2.5-pro",
+        "model": "mimo-v2.6-pro",
         "default_env": "MIMO_API_KEY",
         "default_base_url_env": "MIMO_BASE_URL",
     },

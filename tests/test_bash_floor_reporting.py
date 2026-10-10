@@ -128,9 +128,15 @@ class TestFloorReport:
             f"the write floor was probed WITHOUT the read floor: {seen}")
 
     def test_scope_is_stated_so_it_is_not_over_read(self):
-        """Two green rows must not read as "bash is confined everywhere"."""
+        """Two green rows must not read as "every shell is confined".
+
+        The floors reach every shell a MODEL writes (test_model_shell_floor.py
+        proves each door); command hooks run the operator's own command and
+        are not floored. The report must say both, not just the first."""
         rep = C.floor_report()
-        assert "bash tool only" in str(rep["scope"])
+        scope = str(rep["scope"])
+        assert "model" in scope
+        assert "Not command hooks" in scope
 
 
 # --------------------------------------------------------------------------- #

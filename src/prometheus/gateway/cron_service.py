@@ -124,6 +124,25 @@ def next_run_time(
     return croniter(expression, base).get_next(datetime)
 
 
+#: WHO WROTE a job's command. The model's ``cron_create`` tool stores
+#: ``origin: "model"`` on every job it creates or replaces, and those jobs run
+#: behind the shell floor (``cron_scheduler.execute_job``). Nothing else ever
+#: writes this key: a job without it — every job stored before it existed, and
+#: every job from the operator's own path (``POST /api/cron``) — runs exactly as
+#: it always has, because the operator's jobs need what the floor removes (a
+#: briefing reading its token from the environment, a vault job writing
+#: outside the workspace). The operator's ``PUT`` edits a job in place, so it
+#: never turns a model job into an operator one.
+ORIGIN_KEY = "origin"
+ORIGIN_MODEL = "model"
+
+
+def is_model_job(job: dict[str, Any]) -> bool:
+    """True for a job the model wrote. Exactly ``"model"``; anything else is
+    the operator's — the only writer of this key writes only that value."""
+    return job.get(ORIGIN_KEY) == ORIGIN_MODEL
+
+
 def upsert_cron_job(job: dict[str, Any]) -> None:
     """Insert or replace one cron job.
 

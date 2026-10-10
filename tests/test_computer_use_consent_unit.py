@@ -32,7 +32,7 @@ of adding terms fixes it:
 So a payload-bearing action is NOT REMEMBERABLE AT ALL. That is the honest
 answer and it is the same one SPRINT-CONSENT rule 4 already gives: consent
 that cannot be described cannot be informed. The alternative — offering
-``box:firefox:type_text:background`` off a prompt that showed one string — is
+``box:firefox:-:type_text:background`` off a prompt that showed one string — is
 the narrow-prompt/wide-grant inversion that ``derive_grant`` was rewritten to
 refuse (approving ONE file in $HOME once granted write_file across ALL of it).
 """
@@ -56,6 +56,10 @@ CLICK_ARGS = {
     "target": "box", "app": "Firefox", "pid": 1, "window_id": 2,
     "snapshot_id": "s",
     "element_token": "t", "delivery_mode": "background",
+    # Given explicitly: these tests pin the extent's MECHANICS. Which site a
+    # real window gets is the evidence rule's job, and it would never give a
+    # browser `-` (tests/test_computer_use_site_term.py).
+    "site": "-",
 }
 
 
@@ -77,9 +81,9 @@ def _pending(extent, tool="computer_click") -> PendingAction:
 
 # ── THE EXTENT ──────────────────────────────────────────────────────────────
 
-def test_the_extent_is_target_app_verb_delivery():
+def test_the_extent_is_target_app_site_verb_delivery():
     extent = _extent(ClickInput, CLICK_ARGS)
-    assert extent.value == "box:firefox:click:background"
+    assert extent.value == "box:firefox:-:click:background"
 
 
 def test_the_app_is_case_folded_so_one_grant_covers_one_app():
@@ -94,11 +98,11 @@ def test_the_app_is_case_folded_so_one_grant_covers_one_app():
 def test_a_colon_in_an_app_name_cannot_forge_an_extent():
     """`app` is operator-influenced; the value is colon-delimited."""
     extent = _extent(ClickInput, {**CLICK_ARGS, "app": "evil:click:background"})
-    assert extent.value.count(":") == 3, (
+    assert extent.value.count(":") == 4, (
         f"an app name containing colons forged a different extent: "
         f"{extent.value!r}"
     )
-    assert extent.value == "box:evil_click_background:click:background"
+    assert extent.value == "box:evil_click_background:-:click:background"
 
 
 # ── THE LIMIT: A PAYLOAD IS NOT REMEMBERABLE ────────────────────────────────
@@ -141,7 +145,7 @@ def test_a_click_DOES_offer_a_lasting_scope():
     grant = derive_grant(action, verb="always")
     assert grant is not None
     assert grant.kind == COMPUTER_ACTION_KIND
-    assert grant.value == "box:firefox:click:background"
+    assert grant.value == "box:firefox:-:click:background"
     assert prospective_extents(action), "no scope was offered for a click"
 
 
@@ -164,7 +168,7 @@ def test_the_description_reads_as_wide_as_the_grant_actually_is():
     the defect the whole consent sprint exists to remove.
     """
     grant = Grant(
-        kind=COMPUTER_ACTION_KIND, value="box:firefox:click:background",
+        kind=COMPUTER_ACTION_KIND, value="box:firefox:-:click:background",
         tool_name="computer_click", scope="persistent",
     )
     text = grant.describe()
@@ -178,9 +182,9 @@ def test_the_description_reads_as_wide_as_the_grant_actually_is():
 
 
 def test_foreground_and_background_describe_differently():
-    bg = Grant(kind=COMPUTER_ACTION_KIND, value="box:firefox:click:background",
+    bg = Grant(kind=COMPUTER_ACTION_KIND, value="box:firefox:-:click:background",
                tool_name="computer_click").describe()
-    fg = Grant(kind=COMPUTER_ACTION_KIND, value="box:firefox:click:foreground",
+    fg = Grant(kind=COMPUTER_ACTION_KIND, value="box:firefox:-:click:foreground",
                tool_name="computer_click").describe()
     assert bg != fg
     assert "focus" in fg, f"the foreground sentence does not mention focus: {fg!r}"
@@ -199,16 +203,23 @@ def test_the_refusal_explains_why_nothing_can_be_remembered():
 # ── MATCHING IS EXACT ───────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("stored,candidate,should_match", [
-    ("box:firefox:click:background", "box:firefox:click:background", True),
-    ("box:firefox:click:background", "box:firefox:click:foreground", False),
-    ("box:firefox:click:background", "box:mail:click:background", False),
-    ("box:firefox:click:background", "box:firefox:type_text:background", False),
-    ("box:firefox:click:", "box:firefox:click:background", False),
-    ("box:firefox:click:background", None, False),
+    ("box:firefox:-:click:background", "box:firefox:-:click:background", True),
+    ("box:firefox:-:click:background", "box:firefox:-:click:foreground", False),
+    ("box:firefox:-:click:background", "box:mail:-:click:background", False),
+    ("box:firefox:-:click:background", "box:firefox:-:type_text:background",
+     False),
+    ("box:firefox:-:click:", "box:firefox:-:click:background", False),
+    ("box:firefox:-:click:background", None, False),
     # THE AMENDMENT: the same app, verb and delivery on ANOTHER machine.
-    ("box:firefox:click:background", "laptop:firefox:click:background", False),
+    ("box:firefox:-:click:background", "laptop:firefox:-:click:background",
+     False),
     # And a pre-target value must never match anything.
-    ("firefox:click:background", "box:firefox:click:background", False),
+    ("firefox:click:background", "box:firefox:-:click:background", False),
+    # THE SITE TERM: another site is another grant, a pre-site four-term
+    # value matches nothing (not even itself), and UNKNOWN never matches.
+    ("box:firefox:-:click:background", "box:firefox:?:click:background", False),
+    ("box:firefox:click:background", "box:firefox:click:background", False),
+    ("box:firefox:?:click:background", "box:firefox:?:click:background", False),
 ])
 def test_grant_matching_is_exact_not_prefix(stored, candidate, should_match):
     """`firefox:click:` must not match every delivery mode.
@@ -224,7 +235,8 @@ def test_grant_matching_is_exact_not_prefix(stored, candidate, should_match):
 
 
 def test_a_stored_desktop_grant_survives_a_config_round_trip():
-    grant = Grant(kind=COMPUTER_ACTION_KIND, value="box:firefox:click:background",
+    grant = Grant(kind=COMPUTER_ACTION_KIND,
+                  value="box:firefox:-:click:background",
                   tool_name="computer_click")
     back = Grant.from_config_dict(grant.to_config_dict())
     assert back is not None, (
@@ -233,7 +245,7 @@ def test_a_stored_desktop_grant_survives_a_config_round_trip():
     )
     assert back.kind == COMPUTER_ACTION_KIND
     assert back.matches("computer_click", None, None,
-                        "box:firefox:click:background")
+                        "box:firefox:-:click:background")
 
 
 # ── UNKNOWN IS LOUD ─────────────────────────────────────────────────────────

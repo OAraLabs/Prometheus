@@ -229,7 +229,7 @@ models:
         requires: null
     context_sizes:
       - 1000000
-    notes: "mimo-v2.5-pro via api.xiaomimimo.com (first-party hosted platform). Context ~1M per 2026-07 research."
+    notes: "mimo-v2.6-pro / mimo-v2.6-flash via api.xiaomimimo.com (first-party hosted platform): 1M context, 128K output, function calling (Xiaomi model list, 2026-10-06). mimo-v2.5-pro and mimo-v2.5 are retired 2026-10-21."
 
   phi:
     display_name: "Microsoft Phi"

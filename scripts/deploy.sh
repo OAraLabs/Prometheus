@@ -29,6 +29,8 @@
 #   PROMETHEUS_VENV_ROOT      where venvs live       [$HOME/prometheus-venvs]
 #   PROMETHEUS_DEPLOY_PYTHON  interpreter            [/usr/bin/python3.12]
 #   PROMETHEUS_DEPLOY_EXTRAS  extras to install      ["anthropic mcp push voice"]
+#                             `computer` is never taken from here: it follows
+#                             the live config (see step 2b)
 #   PROMETHEUS_DEPLOY_UNIT    systemd --user unit    [prometheus.service]
 #   PROMETHEUS_DEPLOY_API     the daemon's REST API  [http://127.0.0.1:8005]
 #   PROMETHEUS_ENV_FILE       holds the API token    [$HOME/.config/prometheus/env]
@@ -39,10 +41,16 @@
 #   1. fetch; <ref> must be on origin/main and a fast-forward of HEAD
 #   2. uv sync --locked --no-dev --no-install-project into $ROOT/<sha12>,
 #      with the lock's sha256 recorded in <venv>/BUILT_FROM_UV_LOCK
+#   2b. the `computer` extra (cua-driver, a native desktop driver) follows
+#      the LIVE config — $CLONE/config/prometheus.yaml, the file the unit's
+#      ExecStart reads: installed only when computer_use.enabled is a
+#      literal true, dropped otherwise (re-synced if that changes the set)
 #   3. gates — ANY failure stops the deploy before the daemon is touched:
 #      G1 the venv's interpreter: user site off, nothing from ~/.local
 #      G2 pip-audit over the exported lock for these extras: no advisories
 #      G3 the target code imports in the new venv
+#      G4 cua-driver matches the switch: absent while computer use is off,
+#         exactly a validated version while it is on
 #
 # PHASE B — switch.
 #   B0 record every session's model choice
@@ -137,6 +145,23 @@ git -C "$CLONE" archive "$T" pyproject.toml uv.lock README.md src | tar -x -C "$
 (cd "$ROOT" && UV_PYTHON_DOWNLOADS=never UV_PROJECT_ENVIRONMENT="$VENV" \
     "$UV" sync --quiet --project "$SRC" --locked --no-dev --no-install-project \
     --python "$PY" ${extra_args[@]+"${extra_args[@]}"})
+
+# 2b. The computer extra follows the live config, through the daemon's own
+# literal-true reader, run from the venv just built (it has the YAML parser;
+# the system interpreter may not). Off — the shipped default — leaves
+# cua-driver out entirely.
+LIVE_CONFIG="$CLONE/config/prometheus.yaml"
+WANT_EXTRAS="$(cd /tmp && PYTHONPATH="$SRC/src" "$VENV/bin/python" -m prometheus.computer.deploy extras "$LIVE_CONFIG" "$EXTRAS")" \
+    || die "could not decide the computer extra from $LIVE_CONFIG"
+if [ "$WANT_EXTRAS" != "$EXTRAS" ]; then
+    EXTRAS="$WANT_EXTRAS"
+    extra_args=()
+    for e in $EXTRAS; do extra_args+=(--extra "$e"); done
+    say "extras now: ${EXTRAS:-none}"
+    (cd "$ROOT" && UV_PYTHON_DOWNLOADS=never UV_PROJECT_ENVIRONMENT="$VENV" \
+        "$UV" sync --quiet --project "$SRC" --locked --no-dev --no-install-project \
+        --python "$PY" ${extra_args[@]+"${extra_args[@]}"})
+fi
 sha256_of "$SRC/uv.lock" > "$VENV/BUILT_FROM_UV_LOCK"
 say "venv built from uv.lock $(cut -c1-12 "$VENV/BUILT_FROM_UV_LOCK")"
 
@@ -162,6 +187,10 @@ say "G3 import smoke"
 (cd /tmp && PYTHONPATH="$SRC/src" "$VENV/bin/python" -c \
     'import prometheus, prometheus.daemon, prometheus.web.server; print("deploy:   prometheus", prometheus.__version__, "imports", file=__import__("sys").stderr)') \
     || die "G3 failed: $REF does not import in the new venv"
+
+say "G4 computer extra"
+(cd /tmp && PYTHONPATH="$SRC/src" "$VENV/bin/python" -m prometheus.computer.deploy driver "$LIVE_CONFIG") \
+    || die "G4 failed: the venv's cua-driver does not match computer_use.enabled in $LIVE_CONFIG"
 
 say "phase A passed"
 if [ "$PREPARE_ONLY" = 1 ]; then

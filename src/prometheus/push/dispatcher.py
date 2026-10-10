@@ -97,6 +97,25 @@ class PushDispatcher:
         ``test_approval_push_body_stays_narrow`` fails the build if this set
         changes, so widening it is a decision someone makes on purpose.
         """
+        if payload.get("task_id") is not None:
+            # A DESKTOP TASK'S PROMPT (computer-use v1.1 §5.2.2): no content
+            # at all — not the tool, not the app, not the element, not the
+            # text. And no APPROVAL category: a lock screen that cannot show
+            # what is being approved must not offer to approve it. The phone
+            # fetches the details over the tailnet when it is opened.
+            desk = {
+                "aps": {
+                    "alert": {"title": "Approval required",
+                              "body": "Prometheus needs a decision"},
+                    "sound": "default",
+                    "interruption-level": "time-sensitive",
+                },
+                "request_id": payload.get("request_id"),
+                "expires_at": payload.get("expires_at"),
+            }
+            for target in self._store.push_targets():
+                await self._deliver(target, desk)
+            return
         body = {
             "aps": {
                 "alert": {

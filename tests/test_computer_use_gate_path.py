@@ -95,6 +95,10 @@ def _click_args(**over):
         "target": "box", "app": "scratchapp", "pid": 4242, "window_id": 7,
         "snapshot_id": SNAP, "element_token": "tok-send",
         "delivery_mode": "background",
+        # Given explicitly, as the table would for a window with full
+        # evidence of no web content (candidates.site_of). Without it the
+        # site is UNKNOWN and no grant could ever silence the prompt.
+        "site": "-",
     }
     args.update(over)
     return args
@@ -194,7 +198,7 @@ def test_a_matching_grant_silences_the_prompt():
     prompted: list = []
     ctx, driver, gate = _ctx(prompted)
     gate.add_grant(Grant(
-        kind=COMPUTER_ACTION_KIND, value="box:scratchapp:click:background",
+        kind=COMPUTER_ACTION_KIND, value="box:scratchapp:-:click:background",
         tool_name="computer_click",
     ))
     _call(ctx, "computer_click", _click_args())
@@ -211,7 +215,7 @@ def test_a_grant_for_another_app_does_not_carry_over():
     prompted: list = []
     ctx, _, gate = _ctx(prompted)
     gate.add_grant(Grant(
-        kind=COMPUTER_ACTION_KIND, value="box:mail:click:background",
+        kind=COMPUTER_ACTION_KIND, value="box:mail:-:click:background",
         tool_name="computer_click",
     ))
     _call(ctx, "computer_click", _click_args())
@@ -229,7 +233,7 @@ def test_a_background_grant_does_not_cover_foreground():
     prompted: list = []
     ctx, _, gate = _ctx(prompted)
     gate.add_grant(Grant(
-        kind=COMPUTER_ACTION_KIND, value="box:scratchapp:click:background",
+        kind=COMPUTER_ACTION_KIND, value="box:scratchapp:-:click:background",
         tool_name="computer_click",
     ))
     _call(ctx, "computer_click", _click_args(delivery_mode="foreground"))
@@ -309,7 +313,7 @@ def test_a_grant_for_another_machine_does_not_carry_over():
     prompted: list = []
     ctx, driver, gate = _ctx(prompted)
     gate.add_grant(Grant(
-        kind=COMPUTER_ACTION_KIND, value="laptop:scratchapp:click:background",
+        kind=COMPUTER_ACTION_KIND, value="laptop:scratchapp:-:click:background",
         tool_name="computer_click",
     ))
     _call(ctx, "computer_click", _click_args())   # target="box"
@@ -356,7 +360,7 @@ def test_the_reason_names_the_machine():
 def test_an_action_naming_no_machine_is_refused_not_defaulted():
     """An empty target must be UNKNOWN, never the empty string.
 
-    A blank term still renders four segments (':scratchapp:click:background')
+    A blank term still renders five segments (':scratchapp:-:click:background')
     and would match any other call that also failed to name a machine — a
     cross-machine grant by accident, which is the thing the term prevents.
     """

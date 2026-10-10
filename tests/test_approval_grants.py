@@ -11,6 +11,11 @@ from prometheus.gateway import commands as cmds
 from prometheus.permissions.approval_queue import ApprovalQueue
 from prometheus.permissions.checker import Grant, SecurityGate
 
+from prometheus.permissions.approver import in_process
+
+#: Who answers in these tests: an in-process caller (W4 records it).
+BY = in_process("test")
+
 # built at runtime so the source never contains a blocked literal
 _CHAINED_BAD = "ls -la /tmp; " + "rm " + "-rf /"
 
@@ -39,7 +44,7 @@ class TestCmdApproveScopes:
     async def test_plain_approve_is_once_no_grant(self):
         queue = _make_queue()
         rid = await _request(queue)
-        text = await cmds.cmd_approve(queue, rid)
+        text = await cmds.cmd_approve(queue, rid, by=BY)
         assert rid in text
         assert queue._security_gate.list_grants() == []
 
@@ -56,7 +61,7 @@ class TestCmdApproveScopes:
         vocabulary changed."""
         queue = _make_queue()
         rid = await _request(queue, grant_command="ls -la")
-        text = await cmds.cmd_approve(queue, f"session {rid}")
+        text = await cmds.cmd_approve(queue, f"session {rid}", by=BY)
         assert "restart" in text.lower(), text
         grants = queue._security_gate.list_grants()
         assert len(grants) == 1
@@ -68,7 +73,7 @@ class TestCmdApproveScopes:
         """The offered verb and the legacy alias must not diverge."""
         queue = _make_queue()
         rid = await _request(queue, grant_command="ls -la")
-        await cmds.cmd_approve(queue, f"until-restart {rid}")
+        await cmds.cmd_approve(queue, f"until-restart {rid}", by=BY)
         grants = queue._security_gate.list_grants()
         assert len(grants) == 1
         assert grants[0].scope == "until_restart"
@@ -77,7 +82,7 @@ class TestCmdApproveScopes:
     async def test_always_scope_records_persistent_grant(self):
         queue = _make_queue()
         rid = await _request(queue, grant_command="ls -la")
-        text = await cmds.cmd_approve(queue, f"always {rid}")
+        text = await cmds.cmd_approve(queue, f"always {rid}", by=BY)
         assert "always" in text.lower() or "permanently" in text.lower()
         grants = queue._security_gate.list_grants()
         assert len(grants) == 1
@@ -87,12 +92,12 @@ class TestCmdApproveScopes:
     async def test_invalid_scope_rejected_without_approving(self):
         queue = _make_queue()
         rid = await _request(queue)
-        text = await cmds.cmd_approve(queue, f"forever {rid}")
+        text = await cmds.cmd_approve(queue, f"forever {rid}", by=BY)
         # Vocabulary changed with the rename; the usage must name the
         # verbs it actually accepts, not the retired one.
         assert "Usage" in text and "until-restart" in text and "always" in text
         assert rid in queue.pending  # approve() never called
-        await queue.deny(rid)  # clean up background task
+        await queue.deny(rid, by=BY)  # clean up background task
 
     @pytest.mark.asyncio
     async def test_a_grant_bearing_scope_with_no_gate_RAISES(self):
@@ -108,12 +113,12 @@ class TestCmdApproveScopes:
         rid = await _request(queue, grant_command="ls -la")
         queue._security_gate = None                  # the bypass, made explicit
         with pytest.raises(RuntimeError, match="no SecurityGate"):
-            await cmds.cmd_approve(queue, f"session {rid}")
+            await cmds.cmd_approve(queue, f"session {rid}", by=BY)
         assert rid in queue.pending, (
             "the raise fires BEFORE any mutation, so the request stays "
             "pending and times out into a denial rather than half-resolving"
         )
-        await queue.deny(rid)                        # release the waiter
+        await queue.deny(rid, by=BY)                        # release the waiter
 
 
 class TestCmdGrants:
@@ -222,18 +227,18 @@ class TestBareApprove:
 
     def test_bare_approve_takes_the_only_pending_request(self):
         q = _queue_with(1)
-        out = _asyncio.run(cmd_approve(q, ""))
+        out = _asyncio.run(cmd_approve(q, "", by=BY))
         assert "Approved" in out
         assert "Usage" not in out
         assert _result_of(q, "00000000") is ApprovalResult.APPROVED
 
     def test_bare_approve_with_nothing_pending_says_so(self):
-        out = _asyncio.run(cmd_approve(ApprovalQueue(security_gate=SecurityGate()), ""))
+        out = _asyncio.run(cmd_approve(ApprovalQueue(security_gate=SecurityGate()), "", by=BY))
         assert "No pending approval requests." == out
 
     def test_bare_approve_with_several_lists_them_and_approves_nothing(self):
         q = _queue_with(3)
-        out = _asyncio.run(cmd_approve(q, ""))
+        out = _asyncio.run(cmd_approve(q, "", by=BY))
         assert "3 pending requests" in out
         for i in range(3):
             assert f"{i:08x}" in out
@@ -242,13 +247,13 @@ class TestBareApprove:
 
     def test_scope_without_id_also_resolves(self):
         q = _queue_with(1)
-        out = _asyncio.run(cmd_approve(q, "session"))
+        out = _asyncio.run(cmd_approve(q, "session", by=BY))
         assert "Usage" not in out
         assert _result_of(q, "00000000") is ApprovalResult.APPROVED
 
     def test_explicit_id_still_works(self):
         q = _queue_with(2)
-        out = _asyncio.run(cmd_approve(q, "00000001"))
+        out = _asyncio.run(cmd_approve(q, "00000001", by=BY))
         assert "Approved: 00000001" in out
         assert "00000000" in q.pending
 
@@ -257,12 +262,12 @@ class TestBareApprove:
         shortcut — but with 2 pending we list rather than pick, so this
         asserts the ordering the listing uses."""
         q = _queue_with(2)
-        out = _asyncio.run(cmd_approve(q, ""))
+        out = _asyncio.run(cmd_approve(q, "", by=BY))
         assert out.index("00000000") < out.index("00000001")
 
     def test_mistyped_scope_still_returns_usage(self):
         q = _queue_with(1)
-        out = _asyncio.run(cmd_approve(q, "forever abcdef12"))
+        out = _asyncio.run(cmd_approve(q, "forever abcdef12", by=BY))
         assert "Usage" in out
         assert len(q.pending) == 1
 
@@ -271,7 +276,7 @@ class TestApproveAll:
 
     def test_approve_all_clears_the_queue(self):
         q = _queue_with(4)
-        out = _asyncio.run(cmd_approve(q, "all"))
+        out = _asyncio.run(cmd_approve(q, "all", by=BY))
         assert "Approved 4 request(s)" in out
         assert all(
             _result_of(q, f"{i:08x}") is ApprovalResult.APPROVED for i in range(4)
@@ -283,12 +288,12 @@ class TestApproveAll:
         q = _queue_with(3)
         gate = _MagicMock()
         q._security_gate = gate
-        _asyncio.run(cmd_approve(q, "all"))
+        _asyncio.run(cmd_approve(q, "all", by=BY))
         gate.add_grant.assert_not_called()
         gate.persist_grant.assert_not_called()
 
     def test_approve_all_with_empty_queue(self):
-        out = _asyncio.run(cmd_approve(ApprovalQueue(security_gate=SecurityGate()), "all"))
+        out = _asyncio.run(cmd_approve(ApprovalQueue(security_gate=SecurityGate()), "all", by=BY))
         assert "No pending approval requests." == out
 
 
@@ -296,15 +301,15 @@ class TestBareDeny:
 
     def test_bare_deny_takes_the_only_pending_request(self):
         q = _queue_with(1)
-        out = _asyncio.run(cmd_deny(q, ""))
+        out = _asyncio.run(cmd_deny(q, "", by=BY))
         assert "Denied" in out
         assert _result_of(q, "00000000") is ApprovalResult.DENIED
 
     def test_bare_deny_with_several_lists_them(self):
         q = _queue_with(2)
-        out = _asyncio.run(cmd_deny(q, ""))
+        out = _asyncio.run(cmd_deny(q, "", by=BY))
         assert "2 pending requests" in out
         assert len(q.pending) == 2
 
     def test_bare_deny_with_nothing_pending(self):
-        assert _asyncio.run(cmd_deny(ApprovalQueue(security_gate=SecurityGate()), "")) == "No pending approval requests."
+        assert _asyncio.run(cmd_deny(ApprovalQueue(security_gate=SecurityGate()), "", by=BY)) == "No pending approval requests."

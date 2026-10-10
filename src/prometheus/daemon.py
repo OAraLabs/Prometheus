@@ -54,6 +54,7 @@ from prometheus.__main__ import (
 )
 from prometheus.telemetry.tracker import TELEMETRY_OFF_NOTE, ToolCallTelemetry
 from prometheus.tools.base import ToolRegistry
+from prometheus.web.bind import BindError, resolve_bind
 from prometheus.engine.fallback import build_fallback_target
 
 logger = logging.getLogger("prometheus.daemon")
@@ -636,6 +637,16 @@ async def run_daemon(args: argparse.Namespace) -> None:
             "Loaded %d variable(s) from %s", _env_loaded, get_env_file_path()
         )
 
+    # ── Listen address (--bind > PROMETHEUS_WEB_BIND > web.bind > 0.0.0.0) ──
+    # Resolved here, after the env file is loaded (so a PROMETHEUS_WEB_BIND kept
+    # there counts) and BEFORE anything is started or bound. An invalid value
+    # raises BindError and refuses the boot: it must never degrade to a wider
+    # address. Deliberately outside the try/except that guards the web bridge
+    # below — that block turns a failure into "Web bridge not available" and
+    # carries on, which for a bad bind would be exactly the wrong answer.
+    # `getattr`: callers that build their own Namespace predate the flag.
+    web_bind = resolve_bind(config, flag=getattr(args, "bind", None))
+
     # ── Wiki root ───────────────────────────────────────────────────────
     # Resolved ONCE here and pinned process-wide; every consumer reads it back
     # through get_wiki_root() and none keeps a fallback. Before this, nine
@@ -691,6 +702,26 @@ async def run_daemon(args: argparse.Namespace) -> None:
         import platform as _platform
         enroll_node(vault_root, _node.pubkey, label=_platform.node() or "node")
 
+    # ── Instance key (pairing contract, section 7.3) ─────────────────────
+    # The P-256 key beside the node key that GET /api/hello fingerprints and a later TLS
+    # certificate is made from. Made here, never on a request: hello is unauthenticated and
+    # a GET must not write to disk. A file that cannot be loaded is reported and left alone;
+    # hello then advertises no fingerprint rather than the daemon refusing to start.
+    from prometheus.config import local_pairing
+    from prometheus.config.instance_key import ensure_instance_key, fingerprint_of
+    instance_fp = ""
+    try:
+        instance_fp = fingerprint_of(ensure_instance_key())
+        logger.info("Instance key: fp %s", instance_fp)
+    except Exception:
+        logger.warning(
+            "Instance key unavailable: GET /api/hello will advertise no fingerprint until "
+            "node/instance.key is a loadable P-256 key (it is never regenerated in place)",
+            exc_info=True)
+    # Same-Mac pairing (the app install only): pair.fp beside pair.secret says what hello says, so Beacon can
+    # check it is talking to this daemon before it sends the secret. "" removes an earlier one.
+    local_pairing.publish_fingerprint(instance_fp)
+
     # ── Boot-SHA staleness signal ───────────────────────────────────────
     # The repo HEAD at process start is the identity of the code THIS process
     # loaded. /api/status, /health, and the heartbeat compare it against the
@@ -737,7 +768,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     # Archive writer
     archive = ArchiveWriter()
-    archive.archive_event("daemon_start", {"args": vars(args)})
+    archive.archive_event("daemon_start", {"args": daemon_start_args(args)})
 
     # Write daemon start time for uptime tracking
     import time as _time
@@ -951,6 +982,18 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Tool registry — same tools as CLI mode
     registry = build_tool_registry(security_cfg=security_config)
 
+    # The read floor's state, said ONCE at boot. security.bash_confinement
+    # ships "auto", so a host where the AppArmor profile did not verify runs
+    # every model-written shell without it — the operator hears that now, at
+    # ERROR with the fix, rather than discovering it. The probes are
+    # subprocesses, so off the loop; a failure here never stops the boot.
+    try:
+        from prometheus.security.shell_floor import announce as _announce_floor
+
+        await asyncio.to_thread(_announce_floor)
+    except Exception:
+        logger.warning("could not report the shell floors at boot", exc_info=True)
+
     # DynamicToolLoader — deferred loading support
     from prometheus.context.dynamic_tools import DynamicToolLoader
     tool_loader = DynamicToolLoader(registry, config.get("tools", {}).get("deferred_loading"))
@@ -973,6 +1016,28 @@ async def run_daemon(args: argparse.Namespace) -> None:
         mcp_runtime = await create_mcp_runtime(
             config, registry, tool_loader=tool_loader
         )
+
+    # Computer use — the desktop driver as an Integration (computer-use v1.1).
+    # OFF by default: disabled constructs no driver and probes nothing. When
+    # enabled, one bounded boot probe records its health (a failure is a
+    # recorded state, never a boot failure). It is built AFTER the MCP config
+    # is known so the probe can say when an MCP server also runs cua-driver.
+    # It registers NOTHING: computer.registered stays 0.
+    from prometheus.computer.integration import ComputerIntegration
+    computer_integration = ComputerIntegration.from_config(
+        config,
+        mcp_servers=merged_server_configs(config, McpServerStore()),
+    )
+    if computer_integration.enabled:
+        try:
+            await asyncio.wait_for(
+                computer_integration.probe(force=True),
+                timeout=computer_integration.timeout_s + 2.0,
+            )
+        except Exception as exc:  # noqa: BLE001 — recorded, not fatal
+            logger.warning("Computer use: boot probe did not finish: %s", exc)
+        logger.info("Computer use: integration %s",
+                    computer_integration.snapshot()["state"])
     # FIRSTLIGHT FL-2b: the advertised baseline gets ONE visible line at
     # boot. Before this, a config with no tools: section advertised zero
     # tools and nothing anywhere said so — the only traces were telemetry
@@ -998,6 +1063,19 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Phase 2: router now requires primary provider + adapter + model built first.
     adapter = create_adapter(model_config, config.get("adapter"), template=tool_template)
     security_gate = create_security_gate(security_config, getattr(args, "config", None))
+    # The door (computer-use v1.1 PR 5): the computer approval channel and the
+    # task runner, built ONLY when computer_use.enabled is a literal true.
+    # Off, `computer.runner` is None and nothing below changes. Registers
+    # NOTHING either way (tests/test_computer_registration_pin.py).
+    from prometheus.computer.wiring import wire_computer_use
+    from prometheus.config.shipped_defaults import (
+        resolve_allowed_chat_ids as _computer_people,
+    )
+    computer = wire_computer_use(
+        config, gate=security_gate, registry=registry,
+        telegram_user_ids=_computer_people(gateway_config),
+        integration=computer_integration,
+    )
     model_router = create_model_router(config, provider, adapter, model_name)
     # Phase 3: wire the router back into the adapter's RetryEngine so it can
     # consult router.config.escalation_enabled at tool-retry exhaustion and
@@ -1204,6 +1282,17 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     _boot_project_prompt = _project_files_section(config, str(Path.cwd()))
 
+    # File memory (MEMORY.md + USER.md): run_loop re-reads it every run and
+    # swaps the boot "# Memory" section by exact substring, so a memory-tool
+    # write or a Beacon edit reaches the next turn without a restart. Read
+    # ONCE here and passed to every boot prompt build below, so the section
+    # both loops are told to look for is the one the prompt carries.
+    from prometheus.context.prompt_assembler import _load_memory_and_user
+    from prometheus.context.prompt_assembler import memory_section as _memory_section
+
+    _boot_memory_content = _load_memory_and_user()
+    _boot_memory_prompt = _memory_section(_boot_memory_content)
+
     # Item 4: per-turn file checkpoints for sessions with a workspace.
     checkpoint_store = None
     from prometheus.checkpoints import FileCheckpointStore, resolve_checkpoints_config
@@ -1226,6 +1315,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
         workspace_resolver=_session_workspace,
         boot_project_prompt=_boot_project_prompt,
         project_prompt_builder=_project_prompt_for,
+        boot_memory_prompt=_boot_memory_prompt,
+        memory_prompt_builder=_memory_section,
         checkpoint_store=checkpoint_store,
         # Without this the fallback is INERT: the loop reads context.fallback and nothing
         # ever set it, so every terminal provider failure ended the turn exactly as before.
@@ -1464,6 +1555,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
             system_prompt = build_runtime_system_prompt(
                 cwd=str(Path.cwd()), config=config,
                 skills=skills_for_prompt(),
+                memory_content=_boot_memory_content,
             )
             telegram = TelegramAdapter(
                 config=tg_config,
@@ -1527,6 +1619,16 @@ async def run_daemon(args: argparse.Namespace) -> None:
             security_gate._approval_queue = approval_queue
             gateway_registry.attach("_approval_queue", approval_queue)
             logger.info("Approval queue wired to gateway adapters")
+
+    if computer.runner is not None:
+        # Desktop prompts go to the chat that started the task, and /approve
+        # on every gateway sees them alongside the gate-wide queue (which may
+        # not exist: it ships off). Off, none of this runs.
+        computer.attach_telegram(telegram)
+        gateway_registry.attach(
+            "_approval_queue",
+            computer.approvals_for(approval_queue if "approval_queue" in dir() else None))
+        logger.info("Computer use: /computer wired to the gateways")
 
     # WEAVE-PRESS: Printing Press CLI registry
     press_cfg = config.get("printing_press", {}) or {}
@@ -1621,6 +1723,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 system_prompt = build_runtime_system_prompt(
                     cwd=str(Path.cwd()), config=config,
                     skills=skills_for_prompt(),
+                    memory_content=_boot_memory_content,
                 )
             slack_adapter = SlackAdapter(
                 config=slack_config,
@@ -1691,6 +1794,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 system_prompt = build_runtime_system_prompt(
                     cwd=str(Path.cwd()), config=config,
                     skills=skills_for_prompt(),
+                    memory_content=_boot_memory_content,
                 )
             discord_adapter = DiscordAdapter(
                 config=discord_config,
@@ -2127,6 +2231,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
             # (config gate) — guard like the other late wires.
             if "approval_queue" in dir() and approval_queue is not None:
                 approval_queue.signal_bus = signal_bus
+            # Desktop prompts reach Beacon the same way (computer-use v1.1).
+            computer.attach_signal_bus(signal_bus)
             if "skill_refiner" in dir() and skill_refiner is not None:
                 skill_refiner.signal_bus = signal_bus
             # SPRINT-TEACHER-ESCALATION: golden traces + escalation events
@@ -2524,6 +2630,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 system_prompt = build_runtime_system_prompt(
                     cwd=str(Path.cwd()), config=config,
                     skills=skills_for_prompt(),
+                    memory_content=_boot_memory_content,
                 )
 
             loop_context = LoopContext(
@@ -2594,6 +2701,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 workspace_resolver=_session_workspace,
                 boot_project_prompt=_boot_project_prompt,
                 project_prompt_builder=_project_prompt_for,
+                boot_memory_prompt=_boot_memory_prompt,
+                memory_prompt_builder=_memory_section,
                 checkpoint_store=checkpoint_store,
                 # THE SAME LESSON, THIRD TIME (2026-07-31). Everything below is
                 # config that AgentLoop threads for telegram/CLI and that this
@@ -2795,12 +2904,18 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     local_model=model_name,
                     detected_kv_cache=detected_kv_cache,
                     backend_registry=backend_registry,
+                    computer_integration=computer_integration,
+                    computer_runner=computer.runner,
+                    bind=web_bind.address,
                     api_port=api_port,
                     ws_port=ws_port,
                 ))
             if web_task is not None:
                 tasks.append(web_task)
-                logger.info("Web bridge started (REST :%d, WS :%d)", api_port, ws_port)
+                logger.info(
+                    "Web bridge started (REST :%d, WS :%d, listening on %s)",
+                    api_port, ws_port, web_bind.describe(),
+                )
         except Exception as exc:
             logger.warning("Web bridge not available: %s", exc)
 
@@ -2828,6 +2943,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
     if mcp_runtime is not None:
         await mcp_runtime.close()
 
+    computer.close()
+
     if telegram:
         await telegram.stop()
 
@@ -2854,8 +2971,8 @@ _LOG_MAX_BYTES = 64 * 1024 * 1024
 _LOG_BACKUPS = 5
 
 
-def main() -> None:
-    """CLI entry point."""
+def build_parser() -> argparse.ArgumentParser:
+    """The daemon's command line. A function so a test can hold it against what the parity traces recorded."""
     parser = argparse.ArgumentParser(description="Prometheus daemon")
     parser.add_argument(
         "--config", type=str, default=None, help="Path to prometheus.yaml"
@@ -2868,6 +2985,34 @@ def main() -> None:
     parser.add_argument(
         "--debug", action="store_true", help="Enable debug logging"
     )
+    parser.add_argument(
+        "--bind", metavar="ADDRESS", default=None,
+        help="Address the web API and WebSocket bridge listen on (also in "
+             "setup mode): 127.0.0.1 for this machine only, or an IPv4/IPv6 "
+             "address, or 0.0.0.0 for every interface (the default). Overrides "
+             "PROMETHEUS_WEB_BIND and web.bind in prometheus.yaml. An invalid "
+             "value refuses to start.",
+    )
+    return parser
+
+
+def daemon_start_args(args: argparse.Namespace) -> dict[str, Any]:
+    """The arguments the ``daemon_start`` archive event records: ``vars(args)``, except an unset ``--bind``.
+
+    The 12 parity traces record this dict and the CI replay compares the daemon's whole archive against them.
+    Adding ``--bind`` added ``bind: null`` to every run, so every trace "changed" while nothing the daemon
+    does had. An option that was not given has nothing to record. An explicit ``--bind`` is a fact about the
+    run and stays. Every other argument is recorded as it always was, null or not.
+    """
+    recorded = dict(vars(args))
+    if recorded.get("bind") is None:
+        recorded.pop("bind", None)
+    return recorded
+
+
+def main() -> None:
+    """CLI entry point."""
+    parser = build_parser()
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.debug else logging.INFO
@@ -2899,7 +3044,16 @@ def main() -> None:
             handlers=[logging.StreamHandler(sys.stdout)],
         )
         install_log_redaction()
-        result = run_setup_mode()
+        # Setup mode has no config, so no web.bind: --bind > PROMETHEUS_WEB_BIND >
+        # 0.0.0.0. Resolved BEFORE the server exists; a bad value never listens.
+        from prometheus.web.setup_server import resolve_setup_choice
+
+        try:
+            setup_bind = resolve_setup_choice(args.bind)
+        except BindError as exc:
+            print(f"{exc}", file=sys.stderr)
+            sys.exit(2)
+        result = run_setup_mode(bind=setup_bind)
         # Phase 2: POST /api/setup/complete exits the serve loop with a
         # restart sentinel. RE-CHECK for config — present now → fall
         # through into the normal daemon boot IN THIS SAME PROCESS (no
@@ -2966,6 +3120,11 @@ def main() -> None:
     except ConfigReadError as exc:
         print(f"{exc}", file=sys.stderr)
         sys.exit(1)
+    except BindError as exc:
+        # An address we cannot honour is a refusal, not a fallback. Exit 2, like
+        # an argparse usage error: the invocation or the config is wrong.
+        print(f"{exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

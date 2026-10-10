@@ -32,8 +32,10 @@ from prometheus.permissions.audit import AuditDecision, AuditLogger
 from prometheus.permissions.computer_extent import (
     COMPUTER_ACTION_KIND,
     EXTENT_TERMS,
+    SITE_TERM_INDEX,
     ComputerExtent,
 )
+from prometheus.permissions.computer_schema import SITE_UNKNOWN
 from prometheus.permissions.exfiltration import ExfiltrationDetector
 from prometheus.permissions.modes import PermissionMode, TrustLevel
 # The ONE denied-path matcher. Imported from security/ (a leaf that checker
@@ -378,6 +380,11 @@ class Grant:
     # now set at construction by ``derive_grant``; neither is a caller's
     # responsibility.
     widened: bool | None = None
+    # WHO granted it (W4, record step): the approver's plain record
+    # ({kind, id, name}) — never the dataclass, because prometheus.yaml is
+    # written with yaml.dump and re-read with safe_load. None on grants made
+    # before this existed, and on grants built outside an approval.
+    granted_by: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         # Generated here rather than at the call site so EVERY construction
@@ -413,7 +420,15 @@ class Grant:
             # to the tool's registered name as well would mean a rename of the
             # wrapper silently revoked every stored grant — the same
             # name-coupling this whole change exists to stop relying on.
-            return bool(computer_extent) and computer_extent == self.value
+            #
+            # And never for an UNKNOWN site (``?``), even if such a grant were
+            # somehow minted: "click anything in this app, on whatever page
+            # it shows" is the widening the site term exists to stop.
+            if not computer_extent or computer_extent != self.value:
+                return False
+            terms = self.value.split(":")
+            return (len(terms) == EXTENT_TERMS
+                    and terms[SITE_TERM_INDEX] != SITE_UNKNOWN)
         if self.kind == "path_prefix":
             if tool_name != self.tool_name or not file_path:
                 return False
@@ -447,6 +462,9 @@ class Grant:
             # their shape when there is nothing to say.
             **({"widened": self.widened}
                if self.widened is not None else {}),
+            # Same rule: written only when known.
+            **({"granted_by": dict(self.granted_by)}
+               if self.granted_by is not None else {}),
         }
 
     @classmethod
@@ -466,12 +484,24 @@ class Grant:
             # dropped grant costs one prompt; a mis-read one costs the
             # property the term was added for.
             value = str(d.get("value", ""))
-            if len(value.split(":")) != EXTENT_TERMS:
+            terms = value.split(":")
+            if len(terms) != EXTENT_TERMS:
+                # A four-term row predates the SITE term (computer-use v1.1):
+                # it was minted as "this app, on any page it shows", and
+                # reading it as "-" would narrow it by guesswork while reading
+                # it as any site keeps the widening. Neither is safe.
                 log.warning(
                     "dropping a stored computer_action grant whose value %r "
-                    "does not carry %d terms (target:app:verb:delivery) — it "
-                    "cannot be interpreted safely; re-grant it",
+                    "does not carry %d terms (target:app:site:verb:delivery) "
+                    "— it cannot be interpreted safely; re-grant it",
                     value, EXTENT_TERMS,
+                )
+                return None
+            if terms[SITE_TERM_INDEX] == SITE_UNKNOWN:
+                log.warning(
+                    "dropping a stored computer_action grant whose site is "
+                    "UNKNOWN (%r) — such a grant could cover any site",
+                    value,
                 )
                 return None
         # scope is hardcoded, not read: anything in the config file IS
@@ -492,6 +522,10 @@ class Grant:
             # relabel every pre-existing directory grant as an exact-file one.
             widened=(
                 bool(d["widened"]) if "widened" in d else None
+            ),
+            granted_by=(
+                {str(k): str(v) for k, v in d["granted_by"].items()}
+                if isinstance(d.get("granted_by"), dict) else None
             ),
         )
 
@@ -537,7 +571,7 @@ class Grant:
             what = f"any bash command starting with {self.value!r}"
         elif self.kind == COMPUTER_ACTION_KIND:
             # Rendered from the STORED value, not from a live ComputerExtent:
-            # a grant read back from config has only its four terms, and the
+            # a grant read back from config has only its five terms, and the
             # description an operator is shown on revoke must be the same
             # sentence they consented to. Wide grants have to READ wide — see
             # computer_extent.ComputerExtent.describe, whose phrasing this
@@ -557,9 +591,10 @@ class Grant:
                 from prometheus.permissions.computer_extent import (
                     ComputerExtent as _CE,
                 )
-                target, app, verb, delivery = terms
+                target, app, site, verb, delivery = terms
                 what = _CE(
-                    target=target, app=app, verb=verb, delivery=delivery
+                    target=target, app=app, verb=verb, delivery=delivery,
+                    site=site,
                 ).describe()
         else:  # pragma: no cover - kind is validated at construction
             what = f"{self.kind} {self.value}"
@@ -997,6 +1032,9 @@ class SecurityGate:
         globs, ``sh -c``.
         """
         is_user = (origin == ORIGIN_USER)
+        # A DESKTOP ACTION is recognised by its schema (the caller passes the
+        # extent it assembled, or the reason it could not), never by its name.
+        is_computer = computer_action is not None or bool(computer_unknown)
 
         # Sprint 11: exfiltration check (system origin only — when the user
         # is not in the loop, network+sensitive-file combos are still blocked.
@@ -1023,7 +1061,17 @@ class SecurityGate:
         # deliberately still `_is_always_blocked` here, not
         # `_check_blocked_command`, so denied_commands stays a policy the mode
         # can waive while the always-blocked patterns cannot be.
-        if self._mode == PermissionMode.AUTONOMOUS:
+        #
+        # ⚠ AND IT DOES NOT WAIVE DESKTOP CONSENT (computer-use v1.1, D1).
+        # This branch used to return ALLOW before the computer rule below was
+        # reached, so under `/gate off` a known extent and an unknown one were
+        # both allowed — clicks AND typed text, unprompted, with the payload
+        # rule never consulted. A computer action's consent is not a mode: it
+        # falls through to the same grants check and the same computer rule
+        # as in DEFAULT, so `/gate off` neither waives nor tightens it.
+        # Ordinary tools are untouched — tests/test_gate_computer_floor.py
+        # holds them to a golden table captured before this line existed.
+        if self._mode == PermissionMode.AUTONOMOUS and not is_computer:
             if command and self._is_always_blocked(command):
                 reason = f"Blocked command pattern: {command!r}"
                 self._audit_log(tool_name, AuditDecision.DENY, reason, command)
@@ -1055,10 +1103,16 @@ class SecurityGate:
         # every DENY-tier check, before the APPROVE tier — a grant can silence
         # a prompt, never resurrect a block.
         if self._grants:
+            # ⚠ ONLY AN EXACT `computer_action` GRANT MAY SILENCE A DESKTOP
+            # ACTION (D18). A legacy `tool` grant naming a computer tool —
+            # `security.grants` still loads `kind: tool` rows — matched EVERY
+            # call of it by name: any app, and even an extent this gate could
+            # not assemble. For an ordinary tool nothing changes.
             matched = next(
                 (g for g in self._grants
-                 if g.matches(tool_name, file_path, command,
-                              computer_action.value if computer_action else None)),
+                 if (not is_computer or g.kind == COMPUTER_ACTION_KIND)
+                 and g.matches(tool_name, file_path, command,
+                               computer_action.value if computer_action else None)),
                 None,
             )
             if matched is not None:
@@ -1372,6 +1426,8 @@ class SecurityGate:
                     # Adopt the newer request as the provenance for the
                     # upgrade — it is the approval that widened the duration.
                     existing.request_id = grant.request_id or existing.request_id
+                    # ...and the person who gave it, for the same reason.
+                    existing.granted_by = grant.granted_by or existing.granted_by
                 return existing
         self._grants.append(grant)
         return grant

@@ -154,7 +154,10 @@ async def _two_steps(args, chooser_inner, label):
             await asyncio.sleep(0.05)
             pending = queue.list_pending()
             if pending:
-                await cmd_approve(queue, f"always {pending[0].request_id}")
+                from prometheus.permissions.approver import in_process
+
+                await cmd_approve(queue, f"always {pending[0].request_id}",
+                                  by=in_process("computer_use_multistep_probe"))
                 break
         return await task
 

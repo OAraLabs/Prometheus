@@ -256,6 +256,31 @@ class GoldenTraceExporter:
                 path, exc_info=True,
             )
 
+    def _export_batch(self) -> tuple[int, Any]:
+        """Read the watermark, export the batch after it, advance it. Blocking.
+
+        One unit so the watermark always moves with the file it describes. The
+        daemon cancels this task at shutdown, and a cancel lands at an await:
+        were the watermark written back on the loop, a cancel during the export
+        would leave the file on disk and the cursor behind it, and the next
+        start would write the same traces again. The worker thread finishes all
+        three steps whether or not its awaiter is still there.
+        """
+        since = self._read_watermark()
+        result = self._telemetry.export_new_golden_traces(
+            since_rowid=since,
+            limit=self._limit,
+            format=self._format,
+            output_dir=self._output_dir,
+            context_resolver=self._context_resolver,
+        )
+        if result is not None:
+            # Advance the watermark even when nothing was written: those rows
+            # are permanently untrainable (context gone), so leaving the cursor
+            # behind them would re-read the same dead batch every cycle forever.
+            self._write_watermark(result.last_rowid, result.count)
+        return since, result
+
     async def run_once(self) -> str | None:
         """Export one batch of NEW traces. Returns the path, or None.
 
@@ -269,16 +294,15 @@ class GoldenTraceExporter:
         nothing when there is nothing new, and it means a restart picks up
         the backlog promptly instead of waiting out a 24h interval.
         """
-        since = self._read_watermark()
-        result = None
         try:
-            result = self._telemetry.export_new_golden_traces(
-                since_rowid=since,
-                limit=self._limit,
-                format=self._format,
-                output_dir=self._output_dir,
-                context_resolver=self._context_resolver,
-            )
+            # Off the event loop. The export is synchronous sqlite reads (one
+            # telemetry batch, then an LCM context read per trace) plus a JSONL
+            # write, and it ran on the daemon's only loop: an 890-trace export
+            # blocked it for 3.7 s with no turn running, long enough to stall
+            # every client's progress heartbeat (#705). Both connections it
+            # reads are opened check_same_thread=False, and the LCM store is
+            # the exporter's own.
+            since, result = await asyncio.to_thread(self._export_batch)
         except Exception:
             log.exception("GoldenTraceExporter: export call failed")
             return None
@@ -288,10 +312,6 @@ class GoldenTraceExporter:
             log.debug("GoldenTraceExporter: no new golden traces since rowid %d", since)
             return None
 
-        # Advance the watermark even when nothing was written: those rows are
-        # permanently untrainable (context gone), so leaving the cursor behind
-        # them would re-read the same dead batch every cycle forever.
-        self._write_watermark(result.last_rowid, result.count)
         if result.path is None:
             log.info(
                 "GoldenTraceExporter: advanced past %d untrainable traces "

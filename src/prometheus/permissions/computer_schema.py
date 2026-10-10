@@ -29,6 +29,18 @@ Ruled by Will 2026-09-19: the unit of remembered consent is
 
     target : app : verb : delivery_mode    e.g. ``mini:firefox:click:background``
 
+and, from computer-use v1.1 (W1, agreed 2026-10-04), with a SITE term third:
+
+    target : app : site : verb : delivery  e.g. ``mini:gedit:-:click:background``
+
+THE SITE TERM, AND WHY IT HAD TO GO IN BEFORE ANY GRANT. In a browser,
+``mini:firefox:click:background`` covers a bank tab and a docs tab alike —
+"Firefox" was consent to every site in it. ``site`` is an origin
+(``scheme://host[:port]``), ``-`` (POSITIVELY no web content), or UNKNOWN
+(``?``). UNKNOWN is gated and shown but never rememberable, exactly like a
+payload. It is added now, while no grant exists, for the reason the target
+term was: a term added later cannot narrow a grant minted without it.
+
 Hermes keys the same idea as ``cua:<action>:<background|foreground>``. The APP
 and TARGET terms are the difference, and each earns its place the same way:
 "allow clicks", "allow clicks in Mail", and "allow clicks in Mail on my
@@ -120,6 +132,9 @@ COMPUTER_VERB_KEY = "x-prometheus-computer-verb"
 COMPUTER_TARGET_KEY = "x-prometheus-computer-target"
 COMPUTER_APP_KEY = "x-prometheus-computer-app"
 COMPUTER_DELIVERY_KEY = "x-prometheus-computer-delivery"
+#: Which argument names the SITE: the web origin the action can reach, ``-``
+#: for positively none, or UNKNOWN. See the module docstring.
+COMPUTER_SITE_KEY = "x-prometheus-computer-site"
 
 #: Field key marking an argument the extent CANNOT describe. Any tool with one
 #: is never rememberable. See the module docstring — this is the safety device,
@@ -147,6 +162,15 @@ COMPUTER_TARGET_FIELD: dict[str, Any] = {COMPUTER_TARGET_KEY: True}
 COMPUTER_APP_FIELD: dict[str, Any] = {COMPUTER_APP_KEY: True}
 COMPUTER_DELIVERY_FIELD: dict[str, Any] = {COMPUTER_DELIVERY_KEY: True}
 COMPUTER_PAYLOAD_FIELD: dict[str, Any] = {COMPUTER_PAYLOAD_KEY: True}
+COMPUTER_SITE_FIELD: dict[str, Any] = {COMPUTER_SITE_KEY: True}
+
+#: ``site`` when the action POSITIVELY reaches no web content — established
+#: from evidence (``candidates.site_of``), never assumed.
+SITE_NONE = "-"
+#: ``site`` when it could not be established. Gated, shown, NEVER remembered:
+#: a grant cannot be minted for it, a stored row carrying it is refused, and
+#: a grant can never match it.
+SITE_UNKNOWN = "?"
 
 #: ``pid`` / ``window_id``. They address WHICH WINDOW the driver acts on and
 #: they are load-bearing there — the SDK refuses a cross-window token with
@@ -235,6 +259,11 @@ def declared_app_param(schema: dict[str, Any] | None) -> str | None:
 def declared_delivery_param(schema: dict[str, Any] | None) -> str | None:
     """Which argument selects background/foreground delivery."""
     return _field_declaring(schema, COMPUTER_DELIVERY_KEY)
+
+
+def declared_site_param(schema: dict[str, Any] | None) -> str | None:
+    """Which argument names the site (origin, ``-``, or UNKNOWN)."""
+    return _field_declaring(schema, COMPUTER_SITE_KEY)
 
 
 def declared_payload_params(schema: dict[str, Any] | None) -> tuple[str, ...]:

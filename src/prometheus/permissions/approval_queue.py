@@ -10,11 +10,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 from uuid import uuid4
 
+from prometheus.engine.tool_context import RUN_SESSION
+from prometheus.permissions.approver import Approver
 from prometheus.permissions.argument_view import (
     format_arguments,
     redact_arguments,
@@ -75,6 +78,25 @@ class PendingAction:
     #: mapping rather than pre-rendered text so each surface (Telegram prose,
     #: Beacon's card) formats it for its own width.
     arguments: "dict[str, Any] | None" = None
+    #: A desktop task's prompt (computer-use v1.1, the door): which task and
+    #: which chat session asked. None for a request raised outside any task.
+    task_id: str | None = None
+    #: The conversation that raised this request: a desktop prompt names it, and
+    #: every other request is stamped at creation with the run in progress
+    #: (``engine.tool_context.RUN_SESSION``), None outside a run. It is NOT on the
+    #: wire (``serialize_pending`` still adds it only for a desktop prompt): it is
+    #: how a scoped device is shown, and may answer, only its own sessions' calls.
+    session_id: str | None = None
+    #: APPROVE-ONCE ONLY. A door prompt never offers a lasting scope: one
+    #: "always" on "Click the push button 'Send'" would mint a grant for every
+    #: session, surface and origin, and outlive the binding (W2). The binding
+    #: is the lasting consent; ``prospective_extents`` offers nothing and the
+    #: channel refuses any scope but once.
+    once_only: bool = False
+    #: The length of the text a desktop action would type, counted from the
+    #: RAW text. What a stored or backfilled copy carries instead of the text
+    #: itself (computer-use v1.1 §5.2.2).
+    text_chars: int | None = None
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _result: ApprovalResult = ApprovalResult.TIMEOUT
 
@@ -152,6 +174,7 @@ def stored_scope_for(verb: str) -> str:
 def derive_grant(
     action: PendingAction, root: str | None = None, *,
     verb: str = SCOPE_ONCE,
+    granted_by: dict[str, str] | None = None,
 ):
     """Build the Grant a scoped approval would remember, or None.
 
@@ -202,6 +225,7 @@ def derive_grant(
             value=extent.value,
             tool_name=action.tool_name,
             request_id=action.request_id,
+            granted_by=granted_by,
             # An app:verb:delivery extent covers exactly itself. There is no
             # wider version of it to opt into, so `… here` cannot widen it.
             widened=False,
@@ -214,6 +238,7 @@ def derive_grant(
             value=str(_Path(root).expanduser().resolve()),
             tool_name=action.tool_name,
             request_id=action.request_id,
+            granted_by=granted_by,
             # A root IS a subtree by construction — that is what a root means.
             widened=True,
             scope=stored_scope_for(verb),
@@ -245,6 +270,7 @@ def derive_grant(
             value=value,
             tool_name=action.tool_name,
             request_id=action.request_id,
+            granted_by=granted_by,
             # The one place that KNOWS. describe() used to rediscover this
             # with a stat and got it wrong whenever the directory did not
             # exist yet — which, for a widening approval, is the usual case,
@@ -259,6 +285,7 @@ def derive_grant(
             value=action.grant_command,
             tool_name="bash",
             request_id=action.request_id,
+            granted_by=granted_by,
             scope=stored_scope_for(verb),
         )
     # SPRINT-CONSENT Phase 1 — RULE 4 PRODUCES NO GRANT.
@@ -314,6 +341,8 @@ def prospective_extents(action: PendingAction) -> dict[str, str]:
     Keys are the scope verbs; a verb is ABSENT when it would create no grant.
     """
     out: dict[str, str] = {}
+    if getattr(action, "once_only", False):
+        return out  # a door prompt offers no lasting scope (W2)
     if derive_grant(action) is None:
         return out
     # Derived from GRANT_SCOPES, never hand-listed — a verb added there is
@@ -404,10 +433,34 @@ class ApprovalQueue:
         self._timeout = timeout_seconds
         self._default_chat_id = default_chat_id
         self.pending: dict[str, PendingAction] = {}
+        # Where each request came from, kept after the request leaves ``pending`` so a resolution frame is
+        # routed exactly like the request's: request id -> (session id or None, is a desktop prompt).
+        self._origins: OrderedDict[str, tuple[str | None, bool]] = OrderedDict()
         # Late-wired SignalBus (daemon.py sets it after the bus exists, same
         # pattern as extractor/skill_creator). While None, emission silently
         # skips — behavior identical to pre-push-approval builds.
         self.signal_bus = None
+
+    #: How many requests' origins are remembered. A request lives minutes; this is a ring, not an archive.
+    ORIGINS_REMEMBERED = 512
+
+    def _register(self, action: PendingAction) -> None:
+        """Make *action* pending, and remember where it came from.
+
+        The one place a request becomes pending (the desktop channel, a subclass, uses it too), so the origin
+        log cannot miss one. Who may SEE a request (a scoped device sees its own sessions', over REST and over
+        the WebSocket) is decided from this: ``origin_of``.
+        """
+        self.pending[action.request_id] = action
+        self._origins[action.request_id] = (action.session_id, action.task_id is not None)
+        self._origins.move_to_end(action.request_id)
+        while len(self._origins) > self.ORIGINS_REMEMBERED:
+            self._origins.popitem(last=False)
+
+    def origin_of(self, request_id: str) -> tuple[str | None, bool] | None:
+        """``(session id, is a desktop prompt)`` for a request this queue raised, or None if it never did
+        (or it is older than the log). Outlives the pending entry."""
+        return self._origins.get(request_id)
 
     def serialize_pending(self, action: PendingAction) -> dict:
         """The canonical wire shape of one pending request.
@@ -461,6 +514,15 @@ class ApprovalQueue:
             # None means "this call had no arguments worth showing", which is
             # different from {} and Beacon may render the difference.
             "arguments": action.arguments,
+            # A desktop task's prompt says which task and session asked, and
+            # that it is approve-once. ABSENT for every other request, so no
+            # existing payload changes shape.
+            **({"task_id": action.task_id, "session_id": action.session_id,
+                "once_only": True, "text_chars": action.text_chars,
+                "extent": (action.grant_computer_action.value
+                           if action.grant_computer_action is not None
+                           else None)}
+               if action.task_id is not None else {}),
         }
 
     async def _emit(self, kind: str, payload: dict) -> None:
@@ -561,8 +623,9 @@ class ApprovalQueue:
             # forget to scrub. Storing the raw dict and scrubbing per surface
             # is how one surface ends up echoing a secret.
             arguments=redact_arguments(arguments),
+            session_id=RUN_SESSION.get(),
         )
-        self.pending[request_id] = action
+        self._register(action)
         await self._emit("approval_pending", self.serialize_pending(action))
 
         # Send notification via Telegram
@@ -635,7 +698,18 @@ class ApprovalQueue:
             except Exception as exc:
                 logger.warning("Failed to send approval request: %s", exc)
 
-        # Wait for response or timeout
+        # Wait for response or timeout. The pop is in a FINALLY (D14): a
+        # caller cancelled while it waited — a stopped desktop task, a
+        # shut-down turn — used to leave its request pending forever, still
+        # answerable, with nothing waiting on the answer.
+        try:
+            await self._wait_for_answer(action, request_id, target_chat)
+        finally:
+            self.pending.pop(request_id, None)
+        return action._result
+
+    async def _wait_for_answer(self, action: PendingAction, request_id: str,
+                               target_chat) -> None:
         try:
             await asyncio.wait_for(action._event.wait(), timeout=self._timeout)
         except asyncio.TimeoutError:
@@ -654,10 +728,6 @@ class ApprovalQueue:
             await self._emit("approval_resolved", {
                 "request_id": request_id, "resolution": "expired",
             })
-
-        # Clean up
-        self.pending.pop(request_id, None)
-        return action._result
 
     async def _notify_expiry(self, action: PendingAction, chat_id) -> None:
         """Tell the operator the window closed, and what it was for."""
@@ -685,6 +755,7 @@ class ApprovalQueue:
         *,
         scope: str | None = None,
         grant=None,
+        by=None,
     ) -> None:
         """Write the resolution row. SPRINT-CONSENT Phase 3.
 
@@ -723,14 +794,23 @@ class ApprovalQueue:
                 trust_level=getattr(gate, "_mode_trust_level", lambda: 0)(),
                 reason=f"{decision.value}: " + ", ".join(bits),
                 tool_input=target or None,
+                # WHO answered (W4, record step). The column existed all
+                # along and this row never filled it. None only on expiry,
+                # where nobody answered.
+                user_id=by.label if by is not None else None,
             )
         except Exception:  # pragma: no cover - audit must not mask a decision
             logger.debug("approval audit write failed", exc_info=True)
 
     async def approve(
-        self, request_id: str, *, scope: str | None = None, grant=None
+        self, request_id: str, *, by: Approver,
+        scope: str | None = None, grant=None,
     ) -> bool:
-        """Approve a pending action. Returns True if found and approved."""
+        """Approve a pending action. Returns True if found and approved.
+
+        ``by`` is REQUIRED: every answer records who gave it (W4). Nothing is
+        refused on its account in this step — see permissions/approver.py.
+        """
         from prometheus.permissions.audit import AuditDecision
 
         # BEFORE any mutation, so a raise leaves the request PENDING and it
@@ -754,15 +834,20 @@ class ApprovalQueue:
         action._result = ApprovalResult.APPROVED
         action._event.set()
         self._audit_resolution(
-            action, AuditDecision.CONFIRM_APPROVED, scope=scope, grant=grant
+            action, AuditDecision.CONFIRM_APPROVED, scope=scope, grant=grant,
+            by=by,
         )
         await self._emit("approval_resolved", {
             "request_id": request_id, "resolution": "approved", "scope": scope,
+            "approved_by": by.to_record(),
         })
         return True
 
-    async def deny(self, request_id: str) -> bool:
-        """Deny a pending action. Returns True if found and denied."""
+    async def deny(self, request_id: str, *, by: Approver) -> bool:
+        """Deny a pending action. Returns True if found and denied.
+
+        ``by`` is REQUIRED, as for :meth:`approve`.
+        """
         from prometheus.permissions.audit import AuditDecision
 
         action = self.pending.get(request_id)
@@ -770,12 +855,104 @@ class ApprovalQueue:
             return False
         action._result = ApprovalResult.DENIED
         action._event.set()
-        self._audit_resolution(action, AuditDecision.CONFIRM_REJECTED)
+        self._audit_resolution(action, AuditDecision.CONFIRM_REJECTED, by=by)
         await self._emit("approval_resolved", {
             "request_id": request_id, "resolution": "denied",
+            "denied_by": by.to_record(),
         })
         return True
 
     def list_pending(self) -> list[PendingAction]:
         """Return all pending approval requests."""
         return list(self.pending.values())
+
+
+class ApprovalQueues:
+    """Two queues, one answer surface (computer-use v1.1, the door).
+
+    Desktop prompts live in their own queue — the computer approval channel
+    (``computer/approvals.py``) — so the operator's
+    ``security.approval_queue.enabled`` keeps its meaning for every other
+    tool. But a person answers both from the same ``/approve``, ``/deny``,
+    ``/pending`` and ``POST /api/approvals/{id}/...``, so the surfaces are
+    handed this instead of either queue: it shows both queues' pending
+    requests and sends each answer to the queue that holds it.
+
+    Built ONLY when computer use is on. Off, every surface gets exactly the
+    queue it had before.
+
+    ``pending`` is a merged SNAPSHOT (a plain dict, as readers expect); write
+    to the owning queue, never to it.
+    """
+
+    def __init__(self, *queues: Any) -> None:
+        self._queues = [q for q in queues if q is not None]
+        if not self._queues:
+            raise ValueError("ApprovalQueues needs at least one queue")
+
+    @property
+    def queues(self) -> list[Any]:
+        return list(self._queues)
+
+    @property
+    def pending(self) -> dict[str, PendingAction]:
+        merged: dict[str, PendingAction] = {}
+        for q in self._queues:
+            merged.update(getattr(q, "pending", {}) or {})
+        return merged
+
+    def owner_of(self, request_id: str) -> Any | None:
+        for q in self._queues:
+            if request_id in (getattr(q, "pending", {}) or {}):
+                return q
+        return None
+
+    def origin_of(self, request_id: str) -> tuple[str | None, bool] | None:
+        """The first queue that knows where this request came from (see ``ApprovalQueue.origin_of``)."""
+        for q in self._queues:
+            found = getattr(q, "origin_of", lambda _rid: None)(request_id)
+            if found is not None:
+                return found
+        return None
+
+    def list_pending(self) -> list[PendingAction]:
+        return list(self.pending.values())
+
+    @property
+    def _security_gate(self) -> Any:
+        return getattr(self._queues[0], "_security_gate", None)
+
+    @property
+    def signal_bus(self) -> Any:
+        return getattr(self._queues[0], "signal_bus", None)
+
+    @property
+    def timeout_seconds(self) -> float:
+        return self._queues[0].timeout_seconds
+
+    def _for(self, action: PendingAction) -> Any:
+        return self.owner_of(action.request_id) or self._queues[0]
+
+    def serialize_pending(self, action: PendingAction) -> dict:
+        return self._for(action).serialize_pending(action)
+
+    def expires_at(self, action: PendingAction) -> float:
+        return self._for(action).expires_at(action)
+
+    async def approve(self, request_id: str, *, by: Approver,
+                      scope: str | None = None, grant=None) -> bool:
+        owner = self.owner_of(request_id)
+        if owner is None:
+            return False
+        return await owner.approve(request_id, by=by, scope=scope, grant=grant)
+
+    async def deny(self, request_id: str, *, by: Approver) -> bool:
+        owner = self.owner_of(request_id)
+        if owner is None:
+            return False
+        return await owner.deny(request_id, by=by)
+
+
+def is_desktop_request(action: Any) -> bool:
+    """A desktop task's prompt — skipped by every "approve all" (W2)."""
+    return getattr(action, "task_id", None) is not None

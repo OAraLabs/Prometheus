@@ -44,7 +44,11 @@ ALLOWED_TOP_LEVEL = {"aps", "request_id", "tool_name", "expires_at"}
 #: and `extents` are deliberately absent: the first is the text a tool was
 #: about to type, the second describes lasting grants an operator has not yet
 #: been offered.
-ALLOWED_PAYLOAD_READS = {"tool_name", "description", "request_id", "expires_at"}
+#: `task_id` (computer-use v1.1 PR 6, reviewed 2026-10-04) is read ONLY to
+#: choose the NARROWER body: a desktop task's prompt pushes no tool name, no
+#: description and no category — just request_id and expires_at.
+ALLOWED_PAYLOAD_READS = {"tool_name", "description", "request_id", "expires_at",
+                         "task_id"}
 
 
 class _Store:

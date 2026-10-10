@@ -68,7 +68,8 @@ class TestConfigureCloud:
         assert yaml.safe_dump(cfg["model"], sort_keys=False) == \
             yaml.safe_dump(expected["model"], sort_keys=False)
         assert "base_url" not in cfg["model"]
-        assert cfg["web"] == {"enabled": True, "api_port": 8005, "ws_port": 8010}
+        # D10: a fresh install listens on this machine only (the CLI writer says the same).
+        assert cfg["web"] == {"enabled": True, "api_port": 8005, "ws_port": 8010, "bind": "127.0.0.1"}
         # The key: in the env file, not the yaml.
         assert parse_env_file(env_file)["ANTHROPIC_API_KEY"] == KEY
         assert KEY not in (config_dir / "prometheus.yaml").read_text(encoding="utf-8")

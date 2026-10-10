@@ -472,7 +472,7 @@ class TestConfigSurfaces:
 
         for model in (
             "deepseek-v4-flash", "deepseek-v4-pro", "kimi-k2.6",
-            "glm-5.2", "mimo-v2.5-pro",
+            "glm-5.2", "mimo-v2.6-pro",
         ):
             inp, out = PRICING[model]
             assert inp > 0 and out > 0
@@ -487,7 +487,7 @@ class TestConfigSurfaces:
             "deepseek-v4-flash": ("DeepSeek V4 (cloud API)", 1000000),
             "kimi-k2.6": ("Kimi K2 (Moonshot cloud API)", 262144),
             "glm-5.2": ("GLM-5 (Z.ai cloud API)", 1000000),
-            "mimo-v2.5-pro": ("MiMo (Xiaomi cloud API)", 1000000),
+            "mimo-v2.6-pro": ("MiMo (Xiaomi cloud API)", 1000000),
         }
         for model_name, (display, context) in expectations.items():
             family = match_model(model_name, registry)

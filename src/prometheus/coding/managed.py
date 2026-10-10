@@ -113,4 +113,9 @@ async def create_coding_managed_task(
         notify_target=notify_target,
         on_complete="notify",
         timeout_seconds=timeout_seconds or (max_wall_seconds + 300),
+        # The daemon built this command (`python -m prometheus code ...`);
+        # the model's commands inside the run are floored where they run,
+        # in the coding sandbox. The launcher itself needs the daemon's
+        # environment and writes its state dirs.
+        floored=False,
     )

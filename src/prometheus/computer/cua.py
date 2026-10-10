@@ -68,20 +68,25 @@ rule above could not fire (computer-use v1.1, D3). ``_verdict`` reads both.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from prometheus.computer.driver import (
     ActionOutcomeUnknown,
     DriverBusy,
+    DriverSessionEnded,
     DriverUnavailable,
     StaleSnapshot,
 )
-from prometheus.computer.types import Element, Observation
+from prometheus.computer.types import Element, Observation, WindowCapture
 from prometheus.permissions.computer_schema import DELIVERY_BACKGROUND
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from prometheus.computer.discovery import AppRecord, WindowRecord
 
 #: Effects that mean the action landed. Everything else is not success.
 _EFFECT_OK = frozenset({"CONFIRMED", "PARTIAL"})
@@ -103,6 +108,10 @@ MAX_ELEMENTS = 200
 #: the loop's existing refusal path fires rather than a generic failure.
 _STALE_MARKERS = ("stale", "snapshot_id_required", "superseded")
 
+#: The SDK's ``error_code`` for a driver whose session Cua has ended (idle or
+#: absolute expiry). Read off the exception's attribute, never its text.
+_SESSION_ENDED = "session_ended"
+
 #: Verbs whose 0.28.2 input type can CARRY a delivery mode. Only
 #: ``ClickInput`` takes one; for the others the driver decides, so the
 #: extent's ``:background`` term names a request the driver was never sent.
@@ -112,7 +121,15 @@ _DELIVERY_IN_INPUT: frozenset[str] = frozenset({"click"})
 
 
 def _require_sdk() -> Any:
-    """Import the SDK, or fail with something an operator can act on."""
+    """Import the SDK, or fail with something an operator can act on.
+
+    ⚠ THE TELEMETRY FLOOR GOES FIRST. cua-driver reports usage by default and
+    reads its opt-outs when it loads, so they are forced off BEFORE the import
+    — after it would be too late (computer/integration.py, design Q1).
+    """
+    from prometheus.computer.integration import apply_telemetry_floor
+
+    apply_telemetry_floor()
     try:
         import cua_driver
     except ImportError as exc:
@@ -274,6 +291,44 @@ class CuaDriverAdapter:
     def __exit__(self, *exc: object) -> None:
         self.shutdown()
 
+    # ── discovery (D8) ─────────────────────────────────────────────────
+    #
+    # Read-only, and the ONLY two discovery calls: there is no launch path
+    # here, so "my editor" can resolve to a running window or to a question,
+    # never to a process this adapter started.
+
+    def list_apps(self) -> list[AppRecord]:
+        self.start()
+        try:
+            out = self._await(self._driver.list_apps(
+                _list_apps_input(self._sdk)))
+        except Exception as exc:  # noqa: BLE001
+            # ⚠ AN ENDED SESSION IS NAMED, BY THE SDK'S OWN CODE. ``start()``
+            # keeps this driver, and once Cua has ended its session every call
+            # answers ``session_ended``. The probe replaces the driver once on
+            # exactly this (integration._run_checks); the text is not read.
+            if getattr(exc, "error_code", None) == _SESSION_ENDED:
+                raise DriverSessionEnded(
+                    f"list_apps failed: the driver session ended "
+                    f"({exc.__class__.__name__}: {exc})") from exc
+            raise DriverUnavailable(
+                f"list_apps failed: {exc.__class__.__name__}: {exc}") from exc
+        return [_app_record(a) for a in (getattr(out, "apps", None) or [])]
+
+    def list_windows(
+        self, pid: int | None = None, on_screen_only: bool = True
+    ) -> list[WindowRecord]:
+        self.start()
+        try:
+            out = self._await(self._driver.list_windows(_list_windows_input(
+                self._sdk, pid=pid, on_screen_only=on_screen_only)))
+        except Exception as exc:  # noqa: BLE001
+            raise DriverUnavailable(
+                f"list_windows failed: {exc.__class__.__name__}: {exc}"
+            ) from exc
+        return [_window_record(w)
+                for w in (getattr(out, "windows", None) or [])]
+
     # ── the Driver Protocol ────────────────────────────────────────────
 
     def observe(
@@ -346,7 +401,11 @@ class CuaDriverAdapter:
             self._unusable.pop(key, None)
         return Observation(
             target=target,
-            app=getattr(out, "app_name", None) or app,
+            # ⚠ THE DRIVER'S ANSWER OR NONE (D19). This was
+            # `out.app_name or app`: with no app name from the driver, the
+            # consent term became whatever the CALLER claimed. Empty here
+            # makes the extent unknown and the loop refuse the window.
+            app=str(getattr(out, "app_name", None) or ""),
             pid=pid,
             window_id=window_id,
             snapshot_id=snapshot_id,
@@ -364,6 +423,83 @@ class CuaDriverAdapter:
             # Over the WHOLE walk, before the token filter above.
             web_content_seen=(
                 any(_is_web_or_document(e) for e in raw) if raw else None),
+        )
+
+    def capture(
+        self, target: str, app: str, pid: int, window_id: int, *,
+        max_dimension: int,
+    ) -> WindowCapture:
+        """One window-scoped snapshot WITH its pixels (PR 6b, design §5.2.5).
+
+        The SAME ``get_window_state`` call ``observe`` makes, with the
+        screenshot turned on — one call, so the tree the password check reads
+        and the pixels a person sees describe the same moment. Two rules make
+        this safe and both are enforced here, not downstream:
+
+        * **The whole walk, tokenless nodes included.** ``observe`` filters to
+          token-bearing elements (only those are addressable); the password
+          check must see nodes a filter would drop, because a password field
+          is exactly such a node. So ``roles`` keeps every node's role.
+        * **It invalidates the snapshot.** This call mints a new snapshot, so
+          every element token the loop holds dies — ``_forget`` it, same as a
+          failed observe. Safe in the run only because a capture happens after
+          the step executed and the next step re-observes; a capture that let
+          the old snapshot stand would arm a stale-token action.
+
+        Returns a ``WindowCapture`` (our type) — the SDK never escapes this
+        method, which is why the whole rule engine in ``thumbnails.py`` is
+        CI-coverable with no SDK installed.
+
+        ⚠ NOT VERIFIED ON 0.28.2: whether ``images`` is populated inline or
+        only ``screenshot_file_path`` is set. We read ``images[0]`` and never
+        the file path — a screenshot on disk is a second copy of the desktop
+        whose lifetime we do not control. If the on-box check shows ``images``
+        empty on 0.28.2, the fix is here and only here.
+        """
+        self._assert_target(target)
+        self.start()
+        key = (pid, window_id)
+        try:
+            out = self._await(self._driver.get_window_state(
+                _window_state_input(
+                    self._sdk, pid=pid, window_id=window_id,
+                    session=self._session,
+                    include_screenshot=True, max_dimension=max_dimension)))
+        except DriverUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # A capture that failed or timed out may still have minted a new
+            # snapshot. Forget it — the record can no longer be vouched for.
+            self._forget(key)
+            raise DriverUnavailable(
+                f"capture failed on {target}: "
+                f"{exc.__class__.__name__}: {exc}"
+            ) from exc
+
+        # Whatever came back, the OLD snapshot is superseded: fail closed.
+        self._forget(key)
+
+        raw = list(getattr(out, "elements", None) or [])
+        images = list(getattr(out, "images", None) or [])
+        first = images[0] if images else None
+        data = getattr(first, "data_base64", None) if first else None
+        mime = getattr(first, "mime_type", None) if first else None
+        return WindowCapture(
+            target=target, app=app, pid=pid, window_id=window_id,
+            # ⚠ THE DRIVER'S ANSWER OR NONE (D19). Never `or app`: an empty
+            # app_name makes the identity gate skip as window_changed, which
+            # is the fail-closed answer, not the caller's claim.
+            app_name=_opt_str(getattr(out, "app_name", None)),
+            # The WHOLE walk's roles, tokenless included — see the docstring.
+            roles=tuple(str(getattr(e, "role", "") or "") for e in raw),
+            degraded=bool(getattr(out, "degraded", False)),
+            truncated=bool(getattr(out, "truncated", False)),
+            frame_valid=_opt_bool(
+                getattr(out, "screenshot_frame_valid", None)),
+            image_mime=_opt_str(mime),
+            image_base64=data if isinstance(data, str) else None,
+            image_width=_opt_int(getattr(out, "screenshot_width", None)),
+            image_height=_opt_int(getattr(out, "screenshot_height", None)),
         )
 
     def act(self, verb: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -425,7 +561,8 @@ class CuaDriverAdapter:
             )
         method_name, make_input = builder
         try:
-            result = self._await(getattr(self._driver, method_name)(
+            result = self._await(_dispatch(
+                self._driver, method_name,
                 make_input(self._sdk, arguments, self._session)))
         except TimeoutError as exc:
             # ⚠ NOT "FAILED" (D13). The wait gave up; the action did not.
@@ -472,11 +609,18 @@ class CuaDriverAdapter:
 
 
 def _window_state_input(
-    sdk: Any, *, pid: int, window_id: int, session: str | None
+    sdk: Any, *, pid: int, window_id: int, session: str | None,
+    include_screenshot: bool = False, max_dimension: int | None = None,
 ) -> Any:
     """The observe call's input. A function so the real-SDK tests can build it
     with the PINNED types — from 0.28.3 it gains a required keyword this
-    call does not pass, which is what the exact pin exists to keep out."""
+    call does not pass, which is what the exact pin exists to keep out.
+
+    ``include_screenshot``/``max_dimension`` are keyword-only and default to
+    observe's values (no picture), so every existing call site and the pin
+    asserting ``include_screenshot is False`` are unchanged. Only PR 6b's
+    capture passes them.
+    """
     return sdk.GetWindowStateInput(
         pid=pid,
         window_id=window_id,
@@ -487,11 +631,11 @@ def _window_state_input(
         # candidate table, it is the expensive half of the call, and a frame
         # we do not need is a frame that could end up somewhere it should not
         # be (see the capture ruling).
-        include_screenshot=False,
+        include_screenshot=include_screenshot,
         screenshot_out_file=None,
         max_elements=MAX_ELEMENTS,
         max_depth=None,
-        max_dimension=None,
+        max_dimension=max_dimension,
     )
 
 
@@ -701,12 +845,91 @@ def _invoke_menu_input(sdk: Any, a: dict[str, Any], session: str | None) -> Any:
     )
 
 
+def _set_value_call(sdk: Any, a: dict[str, Any],
+                    session: str | None) -> tuple[str, str]:
+    """``set_value`` by ELEMENT TOKEN (D2), through ``call_tool``.
+
+    0.28.2 has no typed method for it; the generic surface reaches the same
+    driver tool, whose schema (platform-linux/src/tools/impl_.rs:5480-5490 at
+    the 0.28.2 tag) takes the token, the snapshot and the value, with
+    ``additionalProperties: false``. A missing token is a KeyError HERE,
+    before anything is sent — an untargeted set would be the defect again.
+    """
+    del sdk
+    payload: dict[str, Any] = {
+        "pid": int(a["pid"]),
+        "window_id": int(a["window_id"]),
+        "element_token": str(a["element_token"]),
+        "snapshot_id": a.get("snapshot_id"),
+        "value": str(a["text"]),
+    }
+    if session:
+        payload["session"] = session
+    return "set_value", json.dumps(
+        {k: v for k, v in payload.items() if v is not None})
+
+
+def _dispatch(driver: Any, method_name: str, built: Any) -> Any:
+    """The SDK coroutine for one built input. ``call_tool`` is the one method
+    that takes ``(name, arguments_json)`` rather than a typed input."""
+    if method_name == "call_tool":
+        name, arguments_json = built
+        return driver.call_tool(name, arguments_json)
+    return getattr(driver, method_name)(built)
+
+
 #: verb -> (SDK method, input builder). The IMPLEMENTED SET, and `act`
 #: refuses anything absent from it rather than dispatching generically.
+#: ``set_value`` goes through ``call_tool`` by NAME, and only by this name —
+#: the generic surface is not a passthrough for anything else.
 _BUILDERS: dict[str, tuple[str, Any]] = {
     "click": ("click", _click_input),
     "press_key": ("press_key", _press_key_input),
     "scroll": ("scroll", _scroll_input),
     "type_text": ("type_text", _type_text_input),
+    "set_value": ("call_tool", _set_value_call),
     "invoke_menu": ("invoke_menu", _invoke_menu_input),
 }
+
+
+# ── discovery inputs and records (D8) ──────────────────────────────────────
+
+
+def _list_apps_input(sdk: Any) -> Any:
+    return sdk.ListAppsInput()
+
+
+def _list_windows_input(
+    sdk: Any, *, pid: int | None, on_screen_only: bool
+) -> Any:
+    return sdk.ListWindowsInput(pid=pid, on_screen_only=on_screen_only)
+
+
+def _app_record(a: Any) -> AppRecord:
+    from prometheus.computer.discovery import AppRecord
+
+    return AppRecord(
+        pid=int(getattr(a, "pid", 0)),
+        name=str(getattr(a, "name", "") or ""),
+        running=bool(getattr(a, "running", False)),
+        active=bool(getattr(a, "active", False)),
+        bundle_id=getattr(a, "bundle_id", None),
+        launch_path=getattr(a, "launch_path", None),
+    )
+
+
+def _window_record(w: Any) -> WindowRecord:
+    from prometheus.computer.discovery import WindowRecord
+
+    pid = getattr(w, "pid", None)
+    z_index = getattr(w, "z_index", None)
+    minimized = getattr(w, "minimized", None)
+    return WindowRecord(
+        window_id=int(getattr(w, "window_id", 0)),
+        pid=None if pid is None else int(pid),
+        app_name=str(getattr(w, "app_name", "") or ""),
+        title=str(getattr(w, "title", "") or ""),
+        is_on_screen=bool(getattr(w, "is_on_screen", False)),
+        z_index=None if z_index is None else int(z_index),
+        minimized=None if minimized is None else bool(minimized),
+    )

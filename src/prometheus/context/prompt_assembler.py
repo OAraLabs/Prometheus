@@ -79,6 +79,27 @@ def _load_memory_and_user() -> str:
         return ""
 
 
+def memory_section(memory_content: str | None = None) -> str | None:
+    """The "# Memory" section (MEMORY.md + USER.md), or None when there is none.
+
+    One function, two callers, like :func:`project_files_section`:
+    ``build_runtime_system_prompt`` at boot, and ``run_loop`` once per run
+    (``LoopContext.memory_prompt_builder``), which re-reads the files and
+    replaces the boot section by exact substring. The memory tool and
+    ``PUT /api/memory/current`` write the files at once; without the per-run
+    read the model saw the boot copy until the daemon restarted.
+
+    *memory_content* None reads the files now; a string (even "") is used as
+    given, so a caller can build the prompt and remember its section from ONE
+    read.
+    """
+    if memory_content is None:
+        memory_content = _load_memory_and_user()
+    if not memory_content:
+        return None
+    return f"# Memory\n\n{_MEMORY_ETIQUETTE}\n\n{memory_content}"
+
+
 def _load_anatomy_summary() -> str | None:
     """Load compact infrastructure summary from ANATOMY.md for the system prompt.
 
@@ -160,7 +181,7 @@ def build_runtime_system_prompt(
     *,
     cwd: str,
     config: dict | None = None,
-    memory_content: str = "",
+    memory_content: str | None = None,
     skills: list | None = None,
     task_state: str = "",
     profile: object | None = None,
@@ -197,7 +218,9 @@ def build_runtime_system_prompt(
         - ``"bootstrap"``     — bootstrap config (load_soul, load_agents).
     memory_content:
         Pre-formatted memory content to inject (e.g. from MemoryPointer).
-        If empty, MEMORY.md + USER.md are loaded automatically.
+        If None, MEMORY.md + USER.md are loaded automatically; "" means no
+        memory section. The daemon passes what it read so the boot section it
+        remembers for the per-run swap is the one in this prompt.
     skills:
         List of skill dicts with ``"name"`` and ``"description"`` keys.
     task_state:
@@ -358,11 +381,10 @@ def build_runtime_system_prompt(
     if project_prompt:
         dynamic_sections.append(project_prompt)
 
-    # MEMORY.md + USER.md — auto-load if caller didn't provide memory_content
-    if not memory_content:
-        memory_content = _load_memory_and_user()
-    if memory_content:
-        dynamic_sections.append(f"# Memory\n\n{_MEMORY_ETIQUETTE}\n\n{memory_content}")
+    # MEMORY.md + USER.md — read now unless the caller passed memory_content
+    memory_prompt = memory_section(memory_content)
+    if memory_prompt:
+        dynamic_sections.append(memory_prompt)
 
     # User's saved files — so the agent knows what files exist without searching
     try:

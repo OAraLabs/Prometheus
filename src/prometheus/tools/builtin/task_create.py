@@ -138,6 +138,11 @@ class TaskCreateTool(BaseTool):
         # Trusted context — NOT from arguments.
         session_id = context.metadata.get("session_id") if context.metadata else None
         notify_target = _notify_target_from_session(session_id)
+        # A session with a workspace of its own bounds the write floor of the
+        # shells it starts, as it bounds the bash tool's (item W).
+        workspace_roots = (
+            context.metadata.get("workspace_roots") if context.metadata else None
+        ) or None
 
         on_complete = arguments.on_complete if arguments.on_complete in (
             "notify", "reengage", "both",
@@ -157,7 +162,9 @@ class TaskCreateTool(BaseTool):
             if arguments.type == "local_bash":
                 if not arguments.command:
                     return ToolResult(output=_mode_error(arguments, "command", "local_bash"), is_error=True)
-                task = await manager.create_shell_task(command=arguments.command, **common)
+                task = await manager.create_shell_task(
+                    command=arguments.command, workspace_roots=workspace_roots,
+                    **common)
             elif arguments.type == "local_agent":
                 if not arguments.prompt:
                     return ToolResult(output=_mode_error(arguments, "prompt", "local_agent"), is_error=True)
@@ -182,7 +189,8 @@ class TaskCreateTool(BaseTool):
                 if not arguments.poll_predicate:
                     return ToolResult(output=_mode_error(arguments, "poll_predicate", "poll"), is_error=True)
                 task = await manager.create_poll_task(
-                    poll_predicate=arguments.poll_predicate, **common
+                    poll_predicate=arguments.poll_predicate,
+                    workspace_roots=workspace_roots, **common
                 )
             else:
                 return ToolResult(output=f"unsupported task type: {arguments.type}", is_error=True)

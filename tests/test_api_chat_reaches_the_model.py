@@ -78,19 +78,27 @@ class _RecordingLoop:
         )
 
 
+def wire_runtime_prompt(app, prompt: str = "sys"):
+    """What ``launch_web`` does after ``create_app``: the bridge, holding the
+    shared web LoopContext, on ``app.state``. The route reads its system prompt
+    there and answers 503 without it (tests/test_api_chat_runtime_prompt.py)."""
+    app.state.ws_bridge = SimpleNamespace(loop_context=SimpleNamespace(system_prompt=prompt))
+    return app
+
+
 @pytest.fixture
 def client_and_loop(tmp_path, monkeypatch):
     monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path))
     loop = _RecordingLoop()
     app = create_app(
-        {"gateway": {"system_prompt": "sys"}},
+        {},
         session_mgr=SessionManager(),
         # THE REAL SkillRegistry — the object whose missing method was the bug.
         # A mock would answer `list_schemas` happily and prove nothing.
         skill_registry=SkillRegistry(),
         agent_loop=loop,
     )
-    return TestClient(app), loop
+    return TestClient(wire_runtime_prompt(app)), loop
 
 
 def test_the_route_reaches_the_model(client_and_loop):

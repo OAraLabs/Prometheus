@@ -7,12 +7,17 @@ client→server commands (send_message, switch_session).
 Usage:
     from prometheus.web.ws_server import WebSocketBridge
     bridge = WebSocketBridge(signal_bus, session_mgr, loop_context)
-    await bridge.start(host="0.0.0.0", port=8010)
+    await bridge.start(host="127.0.0.1", port=8010)
+
+``host`` is whatever the daemon resolved from ``--bind`` / ``PROMETHEUS_WEB_BIND``
+/ ``web.bind`` (web/bind.py). This server binds it itself, separately from the
+REST server: forcing uvicorn to loopback leaves this one on every interface.
 """
 
 from __future__ import annotations
 
 import asyncio
+import http
 import json
 import logging
 import time
@@ -20,6 +25,9 @@ from typing import Any
 
 from prometheus.engine import loop_watchdog as _loop_watchdog
 from prometheus.version import package_version
+from prometheus.web.bind import DEFAULT_BIND
+from prometheus.web.loopback import is_loopback_address, is_loopback_host_header
+from prometheus.web.session_scope import Scope, SessionAccess, event_session_id, scope_for, session_exists
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +44,16 @@ def _coding_frame_kinds() -> tuple[str, ...]:
     from prometheus.coding.livestream import CODING_FRAME_KINDS
 
     return CODING_FRAME_KINDS
+
+def _computer_frame_kinds() -> tuple[str, ...]:
+    """The desktop action log's own declaration of every kind it emits
+    (computer-use v1.1 PR 6). Promoted from the emitter's tuple for the same
+    reason as the coding kinds: a copied list here is how a kind ends up
+    shipped as ``sentinel_signal`` and silently dropped by every client."""
+    from prometheus.computer.livestream import COMPUTER_FRAME_KINDS
+
+    return COMPUTER_FRAME_KINDS
+
 
 # Close code for an unauthenticated / failed-auth WebSocket. 4000–4999 is the
 # application-private range; 4401 mirrors HTTP 401 for "unauthorized". Beacon
@@ -82,8 +100,49 @@ def _client_label(ws: Any) -> str:
     return f"id={id(ws):x}"
 
 
+def _loopback_process_request(connection: Any, request: Any) -> Any:
+    """Refuse a WebSocket handshake whose Host header is not a loopback name.
+
+    Installed only when the bridge is bound to a loopback address (DNS-rebinding
+    defence, see web/loopback.py). Runs before the upgrade, so a refused client
+    gets an HTTP 403 and never reaches ``_handler``.
+
+    Two library generations call a ``process_request`` hook differently. The
+    asyncio implementation (``websockets.serve`` from 14, and
+    ``websockets.asyncio.server``) passes ``(connection, request)`` and wants a
+    response built with ``connection.respond``; the legacy one (12, 13) passes
+    ``(path, request_headers)`` and wants a ``(status, headers, body)`` tuple.
+    Both are handled so the guard does not depend on which one is installed.
+    """
+    headers = getattr(request, "headers", request)
+    try:
+        hosts = list(headers.get_all("Host"))
+    except Exception:  # unreadable headers: refuse, never guess
+        hosts = []
+    if len(hosts) == 1 and is_loopback_host_header(hosts[0]):
+        return None
+    shown = hosts[0] if len(hosts) == 1 else f"{len(hosts)} Host headers"
+    logger.warning(
+        "refused a WebSocket handshake: its Host header %r is not a loopback "
+        "name, and the bridge is bound to a loopback address (see web.bind)",
+        shown if len(str(shown)) <= 100 else str(shown)[:100] + "...",
+    )
+    message = "Forbidden: this server only answers requests addressed to localhost\n"
+    if hasattr(connection, "respond"):
+        return connection.respond(http.HTTPStatus.FORBIDDEN, message)
+    return http.HTTPStatus.FORBIDDEN, [("Content-Type", "text/plain")], message.encode()
+
+
+#: The frames that carry a tool call awaiting approval (``serialize_pending`` / its resolution).
+_APPROVAL_FRAMES = frozenset({"approval_pending", "approval_resolved"})
+
+
 class WebSocketBridge:
     """Bridges SignalBus events to WebSocket clients."""
+
+    # The pairing runtime, set by attach_pairing. A class-level default so a bridge built without __init__
+    # (some tests do) is simply "not attached" rather than missing the attribute.
+    _pairing: Any = None
 
     def __init__(
         self,
@@ -119,6 +178,10 @@ class WebSocketBridge:
         # it (app.state.approval_queue); the bridge never did, which is one
         # reason those commands were never dispatched here.
         self.approval_queue = approval_queue
+        # Computer use v1.1 (the door): the desktop task runner, late-wired by
+        # the daemon; None while computer use is off. interrupt_turn stops a
+        # session's desktop tasks through it before any chat turn.
+        self.computer_runner: Any = None
         # Same secret the REST middleware uses (config.web.api_token /
         # PROMETHEUS_API_TOKEN). Empty/None => auth DISABLED, exactly like
         # the REST side, so dev/no-token setups (and the tokenless static UI)
@@ -133,6 +196,19 @@ class WebSocketBridge:
         # can only ask "is ANY client connected", and a desktop being open
         # would silently suppress the phone's push.
         self._ws_identity: dict[Any, Any] = {}
+        # Device scoping: the SAME ownership rule the REST layer applies
+        # (web/session_scope.py). A device socket sees and drives only the
+        # sessions its device owns; the global token's socket is the firehose,
+        # exactly as before. See docs/contracts/device-scoping.md.
+        self._access = SessionAccess(lambda: self._device_store, self._session_exists)
+        # Pairing requests (web/pairing_routes.py): set by attach_pairing. Their frames go to OPERATOR
+        # sockets only, through send_to_operators and never broadcast (see there for why).
+        self._pairing: Any = None
+        # A token's sockets die with the token. Authentication happens once, at connect, so without
+        # this a revoked device kept its open socket — and, for an owner device, every session's frames.
+        add_listener = getattr(device_store, "add_revoke_listener", None)
+        if callable(add_listener):
+            add_listener(self._on_devices_revoked)
         # GRAFT Piece 2: set by the launcher when push.enabled. The bridge
         # feeds it agent_progress pulses and chat_done (Live Activity source);
         # bus signals reach it via its own subscription.
@@ -141,6 +217,14 @@ class WebSocketBridge:
         # firehose (today's behaviour); a set = turn frames for those sessions
         # only. Replaced whole on every subscribe, cleaned up with the socket.
         self._ws_filters: dict[Any, set[str]] = {}
+        # computer-use v1.1 PR 6b: per-socket declared capabilities, from the
+        # same `subscribe` frame. Absent = declares nothing, and a socket that
+        # declares nothing NEVER receives a `computer_step_thumbnail`. That is
+        # the protection the capability exists for: an old client renders an
+        # unknown frame kind's whole payload into its exportable Activity feed
+        # (gateway-events.ts), so a picture of someone's desktop would land in
+        # a file a person can copy off the machine.
+        self._ws_caps: dict[Any, set[str]] = {}
         self._clients: set[Any] = set()
         # Monotonic since boot — see delivery_stats(). A frame that fails to
         # send is gone; these are the only record that it existed.
@@ -195,13 +279,141 @@ class WebSocketBridge:
 
         return verify_token(token, self._api_token, self._device_store)
 
+    def _session_exists(self, session_id: str) -> bool:
+        """Is there already a session by this id — live, or with durable rows?"""
+        mgr = self.session_mgr
+        if mgr is None or not hasattr(mgr, "get"):
+            return False
+        engine = getattr(mgr, "lcm_engine", None)
+        return session_exists(mgr, getattr(engine, "conversation_store", None), session_id)
+
+    def _scope(self, websocket: Any) -> Scope:
+        """Whose sessions this socket may touch. Fails CLOSED: with auth on, a socket
+        whose identity was never recorded owns nothing."""
+        return scope_for(self._ws_identity.get(websocket), auth_required=self.auth_required)
+
+    async def _refuse_session(self, websocket: Any, session_id: str) -> None:
+        """The one answer a device gets for a session that is not its own — the same whether
+        the session exists or not, so the frame is no oracle for session ids."""
+        await self._send_one(websocket, {
+            "type": "error",
+            "timestamp": time.time(),
+            "payload": {
+                "session_id": session_id,
+                "message": "unknown session",
+                "kind": "not_found",
+            },
+        })
+
+    # -- pairing requests ----------------------------------------------------
+
+    def attach_pairing(self, runtime: Any) -> None:
+        """Connect the pairing runtime: its events become frames for the owner's sockets.
+
+        ``pairing_pending`` when a new device asks to join, ``pairing_resolved`` when it is decided,
+        withdrawn or runs out (docs/PAIRING-APPROVAL-API.md, 5.1). A connection that arrives later is
+        told what is still waiting (:meth:`_backfill_pairing`).
+        """
+        self._pairing = runtime
+        runtime.notifier.subscribe(self._on_pairing_event, audience=lambda: bool(self.operator_sockets()))
+
+    def operator_sockets(self) -> list[Any]:
+        """Sockets whose identity is an operator: the global token or an OWNER device (``is_operator``).
+
+        A socket with no recorded identity is not one, even on a daemon with auth on: it fails closed.
+        """
+        return [ws for ws in tuple(self._clients) if getattr(self._ws_identity.get(ws), "is_operator", False)]
+
+    async def send_to_operators(self, event: dict[str, Any]) -> int:
+        """Send *event* to operator sockets only. Returns how many took it.
+
+        NOT ``broadcast``: ``_wants`` only holds back a frame that names a session a device does not
+        own, and a pairing frame names none, so a broadcast would put a source address and a match code in
+        front of every scoped device on the daemon. And not the SignalBus, whose tail is durable and is
+        replayed to any authenticated client. A send that fails drops that socket, as ``broadcast`` does.
+        """
+        raw = json.dumps(event)
+        sent = 0
+        for ws in self.operator_sockets():
+            try:
+                await ws.send(raw)
+                sent += 1
+            except Exception as exc:
+                self._frames_dropped += 1
+                self._clients.discard(ws)
+                self._clients_discarded += 1
+                logger.warning("WS frame DROPPED for client %s (type=%s): %s: %s",
+                               _client_label(ws), event.get("type", "?"), type(exc).__name__, exc)
+        return sent
+
+    async def _on_pairing_event(self, kind: str, payload: dict[str, Any]) -> bool:
+        frame_type = {"pending": "pairing_pending", "resolved": "pairing_resolved"}.get(kind)
+        if frame_type is None:
+            return False
+        sent = await self.send_to_operators({"type": frame_type, "timestamp": time.time(), "payload": payload})
+        return sent > 0
+
+    async def _backfill_pairing(self, websocket: Any) -> None:
+        """Tell a newly connected operator what is still waiting, oldest first, so opening Beacon after the
+        request arrived still shows it. A frame can arrive twice if a request lands mid-connect: clients
+        key on ``request_id``."""
+        identity = self._ws_identity.get(websocket)
+        if self._pairing is None or not getattr(identity, "is_operator", False):
+            return
+        try:
+            await self._pairing.sweep()
+            for payload in self._pairing.pending_payloads():
+                if await self._send_one(websocket, {"type": "pairing_pending", "timestamp": time.time(),
+                                                    "payload": payload}):
+                    # Shown to an operator, so the requester's `notified` is true for good, even if they are
+                    # gone before its next poll.
+                    self._pairing.mark_notified(payload["request_id"])
+        except Exception:
+            logger.warning("could not backfill pairing requests to %s", _client_label(websocket), exc_info=True)
+
+    def _on_devices_revoked(self, device_ids: list[str]) -> None:
+        """The registry's word that these devices were just revoked (after the commit is durable).
+
+        Detaches their sockets AT ONCE, synchronously — nothing is sent to one after this returns, and
+        its identity is gone so any command it still manages to send resolves to nobody — then closes
+        them 4401 on the running loop. The close is best effort: the sockets are already inert, and a
+        failure here must not touch the revocation or the mint that caused it."""
+        wanted = set(device_ids)
+        for ws, identity in list(self._ws_identity.items()):
+            if getattr(identity, "id", None) not in wanted:
+                continue
+            self._clients.discard(ws)
+            self._ws_identity.pop(ws, None)
+            self._ws_filters.pop(ws, None)
+            close = getattr(ws, "close", None)
+            if close is None:
+                continue
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                continue  # revoked from a plain thread (a CLI): detached above, the peer will notice
+            task = loop.create_task(self._close_revoked(close))
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+
+    @staticmethod
+    async def _close_revoked(close: Any) -> None:
+        try:
+            await close(code=WS_CLOSE_UNAUTHORIZED, reason="unauthorized")
+        except Exception:
+            logger.debug("closing a revoked device's socket failed", exc_info=True)
+
     def _token_ok(self, raw: str) -> bool:
         """Boolean form of :meth:`_auth_identity` (kept for callers and tests
         that only need pass/fail)."""
         return self._auth_identity(raw) is not None
 
-    async def start(self, host: str = "0.0.0.0", port: int = 8010) -> None:
-        """Start the WebSocket server."""
+    async def start(self, host: str = DEFAULT_BIND, port: int = 8010) -> None:
+        """Start the WebSocket server on *host*.
+
+        A loopback *host* also turns on the Host-header check (DNS rebinding);
+        any other host is left unrestricted, as before.
+        """
         try:
             import websockets
         except ImportError:
@@ -217,8 +429,17 @@ class WebSocketBridge:
             host,
             port,
             max_size=WS_MAX_FRAME_BYTES,
+            process_request=_loopback_process_request if is_loopback_address(host) else None,
         )
         logger.info("WebSocket bridge listening on ws://%s:%d", host, port)
+
+    @property
+    def bound_port(self) -> int | None:
+        """The port this bridge is listening on, read from its socket; ``None`` before ``start()`` or after
+        ``stop()``."""
+        from prometheus.web.serving import bound_port
+
+        return bound_port(getattr(self, "_server", None))
 
     async def stop(self) -> None:
         if self._server:
@@ -247,6 +468,7 @@ class WebSocketBridge:
             "timestamp": time.time(),
             "payload": {"version": package_version()},
         })
+        await self._backfill_pairing(websocket)
 
         try:
             async for raw in websocket:
@@ -304,6 +526,7 @@ class WebSocketBridge:
             self._clients.discard(websocket)
             self._ws_identity.pop(websocket, None)
             self._ws_filters.pop(websocket, None)
+            self._ws_caps.pop(websocket, None)
             logger.info("Client disconnected (%d remain)", len(self._clients))
 
     async def _authenticate(self, websocket: Any) -> bool:
@@ -367,11 +590,24 @@ class WebSocketBridge:
                 self._ws_filters[websocket] = sessions
             else:
                 self._ws_filters.pop(websocket, None)
+            # PR 6b: capabilities arrive on the same frame. Like the session
+            # filter, a list REPLACES any previous set — re-subscribing is a
+            # restatement of what this client can handle, not an accumulation.
+            # A client that drops `computer-thumbnails` from a later subscribe
+            # stops receiving pictures; that is the point of replacing.
+            raw_caps = payload.get("capabilities")
+            caps = {c for c in raw_caps if isinstance(c, str) and c} \
+                if isinstance(raw_caps, list) else set()
+            if caps:
+                self._ws_caps[websocket] = caps
+            else:
+                self._ws_caps.pop(websocket, None)
             await self._send_one(websocket, {
                 "type": "subscribed",
                 "timestamp": time.time(),
                 "payload": {
                     "sessions": sorted(sessions),
+                    "capabilities": sorted(caps),
                     # Legacy echo — the old ack-only shape some clients read.
                     "channels": payload.get("channels", []),
                 },
@@ -380,6 +616,13 @@ class WebSocketBridge:
         elif cmd_type == "send_message":
             session_id = payload.get("session_id", "")
             content = payload.get("content", "")
+            # Device scoping, before anything resolves against the session (references
+            # read its workspace; the message is written into it). A brand-new id is
+            # claimed by the sender; one that is not the device's is refused.
+            if session_id and content and not self._access.admit(
+                    self._scope(websocket), session_id):
+                await self._refuse_session(websocket, session_id)
+                return
             # GRAFT-MOBILE-BRIDGE 8: the correlation handle for the sender's
             # optimistic row. _handle_send_message has echoed it on the user
             # chat_message frame all along (the REST path passes it through);
@@ -450,7 +693,8 @@ class WebSocketBridge:
                     return
             if session_id and content:
                 await self._handle_send_message(session_id, content, client_msg_id=client_msg_id,
-                                                mode=mode, tool_choice=tool_choice, blocks=blocks)
+                                                mode=mode, tool_choice=tool_choice, blocks=blocks,
+                                                **({} if self._scope(websocket).unrestricted else {"operator": False}))
 
         elif cmd_type == "chat_upload":
             # File upload from Beacon: { type: "chat_upload", payload: {
@@ -460,6 +704,10 @@ class WebSocketBridge:
             content_b64 = payload.get("content_base64", "")
             mime_type = payload.get("mime_type", "")
             caption = payload.get("caption", "")
+            if session_id and content_b64 and not self._access.admit(
+                    self._scope(websocket), session_id):
+                await self._refuse_session(websocket, session_id)
+                return
             if session_id and content_b64:
                 await self._handle_file_upload(
                     session_id, filename, content_b64, mime_type, caption
@@ -468,6 +716,11 @@ class WebSocketBridge:
         elif cmd_type == "switch_session":
             session_id = payload.get("session_id", "")
             if session_id and self.session_mgr:
+                # Replays the session's whole history to this socket — so it is the
+                # owner's (or the operator's), or a brand-new id the device now owns.
+                if not self._access.admit(self._scope(websocket), session_id):
+                    await self._refuse_session(websocket, session_id)
+                    return
                 session = self.session_mgr.get_or_create(session_id)
                 # Send existing messages for the session
                 messages = session.get_messages()
@@ -489,11 +742,27 @@ class WebSocketBridge:
             # Ack goes to the REQUESTING socket only; every client learns the
             # outcome from the broadcast chat_done{interrupted:true} frame.
             session_id = payload.get("session_id", "")
-            stopped = self.interrupt_turn(session_id) if session_id else False
+            # Not the caller's session → the answer a quiet session gives, and nothing stops.
+            mine = bool(session_id) and self._access.owns(self._scope(websocket), session_id)
+            stopped = self.interrupt_turn(session_id) if mine else False
             await self._send_one(websocket, {
                 "type": "interrupt_ack",
                 "timestamp": time.time(),
                 "payload": {"session_id": session_id, "stopped": stopped},
+            })
+
+        elif cmd_type == "computer_task_stop":
+            # Stop ONE desktop task: { type: "computer_task_stop", payload:
+            # { task_id } } -> computer_task_stop_ack { task_id, stopped }.
+            # Never refused to an authenticated socket: a stop can only end a
+            # task. No new action starts after it; one in flight may land.
+            task_id = str(payload.get("task_id") or "")
+            runner = getattr(self, "computer_runner", None)
+            stopped = bool(runner.stop(task_id)) if (runner and task_id) else False
+            await self._send_one(websocket, {
+                "type": "computer_task_stop_ack",
+                "timestamp": time.time(),
+                "payload": {"task_id": task_id, "stopped": stopped},
             })
 
     async def _handle_file_upload(
@@ -694,7 +963,7 @@ class WebSocketBridge:
 
     async def dispatch_user_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
-        tool_choice: object | None = None, blocks: list[Any] | None = None
+        tool_choice: object | None = None, blocks: list[Any] | None = None, operator: bool = True
     ) -> None:
         """Public dispatch entry point — kicks off the same flow as a WS-borne
         ``send_message`` command.
@@ -719,6 +988,7 @@ class WebSocketBridge:
         await self._handle_send_message(
             session_id, content, client_msg_id=client_msg_id, mode=mode,
             tool_choice=tool_choice, **({"blocks": blocks} if blocks else {}),
+            **({} if operator else {"operator": False}),
         )
 
     async def resolve_references(self, session_id: str, refs: list[Any]) -> list[Any]:
@@ -796,9 +1066,19 @@ class WebSocketBridge:
         Returns False when no turn is running (idempotent — stopping a quiet
         session is not an error, the caller just gets ``stopped: false``).
         """
+        # A DESKTOP TASK FIRST (computer-use v1.1 §5.1.7). It does not own
+        # the chat turn's slot, so a chat message sent during a task neither
+        # hides the task from Stop nor gets cancelled in its place: both stop.
+        stopped_task = False
+        runner = getattr(self, "computer_runner", None)
+        if runner is not None:
+            try:
+                stopped_task = bool(runner.stop_session(session_id))
+            except Exception:  # noqa: BLE001 - a broken runner must not block Stop
+                logger.warning("desktop task stop failed", exc_info=True)
         task = self._turn_tasks.get(session_id)
         if task is None or task.done():
-            return False
+            return stopped_task
         self._interrupted.add(session_id)
         task.cancel()
         return True
@@ -849,9 +1129,13 @@ class WebSocketBridge:
 
     async def _handle_send_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
-        tool_choice: object | None = None, blocks: list[Any] | None = None
+        tool_choice: object | None = None, blocks: list[Any] | None = None, operator: bool = True
     ) -> None:
         """Process a user message — add to session and run agent loop if context available.
+
+        *operator* is False when a SCOPED device typed it: a slash command then runs only if it is one a scoped
+        device may use (``web/route_access.SCOPED_SLASH_COMMANDS``). It defaults to True so every internal
+        caller (notes, uploads, Paperclip) is unchanged.
 
         A leading-slash message is a command (web parity for Telegram's
         CommandHandler): it's handled here and broadcast back, NOT added to the
@@ -894,7 +1178,10 @@ class WebSocketBridge:
                     local_model=self.local_model,
                     detected_limit=self.detected_context_size,
                     session_manager=self.session_mgr,
+                    computer_runner=self.computer_runner,
                 ),
+                # Only when False, so a router double that predates the keyword still works.
+                **({} if operator else {"operator": False}),
             )
         if outcome is not None and outcome.handled:
             await self._broadcast_command_reply(
@@ -1640,6 +1927,11 @@ class WebSocketBridge:
         elif signal.kind in _coding_frame_kinds():
             event["type"] = signal.kind
             event["payload"] = signal.payload
+        # The desktop action log (computer-use v1.1 PR 6), from the emitter's
+        # own declaration. Each payload carries the chat session_id.
+        elif signal.kind in _computer_frame_kinds():
+            event["type"] = signal.kind
+            event["payload"] = signal.payload
         # Background-task lifecycle (audit P9.7 / Beacon#128). The manager HAS emitted these since
         # the managed-tasks sprint (tasks/manager.py::_emit_completion), and Beacon has listened for
         # both names the whole time (main/index.ts::maybeNotifyTask gates on exactly these; the
@@ -1704,12 +1996,49 @@ class WebSocketBridge:
         "provider_degraded", "error",
     })
 
+    def _approval_frame_visible(self, ws: Any, event: dict[str, Any]) -> bool:
+        """May this socket be told about this approval request?
+
+        An ordinary approval frame names no session (its shape is Beacon's and does not change), so
+        ``frame_visible`` calls it daemon-level. It is not: it carries a tool call's name, description, extents and
+        arguments. The operator's socket gets every one; a scoped device's socket gets the ones raised in a
+        session it owns. A request the queue does not know, or no queue at all, is withheld from a scoped socket:
+        unknown is not daemon-level. (A desktop prompt does name its session, so ``frame_visible`` has always
+        sent it to that session's owner alone; a mark changes who may ANSWER one, not who is told.)
+        """
+        scope = self._scope(ws)
+        if scope.unrestricted:
+            return True
+        queue = self.approval_queue
+        request_id = (event.get("payload") or {}).get("request_id")
+        origin = queue.origin_of(request_id) if queue is not None and isinstance(request_id, str) else None
+        if origin is None:
+            return False
+        session_id = origin[0]
+        return bool(session_id and self._access.owns(scope, session_id))
+
     def _wants(self, ws: Any, event: dict[str, Any]) -> bool:
         """Does this socket's subscribe filter admit this event?
 
         No filter (the default, and `sessions: []`) → everything, today's
         firehose. A frame outside _SESSION_SCOPED_TYPES, or one carrying no
         session_id, is always delivered."""
+        # Ownership comes first and is not the client's to widen: a device socket
+        # receives a frame that names a session only if its device owns that session
+        # (any frame type, flat or nested — see event_session_id), whatever it
+        # subscribed to. The operator's socket passes unchanged.
+        try:
+            if not self._access.frame_visible(self._scope(ws), event):
+                return False
+            if (event.get("type") in _APPROVAL_FRAMES and event_session_id(event) is None
+                    and not self._approval_frame_visible(ws, event)):
+                return False
+        except Exception:
+            # Fail CLOSED, and never raise: this runs inside broadcast(), and an exception
+            # here would unwind into the agent turn that emitted the frame.
+            logger.warning("device scoping could not decide a frame for %s — withheld",
+                           _client_label(ws), exc_info=True)
+            return False
         sessions = self._ws_filters.get(ws)
         if not sessions:
             return True
@@ -1798,8 +2127,88 @@ class WebSocketBridge:
             "clients_discarded": self._clients_discarded,
         }
 
-    async def _send_one(self, websocket: Any, event: dict[str, Any]) -> None:
+    async def _send_one(self, websocket: Any, event: dict[str, Any]) -> bool:
+        """Send one event to one socket. True when it went; a socket that cannot take it is dropped."""
         try:
             await websocket.send(json.dumps(event))
         except Exception:
             self._clients.discard(websocket)
+            return False
+        return True
+
+    # ── computer-use v1.1 PR 6b: the ThumbnailSink ────────────────────────
+    # The runner (computer/thumbnails.ThumbnailSink) calls these. They are the
+    # ONLY path a desktop screenshot takes, and that path is deliberately not
+    # broadcast(): every socket is not every ELIGIBLE socket.
+    #
+    # Four conditions, all required, all failing closed:
+    #   1. authenticated with a DEVICE token — never the global token. The
+    #      global secret sits in a plain file the always-loaded bash tool can
+    #      read (D15), so a model holding it must not be able to watch the
+    #      screen through a socket it opened.
+    #   2. that device is marked for computer use — the door's own W3 ruling,
+    #      already in force for starting tasks; watching is the same grant.
+    #   3. it declared `computer-thumbnails` on its subscribe frame. A client
+    #      that did not would render an unknown kind's whole payload into its
+    #      exportable Activity feed — a picture of a desktop in a file a
+    #      person can copy off the machine.
+    #   4. it is attached to this task's session.
+
+    def _thumbnail_eligible(self, ws: Any, session_id: str) -> bool:
+        identity = self._ws_identity.get(ws)
+        if identity is None or getattr(identity, "is_global", True):
+            return False
+        if "computer-thumbnails" not in (self._ws_caps.get(ws) or ()):
+            return False
+        store = self._device_store
+        if store is None:
+            # No device registry means no device was ever marked for computer
+            # use, so there is no eligible viewer. Not an error — an answer.
+            return False
+        try:
+            if not store.computer_allowed(identity.id):
+                return False
+        except Exception:  # noqa: BLE001 - fail closed on any doubt
+            logger.debug("computer thumbnail eligibility check failed",
+                         exc_info=True)
+            return False
+        # Condition 4, done here rather than through _wants: that method
+        # admits any frame whose type is not in _SESSION_SCOPED_TYPES, and
+        # this kind deliberately is not there (it is not a turn frame, and it
+        # never goes through broadcast). Reusing it would have looked like a
+        # session check while always answering True.
+        sessions = self._ws_filters.get(ws)
+        return not sessions or session_id in sessions
+
+    def viewer_count(self, session_id: str) -> int:
+        """How many sockets may receive this session's thumbnails.
+
+        Asked BEFORE the runner captures, so a task nobody is watching never
+        calls the driver at all — the picture exists only to be watched.
+        """
+        return sum(1 for ws in list(self._clients)
+                   if self._thumbnail_eligible(ws, session_id))
+
+    async def send_thumbnail(self, session_id: str,
+                             frame: dict[str, Any]) -> None:
+        """Send one `computer_step_thumbnail` frame to eligible sockets only.
+
+        Direct-only by construction: this kind is outside COMPUTER_FRAME_KINDS,
+        so it never reaches SignalBus, signal_events, /api/events/recent or a
+        backfill. A failed send is a dropped picture, and that is the right
+        cost — never a retry, never a queue, never a reason to end a task.
+        """
+        event = {"type": "computer_step_thumbnail", "timestamp": time.time(),
+                 "payload": frame}
+        # Snapshot: _clients mutates as connections come and go, and awaiting
+        # a send yields to the loop (the RuntimeError broadcast() documents).
+        for ws in list(self._clients):
+            if not self._thumbnail_eligible(ws, session_id):
+                continue
+            try:
+                await ws.send(json.dumps(event))
+            except Exception:
+                self._clients.discard(ws)
+                self._ws_identity.pop(ws, None)
+                self._ws_caps.pop(ws, None)
+                self._frames_dropped += 1
