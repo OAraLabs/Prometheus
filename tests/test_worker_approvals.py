@@ -71,7 +71,7 @@ async def _standin_worker(tmp_path, monkeypatch, *, session_id="beacon:abc"):
     rec = await mgr.create_agent_task(
         prompt="p", description="the worker", cwd=str(tmp_path), route="local",
         worker=True, session_id=session_id, on_complete="reengage")
-    token = mgr._task_env[rec.id]["PROMETHEUS_WORKER_TOKEN"]
+    token = mgr._worker_tokens[rec.id]
     return mgr, rec, token
 
 
@@ -90,9 +90,14 @@ def _client(app, peer=_LOOPBACK):
                              base_url=_BASE)
 
 
-def _ask(task_id: str, token: str) -> dict:
-    return {"task_id": task_id, "token": token, "tool_name": "write_file",
-            "reason": "write_file needs approval: ./notes.md", "arguments": {"path": "./notes.md"}}
+def _ask(task_id: str, token: str, **body) -> dict:
+    """The worker's request: who it is in HEADERS (checked before the body is
+    read), what it wants in the body."""
+    return {
+        "headers": {"X-Prometheus-Worker-Task": task_id, "X-Prometheus-Worker-Token": token},
+        "json": {"tool_name": "write_file", "reason": "write_file needs approval: ./notes.md",
+                 "arguments": {"path": "./notes.md"}, **body},
+    }
 
 
 @pytest.mark.asyncio
@@ -105,7 +110,7 @@ async def test_a_workers_request_lands_in_its_conversations_queue_and_waits_for_
     queue = ApprovalQueue(security_gate=_Gate())
     try:
         async with _client(_app(queue, mgr, monkeypatch)) as c:
-            req = asyncio.create_task(c.post("/api/workers/approvals", json=_ask(rec.id, token)))
+            req = asyncio.create_task(c.post("/api/workers/approvals", **_ask(rec.id, token)))
             pending = await _until(queue.list_pending)
             assert pending, "the request never reached the approval queue"
             action = pending[0]
@@ -129,7 +134,7 @@ async def test_nothing_but_a_person_approves_it(tmp_path, monkeypatch):
     try:
         # No approval queue: denied, never waved through.
         async with _client(_app(None, mgr, monkeypatch)) as c:
-            r = await c.post("/api/workers/approvals", json=_ask(rec.id, token))
+            r = await c.post("/api/workers/approvals", **_ask(rec.id, token))
         assert r.status_code == 200 and r.json()["result"] == "denied", r.text
     finally:
         await mgr.shutdown()
@@ -145,13 +150,13 @@ async def test_only_a_loopback_peer_with_the_running_workers_token_is_answered(
     app = _app(queue, mgr, monkeypatch)
     try:
         async with _client(app) as c:
-            wrong = await c.post("/api/workers/approvals", json=_ask(rec.id, "not" + "it"))
-            unknown = await c.post("/api/workers/approvals", json=_ask("a00000000", token))
+            wrong = await c.post("/api/workers/approvals", **_ask(rec.id, "not" + "it"))
+            unknown = await c.post("/api/workers/approvals", **_ask("a00000000", token))
         async with _client(app, peer=("192.168.1.50", 40000)) as c:
-            remote = await c.post("/api/workers/approvals", json=_ask(rec.id, token))
+            remote = await c.post("/api/workers/approvals", **_ask(rec.id, token))
         await mgr.stop_task(rec.id)
         async with _client(app) as c:
-            stopped = await c.post("/api/workers/approvals", json=_ask(rec.id, token))
+            stopped = await c.post("/api/workers/approvals", **_ask(rec.id, token))
     finally:
         await mgr.shutdown()
     assert wrong.status_code == 401 and unknown.status_code == 401, (wrong.text, unknown.text)
@@ -168,7 +173,7 @@ async def test_a_worker_request_can_only_be_approved_once(tmp_path, monkeypatch)
     queue = ApprovalQueue(security_gate=_Gate())
     try:
         async with _client(_app(queue, mgr, monkeypatch)) as c:
-            req = asyncio.create_task(c.post("/api/workers/approvals", json=_ask(rec.id, token)))
+            req = asyncio.create_task(c.post("/api/workers/approvals", **_ask(rec.id, token)))
             pending = await _until(queue.list_pending)
             r = await c.post(f"/api/approvals/{pending[0].request_id}/approve",
                              json={"scope": "always"})
@@ -190,6 +195,7 @@ async def test_the_worker_token_is_never_written_down(tmp_path, monkeypatch):
         mgr._persist(mgr.get_task(rec.id))
         assert token not in (rec.command or "")
         assert token not in json.dumps(rec.metadata)
+        assert token not in json.dumps(mgr._task_env.get(rec.id) or {})
         dump = "\n".join(str(row) for row in sqlite3.connect(tmp_path / "tasks.db").execute(
             "select * from tasks"))
         assert token not in dump
@@ -217,6 +223,8 @@ class _Standin:
 
             def do_POST(self):  # noqa: N802
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                body["_task"] = self.headers.get("X-Prometheus-Worker-Task")
+                body["_token"] = self.headers.get("X-Prometheus-Worker-Token")
                 outer.seen.append(body)
                 data = json.dumps({"result": outer.answer}).encode()
                 self.send_response(200)
@@ -239,28 +247,27 @@ class _Standin:
 
 @pytest.mark.asyncio
 async def test_the_workers_prompt_asks_the_daemon_and_denies_on_any_failure():
-    from prometheus.cli.worker_approval import approval_prompt_from_env
+    from prometheus.cli import worker_approval as wa
 
     tok = "fake" + "worker" + "token"
-    assert approval_prompt_from_env({}) is None
+    env = {"PROMETHEUS_WORKER_APPROVAL_URL": "http://127.0.0.1:9/x", "PROMETHEUS_WORKER_TASK_ID": "a1"}
+    assert wa.approval_prompt_from_env({}) is None
     yes, no = _Standin("approved"), _Standin("denied")
     try:
-        ask_yes = approval_prompt_from_env({"PROMETHEUS_WORKER_APPROVAL_URL": yes.url,
-                                            "PROMETHEUS_WORKER_TASK_ID": "a1",
-                                            "PROMETHEUS_WORKER_TOKEN": tok})
+        wa.set_worker_token(tok)
+        ask_yes = wa.approval_prompt_from_env({**env, "PROMETHEUS_WORKER_APPROVAL_URL": yes.url})
         assert await ask_yes("write_file", "needs approval", arguments={"path": "x"}) is True
-        assert yes.seen[0]["task_id"] == "a1" and yes.seen[0]["token"] == tok
-        ask_no = approval_prompt_from_env({"PROMETHEUS_WORKER_APPROVAL_URL": no.url,
-                                           "PROMETHEUS_WORKER_TASK_ID": "a1",
-                                           "PROMETHEUS_WORKER_TOKEN": tok})
+        assert yes.seen[0]["_task"] == "a1" and yes.seen[0]["_token"] == tok
+        assert "token" not in yes.seen[0], "the token belongs in a header, not the body"
+        ask_no = wa.approval_prompt_from_env({**env, "PROMETHEUS_WORKER_APPROVAL_URL": no.url})
         assert await ask_no("write_file", "needs approval") is False
     finally:
         yes.close()
         no.close()
-    gone = approval_prompt_from_env({"PROMETHEUS_WORKER_APPROVAL_URL": "http://127.0.0.1:9/x",
-                                     "PROMETHEUS_WORKER_TASK_ID": "a1",
-                                     "PROMETHEUS_WORKER_TOKEN": tok})
-    assert await gone("write_file", "needs approval") is False
+    assert await wa.approval_prompt_from_env(env)("write_file", "needs approval") is False
+    wa.set_worker_token(None)
+    # No token at all: nobody to ask as, so denied.
+    assert await wa.approval_prompt_from_env({**env})("write_file", "x") is False
 
 
 @pytest.fixture
@@ -322,5 +329,6 @@ async def test_a_worker_under_the_default_mode_gets_its_write_approved_by_the_pa
     finally:
         daemon.close()
     assert daemon.seen, "the worker never asked anyone"
-    assert daemon.seen[0]["task_id"] == task_id and daemon.seen[0]["tool_name"] == "write_file"
+    assert daemon.seen[0]["_task"] == task_id and daemon.seen[0]["tool_name"] == "write_file"
+    assert daemon.seen[0]["_token"], "the worker asked without its token"
     assert (work / "step_0.py").exists(), "the approved write did not happen"
