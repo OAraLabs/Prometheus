@@ -53,6 +53,7 @@ async def launch_web(
     api_port: int = 8005,
     ws_host: str | None = None,
     ws_port: int = 8010,
+    request_restart: Any | None = None,
 ) -> None:
     """Start both REST API and WebSocket servers.
 
@@ -187,6 +188,9 @@ async def launch_web(
     # POST /api/chat/send) can dispatch user messages through the same flow
     # the WebSocket uses, without duplicating the session+agent plumbing.
     app.state.ws_bridge = bridge
+    # POST /api/restart: the daemon's own restart, when it was started as the daemon.
+    if request_restart is not None:
+        app.state.request_restart = request_restart
     # Pairing requests (docs/PAIRING-APPROVAL-API.md): the owner's Beacon sockets hear about a new device
     # asking to join, and a socket that connects later is told what is still waiting. Telegram prompts
     # are OPT-IN (pairing.telegram_prompts, off by default): attach() does nothing unless it is on.

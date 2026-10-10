@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 114 paths
+## Daemon app — 115 paths
 
 | Path | Methods |
 |---|---|
@@ -87,6 +87,7 @@ one is the explanation.
 | `/api/providers/keys/{service_id}` | PUT |
 | `/api/providers/xai/oauth` | DELETE, GET |
 | `/api/providers/xai/oauth/login` | POST |
+| `/api/restart` | POST |
 | `/api/search` | POST |
 | `/api/sentinel` | GET |
 | `/api/sessions` | GET, POST |
