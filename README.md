@@ -36,7 +36,6 @@ That is the environment the CI test job runs in, so a local run exercises the sa
 
 **What it gives you:**
 
-- **Reliable tool calls on open models** — a Model Adapter Layer validates every call, auto-repairs common errors (fuzzy names, JSON inside markdown fences, type coercion), and enforces output schemas at the token level via GBNF for llama.cpp.
 - **Always-on gateways** — Telegram, Slack, and Discord at parity (one shared command layer), with mid-turn `/steer` and `/queue` for durability while the agent is mid-task.
 - **Visible memory that rides every prompt** — `MEMORY.md` and `USER.md` you can read, structured facts mined from conversations every 30 minutes, and passive recall that FTS-matches each message against the memory store and injects what's relevant.
 - **Lossless context** — DAG-based compression with full-text search so long sessions don't drop facts; originals are always recoverable.
@@ -44,6 +43,7 @@ That is the environment the CI test job runs in, so a local run exercises the sa
 - **A working directory per conversation, with undo** — `/workspace <path>` points a chat at a repo; the security gate follows it, project instructions (`PROMETHEUS.md`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`…) load from it, and every turn takes a file checkpoint first so a bad edit is one REST call (or one Beacon click) from undone.
 - **Sees what you show it** — images reach a vision-capable model as images, not paraphrases; stored by reference so the bytes never bloat the transcript. `@file`, `@diff` and `@url` in the composer resolve on the daemon, scoped to the conversation's workspace.
 - **Every GPU box you own, one table** — name your inference boxes under `backends:` and each becomes a slash command and a row in the model picker: `/4090`, `/mini`, `/mini qwen2.5:7b-instruct`. The daemon probes each box (served model, reported context window, detected vision, latency), refuses to switch a chat to a box that is down and says why, budgets the conversation at *that* box's window, and remembers the choice across restarts. `/backends` shows the table; `/local` brings a chat home.
+- **Reliable tool calls on open models** — a Model Adapter Layer validates every call, auto-repairs common errors (fuzzy names, JSON inside markdown fences, type coercion), and enforces output schemas at the token level via GBNF for llama.cpp. How much of it runs is a per-model tier; `adapter.model_tiers` pins one by name.
 - **Telemetry that stays home** — every tool call, repair, and token count logged to SQLite on your own disk and sent nowhere. It's the raw material for tuning the adapter and fine-tuning your own model: the data big labs keep for themselves, kept by you instead.
 - **A desktop cockpit** — Beacon pairs to the daemon over your LAN or tailnet and gives every subsystem a native surface; the model picker groups your own boxes above the cloud presets with each box's health, and on OAra Voice it also talks back — phrase-by-phrase streaming TTS and a hands-free mode with barge-in.
 
@@ -99,11 +99,11 @@ The result: open models that reliably call tools, chain multi-step tasks, and ru
 
 Prometheus isn't a wrapper around `ollama.chat()`. It's a complete agent operating system with novel systems that agent harnesses don't have:
 
-**The Model Adapter Layer is what makes local models work in a tool loop.** Four cascading extraction strategies handle whatever mess the model produces. A retry engine feeds specific schema errors back to the model. Grammar-constrained decoding at the llama.cpp level makes invalid JSON structurally impossible, with Prometheus supplying the grammar on paths the server doesn't cover. Telemetry tracks success rates per model per tool so you know exactly where your model struggles. It is tier-selected: `strictness: NONE` switches it off for cloud APIs that already emit clean tool calls, so the repair path is exercised exactly where it is needed.
-
 **Lossless Context Management means your agent never forgets.** Every message is persisted to SQLite. When context fills up, a two-tier compression system kicks in: Tier 1 strips `tool_result` content from old messages (free — the output was already acted on). Tier 2 uses LLM-powered batch summarization when pruning alone isn't enough. But the originals are always recoverable — old messages get summarized into a DAG structure, and the agent can expand any summary back to full detail on demand. Full-text search across your entire conversation history. And memory isn't just storage: extracted facts ride back into each turn via passive recall, matched against what you just said.
 
 **SENTINEL transforms the agent from reactive to proactive.** Most agents sit idle until you talk to them. Prometheus has a background intelligence layer that watches tool performance patterns, consolidates memory, lints its own knowledge base, and discovers cross-entity insights — all while you're away. Three of four phases use zero LLM calls. The fourth is budget-capped at 2,000 tokens. It nudges you via Telegram when it finds something interesting but never acts without permission.
+
+**The Model Adapter Layer is what makes local models work in a tool loop.** Four cascading extraction strategies handle whatever mess the model produces. A retry engine feeds specific schema errors back to the model. Grammar-constrained decoding at the llama.cpp level makes invalid JSON structurally impossible, with Prometheus supplying the grammar on paths the server doesn't cover. Telemetry tracks success rates per model per tool so you know exactly where your model struggles. It is tier-selected: `strictness: NONE` switches it off for cloud APIs that already emit clean tool calls, so the repair path is exercised exactly where it is needed.
 
 **A compounding knowledge base inspired by Karpathy's LLM Wiki concept.** Every 30 minutes, a Memory Extractor pulls structured facts from your conversations, and the wiki recompiles the affected entity pages automatically — extraction and compilation are one loop, not a manual step. The wiki then maintains itself: SENTINEL's zero-LLM linter patrols for orphans, broken links, and stale pages; dedup gates keep repeated insights from piling up; and passive recall feeds the accumulated facts back into every turn. Point Obsidian at the markdown files and the graph view lights up.
 
@@ -640,7 +640,7 @@ prometheus/
 - 50+ builtin tools registered by default (54 on the reference install, two of them MCP) + config-gated LSP and vision/STT tools
 - 103-file skill library + self-authored skills
 - 10+ model providers (local and cloud)
-- 127 REST routes (120 on the main API, 2 on the OpenAI-compatible `/v1` surface, 5 on the setup-mode pairing server) + an authenticated WebSocket event bridge
+- A bearer-token REST + WebSocket control plane — the full path list is generated from the live FastAPI app and pinned by a test, so it cannot drift silently: [`docs/reference/routes.md`](docs/reference/routes.md)
 - A native desktop cockpit with 18 views, and an iOS client on the same control plane
 
 ## Roadmap
