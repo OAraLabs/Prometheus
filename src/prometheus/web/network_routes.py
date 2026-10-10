@@ -16,9 +16,9 @@ What the owner's switch can and cannot do is stated, not implied:
 * **It edits the file's text** (comments and all) and verifies before writing (``web/network.py``); no config
   file is a 409, never a file conjured into existence.
 * **It does not let a caller lock itself out.** ``this_mac`` from a caller that is not on this machine is a 409
-  ``would_lock_out``: after the restart that caller could no longer reach the daemon. The TCP peer decides (the
-  real one; a forwarded header counts only from a ``web.trusted_proxies`` entry), and anything that does not
-  clearly say loopback is not loopback.
+  ``would_lock_out``: after the restart that caller could no longer reach the daemon. "This machine" is
+  ``web.loopback.is_same_machine``: a loopback TCP peer that relayed nothing (no ``X-Forwarded-For`` or
+  ``Forwarded``, which a local reverse proxy adds), and anything that does not clearly say so is not.
 * **It says whether to show the control** (``can_change``: the caller is an operator AND nothing outside the file
   fixes the bind) and **codes every warning and the advertising reason** (``{"code", "message"}``) so a client
   writes its own copy and keeps the English as the fallback.
@@ -41,7 +41,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from prometheus.web.bind import DEFAULT_BIND, BindError, ResolvedBind, parse_bind, resolve_bind
-from prometheus.web.loopback import is_loopback_address, is_loopback_peer
+from prometheus.web.loopback import is_loopback_address, is_same_machine
 from prometheus.web.network import (
     CHOOSABLE,
     HOME,
@@ -201,7 +201,7 @@ def register_network_routes(app: Any, *, auth_on: Callable[[], bool]) -> None:
             return _json(400, {"error": "invalid_request",
                                "detail": 'send {"mode": "this_mac"} or {"mode": "home_network"}, and nothing else'})
 
-        if mode == THIS_MAC and not is_loopback_peer(request):
+        if mode == THIS_MAC and not is_same_machine(request):
             return _json(409, {
                 "error": "would_lock_out",
                 "detail": "this_mac would stop this daemon answering anywhere but on its own machine after the "

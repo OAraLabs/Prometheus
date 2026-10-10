@@ -99,10 +99,10 @@ An owner who asked for `home_network` and cannot have it is told so (`warnings`,
 
 `open` is what every existing install has today (an absent `web.bind` keeps `0.0.0.0`, so a Mac mini reached over Tailscale does not change). It is reported honestly as `open`, not hidden as "home network". The same goes for a bind to one specific non-loopback address without TLS (a Tailscale address, say): `open`, and no mDNS, because 3.1 never advertises a tunnel or CGNAT address. The app's launcher passes `--bind 127.0.0.1`, and setup mode pins the bind a client reached it on into the new config, so app installs start in `this_mac`.
 
-### 2.2 Routes (read: any valid token; change: operator only, `identity.is_operator`)
+### 2.2 Routes (operator only, `identity.is_operator`; a scoped device is refused both, by default)
 
 ```
-GET /api/network                         (any valid token, scoped devices included)
+GET /api/network                         (operator only: a scoped device is 403 operator_only, like every route it was not given)
 200 {
   "mode": "this_mac" | "home_network" | "open",      // what the daemon is RUNNING as
   "bind": "127.0.0.1",
@@ -152,7 +152,7 @@ PUT /api/network   {"mode": "this_mac" | "home_network"}      (operator only; no
 | `stopped` | the advertiser was stopped |
 | `advertiser_not_running` | this process has no advertiser to ask (set by the route, not the advertiser) |
 
-**`can_change`** is for deciding whether to show the control at all. It is true only when the caller is an operator (`identity.is_operator`; with the token off, everyone) **and** nothing outside the config file fixes the bind (`bind_source` is `config` or `default`, not `flag`, `env` or `caller`). A scoped device and a Mac-app install (its launcher pins `--bind 127.0.0.1`) both read `false`. It is not a promise that a `PUT` will succeed: no config file, no TLS or opt-out for `home_network`, and `would_lock_out` can still refuse one.
+**`can_change`** is for deciding whether to show the control at all. It is true only when the caller is an operator (`identity.is_operator`; with the token off, everyone) **and** nothing outside the config file fixes the bind (`bind_source` is `config` or `default`, not `flag`, `env` or `caller`). A scoped device never gets that far: it is refused the route outright (403), which a client treats as "no control". A Mac-app install (its launcher pins `--bind 127.0.0.1`) reads `false`. It is not a promise that a `PUT` will succeed: no config file, no TLS or opt-out for `home_network`, and `would_lock_out` can still refuse one.
 
 **`would_lock_out`.** `PUT {"mode": "this_mac"}` from a caller whose TCP peer is not loopback is refused, because after the restart the daemon answers only on its own machine and that caller would lose the connection it just used. The peer is the real one (a forwarded header counts only from a `web.trusted_proxies` entry), and anything that does not clearly say loopback is not loopback. `home_network` from anywhere is not a lockout: opening the daemon up cannot cut the caller off. The remedy is to do it from the machine the daemon runs on (Beacon there, or `web.bind: 127.0.0.1` in `prometheus.yaml`).
 
@@ -473,7 +473,7 @@ Beacon, Telegram and the CLI can all answer. The first decision wins; every othe
 | `GET` / `DELETE /api/pair/requests/{id}` | with the poll secret | with the poll secret | with the poll secret | with the poll secret |
 | `GET /api/pair/requests` (list) | no | 403 | yes | yes |
 | `POST /api/pair/requests/{id}/approve` and `/deny` | no | 403 | yes | yes |
-| `GET /api/network` | no | yes (read) | yes | yes |
+| `GET /api/network` | no | **403 `operator_only`** (default-deny; it used to read) | yes | yes |
 | `PUT /api/network` | no | 403 | yes | yes |
 | `GET /api/devices` | no | **its own row only** | all | all |
 | `POST /api/devices`, MCP-server definition (#696) | no | **403 `operator_only`** (the gate; it was the handler's 401) | 401 (the handler: not root) | yes |
@@ -648,6 +648,8 @@ Other tests every PR keeps green: the full suite on the project venv (system `py
 * **`oara network show | this-mac | home`: not built.** Beacon's switch and a hand edit are the two ways in; the CLI can call `persist_choice` (`web/network.py`).
 * **The app launcher stops pinning `--bind 127.0.0.1` (#695's file).** Until then `PUT /api/network` from the app is a 409 `bind_overridden` (the flag outranks the file). A follow-up for #695, not a blocker for v0.4.
 * **Live rebind**, **a pairing window (D4)**, **pairing push notifications** (until the dispatcher can target operators only).
+* **Approval push alerts reach every push target, whatever the session (2026-10-09 review).** `push/dispatcher.py` sends an approval alert to every registered device, so a scoped phone is told that SOME tool call is waiting (and its tool and description) even though it can no longer read or answer it. The REST list and the WebSocket frames are scoped to a device's own sessions; this third channel is not, and it needs the dispatcher to learn the request's session (`ApprovalQueue.origin_of`) and send to that session's owner and the operators.
+* **A global pending cap of 3 can be held by one LAN spammer on a legacy `0.0.0.0` bind (2026-10-09 review).** `pairing.max_pending` is global, and `max_pending_per_source` is per TCP peer, so a few addresses (or one that rotates) keep every slot full and a real device cannot ask. The D4 pairing window removes it, and so does a loopback or home-network bind; on a legacy open bind there is no better answer without a notion of a trusted LAN.
 
 ---
 
