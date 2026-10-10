@@ -1,0 +1,273 @@
+name: Release (macOS app)
+
+# Tag `vX.Y.Z` (or run manually) → build Prometheus.app on an Apple-silicon runner, sign it with the
+# Developer ID Application certificate, notarize it with Apple, staple the ticket, verify the result the
+# way Beacon will, and attach it to the DRAFT GitHub Release that release.yml creates for the same tag.
+# Nothing is published here: a human publishes the draft, and publishing it is what makes the stable
+# `releases/latest/download/Prometheus-mac-arm64.zip` URL point at this build.
+#
+#   Prometheus-<version>-arm64.zip   the app, zipped with `ditto -c -k --keepParent`
+#   Prometheus-mac-arm64.zip         the same bytes under a name that never changes
+#   prometheus-mac.json              version, sha256, size, team id, bundle id, min macOS
+#
+# Design and the contract with Beacon: docs/design/macos-app-installer.md. The build is
+# packaging/macos/build_app.py and the checks are packaging/macos/verify_app.py; both run the same way
+# on a Mac, so a release can be reproduced by hand.
+#
+# ── SECRETS ─────────────────────────────────────────────────────────────────
+#
+# Five secrets of the `release` ENVIRONMENT (Settings → Environments → release), none of which exists yet.
+# The job runs in that environment, so a required reviewer approves each run before any secret reaches it;
+# packaging/macos/set_release_secrets.sh sets them there:
+#
+#   CSC_LINK                      the Developer ID Application certificate as a base64 .p12
+#                                 (`base64 -i cert.p12 | pbcopy`)
+#   CSC_KEY_PASSWORD              that .p12's password
+#   APPLE_ID                      the Apple ID's email
+#   APPLE_APP_SPECIFIC_PASSWORD   an app-specific password (appleid.apple.com), not the Apple ID's own
+#   APPLE_TEAM_ID                 53JM8W47RL
+#
+# The certificate secrets reach ONE step (the keychain import). The notarization secrets reach ONE step, which
+# stores them as a notarytool keychain profile in the temporary keychain, the password on stdin: no argv ever
+# holds it (`ps` shows every argument, and `notarytool submit --wait` runs for up to 40 minutes). The build
+# step holds no secret. The "mode" step sees only whether each secret is non-empty, never its value.
+#
+# ── NOTHING RESOLVES FRESH ───────────────────────────────────────────────────
+#
+# uv and packaging come from packaging/macos/release-tools.txt (pinned, hashed); the wheel's build backend from
+# packaging/macos/build-constraints.txt (pinned, hashed); everything the app contains from uv.lock (hashed).
+# The wheel is the one thing whose build runs fetched code (the backend), so it is built BEFORE the certificate
+# is imported: that code never runs on a runner that holds the signing key.
+#
+# ── WHY A MISSING SECRET IS A RED RUN ON A TAG ──────────────────────────────
+#
+# release.yml's header tells the story of a publish step that was `skipped` inside a job that reported
+# `success`: green, silent, and indistinguishable from a release. A tag whose Mac app was never built is
+# that same failure. So on a tag push, missing secrets fail the run. A manual run only warns, so the job
+# can be dry-run before the secrets exist.
+#
+# An unsigned or un-notarized app is never attached to anything: Beacon downloads it without the quarantine
+# flag, so Gatekeeper never assesses it and the signature IS the gate.
+#
+# If Apple's notary is slow the wait times out at 40 minutes and this run FAILS. The timeout is not raised
+# to make a stall look like success: tell Will, who decides.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# No workflow-level `permissions:`. The job declares what it needs; it has no `id-token`.
+
+concurrency:
+  group: release-macos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  app:
+    runs-on: macos-15
+    timeout-minutes: 60
+    # Its secrets live on the environment, and a required reviewer releases them run by run.
+    environment: release
+    permissions:
+      # Only the draft-release upload at the end writes anything.
+      contents: write
+    env:
+      # uv names its interpreter explicitly everywhere; it must never fetch one (see ci.yml).
+      UV_PYTHON_DOWNLOADS: never
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Nothing here pushes; the draft upload uses the job's token explicitly. No credential is left in
+          # .git/config for anything that runs later to find.
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      # Decide from booleans, never from values: `secrets.X != ''` is evaluated by the runner, so this step
+      # holds no secret.
+      - name: Decide whether this run can build a notarized app
+        id: mode
+        shell: bash
+        env:
+          HAVE_CSC_LINK: ${{ secrets.CSC_LINK != '' }}
+          HAVE_CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD != '' }}
+          HAVE_APPLE_ID: ${{ secrets.APPLE_ID != '' }}
+          HAVE_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD != '' }}
+          HAVE_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID != '' }}
+        run: |
+          missing=()
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            var="HAVE_$name"
+            [ "${!var}" = true ] || missing+=("$name")
+          done
+          if [ ${#missing[@]} -eq 0 ]; then
+            echo "mode=notarized" >> "$GITHUB_OUTPUT"
+            echo "### macOS app: signing and notarizing" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "mode=skipped" >> "$GITHUB_OUTPUT"
+          echo "### macOS app: NOT built" >> "$GITHUB_STEP_SUMMARY"
+          echo "Missing secrets of the release environment: ${missing[*]}" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "::error title=No macOS app for this tag::Missing secrets of the release environment: ${missing[*]}. A tagged release without its Mac app is a failed release, so this run fails. See the header of release-macos.yml."
+            exit 1
+          fi
+          echo "::warning title=macOS app not built::Missing secrets of the release environment: ${missing[*]}. This manual run only checked the workflow; no app was built."
+
+      - name: Install uv and packaging (pinned, hashed — deliberately not astral-sh/setup-uv)
+        if: steps.mode.outputs.mode == 'notarized'
+        run: |
+          python -m pip install --require-hashes --only-binary :all: -r packaging/macos/release-tools.txt
+
+      # The tag decides the release page and the version decides the file. A mismatch would publish one
+      # version's app under another's tag, so it stops here (normalized as PEP 440, like release.yml).
+      - name: Check the tag is the version being built
+        if: steps.mode.outputs.mode == 'notarized' && startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          python -c "
+          import pathlib, re, sys
+          from packaging.version import Version
+          text = pathlib.Path('src/prometheus/__init__.py').read_text()
+          built = re.search(r'^__version__\s*=\s*\"([^\"]+)\"', text, re.M).group(1)
+          tag = sys.argv[1].removeprefix('v')
+          print(f'tag {sys.argv[1]} -> {Version(tag)}; __version__ {built} -> {Version(built)}')
+          if Version(tag) != Version(built):
+              sys.exit(f'TAG/VERSION MISMATCH: tag {tag}, src/prometheus/__init__.py says {built}. Bump the version or retag.')
+          " "$GITHUB_REF_NAME"
+
+      # The one build step that runs fetched code (the hashed build backend), so it runs while no certificate
+      # is on this runner. The signing run below installs this wheel and builds no other.
+      - name: Build the wheel (before any certificate is on this runner)
+        id: wheel
+        if: steps.mode.outputs.mode == 'notarized'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python packaging/macos/build_app.py --wheel-only --work "$RUNNER_TEMP/wheel-work" > "$RUNNER_TEMP/wheel.json"
+          echo "wheel=$(python -c 'import json, sys; print(json.load(open(sys.argv[1]))["wheel"])' "$RUNNER_TEMP/wheel.json")" >> "$GITHUB_OUTPUT"
+
+      # Import the certificate into a keychain of our own and sign from there. This is the sequence GitHub
+      # documents for installing an Apple certificate on a runner; Beacon's release job found that
+      # electron-builder's own import fails on macOS runners with "SecKeychainUnlock: The user name or
+      # passphrase you entered is not correct". The identity is found, not assumed: exactly one Developer
+      # ID Application identity of team 53JM8W47RL must be in the file, and its SHA-1 goes to the build.
+      - name: Import the signing certificate into a temporary keychain
+        id: keychain
+        if: steps.mode.outputs.mode == 'notarized'
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          kc="$RUNNER_TEMP/prometheus-signing.keychain-db"
+          kcpass=$(openssl rand -base64 24)
+          echo "::add-mask::$kcpass"
+          p12="$RUNNER_TEMP/prometheus-signing.p12"
+          if ! printf '%s' "$CSC_LINK" | base64 --decode > "$p12" 2>/dev/null || [ ! -s "$p12" ]; then
+            echo "::error title=CSC_LINK is not usable::CSC_LINK must be the base64 of the Developer ID Application .p12 (base64 -i cert.p12 | pbcopy)."
+            exit 1
+          fi
+          security create-keychain -p "$kcpass" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpass" "$kc"
+          if ! security import "$p12" -P "$CSC_KEY_PASSWORD" -A -t cert -f pkcs12 -k "$kc" >/dev/null; then
+            rm -f "$p12"
+            echo "::error title=Certificate import failed::security import refused the .p12: check CSC_KEY_PASSWORD matches CSC_LINK."
+            exit 1
+          fi
+          rm -f "$p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpass" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          ids=$(security find-identity -v -p codesigning "$kc" | grep '"Developer ID Application: .*(53JM8W47RL)"' || true)
+          count=$(printf '%s\n' "$ids" | grep -c . || true)
+          if [ "$count" -ne 1 ]; then
+            echo "::error title=Expected one Developer ID Application identity of team 53JM8W47RL::Found $count in CSC_LINK. Sign by fingerprint needs exactly one."
+            exit 1
+          fi
+          echo "fingerprint=$(printf '%s' "$ids" | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      # With no --password and no terminal, store-credentials reads the password from stdin, so it is never in an
+      # argv. --validate (the default) asks Apple once: a wrong secret fails HERE, not 40 minutes into a submit.
+      - name: Store the notarization credentials as a profile in the temporary keychain
+        if: steps.mode.outputs.mode == 'notarized'
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          kc="$RUNNER_TEMP/prometheus-signing.keychain-db"
+          printf '%s\n' "$APPLE_APP_SPECIFIC_PASSWORD" | xcrun notarytool store-credentials prometheus-ci --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --keychain "$kc"
+
+      - name: Build, sign, notarize and staple the app
+        if: steps.mode.outputs.mode == 'notarized'
+        shell: bash
+        env:
+          FINGERPRINT: ${{ steps.keychain.outputs.fingerprint }}
+          WHEEL: ${{ steps.wheel.outputs.wheel }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python packaging/macos/build_app.py \
+            --identity "$FINGERPRINT" --wheel "$WHEEL" \
+            --notarize --notary-profile prometheus-ci --notary-keychain "$RUNNER_TEMP/prometheus-signing.keychain-db" \
+            --work "$RUNNER_TEMP/app-work" --out dist/macos
+
+      # The same checks Beacon runs before it moves the app anywhere, on the zip a person would download.
+      - name: Verify the zip as Beacon will (signature, team, hardened runtime, notarization)
+        if: steps.mode.outputs.mode == 'notarized'
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip=$(ls dist/macos/Prometheus-*-arm64.zip)
+          PYTHONPATH=src python packaging/macos/verify_app.py "$zip" --notarized
+
+      - name: Upload the app as a workflow artifact
+        if: steps.mode.outputs.mode == 'notarized'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: prometheus-macos
+          path: |
+            dist/macos/Prometheus-*-arm64.zip
+            dist/macos/Prometheus-mac-arm64.zip
+            dist/macos/prometheus-mac.json
+
+      # Draft only, and never into a release a person has already published: its files are what people
+      # downloaded.
+      - name: Attach to the draft GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') && steps.mode.outputs.mode == 'notarized'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "Prometheus $GITHUB_REF_NAME" \
+            --notes "Draft release for $GITHUB_REF_NAME — publish manually after review." \
+            || true  # already exists: release.yml creates the same draft for this tag
+          draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)
+          if [ "$draft" != true ]; then
+            echo "::error title=$GITHUB_REF_NAME is already published::A published release's files are what people downloaded; assets are not replaced. Tag a new version."
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" \
+            dist/macos/Prometheus-*-arm64.zip dist/macos/Prometheus-mac-arm64.zip dist/macos/prometheus-mac.json \
+            --clobber
+
+      # The import step removes it as soon as it is read; this is for a run that stopped before that line.
+      - name: Delete the decoded .p12
+        if: always() && steps.keychain.outcome != 'skipped'
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/prometheus-signing.p12"
+
+      - name: Delete the temporary keychain
+        if: always() && steps.keychain.outcome != 'skipped'
+        shell: bash
+        run: security delete-keychain "$RUNNER_TEMP/prometheus-signing.keychain-db" 2>/dev/null || true

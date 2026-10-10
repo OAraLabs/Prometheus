@@ -187,6 +187,16 @@ async def launch_web(
     # POST /api/chat/send) can dispatch user messages through the same flow
     # the WebSocket uses, without duplicating the session+agent plumbing.
     app.state.ws_bridge = bridge
+    # Pairing requests (docs/PAIRING-APPROVAL-API.md): the owner's Beacon sockets hear about a new device
+    # asking to join, and a socket that connects later is told what is still waiting. Telegram prompts
+    # are OPT-IN (pairing.telegram_prompts, off by default): attach() does nothing unless it is on.
+    pairing = getattr(app.state, "pairing", None)
+    if pairing is not None:
+        bridge.attach_pairing(pairing)
+        if gateway_adapter is not None:
+            from prometheus.gateway.telegram_pairing import TelegramPairingPrompts
+
+            TelegramPairingPrompts(gateway_adapter, pairing).attach()
     # The chat Stop (WS interrupt / POST /api/chat/interrupt) stops a
     # session's desktop tasks first (computer-use v1.1 §5.1.7).
     bridge.computer_runner = computer_runner
