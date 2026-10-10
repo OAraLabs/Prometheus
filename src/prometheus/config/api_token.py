@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass as _dataclass
 
+import logging
 import os
 import secrets
 from typing import Any
@@ -26,6 +27,8 @@ from prometheus.config.env_file import (
     parse_env_file,
     set_env_value,
 )
+
+logger = logging.getLogger(__name__)
 
 TOKEN_ENV_VAR = "PROMETHEUS_API_TOKEN"
 
@@ -115,24 +118,80 @@ def ensure_api_token(config: dict[str, Any] | None = None) -> tuple[str, bool]:
     return token, True
 
 
-def issue_owner_credential(config: dict[str, Any] | None = None) -> str:
-    """The credential a successful same-Mac pairing hands back to the client that paired.
+#: ``owner_devices.marked_by`` for an owner device issued by ``POST /api/pair/local``.
+OWNER_SOURCE_SAME_MAC = "same-mac-pairing"
+#: … and for one the global token minted (``POST /api/devices`` with ``owner: true``) from THIS Mac's loopback
+#: address, which is how a fresh install trades its setup-mode token for a device token of its own.
+OWNER_SOURCE_SAME_MAC_MINT = "same-mac-mint"
+#: Owner devices issued for THIS Mac. A new one replaces the earlier ones from any of these sources and
+#: from nothing else: an owner device minted for another computer carries a different ``marked_by`` and is
+#: never revoked by this Mac's re-pairing.
+SAME_MAC_OWNER_SOURCES = (OWNER_SOURCE_SAME_MAC, OWNER_SOURCE_SAME_MAC_MINT)
+DEFAULT_OWNER_DEVICE_NAME = "Beacon on this Mac"
 
-    Today that is the daemon's one API token, exactly what ``POST /api/setup/pair`` has always returned,
-    so nothing changes for a client already paired this way. It is a function, and the ONLY place a
-    pairing route obtains its credential, so that per-device credentials (a token for this device alone,
-    with an approver role, revocable on its own) replace the global token by changing this body and
-    nothing else. Until then every device paired this way holds the master key; the macOS app's public
-    release is gated on that change.
+
+@_dataclass(frozen=True)
+class IssuedCredential:
+    """What a pairing route hands back: the token, and what issuing it did to the registry."""
+
+    token: str
+    #: The device the token belongs to; None when it is the daemon's own token (setup mode).
+    device_id: str | None = None
+    #: How many earlier owner credentials of this Mac the issue revoked.
+    revoked_previous: int = 0
+
+
+def issue_owner_credential(
+    config: dict[str, Any] | None = None,
+    *,
+    devices: Any,
+    name: str = DEFAULT_OWNER_DEVICE_NAME,
+    platform: str = "macos",
+) -> IssuedCredential:
+    """The credential a successful same-Mac pairing on a RUNNING daemon hands back to the client.
+
+    A token for THIS device alone: an OWNER device minted in the shared DeviceStore, revocable on its own,
+    listed in ``GET /api/devices``. It is NOT the daemon's API token, so a device paired this way does not
+    hold the master key. It is operator-equivalent (``DeviceIdentity.is_operator``): the person's own
+    cockpit sees all their sessions, including the ones that predate device scoping. Not root: it still
+    cannot enrol devices or define MCP servers.
+
+    ``devices`` is REQUIRED and there is no fallback to the global token: a caller that forgot to pass the
+    registry fails loudly instead of quietly handing out the master key. (Setup mode is the one place that
+    has no registry; it calls :func:`issue_setup_credential`, by name.) ``config`` is unused today and kept
+    so the call shape the pairing routes were written against does not change.
+
+    Pairing again REPLACES the earlier owner credentials of this Mac (``SAME_MAC_OWNER_SOURCES``), in the same
+    transaction as the mint and through the registry's normal revocation, so a replaced token answers 401 and
+    its open WebSocket is closed. A Beacon reinstall must not leave a standing operator credential nobody holds.
 
     **The OWNER tier only.** This is for the person's own app on this Mac, proven by a one-time secret in a
-    file only that user can read. A device that someone approves from another device (a phone, a second
-    computer) must NOT get this credential: it needs an ordinary device token with no approver rights,
-    from its own mint path (``DeviceStore.mint``). Two mint paths on purpose, and the tier is not a
-    parameter a caller can widen. Do not route an approval flow through this function.
+    file only that user can read. A device that someone approves from Telegram or from another device must
+    NOT get this credential: it needs an ordinary scoped token from ``DeviceStore.mint``. Two mint paths on
+    purpose, and the tier is not a parameter a caller can widen. Do not route an approval flow through here.
+
+    What this does NOT fix: the global token stays valid and stays in ``~/.config/prometheus/env``, where the
+    bash tool can read it (and on macOS there is no shell floor). This stops a paired DEVICE holding the master
+    key; it does not stop a MODEL reading it.
+    """
+    minted = devices.mint_owner(name, platform, by=OWNER_SOURCE_SAME_MAC, replaces=SAME_MAC_OWNER_SOURCES)
+    replaced = minted.get("revoked_previous") or []
+    if replaced:
+        logger.info("Same-Mac pairing replaced %d earlier owner device(s) of this Mac", len(replaced))
+    return IssuedCredential(str(minted["token"]), str(minted["id"]), len(replaced))
+
+
+def issue_setup_credential(config: dict[str, Any] | None = None) -> IssuedCredential:
+    """The credential same-Mac pairing hands back in SETUP MODE: the daemon's one API token.
+
+    Setup mutations (``/api/setup/configure``, ``/complete``) authenticate against the global token only,
+    and setup mode must create no ``~/.prometheus`` state — ``devices.db`` lives there — so there is no
+    registry to mint a device into. This is the honest name for that: it IS the master key. The client
+    trades it for an owner device token of its own once the daemon is configured
+    (``POST /api/devices`` with ``{"owner": true}``, a global-token route), keeps only that, and drops this.
     """
     token, _minted = ensure_api_token(config)
-    return token
+    return IssuedCredential(token)
 
 
 def web_refused_on_bootstrap_failure(
@@ -303,10 +362,21 @@ class DeviceIdentity:
     id: str
     name: str = ""
     platform: str = ""
+    #: The person's own device (``DeviceStore.mint_owner``). Set by :func:`verify_token` from the
+    #: registry — never from anything the caller presented.
+    owner: bool = False
 
     @property
     def is_global(self) -> bool:
         return self.id == "global"
+
+    @property
+    def is_operator(self) -> bool:
+        """The master token or an OWNER device: operator-equivalent for conversation scoping
+        (``web/session_scope.scope_for``), for managing devices, and as an approver (pairing
+        approval asks THIS). It is not root: enrolling a device and defining an MCP server test
+        ``is_global`` and stay the master token's alone."""
+        return self.is_global or self.owner
 
 
 GLOBAL_IDENTITY = DeviceIdentity(id="global", name="global", platform="")
@@ -337,5 +407,7 @@ def verify_token(presented: str, global_token: str, store=None) -> DeviceIdentit
         row = store.lookup(token_digest(presented))
         if row is not None:
             store.touch(row.id)
-            return DeviceIdentity(id=row.id, name=row.name, platform=row.platform)
+            is_owner = getattr(store, "is_owner", None)  # a registry without tiers has no owners
+            return DeviceIdentity(id=row.id, name=row.name, platform=row.platform,
+                                  owner=bool(is_owner(row.id)) if callable(is_owner) else False)
     return None

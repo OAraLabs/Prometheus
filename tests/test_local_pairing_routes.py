@@ -33,6 +33,12 @@ CODE = "042999"
 DAEMON_TOKEN = "daemon-test-token-0123456789abcdef"
 
 
+@pytest.fixture(autouse=True)
+def _data_dir(tmp_path, monkeypatch):
+    """/api/pair/local mints an owner device into devices.db: keep it out of the real data dir."""
+    monkeypatch.setenv("PROMETHEUS_DATA_DIR", str(tmp_path / "data"))
+
+
 @pytest.fixture
 def env_file(tmp_path, monkeypatch):
     path = tmp_path / "env"
@@ -83,12 +89,18 @@ class TestSetupModePairing:
         body = _client(_setup_app()).post("/api/setup/pair", json={"code": secret}).json()
         assert body["token"] == resolve_api_token(None)[0] != ""
 
-    def test_the_credential_comes_from_one_function(self, env_file, secret, monkeypatch):
-        """Per-device credentials will replace the global token. That swap must be one function, not a
-        change to every route that pairs."""
-        monkeypatch.setattr(api_token_module, "issue_owner_credential", lambda config=None: "owner-device-token")
+    def test_the_credential_comes_from_one_named_function(self, env_file, secret, monkeypatch):
+        """Setup mode has no device registry and its mutations authenticate with the global token, so it
+        hands out the global token, through a function named for exactly that."""
+        monkeypatch.setattr(api_token_module, "issue_setup_credential",
+                            lambda config=None: api_token_module.IssuedCredential("setup-token"))
         body = _client(_setup_app()).post("/api/setup/pair", json={"code": secret}).json()
-        assert body["token"] == "owner-device-token"
+        assert body["token"] == "setup-token"
+
+    def test_setup_mode_pairing_creates_no_device_registry(self, env_file, secret, tmp_path):
+        """Setup mode must create no ~/.prometheus state, and devices.db lives there."""
+        assert _client(_setup_app()).post("/api/setup/pair", json={"code": secret}).status_code == 200
+        assert not (tmp_path / "data").exists() or not (tmp_path / "data" / "devices.db").exists()
 
     def test_a_second_use_is_refused(self, env_file, secret):
         client = _client(_setup_app())
@@ -206,16 +218,26 @@ class TestSetupModeMintsTheSecret:
 # ═══ the running daemon: POST /api/pair/local ═══════════════════════════════
 
 class TestPairLocalOnTheRunningDaemon:
-    def test_it_pairs_without_a_bearer_and_returns_the_daemons_token(self, secret, pairing_dir):
+    def test_it_pairs_without_a_bearer_and_returns_a_token_of_its_own(self, secret, pairing_dir):
         resp = _client(_daemon_app()).post("/api/pair/local", json={"code": secret})
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"token": DAEMON_TOKEN, "api_base_port": 8123, "ws_port": 8124}
+        body = resp.json()
+        assert set(body) == {"token", "api_base_port", "ws_port", "revoked_previous"}
+        assert (body["api_base_port"], body["ws_port"]) == (8123, 8124)
+        assert body["token"] != DAEMON_TOKEN, "a device paired here must not hold the master key"
         assert not (pairing_dir / "pair.secret").exists()
 
     def test_the_credential_comes_from_one_function(self, secret, monkeypatch):
-        monkeypatch.setattr(api_token_module, "issue_owner_credential", lambda config=None: "owner-device-token")
+        seen: dict = {}
+
+        def _fake(config=None, **kwargs):
+            seen.update(kwargs)
+            return api_token_module.IssuedCredential("owner-device-token", "dev1", 0)
+
+        monkeypatch.setattr(api_token_module, "issue_owner_credential", _fake)
         resp = _client(_daemon_app()).post("/api/pair/local", json={"code": secret})
         assert resp.json()["token"] == "owner-device-token"
+        assert seen["devices"] is not None, "the routes hand the SHARED registry to the one function"
 
     def test_every_other_path_still_needs_the_bearer(self, secret):
         client = _client(_daemon_app())

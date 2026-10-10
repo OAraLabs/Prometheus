@@ -701,7 +701,10 @@ def _pair_with_local_secret(
             "attempts_remaining": pairing.attempts_remaining,
             "detail": "wrong or already-used pairing secret",
         })
-    token = api_token_module.issue_owner_credential(None)
+    # Setup mode has no device registry (setup creates no ~/.prometheus state) and its mutations
+    # authenticate with the global token, so the credential here IS the global token, by name. The
+    # client trades it for an owner device token once the daemon is configured.
+    token = api_token_module.issue_setup_credential(None).token
     logger.info("Same-Mac pairing successful (secret consumed; credential value never logged)")
     return JSONResponse(status_code=200, content={
         "token": token,

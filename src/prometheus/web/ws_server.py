@@ -193,6 +193,11 @@ class WebSocketBridge:
         # sessions its device owns; the global token's socket is the firehose,
         # exactly as before. See docs/contracts/device-scoping.md.
         self._access = SessionAccess(lambda: self._device_store, self._session_exists)
+        # A token's sockets die with the token. Authentication happens once, at connect, so without
+        # this a revoked device kept its open socket — and, for an owner device, every session's frames.
+        add_listener = getattr(device_store, "add_revoke_listener", None)
+        if callable(add_listener):
+            add_listener(self._on_devices_revoked)
         # GRAFT Piece 2: set by the launcher when push.enabled. The bridge
         # feeds it agent_progress pulses and chat_done (Live Activity source);
         # bus signals reach it via its own subscription.
@@ -288,6 +293,38 @@ class WebSocketBridge:
                 "kind": "not_found",
             },
         })
+
+    def _on_devices_revoked(self, device_ids: list[str]) -> None:
+        """The registry's word that these devices were just revoked (after the commit is durable).
+
+        Detaches their sockets AT ONCE, synchronously — nothing is sent to one after this returns, and
+        its identity is gone so any command it still manages to send resolves to nobody — then closes
+        them 4401 on the running loop. The close is best effort: the sockets are already inert, and a
+        failure here must not touch the revocation or the mint that caused it."""
+        wanted = set(device_ids)
+        for ws, identity in list(self._ws_identity.items()):
+            if getattr(identity, "id", None) not in wanted:
+                continue
+            self._clients.discard(ws)
+            self._ws_identity.pop(ws, None)
+            self._ws_filters.pop(ws, None)
+            close = getattr(ws, "close", None)
+            if close is None:
+                continue
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                continue  # revoked from a plain thread (a CLI): detached above, the peer will notice
+            task = loop.create_task(self._close_revoked(close))
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+
+    @staticmethod
+    async def _close_revoked(close: Any) -> None:
+        try:
+            await close(code=WS_CLOSE_UNAUTHORIZED, reason="unauthorized")
+        except Exception:
+            logger.debug("closing a revoked device's socket failed", exc_info=True)
 
     def _token_ok(self, raw: str) -> bool:
         """Boolean form of :meth:`_auth_identity` (kept for callers and tests

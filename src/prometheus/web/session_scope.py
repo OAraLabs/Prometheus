@@ -64,7 +64,12 @@ def scope_for(identity: Any, *, auth_required: bool) -> Scope:
         return OPERATOR  # deliberately open: today's behaviour, unchanged
     if identity is None:
         return NOBODY
-    return OPERATOR if identity.is_global else Scope(identity.id)
+    # The master token and an OWNER device (the person's own: same-Mac pairing) are the operator.
+    # Anything else is a device scoped to what it created. ``is_operator`` is DeviceIdentity's own
+    # test; getattr keeps a bare identity from an older registry on the safe, narrower side.
+    if getattr(identity, "is_operator", identity.is_global):
+        return OPERATOR
+    return Scope(identity.id)
 
 
 def gateway_of(session_id: str) -> str:
