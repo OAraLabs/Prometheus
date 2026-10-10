@@ -87,38 +87,82 @@ The Mac app listens on this Mac only. A "home network" mode listens on the LAN. 
 
 ### 2.1 Modes
 
-The primitive is `web.bind`, owned by #693 (D7). This contract names the three states a user or client can observe and maps them onto it.
+The primitive is `web.bind`, owned by #693 (D7). This contract names the three states a user or client can observe and maps them onto it. The mode is **not a setting of its own**: it is what `web.bind` and two switches (`network.home_network`, `network.allow_plaintext_lan`) add up to, computed in one place (`web/network.py`, `describe`).
 
-| `mode` | `web.bind` | Plain HTTP listens on | TLS listens on | mDNS |
+| `mode` | When | Plain HTTP listens on | TLS listens on | mDNS |
 |---|---|---|---|---|
-| `this_mac` | `127.0.0.1` | loopback | nothing | no |
-| `home_network` | `0.0.0.0` with TLS configured | **loopback only** | all interfaces | yes |
-| `open` | `0.0.0.0`, no TLS (legacy) | all interfaces | nothing | only if `discovery.mdns` and the operator turned it on |
+| `this_mac` | the bind is loopback | loopback | nothing | no |
+| `home_network` | the bind reaches the LAN **and** `network.home_network: true` **and** it can be run safely: TLS (PR 5), or the owner's explicit `network.allow_plaintext_lan: true` | **until PR 5: every address the bind names, and a warning says so every time.** After PR 5: loopback only | after PR 5: all interfaces | yes, if `discovery.mdns` |
+| `open` | any other bind that reaches the LAN: what every install that predates the setting is, and what `home_network: true` without a safe way to run becomes | all interfaces | nothing | **no** (see 3.1) |
+
+An owner who asked for `home_network` and cannot have it is told so (`warnings`, and the `oara doctor` row) and reported as `open`. The daemon does not quietly run plain HTTP on the LAN in a mode named for being safe. `network.home_network: true` on a loopback bind is reported as `this_mac` with a warning that it cannot work there.
 
 `open` is what every existing install has today (an absent `web.bind` keeps `0.0.0.0`, so a Mac mini reached over Tailscale does not change). It is reported honestly as `open`, not hidden as "home network". The same goes for a bind to one specific non-loopback address without TLS (a Tailscale address, say): `open`, and no mDNS, because 3.1 never advertises a tunnel or CGNAT address. The app's launcher passes `--bind 127.0.0.1`, and setup mode pins the bind a client reached it on into the new config, so app installs start in `this_mac`.
 
-### 2.2 Routes (operator only: `identity.is_operator`)
+### 2.2 Routes (operator only, `identity.is_operator`; a scoped device is refused both, by default)
 
 ```
-GET /api/network
+GET /api/network                         (operator only: a scoped device is 403 operator_only, like every route it was not given)
 200 {
-  "mode": "this_mac" | "home_network" | "open",
+  "mode": "this_mac" | "home_network" | "open",      // what the daemon is RUNNING as
   "bind": "127.0.0.1",
-  "tls": {"enabled": false, "spki_sha256": null},
+  "bind_source": "flag" | "env" | "config" | "default" | "caller",
+  "tls": {"enabled": false, "spki_sha256": null},     // there is no TLS listener until PR 5
   "advertising": false,
-  "advertising_reason": null,        // e.g. "loopback bind", "discovery.mdns is false", "zeroconf is not installed"
-  "applied": "live" | "on_restart"   // whether the last PUT has taken effect
+  "advertising_reason": {"code": "this_mac_only", "message": "not advertising: the daemon listens on this machine only"},
+                                     // null while advertising; the code is stable, the English is the fallback
+  "applied": "live" | "on_restart",  // "on_restart": the file says something else than what is running
+  "pending_mode": "home_network",    // ONLY when applied is "on_restart": what it will come back as
+  "warnings": [{"code": "plain_http_on_lan", "message": "..."}],   // see the codes below
+  "can_change": true                 // show the control at all? true only for an operator AND an unpinned bind
 }
 
-PUT /api/network   {"mode": "this_mac" | "home_network"}
-200 {"mode": "...", "applied": "live" | "on_restart", "warnings": ["..."]}
-409 {"error": "tls_unavailable"}      // home_network without TLS and without allow_plaintext_lan
-403 {"error": "operator_only"}        // an authenticated scoped device
+PUT /api/network   {"mode": "this_mac" | "home_network"}      (operator only; nothing else in the body)
+200 { same nine keys }               // mode, bind, bind_source and warnings describe the SAVED choice (what it
+                                     // will be after a restart); advertising* is what is happening now.
+                                     // applied is "live" only when the saved choice is what is already running.
+400 {"error": "invalid_request"}     // anything but exactly {"mode": "this_mac" | "home_network"}; "open" is not a choice
+403 {"error": "operator_only"}       // an authenticated scoped device
+409 {"error": "tls_unavailable"}     // home_network without TLS and without network.allow_plaintext_lan in the FILE
+409 {"error": "would_lock_out"}      // this_mac from a caller that is not on this machine: it would cut itself off
+409 {"error": "bind_overridden", "source": "flag"|"env"|"caller"}   // --bind / PROMETHEUS_WEB_BIND outranks the file
+409 {"error": "no_config_file"}      // the daemon was not started from a file; none is created
+500 {"error": "persist_failed"}      // the edit did not verify, or the write failed; the file is exactly as it was
 ```
 
-`PUT` persists `web.bind` (and TLS material) the same way `POST /api/setup/configure` pins the bind. Whether the change is live or needs a restart is #693's call; this contract only fixes the response shape so Beacon's "Let my other devices connect" toggle can show the truth. Switching back to `this_mac` stops the LAN listeners and mDNS and closes WebSocket connections whose peer is not loopback. It revokes no device.
+**Codes.** Every entry in `warnings` and the `advertising_reason` is `{"code", "message"}` so a client writes its own plain-language copy and keeps the English as the fallback (the log, `oara doctor` and a client with no copy for a code use `message`). A code is a promise: it does not change when the wording does, and a new situation gets a new code instead of reusing one. Clients must tolerate a code they do not know.
 
-`oara network show | this-mac | home` is the terminal route (calls the same code).
+| `warnings[].code` | When |
+|---|---|
+| `home_network_on_loopback` | `network.home_network` is on but the bind is loopback, so nothing on the home network can reach the daemon |
+| `plain_http_on_lan` | home network mode over plain HTTP (no TLS): a device's token and everything it sends cross the Wi-Fi unencrypted |
+| `home_network_unavailable` | `network.home_network` is on but there is no TLS and no `network.allow_plaintext_lan`, so the daemon is reported `open` and does not advertise |
+| `listening_on_all_interfaces` | `open` on a wildcard bind: plain HTTP, the bearer token is the only access control |
+| `restart_required` | a saved change is waiting for a restart (`GET`), or was just saved (`PUT`) |
+
+| `advertising_reason.code` | When |
+|---|---|
+| `not_started` | the advertiser has not started yet |
+| `mdns_disabled` | `discovery.mdns` is off |
+| `this_mac_only` | the bind is loopback |
+| `not_home_network` | the daemon is not in home network mode (this includes `open`) |
+| `no_usable_address` | no private IPv4 address on an interface the daemon listens on |
+| `library_missing` | advertising is wanted and `zeroconf` is not installed |
+| `registration_failed` | the library refused (the message names the error); retried every 30 s |
+| `stopped` | the advertiser was stopped |
+| `advertiser_not_running` | this process has no advertiser to ask (set by the route, not the advertiser) |
+
+**`can_change`** is for deciding whether to show the control at all. It is true only when the caller is an operator (`identity.is_operator`; with the token off, everyone) **and** nothing outside the config file fixes the bind (`bind_source` is `config` or `default`, not `flag`, `env` or `caller`). A scoped device never gets that far: it is refused the route outright (403), which a client treats as "no control". A Mac-app install (its launcher pins `--bind 127.0.0.1`) reads `false`. It is not a promise that a `PUT` will succeed: no config file, no TLS or opt-out for `home_network`, and `would_lock_out` can still refuse one.
+
+**`would_lock_out`.** `PUT {"mode": "this_mac"}` from a caller whose TCP peer is not loopback is refused, because after the restart the daemon answers only on its own machine and that caller would lose the connection it just used. The peer is the real one (a forwarded header counts only from a `web.trusted_proxies` entry), and anything that does not clearly say loopback is not loopback. `home_network` from anywhere is not a lockout: opening the daemon up cannot cut the caller off. The remedy is to do it from the machine the daemon runs on (Beacon there, or `web.bind: 127.0.0.1` in `prometheus.yaml`).
+
+**It is saved, not applied.** The listeners are bound when the daemon starts, so `PUT` writes the choice into the config file and answers `applied: "on_restart"`; the daemon keeps listening as before until it restarts, and `GET` shows the running mode next to `pending_mode`. Live rebinding is not built (the first thing it would have to do is close every socket whose peer is not loopback). `PUT` never revokes a device.
+
+**What it writes.** `this_mac`: `web.bind: "127.0.0.1"` and `network.home_network: false`. `home_network`: `network.home_network: true`, and `web.bind: "0.0.0.0"` only when the file's bind is loopback; a file that names a specific address (a Tailscale address, say) keeps it, and a file that names none while the daemon runs on one specific address gets that address pinned: a toggle never widens what the daemon is bound to. It never writes `network.allow_plaintext_lan`: that is the owner's own line to add. The file is edited as TEXT with the comment-preserving editor `PUT /api/tools/deferred` uses (a round-trip through a YAML dump once took the shipped template from 713 comment lines to 0), the result is re-parsed and must equal the old document plus exactly those keys with every comment line intact before anything is written, and the write is atomic (temp file in the same directory, `os.replace`, the file's mode kept). It writes the file the daemon actually read (`--config` included). An already-saved choice writes nothing.
+
+Every change leaves one `network:` log line naming who made it.
+
+Not built in PR 4: `oara network show | this-mac | home`. Beacon's switch and a hand edit of `prometheus.yaml` are the two ways in; the CLI can call the same `persist_choice` when it is wanted.
 
 ### 2.3 The laptop caveat
 
@@ -130,13 +174,16 @@ PUT /api/network   {"mode": "this_mac" | "home_network"}
 
 ### 3.1 mDNS
 
-Advertise `_prometheus._tcp.local.` when the mode is `home_network`, or `open` with `discovery.mdns` true. Never in `this_mac`.
+Advertise `_prometheus._tcp.local.` when the mode is `home_network` and `discovery.mdns` is true. Never in `this_mac`, and **never in `open`**: that narrows an earlier draft of this contract on purpose. `discovery.mdns` defaults to true, so an existing install that listens on every interface (a Mac mini reached over Tailscale) would otherwise start announcing its name on the LAN the day it upgraded. Announcing is something the owner turns on, by choosing home network.
 
 | Item | Value |
 |---|---|
 | Instance name | the display name (3.3), truncated to 63 UTF-8 bytes (DNS label limit). The library renames on a conflict ("Name (2)"); the TXT `name` stays as set. |
-| Port | the REST port clients should use: the TLS port in `home_network`, the plain port in `open`. |
-| Interfaces | only interfaces the daemon listens on **and** that carry a private IPv4 (RFC 1918) or link-local address. Never a public address, a tunnel, or a CGNAT (Tailscale) address. Re-evaluated every 60 s so Wi-Fi roaming re-registers. |
+| Port | the REST port clients should use: the plain port until PR 5, the TLS port after it. |
+| Host name | `prometheus-<first 8 hex of fp>.local.`, not the machine's own `<name>.local`: a second responder claiming the real name would fight the operating system's for it. |
+| Addresses | IPv4 only: private (RFC 1918) or link-local, on an interface the daemon listens on (a specific `web.bind` announces only that address; `0.0.0.0` and `::` announce every eligible one). Never a public address, 100.64.0.0/10 (Tailscale), or the benchmarking range. Never an interface that is a tunnel, bridge, VM or container: `utun`, `tun`, `tap`, `wg`, `tailscale`, `docker`, `br-`, `veth` (and Windows' `vEthernet`), `virbr`, `awdl`, `llw`, `lo`, `zt`, `bridge`, `vmnet`, `vboxnet`, `gif`, `stf`, `ppp`, `ipsec`, `anpi`, `ap<digit>`, `cni`, `flannel`, `cali`, `kube`, however private its address looks. |
+| Following the network | re-evaluated every 30 s. A different address set is a new registration (zeroconf fixes its interfaces when it is built): the old one is withdrawn with goodbye packets first. A change in what hello says (the `fp` appearing, say) is an update of the TXT record; a changed display name is a new registration. |
+| Starting | `start()` waits at most 2 s for the first registration and lets it finish in the background, so a stuck multicast socket cannot hold up the web server (uvicorn finishes startup before it listens). A registration that fails is a status, retried at the next evaluation. |
 
 TXT records. No secrets, no paths, no usernames, no addresses:
 
@@ -149,7 +196,7 @@ TXT records. No secrets, no paths, no usernames, no addresses:
 | `pair` | `approve` | `approve` when approval requests are enabled and the daemon is configured; `code` when a 6-digit code works (setup mode only, until Beacon's on-demand codes exist); `token` when neither works (no approval route is offered and no 6-digit-code route exists yet: the API token has to be entered); `none` when the daemon runs with auth deliberately off (an explicit empty token): there is nothing to pair into, and `POST /api/pair/requests` answers `403 pairing_unavailable` |
 | `tls` | `1` | `1` when the advertised port speaks TLS, else `0` |
 
-Config opt-out: `discovery.mdns: false`. If it is enabled and the library is missing, the daemon logs a WARNING at boot, `GET /api/network` reports `advertising: false` with the reason, and `oara doctor` gets a row. A silent no-op would be the config-dark failure this repo already has rules against.
+Config opt-out: `discovery.mdns: false`. `zeroconf` (LGPL-2.1-or-later; one dependency of its own, `ifaddr`, MIT) is the optional `discovery` extra, not a base dependency and not in `full`. If advertising is wanted (home network, `discovery.mdns` on, an eligible address) and the library is missing, the daemon starts, serves and pairs exactly as before, logs one WARNING, `GET /api/network` reports `advertising: false` with the reason, and `oara doctor` says so and names the extra. A silent no-op would be the config-dark failure this repo already has rules against.
 
 Crash behaviour: a SIGKILLed daemon cannot send a goodbye packet, so its record lingers until the TTL expires. Clients therefore **always confirm with `GET /api/hello`** before showing an instance to a user.
 
@@ -426,7 +473,7 @@ Beacon, Telegram and the CLI can all answer. The first decision wins; every othe
 | `GET` / `DELETE /api/pair/requests/{id}` | with the poll secret | with the poll secret | with the poll secret | with the poll secret |
 | `GET /api/pair/requests` (list) | no | 403 | yes | yes |
 | `POST /api/pair/requests/{id}/approve` and `/deny` | no | 403 | yes | yes |
-| `GET /api/network` | no | yes (read) | yes | yes |
+| `GET /api/network` | no | **403 `operator_only`** (default-deny; it used to read) | yes | yes |
 | `PUT /api/network` | no | 403 | yes | yes |
 | `GET /api/devices` | no | **its own row only** | all | all |
 | `POST /api/devices`, MCP-server definition (#696) | no | **403 `operator_only`** (the gate; it was the handler's 401) | 401 (the handler: not root) | yes |
@@ -516,9 +563,10 @@ web:
   tls_api_port: 8006
   tls_ws_port: 8011
 network:
-  allow_plaintext_lan: false
+  home_network: false      # the owner's switch (PUT /api/network writes it)
+  allow_plaintext_lan: false   # accept home_network over plain HTTP until TLS exists; never written by the API
 discovery:
-  mdns: true               # advertise when listening beyond loopback
+  mdns: true               # announce in home_network mode only; needs the `discovery` extra
 pairing:
   requests_enabled: true
   request_ttl_seconds: 300           # 60 to 900
@@ -547,6 +595,10 @@ All JSON bodies are `{"error": "<code>", ...}`.
 | 404 | `unknown_request` | no such id, wrong secret, or a secret for another request |
 | 409 | `not_pending` | decision on a request that is no longer pending (`status` says which) |
 | 409 | `tls_unavailable` | `PUT /api/network` to `home_network` with no TLS and no `allow_plaintext_lan` |
+| 409 | `would_lock_out` | `PUT /api/network` to `this_mac` from a caller that is not on this machine |
+| 409 | `bind_overridden` | `PUT /api/network` when `--bind` or `PROMETHEUS_WEB_BIND` fixes the address (`source` says which) |
+| 409 | `no_config_file` | `PUT /api/network` and the daemon was not started from a config file |
+| 500 | `persist_failed` | `PUT /api/network`: the edit did not verify or the write failed; the file is untouched |
 | 410 | `expired` | decision arrived after the TTL |
 | 413 | `too_large` | body over 4 KiB |
 | 503 | `identity_unavailable` | `POST /api/pair/requests` and the daemon has no readable instance key (it is made at boot, never on a request); nothing is created |
@@ -582,20 +634,33 @@ Every PR: red tests first with the failing output kept, a **draft** PR, Auto-fix
 | 1 | `GET /api/hello` in both servers; the hello line in `PUBLIC_ROUTES`; the instance identity key; the display-name function | hello is a 404; the key set is exactly the six fields and the TXT dictionary agrees; hello and every other public route answer an `Origin` request with 400 and no `access-control-*` header, on the normal app **and** the setup server; `pair` is `code` in setup mode and `none` with auth off; hello answers on a loopback bind with a loopback Host |
 | 2 | Pairing core: `pair_requests` table (lazy), state machine, sealing, requester and operator routes (4.2, 4.2b), limits, audit, `mint_paired_device` | the operator's prompt and the requester compute the same code; the token never appears in a response body, log line or database row in plaintext; unseal with the test vectors; expiry at the TTL (injected clock); two simultaneous approves, one wins; **an approved device has no `owner_devices` row, `is_operator` is false, and approving on a fresh database creates no `owner_devices` table**; **it sees an empty `GET /api/sessions` and a session made before it 404s**; **a scoped device calling list, approve, deny or `PUT /api/network` gets 403 `operator_only`, an owner device 200**; **`approve` with `owner: true` (or any unknown key) is 400**; no pairing route creates a session row; each limit returns 429; an uncollected device is auto-revoked and its open socket closed 4401; setup mode and auth-off answer 403 `pairing_unavailable` |
 | 3 | Operator channels: targeted WebSocket frames with backfill, opt-in Telegram buttons with edits, `oara pair` | frames reach the global token **and an owner device, and not a scoped device** (the `broadcast` trap, 5.1); with `telegram_prompts` off nothing is sent and no callback handler is registered; on, the handler rejects a callback from an unlisted or group chat; a second tap reports "already approved"; edits remove the buttons; `oara pair list / approve / deny` |
-| 4 | mDNS advertising, `discovery.mdns`, doctor rows, `GET` / `PUT /api/network` on top of `web.bind` | no registration on loopback; none when opted out; enabled-but-missing library is loud; TXT equals hello; `PUT home_network` is 409 `tls_unavailable` without TLS or `allow_plaintext_lan`; a default-bind install reports `open`, the app `this_mac`. I will also run `dns-sd -B _prometheus._tcp` on this Mac and paste the output |
+| 4 | mDNS advertising (`web/discovery.py`), `discovery.mdns`, the optional `discovery` extra, a doctor row, `GET` / `PUT /api/network` (`web/network.py`, `web/network_routes.py`) on top of `web.bind` | no registration on loopback or in `open`; none when opted out; enabled-but-missing library is loud and once; TXT equals hello; `PUT home_network` is 409 `tls_unavailable` without TLS or `allow_plaintext_lan`; a default-bind install reports `open`, the app `this_mac`; a pinned bind is 409 `bind_overridden`; the daemon starts, serves and pairs with the library made unimportable. Also run on this Mac: `dns-sd -B` and `-L` for `_prometheus._tcp` against the real library |
 | 5 | TLS for `home_network` (section 7). **Built last; Beacon will pin (D5).** | `home_network` without TLS refuses; the certificate's SPKI equals `instance_public_key`; plain HTTP is refused on a non-loopback address in `home_network`; loopback still answers plain |
 
 Other tests every PR keeps green: the full suite on the project venv (system `python3` fails at collection), the parity goldens, and `ruff` on `src/`.
+
+
+### Backlog (decided against for v0.4; **not built**)
+
+* **No 6-digit-code route in v0.4 (P4, Will 2026-10-08).** A Prometheus that is already set up and has no operator connected is joined by one of: Beacon on the Prometheus Mac (path A, `/api/pair/local`, **app installs only**: `local_pairing.enabled()` needs `PROMETHEUS_INSTALL_KIND=app`), `oara pair approve` at the machine (the device gets scoped access), or pasting the API token (the global token is an operator). A terminal-installed Mac has no path A.
+* **`oara pair this-mac`: not built.** The gap it would close: a terminal-installed Prometheus whose owner wants the Beacon on that same Mac to be an owner device. Design if it is ever wanted: the command writes the same one-time same-Mac secret file the app launcher writes (`config/local_pairing.py`) and records an opt-in in `prometheus.yaml` that `local_pairing.enabled()` reads, so `/api/pair/local` is served on a terminal install only after the owner asked for it from the terminal, and the existing loopback-peer, loopback-Host, no-`Origin` and one-use rules apply unchanged. It adds no route and no new credential type.
+* **A restart route: not built (Beacon, 2026-10-08).** `PUT /api/network` only saves, so a client cannot apply a saved mode: nothing exposes "restart the daemon". Beacon can show `applied: "on_restart"` and tell the person to restart, but cannot do it for them. Whoever builds it decides how a daemon restarts itself under launchd, systemd and a terminal (the supervisor differs), who may ask for it (operator only, like `PUT`), and what a connected client sees (every socket drops). Until then the person restarts the daemon (`oara daemon`, or the app).
+* **`oara network show | this-mac | home`: not built.** Beacon's switch and a hand edit are the two ways in; the CLI can call `persist_choice` (`web/network.py`).
+* **The app launcher stops pinning `--bind 127.0.0.1` (#695's file).** Until then `PUT /api/network` from the app is a 409 `bind_overridden` (the flag outranks the file). A follow-up for #695, not a blocker for v0.4.
+* **Live rebind**, **a pairing window (D4)**, **pairing push notifications** (until the dispatcher can target operators only).
+* **Approval push alerts reach every push target, whatever the session (2026-10-09 review).** `push/dispatcher.py` sends an approval alert to every registered device, so a scoped phone is told that SOME tool call is waiting (and its tool and description) even though it can no longer read or answer it. The REST list and the WebSocket frames are scoped to a device's own sessions; this third channel is not, and it needs the dispatcher to learn the request's session (`ApprovalQueue.origin_of`) and send to that session's owner and the operators.
+* **A global pending cap of 3 can be held by one LAN spammer on a legacy `0.0.0.0` bind (2026-10-09 review).** `pairing.max_pending` is global, and `max_pending_per_source` is per TCP peer, so a few addresses (or one that rotates) keep every slot full and a real device cannot ask. The D4 pairing window removes it, and so does a loopback or home-network bind; on a legacy open bind there is no better answer without a notion of a trusted LAN.
 
 ---
 
 ## 13. What I have not verified
 
 * **The other PRs are read, not run.** Sections 3 to 11 quote #692, #693, #694, #695 and #696 as they stood on 2026-10-08. They are drafts; a change to `is_operator`, the `mint` signature or `PUBLIC_ROUTES` before they merge changes this contract and the first thing PR 1 does is diff against them.
-* **A real cross-device mDNS test.** I can register and browse on this Mac. Seeing the service from an iPhone or a second machine on the same Wi-Fi needs one of those present, and Will's phone is the only one that matters for iOS multicast permissions.
+* **A real cross-device mDNS test.** **Verified on this Mac** (PR 4): registered through the real `zeroconf` 0.151.5, `dns-sd -B _prometheus._tcp` showed the instance (Add) and, on stop, its removal (Rmv); `dns-sd -L` resolved it to `prometheus-<fp8>.local.:<port>` with the six hello fields as TXT. **Not verified:** seeing it from an iPhone or a second machine on the same Wi-Fi, which needs one of those present; Will's phone is the only one that matters for iOS multicast permissions.
 * **macOS prompts for the app-launched daemon.** I have not run the signed app in `home_network`. Advertising over multicast and accepting LAN connections may each raise a macOS prompt (Local Network, and the application firewall if it is on) attributed to a bundled Python rather than to "Prometheus". If so, the app's `Info.plist` needs `NSLocalNetworkUsageDescription` and `NSBonjourServices` for `_prometheus._tcp`, which is #695's file. PR 4 checks this on the signed build before `home_network` is offered in the app.
-* **`zeroconf`: licence and the app bundle.** LGPL-2.1-or-later from memory; to be checked against the package metadata, and whether the app zip includes it is decided with #695 (it only matters in `home_network`).
+* **`zeroconf`: the app bundle.** The licence is **verified** from the package metadata (0.151.5: `License-Expression: LGPL-2.1-or-later`; its one dependency `ifaddr` 0.2.0 is MIT; Requires-Python >=3.10). Whether the app zip includes it is decided with #695 (it only matters in `home_network`). It has no macOS x86_64 wheel in `uv.lock`'s resolution (arm64 only on macOS), so an Intel Mac installing the extra builds from source, falling back to pure Python if there is no compiler.
 * **Telegram, live.** The claim that the adapter's group -1 `_authorize_update` covers a callback query is **verified** (PR 3, real `telegram` `Update` and `CallbackQuery` objects: PTB derives `effective_chat` from the callback's message). What is not verified is any of it against Telegram itself: that `editMessageText` without a `reply_markup` removes the inline keyboard, as the Bot API documents, and that a plain-text message with a `*bold*` name stays unformatted on a default install. I have no bot to try it on. First live use should be watched.
 * **Client pinning on iOS WebSockets.** I believe `URLSessionWebSocketTask` honours the session delegate's trust challenge; Beacon iOS should confirm before PR 5.
-* **Live rebind.** Whether `PUT /api/network` can apply without a restart is #693's call.
+* **Live rebind.** Not built. `PUT /api/network` saves and answers `applied: "on_restart"`; making it live would mean rebinding two listeners and closing every non-loopback socket, and that is a change of its own.
+* **The mini.** Nothing here has run on the Linux box. `ifaddr` and `zeroconf` work there in principle; the interface-name rules are written for Linux, macOS and Windows names but only macOS names were seen on a real interface list.
 * **Pairing push.** Whether the push dispatcher can be restricted to operator devices cleanly (5.1); until it can, no pairing push is sent.

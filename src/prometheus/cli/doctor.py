@@ -1288,6 +1288,58 @@ def check_pairing_telegram(config: dict[str, Any]) -> DiagnosticCheck | None:
     )
 
 
+def check_network_discovery(
+    config: dict[str, Any], *, env: Mapping[str, str] | None = None,
+) -> DiagnosticCheck | None:
+    """Home network mode: can it work, is it safe, and will the daemon announce itself?
+
+    ``None`` (no row) unless the owner asked for it with ``network.home_network``: a machine that never did
+    has nothing to report beyond the Web bind row. Asked for, it is always at least a warning today: with no
+    TLS the best it can be is plain HTTP on the owner's own say-so, and the other outcomes are that it cannot
+    work at all. Resolves the bind the way the daemon does, so it cannot disagree with the Web bind row.
+    """
+    import importlib.util
+
+    from prometheus.web.network import HOME, THIS_MAC, NetworkSettings, describe
+
+    settings = NetworkSettings.from_config(config)             # the one reader of these keys
+    if not settings.home_network:
+        return None
+    try:
+        resolved = resolve_bind(config, env=env)
+    except BindError:
+        return None                                            # the Web bind row already says the daemon will not start
+    state = describe(resolved.address, resolved.source, settings)
+    name = "Home network"
+    if state.mode == THIS_MAC:
+        return DiagnosticCheck(
+            name=name, category="connectivity", status="warning",
+            message=f"network.home_network is on, but the daemon listens on {resolved.address} (this machine "
+                    "only), so nothing on the home network can reach it",
+            fix="Choose home network in Beacon (it also widens web.bind), set web.bind: 0.0.0.0 or a LAN "
+                "address, or set network.home_network: false.",
+        )
+    if state.mode != HOME:
+        return DiagnosticCheck(
+            name=name, category="connectivity", status="warning",
+            message="network.home_network is on, but the daemon has no TLS and network.allow_plaintext_lan is "
+                    "off, so it runs as open and will not announce itself",
+            fix="To accept plain HTTP on a network you trust, set network.allow_plaintext_lan: true; or set "
+                "network.home_network: false.",
+        )
+    notes = ["home network mode over plain HTTP (no TLS): a device's token and everything it sends cross the "
+             "Wi-Fi unencrypted"]
+    fix: str | None = None
+    if not settings.mdns:
+        notes.append("discovery.mdns is off, so it will not announce itself")
+    elif importlib.util.find_spec("zeroconf") is None:
+        notes.append("the zeroconf library is not installed, so it will not announce itself")
+        fix = "pip install 'oara-prometheus[discovery]' (the [discovery] extra), then restart the daemon."
+    else:
+        notes.append("it announces itself as _prometheus._tcp on private addresses")
+    return DiagnosticCheck(name=name, category="connectivity", status="warning", message="; ".join(notes), fix=fix)
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -1303,6 +1355,7 @@ def run_extended_checks(
     router = check_router(config)
     bind_row = check_web_bind(config)
     pairing_row = check_pairing_telegram(config)
+    network_row = check_network_discovery(config)
     return [
         config_check,
         *([router] if router is not None else []),
@@ -1312,6 +1365,7 @@ def run_extended_checks(
         check_web_port(config),
         *([bind_row] if bind_row is not None else []),
         *([pairing_row] if pairing_row is not None else []),
+        *([network_row] if network_row is not None else []),
         check_token(config),
         *check_gateways(config),
         check_advertised_tools(config),

@@ -45,13 +45,14 @@ class Requester:
 class World:
     """A daemon with an owner device and a scoped device, a fake clock, and a recording notifier."""
 
-    def __init__(self, tmp_path, *, recording: bool = True, bridge: bool = False, **pairing) -> None:
+    def __init__(self, tmp_path, *, recording: bool = True, bridge: bool = False, config: dict | None = None,
+                 **pairing) -> None:
         self.path = tmp_path / "devices.db"
         self.devices = DeviceStore(self.path)
-        config = {"web": {"api_token": GLOBAL}}
+        full = {"web": {"api_token": GLOBAL}, **(config or {})}
         if pairing:
-            config["pairing"] = pairing
-        self.app = create_app(config, device_store=self.devices)
+            full["pairing"] = pairing
+        self.app = create_app(full, device_store=self.devices)
         self.clock = Clock()
         self.runtime = self.app.state.pairing
         self.runtime.clock = self.clock

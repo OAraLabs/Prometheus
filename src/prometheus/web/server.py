@@ -87,6 +87,39 @@ def _yaml_block(lines: list[str], lo: int, hi: int, key: str
     return None
 
 
+def _insert_in_block(
+    lines: list[str], lo: int, hi: int, parent_indent: int, rest: "list[str]", literal: str
+) -> str:
+    """Add the key path *rest* inside the section whose body is ``lines[lo:hi]``.
+
+    It goes after the section's last real line, not at ``hi``: the blank line and
+    comment that open the NEXT section sit between the two and belong to it. It
+    takes the indentation the section's own keys already use (two spaces deeper
+    than the section when it has none yet).
+    """
+    child = parent_indent + 2
+    last = lo
+    first_seen = False
+    for j in range(lo, hi):
+        stripped = lines[j].lstrip()
+        if not stripped.strip() or stripped.startswith("#"):
+            continue
+        if not first_seen:
+            child = len(lines[j]) - len(stripped)
+            first_seen = True
+        last = j + 1
+    block: list[str] = []
+    pad = " " * child
+    for key in rest[:-1]:
+        block.append(f"{pad}{key}:\n")
+        pad += "  "
+    block.append(f"{pad}{rest[-1]}: {literal}\n")
+    head = lines[:last]
+    if head and not head[-1].endswith("\n"):
+        head[-1] += "\n"
+    return "".join(head + block + lines[last:])
+
+
 def _set_yaml_scalar_preserving_comments(
     text: str, path_keys: "list[str]", literal: str
 ) -> str:
@@ -117,12 +150,20 @@ def _set_yaml_scalar_preserving_comments(
     If the key path does not exist, the missing levels are appended rather than
     threaded in — appending cannot disturb what is already there, and a config
     that never mentioned the key has no comments attached to it to preserve.
+    "Appended" means at the end of the SECTION that does exist: a path whose
+    first levels are present goes inside the last of them (see
+    :func:`_insert_in_block`). It used to go at the end of the FILE, indented,
+    which attaches it to whichever section happens to be last. The edit is only
+    as good as the section it names, so a caller that writes must still re-parse
+    the result before it trusts it (both do).
     """
     lines = text.splitlines(keepends=True)
     lo, hi, indent = 0, len(lines), -1
 
     for depth, key in enumerate(path_keys):
         found = _yaml_block(lines, lo, hi, key)
+        if found is None and depth:
+            return _insert_in_block(lines, lo, hi, indent, path_keys[depth:], literal)
         if found is None:
             # Append the remaining path as a fresh block at the end of file.
             tail = "" if not lines or lines[-1].endswith("\n") else "\n"
@@ -868,13 +909,18 @@ def create_app(
     # checking: no browsers, a per-peer limit, no CORS, no disk writes. Contract: docs/PAIRING-APPROVAL-API.md.
     _hello_limiter = hello_mod.new_limiter()
 
+    def _hello_payload() -> dict[str, Any]:
+        return hello_mod.build_hello(
+            config, auth_on=bool(_api_token),
+            approval=app.state.pairing.settings.requests_enabled)
+
+    # ONE builder for the route and for the mDNS TXT record (web/discovery.py reads it from here), so what the
+    # daemon announces on the network and what it answers over HTTP cannot drift.
+    app.state.hello_payload = _hello_payload
+
     @app.get("/api/hello")
     async def hello(request: Request):
-        return hello_mod.hello_response(
-            request, _hello_limiter,
-            lambda: hello_mod.build_hello(
-                config, auth_on=bool(_api_token),
-                approval=app.state.pairing.settings.requests_enabled))
+        return hello_mod.hello_response(request, _hello_limiter, _hello_payload)
 
     # ── Root ────────────────────────────────────────────────────────
 
@@ -6232,6 +6278,13 @@ def create_app(
 
     register_pairing_routes(
         app, config=config, devices=_devices_or_create, auth_on=lambda: bool(_api_token))
+
+    # ── Network mode and discovery (GET/PUT /api/network; docs/PAIRING-APPROVAL-API.md 2.2) ────
+    # Read by anyone with a token, changed only by an operator. The launcher sets resolved_bind, config_path
+    # and advertiser on app.state; the route says so where one is absent instead of guessing.
+    from prometheus.web.network_routes import register_network_routes
+
+    register_network_routes(app, auth_on=lambda: bool(_api_token))
 
     # ── Static files (must be last — catch-all) ─────────────────────
 

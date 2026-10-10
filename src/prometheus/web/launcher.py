@@ -49,6 +49,8 @@ async def launch_web(
     computer_runner: Any | None = None,
     origin_fetcher: Any | None = None,
     bind: str | None = None,
+    bind_source: str | None = None,
+    config_path: str | None = None,
     api_host: str | None = None,
     api_port: int = 8005,
     ws_host: str | None = None,
@@ -57,8 +59,13 @@ async def launch_web(
     """Start both REST API and WebSocket servers.
 
     *bind* is the already-resolved listen address (the daemon passes the result
-    of ``--bind`` > ``PROMETHEUS_WEB_BIND`` > ``web.bind``); when omitted it is
-    resolved here from the environment and *config*. *api_host* / *ws_host*
+    of ``--bind`` > ``PROMETHEUS_WEB_BIND`` > ``web.bind``) and *bind_source*
+    says which of those decided it (``"flag"``, ``"env"``, ``"config"`` or
+    ``"default"``); when *bind* is omitted both are resolved here from the
+    environment and *config*. A *bind* given without a source is treated as
+    pinned by the caller, so ``PUT /api/network`` never claims the config file
+    can change it. *config_path* is the file the daemon read its config from
+    (``PUT /api/network`` writes the SAME file), or ``None``. *api_host* / *ws_host*
     override it per server and exist for callers that need the two apart. An
     invalid address raises :class:`~prometheus.web.bind.BindError` before
     anything is built or bound.
@@ -66,6 +73,7 @@ async def launch_web(
 
     from pathlib import Path
     from prometheus.web.bind import (
+        ResolvedBind,
         all_interfaces_warning,
         format_host_port,
         parse_bind,
@@ -74,7 +82,11 @@ async def launch_web(
     from prometheus.web.server import create_app, start_web
     from prometheus.web.ws_server import WebSocketBridge
 
-    address = parse_bind(bind, "bind") if bind is not None else resolve_bind(config).address
+    if bind is not None:
+        resolved = ResolvedBind(parse_bind(bind, "bind"), bind_source or "caller")
+    else:
+        resolved = resolve_bind(config)
+    address = resolved.address
     api_host = address if api_host is None else api_host
     ws_host = address if ws_host is None else ws_host
 
@@ -162,6 +174,32 @@ async def launch_web(
     # degrade to unknown once the cached ref goes stale — which is
     # the intended behaviour, not a gap.
     app.state.origin_fetcher = origin_fetcher
+
+    # What GET/PUT /api/network report and change: the address the daemon listens on and which source decided
+    # it, and the config file it was read from (docs/PAIRING-APPROVAL-API.md, 2.2).
+    app.state.resolved_bind = resolved
+    app.state.config_path = config_path
+
+    # Announce the daemon on the home network. The advertiser is timid by construction (web/discovery.py):
+    # it does nothing unless the mode is home_network and discovery.mdns is on, it needs the optional
+    # `discovery` extra and says so once when that is missing, and a failure is a status, never an exception.
+    # It starts and stops with the web server; the TXT record is the same dictionary GET /api/hello answers.
+    from prometheus.config.display_name import display_name
+    from prometheus.web.discovery import Advertiser
+    from prometheus.web.network import ALL_INTERFACES, NetworkSettings, describe
+
+    network_settings = NetworkSettings.from_config(config)       # says once if a switch is not a boolean
+    network_state = describe(address, resolved.source, network_settings)
+    advertiser = Advertiser(
+        state=network_state,
+        settings=network_settings,
+        port=api_port,
+        hello=app.state.hello_payload,
+        display_name=lambda: display_name(config),
+    )
+    app.state.advertiser = advertiser
+    app.router.add_event_handler("startup", advertiser.start)
+    app.router.add_event_handler("shutdown", advertiser.stop)
 
     # Create WebSocket bridge. The WS uses the SAME token as the REST
     # middleware (config.web.api_token or PROMETHEUS_API_TOKEN); empty => auth
@@ -285,6 +323,11 @@ async def launch_web(
         if warning:
             logger.warning(warning)
             break
+    # What the network mode adds: plain HTTP on the home network, a home_network switch that cannot work.
+    # (The all-interfaces warning above is already in `warnings` for an open bind; it is not said twice.)
+    for notice in network_state.warnings:
+        if notice.code != ALL_INTERFACES:
+            logger.warning("network: %s", notice.message)
 
     # Run both servers concurrently
     await asyncio.gather(
