@@ -115,6 +115,16 @@ async def test_with_no_queue_a_scoped_socket_is_sent_none(w):
 
 
 @pytest.mark.asyncio
+async def test_a_frame_that_names_its_session_is_decided_by_that_and_needs_no_queue(w):
+    """The generic session rule (#692) already routes it; the queue's log is only for frames that name nothing."""
+    w.bridge.approval_queue = None
+    a, b, op = connect(w, "a"), connect(w, "b"), connect(w, "op")
+    await w.bridge.broadcast({"type": "approval_pending", "timestamp": time.time(),
+                              "payload": {"request_id": "r1", "session_id": w.sid_a}})
+    assert a.ids("approval_pending") == ["r1"] and b.frames == [] and op.ids("approval_pending") == ["r1"]
+
+
+@pytest.mark.asyncio
 async def test_a_desktop_prompt_goes_to_its_sessions_owner_alone_marked_or_not(w):
     """It names its session, so the generic session filter (#692) has always done this; the mark decides who may
     ANSWER a desktop prompt (REST), not who is told."""
