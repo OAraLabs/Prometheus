@@ -72,6 +72,8 @@ What option 1 uniquely adds, no plaintext master key at rest, is worth keeping a
 means a hashed token together with a presence-gated client credential, designed as its own change once the
 local clients have somewhere safe to keep a credential.
 
+**The narrow opt-out (Will, 2026-10-10):** `security.bash_allow_ssh: true` lifts only the `~/.ssh` rule, for `git` over SSH. `~/.gnupg` and `~/.config/*/*env` stay denied, so the master key stays out. Without it, `bash_confinement: off` was the only way, and it opened everything. It works on macOS (Seatbelt). On Linux the AppArmor profile is a file root loaded, so the daemon warns at boot that the key has no effect there.
+
 ## What gets built
 
 - `permissions/confinement.py`: a Seatbelt read floor beside the AppArmor one.

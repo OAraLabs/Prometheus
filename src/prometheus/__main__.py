@@ -218,6 +218,7 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
         confinement=security_cfg.get("bash_confinement", "auto"),
         write_confinement=security_cfg.get("bash_write_confinement", "auto"),
         write_allow=security_cfg.get("bash_write_allow") or (),
+        allow_ssh=security_cfg.get("bash_allow_ssh", False),
         # Resource ceilings, set in the parent before exec. Defaults chosen
         # ABOVE measured real usage, not below it: the largest file the daemon
         # legitimately writes today is a 1.07 GB install image, with runtime

@@ -81,6 +81,8 @@ class ShellFloor:
     workspaces: tuple[Path, ...] = ()
     write_allow: tuple[str, ...] = field(default=())
     profile: str = _CONFINE.PROFILE
+    #: ``security.bash_allow_ssh``: the read floor lets ~/.ssh through (Seatbelt; AppArmor's profile decides).
+    allow_ssh: bool = False
 
     @classmethod
     def from_security_config(cls, security_cfg: dict[str, Any] | None) -> "ShellFloor":
@@ -98,6 +100,7 @@ class ShellFloor:
             workspaces=tuple(
                 Path(r).expanduser().resolve() for r in roots if r),
             write_allow=tuple(str(p) for p in (sec.get("bash_write_allow") or ())),
+            allow_ssh=_CONFINE.normalise_allow_ssh(sec.get("bash_allow_ssh", False)),
         )
 
 
@@ -174,6 +177,7 @@ def floored_argv(
         writable=writable,
         cwd=cwd,
         profile=floor.profile,
+        allow_ssh=floor.allow_ssh,
     )
     if result.refusal is not None:
         raise ShellFloorRefused(result.refusal, result.write_floor)
@@ -209,7 +213,16 @@ def announce(floor: ShellFloor | None = None) -> dict[str, object]:
         read_mode=floor.read_mode,
         write_mode=floor.write_mode,
         has_workspace=bool(floor.workspaces),
+        allow_ssh=floor.allow_ssh,
     )
+    if floor.allow_ssh:
+        if _CONFINE.read_floor_mechanism() == _CONFINE.MECHANISM_APPARMOR:
+            log.warning(
+                "security.bash_allow_ssh is on, but the read floor here is AppArmor: the loaded profile "
+                "(deploy/apparmor/prometheus-bash) still denies ~/.ssh, and this key cannot change it")
+        else:
+            log.info("security.bash_allow_ssh: model-written shells may read ~/.ssh; ~/.gnupg and "
+                     "~/.config/*/*env stay denied")
     read = rep["bash_read_floor"]
     assert isinstance(read, dict)
     state, detail = read["state"], read["detail"]

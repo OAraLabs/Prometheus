@@ -266,7 +266,15 @@ def _sb_string(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def seatbelt_profile(home: str | os.PathLike[str] | None = None) -> str:
+def normalise_allow_ssh(value: object) -> bool:
+    """``security.bash_allow_ssh``: ``true`` or ``false``. Anything else is false, and said once."""
+    if value is None or isinstance(value, bool):
+        return bool(value)
+    logger.warning("security.bash_allow_ssh must be true or false, got %r: ~/.ssh stays denied", value)
+    return False
+
+
+def seatbelt_profile(home: str | os.PathLike[str] | None = None, *, allow_ssh: bool = False) -> str:
     """The Seatbelt profile: everything allowed except reading or writing the three families
     ``deploy/apparmor/prometheus-bash`` denies, ``~/.ssh``, ``~/.gnupg`` and ``~/.config/*/*env``.
 
@@ -278,19 +286,22 @@ def seatbelt_profile(home: str | os.PathLike[str] | None = None) -> str:
     containing one would break the profile (measured: ``unbound variable``, rc 65). ``~/.config/*/*env`` is
     therefore "under ~/.config" AND "ends in /.config/<one segment>/<name>env", the AppArmor ``*`` that does not
     cross ``/``.
+
+    *allow_ssh* (``security.bash_allow_ssh``) drops ONLY the ``~/.ssh`` rule, for ``git`` over SSH:
+    ``~/.gnupg`` and ``~/.config/*/*env`` (the master key, the provider keys, the bot tokens) stay denied.
     """
     base = _sb_string(os.path.realpath(os.fspath(home) if home is not None else str(Path.home())))
     return (
         "(version 1)\n"
         "(allow default)\n"
         "(deny file-read* file-write*\n"
-        f'  (subpath "{base}/.ssh")\n'
+        + ("" if allow_ssh else f'  (subpath "{base}/.ssh")\n') +
         f'  (subpath "{base}/.gnupg")\n'
         f'  (require-all (subpath "{base}/.config") (regex #"/\\.config/[^/]+/[^/]*env$")))\n'
     )
 
 
-def _probe_seatbelt() -> tuple[bool, str]:
+def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
     """Run a shell under the profile against a scratch home and see what it could read.
 
     Verified BY OUTCOME, as the AppArmor probe is: an ordinary file must be readable and both a ``.ssh`` file
@@ -298,8 +309,10 @@ def _probe_seatbelt() -> tuple[bool, str]:
     """
     if not os.path.exists(SANDBOX_EXEC):
         return False, f"{SANDBOX_EXEC} is not on this Mac"
+    ssh_check = ('cat "$1/.ssh/probe" >/dev/null 2>&1 || exit 6; ' if allow_ssh
+                 else 'cat "$1/.ssh/probe" >/dev/null 2>&1 && exit 4; ')
     script = ('cat "$1/ordinary" >/dev/null || exit 3; '
-              'cat "$1/.ssh/probe" >/dev/null 2>&1 && exit 4; '
+              + ssh_check +
               'cat "$1/.config/prometheus/env" >/dev/null 2>&1 && exit 5; '
               'echo FLOOR_HELD')
     try:
@@ -311,7 +324,8 @@ def _probe_seatbelt() -> tuple[bool, str]:
             (home / ".config" / "prometheus" / "env").write_text("x\n")
             (home / "ordinary").write_text("x\n")
             proc = subprocess.run(
-                [SANDBOX_EXEC, "-p", seatbelt_profile(home), "/bin/sh", "-c", script, "probe", str(home)],
+                [SANDBOX_EXEC, "-p", seatbelt_profile(home, allow_ssh=allow_ssh), "/bin/sh", "-c", script, "probe",
+                 str(home)],
                 capture_output=True, text=True, timeout=15,
             )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -322,21 +336,28 @@ def _probe_seatbelt() -> tuple[bool, str]:
         3: "an ordinary file could not be read under the profile",
         4: "~/.ssh stayed readable under the profile",
         5: "~/.config/*/*env stayed readable under the profile",
+        6: "~/.ssh was refused although security.bash_allow_ssh is on",
     }.get(proc.returncode)
     return False, why or (f"sandbox-exec did not run the probe (rc={proc.returncode})"
                           + (f": {(proc.stderr or '').strip()[:200]}" if (proc.stderr or "").strip() else ""))
 
 
-def seatbelt_preflight(*, force: bool = False) -> tuple[bool, str]:
-    """Cached per-process check that the Seatbelt floor genuinely holds (see :func:`preflight`)."""
-    if force or _SEATBELT_CACHE_KEY not in _preflight_cache:
-        ok, detail = _probe_seatbelt()
-        _preflight_cache[_SEATBELT_CACHE_KEY] = (ok, detail)
+def _seatbelt_key(allow_ssh: bool) -> str:
+    return _SEATBELT_CACHE_KEY + (":allow-ssh" if allow_ssh else "")
+
+
+def seatbelt_preflight(*, force: bool = False, allow_ssh: bool = False) -> tuple[bool, str]:
+    """Cached per-process check that the Seatbelt floor genuinely holds (see :func:`preflight`), for the profile
+    that will run: with *allow_ssh* it must let ``~/.ssh`` through and still refuse ``~/.config/*/*env``."""
+    key = _seatbelt_key(allow_ssh)
+    if force or key not in _preflight_cache:
+        ok, detail = _probe_seatbelt(allow_ssh)
+        _preflight_cache[key] = (ok, detail)
         if ok:
             logger.info("bash confinement ACTIVE: %s", detail)
         else:
             logger.error("bash confinement UNAVAILABLE: %s", detail)
-    return _preflight_cache[_SEATBELT_CACHE_KEY]
+    return _preflight_cache[key]
 
 
 def seatbelt_refusal_message(detail: str) -> str:
@@ -356,22 +377,22 @@ def seatbelt_refusal_message(detail: str) -> str:
     )
 
 
-def _read_preflight(profile: str) -> tuple[bool, str]:
+def _read_preflight(profile: str, allow_ssh: bool = False) -> tuple[bool, str]:
     mechanism = read_floor_mechanism()
     if mechanism == MECHANISM_SEATBELT:
-        return seatbelt_preflight()
+        return seatbelt_preflight(allow_ssh=allow_ssh)
     if mechanism is None:
         return False, "this platform has neither AppArmor (Linux) nor sandbox-exec (macOS)"
     return preflight(profile)
 
 
-def _read_cache_key(profile: str) -> str:
-    return _SEATBELT_CACHE_KEY if read_floor_mechanism() == MECHANISM_SEATBELT else profile
+def _read_cache_key(profile: str, allow_ssh: bool = False) -> str:
+    return _seatbelt_key(allow_ssh) if read_floor_mechanism() == MECHANISM_SEATBELT else profile
 
 
-def _read_prefix(profile: str) -> list[str]:
+def _read_prefix(profile: str, allow_ssh: bool = False) -> list[str]:
     if read_floor_mechanism() == MECHANISM_SEATBELT:
-        return [SANDBOX_EXEC, "-p", seatbelt_profile()]
+        return [SANDBOX_EXEC, "-p", seatbelt_profile(allow_ssh=allow_ssh)]
     return wrap_argv([], profile)
 
 
@@ -735,6 +756,7 @@ def floor_report(
     write_mode: object = WRITE_MODE_AUTO,
     has_workspace: bool = True,
     probe: bool = True,
+    allow_ssh: bool = False,
 ) -> dict[str, object]:
     """What both bash floors are configured to do, and what they actually do.
 
@@ -762,16 +784,16 @@ def floor_report(
     if unsupported:
         read_detail = "this platform has neither AppArmor nor sandbox-exec"
     elif read in (MODE_REQUIRED, MODE_AUTO):
-        read_key = _read_cache_key(PROFILE)
+        read_key = _read_cache_key(PROFILE, allow_ssh)
         if probe:
-            read_ok, read_detail = _read_preflight(PROFILE)
+            read_ok, read_detail = _read_preflight(PROFILE, allow_ssh)
         elif read_key in _preflight_cache:
             read_ok, read_detail = _preflight_cache[read_key]
         # The tool wraps with the read floor (aa-exec, or sandbox-exec on a Mac)
         # whenever it is required, and in auto once it verified, so the write
         # probe carries the same prefix: that is the argv the next call gets.
         if read == MODE_REQUIRED or read_ok:
-            inner_prefix = _read_prefix(PROFILE)
+            inner_prefix = _read_prefix(PROFILE, allow_ssh)
 
     write_ok: bool | None = None
     write_detail = "not probed"
@@ -810,7 +832,10 @@ def floor_report(
             "available": read_ok,
             "detail": read_detail,
             "mechanism": read_mechanism_label(PROFILE),
-            "covers": "reads of ~/.ssh, ~/.gnupg, ~/.config/*/*env",
+            "covers": ("reads of ~/.gnupg, ~/.config/*/*env (~/.ssh allowed: security.bash_allow_ssh)"
+                       if allow_ssh and read_floor_mechanism() == MECHANISM_SEATBELT
+                       else "reads of ~/.ssh, ~/.gnupg, ~/.config/*/*env"),
+            "allow_ssh": allow_ssh,
         },
         "bash_write_floor": {
             "mode": write,
@@ -886,6 +911,7 @@ def apply_floors(
     writable: Sequence[Path],
     cwd: Path | str | None,
     profile: str = PROFILE,
+    allow_ssh: bool = False,
 ) -> FloorResult:
     """Wrap a shell argv in the read floor (inside) and write floor (outside).
 
@@ -911,12 +937,12 @@ def apply_floors(
     if read == MODE_AUTO and read_floor_mechanism() is None:
         read_floor = READ_UNSUPPORTED
     elif read in (MODE_REQUIRED, MODE_AUTO):
-        ok, detail = _read_preflight(profile)
+        ok, detail = _read_preflight(profile, allow_ssh)
         if ok:
             # Kept as a PREFIX rather than applied once, so the write floor
             # below can probe the composed stack as the stack it will be.
             # AppArmor's aa-exec on Linux, Seatbelt's sandbox-exec on a Mac.
-            aa_prefix = _read_prefix(profile)
+            aa_prefix = _read_prefix(profile, allow_ssh)
             out = [*aa_prefix, *out]
             read_floor = READ_ACTIVE
         elif read == MODE_REQUIRED:
