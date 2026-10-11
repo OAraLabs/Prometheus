@@ -28,6 +28,10 @@ DEFAULT_TLS_API_PORT = 8006
 DEFAULT_TLS_WS_PORT = 8011
 #: Where plain HTTP listens when TLS serves the LAN.
 LOOPBACK = "127.0.0.1"
+#: The one cipher policy for both TLS listeners: the AEAD part of Python's default list (ECDHE with AES-GCM or
+#: ChaCha20-Poly1305), nothing CBC. TLS 1.3's suites are AEAD by definition and not governed by this string.
+AEAD_CIPHERS = "ECDH+AESGCM:ECDH+CHACHA20:!aNULL:!eNULL"
+MINIMUM_TLS = ssl.TLSVersion.TLSv1_2
 
 
 @dataclass(frozen=True)
@@ -85,9 +89,11 @@ def listener_hosts(address: str, plan: LanTlsPlan | None) -> tuple[str, str | No
 
 
 def server_ssl_context(plan: LanTlsPlan) -> ssl.SSLContext:
-    """The server side of the handshake: the instance certificate and key, TLS 1.2 or later."""
+    """The WSS side of the handshake: the instance certificate and key, TLS 1.2 or later, AEAD suites only. The REST
+    listener gets the same policy through uvicorn (``web/serving.serve_config``)."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.minimum_version = MINIMUM_TLS
+    context.set_ciphers(AEAD_CIPHERS)
     context.load_cert_chain(certfile=str(plan.certfile), keyfile=str(plan.keyfile))
     return context
 

@@ -33,7 +33,7 @@ import httpx
 import yaml
 
 from prometheus.api.turn_errors import redact_url
-from prometheus.config.api_token import resolve_api_token
+from prometheus.config.api_token import TOKEN_FILE_ENV_VAR, ApiTokenFileError, resolve_api_token
 from prometheus.config.defaults import config_search_paths
 from prometheus.config.env_file import get_env_file_path, parse_env_file
 from prometheus.config.paths import (
@@ -433,7 +433,14 @@ def check_web_bind(
 
 def check_token(config: dict[str, Any]) -> DiagnosticCheck:
     """API token configured?"""
-    token, source = resolve_api_token(config)
+    try:
+        token, source = resolve_api_token(config)
+    except ApiTokenFileError as exc:
+        return DiagnosticCheck(
+            name="API token", category="connectivity", status="error",
+            message=str(exc),
+            fix=f"Put the token in the file {TOKEN_FILE_ENV_VAR} names, or unset it.",
+        )
     if token:
         return DiagnosticCheck(
             name="API token", category="connectivity", status="ok",
@@ -1020,13 +1027,13 @@ def check_bash_floors(config: dict[str, Any]) -> list[DiagnosticCheck]:
                 message=f"mode 'off' — {off_message}",
             )
         if state == C.STATE_UNSUPPORTED:
-            # "auto" on a platform with no AppArmor (macOS). INFO, not a
+            # "auto" on a platform with neither AppArmor nor sandbox-exec. INFO, not a
             # warning, and no fix: there is nothing to load, and a row nobody
             # can clear is how a report gets ignored. Said, not alarmed.
             return DiagnosticCheck(
                 name=name, category="platform", status="info",
-                message=f"mode {mode!r} — unsupported on this platform (no "
-                        f"AppArmor). {off_message}",
+                message=f"mode {mode!r} — unsupported on this platform (neither "
+                        f"AppArmor nor sandbox-exec). {off_message}",
             )
         if state == C.STATE_NO_WORKSPACE:
             return DiagnosticCheck(

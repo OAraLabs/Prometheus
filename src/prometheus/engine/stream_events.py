@@ -27,6 +27,10 @@ class AssistantTurnComplete:
 
     message: ConversationMessage
     usage: UsageSnapshot
+    #: Why the LOOP ended the turn (``turns.forced_stop_reason``: the #356
+    #: context pre-flight, the iteration cap, ...); None when the model chose
+    #: to stop. A worker reports a non-None one as not finished.
+    stop_reason: str | None = None
 
 
 @dataclass(frozen=True)

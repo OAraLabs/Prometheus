@@ -116,6 +116,9 @@ def route_turn(
                 # Which box (if any) this decision runs on — the primary and cloud
                 # overrides leave it None; a `/4090` override names the registry entry.
                 context.backend = getattr(decision, "backend", None)
+                # What a worker spawned by this run inherits (tasks/worker_route.py).
+                context.route_key = getattr(decision, "key", None)
+                context.route_provider = decision.provider_name or None
                 # Phase 4 fix: after the router swap, rewrite the identity
                 # line in the system prompt ("- Model: <name> (provider: <p>)")
                 # to match the *active* provider. Without this, a primary-

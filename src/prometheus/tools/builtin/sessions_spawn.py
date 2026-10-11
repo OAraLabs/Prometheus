@@ -6,11 +6,10 @@
 
 from __future__ import annotations
 
-import os
-
 from pydantic import BaseModel, Field
 
 from prometheus.tasks.manager import get_task_manager
+from prometheus.tasks.worker_route import WorkerRouteRefused, plan_spawn
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -21,6 +20,9 @@ class SessionsSpawnInput(BaseModel):
     description: str = Field(
         default="agent session", description="Short description of the session"
     )
+    # The advertised text is pinned by the parity recording; the RULE is in
+    # tasks/worker_route.py: a worker runs on its conversation's model or on
+    # workers.model, and any other value here is refused with that reason.
     model: str | None = Field(
         default=None, description="Model override for this session"
     )
@@ -40,17 +42,25 @@ class SessionsSpawnTool(BaseTool):
         self, arguments: SessionsSpawnInput, context: ToolExecutionContext
     ) -> ToolResult:
         manager = get_task_manager()
+        # The worker runs on this turn's route, or on the one the operator set;
+        # never on one the model picked, and never on a substitute.
+        try:
+            plan = plan_spawn(context.metadata, requested_model=arguments.model)
+        except WorkerRouteRefused as exc:
+            return ToolResult(output=f"sessions_spawn refused: {exc}", is_error=True)
         try:
             task = await manager.create_agent_task(
                 prompt=arguments.prompt,
                 description=arguments.description,
                 cwd=context.cwd,
-                model=arguments.model,
-                api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                route=plan.key,
+                metadata=plan.record(),
+                # One brief, one turn, then exit with a result (cli/worker.py).
+                worker=True,
             )
         except (ValueError, RuntimeError) as exc:
             return ToolResult(output=f"sessions_spawn failed: {exc}", is_error=True)
         return ToolResult(
-            output=f"Session spawned: {task.id} — {task.description}",
-            metadata={"task_id": task.id},
+            output=f"Session spawned: {task.id} — {task.description}. {plan.note()}",
+            metadata={"task_id": task.id, "worker_route": plan.key},
         )

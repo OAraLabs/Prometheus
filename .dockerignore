@@ -1,0 +1,23 @@
+# An ALLOWLIST, for the same reason the sdist is one (pyproject.toml, [tool.hatch.build.targets.sdist]):
+# a denylist needs a new line for every new scratch directory and fails by shipping it, an allowlist fails
+# by a missing file, which is loud. A checkout holds a developer's own config/prometheus.yaml, env files and
+# .claude/worktrees; none of it can reach the build context, so none of it can reach a layer.
+#
+# Everything the Dockerfile COPYs is listed here (tests/test_docker_image.py checks both directions).
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!NOTICE
+!src/
+!templates/
+!config/prometheus.yaml.default
+!config/model_registry.yaml
+!packaging/macos/release-tools.txt
+!packaging/macos/build-constraints.txt
+
+# Never, even inside an allowed directory.
+**/__pycache__
+**/*.pyc
+**/.DS_Store
