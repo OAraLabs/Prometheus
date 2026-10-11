@@ -153,3 +153,76 @@ def test_doctor_warns_when_the_key_is_there_and_cannot_be_read(node):
     row = check_network_discovery({"web": {"bind": "0.0.0.0"}, **HOME})
     assert row.status == "warning" and "allow_plaintext_lan" in row.message + (row.fix or "")
     assert "nothing is served on the home network" in row.message, row.message
+
+
+# ── oara doctor: the Web bind row ────────────────────────────────────────────
+#
+# The Web bind row says where the web API listens and whether that is plain HTTP. In home-network mode with TLS
+# (pairing PR 5) plain HTTP is on loopback only and the LAN bind is TLS's, so "all interfaces over plain HTTP (no
+# TLS)" would say the exposure is the opposite of what it is. The row predicts the listeners the way the daemon's
+# boot decides them (web/tls.decide_lan), with the same certificate prediction as the Home network row.
+
+WIDE = {"web": {"enabled": True, "bind": "0.0.0.0"}}
+
+
+def _web_bind(config):
+    from prometheus.cli.doctor import check_web_bind
+
+    return check_web_bind(config, env={})
+
+
+def _unreadable_key(node):
+    node.mkdir(parents=True, exist_ok=True)
+    (node / "instance.key").write_text("not a key", encoding="utf-8")
+
+
+def test_web_bind_in_home_network_mode_with_tls_says_plain_http_is_this_machine_only(node):
+    ensure_instance_key()
+    row = _web_bind({**WIDE, **HOME})
+    assert row.status == "ok", row.message
+    assert "no TLS" not in row.message and "all interfaces" not in row.message, row.message
+    assert "127.0.0.1" in row.message and str(T.DEFAULT_TLS_API_PORT) in row.message, row.message
+
+
+def test_web_bind_counts_a_key_not_made_yet_as_tls_like_the_home_network_row(node):
+    row = _web_bind({**WIDE, **HOME})
+    assert "no TLS" not in row.message and str(T.DEFAULT_TLS_API_PORT) in row.message, row.message
+
+
+def test_web_bind_with_no_tls_and_no_opt_out_says_nothing_is_on_the_network(node):
+    _unreadable_key(node)
+    row = _web_bind({**WIDE, **HOME})
+    assert "all interfaces" not in row.message and "127.0.0.1" in row.message, row.message
+
+
+def test_web_bind_with_no_tls_and_the_opt_out_is_still_plain_http_on_every_interface(node):
+    _unreadable_key(node)
+    row = _web_bind({**WIDE, "network": {"home_network": True, "allow_plaintext_lan": True}})
+    assert "all interfaces" in row.message and "no TLS" in row.message, row.message
+
+
+def test_web_bind_without_home_network_is_unchanged(node):
+    ensure_instance_key()
+    row = _web_bind(WIDE)
+    assert "all interfaces" in row.message and "no TLS" in row.message, row.message
+
+
+@pytest.mark.parametrize("key", ["readable", "none yet", "unreadable"])
+@pytest.mark.parametrize("network", [
+    {"home_network": True},
+    {"home_network": True, "allow_plaintext_lan": True},
+    {"home_network": False},
+])
+def test_the_two_rows_never_disagree_about_tls(node, key, network):
+    from prometheus.cli.doctor import check_network_discovery
+
+    if key == "readable":
+        ensure_instance_key()
+    elif key == "unreadable":
+        _unreadable_key(node)
+    config = {**WIDE, "network": network}
+    web = _web_bind(config)
+    home = check_network_discovery(config)
+    web_tls = str(T.DEFAULT_TLS_API_PORT) in web.message
+    home_tls = home is not None and str(T.DEFAULT_TLS_API_PORT) in home.message
+    assert web_tls == home_tls, (web.message, home and home.message)
