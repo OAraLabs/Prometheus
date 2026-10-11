@@ -157,8 +157,13 @@ def test_the_provider_hosts_match_the_provider_registry(policy):
 
 
 def test_no_rule_allows_any_host(policy):
+    # A wildcard is allowed only under a named domain (*.discord.gg: Discord resumes on regional gateway
+    # hosts); never a bare * or a wildcard over a whole top-level domain.
     for host, _port in _endpoints(policy):
-        assert host not in ("*", "**") and not host.startswith("*."), f"wildcard host {host!r}"
+        assert host not in ("*", "**"), f"wildcard host {host!r}"
+        if "*" in host:
+            assert host.startswith("*.") and "*" not in host[2:] and host[2:].count(".") >= 1, \
+                f"wildcard host {host!r} is not scoped under a named domain"
 
 
 # ── the smoke test, CI and the guide ─────────────────────────────────────────
