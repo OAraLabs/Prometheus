@@ -1859,6 +1859,20 @@ async def run_daemon(args: argparse.Namespace) -> None:
     task_manager.poll_max_interval = float(
         tasks_config.get("poll_max_interval_seconds", task_manager.poll_max_interval)
     )
+    # Workers resolve their route against THIS config (tasks/worker_route.py),
+    # and the worker-model setting is seeded from it (workers.model).
+    try:
+        from prometheus.config.defaults import resolve_config_path
+        from prometheus.tasks.worker_settings import (
+            WorkerModelSetting,
+            set_worker_model_setting,
+        )
+
+        task_manager.child_config_path = str(resolve_config_path(args.config))
+        set_worker_model_setting(WorkerModelSetting(config=config))
+    except Exception:
+        logger.warning("worker route wiring failed — workers resolve the config "
+                       "they find", exc_info=True)
     heartbeat = Heartbeat(
         gateway=telegram,
         task_manager=task_manager,
