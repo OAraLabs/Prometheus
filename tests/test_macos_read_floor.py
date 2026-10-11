@@ -71,7 +71,7 @@ def test_a_home_path_cannot_break_out_of_the_profile():
 
 def test_on_a_mac_a_verified_floor_wraps_every_shell_with_sandbox_exec(monkeypatch):
     _as(monkeypatch, "darwin")
-    monkeypatch.setattr(C, "seatbelt_preflight", lambda *, force=False: (True, "verified"))
+    monkeypatch.setattr(C, "seatbelt_preflight", lambda **_: (True, "verified"))
     result = C.apply_floors(["/bin/bash", "-c", "ls"], read_mode="auto", write_mode="off",
                             writable=[], cwd=None)
     assert result.refusal is None and result.read_floor == C.READ_ACTIVE
@@ -82,7 +82,7 @@ def test_on_a_mac_a_verified_floor_wraps_every_shell_with_sandbox_exec(monkeypat
 
 def test_on_a_mac_required_that_cannot_verify_refuses_and_names_sandbox_exec(monkeypatch):
     _as(monkeypatch, "darwin")
-    monkeypatch.setattr(C, "seatbelt_preflight", lambda *, force=False: (False, "it did not hold"))
+    monkeypatch.setattr(C, "seatbelt_preflight", lambda **_: (False, "it did not hold"))
     result = C.apply_floors(["/bin/bash", "-c", "ls"], read_mode="required", write_mode="off",
                             writable=[], cwd=None)
     assert result.argv == () and result.read_floor == "refused"
@@ -92,7 +92,7 @@ def test_on_a_mac_required_that_cannot_verify_refuses_and_names_sandbox_exec(mon
 
 def test_on_a_mac_auto_that_cannot_verify_runs_and_says_unavailable(monkeypatch):
     _as(monkeypatch, "darwin")
-    monkeypatch.setattr(C, "seatbelt_preflight", lambda *, force=False: (False, "it did not hold"))
+    monkeypatch.setattr(C, "seatbelt_preflight", lambda **_: (False, "it did not hold"))
     result = C.apply_floors(["/bin/bash", "-c", "ls"], read_mode="auto", write_mode="off",
                             writable=[], cwd=None)
     assert result.read_floor == C.READ_UNAVAILABLE and list(result.argv) == ["/bin/bash", "-c", "ls"]
@@ -100,7 +100,7 @@ def test_on_a_mac_auto_that_cannot_verify_runs_and_says_unavailable(monkeypatch)
 
 def test_floor_report_on_a_mac_names_seatbelt_and_is_active_not_unsupported(monkeypatch):
     _as(monkeypatch, "darwin")
-    monkeypatch.setattr(C, "seatbelt_preflight", lambda *, force=False: (True, "verified"))
+    monkeypatch.setattr(C, "seatbelt_preflight", lambda **_: (True, "verified"))
     read = C.floor_report(read_mode="auto", write_mode="off")["bash_read_floor"]
     assert read["state"] == C.STATE_ACTIVE and read["mechanism"] == "seatbelt:sandbox-exec"
 
@@ -197,3 +197,68 @@ def test_through_apply_floors_a_real_shell_cannot_read_the_env_file(tmp_path, mo
     assert result.refusal is None and result.read_floor == C.READ_ACTIVE
     done = subprocess.run(list(result.argv), capture_output=True, text=True, timeout=60)
     assert "master" not in done.stdout and "ordinary" in done.stdout, (done.stdout, done.stderr)
+
+
+# ── security.bash_allow_ssh: let ~/.ssh through, keep the master key out ──────
+#
+# `bash_confinement: off` was the only way to let a model-run `git push` over SSH use the keys, and it also opened
+# ~/.config/prometheus/env. The narrow opt-out drops ONLY the ~/.ssh rule; ~/.gnupg and ~/.config/*/*env stay
+# denied. On Linux the AppArmor profile is a file root loaded, so the key cannot change it, and the boot says so.
+
+def test_allow_ssh_drops_only_the_ssh_rule():
+    profile = C.seatbelt_profile("/Users/someone", allow_ssh=True)
+    assert '(subpath "/Users/someone/.ssh")' not in profile
+    assert '(subpath "/Users/someone/.gnupg")' in profile
+    assert '(subpath "/Users/someone/.config")' in profile and "env$" in profile
+
+
+def test_apply_floors_uses_the_ssh_profile_when_allowed(monkeypatch):
+    _as(monkeypatch, "darwin")
+    monkeypatch.setattr(C, "seatbelt_preflight", lambda **_: (True, "verified"))
+    result = C.apply_floors(["/bin/bash", "-c", "ls"], read_mode="auto", write_mode="off", writable=[], cwd=None,
+                            allow_ssh=True)
+    assert result.argv[2] == C.seatbelt_profile(allow_ssh=True)
+
+
+def test_the_key_is_a_strict_boolean_read_into_the_shell_floor():
+    from prometheus.security.shell_floor import ShellFloor
+
+    assert ShellFloor.from_security_config({}).allow_ssh is False
+    assert ShellFloor.from_security_config({"bash_allow_ssh": True}).allow_ssh is True
+    assert ShellFloor.from_security_config({"bash_allow_ssh": "yes"}).allow_ssh is False
+
+
+def test_the_bash_tool_carries_it():
+    from prometheus.tools.builtin.bash import BashTool
+
+    assert BashTool(confinement="auto", allow_ssh=True)._allow_ssh is True
+    assert BashTool(confinement="auto")._allow_ssh is False
+
+
+def test_on_linux_the_boot_says_the_key_cannot_change_the_apparmor_profile(monkeypatch, caplog):
+    import logging
+
+    from prometheus.security.shell_floor import ShellFloor, announce
+
+    _as(monkeypatch, "linux")
+    monkeypatch.setattr(C, "preflight", lambda *a, **k: (True, "prometheus-bash (enforce)"))
+    with caplog.at_level(logging.WARNING):
+        announce(ShellFloor(read_mode="auto", write_mode="off", allow_ssh=True))
+    assert any("bash_allow_ssh" in r.getMessage() and "AppArmor" in r.getMessage() for r in caplog.records)
+
+
+@real
+def test_the_real_floor_with_allow_ssh_reads_ssh_and_still_refuses_the_env_file(tmp_path):
+    home = _scratch_home(tmp_path)
+    done = subprocess.run(
+        [C.SANDBOX_EXEC, "-p", C.seatbelt_profile(home, allow_ssh=True), "/bin/bash", "-c",
+         'cat "$HOME/.ssh/id_ed25519"; cat "$HOME/.config/prometheus/env"'],
+        capture_output=True, text=True, timeout=60, env={**os.environ, "HOME": str(home)})
+    assert "PRIVATE" in done.stdout, "the opt-out did not let ~/.ssh through"
+    assert "master" not in done.stdout, "the opt-out let the master key through"
+
+
+@real
+def test_the_real_preflight_verifies_the_ssh_profile_by_outcome():
+    ok, detail = C.seatbelt_preflight(force=True, allow_ssh=True)
+    assert ok, detail
