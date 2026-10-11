@@ -2982,6 +2982,19 @@ def release_daemon_lock() -> None:
     _release()
 
 
+#: The environment at first startup, before the env file is loaded into it (``snapshot_startup_env``).
+_STARTUP_ENV: dict[str, str] | None = None
+
+
+def snapshot_startup_env() -> None:
+    """Remember the environment as it was at startup, before ``run_daemon`` loads the env file into it (with
+    setdefault: the real environment wins). A restart runs with THIS, so the env file is read again: re-exec'd
+    with the current environment, every value from the old file would count as real and a changed one (a rotated
+    token, a new key) would never be read."""
+    global _STARTUP_ENV
+    _STARTUP_ENV = dict(os.environ)
+
+
 def restart_argv() -> list[str]:
     """This process's own command line, interpreter flags included (``sys.orig_argv``), for this interpreter."""
     return [sys.executable, *sys.orig_argv[1:]]
@@ -2990,7 +3003,8 @@ def restart_argv() -> list[str]:
 def reexec() -> None:
     """Replace this process with a fresh daemon on the same command line (``POST /api/restart``).
 
-    Called by :func:`main` after ``run_daemon``'s ordinary graceful shutdown. Same process, so launchd, systemd and
+    Called by :func:`main` after ``run_daemon``'s ordinary graceful shutdown, with the environment of first startup
+    (:func:`snapshot_startup_env`), so the env file is read again. Same process, so launchd, systemd and
     a terminal all keep it; the instance key is a file, so hello's ``fp`` is the same after it. The daemon lock is
     released first so the new image can take it, and the log handlers are flushed (not closed: a test calls this).
     """
@@ -2999,7 +3013,8 @@ def reexec() -> None:
         handler.flush()
     sys.stdout.flush()
     sys.stderr.flush()
-    os.execv(sys.executable, restart_argv())
+    env = _STARTUP_ENV if _STARTUP_ENV is not None else dict(os.environ)
+    os.execve(sys.executable, restart_argv(), env)
 
 
 # Log rotation. Deliberately constants rather than config keys: there is no
@@ -3051,6 +3066,8 @@ def daemon_start_args(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> None:
     """CLI entry point."""
+    # Before anything loads the env file: what a restart re-execs with (POST /api/restart).
+    snapshot_startup_env()
     parser = build_parser()
     args = parser.parse_args()
 

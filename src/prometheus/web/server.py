@@ -522,6 +522,11 @@ def create_app(
     # scoped device (web/route_access.OPERATOR_ONLY). A process with no hook (not started as the daemon) says so.
     @app.post("/api/restart")
     async def restart_daemon(request: Request):
+        # Never a web page's to ask for, whatever credential it carries: a browser shows itself by Origin.
+        if request.headers.get("origin"):
+            return JSONResponse(status_code=400, content={
+                "error": "browser_not_allowed",
+                "detail": "a restart is not accepted from a web page (the request carried an Origin header)"})
         request_restart = getattr(request.app.state, "request_restart", None)
         if request_restart is None:
             return JSONResponse(status_code=503, content={
