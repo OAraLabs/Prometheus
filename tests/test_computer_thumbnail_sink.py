@@ -10,7 +10,11 @@ The four conditions (design §5.2.5):
   2. that device marked for computer use (the door's W3 ruling);
   3. the ``computer-thumbnails`` capability declared (an old client would
      render the whole payload into its exportable Activity feed);
-  4. attached to the task's session.
+  4. the device owns the task's session (web/session_scope.py; an owner
+     device is the operator and owns every one), and the socket is attached
+     to it or on the firehose. Owning is the rule a device's session frames
+     already follow: no session filter, and no filter naming someone else's
+     session, reaches another device's desktop.
 
 Each gets a test where it is the ONLY thing failing, so a green suite says
 each condition is independently load-bearing — not that some other condition
@@ -28,7 +32,8 @@ from prometheus.config.device_store import DeviceStore
 from prometheus.web.ws_server import WebSocketBridge
 
 GLOBAL = "global-secret"
-SESSION = "telegram:1"
+#: A conversation the rig's device owns: it started it (a claim, as a first send makes).
+SESSION = "web:phone-1"
 
 
 class _FakeWS:
@@ -58,6 +63,7 @@ def _rig(tmp_path, *, marked: bool = True):
     """A bridge with a device store, one enrolled device, and the token."""
     store = DeviceStore(tmp_path / "devices.db")
     minted = store.mint("phone", "ios")
+    assert store.claim_session(SESSION, minted["id"])
     if marked:
         assert store.set_computer(minted["id"], True, by="will") is True
     bridge = WebSocketBridge(api_token=GLOBAL, device_store=store)
@@ -159,9 +165,10 @@ async def test_a_different_capability_is_not_this_one(tmp_path):
 @pytest.mark.asyncio
 async def test_a_socket_attached_to_another_session_never_receives_one(tmp_path):
     """CONDITION 4: the picture belongs to one session's task."""
-    _store, minted, bridge = _rig(tmp_path)
+    store, minted, bridge = _rig(tmp_path)
+    assert store.claim_session("web:phone-2", minted["id"])
     ws = await _connect(bridge, minted["token"], caps=[CAP],
-                        sessions=["telegram:999"])
+                        sessions=["web:phone-2"])
     assert bridge.viewer_count(SESSION) == 0
     await bridge.send_thumbnail(SESSION, FRAME)
     assert [f for f in ws.sent if f["type"] == "computer_step_thumbnail"] == []
@@ -169,11 +176,68 @@ async def test_a_socket_attached_to_another_session_never_receives_one(tmp_path)
 
 @pytest.mark.asyncio
 async def test_a_socket_on_the_firehose_receives_it(tmp_path):
-    """No session filter means every session — that is today's behaviour, and
-    it must not be broken by the thumbnail gate."""
+    """No session filter means every session the device OWNS: its own
+    conversation's picture still arrives without naming it."""
     _store, minted, bridge = _rig(tmp_path)
     ws = await _connect(bridge, minted["token"], caps=[CAP])
     assert bridge.viewer_count(SESSION) == 1
+
+
+def _theirs(store: DeviceStore) -> str:
+    """Another device's conversation."""
+    other = store.mint("someone else's phone", "ios")
+    assert store.claim_session("web:theirs-1", other["id"])
+    return "web:theirs-1"
+
+
+def _thumbs(ws: _FakeWS) -> list[dict]:
+    return [f for f in ws.sent if f["type"] == "computer_step_thumbnail"]
+
+
+@pytest.mark.asyncio
+async def test_a_device_on_the_firehose_never_receives_another_devices_picture(tmp_path):
+    """CONDITION 4, the firehose half: no session filter is the device's own
+    sessions, not every session on the daemon."""
+    store, minted, bridge = _rig(tmp_path)
+    theirs = _theirs(store)
+    ws = await _connect(bridge, minted["token"], caps=[CAP])
+    assert bridge.viewer_count(theirs) == 0
+    await bridge.send_thumbnail(theirs, {**FRAME, "session_id": theirs})
+    assert _thumbs(ws) == []
+
+
+@pytest.mark.asyncio
+async def test_naming_another_devices_session_in_the_filter_receives_nothing(tmp_path):
+    """A subscribe filter is the client's own list: naming a session is not owning it."""
+    store, minted, bridge = _rig(tmp_path)
+    theirs = _theirs(store)
+    ws = await _connect(bridge, minted["token"], caps=[CAP], sessions=[theirs])
+    assert bridge.viewer_count(theirs) == 0
+    await bridge.send_thumbnail(theirs, {**FRAME, "session_id": theirs})
+    assert _thumbs(ws) == []
+
+
+@pytest.mark.asyncio
+async def test_a_scoped_device_never_receives_a_telegram_tasks_picture(tmp_path):
+    """A desktop task started on Telegram runs in a daemon session no device owns."""
+    _store, minted, bridge = _rig(tmp_path)
+    ws = await _connect(bridge, minted["token"], caps=[CAP])
+    assert bridge.viewer_count("telegram:1") == 0
+    await bridge.send_thumbnail("telegram:1", {**FRAME, "session_id": "telegram:1"})
+    assert _thumbs(ws) == []
+
+
+@pytest.mark.asyncio
+async def test_a_marked_owner_device_receives_any_sessions_picture(tmp_path):
+    """The owner's device is the operator: it owns every session, Telegram's included."""
+    store, _minted, bridge = _rig(tmp_path)
+    owner = store.mint_owner("Beacon on this Mac", "macos", by="same-mac-pairing")
+    assert store.set_computer(owner["id"], True, by="will") is True
+    theirs = _theirs(store)
+    ws = await _connect(bridge, owner["token"], caps=[CAP])
+    assert bridge.viewer_count("telegram:1") == 1 and bridge.viewer_count(theirs) == 1
+    await bridge.send_thumbnail("telegram:1", {**FRAME, "session_id": "telegram:1"})
+    assert len(_thumbs(ws)) == 1
 
 
 @pytest.mark.asyncio
