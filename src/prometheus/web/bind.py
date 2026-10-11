@@ -187,13 +187,9 @@ def format_host_port(host: str, port: int) -> str:
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
-def _on(section: object, key: str) -> bool:
-    value = section.get(key) if isinstance(section, Mapping) else None
-    return value is True
-
-
 def app_install_lan_guard(
     resolved: ResolvedBind, config: Mapping[str, Any] | None, env: Mapping[str, str] | None = None,
+    *, quiet: bool = False,
 ) -> ResolvedBind:
     """On the Mac app, plain HTTP never reaches the LAN unless the owner asked for exactly that.
 
@@ -201,6 +197,11 @@ def app_install_lan_guard(
     plain-HTTP opt-in) or ``network.home_network`` (whose TLS listener takes the LAN while plain HTTP stays on
     loopback, pairing PR 5) is ``true``. The source is kept, so the file still decides and the owner's switch
     still works. Only ``PROMETHEUS_INSTALL_KIND=app``: terminal installs keep today's behaviour (D10).
+
+    The switches are read through ``NetworkSettings`` (``web/network.py``), the one reader of ``network.*``. The
+    daemon, setup mode, ``GET /api/network``'s after-restart answer and ``oara doctor`` all come through here, so
+    none of them can disagree about what an app install binds. *quiet* skips the warning, for a caller that only
+    predicts (the route answers on every request).
     """
     environ = os.environ if env is None else env
     if environ.get("PROMETHEUS_INSTALL_KIND") != "app":
@@ -209,9 +210,13 @@ def app_install_lan_guard(
 
     if is_loopback_address(resolved.address):
         return resolved
-    network = config.get("network") if isinstance(config, Mapping) else None
-    if _on(network, "allow_plaintext_lan") or _on(network, "home_network"):
+    from prometheus.web.network import NetworkSettings      # it imports this module: on use, not at the top
+
+    settings = NetworkSettings.from_config(config, quiet=True)  # the launcher says once if a switch is not a boolean
+    if settings.allow_plaintext_lan or settings.home_network:
         return resolved
+    if quiet:
+        return ResolvedBind(APP_INSTALL_DEFAULT_BIND, resolved.source)
     import logging
 
     logging.getLogger(__name__).warning(
