@@ -205,3 +205,112 @@ jobs:
         # "ignores it if it isn't configured", which would turn a broken
         # publisher registration back into a silent green no-op.
         run: uv publish --trusted-publishing always
+
+  # ── THE CONTAINER IMAGE ───────────────────────────────────────────────────
+  #
+  # The same split as the Python distributions, for the same reason. `image` runs repository code (the
+  # Dockerfile's build steps, the smoke test) and can publish nothing: `contents: read`, no packages
+  # scope, no credential. `publish-image` holds `packages: write` and runs no repository code at all: it
+  # downloads the OCI archive `image` built and smoked, and copies it to GHCR byte for byte.
+  #
+  # `publish-image` also waits for `publish`, so it runs only after the `pypi` environment's reviewer has
+  # approved this release and PyPI has the wheel: one approval releases both, and no image is ever
+  # published for a version PyPI does not have. A manual run builds and smokes the image and stops there.
+  #
+  # Both architectures come out of ONE multi-platform build on this amd64 runner (arm64 through QEMU),
+  # because only one build produces a single index the publish job can copy whole. The full smoke test
+  # runs on amd64; under emulation arm64 gets the image-config and start checks (`--quick`). The complete
+  # arm64 smoke test runs natively on every pull request (ci.yml, `container`). The binfmt and BuildKit
+  # images the builder itself runs are pinned by digest like everything else here.
+  image:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up QEMU (arm64 on this amd64 runner)
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          image: docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.0@sha256:b059f8d7226d0b326bc871af489a5dddf65e36af4d20d14251b072974d9ee87c
+      - name: Work out the version and its tags
+        id: meta
+        run: |
+          set -euo pipefail
+          version=$(python3 -c "import re, pathlib; print(re.search(r'^__version__\s*=\s*\"([^\"]+)\"', pathlib.Path('src/prometheus/__init__.py').read_text(), re.M).group(1))")
+          # A PEP 440 pre-release (canonical: 1.0.0a1, 1.0.0b2, 1.0.0rc1, 1.0.0.dev3) is published under its
+          # own version only. A release also moves X.Y and latest.
+          if [[ "$version" =~ (a|b|rc)[0-9]+|\.dev[0-9]+ ]]; then
+            tags="$version"
+          else
+            tags="$version ${version%.*} latest"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          mkdir -p image-out
+          printf '%s\n' $tags > image-out/tags.txt
+          echo "### Container image $version: tags $tags" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build both architectures into one OCI archive (what publish-image pushes)
+        run: |
+          set -euo pipefail
+          src=https://github.com/${GITHUB_REPOSITORY}
+          docker buildx build --platform linux/amd64,linux/arm64 \
+            --label "org.opencontainers.image.version=${{ steps.meta.outputs.version }}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --annotation "index:org.opencontainers.image.source=${src}" \
+            --annotation "index:org.opencontainers.image.licenses=MIT" \
+            --annotation "index:org.opencontainers.image.description=An AI agent daemon that runs on hardware you own." \
+            --output type=oci,dest=image-out/prometheus-image.oci.tar .
+      # The same builder and the same cache as the archive above, so these are the layers it holds.
+      - name: Smoke test amd64 (the full container smoke test)
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64 --load -t prometheus:release-amd64 .
+          python3 packaging/docker/smoke_image.py prometheus:release-amd64 --platform linux/amd64 --expect-version "${{ steps.meta.outputs.version }}"
+      - name: Smoke test arm64 (under emulation, image config and start; ci.yml runs the full test natively)
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/arm64 --load -t prometheus:release-arm64 .
+          python3 packaging/docker/smoke_image.py prometheus:release-arm64 --platform linux/arm64 --quick --expect-version "${{ steps.meta.outputs.version }}"
+      - name: Upload the image archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: container-image
+          path: image-out/
+          retention-days: 14
+
+  publish-image:
+    needs: [image, publish]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      # The credential. GITHUB_TOKEN with this scope can push to this repository's packages, nothing more.
+      packages: write
+    steps:
+      # NO `actions/checkout` HERE, ON PURPOSE (see `publish` above): the archive is the release.
+      - name: Download the image archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: container-image
+          path: image-out/
+      - name: Push to GHCR (every tag from the same archive, the whole multi-arch index)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null || { sudo apt-get update && sudo apt-get install -y skopeo; }
+          repo="ghcr.io/${GITHUB_REPOSITORY,,}"
+          printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          while read -r tag; do
+            [ -n "$tag" ] || continue
+            skopeo copy --all --preserve-digests oci-archive:image-out/prometheus-image.oci.tar "docker://${repo}:${tag}"
+            echo "- \`${repo}:${tag}\`" >> "$GITHUB_STEP_SUMMARY"
+          done < image-out/tags.txt
+          skopeo inspect --raw "docker://${repo}:$(head -n1 image-out/tags.txt)" | python3 -c "import json, sys; m = json.load(sys.stdin); print('platforms:', sorted({(d.get('platform') or {}).get('architecture') for d in m['manifests']} - {None, 'unknown'}))"
