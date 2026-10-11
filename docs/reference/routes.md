@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 118 paths
+## Daemon app — 120 paths
 
 | Path | Methods |
 |---|---|
@@ -69,6 +69,8 @@ one is the explanation.
 | `/api/mcp/servers/{name}` | DELETE, PATCH |
 | `/api/media` | GET |
 | `/api/memory/current` | GET, PUT |
+| `/api/model` | GET, PUT |
+| `/api/model/check-key` | POST |
 | `/api/models` | GET |
 | `/api/network` | GET, PUT |
 | `/api/packs` | GET |
@@ -132,7 +134,7 @@ one is the explanation.
 | `/v1/chat/completions` | POST |
 | `/v1/models` | GET |
 
-## Setup app — 8 paths
+## Setup app — 9 paths
 
 A separate FastAPI app (`web/setup_server.py`), not the daemon app
 behind a flag: the real route surface is deliberately never mounted
@@ -142,6 +144,7 @@ in setup mode.
 |---|---|
 | `/api/hello` | GET |
 | `/api/pair/requests` | POST |
+| `/api/setup/check-key` | POST |
 | `/api/setup/complete` | POST |
 | `/api/setup/configure` | POST |
 | `/api/setup/detect` | GET |

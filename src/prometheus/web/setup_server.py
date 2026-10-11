@@ -31,7 +31,10 @@ Phase 2 flow (the paired client completes the ENTIRE setup remotely):
    generates identity (SOUL.md/AGENTS.md) via the SetupWizard's
    generator when ``agent_name`` is given, and persists an optional
    Telegram token to the env file. Idempotent.
-6. ``POST /api/setup/complete`` (authed) — verifies the config exists
+6. ``POST /api/setup/check-key`` (authed) — ``{"provider", "api_key"}`` →
+   ``{"result": "ok" | "bad_key" | "no_credit" | "unreachable"}``: does this
+   cloud key work, asked BEFORE ``configure`` (see ``providers/key_check.py``).
+7. ``POST /api/setup/complete`` (authed) — verifies the config exists
    and parses, replies, then exits the serve loop with a "restart"
    sentinel. ``daemon.main()`` re-checks for config and falls through
    into the REAL daemon boot IN THE SAME PROCESS — no systemd needed
@@ -901,6 +904,51 @@ def create_setup_app(
             "backends": [_backend_payload(s) for s in servers],
             "cloud_providers": cloud,
         })
+
+    @app.post("/api/setup/check-key")
+    async def setup_check_key(request: Request) -> JSONResponse:
+        """Does this cloud key work? Asked BEFORE ``configure`` (Beacon's O9 contract).
+
+        ``{"provider": "openrouter" | "anthropic" | "openai", "api_key": "<key>"}`` →
+        ``200 {"result": "ok" | "bad_key" | "no_credit" | "unreachable", "status"?, "detail"?}``.
+        Master token required. Fixed destinations only (``providers/key_check.py``): there is no ``base_url`` on
+        this route and one is refused, so it cannot be turned into an authenticated proxy. Writes nothing, and the
+        key appears nowhere but the provider's auth header — not here, not in the answer, not in a log line.
+        """
+        denied = _setup_auth_error(request)
+        if denied is not None:
+            return denied
+        from prometheus.providers import key_check
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=400, content={
+                "error": "bad_request",
+                "detail": 'expected a JSON body: {"provider", "api_key"}',
+            })
+        if "base_url" in body:
+            return JSONResponse(status_code=400, content={
+                "error": "unexpected_base_url",
+                "detail": "the key check calls each provider's own address; it takes no base_url",
+            })
+        provider, api_key = body.get("provider"), body.get("api_key")
+        if not isinstance(provider, str) or not provider.strip():
+            return JSONResponse(status_code=400, content={
+                "error": "bad_request", "detail": "provider is required (a string)"})
+        if provider.strip() not in key_check.CHECKABLE_PROVIDERS:
+            return JSONResponse(status_code=400, content={
+                "error": "unsupported_provider",
+                "detail": f"the key check knows {', '.join(key_check.CHECKABLE_PROVIDERS)}",
+            })
+        if not isinstance(api_key, str) or not api_key.strip():
+            return JSONResponse(status_code=400, content={
+                "error": "bad_request", "detail": "api_key is required (a non-empty string)"})
+        # Blocking HTTP to the provider, off the event loop.
+        verdict = await asyncio.to_thread(key_check.check_provider_key, provider.strip(), api_key.strip())
+        return JSONResponse(status_code=200, content=verdict.as_dict())
 
     @app.post("/api/setup/configure")
     async def setup_configure(request: Request) -> JSONResponse:

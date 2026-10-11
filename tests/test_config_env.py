@@ -37,10 +37,14 @@ class TestEnvOverrides:
         assert config["model"]["model"] == "gemma4-26b"
 
     def test_provider_url_override(self, monkeypatch):
+        # The main model's URL, which is what the llama_cpp provider is built from. This asserted
+        # providers.llama_cpp.base_url until this fix: a key nothing reads, so it pinned a variable that
+        # did nothing. tests/test_provider_url_env.py checks the provider that actually gets built.
         monkeypatch.setenv("PROMETHEUS_LLAMA_CPP_URL", "http://gpu:8080")
         config = {}
         apply_env_overrides(config)
-        assert config["providers"]["llama_cpp"]["base_url"] == "http://gpu:8080"
+        assert config["model"]["base_url"] == "http://gpu:8080"
+        assert "providers" not in config
 
     def test_no_env_vars_is_noop(self):
         config = {"gateway": {"telegram_token": "original"}}

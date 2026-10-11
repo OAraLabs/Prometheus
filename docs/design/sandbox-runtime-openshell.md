@@ -1,9 +1,9 @@
 # Running Prometheus inside an OpenShell sandbox
 
-**Status: research only. No code.** Stage 1 starts after v0.4 (Will, 2026-10-10). The container image
-(`Dockerfile`, docs/guide/docker.md) is built so a sandbox image can be a thin layer on top of it; nothing
-else here exists yet. OpenShell ships weekly, so re-read the sources below before Stage 1 starts: every
-fact here is as of 2026-10-10.
+**Status: Stage 1 shipped (2026-10-11).** Will moved it ahead of v0.4. The sandbox image, the policy, the
+smoke test and the guide are in `packaging/openshell/` and docs/guide/openshell.md, tested with OpenShell 0.1.3
+on Linux amd64; the guide lists exactly what was and was not tested. Stages 2 and 3 below are still open. The
+rest of this note is the research as of 2026-10-10.
 
 ## For Will (one page)
 
@@ -67,7 +67,7 @@ model endpoint, GitHub and PyPI, and a note that its traffic is attributed to th
 | Slack | Socket Mode: `slack.com` API, then WSS URLs Slack hands back (`wss-primary`/`wss-backup.slack.com`). Tokens in headers. | Adapt Hermes's Slack policy, including its WebSocket credential rewrite. |
 | Discord | `discord.com` REST and the `gateway.discord.gg` WebSocket. The bot token is sent inside the IDENTIFY frame, which is WebSocket text, opt-in for substitution. | Verify the opt-in works for IDENTIFY. |
 | Beacon (REST 8005, WS 8010) | Loopback only inside the sandbox. Same machine: a forward per port. Another device: a gateway URL over HTTPS. Beacon pairs to `host:8005`/`8010` directly today. | **The main blocker.** Beacon-side support for a gateway URL, or a documented forward. |
-| Model providers | Every provider takes a base URL. 0.1.x: the real endpoint with a placeholder key. Ollama or llama.cpp on the host: `host.openshell.internal`. | Policy entries per provider. `model.base_url`, not `PROMETHEUS_OLLAMA_URL` (that variable sets nothing today). |
+| Model providers | Every provider takes a base URL. 0.1.x: the real endpoint with a placeholder key. Ollama or llama.cpp on the host: `host.openshell.internal`. | Policy entries per provider. `model.base_url`, or `PROMETHEUS_OLLAMA_URL` / `PROMETHEUS_LLAMA_CPP_URL` for the main model. |
 | The API token | It authenticates **inbound** requests, so it cannot be a placeholder: it must be real inside the sandbox, minted into `$HOME/.config/prometheus/env` or mounted with `PROMETHEUS_API_TOKEN_FILE`. The agent's own shell can read it, as in Docker. | None beyond the image. |
 | AppArmor read floor | A profile cannot be loaded from inside (no capabilities). | Decide the posture (below). |
 | bubblewrap write floor | Needs user namespaces and `mount`, both refused by the seccomp filter. | Decide the posture (below). |

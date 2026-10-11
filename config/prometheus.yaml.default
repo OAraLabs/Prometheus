@@ -1156,9 +1156,11 @@ web:
   # Only an IPv4/IPv6 address or "localhost" is accepted; anything else makes
   # the daemon refuse to start. It never falls back to a wider address.
   #
-  # There is no TLS: this is plain HTTP and ws:// on whichever interface you
-  # name. On 0.0.0.0 the bearer token is the only access control between the
-  # API and everyone who can reach this machine's network address.
+  # Plain HTTP and ws:// on whichever interface you name, with no TLS, unless
+  # network.home_network is on: then the LAN is served over TLS (tls_api_port,
+  # tls_ws_port above) and plain HTTP stays on 127.0.0.1. Without it, on 0.0.0.0
+  # the bearer token is the only access control between the API and everyone
+  # who can reach this machine's network address.
   #
   # Shipped EMPTY (= unset = 0.0.0.0), not commented out, so the key shows in
   # docs/reference/config-keys.md and a config that sets it is not flagged as
@@ -1239,14 +1241,18 @@ pairing:
 network:
   # Be reachable from other devices on your home network, and announce this
   # Prometheus there (see discovery.mdns). Needs a web.bind that reaches the
-  # LAN; the switch in Beacon sets both. Without TLS (not built yet) it also
-  # needs allow_plaintext_lan below, or the daemon reports `open` and says why.
+  # LAN; the switch in Beacon sets both. The LAN is then served over TLS
+  # (web.tls_api_port, web.tls_ws_port) with a certificate over this machine's
+  # instance key, and plain HTTP stays on 127.0.0.1. If that certificate cannot
+  # be had, the LAN gets plain HTTP only with allow_plaintext_lan below;
+  # otherwise the daemon stays on 127.0.0.1 and says why.
   home_network: false
 
   # Accept home network mode over plain HTTP: a device's token and everything
   # it sends cross your Wi-Fi unencrypted, readable by anyone on that network.
-  # Only for a network you trust. There is no TLS yet to make this unnecessary,
-  # so it stays off until you decide.
+  # Only for a network you trust. It is used only when TLS cannot run (the
+  # instance key or its certificate cannot be loaded); it stays off until you
+  # decide.
   allow_plaintext_lan: false
 
 discovery:

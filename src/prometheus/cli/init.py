@@ -287,7 +287,9 @@ _ENV_TEMPLATE = """# Prometheus environment file — secrets live here, not in p
 # Cloud providers (optional):
 #   ANTHROPIC_API_KEY=
 #   OPENAI_API_KEY=
-#   GOOGLE_API_KEY=
+#   GEMINI_API_KEY=        # aistudio.google.com/apikey — /gemini override
+#   XAI_API_KEY=           # console.x.ai — /xai override
+#   OPENROUTER_API_KEY=    # openrouter.ai/keys — one account, many vendors' models
 #   DEEPSEEK_API_KEY=      # platform.deepseek.com — /deepseek override
 #   MOONSHOT_API_KEY=      # platform.moonshot.ai — /kimi override
 #   ZAI_API_KEY=           # z.ai API console — /glm override
@@ -332,6 +334,16 @@ _CLOUD_FAST_PROVIDERS: dict[str, tuple[str, str, int]] = {
     "glm": ("ZAI_API_KEY", "glm-5.3", 64000),
     "mimo": ("MIMO_API_KEY", "mimo-v2.6-pro", 64000),
     "qwen": ("QWEN_API_KEY", "qwen3.8-max", 64000),
+    # OpenRouter (Beacon's Recommended "sign in, no key to copy"). The model is OpenRouter's own id and must agree
+    # with providers/registry.CLOUD_DEFAULTS (tests/test_openrouter_provider.py); the context budget is the one the
+    # same Claude model gets on the direct route. No slash-command preset: it is chosen at setup, not by /command.
+    "openrouter": ("OPENROUTER_API_KEY", "anthropic/claude-sonnet-5", 100000),
+    # Gemini and xAI: the daemon always ran them (registry, presets, pricing, wizard) but setup over the API and
+    # without a prompt could not choose them, because this table did not list them. The key variable and model are
+    # CLOUD_DEFAULTS' and OVERRIDE_PRESETS' (tests/test_model_catalog_consistency.py holds the three together); the
+    # budget is the wizard's (setup_wizard.PROVIDER_EFFECTIVE_LIMITS).
+    "gemini": ("GEMINI_API_KEY", "gemini-2.5-flash", 64000),
+    "xai": ("XAI_API_KEY", "grok-4.5", 64000),
 }
 
 
@@ -643,8 +655,7 @@ def _handle_no_server(
             "No local inference server was found. What now?",
             [
                 "Point Prometheus at a remote server URL",
-                "Use a cloud provider (Anthropic / OpenAI / DeepSeek / "
-                "Kimi / GLM / MiMo)",
+                f"Use a cloud provider ({', '.join(_CLOUD_FAST_PROVIDERS)})",
                 "Show install instructions for a local server and exit",
             ],
             default_index=2,

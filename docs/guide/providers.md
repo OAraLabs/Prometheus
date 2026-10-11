@@ -28,6 +28,8 @@ model:
       model: "claude-haiku-4-5-20251001"
 ```
 
+To move the main model without editing the file (a container, or one config shared by two boxes), set `PROMETHEUS_LLAMA_CPP_URL` or `PROMETHEUS_OLLAMA_URL`. Each replaces `model.base_url` while `model.provider` is its own provider (`llama_cpp` is the default when none is named), and the daemon logs a warning naming it when it is not. `fallback` entries and named backends keep their own URLs. Give the server's origin, `http://gpu-machine:8080`; the provider adds `/v1/chat/completions` itself.
+
 ### Named backends — the registry
 
 Every local inference box the daemon can be pointed at lives in one table: the primary from `model:` (registered automatically as `local`) plus each entry under `backends:` in `prometheus.yaml`. The daemon probes them all at boot, in parallel, bounded by one timeout each, and again on demand — so "what is the 4090 serving right now" is a question the daemon answers, not one you curl by hand.
@@ -96,6 +98,13 @@ Every cloud provider except Anthropic rides the same OpenAI-compatible wire form
 | GLM (Z.ai / Zhipu) | `glm` | `ZAI_API_KEY` | `glm-5.3` |
 | MiMo (Xiaomi) | `mimo` | `MIMO_API_KEY` | `mimo-v2.6-pro` |
 | Qwen (Alibaba Model Studio) | `qwen` | `QWEN_API_KEY` | `qwen3.8-max` |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `anthropic/claude-sonnet-5` |
+
+**Every provider in this table can be chosen in setup:** `POST /api/setup/configure` with `{"provider": "gemini", "api_key": "..."}` (and optionally `model`), `oara setup --provider gemini` with the key already in the environment or the env file, or the interactive menu. `GET /api/setup/detect` lists them all with whether the daemon already holds each key (never the value). Setup writes the key under the variable in the table, and only that one: `GEMINI_API_KEY`, not `GOOGLE_API_KEY`, which the daemon does not read. xAI's SuperGrok sign-in is a route of the running daemon, so setup itself takes an `XAI_API_KEY`.
+
+**OpenRouter** is one account in front of many vendors' models, OpenAI-compatible, so it goes through the same provider class as the others and runs under tier `off` (the API enforces tool-call structure). Its model ids are OpenRouter's own, `vendor/model`. The setup default is a mid-tier **paid** model, never a free one: free models are capped at 50 requests a day and their hosts often train on what they are sent. It needs credit on the OpenRouter account; with none, requests are refused with HTTP 402 and `POST /api/setup/check-key` says `no_credit`. Spend on a priced OpenRouter model is metered like any cloud model; a model OpenRouter lists that Prometheus has no price row for is reported as unpriced (`unknown`), never as free. Setup is `POST /api/setup/configure` with `{"provider": "openrouter", "api_key": "..."}`, or `oara setup --fast --provider openrouter` with the key in the env file; `POST /api/setup/check-key` tells you first whether a key works.
+
+**Changing your mind after setup** needs no reinstall. `PUT /api/model` with `{"provider": "anthropic", "api_key": "..."}` (and optionally `"model"`) switches the provider, model or key of a configured daemon; `GET /api/model` says what is running, what is saved and whether a restart is waiting, and `POST /api/model/check-key` asks whether a key works first. The key is checked before anything is saved, a refused key saves nothing, and the change takes effect when the daemon restarts (`POST /api/restart`). It switches between the cloud providers setup offers; moving to a local server is `oara setup`. A provider fixed by `PROMETHEUS_PROVIDER` or `PROMETHEUS_MODEL` in the daemon's environment cannot be changed here, and the route says so (`model_overridden`).
 
 The defaults live in `src/prometheus/providers/registry.py` (`CLOUD_DEFAULTS`) and carry some hard-won footnotes:
 
@@ -185,7 +194,7 @@ slash_commands:
 
 ### Endpoint overrides: `<PROVIDER>_BASE_URL`
 
-Every cloud provider also reads an endpoint variable from the env file: `OPENAI_BASE_URL`, `GEMINI_BASE_URL`, `XAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `DEEPSEEK_BASE_URL`, `MOONSHOT_BASE_URL`, `ZAI_BASE_URL`, `MIMO_BASE_URL`, `QWEN_BASE_URL`.
+Every cloud provider also reads an endpoint variable from the env file: `OPENAI_BASE_URL`, `GEMINI_BASE_URL`, `XAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `DEEPSEEK_BASE_URL`, `MOONSHOT_BASE_URL`, `ZAI_BASE_URL`, `MIMO_BASE_URL`, `QWEN_BASE_URL`, `OPENROUTER_BASE_URL`.
 
 Resolution order is `base_url` in config → `<PROVIDER>_BASE_URL` → the built-in default. Unset simply falls through, so these cost nothing until you use one.
 

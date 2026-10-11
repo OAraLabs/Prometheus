@@ -6460,6 +6460,12 @@ def create_app(
 
     register_network_routes(app, auth_on=lambda: bool(_api_token))
 
+    # ── Provider, model and API key after setup (GET/PUT /api/model, POST /api/model/check-key) ────
+    # The same shape as /api/network: the operator's, saved to the config file and applied on restart.
+    from prometheus.web.model_routes import register_model_routes
+
+    register_model_routes(app, auth_on=lambda: bool(_api_token))
+
     # ── Static files (must be last — catch-all) ─────────────────────
 
     if static_dir:

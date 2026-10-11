@@ -47,7 +47,7 @@ docker compose -f compose.yaml up -d
 docker compose -f compose.yaml exec prometheus oara token show
 ```
 
-Any Ollama model with tool calling works; `qwen3:8b` is just a common one. Setup probes the server, takes the first model it lists, and writes `~/.prometheus/prometheus.yaml` onto the home volume. For GPU acceleration, follow Ollama's Docker instructions for your GPU and add the device lines they give to the `ollama` service. Pin a Prometheus release with `PROMETHEUS_VERSION=<version>` (in your shell or a `.env` file beside `compose.yaml`) instead of `latest`.
+Any Ollama model with tool calling works; `qwen3:8b` is just a common one. Setup probes the server, takes the first model it lists, and writes `~/.prometheus/prometheus.yaml` onto the home volume. For GPU acceleration, follow Ollama's Docker instructions for your GPU and add the device lines they give to the `ollama` service. Pin a Prometheus release with `PROMETHEUS_VERSION=<version>` (in your shell or a `.env` file beside `compose.yaml`) instead of `latest`. To repoint a configured daemon at another server without editing its config, set `PROMETHEUS_OLLAMA_URL` (or `PROMETHEUS_LLAMA_CPP_URL`) in the service's `environment:`; see [the providers guide](providers.md#multi-machine-setups).
 
 ## Where your data lives
 
@@ -134,4 +134,4 @@ Other extras: `--build-arg PROMETHEUS_EXTRAS="anthropic mcp slack discord push v
 
 ## Building an image on this one
 
-Everything the daemon needs is in `ENV` or derived from `HOME`, and nothing depends on the `ENTRYPOINT`, so a runtime that replaces the start command still gets the same daemon from `oara daemon`. Set `HOME` to move all state; the health probe is `python -m prometheus.web.healthcheck`; the listen address is `PROMETHEUS_WEB_BIND`.
+Everything the daemon needs is in `ENV` or derived from `HOME`, and nothing depends on the `ENTRYPOINT`, so a runtime that replaces the start command still gets the same daemon from `oara daemon`. Set `HOME` to move all state; the health probe is `python -m prometheus.web.healthcheck`; the listen address is `PROMETHEUS_WEB_BIND`. The OpenShell sandbox image is built this way: see [OpenShell sandbox](openshell.md).
