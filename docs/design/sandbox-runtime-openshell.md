@@ -1,9 +1,9 @@
 # Running Prometheus inside an OpenShell sandbox
 
-**Status: research only. No code.** Stage 1 starts after v0.4 (Will, 2026-10-10). The container image
-(`Dockerfile`, docs/guide/docker.md) is built so a sandbox image can be a thin layer on top of it; nothing
-else here exists yet. OpenShell ships weekly, so re-read the sources below before Stage 1 starts: every
-fact here is as of 2026-10-10.
+**Status: Stage 1 shipped (2026-10-11).** Will moved it ahead of v0.4. The sandbox image, the policy, the
+smoke test and the guide are in `packaging/openshell/` and docs/guide/openshell.md, tested with OpenShell 0.1.3
+on Linux amd64; the guide lists exactly what was and was not tested. Stages 2 and 3 below are still open. The
+rest of this note is the research as of 2026-10-10.
 
 ## For Will (one page)
 
