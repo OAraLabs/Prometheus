@@ -134,4 +134,4 @@ Other extras: `--build-arg PROMETHEUS_EXTRAS="anthropic mcp slack discord push v
 
 ## Building an image on this one
 
-Everything the daemon needs is in `ENV` or derived from `HOME`, and nothing depends on the `ENTRYPOINT`, so a runtime that replaces the start command still gets the same daemon from `oara daemon`. Set `HOME` to move all state; the health probe is `python -m prometheus.web.healthcheck`; the listen address is `PROMETHEUS_WEB_BIND`.
+Everything the daemon needs is in `ENV` or derived from `HOME`, and nothing depends on the `ENTRYPOINT`, so a runtime that replaces the start command still gets the same daemon from `oara daemon`. Set `HOME` to move all state; the health probe is `python -m prometheus.web.healthcheck`; the listen address is `PROMETHEUS_WEB_BIND`. The OpenShell sandbox image is built this way: see [OpenShell sandbox](openshell.md).

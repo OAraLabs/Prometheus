@@ -426,3 +426,10 @@ jobs:
         run: |
           version=$(python3 -c "import re, pathlib; print(re.search(r'^__version__\s*=\s*\"([^\"]+)\"', pathlib.Path('src/prometheus/__init__.py').read_text(), re.M).group(1))")
           python3 packaging/docker/smoke_image.py prometheus:ci --expect-version "$version"
+      # The OpenShell sandbox image (packaging/openshell/Dockerfile) is a thin layer on the one just tested.
+      # Here it runs under plain Docker: the sandbox shape, and the daemon with all its state under /sandbox.
+      # The run inside a real OpenShell sandbox is recorded in docs/guide/openshell.md.
+      - name: Build the OpenShell sandbox image on top
+        run: docker build -f packaging/openshell/Dockerfile --build-arg BASE_IMAGE=prometheus:ci -t prometheus-sandbox:ci .
+      - name: Sandbox image smoke test (plain Docker)
+        run: python3 packaging/openshell/smoke_openshell.py --docker prometheus-sandbox:ci
