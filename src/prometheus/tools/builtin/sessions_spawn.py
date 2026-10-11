@@ -55,6 +55,8 @@ class SessionsSpawnTool(BaseTool):
                 cwd=context.cwd,
                 route=plan.key,
                 metadata=plan.record(),
+                # One brief, one turn, then exit with a result (cli/worker.py).
+                worker=True,
             )
         except (ValueError, RuntimeError) as exc:
             return ToolResult(output=f"sessions_spawn failed: {exc}", is_error=True)
