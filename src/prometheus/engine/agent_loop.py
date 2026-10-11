@@ -953,6 +953,7 @@ class _StopReason:
     DIVERGENCE_HALT = _IterationReason.DIVERGENCE_HALT
     EMPTY_RESPONSE = _IterationReason.EMPTY_RESPONSE
     CONTEXT_PREFLIGHT = "context_preflight_refusal"
+    CONTEXT_OVERFLOW = "context_overflow"
     BOUNDARY_ESCAPE = "boundary_escape"
     FORCED_TOOL_NOT_HONORED = "forced_tool_not_honored"
     NO_FINAL_MESSAGE = "no_final_message"
@@ -1586,6 +1587,47 @@ async def _on_stream_error(
         except Exception:
             log.debug("telemetry v2: provider-error row not recorded", exc_info=True)
         raise
+
+
+@dataclass(frozen=True)
+class _ContextOverflowEvent:
+    """The provider refused the round's prompt as over its window (#704)."""
+
+    info: dict
+
+
+async def _overflow_guard(stream: AsyncIterator) -> AsyncIterator:
+    """Pass a round's stream through; turn an over-window refusal into an event.
+
+    Inside ``_on_stream_error`` on purpose: the provider-error row and stop
+    reason are for failures the turn cannot answer, and this one it can — the
+    loop ends the turn with the #356-style explanation instead of raising. Any
+    other failure propagates unchanged.
+    """
+    try:
+        async for event in stream:
+            yield event
+    except Exception as exc:
+        from prometheus.api.turn_errors import KIND_CONTEXT_OVERFLOW, classify_turn_error
+
+        info = classify_turn_error(exc)
+        if info.get("kind") != KIND_CONTEXT_OVERFLOW:
+            raise
+        yield _ContextOverflowEvent(info=info)
+
+
+def _context_overflow_text(model: str, info: dict) -> str:
+    needed, window = info.get("tokens_needed"), info.get("window")
+    size = ""
+    if isinstance(needed, int) and isinstance(window, int):
+        size = (f" — ~{needed:,} tokens against its {window:,}-token window "
+                f"(over by ~{needed - window:,})")
+    return (
+        f"This conversation is too long for {model}{size}, and the backend refused it. "
+        f"Nothing more was sent. Older turns need compacting: /reset clears this "
+        f"session's context, or continue in a new session. Retrying unchanged will "
+        f"fail the same way."
+    )
 
 
 async def _run_loop(
@@ -2315,7 +2357,8 @@ async def _run_loop(
             if turn_record is not None:
                 turn_record.stop(_StopReason.PROVIDER_ERROR)
 
-        async for event in _on_stream_error(stream_round_with_fallback(
+        overflow_info: dict | None = None
+        async for event in _on_stream_error(_overflow_guard(stream_round_with_fallback(
             envelope=loop_envelope,
             provider=context.provider,
             model=context.model,
@@ -2328,7 +2371,11 @@ async def _run_loop(
             operation="loop_round",
             round_index=turn,
             session_id=rec_sid,
-        ), _v2_provider_error):
+        )), _v2_provider_error):
+            if isinstance(event, _ContextOverflowEvent):
+                # The last event of the round: the guard yields it and ends.
+                overflow_info = event.info
+                continue
             if degrade_notice_this_turn and not _degrade_announced:
                 # First event after the swap. on_degrade fires before the fallback streams, so
                 # by now the decision is recorded and the announcement precedes its output.
@@ -2367,6 +2414,45 @@ async def _run_loop(
             _tail = _markup_filter.flush()
             if _tail:
                 yield AssistantTextDelta(text=_tail), None
+
+        if overflow_info is not None:
+            # #704: the backend refused the prompt as over its window. That ends
+            # the TURN with the reason and the way out — the same answer the
+            # #356 pre-flight gives when the estimate catches it first — and
+            # nothing is sent again: the same prompt cannot fit next time.
+            _v2_response("error", None)
+            if turn_record is not None:
+                turn_record.stop(_StopReason.CONTEXT_OVERFLOW)
+            log.error(
+                "context overflow (#704): the backend refused the prompt as over its "
+                "window (needed=%s window=%s). Ending the turn with an explanation. "
+                "session=%s model=%s",
+                overflow_info.get("tokens_needed"), overflow_info.get("window"),
+                effective_session_id, context.model,
+            )
+            if context.telemetry is not None:
+                try:
+                    context.telemetry.record_run(
+                        subsystem="agent_loop",
+                        operation="context_overflow_refusal",
+                        outcome="failed",
+                        session_id=rec_sid,
+                        model=context.model,
+                        summary={
+                            "tokens_needed": overflow_info.get("tokens_needed"),
+                            "window": overflow_info.get("window"),
+                            "provider": overflow_info.get("provider"),
+                        },
+                    )
+                except Exception:
+                    log.debug("context overflow telemetry write failed", exc_info=True)
+            overflow_msg = _make_assistant_msg(
+                _context_overflow_text(context.model, overflow_info))
+            messages.append(overflow_msg)
+            yield AssistantTurnComplete(
+                message=overflow_msg, usage=usage,
+                stop_reason=_StopReason.CONTEXT_OVERFLOW), usage
+            return
 
         if final_message is None:
             _v2_response("error", None)
