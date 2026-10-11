@@ -722,6 +722,21 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # check it is talking to this daemon before it sends the secret. "" removes an earlier one.
     local_pairing.publish_fingerprint(instance_fp)
 
+    # ── Instance certificate (pairing PR 5) ──────────────────────────────
+    # Self-signed over the instance key, so the TLS handshake's SPKI is the key hello fingerprints
+    # (docs/design/lan-tls-pr5.md). Made at boot, re-issued over the same key near expiry, served
+    # only in home-network mode (web/tls.py). Without it nothing is served on the home network.
+    from prometheus.config.instance_cert import ensure_instance_certificate
+    instance_cert_ok = False
+    if instance_fp:
+        try:
+            ensure_instance_certificate()
+            instance_cert_ok = True
+        except Exception:
+            logger.warning(
+                "Instance certificate unavailable: the home network gets no TLS listener, and so "
+                "nothing is served on it", exc_info=True)
+
     # ── Boot-SHA staleness signal ───────────────────────────────────────
     # The repo HEAD at process start is the identity of the code THIS process
     # loaded. /api/status, /health, and the heartbeat compare it against the
@@ -2871,6 +2886,18 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
             api_port = web_config.get("api_port", 8005)
             ws_port = web_config.get("ws_port", 8010)
+            # Home network (pairing PR 5): TLS on the LAN, plain HTTP on this machine only. Asked for
+            # without a certificate, NOTHING goes on the LAN: plain HTTP is kept on loopback, never
+            # put on the home network in TLS's place.
+            from prometheus.web.tls import LOOPBACK, lan_tls_plan
+            lan_tls = lan_tls_plan(config, web_bind.address)
+            loopback_only: dict[str, str] = {}
+            if lan_tls is not None and not instance_cert_ok:
+                logger.error(
+                    "network.home_network is on but there is no instance certificate, so nothing is "
+                    "served on the home network: plain HTTP stays on this machine only (%s)", LOOPBACK)
+                lan_tls = None
+                loopback_only = {"api_host": LOOPBACK, "ws_host": LOOPBACK}
             # Live recorder: give the web layer the daemon's SkillCreator
             # (signal_bus-wired) and the live SkillRegistry so trace uploads
             # persist through THE auto-skill write path and the running
@@ -2931,6 +2958,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     bind=web_bind.address,
                     api_port=api_port,
                     ws_port=ws_port,
+                    lan_tls=lan_tls,
+                    **loopback_only,
                 ))
             if web_task is not None:
                 tasks.append(web_task)
