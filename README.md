@@ -1,11 +1,15 @@
 # Prometheus
 
+[![GitHub stars](https://img.shields.io/github/stars/OAraLabs/Prometheus?style=social)](https://github.com/OAraLabs/Prometheus/stargazers)
+
 **A fire you own doesn't go out.**\
 Not a local model. A local agent.
 
 Pre-1.0 · known limits: [oara.ai/docs/limits/](https://oara.ai/docs/limits/)
 
 Prometheus is an AI agent that runs as a daemon on hardware you own, and keeps working after you close the laptop. It keeps its own schedule, runs background work and can message you on Telegram when a task finishes, remembers you in files you can read, and checks the file edits it claims against the disk. It talks to the inference servers you already run (llama.cpp, Ollama, LM Studio, vLLM), or to a cloud model on your own key.
+
+> If Prometheus is useful to you, or any of this code helps your own project, a ⭐ on the repo helps other people find it.
 
 ![Beacon's Mission home — the Armilla telemetry sphere beside Mission Control: agent state, scheduled jobs, local backends, and tool-call telemetry](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/panel-mission-home.png)
 
@@ -638,6 +642,8 @@ prometheus/
 ## Tests
 
 9,786 tests passed in CI on the v0.9.5 release commit ([run 36461450849](https://github.com/OAraLabs/Prometheus/actions/runs/36461450849), Linux, Python 3.11–3.13).
+
+If you build something with Prometheus, we'd love to hear about it. And if it helped, a star goes a long way.
 
 ## License
 
