@@ -12,6 +12,7 @@ Source: novel code for Prometheus, 2026-10-10.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import ssl
 from collections.abc import Mapping
@@ -101,6 +102,38 @@ def server_ssl_context(plan: LanTlsPlan) -> ssl.SSLContext:
 def advertised_endpoint(plan: LanTlsPlan | None, api_port: int) -> tuple[int, bool]:
     """``(port, tls)`` for the mDNS record: the TLS REST port with ``tls=1`` while TLS serves the LAN."""
     return (plan.api_port, True) if plan is not None else (api_port, False)
+
+
+def request_tls_plan(request: Any) -> LanTlsPlan | None:
+    """The TLS listener set when *request* came in on its REST listener, else ``None``.
+
+    The one rule for "this request is TLS", for anything that tells a client where to connect back (the approved
+    pairing poll, §7.2). The SERVER decides it, never a header the requester sent: the scheme the daemon served
+    (uvicorn does not believe ``X-Forwarded-Proto`` unless ``web.trusted_proxies`` names the proxy) and the local
+    port the connection arrived on. Plain HTTP stays on loopback in home-network mode, so a request on the LAN
+    listener is the only kind that can be TLS here, and the ports to hand back are exactly that listener set's.
+
+    ``None`` for a plain request, in any mode; when no TLS listener set is up (``app.state.lan_tls``); and for an
+    ``https`` request that arrived on some other port (a TLS-terminating proxy in front of another listener), where
+    the TLS ports are not reachable the way an answer would imply. A server that reports no local port is judged by
+    the scheme and the plan alone.
+    """
+    plan = getattr(getattr(getattr(request, "app", None), "state", None), "lan_tls", None)
+    if plan is None or request.url.scheme != "https":
+        return None
+    server = (getattr(request, "scope", None) or {}).get("server")
+    if server and len(server) > 1 and server[1] is not None and int(server[1]) != plan.api_port:
+        return None
+    return plan
+
+
+def spki_sha256() -> str | None:
+    """The instance key's SPKI pin, all 32 bytes as 64 hex characters (the certificate is made over that key), or
+    ``None`` when there is no key. Read-only: creates nothing."""
+    from prometheus.config.instance_key import instance_public_key_der
+
+    der = instance_public_key_der()
+    return hashlib.sha256(der).hexdigest() if der else None
 
 
 def tls_ready() -> bool:
