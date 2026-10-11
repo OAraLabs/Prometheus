@@ -129,6 +129,7 @@ _REASON_WORDS = {
     "max_iterations_hit": "it hit the tool-iteration cap before it finished",
     "timeout": "it ran past its time limit",
     "empty_brief": "it was given an empty brief",
+    "daemon_restart": "the daemon restarted while it ran, and its process was stopped",
 }
 
 
