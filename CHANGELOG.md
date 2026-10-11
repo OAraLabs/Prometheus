@@ -18,6 +18,10 @@ Prometheus can now be reached from more than one device. Phones and other comput
   - New configs are written with `web.bind: 127.0.0.1`. Existing configs are not changed.
 - **An empty `PROMETHEUS_API_TOKEN=` no longer serves the API open (#717).** Before, that happened even when the env file held a token.
 - **Setup refuses a key or token with a line break or another control character (#738).** The env file is line-based, so such a value could add a second variable, such as an API token. Keys and tokens are also capped in length, and a value that isn't text is refused.
+- **A worker never gets the API token, and only a person approves its request (#744).**
+  - Every child the daemon starts (a worker, a spawned agent, a coding run) gets the bash tool's scrubbed environment, with only the provider keys put back. The API token, `PROMETHEUS_API_TOKEN_FILE` and the gateway tokens are never passed on.
+  - Approving a worker's request takes a device token: the owner's device, or the scoped device whose conversation it is. The API token and an open daemon get `401 not_a_person`, and the request stays pending.
+- **A desktop thumbnail goes only to a device that owns the task's session (#742).** A scoped device used to receive every session's thumbnails, or any session it named. The owner's device still sees every session, and a task started on Telegram shows only there.
 - **Agent tasks and coding runs start Python with `-P -s` (#709).** A file in the working directory can no longer shadow a real module.
 - **Logs give the length of what a person sent, never the text (#641).** API keys and bot tokens show only their last 4 characters (#645).
 - **Every approval answer records who gave it (#661):** token, device, or chat user. It goes in the audit log and the `approval_resolved` event.
@@ -40,6 +44,7 @@ Prometheus can now be reached from more than one device. Phones and other comput
   - Home network needs TLS. Plain HTTP on the LAN happens only with the explicit `network.allow_plaintext_lan: true`.
   - With the optional `[discovery]` extra (zeroconf), the daemon announces itself as `_prometheus._tcp` on private addresses, in home-network mode only.
 - **`oara doctor` reports home-network mode (#700, #727).** When `network.home_network` is on, the Home network row says whether it can work, whether it is safe, and whether the daemon will announce itself. The Web bind row says when TLS serves the LAN and plain HTTP stays on 127.0.0.1. Both rows read the same prediction the daemon's boot makes.
+- **A second computer can join over TLS (#745).** An approved join request that came in on the TLS listener is now told to connect back on `https://` and `wss://` (the TLS ports), and is given the certificate pin to check. Before, it got plain `http`/`ws` addresses that only listen on 127.0.0.1 in home-network mode, so the second computer paired and could never connect.
 - **Switch from a client (#700, #724).** `GET`/`PUT /api/network` saves `this_mac` or `home_network` to the config file. `POST /api/restart` (operator only) applies it: the daemon re-execs in place, in the same process, re-reads the env file, and comes back with the same fingerprint. A request from a web page (one with an `Origin` header) is refused.
 
 ### Prometheus.app for Mac (#695, #711, #722, #728, #694, #696, #708)
@@ -71,7 +76,7 @@ Prometheus can now be reached from more than one device. Phones and other comput
   - `/gate off` doesn't waive desktop prompts, `/approve all` skips them, and web content is never offered.
   - Each task has ceilings: 20 steps, 600 s and 10 approvals.
 - **Stop always works:** `/computer stop`, Beacon's Stop, or the REST or WebSocket stop. An action already in flight may still land.
-- Actions are chosen by fixed rules, not a model. A task ends when its one action has run (#672, #674, #664, #665, #710). After each step, a thumbnail of the approved window can go to marked devices (#701); this is experimental and not yet verified with the pinned driver.
+- Actions are chosen by fixed rules, not a model. A task ends when its one action has run (#672, #674, #664, #665, #710). After each step, a thumbnail of the approved window can go to marked devices that own the task's session (#701, #742); this is experimental and not yet verified with the pinned driver.
 
 ### Spawned workers (#713, #715, #719, #720)
 
@@ -79,7 +84,7 @@ Prometheus can now be reached from more than one device. Phones and other comput
 - **It takes its brief as one turn and exits with a result.**
   - If it runs out of context on another route, it's retried once on the conversation's route.
   - When `sentinel.enabled` is on, its result comes back into the conversation that spawned it, Beacon included. SENTINEL ships off.
-- **A worker can ask for approval.** The request shows up in the parent conversation as approve-once.
+- **A worker can ask for approval.** The request shows up in the parent conversation as approve-once, and only a person can approve it, with a device token (#744).
 - **A daemon restart stops the task processes it can no longer supervise (#731).**
   - Each task process records its pid and start time when it launches.
   - On restart, a still-running task process is stopped with its whole process tree.
@@ -107,6 +112,7 @@ Prometheus can now be reached from more than one device. Phones and other comput
 - Microcompaction never makes a tool result longer (#648). A cloud run's breaker recovery no longer starts microcompaction (#637).
 - `/mimo` now defaults to mimo-v2.6-pro, ahead of v2.5's retirement on 2026-10-21. The picker labels gpt-6-astra "no tool calls" (#686).
 - `POST /api/chat` uses the daemon's full runtime system prompt (#680).
+- **MiMo refuses forced tool calls with a clear error (#726).** MiMo supports only `tool_choice: auto` and silently drops anything else, so a forced tool call now fails with an error that says so; automatic tool choice is unchanged. Contributed by Sepehr-Taji (@sepehrtaji-dev).
 - Every tool's example call, which a model is shown after a malformed call, now validates against that tool's own input model (#670).
 
 ### Memory, telemetry and learning
@@ -123,8 +129,9 @@ Prometheus can now be reached from more than one device. Phones and other comput
 - In cron jobs you create, `python3` is the daemon's own interpreter (#651). Model-created jobs don't get this.
 - The daemon reports its real version (#642).
 - `scripts/deploy.sh`'s B6 step checks the model choices instead of re-applying them (#643).
+- The guides cover this release's features: TLS and the network modes, cautious mode, restart, workers, the Seatbelt floor and Docker (#733).
 - The README leads with the always-on daemon (#658, #673). The README, the API and install guides and the config template now describe TLS in home-network mode and `oara install-service` on macOS, which they still denied.
-- Project: the PR-gating workflows also run in a merge queue (#730), and the workflow actions are on current releases (#723). A Linux test switches a real daemon to home-network mode, restarts it, and checks that it comes back on TLS (#729).
+- Project: the PR-gating workflows also run in a merge queue (#730), and the workflow actions are on current releases (#723). A Linux test switches a real daemon to home-network mode, restarts it, and checks that it comes back on TLS (#729). Tests pin that a marked device reaches the computer-use binding of its own sessions only (#743).
 
 ### Upgrading from 0.9.6
 
@@ -136,3 +143,7 @@ Prometheus can now be reached from more than one device. Phones and other comput
 - **If your config came from the 0.9.6 template, edit `slash_commands.mimo.model`.** It sets `mimo-v2.5-pro`, which overrides the new default and stops working on 2026-10-21.
 - **The daemon writes `~/.prometheus/node/instance.key` and `instance.crt` at boot.** Keep them: the key is the fingerprint paired devices pin.
 - `oara install-service` with no systemctl or launchctl now exits 1. `/gate on` restores your configured mode, and re-running `oara setup` keeps it.
+
+### Known issues
+
+- If `web.bind` is set to a specific LAN address (not `0.0.0.0` or loopback), worker approval requests are refused (fail closed); use `0.0.0.0` or home-network mode.
