@@ -90,7 +90,8 @@ cross-volume move. Those need the real build and a clean machine.
    placeholder `[PDF file: name.pdf — install PyMuPDF to extract text]` instead of the text (which tells the
    user to install something an app user cannot install), and large images are sent to the model at full
    size instead of being shrunk first. Word and Excel files are unaffected. LGPL and MPL remain, with
-   their texts in the bundle (`THIRD-PARTY-LICENSES.txt` and each package's own licence file)
+   their texts in the bundle (`THIRD-PARTY-LICENSES.txt`, and each copyleft package's own licence files in
+   `Contents/Resources/licenses/<name>-<version>/`; a copyleft package with none refuses the build)
 
 ### Decisions (Will, 2026-10-07: take the recommended option on each)
 
@@ -110,7 +111,10 @@ cross-volume move. Those need the real build and a clean machine.
 5. **Service management.** Only the `install-service` fix now. `oara service ...`, doctor reporting
    service state and the "start at login" API come after the app.
 6. **Phones.** Left out of v1. Loopback only, and no widening API in this stack.
-7. **Extras.** The 81 MiB bundle: base plus anthropic, mcp, slack and discord.
+7. **Extras.** The 81 MiB bundle: base plus anthropic, mcp, slack and discord. Since 2026-10-11 also
+   discovery (zeroconf, LGPL-2.1-or-later, and ifaddr): the app is the install a phone looks for on the Wi-Fi.
+   It announces only in home-network mode. The Docker image leaves it out (mDNS does not cross Docker's
+   default bridge network).
 
 **Decided since (Will, 2026-10-08):** PyMuPDF is left out of the app (below). The icon is the OAra "O."
 mark. The clean-machine test is on a real MacBook, not a VM. **Still open:** the signing-team plan around

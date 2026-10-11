@@ -2,7 +2,7 @@
 """Build Prometheus.app: a relocatable Python, the pinned wheels, a native launcher, signed.
 
     python packaging/macos/build_app.py --identity <SHA-1 of a Developer ID Application cert> \\
-        [--extras anthropic,mcp,slack,discord] [--without pymupdf] [--wheel PATH]
+        [--extras anthropic,mcp,slack,discord,discovery] [--without pymupdf] [--wheel PATH]
         [--notarize --notary-profile NAME [--notary-keychain PATH]]
     python packaging/macos/build_app.py --wheel-only      # just the wheel, into <work>/wheel
 
@@ -74,7 +74,11 @@ PBS_URL = (
     f"{PBS_RELEASE}/{urllib.parse.quote(PBS_ASSET)}"
 )
 
-DEFAULT_EXTRAS = ("anthropic", "mcp", "slack", "discord")
+# discovery (zeroconf, LGPL-2.1-or-later): the app is the install a phone looks for on the Wi-Fi, so it ships the
+# mDNS announcer (it only runs in home-network mode). Its license text goes into the bundle with every other
+# copyleft package's (ship_copyleft_licenses). The Docker image leaves it out: mDNS does not get through Docker's
+# default bridge network.
+DEFAULT_EXTRAS = ("anthropic", "mcp", "slack", "discord", "discovery")
 
 # The wheel's build backend (pyproject.toml [build-system]) and its dependencies, pinned with hashes.
 BUILD_CONSTRAINTS = Path(__file__).resolve().parent / "build-constraints.txt"
@@ -509,6 +513,20 @@ _COPYLEFT = re.compile(
 )
 
 
+#: Where each copyleft package's own license files go, inside Contents/Resources.
+LICENSES_DIR = "licenses"
+_LICENSE_NAMES = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE)", re.I)
+
+
+def license_files(dist_info: Path, declared: Sequence[str]) -> list[Path]:
+    """A distribution's own license files: what its METADATA declares (``License-File``; PEP 639 wheels keep them
+    under ``licenses/``, older ones at the top of the .dist-info), else any LICENSE/COPYING/NOTICE file in it."""
+    found = [path for name in declared for path in (dist_info / "licenses" / name, dist_info / name) if path.is_file()]
+    if not found:
+        found = sorted(p for p in dist_info.rglob("*") if p.is_file() and _LICENSE_NAMES.match(p.name))
+    return list(dict.fromkeys(found))
+
+
 def license_index(site_packages: Path) -> list[dict[str, Any]]:
     """One row per installed distribution. ``copyleft`` is True/False, or None when the metadata
     names no license at all: unknown is never reported as permissive."""
@@ -529,8 +547,31 @@ def license_index(site_packages: Path) -> list[dict[str, Any]]:
             "license": license_text,
             "classifiers": classifiers,
             "copyleft": (True if _COPYLEFT.search(haystack) else False) if haystack.strip() else None,
+            "license_files": license_files(dist_info, msg.get_all("License-File") or []),
         })
     return rows
+
+
+def ship_copyleft_licenses(rows: Sequence[dict[str, Any]], dest: Path) -> None:
+    """Copy each copyleft distribution's own license files to ``dest/<name>-<version>/``.
+
+    LGPL, MPL and GPL oblige a distributor to hand the license text over with the software. Each wheel keeps it
+    in its .dist-info, which a person will not find inside an app bundle, so the bundle carries them in one
+    place. A copyleft package with no license file refuses the build: shipping it without its text is the one
+    thing the license forbids.
+    """
+    for row in rows:
+        if row["copyleft"] is not True:
+            continue
+        if not row["license_files"]:
+            raise BuildError(
+                f"{row['name']} {row['version']} is copyleft ({row['license'] or 'by its classifiers'}) and its "
+                ".dist-info holds no license file, so the app cannot carry its text. Leave it out (--without) "
+                "or find out why its wheel ships none.")
+        target = dest / f"{row['name']}-{row['version']}"
+        target.mkdir(parents=True, exist_ok=True)
+        for path in row["license_files"]:
+            shutil.copy2(path, target / path.name)
 
 
 def license_index_text(rows: Sequence[dict[str, Any]]) -> str:
@@ -542,6 +583,7 @@ def license_index_text(rows: Sequence[dict[str, Any]]) -> str:
         "",
         "Each package's own license text is kept in its .dist-info directory under",
         "Contents/Resources/python/lib/python3.12/site-packages/. Prometheus itself is MIT (LICENSE).",
+        f"The full license text of each copyleft package is also in Contents/Resources/{LICENSES_DIR}/<name>-<version>/.",
         "",
     ]
     for row in sorted(rows, key=lambda r: (order[r["copyleft"]], r["name"].lower())):
@@ -635,6 +677,7 @@ def assemble(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover - 
             shutil.copy2(REPO / name, bundle / "Contents" / "Resources" / name)
     (bundle / "Contents" / "Resources" / "THIRD-PARTY-LICENSES.txt").write_text(
         license_index_text(rows), encoding="utf-8")
+    ship_copyleft_licenses(rows, bundle / "Contents" / "Resources" / LICENSES_DIR)
 
     sign_all(bundle, args.identity)
 
