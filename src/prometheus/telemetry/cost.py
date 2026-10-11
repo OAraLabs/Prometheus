@@ -57,6 +57,12 @@ PRICING: dict[str, tuple[float, float]] = {
     # prefix match from one: the launch "introductory" $2/$10 became the
     # standard price (the scheduled 2026-09-01 rise to $3/$15 did not happen).
     "claude-sonnet-5": (2.00, 10.00),               # #533: was MISSING while PRESET_MODEL_CHOICES offered it → billed $0
+    # OpenRouter bills per token at the rate its own catalog lists, under ITS ids (vendor/model). This is the setup
+    # default (providers/registry.CLOUD_DEFAULTS["openrouter"]); $2 / $10 per Mtok is the recorded catalog entry
+    # (tests/fixtures/provider_key_checks/openrouter_default_model.json, GET /api/v1/models, 2026-10-11). Credit
+    # purchases carry a separate card fee that is not per-token and is not modelled here. Any OTHER OpenRouter model
+    # is unpriced until it is listed, which the tracker says out loud (billing mode `unknown`).
+    "anthropic/claude-sonnet-5": (2.00, 10.00),
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-sonnet-4-5": (3.00, 15.00),             # alias — added PR #19 (was missing despite being the user's /claude target)
     "claude-sonnet-4-5-20250929": (3.00, 15.00),    # dated snapshot of Sonnet 4.5 — added PR #19
@@ -150,6 +156,11 @@ BillingMode = str  # 'local' | 'subscription' | 'metered' | 'unknown'
 # (Alibaba's Token Plan and Coding Plan; both documented in providers/registry.py.)
 SUBSCRIPTION_HOST_MARKERS: tuple[str, ...] = ("token-plan.", "coding-intl.")
 
+# Hosts that resell other vendors' models per token under `vendor/model` ids. For a call served from one, a slash in
+# the name is the vendor prefix, NOT a path: without this the usual `anthropic/claude-...` id read as "served from a
+# local model file" and real spend was reported as free local traffic.
+METERED_GATEWAY_MARKERS: tuple[str, ...] = ("openrouter.ai",)
+
 
 def price_for(model: str) -> tuple[float, float] | None:
     """The (input, output) per-Mtok price for *model*, or None if unpriced.
@@ -186,7 +197,10 @@ def billing_for(model: str, base_url: str | None = None) -> tuple[BillingMode, s
     name = (model or "").strip()
     if not name:
         return "unknown", "no model recorded on the row"
-    if name.endswith(".gguf") or name.startswith("/") or "/" in name:
+    gateway = bool(base_url) and any(marker in str(base_url) for marker in METERED_GATEWAY_MARKERS)
+    # A real path or a .gguf is local wherever it is served from. A bare slash is only a path when the host is not a
+    # gateway that names its models vendor/model.
+    if name.endswith(".gguf") or name.startswith("/") or ("/" in name and not gateway):
         return "local", "served from a local model file"
     if base_url and any(marker in base_url for marker in SUBSCRIPTION_HOST_MARKERS):
         # #474 / #468: name the MATCHED MARKER, not the host. The reason string
@@ -349,8 +363,14 @@ class CostTracker:
         """The recorded rows, each carrying its own ``billing_mode``."""
         return tuple(self._records)
 
-    def record(self, model: str, input_tokens: int, output_tokens: int) -> float:
+    def record(
+        self, model: str, input_tokens: int, output_tokens: int, *, billing_mode: str | None = None,
+    ) -> float:
         """Record a usage event. Returns the cost in USD.
+
+        ``billing_mode`` is the stamp the telemetry seam already computed from the LIVE provider
+        (:func:`billing_stamp_full`). When given it is used as is; the name-only derivation below is the fallback for
+        a caller with no provider in hand, and it cannot tell a vendor-prefixed gateway id from a file path.
 
         The return value stays a float, and stays 0.0 for anything not metered,
         because callers and stored history read it as one. The fact that a 0.0
@@ -366,7 +386,7 @@ class CostTracker:
         # drift: billing_for() already knows that a .gguf path bills nothing and
         # an unrecognised name bills unknown, and it is the same function
         # /api/usage classifies unstamped history with.
-        mode, _reason = billing_for(model)
+        mode = billing_mode or billing_for(model)[0]
 
         if pricing is None:
             # LOUD, once per model. Returning 0.0 quietly is its own defect, separate from the

@@ -20,7 +20,7 @@ This page takes you from nothing to a running Prometheus daemon with Beacon conn
   24.04 — the likeliest self-hoster baseline — ships **3.12.3**, eleven releases behind
   that 3.12 leg, so a distro interpreter is close to what is tested but not identical to
   it. **3.13 is admitted by `requires-python` and tested**, and any of the three is fine.
-- **An inference backend** — llama.cpp or Ollama running with any model loaded (LM Studio and vLLM also work), *or* a cloud API key (OpenAI, Anthropic, Gemini, xAI, DeepSeek, Kimi, GLM, MiMo). The setup wizard probes for local servers and never writes a config it knows is broken.
+- **An inference backend** — llama.cpp or Ollama running with any model loaded (LM Studio and vLLM also work), *or* a cloud API key (OpenAI, Anthropic, Gemini, xAI, DeepSeek, Kimi, GLM, MiMo, OpenRouter). The setup wizard probes for local servers and never writes a config it knows is broken.
 - **Optional:** a Telegram bot token from [@BotFather](https://t.me/BotFather) if you want the Telegram gateway. The CLI and Beacon work without any gateway.
 
 No GPU? Point Prometheus at a cloud provider and you still get the whole daemon — memory, wiki, security gate, coding runs, all of it.

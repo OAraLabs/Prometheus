@@ -76,6 +76,18 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
         "default_env": "ZAI_API_KEY",
         "default_base_url_env": "ZAI_BASE_URL",
     },
+    "openrouter": {
+        # One account for many vendors' models, OpenAI-compatible. Beacon's "Sign in with OpenRouter" produces the
+        # key; setup (POST /api/setup/configure {"provider": "openrouter", "api_key": ...}) stores it.
+        "base_url": "https://openrouter.ai/api/v1",
+        # A mid-tier PAID model, never a free one: free models are capped at 50 requests a day and their hosts
+        # often train on what they are sent. The id is OpenRouter's own (vendor/model); it is the entry in their
+        # public catalog (GET /api/v1/models, read 2026-10-11): $2 / $10 per Mtok, tool calls supported. Recorded
+        # in tests/fixtures/provider_key_checks/openrouter_default_model.json, which the tests hold this to.
+        "model": "anthropic/claude-sonnet-5",
+        "default_env": "OPENROUTER_API_KEY",
+        "default_base_url_env": "OPENROUTER_BASE_URL",
+    },
     "mimo": {
         # Xiaomi MiMo first-party hosted platform.
         "base_url": "https://api.xiaomimimo.com/v1",
@@ -123,7 +135,7 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
 
 # Providers that use the OpenAI-compatible wire format
 _OPENAI_COMPAT_PROVIDERS = {
-    "openai", "gemini", "xai", "deepseek", "kimi", "glm", "mimo", "qwen",
+    "openai", "gemini", "xai", "deepseek", "kimi", "glm", "mimo", "qwen", "openrouter",
 }
 
 # Local servers that speak the OpenAI wire but are NOT cloud services: LM Studio
@@ -493,5 +505,5 @@ class ProviderRegistry:
         return [
             "llama_cpp", "ollama", "lm_studio", "vllm", "stub", "openai",
             "anthropic", "gemini", "xai", "deepseek", "kimi", "glm", "mimo",
-            "qwen",
+            "qwen", "openrouter",
         ]

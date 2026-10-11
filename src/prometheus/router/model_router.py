@@ -1440,6 +1440,8 @@ def _build_adapter_for(provider_name: str) -> Any:
         # structure the same way — it must NOT fall through to the local
         # QwenFormatter default below just because it is named "qwen".
         "qwen",
+        # OpenRouter is a cloud API in front of other vendors' models, OpenAI-compatible tool calls included.
+        "openrouter",
     ):
         return ModelAdapter(
             formatter=PassthroughFormatter(),

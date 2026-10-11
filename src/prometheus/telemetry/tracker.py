@@ -58,6 +58,8 @@ _CLOUD_PROVIDERS: frozenset[str] = frozenset(
         "deepseek", "kimi", "glm", "mimo",
         # Alibaba (2026-08) — the omission described above.
         "qwen",
+        # OpenRouter (2026-10): a cloud API reached with a paid key, however many vendors' models it routes to.
+        "openrouter",
     }
 )
 
@@ -1512,7 +1514,7 @@ class ToolCallTelemetry:
 
                 handle = get_cost_tracker_handle()
                 if handle is not None:
-                    handle.record(model, input_tokens or 0, output_tokens or 0)
+                    handle.record(model, input_tokens or 0, output_tokens or 0, billing_mode=billing_mode)
             except Exception:
                 log.debug("cost tracker feed skipped", exc_info=True)
         return run_id
