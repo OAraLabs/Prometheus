@@ -17,6 +17,7 @@ Prometheus can now be reached from more than one device. Phones and other comput
   - A loopback bind refuses requests addressed to a foreign host name, which blocks DNS rebinding.
   - New configs are written with `web.bind: 127.0.0.1`. Existing configs are not changed.
 - **An empty `PROMETHEUS_API_TOKEN=` no longer serves the API open (#717).** Before, that happened even when the env file held a token.
+- **Setup refuses a key or token with a line break or another control character (#738).** The env file is line-based, so such a value could add a second variable, such as an API token. Keys and tokens are also capped in length, and a value that isn't text is refused.
 - **Agent tasks and coding runs start Python with `-P -s` (#709).** A file in the working directory can no longer shadow a real module.
 - **Logs give the length of what a person sent, never the text (#641).** API keys and bot tokens show only their last 4 characters (#645).
 - **Every approval answer records who gave it (#661):** token, device, or chat user. It goes in the audit log and the `approval_resolved` event.
@@ -38,7 +39,7 @@ Prometheus can now be reached from more than one device. Phones and other comput
   - Clients pin the certificate. Its SHA-256 starts with the fingerprint `GET /api/hello` advertises.
   - Home network needs TLS. Plain HTTP on the LAN happens only with the explicit `network.allow_plaintext_lan: true`.
   - With the optional `[discovery]` extra (zeroconf), the daemon announces itself as `_prometheus._tcp` on private addresses, in home-network mode only.
-- **`oara doctor` gains a Home network row (#700).** When `network.home_network` is on, it says whether home-network mode can work, whether it is safe, and whether the daemon will announce itself.
+- **`oara doctor` reports home-network mode (#700, #727).** When `network.home_network` is on, the Home network row says whether it can work, whether it is safe, and whether the daemon will announce itself. The Web bind row says when TLS serves the LAN and plain HTTP stays on 127.0.0.1. Both rows read the same prediction the daemon's boot makes.
 - **Switch from a client (#700, #724).** `GET`/`PUT /api/network` saves `this_mac` or `home_network` to the config file. `POST /api/restart` (operator only) applies it: the daemon re-execs in place, in the same process, re-reads the env file, and comes back with the same fingerprint. A request from a web page (one with an `Origin` header) is refused.
 
 ### Prometheus.app for Mac (#695, #711, #722, #728, #694, #696, #708)
@@ -97,6 +98,9 @@ Prometheus can now be reached from more than one device. Phones and other comput
 - **Gemini and xAI can be chosen in setup (#739):** `POST /api/setup/configure`, `oara setup --provider gemini` or `xai`, and `GET /api/setup/detect` offer them, and `PUT /api/model` can switch to them.
   - The env-file template now names `GEMINI_API_KEY`. It said `GOOGLE_API_KEY`, which the daemon never read.
   - Their keys are saved without a check: the key checks cover OpenRouter, Anthropic and OpenAI.
+- **Every setup failure answers with a stable code (#738)**, listed in `docs/contracts/setup-errors.md`. Before, some answered in bare text.
+  - Setup now refuses a provider it doesn't offer. Before, one was written into the config.
+  - An unexpected error is coded JSON that never echoes the exception's message.
 - **`PROMETHEUS_OLLAMA_URL` and `PROMETHEUS_LLAMA_CPP_URL` now work (#725).** They set the main model's URL when it uses that provider; otherwise the daemon logs a warning. Before, they did nothing.
 - **A prompt too long for the backend's window now ends the turn with a plain explanation and the server's numbers (#716),** not "400 Bad Request". The CLI and every worker now compact like the daemon, using the server's real context window (#718).
 - **A `null` for an optional tool parameter takes its default (#666),** rather than failing or becoming a file named "None". This applies to local models; cloud models skip the adapter.
@@ -120,7 +124,7 @@ Prometheus can now be reached from more than one device. Phones and other comput
 - The daemon reports its real version (#642).
 - `scripts/deploy.sh`'s B6 step checks the model choices instead of re-applying them (#643).
 - The README leads with the always-on daemon (#658, #673). The README, the API and install guides and the config template now describe TLS in home-network mode and `oara install-service` on macOS, which they still denied.
-- Project: the PR-gating workflows also run in a merge queue (#730), and the workflow actions are on current releases (#723).
+- Project: the PR-gating workflows also run in a merge queue (#730), and the workflow actions are on current releases (#723). A Linux test switches a real daemon to home-network mode, restarts it, and checks that it comes back on TLS (#729).
 
 ### Upgrading from 0.9.6
 
