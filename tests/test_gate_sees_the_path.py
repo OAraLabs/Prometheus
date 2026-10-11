@@ -346,6 +346,13 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
         "asserts the tool executed, so the direct calls are the demonstration, "
         "not the proof."
     ),
+    "test_cautious_permission_mode.py": (
+        "the new `cautious` mode's decision table (every model-run bash and every file write asks; reads and "
+        "user-typed commands do not), read straight out of evaluate(). The same file then drives a write and a "
+        "shell command through _execute_tool_call with a prompt that answers no, and asserts nothing landed, so "
+        "the direct calls are the table and the dispatch tests are the proof. Registered, not exempted: if that "
+        "file stops calling evaluate directly this entry fails as stale."
+    ),
     "test_denied_prune.py": (
         "P4.1 matcher-drift fix: THREE readers share one deny list — the gate, "
         "the grep/glob prune layer, and the /workspace validator — and they used "

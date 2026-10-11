@@ -3033,6 +3033,19 @@ def main() -> None:
 
     from prometheus.security import install_log_redaction
 
+    # ── A named token file that gives no token: refuse to start ─────────
+    # Before setup mode and before the real boot, because both would carry on
+    # without it: setup mode would mint a token at the first pairing, and the
+    # real daemon would refuse only its web plane and keep running. A
+    # container gets the reason in its log and its restart policy instead.
+    from prometheus.config.api_token import ApiTokenFileError, token_from_file
+
+    try:
+        token_from_file()
+    except ApiTokenFileError as exc:
+        print(f"Refusing to start: {exc}", file=sys.stderr)
+        sys.exit(2)
+
     # ── Setup mode (Onboarding Phase 1) ─────────────────────────────────
     # No config anywhere → don't half-start on defaults (the old dead
     # end): boot the minimal pairing-only web server instead, so a client

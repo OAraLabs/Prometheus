@@ -2121,6 +2121,29 @@ def main() -> None:
         except Exception:
             pass
 
+    # Context compaction, as the daemon builds it (daemon.py, "Context size
+    # detection" and SPRINT-CONTEXT-COMPACTOR): the same `compaction:` switch,
+    # and the window MEASURED from the server (llama.cpp's /props n_ctx), never
+    # a configured effective_limit that outlived a model swap. Without it a
+    # spawned worker — this same CLI — had no tier-2 compaction and no #356
+    # pre-flight, and sent a prompt over its 32k window (#704).
+    detected_ctx_size: int | None = None
+    if hasattr(provider, "detect_context_size"):
+        try:
+            detected_ctx_size = asyncio.run(provider.detect_context_size())
+        except Exception:
+            log.warning("could not read the server's context size", exc_info=True)
+    compactor = None
+    try:
+        from prometheus.context.compactor import ContextCompactor
+
+        compactor = ContextCompactor.from_config(
+            config, provider=provider, model=model_name, telemetry=telemetry,
+            detected_limit=detected_ctx_size,
+        )
+    except Exception as exc:
+        log.warning("Context compactor not available: %s", exc)
+
     # DynamicToolLoader — deferred loading support
     from prometheus.context.dynamic_tools import DynamicToolLoader
     tool_loader = DynamicToolLoader(registry, config.get("tools", {}).get("deferred_loading"))
@@ -2216,6 +2239,7 @@ def main() -> None:
         # The engine built above (create_lcm_engine) — the CLI ingests its
         # turns into it, and the microcompactor checks it; None if unavailable.
         lcm_engine=lcm_engine,
+        compactor=compactor,
         profile_resolver=profile_resolver,
         boot_memory_prompt=memory_section(boot_memory_content),
         memory_prompt_builder=memory_section,
