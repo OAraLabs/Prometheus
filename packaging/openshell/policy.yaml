@@ -63,6 +63,7 @@ network_policies:
       - { host: api.z.ai, port: 443, protocol: rest, enforcement: enforce, access: read-write }
       - { host: api.xiaomimimo.com, port: 443, protocol: rest, enforcement: enforce, access: read-write }
       - { host: dashscope-intl.aliyuncs.com, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+      - { host: openrouter.ai, port: 443, protocol: rest, enforcement: enforce, access: read-write }
     binaries:
       - path: /usr/local/bin/python3.12
 
