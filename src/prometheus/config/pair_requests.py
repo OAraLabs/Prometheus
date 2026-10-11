@@ -22,7 +22,8 @@ What makes it safe to hold a request from a stranger:
   a blob sealed to the requester's key; the registry keeps the SHA-256 of the token. Nothing here returns,
   logs or stores the token itself.
 * **Approval grants an ordinary scoped device**, through ``mint_paired_device`` and nothing else. Never
-  ``mint_owner`` or ``issue_owner_credential``: the owner tier is only ever same-Mac pairing.
+  ``mint_owner`` or ``issue_owner_credential``: the owner tier comes only from the person at the machine
+  (same-Mac pairing, or an owner code from ``oara pair --owner``), never from an approval.
 * **The table appears on first use**, like ``computer_devices`` and ``device_sessions``, so a daemon that
   never pairs a device keeps the exact ``devices.db`` schema the parity fixtures record. Reads before that
   find nothing and create nothing.
@@ -245,8 +246,9 @@ def mint_paired_device(devices: DeviceStore, name: str, platform: str) -> dict:
 
     ``DeviceStore.mint_in_transaction`` has no tier parameter and writes no ``owner_devices`` row, and this
     passes no scope, no approver flag and no permission, because the request has no field to ask for any.
-    Not ``mint_owner`` and not ``api_token.issue_owner_credential``: those are the same-Mac tier only
-    (Will, 2026-10-08), so Jennifer's Mac approved from Will's sees only its own conversations.
+    Not ``mint_owner`` and not ``api_token.issue_owner_credential``: the owner tier comes only from the person
+    at the machine (same-Mac pairing, Will 2026-10-08; an owner code from ``oara pair --owner``, 2026-10-11),
+    never from an approval, so Jennifer's Mac approved from Will's sees only its own conversations.
     """
     return devices.mint_in_transaction(name, registry_platform(platform))
 

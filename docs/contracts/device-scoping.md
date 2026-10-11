@@ -1,6 +1,6 @@
 # Device scoping contract, v1
 
-**Contract id:** `device-scoping/1` (section 6, the owner tier, is `device-scoping/1.1`)
+**Contract id:** `device-scoping/1` (section 6, the owner tier, is `device-scoping/1.1`; its owner codes, 6.5, are `device-scoping/1.3`)
 **Scope:** What a *device token* may see and do with chat sessions, over REST and the WebSocket bridge. Code: `web/session_scope.py` (the rule), `config/device_store.py` (the record), `web/server.py` and `web/ws_server.py` (the enforcement points).
 **Written for:** whoever builds on the device model next (approve-to-pair): section 2 is what changed in it, and section 2.3 is what to keep true.
 
@@ -95,7 +95,7 @@ The person's **own** device is not a guest. Same-Mac pairing used to hand Beacon
 
 - **Marker:** a row in `owner_devices (device_id PRIMARY KEY, marked_at, marked_by)`, created on the first owner mint (so `api_devices` and the parity goldens keep their schema), written in the same transaction as the device row. `marked_by` is the route that issued it. `DeviceIdentity.owner` is read from it at every authentication, never from anything the caller sends. `DeviceIdentity.is_operator` = global token or owner device; pairing-approval's "approver" test is exactly that predicate.
 - **Two mint paths, and the tier is not a parameter on either.** `DeviceStore.mint(name, platform)` makes an ordinary scoped device (an approved device gets this). `DeviceStore.mint_owner(name, platform, by=, replaces=)` makes an owner device. `api_token.issue_owner_credential(config, *, devices, ...)` is the only caller on the pairing path; it needs the registry and has no fallback to the global token.
-- **Who can mint one:** **only same-Mac pairing** (Will, 2026-10-08): `POST /api/pair/local` with the file secret, or — for a fresh install, which cannot mint during setup — the global token's `POST /api/devices` with `{"owner": true}` **from this Mac's loopback address**, as the second step of the same pairing. From any other address that request is a 403. Approved devices (Telegram, or another device) always get `DeviceStore.mint`: another computer, Jennifer's Mac approved from yours, sees only its own conversations. Never a request that merely asks, and never a device: an owner device cannot enrol another.
+- **Who can mint one:** only **the person at the machine**. Same-Mac pairing (Will, 2026-10-08): `POST /api/pair/local` with the file secret, or — for a fresh install, which cannot mint during setup — the global token's `POST /api/devices` with `{"owner": true}` **from this Mac's loopback address**, as the second step of the same pairing; from any other address that request is a 403. And, for a Beacon on **another** computer, a one-time **owner code** that the person mints on this machine with `oara pair --owner` (Will, 2026-10-11; 6.5). Approved devices (Telegram, or another device) always get `DeviceStore.mint`: another computer, Jennifer's Mac approved from yours, sees only its own conversations. Never a request that merely asks, and never a device: an owner device cannot enrol another, and cannot mint an owner code.
 
 ### 6.2 What "operator-equivalent" covers — and what it does not
 
@@ -117,6 +117,16 @@ Minting an owner device **for this Mac** replaces the earlier owner credentials 
 ### 6.4 What this does not fix
 
 The global token stays valid and stays in `~/.config/prometheus/env`, where the bash tool can read it, and macOS has no shell floor. This change stops a paired **device** from holding the master key. It does not stop a **model** from reading it; that needs the restrictive default permission mode, which is separate work.
+
+### 6.5 Owner codes: the owner's device on another computer (`device-scoping/1.3`)
+
+Same-Mac pairing reaches only a Beacon on the daemon's own machine. A Beacon on another computer (a MacBook reaching a Mac mini over Tailscale) could hold the API token, which #744 refuses for a worker's approval because a model can read it, or a scoped token, which sees only its own conversations. Neither can approve a worker. So the person at the machine hands that Beacon a one-time code (`web/owner_code_routes.py`, `config/owner_codes.py`):
+
+- **Minting is the global token's, from this host** (`POST /api/pair/owner-codes`, what `oara pair --owner` calls). An owner device is a 403 `global_token_only` (it is not root: it cannot enrol a device, so it cannot mint the code that would); a scoped device is the gate's 403 `operator_only`; the global token from any other host is a 403 `not_this_machine`. "This host" is `loopback.is_this_host`: a loopback peer, or a peer at the very address the connection arrived on (a daemon bound to one tailnet or LAN address is reached from its own machine at that address), and never a request that carries `X-Forwarded-For` or `Forwarded`. A request with an `Origin` header is a 400. So the API token on a remote Beacon cannot promote that Beacon: someone has to be at the machine.
+- **The code** is 8 digits, good for 5 minutes, for one redemption; only one is live (a new one replaces it), and 5 wrong tries burn it. It is kept as a digest, in memory: a restart ends it. `GET` / `DELETE /api/pair/owner-codes/{id}` (same gate) say what became of it (who redeemed it, from which address) and cancel it.
+- **Redeeming is public** (`POST /api/pair/owner`, in `web/public_routes.py`): `{code, device_name, platform}`. Every failure is one `401 invalid_code`. Success mints an owner device with `marked_by = "owner-code"` (`api_token.OWNER_SOURCE_OWNER_CODE`) and answers `{token, device_id, name, owner: true, endpoints, tls}`. It is not in `SAME_MAC_OWNER_SOURCES`, so this Mac's re-pairing never revokes it, and a second redemption never revokes the first: each computer keeps its own, and the operator revokes one in the device list.
+- **Not sealed.** The token is in the answer in clear, as for `/api/pair/local`; every request the device makes afterwards carries it anyway, so the path has to be TLS, a tailnet or loopback (PAIRING-APPROVAL-API.md 7.1).
+- **What it does not stop:** a TCP relay on this machine that adds no forwarding header makes a remote request look local here, as it does for every peer test; it still needs the global token. And a model's shell that can read the env file can mint a code like any other caller of the API token; the shell floors (#659, #712) are what keep the env file from it.
 
 ## 7. Route access: a scoped device is default-deny (`device-scoping/1.2`)
 

@@ -29,6 +29,9 @@ PUBLIC_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/api/pair/requests"),
     ("GET", "/api/pair/requests/{request_id}"),
     ("DELETE", "/api/pair/requests/{request_id}"),
+    # A Beacon on another computer redeems a one-time owner code that the person minted at this machine
+    # (`oara pair --owner`); the code is its only credential (web/owner_code_routes.py). Minting is NOT here.
+    ("POST", "/api/pair/owner"),
     # A spawned worker asks its parent conversation for approval with its own per-worker token (held in memory
     # by the task manager); loopback peer and Host only, and it approves nothing itself (web/server.py).
     ("POST", "/api/workers/approvals"),

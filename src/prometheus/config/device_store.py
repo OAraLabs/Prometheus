@@ -170,7 +170,8 @@ class DeviceStore:
         The same row ``mint`` writes, without the commit, so an approval can record itself and mint its
         device atomically: a failure after this rolls the device back, and there is never a live token
         nobody holds. There is no tier parameter, as with ``mint``: an owner device is only ever
-        ``mint_owner`` (same-Mac pairing), never the product of an approval.
+        ``mint_owner`` (same-Mac pairing, or an owner code minted at this machine), never the product of an
+        approval.
         """
         return self._new_device(name, platform)
 
@@ -495,8 +496,10 @@ class DeviceStore:
     #   mint()        an ordinary device. Scoped to its own sessions (web/session_scope.py), cannot
     #                 approve anything. This is what a device approved from Telegram or by another
     #                 device gets.
-    #   mint_owner()  the person's OWN device (same-Mac pairing, or the global token minting one
-    #                 for its owner's cockpit). Operator-equivalent for session scoping and device
+    #   mint_owner()  the person's OWN device (same-Mac pairing, the global token minting one
+    #                 for its owner's cockpit, or a one-time owner code the person minted at this
+    #                 machine for a Beacon on another computer, web/owner_code_routes.py).
+    #                 Operator-equivalent for session scoping and device
     #                 management; ``DeviceIdentity.is_operator`` is true. NOT root: it still cannot
     #                 enrol devices or define MCP servers (those stay global-token-only).
     #

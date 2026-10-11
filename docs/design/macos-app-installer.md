@@ -310,7 +310,8 @@ becomes the configured daemon. **Then trade the global token for an owner device
 loopback address, `POST /api/devices` with the global token and `{"owner": true, "name": "..."}` answers
 201 `{id, name, platform, token, created_at, owner: true, revoked_previous}`. **Owner tokens come only from
 same-Mac pairing:** that owner mint is accepted only from the Mac's own loopback address and is a 403 from
-anywhere else. Every other computer, including one approved from Beacon, gets an ordinary scoped token. Keep ONLY that owner token and
+anywhere else. Every other computer, including one approved from Beacon, gets an ordinary scoped token, unless the
+person at this Mac hands it an owner code (`oara pair --owner`, device-scoping.md 6.5). Keep ONLY that owner token and
 drop the global one. *Today* (before #696) there is no such route option and the client keeps the global token.
 
 **Pairing, existing install** (`~/.prometheus` already has a config, so there is no setup mode and no

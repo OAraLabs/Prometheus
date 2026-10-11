@@ -44,6 +44,16 @@ THE PUBLIC SURFACE (stable names and signatures; another change imports them)
     lets a forged header rewrite the client to 127.0.0.1; either way the request
     was relayed, which the header gives away."
 
+``is_this_host(request_or_scope) -> bool``
+    ``is_same_machine``, OR a TCP peer whose address is the very local address
+    the connection arrived on (the ASGI ``server`` slot), still with no relay
+    header. A daemon bound to ONE non-loopback address (a tailnet or LAN
+    address) has no loopback listener, so a terminal on that machine reaches it
+    at that address and the kernel makes that address the source. A remote host
+    cannot complete a TCP handshake with the daemon's own address as its source.
+    For a route that is the person at this machine's act but not a secret
+    handed over loopback (``oara pair --owner`` minting an owner code).
+
 Two further names are internal to the web layer: :class:`LoopbackHostGuard` (an
 ASGI middleware) and :func:`guard_if_loopback`.
 
@@ -202,12 +212,46 @@ def is_same_machine(request_or_scope: Any) -> bool:
     also make.) Anything that does not clearly say "loopback, no relay" is False.
     """
     scope = getattr(request_or_scope, "scope", request_or_scope)
-    if not is_loopback_peer(scope):
+    return is_loopback_peer(scope) and not _relayed(scope)
+
+
+def is_this_host(request_or_scope: Any) -> bool:
+    """True when the request came from a process on THIS host and relayed nothing.
+
+    :func:`is_same_machine`, or a TCP peer whose address equals the local address the connection arrived on
+    (``scope["server"]``, which uvicorn reads from the accepted socket). A daemon bound to one non-loopback address
+    is reached from its own machine at that address, and the kernel picks that address as the source; a remote host
+    cannot complete a handshake from the daemon's own address, because the reply goes to the daemon's own stack.
+    IPv4-mapped spellings compare as the IPv4 address. Host names (a test client's ``testclient``), an unspecified
+    address and a missing slot are not addresses, and a request that carries ``X-Forwarded-For`` or ``Forwarded`` is
+    never this host. Like every peer test it cannot see through a TCP relay on this machine that adds no header.
+    """
+    scope = getattr(request_or_scope, "scope", request_or_scope)
+    if not isinstance(scope, Mapping) or _relayed(scope):
         return False
+    if is_loopback_peer(scope):
+        return True
+    peer, local = _slot_ip(scope, "client"), _slot_ip(scope, "server")
+    return peer is not None and not peer.is_unspecified and peer == local
+
+
+def _relayed(scope: Mapping[str, Any]) -> bool:
+    """Does the request carry a header a relay adds (``X-Forwarded-For``, ``Forwarded``)?"""
     for name, _value in scope.get("headers") or ():
         if isinstance(name, (bytes, bytearray)) and bytes(name).lower() in _RELAY_HEADERS:
-            return False
-    return True
+            return True
+    return False
+
+
+def _slot_ip(scope: Mapping[str, Any], slot: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The IP literal in an ASGI ``client`` or ``server`` slot, IPv4-mapped IPv6 as IPv4; None for anything else."""
+    value = scope.get(slot)
+    if not isinstance(value, (tuple, list)) or not value or not isinstance(value[0], str):
+        return None
+    ip = _ip_or_none(value[0])
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ip
 
 
 def _single_host_header(scope: Scope) -> str | None:
