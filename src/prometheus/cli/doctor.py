@@ -1027,13 +1027,13 @@ def check_bash_floors(config: dict[str, Any]) -> list[DiagnosticCheck]:
                 message=f"mode 'off' — {off_message}",
             )
         if state == C.STATE_UNSUPPORTED:
-            # "auto" on a platform with no AppArmor (macOS). INFO, not a
+            # "auto" on a platform with neither AppArmor nor sandbox-exec. INFO, not a
             # warning, and no fix: there is nothing to load, and a row nobody
             # can clear is how a report gets ignored. Said, not alarmed.
             return DiagnosticCheck(
                 name=name, category="platform", status="info",
-                message=f"mode {mode!r} — unsupported on this platform (no "
-                        f"AppArmor). {off_message}",
+                message=f"mode {mode!r} — unsupported on this platform (neither "
+                        f"AppArmor nor sandbox-exec). {off_message}",
             )
         if state == C.STATE_NO_WORKSPACE:
             return DiagnosticCheck(
