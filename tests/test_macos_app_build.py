@@ -411,6 +411,83 @@ def test_the_index_text_names_the_copyleft_ones_first(app, tmp_path):
     assert "Copyleft" in text
 
 
+LGPL_COPYING = "python-zeroconf is distributed under the GNU Lesser General Public License, version 2.1 or later.\n"
+
+
+def test_a_copyleft_package_ships_its_own_license_text_in_the_bundle(app, tmp_path):
+    """zeroconf (the discovery extra) is LGPL-2.1-or-later: the app has to carry its license text. Every copyleft
+    package's own license files go to Contents/Resources/licenses/<name>-<version>/, where a person can find them
+    without digging through site-packages."""
+    site = tmp_path / "site-packages"
+    _dist(site, "zeroconf", "0.151.5", "License-Expression: LGPL-2.1-or-later\nLicense-File: COPYING",
+          {"licenses/COPYING": LGPL_COPYING})
+    _dist(site, "python-telegram-bot", "22.7", "License-Expression: LGPL-3.0-only\nLicense-File: LICENSE.lesser",
+          {"licenses/LICENSE.lesser": "GNU LESSER GENERAL PUBLIC LICENSE Version 3"})
+    _dist(site, "httpx", "0.28.1", "License-Expression: BSD-3-Clause\nLicense-File: LICENSE.md",
+          {"licenses/LICENSE.md": "BSD"})
+    dest = tmp_path / "licenses"
+    app.ship_copyleft_licenses(app.license_index(site), dest)
+    assert (dest / "zeroconf-0.151.5" / "COPYING").read_text() == LGPL_COPYING
+    assert (dest / "python-telegram-bot-22.7" / "LICENSE.lesser").is_file()
+    assert not (dest / "httpx-0.28.1").exists(), "only the copyleft ones: the rest stay in their .dist-info"
+
+
+def test_an_older_wheel_with_its_license_at_the_top_of_the_dist_info_is_found_too(app, tmp_path):
+    site = tmp_path / "site-packages"
+    _dist(site, "oldlgpl", "1.0", "License: LGPL\nLicense-File: COPYING", {"COPYING": "LGPL text"})
+    dest = tmp_path / "licenses"
+    app.ship_copyleft_licenses(app.license_index(site), dest)
+    assert (dest / "oldlgpl-1.0" / "COPYING").read_text() == "LGPL text"
+
+
+def test_a_copyleft_package_with_no_license_text_refuses_the_build(app, tmp_path):
+    site = tmp_path / "site-packages"
+    _dist(site, "zeroconf", "0.151.5", "License-Expression: LGPL-2.1-or-later")
+    with pytest.raises(app.BuildError, match="zeroconf"):
+        app.ship_copyleft_licenses(app.license_index(site), tmp_path / "licenses")
+
+
+def test_the_index_says_where_the_copyleft_texts_are(app, tmp_path):
+    _dist(tmp_path, "zeroconf", "0.151.5", "License-Expression: LGPL-2.1-or-later")
+    assert "Contents/Resources/licenses/" in app.license_index_text(app.license_index(tmp_path))
+
+
+def test_the_build_ships_them_into_the_bundle_before_it_is_signed(app):
+    source = BUILD_APP.read_text(encoding="utf-8")
+    assert "ship_copyleft_licenses(rows, bundle" in source, "the build never ships the copyleft license texts"
+    assert source.index("ship_copyleft_licenses(rows, bundle") < source.index("sign_all(bundle"), \
+        "a file added after signing breaks the seal"
+
+
+# ── home-network discovery: in the app, not in the container ─────────────────
+
+def test_the_app_ships_discovery_so_beacon_finds_it_on_the_home_network(app):
+    """The discovery extra (zeroconf) announces _prometheus._tcp in home-network mode. The app is the install a
+    phone looks for on the Wi-Fi, so it ships it; mDNS still runs only when home-network mode is on."""
+    assert "discovery" in app.DEFAULT_EXTRAS
+    assert "discovery" in app.parse_args(["--identity", FINGERPRINT]).extras
+
+
+def test_the_lock_pins_discovery_as_wheels_the_app_can_install(app):
+    """The app installs ``--only-binary :all:`` from the lock's export: zeroconf needs a CPython 3.12 macOS arm64
+    wheel in uv.lock, and ifaddr (its one dependency) a pure-Python one."""
+    import tomllib
+
+    lock = tomllib.loads((BUILD_APP.parents[2] / "uv.lock").read_text(encoding="utf-8"))
+    wheels = {p["name"]: [w["url"].rsplit("/", 1)[-1] for w in p.get("wheels", [])] for p in lock["package"]}
+    assert any("cp312" in w and "macosx" in w and "arm64" in w for w in wheels.get("zeroconf", [])), \
+        wheels.get("zeroconf")
+    assert any(w.endswith("py3-none-any.whl") for w in wheels.get("ifaddr", [])), wheels.get("ifaddr")
+
+
+def test_the_docker_image_leaves_discovery_out():
+    """mDNS does not get through Docker's default bridge network, so the image would announce nothing useful."""
+    dockerfile = (BUILD_APP.parents[2] / "Dockerfile").read_text(encoding="utf-8")
+    extras = re.search(r'^ARG PROMETHEUS_EXTRAS="([^"]*)"', dockerfile, re.M)
+    assert extras is not None
+    assert "discovery" not in extras.group(1).split()
+
+
 # ── notarization credentials ─────────────────────────────────────────────────
 
 def test_notarytool_is_told_who_asks_by_a_keychain_profile_and_nothing_else(app):
