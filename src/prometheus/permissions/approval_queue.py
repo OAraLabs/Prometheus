@@ -97,6 +97,12 @@ class PendingAction:
     #: RAW text. What a stored or backfilled copy carries instead of the text
     #: itself (computer-use v1.1 §5.2.2).
     text_chars: int | None = None
+    #: A spawned WORKER's request (PR-6, #704): which worker asked. It is filed
+    #: under the worker's parent conversation (``session_id``) and is
+    #: approve-once only — the worker's gate is not this one, so a lasting
+    #: grant here would grant nothing. Not ``task_id``: that means a DESKTOP
+    #: prompt, with the desktop's own approval rules.
+    worker_task_id: str | None = None
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _result: ApprovalResult = ApprovalResult.TIMEOUT
 
@@ -523,6 +529,11 @@ class ApprovalQueue:
                            if action.grant_computer_action is not None
                            else None)}
                if action.task_id is not None else {}),
+            # A spawned worker's request: which worker, which conversation,
+            # approve once. ABSENT for every other request.
+            **({"worker_task_id": action.worker_task_id, "session_id": action.session_id,
+                "once_only": True}
+               if action.worker_task_id is not None else {}),
         }
 
     async def _emit(self, kind: str, payload: dict) -> None:
@@ -577,8 +588,17 @@ class ApprovalQueue:
         grant_command: str | None = None,
         grant_computer_action: Any | None = None,
         arguments: dict[str, Any] | None = None,
+        *,
+        once_only: bool = False,
+        worker_task_id: str | None = None,
+        session_id: str | None = None,
     ) -> ApprovalResult:
         """Queue an action for user approval.
+
+        *worker_task_id* / *session_id* / *once_only* file a spawned worker's
+        request under the conversation that spawned it, approve-once (see
+        ``PendingAction.worker_task_id``). *session_id* defaults to the run in
+        progress.
 
         Sends a Telegram message and waits for /approve or /deny response.
         Returns APPROVED, DENIED, or TIMEOUT.
@@ -623,7 +643,9 @@ class ApprovalQueue:
             # forget to scrub. Storing the raw dict and scrubbing per surface
             # is how one surface ends up echoing a secret.
             arguments=redact_arguments(arguments),
-            session_id=RUN_SESSION.get(),
+            session_id=session_id or RUN_SESSION.get(),
+            once_only=once_only,
+            worker_task_id=worker_task_id,
         )
         self._register(action)
         await self._emit("approval_pending", self.serialize_pending(action))
@@ -956,3 +978,8 @@ class ApprovalQueues:
 def is_desktop_request(action: Any) -> bool:
     """A desktop task's prompt — skipped by every "approve all" (W2)."""
     return getattr(action, "task_id", None) is not None
+
+
+def is_worker_request(action: Any) -> bool:
+    """A spawned worker's request — answered on its own, like a desktop prompt."""
+    return getattr(action, "worker_task_id", None) is not None
