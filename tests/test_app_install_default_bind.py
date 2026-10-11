@@ -116,3 +116,55 @@ def test_the_daemon_and_setup_mode_apply_it(monkeypatch, tmp_path):
     monkeypatch.setenv("PROMETHEUS_WEB_BIND", "0.0.0.0")
     monkeypatch.setenv("PROMETHEUS_ENV_FILE", str(tmp_path / "env"))
     assert setup_server.resolve_setup_choice().address == "127.0.0.1"
+
+
+# ── one truth: what /api/network and oara doctor say is what the app daemon binds ──
+#
+# The guard and the app default decide what an app install binds. GET /api/network (#700) predicts what a restart
+# brings back from the file, and oara doctor says what the daemon will listen on. Both apply the same default and
+# guard, or every app install is told a restart is pending that would change nothing.
+
+def test_the_guard_reads_the_switches_through_network_settings(monkeypatch):
+    from prometheus.web import network
+
+    seen = []
+    real = network.NetworkSettings.from_config
+
+    def spy(config, **kw):
+        seen.append(config)
+        return real(config, **kw)
+
+    monkeypatch.setattr(network.NetworkSettings, "from_config", staticmethod(spy))
+    app_install_lan_guard(LAN, {"network": {"home_network": True}}, env=APP)
+    assert seen, "the guard reads network.* itself; #700's NetworkSettings is the one reader"
+
+
+def _network_on_the_app(tmp_path, monkeypatch, *, bind: str, source: str, file_text: str) -> dict:
+    import pytest
+
+    pytest.importorskip("fastapi")
+    from tests.test_network_routes import make
+
+    world = make(tmp_path, bind=bind, source=source, file_text=file_text)
+    monkeypatch.setenv("PROMETHEUS_INSTALL_KIND", "app")
+    return world.as_("global", "GET", "/api/network").json()
+
+
+def test_an_app_install_with_no_bind_saved_has_no_restart_pending(tmp_path, monkeypatch):
+    body = _network_on_the_app(tmp_path, monkeypatch, bind="127.0.0.1", source="default",
+                               file_text="web:\n  enabled: true\n")
+    assert (body["mode"], body["applied"]) == ("this_mac", "live"), body
+
+
+def test_a_lan_bind_the_guard_holds_back_is_not_a_restart_pending(tmp_path, monkeypatch):
+    body = _network_on_the_app(tmp_path, monkeypatch, bind="127.0.0.1", source="config",
+                               file_text="web:\n  enabled: true\n  bind: 0.0.0.0\n")
+    assert (body["mode"], body["applied"]) == ("this_mac", "live"), body
+
+
+def test_doctor_says_what_the_app_daemon_will_listen_on():
+    from prometheus.cli.doctor import check_web_bind
+
+    row = check_web_bind({"web": {"enabled": True, "bind": "0.0.0.0"}}, env=APP)
+    assert "127.0.0.1" in row.message and "all interfaces" not in row.message, row.message
+    assert "allow_plaintext_lan" in row.message + (row.fix or ""), "say how the owner gets the LAN back"
