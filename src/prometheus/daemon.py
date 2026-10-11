@@ -626,7 +626,7 @@ def _loaded_config_path(explicit: str | None) -> str | None:
     return str(found) if found is not None else None
 
 
-async def run_daemon(args: argparse.Namespace) -> None:
+async def run_daemon(args: argparse.Namespace) -> bool:
     """Main async entry point — start all subsystems."""
     config = load_config(args.config)
     model_config = config.get("model", {})
@@ -1500,6 +1500,16 @@ async def run_daemon(args: argparse.Namespace) -> None:
     def _signal_handler() -> None:
         logger.info("Shutdown signal received")
         release_daemon_lock()
+        shutdown_event.set()
+
+    # POST /api/restart (Beacon's v0.4 spec, 2.4): the same graceful shutdown, then main() re-execs this
+    # process's own command line, so a saved network mode takes effect with nobody touching the machine.
+    restart_requested = False
+
+    def _request_restart() -> None:
+        nonlocal restart_requested
+        logger.info("Restart requested over the API: shutting down, then starting again in this process")
+        restart_requested = True
         shutdown_event.set()
 
     loop = asyncio.get_running_loop()
@@ -2981,6 +2991,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     ws_port=ws_port,
                     lan_tls=lan_tls,
                     **loopback_only,
+                    request_restart=_request_restart,
                 ))
             if web_task is not None:
                 tasks.append(web_task)
@@ -3033,6 +3044,49 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     await asyncio.gather(*tasks, return_exceptions=True)
     logger.info("Prometheus daemon stopped")
+    return restart_requested
+
+
+def release_daemon_lock() -> None:
+    """The gateway's daemon lock, released (module level so a re-exec can drop it before the new image takes it)."""
+    from prometheus.gateway.status import release_daemon_lock as _release
+
+    _release()
+
+
+#: The environment at first startup, before the env file is loaded into it (``snapshot_startup_env``).
+_STARTUP_ENV: dict[str, str] | None = None
+
+
+def snapshot_startup_env() -> None:
+    """Remember the environment as it was at startup, before ``run_daemon`` loads the env file into it (with
+    setdefault: the real environment wins). A restart runs with THIS, so the env file is read again: re-exec'd
+    with the current environment, every value from the old file would count as real and a changed one (a rotated
+    token, a new key) would never be read."""
+    global _STARTUP_ENV
+    _STARTUP_ENV = dict(os.environ)
+
+
+def restart_argv() -> list[str]:
+    """This process's own command line, interpreter flags included (``sys.orig_argv``), for this interpreter."""
+    return [sys.executable, *sys.orig_argv[1:]]
+
+
+def reexec() -> None:
+    """Replace this process with a fresh daemon on the same command line (``POST /api/restart``).
+
+    Called by :func:`main` after ``run_daemon``'s ordinary graceful shutdown, with the environment of first startup
+    (:func:`snapshot_startup_env`), so the env file is read again. Same process, so launchd, systemd and
+    a terminal all keep it; the instance key is a file, so hello's ``fp`` is the same after it. The daemon lock is
+    released first so the new image can take it, and the log handlers are flushed (not closed: a test calls this).
+    """
+    release_daemon_lock()
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    env = _STARTUP_ENV if _STARTUP_ENV is not None else dict(os.environ)
+    os.execve(sys.executable, restart_argv(), env)
 
 
 # Log rotation. Deliberately constants rather than config keys: there is no
@@ -3084,6 +3138,8 @@ def daemon_start_args(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> None:
     """CLI entry point."""
+    # Before anything loads the env file: what a restart re-execs with (POST /api/restart).
+    snapshot_startup_env()
     parser = build_parser()
     args = parser.parse_args()
 
@@ -3201,7 +3257,7 @@ def main() -> None:
     from prometheus.config.load import ConfigReadError
 
     try:
-        asyncio.run(run_daemon(args))
+        restart = asyncio.run(run_daemon(args))
     except ConfigReadError as exc:
         print(f"{exc}", file=sys.stderr)
         sys.exit(1)
@@ -3210,6 +3266,8 @@ def main() -> None:
         # an argparse usage error: the invocation or the config is wrong.
         print(f"{exc}", file=sys.stderr)
         sys.exit(2)
+    if restart:
+        reexec()
 
 
 if __name__ == "__main__":

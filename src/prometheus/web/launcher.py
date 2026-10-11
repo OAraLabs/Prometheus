@@ -56,6 +56,7 @@ async def launch_web(
     ws_host: str | None = None,
     ws_port: int = 8010,
     lan_tls: Any | None = None,
+    request_restart: Any | None = None,
 ) -> None:
     """Start both REST API and WebSocket servers.
 
@@ -241,6 +242,9 @@ async def launch_web(
     # POST /api/chat/send) can dispatch user messages through the same flow
     # the WebSocket uses, without duplicating the session+agent plumbing.
     app.state.ws_bridge = bridge
+    # POST /api/restart: the daemon's own restart, when it was started as the daemon.
+    if request_restart is not None:
+        app.state.request_restart = request_restart
     # Task re-engagement for non-Telegram conversations goes through the
     # bridge, so a worker's result shows in the Beacon conversation that
     # spawned it (tasks/reengage.py).
