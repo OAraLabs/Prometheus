@@ -2214,7 +2214,11 @@ class WebSocketBridge:
     #      that did not would render an unknown kind's whole payload into its
     #      exportable Activity feed — a picture of a desktop in a file a
     #      person can copy off the machine.
-    #   4. it is attached to this task's session.
+    #   4. the device OWNS this task's session (web/session_scope.py: an owner
+    #      device is the operator and owns every one), and the socket is
+    #      attached to it or on the firehose. No filter is the device's own
+    #      sessions, not every session; a filter is the client's list, and
+    #      naming a session is not owning it.
 
     def _thumbnail_eligible(self, ws: Any, session_id: str) -> bool:
         identity = self._ws_identity.get(ws)
@@ -2239,6 +2243,12 @@ class WebSocketBridge:
         # this kind deliberately is not there (it is not a turn frame, and it
         # never goes through broadcast). Reusing it would have looked like a
         # session check while always answering True.
+        try:
+            if not self._access.owns(self._scope(ws), session_id):
+                return False
+        except Exception:  # noqa: BLE001 - fail closed on any doubt
+            logger.debug("computer thumbnail ownership check failed", exc_info=True)
+            return False
         sessions = self._ws_filters.get(ws)
         return not sessions or session_id in sessions
 

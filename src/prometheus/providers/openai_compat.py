@@ -60,20 +60,21 @@ def _chat_completions_url(base_url: str) -> str:
     return f"{base}/v1/chat/completions"
 
 
-def _native_tool_choice(tool_choice: object) -> object:
+def _native_tool_choice(tool_choice: object, *, provider_name: str = "") -> object:
     """Map the engine's per-call tool_choice to the OpenAI-compatible native param.
 
-    force-search (IGNITION): replaces the historical hardcode — for "auto" it
-    returns the exact same ``"auto"`` string, so the default path serializes
-    byte-identically to before. ``required`` -> ``"required"``; ``{"tool": X}``
-    -> ``{"type": "function", "function": {"name": X}}``.
-
-    Fail-loud guard: any other value raises. "none" never reaches here on the
-    engine path (run_loop sends no tools, so this block is skipped). A silent
-    degrade-to-auto or dropped key would defeat a forced turn invisibly.
+    MiMo only supports ``tool_choice="auto"`` and silently removes other
+    values. Refuse forced choices for MiMo instead of pretending the directive
+    was enforced when the server may choose not to call a tool.
     """
     if tool_choice == "auto" or tool_choice is None:
         return "auto"
+    if provider_name.casefold() == "mimo":
+        raise ValueError(
+            "MiMo only supports tool_choice='auto'; forced tool calls are not "
+            "supported by this provider. Use a provider that supports forced "
+            "tool choice, or allow automatic tool selection."
+        )
     if tool_choice == "required":
         return "required"
     if isinstance(tool_choice, dict) and isinstance(tool_choice.get("tool"), str) and tool_choice["tool"]:
@@ -259,7 +260,9 @@ class OpenAICompatProvider(ModelProvider):
                 }
                 for t in request.tools
             ]
-            payload["tool_choice"] = _native_tool_choice(getattr(request, "tool_choice", "auto"))
+            payload["tool_choice"] = _native_tool_choice(
+                getattr(request, "tool_choice", "auto"), provider_name=self.provider_name
+            )
 
         # Build URL — version-suffixed bases (/v1, /v4, /v1beta) already name
         # the API root; everything else gets the /v1 prefix.

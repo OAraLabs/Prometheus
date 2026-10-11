@@ -49,7 +49,13 @@ from prometheus.infra.doctor import (
     check_router,
     yaml_error_summary,
 )
-from prometheus.web.bind import BindError, app_install_lan_guard, is_all_interfaces, resolve_bind
+from prometheus.web.bind import (
+    BindError,
+    app_install_lan_guard,
+    format_host_port,
+    is_all_interfaces,
+    resolve_bind,
+)
 from prometheus.web.loopback import is_loopback_address
 
 import logging
@@ -372,6 +378,20 @@ def check_web_port(config: dict[str, Any], timeout: float = 3.0) -> DiagnosticCh
     )
 
 
+def _lan_at_next_boot(config: Mapping[str, Any], address: str) -> Any:
+    """What the daemon's next boot does with the home network on *address*: ``web/tls.decide_lan``, the call
+    the boot makes, with the certificate predicted the way the boot makes it. The boot makes the instance key if
+    there is none, then the certificate over it; only a key that is there and cannot be read leaves no
+    certificate. The Web bind and Home network rows both read this, so they cannot disagree about TLS.
+    """
+    from prometheus.config.instance_key import INSTANCE_KEY_FILENAME
+    from prometheus.config.paths import node_dir_path
+    from prometheus.web.tls import decide_lan, tls_ready
+
+    key = node_dir_path() / INSTANCE_KEY_FILENAME
+    return decide_lan(config, address, cert_ok=tls_ready() or not key.exists())
+
+
 def check_web_bind(
     config: dict[str, Any], *, env: Mapping[str, str] | None = None,
 ) -> DiagnosticCheck | None:
@@ -403,6 +423,22 @@ def check_web_bind(
             message=f"web API listens on {guarded.address} — this machine only: {resolved.describe()} asks for "
                     "the network, and on the Mac app plain HTTP stays on this Mac unless network.home_network "
                     "(TLS on the home network) or network.allow_plaintext_lan (plain HTTP, by choice) is on",
+        )
+    from prometheus.web.tls import LOOPBACK
+
+    lan = _lan_at_next_boot(config, resolved.address)
+    if lan.plan is not None:
+        return DiagnosticCheck(
+            name="Web bind", category="connectivity", status="ok",
+            message=f"home network over TLS: the web API listens on "
+                    f"{format_host_port(lan.plan.host, lan.plan.api_port)} (WebSocket port {lan.plan.ws_port}) "
+                    f"over TLS, {resolved.describe()}; plain HTTP stays on {LOOPBACK} (this machine only)",
+        )
+    if lan.loopback_only:
+        return DiagnosticCheck(
+            name="Web bind", category="connectivity", status="ok",
+            message=f"web API listens on {LOOPBACK} only — this machine only: network.home_network asks for "
+                    f"{resolved.describe()}, and with no TLS nothing is served there (see the Home network row)",
         )
     address = resolved.address
     if is_all_interfaces(address):
@@ -1320,7 +1356,6 @@ def check_network_discovery(
     from prometheus.config.instance_key import INSTANCE_KEY_FILENAME
     from prometheus.config.paths import node_dir_path
     from prometheus.web.network import HOME, THIS_MAC, NetworkSettings, describe
-    from prometheus.web.tls import lan_tls_plan, tls_ready
 
     settings = NetworkSettings.from_config(config)             # the one reader of these keys
     if not settings.home_network:
@@ -1329,10 +1364,9 @@ def check_network_discovery(
         resolved = resolve_bind(config, env=env)
     except BindError:
         return None                                            # the Web bind row already says the daemon will not start
-    plan = lan_tls_plan(config, resolved.address)
+    plan = _lan_at_next_boot(config, resolved.address).plan
     key = node_dir_path() / INSTANCE_KEY_FILENAME
-    state = describe(resolved.address, resolved.source, settings,
-                     tls=plan is not None and (tls_ready() or not key.exists()))
+    state = describe(resolved.address, resolved.source, settings, tls=plan is not None)
     name = "Home network"
     if state.mode == THIS_MAC:
         return DiagnosticCheck(

@@ -462,10 +462,10 @@ class TestAModelCannotWriteOutsideTheWorkspace:
 class TestDaemonAuthoredCommandsAreNotFloored:
     """Two launches go through the same spawn site with a command the DAEMON
     built, not the model: a sub-agent (``python -m prometheus``) and a coding
-    run's launcher. They need the daemon's environment (provider keys) and
-    write its state dirs, so flooring them would break them. The model's
-    shells inside them are floored where they run (the child's own bash tool,
-    the coding sandbox)."""
+    run's launcher. They need the provider keys and write the daemon's state
+    dirs, so flooring them would break them. The model's shells inside them
+    are floored where they run (the child's own bash tool, the coding
+    sandbox). They never get the daemon's own tokens (tasks/child_env.py)."""
 
     @pytest.mark.asyncio
     async def test_a_sub_agent_launch_is_not_floored(self, tmp_path, monkeypatch):
@@ -499,22 +499,27 @@ class TestDaemonAuthoredCommandsAreNotFloored:
         assert seen.get("floored") is False, seen
 
     @pytest.mark.asyncio
-    async def test_an_unfloored_launch_keeps_the_environment(
-        self, tmp_path, secret, read_floor_unavailable,
+    async def test_an_unfloored_launch_keeps_the_provider_keys(
+        self, tmp_path, secret, read_floor_unavailable, monkeypatch,
     ):
         """And the exemption really is one: required-but-unavailable does not
-        refuse it, and it still sees the daemon's environment."""
+        refuse it, and it still sees the provider keys a model call reads. Not
+        the API token: a worker's model shell can read its parent's starting
+        environment (tasks/child_env.py)."""
+        provider_key = f"fake-anthropic-{uuid.uuid4().hex}"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", provider_key)
         _configure(read="required")
         manager = get_task_manager()
         task = await manager.create_shell_task(
-            command=f"echo RAN; printenv {SECRET_NAME}",
+            command=f"echo RAN; printenv ANTHROPIC_API_KEY; printenv {SECRET_NAME} || echo NO_API_TOKEN",
             description="daemon-authored", cwd=tmp_path, floored=False)
         deadline = time.monotonic() + 15
         while manager.get_task(task.id).status not in TERMINAL:
             assert time.monotonic() < deadline
             await asyncio.sleep(0.05)
         out = manager.read_task_output(task.id)
-        assert "RAN" in out and secret in out, out
+        assert "RAN" in out and provider_key in out, out
+        assert "NO_API_TOKEN" in out and secret not in out, out
 
 
 @pytest.fixture()

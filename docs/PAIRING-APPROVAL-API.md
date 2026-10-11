@@ -296,7 +296,7 @@ A pairing request is not a device and touches no conversation: until it is appro
 }
 ```
 
-The sealed plaintext is JSON: `{"token": "...", "device_id": "...", "name": "..."}`. `endpoints` are built from the `Host` the requester used plus the configured ports and scheme, so they are reachable from the requester's side. `Cache-Control: no-store` on every response. Polling faster than once per second gets `429`.
+The sealed plaintext is JSON: `{"token": "...", "device_id": "...", "name": "..."}`. `endpoints` are built from the `Host` the requester used plus the ports and scheme of the listener it came in on, so they are reachable from the requester's side. A request that came in on the TLS REST listener (home-network mode) gets `https` for REST and `wss` on the configured TLS WebSocket port (`web.tls_ws_port`, default 8011), and `tls` carries the full SPKI pin; the plain WebSocket port listens on this machine only in that mode, so it is never offered to a TLS requester. A plain request, loopback or otherwise, gets `http` / `ws` on the configured plain ports and `tls: null`. Which listener a request came in on is decided by the daemon (the scheme it served and the local port), never by a header the requester sent (`X-Forwarded-Proto` and a `Host` naming the TLS port change nothing). `Cache-Control: no-store` on every response. Polling faster than once per second gets `429`.
 
 A missing id, a wrong secret and a secret for a different request all return the same `404 {"error": "unknown_request"}`.
 
