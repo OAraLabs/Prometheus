@@ -62,6 +62,17 @@ the config/identity files that call exists to write. Port:
 ``web.api_port``'s default (8005), overridable via
 ``PROMETHEUS_WEB_API_PORT`` (there is no config to read a port from —
 that's the point).
+
+Listen address: ``--bind`` > ``PROMETHEUS_WEB_BIND`` (process environment, then
+the env file) > ``0.0.0.0`` — :func:`resolve_setup_choice`, one resolver with the
+real daemon (web/bind.py), minus the config tier that does not exist yet. On a
+loopback address the Host-header check (web/loopback.py) also runs in front of
+every route, the unauthenticated pairing endpoint included. ``configure`` writes
+``web.bind`` into the new config: the address somebody CHOSE (``--bind`` or the
+variable, ``0.0.0.0`` included) so the real daemon (same process or after a
+restart) listens where setup mode did, and ``127.0.0.1`` when nobody chose one,
+because a fresh install listens on this machine only. A box set up from another
+machine therefore ends up loopback-only until its owner sets ``web.bind``.
 """
 
 from __future__ import annotations
@@ -77,7 +88,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from prometheus.config import local_pairing
 from prometheus.config.defaults import config_search_paths
+from prometheus.web.bind import (
+    BIND_ENV_VAR,
+    DEFAULT_BIND,
+    FRESH_INSTALL_BIND,
+    BindError,
+    ResolvedBind,
+    all_interfaces_warning,
+    format_host_port,
+    parse_bind,
+    resolve_bind,
+)
+from prometheus.web.loopback import (
+    is_loopback_address,
+    is_loopback_host_header,
+    is_same_machine,
+)
 
 logger = logging.getLogger("prometheus.setup_mode")
 
@@ -140,6 +168,56 @@ def resolve_setup_ws_port() -> int:
         return int(raw) if raw else DEFAULT_WS_PORT
     except ValueError:
         return DEFAULT_WS_PORT
+
+
+def resolve_setup_choice(flag: str | None = None) -> ResolvedBind:
+    """The address setup mode listens on, and what decided it: ``--bind`` > ``PROMETHEUS_WEB_BIND`` > 0.0.0.0.
+
+    There is no config yet, so no ``web.bind`` tier. The variable is read from
+    the process environment first and then from the env file, the same two
+    places the real daemon reads it from (it loads that file before resolving).
+    ``source`` is ``"default"`` only when nobody chose an address; ``configure``
+    needs that to tell a chosen ``0.0.0.0`` from an unspecified one.
+    Raises :class:`~prometheus.web.bind.BindError` on an invalid value — and also
+    when the env file exists but cannot be read, because then we cannot tell
+    whether the operator pinned an address, and guessing wide is the one wrong
+    answer.
+    """
+    env = dict(os.environ)
+    if flag is None and BIND_ENV_VAR not in env:
+        from prometheus.config.env_file import get_env_file_path, parse_env_file
+
+        path = get_env_file_path()
+        try:
+            from_file = parse_env_file(path)
+        except (OSError, UnicodeDecodeError) as exc:
+            raise BindError(
+                f"cannot read the env file {path} to look for {BIND_ENV_VAR} "
+                f"({type(exc).__name__}). Refusing to start rather than guess a "
+                "wider address."
+            ) from exc
+        if BIND_ENV_VAR in from_file:
+            env[BIND_ENV_VAR] = from_file[BIND_ENV_VAR]
+    return resolve_bind(None, flag=flag, env=env)
+
+
+def resolve_setup_bind(flag: str | None = None) -> str:
+    """The address alone, for callers that do not need to know what chose it."""
+    return resolve_setup_choice(flag).address
+
+
+def _as_resolved(bind: "str | ResolvedBind | None") -> ResolvedBind:
+    """One resolved choice from whatever a caller holds.
+
+    ``None`` resolves from the environment; a :class:`ResolvedBind` is used as it is
+    (the daemon resolved it already and knows what chose it); a plain string is an
+    address the caller named, so it counts as chosen, validated like any other.
+    """
+    if bind is None:
+        return resolve_setup_choice()
+    if isinstance(bind, ResolvedBind):
+        return bind
+    return ResolvedBind(parse_bind(bind, "bind"), "flag")
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +410,8 @@ def _apply_configure(
     *,
     api_port: int,
     ws_port: int,
+    bind: str = DEFAULT_BIND,
+    bind_source: str = "default",
     state: SetupModeState,
 ) -> "JSONResponse":
     """The blocking core of ``POST /api/setup/configure``.
@@ -350,6 +430,7 @@ def _apply_configure(
         _CLOUD_FAST_PROVIDERS,
         _cloud_default_config,
         _default_config,
+        apply_permission_mode_policy,
         probe_backend,
         write_config,
     )
@@ -485,6 +566,22 @@ def _apply_configure(
     # working after the flip. Defaults (8005/8010) are unchanged.
     config["web"]["api_port"] = api_port
     config["web"]["ws_port"] = ws_port
+    # Same for the interface: an address somebody CHOSE (--bind or the variable, 0.0.0.0
+    # included) is written as chosen, so the real daemon listens where setup mode did. When
+    # nobody chose one, setup mode is merely listening on the default, and a fresh install
+    # listens on this machine only: the file says so, exactly as `oara setup --fast` writes it.
+    if bind_source == "default":
+        written_bind = FRESH_INSTALL_BIND
+        if not is_loopback_address(bind):
+            logger.warning(
+                "Setup mode was reached on %s, but a fresh install listens on this machine "
+                "only: web.bind: %s is written. Once setup completes this box stops "
+                "answering the network; its owner sets web.bind (or starts the daemon with "
+                "--bind) to listen anywhere else.", bind, written_bind,
+            )
+    else:
+        written_bind = bind
+    config["web"]["bind"] = written_bind
     if agent_name:
         config["system"]["name"] = agent_name
 
@@ -520,6 +617,8 @@ def _apply_configure(
     telegram_token_saved = "telegram" in gateways_enabled
 
     cfg_path = get_config_dir() / "prometheus.yaml"
+    # A new app install asks before every shell command and file write; a re-POST keeps what the first wrote.
+    apply_permission_mode_policy(config, cfg_path)
     # backup_existing=False: setup mode only runs when no config existed
     # at boot, so the only thing a re-POST can overwrite is this same
     # call's earlier output — idempotent, no backup litter.
@@ -570,7 +669,49 @@ def _apply_configure(
             "enabled": True,
             "api_port": api_port,
             "ws_port": ws_port,
+            "bind": written_bind,
         },
+    })
+
+
+def _pair_with_local_secret(
+    request: Request, code: str, pairing: PairingState, api_port: int, ws_port: int,
+) -> JSONResponse:
+    """Same-Mac pairing: the one-time secret from ``config/local_pairing.py``.
+
+    Order matters. A browser, then a non-loopback peer or Host, is refused BEFORE the secret is compared
+    or consumed, so a refused request leaves the secret for the real client. The peer must be loopback
+    and so must the Host header: the first stops another machine, the second stops DNS rebinding.
+    """
+    from prometheus.config import api_token as api_token_module
+
+    if request.headers.get("origin"):
+        return JSONResponse(status_code=400, content={
+            "error": "browser_not_allowed",
+            "detail": "this route is for the app on this Mac, not for a web page",
+        })
+    if not (is_same_machine(request) and is_loopback_host_header(request.headers.get("host"))):
+        logger.warning("Same-Mac pairing refused: the request did not come from this Mac")
+        return JSONResponse(status_code=403, content={
+            "error": "not_loopback",
+            "detail": "this pairing secret is only accepted from this Mac, over localhost",
+        })
+    if not local_pairing.consume_if_matches(code):
+        logger.warning("Same-Mac pairing attempt failed (wrong or already-used secret)")
+        return JSONResponse(status_code=401, content={
+            "error": "invalid_code",
+            "attempts_remaining": pairing.attempts_remaining,
+            "detail": "wrong or already-used pairing secret",
+        })
+    # Setup mode has no device registry (setup creates no ~/.prometheus state) and its mutations
+    # authenticate with the global token, so the credential here IS the global token, by name. The
+    # client trades it for an owner device token once the daemon is configured.
+    token = api_token_module.issue_setup_credential(None).token
+    logger.info("Same-Mac pairing successful (secret consumed; credential value never logged)")
+    return JSONResponse(status_code=200, content={
+        "token": token,
+        "api_base_port": api_port,
+        "ws_port": ws_port,
     })
 
 
@@ -579,6 +720,7 @@ def create_setup_app(
     *,
     api_port: int | None = None,
     ws_port: int | None = None,
+    bind: str | None = None,
     state: SetupModeState | None = None,
     on_complete: Any = None,
 ):
@@ -588,6 +730,7 @@ def create_setup_app(
     flag: the real route surface must be unreachable in setup mode, so
     it simply is not mounted. Routes:
 
+    - ``GET  /api/hello``           → (public) the six-field "is there a Prometheus here"
     - ``GET  /api/setup/status``    → mode + pairing availability + configured
     - ``POST /api/setup/pair``      → code → real API token
     - ``GET  /api/setup/detect``    → (authed) probe inference backends
@@ -596,12 +739,18 @@ def create_setup_app(
     - anything else                 → 403 with an honest JSON body
 
     ``on_complete`` is called (after the /complete response is sent) to
-    stop the serve loop; tests leave it None.
+    stop the serve loop; tests leave it None. ``bind`` is the address the
+    server is (or will be) listening on — ``configure`` pins it into the config;
+    it defaults to :func:`resolve_setup_choice`, and an invalid one raises
+    :class:`~prometheus.web.bind.BindError`.
     """
     from prometheus import __version__
+    from prometheus.web import hello as hello_mod
 
     api_port = api_port if api_port is not None else resolve_setup_port()
     ws_port = ws_port if ws_port is not None else resolve_setup_ws_port()
+    resolved_bind = _as_resolved(bind)
+    bind = resolved_bind.address
     state = state if state is not None else SetupModeState()
 
     app = FastAPI(
@@ -611,6 +760,24 @@ def create_setup_app(
     # Same fail-closed rule as the main app: a mistyped query parameter is an error, not a
     # right-looking answer. Set before any route is registered. See web/strict_query.py.
     app.router.route_class = StrictQueryRoute
+
+    # Public like the pairing routes below, and there is no bearer gate here to refuse a browser or
+    # limit a peer, so the shared route does both itself (web/hello.py).
+    _hello_limiter = hello_mod.new_limiter()
+
+    @app.get("/api/hello")
+    async def hello(request: Request) -> JSONResponse:
+        return hello_mod.hello_response(
+            request, _hello_limiter, lambda: hello_mod.build_hello(None, setup_mode=True))
+
+    # A request to join needs an operator who could approve it, and a fresh install has none: the first
+    # device pairs with the six-digit code or the same-Mac secret below. Said in the contract's words, so
+    # a client sees the same refusal here as on a daemon that has turned requests off.
+    @app.post("/api/pair/requests")
+    async def pair_requests_unavailable() -> JSONResponse:
+        return JSONResponse(status_code=403, content={
+            "error": "pairing_unavailable",
+            "detail": "this daemon is in setup mode: pair with the six-digit code, or finish setup first"})
 
     @app.get("/api/setup/status")
     async def setup_status() -> dict[str, Any]:
@@ -632,7 +799,13 @@ def create_setup_app(
                 "error": "bad_request",
                 "detail": 'expected a JSON body: {"code": "<6 digits>"}',
             })
-        ok, reason = pairing.attempt(str(body["code"]).strip())
+        code = str(body["code"]).strip()
+        # A same-Mac client (Beacon, on the app install) sends the one-time FILE secret here instead of the
+        # six-digit code. It never goes through ``pairing.attempt``: a wrong secret must not burn the
+        # six-digit code's attempts, and the six-digit lockout or expiry must not block the secret.
+        if local_pairing.enabled() and local_pairing.is_secret_shaped(code):
+            return _pair_with_local_secret(request, code, pairing, api_port, ws_port)
+        ok, reason = pairing.attempt(code)
         if ok:
             from prometheus.config.api_token import ensure_api_token
             from prometheus.config.env_file import get_env_file_path
@@ -749,7 +922,7 @@ def create_setup_app(
         # Blocking work (backend re-probe, file writes) off the event loop.
         return await asyncio.to_thread(
             _apply_configure, body, api_port=api_port, ws_port=ws_port,
-            state=state,
+            bind=bind, bind_source=resolved_bind.source, state=state,
         )
 
     @app.post("/api/setup/complete")
@@ -828,22 +1001,36 @@ def create_setup_app(
 # ---------------------------------------------------------------------------
 
 
-def format_pairing_banner(code: str, api_port: int) -> str:
-    """The print-ONCE pairing banner (style: format_minted_banner)."""
+def format_pairing_banner(code: str, api_port: int, bind: str | None = None) -> str:
+    """The print-ONCE pairing banner (style: format_minted_banner).
+
+    *bind* is the address setup mode listens on. Left out (or any non-loopback
+    address) the text is unchanged; on a loopback address it must not send the
+    reader to a Tailscale or LAN address that is not listening.
+    """
     import socket
 
     from prometheus.config.api_token import BEACON_DOWNLOAD_URL
 
     host = socket.gethostname()
     bar = "=" * 68
+    if bind is not None and is_loopback_address(bind):
+        where = (
+            f"  Pair from Beacon on THIS machine: address {format_host_port(bind, api_port)}\n"
+            "  (setup is listening on this machine only) + the code above.\n"
+        )
+    else:
+        where = (
+            f"  Pair from Beacon: address {host}:{api_port} (or this machine's\n"
+            "  Tailscale / LAN address) + the code above.\n"
+        )
     return (
         f"\n{bar}\n"
         "  PROMETHEUS IS IN SETUP MODE — no configuration found\n"
         "\n"
         "  Pairing code (printed once — valid 15 min, one client, 5 tries):\n"
         f"\n    {code}\n\n"
-        f"  Pair from Beacon: address {host}:{api_port} (or this machine's\n"
-        "  Tailscale / LAN address) + the code above.\n"
+        f"{where}"
         f"  Don't have Beacon yet?  {BEACON_DOWNLOAD_URL}\n"
         "  Or set up here instead:  oara setup\n"
         "  Expired or locked? Restart `oara daemon` for a new code.\n"
@@ -853,10 +1040,18 @@ def format_pairing_banner(code: str, api_port: int) -> str:
 
 async def _serve_setup_mode(
     pairing: PairingState, state: SetupModeState, api_port: int,
+    bind: "str | ResolvedBind | None" = None,
 ) -> None:
-    """Run uvicorn until SIGTERM/SIGINT or setup-complete; exits cleanly."""
+    """Run uvicorn until SIGTERM/SIGINT or setup-complete; exits cleanly.
+
+    *bind* is the listen address (default: :func:`resolve_setup_choice`), as an
+    address or the :class:`ResolvedBind` that says what chose it. On a
+    loopback address the Host-header check sits in front of the whole app.
+    """
     import uvicorn
 
+    resolved = _as_resolved(bind)
+    address = resolved.address
     server_box: dict[str, Any] = {}
 
     def stop_server() -> None:
@@ -865,15 +1060,13 @@ async def _serve_setup_mode(
             srv.should_exit = True
 
     app = create_setup_app(
-        pairing, api_port=api_port, state=state, on_complete=stop_server,
+        pairing, api_port=api_port, bind=resolved, state=state, on_complete=stop_server,
     )
-    config = uvicorn.Config(app, host="0.0.0.0", port=api_port, log_level="info",
-                            # log_config=None: uvicorn must NOT install its own handlers.
-                            # Its default config gives uvicorn.access/uvicorn.error handlers
-                            # with propagate=False — a path around the root handlers, i.e.
-                            # around log redaction (security/log_redaction.py) and rotation.
-                            log_config=None)
-    server = uvicorn.Server(config)
+    # Built where the daemon builds its own, so setup mode gets the same answer about whose forwarded
+    # headers to believe (nobody's: there is no config yet to name a proxy). web/serving.py says why.
+    from prometheus.web.serving import serve_config
+
+    server = uvicorn.Server(serve_config(app, address, api_port))
     server_box["server"] = server
 
     loop = asyncio.get_running_loop()
@@ -898,8 +1091,12 @@ def missing_web_stack() -> list[str]:
     return missing
 
 
-def run_setup_mode() -> int | str:
+def run_setup_mode(bind: "str | ResolvedBind | None" = None) -> int | str:
     """Entry point: `oara daemon` found no config.
+
+    *bind* is the listen address the caller already resolved (``--bind`` >
+    ``PROMETHEUS_WEB_BIND`` > 0.0.0.0, see :func:`resolve_setup_choice`, which
+    also says what chose it); when omitted it is resolved here from the environment.
 
     Boots the pairing-only server, prints the pairing code banner ONCE,
     serves until SIGTERM/SIGINT — or until a paired client finishes
@@ -923,20 +1120,39 @@ def run_setup_mode() -> int | str:
         return 1
 
     api_port = resolve_setup_port()
+    resolved = _as_resolved(bind)
+    address = resolved.address
     pairing = PairingState()
     state = SetupModeState()
 
+    # The app install starts under launchd, so nobody sees the banner below. A one-time secret in a file
+    # only this user can read is how Beacon on the same Mac pairs. Minted idempotently: a restart before
+    # Beacon has paired keeps the same secret. A failure here costs only the automatic path.
+    if local_pairing.enabled():
+        try:
+            local_pairing.mint_secret()
+        except (local_pairing.PairingFileError, OSError) as exc:
+            logger.error("could not prepare the same-Mac pairing secret (%s); "
+                         "pair with the six-digit code instead", exc)
+        # pair.fp says what this hello says: the fingerprint of a key that ALREADY exists, or nothing. Setup mode
+        # makes no key (a key is ~/.prometheus state), so a fresh install has none and an earlier pair.fp goes.
+        from prometheus.config.instance_key import instance_fingerprint
+        local_pairing.publish_fingerprint(instance_fingerprint())
+
     logger.warning(
         "No prometheus.yaml found — starting in SETUP MODE (pairing-only "
-        "API on :%d; the full daemon surface is NOT running). Run "
+        "API on %s; the full daemon surface is NOT running). Run "
         "`oara setup` to configure, then restart the daemon — or "
         "drive the whole setup from a paired client (Beacon).",
-        api_port,
+        format_host_port(address, api_port),
     )
-    print(format_pairing_banner(pairing.code, api_port), flush=True)
+    wide = all_interfaces_warning(address)
+    if wide:
+        logger.warning(wide)
+    print(format_pairing_banner(pairing.code, api_port, address), flush=True)
 
     try:
-        asyncio.run(_serve_setup_mode(pairing, state, api_port))
+        asyncio.run(_serve_setup_mode(pairing, state, api_port, resolved))
     except KeyboardInterrupt:  # pragma: no cover — belt and braces
         pass
     if state.restart_requested:

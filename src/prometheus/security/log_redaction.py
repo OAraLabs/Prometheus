@@ -151,6 +151,9 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b\d{5,}:(?![0-9a-f]{30,}\b)[A-Za-z0-9_-]{30,}\b"), REDACTED),
     (re.compile(r"\b(?:xox[abcdeprs]|xapp)-[A-Za-z0-9-]{10,}"), REDACTED),
     (re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{16,})"), r"\1" + REDACTED),
+    # The pairing poll secret, beside its header name only (anchored on the label, like item 5: a bare
+    # 43-character base64url run is also a digest or an id).
+    (re.compile(r"(?i)(x-pairing-secret['\"]?\s*[:=]\s*['\"]?)[A-Za-z0-9_-]{16,}"), r"\1" + REDACTED),
     (re.compile(r"([?&](?:token|access_token|api_key|apikey|client_secret)=)([^&\s\"'<>]+)"),
      r"\1" + REDACTED),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), REDACTED),

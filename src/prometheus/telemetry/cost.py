@@ -35,7 +35,7 @@ from typing import Any
 # guesswork. See PR #19's "Drive-by findings" for follow-up.
 PRICING: dict[str, tuple[float, float]] = {
     # ── OpenAI — verified 2026-09-21 from developers.openai.com/api/docs/pricing
-    "gpt-6-astra": (10.00, 50.00),                  # current flagship
+    "gpt-6-astra": (10.00, 50.00),                  # current flagship; no tool calls over Chat Completions
     "gpt-5.6-sol": (4.00, 20.00),
     "gpt-5.6-terra": (2.00, 12.00),
     "gpt-5.6-luna": (0.20, 1.20),                   # /gpt default — cheap + fast, current generation
@@ -97,7 +97,9 @@ PRICING: dict[str, tuple[float, float]] = {
     "glm-5.3-flashx": (0.37, 1.25),
     "glm-5.2": (1.40, 4.40),                        # superseded, still listed and still priced — kept for history
     # ── Xiaomi MiMo — 2026-07 research, not re-verified in #533
-    "mimo-v2.5-pro": (0.435, 0.87),
+    "mimo-v2.6-pro": (0.435, 0.87),                 # same row as the v2.5-pro it replaces
+    "mimo-v2.6-flash": (0.14, 0.28),
+    "mimo-v2.5-pro": (0.435, 0.87),                 # retired 2026-10-21 (no replacement upstream); kept for history
     # ── Alibaba Qwen — the international (Singapore) pay-as-you-go endpoint,
     #    which is what CLOUD_DEFAULTS["qwen"] points at.
     #

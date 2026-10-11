@@ -12,11 +12,10 @@ arguments could originate in observed/injected content.
 
 from __future__ import annotations
 
-import os
-
 from pydantic import BaseModel, Field
 
 from prometheus.tasks.manager import get_task_manager
+from prometheus.tasks.worker_route import WorkerRouteRefused, plan_spawn
 from prometheus.permissions.path_schema import DIR_FIELD_READ
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
@@ -31,6 +30,9 @@ class TaskCreateToolInput(BaseModel):
     description: str = Field(description="Short human-readable task description.")
     command: str | None = Field(default=None, description="Shell command (local_bash only).")
     prompt: str | None = Field(default=None, description="Agent prompt (local_agent only).")
+    # The advertised text is pinned by the parity recording; the RULE is in
+    # tasks/worker_route.py: a worker runs on its conversation's model or on
+    # workers.model, and any other value here is refused with that reason.
     model: str | None = Field(default=None, description="Model override for agent tasks.")
     watch_dir: str | None = Field(
         json_schema_extra=DIR_FIELD_READ,
@@ -138,6 +140,11 @@ class TaskCreateTool(BaseTool):
         # Trusted context — NOT from arguments.
         session_id = context.metadata.get("session_id") if context.metadata else None
         notify_target = _notify_target_from_session(session_id)
+        # A session with a workspace of its own bounds the write floor of the
+        # shells it starts, as it bounds the bash tool's (item W).
+        workspace_roots = (
+            context.metadata.get("workspace_roots") if context.metadata else None
+        ) or None
 
         on_complete = arguments.on_complete if arguments.on_complete in (
             "notify", "reengage", "both",
@@ -153,18 +160,28 @@ class TaskCreateTool(BaseTool):
             timeout_seconds=arguments.timeout_seconds,
         )
 
+        route_note = ""
         try:
             if arguments.type == "local_bash":
                 if not arguments.command:
                     return ToolResult(output=_mode_error(arguments, "command", "local_bash"), is_error=True)
-                task = await manager.create_shell_task(command=arguments.command, **common)
+                task = await manager.create_shell_task(
+                    command=arguments.command, workspace_roots=workspace_roots,
+                    **common)
             elif arguments.type == "local_agent":
                 if not arguments.prompt:
                     return ToolResult(output=_mode_error(arguments, "prompt", "local_agent"), is_error=True)
+                # The worker runs on this turn's route, or on the one the
+                # operator set; never on one the model picked, never a substitute.
+                try:
+                    plan = plan_spawn(context.metadata, requested_model=arguments.model)
+                except WorkerRouteRefused as exc:
+                    return ToolResult(output=f"task_create refused: {exc}", is_error=True)
+                route_note = plan.note()
                 task = await manager.create_agent_task(
                     prompt=arguments.prompt,
-                    model=arguments.model,
-                    api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                    route=plan.key,
+                    metadata=plan.record(),
                     **common,
                 )
             elif arguments.type == "file_watch":
@@ -182,7 +199,8 @@ class TaskCreateTool(BaseTool):
                 if not arguments.poll_predicate:
                     return ToolResult(output=_mode_error(arguments, "poll_predicate", "poll"), is_error=True)
                 task = await manager.create_poll_task(
-                    poll_predicate=arguments.poll_predicate, **common
+                    poll_predicate=arguments.poll_predicate,
+                    workspace_roots=workspace_roots, **common
                 )
             else:
                 return ToolResult(output=f"unsupported task type: {arguments.type}", is_error=True)
@@ -210,6 +228,7 @@ class TaskCreateTool(BaseTool):
             output=(
                 f"Started managed task {task.id} ({task.type}): {task.description}. "
                 f"{notify_note}{reengage_note}."
+                + (f" {route_note}" if route_note else "")
             ),
             metadata={"task_id": task.id, "task_type": task.type, "on_complete": on_complete},
         )

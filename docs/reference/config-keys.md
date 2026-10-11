@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **405** of
+Every key in `config/prometheus.yaml.default` — **436** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -86,7 +86,7 @@ none either — the key is documented so its absence is visible.
 | `security.dashboard_tool_bind_host` | `127.0.0.1` |
 | `security.denied_commands` | `['DROP TABLE']` |
 | `security.denied_paths` | `['/etc', '/sys', '/boot', '/*/.ssh', '/*/.gnupg', '/*/.config/*/*env']` |
-| `security.bash_confinement` | `off` |
+| `security.bash_confinement` | `auto` |
 | `security.bash_write_confinement` | `auto` |
 | `security.bash_write_allow` | `[]` |
 | `security.bash_max_file_gb` | `8` |
@@ -211,7 +211,7 @@ none either — the key is documented so its absence is visible.
 | `slash_commands.mimo` | *(section)* |
 | `slash_commands.mimo.provider` | `mimo` |
 | `slash_commands.mimo.api_key_env` | `MIMO_API_KEY` |
-| `slash_commands.mimo.model` | `mimo-v2.5-pro` |
+| `slash_commands.mimo.model` | `mimo-v2.6-pro` |
 | `slash_commands.qwen` | *(section)* |
 | `slash_commands.qwen.provider` | `qwen` |
 | `slash_commands.qwen.api_key_env` | `QWEN_API_KEY` |
@@ -328,8 +328,18 @@ none either — the key is documented so its absence is visible.
 | `web.enabled` | `True` |
 | `web.api_port` | `8005` |
 | `web.ws_port` | `8010` |
+| `web.bind` | *(empty — no code default)* |
+| `web.trusted_proxies` | `[]` |
 | `web.api_token` | *(empty — no code default)* |
 | `web.dashboard_port` | `3002` |
+| `pairing` | *(section)* |
+| `pairing.display_name` | `` |
+| `pairing.requests_enabled` | `True` |
+| `pairing.request_ttl_seconds` | `300` |
+| `pairing.max_pending` | `3` |
+| `pairing.max_pending_per_source` | `1` |
+| `pairing.max_requests_per_source_per_hour` | `10` |
+| `pairing.telegram_prompts` | `False` |
 | `push` | *(section)* |
 | `push.enabled` | `False` |
 | `push.apns` | *(section)* |
@@ -378,6 +388,25 @@ none either — the key is documented so its absence is visible.
 | `backend_probe` | *(section)* |
 | `backend_probe.ttl_s` | `60` |
 | `backend_probe.timeout_s` | `5.0` |
+| `computer_use` | *(section)* |
+| `computer_use.enabled` | `False` |
+| `computer_use.targets` | `{}` *(open map)* |
+| `computer_use.probe` | *(section)* |
+| `computer_use.probe.ttl_s` | `60` |
+| `computer_use.probe.timeout_s` | `5.0` |
+| `computer_use.apps` | *(section)* |
+| `computer_use.apps.aliases` | `{}` *(open map)* |
+| `computer_use.task` | *(section)* |
+| `computer_use.task.max_steps` | `20` |
+| `computer_use.task.max_seconds` | `600` |
+| `computer_use.task.max_approvals` | `10` |
+| `computer_use.task.max_reobserve` | `3` |
+| `computer_use.action_log` | *(section)* |
+| `computer_use.action_log.keep_per_session` | `200` |
+| `computer_use.thumbnails` | *(section)* |
+| `computer_use.thumbnails.enabled` | `True` |
+| `computer_use.thumbnails.max_dimension` | `480` |
+| `computer_use.thumbnails.persist` | `False` |
 | `anatomy` | *(section)* |
 | `anatomy.enabled` | `True` |
 | `anatomy.scan_on_startup` | `True` |
@@ -411,6 +440,8 @@ none either — the key is documented so its absence is visible.
 | `tasks.poll_initial_interval_seconds` | `5` |
 | `tasks.poll_max_interval_seconds` | `120` |
 | `tasks.reengage_turn_cap` | `3` |
+| `workers` | *(section)* |
+| `workers.model` | `` |
 | `heartbeat` | *(section)* |
 | `heartbeat.maintenance_db` | `` |
 | `documents` | *(section)* |

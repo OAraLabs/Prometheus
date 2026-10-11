@@ -168,7 +168,9 @@ evals = [
     # >=16.4.0: arize-phoenix pins strawberry-graphql EXACTLY, and every
     # release before 16.4.0 pins 0.314.3 (three advisories, fixed by 0.315.7);
     # 16.4.0 pins 0.316.0. Floored here because no strawberry requirement of
-    # ours could move it past phoenix's pin.
+    # ours could move it past phoenix's pin — the [tool.uv] override-dependencies
+    # entry below is what does, and its comment explains why an override rather
+    # than this floor or a phoenix bump.
     "arize-phoenix>=16.4.0",
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
@@ -362,3 +364,48 @@ exclude_also = [
     "raise NotImplementedError",
     "@(abc\\.)?abstractmethod",
 ]
+
+[tool.uv]
+# WHY THIS OVERRIDE EXISTS
+# ------------------------
+# strawberry-graphql 0.316.0 carries CVE-2026-107727 (fixed 0.327.2) and
+# CVE-2026-107728 (fixed 0.326.1). The `quality` job audits every extra, so it
+# went red and blocks every PR — including ones that touch no dependency.
+#
+# It cannot be fixed by a floor, because strawberry reaches the lock ONLY as a
+# transitive dep of arize-phoenix, and phoenix pins it EXACTLY
+# (strawberry-graphql==0.316.0). A requirement of ours cannot move an exact
+# upstream pin.
+#
+# Nor by bumping phoenix. Versions that pin a fixed strawberry
+# (>=20.13.0 -> 0.327.7) also declare a HARD dependency on
+# fastmcp-slim[client,server]>=4 (no extra marker, so it cannot be declined),
+# which requires mcp>=2.0.0 — and `mcp<2` is deliberate and test-guarded:
+# mcp 2.0.0 changed list_tools(cursor=) to list_tools(*, params=) and
+# prometheus.mcp.runtime._list_all_tools passes cursor= unconditionally, so
+# under 2.x every configured MCP server fails on its first discovery call.
+# See tests/test_mcp_dependency_pin.py. Bumping phoenix was tried and produced
+# exactly those four failures.
+#
+# Note 20.10.0-20.12 are NOT sufficient either: they pin 0.327.0, which clears
+# -107728 but not -107727.
+#
+# WHAT THIS OVERRIDES, AND WHAT IT COSTS
+# --------------------------------------
+# Phoenix 16.4.0 declares it does not support a strawberry newer than 0.316.0,
+# and this forces 0.332.0. Anything exercising Phoenix's GraphQL/server surface
+# is therefore running an untested pairing — we are telling an upstream that its
+# pin does not apply to us.
+#
+# That is accepted because nothing here uses that surface: the one Phoenix call
+# in the tree is tracing/phoenix.py's `phoenix.otel.register`, optional and
+# import-guarded, and `evals` is NOT a deploy extra
+# (PROMETHEUS_DEPLOY_EXTRAS is "anthropic mcp push voice"), so this cannot
+# change what the daemon runs. graphql-core moves 3.2.8 -> 3.3.0 with it, since
+# strawberry requires it. No package is added or removed.
+#
+# If Phoenix's GraphQL features are ever used, re-test this pairing first.
+# Removing the override: bump arize-phoenix to >=20.13.0 AND port
+# _list_all_tools to mcp 2.x's params= signature in the same change, or the
+# lock will not resolve.
+override-dependencies = ["strawberry-graphql>=0.327.2"]

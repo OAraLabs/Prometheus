@@ -458,6 +458,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("local", self._cmd_local))
         self._app.add_handler(CommandHandler("route", self._cmd_route))
         self._app.add_handler(CommandHandler("backends", self._cmd_backends))
+        # Computer use v1.1 — the door. A person starts a desktop task here.
+        self._app.add_handler(CommandHandler("computer", self._cmd_computer))
         # One command per configured local backend (`/4090`, `/mini`) — the
         # names come from the registry, so the command set follows the config.
         from prometheus.router.model_router import backend_command_names
@@ -810,6 +812,43 @@ class TelegramAdapter(BasePlatformAdapter):
                 return SendResult(success=False, error=str(exc))
 
         return SendResult(success=True, message_id=last_message_id)
+
+    # -- helpers for other subsystems (pairing prompts) ------------------------
+    #
+    # `send` cannot do these: it has no `reply_markup`, and a `parse_mode` of None there falls back to
+    # `config.parse_mode` (MarkdownV2 on a default install), which would let text a stranger typed be
+    # formatted. These pass `parse_mode=None` to the bot API explicitly, which means "no formatting".
+
+    def add_handler(self, handler: Any, group: int = 0) -> bool:
+        """Register an extra handler after start-up. Runs behind the group -1 authorisation like any other."""
+        if self._app is None:
+            return False
+        self._app.add_handler(handler, group)
+        return True
+
+    async def send_prompt(self, chat_id: int, text: str, keyboard: Any | None = None) -> int | None:
+        """Send PLAIN text, optionally with an inline keyboard. The message id, or None if it did not go."""
+        if self._app is None:
+            return None
+        try:
+            msg = await self._app.bot.send_message(
+                chat_id=chat_id, text=text, parse_mode=None, reply_markup=keyboard)
+        except Exception as exc:
+            logger.error("Failed to send a prompt to chat %d: %s", chat_id, exc)
+            return None
+        return msg.message_id
+
+    async def edit_prompt(self, chat_id: int, message_id: int, text: str) -> bool:
+        """Replace a message with PLAIN text and remove its buttons. False if Telegram would not."""
+        if self._app is None:
+            return False
+        try:
+            await self._app.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id, text=text, parse_mode=None, reply_markup=None)
+        except Exception as exc:
+            logger.info("Could not edit message %s in chat %d: %s", message_id, chat_id, exc)
+            return False
+        return True
 
     async def _authorize_update(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2565,8 +2604,41 @@ class TelegramAdapter(BasePlatformAdapter):
         # parses the scope verb itself.
         arg_text = " ".join(args[1:]) if len(args) >= 2 else ""
         queue = getattr(self, "_approval_queue", None)
-        text = await _cmds.cmd_approve(queue, arg_text)
+        from prometheus.permissions import approver as _approver
+
+        # The SENDER, not the chat: an allowed group chat has many members
+        # (W4 — recorded now, checked later).
+        text = await _cmds.cmd_approve(
+            queue, arg_text, by=_approver.telegram(update.effective_user))
         await self.send(update.effective_chat.id, text, parse_mode=None)
+
+    async def _cmd_computer(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/computer — start, answer, follow and stop a desktop task.
+
+        The shared core returns at once; the task runs in the background and
+        reports milestones (counts only) to THIS chat. Who may start one is
+        the SENDER, not the chat (W3): their own id must be on the allowlist.
+        """
+        if not update.message or not update.effective_chat:
+            return
+        from prometheus.gateway import commands as _cmds
+        from prometheus.permissions import approver as _approver
+
+        parts = (update.message.text or "").split(maxsplit=1)
+        arg_text = parts[1] if len(parts) > 1 else ""
+        chat_id = update.effective_chat.id
+
+        async def notify(text: str) -> None:
+            await self.send(chat_id, text, parse_mode=None)
+
+        reply = await _cmds.cmd_computer(
+            getattr(self, "_computer_runner", None), arg_text,
+            by=_approver.telegram(update.effective_user), surface="telegram",
+            session_id=f"{Platform.TELEGRAM.value}:{chat_id}", chat_id=chat_id,
+            notify=notify)
+        await self.send(chat_id, reply, parse_mode=None)
 
     def _registered_commands(self) -> list[str]:
         """Every command name PTB actually has a handler for.
@@ -2637,7 +2709,10 @@ class TelegramAdapter(BasePlatformAdapter):
         args = (update.message.text or "").split()
         request_id = args[1] if len(args) >= 2 else ""
         queue = getattr(self, "_approval_queue", None)
-        text = await _cmds.cmd_deny(queue, request_id)
+        from prometheus.permissions import approver as _approver
+
+        text = await _cmds.cmd_deny(
+            queue, request_id, by=_approver.telegram(update.effective_user))
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_pending(

@@ -25,6 +25,7 @@ import os
 import re
 import socket
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ import httpx
 import yaml
 
 from prometheus.api.turn_errors import redact_url
-from prometheus.config.api_token import resolve_api_token
+from prometheus.config.api_token import TOKEN_FILE_ENV_VAR, ApiTokenFileError, resolve_api_token
 from prometheus.config.defaults import config_search_paths
 from prometheus.config.env_file import get_env_file_path, parse_env_file
 from prometheus.config.paths import (
@@ -48,6 +49,8 @@ from prometheus.infra.doctor import (
     check_router,
     yaml_error_summary,
 )
+from prometheus.web.bind import BindError, is_all_interfaces, resolve_bind
+from prometheus.web.loopback import is_loopback_address
 
 import logging
 
@@ -369,9 +372,75 @@ def check_web_port(config: dict[str, Any], timeout: float = 3.0) -> DiagnosticCh
     )
 
 
+def check_web_bind(
+    config: dict[str, Any], *, env: Mapping[str, str] | None = None,
+) -> DiagnosticCheck | None:
+    """Which interface will the web API listen on, and is that plain HTTP on all of them?
+
+    Resolves ``PROMETHEUS_WEB_BIND`` > ``web.bind`` > ``0.0.0.0`` exactly as the
+    daemon does (:func:`prometheus.web.bind.resolve_bind`). It cannot see a
+    ``--bind`` flag given to a daemon that is already running, so the warning
+    says what the CONFIGURATION asks for and notes that a flag overrides it.
+    Returns ``None`` when the web API is off (the Web row already says so).
+    """
+    web_cfg = config.get("web", {}) or {}
+    if not web_cfg.get("enabled", False):
+        return None
+    try:
+        resolved = resolve_bind(config, env=env)
+    except BindError as exc:
+        return DiagnosticCheck(
+            name="Web bind", category="connectivity", status="error",
+            message=f"{exc} The daemon will refuse to start.",
+            fix="Set web.bind to an IPv4/IPv6 address or localhost, or remove it "
+                "(and check PROMETHEUS_WEB_BIND).",
+        )
+    address = resolved.address
+    if is_all_interfaces(address):
+        if resolved.source == "default":
+            # Nobody chose this: web.bind is unset (a deployment that predates the
+            # loopback default for new installs) and --bind/the environment did not ask.
+            return DiagnosticCheck(
+                name="Web bind", category="connectivity", status="warning",
+                message=f"web.bind is not set, so the web API will listen on all interfaces "
+                        f"({address}) over plain HTTP (no TLS) — anyone who can reach this "
+                        "machine's network address can reach it; the bearer token is the only "
+                        "access control (a daemon started with --bind overrides this)",
+                fix="Set web.bind: 127.0.0.1 in prometheus.yaml to listen on this machine "
+                    "only, or a specific interface address (a tailnet address, say) to narrow "
+                    "it; set web.bind: 0.0.0.0 to keep every interface on purpose.",
+            )
+        # Somebody asked for every interface: that is a decision, not a finding. Still say
+        # what it is, so the row never reads as if the exposure were smaller than it is.
+        return DiagnosticCheck(
+            name="Web bind", category="connectivity", status="ok",
+            message=f"web API listens on all interfaces, {resolved.describe()}, over plain "
+                    "HTTP (no TLS) — anyone who can reach this machine's network address "
+                    "can reach it; the bearer token is the only access control",
+        )
+    if is_loopback_address(address):
+        return DiagnosticCheck(
+            name="Web bind", category="connectivity", status="ok",
+            message=f"web API listens on {address} — this machine only "
+                    f"(from {resolved.source})",
+        )
+    return DiagnosticCheck(
+        name="Web bind", category="connectivity", status="ok",
+        message=f"web API listens on {address} only, over plain HTTP (no TLS) "
+                f"(from {resolved.source})",
+    )
+
+
 def check_token(config: dict[str, Any]) -> DiagnosticCheck:
     """API token configured?"""
-    token, source = resolve_api_token(config)
+    try:
+        token, source = resolve_api_token(config)
+    except ApiTokenFileError as exc:
+        return DiagnosticCheck(
+            name="API token", category="connectivity", status="error",
+            message=str(exc),
+            fix=f"Put the token in the file {TOKEN_FILE_ENV_VAR} names, or unset it.",
+        )
     if token:
         return DiagnosticCheck(
             name="API token", category="connectivity", status="ok",
@@ -622,7 +691,11 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
         from prometheus.context.dynamic_tools import DynamicToolLoader
 
         deferred = (config.get("tools", {}) or {}).get("deferred_loading")
-        registry = create_tool_registry({})
+        # The REAL security section, not {}: create_tool_registry also wires
+        # the process-wide shell floor (security/shell_floor.py), and a
+        # registry built from an empty section would wire the shipped defaults
+        # over the operator's in any process that later runs a model shell.
+        registry = create_tool_registry(config.get("security") or {})
         loader = DynamicToolLoader(registry, deferred)
         advertised = sorted(
             s.get("name") for s in loader.schemas_for_run(True)
@@ -935,7 +1008,7 @@ def check_bash_floors(config: dict[str, Any]) -> list[DiagnosticCheck]:
     # None path, which is the defect it was written to close.
     roots = resolve_workspace_root(sec)
     rep = C.floor_report(
-        read_mode=sec.get("bash_confinement", "off"),
+        read_mode=sec.get("bash_confinement", "auto"),
         write_mode=sec.get("bash_write_confinement", "auto"),
         has_workspace=bool(roots),
     )
@@ -952,6 +1025,15 @@ def check_bash_floors(config: dict[str, Any]) -> list[DiagnosticCheck]:
             return DiagnosticCheck(
                 name=name, category="platform", status="info",
                 message=f"mode 'off' — {off_message}",
+            )
+        if state == C.STATE_UNSUPPORTED:
+            # "auto" on a platform with no AppArmor (macOS). INFO, not a
+            # warning, and no fix: there is nothing to load, and a row nobody
+            # can clear is how a report gets ignored. Said, not alarmed.
+            return DiagnosticCheck(
+                name=name, category="platform", status="info",
+                message=f"mode {mode!r} — unsupported on this platform (no "
+                        f"AppArmor). {off_message}",
             )
         if state == C.STATE_NO_WORKSPACE:
             return DiagnosticCheck(
@@ -1016,15 +1098,16 @@ def check_bash_floors(config: dict[str, Any]) -> list[DiagnosticCheck]:
 
     rows = [read_row, write_row]
     # Said once, on its own row, because it is the limit most likely to be
-    # over-read from two green lines above: cron jobs, background tasks,
-    # watch_dir predicates and command hooks each spawn /bin/bash at their
-    # own call sites, and NEITHER floor reaches them.
+    # over-read from two green lines above. The floors reach every shell a
+    # MODEL writes; the operator's own shells are deliberately left alone.
     if any(r.status == "ok" for r in rows):
         rows.append(DiagnosticCheck(
             name="Bash floor scope", category="platform", status="info",
-            message="the floors wrap the bash TOOL only — cron jobs, "
-                    "background tasks, watch_dir predicates and command "
-                    "hooks spawn their own shells and are not covered",
+            message="the floors wrap every shell a model writes — the bash "
+                    "tool, background shell tasks and poll predicates, cron "
+                    "jobs the model created, and coding runs. Not your own "
+                    "cron jobs (no origin, or created through /api/cron) "
+                    "and not command hooks: those run as before",
         ))
     return rows
 
@@ -1174,6 +1257,44 @@ def check_whisper(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+def check_pairing_telegram(config: dict[str, Any]) -> DiagnosticCheck | None:
+    """Telegram prompts for pairing requests are opt-in; say so when they are on but nothing could get one.
+
+    ``None`` (no row) while ``pairing.telegram_prompts`` is off, which is the default: a feature that is
+    off needs no line. On, the daemon would send nothing when the Telegram gateway is off or no private chat
+    (a positive id; a group is never used) is in ``gateway.allowed_chat_ids``, and the owner who asked for
+    prompts needs to be told that rather than discover it when a device is waiting.
+    """
+    from prometheus.config.pair_requests import PairingSettings
+    from prometheus.config.shipped_defaults import resolve_allowed_chat_ids, resolve_telegram_enabled
+
+    if not PairingSettings.from_config(config).telegram_prompts:       # the one reader of the key
+        return None
+
+    gw = config.get("gateway", {}) or {}
+    name = "Pairing prompts (Telegram)"
+    if not resolve_telegram_enabled(gw):
+        return DiagnosticCheck(
+            name=name, category="connectivity", status="warning",
+            message="pairing.telegram_prompts is on, but the Telegram gateway is not enabled, so no pairing "
+                    "prompt will be sent",
+            fix="Set gateway.telegram_enabled: true (and a bot token), or set pairing.telegram_prompts: false.",
+        )
+    private = [chat for chat in resolve_allowed_chat_ids(gw) if chat > 0]
+    if not private:
+        return DiagnosticCheck(
+            name=name, category="connectivity", status="warning",
+            message="pairing.telegram_prompts is on, but gateway.allowed_chat_ids has no private chat (a "
+                    "positive id; a group is never used), so no pairing prompt will be sent",
+            fix="Add your own chat id to gateway.allowed_chat_ids (get it from @userinfobot).",
+        )
+    return DiagnosticCheck(
+        name=name, category="connectivity", status="ok",
+        message=f"a device asking to join is sent to {len(private)} private chat"
+                f"{'' if len(private) == 1 else 's'}, as plain text with Approve / Deny buttons",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -1187,6 +1308,8 @@ def run_extended_checks(
     """The Phase 0 onboarding checks (config check computed by the caller)."""
     reach, model = check_inference(config, timeout=timeout)
     router = check_router(config)
+    bind_row = check_web_bind(config)
+    pairing_row = check_pairing_telegram(config)
     return [
         config_check,
         *([router] if router is not None else []),
@@ -1194,6 +1317,8 @@ def run_extended_checks(
         reach,
         model,
         check_web_port(config),
+        *([bind_row] if bind_row is not None else []),
+        *([pairing_row] if pairing_row is not None else []),
         check_token(config),
         *check_gateways(config),
         check_advertised_tools(config),

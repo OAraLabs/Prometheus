@@ -200,6 +200,12 @@ def main() -> None:
     global MODE, SCRIPT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, required=True)
+    parser.add_argument(
+        "--host", default="127.0.0.1",
+        help="address to listen on (default 127.0.0.1). The container smoke test "
+             "(packaging/docker/smoke_image.py) runs the stub in its own container "
+             "and passes 0.0.0.0 so the daemon's container can reach it by name.",
+    )
     parser.add_argument("--mode", choices=["normal", "models-500", "no-final"],
                         default="normal")
     parser.add_argument(
@@ -218,9 +224,9 @@ def main() -> None:
             for s in script
         ), "--script must be a JSON list of {name, arguments} objects"
         SCRIPT = script
-    print(f"firstlight stub model starting on 127.0.0.1:{args.port}", flush=True)
-    server = _StubServer(("127.0.0.1", args.port), Handler)
-    print(f"firstlight stub model listening on 127.0.0.1:{args.port} mode={MODE}",
+    print(f"firstlight stub model starting on {args.host}:{args.port}", flush=True)
+    server = _StubServer((args.host, args.port), Handler)
+    print(f"firstlight stub model listening on {args.host}:{args.port} mode={MODE}",
           flush=True)
     server.serve_forever()
 

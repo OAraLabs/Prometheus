@@ -224,8 +224,20 @@ class ProcessSandbox(Sandbox):
             else self.default_timeout_seconds
         )
         started = time.monotonic()
-        proc = await asyncio.create_subprocess_shell(
-            command,
+        # THE SHELL FLOOR. `command` is the model's (code_run) or the task's
+        # acceptance command running the model's code, so it runs behind the
+        # bash tool's read and write floors, with this clone as the only
+        # workspace. The environment stays this sandbox's own allowlist, which
+        # is stricter than the bash tool's scrub. `/bin/sh -c`, as
+        # create_subprocess_shell ran it. Raises ShellFloorRefused before
+        # anything starts when a required floor is unavailable.
+        from prometheus.security.shell_floor import floored_argv
+
+        argv, _floors = floored_argv(
+            command, cwd=self.root, workspaces=(self.root,),
+            shell=("/bin/sh", "-c"))
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
             cwd=str(self.root),
             env=self._scrubbed_env(),
             stdout=asyncio.subprocess.PIPE,

@@ -247,9 +247,13 @@ class TestSlackApprovalHandlers:
         await adapter._slash_approve(ack, _cmd("abc123"), respond)
         assert respond.messages == ["Approved: abc123"]
         # SPRINT-CONSENT: approve() now carries the scope and the derived
-        # grant so the resolution audit row can name them.
+        # grant so the resolution audit row can name them — and (W4) who
+        # answered: this fake command carries no user_id, so "unknown".
+        from prometheus.permissions.approver import Approver
+
         queue.approve.assert_awaited_once_with(
-            "abc123", scope="once", grant=None
+            "abc123", scope="once", grant=None,
+            by=Approver("slack", "unknown"),
         )
 
     @pytest.mark.asyncio

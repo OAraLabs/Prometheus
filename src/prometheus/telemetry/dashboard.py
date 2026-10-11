@@ -66,8 +66,8 @@ class ToolDashboard:
         * ``lucky_guesses``         – deferred tools called by name: the
           ``agent_loop``/``lucky_guess`` runs, plus the marker rows written to
           ``tool_calls`` before those existed
-        * ``adapter_repairs``       – calls the adapter repaired before
-          running them (``repairs > 0``)
+        * ``adapter_repairs``       – calls the adapter repaired
+          (``repairs > 0``), whether they then ran or were refused
         * ``validation_failures``   – calls that failed validation and could
           not be repaired (``retries > 0``; the loop asked the model to retry)
         * ``total_calls``           – real tool calls in window (synthetic

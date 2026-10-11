@@ -329,6 +329,8 @@ jobs:
             tests/test_bash_write_floor.py \
             tests/test_bash_confinement.py \
             tests/test_bash_floor_reporting.py \
+            tests/test_model_shell_floor.py \
+            tests/test_bash_confinement_auto.py \
             tests/test_bwrap_sandbox.py \
             -q -rs --no-header | tee /tmp/floors.txt
           if grep -qE "[0-9]+ skipped" /tmp/floors.txt; then
@@ -395,3 +397,31 @@ jobs:
         run: >-
           python scripts/firstlight_harness.py --source .
           --leg ${{ matrix.leg }} --install-mode ${{ matrix.install }}
+
+  # The container image, built from the Dockerfile and RUN, on both architectures it ships for: a native
+  # amd64 runner and a native arm64 runner, so neither leg is emulated. packaging/docker/smoke_image.py
+  # does what docs/guide/docker.md tells a user to do: it pairs a fresh container in setup mode, runs
+  # `oara setup` against the FIRSTLIGHT stub model in a second container, takes one REST agent turn
+  # through the configured daemon, and checks every way the API token can arrive (minted, env, secret,
+  # and a broken secret that must stop the container). The release builds the same Dockerfile again and
+  # runs the same script before anything is published (release.yml, `image`).
+  container:
+    name: container (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build the image (this runner's architecture)
+        run: docker build -t prometheus:ci .
+      - name: Container smoke test
+        run: |
+          version=$(python3 -c "import re, pathlib; print(re.search(r'^__version__\s*=\s*\"([^\"]+)\"', pathlib.Path('src/prometheus/__init__.py').read_text(), re.M).group(1))")
+          python3 packaging/docker/smoke_image.py prometheus:ci --expect-version "$version"

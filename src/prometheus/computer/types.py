@@ -131,6 +131,45 @@ class Observation:
 
 
 @dataclass(frozen=True)
+class WindowCapture:
+    """One window-scoped snapshot WITH its pixels (computer-use v1.1 PR 6b).
+
+    The same fields the password and completeness checks already read on an
+    :class:`Observation`, plus the image — one call, so the checks and the
+    picture describe the same moment. It is NOT an Observation: nothing may
+    build candidates from it, because a capture is for a person to look at and
+    must never feed a decision.
+
+    ``image_*`` are None when the driver returned no usable inline image.
+    ``app_name`` is the driver's own report at capture time, which is what
+    makes the D19 window-identity check possible: a window that now belongs to
+    another app is not the window the person approved.
+    """
+
+    target: str
+    app: str
+    pid: int
+    window_id: int
+    #: The driver's report of which app owns this window right now. None means
+    #: it could not say, which fails closed — see thumbnails.decide_capture.
+    app_name: str | None = None
+    #: Every node the walk returned, INCLUDING tokenless ones. The password
+    #: check reads the whole walk: a password field is exactly the kind of node
+    #: a filter drops from the clickable set.
+    roles: tuple[str, ...] = ()
+    degraded: bool = False
+    truncated: bool = False
+    #: The driver's own verdict on whether the frame is trustworthy. None
+    #: means it did not report either way (which is not a refusal); only an
+    #: explicit False skips.
+    frame_valid: bool | None = None
+    image_mime: str | None = None
+    image_base64: str | None = None
+    image_width: int | None = None
+    image_height: int | None = None
+
+
+@dataclass(frozen=True)
 class Candidate:
     """One complete, bounded action the client is willing to execute.
 

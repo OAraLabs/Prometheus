@@ -27,6 +27,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from prometheus.web.route_access import SCOPED_SLASH_COMMANDS
 from prometheus.gateway.commands import (
     CommandContext,
     is_formatter_command,
@@ -101,12 +102,26 @@ def parse_slash(content: str) -> tuple[str, str] | None:
     return name, rest.strip()
 
 
-async def route_slash(content: str, ctx: CommandContext) -> SlashOutcome:
-    """Route a chat message; see the module docstring for the three outcomes."""
+async def route_slash(content: str, ctx: CommandContext, *, operator: bool = True) -> SlashOutcome:
+    """Route a chat message; see the module docstring for the three outcomes.
+
+    *operator* is False for a message typed by a SCOPED device (``identity.is_operator`` is false). Such a caller
+    may run only ``web/route_access.SCOPED_SLASH_COMMANDS``; any other known command is refused in the reply and
+    never runs, because commands run with the operator's authority and some change daemon-wide state
+    (``/gate off``, ``/revoke``). An unknown ``/word`` still falls through to the agent, as text.
+    """
     parsed = parse_slash(content)
     if parsed is None:
         return SlashOutcome(handled=False)
     name, args = parsed
+
+    if not operator and name not in SCOPED_SLASH_COMMANDS and (
+            is_formatter_command(name) or is_session_command(name)):
+        return SlashOutcome(
+            handled=True,
+            reply=f"/{name} is for the owner of this Prometheus, not for a device that was approved to join it. "
+                  "Ask from the owner's own device (Beacon on their Mac) or from Telegram.",
+        )
 
     if is_formatter_command(name):
         reply = await run_formatter_command(name, args, ctx)
@@ -142,6 +157,7 @@ def build_command_context(
     local_model: str | None = None,
     detected_limit: int | None = None,
     session_manager: Any = None,
+    computer_runner: Any = None,
 ) -> CommandContext:
     """Build a CommandContext from the web bridge's loop_context + config.
 
@@ -160,7 +176,7 @@ def build_command_context(
             config=config, session=session, ensure_session=ensure_session,
             session_id=session_id, approval_queue=approval_queue,
             local_model=local_model, detected_limit=detected_limit,
-            session_manager=session_manager,
+            session_manager=session_manager, computer_runner=computer_runner,
         )
     provider = getattr(loop_context, "provider", "")
     provider_str = getattr(provider, "value", None) or str(provider or "")
@@ -179,4 +195,5 @@ def build_command_context(
         local_model=local_model,
         detected_limit=detected_limit,
         session_manager=session_manager,
+        computer_runner=computer_runner,
     )

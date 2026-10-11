@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 100 paths
+## Daemon app — 115 paths
 
 | Path | Methods |
 |---|---|
@@ -35,6 +35,10 @@ one is the explanation.
 | `/api/code/{task_id}/pause` | POST |
 | `/api/code/{task_id}/resume` | POST |
 | `/api/code/{task_id}/stop` | POST |
+| `/api/computer/apps` | GET |
+| `/api/computer/tasks` | POST |
+| `/api/computer/tasks/{task_id}` | GET |
+| `/api/computer/tasks/{task_id}/stop` | POST |
 | `/api/config` | GET |
 | `/api/cron` | GET, POST |
 | `/api/cron/{name}` | DELETE, PUT |
@@ -42,6 +46,7 @@ one is the explanation.
 | `/api/devices` | GET, POST |
 | `/api/devices/{device_id}` | DELETE |
 | `/api/devices/{device_id}/activity` | DELETE, POST |
+| `/api/devices/{device_id}/computer` | PUT |
 | `/api/devices/{device_id}/push` | DELETE, PUT |
 | `/api/documents` | GET |
 | `/api/documents/content` | GET, PUT |
@@ -50,6 +55,9 @@ one is the explanation.
 | `/api/events/recent` | GET |
 | `/api/files` | GET |
 | `/api/files/read` | GET |
+| `/api/hello` | GET |
+| `/api/integrations/computer` | GET |
+| `/api/integrations/computer/probe` | POST |
 | `/api/lcm/{session_id}` | GET |
 | `/api/learning/live-upload` | POST |
 | `/api/learning/skill-drafts` | GET |
@@ -63,6 +71,11 @@ one is the explanation.
 | `/api/memory/current` | GET, PUT |
 | `/api/models` | GET |
 | `/api/packs` | GET |
+| `/api/pair/local` | POST |
+| `/api/pair/requests` | GET, POST |
+| `/api/pair/requests/{request_id}` | DELETE, GET |
+| `/api/pair/requests/{request_id}/approve` | POST |
+| `/api/pair/requests/{request_id}/deny` | POST |
 | `/api/pairs` | GET |
 | `/api/paperclip/wake` | POST |
 | `/api/profiles` | GET |
@@ -81,6 +94,7 @@ one is the explanation.
 | `/api/sessions/{session_id}/checkpoints` | GET |
 | `/api/sessions/{session_id}/checkpoints/{checkpoint_id}` | GET |
 | `/api/sessions/{session_id}/checkpoints/{checkpoint_id}/restore` | POST |
+| `/api/sessions/{session_id}/computer` | DELETE, GET, PUT |
 | `/api/sessions/{session_id}/fork` | GET, POST |
 | `/api/sessions/{session_id}/messages` | GET |
 | `/api/sessions/{session_id}/model` | DELETE, GET, POST |
@@ -110,11 +124,12 @@ one is the explanation.
 | `/api/wiki/pages` | GET |
 | `/api/wiki/search` | GET |
 | `/api/wiki/stats` | GET |
+| `/api/workers/model` | GET, PUT |
 | `/health` | GET |
 | `/v1/chat/completions` | POST |
 | `/v1/models` | GET |
 
-## Setup app — 6 paths
+## Setup app — 8 paths
 
 A separate FastAPI app (`web/setup_server.py`), not the daemon app
 behind a flag: the real route surface is deliberately never mounted
@@ -122,6 +137,8 @@ in setup mode.
 
 | Path | Methods |
 |---|---|
+| `/api/hello` | GET |
+| `/api/pair/requests` | POST |
 | `/api/setup/complete` | POST |
 | `/api/setup/configure` | POST |
 | `/api/setup/detect` | GET |

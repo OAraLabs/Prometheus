@@ -75,7 +75,10 @@ async def _run(args: argparse.Namespace) -> int:
                 break
         pending = queue.list_pending()
         if pending:
-            await queue.approve(pending[0].request_id, scope="once")
+            from prometheus.permissions.approver import in_process
+
+            await queue.approve(pending[0].request_id, scope="once",
+                                by=in_process("computer_use_probe"))
         return await task
 
     _banner("SUBSTRATE (the same probe /api/status reports)")

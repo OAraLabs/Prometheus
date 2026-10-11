@@ -11,12 +11,20 @@ Deliberately-open remains possible: an explicit empty
 ``PROMETHEUS_API_TOKEN=`` line in the env file (or an empty value already
 in the environment) is respected as "auth OFF" — matching the existing
 REST/WS convention that an empty token disables auth.
+
+A token can also come from a FILE: ``PROMETHEUS_API_TOKEN_FILE`` names it,
+which is how a container secret arrives (``/run/secrets/<name>``). It
+outranks ``PROMETHEUS_API_TOKEN`` (see :func:`resolve_api_token`). A file
+that gives no token fails closed (:class:`ApiTokenFileError`): the operator
+named that secret, so neither the env file's token nor a freshly minted one
+may stand in for it.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass as _dataclass
 
+import logging
 import os
 import secrets
 from typing import Any
@@ -27,7 +35,23 @@ from prometheus.config.env_file import (
     set_env_value,
 )
 
+logger = logging.getLogger(__name__)
+
 TOKEN_ENV_VAR = "PROMETHEUS_API_TOKEN"
+#: Names a file holding the token: a Docker or compose secret, read with the same
+#: rules as every other ``*_FILE`` secret (config/env_override.py::read_secret_file).
+TOKEN_FILE_ENV_VAR = "PROMETHEUS_API_TOKEN_FILE"
+
+
+class ApiTokenFileError(RuntimeError):
+    """``PROMETHEUS_API_TOKEN_FILE`` names a file that gives no token.
+
+    Raised instead of falling through to the env file or a mint. A container
+    started with a secret its operator named, and then serving under some other
+    token, would lock out every client they configured while printing a token
+    they never asked for. ``oara daemon`` refuses to start on it; a running
+    daemon's token bootstrap raises it and the web plane refuses to serve.
+    """
 
 # Where a new user gets the Beacon desktop client (Onboarding Phase 3): the
 # public product page, not an infra host, so it is safe to print anywhere.
@@ -42,17 +66,55 @@ def mint_api_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def token_file_path() -> str:
+    """The file ``PROMETHEUS_API_TOKEN_FILE`` names, or ``""`` when it is unset."""
+    return os.environ.get(TOKEN_FILE_ENV_VAR, "")
+
+
+def token_from_file() -> str:
+    """The token in the file ``PROMETHEUS_API_TOKEN_FILE`` names; ``""`` when the variable is unset.
+
+    Raises :class:`ApiTokenFileError` when the variable is set and the file is
+    missing, empty, a symlink or over the size limit. Same reader as every
+    other ``*_FILE`` secret, so the rules cannot drift apart.
+    """
+    path = token_file_path()
+    if not path:
+        return ""
+    from prometheus.config.env_override import read_secret_file
+
+    token = read_secret_file(path, "API token")
+    if not token:
+        raise ApiTokenFileError(
+            f"{TOKEN_FILE_ENV_VAR}={path} gives no token: the file is missing, "
+            "empty, a symlink or over 16 KiB. Refusing to fall back to any other "
+            f"token. Put the token in that file, or unset {TOKEN_FILE_ENV_VAR}."
+        )
+    return token
+
+
 def resolve_api_token(config: dict[str, Any] | None = None) -> tuple[str, str]:
     """Resolve the effective API token.
 
     Returns ``(token, source)`` where source is one of ``"config"``,
-    ``"env"``, ``"env-file"``, or ``""`` when no token is set anywhere.
-    Mirrors the precedence the web server/WS bridge use:
-    ``web.api_token`` (config) first, then the environment.
+    ``"file"``, ``"env"``, ``"env-file"``, or ``""`` when no token is set
+    anywhere. ``web.api_token`` (config) first, as the web server/WS bridge
+    read it; then the file ``PROMETHEUS_API_TOKEN_FILE`` names; then the
+    environment; then the env file. Raises :class:`ApiTokenFileError` when
+    that variable is set and its file gives no token.
+
+    The file outranks the variable because by the time a daemon resolves the
+    token, ``run_daemon`` has loaded the env file into the environment: the
+    variable may be a token minted on an earlier start, and a secret the
+    operator named must not lose to it. :func:`ensure_api_token` then exports
+    the winner into the variable the web plane reads.
     """
     cfg_token = ((config or {}).get("web") or {}).get("api_token") or ""
     if cfg_token:
         return str(cfg_token), "config"
+    secret_token = token_from_file()
+    if secret_token:
+        return secret_token, "file"
     env_token = os.environ.get(TOKEN_ENV_VAR, "")
     if env_token:
         return env_token, "env"
@@ -105,7 +167,13 @@ def ensure_api_token(config: dict[str, Any] | None = None) -> tuple[str, bool]:
     if token:
         # Make sure the running process env carries it (web launcher +
         # WS bridge read the environment when config.web.api_token is unset).
-        os.environ.setdefault(TOKEN_ENV_VAR, token)
+        # Assigned, never setdefault: an EMPTY PROMETHEUS_API_TOKEN= (a unit
+        # file, a compose file, a profile) survives setdefault, resolution
+        # skips it for the env file's token, and the web plane, which reads
+        # only the variable, served OPEN while this function and the startup
+        # log both said a token was in force. The variable must carry the
+        # token resolution chose, whatever it held before.
+        os.environ[TOKEN_ENV_VAR] = token
         return token, False
     if _deliberately_open(config):
         return "", False
@@ -113,6 +181,82 @@ def ensure_api_token(config: dict[str, Any] | None = None) -> tuple[str, bool]:
     set_env_value(TOKEN_ENV_VAR, token)
     os.environ[TOKEN_ENV_VAR] = token
     return token, True
+
+
+#: ``owner_devices.marked_by`` for an owner device issued by ``POST /api/pair/local``.
+OWNER_SOURCE_SAME_MAC = "same-mac-pairing"
+#: … and for one the global token minted (``POST /api/devices`` with ``owner: true``) from THIS Mac's loopback
+#: address, which is how a fresh install trades its setup-mode token for a device token of its own.
+OWNER_SOURCE_SAME_MAC_MINT = "same-mac-mint"
+#: Owner devices issued for THIS Mac. A new one replaces the earlier ones from any of these sources and
+#: from nothing else: an owner device minted for another computer carries a different ``marked_by`` and is
+#: never revoked by this Mac's re-pairing.
+SAME_MAC_OWNER_SOURCES = (OWNER_SOURCE_SAME_MAC, OWNER_SOURCE_SAME_MAC_MINT)
+DEFAULT_OWNER_DEVICE_NAME = "Beacon on this Mac"
+
+
+@_dataclass(frozen=True)
+class IssuedCredential:
+    """What a pairing route hands back: the token, and what issuing it did to the registry."""
+
+    token: str
+    #: The device the token belongs to; None when it is the daemon's own token (setup mode).
+    device_id: str | None = None
+    #: How many earlier owner credentials of this Mac the issue revoked.
+    revoked_previous: int = 0
+
+
+def issue_owner_credential(
+    config: dict[str, Any] | None = None,
+    *,
+    devices: Any,
+    name: str = DEFAULT_OWNER_DEVICE_NAME,
+    platform: str = "macos",
+) -> IssuedCredential:
+    """The credential a successful same-Mac pairing on a RUNNING daemon hands back to the client.
+
+    A token for THIS device alone: an OWNER device minted in the shared DeviceStore, revocable on its own,
+    listed in ``GET /api/devices``. It is NOT the daemon's API token, so a device paired this way does not
+    hold the master key. It is operator-equivalent (``DeviceIdentity.is_operator``): the person's own
+    cockpit sees all their sessions, including the ones that predate device scoping. Not root: it still
+    cannot enrol devices or define MCP servers.
+
+    ``devices`` is REQUIRED and there is no fallback to the global token: a caller that forgot to pass the
+    registry fails loudly instead of quietly handing out the master key. (Setup mode is the one place that
+    has no registry; it calls :func:`issue_setup_credential`, by name.) ``config`` is unused today and kept
+    so the call shape the pairing routes were written against does not change.
+
+    Pairing again REPLACES the earlier owner credentials of this Mac (``SAME_MAC_OWNER_SOURCES``), in the same
+    transaction as the mint and through the registry's normal revocation, so a replaced token answers 401 and
+    its open WebSocket is closed. A Beacon reinstall must not leave a standing operator credential nobody holds.
+
+    **The OWNER tier only.** This is for the person's own app on this Mac, proven by a one-time secret in a
+    file only that user can read. A device that someone approves from Telegram or from another device must
+    NOT get this credential: it needs an ordinary scoped token from ``DeviceStore.mint``. Two mint paths on
+    purpose, and the tier is not a parameter a caller can widen. Do not route an approval flow through here.
+
+    What this does NOT fix: the global token stays valid and stays in ``~/.config/prometheus/env``, where the
+    bash tool can read it (and on macOS there is no shell floor). This stops a paired DEVICE holding the master
+    key; it does not stop a MODEL reading it.
+    """
+    minted = devices.mint_owner(name, platform, by=OWNER_SOURCE_SAME_MAC, replaces=SAME_MAC_OWNER_SOURCES)
+    replaced = minted.get("revoked_previous") or []
+    if replaced:
+        logger.info("Same-Mac pairing replaced %d earlier owner device(s) of this Mac", len(replaced))
+    return IssuedCredential(str(minted["token"]), str(minted["id"]), len(replaced))
+
+
+def issue_setup_credential(config: dict[str, Any] | None = None) -> IssuedCredential:
+    """The credential same-Mac pairing hands back in SETUP MODE: the daemon's one API token.
+
+    Setup mutations (``/api/setup/configure``, ``/complete``) authenticate against the global token only,
+    and setup mode must create no ``~/.prometheus`` state — ``devices.db`` lives there — so there is no
+    registry to mint a device into. This is the honest name for that: it IS the master key. The client
+    trades it for an owner device token of its own once the daemon is configured
+    (``POST /api/devices`` with ``{"owner": true}``, a global-token route), keeps only that, and drops this.
+    """
+    token, _minted = ensure_api_token(config)
+    return IssuedCredential(token)
 
 
 def web_refused_on_bootstrap_failure(
@@ -168,6 +312,17 @@ class TokenRotationBlocked(RuntimeError):
     def __init__(self, source: str, config_path: str | None = None) -> None:
         self.source = source
         self.config_path = config_path or "prometheus.yaml"
+        if source == "file":
+            # A secret the daemon reads but does not own: the new token belongs in that file (or the secret
+            # store behind it), and an env-file line would sit under it unread.
+            super().__init__(
+                f"the active web API token is read from {token_file_path()} "
+                f"({TOKEN_FILE_ENV_VAR}), which the daemon reads BEFORE the env "
+                f"file — writing a new token to {get_env_file_path()} would leave "
+                f"the current one live. Put the new token in that file (or the "
+                f"secret store it comes from) and restart the daemon."
+            )
+            return
         super().__init__(
             f"the active web API token is pinned in {self.config_path} "
             f"(web.api_token), which the daemon reads BEFORE the env file — "
@@ -189,6 +344,8 @@ def rotate_api_token(config: dict[str, Any] | None = None) -> str:
     The returned token is always one the daemon will accept after a restart.
     """
     _token, source = resolve_api_token(config)
+    if source == "file":
+        raise TokenRotationBlocked(source)
     if source == "config":
         from prometheus.config.defaults import resolve_config_path
 
@@ -283,10 +440,21 @@ class DeviceIdentity:
     id: str
     name: str = ""
     platform: str = ""
+    #: The person's own device (``DeviceStore.mint_owner``). Set by :func:`verify_token` from the
+    #: registry — never from anything the caller presented.
+    owner: bool = False
 
     @property
     def is_global(self) -> bool:
         return self.id == "global"
+
+    @property
+    def is_operator(self) -> bool:
+        """The master token or an OWNER device: operator-equivalent for conversation scoping
+        (``web/session_scope.scope_for``), for managing devices, and as an approver (pairing
+        approval asks THIS). It is not root: enrolling a device and defining an MCP server test
+        ``is_global`` and stay the master token's alone."""
+        return self.is_global or self.owner
 
 
 GLOBAL_IDENTITY = DeviceIdentity(id="global", name="global", platform="")
@@ -317,5 +485,7 @@ def verify_token(presented: str, global_token: str, store=None) -> DeviceIdentit
         row = store.lookup(token_digest(presented))
         if row is not None:
             store.touch(row.id)
-            return DeviceIdentity(id=row.id, name=row.name, platform=row.platform)
+            is_owner = getattr(store, "is_owner", None)  # a registry without tiers has no owners
+            return DeviceIdentity(id=row.id, name=row.name, platform=row.platform,
+                                  owner=bool(is_owner(row.id)) if callable(is_owner) else False)
     return None

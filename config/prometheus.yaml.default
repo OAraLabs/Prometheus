@@ -282,6 +282,9 @@ adapter:
   unwrap_dict_args:            # required — no code default
 
 security:
+  # default: asks before destructive and network/install commands and writes outside the workspace.
+  # strict: also asks before every file write. cautious: also asks before every shell command the model
+  # runs (a new Prometheus.app install starts here). autonomous: asks nothing. /gate switches until restart.
   permission_mode: "default"
   # Where write_file / edit_file may write WITHOUT asking. Accepts one path or
   # a list of them. Ships tight — widen deliberately (e.g. "~/projects") if
@@ -390,18 +393,33 @@ security:
   # $HOME indirection, globs, sh -c), so the floor for bash is enforced by the
   # kernel instead:
   #
-  #   off       (default) no kernel floor for bash. The three patterns above
-  #             protect the path-declaring tools ONLY.
+  #   auto      (default) the floor wherever the profile is loaded. At boot
+  #             the profile is verified BY OUTCOME; verified, auto behaves
+  #             exactly like required for the life of the process (a profile
+  #             removed later fails closed). Not verified on Linux: bash runs
+  #             WITHOUT the floor and says so — an ERROR at boot naming the
+  #             fix, "dark" in /api/status, a WARN row in `oara doctor`, and
+  #             read_floor: unavailable in each call's metadata. On a
+  #             platform with no AppArmor (macOS) it reports "unsupported".
   #   required  every bash call execs through `aa-exec -p prometheus-bash`.
   #             If the profile is not loaded, or aa-exec is missing, or the
   #             transition does not happen, bash REFUSES TO RUN and says so —
   #             it never silently falls back to an unconfined shell.
+  #   off       no kernel floor for bash. The three patterns above protect the
+  #             path-declaring tools ONLY. An explicit off stays off.
   #
-  # Default is off because Prometheus runs on hosts without AppArmor, where
-  # "required" would refuse every bash call. Turning it on is a deliberate act.
+  # Not "required" by default because Prometheus runs on hosts without
+  # AppArmor, where that would refuse every bash call.
   # Profile ships at deploy/apparmor/prometheus-bash; load it with:
   #   sudo apparmor_parser -r -W /etc/apparmor.d/prometheus-bash
-  bash_confinement: "off"
+  #
+  # SCOPE: "bash" in this key and the two below means EVERY shell a model
+  # writes, not only the bash tool. task_create's shell and poll tasks, cron
+  # jobs the model created and a coding run's commands run behind the same
+  # floors and the same environment scrub (security/shell_floor.py). Not
+  # floored: command hooks, and your own cron jobs (created through /api/cron,
+  # or stored before cron jobs recorded who wrote them).
+  bash_confinement: "auto"
   # THE ABOVE IS A READ FLOOR. It says nothing about WRITES, and the
   # outside-workspace approval does not cover bash either: SecurityGate
   # raises it by reading a tool's file_path, and bash has a command string.
@@ -658,7 +676,10 @@ gateway:
     timeout_seconds: 30               # per Paperclip API call
     comment_max_chars: 4000           # cap on posted progress comments
 
-  # Placeholder only — the real prompt lives in the live config. See docs.
+  # Read only by the CLI, as its whole prompt when the runtime prompt fails
+  # to build. No daemon surface sends it: Telegram, Slack, Discord, the web
+  # bridge and POST /api/chat all send the runtime prompt (SOUL.md, AGENTS.md,
+  # environment, skills, project files, MEMORY.md + USER.md).
   system_prompt: "# see docs; overridden in live config"
   briefing_chat_id: ""
   voice:
@@ -825,7 +846,7 @@ slash_commands:
   mimo:
     provider: mimo
     api_key_env: MIMO_API_KEY
-    model: mimo-v2.5-pro
+    model: mimo-v2.6-pro       # mimo-v2.5-pro is retired 2026-10-21
   # /qwen — Alibaba Model Studio. The default base URL is the INTERNATIONAL
   # pay-as-you-go endpoint; the subscription plans (Token Plan, Coding Plan)
   # are separate hosts with separate keys that must be used in matching pairs,
@@ -1101,6 +1122,47 @@ web:
   enabled: true
   api_port: 8005
   ws_port: 8010
+  # Which network interface the REST API (api_port), the WebSocket bridge
+  # (ws_port) and setup mode listen on. One setting for all three.
+  #
+  #   (unset)       0.0.0.0, every interface. What the daemon has always done,
+  #                 and what reaching it from another machine over Tailscale
+  #                 or a LAN needs. A config that predates the loopback default
+  #                 and leaves it unset keeps that; `oara doctor` warns about it.
+  #   "0.0.0.0"     the same, chosen on purpose (doctor does not warn).
+  #   "127.0.0.1"   this machine only. Other machines cannot connect at all, and
+  #                 a request whose Host header is not localhost, 127.0.0.1 or
+  #                 [::1] is refused (a defence against DNS rebinding).
+  #   "::1"         IPv6 loopback.
+  #   "100.x.y.z"   one specific interface address, e.g. this machine's tailnet
+  #                 address.
+  #
+  # Overridden, highest first, by `oara daemon --bind ADDRESS` and by the
+  # PROMETHEUS_WEB_BIND environment variable (also read from the env file).
+  # Only an IPv4/IPv6 address or "localhost" is accepted; anything else makes
+  # the daemon refuse to start. It never falls back to a wider address.
+  #
+  # There is no TLS: this is plain HTTP and ws:// on whichever interface you
+  # name. On 0.0.0.0 the bearer token is the only access control between the
+  # API and everyone who can reach this machine's network address.
+  #
+  # Shipped EMPTY (= unset = 0.0.0.0), not commented out, so the key shows in
+  # docs/reference/config-keys.md and a config that sets it is not flagged as
+  # drift. This file is a reference, not what setup writes: `oara setup`, the
+  # wizard and setup mode write `bind: 127.0.0.1` into a NEW prometheus.yaml and
+  # never change an existing one. A headless box set up from another machine is
+  # therefore loopback-only afterwards until its owner sets the bind here.
+  bind:                  # e.g. "127.0.0.1"
+
+  # Reverse proxies whose X-Forwarded-For / X-Forwarded-Proto headers are
+  # believed: addresses or networks, e.g. ["127.0.0.1"] for a tunnel or
+  # `tailscale serve` on this machine, or ["10.0.0.0/8"]. Empty (the default)
+  # believes NO forwarded header: the address every rate limit and every
+  # same-machine check uses is the TCP peer, so a client cannot choose its own
+  # by sending a header. An entry that would believe everyone (`*`, 0.0.0.0/0)
+  # is ignored with a warning. If a proxy on this machine fronts the daemon and
+  # is not named here, every request looks like it comes from 127.0.0.1.
+  trusted_proxies: []
 
 # Image generation — the image_generate tool's backend selection + per-backend
 # settings. CLOUD EXPANSION (2026-07) adds the PAID DashScope backend (WAN 2.5).
@@ -1116,6 +1178,40 @@ web:
   #    Pinned equal to the readers by tests/test_config_defaults_equality.
   api_token:            # required — no code default
   dashboard_port: 3002
+
+# Pairing — how a new device finds this Prometheus and joins it
+# (docs/PAIRING-APPROVAL-API.md). Only the keys the daemon reads today are
+# listed; the rest of the section arrives with the routes that read it.
+pairing:
+  # The name shown to devices that are not paired yet: in GET /api/hello (which
+  # anyone who can reach the port can call), in the local-network
+  # advertisement, and on the Approve prompt. Empty = this computer's own name
+  # (macOS ComputerName, else the host name). At most 64 characters; control
+  # characters are removed.
+  display_name: ""
+
+  # Whether a new device may ask to join at all (POST /api/pair/requests). The
+  # owner then approves it on a device they already use. false = only pasting
+  # the API token pairs a device; GET /api/hello then says pair: token.
+  requests_enabled: true
+
+  # How long a request waits for the owner, in seconds. Allowed 60 to 900; a
+  # value outside that is clamped, with a warning in the log.
+  request_ttl_seconds: 300
+
+  # Limits on strangers asking, counted by TCP peer address. At most this many
+  # requests waiting overall, and per source address; and per source address
+  # in any hour. Over a limit the answer is 429 with a Retry-After.
+  max_pending: 3
+  max_pending_per_source: 1
+  max_requests_per_source_per_hour: 10
+
+  # Opt-in. Approve / Deny buttons in your PRIVATE Telegram chats (the positive
+  # ids in gateway.allowed_chat_ids; a group in that list is never used) when a
+  # new device asks to join. Off by default: Telegram is a third-party relay,
+  # and the message carries the device's address and a match code. Beacon is
+  # told either way. The device's name is sent as plain text, never formatted.
+  telegram_prompts: false
 
 # APNs push to enrolled devices (GRAFT-MOBILE-BRIDGE 2). Disabled by default:
 # enabling requires the `push` extra (pip install 'oara-prometheus[push]')
@@ -1218,6 +1314,66 @@ backends: {}
 backend_probe:
   ttl_s: 60          # a read older than this re-probes; /backends refresh forces it
   timeout_s: 5.0     # per backend; a dead box costs one timeout, never a hang
+
+# Computer use — the desktop driver (cua-driver, `uv sync --extra computer`)
+# as an Integration: its health is probed and known before any task, and it
+# is OFF unless this says `enabled: true` (a literal true; a quoted "true" is
+# not enough). Off means the driver is never constructed, the Cua runtime is
+# never started, and scripts/deploy.sh does not install the `computer` extra.
+# Telemetry is forced off; no key turns it back on.
+#
+# On, it opens THE DOOR: a PERSON starts a desktop task — `/computer <goal>`
+# from Telegram (your own Telegram id on gateway.allowed_chat_ids), or Beacon
+# on a device marked for computer use (`/computer allow <device-id>`). The
+# API token can never start one: a model can read it. Picking the app is the
+# consent; it covers clicks and Tab/Escape in that app only — Return, typing,
+# menus, Send/Delete/Pay-type buttons and anything on a web page ask every
+# time, once each. Enabling it registers NO tool: a model cannot call it.
+computer_use:
+  enabled: false
+  # Named machines — the first term of every desktop grant. Local only (the
+  # local-only ruling); none is implied, so enabling needs one, e.g.
+  #   targets:
+  #     local: {kind: local, description: this machine's desktop}
+  targets: {}
+  probe:
+    ttl_s: 60          # a read older than this re-probes; POST .../probe forces it
+    timeout_s: 5.0     # bounds one health probe; a hung driver costs one timeout
+  apps:
+    # Words a person may use for an app, e.g. {editor: [gnome-text-editor]}.
+    # Otherwise the app's own name, bundle id or launch-path basename.
+    aliases: {}
+  # Ceilings for one desktop task. Each ends the task when reached.
+  task:
+    max_steps: 20        # actions dispatched
+    max_seconds: 600     # wall clock
+    max_approvals: 10    # prompts a task may ask; past it, nothing more is asked
+    max_reobserve: 3     # "look again" answers in a row
+  # The cockpit's action log (computer_* events): what each Beacon shows live
+  # and backfills on reconnect. Kept per chat session; older rows are pruned
+  # when a task or binding ends. No element token, pid, window id or typed
+  # text is ever stored — the text is a character count.
+  action_log:
+    keep_per_session: 200
+  # Cockpit level 2 (v1.1 PR 6b): a thumbnail of the APPROVED WINDOW after
+  # each executed step, for a person watching from a phone. It never reaches
+  # a model, a chat, a push, a log or telemetry, and it is never stored by
+  # default. Only sockets that authenticated with a DEVICE token marked for
+  # computer use, that declared the `computer-thumbnails` capability, and
+  # that are on this session receive it — never the global token.
+  #
+  # The 256 KB frame cap and the password-field skip are FLOORS in code, not
+  # keys: a misconfiguration cannot lift them. Any doubt skips the picture
+  # and says why on the step (window_changed, incomplete_walk,
+  # password_field, frame_invalid, capture_failed, too_large, no_viewer).
+  thumbnails:
+    enabled: true
+    max_dimension: 480     # longest edge, px; scaled by the driver, not here
+    # OPT-IN, and the one key whose wrong answer writes desktop pixels to
+    # disk — so a malformed value parses to false, never to true. When on:
+    # <data>/computer/thumbnails/<task_id>/<seq>.<ext>, mode 0600, pruned
+    # with the action log. No route serves these in v1.1.
+    persist: false
 
 anatomy:
   enabled: true
@@ -1358,6 +1514,20 @@ tasks:
   poll_initial_interval_seconds: 5
   poll_max_interval_seconds: 120
   reengage_turn_cap: 3
+
+# ── Workers ───────────────────────────────────────────────────────────────
+# A worker is an agent another turn spawns (sessions_spawn, or task_create
+# with type local_agent). It runs as its own process.
+workers:
+  # Which model workers run on. Empty = Same as chat: a worker inherits its
+  # spawning conversation's model, provider and backend. A picker key from
+  # GET /api/models (qwen, qwen:qwen3.8-flash, 4090, local) runs EVERY worker
+  # on that one route instead, a smaller window included (the spawn result
+  # says so). Beacon Settings → Worker model sets the same choice; that is
+  # stored in ~/.prometheus/worker_settings.json and wins over this key.
+  # An agent can never choose: a model it names is refused unless it is this
+  # one, and a route that cannot be served is refused, never substituted.
+  model: ""
 
 # ── Heartbeat ─────────────────────────────────────────────────────────────
 heartbeat:

@@ -12,17 +12,31 @@ revoked token can never be re-minted into validity by accident.
 from __future__ import annotations
 
 import hashlib
+import logging
 import sqlite3
 import time
 import uuid
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 from prometheus.config.paths import get_devices_db_path
 
+logger = logging.getLogger(__name__)
+
 # last_seen_at is stamped at most this often per device — a hot client must
 # not turn every request into a write.
 LAST_SEEN_THROTTLE_SECONDS = 60.0
+
+
+def registry_platform(value: object) -> str:
+    """The platform the device registry keeps for a device: ``ios``, ``macos`` or ``other``.
+
+    One narrowing for every enrolment path (``POST /api/devices`` and a pairing approval), so a device
+    called "windows" is ``other`` in the registry however it arrived.
+    """
+    platform = str(value or "").strip().lower()
+    return platform if platform in ("ios", "macos") else "other"
 
 
 def token_digest(token: str) -> str:
@@ -79,6 +93,8 @@ class DeviceStore:
         self._migrate_push_columns()
         # Throttle memory: device_id -> monotonic-ish wall time of last stamp.
         self._last_touch: dict[str, float] = {}
+        # Called with the ids of devices that were just revoked (see add_revoke_listener).
+        self._revoke_listeners: list[Callable[[list[str]], None]] = []
 
     def _migrate_push_columns(self) -> None:
         """GRAFT Piece 2: push registration lives on the device row. ALTER is
@@ -118,6 +134,13 @@ class DeviceStore:
     def mint(self, name: str, platform: str) -> dict:
         """Enrol a device. Returns the ONLY copy of the plaintext token that
         will ever exist — the store keeps the digest."""
+        minted = self._new_device(name, platform)
+        self._conn.commit()
+        return minted
+
+    def _new_device(self, name: str, platform: str) -> dict:
+        """INSERT one device row and return its mint record. Does NOT commit: the caller owns the
+        transaction (mint commits at once; mint_owner commits the device and its owner mark together)."""
         import secrets
 
         device_id = uuid.uuid4().hex
@@ -128,9 +151,28 @@ class DeviceStore:
             " VALUES (?, ?, ?, ?, ?)",
             (device_id, name, platform, token_digest(token), now),
         )
-        self._conn.commit()
         return {"id": device_id, "name": name, "platform": platform,
                 "token": token, "created_at": now}
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """The registry's SQLite connection, for a store that must commit TOGETHER with a device row.
+
+        Pairing requests (``config/pair_requests.py``) live in this file and approve in one transaction
+        with the device they mint. Not for general use: anything that writes through it owns the
+        transaction and the lazily created table it writes to.
+        """
+        return self._conn
+
+    def mint_in_transaction(self, name: str, platform: str) -> dict:
+        """Enrol an ORDINARY (scoped) device inside a transaction the CALLER owns and commits.
+
+        The same row ``mint`` writes, without the commit, so an approval can record itself and mint its
+        device atomically: a failure after this rolls the device back, and there is never a live token
+        nobody holds. There is no tier parameter, as with ``mint``: an owner device is only ever
+        ``mint_owner`` (same-Mac pairing), never the product of an approval.
+        """
+        return self._new_device(name, platform)
 
     def lookup(self, digest: str) -> DeviceRow | None:
         """The live (non-revoked) device for a token digest, or None."""
@@ -171,7 +213,29 @@ class DeviceStore:
                 (time.time(), device_id),
             )
             self._conn.commit()
+            self._notify_revoked([device_id])
         return True
+
+    def add_revoke_listener(self, listener: Callable[[list[str]], None]) -> None:
+        """Be told, AFTER the commit, which devices were just revoked — by :meth:`revoke` or by an owner
+        mint replacing earlier ones. The WebSocket bridge uses it to close a revoked token's open
+        sockets: revocation is a tombstone and authentication only happens at connect, so without
+        this a revoked device kept its live socket (and its frames) until it chose to leave.
+
+        Listeners run synchronously on the revoking thread, in registration order. One that raises is
+        logged and skipped: the revocation is already durable and nothing here may undo it, or the
+        mint that triggered it."""
+        self._revoke_listeners.append(listener)
+
+    def _notify_revoked(self, device_ids: list[str]) -> None:
+        if not device_ids:
+            return
+        for listener in tuple(self._revoke_listeners):
+            try:
+                listener(list(device_ids))
+            except Exception:
+                logger.warning("a device-revocation listener failed; the revocation stands",
+                               exc_info=True)
 
     # ------------------------------------------------------------------
     # Push registration (GRAFT Piece 2)
@@ -286,6 +350,239 @@ class DeviceStore:
                             bundle_id=r["apns_bundle_id"] or "",
                             push_failures=int(r["push_failures"] or 0)),
                  r["activity_token"]) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Computer use: which devices a PERSON marked (computer-use v1.1, W3)
+    # ------------------------------------------------------------------
+    #
+    # Its own table, created on the FIRST mark rather than at open: enrolment
+    # needs only the global token (POST /api/devices), which a model can
+    # read, so a device token alone is not a person — a person has to mark
+    # it. A box that never uses computer use never grows the table (and the
+    # parity fixtures, which record every table in this file, stay as they
+    # are).
+
+    def _has_computer_table(self) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='computer_devices'").fetchone() is not None
+
+    def set_computer(self, device_id: str, on: bool, *, by: str) -> bool:
+        """Mark (or unmark) a LIVE device for computer use. ``by`` names who
+        did it (an approver label). False for an unknown or revoked id."""
+        live = self._conn.execute(
+            "SELECT 1 FROM api_devices WHERE id = ? AND revoked_at IS NULL",
+            (device_id,)).fetchone()
+        if live is None:
+            return False
+        if not on:
+            if self._has_computer_table():
+                self._conn.execute(
+                    "DELETE FROM computer_devices WHERE device_id = ?",
+                    (device_id,))
+                self._conn.commit()
+            return True
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS computer_devices (
+              device_id  TEXT PRIMARY KEY,
+              marked_at  REAL NOT NULL,
+              marked_by  TEXT NOT NULL
+            );
+        """)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO computer_devices (device_id, marked_at, "
+            "marked_by) VALUES (?, ?, ?)", (device_id, time.time(), by))
+        self._conn.commit()
+        return True
+
+    def computer_allowed(self, device_id: str) -> bool:
+        """Is this LIVE device marked for computer use? A revoked device
+        never is, whatever its mark says."""
+        if not self._has_computer_table():
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM computer_devices c JOIN api_devices d "
+            "ON d.id = c.device_id WHERE c.device_id = ? "
+            "AND d.revoked_at IS NULL", (device_id,)).fetchone()
+        return row is not None
+
+    def computer_device_ids(self) -> set[str]:
+        if not self._has_computer_table():
+            return set()
+        rows = self._conn.execute(
+            "SELECT c.device_id FROM computer_devices c JOIN api_devices d "
+            "ON d.id = c.device_id WHERE d.revoked_at IS NULL").fetchall()
+        return {r["device_id"] for r in rows}
+
+    # ------------------------------------------------------------------
+    # Session ownership: which device brought a session into existence
+    # ------------------------------------------------------------------
+    #
+    # A device token sees and manages only the sessions it owns; the operator's
+    # global token sees all (web/session_scope.py is the policy, this is the
+    # record). A session with no row here belongs to the operator — a Telegram
+    # chat, or anything that predates device scoping.
+    #
+    # One row per session, first writer wins, never reassigned and never
+    # deleted: ownership must not change under a session that is mid-turn, and
+    # a purged or revoked-device session must not become claimable by someone
+    # else. Revoking a device leaves its rows; the operator still reads them.
+    # Anything that adds a way to REASSIGN a session (approve-to-pair handing
+    # one over) must do it here, in one UPDATE, and nowhere else.
+    #
+    # Its own table, created on the FIRST claim rather than at open, like
+    # computer_devices above: a daemon with no device activity never grows it,
+    # and the parity fixtures, which record every table in this file, stay as
+    # they are.
+
+    def claim_session(self, session_id: str, device_id: str) -> bool:
+        """Record *device_id* as the owner of *session_id*, if nobody owns it.
+
+        True when the device owns the session afterwards (it already did, or this
+        call took it); False when another device owns it or *device_id* is not a
+        live device. Check that the session does not exist elsewhere BEFORE
+        calling — this only arbitrates between devices; it cannot know that a
+        Telegram chat already holds the id.
+        """
+        live = self._conn.execute(
+            "SELECT 1 FROM api_devices WHERE id = ? AND revoked_at IS NULL",
+            (device_id,)).fetchone()
+        if live is None or not session_id:
+            return False
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS device_sessions (
+              session_id TEXT PRIMARY KEY,
+              device_id  TEXT NOT NULL,
+              claimed_at REAL NOT NULL
+            );
+        """)
+        self._conn.execute(
+            "INSERT OR IGNORE INTO device_sessions (session_id, device_id, claimed_at)"
+            " VALUES (?, ?, ?)", (session_id, device_id, time.time()))
+        self._conn.commit()
+        return self.session_owner(session_id) == device_id
+
+    def session_owner(self, session_id: str) -> str | None:
+        """The device id that owns *session_id*, or None (the operator's)."""
+        try:
+            row = self._conn.execute(
+                "SELECT device_id FROM device_sessions WHERE session_id = ?",
+                (session_id,)).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):  # a lock or I/O error is not "unowned"
+                raise
+            return None  # nothing was ever claimed
+        return row["device_id"] if row else None
+
+    def owned_session_ids(self, device_id: str) -> set[str]:
+        """Every session id *device_id* owns."""
+        try:
+            rows = self._conn.execute(
+                "SELECT session_id FROM device_sessions WHERE device_id = ?",
+                (device_id,)).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            return set()
+        return {r["session_id"] for r in rows}
+
+    # ------------------------------------------------------------------
+    # The OWNER tier: the person's own device (P2)
+    # ------------------------------------------------------------------
+    #
+    # Two ways to mint a device, on purpose, and the tier is not a parameter on either:
+    #
+    #   mint()        an ordinary device. Scoped to its own sessions (web/session_scope.py), cannot
+    #                 approve anything. This is what a device approved from Telegram or by another
+    #                 device gets.
+    #   mint_owner()  the person's OWN device (same-Mac pairing, or the global token minting one
+    #                 for its owner's cockpit). Operator-equivalent for session scoping and device
+    #                 management; ``DeviceIdentity.is_operator`` is true. NOT root: it still cannot
+    #                 enrol devices or define MCP servers (those stay global-token-only).
+    #
+    # The marker is its own table, created on the FIRST owner mint, like computer_devices and
+    # device_sessions: api_devices keeps its columns and a daemon that never has an owner device
+    # keeps its schema, and the parity fixtures, which record both, stay as they are. The device
+    # row and its mark are written in ONE transaction, so there is never a token that
+    # authenticates without its mark or the reverse. ``marked_by`` names the route that issued
+    # it (OWNER_SOURCE_SAME_MAC, or the label of the approver who minted it).
+
+    def mint_owner(self, name: str, platform: str, *, by: str,
+                   replaces: Iterable[str] = ()) -> dict:
+        """Enrol the person's own device. Returns what :meth:`mint` returns, plus ``owner: True``.
+
+        ``replaces`` names SOURCES (``marked_by`` values): every LIVE owner device marked with one of
+        them is revoked in the SAME transaction as this mint, so a crash leaves neither zero owners nor
+        two — the earlier credentials stand until this one exists. A re-pairing replaces the install it
+        came from instead of stacking a second standing operator credential nobody holds. Owner devices
+        from other sources (another computer's), and ordinary devices, are never touched, and neither
+        is the device being minted. The ids revoked come back as ``revoked_previous`` and are announced
+        to the revoke listeners once the commit is durable.
+        """
+        if not by:
+            raise ValueError("an owner device must say who marked it (by=)")
+        sources = tuple(replaces)
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS owner_devices (
+              device_id TEXT PRIMARY KEY,
+              marked_at REAL NOT NULL,
+              marked_by TEXT NOT NULL
+            );
+        """)
+        try:
+            revoked: list[str] = []
+            if sources:
+                marks = ",".join("?" for _ in sources)
+                rows = self._conn.execute(
+                    "SELECT o.device_id FROM owner_devices o JOIN api_devices d"
+                    f" ON d.id = o.device_id WHERE o.marked_by IN ({marks})"
+                    " AND d.revoked_at IS NULL", sources).fetchall()
+                revoked = [r["device_id"] for r in rows]
+                now = time.time()
+                for device_id in revoked:
+                    self._conn.execute(
+                        "UPDATE api_devices SET revoked_at = ? WHERE id = ?", (now, device_id))
+            minted = self._new_device(name, platform)
+            self._conn.execute(
+                "INSERT INTO owner_devices (device_id, marked_at, marked_by) VALUES (?, ?, ?)",
+                (minted["id"], minted["created_at"], by))
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        minted["owner"] = True
+        minted["revoked_previous"] = revoked
+        self._notify_revoked(revoked)
+        return minted
+
+    def is_owner(self, device_id: str) -> bool:
+        """Is this LIVE device an owner device? A revoked device never is."""
+        try:
+            row = self._conn.execute(
+                "SELECT 1 FROM owner_devices o JOIN api_devices d ON d.id = o.device_id"
+                " WHERE o.device_id = ? AND d.revoked_at IS NULL", (device_id,)).fetchone()
+        except sqlite3.OperationalError as exc:  # runs on EVERY authenticated request
+            if "no such table" not in str(exc):
+                raise
+            return False
+        return row is not None
+
+    def owner_device_ids(self) -> set[str]:
+        return set(self.owner_sources())
+
+    def owner_sources(self, *, include_revoked: bool = False) -> dict[str, str]:
+        """{device id: who marked it} for every LIVE owner device — or, with ``include_revoked``,
+        for every device ever marked (the device list shows a replaced credential as what it was)."""
+        live = "" if include_revoked else " WHERE d.revoked_at IS NULL"
+        try:
+            rows = self._conn.execute(
+                "SELECT o.device_id, o.marked_by FROM owner_devices o JOIN api_devices d"
+                f" ON d.id = o.device_id{live}").fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):  # a lock is not 'no owner devices'
+                raise
+            return {}
+        return {r["device_id"]: r["marked_by"] for r in rows}
 
     # ------------------------------------------------------------------
 

@@ -18,10 +18,11 @@ This page is the complete map of what Prometheus can do: every entry point, tool
 | `--model` / `--provider` / `--config` / `--debug` | Per-run overrides |
 | `--reset-telemetry` / `--reset-data` | Wipe the telemetry database, or all user data |
 | `oara setup [--fast\|--noninteractive\|--gateway-only]` | First-run wizard: probes llama.cpp / Ollama / LM Studio / vLLM, generates your agent's identity, writes a working config, smoke-tests the loop, and mints the web API token |
-| `oara daemon [--telegram-only]` | Start the always-on daemon: web API and WebSocket, gateways, cron, heartbeat, SENTINEL (if enabled), memory extractor |
+| `oara daemon [--telegram-only] [--bind ADDRESS]` | Start the always-on daemon: web API and WebSocket, gateways, cron, heartbeat, SENTINEL (if enabled), memory extractor. `--bind 127.0.0.1` listens on this machine only (a new install writes that as `web.bind`; a config with no `web.bind` listens on every interface, plain HTTP); see [Ports & remote access](api.md#ports--remote-access) |
 | `oara doctor` | Diagnostics with one fix hint per failure; exits nonzero when anything is broken, so it works in scripts |
 | `oara token show \| rotate` | Re-print the web API bearer token, or invalidate it and mint a new one |
-| `oara install-service [--force]` | Write and enable a systemd **user** unit |
+| `oara pair list \| approve <id> \| deny <id>` | See and decide the devices asking to join this Prometheus (an id may be a unique prefix of 6+ characters; `approve` takes `--name` and `--code`). Uses the global token against the local daemon |
+| `oara install-service [--force --now]` | Write and enable a systemd **user** unit (Linux), or write a LaunchAgent plist (macOS; `--now` also loads it). Exits non-zero when it could not install or enable the service |
 | `oara identity --show \| --regenerate` | Manage the SOUL.md / AGENTS.md identity files |
 | `oara migrate --from hermes\|openclaw [--dry-run]` | Import config, identity, memory, and skills from `~/.hermes`, `~/.openclaw`, or `~/.clawdbot` |
 | `oara code --repo --task --acceptance [...]` | Launch a sandboxed iterate-to-green coding run; `--control-dir` enables pause / inject / resume |

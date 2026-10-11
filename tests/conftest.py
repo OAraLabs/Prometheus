@@ -65,6 +65,10 @@ def _isolated_state_dirs(tmp_path, monkeypatch):
     # never pointed at tmp, so any data-dir-backed store written by a test
     # (mcp_servers.json being the first heavy one) landed on the live box.
     monkeypatch.setenv("PROMETHEUS_DATA_DIR", str(tmp_path / "prom-data"))
+    # A developer who exports PROMETHEUS_WEB_BIND (the listen address) must not
+    # change which interface a test's server binds, or which Host header the
+    # TestClient's "testserver" is allowed to use.
+    monkeypatch.delenv("PROMETHEUS_WEB_BIND", raising=False)
     # The developer's OWN checkout config is a live-state root too, and it
     # only became reachable when `config.defaults` stopped naming a path one
     # directory above the repo root. `config/prometheus.yaml` is gitignored,
@@ -81,6 +85,19 @@ def _isolated_state_dirs(tmp_path, monkeypatch):
         "prometheus.config.defaults.REPO_CONFIG_PATH",
         tmp_path / "no-repo-config" / "prometheus.yaml",
     )
+
+
+@pytest.fixture(autouse=True)
+def _unwired_shell_floor():
+    """``create_tool_registry`` wires a PROCESS-WIDE shell floor
+    (security/shell_floor.py). One test's security section must not floor the
+    next test's background tasks and cron jobs, so each test starts unwired —
+    which means "read the floor from the (isolated) config", not "no floor"."""
+    from prometheus.security.shell_floor import set_shell_floor
+
+    set_shell_floor(None)
+    yield
+    set_shell_floor(None)
 
 
 def _validated_allowance(marker: pytest.Mark) -> set[str]:
@@ -191,6 +208,8 @@ def _hermetic_prometheus_env(monkeypatch):
     independent of whatever the host environment happens to export.
     """
     monkeypatch.delenv("PROMETHEUS_API_TOKEN", raising=False)
+    # ...and the file form of it (a container secret), which turns auth on just the same.
+    monkeypatch.delenv("PROMETHEUS_API_TOKEN_FILE", raising=False)
     monkeypatch.delenv("PROMETHEUS_FILES_ROOT", raising=False)
     monkeypatch.delenv("PROMETHEUS_TELEGRAM_TOKEN", raising=False)
     # Real provider keys also leak from the daemon env and flip

@@ -438,9 +438,13 @@ class TestApprovalHandlers:
         await adapter._app_approve(interaction, "abc123")
         assert interaction.all_messages == ["Approved: abc123"]
         # SPRINT-CONSENT: approve() now carries the scope and the derived
-        # grant so the resolution audit row can name them.
+        # grant so the resolution audit row can name them — and (W4) who
+        # answered: this fake interaction names no user, so "unknown".
+        from prometheus.permissions.approver import Approver
+
         queue.approve.assert_awaited_once_with(
-            "abc123", scope="once", grant=None
+            "abc123", scope="once", grant=None,
+            by=Approver("discord", "unknown"),
         )
 
     @pytest.mark.asyncio

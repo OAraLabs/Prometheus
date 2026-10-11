@@ -293,8 +293,9 @@ class TestConfigure:
             api_bytes = yaml.safe_dump(api_cfg[section], sort_keys=False)
             cli_bytes = yaml.safe_dump(cli_cfg[section], sort_keys=False)
             assert api_bytes == cli_bytes, f"{section} section diverged"
+        # D10: a fresh install listens on this machine only, from both writers.
         assert api_cfg["web"] == {"enabled": True, "api_port": 8005,
-                                  "ws_port": 8010}
+                                  "ws_port": 8010, "bind": "127.0.0.1"}
 
     def test_summary_shape_and_no_token_leak(self, env_file, config_dir):
         client, _ = make_client()

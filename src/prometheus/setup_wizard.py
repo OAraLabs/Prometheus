@@ -27,6 +27,7 @@ import yaml
 
 from prometheus.config.paths import get_config_dir, get_wiki_root
 from prometheus.providers.registry import CLOUD_DEFAULTS, ProviderRegistry
+from prometheus.web.bind import FRESH_INSTALL_BIND
 
 import logging
 
@@ -59,7 +60,9 @@ CLOUD_PROVIDER_MODELS: dict[str, list[tuple[str, str, str]]] = {
     "openai": [
         ("gpt-5.6-luna", "Fast + cheap", "$0.20/$1.20 per 1M tokens"),
         ("gpt-5.6-terra", "Balanced", "$2/$12 per 1M tokens"),
-        ("gpt-6-astra", "Flagship", "$10/$50 per 1M tokens"),
+        # OpenAI: "GPT-6 Astra ... support Chat Completions, but tool calling
+        # requires Responses", and Prometheus speaks Chat Completions.
+        ("gpt-6-astra", "Flagship; no tool calls", "$10/$50 per 1M tokens"),
     ],
     "anthropic": [
         ("claude-sonnet-5", "Best value", "$2/$10 per 1M tokens"),
@@ -95,7 +98,10 @@ CLOUD_PROVIDER_MODELS: dict[str, list[tuple[str, str, str]]] = {
         ("glm-5.3-flash", "Fast + cheap", "$0.15/$0.50 per 1M tokens"),
     ],
     "mimo": [
-        ("mimo-v2.5-pro", "Flagship", "$0.435/$0.87 per 1M tokens"),
+        # mimo-v2.5-pro and mimo-v2.5 stop working 2026-10-21 10:00 Beijing time,
+        # with no automatic replacement; Xiaomi recommends the v2.6 models.
+        ("mimo-v2.6-pro", "Flagship", "$0.435/$0.87 per 1M tokens"),
+        ("mimo-v2.6-flash", "Fast + cheap", "$0.14/$0.28 per 1M tokens"),
     ],
     "qwen": [
         # International pay-as-you-go endpoint. The Alibaba subscription plans
@@ -859,11 +865,22 @@ Run this wizard again after you're ready:
         """Write a fresh config, preserving defaults from the template."""
         print(f"\nWriting config to {self._config_path}...")
 
+        # A NEW install listens on this machine only. A config that is already there is never
+        # flipped (an unset web.bind means every interface, and a remote deployment depends on it),
+        # so the bind is decided by whether the FILE existed, not by whether it had a bind.
+        is_new_install = not self._config_path.exists()
+
         # Load template defaults
         base = self._load_existing_config() or {}
 
         # Update wizard-touched fields
         self._apply_wizard_fields(base)
+        if is_new_install:
+            base["web"]["bind"] = FRESH_INSTALL_BIND
+            # A new app install asks before every shell command and file write (permissions/modes.py).
+            from prometheus.permissions.modes import fresh_install_mode
+
+            base.setdefault("security", {})["permission_mode"] = fresh_install_mode()
 
         self._save_config(base)
 

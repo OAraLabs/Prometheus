@@ -41,6 +41,8 @@ Two plain markdown files ride every system prompt:
 
 The agent reads and edits these itself over time. You can inspect them at any point with the `/memory` command, or in Beacon under **Config → Memory**. Because they are size-bounded, the agent has to keep them curated rather than letting them grow without limit.
 
+Both files are read again at the start of every turn, so a change reaches the model on your next message with no restart. That holds whether the agent made it, you made it in Beacon, or you edited the file by hand. A change made partway through a turn applies from the next turn. If neither file changed, the system prompt is byte-for-byte the same, so a provider's prompt cache is not disturbed.
+
 ### Editing memory remotely
 
 You can also edit both files yourself, from anywhere the API reaches — `PUT /api/memory/current` replaces the content of `MEMORY.md` and/or `USER.md`, and Beacon's **Config → Memory** tab is the UI over it. The write path is deliberately careful:

@@ -148,66 +148,35 @@ class BashTool(BaseTool):
         # itself and thrashed the disk for minutes after the turn moved on.
         argv = ["/bin/bash", "-lc", arguments.command]
 
-        # The READ floor, below the tool layer. The permission gate cannot see
-        # the paths inside a command string, so this is the only place a bash
-        # call can be stopped from reading a private key. When it is required
-        # and unavailable we REFUSE — never fall through to an unconfined
-        # shell, which would silently remove the floor rather than degrade it.
-        aa_prefix: list[str] = []
-        if self._confinement == _CONFINE.MODE_REQUIRED:
-            ok, detail = _CONFINE.preflight(self._confinement_profile)
-            if not ok:
-                return ToolResult(
-                    output=_CONFINE.refusal_message(
-                        self._confinement_profile, detail),
-                    is_error=True,
-                    metadata={"write_floor": "not-reached"},
-                )
-            # Kept as a PREFIX rather than applied here, so the write floor
-            # below can probe the composed stack as the stack it will be.
-            aa_prefix = _CONFINE.wrap_argv([], self._confinement_profile)
-            argv = [*aa_prefix, *argv]
-
-        # The WRITE floor. Same doctrine, different mechanism and different
-        # failure policy: bubblewrap needs no root, so it can be attempted
-        # everywhere, but it does not EXIST everywhere (no macOS equivalent),
-        # and refusing every bash call on a host that cannot provide it would
-        # be a worse outcome than the hole. Hence three modes rather than two.
-        #
-        # Ordering: the write floor goes OUTSIDE the AppArmor transition, so
-        # aa-exec runs inside the mount namespace. Whether those two compose
-        # on a given host is not asserted here — write_preflight() probes the
-        # composed argv and a stack that does not compose fails closed.
-        write_floor = "off"
-        if self._write_confinement != _CONFINE.WRITE_MODE_OFF:
-            if not writable:
-                # Loud, not silent: "required" with no workspace root is a
-                # config that asks for a boundary without defining one.
-                write_floor = "no-workspace"
-                logger.warning(
-                    "bash write floor is %r but no workspace root is "
-                    "configured — there is no boundary to enforce and bash "
-                    "may write anywhere.", self._write_confinement,
-                )
-            else:
-                ok, detail = _CONFINE.write_preflight(inner_prefix=aa_prefix)
-                if ok:
-                    argv = _CONFINE.write_wrap_argv(
-                        argv, writable=writable, cwd=cwd)
-                    write_floor = "active"
-                elif self._write_confinement == _CONFINE.WRITE_MODE_REQUIRED:
-                    return ToolResult(
-                        output=_CONFINE.write_refusal_message(detail),
-                        is_error=True,
-                        metadata={"write_floor": "refused"},
-                    )
-                else:
-                    # "auto" degrades to today's behaviour. write_preflight()
-                    # has already logged the reason at ERROR, once; this
-                    # records it per call as well, because a floor that is not
-                    # there must be legible from the call that ran without it
-                    # and not only from a log line at startup.
-                    write_floor = "unavailable"
+        # The READ floor (AppArmor) and the WRITE floor (bubblewrap), below
+        # the tool layer: the permission gate cannot see the paths inside a
+        # command string, so this is the only place a bash call can be stopped
+        # from reading a private key or writing outside the workspace. The
+        # composition and its failure policy live in confinement.apply_floors,
+        # shared with every other door that runs a model-written command
+        # (background tasks, poll predicates, cron jobs, coding runs). The
+        # read floor REFUSES when required and unavailable; the write floor
+        # has three modes because bubblewrap does not exist everywhere.
+        floored = _CONFINE.apply_floors(
+            argv,
+            read_mode=self._confinement,
+            write_mode=self._write_confinement,
+            writable=writable,
+            cwd=cwd,
+            profile=self._confinement_profile,
+        )
+        if floored.refusal is not None:
+            return ToolResult(
+                output=floored.refusal,
+                is_error=True,
+                metadata={"write_floor": floored.write_floor,
+                          "read_floor": floored.read_floor},
+            )
+        argv = list(floored.argv)
+        write_floor = floored.write_floor
+        # Per call, so a shell that ran WITHOUT the read floor ("auto" on a
+        # host where the profile did not verify) says so where it ran.
+        read_floor = floored.read_floor
 
         # Strip secret-shaped variables before the child inherits the daemon's
         # environment. Without this, ``env`` / ``printenv`` / ``echo
@@ -241,7 +210,7 @@ class BashTool(BaseTool):
             return ToolResult(
                 output=f"Command timed out after {arguments.timeout_seconds} seconds",
                 is_error=True,
-                metadata={"write_floor": write_floor},
+                metadata={"write_floor": write_floor, "read_floor": read_floor},
             )
         except asyncio.CancelledError:
             # The agent loop wraps tool.execute() in its own (longer) timeout;
@@ -272,6 +241,7 @@ class BashTool(BaseTool):
             metadata={
                 "returncode": process.returncode,
                 "write_floor": write_floor,
+                "read_floor": read_floor,
                 "refused_by": _refused_by(process.returncode, text, write_floor),
             },
         )

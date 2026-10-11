@@ -120,6 +120,7 @@ class TestWSBridgeTurnCompleted:
 
     @staticmethod
     def _bridge() -> Any:
+        from prometheus.web.session_scope import SessionAccess
         from prometheus.web.ws_server import WebSocketBridge
 
         # Bypass __init__; only set the attributes the handler touches.
@@ -128,6 +129,10 @@ class TestWSBridgeTurnCompleted:
         bridge._subscribers = {}
         bridge._subscriptions = {}
         bridge._ws_filters = {}  # broadcast() consults the Piece-4 filter
+        # ... and device scoping: auth off means every socket is the operator's.
+        bridge._ws_identity = {}
+        bridge._api_token = ""
+        bridge._access = SessionAccess(lambda: None, lambda sid: False)
         bridge._last_ids = {}
         bridge._log = MagicMock()
         return bridge

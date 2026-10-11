@@ -1036,6 +1036,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._register(ops, "audit", self._app_audit, "Web capability audit: run | <category>")
         self._register(ops, "press", self._app_press, "CLI library: list | search | install | …")
         self._register(ops, "escalations", self._app_escalations, "Teacher-escalation counters")
+        self._register(ops, "computer", self._app_computer, "Desktop tasks (Telegram and Beacon only in v1.1)")
 
         # -- provider --------------------------------------------------------
         self._register(provider, "claude", self._app_claude, "Route this channel via Anthropic Claude")
@@ -1329,6 +1330,15 @@ class DiscordAdapter(BasePlatformAdapter):
         _handler.__name__ = f"_app_backend_{name}"
         return _handler
 
+    async def _app_computer(self, interaction: Any, args: str) -> None:
+        from prometheus.gateway.commands import cmd_computer
+        from prometheus.permissions import approver as _approver
+
+        await self._defer(interaction)
+        await self._respond(interaction, await cmd_computer(
+            None, args, by=_approver.discord(interaction), surface="discord",
+            session_id=""))
+
     async def _app_backends(self, interaction: Any, args: str) -> None:
         from prometheus.gateway.commands import cmd_backends
 
@@ -1572,10 +1582,13 @@ class DiscordAdapter(BasePlatformAdapter):
     async def _app_approve(self, interaction: Any, args: str) -> None:
         from prometheus.gateway import commands as _cmds
 
-        # Full args text — cmd_approve parses the scope verb itself.
+        from prometheus.permissions import approver as _approver
+
+        # Full args text — cmd_approve parses the scope verb itself. The
+        # invoking USER is recorded, not the channel (W4).
         text = await _cmds.cmd_approve(
             getattr(self, "_approval_queue", None), args,
-            prefix=OPS_PREFIX,
+            by=_approver.discord(interaction), prefix=OPS_PREFIX,
         )
         await self._respond(interaction, text)
 
@@ -1592,9 +1605,11 @@ class DiscordAdapter(BasePlatformAdapter):
         from prometheus.gateway import commands as _cmds
 
         request_id = args.split()[0] if args else ""
+        from prometheus.permissions import approver as _approver
+
         text = await _cmds.cmd_deny(
             getattr(self, "_approval_queue", None), request_id,
-            prefix=OPS_PREFIX,
+            by=_approver.discord(interaction), prefix=OPS_PREFIX,
         )
         await self._respond(interaction, text)
 

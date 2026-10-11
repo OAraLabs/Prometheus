@@ -45,7 +45,10 @@ from prometheus.providers.base import (
     ApiTextDeltaEvent,
     ModelProvider,
 )
-from prometheus.context.system_prompt import rewrite_model_identity
+from prometheus.context.system_prompt import (
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    rewrite_model_identity,
+)
 from prometheus.engine.fallback import stream_round_with_fallback
 from prometheus.engine.stages.routing import route_turn
 
@@ -696,6 +699,12 @@ class LoopContext:
     # window lookup passes it so the compactor budgets THAT box's reported
     # n_ctx, not the primary's.
     backend: str | None = None
+    # The picker key (`qwen`, `4090`, `local`) and provider name of the route
+    # serving this run, as the routing stage decided them — what a worker the
+    # run spawns inherits (tasks/worker_route.py). None when the route has no
+    # key: a task rule, smart routing, or a mid-run model fallback.
+    route_key: str | None = None
+    route_provider: str | None = None
     # H1: per-result cap (tokens) applied to EACH tool result before injection,
     # via ToolResultTruncator's per-tool strategies. 0 disables (back-compat for
     # tests/benchmarks). Runs before the cross-result turn budget below, and
@@ -733,6 +742,15 @@ class LoopContext:
     # (config, cwd) -> the section text for a workspace. Set by the daemon to
     # prompt_assembler.project_files_section bound to its config.
     project_prompt_builder: object | None = None
+    # File memory (MEMORY.md + USER.md), re-read once per run. The boot prompt
+    # carries the "# Memory" section as it was at startup, and the memory tool
+    # and PUT /api/memory/current write the files at once, so without this the
+    # model saw the boot copy until a restart. boot_memory_prompt is the exact
+    # section text the boot prompt carries (None = it had none);
+    # memory_prompt_builder is a zero-arg callable returning the current
+    # section (prompt_assembler.memory_section). None = no refresh.
+    boot_memory_prompt: str | None = None
+    memory_prompt_builder: Callable[[], str | None] | None = None
     # Item 4: per-turn file checkpoints (prometheus.checkpoints.FileCheckpointStore).
     # Used only when the run has a session workspace — that is the write
     # domain the bwrap floor bounds, so it is the domain a checkpoint can
@@ -797,7 +815,7 @@ class LoopContext:
     #: and its own field comment already says "within this loop run".
     PER_RUN_FIELDS: ClassVar[frozenset[str]] = frozenset({
         "provider", "adapter", "model", "backend", "system_prompt",
-        "pair_pending",
+        "pair_pending", "route_key", "route_provider",
     })
 
     #: Not a dataclass field, deliberately: ``dataclasses.replace`` copies
@@ -907,8 +925,10 @@ _ROUND_SERVING: contextvars.ContextVar = contextvars.ContextVar("prometheus_roun
 # The session the run's rows are recorded under (WP-X.21 T3): the recorded id
 # (the turn's conversation, or a record-only run's own id), None on an
 # ephemeral turn. For _log_iteration, whose 14 call sites have no session in
-# scope; a ContextVar for _RUN_PATHS's reason. Descriptive only.
-_RUN_SESSION: contextvars.ContextVar = contextvars.ContextVar("prometheus_run_session", default=None)
+# scope; a ContextVar for _RUN_PATHS's reason. The variable itself lives in
+# engine/tool_context.py so the approval queue can read it too (it stamps each
+# pending request with the session that raised it); this is that same object.
+from prometheus.engine.tool_context import RUN_SESSION as _RUN_SESSION  # noqa: E402
 
 # The turn the run is recording into telemetry v2 (WP-X.54 T-3): a _TurnRecord,
 # or None when the run has no telemetry. Beside _RUN_SESSION for the same
@@ -1229,6 +1249,78 @@ def _serving_provider_name(context: "LoopContext") -> str:
     """The provider name to RECORD (it decides ``is_golden``) for the round in progress."""
     serving = _ROUND_SERVING.get()
     return serving[1] if serving is not None else _provider_name_for_telemetry(context.provider)
+
+
+def _serving_route(context: "LoopContext") -> dict[str, str | None]:
+    """The route serving this run, as a spawned worker should inherit it.
+
+    The SESSION's route — what its conversation chose — not a single round's
+    degrade: a worker is the conversation's helper, and the fallback is a
+    one-round substitute the user never picked.
+    """
+    return {
+        "key": context.route_key,
+        "provider": context.route_provider
+        or _provider_name_for_telemetry(context.provider) or None,
+        "model": context.model,
+        "backend": context.backend,
+    }
+
+
+def _context_window_for(context: "LoopContext") -> Callable[..., int] | None:
+    """``(model, backend) -> window`` from this run's compactor, or None."""
+    compactor = context.compactor
+    if compactor is None or not hasattr(compactor, "limit_for"):
+        return None
+
+    def window_for(model: str, backend: str | None = None) -> int:
+        return int(compactor.limit_for(model, backend=backend))  # type: ignore[attr-defined]
+
+    return window_for
+
+
+def _refresh_memory_section(
+    prompt: str, boot: str | None, builder: Callable[[], str | None],
+) -> str:
+    """*prompt* with its "# Memory" section as MEMORY.md + USER.md read NOW.
+
+    Exact substring, like the item W project swap: *boot* is the section the
+    boot prompt was built with, so it is found verbatim or not at all. Files
+    that have not changed give a byte-identical prompt, so a provider's cached
+    prefix (Anthropic cache_control, llama.cpp's KV reuse) survives every run
+    that wrote no memory. A write misses the cache once, on the next run: the
+    price of the model seeing it.
+
+    - The boot section is present: replaced by the current one, or dropped with
+      its separator if the files are now empty.
+    - There was none at boot and this is an assembled prompt (it carries the
+      dynamic boundary): the current section goes first in the dynamic part,
+      so memory that was empty at boot (a fresh install) appears without a
+      restart. Not appended at the end: the OpenAI-compatible route appends a
+      client's own system text there, and memory must not read as the client's.
+    - Otherwise the prompt is a caller's own (``/benchmark`` on Telegram,
+      Slack and Discord sends a fixed one-liner through the daemon's loop),
+      which never carried memory: left alone.
+
+    Fail-open: if the read raises, the run keeps the prompt it had.
+    """
+    try:
+        current = builder() or ""
+    except Exception:
+        log.warning("memory_prompt_builder failed; this run keeps the boot memory section",
+                    exc_info=True)
+        return prompt
+    if boot:
+        if boot not in prompt:
+            return prompt
+        if current:
+            return prompt.replace(boot, current, 1)
+        with_sep = f"\n\n{boot}"
+        return prompt.replace(with_sep if with_sep in prompt else boot, "", 1)
+    dynamic_start = f"{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\n"
+    if current and current not in prompt and dynamic_start in prompt:
+        return prompt.replace(dynamic_start, f"{dynamic_start}{current}\n\n", 1)
+    return prompt
 
 
 async def run_loop(
@@ -1734,6 +1826,10 @@ async def _run_loop(
             "loaded" if session_section else "none found",
             len(session_section or ""), "replacing" if swapped else "appended after",
         )
+    if context.memory_prompt_builder is not None:
+        active_system_prompt = _refresh_memory_section(
+            active_system_prompt, context.boot_memory_prompt, context.memory_prompt_builder,
+        )
     # The base prompt for THIS run — workspace-swapped when the session has
     # one. The adapter's format_request (below, and again on model fallback
     # and malformed-call retries) must start from this, not from
@@ -2079,8 +2175,12 @@ async def _run_loop(
             # APIs do not publish context length at all, so that side is a configured floor and
             # the refusal message must say which it had.
             backend = getattr(context, "backend", None)
+            # Or the compactor says the number IS a server's report: a local box
+            # with no fallback configured is measured too (#704's workers).
+            _is_measured = getattr(context.compactor, "is_measured", None)
             measured = (
                 bool(getattr(context.fallback, "is_local_backend", False)) or backend is not None
+                or (callable(_is_measured) and bool(_is_measured(_model, backend=backend)))
             )
             return context.compactor.limit_for(_model, backend=backend), measured
 
@@ -2840,6 +2940,9 @@ async def _run_loop(
                         )
                         context.provider = fallback.provider
                         context.model = fallback.model_name
+                        # The run is no longer on the route it was given.
+                        context.route_key = None
+                        context.route_provider = fallback.provider_name or None
                         if fallback.adapter is not None:
                             context.adapter = fallback.adapter
                         circuit_breaker.record_success()
@@ -4557,7 +4660,8 @@ async def _execute_tool_call(
             # M2: a name-changing repair (fuzzy match) silently executes a
             # DIFFERENT tool than the model named — for a mutating tool that's a
             # real surprise. Surface it; the repair count reaches telemetry on
-            # the success record() below.
+            # every row written for this call from here on, the refusals
+            # included: `repairs` and `repair_kind` describe the same log.
             if repair_log and tool_name != _original_tool_name:
                 log.warning(
                     "Adapter repaired tool name %r → %r before execution: %s",
@@ -4670,6 +4774,7 @@ async def _execute_tool_call(
                 success=False,
                 error_type="unknown_tool",
                 error_detail=f"Unknown tool: {tool_name}",
+                repairs=len(repair_log),
                 served_model=served_model,
                 parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
                 session_id=_row_session,
@@ -4763,6 +4868,7 @@ async def _execute_tool_call(
                 error_type="template_markup",
                 error_detail=markup_guard.describe(_markup),
                 parsed_tool_call=_markup_call,
+                repairs=len(repair_log),
                 served_model=served_model,
                 session_id=_row_session,
                 **_v2_call(tool_name, tool_use_id, success=False,
@@ -4841,6 +4947,7 @@ async def _execute_tool_call(
                     # forensics + future mining (input_validation rows had
                     # 0/21 parsed_tool_call coverage in all history)
                     parsed_tool_call=_failed_call,
+                    repairs=len(repair_log),
                     served_model=served_model,
                     session_id=_row_session,
                     **_v2_call(tool_name, tool_use_id, success=False,
@@ -5056,6 +5163,7 @@ async def _execute_tool_call(
                             success=False,
                             error_type="permission_denied",
                             error_detail=f"User denied permission for {tool_name}",
+                            repairs=len(repair_log),
                             served_model=served_model,
                             parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
                             session_id=_row_session,
@@ -5075,6 +5183,7 @@ async def _execute_tool_call(
                         success=False,
                         error_type="permission_denied",
                         error_detail=decision.reason or f"Permission denied for {tool_name}",
+                        repairs=len(repair_log),
                         served_model=served_model,
                         parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
                         session_id=_row_session,
@@ -5095,6 +5204,11 @@ async def _execute_tool_call(
     _tool_override = getattr(tool, "execution_timeout_seconds", None)
     _timeout = _tool_override if _tool_override is not None else context.tool_timeout_seconds
     _t0 = time.monotonic()
+    # Marks the span as a tool call for the one reader that must know: the
+    # desktop door refuses to start from inside one (W3; engine/tool_context).
+    # Set BEFORE wait_for so the task it creates inherits it.
+    from prometheus.engine.tool_context import TOOL_EXECUTION as _TOOL_EXECUTION
+    _tool_ctx_token = _TOOL_EXECUTION.set(tool_name or "?")
     try:
         result = await asyncio.wait_for(
             tool.execute(
@@ -5122,6 +5236,11 @@ async def _execute_tool_call(
                         # Tools that write telemetry null the session for an
                         # ephemeral turn, as the tool_calls row does.
                         "ephemeral": ephemeral,
+                        # What a worker spawned by this call inherits, and how
+                        # big a window each route has (tasks/worker_route.py).
+                        # Public facts only: never a URL or a credential.
+                        "serving_route": _serving_route(context),
+                        "context_window_for": _context_window_for(context),
                         **(context.tool_metadata or {}),
                     },
                 ),
@@ -5158,6 +5277,8 @@ async def _execute_tool_call(
             ),
             is_error=True,
         )
+    finally:
+        _TOOL_EXECUTION.reset(_tool_ctx_token)
     _latency_ms = (time.monotonic() - _t0) * 1000.0
 
     # WEAVE-PRESS: when a user-initiated bash command fails with
@@ -5382,6 +5503,8 @@ class AgentLoop:
         workspace_resolver: object | None = None,
         boot_project_prompt: str | None = None,
         project_prompt_builder: object | None = None,
+        boot_memory_prompt: str | None = None,
+        memory_prompt_builder: Callable[[], str | None] | None = None,
         checkpoint_store: object | None = None,
         fallback: object | None = None,
     ) -> None:
@@ -5405,6 +5528,8 @@ class AgentLoop:
         self._workspace_resolver = workspace_resolver
         self._boot_project_prompt = boot_project_prompt
         self._project_prompt_builder = project_prompt_builder
+        self._boot_memory_prompt = boot_memory_prompt
+        self._memory_prompt_builder = memory_prompt_builder
         self._checkpoint_store = checkpoint_store
         self._max_tokens = max_tokens
         self._max_turns = max_turns
@@ -5562,6 +5687,8 @@ class AgentLoop:
             workspace_resolver=self._workspace_resolver,
             boot_project_prompt=self._boot_project_prompt,
             project_prompt_builder=self._project_prompt_builder,
+            boot_memory_prompt=self._boot_memory_prompt,
+            memory_prompt_builder=self._memory_prompt_builder,
             checkpoint_store=self._checkpoint_store,
             # The nudge USED to be injected below, in the `async for` body.
             # That made it AgentLoop-only, so no web / Beacon / Bridge turn

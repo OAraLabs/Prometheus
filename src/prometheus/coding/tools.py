@@ -30,6 +30,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from prometheus.coding.sandbox import Sandbox, SandboxViolation
+from prometheus.security.shell_floor import ShellFloorRefused
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolRegistry, ToolResult
 
 log = logging.getLogger(__name__)
@@ -438,6 +439,9 @@ class CodeRunTool(BaseTool):
             )
         except SandboxViolation as exc:
             return _violation(exc)
+        except ShellFloorRefused as exc:
+            # Required and unavailable: nothing ran. The text names the fix.
+            return ToolResult(output=str(exc), is_error=True)
         except OSError as exc:
             return ToolResult(output=f"SPAWN FAILED: {exc}", is_error=True)
 
