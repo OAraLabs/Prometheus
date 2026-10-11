@@ -122,12 +122,22 @@ def test_no_row_for_a_machine_that_never_asked_for_home_network():
     assert check_network_discovery({"web": {"bind": "0.0.0.0"}}) is None
 
 
-def test_asking_for_home_network_without_a_way_to_run_it_safely_is_a_warning():
+@pytest.fixture
+def unreadable_key():
+    """An instance key that is there and cannot be loaded: the one case with no TLS on the home network (a key
+    not made yet is made at the daemon's boot, then the certificate over it)."""
+    from prometheus.config.paths import node_dir_path
+
+    node_dir_path().mkdir(parents=True, exist_ok=True)
+    (node_dir_path() / "instance.key").write_text("not a key", encoding="utf-8")
+
+
+def test_asking_for_home_network_without_a_way_to_run_it_safely_is_a_warning(unreadable_key):
     row = check_network_discovery({"web": {"bind": "0.0.0.0"}, "network": {"home_network": True}})
     assert row.status == "warning" and "allow_plaintext_lan" in row.message + (row.fix or "")
 
 
-def test_home_network_over_plain_http_is_a_warning_that_says_so():
+def test_home_network_over_plain_http_is_a_warning_that_says_so(unreadable_key):
     row = check_network_discovery({"web": {"bind": "0.0.0.0"},
                                    "network": {"home_network": True, "allow_plaintext_lan": True}})
     assert row.status == "warning" and "plain HTTP" in row.message

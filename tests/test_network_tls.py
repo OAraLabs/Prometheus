@@ -123,3 +123,33 @@ def test_tls_reads_the_switch_through_network_settings(node, monkeypatch):
     monkeypatch.setattr(network.NetworkSettings, "from_config", staticmethod(spy))
     T.lan_tls_plan(HOME, "0.0.0.0")
     assert seen, "web/tls.py reads network.home_network itself; #700's NetworkSettings is the one reader"
+
+
+# ── oara doctor ──────────────────────────────────────────────────────────────
+
+def test_doctor_reports_a_home_network_it_can_serve_over_tls_as_tls_not_open(node):
+    """The Home network row resolves what the daemon will do, as GET /api/network does: with an instance key the
+    certificate is made over, home network on a LAN bind is TLS. It is not "no TLS ... runs as open"."""
+    from prometheus.cli.doctor import check_network_discovery
+
+    ensure_instance_key()
+    row = check_network_discovery({"web": {"bind": "0.0.0.0"}, **HOME})
+    assert "runs as open" not in row.message and "no TLS" not in row.message, row.message
+    assert "TLS" in row.message and str(T.DEFAULT_TLS_API_PORT) in row.message, row.message
+
+
+def test_doctor_counts_a_key_not_made_yet_as_tls_because_the_daemon_makes_it_at_boot(node):
+    from prometheus.cli.doctor import check_network_discovery
+
+    row = check_network_discovery({"web": {"bind": "0.0.0.0"}, **HOME})
+    assert "TLS" in row.message and "runs as open" not in row.message, row.message
+
+
+def test_doctor_warns_when_the_key_is_there_and_cannot_be_read(node):
+    from prometheus.cli.doctor import check_network_discovery
+
+    node.mkdir(parents=True, exist_ok=True)
+    (node / "instance.key").write_text("not a key", encoding="utf-8")
+    row = check_network_discovery({"web": {"bind": "0.0.0.0"}, **HOME})
+    assert row.status == "warning" and "allow_plaintext_lan" in row.message + (row.fix or "")
+    assert "nothing is served on the home network" in row.message, row.message
