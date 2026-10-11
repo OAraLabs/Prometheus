@@ -201,6 +201,9 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     # route (tasks/worker_settings.py); a phone does not set it.
     ("GET", "/api/workers/model"),
     ("PUT", "/api/workers/model"),
+    # /api/network
+    ("GET", "/api/network"),
+    ("PUT", "/api/network"),
     # /api/packs
     ("GET", "/api/packs"),
     # /api/pair

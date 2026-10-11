@@ -1295,6 +1295,71 @@ def check_pairing_telegram(config: dict[str, Any]) -> DiagnosticCheck | None:
     )
 
 
+def check_network_discovery(
+    config: dict[str, Any], *, env: Mapping[str, str] | None = None,
+) -> DiagnosticCheck | None:
+    """Home network mode: can it work, is it safe, and will the daemon announce itself?
+
+    ``None`` (no row) unless the owner asked for it with ``network.home_network``: a machine that never did
+    has nothing to report beyond the Web bind row. Resolves the bind the way the daemon does, so it cannot
+    disagree with the Web bind row, and TLS the way the daemon's next boot will (pairing PR 5): a LAN bind with
+    an instance key it can read, or none yet (the daemon makes it, then the certificate over it), is TLS. Only a
+    key that is there and cannot be read leaves no TLS; plain HTTP on the LAN is then the owner's own say-so.
+    """
+    import importlib.util
+
+    from prometheus.config.instance_key import INSTANCE_KEY_FILENAME
+    from prometheus.config.paths import node_dir_path
+    from prometheus.web.network import HOME, THIS_MAC, NetworkSettings, describe
+    from prometheus.web.tls import lan_tls_plan, tls_ready
+
+    settings = NetworkSettings.from_config(config)             # the one reader of these keys
+    if not settings.home_network:
+        return None
+    try:
+        resolved = resolve_bind(config, env=env)
+    except BindError:
+        return None                                            # the Web bind row already says the daemon will not start
+    plan = lan_tls_plan(config, resolved.address)
+    key = node_dir_path() / INSTANCE_KEY_FILENAME
+    state = describe(resolved.address, resolved.source, settings,
+                     tls=plan is not None and (tls_ready() or not key.exists()))
+    name = "Home network"
+    if state.mode == THIS_MAC:
+        return DiagnosticCheck(
+            name=name, category="connectivity", status="warning",
+            message=f"network.home_network is on, but the daemon listens on {resolved.address} (this machine "
+                    "only), so nothing on the home network can reach it",
+            fix="Choose home network in Beacon (it also widens web.bind), set web.bind: 0.0.0.0 or a LAN "
+                "address, or set network.home_network: false.",
+        )
+    if state.mode != HOME:
+        return DiagnosticCheck(
+            name=name, category="connectivity", status="warning",
+            message=f"network.home_network is on, but the instance key ({key}) cannot be read, so there is no "
+                    "TLS, and network.allow_plaintext_lan is off: nothing is served on the home network (plain "
+                    "HTTP stays on this machine only) and it will not announce itself",
+            fix="The daemon's log says why the key cannot be read. To accept plain HTTP on a network you trust, "
+                "set network.allow_plaintext_lan: true; or set network.home_network: false.",
+        )
+    if plan is not None and state.tls_enabled:
+        notes = [f"home network mode over TLS (REST on port {plan.api_port}, WebSocket on {plan.ws_port}); "
+                 "plain HTTP stays on this machine only"]
+    else:
+        notes = ["home network mode over plain HTTP (no TLS): a device's token and everything it sends cross the "
+                 "Wi-Fi unencrypted"]
+    fix: str | None = None
+    if not settings.mdns:
+        notes.append("discovery.mdns is off, so it will not announce itself")
+    elif importlib.util.find_spec("zeroconf") is None:
+        notes.append("the zeroconf library is not installed, so it will not announce itself")
+        fix = "pip install 'oara-prometheus[discovery]' (the [discovery] extra), then restart the daemon."
+    else:
+        notes.append("it announces itself as _prometheus._tcp on private addresses")
+    status = "ok" if state.tls_enabled and fix is None else "warning"
+    return DiagnosticCheck(name=name, category="connectivity", status=status, message="; ".join(notes), fix=fix)
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -1310,6 +1375,7 @@ def run_extended_checks(
     router = check_router(config)
     bind_row = check_web_bind(config)
     pairing_row = check_pairing_telegram(config)
+    network_row = check_network_discovery(config)
     return [
         config_check,
         *([router] if router is not None else []),
@@ -1319,6 +1385,7 @@ def run_extended_checks(
         check_web_port(config),
         *([bind_row] if bind_row is not None else []),
         *([pairing_row] if pairing_row is not None else []),
+        *([network_row] if network_row is not None else []),
         check_token(config),
         *check_gateways(config),
         check_advertised_tools(config),
