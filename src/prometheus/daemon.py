@@ -614,6 +614,18 @@ def loop_ceiling_divergence(agent_loop: Any, loop_context: Any) -> list[tuple]:
     return out
 
 
+def _loaded_config_path(explicit: str | None) -> str | None:
+    """The config file ``load_config`` read, as a path, or ``None`` when it read none.
+
+    ``find_config_file`` IS the search ``load_config`` uses (``config_search_paths``), so the two cannot
+    name different files.
+    """
+    from prometheus.web.setup_server import find_config_file
+
+    found = find_config_file(explicit)
+    return str(found) if found is not None else None
+
+
 async def run_daemon(args: argparse.Namespace) -> None:
     """Main async entry point — start all subsystems."""
     config = load_config(args.config)
@@ -2889,15 +2901,19 @@ async def run_daemon(args: argparse.Namespace) -> None:
             # Home network (pairing PR 5): TLS on the LAN, plain HTTP on this machine only. Asked for
             # without a certificate, NOTHING goes on the LAN: plain HTTP is kept on loopback, never
             # put on the home network in TLS's place.
-            from prometheus.web.tls import LOOPBACK, lan_tls_plan
-            lan_tls = lan_tls_plan(config, web_bind.address)
+            from prometheus.web.tls import LOOPBACK, decide_lan
+            lan = decide_lan(config, web_bind.address, cert_ok=instance_cert_ok)
+            lan_tls = lan.plan
             loopback_only: dict[str, str] = {}
-            if lan_tls is not None and not instance_cert_ok:
+            if lan.loopback_only:
                 logger.error(
                     "network.home_network is on but there is no instance certificate, so nothing is "
                     "served on the home network: plain HTTP stays on this machine only (%s)", LOOPBACK)
-                lan_tls = None
                 loopback_only = {"api_host": LOOPBACK, "ws_host": LOOPBACK}
+            elif lan.plaintext_lan:
+                logger.warning(
+                    "network.home_network is on with no instance certificate, and network.allow_plaintext_lan "
+                    "is on: the home network is served PLAIN HTTP (tokens and chat readable on the Wi-Fi)")
             # Live recorder: give the web layer the daemon's SkillCreator
             # (signal_bus-wired) and the live SkillRegistry so trace uploads
             # persist through THE auto-skill write path and the running
@@ -2956,6 +2972,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     computer_integration=computer_integration,
                     computer_runner=computer.runner,
                     bind=web_bind.address,
+                    bind_source=web_bind.source,
+                    # PUT /api/network edits the file THIS daemon read, --config included.
+                    config_path=_loaded_config_path(args.config),
                     api_port=api_port,
                     ws_port=ws_port,
                     lan_tls=lan_tls,

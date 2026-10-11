@@ -1,11 +1,15 @@
 # Prometheus
 
+[![GitHub stars](https://img.shields.io/github/stars/OAraLabs/Prometheus?style=social)](https://github.com/OAraLabs/Prometheus/stargazers)
+
 **A fire you own doesn't go out.**\
 Not a local model. A local agent.
 
 Pre-1.0 · known limits: [oara.ai/docs/limits/](https://oara.ai/docs/limits/)
 
-Prometheus is an AI agent daemon: always on, on hardware you own. It remembers, keeps its own schedule, reaches you on Telegram and Beacon, and helps open models use tools reliably.
+Prometheus is an AI agent that runs as a daemon on hardware you own, and keeps working after you close the laptop. It keeps its own schedule, runs background work and can message you on Telegram when a task finishes, remembers you in files you can read, and checks the file edits it claims against the disk. It talks to the inference servers you already run (llama.cpp, Ollama, LM Studio, vLLM), or to a cloud model on your own key.
+
+> If Prometheus is useful to you, or any of this code helps your own project, a ⭐ on the repo helps other people find it.
 
 ![Beacon's Mission home — the Armilla telemetry sphere beside Mission Control: agent state, scheduled jobs, local backends, and tool-call telemetry](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/panel-mission-home.png)
 
@@ -13,7 +17,7 @@ Prometheus is an AI agent daemon: always on, on hardware you own. It remembers, 
 
 Prometheus is two pieces that pair with a 6-digit code:
 
-- **The daemon** — an always-on Python agent runtime: agent loop + Model Adapter Layer, a registry of every local inference box you own, chat gateways (Telegram, plus Slack and Discord gateways on the same command layer, not yet run in production; all off until a token is added), lossless memory, opt-in coding runs in a sandboxed clone, cron, a security gate, and a bearer-token REST + WebSocket control plane — plus an OpenAI-compatible `/v1` surface so anything that already speaks OpenAI can talk to it.
+- **The daemon** — an always-on Python agent runtime that you can run as a systemd user service on Linux: cron and background tasks stored on disk, chat gateways (Telegram, plus Slack and Discord gateways on the same command layer, not yet run in production; all off until a token is added), lossless memory, a registry of every local inference box you own, opt-in coding runs in a sandboxed clone, a security gate, a Model Adapter Layer that repairs open models' tool calls, and a bearer-token REST + WebSocket control plane — plus an OpenAI-compatible `/v1` surface so anything that already speaks OpenAI can talk to it.
 - **[Beacon](https://oara.ai/beacon)** — free to use, closed source, in beta. Its native desktop cockpit (macOS / Linux): chat with live tool timelines and `@`-references, Mission Control, a Loop Manager for coding runs, per-turn file checkpoints you can restore, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management. [Beacon for iOS](https://oara.ai/beacon-ios) rides the same control plane (per-device tokens, pagination); it is a private beta — request access at [support@oara.ai](mailto:support@oara.ai?subject=Beacon%20iOS) with the subject "Beacon iOS".
 
 ```bash
@@ -51,14 +55,15 @@ That is the environment the CI test job runs in, so a local run exercises the sa
 
 **What it gives you:**
 
-- **Reliable tool calls on open models** — a Model Adapter Layer validates every call and auto-repairs common errors (fuzzy names, JSON inside markdown fences, type coercion). On llama.cpp, when the server isn't parsing a model's tool calls natively, Prometheus supplies a GBNF grammar, so tool calls are constrained while the model is still generating.
+- **Always on, on your box** — run it as a systemd user service (`oara install-service`, Linux) and it keeps going after you walk away. Background tasks are stored on disk: a watch resumes after a daemon restart, and a run that a restart cut off is marked failed instead of left "running". With the Telegram gateway set up, it messages you when a task finishes or fails, and pings every 10 minutes while a long one is still running. Cron jobs take cron syntax or plain English ("every weekday at noon"), and pass the security gate when they're created and again when they run.
 - **Always-on gateways** — Telegram, plus Slack and Discord gateways on the same command layer (not yet run in production). All off until a token is added. Mid-turn `/steer` and `/queue` let you redirect or line up work while the agent is mid-task.
+- **Tool-call repair for open models** — a Model Adapter Layer validates every call and auto-repairs common errors (fuzzy names, JSON inside markdown fences, type coercion). On llama.cpp, when the server isn't parsing a model's tool calls natively, Prometheus supplies a GBNF grammar, so tool calls are constrained while the model is still generating. For models that call tools natively (per the model registry or the server's chat template), the daemon picks a lighter tier and mostly stays out of the way.
+- **Every GPU box you own, one table** — name your inference boxes under `backends:` and each becomes a slash command and a row in the model picker: `/4090`, `/mini`, `/mini qwen2.5:7b-instruct`. The daemon probes each box (served model, reported context window, detected vision, latency), refuses to switch a chat to a box that is down and says why, budgets the conversation at *that* box's window, and remembers the choice across restarts. `/backends` shows the table; `/local` brings a chat home.
 - **Visible memory that rides every prompt** — `MEMORY.md` and `USER.md` you can read, structured facts mined from conversations every 30 minutes, and passive recall that FTS-matches each message against the memory store and injects what's relevant.
 - **Lossless context** — older turns are summarized in the live window; the originals stay in SQLite, full-text searchable, and the stored summaries expand back to them, until you purge the session.
 - **Coding Mode (opt-in)** — point it at a repo and an acceptance command; it iterates to green in a sandboxed clone and hands you a reviewable branch. Never merges, never pushes. Off until you set `coding.enabled: true`.
 - **A working directory per conversation, with undo** — `/workspace <path>` points a chat at a repo; the security gate follows it, project instructions (`PROMETHEUS.md`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`…) load from it, and every turn takes a file checkpoint first so a bad edit is one REST call (or one Beacon click) from undone.
 - **Sees what you show it** — images reach a vision-capable model as images, not paraphrases; stored by reference so the bytes never bloat the transcript. `@file`, `@diff` and `@url` in the composer resolve on the daemon, scoped to the conversation's workspace.
-- **Every GPU box you own, one table** — name your inference boxes under `backends:` and each becomes a slash command and a row in the model picker: `/4090`, `/mini`, `/mini qwen2.5:7b-instruct`. The daemon probes each box (served model, reported context window, detected vision, latency), refuses to switch a chat to a box that is down and says why, budgets the conversation at *that* box's window, and remembers the choice across restarts. `/backends` shows the table; `/local` brings a chat home.
 - **Telemetry that stays home** — every tool call, repair, and token count logged to SQLite on your own disk and sent nowhere. It's the raw material for tuning the adapter, and the capture/export half of a fine-tuning loop (the training half is not built): the data big labs keep for themselves, kept by you instead.
 - **A desktop cockpit** — Beacon (free to use, closed source, in beta) pairs to the daemon over your LAN or tailnet and gives every subsystem a native surface; the model picker groups your own boxes above the cloud presets with each box's health.
 
@@ -112,11 +117,11 @@ The result: open models that reliably call tools, chain multi-step tasks, and ru
 
 Prometheus isn't a wrapper around `ollama.chat()`. These are the systems built around the loop:
 
-**The Model Adapter Layer is what makes local models work in a tool loop.** Four cascading extraction strategies handle whatever mess the model produces. A retry engine feeds specific schema errors back to the model. On llama.cpp, when the server isn't parsing a model's tool calls natively, Prometheus supplies a GBNF grammar, so tool calls are constrained while the model is still generating. Telemetry tracks success rates per model per tool so you know exactly where your model struggles. It is tier-selected: `strictness: NONE` switches it off for cloud APIs that already emit clean tool calls, so the repair path is exercised exactly where it is needed.
-
 **Lossless Context Management keeps the originals.** Every message is persisted to SQLite. Older turns are summarized in the live window; the originals stay in SQLite, and the stored summaries (a DAG the agent can walk with `lcm_expand`) expand back to them on demand, until you purge the session. Full-text search covers your entire conversation history. And memory isn't just storage: extracted facts ride back into each turn via passive recall, matched against what you just said.
 
 **SENTINEL makes the agent proactive (opt-in; it ships off).** Most agents sit idle until you talk to them. Prometheus has a background intelligence layer that watches tool performance patterns, consolidates memory, lints its own knowledge base, and discovers cross-entity insights — all while you're away. Three of four phases use zero LLM calls. The fourth is budget-capped at 2,000 tokens. It nudges you via Telegram when it finds something interesting but never acts without permission.
+
+**The Model Adapter Layer is what makes local models work in a tool loop.** Four cascading extraction strategies handle whatever mess the model produces. A retry engine feeds specific schema errors back to the model. On llama.cpp, when the server isn't parsing a model's tool calls natively, Prometheus supplies a GBNF grammar, so tool calls are constrained while the model is still generating. Telemetry tracks success rates per model per tool so you know exactly where your model struggles. It is tier-selected: `strictness: NONE` switches it off for cloud APIs that already emit clean tool calls, so the repair path is exercised exactly where it is needed.
 
 **A compounding knowledge base inspired by Karpathy's LLM Wiki concept.** Every 30 minutes, a Memory Extractor pulls structured facts from your conversations, and the wiki recompiles the affected entity pages automatically — extraction and compilation are one loop, not a manual step. The wiki then maintains itself: SENTINEL's zero-LLM linter patrols for orphans, broken links, and stale pages; dedup gates keep repeated insights from piling up; and passive recall feeds the accumulated facts back into every turn. Point Obsidian at the markdown files and the graph view lights up.
 
@@ -637,6 +642,8 @@ prometheus/
 ## Tests
 
 9,786 tests passed in CI on the v0.9.5 release commit ([run 36461450849](https://github.com/OAraLabs/Prometheus/actions/runs/36461450849), Linux, Python 3.11–3.13).
+
+If you build something with Prometheus, we'd love to hear about it. And if it helped, a star goes a long way.
 
 ## License
 
