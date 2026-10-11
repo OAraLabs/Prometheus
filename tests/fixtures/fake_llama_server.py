@@ -60,6 +60,7 @@ class FakeLlamaServer:
         work_dir: Path | str = "/nonexistent",
         parent_tool: str = "task_create",
         parent_args: dict[str, Any] | None = None,
+        keep_bodies: bool = False,
     ) -> None:
         self.n_ctx = n_ctx
         self.model_id = model_id
@@ -68,6 +69,9 @@ class FakeLlamaServer:
         self.parent_tool = parent_tool
         self.parent_args = parent_args or {}
         self.rows: list[dict[str, Any]] = []
+        #: Raw chat request bodies, only when asked for (a leak test scans them).
+        self.keep_bodies = keep_bodies
+        self.bodies: list[bytes] = []
         self._lock = threading.Lock()
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
@@ -125,7 +129,11 @@ class FakeLlamaServer:
 
             def do_POST(self) -> None:  # noqa: N802
                 n = int(self.headers.get("Content-Length", "0"))
-                payload = json.loads(self.rfile.read(n) or b"{}")
+                raw = self.rfile.read(n) or b"{}"
+                if fake.keep_bodies:
+                    with fake._lock:
+                        fake.bodies.append(raw)
+                payload = json.loads(raw)
                 msgs = payload.get("messages", [])
                 tokens = _est_tokens(payload)
                 has_tools = bool(payload.get("tools"))

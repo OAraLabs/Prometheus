@@ -216,6 +216,11 @@ def assert_refused_not_missing(res, what: str) -> None:
 
 
 class TestRefusesRatherThanRunningUnconfined:
+    @pytest.fixture(autouse=True)
+    def _apparmor(self, monkeypatch):
+        """These are the AppArmor refusals; on a Mac the read floor would otherwise be Seatbelt."""
+        monkeypatch.setattr(C, "read_floor_mechanism", lambda: C.MECHANISM_APPARMOR)
+
     def test_absent_profile_refuses_and_does_not_run(self):
         res = _run(
             BashTool(confinement="required", confinement_profile="no-such-profile-xyz"),

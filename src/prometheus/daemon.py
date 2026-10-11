@@ -54,7 +54,7 @@ from prometheus.__main__ import (
 )
 from prometheus.telemetry.tracker import TELEMETRY_OFF_NOTE, ToolCallTelemetry
 from prometheus.tools.base import ToolRegistry
-from prometheus.web.bind import BindError, resolve_bind
+from prometheus.web.bind import BindError, app_install_lan_guard, resolve_bind
 from prometheus.engine.fallback import build_fallback_target
 
 logger = logging.getLogger("prometheus.daemon")
@@ -614,7 +614,19 @@ def loop_ceiling_divergence(agent_loop: Any, loop_context: Any) -> list[tuple]:
     return out
 
 
-async def run_daemon(args: argparse.Namespace) -> None:
+def _loaded_config_path(explicit: str | None) -> str | None:
+    """The config file ``load_config`` read, as a path, or ``None`` when it read none.
+
+    ``find_config_file`` IS the search ``load_config`` uses (``config_search_paths``), so the two cannot
+    name different files.
+    """
+    from prometheus.web.setup_server import find_config_file
+
+    found = find_config_file(explicit)
+    return str(found) if found is not None else None
+
+
+async def run_daemon(args: argparse.Namespace) -> bool:
     """Main async entry point — start all subsystems."""
     config = load_config(args.config)
     model_config = config.get("model", {})
@@ -646,6 +658,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # carries on, which for a bad bind would be exactly the wrong answer.
     # `getattr`: callers that build their own Namespace predate the flag.
     web_bind = resolve_bind(config, flag=getattr(args, "bind", None))
+    # The Mac app: plain HTTP on the LAN only if the owner opted in (web/bind.py app_install_lan_guard).
+    web_bind = app_install_lan_guard(web_bind, config)
 
     # ── Wiki root ───────────────────────────────────────────────────────
     # Resolved ONCE here and pinned process-wide; every consumer reads it back
@@ -721,6 +735,21 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Same-Mac pairing (the app install only): pair.fp beside pair.secret says what hello says, so Beacon can
     # check it is talking to this daemon before it sends the secret. "" removes an earlier one.
     local_pairing.publish_fingerprint(instance_fp)
+
+    # ── Instance certificate (pairing PR 5) ──────────────────────────────
+    # Self-signed over the instance key, so the TLS handshake's SPKI is the key hello fingerprints
+    # (docs/design/lan-tls-pr5.md). Made at boot, re-issued over the same key near expiry, served
+    # only in home-network mode (web/tls.py). Without it nothing is served on the home network.
+    from prometheus.config.instance_cert import ensure_instance_certificate
+    instance_cert_ok = False
+    if instance_fp:
+        try:
+            ensure_instance_certificate()
+            instance_cert_ok = True
+        except Exception:
+            logger.warning(
+                "Instance certificate unavailable: the home network gets no TLS listener, and so "
+                "nothing is served on it", exc_info=True)
 
     # ── Boot-SHA staleness signal ───────────────────────────────────────
     # The repo HEAD at process start is the identity of the code THIS process
@@ -1471,6 +1500,16 @@ async def run_daemon(args: argparse.Namespace) -> None:
     def _signal_handler() -> None:
         logger.info("Shutdown signal received")
         release_daemon_lock()
+        shutdown_event.set()
+
+    # POST /api/restart (Beacon's v0.4 spec, 2.4): the same graceful shutdown, then main() re-execs this
+    # process's own command line, so a saved network mode takes effect with nobody touching the machine.
+    restart_requested = False
+
+    def _request_restart() -> None:
+        nonlocal restart_requested
+        logger.info("Restart requested over the API: shutting down, then starting again in this process")
+        restart_requested = True
         shutdown_event.set()
 
     loop = asyncio.get_running_loop()
@@ -2284,13 +2323,21 @@ async def run_daemon(args: argparse.Namespace) -> None:
             try:
                 from prometheus.tasks.completion_handler import TaskCompletionHandler
 
+                from prometheus.tasks.reengage import get_reengage_router
+
+                # Re-engagement goes to the conversation's own surface: a
+                # telegram:* chat through Telegram, anything else through the
+                # web bridge (set when the web launcher builds it), with or
+                # without Telegram configured (#704).
+                reengage = get_reengage_router()
+                reengage.telegram = (
+                    getattr(telegram, "inject_turn", None)
+                    if "telegram" in dir() and telegram is not None
+                    else None
+                )
                 task_completion = TaskCompletionHandler(
                     signal_bus=signal_bus,
-                    inject_turn=(
-                        getattr(telegram, "inject_turn", None)
-                        if "telegram" in dir() and telegram is not None
-                        else None
-                    ),
+                    inject_turn=reengage,
                     config=tasks_config,
                 )
                 await task_completion.start()
@@ -2863,6 +2910,22 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
             api_port = web_config.get("api_port", 8005)
             ws_port = web_config.get("ws_port", 8010)
+            # Home network (pairing PR 5): TLS on the LAN, plain HTTP on this machine only. Asked for
+            # without a certificate, NOTHING goes on the LAN: plain HTTP is kept on loopback, never
+            # put on the home network in TLS's place.
+            from prometheus.web.tls import LOOPBACK, decide_lan
+            lan = decide_lan(config, web_bind.address, cert_ok=instance_cert_ok)
+            lan_tls = lan.plan
+            loopback_only: dict[str, str] = {}
+            if lan.loopback_only:
+                logger.error(
+                    "network.home_network is on but there is no instance certificate, so nothing is "
+                    "served on the home network: plain HTTP stays on this machine only (%s)", LOOPBACK)
+                loopback_only = {"api_host": LOOPBACK, "ws_host": LOOPBACK}
+            elif lan.plaintext_lan:
+                logger.warning(
+                    "network.home_network is on with no instance certificate, and network.allow_plaintext_lan "
+                    "is on: the home network is served PLAIN HTTP (tokens and chat readable on the Wi-Fi)")
             # Live recorder: give the web layer the daemon's SkillCreator
             # (signal_bus-wired) and the live SkillRegistry so trace uploads
             # persist through THE auto-skill write path and the running
@@ -2921,8 +2984,14 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     computer_integration=computer_integration,
                     computer_runner=computer.runner,
                     bind=web_bind.address,
+                    bind_source=web_bind.source,
+                    # PUT /api/network edits the file THIS daemon read, --config included.
+                    config_path=_loaded_config_path(args.config),
                     api_port=api_port,
                     ws_port=ws_port,
+                    lan_tls=lan_tls,
+                    **loopback_only,
+                    request_restart=_request_restart,
                 ))
             if web_task is not None:
                 tasks.append(web_task)
@@ -2975,6 +3044,49 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     await asyncio.gather(*tasks, return_exceptions=True)
     logger.info("Prometheus daemon stopped")
+    return restart_requested
+
+
+def release_daemon_lock() -> None:
+    """The gateway's daemon lock, released (module level so a re-exec can drop it before the new image takes it)."""
+    from prometheus.gateway.status import release_daemon_lock as _release
+
+    _release()
+
+
+#: The environment at first startup, before the env file is loaded into it (``snapshot_startup_env``).
+_STARTUP_ENV: dict[str, str] | None = None
+
+
+def snapshot_startup_env() -> None:
+    """Remember the environment as it was at startup, before ``run_daemon`` loads the env file into it (with
+    setdefault: the real environment wins). A restart runs with THIS, so the env file is read again: re-exec'd
+    with the current environment, every value from the old file would count as real and a changed one (a rotated
+    token, a new key) would never be read."""
+    global _STARTUP_ENV
+    _STARTUP_ENV = dict(os.environ)
+
+
+def restart_argv() -> list[str]:
+    """This process's own command line, interpreter flags included (``sys.orig_argv``), for this interpreter."""
+    return [sys.executable, *sys.orig_argv[1:]]
+
+
+def reexec() -> None:
+    """Replace this process with a fresh daemon on the same command line (``POST /api/restart``).
+
+    Called by :func:`main` after ``run_daemon``'s ordinary graceful shutdown, with the environment of first startup
+    (:func:`snapshot_startup_env`), so the env file is read again. Same process, so launchd, systemd and
+    a terminal all keep it; the instance key is a file, so hello's ``fp`` is the same after it. The daemon lock is
+    released first so the new image can take it, and the log handlers are flushed (not closed: a test calls this).
+    """
+    release_daemon_lock()
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    env = _STARTUP_ENV if _STARTUP_ENV is not None else dict(os.environ)
+    os.execve(sys.executable, restart_argv(), env)
 
 
 # Log rotation. Deliberately constants rather than config keys: there is no
@@ -3026,6 +3138,8 @@ def daemon_start_args(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> None:
     """CLI entry point."""
+    # Before anything loads the env file: what a restart re-execs with (POST /api/restart).
+    snapshot_startup_env()
     parser = build_parser()
     args = parser.parse_args()
 
@@ -3143,7 +3257,7 @@ def main() -> None:
     from prometheus.config.load import ConfigReadError
 
     try:
-        asyncio.run(run_daemon(args))
+        restart = asyncio.run(run_daemon(args))
     except ConfigReadError as exc:
         print(f"{exc}", file=sys.stderr)
         sys.exit(1)
@@ -3152,6 +3266,8 @@ def main() -> None:
         # an argparse usage error: the invocation or the config is wrong.
         print(f"{exc}", file=sys.stderr)
         sys.exit(2)
+    if restart:
+        reexec()
 
 
 if __name__ == "__main__":

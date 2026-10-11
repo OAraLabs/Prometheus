@@ -169,6 +169,36 @@ def test_a_missing_key_is_appended_without_touching_what_exists():
     assert "# keep me" in out and "# a leading comment" in out
 
 
+def test_a_missing_key_in_an_existing_section_goes_inside_that_section():
+    """It used to be appended at the END OF THE FILE, indented, which attaches it to whichever section happens to
+    be last (here: ``model``). The usual config has the section and not the key, with others after it."""
+    text = "web:\n  api_port: 8005\n\n# models\nmodel:\n  name: x\n"
+    out = _set_yaml_scalar_preserving_comments(text, ["web", "bind"], '"0.0.0.0"')
+    assert yaml.safe_load(out) == {"web": {"api_port": 8005, "bind": "0.0.0.0"}, "model": {"name": "x"}}
+    assert "\n\n# models\nmodel:\n" in out, "the gap and the comment that open the next section stay with it"
+
+
+def test_two_missing_levels_in_an_existing_section_go_inside_it_too():
+    text = "tools:\n  other: 1\nweb:\n  x: 1\n"
+    out = _set_yaml_scalar_preserving_comments(text, ["tools", "deferred_loading", "enabled"], "true")
+    assert yaml.safe_load(out) == {"tools": {"other": 1, "deferred_loading": {"enabled": True}}, "web": {"x": 1}}
+
+
+def test_a_section_with_no_children_yet_gets_the_key_under_it():
+    out = _set_yaml_scalar_preserving_comments("web:\nmodel:\n  name: x\n", ["web", "bind"], '"127.0.0.1"')
+    assert yaml.safe_load(out) == {"web": {"bind": "127.0.0.1"}, "model": {"name": "x"}}
+
+
+def test_an_insertion_after_a_last_line_with_no_newline_is_still_well_formed():
+    out = _set_yaml_scalar_preserving_comments("web:\n  api_port: 8005", ["web", "bind"], '"127.0.0.1"')
+    assert yaml.safe_load(out) == {"web": {"api_port": 8005, "bind": "127.0.0.1"}}
+
+
+def test_an_insertion_uses_the_indentation_the_section_already_has():
+    out = _set_yaml_scalar_preserving_comments("web:\n    api_port: 8005\nx: 1\n", ["web", "bind"], "true")
+    assert "\n    bind: true\n" in out and yaml.safe_load(out)["web"] == {"api_port": 8005, "bind": True}
+
+
 def test_a_same_named_key_in_another_section_is_not_touched():
     """`enabled:` appears all over a real config. Only the one under the
     requested path may change."""

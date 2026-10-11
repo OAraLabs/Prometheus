@@ -81,6 +81,8 @@ class ShellFloor:
     workspaces: tuple[Path, ...] = ()
     write_allow: tuple[str, ...] = field(default=())
     profile: str = _CONFINE.PROFILE
+    #: ``security.bash_allow_ssh``: the read floor lets ~/.ssh through (Seatbelt; AppArmor's profile decides).
+    allow_ssh: bool = False
 
     @classmethod
     def from_security_config(cls, security_cfg: dict[str, Any] | None) -> "ShellFloor":
@@ -98,6 +100,7 @@ class ShellFloor:
             workspaces=tuple(
                 Path(r).expanduser().resolve() for r in roots if r),
             write_allow=tuple(str(p) for p in (sec.get("bash_write_allow") or ())),
+            allow_ssh=_CONFINE.normalise_allow_ssh(sec.get("bash_allow_ssh", False)),
         )
 
 
@@ -174,6 +177,7 @@ def floored_argv(
         writable=writable,
         cwd=cwd,
         profile=floor.profile,
+        allow_ssh=floor.allow_ssh,
     )
     if result.refusal is not None:
         raise ShellFloorRefused(result.refusal, result.write_floor)
@@ -200,29 +204,43 @@ def announce(floor: ShellFloor | None = None) -> dict[str, object]:
     The loud half of "auto": a host where the profile did not verify runs
     every model shell without the read floor, and an operator must not have to
     infer that from a missing line. ERROR with the one-line fix when it is not
-    in force on Linux; one WARNING on a platform with no AppArmor; INFO when it
-    is active or deliberately off. Returns the report it logged from.
+    in force (AppArmor on Linux, Seatbelt on macOS); one WARNING on a platform
+    with neither; INFO when it is active or deliberately off. Returns the report
+    it logged from.
     """
     floor = floor or current_shell_floor()
     rep = _CONFINE.floor_report(
         read_mode=floor.read_mode,
         write_mode=floor.write_mode,
         has_workspace=bool(floor.workspaces),
+        allow_ssh=floor.allow_ssh,
     )
+    if floor.allow_ssh:
+        if _CONFINE.read_floor_mechanism() == _CONFINE.MECHANISM_APPARMOR:
+            log.warning(
+                "security.bash_allow_ssh is on, but the read floor here is AppArmor: the loaded profile "
+                "(deploy/apparmor/prometheus-bash) still denies ~/.ssh, and this key cannot change it")
+        else:
+            log.info("security.bash_allow_ssh: model-written shells may read ~/.ssh; ~/.gnupg and "
+                     "~/.config/*/*env stay denied")
     read = rep["bash_read_floor"]
     assert isinstance(read, dict)
     state, detail = read["state"], read["detail"]
-    fix = (f"sudo apparmor_parser -r -W /etc/apparmor.d/{_CONFINE.PROFILE} "
-           f"— or set security.bash_confinement: off to run without it "
-           f"knowingly")
+    seatbelt = _CONFINE.read_floor_mechanism() == _CONFINE.MECHANISM_SEATBELT
+    mechanism = "the Seatbelt profile (sandbox-exec)" if seatbelt else "the AppArmor profile"
+    fix = (("sandbox-exec ships with macOS and needs nothing loaded; if it is gone or no longer holds, "
+            "set security.bash_confinement: off to run without the floor knowingly") if seatbelt else
+           (f"sudo apparmor_parser -r -W /etc/apparmor.d/{_CONFINE.PROFILE} "
+            f"— or set security.bash_confinement: off to run without it "
+            f"knowingly"))
     exposed = ("every model-written shell (bash, background tasks, poll "
                "predicates, model-created cron jobs, coding runs) can read "
                "~/.ssh, ~/.gnupg and ~/.config/*/*env")
     if state == _CONFINE.STATE_DARK:
         log.error(
-            "the READ floor is NOT in force: security.bash_confinement is %r and the "
-            "AppArmor profile did not verify (%s), so %s. Fix: %s.",
-            floor.read_mode, detail, exposed, fix,
+            "the READ floor is NOT in force: security.bash_confinement is %r and "
+            "%s did not verify (%s), so %s. Fix: %s.",
+            floor.read_mode, mechanism, detail, exposed, fix,
         )
     elif state == _CONFINE.STATE_REFUSING:
         log.error(
@@ -231,8 +249,9 @@ def announce(floor: ShellFloor | None = None) -> dict[str, object]:
         )
     elif state == _CONFINE.STATE_UNSUPPORTED:
         log.warning(
-            "read floor unsupported on this platform (no AppArmor): %s. The "
-            "denied_paths list protects the path-declaring tools only.",
+            "read floor unsupported on this platform (neither AppArmor nor "
+            "sandbox-exec): %s. The denied_paths list protects the path-declaring "
+            "tools only.",
             exposed,
         )
     elif state == _CONFINE.STATE_ACTIVE:

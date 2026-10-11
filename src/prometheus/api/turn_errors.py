@@ -44,6 +44,11 @@ KIND_UNREACHABLE = "unreachable"
 KIND_PROVIDER_ERROR = "provider_error"
 KIND_BAD_REQUEST = "bad_request"
 KIND_UNKNOWN = "unknown"
+# The request is over the model's context window (#704). Its own kind, not a
+# bad_request: the fix is shrinking the conversation, never retrying it, and
+# the server usually says both numbers — the dict carries them as
+# ``tokens_needed`` and ``window``.
+KIND_CONTEXT_OVERFLOW = "context_overflow"
 
 # Longest provider message echoed onto the wire.
 _MAX_MESSAGE_CHARS = 400
@@ -185,6 +190,62 @@ def _provider_message(body: str, exc: BaseException) -> str:
     return _redact(str(exc))[:_MAX_MESSAGE_CHARS]
 
 
+# ── Context overflow (#704) ──────────────────────────────────────────────────
+# Each server says "over the window" its own way; these are the shapes seen:
+#   llama.cpp   {"error": {"type": "exceed_context_size_error",
+#                          "n_prompt_tokens": 33094, "n_ctx": 32768, ...}}
+#   OpenAI-compatible  {"error": {"code": "context_length_exceeded",
+#               "message": "...maximum context length is 128000 tokens. However,
+#                           your messages resulted in 131072 tokens."}}
+#   Anthropic   {"error": {"type": "invalid_request_error",
+#               "message": "prompt is too long: 210012 tokens > 200000 maximum"}}
+_OVERFLOW_TYPES = frozenset({"exceed_context_size_error"})
+_OVERFLOW_CODES = frozenset({"context_length_exceeded"})
+_LLAMA_OVERFLOW_RE = re.compile(
+    r"request \((\d+) tokens\) exceeds the available context size \((\d+) tokens\)", re.I)
+_OPENAI_OVERFLOW_RE = re.compile(
+    r"maximum context length is (\d+) tokens.*?(?:resulted in|requested) (\d+) tokens",
+    re.I | re.S)
+_ANTHROPIC_OVERFLOW_RE = re.compile(
+    r"prompt is too long:\s*(\d+)\s*tokens\s*>\s*(\d+)", re.I)
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _context_overflow(body: str) -> dict[str, int | None] | None:
+    """``{tokens_needed, window}`` when *body* rejects a prompt over the window."""
+    try:
+        data = json.loads(body) if body else None
+    except ValueError:
+        data = None
+    err = data.get("error") if isinstance(data, dict) else None
+    if isinstance(err, dict):
+        message = str(err.get("message") or "")
+        if str(err.get("type") or "") in _OVERFLOW_TYPES:
+            m = _LLAMA_OVERFLOW_RE.search(message)
+            return {
+                "tokens_needed": _int_or_none(err.get("n_prompt_tokens"))
+                or (int(m.group(1)) if m else None),
+                "window": _int_or_none(err.get("n_ctx")) or (int(m.group(2)) if m else None),
+            }
+        if str(err.get("code") or "") in _OVERFLOW_CODES:
+            m = _OPENAI_OVERFLOW_RE.search(message)
+            return {"tokens_needed": int(m.group(2)) if m else None,
+                    "window": int(m.group(1)) if m else None}
+        m = _ANTHROPIC_OVERFLOW_RE.search(message)
+        if m:
+            return {"tokens_needed": int(m.group(1)), "window": int(m.group(2))}
+    m = _LLAMA_OVERFLOW_RE.search(body or "")
+    if m:
+        return {"tokens_needed": int(m.group(1)), "window": int(m.group(2))}
+    return None
+
+
 def _hint(kind: str, provider: str, status: int | None) -> str:
     """One actionable sentence. Every path ends with a way forward."""
     switch = "or switch this session's model (composer dropdown)"
@@ -210,6 +271,12 @@ def _hint(kind: str, provider: str, status: int | None) -> str:
         )
     if kind == KIND_PROVIDER_ERROR:
         return f"{provider} returned a server error ({status}) — usually transient, so retry."
+    if kind == KIND_CONTEXT_OVERFLOW:
+        return (
+            f"The conversation is too long for {provider}'s context window — /reset clears "
+            f"this session's context, or continue in a new session. Retrying unchanged "
+            f"will fail the same way."
+        )
     if kind == KIND_BAD_REQUEST:
         return f"{provider} rejected the request ({status})."
     return "Check the daemon log for the full traceback."
@@ -350,15 +417,20 @@ def classify_turn_error(exc: BaseException) -> dict[str, Any]:
                 kind = KIND_RATE_LIMIT
             elif status >= 500:
                 kind = KIND_PROVIDER_ERROR
+            elif status in (400, 413) and (overflow := _context_overflow(body)) is not None:
+                kind = KIND_CONTEXT_OVERFLOW
             else:
                 kind = KIND_BAD_REQUEST
-            return {
+            out: dict[str, Any] = {
                 "kind": kind,
                 "provider": provider,
                 "status": status,
                 "message": _provider_message(body, exc),
                 "hint": _hint(kind, provider, status),
             }
+            if kind == KIND_CONTEXT_OVERFLOW and overflow is not None:
+                out.update(overflow)
+            return out
 
         if names & {"TimeoutException", "ReadTimeout", "ConnectTimeout",
                     "WriteTimeout", "PoolTimeout", "TimeoutError"}:

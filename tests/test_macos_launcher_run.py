@@ -71,3 +71,12 @@ def test_with_the_launchers_flags_a_module_in_the_working_directory_is_not_impor
     isolated.mkdir()
     assert not _shadow_imported(isolated, interpreter_flags()), (
         f"{interpreter_flags()} still imports ./json.py from the working directory")
+
+
+def test_the_launcher_no_longer_pins_the_bind_so_the_network_switch_works():
+    """`--bind` outranks the config file, so with it pinned PUT /api/network was a 409 bind_overridden for every
+    app install (Beacon's v0.4 spec, open item 1). The daemon now reads web.bind; an app install's DEFAULT is
+    still this Mac only (web/bind.py default_bind)."""
+    arguments = run_arguments()
+    assert "--bind" not in arguments and "127.0.0.1" not in arguments, arguments
+    assert arguments[arguments.index("-m") + 1:] == ["prometheus", "daemon"], arguments

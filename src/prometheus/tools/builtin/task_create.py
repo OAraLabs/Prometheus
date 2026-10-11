@@ -137,8 +137,12 @@ class TaskCreateTool(BaseTool):
     ) -> ToolResult:
         manager = get_task_manager()
 
-        # Trusted context — NOT from arguments.
-        session_id = context.metadata.get("session_id") if context.metadata else None
+        # Trusted context — NOT from arguments. The TURN's own conversation:
+        # on the web path `session_id` is the shared "web" namespace, and a
+        # re-engagement filed under it ran in a session nobody reads (#704).
+        from prometheus.tasks.reengage import conversation_of
+
+        session_id = conversation_of(context.metadata)
         notify_target = _notify_target_from_session(session_id)
         # A session with a workspace of its own bounds the write floor of the
         # shells it starts, as it bounds the bash tool's (item W).
@@ -149,6 +153,11 @@ class TaskCreateTool(BaseTool):
         on_complete = arguments.on_complete if arguments.on_complete in (
             "notify", "reengage", "both",
         ) else "notify"
+        # A worker reports back to the conversation that spawned it unless the
+        # call said otherwise (Will's ruling D4). Unset, not "notify": the
+        # field's advertised default is pinned by the parity recording.
+        if arguments.type == "local_agent" and "on_complete" not in arguments.model_fields_set:
+            on_complete = "reengage"
 
         common = dict(
             description=arguments.description,
@@ -182,6 +191,8 @@ class TaskCreateTool(BaseTool):
                     prompt=arguments.prompt,
                     route=plan.key,
                     metadata=plan.record(),
+                    # One brief, one turn, then exit with a result (cli/worker.py).
+                    worker=True,
                     **common,
                 )
             elif arguments.type == "file_watch":

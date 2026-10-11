@@ -20,6 +20,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.background import BackgroundTask
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -88,6 +89,39 @@ def _yaml_block(lines: list[str], lo: int, hi: int, key: str
     return None
 
 
+def _insert_in_block(
+    lines: list[str], lo: int, hi: int, parent_indent: int, rest: "list[str]", literal: str
+) -> str:
+    """Add the key path *rest* inside the section whose body is ``lines[lo:hi]``.
+
+    It goes after the section's last real line, not at ``hi``: the blank line and
+    comment that open the NEXT section sit between the two and belong to it. It
+    takes the indentation the section's own keys already use (two spaces deeper
+    than the section when it has none yet).
+    """
+    child = parent_indent + 2
+    last = lo
+    first_seen = False
+    for j in range(lo, hi):
+        stripped = lines[j].lstrip()
+        if not stripped.strip() or stripped.startswith("#"):
+            continue
+        if not first_seen:
+            child = len(lines[j]) - len(stripped)
+            first_seen = True
+        last = j + 1
+    block: list[str] = []
+    pad = " " * child
+    for key in rest[:-1]:
+        block.append(f"{pad}{key}:\n")
+        pad += "  "
+    block.append(f"{pad}{rest[-1]}: {literal}\n")
+    head = lines[:last]
+    if head and not head[-1].endswith("\n"):
+        head[-1] += "\n"
+    return "".join(head + block + lines[last:])
+
+
 def _set_yaml_scalar_preserving_comments(
     text: str, path_keys: "list[str]", literal: str
 ) -> str:
@@ -118,12 +152,20 @@ def _set_yaml_scalar_preserving_comments(
     If the key path does not exist, the missing levels are appended rather than
     threaded in — appending cannot disturb what is already there, and a config
     that never mentioned the key has no comments attached to it to preserve.
+    "Appended" means at the end of the SECTION that does exist: a path whose
+    first levels are present goes inside the last of them (see
+    :func:`_insert_in_block`). It used to go at the end of the FILE, indented,
+    which attaches it to whichever section happens to be last. The edit is only
+    as good as the section it names, so a caller that writes must still re-parse
+    the result before it trusts it (both do).
     """
     lines = text.splitlines(keepends=True)
     lo, hi, indent = 0, len(lines), -1
 
     for depth, key in enumerate(path_keys):
         found = _yaml_block(lines, lo, hi, key)
+        if found is None and depth:
+            return _insert_in_block(lines, lo, hi, indent, path_keys[depth:], literal)
         if found is None:
             # Append the remaining path as a fresh block at the end of file.
             tail = "" if not lines or lines[-1].endswith("\n") else "\n"
@@ -512,6 +554,29 @@ def create_app(
         text = "".join(ch for ch in str(raw or "") if ch.isprintable()).strip()
         return text[:64].strip() or default
 
+    # ── /api/restart — the operator applies a saved setting (Beacon's v0.4 spec, 2.4) ─────
+    #
+    # PUT /api/network only saves; listeners are bound at start. This answers 202 and THEN asks the daemon to
+    # restart (a background task, so the answer is sent first): its ordinary graceful shutdown, then a re-exec of
+    # the same command line in the same process (daemon.reexec), so it comes back under launchd, systemd or a
+    # terminal alike, with the same instance key and so the same hello fp. Operator only: the gate refuses a
+    # scoped device (web/route_access.OPERATOR_ONLY). A process with no hook (not started as the daemon) says so.
+    @app.post("/api/restart")
+    async def restart_daemon(request: Request):
+        # Never a web page's to ask for, whatever credential it carries: a browser shows itself by Origin.
+        if request.headers.get("origin"):
+            return JSONResponse(status_code=400, content={
+                "error": "browser_not_allowed",
+                "detail": "a restart is not accepted from a web page (the request carried an Origin header)"})
+        request_restart = getattr(request.app.state, "request_restart", None)
+        if request_restart is None:
+            return JSONResponse(status_code=503, content={
+                "error": "restart_unavailable",
+                "detail": "this process cannot restart itself: it was not started as the daemon"})
+        logger.info("Restart requested over the API")
+        return JSONResponse(status_code=202, content={"restarting": True},
+                            background=BackgroundTask(request_restart))
+
     # ── /api/devices — enrolment, listing, revocation (GRAFT 1) ─────
 
     @app.post("/api/devices", status_code=201)
@@ -874,13 +939,22 @@ def create_app(
     # checking: no browsers, a per-peer limit, no CORS, no disk writes. Contract: docs/PAIRING-APPROVAL-API.md.
     _hello_limiter = hello_mod.new_limiter()
 
+    def _hello_payload(tls: bool = False) -> dict[str, Any]:
+        """*tls*: whether the port being described speaks TLS (the asked port for the route, the advertised
+        port for mDNS)."""
+        return hello_mod.build_hello(
+            config, auth_on=bool(_api_token),
+            approval=app.state.pairing.settings.requests_enabled, tls=tls)
+
+    # ONE builder for the route and for the mDNS TXT record (web/discovery.py reads it from here), so what the
+    # daemon announces on the network and what it answers over HTTP cannot drift.
+    app.state.hello_payload = _hello_payload
+
     @app.get("/api/hello")
     async def hello(request: Request):
-        return hello_mod.hello_response(
-            request, _hello_limiter,
-            lambda: hello_mod.build_hello(
-                config, auth_on=bool(_api_token),
-                approval=app.state.pairing.settings.requests_enabled))
+        # Per listener: the port this request came in on speaks TLS or it does not.
+        tls = request.url.scheme == "https"
+        return hello_mod.hello_response(request, _hello_limiter, lambda: _hello_payload(tls))
 
     # ── Root ────────────────────────────────────────────────────────
 
@@ -4809,6 +4883,11 @@ def create_app(
             refusal = _desktop_approve_refusal(request, _desk, scope)
             if refusal is not None:
                 return refusal
+        # Any approve-once request (a spawned worker's, PR-6) refuses a lasting
+        # scope by name, rather than approving once and remembering nothing.
+        if _desk is not None and getattr(_desk, "once_only", False) and scope != "once":
+            return JSONResponse(status_code=409, content={
+                "error": "This request can only be approved once.", "code": "once_only"})
 
         arg_text = request_id if scope == "once" else f"{scope} {request_id}"
         # STRUCTURED, NOT INFERRED FROM THE PROSE. This was
@@ -5576,6 +5655,87 @@ def create_app(
             return JSONResponse(status_code=400, content={"error": str(exc)})
         return _worker_model_view()
 
+    # ── A spawned worker asks its parent conversation for approval (PR-6) ──
+    # A public route (web/public_routes.py): a worker has no API token, it has
+    # a per-worker token the task manager minted and holds in memory. The
+    # request is filed in the approval queue under the worker's PARENT
+    # conversation, approve-once, and this waits for a PERSON's answer.
+    # Nothing here approves anything: no queue, a wrong token, a stopped
+    # worker or a remote peer is a refusal.
+    from prometheus.tasks.worker_auth import RateLimiter as _WorkerRateLimiter
+
+    _worker_rate = _WorkerRateLimiter()
+
+    @app.post("/api/workers/approvals")
+    async def worker_approval(request: Request):
+        # In this order, so nothing about the caller is trusted before it is
+        # checked and no body is read for a caller that fails a check:
+        # same machine -> the worker's token (HEADERS) -> its pending cap and
+        # rate limit -> a capped body (chunked or not) -> cleaned card text.
+        import json as _wjson
+
+        from prometheus.tasks import worker_auth as wa
+        from prometheus.tasks.manager import get_task_manager
+
+        if not (is_same_machine(request) and is_loopback_host_header(request.headers.get("host"))):
+            return JSONResponse(status_code=403, content={
+                "error": "not_loopback",
+                "detail": "a worker's approval request is only accepted from this machine"})
+        task = get_task_manager().verify_worker_token(
+            request.headers.get(wa.HEADER_TASK, ""), request.headers.get(wa.HEADER_TOKEN, ""))
+        if task is None:
+            return JSONResponse(status_code=401, content={
+                "error": "unknown_worker",
+                "detail": "no running worker holds that token"})
+        queue = app.state.approval_queue
+        primary = queue.queues[0] if hasattr(queue, "queues") else queue
+        if primary is None or not hasattr(primary, "request_approval"):
+            return {"result": "denied",
+                    "reason": "no approval queue: nobody can approve a worker's request"}
+        open_now = sum(1 for a in primary.list_pending()
+                       if getattr(a, "worker_task_id", None) == task.id)
+        if open_now >= wa.MAX_PENDING_PER_WORKER:
+            return JSONResponse(status_code=429, content={
+                "result": "denied",
+                "reason": f"this worker already has {open_now} requests waiting for a person"})
+        if not _worker_rate.allow(task.id):
+            return JSONResponse(status_code=429, content={
+                "result": "denied", "reason": "too many approval requests from this worker"})
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > wa.MAX_BODY_BYTES:
+                return JSONResponse(status_code=413, content={
+                    "result": "denied", "reason": "approval request body too large"})
+        try:
+            body = _wjson.loads(bytes(raw) or b"{}")
+        except ValueError:
+            return JSONResponse(status_code=400, content={
+                "result": "denied", "reason": "approval request body is not JSON"})
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=400, content={
+                "result": "denied", "reason": "approval request body is not an object"})
+        session = task.session_id or ""
+        chat_id = None
+        if session.startswith("telegram:") and session.split(":", 1)[1].lstrip("-").isdigit():
+            chat_id = int(session.split(":", 1)[1])
+        # The model's words, on a card a person reads: one line each, capped,
+        # no control characters (worker_auth.clean_card_text).
+        tool_name = wa.clean_card_text(body.get("tool_name") or "?", wa.TOOL_NAME_CHARS)
+        reason = wa.clean_card_text(body.get("reason") or tool_name, wa.REASON_CHARS)
+        what = wa.clean_card_text(task.description, wa.DESCRIPTION_CHARS)
+        arguments = body.get("arguments") if isinstance(body.get("arguments"), dict) else None
+        result = await primary.request_approval(
+            tool_name,
+            f"Worker {task.id} ({what}) asks: {reason}",
+            chat_id=chat_id,
+            arguments=arguments,
+            once_only=True,
+            worker_task_id=task.id,
+            session_id=task.session_id,
+        )
+        return {"result": getattr(result, "value", str(result))}
+
     @app.get("/api/sessions/{session_id}/model")
     async def get_session_model(session_id: str):
         router = getattr(app.state, "model_router", None)
@@ -6293,6 +6453,13 @@ def create_app(
     register_pairing_routes(
         app, config=config, devices=_devices_or_create, auth_on=lambda: bool(_api_token))
 
+    # ── Network mode and discovery (GET/PUT /api/network; docs/PAIRING-APPROVAL-API.md 2.2) ────
+    # Read by anyone with a token, changed only by an operator. The launcher sets resolved_bind, config_path
+    # and advertiser on app.state; the route says so where one is absent instead of guessing.
+    from prometheus.web.network_routes import register_network_routes
+
+    register_network_routes(app, auth_on=lambda: bool(_api_token))
+
     # ── Static files (must be last — catch-all) ─────────────────────
 
     if static_dir:
@@ -6458,7 +6625,7 @@ def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005,
-                    config: dict[str, Any] | None = None) -> None:
+                    config: dict[str, Any] | None = None, *, tls: Any = None) -> None:
     """Start the FastAPI server using uvicorn, listening on *host*.
 
     *host* is whatever the daemon resolved from ``--bind`` /
@@ -6489,6 +6656,11 @@ async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005,
 
     from prometheus.web.serving import serve_config
 
-    server = uvicorn.Server(serve_config(app, host, port, config))
-    app.state.http_server = server
+    server = uvicorn.Server(serve_config(app, host, port, config, tls=tls))
+    # The home-network TLS listener is a second server over the same app (pairing PR 5); it never replaces
+    # the plain one a caller stops or asks for its port.
+    if tls is None:
+        app.state.http_server = server
+    else:
+        app.state.https_server = server
     await server.serve()

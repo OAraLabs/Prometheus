@@ -81,6 +81,15 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
 # Provider factory
 # ---------------------------------------------------------------------------
 
+def _worker_permission_prompt(args: Any) -> Any:
+    """A spawned worker's approval channel to its parent conversation, or None."""
+    if not getattr(args, "worker", False):
+        return None
+    from prometheus.cli.worker_approval import approval_prompt_from_env
+
+    return approval_prompt_from_env(os.environ)
+
+
 def _detect_served_model(base_url: str) -> str | None:
     """The model a llama.cpp server reports at /v1/models, or None."""
     import httpx as _httpx
@@ -226,6 +235,7 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
         confinement=security_cfg.get("bash_confinement", "auto"),
         write_confinement=security_cfg.get("bash_write_confinement", "auto"),
         write_allow=security_cfg.get("bash_write_allow") or (),
+        allow_ssh=security_cfg.get("bash_allow_ssh", False),
         # Resource ceilings, set in the parent before exec. Defaults chosen
         # ABOVE measured real usage, not below it: the largest file the daemon
         # legitimately writes today is a 1.07 GB install image, with runtime
@@ -1473,6 +1483,12 @@ def main() -> None:
         help="Override provider (llama_cpp, ollama, anthropic)",
     )
     parser.add_argument(
+        "--worker", action="store_true",
+        help="Run as a spawned worker: read the whole brief from stdin to EOF, "
+             "run it as ONE turn, print a result line and exit (0 = finished). "
+             "How sessions_spawn / task_create local_agent workers run.",
+    )
+    parser.add_argument(
         "--route", type=str, default=None, metavar="KEY",
         help="Run on one whole route: a picker key from GET /api/models (qwen, "
              "qwen:qwen3.8-flash, 4090, local), resolved against this config. "
@@ -2214,6 +2230,9 @@ def main() -> None:
         max_tokens=4096,
         tool_registry=registry,
         permission_checker=security_gate,
+        # A worker asks its parent conversation (cli/worker_approval.py);
+        # with nobody to ask, the gate's refusal stands.
+        permission_prompt=_worker_permission_prompt(args),
         hook_executor=hook_executor,
         adapter=adapter,
         telemetry=telemetry,
@@ -2239,7 +2258,15 @@ def main() -> None:
         memory_prompt_builder=memory_section,
     )
 
+    if args.worker and args.once:
+        print("error: --worker reads its brief from stdin; it cannot be combined "
+              "with --once", file=sys.stderr)
+        sys.exit(2)
+
+    worker_exit = 0
+
     async def _async_main() -> None:
+        nonlocal worker_exit
         # FOUNDATION Part 3: node identity is minted at first run — the CLI
         # is a first run as much as the daemon is. Idempotent afterwards.
         # This runs BEFORE telemetry writes so a first CLI session's traces
@@ -2271,7 +2298,11 @@ def main() -> None:
                 log.info("GBNF grammar enforcement enabled for tool calls")
 
         try:
-            if args.once:
+            if args.worker:
+                from prometheus.cli.worker import run_worker
+
+                worker_exit = await run_worker(context, route=args.route)
+            elif args.once:
                 await run_once(context, args.once)
             else:
                 # Voice-mode plumbing: pull gateway.voice block from the
@@ -2293,6 +2324,8 @@ def main() -> None:
     # Cleanup
     if lcm_engine:
         lcm_engine.close()
+    if args.worker:
+        sys.exit(worker_exit)
 
 
 if __name__ == "__main__":

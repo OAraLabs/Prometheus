@@ -91,6 +91,7 @@ from typing import Any
 from prometheus.config import local_pairing
 from prometheus.config.defaults import config_search_paths
 from prometheus.web.bind import (
+    app_install_lan_guard,
     BIND_ENV_VAR,
     DEFAULT_BIND,
     FRESH_INSTALL_BIND,
@@ -198,7 +199,8 @@ def resolve_setup_choice(flag: str | None = None) -> ResolvedBind:
             ) from exc
         if BIND_ENV_VAR in from_file:
             env[BIND_ENV_VAR] = from_file[BIND_ENV_VAR]
-    return resolve_bind(None, flag=flag, env=env)
+    # The Mac app: plain HTTP on the LAN only if the owner opted in; setup mode has no config, so never.
+    return app_install_lan_guard(resolve_bind(None, flag=flag, env=env), None, env=env)
 
 
 def resolve_setup_bind(flag: str | None = None) -> str:
@@ -430,6 +432,7 @@ def _apply_configure(
         _CLOUD_FAST_PROVIDERS,
         _cloud_default_config,
         _default_config,
+        apply_permission_mode_policy,
         probe_backend,
         write_config,
     )
@@ -616,6 +619,8 @@ def _apply_configure(
     telegram_token_saved = "telegram" in gateways_enabled
 
     cfg_path = get_config_dir() / "prometheus.yaml"
+    # A new app install asks before every shell command and file write; a re-POST keeps what the first wrote.
+    apply_permission_mode_policy(config, cfg_path)
     # backup_existing=False: setup mode only runs when no config existed
     # at boot, so the only thing a re-POST can overwrite is this same
     # call's earlier output — idempotent, no backup litter.

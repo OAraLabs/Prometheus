@@ -828,6 +828,8 @@ class SecurityGate:
                 Path(w).expanduser().resolve() for w in workspace_root if w
             )
         self._mode = PermissionMode(mode) if isinstance(mode, str) else mode
+        # What config said at start: `/gate on` comes back to THIS, not to "default".
+        self._configured_mode = self._mode
 
         # Sprint 11: optional audit + exfiltration
         self._audit = audit_logger
@@ -961,10 +963,14 @@ class SecurityGate:
     def current_mode(self) -> PermissionMode:
         return self._mode
 
+    def configured_mode(self) -> PermissionMode:
+        """The mode the gate was built with (security.permission_mode), whatever ``set_mode`` did since."""
+        return self._configured_mode
+
     def _mode_trust_level(self) -> int:
         if self._mode == PermissionMode.AUTONOMOUS:
             return TrustLevel.AUTONOMOUS
-        if self._mode == PermissionMode.STRICT:
+        if self._mode in (PermissionMode.STRICT, PermissionMode.CAUTIOUS):
             return TrustLevel.APPROVE
         return TrustLevel.AUTO
 
@@ -1228,8 +1234,8 @@ class SecurityGate:
         # (Dropping this cost 23 test failures across cron, denied-paths and
         # the grant-floor invariant before it was put back.)
         if file_path and self._write_boundary_applies(is_read_only, path_is_write):
-            if self._mode == PermissionMode.STRICT:
-                reason = f"{tool_name} requires confirmation in strict mode"
+            if self._mode in (PermissionMode.STRICT, PermissionMode.CAUTIOUS):
+                reason = f"{tool_name} requires confirmation in {self._mode.value} mode"
                 self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason)
                 self._remember_approve_target(reason, file_path=file_path, command=command)
                 return PermissionDecision.approve(reason)
@@ -1250,6 +1256,16 @@ class SecurityGate:
                 "Auto-allowed (trusted command pattern)", command,
             )
             return PermissionDecision.allow(level=TrustLevel.AUTO)
+
+        # --- LEVEL 1: cautious — EVERY shell command the model runs → APPROVE
+        # (system origin only, like the network rule below: what the person types is theirs). New app installs
+        # start here: on macOS the daemon has no shell floor, so the prompt is the protection. A remembered
+        # grant (checked earlier) and the operator's trusted-command allowlist (just above) still apply.
+        if tool_name == "bash" and not is_user and self._mode == PermissionMode.CAUTIOUS:
+            reason = f"Shell commands require confirmation in cautious mode: {command!r}"
+            self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason, command)
+            self._remember_approve_target(reason, file_path=None, command=command)
+            return PermissionDecision.approve(reason)
 
         # --- LEVEL 1: bash with network/install commands → APPROVE
         # (system origin only — user-initiated curl/pip/wget/ssh allowed) ---
