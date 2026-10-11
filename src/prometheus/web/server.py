@@ -880,7 +880,9 @@ def create_app(
             request, _hello_limiter,
             lambda: hello_mod.build_hello(
                 config, auth_on=bool(_api_token),
-                approval=app.state.pairing.settings.requests_enabled))
+                approval=app.state.pairing.settings.requests_enabled,
+                # Per listener: the port this request came in on speaks TLS or it does not.
+                tls=request.url.scheme == "https"))
 
     # ── Root ────────────────────────────────────────────────────────
 
@@ -6458,7 +6460,7 @@ def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005,
-                    config: dict[str, Any] | None = None) -> None:
+                    config: dict[str, Any] | None = None, *, tls: Any = None) -> None:
     """Start the FastAPI server using uvicorn, listening on *host*.
 
     *host* is whatever the daemon resolved from ``--bind`` /
@@ -6489,6 +6491,11 @@ async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005,
 
     from prometheus.web.serving import serve_config
 
-    server = uvicorn.Server(serve_config(app, host, port, config))
-    app.state.http_server = server
+    server = uvicorn.Server(serve_config(app, host, port, config, tls=tls))
+    # The home-network TLS listener is a second server over the same app (pairing PR 5); it never replaces
+    # the plain one a caller stops or asks for its port.
+    if tls is None:
+        app.state.http_server = server
+    else:
+        app.state.https_server = server
     await server.serve()

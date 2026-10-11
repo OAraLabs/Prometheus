@@ -1130,6 +1130,12 @@ web:
   enabled: true
   api_port: 8005
   ws_port: 8010
+  # The home network's TLS ports (pairing PR 5). Only used when network.home_network is on and the bind
+  # reaches beyond this machine: the LAN is then served over TLS here, with a self-signed certificate over
+  # the instance key (node/instance.crt), and api_port/ws_port above stay plain HTTP on 127.0.0.1 only.
+  # Clients pin the certificate's key; hello's fp is the first 16 hex of that pin.
+  tls_api_port: 8006
+  tls_ws_port: 8011
   # Which network interface the REST API (api_port), the WebSocket bridge
   # (ws_port) and setup mode listen on. One setting for all three.
   #
