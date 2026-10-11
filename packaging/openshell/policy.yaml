@@ -1,0 +1,96 @@
+# OpenShell sandbox policy for Prometheus (policy schema version 1, OpenShell 0.1.x).
+# Guide: docs/guide/openshell.md. Use it at create time:
+#
+#   openshell sandbox create --name prometheus --from prometheus-sandbox \
+#     --policy packaging/openshell/policy.yaml -- oara daemon
+#
+# Everything not listed is denied. Delete the rules for what you don't use: a provider you have no key
+# for, or a gateway you haven't enabled. Network rules reload live with `openshell policy set`; the
+# filesystem and process sections need a new sandbox.
+#
+# BINARIES. A rule matches the real path of the process's executable, not a symlink. Every process of
+# Prometheus runs as the official image's interpreter (/opt/prometheus/bin/python is a symlink to it), and
+# children inherit their parent's rules, so each rule names that one file. Model-written shell commands
+# are children of the daemon, so they can reach what the daemon can, and nothing else.
+#
+# TLS. Port-443 traffic is terminated by the sandbox proxy with a per-sandbox CA, which OpenShell puts in
+# SSL_CERT_FILE and REQUESTS_CA_BUNDLE. httpx (the model providers and Telegram) and Python's ssl module
+# (Slack, Discord) read those, so every rule below is inspected at L7 and enforced.
+
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /bin
+    - /usr
+    - /lib
+    - /etc
+    - /proc
+    - /dev/urandom
+    - /var/log
+    - /opt/prometheus        # the daemon's own code
+  read_write:
+    - /sandbox               # the workspace, and HOME: config, memory, logs, the API token
+    - /tmp
+    - /dev/null
+
+landlock:
+  compatibility: best_effort
+
+network_policies:
+  # A model server on the machine running OpenShell. Inside the sandbox it is host.openshell.internal,
+  # never localhost. Point Prometheus at it with `oara setup --probe-url http://host.openshell.internal:11434`
+  # (or :8080), or with PROMETHEUS_OLLAMA_URL / PROMETHEUS_LLAMA_CPP_URL.
+  model_server_on_host:
+    name: model-server-on-host
+    endpoints:
+      - { host: host.openshell.internal, port: 11434, protocol: rest, enforcement: enforce, access: read-write }   # Ollama
+      - { host: host.openshell.internal, port: 8080, protocol: rest, enforcement: enforce, access: read-write }    # llama.cpp
+    binaries:
+      - path: /usr/local/bin/python3.12
+
+  # The cloud providers Prometheus ships presets for (providers/registry.py, providers/anthropic.py).
+  model_providers:
+    name: model-providers
+    endpoints:
+      - { host: api.anthropic.com, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+      - { host: api.openai.com, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+      - { host: generativelanguage.googleapis.com, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+      - { host: api.x.ai, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+      - { host: api.deepseek.com, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+      - { host: api.moonshot.ai, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+      - { host: api.z.ai, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+      - { host: api.xiaomimimo.com, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+      - { host: dashscope-intl.aliyuncs.com, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+    binaries:
+      - path: /usr/local/bin/python3.12
+
+  # Telegram: long polling and file downloads, all on the Bot API host.
+  telegram:
+    name: telegram
+    endpoints:
+      - { host: api.telegram.org, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+    binaries:
+      - path: /usr/local/bin/python3.12
+
+  # Slack: Socket Mode. The Web API, then the WebSocket URL Slack hands back.
+  slack:
+    name: slack
+    endpoints:
+      - { host: slack.com, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+      - { host: wss-primary.slack.com, port: 443, protocol: websocket, enforcement: enforce, access: full }
+      - { host: wss-backup.slack.com, port: 443, protocol: websocket, enforcement: enforce, access: full }
+    binaries:
+      - path: /usr/local/bin/python3.12
+
+  # Discord: REST, the gateway WebSocket (resumes can land on a regional *.discord.gg host), attachments.
+  discord:
+    name: discord
+    endpoints:
+      - { host: discord.com, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+      - { host: gateway.discord.gg, port: 443, protocol: websocket, enforcement: enforce, access: full }
+      - { host: "*.discord.gg", port: 443, protocol: websocket, enforcement: enforce, access: full }
+      - { host: cdn.discordapp.com, port: 443, protocol: rest, enforcement: enforce, access: read-only }
+    binaries:
+      - path: /usr/local/bin/python3.12
