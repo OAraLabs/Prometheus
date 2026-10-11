@@ -63,3 +63,13 @@ def test_the_skip_is_by_exact_path_not_by_a_name_that_would_hide_other_files(tmp
     other.mkdir()
     (other / "instance.key").write_text("not the node directory's file")
     assert "home/.prometheus/data/instance.key" in snapshot(root)
+
+
+def test_the_instance_certificate_is_not_in_the_snapshot_either(tmp_path):
+    """Pairing PR 5: node/instance.crt is made at boot over the instance key (random serial, dates of the run),
+    so no golden recorded before it could match. Its creation is pinned by tests/test_lan_tls.py."""
+    root = _home(tmp_path)
+    (root / "home" / ".prometheus" / "node" / "instance.crt").write_text("certificate of this run\n")
+    seen = snapshot(root)
+    assert "home/.prometheus/node/instance.crt" not in seen
+    assert "home/.prometheus/node/node.key" in seen, "the skip is for one name, not the node directory"

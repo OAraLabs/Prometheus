@@ -53,6 +53,7 @@ async def launch_web(
     api_port: int = 8005,
     ws_host: str | None = None,
     ws_port: int = 8010,
+    lan_tls: Any | None = None,
 ) -> None:
     """Start both REST API and WebSocket servers.
 
@@ -62,6 +63,11 @@ async def launch_web(
     override it per server and exist for callers that need the two apart. An
     invalid address raises :class:`~prometheus.web.bind.BindError` before
     anything is built or bound.
+
+    *lan_tls* (``web.tls.lan_tls_plan``) is the home network: plain HTTP then
+    listens on loopback only, and a second REST server and a second WebSocket
+    listener serve the LAN bind over TLS with the instance certificate
+    (pairing PR 5, docs/design/lan-tls-pr5.md).
     """
 
     from pathlib import Path
@@ -74,9 +80,12 @@ async def launch_web(
     from prometheus.web.server import create_app, start_web
     from prometheus.web.ws_server import WebSocketBridge
 
+    from prometheus.web.tls import listener_hosts, server_ssl_context
+
     address = parse_bind(bind, "bind") if bind is not None else resolve_bind(config).address
-    api_host = address if api_host is None else api_host
-    ws_host = address if ws_host is None else ws_host
+    plain_host, _tls_host = listener_hosts(address, lan_tls)
+    api_host = plain_host if api_host is None else api_host
+    ws_host = plain_host if ws_host is None else ws_host
 
     # Polish sprint WS2: when no explicit static_dir is passed, fall back to
     # the shipped frontend at <package>/web/static/. Users can override via
@@ -285,15 +294,27 @@ async def launch_web(
         "Starting Mission Control — REST on %s, WebSocket on %s",
         format_host_port(api_host, api_port), format_host_port(ws_host, ws_port),
     )
+    servers = [
+        start_web(app, host=api_host, port=api_port, config=config),
+        bridge.start(host=ws_host, port=ws_port),
+    ]
+    tls_hosts: tuple[str, ...] = ()
+    if lan_tls is not None:
+        servers += [
+            start_web(app, host=lan_tls.host, port=lan_tls.api_port, config=config, tls=lan_tls),
+            bridge.start(host=lan_tls.host, port=lan_tls.ws_port, ssl=server_ssl_context(lan_tls)),
+        ]
+        tls_hosts = (lan_tls.host,)
+        logger.info(
+            "Home network: REST over TLS on %s, WebSocket over TLS on %s; plain HTTP on this machine only",
+            format_host_port(lan_tls.host, lan_tls.api_port), format_host_port(lan_tls.host, lan_tls.ws_port),
+        )
     # One warning per start, not one per listener: it is the same exposure.
-    for wide_host in (api_host, ws_host):
+    for wide_host in (api_host, ws_host, *tls_hosts):
         warning = all_interfaces_warning(wide_host)
         if warning:
             logger.warning(warning)
             break
 
-    # Run both servers concurrently
-    await asyncio.gather(
-        start_web(app, host=api_host, port=api_port, config=config),
-        bridge.start(host=ws_host, port=ws_port),
-    )
+    # Run every listener concurrently
+    await asyncio.gather(*servers)

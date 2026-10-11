@@ -408,11 +408,13 @@ class WebSocketBridge:
         that only need pass/fail)."""
         return self._auth_identity(raw) is not None
 
-    async def start(self, host: str = DEFAULT_BIND, port: int = 8010) -> None:
+    async def start(self, host: str = DEFAULT_BIND, port: int = 8010, *, ssl: Any = None) -> None:
         """Start the WebSocket server on *host*.
 
         A loopback *host* also turns on the Host-header check (DNS rebinding);
-        any other host is left unrestricted, as before.
+        any other host is left unrestricted, as before. *ssl* (an
+        ``ssl.SSLContext``) starts the home-network WSS listener instead, beside
+        the plain one (pairing PR 5): same handler, same clients.
         """
         try:
             import websockets
@@ -420,18 +422,25 @@ class WebSocketBridge:
             logger.error("websockets package not installed — pip install websockets")
             return
 
-        # Subscribe to all SignalBus events
-        if self.signal_bus:
+        # Subscribe to all SignalBus events, once: a second listener (TLS) must
+        # not deliver every event twice.
+        if self.signal_bus and not getattr(self, "_subscribed", False):
             self.signal_bus.subscribe("*", self._on_signal)
+            self._subscribed = True
 
-        self._server = await websockets.serve(  # type: ignore[attr-defined]
+        server = await websockets.serve(  # type: ignore[attr-defined]
             self._handler,
             host,
             port,
             max_size=WS_MAX_FRAME_BYTES,
             process_request=_loopback_process_request if is_loopback_address(host) else None,
+            ssl=ssl,
         )
-        logger.info("WebSocket bridge listening on ws://%s:%d", host, port)
+        if ssl is None:
+            self._server = server
+        else:
+            self._tls_server = server
+        logger.info("WebSocket bridge listening on %s://%s:%d", "wss" if ssl else "ws", host, port)
 
     @property
     def bound_port(self) -> int | None:
@@ -441,10 +450,18 @@ class WebSocketBridge:
 
         return bound_port(getattr(self, "_server", None))
 
+    @property
+    def tls_bound_port(self) -> int | None:
+        """The home-network WSS listener's port, or ``None`` when there is none."""
+        from prometheus.web.serving import bound_port
+
+        return bound_port(getattr(self, "_tls_server", None))
+
     async def stop(self) -> None:
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
+        for server in (self._server, getattr(self, "_tls_server", None)):
+            if server:
+                server.close()
+                await server.wait_closed()
 
     async def _handler(self, websocket: Any) -> None:
         """Handle a single WebSocket client connection.
