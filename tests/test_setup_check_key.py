@@ -14,7 +14,7 @@ What is pinned, and why each matters:
   runs after the free ``/key`` call and never when the key is already refused;
 * the key travels only in the auth header, is never in the answer, the URL or the logs, and no provider body is
   relayed (it can echo the key);
-* only the three known providers are called, at fixed URLs (this route must not become an authenticated proxy), and
+* only the known providers are called, at fixed URLs (this route must not become an authenticated proxy), and
   nothing follows a redirect;
 * anything unexpected is ``unreachable``, never ``ok``.
 """
@@ -54,7 +54,7 @@ def reply(name: str) -> httpx.Response:
 
 
 class Upstream:
-    """A stand-in for the three providers: records every request, answers from a table."""
+    """A stand-in for the providers: records every request, answers from a table."""
 
     def __init__(self, answers: dict[tuple[str, str], httpx.Response | Exception]) -> None:
         self.answers = answers
@@ -244,10 +244,10 @@ class TestTheKeyStaysPut:
         assert check("openrouter", key, up).result == "bad_key"
         assert up.requests == []
 
-    def test_only_the_three_providers_are_known(self):
+    def test_only_the_known_providers_are_checked(self):
         from prometheus.providers import key_check
 
-        assert sorted(key_check.CHECKABLE_PROVIDERS) == ["anthropic", "openai", "openrouter"]
+        assert sorted(key_check.CHECKABLE_PROVIDERS) == ["anthropic", "gemini", "openai", "openrouter", "xai"]
         with pytest.raises(ValueError):
             key_check.check_provider_key("evil", KEY, client=Upstream({}).client())
 
@@ -305,7 +305,7 @@ class TestCheckKeyRoute:
 
     @pytest.mark.parametrize("body", [
         {}, {"api_key": KEY}, {"provider": "openrouter"}, {"provider": "openrouter", "api_key": ""},
-        {"provider": "evil", "api_key": KEY}, {"provider": "gemini", "api_key": KEY},
+        {"provider": "evil", "api_key": KEY}, {"provider": "deepseek", "api_key": KEY},
         {"provider": ["openrouter"], "api_key": KEY}, {"provider": "openrouter", "api_key": 7},
         {"provider": "openrouter", "api_key": KEY, "base_url": "https://evil.example"},
     ])

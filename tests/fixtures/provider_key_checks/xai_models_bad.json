@@ -1,0 +1,11 @@
+{
+  "body": {
+    "code": "invalid-argument",
+    "error": "Incorrect API key provided. You can obtain an API key from https://console.x.ai."
+  },
+  "content_type": "application/json",
+  "note": "xAI answers an invalid key with HTTP 400, not 401; the machine-readable code is invalid-argument (a missing or empty credential is 401 unauthenticated:*). The request has no other argument, so the argument is the key",
+  "provenance": "RECORDED from the live service on 2026-10-11 with a deliberately invalid key; never a real credential",
+  "request": "GET https://api.x.ai/v1/models",
+  "status": 400
+}
