@@ -216,6 +216,27 @@ class TestTheKeyStaysPut:
         joined = "\n".join(r.getMessage() for r in caplog.records)
         assert OPENAI_KEY not in joined and KEY not in joined and "sk-inval" not in joined
 
+    def test_a_network_failure_is_logged_by_its_class_alone(self, caplog):
+        """An exception's message can carry a URL or a header, and a header carries the key."""
+        caplog.set_level(logging.DEBUG)
+        boom = httpx.ConnectError(f"connection failed; Authorization: Bearer {KEY}; url=https://openrouter.ai/api/v1/key")
+        res = check("openrouter", KEY, Upstream({OR_KEY: boom}))
+        assert res.result == "unreachable"
+        joined = "\n".join(r.getMessage() for r in caplog.records)
+        assert KEY not in joined and "Authorization" not in joined and KEY not in json.dumps(res.as_dict())
+        assert "ConnectError" in joined, "the class is the useful part and is kept"
+
+    def test_the_real_client_follows_no_redirect_and_gives_up_quickly(self):
+        """The tests inject their own client; this pins the one that ships."""
+        from prometheus.providers import key_check
+
+        real = key_check._make_client()
+        try:
+            assert real.follow_redirects is False
+            assert real.timeout.connect <= 10 and real.timeout.read <= 10
+        finally:
+            real.close()
+
     @pytest.mark.parametrize("key", ["", " ", "short", "has space in it 1234567890", "new\nline-1234567890",
                                      "tab\there-1234567890", "k" * 600, "ключ-1234567890123456"])
     def test_a_key_that_cannot_be_an_http_header_value_is_bad_key_and_calls_nobody(self, key):
