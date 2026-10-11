@@ -41,15 +41,12 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     # Alibaba Model Studio text models (/qwen). Separate from DASHSCOPE_API_KEY
     # below, which is the WAN image backend on a different host.
     "QWEN_API_KEY": ("providers", "qwen", "api_key"),
+    "OPENROUTER_API_KEY": ("providers", "openrouter", "api_key"),
     # WAN 2.5 image backend (Alibaba DashScope) — paid, opt-in only
     "DASHSCOPE_API_KEY": ("image_generation", "dashscope", "api_key"),
     # Kling 3.0 video tool — AccessKey + SecretKey pair (JWT minted per call)
     "KLING_ACCESS_KEY": ("video_generation", "kling", "access_key"),
     "KLING_SECRET_KEY": ("video_generation", "kling", "secret_key"),
-
-    # Provider URLs (for switching machines)
-    "PROMETHEUS_LLAMA_CPP_URL": ("providers", "llama_cpp", "base_url"),
-    "PROMETHEUS_OLLAMA_URL": ("providers", "ollama", "base_url"),
 
     # Model/provider override
     "PROMETHEUS_MODEL": ("model", "model"),
@@ -60,6 +57,16 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
 
     # Permission mode
     "PROMETHEUS_PERMISSION_MODE": ("security", "permission_mode"),
+}
+
+# The main model's server URL, per local provider (for switching machines). Not in ENV_OVERRIDES: these
+# used to write providers.<name>.base_url there, a block nothing reads for llama_cpp or ollama, so neither
+# variable did anything. ProviderRegistry.create takes these providers' URL from model.base_url, so that
+# is what each sets, and only while the main model's provider is the variable's own. Router rules and
+# backends: entries name their own URLs and are left alone.
+MODEL_URL_VARS: dict[str, str] = {
+    "PROMETHEUS_LLAMA_CPP_URL": "llama_cpp",
+    "PROMETHEUS_OLLAMA_URL": "ollama",
 }
 
 # Secret file env vars (alternative to inline secrets)
@@ -183,6 +190,24 @@ def apply_env_overrides(config: dict) -> dict:
             # environment override" — and match what this codebase already does on the other
             # config wire (web/server.py::_sanitize_config emits ***REDACTED***, never fragments).
             applied.append(env_var)
+
+    # After the direct overrides, so a PROMETHEUS_PROVIDER switch decides which URL variable applies.
+    from prometheus.config.defaults import DEFAULT_MODEL_PROVIDER
+
+    model = config.get("model")
+    active = (model.get("provider") if isinstance(model, dict) else None) or DEFAULT_MODEL_PROVIDER
+    for env_var, provider in MODEL_URL_VARS.items():
+        if not os.environ.get(env_var):
+            continue
+        if active == provider:
+            _set_nested(config, ("model", "base_url"), os.environ[env_var])
+            applied.append(env_var)
+        else:
+            # A setting that silently changes nothing is the bug this replaced. Names only (see above).
+            logger.warning(
+                "%s is set, but the main model's provider is %r: the variable only points the %s "
+                "provider, so it changes nothing here.", env_var, active, provider,
+            )
 
     if applied:
         logger.info("Applied env overrides: %s", ", ".join(applied))
