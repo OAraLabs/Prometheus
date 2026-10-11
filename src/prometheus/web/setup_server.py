@@ -91,6 +91,7 @@ from typing import Any
 from prometheus.config import local_pairing
 from prometheus.config.defaults import config_search_paths
 from prometheus.web.bind import (
+    app_install_lan_guard,
     BIND_ENV_VAR,
     DEFAULT_BIND,
     FRESH_INSTALL_BIND,
@@ -198,7 +199,8 @@ def resolve_setup_choice(flag: str | None = None) -> ResolvedBind:
             ) from exc
         if BIND_ENV_VAR in from_file:
             env[BIND_ENV_VAR] = from_file[BIND_ENV_VAR]
-    return resolve_bind(None, flag=flag, env=env)
+    # The Mac app: plain HTTP on the LAN only if the owner opted in; setup mode has no config, so never.
+    return app_install_lan_guard(resolve_bind(None, flag=flag, env=env), None, env=env)
 
 
 def resolve_setup_bind(flag: str | None = None) -> str:

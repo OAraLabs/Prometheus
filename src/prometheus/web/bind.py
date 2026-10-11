@@ -185,3 +185,38 @@ def all_interfaces_warning(address: str) -> str | None:
 def format_host_port(host: str, port: int) -> str:
     """``host:port`` for a log line, bracketing an IPv6 literal."""
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def _on(section: object, key: str) -> bool:
+    value = section.get(key) if isinstance(section, Mapping) else None
+    return value is True
+
+
+def app_install_lan_guard(
+    resolved: ResolvedBind, config: Mapping[str, Any] | None, env: Mapping[str, str] | None = None,
+) -> ResolvedBind:
+    """On the Mac app, plain HTTP never reaches the LAN unless the owner asked for exactly that.
+
+    A bind beyond loopback falls back to ``127.0.0.1`` unless ``network.allow_plaintext_lan`` (the explicit
+    plain-HTTP opt-in) or ``network.home_network`` (whose TLS listener takes the LAN while plain HTTP stays on
+    loopback, pairing PR 5) is ``true``. The source is kept, so the file still decides and the owner's switch
+    still works. Only ``PROMETHEUS_INSTALL_KIND=app``: terminal installs keep today's behaviour (D10).
+    """
+    environ = os.environ if env is None else env
+    if environ.get("PROMETHEUS_INSTALL_KIND") != "app":
+        return resolved
+    from prometheus.web.loopback import is_loopback_address
+
+    if is_loopback_address(resolved.address):
+        return resolved
+    network = config.get("network") if isinstance(config, Mapping) else None
+    if _on(network, "allow_plaintext_lan") or _on(network, "home_network"):
+        return resolved
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "web bind %s (from %s) would serve plain HTTP on the network, and this is the Mac app with "
+        "network.home_network off and no network.allow_plaintext_lan: listening on this Mac only (%s)",
+        resolved.address, resolved.source, APP_INSTALL_DEFAULT_BIND)
+    return ResolvedBind(APP_INSTALL_DEFAULT_BIND, resolved.source)
+
