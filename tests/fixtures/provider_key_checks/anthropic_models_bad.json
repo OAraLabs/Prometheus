@@ -1,0 +1,15 @@
+{
+  "body": {
+    "error": {
+      "message": "invalid x-api-key",
+      "type": "authentication_error"
+    },
+    "request_id": "req_011CfvVxB47EKDm2c8Hp2v6W",
+    "type": "error"
+  },
+  "content_type": "application/json",
+  "note": "x-api-key rejected",
+  "provenance": "RECORDED from the live service on 2026-10-11 with a deliberately invalid key; never a real credential",
+  "request": "GET https://api.anthropic.com/v1/models",
+  "status": 401
+}

@@ -332,6 +332,10 @@ _CLOUD_FAST_PROVIDERS: dict[str, tuple[str, str, int]] = {
     "glm": ("ZAI_API_KEY", "glm-5.3", 64000),
     "mimo": ("MIMO_API_KEY", "mimo-v2.6-pro", 64000),
     "qwen": ("QWEN_API_KEY", "qwen3.8-max", 64000),
+    # OpenRouter (Beacon's Recommended "sign in, no key to copy"). The model is OpenRouter's own id and must agree
+    # with providers/registry.CLOUD_DEFAULTS (tests/test_openrouter_provider.py); the context budget is the one the
+    # same Claude model gets on the direct route. No slash-command preset: it is chosen at setup, not by /command.
+    "openrouter": ("OPENROUTER_API_KEY", "anthropic/claude-sonnet-5", 100000),
 }
 
 
