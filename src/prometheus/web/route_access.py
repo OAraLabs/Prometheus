@@ -196,6 +196,10 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     # /api/memory
     ("GET", "/api/memory/current"),
     ("PUT", "/api/memory/current"),
+    # /api/model — the daemon's own provider, model and key (after setup); the owner's, saved and applied on restart
+    ("GET", "/api/model"),
+    ("PUT", "/api/model"),
+    ("POST", "/api/model/check-key"),
     # /api/models
     ("GET", "/api/models"),
     ("GET", "/v1/models"),
