@@ -1,0 +1,35 @@
+# Pins that only ever age unless something refreshes them.
+#
+# docker: the Dockerfile's base image is pinned by digest (both FROM lines, written literally because
+# Dependabot does not follow a build ARG). A new digest for the same python:3.12-slim-trixie tag is how
+# Debian's security fixes reach the image, so that is the update wanted; a new Python minor is a decision
+# (the CI matrix, the release and the macOS app all build 3.12), so it is ignored here.
+#
+# github-actions: every action in .github/workflows is pinned to a commit SHA with its tag in a comment;
+# Dependabot moves both. Grouped into one weekly PR so a round of bumps is one review.
+#
+# Every PR this opens runs the full CI, including the container smoke test on amd64 and arm64.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: python
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      actions:
+        patterns:
+          - "*"

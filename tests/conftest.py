@@ -208,6 +208,8 @@ def _hermetic_prometheus_env(monkeypatch):
     independent of whatever the host environment happens to export.
     """
     monkeypatch.delenv("PROMETHEUS_API_TOKEN", raising=False)
+    # ...and the file form of it (a container secret), which turns auth on just the same.
+    monkeypatch.delenv("PROMETHEUS_API_TOKEN_FILE", raising=False)
     monkeypatch.delenv("PROMETHEUS_FILES_ROOT", raising=False)
     monkeypatch.delenv("PROMETHEUS_TELEGRAM_TOKEN", raising=False)
     # Real provider keys also leak from the daemon env and flip

@@ -180,6 +180,7 @@ def test_trajectory_export_is_off_in_the_shipped_template():
 #: template key that decides it. A name in the prose with no key here fails
 #: below, so the list cannot grow a claim nothing checks.
 OFF_BY_DEFAULT_KEYS = {
+    "Coding Mode": "coding.enabled",
     "SENTINEL": "sentinel.enabled",
     "divergence detection": "divergence.enabled",
     "LSP": "lsp.enabled",

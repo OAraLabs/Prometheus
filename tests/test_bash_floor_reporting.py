@@ -124,7 +124,8 @@ class TestFloorReport:
         monkeypatch.setattr(C, "write_preflight", spy)
         C.floor_report(read_mode="required", write_mode="auto")
         assert seen, "the write floor was never probed"
-        assert any("aa-exec" in " ".join(p) for p in seen), (
+        read_prefix = tuple(C._read_prefix(C.PROFILE))     # aa-exec on Linux, sandbox-exec on a Mac
+        assert any(p == read_prefix for p in seen), (
             f"the write floor was probed WITHOUT the read floor: {seen}")
 
     def test_scope_is_stated_so_it_is_not_over_read(self):
