@@ -30,7 +30,7 @@ It builds on `ghcr.io/oaralabs/prometheus:latest`. Until that image is published
 | Rule | Hosts |
 |---|---|
 | `model_server_on_host` | `host.openshell.internal:11434` (Ollama) and `:8080` (llama.cpp) on the machine running OpenShell |
-| `model_providers` | the cloud providers Prometheus ships presets for: Anthropic, OpenAI, Gemini, xAI, DeepSeek, Kimi, GLM, MiMo, Qwen |
+| `model_providers` | the cloud providers Prometheus ships presets for: Anthropic, OpenAI, OpenRouter, Gemini, xAI, DeepSeek, Kimi, GLM, MiMo, Qwen |
 | `telegram` | `api.telegram.org` |
 | `slack` | `slack.com`, and the Socket Mode WebSocket hosts `wss-primary.slack.com` and `wss-backup.slack.com` |
 | `discord` | `discord.com`, the gateway WebSocket (`gateway.discord.gg`, `*.discord.gg`) and `cdn.discordapp.com` |
