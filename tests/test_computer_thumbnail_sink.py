@@ -304,6 +304,21 @@ async def test_a_store_that_raises_means_no_viewers(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_an_ownership_lookup_that_raises_means_no_viewers(tmp_path):
+    """The same for condition 4: a session owner that cannot be read is not the device."""
+    store, minted, bridge = _rig(tmp_path)
+    ws = await _connect(bridge, minted["token"], caps=[CAP])
+
+    def boom(_session_id):
+        raise RuntimeError("db gone")
+
+    store.session_owner = boom
+    assert bridge.viewer_count(SESSION) == 0
+    await bridge.send_thumbnail(SESSION, FRAME)
+    assert _thumbs(ws) == []
+
+
+@pytest.mark.asyncio
 async def test_a_dead_socket_is_dropped_not_retried(tmp_path):
     """A failed send is a dropped picture. Never a retry, never a queue, and
     never a reason to end a task."""
