@@ -126,3 +126,85 @@ def test_a_real_daemon_restarted_over_http_comes_back_with_the_same_fp(tmp_path)
                 proc.kill()
         log.close()
         stub.shutdown()
+
+
+def test_after_a_restart_the_env_file_is_read_again(tmp_path):
+    """The token lives in the env file. It is changed while the daemon runs, then the daemon is restarted over
+    HTTP: the new token must work and the old one must not (a re-exec with the inherited environment would keep
+    the old one, because the env file never overrides a variable that is already set)."""
+    stub = ThreadingHTTPServer(("127.0.0.1", 0), _ModelsHandler)
+    threading.Thread(target=stub.serve_forever, daemon=True).start()
+    api_port, ws_port = _free_port(), _free_port()
+    home = tmp_path / "home"
+    (home / ".prometheus").mkdir(parents=True)
+    (home / ".config" / "prometheus").mkdir(parents=True)
+    env_file = home / ".config" / "prometheus" / "env"
+    old, new = "token-before-the-restart-0123456789", "token-after-the-restart-9876543210"
+    env_file.write_text(f"PROMETHEUS_API_TOKEN={old}\n", encoding="utf-8")
+    (home / ".prometheus" / "prometheus.yaml").write_text(textwrap.dedent(f"""\
+        model:
+          provider: llama_cpp
+          base_url: http://127.0.0.1:{stub.server_port}
+          model: restart-model
+        gateway:
+          telegram_enabled: false
+        web:
+          enabled: true
+          bind: 127.0.0.1
+          api_port: {api_port}
+          ws_port: {ws_port}
+        """), encoding="utf-8")
+    env = {"HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONUNBUFFERED": "1",
+           "LANG": "C.UTF-8", "PYTHONUSERBASE": site.getuserbase()}
+    if "VIRTUAL_ENV" in os.environ:
+        env["VIRTUAL_ENV"] = os.environ["VIRTUAL_ENV"]
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (src, os.environ.get("PYTHONPATH", "")) if p)
+    log_path = tmp_path / "daemon.log"
+    log = log_path.open("w", encoding="utf-8")
+    proc = subprocess.Popen([sys.executable, "-m", "prometheus", "daemon"], cwd=tmp_path, env=env,
+                            stdout=log, stderr=subprocess.STDOUT)
+
+    def status(token: str) -> int | None:
+        request = urllib.request.Request(f"http://127.0.0.1:{api_port}/api/status",
+                                         headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                return response.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+        except OSError:
+            return None
+
+    def wait_for(predicate, what: str, seconds: float = 60):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                pytest.fail(f"daemon exited rc={proc.returncode} while waiting for {what}: "
+                            f"{log_path.read_text()[-2000:]}")
+            value = predicate()
+            if value:
+                return value
+            time.sleep(0.5)
+        pytest.fail(f"timed out waiting for {what}: {log_path.read_text()[-2000:]}")
+
+    try:
+        wait_for(lambda: status(old) == 200, "the first boot, on the old token")
+        env_file.write_text(f"PROMETHEUS_API_TOKEN={new}\n", encoding="utf-8")
+        request = urllib.request.Request(f"http://127.0.0.1:{api_port}/api/restart", method="POST", data=b"",
+                                         headers={"Authorization": f"Bearer {old}"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            assert response.status == 202
+        wait_for(lambda: log_path.read_text().count(BOOTED) >= 2, "the second boot")
+        wait_for(lambda: status(new) == 200, "the new token after the restart")
+        assert status(old) == 401, "the restarted daemon still accepts the token the env file no longer holds"
+    finally:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGTERM)
+            try:
+                proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        log.close()
+        stub.shutdown()
+
