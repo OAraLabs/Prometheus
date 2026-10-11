@@ -370,6 +370,29 @@ def apply_web_bind_policy(config: dict[str, Any], target_path: Path) -> None:
         web["bind"] = prior_web["bind"]
 
 
+def apply_permission_mode_policy(config: dict[str, Any], target_path: Path) -> None:
+    """Decide ``security.permission_mode`` for a config about to be written over *target_path*.
+
+    A NEW config gets :func:`~prometheus.permissions.modes.fresh_install_mode`: ``cautious`` on the app install,
+    ``default`` elsewhere. A config that is already there keeps its mode: carried over as it was, and
+    ``default`` (what an absent key has always meant) when it had none. ``--fast`` replaces the whole file, so
+    without the carry-over a rerun would reset a mode its owner chose.
+    """
+    from prometheus.permissions.modes import fresh_install_mode
+
+    security = config.setdefault("security", {})
+    if not target_path.exists():
+        security["permission_mode"] = fresh_install_mode()
+        return
+    try:
+        prior = yaml.safe_load(target_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return  # unreadable: nothing to carry; the builder's "default" is what an unset mode means
+    prior_security = prior.get("security") if isinstance(prior, dict) else None
+    if isinstance(prior_security, dict) and prior_security.get("permission_mode") is not None:
+        security["permission_mode"] = prior_security["permission_mode"]
+
+
 def write_config(
     config: dict[str, Any],
     target_path: Path,
@@ -812,6 +835,8 @@ def run_init(
 
     # New install: this machine only. Existing config: its web.bind is carried over, never flipped.
     apply_web_bind_policy(config, cfg_path)
+    # New app install: cautious. Existing config: its permission mode is carried over, never changed.
+    apply_permission_mode_policy(config, cfg_path)
 
     # Backup existing config if present
     backup = write_config(config, cfg_path, backup_existing=True)

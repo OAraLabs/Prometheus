@@ -282,6 +282,9 @@ adapter:
   unwrap_dict_args:            # required — no code default
 
 security:
+  # default: asks before destructive and network/install commands and writes outside the workspace.
+  # strict: also asks before every file write. cautious: also asks before every shell command the model
+  # runs (a new Prometheus.app install starts here). autonomous: asks nothing. /gate switches until restart.
   permission_mode: "default"
   # Where write_file / edit_file may write WITHOUT asking. Accepts one path or
   # a list of them. Ships tight — widen deliberately (e.g. "~/projects") if
