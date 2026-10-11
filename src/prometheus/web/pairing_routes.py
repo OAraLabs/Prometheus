@@ -277,6 +277,22 @@ def _peer(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def operator_refusal(request: Request, auth_on: bool) -> JSONResponse | None:
+    """403 ``operator_only`` for a live token that is not an operator, else ``None``.
+
+    The operator is the global token or an owner device (``identity.is_operator``); a scoped device is a 403,
+    never a 401, because 401 tells a client its token is dead. With auth off everyone is the operator. Shared by
+    every route that only the owner may use (here and ``web/network_routes.py``).
+    """
+    if not auth_on:
+        return None
+    identity = getattr(request.state, "device_identity", None)
+    if identity is None or not identity.is_operator:
+        return _json(403, {"error": "operator_only",
+                           "detail": "only the owner (the master token or an owner device) may do this"})
+    return None
+
+
 def _browser_refusal(request: Request) -> JSONResponse | None:
     if request.headers.get("origin"):
         return _json(400, {"error": "browser_not_allowed",
@@ -379,14 +395,7 @@ def register_pairing_routes(
     app.router.add_event_handler("shutdown", runtime.stop_sweeper)
 
     def operator_only(request: Request) -> JSONResponse | None:
-        """403 for a live token that is not an operator. With auth off everyone is the operator."""
-        if not auth_on():
-            return None
-        identity = getattr(request.state, "device_identity", None)
-        if identity is None or not identity.is_operator:
-            return _json(403, {"error": "operator_only",
-                               "detail": "only the owner (the master token or an owner device) may do this"})
-        return None
+        return operator_refusal(request, auth_on())
 
     def verified(request: Request, request_id: str) -> PairRequest | JSONResponse:
         """The request for a valid poll secret, or the one answer a stranger ever gets.

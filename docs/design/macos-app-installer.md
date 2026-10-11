@@ -335,6 +335,11 @@ separate follow-up (design: keep the master key out of the agent's reach), and t
 gated on it and on a restrictive default permission mode. Requires-approval, `/Applications`, ad-hoc
 signing and logout/login are unproven (see below).
 
+*Status, 2026-10-10:* both gates have a change. The master key: the shell read floor on macOS is now a
+Seatbelt profile (`sandbox-exec`) denying `~/.config/*/*env`, `~/.ssh` and `~/.gnupg` to every model-written
+shell (`docs/design/master-key-out-of-agent-shell.md`). The write floor is still Linux-only. The permission
+mode: a new app install is written with `security.permission_mode: cautious` (#711).
+
 ## Order of work
 
 Each is a draft PR, not merged, Auto-fix off. Where it can be tested, the test that fails on today's

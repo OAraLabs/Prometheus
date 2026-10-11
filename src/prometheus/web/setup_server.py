@@ -432,6 +432,7 @@ def _apply_configure(
         _CLOUD_FAST_PROVIDERS,
         _cloud_default_config,
         _default_config,
+        apply_permission_mode_policy,
         probe_backend,
         write_config,
     )
@@ -618,6 +619,8 @@ def _apply_configure(
     telegram_token_saved = "telegram" in gateways_enabled
 
     cfg_path = get_config_dir() / "prometheus.yaml"
+    # A new app install asks before every shell command and file write; a re-POST keeps what the first wrote.
+    apply_permission_mode_policy(config, cfg_path)
     # backup_existing=False: setup mode only runs when no config existed
     # at boot, so the only thing a re-POST can overwrite is this same
     # call's earlier output — idempotent, no backup litter.
