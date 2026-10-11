@@ -68,6 +68,7 @@ from prometheus.config.pair_requests import (
     UnknownRequest,
 )
 from prometheus.web.source_limits import SourceLimiter
+from prometheus.web.tls import request_tls_plan, spki_sha256
 
 logger = logging.getLogger("prometheus.pairing")
 
@@ -349,17 +350,34 @@ async def _read_limited(request: Request) -> bytes:
 
 
 def _endpoints(request: Request, web_config: dict[str, Any]) -> dict[str, str | None]:
-    """Where the requester should connect, from the Host it used (so the address is reachable from its side)."""
+    """Where the requester should connect, from the Host it used (so the address is reachable from its side).
+
+    A request that came in on the TLS listener (``web/tls.request_tls_plan``) is answered over TLS: ``https`` for
+    REST, and ``wss`` on the configured TLS WebSocket port (``web.tls_ws_port``, default 8011), because the plain
+    WebSocket port listens on this machine only in home-network mode and cannot be reached from another computer
+    (§7.2, §7.3). Every other request keeps the plain answer.
+    """
     host = request.headers.get("host", "")
     match = _HOST_RE.fullmatch(host)
     if match is None or (match["port"] is not None and int(match["port"]) > 65535):
         return {"rest": None, "ws": None}
     hostname = match["host"]
+    plan = request_tls_plan(request)
+    if plan is not None:
+        return {"rest": f"https://{host}", "ws": f"wss://{hostname}:{plan.ws_port}"}
     try:
         ws_port = int(web_config.get("ws_port", 8010) or 8010)
     except (TypeError, ValueError):
         ws_port = 8010
     return {"rest": f"http://{host}", "ws": f"ws://{hostname}:{ws_port}"}
+
+
+def _tls_pin(request: Request) -> dict[str, str] | None:
+    """The poll's ``tls`` block: the full SPKI pin when the requester came in over TLS, else ``None`` (§7.2)."""
+    if request_tls_plan(request) is None:
+        return None
+    pin = spki_sha256()
+    return {"spki_sha256": pin} if pin else None
 
 
 def _via(request: Request) -> str:
@@ -504,7 +522,7 @@ def register_pairing_routes(
             if sealed is not None:
                 return _json(200, {
                     "status": APPROVED, "device_id": req.device_id, "sealed": sealed,
-                    "endpoints": _endpoints(request, runtime.web_config), "tls": None,
+                    "endpoints": _endpoints(request, runtime.web_config), "tls": _tls_pin(request),
                     "approved_at": int(req.decided_at or 0)})
         status = EXPIRED if req.state in (UNCOLLECTED, APPROVED) else req.state
         return _json(200, {"status": status})

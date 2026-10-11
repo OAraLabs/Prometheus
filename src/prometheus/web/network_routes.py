@@ -31,7 +31,6 @@ Source: novel code for Prometheus, 2026-10-08.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -63,7 +62,7 @@ from prometheus.web.network import (
     persist_choice,
 )
 from prometheus.web.pairing_routes import operator_refusal
-from prometheus.web.tls import lan_tls_plan, tls_ready
+from prometheus.web.tls import lan_tls_plan, spki_sha256, tls_ready
 
 logger = logging.getLogger("prometheus.network")
 
@@ -88,10 +87,7 @@ def _tls_block(request: Request | None = None) -> dict[str, Any]:
     live = request is not None and getattr(request.app.state, "lan_tls", None) is not None
     if not live:
         return {"enabled": False, "spki_sha256": None}
-    from prometheus.config.instance_key import instance_public_key_der
-
-    der = instance_public_key_der()            # read-only: a GET writes nothing
-    return {"enabled": True, "spki_sha256": hashlib.sha256(der).hexdigest() if der else None}
+    return {"enabled": True, "spki_sha256": spki_sha256()}      # read-only: a GET writes nothing
 
 
 def _read_file(path: str | None) -> dict[str, Any] | None:
