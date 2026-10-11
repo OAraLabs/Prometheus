@@ -41,7 +41,14 @@ import yaml
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from prometheus.web.bind import DEFAULT_BIND, BindError, ResolvedBind, parse_bind, resolve_bind
+from prometheus.web.bind import (
+    BindError,
+    ResolvedBind,
+    app_install_lan_guard,
+    default_bind,
+    parse_bind,
+    resolve_bind,
+)
 from prometheus.web.loopback import is_loopback_address, is_same_machine
 from prometheus.web.network import (
     CHOOSABLE,
@@ -109,19 +116,26 @@ def _tls_after_restart(document: Mapping[str, Any], address: str) -> bool:
 
 
 def _state_from_file(resolved: ResolvedBind, document: Mapping[str, Any]) -> NetworkState | None:
-    """What the daemon will be after a restart, from the file and whatever outranks it. ``None`` if unknowable."""
+    """What the daemon will be after a restart, from the file and whatever outranks it. ``None`` if unknowable.
+
+    Through the same default and app-install guard the daemon's boot applies (``web/bind.py``): an app install
+    with no ``web.bind`` comes back on this Mac, and a LAN bind it holds back is not a change waiting for a restart.
+    """
     settings = NetworkSettings.from_config(document, quiet=True)
     if resolved.source not in _FILE_DECIDES:
-        return describe(resolved.address, resolved.source, settings, tls=_tls_after_restart(document, resolved.address))
-    web = document.get("web")
-    raw = web.get("bind") if isinstance(web, Mapping) else None
-    if raw is None:
-        return describe(DEFAULT_BIND, "default", settings, tls=_tls_after_restart(document, DEFAULT_BIND))
-    try:
-        address = parse_bind(raw, "web.bind")
-        return describe(address, "config", settings, tls=_tls_after_restart(document, address))
-    except BindError:
-        return None                                    # the daemon would refuse to start; nothing to promise
+        after = resolved
+    else:
+        web = document.get("web")
+        raw = web.get("bind") if isinstance(web, Mapping) else None
+        if raw is None:
+            after = ResolvedBind(default_bind(), "default")
+        else:
+            try:
+                after = ResolvedBind(parse_bind(raw, "web.bind"), "config")
+            except BindError:
+                return None                            # the daemon would refuse to start; nothing to promise
+    after = app_install_lan_guard(after, document, quiet=True)
+    return describe(after.address, after.source, settings, tls=_tls_after_restart(document, after.address))
 
 
 def register_network_routes(app: Any, *, auth_on: Callable[[], bool]) -> None:
@@ -138,9 +152,9 @@ def register_network_routes(app: Any, *, auth_on: Callable[[], bool]) -> None:
         resolved = getattr(state, "resolved_bind", None)
         if resolved is None:
             try:
-                resolved = resolve_bind(config)
+                resolved = app_install_lan_guard(resolve_bind(config), config, quiet=True)
             except BindError:
-                resolved = ResolvedBind(DEFAULT_BIND, "default")
+                resolved = ResolvedBind(default_bind(), "default")
         # TLS: the listener set pairing PR 5 starts in home-network mode, published by the launcher.
         return resolved, describe(resolved.address, resolved.source, NetworkSettings.from_config(config, quiet=True),
                                   tls=getattr(state, "lan_tls", None) is not None)

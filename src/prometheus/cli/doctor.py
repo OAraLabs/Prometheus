@@ -49,7 +49,7 @@ from prometheus.infra.doctor import (
     check_router,
     yaml_error_summary,
 )
-from prometheus.web.bind import BindError, is_all_interfaces, resolve_bind
+from prometheus.web.bind import BindError, app_install_lan_guard, is_all_interfaces, resolve_bind
 from prometheus.web.loopback import is_loopback_address
 
 import logging
@@ -377,8 +377,9 @@ def check_web_bind(
 ) -> DiagnosticCheck | None:
     """Which interface will the web API listen on, and is that plain HTTP on all of them?
 
-    Resolves ``PROMETHEUS_WEB_BIND`` > ``web.bind`` > ``0.0.0.0`` exactly as the
-    daemon does (:func:`prometheus.web.bind.resolve_bind`). It cannot see a
+    Resolves ``PROMETHEUS_WEB_BIND`` > ``web.bind`` > the default exactly as the
+    daemon does (:func:`prometheus.web.bind.resolve_bind`, then the Mac app's
+    :func:`~prometheus.web.bind.app_install_lan_guard`). It cannot see a
     ``--bind`` flag given to a daemon that is already running, so the warning
     says what the CONFIGURATION asks for and notes that a flag overrides it.
     Returns ``None`` when the web API is off (the Web row already says so).
@@ -394,6 +395,14 @@ def check_web_bind(
             message=f"{exc} The daemon will refuse to start.",
             fix="Set web.bind to an IPv4/IPv6 address or localhost, or remove it "
                 "(and check PROMETHEUS_WEB_BIND).",
+        )
+    guarded = app_install_lan_guard(resolved, config, env=env, quiet=True)
+    if guarded != resolved:
+        return DiagnosticCheck(
+            name="Web bind", category="connectivity", status="ok",
+            message=f"web API listens on {guarded.address} — this machine only: {resolved.describe()} asks for "
+                    "the network, and on the Mac app plain HTTP stays on this Mac unless network.home_network "
+                    "(TLS on the home network) or network.allow_plaintext_lan (plain HTTP, by choice) is on",
         )
     address = resolved.address
     if is_all_interfaces(address):
