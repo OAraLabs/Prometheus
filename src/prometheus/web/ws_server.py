@@ -408,11 +408,13 @@ class WebSocketBridge:
         that only need pass/fail)."""
         return self._auth_identity(raw) is not None
 
-    async def start(self, host: str = DEFAULT_BIND, port: int = 8010) -> None:
+    async def start(self, host: str = DEFAULT_BIND, port: int = 8010, *, ssl: Any = None) -> None:
         """Start the WebSocket server on *host*.
 
         A loopback *host* also turns on the Host-header check (DNS rebinding);
-        any other host is left unrestricted, as before.
+        any other host is left unrestricted, as before. *ssl* (an
+        ``ssl.SSLContext``) starts the home-network WSS listener instead, beside
+        the plain one (pairing PR 5): same handler, same clients.
         """
         try:
             import websockets
@@ -420,18 +422,25 @@ class WebSocketBridge:
             logger.error("websockets package not installed — pip install websockets")
             return
 
-        # Subscribe to all SignalBus events
-        if self.signal_bus:
+        # Subscribe to all SignalBus events, once: a second listener (TLS) must
+        # not deliver every event twice.
+        if self.signal_bus and not getattr(self, "_subscribed", False):
             self.signal_bus.subscribe("*", self._on_signal)
+            self._subscribed = True
 
-        self._server = await websockets.serve(  # type: ignore[attr-defined]
+        server = await websockets.serve(  # type: ignore[attr-defined]
             self._handler,
             host,
             port,
             max_size=WS_MAX_FRAME_BYTES,
             process_request=_loopback_process_request if is_loopback_address(host) else None,
+            ssl=ssl,
         )
-        logger.info("WebSocket bridge listening on ws://%s:%d", host, port)
+        if ssl is None:
+            self._server = server
+        else:
+            self._tls_server = server
+        logger.info("WebSocket bridge listening on %s://%s:%d", "wss" if ssl else "ws", host, port)
 
     @property
     def bound_port(self) -> int | None:
@@ -441,10 +450,18 @@ class WebSocketBridge:
 
         return bound_port(getattr(self, "_server", None))
 
+    @property
+    def tls_bound_port(self) -> int | None:
+        """The home-network WSS listener's port, or ``None`` when there is none."""
+        from prometheus.web.serving import bound_port
+
+        return bound_port(getattr(self, "_tls_server", None))
+
     async def stop(self) -> None:
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
+        for server in (self._server, getattr(self, "_tls_server", None)):
+            if server:
+                server.close()
+                await server.wait_closed()
 
     async def _handler(self, websocket: Any) -> None:
         """Handle a single WebSocket client connection.
@@ -1056,6 +1073,51 @@ class WebSocketBridge:
             },
         })
         return await self._run_agent(session_id, session, raise_on_error=True)
+
+    async def inject_turn(
+        self, session_id: str, content: str, *,
+        provenance: str = "task_supervisor", is_trusted: bool = False,
+    ) -> str:
+        """Run a NON-USER turn in ``session_id`` and show it live (#704).
+
+        The web half of task re-engagement (tasks/reengage.py): a worker's
+        result reaches the Beacon conversation that spawned it, recorded with
+        its own provenance — untrusted by default, so the model reads it as
+        data, never as the user's instruction — and broadcast like any turn so
+        an open conversation renders it. Telegram's ``inject_turn`` is the same
+        primitive for ``telegram:*`` chats. Returns the reply text.
+        """
+        if not self.session_mgr or not self.loop_context:
+            raise RuntimeError(
+                "bridge not fully wired (session_mgr/loop_context missing) — "
+                "cannot inject a turn"
+            )
+        if hasattr(self.session_mgr, "rehydrate_if_cold"):
+            self.session_mgr.rehydrate_if_cold(session_id)
+        session = self.session_mgr.get_or_create(session_id)
+        turn_index = session.add_user_message(
+            content, provenance=provenance, is_trusted=is_trusted)
+        row_id = session.last_persisted_row_id()
+        ts = time.time()
+        await self.broadcast({
+            "type": "chat_message",
+            "timestamp": ts,
+            "payload": {
+                "session_id": session_id,
+                "role": "user",
+                "content": content,
+                "content_json": json.dumps([{"type": "text", "text": content}]),
+                "message_id": row_id,
+                "ordinal": turn_index,
+                "client_msg_id": None,
+                "created_at": ts,
+                # Not the user's words: a client can render it as such.
+                "provenance": provenance,
+                "is_trusted": is_trusted,
+            },
+        })
+        text, _usage = await self._run_agent(session_id, session, raise_on_error=True)
+        return text
 
     def interrupt_turn(self, session_id: str) -> bool:
         """Stop the running agent turn in ``session_id`` (the chat Stop button).

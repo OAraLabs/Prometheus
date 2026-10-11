@@ -140,7 +140,7 @@ mode prints **one JSON line** and exits with a distinct code, so Beacon reads st
 | Mode | Does | Exit codes |
 |---|---|---|
 | `--register` | registers the LaunchAgent via `SMAppService`; idempotent | 0 ok (`registered` or `already_registered`), 10 `requires_approval`, 11 `already_running` (a Prometheus answers on 127.0.0.1:8005 that is not ours), 12 `port_busy`, 13 `registration_failed`, 14 `unsupported_os` |
-| `--run` | what launchd starts: sets paths, redirects logs to `~/Library/Logs/Prometheus/`, then `exec`s the bundled Python with `-I -B -m prometheus daemon --bind 127.0.0.1` and `PROMETHEUS_INSTALL_KIND=app` (`-I`: nothing from the working directory, `PYTHON*` variables or the user site is imported; `-B`: no bytecode is written into the signed bundle) | the daemon's |
+| `--run` | what launchd starts: sets paths, redirects logs to `~/Library/Logs/Prometheus/`, then `exec`s the bundled Python with `-I -B -m prometheus daemon` and `PROMETHEUS_INSTALL_KIND=app`, under which an unset `web.bind` means `127.0.0.1` (no `--bind` pin, so the owner's network switch can change it) (`-I`: nothing from the working directory, `PYTHON*` variables or the user site is imported; `-B`: no bytecode is written into the signed bundle) | the daemon's |
 | `--unregister` | stops and unregisters the agent; the way to swap the app for an update | 0 / 13 |
 | `--status` | `not_registered`, `registered`, `requires_approval`, `running` | 0 |
 | `--pair` | writes a fresh pairing secret (re-pair after a Beacon reinstall) | 0 / 13 |
@@ -178,7 +178,9 @@ your Mac mini reached over Tailscale does not change. A NEW config, from `oara s
 up remotely through setup mode therefore ends up loopback-only until its owner sets the bind.
 `oara doctor` warns only about an UNSET bind that resolves to every interface. When bound to loopback the server refuses a
 `Host` header that is not `localhost`, `127.0.0.1` or `[::1]` (DNS rebinding). The app's launcher
-passes `--bind 127.0.0.1`. The "let my other devices connect" API is a separate later change.
+used to pass `--bind 127.0.0.1`; it no longer does (a flag outranks the file, which made the network switch a dead
+letter on the app). An app install's unset `web.bind` defaults to `127.0.0.1` instead (`web/bind.py`
+`default_bind`), so it stays on this Mac until the owner turns on the home network.
 
 ### Pairing with no typing
 
@@ -332,6 +334,11 @@ paired *device* from holding the master key; they do not stop *the agent* from r
 separate follow-up (design: keep the master key out of the agent's reach), and the app's release stays
 gated on it and on a restrictive default permission mode. Requires-approval, `/Applications`, ad-hoc
 signing and logout/login are unproven (see below).
+
+*Status, 2026-10-10:* both gates have a change. The master key: the shell read floor on macOS is now a
+Seatbelt profile (`sandbox-exec`) denying `~/.config/*/*env`, `~/.ssh` and `~/.gnupg` to every model-written
+shell (`docs/design/master-key-out-of-agent-shell.md`). The write floor is still Linux-only. The permission
+mode: a new app install is written with `security.permission_mode: cautious` (#711).
 
 ## Order of work
 

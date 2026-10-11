@@ -49,7 +49,7 @@ from prometheus.infra.doctor import (
     check_router,
     yaml_error_summary,
 )
-from prometheus.web.bind import BindError, is_all_interfaces, resolve_bind
+from prometheus.web.bind import BindError, app_install_lan_guard, is_all_interfaces, resolve_bind
 from prometheus.web.loopback import is_loopback_address
 
 import logging
@@ -377,8 +377,9 @@ def check_web_bind(
 ) -> DiagnosticCheck | None:
     """Which interface will the web API listen on, and is that plain HTTP on all of them?
 
-    Resolves ``PROMETHEUS_WEB_BIND`` > ``web.bind`` > ``0.0.0.0`` exactly as the
-    daemon does (:func:`prometheus.web.bind.resolve_bind`). It cannot see a
+    Resolves ``PROMETHEUS_WEB_BIND`` > ``web.bind`` > the default exactly as the
+    daemon does (:func:`prometheus.web.bind.resolve_bind`, then the Mac app's
+    :func:`~prometheus.web.bind.app_install_lan_guard`). It cannot see a
     ``--bind`` flag given to a daemon that is already running, so the warning
     says what the CONFIGURATION asks for and notes that a flag overrides it.
     Returns ``None`` when the web API is off (the Web row already says so).
@@ -394,6 +395,14 @@ def check_web_bind(
             message=f"{exc} The daemon will refuse to start.",
             fix="Set web.bind to an IPv4/IPv6 address or localhost, or remove it "
                 "(and check PROMETHEUS_WEB_BIND).",
+        )
+    guarded = app_install_lan_guard(resolved, config, env=env, quiet=True)
+    if guarded != resolved:
+        return DiagnosticCheck(
+            name="Web bind", category="connectivity", status="ok",
+            message=f"web API listens on {guarded.address} — this machine only: {resolved.describe()} asks for "
+                    "the network, and on the Mac app plain HTTP stays on this Mac unless network.home_network "
+                    "(TLS on the home network) or network.allow_plaintext_lan (plain HTTP, by choice) is on",
         )
     address = resolved.address
     if is_all_interfaces(address):
@@ -1027,13 +1036,13 @@ def check_bash_floors(config: dict[str, Any]) -> list[DiagnosticCheck]:
                 message=f"mode 'off' — {off_message}",
             )
         if state == C.STATE_UNSUPPORTED:
-            # "auto" on a platform with no AppArmor (macOS). INFO, not a
+            # "auto" on a platform with neither AppArmor nor sandbox-exec. INFO, not a
             # warning, and no fix: there is nothing to load, and a row nobody
             # can clear is how a report gets ignored. Said, not alarmed.
             return DiagnosticCheck(
                 name=name, category="platform", status="info",
-                message=f"mode {mode!r} — unsupported on this platform (no "
-                        f"AppArmor). {off_message}",
+                message=f"mode {mode!r} — unsupported on this platform (neither "
+                        f"AppArmor nor sandbox-exec). {off_message}",
             )
         if state == C.STATE_NO_WORKSPACE:
             return DiagnosticCheck(
@@ -1295,6 +1304,71 @@ def check_pairing_telegram(config: dict[str, Any]) -> DiagnosticCheck | None:
     )
 
 
+def check_network_discovery(
+    config: dict[str, Any], *, env: Mapping[str, str] | None = None,
+) -> DiagnosticCheck | None:
+    """Home network mode: can it work, is it safe, and will the daemon announce itself?
+
+    ``None`` (no row) unless the owner asked for it with ``network.home_network``: a machine that never did
+    has nothing to report beyond the Web bind row. Resolves the bind the way the daemon does, so it cannot
+    disagree with the Web bind row, and TLS the way the daemon's next boot will (pairing PR 5): a LAN bind with
+    an instance key it can read, or none yet (the daemon makes it, then the certificate over it), is TLS. Only a
+    key that is there and cannot be read leaves no TLS; plain HTTP on the LAN is then the owner's own say-so.
+    """
+    import importlib.util
+
+    from prometheus.config.instance_key import INSTANCE_KEY_FILENAME
+    from prometheus.config.paths import node_dir_path
+    from prometheus.web.network import HOME, THIS_MAC, NetworkSettings, describe
+    from prometheus.web.tls import lan_tls_plan, tls_ready
+
+    settings = NetworkSettings.from_config(config)             # the one reader of these keys
+    if not settings.home_network:
+        return None
+    try:
+        resolved = resolve_bind(config, env=env)
+    except BindError:
+        return None                                            # the Web bind row already says the daemon will not start
+    plan = lan_tls_plan(config, resolved.address)
+    key = node_dir_path() / INSTANCE_KEY_FILENAME
+    state = describe(resolved.address, resolved.source, settings,
+                     tls=plan is not None and (tls_ready() or not key.exists()))
+    name = "Home network"
+    if state.mode == THIS_MAC:
+        return DiagnosticCheck(
+            name=name, category="connectivity", status="warning",
+            message=f"network.home_network is on, but the daemon listens on {resolved.address} (this machine "
+                    "only), so nothing on the home network can reach it",
+            fix="Choose home network in Beacon (it also widens web.bind), set web.bind: 0.0.0.0 or a LAN "
+                "address, or set network.home_network: false.",
+        )
+    if state.mode != HOME:
+        return DiagnosticCheck(
+            name=name, category="connectivity", status="warning",
+            message=f"network.home_network is on, but the instance key ({key}) cannot be read, so there is no "
+                    "TLS, and network.allow_plaintext_lan is off: nothing is served on the home network (plain "
+                    "HTTP stays on this machine only) and it will not announce itself",
+            fix="The daemon's log says why the key cannot be read. To accept plain HTTP on a network you trust, "
+                "set network.allow_plaintext_lan: true; or set network.home_network: false.",
+        )
+    if plan is not None and state.tls_enabled:
+        notes = [f"home network mode over TLS (REST on port {plan.api_port}, WebSocket on {plan.ws_port}); "
+                 "plain HTTP stays on this machine only"]
+    else:
+        notes = ["home network mode over plain HTTP (no TLS): a device's token and everything it sends cross the "
+                 "Wi-Fi unencrypted"]
+    fix: str | None = None
+    if not settings.mdns:
+        notes.append("discovery.mdns is off, so it will not announce itself")
+    elif importlib.util.find_spec("zeroconf") is None:
+        notes.append("the zeroconf library is not installed, so it will not announce itself")
+        fix = "pip install 'oara-prometheus[discovery]' (the [discovery] extra), then restart the daemon."
+    else:
+        notes.append("it announces itself as _prometheus._tcp on private addresses")
+    status = "ok" if state.tls_enabled and fix is None else "warning"
+    return DiagnosticCheck(name=name, category="connectivity", status=status, message="; ".join(notes), fix=fix)
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -1310,6 +1384,7 @@ def run_extended_checks(
     router = check_router(config)
     bind_row = check_web_bind(config)
     pairing_row = check_pairing_telegram(config)
+    network_row = check_network_discovery(config)
     return [
         config_check,
         *([router] if router is not None else []),
@@ -1319,6 +1394,7 @@ def run_extended_checks(
         check_web_port(config),
         *([bind_row] if bind_row is not None else []),
         *([pairing_row] if pairing_row is not None else []),
+        *([network_row] if network_row is not None else []),
         check_token(config),
         *check_gateways(config),
         check_advertised_tools(config),

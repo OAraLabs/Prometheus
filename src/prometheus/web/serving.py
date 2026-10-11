@@ -79,8 +79,11 @@ def uvicorn_proxy_options(config: Mapping[str, Any] | None) -> dict[str, Any]:
     return {"proxy_headers": True, "forwarded_allow_ips": ",".join(named)}
 
 
-def serve_config(app: Any, host: str, port: int, config: Mapping[str, Any] | None = None) -> Any:
+def serve_config(app: Any, host: str, port: int, config: Mapping[str, Any] | None = None, *,
+                 tls: Any = None) -> Any:
     """The ``uvicorn.Config`` the daemon (and setup mode) serves *app* with, on *host*.
+
+    *tls* (a ``web.tls.LanTlsPlan``) serves it over TLS with the instance certificate: the home-network listener.
 
     A loopback *host* also puts the Host-header check in front of the app (DNS rebinding; web/loopback.py).
     ``log_config=None``: uvicorn must NOT install its own handlers. Its default config gives
@@ -89,10 +92,26 @@ def serve_config(app: Any, host: str, port: int, config: Mapping[str, Any] | Non
     """
     import uvicorn
 
-    return uvicorn.Config(
+    tls_options: dict[str, Any] = {}
+    if tls is not None:
+        from prometheus.web.tls import AEAD_CIPHERS
+
+        tls_options = {"ssl_certfile": str(tls.certfile), "ssl_keyfile": str(tls.keyfile), "ssl_ciphers": AEAD_CIPHERS}
+    server_config = uvicorn.Config(
         guard_if_loopback(app, host), host=host, port=port, log_level="info", log_config=None,
-        **uvicorn_proxy_options(config),
+        **uvicorn_proxy_options(config), **tls_options,
     )
+    if tls is not None:
+        # The same policy as the WSS listener (web/tls.server_ssl_context): uvicorn takes the cipher string but has
+        # no setting for the protocol floor, so its context is built here (load() is what serve() would call) and
+        # pinned before it ever accepts a connection.
+        from prometheus.web.tls import MINIMUM_TLS
+
+        server_config.load()
+        if server_config.ssl is None:          # a certificate was configured, so uvicorn must have built one
+            raise RuntimeError("uvicorn built no TLS context for the home-network listener")
+        server_config.ssl.minimum_version = MINIMUM_TLS
+    return server_config
 
 
 def bound_port(server: Any) -> int | None:

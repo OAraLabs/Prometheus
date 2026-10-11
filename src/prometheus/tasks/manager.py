@@ -22,8 +22,11 @@ On top of the original in-memory manager this adds, all backward-compatibly
 from __future__ import annotations
 
 import asyncio
+import hmac
+import json
 import logging
 import os
+import secrets
 import shlex
 import signal
 import time
@@ -185,6 +188,18 @@ class BackgroundTaskManager:
         self.poll_initial_interval = poll_initial_interval
         self.poll_max_interval = poll_max_interval
         self.default_timeout_seconds = default_timeout_seconds
+        #: The config file the daemon booted from, passed to every worker it
+        #: starts so the child resolves its route against the SAME config
+        #: (tasks/worker_route.py). None outside the daemon: the child searches.
+        self.child_config_path: str | None = None
+        #: Where a worker asks for approval (``POST /api/workers/approvals``),
+        #: set by the web launcher. None: a worker has no one to ask, and its
+        #: requests are denied (tasks/worker_approval docs in cli/worker_approval.py).
+        self.worker_approval_url: str | None = None
+        #: Per-worker approval tokens. IN MEMORY ONLY, like ``_task_env``: the
+        #: child gets its token through the environment overlay, and nothing
+        #: durable has a field for it.
+        self._worker_tokens: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Creation
@@ -205,6 +220,7 @@ class BackgroundTaskManager:
         env_overlay: Mapping[str, str] | None = None,
         workspace_roots: Sequence[str | Path] | None = None,
         floored: bool = True,
+        task_id: str | None = None,
     ) -> TaskRecord:
         """Start a background shell command and return its TaskRecord.
 
@@ -237,6 +253,7 @@ class BackgroundTaskManager:
             on_complete=on_complete,
             reengage_prompt=reengage_prompt,
             timeout_seconds=timeout_seconds,
+            task_id=task_id,
         )
         if blocked is not None:
             record.status = "blocked"
@@ -281,6 +298,9 @@ class BackgroundTaskManager:
         cwd: str | Path,
         task_type: TaskType = "local_agent",
         model: str | None = None,
+        route: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+        worker: bool = False,
         api_key: str | None = None,
         command: str | None = None,
         session_id: str | None = None,
@@ -290,6 +310,17 @@ class BackgroundTaskManager:
         timeout_seconds: int | None = None,
     ) -> TaskRecord:
         """Start a Prometheus agent as a subprocess task.
+
+        *route* is a picker key (``qwen``, ``4090``, ``local``) the child
+        resolves as a full route against :attr:`child_config_path` — the spawn
+        tools decide it (tasks/worker_route.py) and pass nothing else, so no
+        endpoint or credential is ever on the command line. *model* is the
+        older bare ``--model`` (a name for the configured provider), kept for
+        callers that use it. *metadata* is added to the task record.
+
+        *worker* starts it as a spawned worker (``--worker``): the prompt is
+        its whole brief, one turn, stdin is closed after it, and the process
+        exits with a result line the record keeps (``worker_result``).
 
         THE CREDENTIAL NEVER ENTERS ``command``.
 
@@ -325,12 +356,13 @@ class BackgroundTaskManager:
         reads it — including this very process, whose ``os.environ`` is the
         fallback source.
         """
+        command_was_built = command is None
+        worker_task_id: str | None = None
         if command is None:
-            effective_api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-            if not effective_api_key:
-                raise ValueError(
-                    "Local agent tasks require ANTHROPIC_API_KEY or an explicit command override"
-                )
+            # No credential is required to START a worker: it runs on a route
+            # (often a local box) and reads its own credential from the
+            # environment it inherits, as the daemon does. A worker used to be
+            # refused without ANTHROPIC_API_KEY whatever it would run on.
             # The daemon's OWN interpreter, not whatever `python` is on PATH.
             # A Mac has no `python` at all ("command not found"), and where
             # one exists it is rarely the interpreter Prometheus is installed
@@ -338,10 +370,30 @@ class BackgroundTaskManager:
             # before it started: "No module named ..." (WP-X.24). And with -P -s, so a
             # module in the task's directory never shadows a real one (utils/child_python.py).
             cmd = prometheus_argv()
+            if self.child_config_path:
+                cmd.extend(["--config", self.child_config_path])
+            if route:
+                cmd.extend(["--route", route])
+            if worker:
+                cmd.append("--worker")
             if model:
                 cmd.extend(["--model", model])
             command = " ".join(shlex.quote(part) for part in cmd)
-            env_overlay = {"ANTHROPIC_API_KEY": effective_api_key}
+            # A key the caller passed still travels only in the environment.
+            env_overlay = {"ANTHROPIC_API_KEY": api_key} if api_key else None
+            if worker and self.worker_approval_url:
+                # The worker asks its parent conversation for approval with a
+                # token minted here and held in memory only (PR-6, #704). It
+                # goes to the worker on STDIN, never in its environment, which
+                # /proc/<pid>/environ would show to the model's shell
+                # (tasks/worker_auth.py). The id and URL are not secrets.
+                worker_task_id = _task_id(task_type)
+                self._mint_worker_token(worker_task_id)
+                env_overlay = {
+                    **(env_overlay or {}),
+                    "PROMETHEUS_WORKER_TASK_ID": worker_task_id,
+                    "PROMETHEUS_WORKER_APPROVAL_URL": self.worker_approval_url,
+                }
             # The daemon built this command; nothing in it is the model's.
             # The sub-agent's own bash tool carries the floor.
             floored = False
@@ -364,12 +416,21 @@ class BackgroundTaskManager:
             timeout_seconds=timeout_seconds,
             env_overlay=env_overlay,
             floored=floored,
+            task_id=worker_task_id,
         )
         # A refusal ("blocked") or a launch that failed outright — either way no
         # process is attached, so there is no stdin to write the prompt to.
         if record.status in ("blocked", "failed"):
+            if worker_task_id:
+                self._worker_tokens.pop(worker_task_id, None)
             return record
         updated = replace(record, prompt=prompt)
+        if metadata:
+            updated.metadata.update({str(k): str(v) for k, v in metadata.items()})
+        if worker and command_was_built:
+            # Set BEFORE the prompt is written: write_to_task closes a worker's
+            # stdin after its one brief.
+            updated.metadata["worker"] = "1"
         self._tasks[record.id] = updated
         self._persist(updated)
         await self.write_to_task(record.id, prompt)
@@ -593,20 +654,68 @@ class BackgroundTaskManager:
         # _watch_process sees the killed status and emits + persists.
         return task
 
+    def _mint_worker_token(self, task_id: str) -> str:
+        """A fresh approval token for *task_id*, replacing any earlier one."""
+        token = secrets.token_urlsafe(32)
+        self._worker_tokens[task_id] = token
+        return token
+
+    def _worker_stdin_text(self, task_id: str, data: str) -> str:
+        """What a worker's stdin gets: its token line (if it has a token), then *data*."""
+        from prometheus.tasks.worker_auth import token_line
+
+        token = self._worker_tokens.get(task_id)
+        body = data.rstrip("\n") + "\n"
+        return (token_line(token) + body) if token else body
+
+    def verify_worker_token(self, task_id: str, token: str) -> TaskRecord | None:
+        """The RUNNING worker *task_id* if *token* is its approval token, else None."""
+        expected = self._worker_tokens.get(task_id)
+        record = self._tasks.get(task_id)
+        if not expected or not token or record is None or record.status != "running":
+            return None
+        if not hmac.compare_digest(expected.encode(), token.encode()):
+            return None
+        return record
+
     async def write_to_task(self, task_id: str, data: str) -> None:
-        """Write a line to the task's stdin."""
+        """Write a line to the task's stdin.
+
+        A WORKER takes exactly one brief: its stdin is closed after it, and a
+        write while it runs is refused (its turn has its brief already). Once
+        it has exited, a write starts it again with *data* as the new brief,
+        as any agent task restarts.
+        """
         task = self._require_task(task_id)
+        is_worker = task.metadata.get("worker") == "1"
         async with self._input_locks[task_id]:
+            running = self._processes.get(task_id)
+            if (is_worker and running is not None and running.returncode is None
+                    and (running.stdin is None or running.stdin.is_closing())):
+                raise ValueError(
+                    f"Task {task_id} is a worker: it takes one brief, and accepts no "
+                    f"more input while it runs. Wait for its result, or stop it and "
+                    f"spawn another.")
             process = await self._ensure_writable_process(task)
-            process.stdin.write((data.rstrip("\n") + "\n").encode("utf-8"))
+
+            def _text() -> bytes:
+                # A worker's token line rides ahead of its brief; read per
+                # write, because a restart mints a fresh token.
+                if is_worker:
+                    return self._worker_stdin_text(task_id, data).encode("utf-8")
+                return (data.rstrip("\n") + "\n").encode("utf-8")
+
+            process.stdin.write(_text())
             try:
                 await process.stdin.drain()
             except (BrokenPipeError, ConnectionResetError):
                 if task.type not in {"local_agent", "remote_agent", "in_process_teammate"}:
                     raise ValueError(f"Task {task_id} does not accept input") from None
                 process = await self._restart_agent_task(task)
-                process.stdin.write((data.rstrip("\n") + "\n").encode("utf-8"))
+                process.stdin.write(_text())
                 await process.stdin.drain()
+            if is_worker:
+                process.stdin.close()
 
     def read_task_output(self, task_id: str, *, max_bytes: int = 12000) -> str:
         """Return the tail of a task's output log."""
@@ -709,8 +818,9 @@ class BackgroundTaskManager:
         reengage_prompt: str | None = None,
         timeout_seconds: int | None = None,
         spec: dict[str, Any] | None = None,
+        task_id: str | None = None,
     ) -> TaskRecord:
-        task_id = _task_id(task_type)
+        task_id = task_id or _task_id(task_type)
         effective_timeout = (
             timeout_seconds if timeout_seconds is not None else self.default_timeout_seconds
         )
@@ -820,6 +930,78 @@ class BackgroundTaskManager:
 
         self._leak_state.drained = True
 
+    async def _retry_worker_on_parent_route(self, task: TaskRecord) -> bool:
+        """Re-run a worker ONCE on its parent's route when it ran out of context
+        on a smaller route the worker-model setting chose (Will's ruling D3).
+
+        A worker already on its parent's route is not retried: the same prompt
+        cannot fit the same window, and the code says so in its own words
+        ("retrying unchanged will fail the same way"). That is recorded, so the
+        report can say why. Returns True when the retry is running.
+        """
+        if task.status != "failed" or task.error not in _RETRY_ON_PARENT_REASONS:
+            return False
+        if task.metadata.get("worker_retry"):
+            return False  # once
+        parent = task.metadata.get("parent_route")
+        current = task.metadata.get("worker_route")
+        if not parent or not current or task.prompt is None or not task.command:
+            return False
+        if parent == current:
+            task.metadata["worker_retry_skipped"] = (
+                "it already ran on this conversation's route, and the same prompt "
+                "cannot fit the same window")
+            return False
+        command = _swap_route(task.command, parent)
+        if command is None:
+            return False
+        first = _json_or_none(task.metadata.get("worker_result"))
+        task.metadata["worker_retry"] = json.dumps({
+            "from_route": current, "to_route": parent,
+            "first_error": task.error, "first_result": first,
+        })
+        task.metadata["worker_route"] = parent
+        task.metadata.pop("worker_result", None)
+        task.command = command
+        task.status = "running"
+        task.error = None
+        task.return_code = None
+        task.ended_at = None
+        task.started_at = time.time()
+        self._emitted.discard(task.id)
+        self._persist(task)
+        log.warning("worker %s ran out of context on %s; retrying once on its parent's "
+                    "route %s", task.id, current, parent)
+        if self.worker_approval_url:
+            self._mint_worker_token(task.id)  # a new process, a new token
+        try:
+            process = await self._start_process(task.id)
+            assert process.stdin is not None
+            process.stdin.write(self._worker_stdin_text(task.id, task.prompt).encode("utf-8"))
+            await process.stdin.drain()
+            process.stdin.close()
+        except Exception as exc:  # noqa: BLE001 — the retry failed to start; report the first failure
+            log.warning("worker %s retry could not start: %s", task.id, exc)
+            task.status = "failed"
+            task.error = f"retry on {parent} could not start"
+            task.ended_at = time.time()
+            return False
+        return True
+
+    def _record_worker_result(self, task: TaskRecord, *, timed_out: bool) -> None:
+        """Copy a worker's result line onto its record; name its failure."""
+        from prometheus.tasks.worker_result import parse_result
+
+        result = parse_result(self.read_task_output(task.id, max_bytes=16000))
+        if result is not None:
+            task.metadata["worker_result"] = json.dumps(result)
+        if timed_out or task.status == "killed" or task.status == "completed":
+            return
+        if result is not None and result.get("status") == "failed":
+            task.error = str(result.get("reason") or "failed")
+        elif task.error is None:
+            task.error = f"worker exited {task.return_code} without a result"
+
     async def _emit_completion(self, task: TaskRecord) -> None:
         """Emit ``task_completed`` / ``task_failed`` once per terminal task."""
         if self.signal_bus is None or task.status not in TERMINAL_STATUSES:
@@ -852,6 +1034,10 @@ class BackgroundTaskManager:
                         "on_complete": task.on_complete,
                         "reengage_prompt": task.reengage_prompt,
                         "output_tail": self.read_task_output(task.id, max_bytes=4000),
+                        # A worker's own result line, parsed (worker_result.py).
+                        "worker_result": _json_or_none(task.metadata.get("worker_result")),
+                        # Its route, and the retry on its parent's route if any.
+                        "worker": _worker_view(task),
                     },
                     source="task_supervisor",
                 )
@@ -936,9 +1122,15 @@ class BackgroundTaskManager:
             task.error = "timeout"
         elif task.status != "killed":
             task.status = "completed" if return_code == 0 else "failed"
+        if task.metadata.get("worker") == "1":
+            self._record_worker_result(task, timed_out=timed_out)
         task.ended_at = time.time()
         self._processes.pop(task_id, None)
         self._waiters.pop(task_id, None)
+        # After the pops: a retry registers its own process and waiter.
+        if task.metadata.get("worker") == "1" and await self._retry_worker_on_parent_route(task):
+            return
+        self._worker_tokens.pop(task_id, None)
         self._persist(task)
         await self._emit_completion(task)
 
@@ -1036,6 +1228,10 @@ class BackgroundTaskManager:
             await waiter
         restart_count = int(task.metadata.get("restart_count", "0")) + 1
         task.metadata["restart_count"] = str(restart_count)
+        if task.metadata.get("worker") == "1" and self.worker_approval_url:
+            # A relaunched worker is a new process: a fresh token, and the old
+            # one stops working (#720 review).
+            self._mint_worker_token(task.id)
         task.status = "running"
         task.started_at = time.time()
         task.ended_at = None
@@ -1059,6 +1255,46 @@ def get_task_manager() -> BackgroundTaskManager:
         _DEFAULT_MANAGER = BackgroundTaskManager()
         _DEFAULT_MANAGER_KEY = current_key
     return _DEFAULT_MANAGER
+
+
+#: A worker that failed for one of these on a route the worker-model setting
+#: chose is retried once on its parent's route (Will's ruling D3).
+_RETRY_ON_PARENT_REASONS = frozenset({"context_overflow", "context_preflight_refusal"})
+
+
+def _swap_route(command: str, key: str) -> str | None:
+    """*command* with its ``--route`` value replaced by *key*, or None."""
+    parts = shlex.split(command)
+    if "--route" not in parts:
+        return None
+    i = parts.index("--route")
+    if i + 1 >= len(parts):
+        return None
+    parts[i + 1] = key
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+def _worker_view(task: TaskRecord) -> dict[str, Any] | None:
+    """The public facts about a worker's route for its completion payload."""
+    if task.metadata.get("worker") != "1":
+        return None
+    md = task.metadata
+    return {
+        "route": md.get("worker_route"),
+        "parent_route": md.get("parent_route"),
+        "source": md.get("worker_route_source"),
+        "retry": _json_or_none(md.get("worker_retry")),
+        "retry_skipped": md.get("worker_retry_skipped"),
+    }
+
+
+def _json_or_none(text: str | None) -> Any:
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
 
 
 def _task_id(task_type: TaskType) -> str:

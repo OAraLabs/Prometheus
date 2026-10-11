@@ -79,6 +79,7 @@ class BashTool(BaseTool):
         confinement_profile: str = _CONFINE.PROFILE,
         write_confinement: str = _CONFINE.WRITE_MODE_AUTO,
         write_allow: Sequence[str | Path] = (),
+        allow_ssh: bool = False,
     ) -> None:
         # Multi-root, mirroring SecurityGate: security.workspace_root may be
         # a list. A single root did not survive contact on a real box.
@@ -95,6 +96,8 @@ class BashTool(BaseTool):
         self._max_procs = max_procs
         self._confinement = _CONFINE.normalise_mode(confinement)
         self._confinement_profile = confinement_profile
+        # security.bash_allow_ssh: the read floor lets ~/.ssh through (Seatbelt); the master key stays out.
+        self._allow_ssh = _CONFINE.normalise_allow_ssh(allow_ssh)
         # The write floor's boundary IS the workspace lock, one level down:
         # the lock decides where a command may start, the floor decides where
         # its writes may land. With no workspace root there is no boundary to
@@ -164,6 +167,7 @@ class BashTool(BaseTool):
             writable=writable,
             cwd=cwd,
             profile=self._confinement_profile,
+            allow_ssh=self._allow_ssh,
         )
         if floored.refusal is not None:
             return ToolResult(

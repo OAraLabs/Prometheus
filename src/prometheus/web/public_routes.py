@@ -29,6 +29,9 @@ PUBLIC_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/api/pair/requests"),
     ("GET", "/api/pair/requests/{request_id}"),
     ("DELETE", "/api/pair/requests/{request_id}"),
+    # A spawned worker asks its parent conversation for approval with its own per-worker token (held in memory
+    # by the task manager); loopback peer and Host only, and it approves nothing itself (web/server.py).
+    ("POST", "/api/workers/approvals"),
 })
 
 

@@ -2654,21 +2654,29 @@ async def approve_detail(
         pending = _pending_actions(queue)
         if not pending:
             return ApproveOutcome("No pending approval requests.")
-        from prometheus.permissions.approval_queue import is_desktop_request
+        from prometheus.permissions.approval_queue import (
+            is_desktop_request,
+            is_worker_request,
+        )
 
         # A DESKTOP TASK'S PROMPT IS NEVER PART OF "ALL" (computer-use v1.1,
         # W2). Draining a backlog must not approve "Set the field to <text>"
-        # or "Click 'Send'" sight unseen; each is answered on its own.
-        skipped = [a for a in pending if is_desktop_request(a)]
+        # or "Click 'Send'" sight unseen; each is answered on its own. Nor is a
+        # spawned WORKER's request: it asks for the worker, whose arguments
+        # the operator has not seen (#720).
+        def _alone(a: Any) -> bool:
+            return is_desktop_request(a) or is_worker_request(a)
+
+        skipped = [a for a in pending if _alone(a)]
         approved: list[str] = []
         for act in pending:
-            if is_desktop_request(act):
+            if _alone(act):
                 continue
             rid = getattr(act, "request_id", "")
             if rid and await queue.approve(rid, by=by):
                 approved.append(rid)
-        note = (f" — skipped {len(skipped)} desktop request(s); answer each "
-                f"with {prefix}approve <id>" if skipped else "")
+        note = (f" — skipped {len(skipped)} desktop or worker request(s); answer "
+                f"each with {prefix}approve <id>" if skipped else "")
         if not approved:
             if skipped:
                 return ApproveOutcome(
@@ -2757,6 +2765,13 @@ async def approve_detail(
     # pending dict the moment the event fires, and the grant needs the
     # structured target (path/command) it carries.
     action = queue.pending.get(request_id)
+    # An approve-once request (a worker's, a desktop prompt) refuses a lasting
+    # scope BY NAME. It used to approve once and remember nothing because it
+    # carried no grant target: the right outcome, by accident (#720).
+    if action is not None and getattr(action, "once_only", False) and scope != "once":
+        return ApproveOutcome(
+            f"Not approved: {request_id} can only be approved once — "
+            f"{prefix}approve {request_id}")
     from prometheus.permissions.approval_queue import (
         derive_grant)
 
@@ -4356,22 +4371,34 @@ def cmd_gate(gate: Any, arg: str = "") -> str:
             "(security.bash_confinement).\n"
             "/gate on to restore. A daemon restart also restores it."
         )
-    if arg in ("on", "default"):
+    if arg == "on":
+        # Back to the CONFIGURED mode (security.permission_mode), not to "default": a cautious install that
+        # went /gate off and /gate on must come back cautious.
+        configured = getattr(gate, "configured_mode", None)
+        restored = gate.set_mode(configured() if callable(configured) else "default")
+        name = getattr(restored, "value", restored)
+        return f"Permission gate ON ({name}). Approval prompts restored."
+    if arg == "default":
         gate.set_mode("default")
-        return "Permission gate ON (default). Approval prompts restored."
+        return "Permission gate set to DEFAULT. Approval prompts restored."
     if arg in ("strict",):
         gate.set_mode("strict")
         return "Permission gate set to STRICT (writes + network need approval)."
+    if arg in ("cautious",):
+        gate.set_mode("cautious")
+        return "Permission gate set to CAUTIOUS (every shell command and file write needs approval)."
     if arg and arg != "status":
-        return f"Unknown gate mode: {arg}\nUsage: /gate [off | on | strict | status]"
+        return (f"Unknown gate mode: {arg}\n"
+                "Usage: /gate [off | on | default | strict | cautious | status]")
 
     state = current.value if current is not None else "unknown"
     note = "" if state != "autonomous" else "  <- prompts suppressed"
     return (
         f"Permission gate: {state}{note}\n"
         "/gate off — autonomous (no prompts)\n"
-        "/gate on  — default\n"
-        "/gate strict — extra-cautious"
+        "/gate on  — the configured mode\n"
+        "/gate strict — writes need approval\n"
+        "/gate cautious — every shell command and write needs approval"
     )
 
 
