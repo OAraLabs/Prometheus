@@ -89,6 +89,39 @@ def _yaml_block(lines: list[str], lo: int, hi: int, key: str
     return None
 
 
+def _insert_in_block(
+    lines: list[str], lo: int, hi: int, parent_indent: int, rest: "list[str]", literal: str
+) -> str:
+    """Add the key path *rest* inside the section whose body is ``lines[lo:hi]``.
+
+    It goes after the section's last real line, not at ``hi``: the blank line and
+    comment that open the NEXT section sit between the two and belong to it. It
+    takes the indentation the section's own keys already use (two spaces deeper
+    than the section when it has none yet).
+    """
+    child = parent_indent + 2
+    last = lo
+    first_seen = False
+    for j in range(lo, hi):
+        stripped = lines[j].lstrip()
+        if not stripped.strip() or stripped.startswith("#"):
+            continue
+        if not first_seen:
+            child = len(lines[j]) - len(stripped)
+            first_seen = True
+        last = j + 1
+    block: list[str] = []
+    pad = " " * child
+    for key in rest[:-1]:
+        block.append(f"{pad}{key}:\n")
+        pad += "  "
+    block.append(f"{pad}{rest[-1]}: {literal}\n")
+    head = lines[:last]
+    if head and not head[-1].endswith("\n"):
+        head[-1] += "\n"
+    return "".join(head + block + lines[last:])
+
+
 def _set_yaml_scalar_preserving_comments(
     text: str, path_keys: "list[str]", literal: str
 ) -> str:
@@ -119,12 +152,20 @@ def _set_yaml_scalar_preserving_comments(
     If the key path does not exist, the missing levels are appended rather than
     threaded in — appending cannot disturb what is already there, and a config
     that never mentioned the key has no comments attached to it to preserve.
+    "Appended" means at the end of the SECTION that does exist: a path whose
+    first levels are present goes inside the last of them (see
+    :func:`_insert_in_block`). It used to go at the end of the FILE, indented,
+    which attaches it to whichever section happens to be last. The edit is only
+    as good as the section it names, so a caller that writes must still re-parse
+    the result before it trusts it (both do).
     """
     lines = text.splitlines(keepends=True)
     lo, hi, indent = 0, len(lines), -1
 
     for depth, key in enumerate(path_keys):
         found = _yaml_block(lines, lo, hi, key)
+        if found is None and depth:
+            return _insert_in_block(lines, lo, hi, indent, path_keys[depth:], literal)
         if found is None:
             # Append the remaining path as a fresh block at the end of file.
             tail = "" if not lines or lines[-1].endswith("\n") else "\n"
@@ -898,13 +939,22 @@ def create_app(
     # checking: no browsers, a per-peer limit, no CORS, no disk writes. Contract: docs/PAIRING-APPROVAL-API.md.
     _hello_limiter = hello_mod.new_limiter()
 
+    def _hello_payload(tls: bool = False) -> dict[str, Any]:
+        """*tls*: whether the port being described speaks TLS (the asked port for the route, the advertised
+        port for mDNS)."""
+        return hello_mod.build_hello(
+            config, auth_on=bool(_api_token),
+            approval=app.state.pairing.settings.requests_enabled, tls=tls)
+
+    # ONE builder for the route and for the mDNS TXT record (web/discovery.py reads it from here), so what the
+    # daemon announces on the network and what it answers over HTTP cannot drift.
+    app.state.hello_payload = _hello_payload
+
     @app.get("/api/hello")
     async def hello(request: Request):
-        return hello_mod.hello_response(
-            request, _hello_limiter,
-            lambda: hello_mod.build_hello(
-                config, auth_on=bool(_api_token),
-                approval=app.state.pairing.settings.requests_enabled))
+        # Per listener: the port this request came in on speaks TLS or it does not.
+        tls = request.url.scheme == "https"
+        return hello_mod.hello_response(request, _hello_limiter, lambda: _hello_payload(tls))
 
     # ── Root ────────────────────────────────────────────────────────
 
@@ -5561,6 +5611,45 @@ def create_app(
             "catalog_note": _CATALOG_NOTE,
         }
 
+    # ── Worker model (Beacon Settings → Worker model) ────────────────
+    # The one operator choice for spawned workers (tasks/worker_settings.py).
+    # null = Same as chat: a worker runs on its conversation's route. A key is
+    # a picker key from the catalog above, validated here and stored by the
+    # setting itself (never in prometheus.yaml); its credential is checked at
+    # spawn, where a missing one is refused with that reason.
+
+    def _worker_model_view() -> dict:
+        from prometheus.tasks.worker_settings import get_worker_model_setting
+
+        setting = get_worker_model_setting()
+        key = setting.current()
+        return {
+            "model": key,
+            "same_as_chat": key is None,
+            "source": setting.source,
+            "choices": [
+                {"key": row.get("key"), "label": row.get("label"),
+                 "provider": row.get("provider"), "model": row.get("model")}
+                for row in _model_catalog()
+            ],
+        }
+
+    @app.get("/api/workers/model")
+    async def get_worker_model():
+        return _worker_model_view()
+
+    @app.put("/api/workers/model")
+    async def set_worker_model(body: dict):
+        from prometheus.tasks.worker_settings import get_worker_model_setting
+
+        raw = body.get("model")
+        key = str(raw).strip() if raw else None
+        try:
+            get_worker_model_setting().set(key)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        return _worker_model_view()
+
     @app.get("/api/sessions/{session_id}/model")
     async def get_session_model(session_id: str):
         router = getattr(app.state, "model_router", None)
@@ -6278,6 +6367,13 @@ def create_app(
     register_pairing_routes(
         app, config=config, devices=_devices_or_create, auth_on=lambda: bool(_api_token))
 
+    # ── Network mode and discovery (GET/PUT /api/network; docs/PAIRING-APPROVAL-API.md 2.2) ────
+    # Read by anyone with a token, changed only by an operator. The launcher sets resolved_bind, config_path
+    # and advertiser on app.state; the route says so where one is absent instead of guessing.
+    from prometheus.web.network_routes import register_network_routes
+
+    register_network_routes(app, auth_on=lambda: bool(_api_token))
+
     # ── Static files (must be last — catch-all) ─────────────────────
 
     if static_dir:
@@ -6443,7 +6539,7 @@ def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005,
-                    config: dict[str, Any] | None = None) -> None:
+                    config: dict[str, Any] | None = None, *, tls: Any = None) -> None:
     """Start the FastAPI server using uvicorn, listening on *host*.
 
     *host* is whatever the daemon resolved from ``--bind`` /
@@ -6474,6 +6570,11 @@ async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005,
 
     from prometheus.web.serving import serve_config
 
-    server = uvicorn.Server(serve_config(app, host, port, config))
-    app.state.http_server = server
+    server = uvicorn.Server(serve_config(app, host, port, config, tls=tls))
+    # The home-network TLS listener is a second server over the same app (pairing PR 5); it never replaces
+    # the plain one a caller stops or asks for its port.
+    if tls is None:
+        app.state.http_server = server
+    else:
+        app.state.https_server = server
     await server.serve()

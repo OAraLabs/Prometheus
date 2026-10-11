@@ -1,0 +1,56 @@
+# Prometheus and Ollama on one Linux machine (amd64 or arm64). The walkthrough is docs/guide/docker.md.
+#
+#   docker compose -f compose.yaml up -d ollama
+#   docker compose -f compose.yaml exec ollama ollama pull qwen3:8b
+#   docker compose -f compose.yaml run --rm prometheus oara setup --noninteractive --probe-url http://ollama:11434
+#   docker compose -f compose.yaml up -d
+#   docker compose -f compose.yaml exec prometheus oara token show
+#
+# Pin a release with PROMETHEUS_VERSION=X.Y.Z in the environment or in a .env file next to this one.
+
+name: prometheus
+
+services:
+  ollama:
+    image: ollama/ollama:0.40.2
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+    # No published port: only Prometheus talks to Ollama, over this project's own network, at
+    # http://ollama:11434. For GPU acceleration, follow Ollama's Docker instructions for your GPU and
+    # add the device lines they give to this service.
+
+  prometheus:
+    image: ghcr.io/oaralabs/prometheus:${PROMETHEUS_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    ports:
+      # This machine only. To pair Beacon from another device, publish on an address that device can
+      # reach instead ("8005:8005" and "8010:8010" for every interface). The API token is then the only
+      # thing between your network and an agent that runs shell commands; read the guide first.
+      - "127.0.0.1:8005:8005"
+      - "127.0.0.1:8010:8010"
+    volumes:
+      # Config, identity, memory, logs, the workspace, and ~/.config/prometheus/env (the API token).
+      - prometheus-home:/home/prometheus
+      # Conversations, sessions, background tasks, paired devices.
+      - prometheus-data:/home/prometheus/.prometheus/data
+    # The API token. By default the daemon mints one on first start, keeps it on the home volume, and
+    # `oara token show` prints it. To bring your own as a secret instead, uncomment these two blocks and
+    # the `secrets:` block at the end:
+    # environment:
+    #   PROMETHEUS_API_TOKEN_FILE: /run/secrets/prometheus_api_token
+    # secrets:
+    #   - prometheus_api_token
+
+volumes:
+  ollama:
+  prometheus-home:
+  prometheus-data:
+
+# secrets:
+#   prometheus_api_token:
+#     # The container runs as uid 10001, so the file must be readable by it (chmod 644) and should sit
+#     # in a directory only you can open (chmod 700).
+#     file: ./secrets/prometheus_api_token

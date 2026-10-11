@@ -614,6 +614,18 @@ def loop_ceiling_divergence(agent_loop: Any, loop_context: Any) -> list[tuple]:
     return out
 
 
+def _loaded_config_path(explicit: str | None) -> str | None:
+    """The config file ``load_config`` read, as a path, or ``None`` when it read none.
+
+    ``find_config_file`` IS the search ``load_config`` uses (``config_search_paths``), so the two cannot
+    name different files.
+    """
+    from prometheus.web.setup_server import find_config_file
+
+    found = find_config_file(explicit)
+    return str(found) if found is not None else None
+
+
 async def run_daemon(args: argparse.Namespace) -> bool:
     """Main async entry point — start all subsystems."""
     config = load_config(args.config)
@@ -721,6 +733,21 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # Same-Mac pairing (the app install only): pair.fp beside pair.secret says what hello says, so Beacon can
     # check it is talking to this daemon before it sends the secret. "" removes an earlier one.
     local_pairing.publish_fingerprint(instance_fp)
+
+    # ── Instance certificate (pairing PR 5) ──────────────────────────────
+    # Self-signed over the instance key, so the TLS handshake's SPKI is the key hello fingerprints
+    # (docs/design/lan-tls-pr5.md). Made at boot, re-issued over the same key near expiry, served
+    # only in home-network mode (web/tls.py). Without it nothing is served on the home network.
+    from prometheus.config.instance_cert import ensure_instance_certificate
+    instance_cert_ok = False
+    if instance_fp:
+        try:
+            ensure_instance_certificate()
+            instance_cert_ok = True
+        except Exception:
+            logger.warning(
+                "Instance certificate unavailable: the home network gets no TLS listener, and so "
+                "nothing is served on it", exc_info=True)
 
     # ── Boot-SHA staleness signal ───────────────────────────────────────
     # The repo HEAD at process start is the identity of the code THIS process
@@ -1869,6 +1896,20 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     task_manager.poll_max_interval = float(
         tasks_config.get("poll_max_interval_seconds", task_manager.poll_max_interval)
     )
+    # Workers resolve their route against THIS config (tasks/worker_route.py),
+    # and the worker-model setting is seeded from it (workers.model).
+    try:
+        from prometheus.config.defaults import resolve_config_path
+        from prometheus.tasks.worker_settings import (
+            WorkerModelSetting,
+            set_worker_model_setting,
+        )
+
+        task_manager.child_config_path = str(resolve_config_path(args.config))
+        set_worker_model_setting(WorkerModelSetting(config=config))
+    except Exception:
+        logger.warning("worker route wiring failed — workers resolve the config "
+                       "they find", exc_info=True)
     heartbeat = Heartbeat(
         gateway=telegram,
         task_manager=task_manager,
@@ -2859,6 +2900,22 @@ async def run_daemon(args: argparse.Namespace) -> bool:
 
             api_port = web_config.get("api_port", 8005)
             ws_port = web_config.get("ws_port", 8010)
+            # Home network (pairing PR 5): TLS on the LAN, plain HTTP on this machine only. Asked for
+            # without a certificate, NOTHING goes on the LAN: plain HTTP is kept on loopback, never
+            # put on the home network in TLS's place.
+            from prometheus.web.tls import LOOPBACK, decide_lan
+            lan = decide_lan(config, web_bind.address, cert_ok=instance_cert_ok)
+            lan_tls = lan.plan
+            loopback_only: dict[str, str] = {}
+            if lan.loopback_only:
+                logger.error(
+                    "network.home_network is on but there is no instance certificate, so nothing is "
+                    "served on the home network: plain HTTP stays on this machine only (%s)", LOOPBACK)
+                loopback_only = {"api_host": LOOPBACK, "ws_host": LOOPBACK}
+            elif lan.plaintext_lan:
+                logger.warning(
+                    "network.home_network is on with no instance certificate, and network.allow_plaintext_lan "
+                    "is on: the home network is served PLAIN HTTP (tokens and chat readable on the Wi-Fi)")
             # Live recorder: give the web layer the daemon's SkillCreator
             # (signal_bus-wired) and the live SkillRegistry so trace uploads
             # persist through THE auto-skill write path and the running
@@ -2917,8 +2974,13 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                     computer_integration=computer_integration,
                     computer_runner=computer.runner,
                     bind=web_bind.address,
+                    bind_source=web_bind.source,
+                    # PUT /api/network edits the file THIS daemon read, --config included.
+                    config_path=_loaded_config_path(args.config),
                     api_port=api_port,
                     ws_port=ws_port,
+                    lan_tls=lan_tls,
+                    **loopback_only,
                     request_restart=_request_restart,
                 ))
             if web_task is not None:
@@ -3074,6 +3136,19 @@ def main() -> None:
     log_level = logging.DEBUG if args.debug else logging.INFO
 
     from prometheus.security import install_log_redaction
+
+    # ── A named token file that gives no token: refuse to start ─────────
+    # Before setup mode and before the real boot, because both would carry on
+    # without it: setup mode would mint a token at the first pairing, and the
+    # real daemon would refuse only its web plane and keep running. A
+    # container gets the reason in its log and its restart policy instead.
+    from prometheus.config.api_token import ApiTokenFileError, token_from_file
+
+    try:
+        token_from_file()
+    except ApiTokenFileError as exc:
+        print(f"Refusing to start: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     # ── Setup mode (Onboarding Phase 1) ─────────────────────────────────
     # No config anywhere → don't half-start on defaults (the old dead

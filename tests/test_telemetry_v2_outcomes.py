@@ -192,6 +192,7 @@ class TestTurnEnd:
         ("max_turns_exhausted", "tool_call", "forced_stop"),
         ("empty_response", "empty", "error_terminal"),
         ("context_preflight_refusal", None, "error_terminal"),
+        ("context_overflow", None, "error_terminal"),
         ("provider_error", "error", "error_terminal"),
         (None, "error", "error_terminal"),
         (None, "prose", None),

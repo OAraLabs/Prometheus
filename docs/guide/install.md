@@ -27,7 +27,9 @@ No GPU? Point Prometheus at a cloud provider and you still get the whole daemon 
 
 ## Install the daemon
 
-Four ways. A plain install, with no extras, runs `oara daemon` and pairs with Beacon: the web API (FastAPI, Uvicorn, websockets) is part of the base package. The pip commands below add `[full]`, which adds the Slack and Discord gateways, MCP, the Playwright browser tool, the Anthropic provider, and voice output (piper-tts, sounddevice, scipy). It does not add voice input (faster-whisper — the `voice` extra), `evals`, `push` or `computer`; install those by name if you want them. You can also install single extras — for example `pip install 'oara-prometheus[slack]'` adds just the Slack gateway.
+Four ways. A plain install, with no extras, runs `oara daemon` and pairs with Beacon: the web API (FastAPI, Uvicorn, websockets) is part of the base package. The pip commands below add `[full]`, which adds the Slack and Discord gateways, MCP, the Playwright browser tool, the Anthropic provider, and voice output (piper-tts, sounddevice, scipy). It does not add voice input (faster-whisper — the `voice` extra), `evals`, `push` or `computer`; install those by name if you want them. You can also install single extras — for example `pip install 'oara-prometheus[slack]'` adds just the Slack gateway. `pip install 'oara-prometheus[discovery]'` lets the daemon announce itself on your home network (mDNS) once you choose home network mode; without it everything else works and the daemon says so once in its log.
+
+On a Linux server you can run the daemon in a container instead: the image is built for amd64 and arm64, with a compose example that runs it beside Ollama. See [Docker](docker.md).
 
 **One command, from Git** — an isolated install of the `oara` command straight from `main`, with [uv](https://docs.astral.sh/uv/) or pipx:
 

@@ -76,6 +76,9 @@ FORCED_STOP_REASONS = frozenset({
 #: The turn ended in an error: no usable model response.
 ERROR_TERMINAL_REASONS = frozenset({
     "provider_error", "no_final_message", "error", "empty_response", "context_preflight_refusal",
+    # #704: the backend refused the prompt as over its window — the pre-flight's
+    # failure, discovered one step later.
+    "context_overflow",
 })
 
 
