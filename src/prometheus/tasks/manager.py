@@ -400,8 +400,9 @@ class BackgroundTaskManager:
             floored = False
         else:
             # An explicit command override is the caller's own string; it gets
-            # no credential injected into it, and inherits os.environ as before.
-            # Whose string it is cannot be known here, so it is floored.
+            # no credential injected into it. Whose string it is cannot be
+            # known here, so it is floored, with the bash tool's scrubbed
+            # environment.
             env_overlay = None
             floored = True
 
@@ -1117,14 +1118,21 @@ class BackgroundTaskManager:
         # the command), not just /bin/bash — otherwise children orphan and run
         # on. Same fix as tools/builtin/bash.py.
         # The overlay is in-memory only (see create_shell_task). When absent —
-        # a task restarted after a daemon restart, say — the child simply
-        # inherits os.environ, which is where the key came from in the first
-        # place. Nothing silently swaps one credential for another: the overlay
-        # only ever holds what this process was given.
+        # a task restarted after a daemon restart, say — the child reads its
+        # provider key from the environment it gets, which is where the key
+        # came from in the first place. Nothing silently swaps one credential
+        # for another: the overlay only ever holds what this process was given.
         overlay = self._task_env.get(task_id)
         if task_id in self._unfloored:
             argv = ["/bin/bash", "-lc", task.command]
-            env = {**os.environ, **overlay} if overlay else None
+            # A command the daemon built (a worker, a spawned agent, a coding
+            # run): provider keys and nothing else secret. Never os.environ
+            # whole, with or without an overlay: it holds the API token, and a
+            # worker's model shell can read /proc/$PPID/environ
+            # (tasks/child_env.py).
+            from prometheus.tasks.child_env import task_child_env
+
+            env = task_child_env(overlay, config_path=self.child_config_path)
         else:
             # A model-written command: the bash tool's read floor, write floor
             # and environment scrub. Raises ShellFloorRefused BEFORE anything

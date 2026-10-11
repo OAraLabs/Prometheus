@@ -114,8 +114,9 @@ def scrubbed_env(
     ``extra_keep`` names variables to retain even if they look secret-shaped. It
     exists for a caller that has a specific, deliberate reason (a tool whose whole
     job is to use one credential), so that the reason is written at the call site
-    instead of being encoded as an exception inside this function. Nothing uses it
-    today; bash does not get to keep anything.
+    instead of being encoded as an exception inside this function. The task
+    manager's daemon-built children keep the provider keys this way
+    (tasks/child_env.py); bash does not get to keep anything.
     """
     src = os.environ if base is None else base
     keep = set(extra_keep or ())

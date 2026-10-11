@@ -4888,6 +4888,13 @@ def create_app(
         if _desk is not None and getattr(_desk, "once_only", False) and scope != "once":
             return JSONResponse(status_code=409, content={
                 "error": "This request can only be approved once.", "code": "once_only"})
+        # A WORKER'S REQUEST is a person's to answer (#720): a device token, the
+        # owner's or that of the device whose conversation it is (the ownership
+        # filter above). Never the API token: a worker's model shell can reach it.
+        if _desk is not None and getattr(_desk, "worker_task_id", None) is not None:
+            refusal = _worker_approve_refusal(request)
+            if refusal is not None:
+                return refusal
 
         arg_text = request_id if scope == "once" else f"{scope} {request_id}"
         # STRUCTURED, NOT INFERRED FROM THE PROSE. This was
@@ -4917,6 +4924,27 @@ def create_app(
             # Desktop prompts an "all" left alone (each is answered on its own).
             "skipped": outcome.skipped,
         }
+
+    def _worker_approve_refusal(request: Request):
+        """Why a worker's request may not be approved by THIS request, or None.
+
+        Only a device token is a person's here. The API token is not: a model
+        can read it (its parent's environment, a plain file). An open daemon
+        cannot tell a person from a model at all. Unlike a desktop prompt it
+        needs no computer-use mark, and computer use may be off.
+        """
+        from prometheus.permissions import approver as _approver
+
+        by = _approver.from_request(request)
+        if by.kind == _approver.DEVICE:
+            return None
+        why = ("the API token cannot do this: a model can read it"
+               if by.kind == _approver.GLOBAL_TOKEN else
+               "no API token is configured, so no caller can be told apart from a model")
+        return JSONResponse(status_code=401, content={
+            "error": f"Only a person may approve a worker's request: {why}. "
+                     "Answer it from Beacon or the chat it came from.",
+            "code": "not_a_person"})
 
     def _desktop_approve_refusal(request: Request, action: Any, scope: str):
         """Why a desktop prompt may not be approved by THIS request, or None.
