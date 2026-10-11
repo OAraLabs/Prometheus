@@ -372,3 +372,74 @@ def test_the_endpoint_url_brackets_an_ipv6_host():
     assert worker_approval_url("::", 8005) == "http://127.0.0.1:8005/api/workers/approvals"
     assert worker_approval_url(None, 8005) == "http://127.0.0.1:8005/api/workers/approvals"
     assert worker_approval_url("fe80::1", 9) == "http://[fe80::1]:9/api/workers/approvals"
+
+
+# --- the token line never lands anywhere durable, nor in the model's context ---
+
+@pytest.mark.asyncio
+async def test_the_token_line_lands_in_no_record_file_log_telemetry_or_model_request(
+        child_env, tmp_path, caplog):
+    """The token rides stdin ahead of the brief. A real worker runs a turn;
+    then every durable place this run could have written it is searched for
+    the literal token: the task row in tasks.db (the stored prompt is the brief
+    alone), the task's output file, every file under the test's config, data
+    and log directories (the worker's cli.log, telemetry.db, lcm.db, ...), the
+    daemon side's log records, and the raw requests the model was sent."""
+    import logging
+
+    from prometheus.tasks.manager import get_task_manager
+    from prometheus.tasks.store import TaskStore
+    from prometheus.tools.base import ToolExecutionContext
+    from prometheus.tools.builtin.task_create import TaskCreateTool, TaskCreateToolInput
+
+    caplog.set_level(logging.DEBUG)
+    work = child_env
+    brief = f"{WORKER_MARK} L. Write the step files."
+    with FakeLlamaServer(work_dir=work, writes_per_turn=1, keep_bodies=True) as box:
+        cfg_dir = Path(os.environ["PROMETHEUS_CONFIG_DIR"])
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        (cfg_dir / "prometheus.yaml").write_text(
+            f"model:\n  provider: llama_cpp\n  base_url: {box.url}\n  model: fake-local-27b\n"
+            f"security:\n  permission_mode: autonomous\n  workspace_root: {work}\n",
+            encoding="utf-8")
+        mgr = get_task_manager()
+        mgr.store = TaskStore(tmp_path / "tasks.db")
+        mgr.worker_approval_url = _BASE + "/api/workers/approvals"
+        result = await TaskCreateTool().execute(
+            TaskCreateToolInput(type="local_agent", description="w", prompt=brief,
+                                timeout_seconds=60),
+            ToolExecutionContext(cwd=work, metadata={
+                "session_id": "web", "effective_session_id": "beacon:abc", "ephemeral": False,
+                "serving_route": {"key": "local", "provider": "llama_cpp",
+                                  "model": "fake-local-27b", "backend": None}}))
+        task_id = result.metadata["task_id"]
+        token = mgr._worker_tokens[task_id]
+        deadline = time.monotonic() + 40
+        while mgr.get_task(task_id).status == "running" and time.monotonic() < deadline:
+            await asyncio.sleep(0.25)
+        rec = mgr.get_task(task_id)
+        bodies = list(box.bodies)
+    assert rec.status == "completed", (rec.status, rec.error)
+    assert bodies, "the worker never reached the model"
+    needle = token.encode()
+
+    # The stored prompt is the brief and nothing else.
+    import sqlite3
+
+    rows = sqlite3.connect(tmp_path / "tasks.db").execute(
+        "select prompt, command, metadata from tasks where id = ?", (task_id,)).fetchall()
+    assert rows and rows[0][0] == brief, rows
+    assert all(needle not in str(col).encode() for col in rows[0])
+
+    # Every file this run could have written.
+    roots = {Path(os.environ[v]) for v in ("PROMETHEUS_CONFIG_DIR", "PROMETHEUS_DATA_DIR")
+             if os.environ.get(v)} | {tmp_path}
+    leaked = sorted(str(p) for root in roots for p in root.rglob("*")
+                    if p.is_file() and needle in p.read_bytes())
+    assert not leaked, f"the token is written in: {leaked}"
+    assert needle not in rec.output_file.read_bytes()
+
+    # The daemon side's logs, and the model's context.
+    assert not [r for r in caplog.records if token in r.getMessage()]
+    assert not [b for b in bodies if needle in b], "the token reached the model's context"
+    assert any(brief.encode() in b for b in bodies), "the brief itself never reached the model"
