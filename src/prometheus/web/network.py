@@ -169,6 +169,10 @@ class PersistError(Exception):
     """The choice could not be saved. The file is exactly as it was."""
 
 
+class NoConfigFile(PersistError):
+    """There is no config file to save into (the daemon was not started from one). Never conjured into being."""
+
+
 Edit = tuple[list[str], str]
 
 
@@ -236,23 +240,18 @@ def _comments(text: str) -> int:
     return sum(1 for line in text.splitlines() if line.lstrip().startswith("#"))
 
 
-def persist_choice(path: str | os.PathLike[str], mode: str, current_bind: str) -> bool:
-    """Save ``this_mac`` or ``home_network`` into the config file at *path*. ``True`` when it wrote.
+def read_config_text(path: str | os.PathLike[str]) -> tuple[Path, str, dict[str, Any]]:
+    """The config file at *path*: ``(path, its text, its parsed top-level mapping)``.
 
-    *current_bind* is the address the daemon is listening on now. ``home_network`` keeps whatever address the
-    file or the daemon already has, and only widens a loopback bind to every interface.
-
-    Raises :class:`PersistError` and leaves the file exactly as it was: no file, a file that is not YAML, an
-    edit that does not read back as intended or that lost a comment, or a write that fails. The file is never
-    created, and it is replaced atomically (a temp file in the same directory, ``os.replace``), keeping its mode.
+    Raises :class:`PersistError` for what an edit must not start from: no file (a file is never created), one that
+    cannot be read, one that is not YAML, or one whose top level is not a mapping. The text is returned as bytes
+    were written (UTF-8, no newline translation), so an edit of it changes only what it names.
     """
-    if mode not in CHOOSABLE:
-        raise PersistError(f"cannot save {mode!r}: only {' and '.join(CHOOSABLE)} can be chosen")
     target = Path(path)
     try:
         original = target.read_bytes().decode("utf-8")
     except FileNotFoundError:
-        raise PersistError(f"no config file at {target}") from None
+        raise NoConfigFile(f"no config file at {target}") from None
     except (OSError, UnicodeDecodeError) as exc:
         raise PersistError(f"cannot read {target}: {exc}") from exc
     try:
@@ -263,28 +262,30 @@ def persist_choice(path: str | os.PathLike[str], mode: str, current_bind: str) -
         document = {}
     if not isinstance(document, dict):
         raise PersistError(f"{target} does not hold a mapping at the top level; not touching it")
+    return target, original, document
 
-    wanted = _wanted(document, mode, current_bind)
-    if not wanted:
-        return False
 
-    expected = copy.deepcopy(document)
-    for keys, value in wanted.items():
-        _set_nested(expected, list(keys), value)
-    updated = _edit_text(original, [(list(keys), _literal(value)) for keys, value in wanted.items()])
+def verify_edit(original: str, updated: str, expected: Mapping[str, Any], target: Path, what: str) -> None:
+    """VERIFY BEFORE WRITING. A text edit can be wrong in ways a dict assignment cannot, so the whole document
+    must read back as the old one plus exactly the intended keys (*expected*), with every comment line still there.
 
-    # VERIFY BEFORE WRITING. A text edit can be wrong in ways a dict assignment cannot, so the whole document
-    # must read back as the old one plus exactly these keys, with every comment line still there.
+    Raises :class:`PersistError`, logging which edit (*what*) was refused, and writes nothing.
+    """
     try:
         reparsed = yaml.safe_load(updated)
     except yaml.YAMLError:
         reparsed = None
     if reparsed != expected or _comments(updated) != _comments(original):
         logger.warning("network: refusing to save %s to %s: the edit did not verify (file left unchanged)",
-                       mode, target)
+                       what, target)
         raise PersistError("the edit did not verify against the file, so nothing was written")
 
-    real = target.resolve()                           # a symlinked config is edited where it lives
+
+def replace_config(target: Path, updated: str) -> None:
+    """Atomically replace the config file with *updated*, keeping its mode (a temp file in the same directory,
+    ``os.replace``). A symlinked config is edited where it lives. Raises :class:`PersistError` if the write fails;
+    the file is then as it was."""
+    real = target.resolve()
     file_mode = stat.S_IMODE(real.stat().st_mode)
     fd, temp = tempfile.mkstemp(dir=real.parent, prefix=f".{real.name}.", suffix=".tmp")
     try:
@@ -298,4 +299,30 @@ def persist_choice(path: str | os.PathLike[str], mode: str, current_bind: str) -
         with contextlib.suppress(OSError):
             os.unlink(temp)
         raise PersistError(f"could not write {real}: {exc}") from exc
+
+
+def persist_choice(path: str | os.PathLike[str], mode: str, current_bind: str) -> bool:
+    """Save ``this_mac`` or ``home_network`` into the config file at *path*. ``True`` when it wrote.
+
+    *current_bind* is the address the daemon is listening on now. ``home_network`` keeps whatever address the
+    file or the daemon already has, and only widens a loopback bind to every interface.
+
+    Raises :class:`PersistError` and leaves the file exactly as it was: no file, a file that is not YAML, an
+    edit that does not read back as intended or that lost a comment, or a write that fails. The file is never
+    created, and it is replaced atomically (:func:`replace_config`), keeping its mode.
+    """
+    if mode not in CHOOSABLE:
+        raise PersistError(f"cannot save {mode!r}: only {' and '.join(CHOOSABLE)} can be chosen")
+    target, original, document = read_config_text(path)
+
+    wanted = _wanted(document, mode, current_bind)
+    if not wanted:
+        return False
+
+    expected = copy.deepcopy(document)
+    for keys, value in wanted.items():
+        _set_nested(expected, list(keys), value)
+    updated = _edit_text(original, [(list(keys), _literal(value)) for keys, value in wanted.items()])
+    verify_edit(original, updated, expected, target, mode)
+    replace_config(target, updated)
     return True
