@@ -28,6 +28,8 @@ model:
       model: "claude-haiku-4-5-20251001"
 ```
 
+To move the main model without editing the file (a container, or one config shared by two boxes), set `PROMETHEUS_LLAMA_CPP_URL` or `PROMETHEUS_OLLAMA_URL`. Each replaces `model.base_url` while `model.provider` is its own provider (`llama_cpp` is the default when none is named), and the daemon logs a warning naming it when it is not. `fallback` entries and named backends keep their own URLs. Give the server's origin, `http://gpu-machine:8080`; the provider adds `/v1/chat/completions` itself.
+
 ### Named backends — the registry
 
 Every local inference box the daemon can be pointed at lives in one table: the primary from `model:` (registered automatically as `local`) plus each entry under `backends:` in `prometheus.yaml`. The daemon probes them all at boot, in parallel, bounded by one timeout each, and again on demand — so "what is the 4090 serving right now" is a question the daemon answers, not one you curl by hand.
