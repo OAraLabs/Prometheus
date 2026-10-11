@@ -41,6 +41,7 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     # Alibaba Model Studio text models (/qwen). Separate from DASHSCOPE_API_KEY
     # below, which is the WAN image backend on a different host.
     "QWEN_API_KEY": ("providers", "qwen", "api_key"),
+    "OPENROUTER_API_KEY": ("providers", "openrouter", "api_key"),
     # WAN 2.5 image backend (Alibaba DashScope) — paid, opt-in only
     "DASHSCOPE_API_KEY": ("image_generation", "dashscope", "api_key"),
     # Kling 3.0 video tool — AccessKey + SecretKey pair (JWT minted per call)

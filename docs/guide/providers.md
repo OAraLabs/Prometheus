@@ -96,6 +96,9 @@ Every cloud provider except Anthropic rides the same OpenAI-compatible wire form
 | GLM (Z.ai / Zhipu) | `glm` | `ZAI_API_KEY` | `glm-5.3` |
 | MiMo (Xiaomi) | `mimo` | `MIMO_API_KEY` | `mimo-v2.6-pro` |
 | Qwen (Alibaba Model Studio) | `qwen` | `QWEN_API_KEY` | `qwen3.8-max` |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `anthropic/claude-sonnet-5` |
+
+**OpenRouter** is one account in front of many vendors' models, OpenAI-compatible, so it goes through the same provider class as the others and runs under tier `off` (the API enforces tool-call structure). Its model ids are OpenRouter's own, `vendor/model`. The setup default is a mid-tier **paid** model, never a free one: free models are capped at 50 requests a day and their hosts often train on what they are sent. It needs credit on the OpenRouter account; with none, requests are refused with HTTP 402 and `POST /api/setup/check-key` says `no_credit`. Spend on a priced OpenRouter model is metered like any cloud model; a model OpenRouter lists that Prometheus has no price row for is reported as unpriced (`unknown`), never as free. Setup is `POST /api/setup/configure` with `{"provider": "openrouter", "api_key": "..."}`, or `oara setup --fast --provider openrouter` with the key in the env file; `POST /api/setup/check-key` tells you first whether a key works.
 
 The defaults live in `src/prometheus/providers/registry.py` (`CLOUD_DEFAULTS`) and carry some hard-won footnotes:
 
@@ -185,7 +188,7 @@ slash_commands:
 
 ### Endpoint overrides: `<PROVIDER>_BASE_URL`
 
-Every cloud provider also reads an endpoint variable from the env file: `OPENAI_BASE_URL`, `GEMINI_BASE_URL`, `XAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `DEEPSEEK_BASE_URL`, `MOONSHOT_BASE_URL`, `ZAI_BASE_URL`, `MIMO_BASE_URL`, `QWEN_BASE_URL`.
+Every cloud provider also reads an endpoint variable from the env file: `OPENAI_BASE_URL`, `GEMINI_BASE_URL`, `XAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `DEEPSEEK_BASE_URL`, `MOONSHOT_BASE_URL`, `ZAI_BASE_URL`, `MIMO_BASE_URL`, `QWEN_BASE_URL`, `OPENROUTER_BASE_URL`.
 
 Resolution order is `base_url` in config → `<PROVIDER>_BASE_URL` → the built-in default. Unset simply falls through, so these cost nothing until you use one.
 

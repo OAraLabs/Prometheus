@@ -173,7 +173,8 @@ class TestProviderRegistry:
         # model.provider, where create() did not recognise them.
         assert "lm_studio" in providers
         assert "vllm" in providers
-        assert len(providers) == 14
+        # OpenRouter (2026-10): +openrouter → 15.
+        assert len(providers) == 15
 
     def test_qwen_is_openai_compat_not_local_adapter(self):
         """A provider NAMED qwen must not fall through to QwenFormatter.

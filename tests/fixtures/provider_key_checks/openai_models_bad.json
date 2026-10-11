@@ -1,0 +1,15 @@
+{
+  "body": {
+    "error": {
+      "code": "invalid_api_key",
+      "message": "Incorrect API key provided: sk-inval************************ding. You can find your API key at https://platform.openai.com/account/api-keys.",
+      "param": null,
+      "type": "invalid_request_error"
+    }
+  },
+  "content_type": "application/json",
+  "note": "the body echoes a masked form of the key it was sent",
+  "provenance": "RECORDED from the live service on 2026-10-11 with a deliberately invalid key; never a real credential",
+  "request": "GET https://api.openai.com/v1/models",
+  "status": 401
+}

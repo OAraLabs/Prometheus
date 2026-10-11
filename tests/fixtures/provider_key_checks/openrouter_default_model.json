@@ -1,0 +1,29 @@
+{
+  "model": {
+    "context_length": 1000000,
+    "id": "anthropic/claude-sonnet-5",
+    "name": "Anthropic: Claude Sonnet 5",
+    "pricing": {
+      "completion": "0.00001",
+      "input_cache_read": "0.0000002",
+      "input_cache_write": "0.0000025",
+      "input_cache_write_1h": "0.000004",
+      "prompt": "0.000002",
+      "web_search": "0.01"
+    },
+    "supported_parameters": [
+      "include_reasoning",
+      "max_completion_tokens",
+      "max_tokens",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "stop",
+      "structured_outputs",
+      "tool_choice",
+      "tools",
+      "verbosity"
+    ]
+  },
+  "provenance": "RECORDED from GET https://openrouter.ai/api/v1/models (public, no key) on 2026-10-11; the entry for the setup default model"
+}

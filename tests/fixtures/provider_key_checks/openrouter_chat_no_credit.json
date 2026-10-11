@@ -1,0 +1,12 @@
+{
+  "body": {
+    "error": {
+      "code": 402,
+      "message": "Your account or API key has insufficient credits. Add more credits and retry the request."
+    }
+  },
+  "content_type": "application/json",
+  "provenance": "DOCUMENTED, not recorded: producing a real 402 needs an OpenRouter account with no credit. Source: openrouter.ai/docs/api/reference/errors-and-debugging (read 2026-10-11): HTTP 402, error_type payment_required, 'The account or API key has insufficient credits. Add credits and retry.' The check classifies by STATUS CODE only, so the body wording is not load-bearing.",
+  "request": "POST https://openrouter.ai/api/v1/chat/completions",
+  "status": 402
+}

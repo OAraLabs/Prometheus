@@ -517,6 +517,7 @@ class Doctor:
             ("GLM", "ZAI_API_KEY"),
             ("MiMo", "MIMO_API_KEY"),
             ("Qwen", "QWEN_API_KEY"),
+            ("OpenRouter", "OPENROUTER_API_KEY"),
             # Presence only — a custom endpoint is the usual cause of a 403 on
             # a key that is otherwise valid, so it is worth seeing in /doctor.
             ("Qwen endpoint override", "QWEN_BASE_URL"),
