@@ -201,6 +201,19 @@ FIELD_RULES: list[FieldRule] = [
         fields=frozenset({"node_id"}),
         placeholder="<node>",
     ),
+    FieldRule(
+        name="os-process-identity",
+        family="observable",
+        replaces="any column/key named pid or pid_started — including the keys inside a "
+                 "task's JSON metadata",
+        why="the OS pid of a task's process and its start time, which tasks/manager.py "
+            "records so a restarted daemon can find and stop an orphan; the OS assigns "
+            "both afresh on every run",
+        cost="WHICH process ran is invisible; THAT it was recorded (the key's presence) "
+             "is still compared",
+        fields=frozenset({"pid", "pid_started"}),
+        placeholder="<pid>",
+    ),
 ]
 
 @dataclass(frozen=True)
