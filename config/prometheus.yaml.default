@@ -282,6 +282,9 @@ adapter:
   unwrap_dict_args:            # required — no code default
 
 security:
+  # default: asks before destructive and network/install commands and writes outside the workspace.
+  # strict: also asks before every file write. cautious: also asks before every shell command the model
+  # runs (a new Prometheus.app install starts here). autonomous: asks nothing. /gate switches until restart.
   permission_mode: "default"
   # Where write_file / edit_file may write WITHOUT asking. Accepts one path or
   # a list of them. Ships tight — widen deliberately (e.g. "~/projects") if
@@ -396,9 +399,12 @@ security:
   #             removed later fails closed). Not verified on Linux: bash runs
   #             WITHOUT the floor and says so — an ERROR at boot naming the
   #             fix, "dark" in /api/status, a WARN row in `oara doctor`, and
-  #             read_floor: unavailable in each call's metadata. On a
-  #             platform with no AppArmor (macOS) it reports "unsupported".
-  #   required  every bash call execs through `aa-exec -p prometheus-bash`.
+  #             read_floor: unavailable in each call's metadata. On macOS the
+  #             same floor is a Seatbelt profile run through
+  #             /usr/bin/sandbox-exec (no root, nothing to load), verified
+  #             the same way; "unsupported" only where neither exists.
+  #   required  every bash call execs through `aa-exec -p prometheus-bash`
+  #             (on macOS, `sandbox-exec -p <the profile>`).
   #             If the profile is not loaded, or aa-exec is missing, or the
   #             transition does not happen, bash REFUSES TO RUN and says so —
   #             it never silently falls back to an unconfined shell.
@@ -417,6 +423,11 @@ security:
   # floored: command hooks, and your own cron jobs (created through /api/cron,
   # or stored before cron jobs recorded who wrote them).
   bash_confinement: "auto"
+  # Let model-written shells read ~/.ssh (git over SSH, ssh to your own machines) while ~/.gnupg and
+  # ~/.config/*/*env (where the API token, the provider keys and the bot tokens live) stay denied. Narrower than
+  # bash_confinement: off. macOS (the Seatbelt floor) only: on Linux the AppArmor profile is a file root loaded,
+  # so this cannot change it, and the daemon says so at boot.
+  bash_allow_ssh: false
   # THE ABOVE IS A READ FLOOR. It says nothing about WRITES, and the
   # outside-workspace approval does not cover bash either: SecurityGate
   # raises it by reading a tool's file_path, and bash has a command string.
@@ -1517,6 +1528,20 @@ tasks:
   poll_initial_interval_seconds: 5
   poll_max_interval_seconds: 120
   reengage_turn_cap: 3
+
+# ── Workers ───────────────────────────────────────────────────────────────
+# A worker is an agent another turn spawns (sessions_spawn, or task_create
+# with type local_agent). It runs as its own process.
+workers:
+  # Which model workers run on. Empty = Same as chat: a worker inherits its
+  # spawning conversation's model, provider and backend. A picker key from
+  # GET /api/models (qwen, qwen:qwen3.8-flash, 4090, local) runs EVERY worker
+  # on that one route instead, a smaller window included (the spawn result
+  # says so). Beacon Settings → Worker model sets the same choice; that is
+  # stored in ~/.prometheus/worker_settings.json and wins over this key.
+  # An agent can never choose: a model it names is refused unless it is this
+  # one, and a route that cannot be served is refused, never substituted.
+  model: ""
 
 # ── Heartbeat ─────────────────────────────────────────────────────────────
 heartbeat:

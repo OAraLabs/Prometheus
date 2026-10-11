@@ -699,6 +699,12 @@ class LoopContext:
     # window lookup passes it so the compactor budgets THAT box's reported
     # n_ctx, not the primary's.
     backend: str | None = None
+    # The picker key (`qwen`, `4090`, `local`) and provider name of the route
+    # serving this run, as the routing stage decided them — what a worker the
+    # run spawns inherits (tasks/worker_route.py). None when the route has no
+    # key: a task rule, smart routing, or a mid-run model fallback.
+    route_key: str | None = None
+    route_provider: str | None = None
     # H1: per-result cap (tokens) applied to EACH tool result before injection,
     # via ToolResultTruncator's per-tool strategies. 0 disables (back-compat for
     # tests/benchmarks). Runs before the cross-result turn budget below, and
@@ -809,7 +815,7 @@ class LoopContext:
     #: and its own field comment already says "within this loop run".
     PER_RUN_FIELDS: ClassVar[frozenset[str]] = frozenset({
         "provider", "adapter", "model", "backend", "system_prompt",
-        "pair_pending",
+        "pair_pending", "route_key", "route_provider",
     })
 
     #: Not a dataclass field, deliberately: ``dataclasses.replace`` copies
@@ -1243,6 +1249,34 @@ def _serving_provider_name(context: "LoopContext") -> str:
     """The provider name to RECORD (it decides ``is_golden``) for the round in progress."""
     serving = _ROUND_SERVING.get()
     return serving[1] if serving is not None else _provider_name_for_telemetry(context.provider)
+
+
+def _serving_route(context: "LoopContext") -> dict[str, str | None]:
+    """The route serving this run, as a spawned worker should inherit it.
+
+    The SESSION's route — what its conversation chose — not a single round's
+    degrade: a worker is the conversation's helper, and the fallback is a
+    one-round substitute the user never picked.
+    """
+    return {
+        "key": context.route_key,
+        "provider": context.route_provider
+        or _provider_name_for_telemetry(context.provider) or None,
+        "model": context.model,
+        "backend": context.backend,
+    }
+
+
+def _context_window_for(context: "LoopContext") -> Callable[..., int] | None:
+    """``(model, backend) -> window`` from this run's compactor, or None."""
+    compactor = context.compactor
+    if compactor is None or not hasattr(compactor, "limit_for"):
+        return None
+
+    def window_for(model: str, backend: str | None = None) -> int:
+        return int(compactor.limit_for(model, backend=backend))  # type: ignore[attr-defined]
+
+    return window_for
 
 
 def _refresh_memory_section(
@@ -2272,7 +2306,7 @@ async def _run_loop(
                 messages.append(error_msg)
                 if turn_record is not None:
                     turn_record.stop(_StopReason.CONTEXT_PREFLIGHT)
-                yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.CONTEXT_PREFLIGHT), usage
                 return
 
         def _v2_provider_error() -> None:
@@ -2496,7 +2530,7 @@ async def _run_loop(
             messages.append(error_msg)
             if turn_record is not None:
                 turn_record.stop(_StopReason.CIRCUIT_BREAKER)
-            yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+            yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.CIRCUIT_BREAKER), usage
             return
 
         # ── Empty-response guard ──
@@ -2532,7 +2566,7 @@ async def _run_loop(
             messages.append(error_msg)
             if turn_record is not None:
                 turn_record.stop(_StopReason.EMPTY_RESPONSE)
-            yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+            yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.EMPTY_RESPONSE), usage
             return
 
         # FIRST-ROUND FORCING: this round produced substance (text or a tool
@@ -2668,7 +2702,7 @@ async def _run_loop(
                 messages.append(error_msg)
                 if turn_record is not None:
                     turn_record.stop(_StopReason.CIRCUIT_BREAKER)
-                yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.CIRCUIT_BREAKER), usage
                 return
 
             # SPRINT-2 WS2: turn ended without further tool calls — drain
@@ -2726,7 +2760,7 @@ async def _run_loop(
                 messages.append(error_msg)
                 if turn_record is not None:
                     turn_record.stop(_StopReason.BOUNDARY_ESCAPE)
-                yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.BOUNDARY_ESCAPE), usage
                 return
             return
 
@@ -2750,7 +2784,7 @@ async def _run_loop(
             if turn_record is not None:
                 turn_record.not_run(len(tool_calls))
                 turn_record.stop(_StopReason.ITERATION_LIMIT)
-            yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+            yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.ITERATION_LIMIT), usage
             return
 
         # SPRINT-2 WS2: snapshot every path the upcoming tool batch may
@@ -2906,6 +2940,9 @@ async def _run_loop(
                         )
                         context.provider = fallback.provider
                         context.model = fallback.model_name
+                        # The run is no longer on the route it was given.
+                        context.route_key = None
+                        context.route_provider = fallback.provider_name or None
                         if fallback.adapter is not None:
                             context.adapter = fallback.adapter
                         circuit_breaker.record_success()
@@ -2969,7 +3006,7 @@ async def _run_loop(
                     messages.append(error_msg)
                     if turn_record is not None:
                         turn_record.stop(_StopReason.CIRCUIT_BREAKER)
-                    yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                    yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.CIRCUIT_BREAKER), usage
                     return
 
                 messages.append(ConversationMessage(role="user", content=tool_results))
@@ -2980,7 +3017,7 @@ async def _run_loop(
                 messages.append(error_msg)
                 if turn_record is not None:
                     turn_record.stop(_StopReason.CIRCUIT_BREAKER)
-                yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.CIRCUIT_BREAKER), usage
                 return
             else:
                 _log_iteration(context, _IterationReason.TOOL_ERROR_RETRY, turn, tool_iteration)
@@ -3057,7 +3094,7 @@ async def _run_loop(
             messages.append(error_msg)
             if turn_record is not None:
                 turn_record.stop(_StopReason.REPEAT_DETECTOR)
-            yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+            yield AssistantTurnComplete(message=error_msg, usage=usage, stop_reason=_StopReason.REPEAT_DETECTOR), usage
             return
 
         # Sprint 10 / FL-4 / LONGHAUL-2: checkpoint + divergence evaluation
@@ -3162,7 +3199,7 @@ async def _run_loop(
                 messages.append(_halt_msg)
                 if turn_record is not None:
                     turn_record.stop(_StopReason.DIVERGENCE_HALT)
-                yield AssistantTurnComplete(message=_halt_msg, usage=usage), usage
+                yield AssistantTurnComplete(message=_halt_msg, usage=usage, stop_reason=_StopReason.DIVERGENCE_HALT), usage
                 return
 
     if turn_record is not None:
@@ -5199,6 +5236,11 @@ async def _execute_tool_call(
                         # Tools that write telemetry null the session for an
                         # ephemeral turn, as the tool_calls row does.
                         "ephemeral": ephemeral,
+                        # What a worker spawned by this call inherits, and how
+                        # big a window each route has (tasks/worker_route.py).
+                        # Public facts only: never a URL or a credential.
+                        "serving_route": _serving_route(context),
+                        "context_window_for": _context_window_for(context),
                         **(context.tool_metadata or {}),
                     },
                 ),

@@ -5539,6 +5539,45 @@ def create_app(
             "catalog_note": _CATALOG_NOTE,
         }
 
+    # ── Worker model (Beacon Settings → Worker model) ────────────────
+    # The one operator choice for spawned workers (tasks/worker_settings.py).
+    # null = Same as chat: a worker runs on its conversation's route. A key is
+    # a picker key from the catalog above, validated here and stored by the
+    # setting itself (never in prometheus.yaml); its credential is checked at
+    # spawn, where a missing one is refused with that reason.
+
+    def _worker_model_view() -> dict:
+        from prometheus.tasks.worker_settings import get_worker_model_setting
+
+        setting = get_worker_model_setting()
+        key = setting.current()
+        return {
+            "model": key,
+            "same_as_chat": key is None,
+            "source": setting.source,
+            "choices": [
+                {"key": row.get("key"), "label": row.get("label"),
+                 "provider": row.get("provider"), "model": row.get("model")}
+                for row in _model_catalog()
+            ],
+        }
+
+    @app.get("/api/workers/model")
+    async def get_worker_model():
+        return _worker_model_view()
+
+    @app.put("/api/workers/model")
+    async def set_worker_model(body: dict):
+        from prometheus.tasks.worker_settings import get_worker_model_setting
+
+        raw = body.get("model")
+        key = str(raw).strip() if raw else None
+        try:
+            get_worker_model_setting().set(key)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        return _worker_model_view()
+
     @app.get("/api/sessions/{session_id}/model")
     async def get_session_model(session_id: str):
         router = getattr(app.state, "model_router", None)
