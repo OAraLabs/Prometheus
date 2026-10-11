@@ -20,6 +20,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.background import BackgroundTask
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -552,6 +553,29 @@ def create_app(
         """A device name the person will read in a list: printable, trimmed, at most 64 characters."""
         text = "".join(ch for ch in str(raw or "") if ch.isprintable()).strip()
         return text[:64].strip() or default
+
+    # ── /api/restart — the operator applies a saved setting (Beacon's v0.4 spec, 2.4) ─────
+    #
+    # PUT /api/network only saves; listeners are bound at start. This answers 202 and THEN asks the daemon to
+    # restart (a background task, so the answer is sent first): its ordinary graceful shutdown, then a re-exec of
+    # the same command line in the same process (daemon.reexec), so it comes back under launchd, systemd or a
+    # terminal alike, with the same instance key and so the same hello fp. Operator only: the gate refuses a
+    # scoped device (web/route_access.OPERATOR_ONLY). A process with no hook (not started as the daemon) says so.
+    @app.post("/api/restart")
+    async def restart_daemon(request: Request):
+        # Never a web page's to ask for, whatever credential it carries: a browser shows itself by Origin.
+        if request.headers.get("origin"):
+            return JSONResponse(status_code=400, content={
+                "error": "browser_not_allowed",
+                "detail": "a restart is not accepted from a web page (the request carried an Origin header)"})
+        request_restart = getattr(request.app.state, "request_restart", None)
+        if request_restart is None:
+            return JSONResponse(status_code=503, content={
+                "error": "restart_unavailable",
+                "detail": "this process cannot restart itself: it was not started as the daemon"})
+        logger.info("Restart requested over the API")
+        return JSONResponse(status_code=202, content={"restarting": True},
+                            background=BackgroundTask(request_restart))
 
     # ── /api/devices — enrolment, listing, revocation (GRAFT 1) ─────
 

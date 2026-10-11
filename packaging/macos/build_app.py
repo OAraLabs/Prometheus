@@ -153,6 +153,12 @@ def info_plist(version: str, build: str | None = None) -> dict[str, Any]:
         "NSHumanReadableCopyright": "Copyright (c) OAra Labs. MIT License.",
         # The launcher probes http://127.0.0.1 itself; say so rather than rely on ATS exempting IP literals.
         "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
+        # Home-network mode: the daemon (this bundle's Python) listens on the LAN and announces itself over
+        # Bonjour, and macOS asks first. These name Prometheus in that prompt, not a bundled interpreter.
+        "NSLocalNetworkUsageDescription": (
+            "Prometheus listens on your home network when you turn on \u201cLet other computers on my home "
+            "network connect\u201d in Beacon, so Beacon on your other computers can find it and connect."),
+        "NSBonjourServices": ["_prometheus._tcp"],
         # Which agent plist the launcher registers; read from here so a development bundle with
         # other identifiers runs the identical launcher.
         "PrometheusAgentLabel": launchd.LABEL,

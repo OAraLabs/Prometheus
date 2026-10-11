@@ -67,6 +67,16 @@ def test_bundle_identity_is_the_contract_with_beacon(app):
 
 # ── Info.plist ───────────────────────────────────────────────────────────────
 
+def test_info_plist_names_prometheus_in_the_local_network_prompt(app):
+    """In home-network mode the daemon (the bundled Python, launched from this bundle) listens on the LAN and
+    announces itself over Bonjour. macOS asks the person first, and without these keys the prompt has nothing of
+    Prometheus's to say (Beacon's v0.4 spec, open item 5)."""
+    info = app.info_plist("1.2.3")
+    text = info.get("NSLocalNetworkUsageDescription", "")
+    assert "Prometheus" in text and "home network" in text, text
+    assert info.get("NSBonjourServices") == ["_prometheus._tcp"]
+
+
 def test_info_plist_names_the_agent_the_launcher_registers(app):
     from prometheus.cli import launchd
 

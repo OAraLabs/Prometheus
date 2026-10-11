@@ -163,6 +163,8 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/api/cron/{name}/run"),
     # /api/devices
     ("POST", "/api/devices"),
+    # /api/restart: the daemon restarts itself to apply a saved setting (Beacon's v0.4 spec, 2.4)
+    ("POST", "/api/restart"),
     # /api/documents
     ("GET", "/api/documents"),
     ("GET", "/api/documents/content"),

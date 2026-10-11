@@ -88,6 +88,7 @@ one is the explanation.
 | `/api/providers/keys/{service_id}` | PUT |
 | `/api/providers/xai/oauth` | DELETE, GET |
 | `/api/providers/xai/oauth/login` | POST |
+| `/api/restart` | POST |
 | `/api/search` | POST |
 | `/api/sentinel` | GET |
 | `/api/sessions` | GET, POST |
