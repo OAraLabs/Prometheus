@@ -249,10 +249,14 @@ class TestTheDaemonsSecretsStayOutOfAModelsShell:
 
 @pytest.fixture()
 def read_floor_unavailable(monkeypatch):
-    """The read floor is required and this host cannot provide it."""
+    """The read floor is required and this host cannot provide it, whichever mechanism it has."""
     monkeypatch.setattr(
         C, "preflight",
         lambda *a, **k: (False, "profile 'prometheus-bash' does not exist (test)"),
+    )
+    monkeypatch.setattr(
+        C, "seatbelt_preflight",
+        lambda *a, **k: (False, "sandbox-exec did not hold (test)"),
     )
 
 

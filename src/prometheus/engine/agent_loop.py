@@ -2217,8 +2217,12 @@ async def _run_loop(
             # APIs do not publish context length at all, so that side is a configured floor and
             # the refusal message must say which it had.
             backend = getattr(context, "backend", None)
+            # Or the compactor says the number IS a server's report: a local box
+            # with no fallback configured is measured too (#704's workers).
+            _is_measured = getattr(context.compactor, "is_measured", None)
             measured = (
                 bool(getattr(context.fallback, "is_local_backend", False)) or backend is not None
+                or (callable(_is_measured) and bool(_is_measured(_model, backend=backend)))
             )
             return context.compactor.limit_for(_model, backend=backend), measured
 

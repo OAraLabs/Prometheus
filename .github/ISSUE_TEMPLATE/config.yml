@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/OAraLabs/Prometheus/security/advisories/new
+    about: Privately, through GitHub's vulnerability reporting. Never as a public issue.
+  - name: Known limits
+    url: https://oara.ai/docs/limits/
+    about: What doesn't work yet. Worth a look before filing a bug.
+  - name: Private contact
+    url: https://oara.ai/prometheus
+    about: Issues and GitHub handles are public. To reach us privately, email support@oara.ai.
