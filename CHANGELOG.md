@@ -57,7 +57,7 @@ Prometheus can now be reached from more than one device. Phones and other comput
   - A compose example is in `docs/guide/docker.md`.
 - It leaves out mDNS discovery, which doesn't cross Docker's default bridge network.
 - **Running in an OpenShell sandbox (#734).** `packaging/openshell/` holds a thin image on top of the official one, plus a default-deny policy.
-  - The policy allows only the model server on the host, the cloud providers, Telegram, Slack and Discord.
+  - The policy allows only the model server on the host, the cloud providers (OpenRouter included, #735), Telegram, Slack and Discord.
   - Only `/sandbox` and `/tmp` are writable.
   - `docs/guide/openshell.md` says what was tested: OpenShell 0.1.3 on Linux amd64. You build that image yourself; the release doesn't publish it.
 
@@ -90,6 +90,13 @@ Prometheus can now be reached from more than one device. Phones and other comput
 - **OpenRouter is a cloud provider (#732).** Setup accepts `{"provider": "openrouter", "api_key": …}`. The default model is `anthropic/claude-sonnet-5`, a paid, tool-capable model.
   - `POST /api/setup/check-key` tests a key before it's saved. It covers OpenRouter, Anthropic and OpenAI, and answers `ok`, `bad_key`, `no_credit` or `unreachable`.
   - OpenRouter's `vendor/model` ids are no longer counted as free local traffic. Unpriced models are reported as unknown, not free.
+- **Change the provider, model and API key after setup (#737).** `GET`/`PUT /api/model` and `POST /api/model/check-key`, operator only.
+  - A change is saved to the config file and applied on restart (`POST /api/restart`). Cloud providers only.
+  - The key is checked first, and a rejected key writes nothing. It goes to the env file only, never the config.
+  - Switching providers drops the old vendor's key, base URL and key variable from `model:`. A value pinned by `PROMETHEUS_PROVIDER` or `PROMETHEUS_MODEL` answers `409 model_overridden`.
+- **Gemini and xAI can be chosen in setup (#739):** `POST /api/setup/configure`, `oara setup --provider gemini` or `xai`, and `GET /api/setup/detect` offer them, and `PUT /api/model` can switch to them.
+  - The env-file template now names `GEMINI_API_KEY`. It said `GOOGLE_API_KEY`, which the daemon never read.
+  - Their keys are saved without a check: the key checks cover OpenRouter, Anthropic and OpenAI.
 - **`PROMETHEUS_OLLAMA_URL` and `PROMETHEUS_LLAMA_CPP_URL` now work (#725).** They set the main model's URL when it uses that provider; otherwise the daemon logs a warning. Before, they did nothing.
 - **A prompt too long for the backend's window now ends the turn with a plain explanation and the server's numbers (#716),** not "400 Bad Request". The CLI and every worker now compact like the daemon, using the server's real context window (#718).
 - **A `null` for an optional tool parameter takes its default (#666),** rather than failing or becoming a file named "None". This applies to local models; cloud models skip the adapter.
