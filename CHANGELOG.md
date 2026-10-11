@@ -44,6 +44,7 @@ Prometheus can now be reached from more than one device. Phones and other comput
   - Home network needs TLS. Plain HTTP on the LAN happens only with the explicit `network.allow_plaintext_lan: true`.
   - With the optional `[discovery]` extra (zeroconf), the daemon announces itself as `_prometheus._tcp` on private addresses, in home-network mode only.
 - **`oara doctor` reports home-network mode (#700, #727).** When `network.home_network` is on, the Home network row says whether it can work, whether it is safe, and whether the daemon will announce itself. The Web bind row says when TLS serves the LAN and plain HTTP stays on 127.0.0.1. Both rows read the same prediction the daemon's boot makes.
+- **A second computer can join over TLS (#745).** An approved join request that came in on the TLS listener is now told to connect back on `https://` and `wss://` (the TLS ports), and is given the certificate pin to check. Before, it got plain `http`/`ws` addresses that only listen on 127.0.0.1 in home-network mode, so the second computer paired and could never connect.
 - **Switch from a client (#700, #724).** `GET`/`PUT /api/network` saves `this_mac` or `home_network` to the config file. `POST /api/restart` (operator only) applies it: the daemon re-execs in place, in the same process, re-reads the env file, and comes back with the same fingerprint. A request from a web page (one with an `Origin` header) is refused.
 
 ### Prometheus.app for Mac (#695, #711, #722, #728, #694, #696, #708)
@@ -111,6 +112,7 @@ Prometheus can now be reached from more than one device. Phones and other comput
 - Microcompaction never makes a tool result longer (#648). A cloud run's breaker recovery no longer starts microcompaction (#637).
 - `/mimo` now defaults to mimo-v2.6-pro, ahead of v2.5's retirement on 2026-10-21. The picker labels gpt-6-astra "no tool calls" (#686).
 - `POST /api/chat` uses the daemon's full runtime system prompt (#680).
+- **MiMo refuses forced tool calls with a clear error (#726).** MiMo supports only `tool_choice: auto` and silently drops anything else, so a forced tool call now fails with an error that says so; automatic tool choice is unchanged. Contributed by Sepehr-Taji (@sepehrtaji-dev).
 - Every tool's example call, which a model is shown after a malformed call, now validates against that tool's own input model (#670).
 
 ### Memory, telemetry and learning
