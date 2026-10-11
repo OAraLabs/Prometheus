@@ -262,3 +262,89 @@ def test_the_daemon_makes_the_certificate_after_the_key_and_hands_the_plan_to_th
     assert cert_calls and min(c.lineno for c in cert_calls) > key_line
     launches = calls("launch_web")
     assert launches and all(any(k.arg == "lan_tls" for k in c.keywords) for c in launches)
+
+
+# ── the handshake is hardened the same way on both listeners ─────────────────
+#
+# Independent review: the WSS listener had an explicit TLS 1.2 floor, the REST one used uvicorn's defaults, and
+# both accepted CBC suites (uvicorn's default cipher string is "TLSv1"; Python's own default includes ECDH+AES).
+# Both now use one context policy: TLS 1.2 or later and AEAD suites only (TLS 1.3's suites are AEAD by definition).
+
+_CBC_ONLY = "ECDHE-ECDSA-AES128-SHA256:ECDHE-ECDSA-AES256-SHA384:ECDHE-ECDSA-AES128-SHA:ECDHE-ECDSA-AES256-SHA"
+
+
+def _cbc_only_client() -> ssl.SSLContext:
+    ctx = _client_ctx()
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    ctx.set_ciphers(_CBC_ONLY)
+    return ctx
+
+
+async def _handshake(port: int, ctx: ssl.SSLContext) -> str | None:
+    """The negotiated cipher, or None when the server refused the handshake."""
+    try:
+        _reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=ctx)
+    except (ssl.SSLError, ConnectionError, OSError):
+        return None
+    try:
+        return writer.get_extra_info("ssl_object").cipher()[0]
+    finally:
+        writer.close()
+
+
+def test_one_policy_aead_only_and_tls_1_2_or_later(node):
+    from prometheus.web.tls import AEAD_CIPHERS, LanTlsPlan, server_ssl_context
+
+    ensure_instance_key()
+    instance_cert.ensure_instance_certificate()
+    plan = LanTlsPlan(host="127.0.0.1", api_port=0, ws_port=0,
+                      certfile=node / "instance.crt", keyfile=node / "instance.key")
+    ctx = server_ssl_context(plan)
+    assert ctx.minimum_version == ssl.TLSVersion.TLSv1_2
+    tls12 = [c["name"] for c in ctx.get_ciphers() if c["protocol"] == "TLSv1.2"]
+    assert tls12 and all("GCM" in n or "CHACHA20" in n for n in tls12), tls12
+    assert "GCM" in AEAD_CIPHERS or "AESGCM" in AEAD_CIPHERS
+
+
+@pytest.mark.asyncio
+async def test_the_rest_tls_listener_refuses_cbc_and_has_the_same_floor(node):
+    pytest.importorskip("fastapi")
+    from prometheus.web.server import create_app, start_web
+    from prometheus.web.serving import bound_port
+    from prometheus.web.tls import LanTlsPlan
+
+    ensure_instance_key()
+    instance_cert.ensure_instance_certificate()
+    plan = LanTlsPlan(host="127.0.0.1", api_port=0, ws_port=0,
+                      certfile=node / "instance.crt", keyfile=node / "instance.key")
+    app = create_app({"web": {"api_token": TOKEN}})
+    task = asyncio.create_task(start_web(app, host="127.0.0.1", port=0, tls=plan))
+    try:
+        server = await _wait_started(app, "https_server")
+        port = bound_port(server)
+        assert server.config.ssl.minimum_version == ssl.TLSVersion.TLSv1_2
+        assert await _handshake(port, _cbc_only_client()) is None, "a CBC-only TLS 1.2 client was accepted"
+        negotiated = await _handshake(port, _client_ctx())
+        assert negotiated and ("GCM" in negotiated or "CHACHA20" in negotiated or negotiated.startswith("TLS_"))
+    finally:
+        app.state.https_server.should_exit = True
+        await asyncio.wait_for(task, 10)
+
+
+@pytest.mark.asyncio
+async def test_the_wss_listener_refuses_cbc(node):
+    pytest.importorskip("websockets")
+    from prometheus.web.tls import LanTlsPlan, server_ssl_context
+    from prometheus.web.ws_server import WebSocketBridge
+
+    ensure_instance_key()
+    instance_cert.ensure_instance_certificate()
+    plan = LanTlsPlan(host="127.0.0.1", api_port=0, ws_port=0,
+                      certfile=node / "instance.crt", keyfile=node / "instance.key")
+    bridge = WebSocketBridge()
+    await bridge.start(host="127.0.0.1", port=0, ssl=server_ssl_context(plan))
+    try:
+        assert await _handshake(bridge.tls_bound_port, _cbc_only_client()) is None
+        assert await _handshake(bridge.tls_bound_port, _client_ctx())
+    finally:
+        await bridge.stop()
