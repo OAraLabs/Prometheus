@@ -24,9 +24,13 @@ Source: novel code for Prometheus, 2026-10-11.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from fastapi.responses import JSONResponse
+# NOT imported at module level: setup_server.py imports this where the web stack may be missing (the daemon's
+# setup-mode gate must still explain itself instead of raising, tests/test_web_is_base.py), and the catalog is plain
+# data a client or a doc check can read without it. Only refuse() builds a response.
+if TYPE_CHECKING:
+    from fastapi.responses import JSONResponse
 
 
 @dataclass(frozen=True)
@@ -82,13 +86,15 @@ CATALOG: dict[str, SetupError] = {
 }
 
 
-def refuse(code: str, detail: str, *, fields: list[str] | None = None, **extra: Any) -> JSONResponse:
+def refuse(code: str, detail: str, *, fields: list[str] | None = None, **extra: Any) -> "JSONResponse":
     """The one way setup mode refuses. Unknown *code* is a ``KeyError``: add it to :data:`CATALOG` (and the
     contract document) first.
 
     *detail* is the specific English for this occurrence; *fields* names the request fields it is about;
     *extra* is machine data a client may use (``attempts_remaining``).
     """
+    from fastapi.responses import JSONResponse
+
     entry = CATALOG[code]
     content: dict[str, Any] = {"error": code, "detail": detail}
     if fields:

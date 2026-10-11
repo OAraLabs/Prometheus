@@ -391,6 +391,25 @@ class TestTheCatalog:
             assert f"| {entry.status} |" in row, f"{code}: the document and the catalog disagree on the status"
 
 
+class TestTheCatalogNeedsNoWebStack:
+    def test_it_imports_where_fastapi_is_missing(self):
+        """setup_server.py imports it where the web stack may be absent; the daemon must then explain itself, not
+        raise (tests/test_web_is_base.py). CI caught this once: a module-level fastapi import here."""
+        import subprocess
+        import sys
+
+        code = (
+            "import sys\n"
+            "for name in ('fastapi', 'starlette', 'uvicorn'):\n"
+            "    sys.modules[name] = None  # an import of it now raises ImportError\n"
+            "from prometheus.web import setup_errors\n"
+            "assert 'bad_request' in setup_errors.CATALOG\n"
+        )
+        proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60,
+                              env={**__import__("os").environ, "PYTHONPATH": str(REPO / "src")})
+        assert proc.returncode == 0, proc.stderr[-800:]
+
+
 class TestNothingBuildsAnErrorByHand:
     def test_setup_server_has_no_raw_error_response(self):
         """A failure answered with ``JSONResponse(status_code=4xx/5xx, ...)`` is a code nobody catalogued."""
