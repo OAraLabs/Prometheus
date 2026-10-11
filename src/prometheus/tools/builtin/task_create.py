@@ -182,6 +182,8 @@ class TaskCreateTool(BaseTool):
                     prompt=arguments.prompt,
                     route=plan.key,
                     metadata=plan.record(),
+                    # One brief, one turn, then exit with a result (cli/worker.py).
+                    worker=True,
                     **common,
                 )
             elif arguments.type == "file_watch":

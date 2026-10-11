@@ -22,6 +22,7 @@ On top of the original in-memory manager this adds, all backward-compatibly
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shlex
@@ -287,6 +288,7 @@ class BackgroundTaskManager:
         model: str | None = None,
         route: str | None = None,
         metadata: Mapping[str, str] | None = None,
+        worker: bool = False,
         api_key: str | None = None,
         command: str | None = None,
         session_id: str | None = None,
@@ -303,6 +305,10 @@ class BackgroundTaskManager:
         endpoint or credential is ever on the command line. *model* is the
         older bare ``--model`` (a name for the configured provider), kept for
         callers that use it. *metadata* is added to the task record.
+
+        *worker* starts it as a spawned worker (``--worker``): the prompt is
+        its whole brief, one turn, stdin is closed after it, and the process
+        exits with a result line the record keeps (``worker_result``).
 
         THE CREDENTIAL NEVER ENTERS ``command``.
 
@@ -338,6 +344,7 @@ class BackgroundTaskManager:
         reads it — including this very process, whose ``os.environ`` is the
         fallback source.
         """
+        command_was_built = command is None
         if command is None:
             # No credential is required to START a worker: it runs on a route
             # (often a local box) and reads its own credential from the
@@ -354,6 +361,8 @@ class BackgroundTaskManager:
                 cmd.extend(["--config", self.child_config_path])
             if route:
                 cmd.extend(["--route", route])
+            if worker:
+                cmd.append("--worker")
             if model:
                 cmd.extend(["--model", model])
             command = " ".join(shlex.quote(part) for part in cmd)
@@ -389,6 +398,10 @@ class BackgroundTaskManager:
         updated = replace(record, prompt=prompt)
         if metadata:
             updated.metadata.update({str(k): str(v) for k, v in metadata.items()})
+        if worker and command_was_built:
+            # Set BEFORE the prompt is written: write_to_task closes a worker's
+            # stdin after its one brief.
+            updated.metadata["worker"] = "1"
         self._tasks[record.id] = updated
         self._persist(updated)
         await self.write_to_task(record.id, prompt)
@@ -613,9 +626,23 @@ class BackgroundTaskManager:
         return task
 
     async def write_to_task(self, task_id: str, data: str) -> None:
-        """Write a line to the task's stdin."""
+        """Write a line to the task's stdin.
+
+        A WORKER takes exactly one brief: its stdin is closed after it, and a
+        write while it runs is refused (its turn has its brief already). Once
+        it has exited, a write starts it again with *data* as the new brief,
+        as any agent task restarts.
+        """
         task = self._require_task(task_id)
+        is_worker = task.metadata.get("worker") == "1"
         async with self._input_locks[task_id]:
+            running = self._processes.get(task_id)
+            if (is_worker and running is not None and running.returncode is None
+                    and (running.stdin is None or running.stdin.is_closing())):
+                raise ValueError(
+                    f"Task {task_id} is a worker: it takes one brief, and accepts no "
+                    f"more input while it runs. Wait for its result, or stop it and "
+                    f"spawn another.")
             process = await self._ensure_writable_process(task)
             process.stdin.write((data.rstrip("\n") + "\n").encode("utf-8"))
             try:
@@ -626,6 +653,8 @@ class BackgroundTaskManager:
                 process = await self._restart_agent_task(task)
                 process.stdin.write((data.rstrip("\n") + "\n").encode("utf-8"))
                 await process.stdin.drain()
+            if is_worker:
+                process.stdin.close()
 
     def read_task_output(self, task_id: str, *, max_bytes: int = 12000) -> str:
         """Return the tail of a task's output log."""
@@ -839,6 +868,20 @@ class BackgroundTaskManager:
 
         self._leak_state.drained = True
 
+    def _record_worker_result(self, task: TaskRecord, *, timed_out: bool) -> None:
+        """Copy a worker's result line onto its record; name its failure."""
+        from prometheus.tasks.worker_result import parse_result
+
+        result = parse_result(self.read_task_output(task.id, max_bytes=16000))
+        if result is not None:
+            task.metadata["worker_result"] = json.dumps(result)
+        if timed_out or task.status == "killed" or task.status == "completed":
+            return
+        if result is not None and result.get("status") == "failed":
+            task.error = str(result.get("reason") or "failed")
+        elif task.error is None:
+            task.error = f"worker exited {task.return_code} without a result"
+
     async def _emit_completion(self, task: TaskRecord) -> None:
         """Emit ``task_completed`` / ``task_failed`` once per terminal task."""
         if self.signal_bus is None or task.status not in TERMINAL_STATUSES:
@@ -871,6 +914,8 @@ class BackgroundTaskManager:
                         "on_complete": task.on_complete,
                         "reengage_prompt": task.reengage_prompt,
                         "output_tail": self.read_task_output(task.id, max_bytes=4000),
+                        # A worker's own result line, parsed (worker_result.py).
+                        "worker_result": _json_or_none(task.metadata.get("worker_result")),
                     },
                     source="task_supervisor",
                 )
@@ -955,6 +1000,8 @@ class BackgroundTaskManager:
             task.error = "timeout"
         elif task.status != "killed":
             task.status = "completed" if return_code == 0 else "failed"
+        if task.metadata.get("worker") == "1":
+            self._record_worker_result(task, timed_out=timed_out)
         task.ended_at = time.time()
         self._processes.pop(task_id, None)
         self._waiters.pop(task_id, None)
@@ -1078,6 +1125,15 @@ def get_task_manager() -> BackgroundTaskManager:
         _DEFAULT_MANAGER = BackgroundTaskManager()
         _DEFAULT_MANAGER_KEY = current_key
     return _DEFAULT_MANAGER
+
+
+def _json_or_none(text: str | None) -> Any:
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
 
 
 def _task_id(task_type: TaskType) -> str:

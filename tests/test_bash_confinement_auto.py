@@ -55,13 +55,16 @@ def linux(monkeypatch):
 
 @pytest.fixture()
 def no_apparmor_platform(monkeypatch):
-    """macOS: AppArmor cannot exist, so there is nothing to probe."""
+    """A platform with NO read-floor mechanism: no AppArmor and no sandbox-exec (a Mac stripped of it, or
+    Windows). A Mac with sandbox-exec has the Seatbelt floor (tests/test_macos_read_floor.py)."""
     monkeypatch.setattr(C, "apparmor_possible", lambda: False, raising=False)
+    monkeypatch.setattr(C, "seatbelt_possible", lambda: False, raising=False)
 
     def _never(*a, **k):
-        raise AssertionError("probed AppArmor on a platform that has none")
+        raise AssertionError("probed a read floor on a platform that has none")
 
     monkeypatch.setattr(C, "preflight", _never)
+    monkeypatch.setattr(C, "seatbelt_preflight", _never)
 
 
 @pytest.fixture()
