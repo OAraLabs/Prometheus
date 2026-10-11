@@ -20,6 +20,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.background import BackgroundTask
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -552,6 +553,29 @@ def create_app(
         """A device name the person will read in a list: printable, trimmed, at most 64 characters."""
         text = "".join(ch for ch in str(raw or "") if ch.isprintable()).strip()
         return text[:64].strip() or default
+
+    # ── /api/restart — the operator applies a saved setting (Beacon's v0.4 spec, 2.4) ─────
+    #
+    # PUT /api/network only saves; listeners are bound at start. This answers 202 and THEN asks the daemon to
+    # restart (a background task, so the answer is sent first): its ordinary graceful shutdown, then a re-exec of
+    # the same command line in the same process (daemon.reexec), so it comes back under launchd, systemd or a
+    # terminal alike, with the same instance key and so the same hello fp. Operator only: the gate refuses a
+    # scoped device (web/route_access.OPERATOR_ONLY). A process with no hook (not started as the daemon) says so.
+    @app.post("/api/restart")
+    async def restart_daemon(request: Request):
+        # Never a web page's to ask for, whatever credential it carries: a browser shows itself by Origin.
+        if request.headers.get("origin"):
+            return JSONResponse(status_code=400, content={
+                "error": "browser_not_allowed",
+                "detail": "a restart is not accepted from a web page (the request carried an Origin header)"})
+        request_restart = getattr(request.app.state, "request_restart", None)
+        if request_restart is None:
+            return JSONResponse(status_code=503, content={
+                "error": "restart_unavailable",
+                "detail": "this process cannot restart itself: it was not started as the daemon"})
+        logger.info("Restart requested over the API")
+        return JSONResponse(status_code=202, content={"restarting": True},
+                            background=BackgroundTask(request_restart))
 
     # ── /api/devices — enrolment, listing, revocation (GRAFT 1) ─────
 
@@ -4859,6 +4883,11 @@ def create_app(
             refusal = _desktop_approve_refusal(request, _desk, scope)
             if refusal is not None:
                 return refusal
+        # Any approve-once request (a spawned worker's, PR-6) refuses a lasting
+        # scope by name, rather than approving once and remembering nothing.
+        if _desk is not None and getattr(_desk, "once_only", False) and scope != "once":
+            return JSONResponse(status_code=409, content={
+                "error": "This request can only be approved once.", "code": "once_only"})
 
         arg_text = request_id if scope == "once" else f"{scope} {request_id}"
         # STRUCTURED, NOT INFERRED FROM THE PROSE. This was
@@ -5625,6 +5654,87 @@ def create_app(
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
         return _worker_model_view()
+
+    # ── A spawned worker asks its parent conversation for approval (PR-6) ──
+    # A public route (web/public_routes.py): a worker has no API token, it has
+    # a per-worker token the task manager minted and holds in memory. The
+    # request is filed in the approval queue under the worker's PARENT
+    # conversation, approve-once, and this waits for a PERSON's answer.
+    # Nothing here approves anything: no queue, a wrong token, a stopped
+    # worker or a remote peer is a refusal.
+    from prometheus.tasks.worker_auth import RateLimiter as _WorkerRateLimiter
+
+    _worker_rate = _WorkerRateLimiter()
+
+    @app.post("/api/workers/approvals")
+    async def worker_approval(request: Request):
+        # In this order, so nothing about the caller is trusted before it is
+        # checked and no body is read for a caller that fails a check:
+        # same machine -> the worker's token (HEADERS) -> its pending cap and
+        # rate limit -> a capped body (chunked or not) -> cleaned card text.
+        import json as _wjson
+
+        from prometheus.tasks import worker_auth as wa
+        from prometheus.tasks.manager import get_task_manager
+
+        if not (is_same_machine(request) and is_loopback_host_header(request.headers.get("host"))):
+            return JSONResponse(status_code=403, content={
+                "error": "not_loopback",
+                "detail": "a worker's approval request is only accepted from this machine"})
+        task = get_task_manager().verify_worker_token(
+            request.headers.get(wa.HEADER_TASK, ""), request.headers.get(wa.HEADER_TOKEN, ""))
+        if task is None:
+            return JSONResponse(status_code=401, content={
+                "error": "unknown_worker",
+                "detail": "no running worker holds that token"})
+        queue = app.state.approval_queue
+        primary = queue.queues[0] if hasattr(queue, "queues") else queue
+        if primary is None or not hasattr(primary, "request_approval"):
+            return {"result": "denied",
+                    "reason": "no approval queue: nobody can approve a worker's request"}
+        open_now = sum(1 for a in primary.list_pending()
+                       if getattr(a, "worker_task_id", None) == task.id)
+        if open_now >= wa.MAX_PENDING_PER_WORKER:
+            return JSONResponse(status_code=429, content={
+                "result": "denied",
+                "reason": f"this worker already has {open_now} requests waiting for a person"})
+        if not _worker_rate.allow(task.id):
+            return JSONResponse(status_code=429, content={
+                "result": "denied", "reason": "too many approval requests from this worker"})
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > wa.MAX_BODY_BYTES:
+                return JSONResponse(status_code=413, content={
+                    "result": "denied", "reason": "approval request body too large"})
+        try:
+            body = _wjson.loads(bytes(raw) or b"{}")
+        except ValueError:
+            return JSONResponse(status_code=400, content={
+                "result": "denied", "reason": "approval request body is not JSON"})
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=400, content={
+                "result": "denied", "reason": "approval request body is not an object"})
+        session = task.session_id or ""
+        chat_id = None
+        if session.startswith("telegram:") and session.split(":", 1)[1].lstrip("-").isdigit():
+            chat_id = int(session.split(":", 1)[1])
+        # The model's words, on a card a person reads: one line each, capped,
+        # no control characters (worker_auth.clean_card_text).
+        tool_name = wa.clean_card_text(body.get("tool_name") or "?", wa.TOOL_NAME_CHARS)
+        reason = wa.clean_card_text(body.get("reason") or tool_name, wa.REASON_CHARS)
+        what = wa.clean_card_text(task.description, wa.DESCRIPTION_CHARS)
+        arguments = body.get("arguments") if isinstance(body.get("arguments"), dict) else None
+        result = await primary.request_approval(
+            tool_name,
+            f"Worker {task.id} ({what}) asks: {reason}",
+            chat_id=chat_id,
+            arguments=arguments,
+            once_only=True,
+            worker_task_id=task.id,
+            session_id=task.session_id,
+        )
+        return {"result": getattr(result, "value", str(result))}
 
     @app.get("/api/sessions/{session_id}/model")
     async def get_session_model(session_id: str):

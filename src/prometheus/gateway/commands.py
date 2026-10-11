@@ -2654,21 +2654,29 @@ async def approve_detail(
         pending = _pending_actions(queue)
         if not pending:
             return ApproveOutcome("No pending approval requests.")
-        from prometheus.permissions.approval_queue import is_desktop_request
+        from prometheus.permissions.approval_queue import (
+            is_desktop_request,
+            is_worker_request,
+        )
 
         # A DESKTOP TASK'S PROMPT IS NEVER PART OF "ALL" (computer-use v1.1,
         # W2). Draining a backlog must not approve "Set the field to <text>"
-        # or "Click 'Send'" sight unseen; each is answered on its own.
-        skipped = [a for a in pending if is_desktop_request(a)]
+        # or "Click 'Send'" sight unseen; each is answered on its own. Nor is a
+        # spawned WORKER's request: it asks for the worker, whose arguments
+        # the operator has not seen (#720).
+        def _alone(a: Any) -> bool:
+            return is_desktop_request(a) or is_worker_request(a)
+
+        skipped = [a for a in pending if _alone(a)]
         approved: list[str] = []
         for act in pending:
-            if is_desktop_request(act):
+            if _alone(act):
                 continue
             rid = getattr(act, "request_id", "")
             if rid and await queue.approve(rid, by=by):
                 approved.append(rid)
-        note = (f" — skipped {len(skipped)} desktop request(s); answer each "
-                f"with {prefix}approve <id>" if skipped else "")
+        note = (f" — skipped {len(skipped)} desktop or worker request(s); answer "
+                f"each with {prefix}approve <id>" if skipped else "")
         if not approved:
             if skipped:
                 return ApproveOutcome(
@@ -2757,6 +2765,13 @@ async def approve_detail(
     # pending dict the moment the event fires, and the grant needs the
     # structured target (path/command) it carries.
     action = queue.pending.get(request_id)
+    # An approve-once request (a worker's, a desktop prompt) refuses a lasting
+    # scope BY NAME. It used to approve once and remember nothing because it
+    # carried no grant target: the right outcome, by accident (#720).
+    if action is not None and getattr(action, "once_only", False) and scope != "once":
+        return ApproveOutcome(
+            f"Not approved: {request_id} can only be approved once — "
+            f"{prefix}approve {request_id}")
     from prometheus.permissions.approval_queue import (
         derive_grant)
 
