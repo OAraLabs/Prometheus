@@ -110,6 +110,7 @@ from prometheus.web.loopback import (
     is_loopback_host_header,
     is_same_machine,
 )
+from prometheus.web.setup_errors import refuse
 
 logger = logging.getLogger("prometheus.setup_mode")
 
@@ -352,19 +353,17 @@ def _setup_auth_error(request: "Request") -> "JSONResponse | None":
 
     expected, _source = resolve_api_token(None)
     if not expected:
-        return JSONResponse(status_code=401, content={
-            "error": "not_paired",
-            "detail": "no client is paired yet — POST /api/setup/pair with "
-                      "the pairing code first, then send the returned token "
-                      "as Authorization: Bearer <token>",
-        })
+        return refuse(
+            "not_paired",
+            "no client is paired yet — POST /api/setup/pair with "
+            "the pairing code first, then send the returned token "
+            "as Authorization: Bearer <token>")
     supplied = _extract_bearer(request)
     if not supplied or not hmac.compare_digest(supplied, expected):
-        return JSONResponse(status_code=401, content={
-            "error": "unauthorized",
-            "detail": "setup mutations require Authorization: Bearer with "
-                      "the token returned by /api/setup/pair",
-        })
+        return refuse(
+            "unauthorized",
+            "setup mutations require Authorization: Bearer with "
+            "the token returned by /api/setup/pair")
     return None
 
 
@@ -410,6 +409,32 @@ def _int_list(value: Any) -> list[int]:
     return out
 
 
+#: The configure fields that are text. A value of another type used to be turned into text (``str({"a": 1})`` was
+#: saved as an API key), so it is refused instead.
+_TEXT_FIELDS = (
+    "provider", "base_url", "model", "api_key", "agent_name", "persona", "telegram_token",
+    "slack_bot_token", "slack_app_token", "discord_token",
+)
+
+#: Longest key or token accepted; real ones are far shorter (the same sanity cap ``PUT /api/providers/keys`` uses).
+_SECRET_MAX_CHARS = 4096
+_MODEL_MAX_CHARS = 200
+
+
+def _has_control_characters(value: str) -> bool:
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
+def _unsafe_secret(value: str) -> str | None:
+    """Why *value* cannot be saved as a key or token, or ``None``. The env file is line-based: a line break in a
+    value starts a second assignment."""
+    if len(value) > _SECRET_MAX_CHARS:
+        return "that is too long to be a key or token"
+    if _has_control_characters(value):
+        return "a key or token has no control characters or line breaks"
+    return None
+
+
 def _apply_configure(
     body: dict[str, Any],
     *,
@@ -433,6 +458,7 @@ def _apply_configure(
     """
     from prometheus.cli.init import (
         _CLOUD_FAST_PROVIDERS,
+        KNOWN_LOCAL_SERVERS,
         _cloud_default_config,
         _default_config,
         apply_permission_mode_policy,
@@ -441,11 +467,22 @@ def _apply_configure(
     )
     from prometheus.config.paths import get_config_dir
 
+    # Every input is checked before anything is written: a refused token must not leave the good key behind.
+    wrong_type = [name for name in _TEXT_FIELDS if body.get(name) is not None and not isinstance(body[name], str)]
+    if wrong_type:
+        return refuse("bad_request", f"{', '.join(wrong_type)} must be text", fields=wrong_type)
+
     provider = str(body.get("provider") or "").strip()
     base_url = str(body.get("base_url") or "").strip().rstrip("/")
     model = str(body.get("model") or "").strip()
     api_key = str(body.get("api_key") or "").strip()
     is_cloud = provider in _CLOUD_FAST_PROVIDERS
+    local_providers = sorted({spec["provider"] for spec in KNOWN_LOCAL_SERVERS})
+    if provider and not is_cloud and provider not in local_providers:
+        return refuse(
+            "unsupported_provider",
+            f"setup offers {', '.join(local_providers + list(_CLOUD_FAST_PROVIDERS))}; got {provider[:40]!r}",
+            fields=["provider"])
     agent_name = str(body.get("agent_name") or "").strip()
     persona = str(body.get("persona") or "").strip()
     telegram_token = str(body.get("telegram_token") or "").strip()
@@ -475,12 +512,12 @@ def _apply_configure(
         from prometheus.config.env_file import get_env_file_path, parse_env_file
 
         if base_url:
-            return JSONResponse(status_code=400, content={
-                "error": "unexpected_base_url",
-                "detail": f"{provider} is a cloud provider and takes no base_url; "
-                          "send provider + model (+ api_key), or use a local "
-                          "provider with a base_url",
-            })
+            return refuse(
+                "unexpected_base_url",
+                f"{provider} is a cloud provider and takes no base_url; "
+                "send provider + model (+ api_key), or use a local "
+                "provider with a base_url",
+                fields=["base_url"])
         cloud_key_env, default_model, _limit = _CLOUD_FAST_PROVIDERS[provider]
         model = model or default_model
         if not api_key:
@@ -495,27 +532,30 @@ def _apply_configure(
                 except Exception:
                     present = False
             if not present:
-                return JSONResponse(status_code=400, content={
-                    "error": "cloud_key_missing",
-                    "detail": f"{provider} needs an API key: send api_key, or "
-                              f"set ${cloud_key_env} in the daemon's env file "
-                              "first — configure refused (a config written now "
-                              "would be known-broken)",
-                })
+                return refuse(
+                    "cloud_key_missing",
+                    f"{provider} needs an API key: send api_key, or "
+                    f"set ${cloud_key_env} in the daemon's env file "
+                    "first — configure refused (a config written now "
+                    "would be known-broken)",
+                    fields=["api_key"])
     else:
         missing = [k for k, v in
                    (("provider", provider), ("base_url", base_url), ("model", model))
                    if not v]
         if missing:
-            return JSONResponse(status_code=400, content={
-                "error": "bad_request",
-                "detail": f"missing required field(s): {', '.join(missing)}",
-            })
+            return refuse("bad_request", f"missing required field(s): {', '.join(missing)}", fields=missing)
         if not base_url.startswith(("http://", "https://")):
-            return JSONResponse(status_code=400, content={
-                "error": "bad_base_url",
-                "detail": "base_url must start with http:// or https://",
-            })
+            return refuse("bad_base_url", "base_url must start with http:// or https://", fields=["base_url"])
+
+    if api_key and (why := _unsafe_secret(api_key)):
+        return refuse("invalid_key", why, fields=["api_key"])
+    for name, token in (("telegram_token", telegram_token), ("slack_bot_token", slack_bot_token),
+                        ("slack_app_token", slack_app_token), ("discord_token", discord_token)):
+        if token and (why := _unsafe_secret(token)):
+            return refuse("invalid_token", f"{name}: {why}", fields=[name])
+    if len(model) > _MODEL_MAX_CHARS or _has_control_characters(model):
+        return refuse("bad_model", "model must be a short name with no control characters", fields=["model"])
 
     # Slack is a token PAIR — half a pair can only produce a gateway that
     # is enabled but can never start. Refuse it loudly (dead-end rule).
@@ -525,11 +565,10 @@ def _apply_configure(
             if slack_bot_token else
             ("slack_app_token", "slack_bot_token (xoxb-...)")
         )
-        return JSONResponse(status_code=400, content={
-            "error": "slack_token_pair_incomplete",
-            "detail": f"Slack needs BOTH tokens — got {got} but no {need}. "
-                      "Send both, or neither.",
-        })
+        return refuse(
+            "slack_token_pair_incomplete",
+            f"Slack needs BOTH tokens — got {got} but no {need}. Send both, or neither.",
+            fields=["slack_bot_token", "slack_app_token"])
 
     # Discord guild IDs: accept a JSON array (or comma string) of integer
     # IDs; anything non-numeric is a 400, not a silently-broken whitelist.
@@ -539,11 +578,10 @@ def _apply_configure(
         try:
             discord_guild_ids.append(int(g))
         except ValueError:
-            return JSONResponse(status_code=400, content={
-                "error": "bad_discord_guild_ids",
-                "detail": f"discord_guild_ids must be integer guild IDs "
-                          f"(got {g!r})",
-            })
+            return refuse(
+                "bad_discord_guild_ids",
+                f"discord_guild_ids must be integer guild IDs (got {g[:40]!r})",
+                fields=["discord_guild_ids"])
 
     if is_cloud:
         assert cloud_key_env is not None
@@ -558,12 +596,12 @@ def _apply_configure(
         # that is not there. Re-probe the exact provider+URL the client chose.
         server = probe_backend(provider, base_url)
         if server is None:
-            return JSONResponse(status_code=400, content={
-                "error": "backend_unreachable",
-                "detail": f"{base_url} did not answer like a {provider} "
-                          "inference server — configure refused (a config "
-                          "written now would be known-broken)",
-            })
+            return refuse(
+                "backend_unreachable",
+                f"{base_url} did not answer like a {provider} "
+                "inference server — configure refused (a config "
+                "written now would be known-broken)",
+                fields=["base_url"])
 
         config = _default_config(server, model)
     # The paired client reached setup mode on THESE ports — the real
@@ -691,23 +729,14 @@ def _pair_with_local_secret(
     from prometheus.config import api_token as api_token_module
 
     if request.headers.get("origin"):
-        return JSONResponse(status_code=400, content={
-            "error": "browser_not_allowed",
-            "detail": "this route is for the app on this Mac, not for a web page",
-        })
+        return refuse("browser_not_allowed", "this route is for the app on this Mac, not for a web page")
     if not (is_same_machine(request) and is_loopback_host_header(request.headers.get("host"))):
         logger.warning("Same-Mac pairing refused: the request did not come from this Mac")
-        return JSONResponse(status_code=403, content={
-            "error": "not_loopback",
-            "detail": "this pairing secret is only accepted from this Mac, over localhost",
-        })
+        return refuse("not_loopback", "this pairing secret is only accepted from this Mac, over localhost")
     if not local_pairing.consume_if_matches(code):
         logger.warning("Same-Mac pairing attempt failed (wrong or already-used secret)")
-        return JSONResponse(status_code=401, content={
-            "error": "invalid_code",
-            "attempts_remaining": pairing.attempts_remaining,
-            "detail": "wrong or already-used pairing secret",
-        })
+        return refuse("invalid_code", "wrong or already-used pairing secret",
+                      attempts_remaining=pairing.attempts_remaining)
     # Setup mode has no device registry (setup creates no ~/.prometheus state) and its mutations
     # authenticate with the global token, so the credential here IS the global token, by name. The
     # client trades it for an owner device token once the daemon is configured.
@@ -766,6 +795,18 @@ def create_setup_app(
     # right-looking answer. Set before any route is registered. See web/strict_query.py.
     app.router.route_class = StrictQueryRoute
 
+    # Whatever else goes wrong is still a coded answer, not a plain-text 500 a client has no word for. The
+    # exception's MESSAGE is not logged or sent: a library's can carry a URL or a header, and a header carries a key.
+    @app.exception_handler(Exception)
+    async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        import traceback
+
+        frames = traceback.extract_tb(exc.__traceback__)
+        where = f"{Path(frames[-1].filename).name}:{frames[-1].lineno}" if frames else "unknown"
+        logger.error("setup: unexpected %s on %s %s (at %s)", type(exc).__name__, request.method,
+                     request.url.path, where)
+        return refuse("internal_error", "something went wrong inside the daemon; see its log")
+
     # Public like the pairing routes below, and there is no bearer gate here to refuse a browser or
     # limit a peer, so the shared route does both itself (web/hello.py).
     _hello_limiter = hello_mod.new_limiter()
@@ -780,9 +821,8 @@ def create_setup_app(
     # a client sees the same refusal here as on a daemon that has turned requests off.
     @app.post("/api/pair/requests")
     async def pair_requests_unavailable() -> JSONResponse:
-        return JSONResponse(status_code=403, content={
-            "error": "pairing_unavailable",
-            "detail": "this daemon is in setup mode: pair with the six-digit code, or finish setup first"})
+        return refuse("pairing_unavailable",
+                      "this daemon is in setup mode: pair with the six-digit code, or finish setup first")
 
     @app.get("/api/setup/status")
     async def setup_status() -> dict[str, Any]:
@@ -800,10 +840,7 @@ def create_setup_app(
         except Exception:
             body = None
         if not isinstance(body, dict) or not str(body.get("code") or "").strip():
-            return JSONResponse(status_code=400, content={
-                "error": "bad_request",
-                "detail": 'expected a JSON body: {"code": "<6 digits>"}',
-            })
+            return refuse("bad_request", 'expected a JSON body: {"code": "<6 digits>"}', fields=["code"])
         code = str(body["code"]).strip()
         # A same-Mac client (Beacon, on the app install) sends the one-time FILE secret here instead of the
         # six-digit code. It never goes through ``pairing.attempt``: a wrong secret must not burn the
@@ -832,12 +869,9 @@ def create_setup_app(
                 "Pairing attempt failed (wrong code) — %d attempt(s) remaining",
                 pairing.attempts_remaining,
             )
-            return JSONResponse(status_code=401, content={
-                "error": "invalid_code",
-                "attempts_remaining": pairing.attempts_remaining,
-                "detail": f"wrong pairing code — "
-                          f"{pairing.attempts_remaining} attempt(s) remaining",
-            })
+            return refuse("invalid_code",
+                          f"wrong pairing code — {pairing.attempts_remaining} attempt(s) remaining",
+                          attempts_remaining=pairing.attempts_remaining)
         detail = {
             "pairing_used": "this pairing code was already used — restart the "
                             "daemon to mint a new one",
@@ -847,9 +881,7 @@ def create_setup_app(
                               "restart the daemon to re-enable it",
         }[reason]
         logger.warning("Pairing attempt rejected: %s", reason)
-        return JSONResponse(status_code=403, content={
-            "error": reason, "detail": detail,
-        })
+        return refuse(reason, detail)
 
     # ── Phase 2: remotely drivable setup (authed) ───────────────────────
 
@@ -868,10 +900,8 @@ def create_setup_app(
         if base_url is not None:
             url = base_url.strip().rstrip("/")
             if not url.startswith(("http://", "https://")):
-                return JSONResponse(status_code=400, content={
-                    "error": "bad_base_url",
-                    "detail": "base_url must start with http:// or https://",
-                })
+                return refuse("bad_base_url", "base_url must start with http:// or https://",
+                              fields=["base_url"])
             servers = detect_local_servers(
                 timeout=3.0, candidates=remote_server_candidates(url),
             )
@@ -925,27 +955,19 @@ def create_setup_app(
         except Exception:
             body = None
         if not isinstance(body, dict):
-            return JSONResponse(status_code=400, content={
-                "error": "bad_request",
-                "detail": 'expected a JSON body: {"provider", "api_key"}',
-            })
+            return refuse("bad_request", 'expected a JSON body: {"provider", "api_key"}')
         if "base_url" in body:
-            return JSONResponse(status_code=400, content={
-                "error": "unexpected_base_url",
-                "detail": "the key check calls each provider's own address; it takes no base_url",
-            })
+            return refuse("unexpected_base_url",
+                          "the key check calls each provider's own address; it takes no base_url",
+                          fields=["base_url"])
         provider, api_key = body.get("provider"), body.get("api_key")
         if not isinstance(provider, str) or not provider.strip():
-            return JSONResponse(status_code=400, content={
-                "error": "bad_request", "detail": "provider is required (a string)"})
+            return refuse("bad_request", "provider is required (a string)", fields=["provider"])
         if provider.strip() not in key_check.CHECKABLE_PROVIDERS:
-            return JSONResponse(status_code=400, content={
-                "error": "unsupported_provider",
-                "detail": f"the key check knows {', '.join(key_check.CHECKABLE_PROVIDERS)}",
-            })
+            return refuse("unsupported_provider",
+                          f"the key check knows {', '.join(key_check.CHECKABLE_PROVIDERS)}", fields=["provider"])
         if not isinstance(api_key, str) or not api_key.strip():
-            return JSONResponse(status_code=400, content={
-                "error": "bad_request", "detail": "api_key is required (a non-empty string)"})
+            return refuse("bad_request", "api_key is required (a non-empty string)", fields=["api_key"])
         # Blocking HTTP to the provider, off the event loop.
         verdict = await asyncio.to_thread(key_check.check_provider_key, provider.strip(), api_key.strip())
         return JSONResponse(status_code=200, content=verdict.as_dict())
@@ -960,20 +982,27 @@ def create_setup_app(
         except Exception:
             body = None
         if not isinstance(body, dict):
-            return JSONResponse(status_code=400, content={
-                "error": "bad_request",
-                "detail": 'expected a JSON body: {"provider", "base_url" '
-                          '(local providers) | "api_key"? (cloud providers), '
-                          '"model", "agent_name"?, "persona"?, '
-                          '"telegram_token"?, "slack_bot_token"?, '
-                          '"slack_app_token"?, "slack_channels"?, '
-                          '"discord_token"?, "discord_guild_ids"?}',
-            })
+            return refuse(
+                "bad_request",
+                'expected a JSON body: {"provider", "base_url" '
+                '(local providers) | "api_key"? (cloud providers), '
+                '"model", "agent_name"?, "persona"?, '
+                '"telegram_token"?, "slack_bot_token"?, '
+                '"slack_app_token"?, "slack_channels"?, '
+                '"discord_token"?, "discord_guild_ids"?}')
         # Blocking work (backend re-probe, file writes) off the event loop.
-        return await asyncio.to_thread(
-            _apply_configure, body, api_port=api_port, ws_port=ws_port,
-            bind=bind, bind_source=resolved_bind.source, state=state,
-        )
+        try:
+            return await asyncio.to_thread(
+                _apply_configure, body, api_port=api_port, ws_port=ws_port,
+                bind=bind, bind_source=resolved_bind.source, state=state,
+            )
+        except OSError as exc:
+            # The disk, not the request: a read-only folder, a full disk, a permission. The reason is the OS's own
+            # words; the request body (keys and tokens) is never in it.
+            logger.error("setup: configure could not write: %s", type(exc).__name__)
+            where = f" ({exc.filename})" if getattr(exc, "filename", None) else ""
+            return refuse("config_write_failed",
+                          f"could not write the settings{where}: {exc.strerror or type(exc).__name__}")
 
     @app.post("/api/setup/complete")
     async def setup_complete(request: Request) -> JSONResponse:
@@ -998,11 +1027,7 @@ def create_setup_app(
                 )
                 parsed = None
         if not isinstance(parsed, dict) or not parsed.get("model"):
-            return JSONResponse(status_code=409, content={
-                "error": "not_configured",
-                "detail": "no valid prometheus.yaml found — POST "
-                          "/api/setup/configure first",
-            })
+            return refuse("not_configured", "no valid prometheus.yaml found — POST /api/setup/configure first")
 
         state.restart_requested = True
         logger.info(
@@ -1036,12 +1061,10 @@ def create_setup_app(
         methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
     )
     async def setup_mode_catch_all(path: str) -> JSONResponse:
-        return JSONResponse(status_code=403, content={
-            "error": "setup_mode",
-            "detail": "the daemon is in setup mode — only /api/setup/* is "
+        return refuse("setup_mode",
+                      "the daemon is in setup mode — only /api/setup/* is "
                       "available. Finish `oara setup` on the host, "
-                      "then restart `oara daemon`.",
-        })
+                      "then restart `oara daemon`.")
 
     return app
 
