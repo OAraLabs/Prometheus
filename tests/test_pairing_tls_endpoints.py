@@ -27,6 +27,7 @@ Expected values are literals, not computed from the code under test.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 
 import pytest
@@ -181,3 +182,63 @@ class TestTheSharedHelper:
         plan = T.lan_tls_plan(HOME, "0.0.0.0")
         probe.app = type("A", (), {"state": type("S", (), {"lan_tls": plan})()})()
         assert T.request_tls_plan(probe) is plan
+
+
+# --------------------------------------------------------------------------- #
+# Real listeners: what the daemon is told about each connection, not what a test client says
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_over_real_uvicorn_listeners_the_tls_one_answers_tls_and_the_plain_one_does_not(tmp_path, monkeypatch):
+    """The rule reads ``scope["scheme"]`` and ``scope["server"]``; the test client makes both up from the URL. Here a
+    real TLS listener and a real plain one serve the same pairing app, on ports the OS chose, and the same approved
+    request is polled over each."""
+    import httpx
+
+    from prometheus.config.instance_cert import ensure_instance_certificate
+    from prometheus.web.server import start_web
+    from prometheus.web.serving import bound_port
+    from tests.support.pairing_world import Requester
+    from tests.test_lan_tls import _wait_started
+
+    monkeypatch.setenv("PROMETHEUS_NODE_DIR", str(tmp_path / "node"))
+    world = World(tmp_path, config={**HOME, "web": {"api_token": GLOBAL}})
+    ensure_instance_certificate()                          # over the instance key the World made
+    node = tmp_path / "node"
+    boot_plan = T.LanTlsPlan(host="127.0.0.1", api_port=0, ws_port=0,
+                             certfile=node / "instance.crt", keyfile=node / "instance.key")
+    app = world.app
+    plain = asyncio.create_task(start_web(app, host="127.0.0.1", port=0))
+    secure = asyncio.create_task(start_web(app, host="127.0.0.1", port=0, tls=boot_plan))
+    try:
+        plain_port = bound_port(await _wait_started(app, "http_server"))
+        tls_port = bound_port(await _wait_started(app, "https_server"))
+        # What the launcher publishes once it knows the ports it bound (a real daemon names them in config).
+        app.state.lan_tls = T.LanTlsPlan(host="127.0.0.1", api_port=tls_port, ws_port=49011,
+                                         certfile=boot_plan.certfile, keyfile=boot_plan.keyfile)
+        requester = Requester()
+        async with httpx.AsyncClient(verify=False) as client:
+            made = await client.post(f"http://127.0.0.1:{plain_port}/api/pair/requests", json={
+                "device_name": "Jennifer's MacBook", "platform": "macos", "public_key": requester.public_b64})
+            assert made.status_code == 201, made.text
+            created = made.json()
+            approved = await client.post(
+                f"http://127.0.0.1:{plain_port}/api/pair/requests/{created['request_id']}/approve",
+                headers={"Authorization": f"Bearer {GLOBAL}"}, json={})
+            assert approved.status_code == 200, approved.text
+            secret = {"X-Pairing-Secret": created["poll_secret"]}
+            poll = f"/api/pair/requests/{created['request_id']}"
+            over_tls = (await client.get(f"https://127.0.0.1:{tls_port}{poll}", headers=secret)).json()
+            world.clock.now += 1.1                         # the contract's one-poll-a-second floor
+            over_plain = (await client.get(f"http://127.0.0.1:{plain_port}{poll}", headers=secret)).json()
+        assert over_tls["endpoints"] == {"rest": f"https://127.0.0.1:{tls_port}", "ws": "wss://127.0.0.1:49011"}
+        assert over_tls["tls"] == {"spki_sha256": hashlib.sha256(world.der).hexdigest()}
+        assert over_plain["endpoints"] == {"rest": f"http://127.0.0.1:{plain_port}", "ws": "ws://127.0.0.1:8010"}
+        assert over_plain["tls"] is None
+    finally:
+        for name in ("http_server", "https_server"):
+            server = getattr(app.state, name, None)
+            if server is not None:
+                server.should_exit = True
+        await asyncio.wait_for(asyncio.gather(plain, secure), 10)
