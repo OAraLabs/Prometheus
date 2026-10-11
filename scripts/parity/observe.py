@@ -33,6 +33,9 @@ SKIP_SUFFIXES = (
     # snapshot and CI log. The node keys are NOT skipped: node/node.key keeps its content-normalised,
     # existence-compared rule (normalize.py: boot-stamps).
     "node/instance.key",
+    # Its certificate (config/instance_cert.py, pairing PR 5): made at boot over that key, with a random serial
+    # and the run's dates. Same reasoning; pinned by tests/test_lan_tls.py.
+    "node/instance.crt",
 )
 SKIP_NAMES = {".parity-root"}      # the harness's own marker, not a daemon write
 SKIP_PARTS = {
