@@ -241,6 +241,12 @@ async def launch_web(
     # POST /api/chat/send) can dispatch user messages through the same flow
     # the WebSocket uses, without duplicating the session+agent plumbing.
     app.state.ws_bridge = bridge
+    # Task re-engagement for non-Telegram conversations goes through the
+    # bridge, so a worker's result shows in the Beacon conversation that
+    # spawned it (tasks/reengage.py).
+    from prometheus.tasks.reengage import get_reengage_router
+
+    get_reengage_router().set_bridge(bridge.inject_turn)
     # Pairing requests (docs/PAIRING-APPROVAL-API.md): the owner's Beacon sockets hear about a new device
     # asking to join, and a socket that connects later is told what is still waiting. Telegram prompts
     # are OPT-IN (pairing.telegram_prompts, off by default): attach() does nothing unless it is on.

@@ -1074,6 +1074,51 @@ class WebSocketBridge:
         })
         return await self._run_agent(session_id, session, raise_on_error=True)
 
+    async def inject_turn(
+        self, session_id: str, content: str, *,
+        provenance: str = "task_supervisor", is_trusted: bool = False,
+    ) -> str:
+        """Run a NON-USER turn in ``session_id`` and show it live (#704).
+
+        The web half of task re-engagement (tasks/reengage.py): a worker's
+        result reaches the Beacon conversation that spawned it, recorded with
+        its own provenance — untrusted by default, so the model reads it as
+        data, never as the user's instruction — and broadcast like any turn so
+        an open conversation renders it. Telegram's ``inject_turn`` is the same
+        primitive for ``telegram:*`` chats. Returns the reply text.
+        """
+        if not self.session_mgr or not self.loop_context:
+            raise RuntimeError(
+                "bridge not fully wired (session_mgr/loop_context missing) — "
+                "cannot inject a turn"
+            )
+        if hasattr(self.session_mgr, "rehydrate_if_cold"):
+            self.session_mgr.rehydrate_if_cold(session_id)
+        session = self.session_mgr.get_or_create(session_id)
+        turn_index = session.add_user_message(
+            content, provenance=provenance, is_trusted=is_trusted)
+        row_id = session.last_persisted_row_id()
+        ts = time.time()
+        await self.broadcast({
+            "type": "chat_message",
+            "timestamp": ts,
+            "payload": {
+                "session_id": session_id,
+                "role": "user",
+                "content": content,
+                "content_json": json.dumps([{"type": "text", "text": content}]),
+                "message_id": row_id,
+                "ordinal": turn_index,
+                "client_msg_id": None,
+                "created_at": ts,
+                # Not the user's words: a client can render it as such.
+                "provenance": provenance,
+                "is_trusted": is_trusted,
+            },
+        })
+        text, _usage = await self._run_agent(session_id, session, raise_on_error=True)
+        return text
+
     def interrupt_turn(self, session_id: str) -> bool:
         """Stop the running agent turn in ``session_id`` (the chat Stop button).
 
