@@ -185,6 +185,10 @@ class BackgroundTaskManager:
         self.poll_initial_interval = poll_initial_interval
         self.poll_max_interval = poll_max_interval
         self.default_timeout_seconds = default_timeout_seconds
+        #: The config file the daemon booted from, passed to every worker it
+        #: starts so the child resolves its route against the SAME config
+        #: (tasks/worker_route.py). None outside the daemon: the child searches.
+        self.child_config_path: str | None = None
 
     # ------------------------------------------------------------------
     # Creation
@@ -281,6 +285,8 @@ class BackgroundTaskManager:
         cwd: str | Path,
         task_type: TaskType = "local_agent",
         model: str | None = None,
+        route: str | None = None,
+        metadata: Mapping[str, str] | None = None,
         api_key: str | None = None,
         command: str | None = None,
         session_id: str | None = None,
@@ -290,6 +296,13 @@ class BackgroundTaskManager:
         timeout_seconds: int | None = None,
     ) -> TaskRecord:
         """Start a Prometheus agent as a subprocess task.
+
+        *route* is a picker key (``qwen``, ``4090``, ``local``) the child
+        resolves as a full route against :attr:`child_config_path` — the spawn
+        tools decide it (tasks/worker_route.py) and pass nothing else, so no
+        endpoint or credential is ever on the command line. *model* is the
+        older bare ``--model`` (a name for the configured provider), kept for
+        callers that use it. *metadata* is added to the task record.
 
         THE CREDENTIAL NEVER ENTERS ``command``.
 
@@ -326,11 +339,10 @@ class BackgroundTaskManager:
         fallback source.
         """
         if command is None:
-            effective_api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-            if not effective_api_key:
-                raise ValueError(
-                    "Local agent tasks require ANTHROPIC_API_KEY or an explicit command override"
-                )
+            # No credential is required to START a worker: it runs on a route
+            # (often a local box) and reads its own credential from the
+            # environment it inherits, as the daemon does. A worker used to be
+            # refused without ANTHROPIC_API_KEY whatever it would run on.
             # The daemon's OWN interpreter, not whatever `python` is on PATH.
             # A Mac has no `python` at all ("command not found"), and where
             # one exists it is rarely the interpreter Prometheus is installed
@@ -338,10 +350,15 @@ class BackgroundTaskManager:
             # before it started: "No module named ..." (WP-X.24). And with -P -s, so a
             # module in the task's directory never shadows a real one (utils/child_python.py).
             cmd = prometheus_argv()
+            if self.child_config_path:
+                cmd.extend(["--config", self.child_config_path])
+            if route:
+                cmd.extend(["--route", route])
             if model:
                 cmd.extend(["--model", model])
             command = " ".join(shlex.quote(part) for part in cmd)
-            env_overlay = {"ANTHROPIC_API_KEY": effective_api_key}
+            # A key the caller passed still travels only in the environment.
+            env_overlay = {"ANTHROPIC_API_KEY": api_key} if api_key else None
             # The daemon built this command; nothing in it is the model's.
             # The sub-agent's own bash tool carries the floor.
             floored = False
@@ -370,6 +387,8 @@ class BackgroundTaskManager:
         if record.status in ("blocked", "failed"):
             return record
         updated = replace(record, prompt=prompt)
+        if metadata:
+            updated.metadata.update({str(k): str(v) for k, v in metadata.items()})
         self._tasks[record.id] = updated
         self._persist(updated)
         await self.write_to_task(record.id, prompt)

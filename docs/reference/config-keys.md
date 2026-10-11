@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **435** of
+Every key in `config/prometheus.yaml.default` — **437** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -441,6 +441,8 @@ none either — the key is documented so its absence is visible.
 | `tasks.poll_initial_interval_seconds` | `5` |
 | `tasks.poll_max_interval_seconds` | `120` |
 | `tasks.reengage_turn_cap` | `3` |
+| `workers` | *(section)* |
+| `workers.model` | `` |
 | `heartbeat` | *(section)* |
 | `heartbeat.maintenance_db` | `` |
 | `documents` | *(section)* |

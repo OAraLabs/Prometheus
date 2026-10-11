@@ -4,6 +4,8 @@ Prometheus Coding Mode is a sandboxed, autonomous "iterate-to-green" coding loop
 
 [← README](../../README.md)
 
+**Coding Mode is opt-in.** `coding.enabled` ships `false`; until you set it to `true` in `prometheus.yaml`, `oara code` exits non-zero and `POST /api/code` returns 403. Runs execute model-authored commands against a clone of your repository, so you turn them on deliberately.
+
 ![Artifact review: Converted verdict with acceptance evidence and a colorized diff](../assets/shots/run-2-artifact.png)
 
 ## The philosophy: done is a verdict, not a claim
@@ -124,7 +126,7 @@ One honest caveat: **Beacon's UI does not expose pause/inject yet.** Supervised 
 
 ## Honest limits
 
-- **The sandbox is process-level, not a container.** `ProcessSandbox` gives you a clone, a cwd jail, env-scrubbing, and time limits — but it is not OS-level isolation. `DockerSandbox` exists as an interface only and is unimplemented.
+- **The default sandbox is process-level, not a container.** `ProcessSandbox` gives you a clone, a cwd jail, env-scrubbing, and time limits — but it is not OS-level isolation.
 - **Live view is instance-local.** Beacon's live run view only shows runs launched from that Beacon instance. You cannot attach to a run started elsewhere (CLI, another Beacon), and relaunching Beacon mid-run loses the live view — the run itself keeps going, and the artifact is still there when it finishes.
 - **Per-round detail is coarse.** Tool names and per-test pass/fail are not on the wire yet; you get round-level outcome, tokens, duration, and thinking flag.
 - **Loop Manager is local-only.** Projects are local repository paths on the daemon host; there is no SSH or remote-host support in v1.

@@ -81,8 +81,8 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
 # Provider factory
 # ---------------------------------------------------------------------------
 
-def _detect_model_or_fallback(base_url: str, config_model: str) -> str:
-    """Query /v1/models to discover the loaded model; fall back to config value."""
+def _detect_served_model(base_url: str) -> str | None:
+    """The model a llama.cpp server reports at /v1/models, or None."""
     import httpx as _httpx
     url = f"{base_url.rstrip('/')}/v1/models"
     try:
@@ -93,9 +93,17 @@ def _detect_model_or_fallback(base_url: str, config_model: str) -> str:
             detected = models[0].get("id")
             if detected:
                 log.info("Detected loaded model: %s", detected)
-                return detected
+                return str(detected)
     except Exception as exc:
         log.warning("Could not detect model from %s: %s", url, exc)
+    return None
+
+
+def _detect_model_or_fallback(base_url: str, config_model: str) -> str:
+    """Query /v1/models to discover the loaded model; fall back to config value."""
+    detected = _detect_served_model(base_url)
+    if detected:
+        return detected
     log.info("Using model name from config: %s", config_model)
     return config_model
 
@@ -1466,6 +1474,13 @@ def main() -> None:
         help="Override provider (llama_cpp, ollama, anthropic)",
     )
     parser.add_argument(
+        "--route", type=str, default=None, metavar="KEY",
+        help="Run on one whole route: a picker key from GET /api/models (qwen, "
+             "qwen:qwen3.8-flash, 4090, local), resolved against this config. "
+             "Refused with the reason when it cannot be served. How a spawned "
+             "worker is told which route to run on.",
+    )
+    parser.add_argument(
         "--debug", action="store_true",
         help="Enable debug logging",
     )
@@ -2014,20 +2029,66 @@ def main() -> None:
     model_cfg = config.get("model", {})
     security_cfg = config.get("security", {})
 
+    # A model named on the command line is a CHOICE: it is served, or refused.
+    explicit_model: str | None = args.model or None
+    # --route pins this process to one route: no router, no provider fallback,
+    # so nothing moves it to another model mid-run (tasks/worker_route.py).
+    pinned_route = bool(args.route)
+    if args.route:
+        if args.model or args.provider:
+            print("error: --route names a whole route; it cannot be combined with "
+                  "--model or --provider", file=sys.stderr)
+            sys.exit(2)
+        from prometheus.router.model_router import split_model_key
+        from prometheus.tasks.worker_route import WorkerRouteRefused, resolve_route
+
+        try:
+            model_cfg = resolve_route(args.route, config)
+        except WorkerRouteRefused as exc:
+            print(f"error: route {args.route!r}: {exc}", file=sys.stderr)
+            sys.exit(2)
+        # A worker runs on its route or fails, plainly: no provider fallback
+        # to another model, the way an operator turns it off.
+        model_cfg["fallback"] = {"enabled": False}
+        config["model"] = model_cfg
+        # `4090:qwen2.5:7b` names its model; `4090` and `local` serve whatever
+        # their box serves, which detection reads below.
+        explicit_model = split_model_key(args.route)[1]
+
     # Apply CLI overrides
     if args.model:
         model_cfg["model"] = args.model
-    if args.provider:
+    if args.provider and args.provider != model_cfg.get("provider", "llama_cpp"):
+        # Another provider is another endpoint and another credential. The
+        # config's base_url and key belong to the CONFIGURED provider: kept,
+        # they sent `--provider qwen` (and its key) to the local box.
+        for k in ("base_url", "base_url_env", "api_key", "api_key_env"):
+            model_cfg.pop(k, None)
         model_cfg["provider"] = args.provider
 
     # Build components
     provider, model_name = create_provider(model_cfg)
 
-    # Detect actual loaded model from the server (falls back to config)
+    # The model a llama.cpp server serves is the one it was started with —
+    # one per process. Read it; a different name asked for explicitly is
+    # REFUSED, never run under the asked-for name (it used to be overwritten
+    # silently, so `--model qwen3.8-max` ran the local GGUF).
     if model_cfg.get("provider", "llama_cpp") in ("llama_cpp",):
-        model_name = _detect_model_or_fallback(
-            model_cfg.get("base_url", "http://localhost:8080"), model_name,
-        )
+        served = _detect_served_model(model_cfg.get("base_url", "http://localhost:8080"))
+        if explicit_model and served and served != explicit_model:
+            print(
+                f"error: model {explicit_model!r} is not what the llama_cpp server serves "
+                f"({served!r}); llama.cpp serves one model per process, so the request "
+                f"would run {served!r} under another name. Leave --model off to use the "
+                f"served model, or pass --route with a route that serves "
+                f"{explicit_model!r} (see GET /api/models).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if served:
+            model_name = served
+        else:
+            log.info("Using model name from config: %s", model_name)
         model_cfg["model"] = model_name
 
     security_gate = create_security_gate(security_cfg, getattr(args, "config", None))
@@ -2055,13 +2116,38 @@ def main() -> None:
         except Exception:
             pass
 
+    # Context compaction, as the daemon builds it (daemon.py, "Context size
+    # detection" and SPRINT-CONTEXT-COMPACTOR): the same `compaction:` switch,
+    # and the window MEASURED from the server (llama.cpp's /props n_ctx), never
+    # a configured effective_limit that outlived a model swap. Without it a
+    # spawned worker — this same CLI — had no tier-2 compaction and no #356
+    # pre-flight, and sent a prompt over its 32k window (#704).
+    detected_ctx_size: int | None = None
+    if hasattr(provider, "detect_context_size"):
+        try:
+            detected_ctx_size = asyncio.run(provider.detect_context_size())
+        except Exception:
+            log.warning("could not read the server's context size", exc_info=True)
+    compactor = None
+    try:
+        from prometheus.context.compactor import ContextCompactor
+
+        compactor = ContextCompactor.from_config(
+            config, provider=provider, model=model_name, telemetry=telemetry,
+            detected_limit=detected_ctx_size,
+        )
+    except Exception as exc:
+        log.warning("Context compactor not available: %s", exc)
+
     # DynamicToolLoader — deferred loading support
     from prometheus.context.dynamic_tools import DynamicToolLoader
     tool_loader = DynamicToolLoader(registry, config.get("tools", {}).get("deferred_loading"))
 
     # Sprint 10 / Phase 2: Model Router + Divergence Detector
     # Router now requires primary provider + adapter + model built beforehand.
-    model_router = create_model_router(config, provider, adapter, model_name)
+    model_router = (
+        None if pinned_route else create_model_router(config, provider, adapter, model_name)
+    )
     # Phase 3: wire router back into adapter.retry so RetryEngine can escalate
     if adapter is not None and hasattr(adapter, "retry"):
         adapter.retry.router = model_router
@@ -2121,6 +2207,7 @@ def main() -> None:
         log.warning("profile store unavailable — advertisement unfiltered", exc_info=True)
 
     context = LoopContext(
+        # None on a pinned route (its model_cfg disables it, above).
         fallback=build_fallback_target(model_cfg, detected_model=model_name),
         provider=provider,
         model=model_name,
@@ -2147,6 +2234,7 @@ def main() -> None:
         # The engine built above (create_lcm_engine) — the CLI ingests its
         # turns into it, and the microcompactor checks it; None if unavailable.
         lcm_engine=lcm_engine,
+        compactor=compactor,
         profile_resolver=profile_resolver,
         boot_memory_prompt=memory_section(boot_memory_content),
         memory_prompt_builder=memory_section,
