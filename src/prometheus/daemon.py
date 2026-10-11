@@ -54,7 +54,7 @@ from prometheus.__main__ import (
 )
 from prometheus.telemetry.tracker import TELEMETRY_OFF_NOTE, ToolCallTelemetry
 from prometheus.tools.base import ToolRegistry
-from prometheus.web.bind import BindError, resolve_bind
+from prometheus.web.bind import BindError, app_install_lan_guard, resolve_bind
 from prometheus.engine.fallback import build_fallback_target
 
 logger = logging.getLogger("prometheus.daemon")
@@ -658,6 +658,8 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # carries on, which for a bad bind would be exactly the wrong answer.
     # `getattr`: callers that build their own Namespace predate the flag.
     web_bind = resolve_bind(config, flag=getattr(args, "bind", None))
+    # The Mac app: plain HTTP on the LAN only if the owner opted in (web/bind.py app_install_lan_guard).
+    web_bind = app_install_lan_guard(web_bind, config)
 
     # ── Wiki root ───────────────────────────────────────────────────────
     # Resolved ONCE here and pinned process-wide; every consumer reads it back
@@ -2321,13 +2323,21 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             try:
                 from prometheus.tasks.completion_handler import TaskCompletionHandler
 
+                from prometheus.tasks.reengage import get_reengage_router
+
+                # Re-engagement goes to the conversation's own surface: a
+                # telegram:* chat through Telegram, anything else through the
+                # web bridge (set when the web launcher builds it), with or
+                # without Telegram configured (#704).
+                reengage = get_reengage_router()
+                reengage.telegram = (
+                    getattr(telegram, "inject_turn", None)
+                    if "telegram" in dir() and telegram is not None
+                    else None
+                )
                 task_completion = TaskCompletionHandler(
                     signal_bus=signal_bus,
-                    inject_turn=(
-                        getattr(telegram, "inject_turn", None)
-                        if "telegram" in dir() and telegram is not None
-                        else None
-                    ),
+                    inject_turn=reengage,
                     config=tasks_config,
                 )
                 await task_completion.start()

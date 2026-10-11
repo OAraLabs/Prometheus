@@ -245,6 +245,12 @@ async def launch_web(
     # POST /api/restart: the daemon's own restart, when it was started as the daemon.
     if request_restart is not None:
         app.state.request_restart = request_restart
+    # Task re-engagement for non-Telegram conversations goes through the
+    # bridge, so a worker's result shows in the Beacon conversation that
+    # spawned it (tasks/reengage.py).
+    from prometheus.tasks.reengage import get_reengage_router
+
+    get_reengage_router().set_bridge(bridge.inject_turn)
     # Pairing requests (docs/PAIRING-APPROVAL-API.md): the owner's Beacon sockets hear about a new device
     # asking to join, and a socket that connects later is told what is still waiting. Telegram prompts
     # are OPT-IN (pairing.telegram_prompts, off by default): attach() does nothing unless it is on.

@@ -391,7 +391,10 @@ func run() -> Never {
     // of the real module. -I keeps it off, and also ignores PYTHON* variables and the user site. -B: no bytecode
     // is written into the signed bundle. The two setenv calls above stay for the daemon's own children, which
     // inherit the environment but not these flags. tests/test_macos_launcher_run.py reads this line.
-    let arguments = [python, "-I", "-B", "-m", "prometheus", "daemon", "--bind", "127.0.0.1"]
+    // No --bind: a flag outranks the config file, and pinning one made the owner's network switch
+    // (PUT /api/network writes web.bind) impossible on the app. PROMETHEUS_INSTALL_KIND=app above makes
+    // the DEFAULT this Mac only (web/bind.py default_bind), so nothing changes until the config says so.
+    let arguments = [python, "-I", "-B", "-m", "prometheus", "daemon"]
     let cArguments: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) } + [nil]
     execv(python, cArguments)
     // execv only returns on failure.

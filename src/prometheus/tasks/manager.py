@@ -868,6 +868,62 @@ class BackgroundTaskManager:
 
         self._leak_state.drained = True
 
+    async def _retry_worker_on_parent_route(self, task: TaskRecord) -> bool:
+        """Re-run a worker ONCE on its parent's route when it ran out of context
+        on a smaller route the worker-model setting chose (Will's ruling D3).
+
+        A worker already on its parent's route is not retried: the same prompt
+        cannot fit the same window, and the code says so in its own words
+        ("retrying unchanged will fail the same way"). That is recorded, so the
+        report can say why. Returns True when the retry is running.
+        """
+        if task.status != "failed" or task.error not in _RETRY_ON_PARENT_REASONS:
+            return False
+        if task.metadata.get("worker_retry"):
+            return False  # once
+        parent = task.metadata.get("parent_route")
+        current = task.metadata.get("worker_route")
+        if not parent or not current or task.prompt is None or not task.command:
+            return False
+        if parent == current:
+            task.metadata["worker_retry_skipped"] = (
+                "it already ran on this conversation's route, and the same prompt "
+                "cannot fit the same window")
+            return False
+        command = _swap_route(task.command, parent)
+        if command is None:
+            return False
+        first = _json_or_none(task.metadata.get("worker_result"))
+        task.metadata["worker_retry"] = json.dumps({
+            "from_route": current, "to_route": parent,
+            "first_error": task.error, "first_result": first,
+        })
+        task.metadata["worker_route"] = parent
+        task.metadata.pop("worker_result", None)
+        task.command = command
+        task.status = "running"
+        task.error = None
+        task.return_code = None
+        task.ended_at = None
+        task.started_at = time.time()
+        self._emitted.discard(task.id)
+        self._persist(task)
+        log.warning("worker %s ran out of context on %s; retrying once on its parent's "
+                    "route %s", task.id, current, parent)
+        try:
+            process = await self._start_process(task.id)
+            assert process.stdin is not None
+            process.stdin.write((task.prompt.rstrip("\n") + "\n").encode("utf-8"))
+            await process.stdin.drain()
+            process.stdin.close()
+        except Exception as exc:  # noqa: BLE001 — the retry failed to start; report the first failure
+            log.warning("worker %s retry could not start: %s", task.id, exc)
+            task.status = "failed"
+            task.error = f"retry on {parent} could not start"
+            task.ended_at = time.time()
+            return False
+        return True
+
     def _record_worker_result(self, task: TaskRecord, *, timed_out: bool) -> None:
         """Copy a worker's result line onto its record; name its failure."""
         from prometheus.tasks.worker_result import parse_result
@@ -916,6 +972,8 @@ class BackgroundTaskManager:
                         "output_tail": self.read_task_output(task.id, max_bytes=4000),
                         # A worker's own result line, parsed (worker_result.py).
                         "worker_result": _json_or_none(task.metadata.get("worker_result")),
+                        # Its route, and the retry on its parent's route if any.
+                        "worker": _worker_view(task),
                     },
                     source="task_supervisor",
                 )
@@ -1005,6 +1063,9 @@ class BackgroundTaskManager:
         task.ended_at = time.time()
         self._processes.pop(task_id, None)
         self._waiters.pop(task_id, None)
+        # After the pops: a retry registers its own process and waiter.
+        if task.metadata.get("worker") == "1" and await self._retry_worker_on_parent_route(task):
+            return
         self._persist(task)
         await self._emit_completion(task)
 
@@ -1125,6 +1186,37 @@ def get_task_manager() -> BackgroundTaskManager:
         _DEFAULT_MANAGER = BackgroundTaskManager()
         _DEFAULT_MANAGER_KEY = current_key
     return _DEFAULT_MANAGER
+
+
+#: A worker that failed for one of these on a route the worker-model setting
+#: chose is retried once on its parent's route (Will's ruling D3).
+_RETRY_ON_PARENT_REASONS = frozenset({"context_overflow", "context_preflight_refusal"})
+
+
+def _swap_route(command: str, key: str) -> str | None:
+    """*command* with its ``--route`` value replaced by *key*, or None."""
+    parts = shlex.split(command)
+    if "--route" not in parts:
+        return None
+    i = parts.index("--route")
+    if i + 1 >= len(parts):
+        return None
+    parts[i + 1] = key
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+def _worker_view(task: TaskRecord) -> dict[str, Any] | None:
+    """The public facts about a worker's route for its completion payload."""
+    if task.metadata.get("worker") != "1":
+        return None
+    md = task.metadata
+    return {
+        "route": md.get("worker_route"),
+        "parent_route": md.get("parent_route"),
+        "source": md.get("worker_route_source"),
+        "retry": _json_or_none(md.get("worker_retry")),
+        "retry_skipped": md.get("worker_retry_skipped"),
+    }
 
 
 def _json_or_none(text: str | None) -> Any:

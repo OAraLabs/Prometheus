@@ -48,11 +48,20 @@ class SessionsSpawnTool(BaseTool):
             plan = plan_spawn(context.metadata, requested_model=arguments.model)
         except WorkerRouteRefused as exc:
             return ToolResult(output=f"sessions_spawn refused: {exc}", is_error=True)
+        # The worker reports back to the turn's own conversation (Will's
+        # ruling D4); it used to record no session at all, so nothing ever did.
+        from prometheus.tasks.reengage import conversation_of
+        from prometheus.tools.builtin.task_create import _notify_target_from_session
+
+        conversation = conversation_of(context.metadata)
         try:
             task = await manager.create_agent_task(
                 prompt=arguments.prompt,
                 description=arguments.description,
                 cwd=context.cwd,
+                session_id=conversation,
+                notify_target=_notify_target_from_session(conversation),
+                on_complete="reengage",
                 route=plan.key,
                 metadata=plan.record(),
                 # One brief, one turn, then exit with a result (cli/worker.py).
