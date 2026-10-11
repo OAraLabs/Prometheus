@@ -36,7 +36,8 @@
 FROM python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS build
 
 # The gateway and provider extras a server wants. Voice (onnxruntime), the browser (Playwright and its
-# browsers) and computer use (a desktop driver) are left out: build with --build-arg to add them.
+# browsers) and computer use (a desktop driver) are left out: build with --build-arg to add them. So is
+# discovery (mDNS): its announcements do not cross Docker's default bridge network.
 ARG PROMETHEUS_EXTRAS="anthropic mcp slack discord push"
 
 ENV UV_PYTHON_DOWNLOADS=never \

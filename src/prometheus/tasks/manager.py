@@ -29,6 +29,7 @@ import os
 import secrets
 import shlex
 import signal
+import sys
 import time
 import weakref
 from collections.abc import Mapping, Sequence
@@ -748,6 +749,7 @@ class BackgroundTaskManager:
             log.warning("resume_running: TaskStore.list failed", exc_info=True)
             return
 
+        orphans: list[TaskRecord] = []
         for rec in stale:
             self._tasks[rec.id] = rec
             if rec.type == "file_watch":
@@ -757,12 +759,71 @@ class BackgroundTaskManager:
                 self._waiters[rec.id] = asyncio.create_task(self._run_poll(rec.id))
                 log.info("Resumed poll task %s", rec.id)
             else:
-                rec.status = "failed"
-                rec.error = "daemon_restart"
-                rec.ended_at = time.time()
-                self._persist(rec)
-                await self._emit_completion(rec)
-                log.info("Reaped orphaned process task %s (daemon_restart)", rec.id)
+                orphans.append(rec)
+        # The OS process handle is gone with the old daemon, but the process
+        # may not be: it runs in a session of its own. Stop it (Will's ruling,
+        # 2026-09-20: "kill on reap"), then reap the record. Concurrently, so
+        # several orphans cost one grace period, not one each.
+        outcomes = await asyncio.gather(
+            *(self._stop_orphan(rec) for rec in orphans), return_exceptions=True)
+        for rec, outcome in zip(orphans, outcomes):
+            rec.metadata["restart_reap"] = (
+                outcome if isinstance(outcome, str) else f"could not be stopped: {outcome!r}")
+            rec.status = "failed"
+            rec.error = "daemon_restart"
+            rec.ended_at = time.time()
+            self._persist(rec)
+            await self._emit_completion(rec)
+            log.info("Reaped orphaned process task %s (daemon_restart): %s",
+                     rec.id, rec.metadata["restart_reap"])
+
+    async def _stop_orphan(self, rec: TaskRecord) -> str:
+        """Stop a previous daemon's process for *rec*, if it is still that process.
+
+        Returns what happened, for the record. Signals nothing it cannot show
+        is ours: the recorded pid must still carry the recorded start marker.
+        Then the whole tree goes — the task's process group and every
+        descendant's, including one that started a session of its own (a
+        worker's tool calls) — SIGTERM, then SIGKILL after the grace period.
+        """
+        try:
+            pid = int(rec.metadata.get("pid") or 0)
+        except ValueError:
+            pid = 0
+        if pid <= 1 or pid == os.getpid():
+            return "no pid recorded"
+        current = await _process_start_marker(pid)
+        if current is None:
+            return "already gone"
+        if not rec.metadata.get("pid_started") or current != rec.metadata["pid_started"]:
+            return "pid now belongs to another process; left alone"
+        tree = await _process_tree(pid)
+        members = set(tree)
+        own_group = os.getpgrp()
+        groups = set()
+        for p in tree:
+            try:
+                g = os.getpgid(p)
+            except OSError:
+                continue
+            if g in members and g != own_group:
+                groups.add(g)
+        _signal_all(groups, tree, signal.SIGTERM)
+        deadline = time.monotonic() + ORPHAN_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            if not [p for p in tree if await _process_start_marker(p) is not None]:
+                break
+            await asyncio.sleep(0.1)
+        else:
+            _signal_all(groups, tree, signal.SIGKILL)
+        for p in tree:  # a re-exec in place keeps the pid: reap our own children
+            try:
+                os.waitpid(p, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                pass
+        log.warning("Stopped orphaned task %s: %d process(es) left by the previous daemon",
+                    rec.id, len(tree))
+        return "stopped"
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1089,6 +1150,13 @@ class BackgroundTaskManager:
         )
         self._leak_state.spawned = True
         self._processes[task_id] = process
+        # Record WHICH process this is, durably, so a daemon that restarts
+        # while it runs can find it and stop it (resume_running): the pid,
+        # and its start time to tell it apart from a later process that
+        # reuses the pid. "You can't kill what you can't find."
+        task.metadata["pid"] = str(process.pid)
+        task.metadata["pid_started"] = await _process_start_marker(process.pid) or ""
+        self._persist(task)
         self._waiters[task_id] = asyncio.create_task(
             self._watch_process(task_id, process, generation)
         )
@@ -1260,6 +1328,75 @@ def get_task_manager() -> BackgroundTaskManager:
 #: A worker that failed for one of these on a route the worker-model setting
 #: chose is retried once on its parent's route (Will's ruling D3).
 _RETRY_ON_PARENT_REASONS = frozenset({"context_overflow", "context_preflight_refusal"})
+
+
+#: How long an orphaned task's processes get after SIGTERM, at restart,
+#: before SIGKILL.
+ORPHAN_GRACE_SECONDS = 5.0
+
+
+async def _process_start_marker(pid: int) -> str | None:
+    """A token naming THIS process instance (its start time), or None when the
+    pid is gone or a zombie. Linux reads /proc/<pid>/stat (start time in clock
+    ticks since boot, field 22); elsewhere (macOS) ``ps -o stat=,lstart=``."""
+    if sys.platform.startswith("linux"):
+        try:
+            data = Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
+            return None
+        # comm (field 2) is parenthesised and may hold spaces: split after it.
+        rest = data[data.rfind(")") + 2:].split()
+        if len(rest) < 20 or rest[0] == "Z":
+            return None
+        return f"proc:{rest[19]}"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ps", "-o", "stat=,lstart=", "-p", str(pid),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+    except (OSError, asyncio.TimeoutError):
+        return None
+    text = out.decode("utf-8", "replace").strip()
+    if not text or text.split()[0].startswith("Z"):
+        return None
+    return "ps:" + " ".join(text.split()[1:])
+
+
+async def _process_tree(root: int) -> list[int]:
+    """*root* and every descendant of it (``ps -A -o pid=,ppid=``)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ps", "-A", "-o", "pid=,ppid=",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+    except (OSError, asyncio.TimeoutError):
+        return [root]
+    children: dict[int, list[int]] = {}
+    for line in out.decode("utf-8", "replace").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    tree, todo = [root], [root]
+    while todo:
+        for child in children.get(todo.pop(), []):
+            if child not in tree:
+                tree.append(child)
+                todo.append(child)
+    return tree
+
+
+def _signal_all(groups: set[int], pids: list[int], sig: int) -> None:
+    """*sig* to each process group in *groups*, then to each pid (best effort)."""
+    for g in groups:
+        try:
+            os.killpg(g, sig)
+        except OSError:
+            pass
+    for p in pids:
+        try:
+            os.kill(p, sig)
+        except OSError:
+            pass
 
 
 def _swap_route(command: str, key: str) -> str | None:
