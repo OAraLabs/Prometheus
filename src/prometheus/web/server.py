@@ -603,17 +603,21 @@ def create_app(
         # exist — the store keeps a SHA-256.
         if owner:
             # The global token minting an OWNER device — the person's own cockpit on THIS Mac trading the
-            # setup-mode token for one of its own. Owner tokens come only from same-Mac pairing (Will,
-            # 2026-10-08): from any other address this is refused, and the other computer is enrolled as an
-            # ordinary, scoped device like every approved one. From this Mac's loopback address it carries the
-            # same-Mac source and replaces the earlier same-Mac credentials, exactly as a re-pairing does.
-            # (The test is `is_same_machine`: a loopback TCP peer AND no X-Forwarded-For or Forwarded header.
-            # A proxy on this machine (`tailscale serve`, cloudflared, nginx) connects from loopback and relays
-            # requests from anywhere; the header it adds is what gives it away.)
+            # setup-mode token for one of its own. This route issues owner tokens for THIS Mac only (Will,
+            # 2026-10-08): from any other address it is refused, and the other computer is enrolled as an
+            # ordinary, scoped device, or becomes an owner device only through a one-time code the person
+            # mints on this machine (`oara pair --owner`, web/owner_code_routes.py). From this Mac's loopback
+            # address it carries the same-Mac source and replaces the earlier same-Mac credentials, exactly as a
+            # re-pairing does.
+            # (The test is `is_same_machine`: a loopback TCP peer AND no relay header (X-Forwarded-For, Forwarded,
+            # X-Real-IP, Via, ...). A proxy on this machine (`tailscale serve`, cloudflared, nginx) connects from
+            # loopback and relays requests from anywhere; a header it adds gives it away, and one that adds none
+            # (nginx's bare proxy_pass, a TCP forwarder) is not seen by any peer test.)
             if not is_same_machine(request):
                 return JSONResponse(status_code=403, content={
                     "error": "owner devices are issued only for this Mac, from this Mac; enrol another "
-                             "computer without owner (an ordinary, scoped device)"})
+                             "computer without owner (an ordinary, scoped device), or make it an owner device "
+                             "with a code from `oara pair --owner` run on this machine"})
             minted = _devices_or_create().mint_owner(
                 name, platform, by=api_token_module.OWNER_SOURCE_SAME_MAC_MINT,
                 replaces=api_token_module.SAME_MAC_OWNER_SOURCES)
@@ -6479,6 +6483,13 @@ def create_app(
     from prometheus.web.pairing_routes import register_pairing_routes
 
     register_pairing_routes(
+        app, config=config, devices=_devices_or_create, auth_on=lambda: bool(_api_token))
+
+    # ── Owner codes (oara pair --owner): a Beacon on another computer becomes the owner's own device ────
+    # Minted by the global token from this host only, redeemed on one public route (web/owner_code_routes.py).
+    from prometheus.web.owner_code_routes import register_owner_code_routes
+
+    register_owner_code_routes(
         app, config=config, devices=_devices_or_create, auth_on=lambda: bool(_api_token))
 
     # ── Network mode and discovery (GET/PUT /api/network; docs/PAIRING-APPROVAL-API.md 2.2) ────

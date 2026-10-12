@@ -192,6 +192,10 @@ OWNER_SOURCE_SAME_MAC_MINT = "same-mac-mint"
 #: from nothing else: an owner device minted for another computer carries a different ``marked_by`` and is
 #: never revoked by this Mac's re-pairing.
 SAME_MAC_OWNER_SOURCES = (OWNER_SOURCE_SAME_MAC, OWNER_SOURCE_SAME_MAC_MINT)
+#: … and for one a Beacon on ANOTHER computer redeemed with a one-time owner code (``POST /api/pair/owner``) that
+#: the person minted on this machine with ``oara pair --owner`` (config/owner_codes.py). Never replaced by this
+#: Mac's re-pairing, and a second redemption never replaces the first: each computer keeps its own.
+OWNER_SOURCE_OWNER_CODE = "owner-code"
 DEFAULT_OWNER_DEVICE_NAME = "Beacon on this Mac"
 
 

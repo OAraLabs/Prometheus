@@ -1855,7 +1855,8 @@ def main() -> None:
         from prometheus.cli.token import run_token_command
         sys.exit(run_token_command(args, load_config(args.config)))
 
-    # `oara pair list|approve|deny` — decide the devices asking to join (the terminal route).
+    # `oara pair list|approve|deny` — decide the devices asking to join (the terminal route); `oara pair --owner`
+    # prints a one-time code that makes a Beacon on another computer an owner device.
     if args.command == "pair":
         from prometheus.cli.pair import run_pair_command
         sys.exit(run_pair_command(args, load_config(args.config)))

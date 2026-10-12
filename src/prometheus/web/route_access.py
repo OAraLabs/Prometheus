@@ -216,6 +216,10 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/pair/requests"),
     ("POST", "/api/pair/requests/{request_id}/approve"),
     ("POST", "/api/pair/requests/{request_id}/deny"),
+    # minting an owner code: the handler narrows further, to the global token from this host
+    ("POST", "/api/pair/owner-codes"),
+    ("GET", "/api/pair/owner-codes/{code_id}"),
+    ("DELETE", "/api/pair/owner-codes/{code_id}"),
     # /api/pairs
     ("GET", "/api/pairs"),
     # /api/paperclip
