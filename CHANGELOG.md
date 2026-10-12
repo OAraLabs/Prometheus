@@ -2,6 +2,51 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## 0.9.8
+
+A Beacon on another computer can now become the owner's own device, so it can approve workers. Workers also behave better at the edges: their approval requests end when they do, and their time limit is a setting that counts only working time. Read "Upgrading from 0.9.7": a worker's time limit no longer comes from the model, and a late answer to an approval is now a 410.
+
+### Owner devices on other computers (#748, #750)
+
+- **`oara pair --owner` makes a Beacon on another computer an owner device (#748).**
+  - Run it on the machine Prometheus runs on. It asks the daemon for a one-time code (8 digits, 5 minutes, one use), prints it, and waits to report who used it and from which address. Ctrl-C cancels it.
+  - Only the API token, from that machine, can mint a code (`POST /api/pair/owner-codes`; `GET`/`DELETE /api/pair/owner-codes/{id}` report on it and cancel it). An owner device can't mint one.
+  - The other computer's Beacon sends the code to `POST /api/pair/owner` (`{code, device_name, platform}`, no token needed) and gets an owner device token of its own, listed with `owner_source: "owner-code"`. Unlike the API token, that device can approve a worker's request (#744). The token is in the answer in clear, so redeem over TLS, a tailnet or loopback.
+  - Re-pairing this Mac never revokes it, and neither does another computer's redemption. Every failure is one `401 invalid_code`.
+  - Each code issued or redeemed is announced to the owner's open Beacons (an `owner_code` frame).
+- **Wrong guesses can't switch an owner code off (#750).**
+  - Five wrong tries shut out one address (an IPv6 /64 counts as one). At most ten wrong tries a minute are checked from everyone together; past that, tries are refused unchecked until the minute passes, the right code included.
+  - No number of guesses ends a code, so a stranger can delay a redemption but never cancel it. A code gets about 50 chances in 10^8.
+  - The terminal warns as wrong tries come in, and the code's status carries `wrong_attempts`.
+  - `oara pair --owner` shows a code only on a terminal (over ssh, `ssh -t`), so asking the agent to run it, or piping it, can't put the code in a transcript or a log.
+
+### Workers (#751, #752)
+
+- **A worker's approval requests end when the worker does (#751).** Before, a worker stopped at its time limit left its request pending for as long as the approval window lasted.
+  - When a worker's process ends for any reason (it finished, ran out of time, was stopped or killed, or a context-overflow retry replaced it), its requests leave the queue at once.
+  - Every client gets `approval_resolved` with `resolution: "withdrawn"` and a `reason`, so the card drops everywhere. The chat that was asked gets a notice that it was withdrawn and nothing ran. Anything still waiting on it gets a denial.
+  - A daemon shutting down or restarting withdraws everything still pending, the same way.
+  - Approving or denying a request that has ended is **410** `no_longer_active`, with how it ended: withdrawn and why, already approved, already denied, expired, or no record (the daemon restarted). The body keeps `ok: false` and the usual keys. A scoped device still gets 404 for a request that isn't its own conversation's.
+- **A worker's time limit is `workers.timeout_minutes`, default 60 (#752).**
+  - The limit counts working time only: time spent waiting for a person to approve something doesn't count.
+  - The agent can't set it. `task_create`'s `timeout_seconds` is for shell, watch and poll tasks, and is ignored for a worker; `tasks.default_timeout_seconds` no longer applies to workers either.
+  - A worker stopped for time tells its conversation so: "stopped after N minutes — time limit", with its limit, any approval wait that didn't count, and what to try next.
+
+### Models
+
+- **Gemini and xAI keys can be checked (#740)** by `POST /api/setup/check-key` and `POST /api/model/check-key`, which answered `unsupported_provider` for them before. Both services answer an invalid key with HTTP 400 rather than 401, so the check reads each service's own error code for a bad key. Gemini's key is checked against its native model list.
+
+### Upgrading from 0.9.7
+
+- **Workers now stop after 60 minutes of working time** unless you set `workers.timeout_minutes`. A limit the agent passed to `task_create`, or `tasks.default_timeout_seconds`, no longer applies to workers.
+- **A late approve or deny is now 410 `no_longer_active`.** It used to be `200` with `ok: false`. A client that reads only the status code should treat 410 as "this request is gone".
+- **One more route answers without a token:** `POST /api/pair/owner`. It needs a code minted on the daemon's own machine, and wrong guesses are rate-limited per address and in total.
+- The `owner_code` frame's `locked` event and the code status `locked` no longer occur: wrong guesses don't end a code.
+
+### Known issues
+
+- If `web.bind` is set to a specific LAN address (not `0.0.0.0` or loopback), worker approval requests are refused (fail closed); use `0.0.0.0` or home-network mode.
+
 ## 0.9.7
 
 Prometheus can now be reached from more than one device. Phones and other computers pair with the owner's approval and get their own scoped tokens, and the home network gets TLS. This is also the first release with a Mac app and an official Docker image. Read "Upgrading from 0.9.6" before you restart the daemon: existing device tokens become scoped, and on macOS the shells a model writes lose `~/.ssh`.
