@@ -3020,6 +3020,14 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     logger.info("Shutting down...")
     archive.archive_event("daemon_shutdown")
 
+    # Pending approvals live in this process's memory, and nothing that asked survives it (a restart re-execs, and
+    # the workers are reaped on boot). Withdraw them now, while Telegram and the sockets can still say so, so no card
+    # waits on screen for an answer that can reach nothing.
+    from prometheus.permissions.approval_queue import withdraw_pending_for_shutdown
+
+    await withdraw_pending_for_shutdown([approval_queue if "approval_queue" in dir() else None,
+                                         getattr(computer, "channel", None)])
+
     if lsp_orchestrator:
         await lsp_orchestrator.shutdown_all()
 

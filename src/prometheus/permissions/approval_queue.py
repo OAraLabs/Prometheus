@@ -103,6 +103,8 @@ class PendingAction:
     #: grant here would grant nothing. Not ``task_id``: that means a DESKTOP
     #: prompt, with the desktop's own approval rules.
     worker_task_id: str | None = None
+    #: The chat the prompt went to (Telegram), so a withdrawal is told where the request was asked. None: no chat.
+    notify_chat: Any = None
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _result: ApprovalResult = ApprovalResult.TIMEOUT
 
@@ -442,6 +444,9 @@ class ApprovalQueue:
         # Where each request came from, kept after the request leaves ``pending`` so a resolution frame is
         # routed exactly like the request's: request id -> (session id or None, is a desktop prompt).
         self._origins: OrderedDict[str, tuple[str | None, bool]] = OrderedDict()
+        # How each request ENDED, kept after it leaves ``pending`` (as ``_origins``), so a late answer is told why it
+        # acts on nothing: request id -> (resolution, detail): approved / denied / expired / withdrawn (+ the reason).
+        self._finished: OrderedDict[str, tuple[str, str]] = OrderedDict()
         # Late-wired SignalBus (daemon.py sets it after the bus exists, same
         # pattern as extractor/skill_creator). While None, emission silently
         # skips — behavior identical to pre-push-approval builds.
@@ -462,6 +467,18 @@ class ApprovalQueue:
         self._origins.move_to_end(action.request_id)
         while len(self._origins) > self.ORIGINS_REMEMBERED:
             self._origins.popitem(last=False)
+
+    def _remember_end(self, request_id: str, resolution: str, detail: str = "") -> None:
+        self._finished[request_id] = (resolution, detail)
+        self._finished.move_to_end(request_id)
+        while len(self._finished) > self.ORIGINS_REMEMBERED:
+            self._finished.popitem(last=False)
+
+    def finished(self, request_id: str) -> tuple[str, str] | None:
+        """``(resolution, detail)`` for a request this queue raised and that has ended (``approved``, ``denied``,
+        ``expired`` or ``withdrawn`` with its reason), or None if it is still pending, never existed here, or is
+        older than the log. A restart forgets everything: the queue lives in memory."""
+        return self._finished.get(request_id)
 
     def origin_of(self, request_id: str) -> tuple[str | None, bool] | None:
         """``(session id, is a desktop prompt)`` for a request this queue raised, or None if it never did
@@ -646,6 +663,7 @@ class ApprovalQueue:
             session_id=session_id or RUN_SESSION.get(),
             once_only=once_only,
             worker_task_id=worker_task_id,
+            notify_chat=chat_id or self._default_chat_id,
         )
         self._register(action)
         await self._emit("approval_pending", self.serialize_pending(action))
@@ -746,6 +764,7 @@ class ApprovalQueue:
             from prometheus.permissions.audit import AuditDecision
 
             self._audit_resolution(action, AuditDecision.CONFIRM_TIMEOUT)
+            self._remember_end(request_id, "expired")
             await self._notify_expiry(action, target_chat)
             await self._emit("approval_resolved", {
                 "request_id": request_id, "resolution": "expired",
@@ -851,10 +870,12 @@ class ApprovalQueue:
                     f"returning True -- which is what made this silent."
                 )
         action = self.pending.get(request_id)
-        if action is None:
+        if action is None or request_id in self._finished:
+            # Gone, or already answered and waiting for its waiter to pop it: a second answer resolves nothing.
             return False
         action._result = ApprovalResult.APPROVED
         action._event.set()
+        self._remember_end(request_id, "approved")
         self._audit_resolution(
             action, AuditDecision.CONFIRM_APPROVED, scope=scope, grant=grant,
             by=by,
@@ -873,10 +894,11 @@ class ApprovalQueue:
         from prometheus.permissions.audit import AuditDecision
 
         action = self.pending.get(request_id)
-        if action is None:
+        if action is None or request_id in self._finished:
             return False
         action._result = ApprovalResult.DENIED
         action._event.set()
+        self._remember_end(request_id, "denied")
         self._audit_resolution(action, AuditDecision.CONFIRM_REJECTED, by=by)
         await self._emit("approval_resolved", {
             "request_id": request_id, "resolution": "denied",
@@ -887,6 +909,71 @@ class ApprovalQueue:
     def list_pending(self) -> list[PendingAction]:
         """Return all pending approval requests."""
         return list(self.pending.values())
+
+    # -- withdrawal: the asker is gone ------------------------------------------------------------------------------
+
+    async def withdraw(self, request_id: str, *, why: str) -> bool:
+        """End a pending request because whatever asked can no longer act on an answer (a worker that ended, a daemon
+        going down). True if it was pending.
+
+        It resolves as a DENIAL for anything still waiting on it: there is deliberately no new ``ApprovalResult``,
+        because callers check DENIED and TIMEOUT and read anything else as approved. Everyone is told it is gone:
+        ``approval_resolved`` with ``resolution: "withdrawn"`` and *why* (every client drops the card), a notice to the
+        chat that was asked, and a resolution row. A later approve or deny finds nothing (``finished`` says why).
+        """
+        from prometheus.permissions.approver import in_process
+        from prometheus.permissions.audit import AuditDecision
+
+        action = self.pending.pop(request_id, None)
+        if action is None:
+            return False
+        action._result = ApprovalResult.DENIED
+        action._event.set()
+        self._remember_end(request_id, "withdrawn", why)
+        self._audit_resolution(action, AuditDecision.CONFIRM_REJECTED, by=in_process(f"withdrawn: {why}"))
+        logger.info("approval %s withdrawn (%s)", request_id, why)
+        await self._notify_withdrawn(action, why)
+        await self._emit("approval_resolved", {"request_id": request_id, "resolution": "withdrawn", "reason": why})
+        return True
+
+    async def withdraw_worker(self, worker_task_id: str, *, why: str) -> list[str]:
+        """Withdraw every pending request a worker raised (its process ended). Returns their ids."""
+        ids = [a.request_id for a in list(self.pending.values()) if a.worker_task_id == worker_task_id]
+        return [rid for rid in ids if await self.withdraw(rid, why=why)]
+
+    async def withdraw_all(self, *, why: str) -> list[str]:
+        """Withdraw everything pending (the daemon is going down). Returns the ids."""
+        return [rid for rid in list(self.pending) if await self.withdraw(rid, why=why)]
+
+    async def _notify_withdrawn(self, action: PendingAction, why: str) -> None:
+        chat_id = action.notify_chat
+        if not (self._telegram and chat_id):
+            return
+        msg = (f"Approval WITHDRAWN — {why}.\n"
+               f"Tool: {action.tool_name}\n"
+               f"Request {action.request_id} is no longer active, and the action did NOT run. "
+               f"There is nothing left to approve.")
+        try:
+            await self._telegram.send(chat_id, msg, parse_mode=None)
+        except Exception as exc:  # pragma: no cover - notify is best-effort
+            logger.warning("Failed to send approval-withdrawn notice: %s", exc)
+
+
+#: Why everything still pending is withdrawn when the daemon stops (a restart re-execs it: the queue is memory only).
+SHUTDOWN_REASON = "the daemon is shutting down"
+
+
+async def withdraw_pending_for_shutdown(queues: Any, why: str = SHUTDOWN_REASON) -> None:
+    """The graceful shutdown's step: every queue withdraws what is pending, while Telegram and the sockets can still
+    say so. Never raises (a shutdown must finish), and each queue is tried whatever another did."""
+    for queue in queues or ():
+        withdraw_all = getattr(queue, "withdraw_all", None)
+        if withdraw_all is None:
+            continue
+        try:
+            await asyncio.wait_for(withdraw_all(why=why), timeout=5)
+        except Exception:  # noqa: BLE001 - best effort on the way down
+            logger.warning("could not withdraw pending approvals at shutdown", exc_info=True)
 
 
 class ApprovalQueues:
@@ -973,6 +1060,25 @@ class ApprovalQueues:
         if owner is None:
             return False
         return await owner.deny(request_id, by=by)
+
+    def finished(self, request_id: str) -> tuple[str, str] | None:
+        for q in self._queues:
+            found = getattr(q, "finished", lambda _rid: None)(request_id)
+            if found is not None:
+                return found
+        return None
+
+    async def withdraw_worker(self, worker_task_id: str, *, why: str) -> list[str]:
+        withdrawn: list[str] = []
+        for q in self._queues:
+            withdrawn += await q.withdraw_worker(worker_task_id, why=why)
+        return withdrawn
+
+    async def withdraw_all(self, *, why: str) -> list[str]:
+        withdrawn: list[str] = []
+        for q in self._queues:
+            withdrawn += await q.withdraw_all(why=why)
+        return withdrawn
 
 
 def is_desktop_request(action: Any) -> bool:

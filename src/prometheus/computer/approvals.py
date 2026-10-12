@@ -96,6 +96,7 @@ class ComputerApprovalChannel(ApprovalQueue):
             session_id=session_id,
             once_only=True,
             text_chars=len(raw_text) if isinstance(raw_text, str) else None,
+            notify_chat=chat_id,
         )
         self._register(action)
         await self._emit("approval_pending", self.serialize_pending(action))

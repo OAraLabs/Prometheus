@@ -355,10 +355,11 @@ def _gone(response, *, says: str) -> bool:
             and says in body.get("detail", ""))
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("verb", ["approve", "deny"])
-def test_a_late_answer_to_a_withdrawn_request_is_410_and_acts_on_nothing(d, verb):
+async def test_a_late_answer_to_a_withdrawn_request_is_410_and_acts_on_nothing(d, verb):
     action = d.worker_request("f0f0a001")
-    asyncio.run(d.queue.withdraw_worker("aaae770e7", why="its time limit ran out"))
+    await d.queue.withdraw_worker("aaae770e7", why="its time limit ran out")
     count = len(d.bus.signals)
     r = d.answer("owner", verb, "f0f0a001")
     assert _gone(r, says="its time limit ran out"), r.text
@@ -366,15 +367,17 @@ def test_a_late_answer_to_a_withdrawn_request_is_410_and_acts_on_nothing(d, verb
     assert action._result == ApprovalResult.DENIED and len(d.bus.signals) == count
 
 
-def test_the_device_whose_conversation_it_was_is_told_410_too(d):
+@pytest.mark.asyncio
+async def test_the_device_whose_conversation_it_was_is_told_410_too(d):
     d.worker_request("f0f0a002")
-    asyncio.run(d.queue.withdraw_worker("aaae770e7", why="it was stopped"))
+    await d.queue.withdraw_worker("aaae770e7", why="it was stopped")
     assert _gone(d.answer("alice", "approve", "f0f0a002"), says="it was stopped")
 
 
-def test_another_device_still_gets_the_404_it_always_did(d):
+@pytest.mark.asyncio
+async def test_another_device_still_gets_the_404_it_always_did(d):
     d.worker_request("f0f0a003")
-    asyncio.run(d.queue.withdraw_worker("aaae770e7", why="it was stopped"))
+    await d.queue.withdraw_worker("aaae770e7", why="it was stopped")
     r = d.answer("bob", "approve", "f0f0a003")
     assert r.status_code == 404, r.text
 

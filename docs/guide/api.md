@@ -228,6 +228,10 @@ Artifacts are **content-addressed**: ids are a sha256 prefix of the file bytes, 
 | POST | `/api/approvals/{request_id}/approve` | Approve a request |
 | POST | `/api/approvals/{request_id}/deny` | Deny a request |
 
+**A request that has ended cannot be answered.** Approving or denying a request that is no longer pending acts on nothing and is **410** `{"ok": false, "error": "no_longer_active", "resolution", "detail", ...}` (the approve route's usual `remembered`, `grant_id`, `message` and `skipped` keys are there too). `resolution` says how it ended: `withdrawn` (with the reason in `detail`), `approved`, `denied`, `expired`, or `null` when this daemon has no record of it (the queue is in memory, so a restart ends every request). A scoped device still gets 404 for a request that is not its own conversation's. `all` is not a request id.
+
+**A request is withdrawn when whatever asked can no longer act on an answer.** The moment a spawned worker's process ends (it finished, its time limit ran out, it was stopped or killed, or a context-overflow retry replaced it) its requests leave the queue, and when the daemon shuts down or restarts everything still pending does. Each sends `approval_resolved` with `resolution: "withdrawn"` and a `reason` ("its time limit ran out", "it was stopped", "the daemon is shutting down"), so every connected client drops the card, plus a Telegram notice to the chat that was asked. Whatever was still waiting on it gets a denial.
+
 ### Benchmarks
 
 | Method | Path | Purpose |
