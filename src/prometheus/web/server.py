@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import time
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -4788,6 +4789,40 @@ def create_app(
             return JSONResponse(status_code=404, content={"error": "unknown request"})
         return None
 
+    def _no_longer_active(request: Request, request_id: str) -> JSONResponse | None:
+        """The 410 for an answer to a request that is not pending any more, else None.
+
+        A late approve or deny acts on nothing, and says why: withdrawn (the worker that asked ended, or the daemon
+        went down: the queue's ``finished`` has the reason), already approved, already denied, expired, or no record
+        at all (the queue is memory only, so a restart ends every request). ``ok: false`` stays in the body for
+        clients that read only that. A scoped caller hears this only about its own conversation's request; anything
+        else stays ``_not_mine``'s 404, so not yours still looks exactly like not there. ``all`` is not a request id.
+        A helper, like ``_not_mine``, because ``approve_action`` is pinned to contain no membership test.
+        """
+        queue = app.state.approval_queue
+        if not queue or request_id == "all":
+            return None
+        ended = getattr(queue, "finished", lambda _rid: None)(request_id)
+        if ended is None and request_id in (getattr(queue, "pending", {}) or {}):
+            return None                                   # still waiting for an answer
+        scope = _scope(request)
+        if not scope.unrestricted:
+            origin = getattr(queue, "origin_of", lambda _rid: None)(request_id)
+            if origin is None or not origin[0] or not _access.owns(scope, origin[0]):
+                return None
+        resolution, why = ended if ended else (None, "")
+        detail = {
+            "withdrawn": f"This request is no longer active: it was withdrawn ({why}). Nothing was approved.",
+            "approved": "This request is no longer active: it was already approved.",
+            "denied": "This request is no longer active: it was already denied.",
+            "expired": "This request is no longer active: it expired unanswered.",
+        }.get(resolution or "", "This request is no longer active: this daemon has no record of it (it may have "
+                                "restarted since it was asked, which ends every request).")
+        # The approve route's usual keys too, so a client that parses only those still reads "nothing happened".
+        return JSONResponse(status_code=410, content={
+            "ok": False, "remembered": False, "grant_id": None, "message": detail, "skipped": 0,
+            "error": "no_longer_active", "resolution": resolution, "detail": detail})
+
     def _scope_refusal(request: Request, scope: str) -> JSONResponse | None:
         """The 403 for a scoped caller asking for a lasting or widened grant, else None."""
         if _scope(request).unrestricted or scope in SCOPED_APPROVE_SCOPES:
@@ -4855,6 +4890,10 @@ def create_app(
         queue = app.state.approval_queue
         if not queue:
             return JSONResponse(status_code=404, content={"error": "approval queue not enabled"})
+        # A request that has ended (a worker that asked is gone, it was answered, it expired) is a 410 that acts on
+        # nothing. Before ownership: _no_longer_active keeps the 404 for a request that is not the caller's own.
+        if (refusal := _no_longer_active(request, request_id)) is not None:
+            return refusal
         # A scoped device answers only the calls of its own sessions (web/route_access.py). Ownership comes
         # first, so a request that is not its own is a 404 whatever else is wrong with the call.
         if (refusal := _not_mine(request, request_id)) is not None:
@@ -5063,6 +5102,8 @@ def create_app(
         queue = app.state.approval_queue
         if not queue:
             return JSONResponse(status_code=404, content={"error": "approval queue not enabled"})
+        if (refusal := _no_longer_active(request, request_id)) is not None:
+            return refusal
         if (refusal := _not_mine(request, request_id)) is not None:
             return refusal
         from prometheus.permissions import approver as _approver
@@ -5698,6 +5739,23 @@ def create_app(
 
     _worker_rate = _WorkerRateLimiter()
 
+    _withdrawing_for: weakref.WeakSet = weakref.WeakSet()
+
+    def _withdraw_when_workers_end(manager: Any) -> None:
+        """Have *manager* tell this app the moment a worker's process ends, so its approval requests are withdrawn
+        (``ApprovalQueue.withdraw_worker``): a request nothing can act on must not wait on anyone's screen. Wired on
+        a worker's first request, once per manager, and reads the queue at the time of the end."""
+        if manager in _withdrawing_for:
+            return
+
+        async def withdraw(task_id: str, why: str) -> None:
+            queue = app.state.approval_queue
+            if queue is not None and hasattr(queue, "withdraw_worker"):
+                await queue.withdraw_worker(task_id, why=why)
+
+        manager.add_process_end_listener(withdraw)
+        _withdrawing_for.add(manager)
+
     @app.post("/api/workers/approvals")
     async def worker_approval(request: Request):
         # In this order, so nothing about the caller is trusted before it is
@@ -5713,12 +5771,14 @@ def create_app(
             return JSONResponse(status_code=403, content={
                 "error": "not_loopback",
                 "detail": "a worker's approval request is only accepted from this machine"})
-        task = get_task_manager().verify_worker_token(
+        manager = get_task_manager()
+        task = manager.verify_worker_token(
             request.headers.get(wa.HEADER_TASK, ""), request.headers.get(wa.HEADER_TOKEN, ""))
         if task is None:
             return JSONResponse(status_code=401, content={
                 "error": "unknown_worker",
                 "detail": "no running worker holds that token"})
+        _withdraw_when_workers_end(manager)
         queue = app.state.approval_queue
         primary = queue.queues[0] if hasattr(queue, "queues") else queue
         if primary is None or not hasattr(primary, "request_approval"):
@@ -5757,6 +5817,14 @@ def create_app(
         reason = wa.clean_card_text(body.get("reason") or tool_name, wa.REASON_CHARS)
         what = wa.clean_card_text(task.description, wa.DESCRIPTION_CHARS)
         arguments = body.get("arguments") if isinstance(body.get("arguments"), dict) else None
+        # The body was read (awaited) since the token was checked, and the worker may have ended meanwhile, after
+        # its end was announced: a request filed now would wait on screen for nobody. So check again, and file it
+        # with no await in between (request_approval registers before its first await), so any end from here on
+        # reaches the listener above and withdraws it.
+        if manager.verify_worker_token(
+                request.headers.get(wa.HEADER_TASK, ""), request.headers.get(wa.HEADER_TOKEN, "")) is None:
+            return JSONResponse(status_code=401, content={
+                "error": "unknown_worker", "detail": "the worker ended while it was asking"})
         result = await primary.request_approval(
             tool_name,
             f"Worker {task.id} ({what}) asks: {reason}",

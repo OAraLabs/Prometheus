@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import inspect
 import json
 import logging
 import os
@@ -32,7 +33,7 @@ import signal
 import sys
 import time
 import weakref
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -53,6 +54,17 @@ if TYPE_CHECKING:
     from prometheus.tasks.store import TaskStore
 
 log = logging.getLogger(__name__)
+
+
+def _why_process_ended(task: TaskRecord, return_code: int | None, *, timed_out: bool) -> str:
+    """How a worker's process ended, in the words a person reads on a withdrawn approval."""
+    if timed_out:
+        return "its time limit ran out"
+    if task.status == "killed" or (return_code is not None and return_code < 0):
+        return "it was stopped"
+    if return_code == 0:
+        return "it finished"
+    return f"it exited with code {return_code}"
 
 
 def _signal_process_group(process: asyncio.subprocess.Process, sig: int) -> None:
@@ -201,6 +213,29 @@ class BackgroundTaskManager:
         #: child gets its token through the environment overlay, and nothing
         #: durable has a field for it.
         self._worker_tokens: dict[str, str] = {}
+        #: Called with ``(task_id, why)`` the moment a WORKER's process ends, however it ended (see
+        #: ``add_process_end_listener``).
+        self._process_end_listeners: list[Callable[[str, str], Any]] = []
+
+    def add_process_end_listener(self, listener: Callable[[str, str], Any]) -> None:
+        """Be told, the moment a worker's process ends, which worker and why in plain words ("it finished", "its
+        time limit ran out", "it was stopped", "it exited with code N").
+
+        For every end: a normal exit, the time limit, a stop, a kill, a crash, and the process a context-overflow
+        retry replaces. The web plane uses it to withdraw the worker's approval requests at once (nothing is left to
+        act on an answer). A listener may be async (awaited); one that raises or stalls is logged and skipped, and
+        never changes how the task ends.
+        """
+        self._process_end_listeners.append(listener)
+
+    async def _tell_process_ended(self, task_id: str, why: str) -> None:
+        for listener in tuple(self._process_end_listeners):
+            try:
+                result = listener(task_id, why)
+                if inspect.isawaitable(result):
+                    await asyncio.wait_for(result, timeout=10)
+            except Exception:  # noqa: BLE001 - a listener never decides how a task ends
+                log.warning("a process-end listener failed for task %s", task_id, exc_info=True)
 
     # ------------------------------------------------------------------
     # Creation
@@ -1190,6 +1225,10 @@ class BackgroundTaskManager:
             _signal_process_group(process, signal.SIGKILL)
             return_code = await process.wait()
         await reader
+        if task.metadata.get("worker") == "1":
+            # Before anything else, the generation check included: the process that asked is gone, whatever comes
+            # next (a retry, a restart by input), and an answer to it can no longer reach anything.
+            await self._tell_process_ended(task_id, _why_process_ended(task, return_code, timed_out=timed_out))
         if self._generations.get(task_id) != generation:
             return
         task.return_code = return_code
