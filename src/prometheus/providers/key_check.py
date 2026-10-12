@@ -12,6 +12,12 @@ Rules this module exists to keep:
 
 * **Classification is by HTTP status, never by a provider's wording.** OpenAI's 401 body echoes a masked copy of the
   key, and any service may reword a message tomorrow; a verdict must not depend on either.
+  One exception, and it is narrow: **Gemini and xAI answer an invalid key with 400, not 401**, which by status alone
+  is "could not tell" and would report a mistyped key as a network problem. For a 400 from those two a
+  machine-readable error CODE names the key (Google's ``ErrorInfo.reason == "API_KEY_INVALID"``; xAI's
+  ``code == "invalid-argument"`` on a request that has no other argument). Any other 400 stays ``unreachable``, and
+  the English message is still never read. Both answers are recorded, not guessed
+  (``tests/fixtures/provider_key_checks``).
 * **Nothing the provider says is relayed.** ``detail`` is OUR sentence. A provider body can contain the key.
 * **The key goes in the auth header only** — never a URL, a body, a log line or an exception message — and every
   URL is fixed here. This is a fixed-destination check, not a proxy: only ``CHECKABLE_PROVIDERS`` are known.
@@ -19,8 +25,8 @@ Rules this module exists to keep:
 * **Anything unexpected is ``unreachable``, never ``ok``.**
 * **OpenRouter is checked with a request that SPENDS (one token), after the free call.** No credit cannot be seen
   any other way: ``GET /key`` answers 200 for a key whose account is empty. The free call goes first so a key that
-  is already refused never spends anything. Anthropic and OpenAI use their free model-list call, so for them a
-  valid key on an empty account still answers ``ok`` — the first chat says otherwise.
+  is already refused never spends anything. Anthropic, OpenAI, Gemini and xAI use their free model-list call, so for
+  them a valid key on an empty account still answers ``ok`` — the first chat says otherwise.
 """
 
 from __future__ import annotations
@@ -40,11 +46,15 @@ NO_CREDIT = "no_credit"
 UNREACHABLE = "unreachable"
 
 #: The providers this will call, at the fixed URLs below. Anything else is refused by the route.
-CHECKABLE_PROVIDERS = ("anthropic", "openai", "openrouter")
+CHECKABLE_PROVIDERS = ("anthropic", "openai", "openrouter", "gemini", "xai")
 
 _OPENROUTER = "https://openrouter.ai/api/v1"
 _ANTHROPIC = "https://api.anthropic.com/v1"
 _OPENAI = "https://api.openai.com/v1"
+#: Gemini's NATIVE model list, not the OpenAI-compatible endpoint the daemon calls: that one answers a bad key with a
+#: bare 400 and no machine-readable reason. Same key, same service.
+_GEMINI = "https://generativelanguage.googleapis.com/v1beta"
+_XAI = "https://api.x.ai/v1"
 _ANTHROPIC_VERSION = "2023-06-01"
 
 #: Printable ASCII with no space: the only thing that is a safe HTTP header value. A pasted key with a newline or
@@ -132,7 +142,47 @@ def _check_openai(client: httpx.Client, key: str) -> KeyCheck:
     return _result(_verdict(resp.status_code), resp.status_code)
 
 
-_CHECKS = {"openrouter": _check_openrouter, "anthropic": _check_anthropic, "openai": _check_openai}
+def _json_body(resp: httpx.Response) -> Any:
+    try:
+        return resp.json()
+    except ValueError:                                  # not JSON (an HTML error page, an empty body)
+        return None
+
+
+def _gemini_error_reasons(resp: httpx.Response) -> set[str]:
+    """The ``google.rpc.ErrorInfo`` reasons in a Google error body. Only the enum, never the message."""
+    body = _json_body(resp)
+    error = body.get("error") if isinstance(body, dict) else None
+    details = error.get("details") if isinstance(error, dict) else None
+    if not isinstance(details, list):
+        return set()
+    return {d["reason"] for d in details if isinstance(d, dict) and isinstance(d.get("reason"), str)}
+
+
+def _check_gemini(client: httpx.Client, key: str) -> KeyCheck:
+    # One model, not the catalogue. The key goes in Google's own header; it also accepts ``?key=``, which would put
+    # it in a URL.
+    resp = client.get(f"{_GEMINI}/models", params={"pageSize": 1}, headers={"x-goog-api-key": key})
+    if resp.status_code == 400 and "API_KEY_INVALID" in _gemini_error_reasons(resp):
+        return _result(BAD_KEY, resp.status_code)
+    return _result(_verdict(resp.status_code), resp.status_code)
+
+
+def _check_xai(client: httpx.Client, key: str) -> KeyCheck:
+    resp = client.get(f"{_XAI}/models", headers={"Authorization": f"Bearer {key}"})
+    if resp.status_code == 400:
+        body = _json_body(resp)
+        # ``invalid-argument`` on a body-less GET that takes no parameters: the only argument is the credential. (A
+        # missing or empty one is a 401 ``unauthenticated:*``, which the status rule already reads as bad_key.)
+        if isinstance(body, dict) and body.get("code") == "invalid-argument":
+            return _result(BAD_KEY, resp.status_code)
+    return _result(_verdict(resp.status_code), resp.status_code)
+
+
+_CHECKS = {
+    "openrouter": _check_openrouter, "anthropic": _check_anthropic, "openai": _check_openai,
+    "gemini": _check_gemini, "xai": _check_xai,
+}
 
 
 def check_provider_key(provider: str, api_key: str, *, client: httpx.Client | None = None) -> KeyCheck:

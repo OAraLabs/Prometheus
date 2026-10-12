@@ -939,7 +939,7 @@ def create_setup_app(
     async def setup_check_key(request: Request) -> JSONResponse:
         """Does this cloud key work? Asked BEFORE ``configure`` (Beacon's O9 contract).
 
-        ``{"provider": "openrouter" | "anthropic" | "openai", "api_key": "<key>"}`` →
+        ``{"provider": "openrouter" | "anthropic" | "openai" | "gemini" | "xai", "api_key": "<key>"}`` →
         ``200 {"result": "ok" | "bad_key" | "no_credit" | "unreachable", "status"?, "detail"?}``.
         Master token required. Fixed destinations only (``providers/key_check.py``): there is no ``base_url`` on
         this route and one is refused, so it cannot be turned into an authenticated proxy. Writes nothing, and the
