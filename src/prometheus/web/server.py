@@ -12,7 +12,6 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import time
@@ -5725,6 +5724,11 @@ def create_app(
         if primary is None or not hasattr(primary, "request_approval"):
             return {"result": "denied",
                     "reason": "no approval queue: nobody can approve a worker's request"}
+        # A worker's limit is WORKING time (workers.timeout_minutes): while its request waits for a person, the queue
+        # stops the worker's clock with the task manager's (ApprovalQueue.worker_clock). Bound once per queue.
+        _clock = getattr(get_task_manager(), "waiting_for_approval", None)
+        if _clock is not None and getattr(primary, "worker_clock", None) is None:
+            primary.worker_clock = _clock
         open_now = sum(1 for a in primary.list_pending()
                        if getattr(a, "worker_task_id", None) == task.id)
         if open_now >= wa.MAX_PENDING_PER_WORKER:
@@ -5758,19 +5762,15 @@ def create_app(
         reason = wa.clean_card_text(body.get("reason") or tool_name, wa.REASON_CHARS)
         what = wa.clean_card_text(task.description, wa.DESCRIPTION_CHARS)
         arguments = body.get("arguments") if isinstance(body.get("arguments"), dict) else None
-        # The worker's clock stops while a person decides: its limit is working time (workers.timeout_minutes).
-        _manager = get_task_manager()
-        _waiting = getattr(_manager, "waiting_for_approval", None)
-        async with (_waiting(task.id) if _waiting is not None else contextlib.nullcontext()):
-            result = await primary.request_approval(
-                tool_name,
-                f"Worker {task.id} ({what}) asks: {reason}",
-                chat_id=chat_id,
-                arguments=arguments,
-                once_only=True,
-                worker_task_id=task.id,
-                session_id=task.session_id,
-            )
+        result = await primary.request_approval(
+            tool_name,
+            f"Worker {task.id} ({what}) asks: {reason}",
+            chat_id=chat_id,
+            arguments=arguments,
+            once_only=True,
+            worker_task_id=task.id,
+            session_id=task.session_id,
+        )
         return {"result": getattr(result, "value", str(result))}
 
     @app.get("/api/sessions/{session_id}/model")

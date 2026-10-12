@@ -33,7 +33,7 @@ import signal
 import sys
 import time
 import weakref
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -51,6 +51,8 @@ from prometheus.tasks.watchers import poll_until, watch_for_file
 from prometheus.utils.child_python import prometheus_argv
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from prometheus.tasks.store import TaskStore
 
 log = logging.getLogger(__name__)
@@ -177,6 +179,14 @@ class BackgroundTaskManager:
         self._task_roots: dict[str, tuple[str, ...]] = {}
         self._generations: dict[str, int] = {}
         self._emitted: set[str] = set()
+        #: A worker's time limit when its creator names none: ``workers.timeout_minutes``, set by the daemon. WORKING
+        #: time: the clock stops while the worker waits for a person (``waiting_for_approval``).
+        self.worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS
+        # The approval-wait clock, per task (monotonic): open waits, since when the clock has been stopped, and the
+        # time already spent stopped by this process of the task.
+        self._approval_waits: dict[str, int] = {}
+        self._paused_since: dict[str, float] = {}
+        self._paused_total: dict[str, float] = {}
 
         # Optional collaborators (wired by the daemon; None in lightweight use).
         self.signal_bus = signal_bus
@@ -205,39 +215,6 @@ class BackgroundTaskManager:
         #: child gets its token through the environment overlay, and nothing
         #: durable has a field for it.
         self._worker_tokens: dict[str, str] = {}
-        #: A worker's time limit when its creator names none: ``workers.timeout_minutes``, set by the daemon. WORKING
-        #: time: the clock stops while the worker waits for a person (``waiting_for_approval``).
-        self.worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS
-        # The approval-wait clock, per task (monotonic): open waits, since when the clock has been stopped, and the
-        # time already spent stopped by this process of the task.
-        self._approval_waits: dict[str, int] = {}
-        self._paused_since: dict[str, float] = {}
-        self._paused_total: dict[str, float] = {}
-
-    @contextlib.asynccontextmanager
-    async def waiting_for_approval(self, task_id: str) -> AsyncIterator[None]:
-        """Stop *task_id*'s time-limit clock for as long as this block runs: the daemon wraps each approval request a
-        worker files, so time spent waiting for a person never counts against the worker. Waits that overlap stop it
-        once, and it starts again when the last one ends."""
-        if self._approval_waits.get(task_id, 0) == 0:
-            self._paused_since[task_id] = time.monotonic()
-        self._approval_waits[task_id] = self._approval_waits.get(task_id, 0) + 1
-        try:
-            yield
-        finally:
-            left = self._approval_waits.get(task_id, 1) - 1
-            if left > 0:
-                self._approval_waits[task_id] = left
-            else:
-                self._approval_waits.pop(task_id, None)
-                since = self._paused_since.pop(task_id, None)
-                if since is not None and task_id in self._processes:      # a wait that outlived its process counts
-                    self._paused_total[task_id] = self._paused_total.get(task_id, 0.0) + time.monotonic() - since
-
-    def _waited(self, task_id: str) -> float:
-        """Seconds *task_id*'s clock has been stopped, an open wait included."""
-        since = self._paused_since.get(task_id)
-        return self._paused_total.get(task_id, 0.0) + (time.monotonic() - since if since is not None else 0.0)
 
     # ------------------------------------------------------------------
     # Creation
@@ -662,6 +639,31 @@ class BackgroundTaskManager:
                 task.metadata.pop("status_note", None)
         self._persist(task)
         return task
+
+    @contextlib.asynccontextmanager
+    async def waiting_for_approval(self, task_id: str) -> AsyncIterator[None]:
+        """Stop *task_id*'s time-limit clock for as long as this block runs: the daemon wraps each approval request a
+        worker files, so time spent waiting for a person never counts against the worker. Waits that overlap stop it
+        once, and it starts again when the last one ends."""
+        if self._approval_waits.get(task_id, 0) == 0:
+            self._paused_since[task_id] = time.monotonic()
+        self._approval_waits[task_id] = self._approval_waits.get(task_id, 0) + 1
+        try:
+            yield
+        finally:
+            left = self._approval_waits.get(task_id, 1) - 1
+            if left > 0:
+                self._approval_waits[task_id] = left
+            else:
+                self._approval_waits.pop(task_id, None)
+                since = self._paused_since.pop(task_id, None)
+                if since is not None and task_id in self._processes:      # a wait that outlived its process counts
+                    self._paused_total[task_id] = self._paused_total.get(task_id, 0.0) + time.monotonic() - since
+
+    def _waited(self, task_id: str) -> float:
+        """Seconds *task_id*'s clock has been stopped, an open wait included."""
+        since = self._paused_since.get(task_id)
+        return self._paused_total.get(task_id, 0.0) + (time.monotonic() - since if since is not None else 0.0)
 
     async def stop_task(self, task_id: str) -> TaskRecord:
         """Terminate a running task (SIGTERM then SIGKILL, or cancel a watcher)."""
@@ -1248,7 +1250,6 @@ class BackgroundTaskManager:
             task.metadata["time_limit_seconds"] = str(timeout)
             task.metadata["active_seconds"] = f"{max(0.0, time.monotonic() - started - waited):.1f}"
             task.metadata["approval_wait_seconds"] = f"{waited:.1f}" if waited >= 0.05 else "0"
-        self._paused_total.pop(task_id, None)
         await reader
         if self._generations.get(task_id) != generation:
             return
@@ -1263,6 +1264,7 @@ class BackgroundTaskManager:
         task.ended_at = time.time()
         self._processes.pop(task_id, None)
         self._waiters.pop(task_id, None)
+        self._paused_total.pop(task_id, None)
         # After the pops: a retry registers its own process and waiter.
         if task.metadata.get("worker") == "1" and await self._retry_worker_on_parent_route(task):
             return
