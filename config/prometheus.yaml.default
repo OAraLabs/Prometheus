@@ -1580,6 +1580,12 @@ workers:
   # An agent can never choose: a model it names is refused unless it is this
   # one, and a route that cannot be served is refused, never substituted.
   model: ""
+  # How long a worker may WORK before it is stopped, in minutes. Time it spends
+  # waiting for a person to approve something does not count. The agent that
+  # spawns a worker cannot change it (task_create's timeout_seconds is for
+  # shell, watch and poll tasks), and a worker stopped for time tells its
+  # conversation so: "stopped after N minutes — time limit".
+  timeout_minutes: 60
 
 # ── Heartbeat ─────────────────────────────────────────────────────────────
 heartbeat:

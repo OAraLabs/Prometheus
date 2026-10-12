@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
@@ -5757,15 +5758,19 @@ def create_app(
         reason = wa.clean_card_text(body.get("reason") or tool_name, wa.REASON_CHARS)
         what = wa.clean_card_text(task.description, wa.DESCRIPTION_CHARS)
         arguments = body.get("arguments") if isinstance(body.get("arguments"), dict) else None
-        result = await primary.request_approval(
-            tool_name,
-            f"Worker {task.id} ({what}) asks: {reason}",
-            chat_id=chat_id,
-            arguments=arguments,
-            once_only=True,
-            worker_task_id=task.id,
-            session_id=task.session_id,
-        )
+        # The worker's clock stops while a person decides: its limit is working time (workers.timeout_minutes).
+        _manager = get_task_manager()
+        _waiting = getattr(_manager, "waiting_for_approval", None)
+        async with (_waiting(task.id) if _waiting is not None else contextlib.nullcontext()):
+            result = await primary.request_approval(
+                tool_name,
+                f"Worker {task.id} ({what}) asks: {reason}",
+                chat_id=chat_id,
+                arguments=arguments,
+                once_only=True,
+                worker_task_id=task.id,
+                session_id=task.session_id,
+            )
         return {"result": getattr(result, "value", str(result))}
 
     @app.get("/api/sessions/{session_id}/model")
