@@ -110,6 +110,8 @@ prometheus                # interactive CLI chat
 oara daemon         # always-on: web API + gateways + cron + background layer
 ```
 
+On a terminal, `oara daemon`, `oara setup` and the interactive chat start with a short banner: the wordmark, then the port the daemon listens on and the model it serves, once each is known. It shows the port only, never an address, a token or a path. It is not printed when stdout isn't a terminal (a service, a pipe, CI), for `oara --once`, with `--quiet` (`-q`), or with `OARA_NO_BANNER=1`; with `NO_COLOR` set it is plain text. `oara --version` prints one line, `◉ prometheus <version> · OAra Labs`.
+
 ## The API token
 
 On the **first** daemon start, Prometheus mints a secure `PROMETHEUS_API_TOKEN`, saves it to `~/.config/prometheus/env`, and prints it **once**. Everything that talks to the daemon's REST or WebSocket surface — including Beacon — presents this token.

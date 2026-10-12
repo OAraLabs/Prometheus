@@ -60,7 +60,7 @@ body:
     attributes:
       label: Prometheus version
       description: "`oara --version`, if you got that far."
-      placeholder: Prometheus 0.9.7
+      placeholder: "◉ prometheus 0.9.8 · OAra Labs"
   - type: input
     id: backend
     attributes:

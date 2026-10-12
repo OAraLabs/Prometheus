@@ -224,9 +224,9 @@ def s2_inside(run: Run, expect_version: str | None) -> str:
     probe = run.run_once(run.image, "sh", "-c", "touch /opt/prometheus/.w 2>/dev/null && echo writable || echo readonly")
     expect(probe.stdout.strip() == "readonly", "the agent's user can write the code it runs (/opt/prometheus)")
     version = run.run_once(run.image, "oara", "--version").stdout.strip()
-    expect(version.startswith("Prometheus "), f"oara --version printed {version!r}")
+    expect(version.startswith("◉ prometheus "), f"oara --version printed {version!r}")
     if expect_version:
-        expect(version == f"Prometheus {expect_version}", f"{version!r}, wanted Prometheus {expect_version}")
+        expect(version == f"◉ prometheus {expect_version} · OAra Labs", f"{version!r}, wanted ◉ prometheus {expect_version} · OAra Labs")
     return f"uid {uid}, /opt/prometheus read-only, {version}"
 
 

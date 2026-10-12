@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from prometheus import __version__
+from prometheus.banner import show_banner, write_version
 from prometheus.config.paths import get_config_dir, get_data_dir, get_wiki_root
 from prometheus.engine.agent_loop import run_loop, LoopContext
 from prometheus.config.shipped_defaults import resolve_max_tool_iterations, resolve_max_tool_iterations_cloud
@@ -1456,6 +1457,23 @@ def invoked_command_name() -> str:
     return base if base in (COMMAND_NAME, LEGACY_COMMAND_NAME) else COMMAND_NAME
 
 
+class _VersionAction(argparse.Action):
+    """``--version``: one plain line (banner.version_line), then exit.
+
+    Not argparse's own "version" action, which writes through the help formatter
+    and raises on a stdout whose encoding cannot carry the line's ◉.
+    """
+
+    def __init__(self, option_strings: Any, dest: str = argparse.SUPPRESS,
+                 default: str = argparse.SUPPRESS, help: str | None = None) -> None:
+        super().__init__(option_strings, dest=dest, default=default, nargs=0, help=help)
+
+    def __call__(self, parser: argparse.ArgumentParser, namespace: Any,
+                 values: Any, option_string: str | None = None) -> None:
+        write_version()
+        parser.exit()
+
+
 def main() -> None:
     """Prometheus CLI entry point (installed as `oara`, alias `prometheus`)."""
     invoked = invoked_command_name()
@@ -1464,7 +1482,13 @@ def main() -> None:
         description="Prometheus — sovereign AI agent harness",
     )
     parser.add_argument(
-        "--version", action="version", version=f"Prometheus {__version__}"
+        "--version", action=_VersionAction,
+        help="Print the version and exit",
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="Do not print the startup banner (also off: OARA_NO_BANNER=1, "
+             "and it is never printed when stdout is not a terminal)",
     )
     parser.add_argument(
         "--config", type=str, default=None,
@@ -1550,6 +1574,11 @@ def main() -> None:
     daemon_parser.add_argument(
         "--telegram-only", action="store_true",
         help="Only start Telegram adapter",
+    )
+    # SUPPRESS: a subparser's own default would overwrite `oara --quiet daemon`.
+    daemon_parser.add_argument(
+        "-q", "--quiet", action="store_true", default=argparse.SUPPRESS,
+        help="Do not print the startup banner",
     )
     daemon_parser.add_argument(
         "--bind", metavar="ADDRESS", default=None,
@@ -2028,6 +2057,8 @@ def main() -> None:
             sys.argv.append("--telegram-only")
         if args.debug:
             sys.argv.append("--debug")
+        if args.quiet:
+            sys.argv.append("--quiet")
         if args.bind is not None:  # "" is a value (and an invalid one), not absence
             sys.argv.extend(["--bind", args.bind])
         daemon_main()
@@ -2311,6 +2342,12 @@ def main() -> None:
                 # settings, and respect --voice for sticky-on at start.
                 from prometheus.cli.voice import get_voice_config
                 voice_cfg = get_voice_config(config)
+                if show_banner(
+                    model=model_name,
+                    backend=model_cfg.get("provider", "llama_cpp"),
+                    quiet=args.quiet,
+                ):
+                    print()
                 await run_interactive(
                     context, lcm_engine, session_id,
                     voice_mode=bool(getattr(args, "voice", False)),
