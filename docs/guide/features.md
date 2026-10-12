@@ -22,6 +22,7 @@ This page is the complete map of what Prometheus can do: every entry point, tool
 | `oara doctor` | Diagnostics with one fix hint per failure; exits nonzero when anything is broken, so it works in scripts |
 | `oara token show \| rotate` | Re-print the web API bearer token, or invalidate it and mint a new one |
 | `oara pair list \| approve <id> \| deny <id>` | See and decide the devices asking to join this Prometheus (an id may be a unique prefix of 6+ characters; `approve` takes `--name` and `--code`). Uses the global token against the local daemon |
+| `oara pair --owner` | Run on the daemon's machine: print a one-time code (10 minutes, one use) that makes Beacon on **another** computer an owner device, so it can approve workers. Writes the code's digest into the daemon's `devices.db`; uses no token and no network |
 | `oara install-service [--force --now]` | Write and enable a systemd **user** unit (Linux), or write a LaunchAgent plist (macOS; `--now` also loads it). Exits non-zero when it could not install or enable the service |
 | `oara identity --show \| --regenerate` | Manage the SOUL.md / AGENTS.md identity files |
 | `oara migrate --from hermes\|openclaw [--dry-run]` | Import config, identity, memory, and skills from `~/.hermes`, `~/.openclaw`, or `~/.clawdbot` |

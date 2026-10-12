@@ -12,7 +12,7 @@
 
 1. A new device asks to join with `POST /api/pair/requests` (no credentials). It gets a request id, a poll secret and a 4-digit code, and shows the code on its own screen.
 2. The operator sees "Jennifer's MacBook wants to connect. Code 4821" with Approve and Deny in every connected Beacon whose token is an operator's (`identity.is_operator`: the global token or an owner device). Telegram buttons exist too but are **opt-in and off by default** (`pairing.telegram_prompts`). They compare the code with the one on the new device and tap.
-3. On approval the daemon mints an ordinary, **always scoped** device token through `DeviceStore.mint` (never an owner device: that tier comes only from same-Mac pairing). The new device owns no conversations and sees only what it creates. The token is **sealed to a public key the new device sent** and handed over on its next poll. It is never in plaintext on the wire and never stored in plaintext on the daemon.
+3. On approval the daemon mints an ordinary, **always scoped** device token through `DeviceStore.mint` (never an owner device: that tier comes only from same-Mac pairing, or from a one-time code printed on the daemon's machine, 4.9). The new device owns no conversations and sees only what it creates. The token is **sealed to a public key the new device sent** and handed over on its next poll. It is never in plaintext on the wire and never stored in plaintext on the daemon.
 4. A request lives 5 minutes. Approve, deny, cancel and expiry are one-way and atomic; the first decision wins.
 5. Only four routes are reachable without a bearer token: `GET /api/hello` and the three requester routes under `/api/pair/requests`. They are an exact allowlist, tested.
 6. Discovery is a hint. mDNS TXT records and `/api/hello` are unauthenticated and can be forged; the code, and later the TLS pin, are what establish trust.
@@ -26,7 +26,7 @@ These are the places where I chose something your brief or Beacon's prompt left 
 |---|---|---|---|
 | D1 | Request lifetime. Your brief says 5 minutes; Beacon's P3 prompt says 2. | **5 minutes**, key `pairing.request_ttl_seconds`, allowed 60 to 900. Beacon adapts (its prompt says the first to land wins). | 2 minutes: safer, but too short to walk to another room. |
 | D2 | Your brief has the device send "name and platform". Beacon's prompt adds a public key. | **Add `public_key` (required).** Without it the token has to cross Wi-Fi in clear at poll time. | Name and platform only, token in the poll response. Not recommended. |
-| D3 | Who may approve. | **`identity.is_operator`** (#696): the global token, or an **owner device**, which only same-Mac pairing can create. A scoped device (anything approved through this contract) cannot approve. Telegram counts only if the owner opted in (4.6, 5.2). The decision routes are *not* `is_global`: that stays the rule for `POST /api/devices` and MCP-server definitions, which an owner device also cannot do. | Any valid device token may approve. Rejected: a stolen unprivileged phone could enrol an attacker. |
+| D3 | Who may approve. | **`identity.is_operator`** (#696): the global token, or an **owner device**, which only same-Mac pairing can create (since 2026-10-11 also a one-time code printed on the daemon's machine, 4.9). A scoped device (anything approved through this contract) cannot approve. Telegram counts only if the owner opted in (4.6, 5.2). The decision routes are *not* `is_global`: that stays the rule for `POST /api/devices` and MCP-server definitions, which an owner device also cannot do. | Any valid device token may approve. Rejected: a stolen unprivileged phone could enrol an attacker. |
 | D4 | Is pairing always open, or only while the operator has pressed "Add a device"? | **Always open** (your flow: the prompt just appears), bounded by limits. Key `pairing.require_window: true` flips to window-gated. | Window-gated by default: no unsolicited prompts on a café network, one extra step for the operator. |
 | D5 | Home-network mode and TLS (Beacon's P13 says TLS is later). Your brief asks for the mode plus a *plan* for tokens on Wi-Fi. | **Decided (Will, 2026-10-08): approved as written, and Beacon will pin the certificate, so PR 5 builds TLS.** **Section 7 is the plan; PRs 1 to 4 build everything else.** Until PR 5, `PUT /api/network` to `home_network` answers `409 tls_unavailable` unless `network.allow_plaintext_lan: true` (WARNING every boot). A server-side TLS listener no client can pin would only be dead weight, and I do not want a released state where the LAN mode is plain HTTP by default. | Build TLS now with the rest. Or ship `home_network` as plain HTTP with a warning: then the bearer token is readable by anyone on the same Wi-Fi from the first request on. |
 | D6 | mDNS library. | **`zeroconf`** as an optional extra `discovery`, loud when enabled but missing. It is LGPL-2.1-or-later (verify before the app bundle ships it). | macOS-only `dns-sd -R` child process: no dependency, but an orphaned child keeps advertising after a daemon crash. |
@@ -48,7 +48,7 @@ Beacon is building against a stub of its own prompt. These are the deltas; I wil
 | Telegram | an Approve/Deny message (item 5), on by default | **opt-in, off by default** (`pairing.telegram_prompts`) | Your brief. A pairing prompt carries a source address and a code, and Telegram is a third-party relay; the owner chooses it. |
 | `pair` value | `approve` or `code` | adds `none` and `token` | A daemon deliberately run with auth off has nothing to pair into: device tokens are unused (4). `code` would be false on a configured daemon today (no on-demand code route exists) and `approve` is false until the request routes are served, so `token` says what is true. |
 | Who may approve | "approvers only" | `identity.is_operator` (global token or owner device); a scoped device gets **403** `operator_only`, not 401 (decided by Will, 2026-10-08) | #696 supplies the predicate. 401 would read as "this token is dead" to a client that treats 401 as "re-pair" (the installer's contract does). |
-| Token scope | not stated | always scoped (`DeviceStore.mint`); never an owner device; no field on any pairing route can ask for more | Your brief and #696: owner tokens come only from same-Mac pairing. |
+| Token scope | not stated | always scoped (`DeviceStore.mint`); never an owner device; no field on any pairing route can ask for more | Your brief and #696: owner tokens come only from same-Mac pairing (and, since 2026-10-11, a one-time code printed on the daemon's machine, 4.9; never an approval). |
 | Poll credential | "with poll_secret" | header `X-Pairing-Secret`, never in the URL | URLs land in logs and history. |
 | Cancel and acknowledge | not present | `DELETE /api/pair/requests/{id}` | One verb: cancel while pending, acknowledge receipt once approved. |
 | Approved response | token sealed to the device key | adds `endpoints` and `device_id` | A new device otherwise needs a second round trip to learn the WebSocket port. |
@@ -371,7 +371,7 @@ The overall cap is also a denial of service: a hostile neighbour can fill the th
 
 ### 4.6 What approval grants
 
-Approval calls **one function**, `mint_paired_device(name, platform)`, which narrows `platform` the way `POST /api/devices` does and calls `DeviceStore.mint(name, platform)` and nothing else. **An approved device is always scoped** (Will, 2026-10-08, as built in #696): it is never an owner device. Specifically it never calls `DeviceStore.mint_owner` or `api_token.issue_owner_credential()`; those are the same-Mac tier (#694, #696), and `mint` has no tier parameter that could widen it. The request has no field to ask for more, and `approve` rejects unknown keys (4.2b).
+Approval calls **one function**, `mint_paired_device(name, platform)`, which narrows `platform` the way `POST /api/devices` does and calls `DeviceStore.mint(name, platform)` and nothing else. **An approved device is always scoped** (Will, 2026-10-08, as built in #696): it is never an owner device. Specifically it never calls `DeviceStore.mint_owner` or `api_token.issue_owner_credential()`; those are the owner tier (same-Mac pairing, #694 and #696, and the one-time owner code, 4.9), and `mint` has no tier parameter that could widen it. The request has no field to ask for more, and `approve` rejects unknown keys (4.2b).
 
 What the new device therefore is, by #692 and #696, with nothing special-cased here:
 
@@ -402,6 +402,54 @@ pending --approve--> approved --DELETE or 5 min--> delivered
 ### 4.8 Audit
 
 One structured audit record per create, approve, deny, cancel, expiry, delivery and auto-revoke: request id, device name, platform, source address, deciding channel (`beacon:<device>`, `telegram:<chat>`, `cli`, `system`). Written through the existing permission audit trail if its row shape fits, else a logger line with a stable `pairing:` prefix. Never logged: the poll secret, the token, the sealed blob.
+
+### 4.9 Owner codes: making Beacon on another computer an owner device (added 2026-10-11)
+
+An approval never makes an owner device (4.6), and since #744 a worker's request is approved only by a device token, because a model can read the API token. So a Beacon on another computer holding the API token could approve no worker. This is the one way up for it, and it starts at the daemon's machine.
+
+**On the daemon's machine:** `oara pair --owner` prints a code such as `K7QM-2XW9-RTHP`: 12 characters from `23456789ABCDEFGHJKMNPQRSTVWXYZ` (no 0, 1, I, L, O, U), good for **10 minutes** and **one use**. Running it again replaces the earlier code. It writes the code's SHA-256 into `devices.db` (table `owner_codes`, created on first use) and uses no token and no network. **No route issues a code**, so nothing that only reaches the daemon over the network can make one; the API token alone mints no owner device.
+
+**From the other computer:** `POST /api/pair/owner`, behind the bearer gate. Any valid token: the API token, an owner device, or a scoped device (a Beacon that joined through 4.1). Not a public route.
+
+```
+POST /api/pair/owner
+Authorization: Bearer <the token this Beacon already holds>
+Content-Type: application/json
+
+{"code": "K7QM-2XW9-RTHP", "device_name": "Will's MacBook Pro", "platform": "macos",
+ "public_key": "<fresh X25519 public key, 32 bytes, unpadded base64url>"}
+```
+
+* `code`: as typed; case, spaces and hyphens are ignored. Anything that is not 12 characters of the alphabet is a 400 (`fields: ["code"]`) that spends nothing.
+* `device_name`: required, 1 to 64 characters, no control or line-separator characters (4.2's rule). `platform`: `ios`, `macos`, or anything else (stored as `other`).
+* `public_key`: required, as in 4.2, and a fresh key per attempt. A low-order key is refused.
+* A request with an `Origin` header is a 400 `browser_not_allowed`; a body over 4 KiB is a 413.
+
+**201:**
+
+```json
+{"device_id": "<32 hex>", "name": "Will's MacBook Pro", "platform": "macos",
+ "owner": true, "owner_source": "owner-code",
+ "sealed": {"alg": "x25519-hkdf-sha256-chacha20poly1305", "ephemeral_public_key": "...", "nonce": "...", "ciphertext": "..."}}
+```
+
+`sealed` is 4.3's recipe exactly, with **`device_id` in place of the request id** (HKDF salt and associated data). It opens to `{"token", "device_id", "name"}`. The plaintext token is in no response field and no log line. Then, on the client: store the new token, use it for REST and the WebSocket, **drop the API token**, and, if this Beacon held a scoped device token before, it may revoke that device with `DELETE /api/devices/{old id}` (a device may revoke itself). Nothing is revoked for it: same-Mac re-pairing never touches an `owner-code` device, and redeeming replaces no other owner device.
+
+**Refusals:**
+
+| HTTP | `error` | When |
+|---|---|---|
+| 400 | `invalid_request` | bad JSON, not `application/json`, or a malformed field (`fields`); the code is not looked at |
+| 400 | `browser_not_allowed` | `Origin` header |
+| 401 | (the gate's) | no bearer or a dead one |
+| 403 | `pairing_unavailable` | the daemon has no API token (open mode) |
+| 413 | `too_large` | body over 4 KiB |
+| 422 | `invalid_code` | wrong, expired, already used, burned, or no code was issued. Never 401: the bearer is fine |
+| 429 | `rate_limited` | `reason: bad_code`, `retry_after_seconds`, `Retry-After`: this source guessed wrong 3 times in a minute; the code was not looked at |
+
+**Limits.** Each source (the TCP peer) may guess wrong 3 times a minute. Every wrong guess, from anyone, counts against the live code, and the **fifth burns it** (then `422` until someone runs `oara pair --owner` again). Spending the code and minting the device are one transaction, so two redemptions of one code have one winner.
+
+**Audit.** `pairing: owner code issued` (by, ttl), `refused` (source, failures so far, burned), `redeemed` (device, name, platform, source, presenting identity). Never logged: the code, the token.
 
 ---
 
@@ -458,6 +506,8 @@ The name is typed on the new device and is not checked. Approve only if the code
 
 `oara pair list | approve <id> [--name N] [--code NNNN] | deny <id>` call the same routes with the global token, read the way `oara token show` reads it, and send `X-Pairing-Via: cli` so the owner's other screens say "approved in the terminal". This is the route for a headless box with no Beacon open and no Telegram. It reaches the daemon where it listens: `PROMETHEUS_WEB_BIND` (from the environment, else the env file the daemon loads), else `web.bind`, with every-interface binds reached over loopback and one specific address reached at that address (a daemon bound to one LAN or tailnet address does not answer on 127.0.0.1, which the first version assumed). A `--bind` flag given to a running daemon cannot be seen from the CLI, so an unreachable daemon is reported with the address that was tried and the way to set it. An id may be a unique prefix of at least 6 characters; an ambiguous or unknown prefix is refused, never guessed. A whole 32-character id goes straight to the daemon, which knows a request someone else already decided (`no longer waiting: already approved`), where the waiting list no longer does. It prints no token (the approve response has none) and no poll secret (the list has none). It does not build its own decision: every channel calls `PairingRuntime.approve` / `deny`.
 
+`oara pair --owner` is different in kind (4.9): it prints a one-time owner code for Beacon on another computer, written straight into the daemon's `devices.db`, with no token and no network.
+
 ### 5.4 Races and reachability
 
 Beacon, Telegram and the CLI can all answer. The first decision wins; every other surface is told through `pairing_resolved` or a message edit. If no channel is reachable the request still lives out its 5 minutes and any channel opened within that window shows it.
@@ -473,6 +523,7 @@ Beacon, Telegram and the CLI can all answer. The first decision wins; every othe
 | `GET` / `DELETE /api/pair/requests/{id}` | with the poll secret | with the poll secret | with the poll secret | with the poll secret |
 | `GET /api/pair/requests` (list) | no | 403 | yes | yes |
 | `POST /api/pair/requests/{id}/approve` and `/deny` | no | 403 | yes | yes |
+| `POST /api/pair/owner` (4.9) | no (401) | with a code | with a code | with a code |
 | `GET /api/network` | no | **403 `operator_only`** (default-deny; it used to read) | yes | yes |
 | `PUT /api/network` | no | 403 | yes | yes |
 | `GET /api/devices` | no | **its own row only** | all | all |
@@ -592,7 +643,7 @@ All JSON bodies are `{"error": "<code>", ...}`.
 | 400 | `browser_not_allowed` | request carried `Origin` |
 | 401 | `unauthorized` | operator route with no token or a dead one (wording of the existing 401 unchanged) |
 | 403 | `operator_only` | a live scoped device called an operator route (6) |
-| 403 | `pairing_unavailable` | setup mode, `pairing.requests_enabled` is false, or auth is off |
+| 403 | `pairing_unavailable` | setup mode, `pairing.requests_enabled` is false, or auth is off (for `POST /api/pair/owner`: auth is off) |
 | 403 | `pairing_closed` | `pairing.require_window` is true and no window is open |
 | 404 | `unknown_request` | no such id, wrong secret, or a secret for another request |
 | 409 | `not_pending` | decision on a request that is no longer pending (`status` says which) |
@@ -605,6 +656,7 @@ All JSON bodies are `{"error": "<code>", ...}`.
 | 413 | `too_large` | body over 4 KiB |
 | 503 | `identity_unavailable` | `POST /api/pair/requests` and the daemon has no readable instance key (it is made at boot, never on a request); nothing is created |
 | 422 | `code_mismatch` | optional `match_code` on approve differs |
+| 422 | `invalid_code` | `POST /api/pair/owner`: wrong, expired, used or burned owner code (4.9) |
 | 429 | `rate_limited` | see 4.5 (`reason`, `retry_after_seconds`, `Retry-After`) |
 
 ---

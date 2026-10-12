@@ -1,6 +1,6 @@
 # Device scoping contract, v1
 
-**Contract id:** `device-scoping/1` (section 6, the owner tier, is `device-scoping/1.1`)
+**Contract id:** `device-scoping/1` (section 6, the owner tier, is `device-scoping/1.1`; section 6.5, an owner device on another computer, is `device-scoping/1.3`)
 **Scope:** What a *device token* may see and do with chat sessions, over REST and the WebSocket bridge. Code: `web/session_scope.py` (the rule), `config/device_store.py` (the record), `web/server.py` and `web/ws_server.py` (the enforcement points).
 **Written for:** whoever builds on the device model next (approve-to-pair): section 2 is what changed in it, and section 2.3 is what to keep true.
 
@@ -85,7 +85,7 @@ Stated so nobody reads "device scoping" as more than it is. None of these change
 
 ## 5. Upgrading
 
-Sessions that existed before this change are **unowned, so operator-only**. A device that used sessions before the upgrade no longer sees them over REST or the socket until the operator gets them back to it: there is no reassignment tool yet. New sessions are scoped from the first message. An **owner device** (section 6) sees them all, which is how the person's own cockpit keeps its history; a device already enrolled with an ordinary token stays scoped until it is paired again as an owner.
+Sessions that existed before this change are **unowned, so operator-only**. A device that used sessions before the upgrade no longer sees them over REST or the socket until the operator gets them back to it: there is no reassignment tool yet. New sessions are scoped from the first message. An **owner device** (section 6) sees them all, which is how the person's own cockpit keeps its history; a device already enrolled with an ordinary token stays scoped until it is paired again as an owner, or its owner promotes it with a one-time code (6.5).
 
 ## 6. The owner tier (`device-scoping/1.1`)
 
@@ -94,8 +94,8 @@ The person's **own** device is not a guest. Same-Mac pairing used to hand Beacon
 ### 6.1 What an owner device is
 
 - **Marker:** a row in `owner_devices (device_id PRIMARY KEY, marked_at, marked_by)`, created on the first owner mint (so `api_devices` and the parity goldens keep their schema), written in the same transaction as the device row. `marked_by` is the route that issued it. `DeviceIdentity.owner` is read from it at every authentication, never from anything the caller sends. `DeviceIdentity.is_operator` = global token or owner device; pairing-approval's "approver" test is exactly that predicate.
-- **Two mint paths, and the tier is not a parameter on either.** `DeviceStore.mint(name, platform)` makes an ordinary scoped device (an approved device gets this). `DeviceStore.mint_owner(name, platform, by=, replaces=)` makes an owner device. `api_token.issue_owner_credential(config, *, devices, ...)` is the only caller on the pairing path; it needs the registry and has no fallback to the global token.
-- **Who can mint one:** **only same-Mac pairing** (Will, 2026-10-08): `POST /api/pair/local` with the file secret, or — for a fresh install, which cannot mint during setup — the global token's `POST /api/devices` with `{"owner": true}` **from this Mac's loopback address**, as the second step of the same pairing. From any other address that request is a 403. Approved devices (Telegram, or another device) always get `DeviceStore.mint`: another computer, Jennifer's Mac approved from yours, sees only its own conversations. Never a request that merely asks, and never a device: an owner device cannot enrol another.
+- **Two mint paths, and the tier is not a parameter on either.** `DeviceStore.mint(name, platform)` makes an ordinary scoped device (an approved device gets this). `DeviceStore.mint_owner(name, platform, by=, replaces=)` makes an owner device. `api_token.issue_owner_credential(config, *, devices, ...)` is the only caller on the pairing path; it needs the registry and has no fallback to the global token. `DeviceStore.mint_owner_in_transaction(name, platform, by=)` is the same owner mint inside a transaction its caller owns, for the one-time owner code (6.5), whose spending and the device it buys commit together.
+- **Who can mint one:** **same-Mac pairing** (Will, 2026-10-08): `POST /api/pair/local` with the file secret, or — for a fresh install, which cannot mint during setup — the global token's `POST /api/devices` with `{"owner": true}` **from this Mac's loopback address**, as the second step of the same pairing. From any other address that request is a 403. **And, for another computer, a one-time code printed on the daemon's machine** (Will, 2026-10-11; 6.5). Approved devices (Telegram, or another device) always get `DeviceStore.mint`: another computer, Jennifer's Mac approved from yours, sees only its own conversations. Never a request that merely asks, never the API token alone, and never a device: an owner device cannot enrol another.
 
 ### 6.2 What "operator-equivalent" covers — and what it does not
 
@@ -118,13 +118,24 @@ Minting an owner device **for this Mac** replaces the earlier owner credentials 
 
 The global token stays valid and stays in `~/.config/prometheus/env`, where the bash tool can read it, and macOS has no shell floor. This change stops a paired **device** from holding the master key. It does not stop a **model** from reading it; that needs the restrictive default permission mode, which is separate work.
 
+### 6.5 An owner device on another computer (`device-scoping/1.3`)
+
+Since #744 only a device token approves a worker's request (a model can read the API token), and owner devices came only from this Mac, so Beacon on another computer, connected with the API token, could approve no worker. The way up for it:
+
+- **`oara pair --owner`, run on the daemon's machine,** writes the SHA-256 of a one-time code into the daemon's `devices.db` (table `owner_codes`, created on first use) and prints the code: 12 characters from `23456789ABCDEFGHJKMNPQRSTVWXYZ` in three groups of four (about 2^59), good for 10 minutes and one use. There is one live code at a time; issuing replaces the one before. It uses no token and no network. **No route issues a code** (`tests/test_owner_code_promotion.py` scans the source: only the CLI calls `issue_owner_code`), so nothing that only reaches the daemon over the network can make one, whatever bearer it holds. Being able to write `devices.db` is already being able to mint any device, so this widens nothing.
+- **`POST /api/pair/owner`** trades the code for an owner device (`marked_by = "owner-code"`). It is behind the bearer gate and takes any valid token, scoped devices included (it is in `SCOPED_ALLOWED`: a Beacon that joined by approve-to-pair holds a scoped token). The body is `{"code", "device_name", "platform", "public_key"}`; the token comes back **sealed** to `public_key`, with the new `device_id` as the request id of the pairing seal (`config/pair_seal.py`), because an owner token can approve a worker and the API token cannot, so it must not cross a plaintext link in clear.
+- **Guessing.** Every problem with the body is refused (400) before the code is looked at, and spends nothing. A source that has guessed wrong 3 times in a minute is told to wait (429) before the code is looked at. Every wrong guess, from anyone, counts against the live code, and the fifth burns it. Spending the code and minting the device are one `BEGIN IMMEDIATE` transaction, so two redemptions have one winner (the CLI and the daemon are two processes on the file).
+- **It replaces nothing**, and same-Mac re-pairing never revokes it (`owner-code` is not a same-Mac source). The person revokes it like any device. The client keeps the new token and drops the API token.
+- **Open mode** (no API token): 403 `pairing_unavailable`, and the CLI refuses to issue.
+- **Still true (6.4):** a model whose shell can write `devices.db`, or read the API token and reach loopback, could already mint an owner device; the shell floors are what stop that, not this.
+
 ## 7. Route access: a scoped device is default-deny (`device-scoping/1.2`)
 
 Sections 1 to 6 scoped what a device sees in the SESSION routes and left every other route open to any valid token. Once approve-to-pair made scoped tokens common (a phone on the home network asks, the owner taps Approve), that was a hole an independent review verified: an approved phone could approve any session's tool call with a persistent grant, create and run cron jobs (which run through `/bin/bash` with the daemon's environment), write provider keys, and type `/gate off`.
 
 **The rule.** The bearer middleware answers `403 operator_only` to a scoped token on any route that is not in `web/route_access.py`'s allowlist. Default-deny: a route added tomorrow, an unknown path, a method nobody listed, and `/v1/*` are refused without anyone remembering to refuse them. The code is 403, not 401, because the token is valid.
 
-**What a scoped device may use** (`SCOPED_ALLOWED`): hello; its own device (list itself, sign itself out, its push and live-activity registration, the live activity for a session it owns); chat (`/api/chat`, `/send`, `/interrupt`); its own sessions (list, create, delete, messages, title, pin, fork, `events/recent`, `activity/recent`, search); and approvals, below. Everything else is the operator's: the global token or an owner device.
+**What a scoped device may use** (`SCOPED_ALLOWED`): hello; its own device (list itself, sign itself out, its push and live-activity registration, the live activity for a session it owns); chat (`/api/chat`, `/send`, `/interrupt`); its own sessions (list, create, delete, messages, title, pin, fork, `events/recent`, `activity/recent`, search); approvals, below; and trading a one-time owner code for an owner device (`POST /api/pair/owner`, 6.5). Everything else is the operator's: the global token or an owner device.
 
 **Approvals.** A scoped caller sees and answers only the requests raised in a session it owns: the queue stamps each request with the run's session (`engine/tool_context.RUN_SESSION`). The id must be exactly a pending id (no `all`, no scope smuggled through the id), the scope is `once` or `until-restart` (`SCOPED_APPROVE_SCOPES`), and the same filter decides which `approval_pending` / `approval_resolved` frames its socket is sent. A request that is not its own is a 404, like a session that is not its own. The wire shapes did not change.
 
