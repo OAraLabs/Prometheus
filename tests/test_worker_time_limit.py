@@ -156,11 +156,13 @@ async def test_the_model_cannot_set_a_workers_time_limit(tmp_path, monkeypatch):
     assert seen["shell"]["timeout_seconds"] == 900
 
 
-def test_the_tool_tells_the_model_its_timeout_does_not_apply_to_workers():
+def test_the_tool_text_the_model_sees_is_unchanged():
+    """The parity goldens record every tool's schema as the model sees it, so rewording this description (as #752
+    did) turns nine replay traces red for no change in behaviour. Workers ignore the value whatever the text says."""
     from prometheus.tools.builtin.task_create import TaskCreateToolInput
 
     text = TaskCreateToolInput.model_fields["timeout_seconds"].description
-    assert "local_agent" in text and "workers.timeout_minutes" in text
+    assert text == "Hard ceiling; on expiry the task is marked failed (timeout)."
 
 
 # ── waiting for approval does not count ──────────────────────────────────────
