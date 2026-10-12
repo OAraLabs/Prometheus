@@ -357,11 +357,17 @@ def test_four_typos_then_the_right_code_still_works(world):
     assert response.status_code == 201, response.text
 
 
+def test_the_limits_are_five_guesses_per_code_and_three_wrong_guesses_a_minute_per_source():
+    assert (owner_codes.MAX_FAILURES, owner_codes.WRONG_CODES_PER_MINUTE, owner_codes.CODE_TTL_SECONDS) == (5, 3, 600)
+
+
 def test_the_fifth_wrong_guess_burns_the_code_wherever_the_guesses_came_from(world):
     code = issue(world)
-    for i in range(owner_codes.MAX_FAILURES):
+    for i in range(5):
         response, _ = redeem(world, wrong_for(code), source=f"192.0.2.{10 + i}")
         assert response.status_code == 422
+    with sqlite3.connect(world.path) as conn:
+        assert conn.execute("select count(*) from owner_codes").fetchone()[0] == 0, "burned at once, not lazily"
     response, _ = redeem(world, code)
     assert response.status_code == 422 and response.json()["error"] == "invalid_code"
     assert "owner-code" not in owner_rows(world).values()
@@ -371,7 +377,7 @@ def test_the_fifth_wrong_guess_burns_the_code_wherever_the_guesses_came_from(wor
 
 def test_a_source_that_keeps_guessing_is_told_to_wait_and_spends_nothing_more(world):
     code = issue(world)
-    for _ in range(owner_codes.WRONG_CODES_PER_MINUTE):
+    for _ in range(3):
         response, _ = redeem(world, wrong_for(code), source=OTHER)
         assert response.status_code == 422
     limited, _ = redeem(world, code, source=OTHER)
@@ -512,13 +518,16 @@ def test_running_it_again_replaces_the_first_code(world):
     assert accepted.status_code == 201
 
 
-def test_it_refuses_where_there_is_no_daemon_registry_and_creates_none(world, tmp_path, monkeypatch):
+@pytest.mark.parametrize("exists", [True, False], ids=["empty-data-dir", "no-data-dir"])
+def test_it_refuses_where_there_is_no_daemon_registry_and_creates_none(world, tmp_path, monkeypatch, exists):
     empty = tmp_path / "elsewhere"
+    if exists:
+        empty.mkdir()
     monkeypatch.setenv("PROMETHEUS_DATA_DIR", str(empty))
     status, out = run_cli("--owner")
     assert status == 1
-    assert "devices.db" in out and str(empty) in out
-    assert not empty.exists()
+    assert "no device registry" in out and str(empty / "devices.db") in out
+    assert empty.exists() is exists and not (empty / "devices.db").exists()
 
 
 def test_it_finds_the_registry_the_daemon_uses_through_the_env_file(world, tmp_path, monkeypatch):
