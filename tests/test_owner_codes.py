@@ -9,7 +9,8 @@ device token of its own.
 This file pins the code itself (``config/owner_codes.py``), with no HTTP:
 
 * 8 ASCII digits, good for 5 minutes, for ONE redemption, and only one code is live at a time;
-* 5 wrong tries burn it, so an online guesser gets 5 chances in 10^8 per code the owner asks for;
+* 5 wrong tries shut a source out and 25 in all burn the code, so an online guesser gets at most 25 chances in
+  10^8 per code the owner asks for, and one neighbour guessing badly cannot burn it for everyone;
 * the store keeps a digest, never the code, and nothing it returns or logs carries the code;
 * a redemption that fails to mint leaves the code usable (nothing was granted), and a mint happens at most once.
 """
@@ -34,6 +35,9 @@ class Clock:
         return self.now
 
 
+WALL = 1_760_500_000.0
+
+
 class Minter:
     """Stands in for ``DeviceStore.mint_owner``: counts calls and returns a mint record."""
 
@@ -56,7 +60,7 @@ def clock() -> Clock:
 
 @pytest.fixture
 def codes(clock) -> oc.OwnerCodes:
-    return oc.OwnerCodes(clock=clock)
+    return oc.OwnerCodes(clock=clock, wall=lambda: WALL)
 
 
 def wrong_for(code: str) -> str:
@@ -70,6 +74,7 @@ def test_a_code_is_eight_ascii_digits_good_for_five_minutes(codes, clock):
     assert len(code) == 8 and code.isascii() and code.isdigit()
     assert record.status == oc.PENDING
     assert record.expires_at == clock.now + oc.TTL_SECONDS == clock.now + 300
+    assert record.expires_wall == WALL + 300
     assert len(record.id) == 32 and int(record.id, 16) >= 0
 
 
@@ -177,22 +182,46 @@ def test_four_wrong_tries_still_leave_the_right_code_working(codes):
     assert codes.redeem(code, Minter(), source="x") is not None
 
 
-def test_five_wrong_tries_burn_the_code(codes, caplog):
+def test_five_wrong_tries_shut_that_source_out_and_no_one_else(codes, caplog):
     caplog.set_level(logging.INFO)
     record, code = codes.issue()
-    for _ in range(5):
+    for _ in range(oc.MAX_WRONG_PER_SOURCE):
         assert codes.redeem(wrong_for(code), Minter(), source="198.51.100.4") is None
+    mint = Minter()
+    assert codes.redeem(code, mint, source="198.51.100.4") is None and mint.calls == 0
+    assert codes.status(record.id).status == oc.PENDING
+    assert codes.redeem(code, Minter(), source="192.0.2.77") is not None
+    assert any("198.51.100.4" in r.getMessage() and "shut out" in r.getMessage() for r in caplog.records)
+
+
+def test_twenty_five_wrong_tries_in_all_burn_the_code(codes, caplog):
+    caplog.set_level(logging.INFO)
+    record, code = codes.issue()
+    assert oc.MAX_WRONG_ATTEMPTS == 25
+    for n in range(oc.MAX_WRONG_ATTEMPTS):
+        codes.redeem(wrong_for(code), Minter(), source=f"198.51.100.{n // oc.MAX_WRONG_PER_SOURCE}")
     assert codes.status(record.id).status == oc.LOCKED
     mint = Minter()
-    assert codes.redeem(code, mint, source="x") is None and mint.calls == 0
+    assert codes.redeem(code, mint, source="192.0.2.77") is None and mint.calls == 0
     assert any("locked" in r.getMessage() for r in caplog.records)
+
+
+def test_one_source_cannot_burn_the_code_however_often_it_tries(codes):
+    """A shut-out source is refused BEFORE its try is compared, so its tries guess nothing and count nothing."""
+    record, code = codes.issue()
+    for _ in range(100):
+        codes.redeem(wrong_for(code), Minter(), source="198.51.100.4")
+    assert codes.status(record.id).status == oc.PENDING
+    assert codes.status(record.id).wrong_attempts == oc.MAX_WRONG_PER_SOURCE
+    assert codes.redeem(code, Minter(), source="192.0.2.77") is not None
 
 
 def test_junk_counts_as_a_wrong_try_while_a_code_is_live(codes):
     record, code = codes.issue()
     for junk in ("", "abc", "1234567", None, 5, "１２３４５６７８"):
         codes.redeem(junk, Minter(), source="x")
-    assert codes.status(record.id).status == oc.LOCKED
+    assert codes.status(record.id).wrong_attempts == oc.MAX_WRONG_PER_SOURCE    # the sixth was refused unread
+    assert codes.redeem(code, Minter(), source="x") is None                      # shut out after five
 
 
 # ── time, replacement, cancel ────────────────────────────────────────────────
@@ -233,6 +262,29 @@ def test_cancel_is_false_for_an_unknown_or_finished_code(codes):
     codes.redeem(code, Minter(), source="x")
     assert codes.cancel(record.id) is False
     assert codes.cancel("0" * 32) is False
+
+
+def test_the_lifetime_follows_the_monotonic_clock_not_the_wall(clock):
+    """An NTP step must not stretch or cut a code's five minutes; the wall clock is only for showing a time."""
+    wall = Clock(WALL)
+    codes = oc.OwnerCodes(clock=clock, wall=wall)
+    record, code = codes.issue()
+    wall.now -= 3600                                    # the wall clock steps back an hour
+    clock.now += oc.TTL_SECONDS
+    assert codes.redeem(code, Minter(), source="x") is None
+    assert codes.status(record.id).status == oc.EXPIRED
+
+
+def test_the_default_clock_is_monotonic():
+    import time
+
+    assert oc.OwnerCodes().clock is time.monotonic
+
+
+def test_the_live_code_is_readable_without_the_code(codes):
+    assert codes.live() is None
+    record, _code = codes.issue()
+    assert codes.live() == record
 
 
 def test_the_status_of_an_unknown_id_is_none(codes):

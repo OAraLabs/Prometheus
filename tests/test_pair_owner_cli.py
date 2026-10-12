@@ -32,6 +32,7 @@ MACBOOK = "192.0.2.77"
 def world(tmp_path) -> World:
     w = World(tmp_path)
     w.app.state.owner_codes.clock = w.clock
+    w.app.state.owner_codes.wall = w.clock
     return w
 
 
@@ -135,8 +136,8 @@ def test_wrong_guesses_are_reported_as_a_warning(world):
 
     def sleep(_seconds: float) -> None:
         wrong = f"{(int(printed_code(lines)) + 1) % 10**8:08d}"
-        client = TestClient(world.app, base_url="http://192.0.2.50:8005", client=("198.51.100.4", 1))
-        for _ in range(5):
+        for n in range(25):                                   # five addresses, five wrong tries each
+            client = TestClient(world.app, base_url="http://192.0.2.50:8005", client=(f"198.51.100.{n // 5}", 1))
             client.post("/api/pair/owner", json={"code": wrong, "device_name": "guesser"})
 
     code = run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, sleep=sleep)
@@ -150,6 +151,44 @@ def test_a_newer_code_from_another_terminal_is_reported(world):
 
     code, lines = run(world, "--owner", sleep=sleep)
     assert code == 1 and "replaced" in "\n".join(lines).lower()
+
+
+def test_ctrl_c_after_someone_used_the_code_reports_who_and_never_says_cancelled(world):
+    """The review's case: a code redeemed in the second between two polls, then Ctrl-C. The alarm must still sound."""
+    lines: list[str] = []
+
+    def sleep(_seconds: float) -> None:
+        assert beacon_redeems(world, lines, peer="198.51.100.66", name="not you").status_code == 200
+        raise KeyboardInterrupt
+
+    code = run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, sleep=sleep)
+    text = "\n".join(lines)
+    assert "Cancelled" not in text and "cancelled" not in text.lower().split("was cancelled")[0]
+    assert "not you" in text and "198.51.100.66" in text and "revoke" in text.lower()
+    assert code == 0
+
+
+def test_ctrl_c_when_the_daemon_cannot_be_told_says_how_long_the_code_lasts(world):
+    lines: list[str] = []
+    calls = {"n": 0}
+    real = loopback(world)
+
+    class Flaky:
+        def post(self, *a, **kw):
+            return real.post(*a, **kw)
+
+        def get(self, *a, **kw):
+            return real.get(*a, **kw)
+
+        def delete(self, *a, **kw):
+            calls["n"] += 1
+            raise httpx.ConnectError("gone")
+
+    def sleep(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    code = run_pair_command(_args("--owner"), CONFIG, client=Flaky(), out=lines.append, sleep=sleep)
+    assert code == 130 and calls["n"] == 1 and "until" in "\n".join(lines)
 
 
 def test_ctrl_c_cancels_the_code(world):
@@ -193,3 +232,45 @@ def test_an_unreachable_daemon_says_where_it_looked(world):
 
     code, lines = run(world, "--owner", client=Down())
     assert code == 1 and "Could not reach the daemon" in "\n".join(lines)
+
+
+# ── where the terminal finds the daemon (independent review, 2026-10-11) ─────
+#
+# In home-network mode plain HTTP listens on this machine only and TLS takes the LAN address, so a terminal on the
+# machine must use loopback, not the bind address (whose plain port answers nothing). `oara pair approve` shares it.
+
+LAN = "192.168.1.10"
+
+
+def test_a_home_network_daemon_is_reached_over_loopback(monkeypatch):
+    from prometheus.cli.pair import daemon_base_url
+    from prometheus.web import tls
+
+    monkeypatch.setattr(tls, "tls_ready", lambda: True)
+    config = {"web": {"bind": LAN, "api_port": 8005}, "network": {"home_network": True}}
+    assert daemon_base_url(config, env={}) == "http://127.0.0.1:8005"
+
+
+def test_home_network_asked_for_without_tls_keeps_plain_http_on_loopback_too(monkeypatch):
+    from prometheus.cli.pair import daemon_base_url
+    from prometheus.web import tls
+
+    monkeypatch.setattr(tls, "tls_ready", lambda: False)
+    config = {"web": {"bind": LAN, "api_port": 8005}, "network": {"home_network": True}}
+    assert daemon_base_url(config, env={}) == "http://127.0.0.1:8005"
+
+
+def test_the_owners_plain_http_opt_out_serves_the_lan_address(monkeypatch):
+    from prometheus.cli.pair import daemon_base_url
+    from prometheus.web import tls
+
+    monkeypatch.setattr(tls, "tls_ready", lambda: False)
+    config = {"web": {"bind": LAN, "api_port": 8005},
+              "network": {"home_network": True, "allow_plaintext_lan": True}}
+    assert daemon_base_url(config, env={}) == f"http://{LAN}:8005"
+
+
+def test_a_specific_bind_without_home_network_is_reached_at_that_address():
+    from prometheus.cli.pair import daemon_base_url
+
+    assert daemon_base_url({"web": {"bind": LAN, "api_port": 8005}}, env={}) == f"http://{LAN}:8005"

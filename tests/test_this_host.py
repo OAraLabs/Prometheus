@@ -72,3 +72,22 @@ def test_it_takes_a_request_as_well_as_a_scope():
         scope = {"type": "http", "client": ("10.0.0.4", 1), "server": ("10.0.0.4", 8005), "headers": []}
 
     assert is_this_host(Request()) is True
+
+
+# ── what a relay says about itself (independent review, 2026-10-11) ──────────
+#
+# nginx's default proxy_pass adds no X-Forwarded-For; it is the X-Real-IP recipe that sets one, and Cloudflare,
+# Akamai and HTTP/1.1 proxies have their own. Each of these means the request was relayed, so neither test may call
+# it this machine. A client on this machine (curl, Beacon's main process, URLSession) sends none of them.
+
+RELAY_HEADERS = ["X-Real-IP", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Forwarded-Server", "X-Client-IP",
+                 "CF-Connecting-IP", "True-Client-IP", "Via"]
+
+
+@pytest.mark.parametrize("name", RELAY_HEADERS)
+def test_any_relay_header_means_not_this_host(name):
+    from prometheus.web.loopback import is_same_machine
+
+    assert is_this_host(scope("127.0.0.1", "127.0.0.1", (name, "203.0.113.9"))) is False
+    assert is_this_host(scope("192.168.1.20", "192.168.1.20", (name, "1.1 proxy"))) is False
+    assert is_same_machine(scope("127.0.0.1", "127.0.0.1", (name, "203.0.113.9"))) is False

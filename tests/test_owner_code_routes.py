@@ -17,7 +17,9 @@ THE ROUTES
 Nothing remote can mint: an owner device is not root (it cannot enrol devices, so it cannot mint owner codes
 either), a scoped device is default-denied, and the global token is refused unless the request came from this
 host (a loopback peer, or the daemon's own address) without a relay header. The code, not the caller, is what
-the public route checks; every way it can be wrong answers the same ``401 invalid_code``.
+the public route checks; every way it can be wrong answers the same ``401 invalid_code``. Five wrong tries shut a
+source out and 25 in all burn the code. Each issue, redemption and lock is told to the operator's sockets (and
+only theirs), so a code nobody at the machine meant to mint is seen.
 
 Real FastAPI app and DeviceStore (tests/support/pairing_world.py). The peer and the address a request arrived
 on are set through the test client (``client=``, ``base_url=``), which is what Starlette puts in the scope.
@@ -47,8 +49,9 @@ MACBOOK = "192.0.2.77"
 
 @pytest.fixture
 def world(tmp_path) -> World:
-    w = World(tmp_path)
+    w = World(tmp_path, bridge=True)
     w.app.state.owner_codes.clock = w.clock
+    w.app.state.owner_codes.wall = w.clock
     return w
 
 
@@ -112,7 +115,8 @@ def test_the_global_token_from_another_computer_mints_nothing(world):
     assert response.status_code == 403 and response.json()["error"] == "not_this_machine"
 
 
-@pytest.mark.parametrize("relay", [{"X-Forwarded-For": MACBOOK}, {"Forwarded": f"for={MACBOOK}"}])
+@pytest.mark.parametrize("relay", [{"X-Forwarded-For": MACBOOK}, {"Forwarded": f"for={MACBOOK}"},
+                                   {"X-Real-IP": MACBOOK}, {"Via": "1.1 nginx"}, {"CF-Connecting-IP": MACBOOK}])
 def test_a_relayed_request_mints_nothing_even_from_loopback(world, relay):
     response = mint(world, headers=relay)
     assert response.status_code == 403 and response.json()["error"] == "not_this_machine"
@@ -240,9 +244,12 @@ def test_every_failure_is_one_answer(world):
     cancelled = minted(world)
     here(world).delete(f"/api/pair/owner-codes/{cancelled['code_id']}", headers=bearer(GLOBAL))
     answers.add(redeem(world, cancelled["code"]).text)                              # cancelled
+    shut = minted(world)["code"]
+    for _ in range(oc.MAX_WRONG_PER_SOURCE):
+        redeem(world, wrong_for(shut), client=remote(world, "198.51.100.4"))
+    answers.add(redeem(world, shut, client=remote(world, "198.51.100.4")).text)   # this source shut out
     locked = minted(world)["code"]
-    for _ in range(oc.MAX_WRONG_ATTEMPTS):
-        redeem(world, wrong_for(locked))
+    guess_until_locked(world, locked)
     answers.add(redeem(world, locked).text)                                         # locked
     stale = minted(world)["code"]
     world.clock.now += 301
@@ -251,10 +258,25 @@ def test_every_failure_is_one_answer(world):
     assert redeem(world, "12345678").status_code == 401
 
 
-def test_five_wrong_tries_lock_the_code_and_the_terminal_is_told(world):
+def guess_until_locked(world: World, code: str) -> None:
+    """25 wrong tries, five from each of five addresses: what it takes to burn a code."""
+    for n in range(oc.MAX_WRONG_ATTEMPTS):
+        redeem(world, wrong_for(code), client=remote(world, f"198.51.100.{10 + n // oc.MAX_WRONG_PER_SOURCE}"))
+
+
+def test_five_wrong_tries_shut_that_source_out_and_leave_the_code_to_everyone_else(world):
     body = minted(world)
-    for _ in range(oc.MAX_WRONG_ATTEMPTS):
-        assert redeem(world, wrong_for(body["code"])).status_code == 401
+    guesser = remote(world, "198.51.100.4")
+    for _ in range(oc.MAX_WRONG_PER_SOURCE):
+        assert redeem(world, wrong_for(body["code"]), client=guesser).status_code == 401
+    assert redeem(world, body["code"], client=guesser).status_code == 401
+    assert status(world, body["code_id"]).json()["status"] == "pending"
+    assert redeem(world, body["code"]).status_code == 200
+
+
+def test_twenty_five_wrong_tries_lock_the_code_and_the_terminal_is_told(world):
+    body = minted(world)
+    guess_until_locked(world, body["code"])
     assert redeem(world, body["code"]).status_code == 401
     assert status(world, body["code_id"]).json()["status"] == "locked"
 
@@ -310,6 +332,19 @@ def test_a_bad_device_name_is_a_400_and_spends_no_try(world, body):
     assert world.app.state.owner_codes.status(issued["code_id"]).wrong_attempts == 0
 
 
+@pytest.mark.parametrize("code", [12345678, None, ["1234", "5678"], {"code": "12345678"}])
+def test_a_code_that_is_not_a_string_is_a_400_and_spends_no_try(world, code):
+    issued = minted(world)
+    response = remote(world).post("/api/pair/owner", json={"code": code, "device_name": "x"})
+    assert response.status_code == 400 and response.json() == {"error": "invalid_request", "fields": ["code"]}
+    assert world.app.state.owner_codes.status(issued["code_id"]).wrong_attempts == 0
+
+
+def test_a_missing_code_is_a_400(world):
+    response = remote(world).post("/api/pair/owner", json={"device_name": "x"})
+    assert response.status_code == 400 and response.json()["fields"] == ["code"]
+
+
 def test_a_body_that_is_not_a_json_object_is_a_400(world):
     client = remote(world)
     assert client.post("/api/pair/owner", content=b"[1]", headers={"Content-Type": "application/json"}).status_code == 400
@@ -327,6 +362,59 @@ def test_the_platform_is_narrowed_like_every_enrolment(world):
     device_id = redeem(world, minted(world)["code"], platform="windows").json()["device_id"]
     rows = {r["id"]: r for r in world.as_("global", "GET", "/api/devices").json()}
     assert rows[device_id]["platform"] == "other"
+
+
+# ── the operator is told ─────────────────────────────────────────────────────
+
+def sockets(world: World) -> dict:
+    """Fake operator, owner-device and scoped sockets on the real bridge, as tests/test_pairing_ws_frames.py does."""
+    from prometheus.config.api_token import GLOBAL_IDENTITY, DeviceIdentity
+    from tests.test_pairing_ws_frames import Sock
+
+    socks = {}
+    for who, identity in (
+        ("op", GLOBAL_IDENTITY),
+        ("owner", DeviceIdentity(id=world.owner["id"], name="Beacon on this Mac", platform="macos", owner=True)),
+        ("scoped", DeviceIdentity(id=world.scoped["id"], name="a scoped phone", platform="ios")),
+    ):
+        ws = Sock()
+        world.bridge._clients.add(ws)
+        world.bridge._ws_identity[ws] = identity
+        socks[who] = ws
+    return socks
+
+
+def owner_frames(ws) -> list[dict]:
+    return [f for f in ws.frames if f["type"] == "owner_code"]
+
+
+def test_every_operator_socket_hears_a_code_issued_and_redeemed_and_a_scoped_one_hears_nothing(world):
+    socks = sockets(world)
+    body = minted(world)
+    redeemed = redeem(world, body["code"]).json()
+    for who in ("op", "owner"):
+        frames = owner_frames(socks[who])
+        assert [f["payload"]["event"] for f in frames] == ["issued", "redeemed"], who
+        issued, done = (f["payload"] for f in frames)
+        assert issued == {"event": "issued", "code_id": body["code_id"], "expires_at": body["expires_at"],
+                          "redeemed_by": None}
+        assert done["redeemed_by"] == {"id": redeemed["device_id"], "name": "Will's MacBook Pro",
+                                       "platform": "macos", "source": MACBOOK}
+    assert socks["scoped"].frames == []
+
+
+def test_a_locked_code_is_told_as_well(world):
+    socks = sockets(world)
+    guess_until_locked(world, minted(world)["code"])
+    assert [f["payload"]["event"] for f in owner_frames(socks["op"])] == ["issued", "locked"]
+
+
+def test_no_frame_carries_the_code_or_the_token(world):
+    socks = sockets(world)
+    body = minted(world)
+    token = redeem(world, body["code"]).json()["token"]
+    text = socks["op"].text()
+    assert body["code"] not in text and oc.format_code(body["code"]) not in text and token not in text
 
 
 # ── nothing secret leaves ────────────────────────────────────────────────────
