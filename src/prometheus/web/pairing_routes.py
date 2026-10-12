@@ -14,6 +14,13 @@ device is a 403 ``operator_only``, never a 401, because 401 tells a client its t
     GET    /api/pair/requests            who is waiting
     POST   /api/pair/requests/{id}/approve | /deny
 
+**Owner code** (bearer required, ANY valid token: the API token or a device, scoped included):
+
+    POST   /api/pair/owner               a one-time code from `oara pair --owner` -> an owner device, sealed
+
+The code is the authority there, and only the terminal on the daemon's machine makes one
+(``config/owner_codes.py``); the bearer only narrows who may try to people already connected.
+
 A public route is outside the bearer gate, so each of these does its own checking: no browsers (an
 ``Origin`` header), the poll secret only in a header and only compared in constant time, the TCP peer (never
 ``X-Forwarded-For``) as the rate-limit key, and a body of at most 4 KiB. An unknown id, a wrong secret and
@@ -47,7 +54,7 @@ from typing import Any
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 
-from prometheus.config import pair_seal
+from prometheus.config import owner_codes, pair_seal
 from prometheus.config.device_store import DeviceStore
 from prometheus.config.instance_key import instance_public_key_der
 from prometheus.config.pair_requests import (
@@ -162,8 +169,10 @@ class PairingRuntime:
         self.clock = clock
         self.sweep_interval = SWEEP_INTERVAL_SECONDS
         self.bad_secret = SourceLimiter(WRONG_SECRETS_PER_MINUTE, 60.0, clock=lambda: self.clock())
+        self.bad_owner_code = SourceLimiter(owner_codes.WRONG_CODES_PER_MINUTE, 60.0, clock=lambda: self.clock())
         self._devices = devices
         self._store: PairRequestStore | None = None
+        self._owner_codes: owner_codes.OwnerCodeStore | None = None
         self._last_poll: OrderedDict[str, float] = OrderedDict()
         self._told: OrderedDict[str, None] = OrderedDict()
         self._sweeper: asyncio.Task | None = None
@@ -173,6 +182,12 @@ class PairingRuntime:
         if self._store is None:
             self._store = PairRequestStore(self._devices(), settings=self.settings, clock=lambda: self.clock())
         return self._store
+
+    def owner_codes(self) -> owner_codes.OwnerCodeStore:
+        """The redeeming half of the owner codes. Built on first use; redeeming creates no table."""
+        if self._owner_codes is None:
+            self._owner_codes = owner_codes.OwnerCodeStore(self._devices(), clock=lambda: self.clock())
+        return self._owner_codes
 
     # -- sweeping ---------------------------------------------------------
 
@@ -621,5 +636,86 @@ def register_pairing_routes(
         except (UnknownRequest, RequestExpired, NotPending) as exc:
             return refusal_for(exc)
         return _json(200, {"request_id": denied.id, "status": DENIED})
+
+    # ── a Beacon on another computer becomes an owner device ─────────────
+
+    @app.post("/api/pair/owner")
+    async def redeem_owner_code(request: Request):
+        """Trade the one-time code ``oara pair --owner`` printed on this machine for an owner device.
+
+        Behind the bearer gate (any valid token; ``web/route_access.SCOPED_ALLOWED`` lets a scoped device in), so
+        the caller is already connected. Everything that can be wrong with the body is refused BEFORE the code is
+        looked at, so a malformed request never spends or counts the code. A source that has guessed wrong
+        :data:`owner_codes.WRONG_CODES_PER_MINUTE` times is told to wait before the code is looked at, too, and
+        every wrong guess counts against the code itself (the fifth burns it). The token goes back sealed to the
+        caller's key, with the new device id as the request id: an owner token can approve a worker, which the
+        API token cannot, so it does not cross a plaintext link in clear.
+        """
+        if (refusal := _browser_refusal(request)) is not None:
+            return refusal
+        if not auth_on():
+            return _json(403, {"error": "pairing_unavailable",
+                               "detail": "this daemon has no API token, so no caller can be told apart from a "
+                                         "model and an owner device would mean nothing"})
+        if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+            return _json(400, {"error": "invalid_request", "fields": [],
+                               "detail": "Content-Type must be application/json"})
+        try:
+            raw = await _read_limited(request)
+        except _TooLarge:
+            return _json(413, {"error": "too_large", "detail": f"at most {MAX_BODY_BYTES} bytes"})
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            return _json(400, {"error": "invalid_request", "fields": [], "detail": "body must be a JSON object"})
+
+        fields: list[str] = []
+        code = owner_codes.normalize_code(body.get("code"))
+        if code is None:
+            fields.append("code")
+        name = _clean_name(body.get("device_name"))
+        if name is None:
+            fields.append("device_name")
+        platform = body.get("platform")
+        platform = platform.strip().lower() if isinstance(platform, str) else "other"
+        platform = platform if platform in _PLATFORMS else "other"
+        key: bytes | None = None
+        public_key = body.get("public_key")
+        if isinstance(public_key, str) and _PUBLIC_KEY_RE.fullmatch(public_key):
+            try:
+                key = pair_seal.b64url_decode(public_key)
+                pair_seal.check_requester_key(key)
+            except ValueError:
+                key = None
+        if key is None:
+            fields.append("public_key")
+        if fields or code is None or name is None or key is None:
+            return _json(400, {"error": "invalid_request", "fields": fields})
+
+        source = _peer(request)
+        blocked = runtime.bad_owner_code.peek(source)
+        if not blocked.allowed:
+            return _rate_limited("bad_code", blocked.retry_after)
+        redeemed = runtime.owner_codes().redeem(
+            code, name=name, platform=platform, source=source, by=_decider(request, "owner-code"))
+        if redeemed is None:
+            runtime.bad_owner_code.check(source)
+            return _json(422, {"error": "invalid_code",
+                               "detail": "that code is wrong, expired or already used; run `oara pair --owner` "
+                                         "on the daemon's machine for a new one (five wrong tries end a code)"})
+        try:
+            sealed = pair_seal.seal_token(
+                requester_public_key=key, request_id=redeemed.device_id,
+                payload={"token": redeemed.token, "device_id": redeemed.device_id, "name": redeemed.name})
+        except Exception:
+            # Unreachable with a key that passed the check above; if it happens, nobody holds the token, so the
+            # device must not stand.
+            devices().revoke(redeemed.device_id)
+            logger.exception("pairing: could not seal an owner device's token; device %s revoked", redeemed.device_id)
+            return _json(500, {"error": "seal_failed"})
+        return _json(201, {"device_id": redeemed.device_id, "name": redeemed.name, "platform": redeemed.platform,
+                           "owner": True, "owner_source": owner_codes.OWNER_SOURCE, "sealed": sealed})
 
     return runtime

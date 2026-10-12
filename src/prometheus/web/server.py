@@ -603,9 +603,10 @@ def create_app(
         # exist — the store keeps a SHA-256.
         if owner:
             # The global token minting an OWNER device — the person's own cockpit on THIS Mac trading the
-            # setup-mode token for one of its own. Owner tokens come only from same-Mac pairing (Will,
-            # 2026-10-08): from any other address this is refused, and the other computer is enrolled as an
-            # ordinary, scoped device like every approved one. From this Mac's loopback address it carries the
+            # setup-mode token for one of its own. This route issues owner tokens for this Mac only (Will,
+            # 2026-10-08): from any other address this is refused. Another computer becomes an owner device only
+            # with a one-time code printed on this machine (`oara pair --owner`, POST /api/pair/owner), never with
+            # the API token alone. From this Mac's loopback address it carries the
             # same-Mac source and replaces the earlier same-Mac credentials, exactly as a re-pairing does.
             # (The test is `is_same_machine`: a loopback TCP peer AND no X-Forwarded-For or Forwarded header.
             # A proxy on this machine (`tailscale serve`, cloudflared, nginx) connects from loopback and relays

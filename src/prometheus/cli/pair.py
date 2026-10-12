@@ -3,6 +3,12 @@
     oara pair list
     oara pair approve <id> [--name NAME] [--code NNNN]
     oara pair deny <id>
+    oara pair --owner
+
+``--owner`` is different in kind. Run on the daemon's machine, it prints a one-time code that makes a Beacon on
+ANOTHER computer an owner device (``POST /api/pair/owner``; config/owner_codes.py). It does not use the API token
+or the network at all: it writes the code's digest into the daemon's ``devices.db``, so the only way to make a code
+is to be able to write that file, and nothing that merely reaches the daemon over the network can.
 
 For a headless box with no Beacon open and no Telegram (docs/PAIRING-APPROVAL-API.md, 5.3). It is the same
 REST routes the other channels use, with the global token read the way ``oara token show`` reads it, and it
@@ -21,13 +27,17 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import sqlite3
+import time
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from prometheus.config.api_token import resolve_api_token
 from prometheus.config.env_file import parse_env_file
+from prometheus.config.paths import DEVICES_DB_NAME, data_dir_path
 from prometheus.web.bind import BindError, format_host_port, is_all_interfaces, resolve_bind
 
 MIN_PREFIX = 6
@@ -37,6 +47,9 @@ _TIMEOUT_SECONDS = 10.0
 def add_pair_subparser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``pair`` subcommand on the main CLI parser."""
     pair = subparsers.add_parser("pair", help="List, approve or deny devices asking to join this Prometheus")
+    pair.add_argument("--owner", action="store_true",
+                      help="print a one-time code that makes Beacon on another computer an OWNER device "
+                           "(run this on the daemon's machine)")
     sub = pair.add_subparsers(dest="pair_action")
     sub.add_parser("list", help="Show the devices waiting for a decision")
     approve = sub.add_parser("approve", help="Let a waiting device join (it gets its own scoped token)")
@@ -82,10 +95,15 @@ def run_pair_command(
     client: Any = None,
     out: Callable[[str], None] = print,
 ) -> int:
-    """Execute ``oara pair <list|approve|deny>``. Returns an exit code."""
+    """Execute ``oara pair <list|approve|deny>`` or ``oara pair --owner``. Returns an exit code."""
     action = getattr(args, "pair_action", None)
+    if getattr(args, "owner", False):
+        if action is not None:
+            out("--owner takes no action: run `oara pair --owner` on its own.")
+            return 2
+        return issue_owner_code_here(config, out=out)
     if action not in ("list", "approve", "deny"):
-        out("Usage: oara pair <list|approve <id>|deny <id>>")
+        out("Usage: oara pair <list|approve <id>|deny <id>>   or   oara pair --owner")
         return 2
     prefix = getattr(args, "request", None)
     if action in ("approve", "deny") and len(prefix or "") < MIN_PREFIX:
@@ -111,6 +129,55 @@ def run_pair_command(
     finally:
         if own:
             client.close()
+
+
+def daemon_devices_db(env: Mapping[str, str] | None = None) -> Path:
+    """The ``devices.db`` the daemon on this machine uses: its data directory as the daemon resolves it (the env
+    file under the environment, the way ``oara daemon`` loads it at start). Creates nothing."""
+    environment = {**parse_env_file(), **os.environ} if env is None else env
+    return data_dir_path(environment).expanduser() / DEVICES_DB_NAME
+
+
+def issue_owner_code_here(config: dict[str, Any] | None, *, out: Callable[[str], None] = print) -> int:
+    """``oara pair --owner``: write a fresh one-time owner code into the daemon's registry and print it.
+
+    Refuses, issuing nothing, when the API is open (an owner device would mean nothing, and the route refuses
+    then too) and when there is no registry where the daemon keeps one (a wrong data directory must not grow a
+    second ``devices.db`` that the daemon never reads).
+    """
+    from prometheus.config.device_store import DeviceStore
+    from prometheus.config.owner_codes import CODE_TTL_SECONDS, MAX_FAILURES, issue_owner_code
+
+    token, _source = resolve_api_token(config)
+    if not token:
+        out("This daemon's API is open (no web API token is set), so there is no owner device to make: every "
+            "caller is already everything.\nSet a token with: oara token rotate")
+        return 1
+    path = daemon_devices_db()
+    if not path.is_file():
+        out(f"There is no device registry at {path}, so this is not where the daemon keeps its devices.\n"
+            "Run this on the daemon's machine, as the user it runs as. If the daemon uses another data directory, "
+            "run this with PROMETHEUS_DATA_DIR set to it.")
+        return 1
+    try:
+        devices = DeviceStore(path)
+        try:
+            issued = issue_owner_code(devices, by="cli")
+        finally:
+            devices.close()
+    except sqlite3.Error as exc:
+        out(f"Could not write the code into {path}: {exc}.\nRun this as the user the daemon runs as.")
+        return 1
+    minutes = CODE_TTL_SECONDS // 60
+    until = time.strftime("%H:%M", time.localtime(issued.expires_at))
+    out(f"Owner code:  {issued.code}\n\n"
+        f"Enter it in Beacon on the computer you want to make an owner device, within {minutes} minutes "
+        f"(until {until}). It works once; running `oara pair --owner` again replaces it, and {MAX_FAILURES} wrong "
+        "tries end it.\n"
+        "An owner device sees every conversation and can approve workers' requests. It cannot enrol devices or "
+        "define MCP servers, and you can revoke it from the device list at any time.\n"
+        f"(Registry: {path})")
+    return 0
 
 
 def _waiting_quietly(client: Any, headers: dict[str, str]) -> list[dict[str, Any]]:

@@ -213,6 +213,7 @@ def test_a_code_works_once_even_when_two_connections_race(world):
         t.start()
     for t in threads:
         t.join()
+    assert len(results) == len(stores), "every racer got an answer (none raised)"
     assert sum(1 for r in results if r is not None) == 1, results
     assert sum(1 for s in owner_rows(world).values() if s == "owner-code") == 1
 

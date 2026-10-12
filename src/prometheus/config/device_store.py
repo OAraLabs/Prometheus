@@ -170,7 +170,8 @@ class DeviceStore:
         The same row ``mint`` writes, without the commit, so an approval can record itself and mint its
         device atomically: a failure after this rolls the device back, and there is never a live token
         nobody holds. There is no tier parameter, as with ``mint``: an owner device is only ever
-        ``mint_owner`` (same-Mac pairing), never the product of an approval.
+        ``mint_owner`` / ``mint_owner_in_transaction`` (same-Mac pairing, a one-time owner code), never the
+        product of an approval.
         """
         return self._new_device(name, platform)
 
@@ -499,6 +500,9 @@ class DeviceStore:
     #                 for its owner's cockpit). Operator-equivalent for session scoping and device
     #                 management; ``DeviceIdentity.is_operator`` is true. NOT root: it still cannot
     #                 enrol devices or define MCP servers (those stay global-token-only).
+    #                 ``mint_owner_in_transaction`` is the same mint inside a transaction the caller
+    #                 owns, for a one-time owner code (config/owner_codes.py) that is spent in the same
+    #                 commit as the device it buys.
     #
     # The marker is its own table, created on the FIRST owner mint, like computer_devices and
     # device_sessions: api_devices keeps its columns and a daemon that never has an owner device
@@ -522,13 +526,7 @@ class DeviceStore:
         if not by:
             raise ValueError("an owner device must say who marked it (by=)")
         sources = tuple(replaces)
-        self._conn.executescript("""
-            CREATE TABLE IF NOT EXISTS owner_devices (
-              device_id TEXT PRIMARY KEY,
-              marked_at REAL NOT NULL,
-              marked_by TEXT NOT NULL
-            );
-        """)
+        self.ensure_owner_table()
         try:
             revoked: list[str] = []
             if sources:
@@ -542,10 +540,7 @@ class DeviceStore:
                 for device_id in revoked:
                     self._conn.execute(
                         "UPDATE api_devices SET revoked_at = ? WHERE id = ?", (now, device_id))
-            minted = self._new_device(name, platform)
-            self._conn.execute(
-                "INSERT INTO owner_devices (device_id, marked_at, marked_by) VALUES (?, ?, ?)",
-                (minted["id"], minted["created_at"], by))
+            minted = self._new_owner_device(name, platform, by)
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -553,6 +548,41 @@ class DeviceStore:
         minted["owner"] = True
         minted["revoked_previous"] = revoked
         self._notify_revoked(revoked)
+        return minted
+
+    def ensure_owner_table(self) -> None:
+        """Create ``owner_devices`` if it is not there yet. ``executescript`` COMMITS whatever is open, so this
+        runs before a transaction, never inside one."""
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS owner_devices (
+              device_id TEXT PRIMARY KEY,
+              marked_at REAL NOT NULL,
+              marked_by TEXT NOT NULL
+            );
+        """)
+
+    def _new_owner_device(self, name: str, platform: str, by: str) -> dict:
+        """The device row and its owner mark. Does NOT commit, and needs ``owner_devices`` to exist."""
+        minted = self._new_device(name, platform)
+        self._conn.execute(
+            "INSERT INTO owner_devices (device_id, marked_at, marked_by) VALUES (?, ?, ?)",
+            (minted["id"], minted["created_at"], by))
+        return minted
+
+    def mint_owner_in_transaction(self, name: str, platform: str, *, by: str) -> dict:
+        """Enrol an owner device inside a transaction the CALLER owns and commits (call
+        :meth:`ensure_owner_table` before opening it).
+
+        For a one-time owner code (``config/owner_codes.py``): the code is spent and the device minted in one
+        commit, so a crash leaves neither a spent code with no device nor a device whose code still works. It
+        replaces nothing, because a code does not say which computer it is for. Returns what :meth:`mint_owner`
+        returns, with an empty ``revoked_previous``.
+        """
+        if not by:
+            raise ValueError("an owner device must say who marked it (by=)")
+        minted = self._new_owner_device(name, platform, by)
+        minted["owner"] = True
+        minted["revoked_previous"] = []
         return minted
 
     def is_owner(self, device_id: str) -> bool:

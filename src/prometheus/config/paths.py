@@ -12,13 +12,14 @@ Follows XDG-like conventions with ~/.prometheus/ as the default base directory.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 _DEFAULT_BASE_DIR = ".prometheus"
 _CONFIG_FILE_NAME = "settings.json"
 
 
-def config_dir_path() -> Path:
+def config_dir_path(environ: Mapping[str, str] | None = None) -> Path:
     """Where the configuration directory IS. Creates nothing.
 
     Resolution order:
@@ -34,7 +35,7 @@ def config_dir_path() -> Path:
     the resolution rather than calling the helper — which is how it became a
     fifth, separately-drifting copy of the config search order.
     """
-    env_dir = os.environ.get("PROMETHEUS_CONFIG_DIR")
+    env_dir = (os.environ if environ is None else environ).get("PROMETHEUS_CONFIG_DIR")
     if env_dir:
         return Path(env_dir)
     return Path.home() / _DEFAULT_BASE_DIR
@@ -60,17 +61,21 @@ def get_config_file_path() -> Path:
     return get_config_dir() / _CONFIG_FILE_NAME
 
 
-def data_dir_path() -> Path:
+def data_dir_path(environ: Mapping[str, str] | None = None) -> Path:
     """Where the data directory IS. Creates nothing — see :func:`config_dir_path`.
 
     Resolution order:
     1. PROMETHEUS_DATA_DIR environment variable
     2. ~/.prometheus/data/
+
+    *environ* replaces ``os.environ`` for both lookups: a command asking where the DAEMON keeps its data passes
+    the environment the daemon starts with (the env file under its own environment).
     """
-    env_dir = os.environ.get("PROMETHEUS_DATA_DIR")
+    env = os.environ if environ is None else environ
+    env_dir = env.get("PROMETHEUS_DATA_DIR")
     if env_dir:
         return Path(env_dir)
-    return config_dir_path() / "data"
+    return config_dir_path(env) / "data"
 
 
 def get_data_dir() -> Path:
@@ -83,11 +88,14 @@ def get_data_dir() -> Path:
     return data_dir
 
 
+DEVICES_DB_NAME = "devices.db"
+
+
 def get_devices_db_path() -> Path:
     """Enrolled API devices (GRAFT-MOBILE-BRIDGE 1). Its own small file, NOT
     lcm.db — auth material and conversation memory have different lifecycles
     and different backup/wipe expectations."""
-    return get_data_dir() / "devices.db"
+    return get_data_dir() / DEVICES_DB_NAME
 
 
 def get_logs_dir() -> Path:

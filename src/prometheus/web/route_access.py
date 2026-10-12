@@ -99,6 +99,10 @@ SCOPED_ALLOWED: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/approvals"),
     ("POST", "/api/approvals/{request_id}/approve"),
     ("POST", "/api/approvals/{request_id}/deny"),
+    # trading a one-time code for an owner device (web/pairing_routes.py): the code is the authority, and only
+    # `oara pair --owner` on the daemon's machine makes one; a Beacon that joined by approve-to-pair holds a
+    # scoped token, and promoting it is this one step
+    ("POST", "/api/pair/owner"),
 })
 
 #: What a device an operator MARKED for computer use may additionally do over REST (the door's W3 ruling: a marked

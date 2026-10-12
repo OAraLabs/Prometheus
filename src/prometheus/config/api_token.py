@@ -188,6 +188,9 @@ OWNER_SOURCE_SAME_MAC = "same-mac-pairing"
 #: … and for one the global token minted (``POST /api/devices`` with ``owner: true``) from THIS Mac's loopback
 #: address, which is how a fresh install trades its setup-mode token for a device token of its own.
 OWNER_SOURCE_SAME_MAC_MINT = "same-mac-mint"
+#: … and for one ANOTHER computer bought with a one-time code that ``oara pair --owner`` printed on this machine
+#: (``POST /api/pair/owner``, config/owner_codes.py). Not a same-Mac source: this Mac's re-pairing never revokes it.
+OWNER_SOURCE_OWNER_CODE = "owner-code"
 #: Owner devices issued for THIS Mac. A new one replaces the earlier ones from any of these sources and
 #: from nothing else: an owner device minted for another computer carries a different ``marked_by`` and is
 #: never revoked by this Mac's re-pairing.
@@ -234,6 +237,8 @@ def issue_owner_credential(
     file only that user can read. A device that someone approves from Telegram or from another device must
     NOT get this credential: it needs an ordinary scoped token from ``DeviceStore.mint``. Two mint paths on
     purpose, and the tier is not a parameter a caller can widen. Do not route an approval flow through here.
+    (The person's own app on ANOTHER computer becomes an owner device with a one-time code printed on this
+    machine by ``oara pair --owner``: config/owner_codes.py. Approving a request still never does.)
 
     What this does NOT fix: the global token stays valid and stays in ``~/.config/prometheus/env``, where the
     bash tool can read it (and on macOS there is no shell floor). This stops a paired DEVICE holding the master
