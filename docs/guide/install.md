@@ -1,6 +1,6 @@
 # Install & first flight
 
-This page takes you from nothing to a running Prometheus daemon with Beacon connected — including the fully guided "couch mode" path, where the daemon boots into setup mode and Beacon's wizard does the rest. Every command here is copy-pasteable; where something is rough today (unsigned macOS builds, Homebrew verified on Apple Silicon only), the page says so instead of pretending otherwise.
+This page takes you from nothing to a running Prometheus daemon with Beacon connected — including the fully guided "couch mode" path, where the daemon boots into setup mode and Beacon's wizard does the rest. Every command here is copy-pasteable; where something is rough today (Homebrew verified on Apple Silicon only), the page says so instead of pretending otherwise.
 
 [← README](../../README.md)
 
@@ -182,13 +182,9 @@ The exit code is nonzero when anything is broken, so it also works in scripts an
 
 ## Install Beacon
 
-Beacon is the native desktop cockpit (macOS / Linux). It is free to use but not open source, and it is in beta: builds are published when Beacon leaves beta, and until then early users get draft builds ([oara.ai/beacon](https://oara.ai/beacon)). Once you have a build (`.dmg` for macOS, `.AppImage`/`.deb` for Linux), the notes below apply:
+Beacon is the native desktop cockpit (macOS / Linux). It is free to use but not open source, and it is in beta. Every release publishes its builds — a `.dmg` for macOS (Apple silicon), an `.AppImage` and a `.deb` for Linux — from the [releases page](https://github.com/OAraLabs/beacon/releases/latest), which is what [oara.ai/beacon](https://oara.ai/beacon) reads. Once you have a build, the notes below apply:
 
-- **macOS (Apple Silicon)** — download `Beacon-<version>-arm64.dmg` and drag Beacon to Applications. The build is currently **unsigned**, so Gatekeeper will balk the first time: right-click the app → **Open** → **Open**, or clear the quarantine flag directly:
-
-  ```bash
-  xattr -dr com.apple.quarantine /Applications/Beacon.app
-  ```
+- **macOS (Apple Silicon)** — download `Beacon-<version>-arm64.dmg` and drag Beacon to Applications. The published macOS app and disk image are **signed, notarized and stapled** with an Apple Developer ID, so Gatekeeper opens them without a warning. (The Linux builds are not signed.)
 
 - **Linux (AppImage)** — universal, no install step:
 
@@ -325,7 +321,7 @@ A new install listens on **this machine only** (`web.bind: 127.0.0.1`), so for r
 
 - **Something's broken and you don't know what** — `oara doctor`. It checks every subsystem and prints a fix hint per failure; nonzero exit when anything fails.
 - **Lost the API token** — it was only printed once, but `oara token show` re-prints it any time. `oara token rotate` if you think it leaked. It lives in `~/.config/prometheus/env`.
-- **macOS refuses to open Beacon** — the build is unsigned. Right-click → **Open** → **Open** once, or `xattr -dr com.apple.quarantine /Applications/Beacon.app`.
+- **macOS refuses to open Beacon** — the published macOS build is signed and notarized, so this shouldn't happen with a downloaded release. If it does, the `.dmg` was damaged in transit or the app was rebuilt from source without signing credentials: re-download it, or right-click → **Open** → **Open** once for an unsigned build.
 - **Pairing code rejected or expired** — codes are strict by design: each one lives **15 minutes**, pairs **one client**, and allows **5 wrong attempts** before locking. Restart the daemon (`oara daemon`) to mint a fresh code and try again. Only a wrong code burns an attempt.
 - **Beacon connects but shows auth errors** — the token Beacon stored no longer matches the daemon's (e.g. after a rotate). Open Connection Settings (`⌘,`), paste the output of `oara token show`, and hit **Test**.
 
