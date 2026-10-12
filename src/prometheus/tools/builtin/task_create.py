@@ -59,7 +59,9 @@ class TaskCreateToolInput(BaseModel):
     )
     timeout_seconds: int | None = Field(
         default=None,
-        description="Hard ceiling; on expiry the task is marked failed (timeout).",
+        description=("Hard ceiling for a local_bash, file_watch or poll task; on expiry the task is marked failed "
+                     "(timeout). Not for local_agent: a worker's limit is the owner's setting "
+                     "(workers.timeout_minutes, working time only), and a value here is ignored for it."),
     )
 
 
@@ -166,7 +168,9 @@ class TaskCreateTool(BaseTool):
             notify_target=notify_target,
             on_complete=on_complete,
             reengage_prompt=arguments.reengage_prompt,
-            timeout_seconds=arguments.timeout_seconds,
+            # A worker's limit is the owner's (workers.timeout_minutes), never the model's: six research workers
+            # were killed at the 900 seconds a model chose here.
+            timeout_seconds=None if arguments.type == "local_agent" else arguments.timeout_seconds,
         )
 
         route_note = ""

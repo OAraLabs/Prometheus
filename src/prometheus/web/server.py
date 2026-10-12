@@ -5784,6 +5784,11 @@ def create_app(
         if primary is None or not hasattr(primary, "request_approval"):
             return {"result": "denied",
                     "reason": "no approval queue: nobody can approve a worker's request"}
+        # A worker's limit is WORKING time (workers.timeout_minutes): while its request waits for a person, the queue
+        # stops the worker's clock with the task manager's (ApprovalQueue.worker_clock). Bound once per queue.
+        _clock = getattr(get_task_manager(), "waiting_for_approval", None)
+        if _clock is not None and getattr(primary, "worker_clock", None) is None:
+            primary.worker_clock = _clock
         open_now = sum(1 for a in primary.list_pending()
                        if getattr(a, "worker_task_id", None) == task.id)
         if open_now >= wa.MAX_PENDING_PER_WORKER:

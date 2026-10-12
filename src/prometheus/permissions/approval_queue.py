@@ -8,6 +8,7 @@ for the response (with timeout).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections import OrderedDict
@@ -596,6 +597,16 @@ class ApprovalQueue:
         """
         return action.created_at + self._timeout
 
+    #: A worker's time-limit clock: ``task_id -> async context manager`` that stops the clock while it is open (the task
+    #: manager's ``waiting_for_approval``, bound by the worker approval route). While a WORKER's request waits for a
+    #: person, its clock is stopped, so the wait never counts against its limit. None: nothing to stop.
+    worker_clock: Any = None
+
+    def _worker_clock_for(self, action: PendingAction) -> Any:
+        if self.worker_clock is None or action.worker_task_id is None:
+            return contextlib.nullcontext()
+        return self.worker_clock(action.worker_task_id)
+
     async def request_approval(
         self,
         tool_name: str,
@@ -743,7 +754,8 @@ class ApprovalQueue:
         # shut-down turn — used to leave its request pending forever, still
         # answerable, with nothing waiting on the answer.
         try:
-            await self._wait_for_answer(action, request_id, target_chat)
+            async with self._worker_clock_for(action):
+                await self._wait_for_answer(action, request_id, target_chat)
         finally:
             self.pending.pop(request_id, None)
         return action._result

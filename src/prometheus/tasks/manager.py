@@ -22,6 +22,7 @@ On top of the original in-memory manager this adds, all backward-compatibly
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import inspect
 import json
@@ -51,6 +52,8 @@ from prometheus.tasks.watchers import poll_until, watch_for_file
 from prometheus.utils.child_python import prometheus_argv
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from prometheus.tasks.store import TaskStore
 
 log = logging.getLogger(__name__)
@@ -88,6 +91,9 @@ def _signal_process_group(process: asyncio.subprocess.Process, sig: int) -> None
 
 # Defaults; the daemon overrides from config["tasks"].
 DEFAULT_TIMEOUT_SECONDS = 3600
+#: A worker's limit until the daemon reads ``workers.timeout_minutes`` (tasks/worker_settings.py): an hour of working
+#: time.
+DEFAULT_WORKER_TIMEOUT_SECONDS = 3600
 DEFAULT_POLL_INITIAL_INTERVAL = 5.0
 DEFAULT_POLL_MAX_INTERVAL = 120.0
 
@@ -185,6 +191,14 @@ class BackgroundTaskManager:
         self._task_roots: dict[str, tuple[str, ...]] = {}
         self._generations: dict[str, int] = {}
         self._emitted: set[str] = set()
+        #: A worker's time limit when its creator names none: ``workers.timeout_minutes``, set by the daemon. WORKING
+        #: time: the clock stops while the worker waits for a person (``waiting_for_approval``).
+        self.worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS
+        # The approval-wait clock, per task (monotonic): open waits, since when the clock has been stopped, and the
+        # time already spent stopped by this process of the task.
+        self._approval_waits: dict[str, int] = {}
+        self._paused_since: dict[str, float] = {}
+        self._paused_total: dict[str, float] = {}
 
         # Optional collaborators (wired by the daemon; None in lightweight use).
         self.signal_bus = signal_bus
@@ -450,7 +464,9 @@ class BackgroundTaskManager:
             notify_target=notify_target,
             on_complete=on_complete,
             reengage_prompt=reengage_prompt,
-            timeout_seconds=timeout_seconds,
+            # A worker's limit is the owner's workers.timeout_minutes unless the caller names one.
+            timeout_seconds=(timeout_seconds if timeout_seconds is not None
+                             else self.worker_timeout_seconds if worker else None),
             env_overlay=env_overlay,
             floored=floored,
             task_id=worker_task_id,
@@ -658,6 +674,31 @@ class BackgroundTaskManager:
                 task.metadata.pop("status_note", None)
         self._persist(task)
         return task
+
+    @contextlib.asynccontextmanager
+    async def waiting_for_approval(self, task_id: str) -> AsyncIterator[None]:
+        """Stop *task_id*'s time-limit clock for as long as this block runs: the daemon wraps each approval request a
+        worker files, so time spent waiting for a person never counts against the worker. Waits that overlap stop it
+        once, and it starts again when the last one ends."""
+        if self._approval_waits.get(task_id, 0) == 0:
+            self._paused_since[task_id] = time.monotonic()
+        self._approval_waits[task_id] = self._approval_waits.get(task_id, 0) + 1
+        try:
+            yield
+        finally:
+            left = self._approval_waits.get(task_id, 1) - 1
+            if left > 0:
+                self._approval_waits[task_id] = left
+            else:
+                self._approval_waits.pop(task_id, None)
+                since = self._paused_since.pop(task_id, None)
+                if since is not None and task_id in self._processes:      # a wait that outlived its process counts
+                    self._paused_total[task_id] = self._paused_total.get(task_id, 0.0) + time.monotonic() - since
+
+    def _waited(self, task_id: str) -> float:
+        """Seconds *task_id*'s clock has been stopped, an open wait included."""
+        since = self._paused_since.get(task_id)
+        return self._paused_total.get(task_id, 0.0) + (time.monotonic() - since if since is not None else 0.0)
 
     async def stop_task(self, task_id: str) -> TaskRecord:
         """Terminate a running task (SIGTERM then SIGKILL, or cancel a watcher)."""
@@ -1215,15 +1256,35 @@ class BackgroundTaskManager:
         task = self._tasks[task_id]
         timed_out = False
         timeout = task.timeout_seconds
+        started = time.monotonic()
+        self._paused_total[task_id] = 0.0       # this process's clock; an earlier process of the task kept its own
         try:
             if timeout and timeout > 0:
-                return_code = await asyncio.wait_for(process.wait(), timeout=timeout)
+                # WORKING time: wall time minus the time spent waiting for a person (waiting_for_approval). When the
+                # wait runs out, look again: a wait for approval may have stopped the clock meanwhile.
+                while True:
+                    left = timeout - (time.monotonic() - started - self._waited(task_id))
+                    if left <= 0:
+                        raise asyncio.TimeoutError
+                    if task_id in self._paused_since:
+                        left = max(left, 1.0)   # stopped: nothing to count down, so do not spin
+                    try:
+                        return_code = await asyncio.wait_for(process.wait(), timeout=left)
+                        break
+                    except asyncio.TimeoutError:
+                        continue
             else:
                 return_code = await process.wait()
         except asyncio.TimeoutError:
             timed_out = True
             _signal_process_group(process, signal.SIGKILL)
             return_code = await process.wait()
+            # What the parent's report says (completion_handler._worker_report): the limit, the time it worked and
+            # the time it waited for a person. Recorded only for a stop for time, so no other record changes.
+            waited = self._waited(task_id)
+            task.metadata["time_limit_seconds"] = str(timeout)
+            task.metadata["active_seconds"] = f"{max(0.0, time.monotonic() - started - waited):.1f}"
+            task.metadata["approval_wait_seconds"] = f"{waited:.1f}" if waited >= 0.05 else "0"
         await reader
         if task.metadata.get("worker") == "1":
             # Before anything else, the generation check included: the process that asked is gone, whatever comes
@@ -1242,6 +1303,7 @@ class BackgroundTaskManager:
         task.ended_at = time.time()
         self._processes.pop(task_id, None)
         self._waiters.pop(task_id, None)
+        self._paused_total.pop(task_id, None)
         # After the pops: a retry registers its own process and waiter.
         if task.metadata.get("worker") == "1" and await self._retry_worker_on_parent_route(task):
             return
@@ -1463,13 +1525,19 @@ def _worker_view(task: TaskRecord) -> dict[str, Any] | None:
     if task.metadata.get("worker") != "1":
         return None
     md = task.metadata
-    return {
+    view: dict[str, Any] = {
         "route": md.get("worker_route"),
         "parent_route": md.get("parent_route"),
         "source": md.get("worker_route_source"),
         "retry": _json_or_none(md.get("worker_retry")),
         "retry_skipped": md.get("worker_retry_skipped"),
     }
+    if md.get("time_limit_seconds"):
+        # Only for a worker stopped for time: its limit and what it spent, for the plain report to its conversation.
+        view["time_limit"] = {"limit_seconds": int(md["time_limit_seconds"]),
+                              "active_seconds": float(md.get("active_seconds") or 0),
+                              "waited_seconds": float(md.get("approval_wait_seconds") or 0)}
+    return view
 
 
 def _json_or_none(text: str | None) -> Any:

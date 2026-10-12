@@ -1905,8 +1905,10 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         from prometheus.tasks.worker_settings import (
             WorkerModelSetting,
             set_worker_model_setting,
+            worker_timeout_seconds,
         )
 
+        task_manager.worker_timeout_seconds = worker_timeout_seconds(config)
         task_manager.child_config_path = str(resolve_config_path(args.config))
         set_worker_model_setting(WorkerModelSetting(config=config))
     except Exception:

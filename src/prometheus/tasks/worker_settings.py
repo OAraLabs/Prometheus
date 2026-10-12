@@ -40,6 +40,28 @@ def load_worker_config() -> dict[str, Any]:
     )
 
 
+#: What ``workers.timeout_minutes`` is when it is unset or unusable: an hour of WORKING time (a wait for a person's
+#: approval does not count). Must equal the template value (config/prometheus.yaml.default).
+DEFAULT_WORKER_TIMEOUT_MINUTES = 60
+
+
+def worker_timeout_seconds(config: Mapping[str, Any] | None) -> int:
+    """A worker's time limit, from ``workers.timeout_minutes``, in seconds.
+
+    The owner's setting, not the model's: ``task_create`` no longer passes a model's ``timeout_seconds`` for an agent
+    worker. A value that is not a whole number of minutes of at least 1 is a WARNING and the default, never a worker
+    with no limit or one killed at once.
+    """
+    section = (config or {}).get("workers") or {}
+    # LITERAL default on purpose: test_config_defaults_equality parses this call to compare it with the template.
+    value = section.get("timeout_minutes", 60) if isinstance(section, Mapping) else 60
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        log.warning("workers.timeout_minutes must be a whole number of minutes, at least 1; got %r — using %d",
+                    value, DEFAULT_WORKER_TIMEOUT_MINUTES)
+        value = DEFAULT_WORKER_TIMEOUT_MINUTES
+    return int(value) * 60
+
+
 def _config_value(config: Mapping[str, Any] | None) -> str | None:
     section = (config or {}).get("workers") or {}
     value = section.get("model") if isinstance(section, Mapping) else None
