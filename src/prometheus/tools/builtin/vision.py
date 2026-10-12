@@ -133,16 +133,22 @@ class VisionTool(BaseTool):
             from prometheus.telemetry.tracker import get_telemetry_handle
 
             envelope = LLMCallEnvelope("vision", telemetry=get_telemetry_handle())
-            text_parts: list[str] = []
+            # The model's text arrives TWICE by contract: as ApiTextDeltaEvent chunks, then
+            # again as the whole message on the terminal ApiMessageCompleteEvent. Appending
+            # both doubled every description, glued end to end with no separator. Read the
+            # deltas (the briefing job's rule: llama_cpp even emits a recovery delta for
+            # exactly this reason) and fall back to the complete event only when a provider
+            # streamed none.
+            deltas: list[str] = []
+            final_text = ""
             async for event in envelope.stream(provider=provider, request=request,
                                                operation="describe_image"):
                 if isinstance(event, ApiMessageCompleteEvent):
-                    if event.message.text:
-                        text_parts.append(event.message.text)
+                    final_text = event.message.text or ""
                 elif hasattr(event, "text"):
-                    text_parts.append(event.text)
+                    deltas.append(event.text)
 
-            description = "".join(text_parts).strip()
+            description = ("".join(deltas) or final_text).strip()
             if not description:
                 return ToolResult(
                     output=f"Image received ({path.name}, {path.stat().st_size} bytes) "
