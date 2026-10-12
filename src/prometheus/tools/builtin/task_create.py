@@ -59,9 +59,7 @@ class TaskCreateToolInput(BaseModel):
     )
     timeout_seconds: int | None = Field(
         default=None,
-        description=("Hard ceiling for a local_bash, file_watch or poll task; on expiry the task is marked failed "
-                     "(timeout). Not for local_agent: a worker's limit is the owner's setting "
-                     "(workers.timeout_minutes, working time only), and a value here is ignored for it."),
+        description="Hard ceiling; on expiry the task is marked failed (timeout).",
     )
 
 
