@@ -72,11 +72,12 @@ _INVALID_CODE = {"error": "invalid_code",
 
 
 def _status_payload(record: OwnerCode) -> dict[str, Any]:
-    device = None
+    redeemed_by = None
     if record.device_id is not None:
-        device = {"id": record.device_id, "name": record.device_name, "platform": record.platform,
-                  "source": record.source}
-    return {"code_id": record.id, "status": record.status, "expires_at": int(record.expires_at), "device": device}
+        redeemed_by = {"id": record.device_id, "name": record.device_name, "platform": record.platform,
+                       "source": record.source}
+    return {"code_id": record.id, "status": record.status, "expires_at": int(record.expires_at),
+            "redeemed_by": redeemed_by}
 
 
 def register_owner_code_routes(

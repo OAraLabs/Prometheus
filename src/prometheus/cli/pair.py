@@ -268,7 +268,7 @@ def _owner_code(client: Any, headers: dict[str, str], out: Callable[[str], None]
 
 def _owner_outcome(body: dict[str, Any], out: Callable[[str], None]) -> int:
     status = body["status"]
-    device = body.get("device") or {}
+    device = body.get("redeemed_by") or {}
     if status == "redeemed":
         out(f"Done: {device.get('name')!r} ({device.get('platform')}, from {device.get('source')}) is now an owner "
             f"device (id {str(device.get('id'))[:8]}).")

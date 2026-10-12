@@ -276,9 +276,9 @@ def test_a_cancelled_code_mints_nothing(world):
 def test_the_terminal_learns_who_redeemed_it_and_from_where(world):
     body = minted(world)
     assert status(world, body["code_id"]).json() == {
-        "code_id": body["code_id"], "status": "pending", "expires_at": body["expires_at"], "device": None}
+        "code_id": body["code_id"], "status": "pending", "expires_at": body["expires_at"], "redeemed_by": None}
     device_id = redeem(world, body["code"]).json()["device_id"]
-    assert status(world, body["code_id"]).json()["device"] == {
+    assert status(world, body["code_id"]).json()["redeemed_by"] == {
         "id": device_id, "name": "Will's MacBook Pro", "platform": "macos", "source": MACBOOK}
 
 
