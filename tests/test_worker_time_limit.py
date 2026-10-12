@@ -198,11 +198,13 @@ async def test_overlapping_waits_count_once(tmp_path, monkeypatch):
         rec = await mgr.create_agent_task(prompt="p", description="w", cwd=str(tmp_path), route="local",
                                           worker=True, session_id="beacon:abc", timeout_seconds=2)
 
-        async def wait(seconds: float) -> None:
+        async def wait(after: float, seconds: float) -> None:
+            await asyncio.sleep(after)
             async with mgr.waiting_for_approval(rec.id):
                 await asyncio.sleep(seconds)
 
-        await asyncio.gather(wait(1.5), wait(2.5))
+        # One wait from 0 to 2 s, another from 1 to 2.5 s: the clock is stopped from 0 to 2.5 s, once.
+        await asyncio.gather(wait(0, 2.0), wait(1.0, 1.5))
         done = await _terminal(mgr, rec.id)
         assert done.error == "timeout"
         assert 2.4 <= float(done.metadata["approval_wait_seconds"]) <= 3.0, done.metadata
@@ -310,6 +312,14 @@ def test_a_short_limit_is_reported_in_seconds():
 
     text = _worker_report(_timeout_payload(active_seconds=2.1, limit_seconds=2))
     assert "stopped after 2 seconds — time limit" in text
+
+
+@pytest.mark.parametrize("active, words", [(60, "60 seconds"), (89, "89 seconds"), (120, "2 minutes"),
+                                           (1, "1 second")])
+def test_short_times_read_in_seconds_and_longer_ones_in_minutes(active, words):
+    from prometheus.tasks.completion_handler import _worker_report
+
+    assert f"stopped after {words} — time limit" in _worker_report(_timeout_payload(active_seconds=active))
 
 
 def test_a_timeout_from_before_this_change_still_reads_sensibly():
