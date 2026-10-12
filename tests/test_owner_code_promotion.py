@@ -242,6 +242,17 @@ def test_a_new_code_replaces_the_one_before(world):
     assert accepted.status_code == 201, accepted.text
 
 
+def test_the_replaced_code_stays_dead_after_the_new_one_is_spent(world):
+    old = issue(world)
+    new = issue(world)
+    accepted, _ = redeem(world, new)
+    assert accepted.status_code == 201, accepted.text
+    refused, _ = redeem(world, old, source=OTHER)
+    assert refused.status_code == 422, "issuing replaced it; it did not merely queue behind the new one"
+    with sqlite3.connect(world.path) as conn:
+        assert conn.execute("select count(*) from owner_codes").fetchone()[0] == 0
+
+
 def test_redeeming_replaces_no_other_owner_device(world):
     same_mac = world.owner["id"]
     first, _ = redeem(world, issue(world))
