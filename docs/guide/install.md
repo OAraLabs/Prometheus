@@ -27,9 +27,31 @@ No GPU? Point Prometheus at a cloud provider and you still get the whole daemon 
 
 ## Install the daemon
 
-Four ways. A plain install, with no extras, runs `oara daemon` and pairs with Beacon: the web API (FastAPI, Uvicorn, websockets) is part of the base package. The pip commands below add `[full]`, which adds the Slack and Discord gateways, MCP, the Playwright browser tool, the Anthropic provider, and voice output (piper-tts, sounddevice, scipy). It does not add voice input (faster-whisper — the `voice` extra), `evals`, `push` or `computer`; install those by name if you want them. You can also install single extras — for example `pip install 'oara-prometheus[slack]'` adds just the Slack gateway. `pip install 'oara-prometheus[discovery]'` lets the daemon announce itself on your home network (mDNS) once you choose home network mode; without it everything else works and the daemon says so once in its log.
+On a Mac with an Apple chip the app below is the easiest start; on a Linux box (or any Mac you'd rather use a terminal on) pick one of the pip, Homebrew, Docker or OpenShell routes. Every one of them installs the same daemon and pairs with Beacon the same way.
 
-On a Linux server you can run the daemon in a container instead: the image is built for amd64 and arm64, with a compose example that runs it beside Ollama. See [Docker](docker.md).
+A plain install, with no extras, runs `oara daemon` and pairs with Beacon: the web API (FastAPI, Uvicorn, websockets) is part of the base package. The pip commands below add `[full]`, which adds the Slack and Discord gateways, MCP, the Playwright browser tool, the Anthropic provider, and voice output (piper-tts, sounddevice, scipy). It does not add voice input (faster-whisper — the `voice` extra), `evals`, `push` or `computer`; install those by name if you want them. You can also install single extras — for example `pip install 'oara-prometheus[slack]'` adds just the Slack gateway. `pip install 'oara-prometheus[discovery]'` lets the daemon announce itself on your home network (mDNS) once you choose home network mode; without it everything else works and the daemon says so once in its log.
+
+### The Mac app (no terminal)
+
+**Prometheus.app** is a signed, notarized app for Apple silicon Macs on macOS 13 or later, published with every release as a zip. It carries its own Python 3.12, so it needs nothing already installed:
+
+1. Download `Prometheus-mac-arm64.zip` from the [latest release](https://github.com/OAraLabs/Prometheus/releases/latest) — that name always points at the newest version. Unzip it and drag **Prometheus** into your Applications folder.
+2. Open it. macOS may say the app came from the internet the first time; **Open** it once and it won't ask again.
+3. It installs the daemon as a **login item**, so your assistant keeps running when you close the app. macOS will show a note about Login Items — that's expected.
+
+Three things worth knowing about the app install:
+
+- It listens on **this Mac only** until you say otherwise, so nothing on your network can reach it by default. See [Remote access](#remote-access-over-tailscale).
+- It starts in the **`cautious`** permission mode: every shell command the model runs, and every file write, asks you first. `/gate cautious` selects the same mode anywhere. macOS has no kernel write boundary equivalent to the one Linux gets from bubblewrap, so on the app the prompt is the protection.
+- It ships **without PyMuPDF** (its license is AGPL), so PDF text extraction and image downscaling aren't available in the app install. Everything else is.
+
+Beacon on the same Mac pairs with it automatically, using a one-time file secret (`POST /api/pair/local`) — no code to type. If you reinstall Beacon, `Prometheus --pair` writes a fresh secret.
+
+You can install the daemon from a terminal instead; the app is a convenience, not a requirement.
+
+### On Linux, and in a terminal
+
+On a Linux server you can run the daemon in a container instead: the image is built for amd64 and arm64, with a compose example that runs it beside Ollama. See [Docker](docker.md). To run the daemon **confined** — its own container, default-deny network egress, filesystem limited to its workspace — see the [OpenShell sandbox](openshell.md), which is tested with OpenShell 0.1.3 on Linux amd64.
 
 **One command, from Git** — an isolated install of the `oara` command straight from `main`, with [uv](https://docs.astral.sh/uv/) or pipx:
 
@@ -243,6 +265,53 @@ A short checklist of things to try first — your launch pad into the app.
 And you land on Mission home, connected to your freshly installed daemon:
 
 ![Beacon's Mission Control home, connected to the new daemon](../assets/shots/install-9-mission-home.png)
+
+## Reach it from your home network
+
+Tailscale covers two machines you control. To reach the daemon from a **phone, a tablet or a laptop that isn't on your tailnet** — anything else on your home Wi-Fi — turn on home network mode. In Beacon that's the network control in Settings; in the config file it's `network.home_network: true`. The daemon has to restart for it to take effect, and Beacon's **Apply** does that for you.
+
+What changes when it's on:
+
+- The daemon serves **TLS on port 8006** (REST) and **port 8011** (WebSocket) to your network — `web.tls_api_port` and `web.tls_ws_port`. Open both in your firewall if you have one.
+- **Plain HTTP then listens on 127.0.0.1 only.** Port 8005 and port 8010 stop answering from your network. That's the point: once the daemon is reachable beyond this machine, nobody gets a cleartext bearer token flying over Wi-Fi. To undo it you set `network.allow_plaintext_lan: true` yourself — the API will never write that line for you.
+- The certificate is made over the daemon's **instance key** (P-256, TLS 1.2 or later, AEAD ciphers only). It's self-signed, so a browser will warn about it; clients are expected to **pin** it instead. `GET /api/hello` advertises `fp`, the first 16 hex characters of the certificate's SHA-256, and `GET /api/network` gives the full value as `tls.spki_sha256` — a client matches what it discovered to what it pinned. Beacon does this for you.
+- With the optional `[discovery]` extra installed, the daemon announces itself as `_prometheus._tcp` on private addresses, so Beacon's "Look for another computer" finds it without you typing an address. Without that extra everything still works; you type the address.
+
+Home network needs TLS. If this daemon has no instance key to make a certificate over, the switch refuses with `409 tls_unavailable` rather than quietly serving your network in plaintext.
+
+`oara doctor` reports home-network mode honestly: whether it can work, whether it's safe, and whether the daemon will announce itself.
+
+A second computer that joins over TLS is told to connect back on `https://` and `wss://` with the certificate pin to check, so a device paired in home-network mode can actually reach the daemon afterwards.
+
+## Reach it from a specific address
+
+`web.bind` picks the interface: `0.0.0.0` for every interface, `127.0.0.1` for this machine only, or one specific address such as a tailnet IP or `192.168.1.20`. Precedence is `--bind` > `PROMETHEUS_WEB_BIND` > `web.bind` > `0.0.0.0`, and an invalid value refuses to start rather than guessing. One specific address has a consequence worth knowing before you pick it — see [Known issues](#known-issues).
+
+## Make a Beacon on another computer the owner
+
+A Beacon on the machine the daemon runs on pairs automatically. A Beacon on a **second** computer can join too, but by default it gets an ordinary *scoped* device: it sees only the conversations it creates, and — the part that matters — it **cannot approve a worker's request**. The API token can't either, because a model can read it.
+
+To give that second Beacon real authority, run this on the machine Prometheus runs on:
+
+```bash
+oara pair --owner
+```
+
+It prints a one-time code — 8 digits, shown as `1234-5678` — good for **5 minutes** and one use, then waits and tells you who used it and from which address. Type the code into **Settings** on the other computer's Beacon. That Beacon gets its own owner device token, and the terminal warns as soon as anyone types a wrong code. Ctrl-C cancels.
+
+Worth knowing:
+
+- The code prints **only to a terminal**. Piped, or run by the agent's own shell, it asks for no code at all — so it can't end up in a transcript or a log. Over ssh, use `ssh -t`.
+- **Wrong guesses can't switch the code off.** Five wrong tries from one address shut that address out, and the daemon caps how many wrong tries it compares in a minute across everyone. No number of guesses ends a code, so a stranger can delay a redemption but never cancel one.
+- Minting a code needs the API token **from that machine**. An owner device can't mint one, so this doesn't cascade.
+- Redeeming is a new token on the wire, so do it over TLS, a tailnet or loopback.
+- Re-pairing the daemon's own Mac never revokes this device, and neither does another computer redeeming its own code. Each computer keeps its own owner device; you revoke one from the device list in Beacon.
+
+Full behavior, including every route and its error codes, is in the [API guide](api.md#ports--remote-access) and `docs/contracts/device-scoping.md`.
+
+## Known issues
+
+- **Worker approvals fail closed when `web.bind` is one specific address.** A spawned worker asks for approval on the address the daemon is actually bound to. That route is accepted only from this machine — a loopback peer *and* a `Host` header that names loopback — and a bind of `192.168.1.20` makes the worker's `Host` header `192.168.1.20`, so the daemon answers `403 not_loopback` and the request never reaches the approval queue. The worker then waits for an answer nobody can give. This is the refusal working as designed; it just isn't what you want. Use `0.0.0.0` (the worker reaches it on `127.0.0.1`), or loopback, or home-network mode instead.
 
 ## Remote access over Tailscale
 
