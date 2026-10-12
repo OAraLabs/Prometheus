@@ -10,20 +10,31 @@ the API token, which #744 refuses for that, or a scoped device token, which sees
     POST   /api/pair/owner               PUBLIC: {code, device_name, platform} -> an owner device token
 
 **Minting is the global token's, from THIS host.** ``oara pair --owner`` calls it with the token it reads from the
-env file. An owner device is not root (it cannot enrol devices, ``POST /api/devices``), so it cannot mint the code
-that would enrol one either; a scoped device never reaches the handler (the default-deny gate,
-``web/route_access.py``). The global token from anywhere else is refused (``not_this_machine``), so the API token in
-a remote Beacon cannot promote that Beacon: someone has to be at the machine. "This host" is
-``loopback.is_this_host``: a loopback peer, or the daemon's own address for a daemon bound to one address, and never
-a request carrying ``X-Forwarded-For`` or ``Forwarded``. A web page is refused (an ``Origin`` header), whatever it
-carries. On a Mac whose shells run behind the read floor (#712), a model's shell cannot read the env file, so it
-cannot mint a code this way either.
+env file. An owner device is not root (it cannot mint a device directly, ``POST /api/devices``), so it cannot mint the
+code that would make an owner either; a scoped device never reaches the handler (the default-deny gate,
+``web/route_access.py``). "This host" is ``loopback.is_this_host``: a loopback peer, or the daemon's own address for
+a daemon bound to one address, and never a request carrying a relay header (``X-Forwarded-For``, ``X-Real-IP``,
+``Via``, ...). A web page is refused (an ``Origin`` header), whatever it carries.
+
+**What the host test is, and is not.** It stops the casual path: a remote Beacon holding the API token cannot just
+ask for a code. It is NOT a boundary against a determined holder of the global token, because that token already
+runs code on this machine (an MCP server definition, or the agent's shell, whose ordinary prompts the token can
+answer), and that code calls this route from loopback; ``POST /api/devices`` with ``owner: true`` has the same
+limit. The boundary is the global token itself: keep it off other computers (a Beacon that redeemed a code drops it)
+and out of a model's shell (the read floors, #659 and #712). Nor can any peer test see a relay on this machine that
+adds no header (nginx's bare ``proxy_pass``, a TCP forwarder, an SSH tunnel).
+
+**Every code is told to the operator.** Each issue, redemption (who, from where) and lock sends an ``owner_code``
+frame to the operator's sockets only (the global token or an owner device; never ``broadcast``, never the SignalBus),
+so a code nobody at the machine meant to mint, or a redemption nobody expected, shows on the owner's open Beacons and
+not only in a terminal that may not be there.
 
 **Redeeming is public, and checks its own input**, like the other pairing doors (``web/public_routes.py``): no
 ``Origin``; ``application/json``, at most 4 KiB, a JSON object; a ``device_name`` of 1 to 64 characters with no
 control or format characters (refused, not stripped, as for a pairing request). A bad body is a 400 and spends no
-try. Then the code, and only the code, decides: wrong, expired, used, replaced, cancelled, locked or no code at all
-are ONE answer (``401 invalid_code``), so a guesser learns nothing, and five wrong tries burn the code. The device
+try (a ``code`` that is not a string included). Then the code, and only the code, decides: wrong, expired, used,
+replaced, cancelled, locked, a shut-out source or no code at all are ONE answer (``401 invalid_code``), so a guesser
+learns nothing; five wrong tries shut a source out and 25 in all burn the code. The device
 gets a token of its own (``DeviceStore.mint_owner``, ``marked_by = "owner-code"``), listed as an owner device and
 revocable on its own; a later redemption, or this Mac's same-Mac re-pairing, never revokes it.
 
@@ -38,8 +49,10 @@ Source: novel code for Prometheus, 2026-10-11.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -48,7 +61,7 @@ from fastapi.responses import JSONResponse
 
 from prometheus.config.api_token import OWNER_SOURCE_OWNER_CODE
 from prometheus.config.device_store import DeviceStore, registry_platform
-from prometheus.config.owner_codes import OwnerCode, OwnerCodes
+from prometheus.config.owner_codes import LOCKED, OwnerCode, OwnerCodes
 from prometheus.web.loopback import is_this_host
 
 # The pairing doors read a body and answer a stranger one way; these are shared on purpose.
@@ -71,13 +84,37 @@ _INVALID_CODE = {"error": "invalid_code",
                            "Prometheus runs on for a new one"}
 
 
+#: How long telling the operator's sockets may hold up the request that caused it (as ``PairingNotifier``).
+TELL_TIMEOUT_SECONDS = 3.0
+
+
+def _redeemed_by(record: OwnerCode) -> dict[str, Any] | None:
+    if record.device_id is None:
+        return None
+    return {"id": record.device_id, "name": record.device_name, "platform": record.platform, "source": record.source}
+
+
 def _status_payload(record: OwnerCode) -> dict[str, Any]:
-    redeemed_by = None
-    if record.device_id is not None:
-        redeemed_by = {"id": record.device_id, "name": record.device_name, "platform": record.platform,
-                       "source": record.source}
-    return {"code_id": record.id, "status": record.status, "expires_at": int(record.expires_at),
-            "redeemed_by": redeemed_by}
+    return {"code_id": record.id, "status": record.status, "expires_at": int(record.expires_wall),
+            "redeemed_by": _redeemed_by(record)}
+
+
+async def _tell_operators(request: Request, event: str, record: OwnerCode) -> None:
+    """An ``owner_code`` frame to the operator's sockets ONLY (the global token or an owner device): a code was issued,
+    redeemed (by whom, from where) or locked by wrong guesses. So a code nobody at the machine meant to mint, or a
+    redemption nobody expected, is seen on every Beacon the owner has open, not only in a terminal that may not be
+    there. Never ``broadcast`` (a scoped device must not learn who is enrolling) and never the SignalBus. Carries no
+    code and no token. Best effort: a failure or a stall is logged and never fails the request."""
+    bridge = getattr(request.app.state, "ws_bridge", None)
+    if bridge is None:
+        return
+    frame = {"type": "owner_code", "timestamp": time.time(),
+             "payload": {"event": event, "code_id": record.id, "expires_at": int(record.expires_wall),
+                         "redeemed_by": _redeemed_by(record)}}
+    try:
+        await asyncio.wait_for(bridge.send_to_operators(frame), TELL_TIMEOUT_SECONDS)
+    except Exception:
+        logger.warning("pairing: owner-code %s could not be told to the operator's sockets", event, exc_info=True)
 
 
 def register_owner_code_routes(
@@ -119,7 +156,8 @@ def register_owner_code_routes(
         if (refusal := minting_refusal(request)) is not None:
             return refusal
         record, code = codes.issue()
-        return _json(201, {"code_id": record.id, "code": code, "expires_at": int(record.expires_at),
+        await _tell_operators(request, "issued", record)
+        return _json(201, {"code_id": record.id, "code": code, "expires_at": int(record.expires_wall),
                            "ttl_seconds": int(record.expires_at - record.created_at)})
 
     @app.get("/api/pair/owner-codes/{code_id}")
@@ -162,16 +200,29 @@ def register_owner_code_routes(
             body = None
         if not isinstance(body, dict):
             return _json(400, {"error": "invalid_request", "fields": [], "detail": "body must be a JSON object"})
+        fields = [] if isinstance(body.get("code"), str) else ["code"]
         name = _clean_name(body.get("device_name"))
         if name is None:
-            return _json(400, {"error": "invalid_request", "fields": ["device_name"]})
+            fields.append("device_name")
+        if fields or name is None:
+            # Before the code is looked at: a malformed body is a client's bug, and spends no try.
+            return _json(400, {"error": "invalid_request", "fields": fields})
         platform = registry_platform(body.get("platform"))
+        live = codes.live()
         minted = codes.redeem(
-            body.get("code"),
+            body["code"],
             lambda: devices().mint_owner(name, platform, by=OWNER_SOURCE_OWNER_CODE),
             source=_peer(request))
         if minted is None:
+            # `live` was pending, and there is no await between the redeem and this read, so a LOCKED code now is
+            # one this very try locked.
+            after = codes.status(live.id) if live is not None else None
+            if after is not None and after.status == LOCKED:
+                await _tell_operators(request, "locked", after)
             return _json(401, _INVALID_CODE)
+        done = codes.status(live.id) if live is not None else None
+        if done is not None:
+            await _tell_operators(request, "redeemed", done)
         return _json(200, {"token": minted["token"], "device_id": minted["id"], "name": minted["name"],
                            "owner": True, "endpoints": _endpoints(request, web_config), "tls": _tls_pin(request)})
 

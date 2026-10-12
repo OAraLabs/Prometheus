@@ -175,11 +175,18 @@ def test_a_wrong_code_mints_nothing_and_is_counted(codes):
     assert mint.calls == 0 and codes.status(record.id).wrong_attempts == 1
 
 
-def test_four_wrong_tries_still_leave_the_right_code_working(codes):
+def test_four_wrong_tries_still_leave_the_right_code_working_from_that_source(codes):
     _record, code = codes.issue()
-    for _ in range(oc.MAX_WRONG_ATTEMPTS - 1):
+    for _ in range(oc.MAX_WRONG_PER_SOURCE - 1):
         codes.redeem(wrong_for(code), Minter(), source="x")
     assert codes.redeem(code, Minter(), source="x") is not None
+
+
+def test_twenty_four_wrong_tries_in_all_still_leave_it_working(codes):
+    _record, code = codes.issue()
+    for n in range(oc.MAX_WRONG_ATTEMPTS - 1):
+        codes.redeem(wrong_for(code), Minter(), source=f"198.51.100.{n // oc.MAX_WRONG_PER_SOURCE}")
+    assert codes.redeem(code, Minter(), source="192.0.2.77") is not None
 
 
 def test_five_wrong_tries_shut_that_source_out_and_no_one_else(codes, caplog):

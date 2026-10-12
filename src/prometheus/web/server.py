@@ -609,9 +609,10 @@ def create_app(
             # mints on this machine (`oara pair --owner`, web/owner_code_routes.py). From this Mac's loopback
             # address it carries the same-Mac source and replaces the earlier same-Mac credentials, exactly as a
             # re-pairing does.
-            # (The test is `is_same_machine`: a loopback TCP peer AND no X-Forwarded-For or Forwarded header.
-            # A proxy on this machine (`tailscale serve`, cloudflared, nginx) connects from loopback and relays
-            # requests from anywhere; the header it adds is what gives it away.)
+            # (The test is `is_same_machine`: a loopback TCP peer AND no relay header (X-Forwarded-For, Forwarded,
+            # X-Real-IP, Via, ...). A proxy on this machine (`tailscale serve`, cloudflared, nginx) connects from
+            # loopback and relays requests from anywhere; a header it adds gives it away, and one that adds none
+            # (nginx's bare proxy_pass, a TCP forwarder) is not seen by any peer test.)
             if not is_same_machine(request):
                 return JSONResponse(status_code=403, content={
                     "error": "owner devices are issued only for this Mac, from this Mac; enrol another "

@@ -72,8 +72,9 @@ def _port(config: dict[str, Any] | None) -> int:
 def daemon_base_url(config: dict[str, Any] | None, env: Mapping[str, str] | None = None) -> str:
     """Where this machine reaches the daemon: the address it listens on, or loopback when that is every interface.
 
-    A daemon bound to ONE address (a LAN or tailnet address, how an owner narrows a headless box) does not
-    answer on 127.0.0.1, so the terminal route used to report "could not reach the daemon" about a daemon that
+    In home-network mode plain HTTP listens on loopback only (TLS takes the bind address), so that mode is reached
+    over loopback. Otherwise, a daemon bound to ONE address (a LAN or tailnet address, how an owner narrows a headless
+    box) does not answer on 127.0.0.1, so the terminal route used to report "could not reach the daemon" about a daemon that
     was running. The address is resolved the way the daemon resolves it (``PROMETHEUS_WEB_BIND``, from the
     environment or the env file the daemon loads, then ``web.bind``). A ``--bind`` flag given to a running
     daemon cannot be seen from here, which is why an unreachable daemon is reported with the address tried.
@@ -87,7 +88,20 @@ def daemon_base_url(config: dict[str, Any] | None, env: Mapping[str, str] | None
         address = "127.0.0.1"
     if is_all_interfaces(address):
         address = "::1" if ":" in address else "127.0.0.1"
+    elif _plain_http_on_loopback(config, address):
+        address = "127.0.0.1"
     return f"http://{format_host_port(address, _port(config))}"
+
+
+def _plain_http_on_loopback(config: dict[str, Any] | None, address: str) -> bool:
+    """Home-network mode keeps plain HTTP on this machine only and puts TLS on the LAN bind, so a terminal here must
+    use loopback. The daemon's own decision (``web.tls.decide_lan``), with "is there a certificate" answered the
+    read-only way (``tls_ready``): only the owner's ``network.allow_plaintext_lan`` opt-out without one serves plain
+    HTTP on the bind address."""
+    from prometheus.web import tls
+
+    lan = tls.decide_lan(config or {}, address, cert_ok=tls.tls_ready())
+    return lan.plan is not None or lan.loopback_only
 
 
 def run_pair_command(
@@ -259,10 +273,23 @@ def _owner_code(client: Any, headers: dict[str, str], out: Callable[[str], None]
         return 1
     except KeyboardInterrupt:
         try:
-            client.delete(f"/api/pair/owner-codes/{code_id}", headers=headers)
-            out("\nCancelled: the code no longer works.")
+            cancelled = client.delete(f"/api/pair/owner-codes/{code_id}", headers=headers)
         except httpx.TransportError:
             out(f"\nStopped waiting, but the daemon could not be told: the code works until {until}.")
+            return 130
+        if cancelled.status_code == 200:
+            out("\nCancelled: the code no longer works.")
+            return 130
+        try:
+            body = cancelled.json()
+        except ValueError:
+            body = {}
+        if cancelled.status_code == 409 and body.get("status"):
+            # It finished before the cancel landed, perhaps in the second between two polls: say how, above all
+            # if someone redeemed it, because that report is the alarm.
+            out("")
+            return _owner_outcome(body, out)
+        out(f"\nThe daemon answered {cancelled.status_code} to the cancel: the code may still work until {until}.")
         return 130
 
 

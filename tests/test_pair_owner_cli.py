@@ -109,7 +109,8 @@ def test_the_code_is_printed_once_in_two_groups_of_four(world):
                      sleep=lambda _s: beacon_redeems(world, lines))
     groups = [line for line in lines if re.search(r"\b[0-9]{4}-[0-9]{4}\b", line)]
     assert len(groups) == 1
-    assert not any(re.search(r"\b[0-9]{8}\b", line) for line in lines)
+    code = printed_code(lines)
+    assert not any(code in line for line in lines)         # never ungrouped (the device id may well be digits)
 
 
 def test_it_says_what_an_owner_device_can_do_and_how_long_the_code_lasts(world):

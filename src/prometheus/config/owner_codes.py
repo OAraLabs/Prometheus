@@ -19,10 +19,15 @@ The code
 * **Five minutes, once.** A redemption mints at most one device: the check, the mint and the mark happen under one
   lock. A mint that raises leaves the code pending (nothing was granted), so the person can simply try again.
 * **One live code.** Issuing another replaces it (``replaced``), so there is never more than one thing to guess.
-* **Five wrong tries burn it** (``locked``). With one live code, an online guesser has 5 chances in 10^8 per code
-  the person asks for. While a code is live, ANY presentation that is not it counts, junk included. With no code
-  live there is nothing to guess, and nothing is counted. The price is that a neighbour can burn a code by guessing
-  badly; the terminal says "locked after 5 wrong tries", which is also the alarm.
+* **Five wrong tries shut a source out, 25 in all burn the code** (``locked``). A shut-out source (the TCP peer
+  address) is refused before its try is compared, so its later tries guess nothing and count nothing: one neighbour
+  guessing badly cannot burn the code for everyone, and an online guesser has at most 25 chances in 10^8 per code the
+  person asks for. While a code is live, ANY presentation from a source still in budget that is not the code counts,
+  junk included (a body whose ``code`` is not a string is the route's 400 and never gets here). With no code live
+  there is nothing to guess, and nothing is counted. Burning a code takes five addresses; the terminal and the
+  operator's sockets then say "locked", which is also the alarm.
+* **Five minutes by the MONOTONIC clock.** A wall-clock step (NTP, a sleep, a person) neither stretches nor cuts a
+  code's life; the wall clock is read once, to tell a person until when (``expires_wall``).
 * **Kept as a SHA-256 digest**, never the code, and in memory only: a restart ends every code, which is the right
   answer for something that lives five minutes. A digest of eight digits is no secret from anyone who can read this
   process's memory, so it is not meant as one; it keeps the code out of reprs, dumps and logs.
@@ -52,7 +57,10 @@ logger = logging.getLogger("prometheus.pairing")
 
 CODE_DIGITS = 8
 TTL_SECONDS = 300
-MAX_WRONG_ATTEMPTS = 5
+#: Wrong tries one source (TCP peer address) may make at a code before it is refused unread.
+MAX_WRONG_PER_SOURCE = 5
+#: Wrong tries in all that burn the code.
+MAX_WRONG_ATTEMPTS = 25
 #: Finished codes the terminal can still ask about. Older ones answer "unknown".
 KEEP_FINISHED = 16
 
@@ -87,11 +95,16 @@ def _digest(code: str) -> str:
 
 @dataclass(frozen=True)
 class OwnerCode:
-    """What the store says about a code. It carries no code: the plaintext exists only in ``issue``'s return."""
+    """What the store says about a code. It carries no code: the plaintext exists only in ``issue``'s return.
+
+    ``created_at`` / ``expires_at`` are on the store's monotonic clock and decide the code's life; ``expires_wall`` is
+    the wall-clock time to show a person.
+    """
 
     id: str
     created_at: float
     expires_at: float
+    expires_wall: float = 0.0
     status: str = PENDING
     wrong_attempts: int = 0
     device_id: str | None = None
@@ -104,13 +117,18 @@ class OwnerCode:
 class OwnerCodes:
     """The live owner code, if any, and the recent finished ones. Thread-safe; in memory only."""
 
-    def __init__(self, clock: Callable[[], float] = time.time) -> None:
-        #: Read at every call, so a test can swap it (as ``PairingRuntime.clock``).
+    def __init__(self, clock: Callable[[], float] = time.monotonic,
+                 wall: Callable[[], float] = time.time) -> None:
+        #: Both read at every call, so a test can swap them (as ``PairingRuntime.clock``). ``clock`` decides a code's
+        #: life and must not jump; ``wall`` only says until when, for a person.
         self.clock = clock
+        self.wall = wall
         self._lock = threading.Lock()
         self._codes: OrderedDict[str, OwnerCode] = OrderedDict()
         self._live_id: str | None = None
         self._live_digest: str | None = None
+        #: Wrong tries per source at the live code; cleared whenever the live code changes.
+        self._wrong_by_source: dict[str, int] = {}
 
     # -- the one live code -------------------------------------------------
 
@@ -119,6 +137,7 @@ class OwnerCodes:
         self._codes[code_id] = record
         if self._live_id == code_id:
             self._live_id = self._live_digest = None
+            self._wrong_by_source = {}
         return record
 
     def _settle(self, now: float) -> None:
@@ -138,9 +157,11 @@ class OwnerCodes:
                 replaced_id = self._live_id
                 self._finish(replaced_id, REPLACED, now)
                 logger.info("pairing: owner-code replaced id=%s (a newer code was issued)", replaced_id)
-            record = OwnerCode(id=secrets.token_hex(16), created_at=now, expires_at=now + TTL_SECONDS)
+            record = OwnerCode(id=secrets.token_hex(16), created_at=now, expires_at=now + TTL_SECONDS,
+                               expires_wall=self.wall() + TTL_SECONDS)
             self._codes[record.id] = record
             self._live_id, self._live_digest = record.id, _digest(code)
+            self._wrong_by_source = {}
             while len(self._codes) > KEEP_FINISHED + 1:
                 oldest = next(iter(self._codes))
                 if oldest == self._live_id:          # never evict the live one (it is the newest anyway)
@@ -162,17 +183,24 @@ class OwnerCodes:
             if self._live_id is None or self._live_digest is None:
                 return None
             live = self._codes[self._live_id]
+            spent = self._wrong_by_source.get(source, 0)
+            if spent >= MAX_WRONG_PER_SOURCE:
+                return None                     # refused unread: this try is not compared, so it is not counted
             right = typed is not None and hmac.compare_digest(_digest(typed), self._live_digest)
             if not right:
                 wrong = live.wrong_attempts + 1
+                self._wrong_by_source[source] = spent + 1
                 if wrong >= MAX_WRONG_ATTEMPTS:
                     self._finish(live.id, LOCKED, now, wrong_attempts=wrong)
                     logger.warning("pairing: owner-code locked id=%s after %d wrong tries (last from %s)",
                                    live.id, wrong, source)
                 else:
                     self._codes[live.id] = replace(live, wrong_attempts=wrong)
-                    logger.warning("pairing: owner-code wrong try id=%s source=%s (%d of %d)",
-                                   live.id, source, wrong, MAX_WRONG_ATTEMPTS)
+                    logger.warning("pairing: owner-code wrong try id=%s source=%s (%d of %d; %d of %d from it)",
+                                   live.id, source, wrong, MAX_WRONG_ATTEMPTS, spent + 1, MAX_WRONG_PER_SOURCE)
+                    if spent + 1 >= MAX_WRONG_PER_SOURCE:
+                        logger.warning("pairing: owner-code source %s shut out of id=%s after %d wrong tries",
+                                       source, live.id, spent + 1)
                 return None
             minted = mint()
             self._finish(live.id, REDEEMED, now, device_id=str(minted["id"]), device_name=str(minted["name"]),
@@ -180,6 +208,12 @@ class OwnerCodes:
         logger.info("pairing: owner-code redeemed id=%s device=%s name=%r platform=%s source=%s",
                     live.id, minted["id"], minted["name"], minted["platform"], source)
         return minted
+
+    def live(self) -> OwnerCode | None:
+        """The pending code's record, if one is live (it carries no code)."""
+        with self._lock:
+            self._settle(self.clock())
+            return self._codes[self._live_id] if self._live_id is not None else None
 
     def status(self, code_id: object) -> OwnerCode | None:
         """What became of a code, or None for one this process never issued (or has forgotten)."""
