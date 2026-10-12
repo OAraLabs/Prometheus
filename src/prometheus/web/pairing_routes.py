@@ -1,6 +1,6 @@
 """The pairing request routes: a new device asks to join, the owner approves, a scoped token arrives sealed.
 
-Contract: docs/PAIRING-APPROVAL-API.md (sections 4, 5, 6 and 8). Six routes in two groups.
+Contract: docs/PAIRING-APPROVAL-API.md (sections 4, 5, 6, 8 and 4.9). Seven routes in three groups.
 
 **Public** (the requester has no credential yet; ``web/public_routes.py`` lists the three, exactly):
 
@@ -170,6 +170,10 @@ class PairingRuntime:
         self.sweep_interval = SWEEP_INTERVAL_SECONDS
         self.bad_secret = SourceLimiter(WRONG_SECRETS_PER_MINUTE, 60.0, clock=lambda: self.clock())
         self.bad_owner_code = SourceLimiter(owner_codes.WRONG_CODES_PER_MINUTE, 60.0, clock=lambda: self.clock())
+        #: The same budget per TOKEN (keyed by device id, or "global"): one device must not burn the owner's code
+        #: by guessing from address after address.
+        self.bad_owner_code_by_token = SourceLimiter(
+            owner_codes.WRONG_CODES_PER_MINUTE, 60.0, clock=lambda: self.clock())
         self._devices = devices
         self._store: PairRequestStore | None = None
         self._owner_codes: owner_codes.OwnerCodeStore | None = None
@@ -417,7 +421,7 @@ def register_pairing_routes(
     auth_on: Callable[[], bool],
     clock: Callable[[], float] = time.time,
 ) -> PairingRuntime:
-    """Mount the six routes on *app* (before the static catch-all) and return the shared runtime.
+    """Mount the seven routes on *app* (before the static catch-all) and return the shared runtime.
 
     The runtime is also ``app.state.pairing``. Registering touches no database: the store, and with it the
     ``pair_requests`` table, appear on the first request.
@@ -646,8 +650,9 @@ def register_pairing_routes(
         Behind the bearer gate (any valid token; ``web/route_access.SCOPED_ALLOWED`` lets a scoped device in), so
         the caller is already connected. Everything that can be wrong with the body is refused BEFORE the code is
         looked at, so a malformed request never spends or counts the code. A source that has guessed wrong
-        :data:`owner_codes.WRONG_CODES_PER_MINUTE` times is told to wait before the code is looked at, too, and
-        every wrong guess counts against the code itself (the fifth burns it). The token goes back sealed to the
+        :data:`owner_codes.WRONG_CODES_PER_MINUTE` times in a minute is told to wait before the code is looked at,
+        and so is a token that has (whatever addresses it came from), and every wrong guess counts against the code
+        itself (the hundredth burns it). The token goes back sealed to the
         caller's key, with the new device id as the request id: an owner token can approve a worker, which the
         API token cannot, so it does not cross a plaintext link in clear.
         """
@@ -695,16 +700,20 @@ def register_pairing_routes(
             return _json(400, {"error": "invalid_request", "fields": fields})
 
         source = _peer(request)
-        blocked = runtime.bad_owner_code.peek(source)
-        if not blocked.allowed:
-            return _rate_limited("bad_code", blocked.retry_after)
+        identity = getattr(request.state, "device_identity", None)
+        token_key = str(getattr(identity, "id", None) or "unknown")
+        for limiter, budget in ((runtime.bad_owner_code, source), (runtime.bad_owner_code_by_token, token_key)):
+            blocked = limiter.peek(budget)
+            if not blocked.allowed:
+                return _rate_limited("bad_code", blocked.retry_after)
         redeemed = runtime.owner_codes().redeem(
             code, name=name, platform=platform, source=source, by=_decider(request, "owner-code"))
         if redeemed is None:
             runtime.bad_owner_code.check(source)
+            runtime.bad_owner_code_by_token.check(token_key)
             return _json(422, {"error": "invalid_code",
                                "detail": "that code is wrong, expired or already used; run `oara pair --owner` "
-                                         "on the daemon's machine for a new one (five wrong tries end a code)"})
+                                         "on the daemon's machine for a new one"})
         try:
             sealed = pair_seal.seal_token(
                 requester_public_key=key, request_id=redeemed.device_id,

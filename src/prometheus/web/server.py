@@ -609,8 +609,10 @@ def create_app(
             # the API token alone. From this Mac's loopback address it carries the
             # same-Mac source and replaces the earlier same-Mac credentials, exactly as a re-pairing does.
             # (The test is `is_same_machine`: a loopback TCP peer AND no X-Forwarded-For or Forwarded header.
-            # A proxy on this machine (`tailscale serve`, cloudflared, nginx) connects from loopback and relays
-            # requests from anywhere; the header it adds is what gives it away.)
+            # An HTTP proxy on this machine (`tailscale serve`, cloudflared, nginx) connects from loopback and
+            # relays requests from anywhere; the header it adds is what gives it away. A RAW TCP relay
+            # (`tailscale serve --tcp`, `ssh -L`, socat) adds none, and through one the API token mints an owner
+            # device here: a known gap, docs/contracts/device-scoping.md 6.3.)
             if not is_same_machine(request):
                 return JSONResponse(status_code=403, content={
                     "error": "owner devices are issued only for this Mac, from this Mac; enrol another "

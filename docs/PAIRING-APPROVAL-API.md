@@ -407,7 +407,7 @@ One structured audit record per create, approve, deny, cancel, expiry, delivery 
 
 An approval never makes an owner device (4.6), and since #744 a worker's request is approved only by a device token, because a model can read the API token. So a Beacon on another computer holding the API token could approve no worker. This is the one way up for it, and it starts at the daemon's machine.
 
-**On the daemon's machine:** `oara pair --owner` prints a code such as `K7QM-2XW9-RTHP`: 12 characters from `23456789ABCDEFGHJKMNPQRSTVWXYZ` (no 0, 1, I, L, O, U), good for **10 minutes** and **one use**. Running it again replaces the earlier code. It writes the code's SHA-256 into `devices.db` (table `owner_codes`, created on first use) and uses no token and no network. **No route issues a code**, so nothing that only reaches the daemon over the network can make one; the API token alone mints no owner device.
+**On the daemon's machine:** `oara pair --owner` prints a code such as `K7QM-2XW9-RTHP`: 12 characters from `23456789ABCDEFGHJKMNPQRSTVWXYZ` (no 0, 1, I, L, O, U), good for **10 minutes** and **one use**. Running it again replaces the earlier code. It writes the code's SHA-256 into `devices.db` (table `owner_codes`, created on first use) and uses no token and no network. It prints the code only to a terminal (piped, or run by the agent's shell, it refuses), so the code does not land in a transcript or a log by accident; over ssh use `ssh -t`. **No route issues a code**, so nothing that only reaches the daemon over the network can make one, and no route trades the API token alone for an owner device. (What the API token can still do is pre-existing and listed in `docs/contracts/device-scoping.md` 6.5.)
 
 **From the other computer:** `POST /api/pair/owner`, behind the bearer gate. Any valid token: the API token, an owner device, or a scoped device (a Beacon that joined through 4.1). Not a public route.
 
@@ -445,9 +445,9 @@ Content-Type: application/json
 | 403 | `pairing_unavailable` | the daemon has no API token (open mode) |
 | 413 | `too_large` | body over 4 KiB |
 | 422 | `invalid_code` | wrong, expired, already used, burned, or no code was issued. Never 401: the bearer is fine |
-| 429 | `rate_limited` | `reason: bad_code`, `retry_after_seconds`, `Retry-After`: this source guessed wrong 3 times in a minute; the code was not looked at |
+| 429 | `rate_limited` | `reason: bad_code`, `retry_after_seconds`, `Retry-After`: this source, or this token, guessed wrong 3 times in the last minute; the code was not looked at |
 
-**Limits.** Each source (the TCP peer) may guess wrong 3 times a minute. Every wrong guess, from anyone, counts against the live code, and the **fifth burns it** (then `422` until someone runs `oara pair --owner` again). Spending the code and minting the device are one transaction, so two redemptions of one code have one winner.
+**Limits.** Each source (the TCP peer) and each token (device id, or the API token) may guess wrong 3 times a minute, so one device rotating addresses cannot burn the owner's code: 30 guesses in a code's ten minutes. Every wrong guess, from anyone, counts against the live code, and the **hundredth burns it** (then `422` until someone runs `oara pair --owner` again); a hundred guesses at about 2^59 values is a chance near 2e-16. Spending the code and minting the device are one transaction, so two redemptions of one code have one winner.
 
 **Audit.** `pairing: owner code issued` (by, ttl), `refused` (source, failures so far, burned), `redeemed` (device, name, platform, source, presenting identity). Never logged: the code, the token.
 

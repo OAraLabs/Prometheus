@@ -8,15 +8,17 @@ worker at all: every Approve was a 401 and the card came back.
 The fix, and what these tests pin:
 
 * ``oara pair --owner``, run ON the daemon's machine, prints a one-time code: 12 characters, ten minutes, one
-  use, and the fifth wrong guess burns it. It writes the code's SHA-256 straight into ``devices.db``; there is
+  use, and the hundredth wrong guess burns it. It writes the code's SHA-256 straight into ``devices.db``; there is
   NO route that issues a code, so nothing that only reaches the daemon over the network can make one. The
   API token alone, from anywhere, mints no owner device.
 * ``POST /api/pair/owner`` trades a code for an owner device. It needs a bearer (the API token or a device
   token: the Beacon is already connected), a public key, and the code. The token comes back SEALED to that
   key, the way an approved pairing's does, because the owner token can do one thing the API token cannot
   (approve a worker) and must not cross a plaintext link in clear.
-* Wrong guesses are limited per source, and every wrong guess counts against the code, so a short code cannot
-  be ground out; a malformed body is refused before the code is looked at, and spends nothing.
+* Wrong guesses are limited per source AND per token (one device rotating addresses cannot burn the owner's
+  code), and every wrong guess counts against the code, so a short code cannot be ground out; a malformed body
+  is refused before the code is looked at, and spends nothing.
+* The command prints the code only to a terminal, so it does not land in an agent's transcript by accident.
 """
 
 from __future__ import annotations
@@ -348,24 +350,50 @@ def test_a_wrong_code_is_422_invalid_code_never_401(world):
     assert response.status_code == 422 and response.json()["error"] == "invalid_code"
 
 
-def test_four_typos_then_the_right_code_still_works(world):
+def test_two_typos_then_the_right_code_still_works(world):
     code = issue(world)
-    for i in range(4):
-        response, _ = redeem(world, wrong_for(code), source=f"192.0.2.{10 + i}")
+    for _ in range(2):
+        response, _ = redeem(world, wrong_for(code))
         assert response.status_code == 422
     response, _ = redeem(world, code)
     assert response.status_code == 201, response.text
 
 
-def test_the_limits_are_five_guesses_per_code_and_three_wrong_guesses_a_minute_per_source():
-    assert (owner_codes.MAX_FAILURES, owner_codes.WRONG_CODES_PER_MINUTE, owner_codes.CODE_TTL_SECONDS) == (5, 3, 600)
-
-
-def test_the_fifth_wrong_guess_burns_the_code_wherever_the_guesses_came_from(world):
+def test_one_device_guessing_from_address_after_address_is_told_to_wait(world):
+    """The review's probe: a scoped phone rotating source addresses must not burn the owner's code."""
     code = issue(world)
-    for i in range(5):
-        response, _ = redeem(world, wrong_for(code), source=f"192.0.2.{10 + i}")
+    for i in range(3):
+        response, _ = redeem(world, wrong_for(code), who="scoped", source=f"192.0.2.{20 + i}")
         assert response.status_code == 422
+    limited, _ = redeem(world, wrong_for(code), who="scoped", source="2001:db8::7")
+    assert limited.status_code == 429 and limited.json()["reason"] == "bad_code"
+    with sqlite3.connect(world.path) as conn:
+        assert conn.execute("select failures from owner_codes").fetchone()[0] == 3, "the refused guess was not counted"
+    accepted, _ = redeem(world, code, who="global", source=REMOTE)
+    assert accepted.status_code == 201, accepted.text
+
+
+def test_the_limits_are_a_hundred_guesses_per_code_and_three_wrong_a_minute_per_source_and_token():
+    assert (owner_codes.MAX_FAILURES, owner_codes.WRONG_CODES_PER_MINUTE, owner_codes.CODE_TTL_SECONDS) == (100, 3, 600)
+
+
+def guess_wrong(world: World, code: str, times: int) -> None:
+    """Wrong guesses straight at the store: what many tokens from many places add up to, past the route's limiters."""
+    store = owner_codes.OwnerCodeStore(DeviceStore(world.path), clock=world.clock)
+    for _ in range(times):
+        assert store.redeem(wrong_for(code), name="x", platform="macos") is None
+
+
+def test_ninety_nine_wrong_guesses_then_the_right_code_still_works(world):
+    code = issue(world)
+    guess_wrong(world, code, 99)
+    response, _ = redeem(world, code)
+    assert response.status_code == 201, response.text
+
+
+def test_the_hundredth_wrong_guess_burns_the_code(world):
+    code = issue(world)
+    guess_wrong(world, code, 100)
     with sqlite3.connect(world.path) as conn:
         assert conn.execute("select count(*) from owner_codes").fetchone()[0] == 0, "burned at once, not lazily"
     response, _ = redeem(world, code)
@@ -378,9 +406,9 @@ def test_the_fifth_wrong_guess_burns_the_code_wherever_the_guesses_came_from(wor
 def test_a_source_that_keeps_guessing_is_told_to_wait_and_spends_nothing_more(world):
     code = issue(world)
     for _ in range(3):
-        response, _ = redeem(world, wrong_for(code), source=OTHER)
+        response, _ = redeem(world, wrong_for(code), who="scoped", source=OTHER)
         assert response.status_code == 422
-    limited, _ = redeem(world, code, source=OTHER)
+    limited, _ = redeem(world, code, who="global", source=OTHER)
     assert limited.status_code == 429 and limited.json()["error"] == "rate_limited"
     assert int(limited.headers["Retry-After"]) >= 1
     # Refused before the code was looked at: the code is alive, and the owner's own Beacon gets it.
@@ -400,7 +428,7 @@ def test_the_limited_source_may_try_again_after_the_window(world):
 def test_a_malformed_code_is_400_and_spends_nothing(world):
     code = issue(world)
     for bad in ("", "1234-5678-9ABC", "OOOO-OOOO-OOOO", "2345-6789-ABC", "2345-6789-ABCDE", 12345678, None,
-                "2345­6789ABCD"):
+                "2345\u00ad6789ABCD", "\u00df" * 6, "\u017f" * 12, "\uff12" * 12):
         response, _ = redeem(world, bad, source=OTHER)
         assert response.status_code == 400 and response.json()["fields"] == ["code"], (bad, response.text)
     response, _ = redeem(world, code, source=OTHER)
@@ -485,10 +513,10 @@ class NoNetwork:
         raise AssertionError(f"oara pair --owner made a network call ({name})")
 
 
-def run_cli(*argv: str, config=None) -> tuple[int, str]:
+def run_cli(*argv: str, config=None, interactive=True) -> tuple[int, str]:
     lines: list[str] = []
     code = pair_cli.run_pair_command(_args(*argv), config if config is not None else {"web": {"api_token": GLOBAL}},
-                                     client=NoNetwork(), out=lines.append)
+                                     client=NoNetwork(), out=lines.append, interactive=interactive)
     return code, "\n".join(lines)
 
 
@@ -540,6 +568,21 @@ def test_it_finds_the_registry_the_daemon_uses_through_the_env_file(world, tmp_p
     assert status == 0, out
     response, _ = redeem(world, _printed_code(out))
     assert response.status_code == 201
+
+
+def test_it_prints_a_code_only_to_a_terminal(world):
+    """Run by the agent's shell or piped into a file, the code would land in a transcript or a log."""
+    status, out = run_cli("--owner", interactive=False)
+    assert status == 1 and "terminal" in out and "ssh -t" in out
+    assert "owner_codes" not in table_names(world.path)
+
+
+def test_it_asks_stdout_whether_it_is_a_terminal(world, monkeypatch):
+    import io
+
+    monkeypatch.setattr(pair_cli.sys, "stdout", io.StringIO())
+    status, out = run_cli("--owner", interactive=None)
+    assert status == 1 and "terminal" in out
 
 
 def test_it_refuses_when_the_api_is_open(world):

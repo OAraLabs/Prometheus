@@ -28,6 +28,7 @@ import argparse
 import os
 import re
 import sqlite3
+import sys
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -94,14 +95,18 @@ def run_pair_command(
     *,
     client: Any = None,
     out: Callable[[str], None] = print,
+    interactive: bool | None = None,
 ) -> int:
-    """Execute ``oara pair <list|approve|deny>`` or ``oara pair --owner``. Returns an exit code."""
+    """Execute ``oara pair <list|approve|deny>`` or ``oara pair --owner``. Returns an exit code.
+
+    *interactive* (``--owner`` only) says whether the output reaches a person's terminal; None asks stdout.
+    """
     action = getattr(args, "pair_action", None)
     if getattr(args, "owner", False):
         if action is not None:
             out("--owner takes no action: run `oara pair --owner` on its own.")
             return 2
-        return issue_owner_code_here(config, out=out)
+        return issue_owner_code_here(config, out=out, interactive=interactive)
     if action not in ("list", "approve", "deny"):
         out("Usage: oara pair <list|approve <id>|deny <id>>   or   oara pair --owner")
         return 2
@@ -138,16 +143,25 @@ def daemon_devices_db(env: Mapping[str, str] | None = None) -> Path:
     return data_dir_path(environment).expanduser() / DEVICES_DB_NAME
 
 
-def issue_owner_code_here(config: dict[str, Any] | None, *, out: Callable[[str], None] = print) -> int:
+def issue_owner_code_here(config: dict[str, Any] | None, *, out: Callable[[str], None] = print,
+                          interactive: bool | None = None) -> int:
     """``oara pair --owner``: write a fresh one-time owner code into the daemon's registry and print it.
 
-    Refuses, issuing nothing, when the API is open (an owner device would mean nothing, and the route refuses
-    then too) and when there is no registry where the daemon keeps one (a wrong data directory must not grow a
-    second ``devices.db`` that the daemon never reads).
+    Refuses, issuing nothing, when its output is not a terminal (the code is for a person's eyes: run by the
+    agent's shell, or piped, it would land in a transcript, a model's context or a log; this stops that by
+    accident, not a determined process, which the shell floors are for), when the API is open (an owner device
+    would mean nothing, and the route refuses then too) and when there is no registry where the daemon keeps one (a
+    wrong data directory must not grow a second ``devices.db`` that the daemon never reads).
     """
     from prometheus.config.device_store import DeviceStore
-    from prometheus.config.owner_codes import CODE_TTL_SECONDS, MAX_FAILURES, issue_owner_code
+    from prometheus.config.owner_codes import CODE_TTL_SECONDS, issue_owner_code
 
+    if interactive is None:
+        interactive = sys.stdout.isatty()
+    if not interactive:
+        out("oara pair --owner prints its code only to a terminal, so the code cannot end up in a transcript or a "
+            "log. Run it yourself in a terminal on the daemon's machine (over ssh: ssh -t <host> oara pair --owner).")
+        return 1
     token, _source = resolve_api_token(config)
     if not token:
         out("This daemon's API is open (no web API token is set), so there is no owner device to make: every "
@@ -172,8 +186,7 @@ def issue_owner_code_here(config: dict[str, Any] | None, *, out: Callable[[str],
     until = time.strftime("%H:%M", time.localtime(issued.expires_at))
     out(f"Owner code:  {issued.code}\n\n"
         f"Enter it in Beacon on the computer you want to make an owner device, within {minutes} minutes "
-        f"(until {until}). It works once; running `oara pair --owner` again replaces it, and {MAX_FAILURES} wrong "
-        "tries end it.\n"
+        f"(until {until}). It works once, and running `oara pair --owner` again replaces it.\n"
         "An owner device sees every conversation and can approve workers' requests. It cannot enrol devices or "
         "define MCP servers, and you can revoke it from the device list at any time.\n"
         f"(Registry: {path})")

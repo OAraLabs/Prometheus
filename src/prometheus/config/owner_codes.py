@@ -14,8 +14,10 @@ Where the authority comes from
 nothing else (``tests/test_owner_code_promotion.py`` scans the source for it), and there is no route that makes
 one, so nothing that only reaches the daemon over the network can mint a code, whatever bearer it holds. Being
 able to write ``devices.db`` is already being able to mint any device outright, so issuing through it widens
-nothing. The API token alone mints no owner device anywhere: the route also needs a code, and the loopback-only
-``POST /api/devices`` refuses ``owner`` from another address.
+nothing. No ROUTE trades the API token alone for an owner device: this one also needs a code, and
+``POST /api/devices`` refuses ``owner`` from another address. (The API token can still run code as the daemon's user
+through a stdio MCP server definition, which could write this file; that is the master key's power, it predates
+this, and it is listed in docs/contracts/device-scoping.md 6.5.)
 
 The code
 --------
@@ -23,8 +25,9 @@ The code
 another), printed as three groups of four: ``30**12`` is about ``2**59``. It is good for
 :data:`CODE_TTL_SECONDS` and for one use, and there is at most one live code: issuing replaces the one before.
 Every wrong guess, from anyone, counts against the live code and the :data:`MAX_FAILURES`-th burns it, so the
-whole network gets five guesses at a 59-bit value; the route also slows each source to
-:data:`WRONG_CODES_PER_MINUTE`. Only the SHA-256 of the code is stored. That is enough against someone who later
+whole network gets a hundred guesses at a 59-bit value (a chance near ``2e-16``). The route also slows each source
+AND each token to :data:`WRONG_CODES_PER_MINUTE`, so one device cannot burn the owner's code by itself: rotating
+addresses does not reset its token's budget, and three a minute is thirty in a code's ten minutes. Only the SHA-256 of the code is stored. That is enough against someone who later
 reads a copy of the file: there are ten minutes, and ``2**59`` hashes take a GPU about a year.
 
 A malformed code (wrong length, a character outside the alphabet) is not a guess at the live code: it is refused
@@ -67,9 +70,10 @@ ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
 CODE_CHARS = 12
 GROUP = 4
 CODE_TTL_SECONDS = 600
-#: Wrong guesses, from anyone, that burn the live code.
-MAX_FAILURES = 5
-#: Wrong guesses one source may make in a minute before it is told to wait (the route's limiter).
+#: Wrong guesses, from anyone, that burn the live code. High enough that no one token (limited below) can burn it
+#: inside its lifetime, low enough that guessing stays hopeless.
+MAX_FAILURES = 100
+#: Wrong guesses one source, and one token, may make in a minute before being told to wait (the route's limiters).
 WRONG_CODES_PER_MINUTE = 3
 #: ``owner_devices.marked_by`` for an owner device bought with a code.
 OWNER_SOURCE = OWNER_SOURCE_OWNER_CODE
@@ -115,7 +119,10 @@ def normalize_code(value: object) -> str | None:
     """
     if not isinstance(value, str):
         return None
-    text = value.translate(_SEPARATORS).upper()
+    text = value.translate(_SEPARATORS)
+    if not text.isascii():          # before upper(): "ß".upper() is "SS", "ſ".upper() is "S"
+        return None
+    text = text.upper()
     if len(text) != CODE_CHARS or any(ch not in ALPHABET for ch in text):
         return None
     return text
@@ -208,6 +215,6 @@ class OwnerCodeStore:
             conn.rollback()
             raise
         conn.commit()
-        logger.info("pairing: owner code redeemed device=%s name=%r platform=%s source=%s by=%s",
+        logger.info("pairing: owner code redeemed device=%s name=%r platform=%s source=%s by=%r",
                     minted["id"], minted["name"], minted["platform"], source or "?", by or "?")
         return Redeemed(str(minted["id"]), str(minted["token"]), str(minted["name"]), str(minted["platform"]))
