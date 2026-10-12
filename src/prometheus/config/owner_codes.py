@@ -19,13 +19,21 @@ The code
 * **Five minutes, once.** A redemption mints at most one device: the check, the mint and the mark happen under one
   lock. A mint that raises leaves the code pending (nothing was granted), so the person can simply try again.
 * **One live code.** Issuing another replaces it (``replaced``), so there is never more than one thing to guess.
-* **Five wrong tries shut a source out, 25 in all burn the code** (``locked``). A shut-out source (the TCP peer
-  address) is refused before its try is compared, so its later tries guess nothing and count nothing: one neighbour
-  guessing badly cannot burn the code for everyone, and an online guesser has at most 25 chances in 10^8 per code the
-  person asks for. While a code is live, ANY presentation from a source still in budget that is not the code counts,
-  junk included (a body whose ``code`` is not a string is the route's 400 and never gets here). With no code live
-  there is nothing to guess, and nothing is counted. Burning a code takes five addresses; the terminal and the
-  operator's sockets then say "locked", which is also the alarm.
+* **No wrong guess burns the code.** Redeeming is a public route, so a code that strangers could burn would be a
+  stranger's off switch for the owner. Guessing is bounded instead, by refusing tries UNREAD (not compared, not
+  counted, the code untouched):
+
+  - **Five wrong tries per source per code.** A source is the TCP peer's IPv4 address, or its IPv6 /64 (one host
+    commonly holds a whole /64, so rotating inside it is not a new source; an IPv4-mapped address is its IPv4).
+  - **Ten compared wrong tries a minute in all** (:data:`MAX_WRONG_PER_MINUTE`, a sliding window). While it is
+    full every try is refused unread, the right code included, so a guesser with any number of addresses gets about
+    ``10 x 5 = 50`` chances in 10^8 per code. Once the guessing stops the code works again, for the rest of its five
+    minutes: an attacker can delay a redemption, never cancel one.
+
+  While a code is live, ANY compared presentation that is not the code counts, junk included (a body whose ``code``
+  is not a string is the route's 400 and never gets here). With no code live there is nothing to guess, and nothing
+  is counted. The terminal that asked is told how many wrong tries there were (``wrong_attempts``), and a full
+  window logs a ``guessing`` warning: the alarm, without the off switch.
 * **Five minutes by the MONOTONIC clock.** A wall-clock step (NTP, a sleep, a person) neither stretches nor cuts a
   code's life; the wall clock is read once, to tell a person until when (``expires_wall``).
 * **Kept as a SHA-256 digest**, never the code, and in memory only: a restart ends every code, which is the right
@@ -45,11 +53,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import logging
 import secrets
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
@@ -57,17 +66,17 @@ logger = logging.getLogger("prometheus.pairing")
 
 CODE_DIGITS = 8
 TTL_SECONDS = 300
-#: Wrong tries one source (TCP peer address) may make at a code before it is refused unread.
+#: Wrong tries one source (an IPv4 address, or an IPv6 /64) may make at a code before it is refused unread.
 MAX_WRONG_PER_SOURCE = 5
-#: Wrong tries in all that burn the code.
-MAX_WRONG_ATTEMPTS = 25
+#: Wrong tries compared in any sixty seconds, from all sources together; past it every try is refused unread.
+MAX_WRONG_PER_MINUTE = 10
+_WINDOW_SECONDS = 60.0
 #: Finished codes the terminal can still ask about. Older ones answer "unknown".
 KEEP_FINISHED = 16
 
 PENDING = "pending"
 REDEEMED = "redeemed"
 EXPIRED = "expired"
-LOCKED = "locked"
 REPLACED = "replaced"
 CANCELED = "canceled"
 
@@ -82,6 +91,20 @@ def normalize(presented: object) -> str | None:
     if len(digits) != CODE_DIGITS or not (digits.isascii() and digits.isdigit()):
         return None
     return digits
+
+
+def source_key(peer: str) -> str:
+    """What one guesser is, for the per-source budget: an IPv4 address, or the /64 of an IPv6 one (a mapped IPv4
+    address is that IPv4 address). Anything that is not an address is itself."""
+    try:
+        address = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            return str(address.ipv4_mapped)
+        return str(ipaddress.IPv6Network((address, 64), strict=False))
+    return str(address)
 
 
 def format_code(code: str) -> str:
@@ -127,8 +150,10 @@ class OwnerCodes:
         self._codes: OrderedDict[str, OwnerCode] = OrderedDict()
         self._live_id: str | None = None
         self._live_digest: str | None = None
-        #: Wrong tries per source at the live code; cleared whenever the live code changes.
+        #: Wrong tries per source (``source_key``) at the live code; cleared whenever the live code changes.
         self._wrong_by_source: dict[str, int] = {}
+        #: When each compared wrong try of the last minute happened (any code): the global bound.
+        self._recent_wrong: deque[float] = deque()
 
     # -- the one live code -------------------------------------------------
 
@@ -177,30 +202,34 @@ class OwnerCodes:
         propagates and the code stays pending with no wrong try counted: nothing was granted.
         """
         typed = normalize(presented)
+        key = source_key(source)
         with self._lock:
             now = self.clock()
             self._settle(now)
             if self._live_id is None or self._live_digest is None:
                 return None
             live = self._codes[self._live_id]
-            spent = self._wrong_by_source.get(source, 0)
+            spent = self._wrong_by_source.get(key, 0)
             if spent >= MAX_WRONG_PER_SOURCE:
                 return None                     # refused unread: this try is not compared, so it is not counted
+            while self._recent_wrong and now - self._recent_wrong[0] >= _WINDOW_SECONDS:
+                self._recent_wrong.popleft()
+            if len(self._recent_wrong) >= MAX_WRONG_PER_MINUTE:
+                return None                     # refused unread, the right code included; the code is untouched
             right = typed is not None and hmac.compare_digest(_digest(typed), self._live_digest)
             if not right:
                 wrong = live.wrong_attempts + 1
-                self._wrong_by_source[source] = spent + 1
-                if wrong >= MAX_WRONG_ATTEMPTS:
-                    self._finish(live.id, LOCKED, now, wrong_attempts=wrong)
-                    logger.warning("pairing: owner-code locked id=%s after %d wrong tries (last from %s)",
-                                   live.id, wrong, source)
-                else:
-                    self._codes[live.id] = replace(live, wrong_attempts=wrong)
-                    logger.warning("pairing: owner-code wrong try id=%s source=%s (%d of %d; %d of %d from it)",
-                                   live.id, source, wrong, MAX_WRONG_ATTEMPTS, spent + 1, MAX_WRONG_PER_SOURCE)
-                    if spent + 1 >= MAX_WRONG_PER_SOURCE:
-                        logger.warning("pairing: owner-code source %s shut out of id=%s after %d wrong tries",
-                                       source, live.id, spent + 1)
+                self._wrong_by_source[key] = spent + 1
+                self._recent_wrong.append(now)
+                self._codes[live.id] = replace(live, wrong_attempts=wrong)
+                logger.warning("pairing: owner-code wrong try id=%s source=%s (%d so far; %d of %d from it)",
+                               live.id, source, wrong, spent + 1, MAX_WRONG_PER_SOURCE)
+                if spent + 1 >= MAX_WRONG_PER_SOURCE:
+                    logger.warning("pairing: owner-code source %s shut out of id=%s after %d wrong tries",
+                                   key, live.id, spent + 1)
+                if len(self._recent_wrong) == MAX_WRONG_PER_MINUTE:   # logged once per filling, not per refusal
+                    logger.warning("pairing: owner-code guessing: %d wrong tries in a minute; every try is refused "
+                                   "unread until it passes (id=%s stays live)", MAX_WRONG_PER_MINUTE, live.id)
                 return None
             minted = mint()
             self._finish(live.id, REDEEMED, now, device_id=str(minted["id"]), device_name=str(minted["name"]),

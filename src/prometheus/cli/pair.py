@@ -8,8 +8,9 @@
 ``--owner`` makes a Beacon on ANOTHER computer the owner's own device (an owner device: the operator, and a person
 for a worker's approval). It asks the daemon for a one-time code (8 digits, 5 minutes, once; only the API token from
 this machine may), prints it, and waits to say what became of it: who used it and from which address, or that it
-expired, was replaced or was locked by wrong guesses. The report is the alarm: a code someone else typed first shows
-up here at once. Ctrl-C cancels the code. It prints no token.
+expired or was replaced, and how many wrong tries there were. The report is the alarm: a code someone else typed
+first shows up here at once. Ctrl-C cancels the code. It prints no token. It asks for a code only when its output is
+a terminal: piped, captured, or run by the agent's own shell, the code would land in a transcript or a log.
 
 For a headless box with no Beacon open and no Telegram (docs/PAIRING-APPROVAL-API.md, 5.3). It is the same
 REST routes the other channels use, with the global token read the way ``oara token show`` reads it, and it
@@ -28,6 +29,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import sys
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -111,13 +113,24 @@ def run_pair_command(
     client: Any = None,
     out: Callable[[str], None] = print,
     sleep: Callable[[float], None] = time.sleep,
+    interactive: bool | None = None,
 ) -> int:
-    """Execute ``oara pair <list|approve|deny>`` or ``oara pair --owner``. Returns an exit code."""
+    """Execute ``oara pair <list|approve|deny>`` or ``oara pair --owner``. Returns an exit code.
+
+    *interactive* (``--owner`` only): whether the output reaches a person's terminal; None asks stdout.
+    """
     action = getattr(args, "pair_action", None)
     owner = bool(getattr(args, "owner", False))
     if owner and action is not None:
         out("Usage: oara pair --owner  (on its own), or oara pair <list|approve <id>|deny <id>>")
         return 2
+    if owner and not (sys.stdout.isatty() if interactive is None else interactive):
+        # Before any request, so no code exists at all. An accident guard (asking the agent to run it, a pipe into a
+        # log), not a wall: a process set on it can fake a terminal, and the shell floors are what stop that.
+        out("oara pair --owner shows its code only on a terminal, so the code cannot end up in a transcript or a "
+            "log. Run it yourself in a terminal on the machine Prometheus runs on (over ssh: ssh -t <host> oara "
+            "pair --owner).")
+        return 1
     if not owner and action not in ("list", "approve", "deny"):
         out("Usage: oara pair <list|approve <id>|deny <id>>, or oara pair --owner")
         return 2
@@ -258,6 +271,7 @@ def _owner_code(client: Any, headers: dict[str, str], out: Callable[[str], None]
     out("")
     out("Waiting for it to be used (Ctrl-C cancels it)...")
     code_id = issued["code_id"]
+    warned = 0
     try:
         for _ in range(_OWNER_MAX_POLLS):
             sleep(OWNER_POLL_SECONDS)
@@ -267,6 +281,13 @@ def _owner_code(client: Any, headers: dict[str, str], out: Callable[[str], None]
                     "every code. Run oara pair --owner again.")
                 return 1
             body = state.json()
+            wrong = int(body.get("wrong_attempts") or 0)
+            if wrong > warned:
+                # The alarm. Wrong guesses no longer burn the code (a stranger could switch it off); they are
+                # reported here instead, as they happen.
+                out(f"Warning: {wrong} wrong {'try' if wrong == 1 else 'tries'} at this code so far. If that was not "
+                    "you, someone may be guessing: Ctrl-C cancels the code.")
+                warned = wrong
             if body["status"] != "pending":
                 return _owner_outcome(body, out)
         out("Stopped waiting. The code may still work until it expires.")
@@ -302,10 +323,7 @@ def _owner_outcome(body: dict[str, Any], out: Callable[[str], None]) -> int:
         out("If that was not you, revoke it now: in Beacon's device list, or "
             f"DELETE /api/devices/{device.get('id')} with the API token.")
         return 0
-    if status == "locked":
-        out("The code was locked after 5 wrong tries, so nobody can use it. Someone may have been guessing: run "
-            "oara pair --owner again when you are ready, and type the new code straight away.")
-    elif status == "expired":
+    if status == "expired":
         out("The code expired unused. Run oara pair --owner again when the other computer is ready.")
     elif status == "replaced":
         out("A newer owner code replaced this one (oara pair --owner was run again). Only the newest works.")

@@ -24,7 +24,7 @@ limit. The boundary is the global token itself: keep it off other computers (a B
 and out of a model's shell (the read floors, #659 and #712). Nor can any peer test see a relay on this machine that
 adds no header (nginx's bare ``proxy_pass``, a TCP forwarder, an SSH tunnel).
 
-**Every code is told to the operator.** Each issue, redemption (who, from where) and lock sends an ``owner_code``
+**Every code is told to the operator.** Each issue and redemption (who, from where) sends an ``owner_code``
 frame to the operator's sockets only (the global token or an owner device; never ``broadcast``, never the SignalBus),
 so a code nobody at the machine meant to mint, or a redemption nobody expected, shows on the owner's open Beacons and
 not only in a terminal that may not be there.
@@ -33,8 +33,10 @@ not only in a terminal that may not be there.
 ``Origin``; ``application/json``, at most 4 KiB, a JSON object; a ``device_name`` of 1 to 64 characters with no
 control or format characters (refused, not stripped, as for a pairing request). A bad body is a 400 and spends no
 try (a ``code`` that is not a string included). Then the code, and only the code, decides: wrong, expired, used,
-replaced, cancelled, locked, a shut-out source or no code at all are ONE answer (``401 invalid_code``), so a guesser
-learns nothing; five wrong tries shut a source out and 25 in all burn the code. The device
+replaced, cancelled, a shut-out source, a minute already full of wrong guesses, or no code at all are ONE answer
+(``401 invalid_code``), so a guesser learns nothing. No guess burns the code (``config/owner_codes.py``): five wrong
+tries shut a source out and at most ten a minute are compared at all, so strangers can delay a redemption but never
+cancel the owner's code. The device
 gets a token of its own (``DeviceStore.mint_owner``, ``marked_by = "owner-code"``), listed as an owner device and
 revocable on its own; a later redemption, or this Mac's same-Mac re-pairing, never revokes it.
 
@@ -61,7 +63,7 @@ from fastapi.responses import JSONResponse
 
 from prometheus.config.api_token import OWNER_SOURCE_OWNER_CODE
 from prometheus.config.device_store import DeviceStore, registry_platform
-from prometheus.config.owner_codes import LOCKED, OwnerCode, OwnerCodes
+from prometheus.config.owner_codes import OwnerCode, OwnerCodes
 from prometheus.web.loopback import is_this_host
 
 # The pairing doors read a body and answer a stranger one way; these are shared on purpose.
@@ -96,12 +98,12 @@ def _redeemed_by(record: OwnerCode) -> dict[str, Any] | None:
 
 def _status_payload(record: OwnerCode) -> dict[str, Any]:
     return {"code_id": record.id, "status": record.status, "expires_at": int(record.expires_wall),
-            "redeemed_by": _redeemed_by(record)}
+            "redeemed_by": _redeemed_by(record), "wrong_attempts": record.wrong_attempts}
 
 
 async def _tell_operators(request: Request, event: str, record: OwnerCode) -> None:
     """An ``owner_code`` frame to the operator's sockets ONLY (the global token or an owner device): a code was issued,
-    redeemed (by whom, from where) or locked by wrong guesses. So a code nobody at the machine meant to mint, or a
+    or redeemed (by whom, from where). So a code nobody at the machine meant to mint, or a
     redemption nobody expected, is seen on every Beacon the owner has open, not only in a terminal that may not be
     there. Never ``broadcast`` (a scoped device must not learn who is enrolling) and never the SignalBus. Carries no
     code and no token. Best effort: a failure or a stall is logged and never fails the request."""
@@ -214,11 +216,6 @@ def register_owner_code_routes(
             lambda: devices().mint_owner(name, platform, by=OWNER_SOURCE_OWNER_CODE),
             source=_peer(request))
         if minted is None:
-            # `live` was pending, and there is no await between the redeem and this read, so a LOCKED code now is
-            # one this very try locked.
-            after = codes.status(live.id) if live is not None else None
-            if after is not None and after.status == LOCKED:
-                await _tell_operators(request, "locked", after)
             return _json(401, _INVALID_CODE)
         done = codes.status(live.id) if live is not None else None
         if done is not None:

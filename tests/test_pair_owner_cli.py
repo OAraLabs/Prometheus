@@ -59,11 +59,40 @@ def beacon_redeems(world: World, lines: list[str], peer: str = MACBOOK, name: st
     return client.post("/api/pair/owner", json={"code": printed_code(lines), "device_name": name, "platform": "macos"})
 
 
-def run(world: World, *argv: str, sleep=None, config=CONFIG, client=None) -> tuple[int, list[str]]:
+def run(world: World, *argv: str, sleep=None, config=CONFIG, client=None, interactive=True) -> tuple[int, list[str]]:
     lines: list[str] = []
     code = run_pair_command(_args(*argv), config, client=client or loopback(world), out=lines.append,
-                            sleep=sleep or (lambda _s: None))
+                            sleep=sleep or (lambda _s: None), interactive=interactive)
     return code, lines
+
+
+# ── only to a terminal ───────────────────────────────────────────────────────
+
+class NoNetwork:
+    def __getattr__(self, name):
+        raise AssertionError(f"a code was asked for ({name}) though nobody would see it")
+
+
+def test_it_mints_and_prints_a_code_only_for_a_terminal(world):
+    """Piped, captured, or run by the agent's own shell, the code would land in a transcript or a log."""
+    code, lines = run(world, "--owner", interactive=False, client=NoNetwork())
+    text = "\n".join(lines)
+    assert code == 1 and "terminal" in text and "ssh -t" in text
+    assert world.app.state.owner_codes.live() is None
+
+
+def test_it_asks_stdout_whether_it_is_a_terminal(world, monkeypatch):
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    code, lines = run(world, "--owner", interactive=None, client=NoNetwork())
+    assert code == 1 and "terminal" in "\n".join(lines)
+
+
+def test_list_approve_and_deny_still_work_without_a_terminal(world):
+    code, lines = run(world, "list", interactive=False)
+    assert code == 0, lines
 
 
 # ── the flag ─────────────────────────────────────────────────────────────────
@@ -95,7 +124,7 @@ def test_it_prints_the_code_waits_and_reports_who_used_it(world):
             assert response.status_code == 200, response.text
             redeemed.append(response.json())
 
-    code = run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, sleep=sleep)
+    code = run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, interactive=True, sleep=sleep)
     text = "\n".join(lines)
     assert code == 0, text
     assert "Will's MacBook Pro" in text and MACBOOK in text and redeemed[0]["device_id"][:8] in text
@@ -105,7 +134,7 @@ def test_it_prints_the_code_waits_and_reports_who_used_it(world):
 
 def test_the_code_is_printed_once_in_two_groups_of_four(world):
     lines: list[str] = []
-    run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append,
+    run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, interactive=True,
                      sleep=lambda _s: beacon_redeems(world, lines))
     groups = [line for line in lines if re.search(r"\b[0-9]{4}-[0-9]{4}\b", line)]
     assert len(groups) == 1
@@ -115,7 +144,7 @@ def test_the_code_is_printed_once_in_two_groups_of_four(world):
 
 def test_it_says_what_an_owner_device_can_do_and_how_long_the_code_lasts(world):
     lines: list[str] = []
-    run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append,
+    run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, interactive=True,
                      sleep=lambda _s: beacon_redeems(world, lines))
     text = "\n".join(lines)
     assert "5 minutes" in text and "once" in text
@@ -134,16 +163,23 @@ def test_an_unused_code_is_reported_expired(world):
 
 def test_wrong_guesses_are_reported_as_a_warning(world):
     lines: list[str] = []
+    guessed = []
 
     def sleep(_seconds: float) -> None:
-        wrong = f"{(int(printed_code(lines)) + 1) % 10**8:08d}"
-        for n in range(25):                                   # five addresses, five wrong tries each
-            client = TestClient(world.app, base_url="http://192.0.2.50:8005", client=(f"198.51.100.{n // 5}", 1))
-            client.post("/api/pair/owner", json={"code": wrong, "device_name": "guesser"})
+        if not guessed:
+            wrong = f"{(int(printed_code(lines)) + 1) % 10**8:08d}"
+            for n in range(7):
+                client = TestClient(world.app, base_url="http://192.0.2.50:8005", client=(f"198.51.100.{n // 5}", 1))
+                client.post("/api/pair/owner", json={"code": wrong, "device_name": "guesser"})
+            guessed.append(1)
+        else:
+            world.clock.now += 61
 
-    code = run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, sleep=sleep)
+    code = run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, sleep=sleep,
+                            interactive=True)
     text = "\n".join(lines).lower()
-    assert code == 1 and "locked" in text and "wrong" in text
+    assert code == 1 and "expired" in text and "locked" not in text
+    assert "7 wrong" in text, text
 
 
 def test_a_newer_code_from_another_terminal_is_reported(world):
@@ -162,7 +198,7 @@ def test_ctrl_c_after_someone_used_the_code_reports_who_and_never_says_cancelled
         assert beacon_redeems(world, lines, peer="198.51.100.66", name="not you").status_code == 200
         raise KeyboardInterrupt
 
-    code = run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, sleep=sleep)
+    code = run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, interactive=True, sleep=sleep)
     text = "\n".join(lines)
     assert "Cancelled" not in text and "cancelled" not in text.lower().split("was cancelled")[0]
     assert "not you" in text and "198.51.100.66" in text and "revoke" in text.lower()
@@ -188,7 +224,7 @@ def test_ctrl_c_when_the_daemon_cannot_be_told_says_how_long_the_code_lasts(worl
     def sleep(_seconds: float) -> None:
         raise KeyboardInterrupt
 
-    code = run_pair_command(_args("--owner"), CONFIG, client=Flaky(), out=lines.append, sleep=sleep)
+    code = run_pair_command(_args("--owner"), CONFIG, client=Flaky(), out=lines.append, interactive=True, sleep=sleep)
     assert code == 130 and calls["n"] == 1 and "until" in "\n".join(lines)
 
 
@@ -198,7 +234,7 @@ def test_ctrl_c_cancels_the_code(world):
     def sleep(_seconds: float) -> None:
         raise KeyboardInterrupt
 
-    code = run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, sleep=sleep)
+    code = run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, interactive=True, sleep=sleep)
     assert code == 130 and "cancel" in "\n".join(lines).lower()
     assert beacon_redeems(world, lines).status_code == 401
 
