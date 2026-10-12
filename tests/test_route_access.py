@@ -59,6 +59,9 @@ EXPECTED_SCOPED_ALLOWED = {
     ("GET", "/api/approvals"),
     ("POST", "/api/approvals/{request_id}/approve"),
     ("POST", "/api/approvals/{request_id}/deny"),
+    # trading a one-time code from `oara pair --owner` (run on the daemon's machine) for an owner device: the
+    # code is the authority, and a Beacon that joined by approve-to-pair holds a scoped token
+    ("POST", "/api/pair/owner"),
 }
 
 
