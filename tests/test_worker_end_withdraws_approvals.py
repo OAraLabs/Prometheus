@@ -144,6 +144,18 @@ async def test_a_withdrawn_request_cannot_be_answered_afterwards():
 
 
 @pytest.mark.asyncio
+async def test_a_second_answer_resolves_nothing_even_before_the_waiter_wakes():
+    queue, bus, _tg = _queue()
+    action = PendingAction(request_id="0a0a0001", tool_name="bash", description="run ls")
+    queue._register(action)                      # no waiter: nothing pops it, as in the instant after an answer
+    assert await queue.approve("0a0a0001", by=in_process("first")) is True
+    count = len(bus.signals)
+    assert await queue.approve("0a0a0001", by=in_process("second")) is False
+    assert await queue.deny("0a0a0001", by=in_process("second")) is False
+    assert action._result == ApprovalResult.APPROVED and len(bus.signals) == count
+
+
+@pytest.mark.asyncio
 async def test_withdrawing_twice_or_a_worker_with_nothing_pending_is_quiet():
     queue, bus, tg = _queue()
     _w, _rid = await _ask_queue(queue, worker="aaae770e7")
@@ -254,11 +266,14 @@ async def test_a_listener_that_raises_does_not_break_the_task(tmp_path, monkeypa
     def broken(_task_id: str, _why: str) -> None:
         raise RuntimeError("listener exploded")
 
+    heard: list[str] = []
     mgr.add_process_end_listener(broken)
+    mgr.add_process_end_listener(lambda task_id, _why: heard.append(task_id))
     try:
         stopped = await mgr.stop_task(rec.id)
-        await _until(lambda: mgr.get_task(rec.id).ended_at)
+        await _until(lambda: heard)
         assert stopped.status == "killed"
+        assert heard == [rec.id], "a listener after the broken one is still told"
     finally:
         await mgr.shutdown()
 
