@@ -8,24 +8,36 @@ Beacon is the native desktop client for the Prometheus daemon — an Electron ap
 
 ## Getting Beacon
 
-Honest status first: Beacon is free to use but not open source, and it is in beta. Builds — a `.dmg` for macOS, an `.AppImage` and a `.deb` for Linux — are published when Beacon leaves beta; until then, early users get draft builds ([oara.ai/beacon](https://oara.ai/beacon)). Two more caveats about those builds: macOS builds are **unsigned** unless Apple credentials were in the build environment, so Gatekeeper will complain the first time — right-click → Open gets you past it. And there is **no auto-update channel** yet; new versions are a manual download.
+Honest status first: Beacon is free to use but not open source, and it is in beta. Every release publishes its builds — a `.dmg` for macOS (Apple silicon), an `.AppImage` and a `.deb` for Linux — from the [releases page](https://github.com/OAraLabs/beacon/releases/latest), and [oara.ai/beacon](https://oara.ai/beacon) reads whatever is newest there. Two caveats that remain: macOS builds are **unsigned** unless Apple credentials were in the build environment, so Gatekeeper will complain the first time — right-click → Open gets you past it. And there is **no auto-update channel** yet; new versions are a manual download.
 
-First launch drops you into a stepped setup wizard that connects to your daemon — either with a 6-digit pairing code (if the daemon booted in setup mode) or an API token — then walks through model detection, agent identity, and optional chat gateways. The full pairing walkthrough with screenshots lives in the [install guide](install.md).
+### The first five minutes
+
+On a Mac, the whole path from nothing to a first answer is Beacon doing the work:
+
+1. **Download and open Beacon.** Drag it to Applications, open it. If macOS balks, right-click → **Open** once.
+2. Choose **"No, set it up on this Mac."** Beacon gets Prometheus for you, checks it's genuine, puts it in your Applications folder, and starts it. You won't type a command. It needs about 2 GB free and macOS 13 or later, on an Apple chip. macOS will tell you Prometheus was added to Login Items — that's expected, it's what keeps your assistant running when Beacon is closed.
+3. **"How should your assistant think?"** Pick **With a cloud AI**, then **"Sign in with OpenRouter"** — one account that gives your assistant Claude, ChatGPT, Gemini and more, with no key to copy. OpenRouter opens in your browser; sign in (or make an account) and choose **Authorize**. OpenRouter needs a few dollars of credit before your assistant can answer: $5 is the smallest amount, plus a small card fee. Prefer a key? **Other options** takes an Anthropic or OpenAI key, pasted and checked before anything is saved.
+4. Beacon finishes setup: saves your choices, starts your assistant, and **connects this Mac as its owner**.
+5. **Say hello.** Send one of the suggested messages, or type your own. That's your first real round-trip.
+
+If you already have Prometheus running, choose **"Yes, connect to it"** instead and Beacon connects to the daemon it finds.
 
 ![Beacon's setup wizard pairing with a daemon using a 6-digit code](../assets/shots/install-2-pairing.png)
+
+The terminal-driven pairing path — the daemon in setup mode, a 6-digit code, `oara setup` — is in the [install guide](install.md). Both reach the same place.
 
 The token you pair with goes into the OS keychain via Electron's `safeStorage` and never reaches the renderer process — Beacon's UI can see that a token is saved, but never the token itself.
 
 ## The nav
 
-Thirteen views, organized into collapsible groups in a left rail. Groups remember whether you left them open, and the active view's group is always forced open so you can't lose your place:
+Six destinations in a rail that never expands — a surface's second level is a pill row at the top of that surface, not a tree in the rail:
 
-- **Mission** — the default landing view
-- **Conversations** — Chat · Sessions
+- **Mission** — the cockpit landing, and the default view on launch
+- **Chats** — Chat · Sessions
 - **Coding** — Run · Loop Manager
-- **Workspace** — Documents · Files · Board · Integrations
+- **Workspace** — Files · Artifacts · Board · Documents · Wiki · Checkpoints · Skills · Integrations
 - **Activity** — Live · Tool Feed · Status
-- **Config**
+- **Config** — a tabbed panel, not a group: Models · Connectors · Skills · Telemetry · Usage · Memory · Sentinel · Wiki · Cron · Config · Profiles · Grants · **Devices** · Skin
 
 The foot of the rail pins a global connection indicator — more on that in [Cross-cutting UX](#cross-cutting-ux).
 
@@ -154,6 +166,8 @@ A tabbed panel of native surfaces over the daemon's configuration. Every tab sha
 
 - **Models** — the per-provider key manager. Paste a key and it saves to the daemon, takes effect immediately, needs no restart, and is **never shown again** — the UI only knows a key exists. Each provider card carries a "Get a key ↗" link and an auth-mode badge, and there's a read-only card for your local model. This tab is also home to **"Sign in with SuperGrok"** — an OAuth device-code flow for xAI: start the login, approve it at accounts.x.ai, and Beacon polls until you're signed in. Your subscription then powers `/xai` with no API key at all; expiry is shown, and you can sign out anytime.
 
+  **Main model** — *Which AI your assistant thinks with.* Pick a company and (optionally) a version; leave the version blank for that company's default. If the model you want is a cloud one you haven't keyed yet, **"Sign in with OpenRouter"** is right here too, the same browser sign-in as setup. A change here **takes effect when Prometheus restarts** — the panel shows `Now:` and `After a restart:` separately and offers the restart button, so you can see the pending change rather than wonder whether it took. This writes the daemon's configured main model; a per-chat `/qwen`-style override is separate and unaffected.
+
   ![The Models tab — per-provider keys, auth-mode badges, and SuperGrok subscription sign-in](../assets/shots/extra-models-tab.png)
 
 - **Skills** — the agent's skill library, read-only, with **Pin/Unpin** (pinned skills are protected from automated pruning) and a View action that opens the skill in the preview pane.
@@ -164,6 +178,26 @@ A tabbed panel of native surfaces over the daemon's configuration. Every tab sha
 - **Cron** — full CRUD over scheduled jobs: create, **Run now**, enable/disable, delete, with next-run/last-run times and status.
 - **Config** — the raw `prometheus.yaml`, for when you want the source of truth.
 - **Profiles** — the profile list with the active one marked.
+
+## Another computer, and a phone
+
+### Let a second computer connect
+
+By default **only this Mac can use Prometheus.** To reach it from another computer on the same network, open **Connection Settings** (`⌘,`) and turn on **"Let other computers on my home network connect."** That's home-network mode: it switches the daemon to serve your network over TLS, and the setting says plainly what it does — *"Beacon on your other computers can find this Prometheus and ask to connect. You approve each one."* Restart Prometheus to finish (the panel offers the restart), and if anything would make it unsafe — no way to share safely yet, or set to share but only listening on this Mac — it says so instead of flipping a switch that wouldn't work.
+
+On the **second** computer, open Beacon and pick **"Look for another computer."** Beacon searches this Mac and your home network. If it finds Prometheus, choose it and **Connect**; it then waits for approval — *"Approve it in Beacon on a computer that already uses Prometheus"* — and shows the code to match. If it doesn't find it, **"Or type its address"** takes the computer's name or address directly (a port you type is kept and shown). A computer that joins this way gets an ordinary scoped device: it sees only its own conversations, and can't approve a worker's request.
+
+### Make this Beacon an owner
+
+If the second computer needs real authority — to approve a worker's request, the way the machine Prometheus runs on can — promote it to an **owner device**. In **Connection Settings** (`⌘,`) on that computer, find **"Make this Beacon an owner."** It reads:
+
+> *An owner Beacon can approve worker requests. On the computer running Prometheus, run `oara pair --owner` and type the code it shows here. It works once, within 5 minutes.*
+
+So: run `oara pair --owner` on the daemon's machine, which prints an 8-digit code (shown as `1234-5678`); type those eight digits into this Beacon. A 200 that says `owner: true` is the promotion — every other outcome (wrong, expired, used, replaced) is the one honest "that code didn't work" message, so a stale code can't look like success. The full command-side behavior — terminal-only printing, rate-limiting of wrong guesses, what can and can't mint a code — is in the [install guide](install.md#make-a-beacon-on-another-computer-the-owner).
+
+### Pair a phone with the QR
+
+In **Config → Devices**, name the device and click **"Mint a one-shot pairing QR."** Beacon mints a code and renders a QR — the token is held in memory and drawn locally, never sent to a remote renderer, and the device list refreshes immediately after. Scan it from the phone. The token is **one-shot**: the daemon returns the plaintext once and keeps only a SHA-256, so there's deliberately no "show it again" — if you dismiss the QR unscanned the credential still exists on the daemon, and the row stays visible so you can revoke it (an orphan you can't see is a credential you can't withdraw). Minting needs the global token, which only the desktop holds; a device token presented to `POST /api/devices` gets a 401 by design, so an already-enrolled phone can't enrol a second attacker device. A phone enrolled this way gets a scoped device like any other — promote it to an owner separately if it needs to approve workers.
 
 ## Cross-cutting UX
 
