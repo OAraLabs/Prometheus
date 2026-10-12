@@ -2,7 +2,7 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
-## Unreleased
+## 0.9.9 (unreleased)
 
 ### Startup banner
 
