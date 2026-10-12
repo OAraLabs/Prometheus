@@ -8,13 +8,17 @@ Beacon is the native desktop client for the Prometheus daemon — an Electron ap
 
 ## Getting Beacon
 
-Honest status first: Beacon is free to use but not open source, and it is in beta. Every release publishes its builds — a `.dmg` for macOS (Apple silicon), an `.AppImage` and a `.deb` for Linux — from the [releases page](https://github.com/OAraLabs/beacon/releases/latest), and [oara.ai/beacon](https://oara.ai/beacon) reads whatever is newest there. Two caveats that remain: macOS builds are **unsigned** unless Apple credentials were in the build environment, so Gatekeeper will complain the first time — right-click → Open gets you past it. And there is **no auto-update channel** yet; new versions are a manual download.
+Honest status first: Beacon is free to use but not open source, and it is in beta. Every release publishes its builds — a `.dmg` for macOS (Apple silicon), an `.AppImage` and a `.deb` for Linux — from the [releases page](https://github.com/OAraLabs/beacon/releases/latest), and [oara.ai/beacon](https://oara.ai/beacon) reads whatever is newest there.
+
+**Signing:** the macOS app and disk image are **signed, notarized and stapled** with an Apple Developer ID, so Gatekeeper opens them without ceremony. The Linux AppImage and `.deb` are **not** signed.
+
+**Updates:** a packaged Beacon **updates itself.** It checks about 30 seconds after it opens and every four hours after that, downloads the new version in the background, and installs it the next time you quit (`⌘Q`). When one is ready the menu-bar icon also offers *"Beacon v\<version\> ready — restart to install"*, and **Connection Settings** has an **Updates** section showing the state, with a **Check for updates** button. The feed is the public `OAraLabs/beacon` releases page, so checking needs no credential and no token is shipped or stored. Two honest limits: a build **from source never checks** (the updater needs the packaged app's feed metadata), and the Linux update paths — the AppImage replacing its own file, and the `.deb` installing with `dpkg -i` behind a graphical sudo prompt — **have not been run on real Linux hardware yet**, only in CI.
 
 ### The first five minutes
 
 On a Mac, the whole path from nothing to a first answer is Beacon doing the work:
 
-1. **Download and open Beacon.** Drag it to Applications, open it. If macOS balks, right-click → **Open** once.
+1. **Download and open Beacon.** Drag it to Applications and open it. The published macOS build is signed and notarized, so Gatekeeper opens it without a warning.
 2. Choose **"No, set it up on this Mac."** Beacon gets Prometheus for you, checks it's genuine, puts it in your Applications folder, and starts it. You won't type a command. It needs about 2 GB free and macOS 13 or later, on an Apple chip. macOS will tell you Prometheus was added to Login Items — that's expected, it's what keeps your assistant running when Beacon is closed.
 3. **"How should your assistant think?"** Pick **With a cloud AI**, then **"Sign in with OpenRouter"** — one account that gives your assistant Claude, ChatGPT, Gemini and more, with no key to copy. OpenRouter opens in your browser; sign in (or make an account) and choose **Authorize**. OpenRouter needs a few dollars of credit before your assistant can answer: $5 is the smallest amount, plus a small card fee. Prefer a key? **Other options** takes an Anthropic or OpenAI key, pasted and checked before anything is saved.
 4. Beacon finishes setup: saves your choices, starts your assistant, and **connects this Mac as its owner**.
@@ -242,4 +246,4 @@ Honesty section — the things Beacon does not do yet, so you're not surprised m
 - **Integrations has no add-integration UI** — new integrations mean hand-editing `integrations.json`.
 - **Agent | Chat mode resets to Agent on every launch** — it's deliberately in-memory, not persisted.
 - **The diff viewer and file preview truncate at 256 KB.**
-- **Builds are unsigned (macOS) and there's no auto-update.** Every new version is a manual download; Gatekeeper needs right-click → Open the first time.
+- **The Linux update paths aren't run on real hardware yet.** macOS updates are signed, notarized and self-installing, but the AppImage and `.deb` self-update flows have only run in CI, not on a real Linux machine — the `.deb` in particular needs a graphical sudo prompt (`pkexec`/`gksudo`/`kdesudo`/`beesu`) to install.
