@@ -315,7 +315,11 @@ Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, a
 
 ### Install
 
-Four ways to get it:
+On an Apple silicon Mac the app is the easiest start; everywhere else, pick one of the four terminal routes. All of them install the same daemon.
+
+**The Mac app (no terminal)** — a signed, notarized `Prometheus.app` for Apple silicon on macOS 13 or later, with its own Python 3.12. Download `Prometheus-mac-arm64.zip` from the [latest release](https://github.com/OAraLabs/Prometheus/releases/latest), unzip, drag to Applications, open it. It installs the daemon as a login item, listens on this Mac only until you say otherwise, and starts in the `cautious` permission mode. It ships without PyMuPDF (AGPL), so PDF text extraction and image downscaling aren't available in the app. Details: [the install guide](docs/guide/install.md#the-mac-app-no-terminal).
+
+Four ways to get it from a terminal:
 
 **One command, from Git** — an isolated install of the `oara` command straight from the main branch, with [uv](https://docs.astral.sh/uv/) or pipx:
 
