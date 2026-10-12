@@ -9,8 +9,10 @@ device token of its own.
 This file pins the code itself (``config/owner_codes.py``), with no HTTP:
 
 * 8 ASCII digits, good for 5 minutes, for ONE redemption, and only one code is live at a time;
-* 5 wrong tries shut a source out and 25 in all burn the code, so an online guesser gets at most 25 chances in
-  10^8 per code the owner asks for, and one neighbour guessing badly cannot burn it for everyone;
+* no wrong guess ever burns the code (the redeem route is public, so a burn is a stranger's off switch): 5 wrong
+  tries shut a SOURCE out (an IPv6 /64 is one source), and at most 10 wrong tries a minute are compared at all, so a
+  guesser with any number of addresses gets about 50 chances in 10^8 per code, and the code works again the moment
+  the guessing stops;
 * the store keeps a digest, never the code, and nothing it returns or logs carries the code;
 * a redemption that fails to mint leaves the code usable (nothing was granted), and a mint happens at most once.
 """
@@ -182,11 +184,68 @@ def test_four_wrong_tries_still_leave_the_right_code_working_from_that_source(co
     assert codes.redeem(code, Minter(), source="x") is not None
 
 
-def test_twenty_four_wrong_tries_in_all_still_leave_it_working(codes):
-    _record, code = codes.issue()
-    for n in range(oc.MAX_WRONG_ATTEMPTS - 1):
-        codes.redeem(wrong_for(code), Minter(), source=f"198.51.100.{n // oc.MAX_WRONG_PER_SOURCE}")
+def test_the_limits_are_five_per_source_and_ten_a_minute_in_all():
+    assert (oc.MAX_WRONG_PER_SOURCE, oc.MAX_WRONG_PER_MINUTE, oc.TTL_SECONDS) == (5, 10, 300)
+    assert not hasattr(oc, "MAX_WRONG_ATTEMPTS") and not hasattr(oc, "LOCKED"), "nothing burns a code any more"
+
+
+def test_no_number_of_wrong_guesses_burns_the_code(codes, clock):
+    """Twenty-five wrong tries from five addresses used to lock it for everyone. Now it stays pending."""
+    record, code = codes.issue()
+    for n in range(25):
+        if n and n % 5 == 0:
+            clock.now += 61                     # keep under the per-minute window: this is about the burn
+        codes.redeem(wrong_for(code), Minter(), source=f"198.51.100.{n // 5}")
+    assert codes.status(record.id).status == oc.PENDING
+    assert codes.status(record.id).wrong_attempts == 25
     assert codes.redeem(code, Minter(), source="192.0.2.77") is not None
+
+
+def test_ten_wrong_tries_in_a_minute_are_all_that_are_compared(codes, clock):
+    record, code = codes.issue()
+    for n in range(10):
+        codes.redeem(wrong_for(code), Minter(), source=f"198.51.100.{n // 5}")
+    mint = Minter()
+    assert codes.redeem(code, mint, source="192.0.2.77") is None and mint.calls == 0, "refused unread"
+    assert codes.status(record.id).wrong_attempts == 10 and codes.status(record.id).status == oc.PENDING
+    clock.now += 60
+    assert codes.redeem(code, Minter(), source="192.0.2.77") is not None, "the code outlived the guessing"
+
+
+def test_a_guesser_with_endless_addresses_is_still_bounded(codes, clock):
+    """One fresh address per try, a hundred tries a second, for the code's whole life: about fifty are compared."""
+    record, code = codes.issue()
+    n = 0
+    while codes.status(record.id).status == oc.PENDING:
+        for _ in range(100):
+            n += 1
+            codes.redeem(wrong_for(code), Minter(), source=f"10.{n >> 16 & 255}.{n >> 8 & 255}.{n & 255}")
+        clock.now += 1
+    assert codes.status(record.id).status == oc.EXPIRED
+    assert codes.status(record.id).wrong_attempts <= 50
+
+
+def test_one_ipv6_host_is_one_source_across_its_64(codes):
+    record, code = codes.issue()
+    for i in range(5):
+        codes.redeem(wrong_for(code), Minter(), source=f"2001:db8:0:7::{i + 1}")
+    assert codes.redeem(code, Minter(), source="2001:db8:0:7::ffff") is None, "the same /64, shut out"
+    assert codes.status(record.id).wrong_attempts == 5
+    assert codes.redeem(code, Minter(), source="2001:db8:0:8::1") is not None, "another /64 is another source"
+
+
+def test_a_mapped_ipv4_address_is_that_ipv4_source(codes):
+    record, code = codes.issue()
+    for _ in range(5):
+        codes.redeem(wrong_for(code), Minter(), source="::ffff:198.51.100.4")
+    assert codes.redeem(code, Minter(), source="198.51.100.4") is None
+    assert codes.status(record.id).wrong_attempts == 5
+
+
+def test_the_redeemer_is_recorded_by_its_own_address_not_its_prefix(codes):
+    record, code = codes.issue()
+    assert codes.redeem(code, Minter(), source="2001:db8:0:7::42") is not None
+    assert codes.status(record.id).source == "2001:db8:0:7::42"
 
 
 def test_five_wrong_tries_shut_that_source_out_and_no_one_else(codes, caplog):
@@ -201,16 +260,13 @@ def test_five_wrong_tries_shut_that_source_out_and_no_one_else(codes, caplog):
     assert any("198.51.100.4" in r.getMessage() and "shut out" in r.getMessage() for r in caplog.records)
 
 
-def test_twenty_five_wrong_tries_in_all_burn_the_code(codes, caplog):
+def test_a_full_window_is_logged_as_guessing(codes, caplog):
     caplog.set_level(logging.INFO)
-    record, code = codes.issue()
-    assert oc.MAX_WRONG_ATTEMPTS == 25
-    for n in range(oc.MAX_WRONG_ATTEMPTS):
-        codes.redeem(wrong_for(code), Minter(), source=f"198.51.100.{n // oc.MAX_WRONG_PER_SOURCE}")
-    assert codes.status(record.id).status == oc.LOCKED
-    mint = Minter()
-    assert codes.redeem(code, mint, source="192.0.2.77") is None and mint.calls == 0
-    assert any("locked" in r.getMessage() for r in caplog.records)
+    _record, code = codes.issue()
+    for n in range(11):
+        codes.redeem(wrong_for(code), Minter(), source=f"198.51.100.{n // 5}")
+    assert any("guessing" in r.getMessage() for r in caplog.records)
+    assert not any(code in r.getMessage() for r in caplog.records)
 
 
 def test_one_source_cannot_burn_the_code_however_often_it_tries(codes):

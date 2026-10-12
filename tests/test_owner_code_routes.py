@@ -248,9 +248,10 @@ def test_every_failure_is_one_answer(world):
     for _ in range(oc.MAX_WRONG_PER_SOURCE):
         redeem(world, wrong_for(shut), client=remote(world, "198.51.100.4"))
     answers.add(redeem(world, shut, client=remote(world, "198.51.100.4")).text)   # this source shut out
-    locked = minted(world)["code"]
-    guess_until_locked(world, locked)
-    answers.add(redeem(world, locked).text)                                         # locked
+    busy = minted(world)["code"]
+    fill_the_window(world, busy)
+    answers.add(redeem(world, busy).text)                                           # too many guesses this minute
+    world.clock.now += 60
     stale = minted(world)["code"]
     world.clock.now += 301
     answers.add(redeem(world, stale).text)                                          # expired
@@ -258,10 +259,10 @@ def test_every_failure_is_one_answer(world):
     assert redeem(world, "12345678").status_code == 401
 
 
-def guess_until_locked(world: World, code: str) -> None:
-    """25 wrong tries, five from each of five addresses: what it takes to burn a code."""
-    for n in range(oc.MAX_WRONG_ATTEMPTS):
-        redeem(world, wrong_for(code), client=remote(world, f"198.51.100.{10 + n // oc.MAX_WRONG_PER_SOURCE}"))
+def fill_the_window(world: World, code: str) -> None:
+    """Ten wrong tries, five from each of two addresses: a minute's worth."""
+    for n in range(10):
+        redeem(world, wrong_for(code), client=remote(world, f"198.51.100.{10 + n // 5}"))
 
 
 def test_five_wrong_tries_shut_that_source_out_and_leave_the_code_to_everyone_else(world):
@@ -274,11 +275,26 @@ def test_five_wrong_tries_shut_that_source_out_and_leave_the_code_to_everyone_el
     assert redeem(world, body["code"]).status_code == 200
 
 
-def test_twenty_five_wrong_tries_lock_the_code_and_the_terminal_is_told(world):
+def test_strangers_guessing_cannot_burn_the_code(world):
+    """The redeem route is public: a wrong guess must never be an off switch for the owner's code. Thirty wrong
+    tries from six addresses (25 used to lock it): while a minute's window is full even the right code is refused
+    unread, and once it empties the code still works."""
     body = minted(world)
-    guess_until_locked(world, body["code"])
-    assert redeem(world, body["code"]).status_code == 401
-    assert status(world, body["code_id"]).json()["status"] == "locked"
+    for burst in range(3):
+        for n in range(10):
+            redeem(world, wrong_for(body["code"]), client=remote(world, f"198.51.100.{10 + burst * 2 + n // 5}"))
+        assert redeem(world, body["code"]).status_code == 401
+        world.clock.now += 61
+    assert status(world, body["code_id"]).json()["status"] == "pending"
+    assert status(world, body["code_id"]).json()["wrong_attempts"] == 30
+    assert redeem(world, body["code"]).status_code == 200
+
+
+def test_the_terminal_hears_how_many_wrong_tries_there_were(world):
+    body = minted(world)
+    redeem(world, wrong_for(body["code"]), client=remote(world, "198.51.100.4"))
+    redeem(world, wrong_for(body["code"]), client=remote(world, "198.51.100.5"))
+    assert status(world, body["code_id"]).json()["wrong_attempts"] == 2
 
 
 def test_an_expired_code_mints_nothing(world):
@@ -298,7 +314,8 @@ def test_a_cancelled_code_mints_nothing(world):
 def test_the_terminal_learns_who_redeemed_it_and_from_where(world):
     body = minted(world)
     assert status(world, body["code_id"]).json() == {
-        "code_id": body["code_id"], "status": "pending", "expires_at": body["expires_at"], "redeemed_by": None}
+        "code_id": body["code_id"], "status": "pending", "expires_at": body["expires_at"], "redeemed_by": None,
+        "wrong_attempts": 0}
     device_id = redeem(world, body["code"]).json()["device_id"]
     assert status(world, body["code_id"]).json()["redeemed_by"] == {
         "id": device_id, "name": "Will's MacBook Pro", "platform": "macos", "source": MACBOOK}
@@ -403,10 +420,11 @@ def test_every_operator_socket_hears_a_code_issued_and_redeemed_and_a_scoped_one
     assert socks["scoped"].frames == []
 
 
-def test_a_locked_code_is_told_as_well(world):
+def test_guessing_sends_no_frame_of_its_own(world):
+    """No event was added (Beacon 0.4.2 knows issued/redeemed/locked), and "locked" can no longer happen."""
     socks = sockets(world)
-    guess_until_locked(world, minted(world)["code"])
-    assert [f["payload"]["event"] for f in owner_frames(socks["op"])] == ["issued", "locked"]
+    fill_the_window(world, minted(world)["code"])
+    assert [f["payload"]["event"] for f in owner_frames(socks["op"])] == ["issued"]
 
 
 def test_no_frame_carries_the_code_or_the_token(world):
