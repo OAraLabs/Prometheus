@@ -2,12 +2,44 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
-## 0.9.9 (unreleased)
+## 0.9.9 (2026-10-13)
 
-### Startup banner
+0.9.9 closes a way for a model-written shell on a Mac to reach the same-Mac pairing secret, makes the `agent` tool work, and adds a startup banner. Read "Upgrading from 0.9.8": `--version` prints different text, and an earlier default `denied_paths` list now resolves to the new one.
+
+### Security (#764)
+
+- **A model-written shell on a Mac can no longer read, write or move the same-Mac pairing secret.** `pair.secret`, in `~/Library/Application Support/Prometheus/pairing/`, is what `POST /api/pair/local` (and `POST /api/setup/pair` in setup mode) trades for an owner device token, and the request has to come from loopback, which every shell on the same Mac meets. Measured on macOS 15 before the change: `cat` printed the secret, `read_file` on it was allowed without a prompt, `write_file` could plant a secret of the agent's choosing, and `grep --root ~/Library` returned its contents.
+  - The Seatbelt floor denies reading and writing the pairing folder, and the folder named by `PROMETHEUS_LOCAL_PAIRING_DIR` when it is set. `bash_allow_ssh` does not change this.
+  - The gate's always-denied list, the shipped `denied_paths` and the config template now include the pairing folders for the Mac and Linux locations, and the folder this process would actually mint into. Differently-cased spellings are refused on macOS.
+  - `grep` and `glob` now prune with that built-in floor as well as your `denied_paths`. Before, `denied_paths: []`, or a config holding an earlier list, let `grep --root ~` print a file the gate itself floors.
+- **Renaming a parent folder no longer escapes the Seatbelt floor.** `mv ~/.config ~/cfg && cat ~/cfg/prometheus/env` printed the env file (the master key), because `~/.config` itself matched no rule; moving `Application Support/Prometheus` did the same to the pairing secret. The floor now refuses to rename, replace or re-mode each folder above a protected one (`~/.config`, `~/Library`, `~/Library/Application Support` and its `Prometheus` folder), up to but not including the home folder. Creating, writing and deleting files inside them still works. Hard links, symlinks and moving a prepared folder into place are refused too.
+- **The boot probe now proves both refusals by outcome:** the pairing secret can't be read, and `~/.config` can't be renamed.
+
+### The agent tool works (#762)
+
+- **The `agent` tool no longer always fails.** It answered "SubagentSpawner not configured" on every call, because the daemon never gave it a spawner. It now runs a subagent on the same model as the turn that called it and returns the subagent's answer; the calling turn waits for it.
+- **A subagent runs under the same gate as the turn that spawned it.** Its tool calls are checked like any other, approvals apply and a denial stops the call. A subagent can't spawn another.
+
+### Startup banner (#759)
 
 - **`oara daemon`, `oara setup` and the interactive chat open with a banner on a terminal.** It shows the wordmark, the port the daemon listens on and the model it serves, each only once it is known; never an address, a token or a path. Nothing is printed when stdout isn't a terminal, for `oara --once`, with `--quiet` (`-q`) or `OARA_NO_BANNER=1`, and `NO_COLOR` makes it plain text.
-- **`oara --version` prints `◉ prometheus <version> · OAra Labs`.** It used to print `Prometheus <version>`; a script that matches the old text needs the new one.
+- **`oara --version` prints `◉ prometheus <version> · OAra Labs`.** It used to print `Prometheus <version>`. On a terminal that can't show `◉` it prints `prometheus <version> - OAra Labs`.
+
+### Fixes
+
+- **A photo described for a model that can't see is described once, not twice (#755).** The description was added to the message twice, glued together.
+
+### Upgrading from 0.9.8
+
+- **`oara --version` has new text** (see above). A script that matches the old `Prometheus <version>` should match the first `x.y.z` in the line instead.
+- **A default `denied_paths` list from an earlier release now resolves to the new one (#764).** Setup copies the template, so each install holds the list of its day. A config that holds a previously shipped list exactly, in order, gets the new list, and the daemon logs one INFO line at boot saying so; a config already holding the new list is silent. Any other list, `[]` included, is yours: it is used as written and keeps the override warning. One effect: the oldest shipped list has a relative entry the gate refuses at boot, so a config still carrying it now boots with the new list instead of refusing.
+- **A model's `agent` call now succeeds,** so a turn that used to get an error from it now waits for the subagent.
+
+### Known issues
+
+- **Built-in subagent types get no tools.** Their definitions name tools (`Bash`, `FileRead`, ...) this daemon doesn't have, so `general-purpose`, `explorer`, `planner`, `worker` and `verification` subagents answer from the model alone.
+- **How an approval request raised inside a subagent appears in Beacon and Telegram has not been checked.** A subagent has no session of its own.
+- **The Linux AppArmor read floor may have the same `~/.config` rename hole** the Seatbelt floor had. It is unmeasured (#766).
 
 ## 0.9.8
 
