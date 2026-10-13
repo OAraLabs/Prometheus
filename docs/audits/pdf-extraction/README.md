@@ -135,8 +135,8 @@ The swap is about 31 MiB smaller installed.
 - abseil, agg23, fast_float, freetype, icu, lcms, libjpeg-turbo (IJG and its own file), libopenjpeg, libpng,
   llvm-libc, pdfium, pdfium-binaries, simdutf, zlib.
 
-FreeType's own licence is a choice of the FreeType License or GPLv2; under the FreeType License it is
-permissive.
+The FreeType file shipped is the FreeType Project License (BSD-style, with an attribution clause), not
+the GPL.
 
 **Pillow.** Pillow bundles its image libraries as dylibs: libjpeg, libpng, libtiff, libwebp, libavif,
 freetype, harfbuzz, lcms2, openjpeg, brotli, xz, zlib-ng, libxcb.
