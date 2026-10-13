@@ -37,7 +37,7 @@ from prometheus.engine.stream_events import (
     ToolExecutionStarted,
 )
 from prometheus.config.ephemeral import is_session_ephemeral
-from prometheus.config.shipped_defaults import SHIPPED_MAX_TOOL_ITERATIONS
+from prometheus.config.shipped_defaults import SHIPPED_MAX_TOOL_ITERATIONS, SHIPPED_MAX_TURNS
 from prometheus.engine.usage import UsageSnapshot
 from prometheus.providers.base import (
     ApiMessageCompleteEvent,
@@ -658,7 +658,7 @@ class LoopContext:
     adapter: object | None = None             # ModelAdapter — wired in Sprint 3
     telemetry: object | None = None           # ToolCallTelemetry — wired in Sprint 3
     cwd: Path = field(default_factory=Path.cwd)
-    max_turns: int = 200
+    max_turns: int = SHIPPED_MAX_TURNS
     max_tool_iterations: int = SHIPPED_MAX_TOOL_ITERATIONS
     # SPRINT-coding-mode v2 (scope item 1): per-RUN thinking override,
     # forwarded on every model call this context makes. None = provider
@@ -3288,9 +3288,19 @@ async def _run_loop(
                 yield AssistantTurnComplete(message=_halt_msg, usage=usage, stop_reason=_StopReason.DIVERGENCE_HALT), usage
                 return
 
+    # #774: the round cap is a BUDGET stop, not a failure. Every round above
+    # completed normally, so the history is valid and is KEPT: answer any call
+    # that never got a result (else the next request on this session is a hard
+    # 400), end on a plain note the user sees and the model reads next turn, and
+    # raise the dedicated exception carrying the list, so callers that handed
+    # run_async a COPY can still save it. Callers keep and persist the turn; a
+    # generic ``except Exception`` would roll it back as if it had failed.
+    _answer_unanswered_tool_uses(messages)
+    notice = _round_cap_notice(context.max_turns)
+    messages.append(_make_assistant_msg(notice))
     if turn_record is not None:
         turn_record.stop(_StopReason.MAX_TURNS)
-    raise RuntimeError(f"Exceeded maximum turn limit ({context.max_turns})")
+    raise MaxTurnsExhausted(context.max_turns, messages, notice)
 
 
 # ---------------------------------------------------------------------------
@@ -3405,6 +3415,67 @@ def _unanswered_tool_results(tool_calls) -> ConversationMessage:
             for tc in tool_calls
         ],
     )
+
+
+class MaxTurnsExhausted(RuntimeError):
+    """A turn reached ``max_turns`` model rounds (#774). A budget stop, not a failure.
+
+    Subclasses ``RuntimeError`` and keeps the old message so every caller that
+    matches on it (gym/ladder, coding mode) is unchanged. ``messages`` is the
+    list ``run_loop`` appended to, already ending on ``notice`` with every tool
+    call answered: callers KEEP and persist it rather than rolling it back.
+    """
+
+    def __init__(self, max_turns: int, messages: list, notice: str) -> None:
+        super().__init__(f"Exceeded maximum turn limit ({max_turns})")
+        self.max_turns = max_turns
+        self.messages = messages
+        self.notice = notice
+
+
+def _round_cap_notice(max_turns: int) -> str:
+    """The note a capped turn ends on: what happened, that nothing was lost, what next."""
+    return (
+        f"I stopped here: this turn reached its limit of {max_turns} model rounds "
+        f"(model.max_turns). Everything done so far is kept. Send a message and "
+        f"I'll continue from where I left off."
+    )
+
+
+def _answer_unanswered_tool_uses(messages: list) -> int:
+    """Answer the last tool-using assistant message's calls that have no result.
+
+    Returns how many results were synthesized (0 when the history is already
+    complete, so it is safe to call on any turn exit). Results go IMMEDIATELY
+    after that assistant message — merged into the tool-result message already
+    there, or inserted as a new one — because providers pair each ``tool_use``
+    with the message that directly follows it (see :func:`_unanswered_tool_results`).
+    """
+    for idx in range(len(messages) - 1, -1, -1):
+        if messages[idx].role == "assistant" and messages[idx].tool_uses:
+            break
+    else:
+        return 0
+    answered = {
+        block.tool_use_id
+        for msg in messages[idx + 1:]
+        for block in msg.content
+        if isinstance(block, ToolResultBlock)
+    }
+    missing = [tc for tc in messages[idx].tool_uses if tc.id not in answered]
+    if not missing:
+        return 0
+    filler = _unanswered_tool_results(missing)
+    nxt = messages[idx + 1] if idx + 1 < len(messages) else None
+    if (
+        nxt is not None
+        and nxt.role == "user"
+        and any(isinstance(b, ToolResultBlock) for b in nxt.content)
+    ):
+        messages[idx + 1] = nxt.model_copy(update={"content": [*nxt.content, *filler.content]})
+    else:
+        messages.insert(idx + 1, filler)
+    return len(missing)
 
 
 def _maybe_periodic_nudge(context: LoopContext, turn_count: int) -> str | None:
@@ -5560,7 +5631,7 @@ class AgentLoop:
         provider: ModelProvider,
         model: str = "qwen3.5-32b",
         max_tokens: int = 4096,
-        max_turns: int = 200,
+        max_turns: int = SHIPPED_MAX_TURNS,
         max_tool_iterations: int = SHIPPED_MAX_TOOL_ITERATIONS,
         max_tool_iterations_cloud: int | None = None,
         tool_registry=None,

@@ -54,6 +54,7 @@ from prometheus.config.shipped_defaults import (
     SHIPPED_DENIED_PATHS,
     SHIPPED_MAX_TOOL_ITERATIONS,
     SHIPPED_MAX_TOOL_ITERATIONS_CLOUD,
+    SHIPPED_MAX_TURNS,
     SHIPPED_TELEGRAM_ENABLED,
     SHIPPED_WORKSPACE_ROOT,
     always_loaded_origin,
@@ -62,6 +63,7 @@ from prometheus.config.shipped_defaults import (
     resolve_denied_paths,
     resolve_max_tool_iterations,
     resolve_max_tool_iterations_cloud,
+    resolve_max_turns,
     resolve_media_allowlist,
     resolve_telegram_enabled,
     resolve_workspace_root,
@@ -197,6 +199,10 @@ GOVERNED: tuple[_Governed, ...] = (
         "model.max_tool_iterations_cloud", ("model",), "max_tool_iterations_cloud",
         SHIPPED_MAX_TOOL_ITERATIONS_CLOUD, resolve_max_tool_iterations_cloud,
         _admits_positive_int,
+    ),
+    _Governed(
+        "model.max_turns", ("model",), "max_turns",
+        SHIPPED_MAX_TURNS, resolve_max_turns, _admits_positive_int,
     ),
     _Governed(
         "gateway.telegram_enabled", ("gateway",), "telegram_enabled",

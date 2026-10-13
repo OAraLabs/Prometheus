@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **445** of
+Every key in `config/prometheus.yaml.default` — **446** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -35,6 +35,7 @@ none either — the key is documented so its absence is visible.
 | `model.verify_thinking_suppression` | `warn` |
 | `model.max_tool_iterations` | `500` |
 | `model.max_tool_iterations_cloud` | `500` |
+| `model.max_turns` | `200` |
 | `model.fallback_provider` | `ollama` |
 | `model.fallback_url` | `http://localhost:11434` |
 | `compaction` | *(section)* |
