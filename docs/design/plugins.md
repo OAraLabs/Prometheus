@@ -93,7 +93,8 @@ Beacon, on the market page and in pip.
     4. the Browser plugin in CI;
     5. `/api/plugins` for Beacon.
 
-    The Speech plugin (without piper) follows the Browser plugin. All of this waits until 0.9.9 is out.
+    The Speech plugin (the OAra Voice stack, section 1a) comes right after Browser. All of this waits until
+    0.9.9 is out.
 
 ### Will's decisions (2026-10-13)
 
@@ -104,15 +105,21 @@ Beacon, on the market page and in pip.
    - Pure-Python third-party code would load, but no mechanism can police it in-process (FOUNDATION 2.3a).
    - Third-party *skills* and *MCP config* are not decided. The shapes for them are in 3.3, and nothing is
      built for them.
-2. **The Speech plugin ships without piper.** Speech-to-text by faster-whisper (MIT), and spoken replies by
-   macOS's built-in `say`. No GPL code is distributed.
+2. **The Speech plugin is the OAra Voice plugin stack, the first plugin after Browser** (revised
+   2026-10-13).
+   - The stack is Kokoro TTS, whisper.cpp STT and Silero VAD. It is not Prometheus's piper-based `voice`
+     extra, and piper is removed from the plan.
+   - With nothing downloaded, spoken replies fall back to macOS's built-in `say`.
+   - Voice must be ready to ship right after launch. Section 1a has the stack, its licence audit and the
+     "voice ready to ship" checklist.
 3. **PDF: pypdfium2 + Pillow, after a comparison.** Extraction is first tested against PyMuPDF on at least
    five real PDFs (scanned, multi-column, forms), and Will approves that comparison before the swap PR.
 4. **No pricing.**
 5. **Plugin auto-update is off.** After an app update, a plugin built for the previous version shows
    **"update available"** (5.4). Nothing downloads until someone asks.
 6. **Packs stay working for now.** Plugins are the future user-facing format. The FOUNDATION Part 2
-   amendment lands with the plugin core.
+   amendment lands with the plugin core. Nothing needs converting: `~/.prometheus/packs/` on the mini, the one
+   running install, exists and is empty (listed 2026-10-13, names only).
 7. **Order.** The plugin core waits until 0.9.9 is out.
 
 ### Real problems found in the decisions (flagged, not re-opened)
@@ -125,16 +132,16 @@ Beacon, on the market page and in pip.
    - The amendment names section 10.1 as the mechanism its 2.4 asks for, for first-party code only.
    - It also makes the pack loader's rule (quarantine until accepted) the rule for any later third-party plugin
      skills.
-2. **The Speech plugin's voice output was GPL.** The locked `piper-tts` 1.4.2 is **GPL-3.0-or-later** (PyPI
-   metadata; the upstream repository is named `piper1-gpl`).
-   - *Decided:* Speech ships without piper. Input is faster-whisper (MIT), and output is macOS's built-in
-     `say`.
-   - That needs a `say` path in `tts.py`, which today looks only for espeak and piper
-     (`tools/builtin/tts.py:86-91`).
-   - Whether `say`'s audio needs converting for Telegram voice notes is still to be checked.
-   - `piper-tts` leaves the `speech` extra's plugin build. Whether it also leaves the pip extra for terminal
-     installs, where pip installs it from PyPI and we distribute nothing, is a separate question for the
-     Speech PR.
+2. **GPL in the voice path, twice.**
+   - The locked `piper-tts` 1.4.2 is **GPL-3.0-or-later** (PyPI metadata; upstream `piper1-gpl`). It is out
+     of the plan now that Speech is the OAra Voice stack.
+   - That stack's default TTS has the same problem one layer down. `kokoro-onnx` requires `phonemizer`
+     (GPL-3.0-or-later) and `espeakng-loader`, which bundles espeak-ng (GPL-3.0 upstream), and imports both
+     when it loads.
+   - It can be avoided, at a cost; section 1a has the audit and the options.
+   - The `say` fallback needs a path in `tts.py`, which today looks only for espeak and piper
+     (`tools/builtin/tts.py:86-91`). Whether `say`'s audio needs converting for Telegram voice notes is still
+     to be checked.
 3. **"Voice" is still a user-facing word outside the plugin.** `oara`'s interactive chat has a `--voice` flag
    and `:voice on` (`__main__.py:970-979`), and the config section is `gateway.voice` (`cli/voice.py:297-302`).
    Decision 4 covers the plugin's name. Whether those also become "speech" is a later, separate rename.
@@ -217,7 +224,7 @@ before thinning, not a build, not installed size.
 | User-facing name | Id = extra | Beyond the app | Wheels | Also downloads | Recommendation |
 |---|---|---|---|---|---|
 | **Browser plugin** | `browser` (`pyproject.toml:96`) | playwright 1.60.0, greenlet, pyee | **42.6 MB** | Chromium from Playwright's CDN, about 150 MB (measure the headless shell) | **Plugin, first** |
-| **Speech plugin** | `speech` (new; `voice` kept as an alias, `:129-134`) | 21 packages: av, onnxruntime, scipy, numpy, piper-tts, faster-whisper, ctranslate2, tokenizers, huggingface-hub… | **104.7 MB**; about 91 MB without piper-tts | a Whisper model from Hugging Face | **Plugin, without piper-tts** (decided); spoken replies use macOS `say` |
+| **Speech plugin** | `speech` (what pip installs for it is open; section 1a) | the OAra Voice stack: the `oara_voice` services, onnxruntime, numpy, Kokoro's G2P, a signed `whisper-server` | not built; section 1a | Kokoro, Whisper and Silero models, pinned (section 1a) | **Plugin, first after Browser** (decided); fallback spoken replies use macOS `say` |
 | **Computer-use plugin** | `computer` (`:112`, exact pin, not in `full`) | cua-driver 0.28.2, one universal2 wheel | 40.9 MB before thinning | none | **Plugin later**: macOS Accessibility and Screen Recording grants for the app's identity are unproven |
 | *(none: hidden)* | `skill-dedupe` (new; `skills` kept as an alias, `:140`) | numpy, onnxruntime, tokenizers, hub client: 13 packages | 41.2 MB | the encoder, about 134 MB (`similarity.py:12`) | **Not a plugin.** An internal duplicate check, not a feature anyone asks for. Never listed |
 | *(built in)* | `push` (`:95`) | h2, hpack, hyperframe | 0.1 MB | none | **Bundle in the app** (finding 7) |
@@ -233,6 +240,119 @@ that each alias equals its new name. `full` is unchanged.
 **Overlap.** Speech and the hidden dedupe extra share onnxruntime, numpy and tokenizers. Plugins are
 self-contained, so two may carry the same wheel twice. One lock means identical versions, and the first on
 the path wins. The overlap costs disk, never correctness.
+
+## 1a. The Speech plugin: the OAra Voice stack
+
+**What it is.** Will's revision of 2026-10-13: Speech is built from the OAra Voice plugin, not from
+Prometheus's `voice` extra. The voice plugin repo is Apache-2.0 in its own `LICENSE` and `pyproject.toml`; it is
+not public yet, and Will intends to make it public. As that repo stands at its `main`:
+
+| Part | What it runs | Port today | Model, downloaded on first run |
+|---|---|---|---|
+| STT | whisper.cpp's `whisper-server` (`POST /inference`) | 8081 | `ggml-base.bin` |
+| TTS | `oara_voice.tts_servers.kokoro_server`, through `kokoro-onnx` | 8003 | `kokoro-v1.0.onnx` and `voices-v1.0.bin`, from the `thewh1teagle/kokoro-onnx` GitHub release `model-files-v1.0` |
+| VAD | `oara_voice.vad`, Silero VAD v5 on onnxruntime | 8011 (moving to 8012) | `silero_vad.onnx`, from `snakers4/silero-vad` on raw GitHub |
+| Bridge | `oara_voice.bridge` (to Prometheus REST 8005 and WS 8010) | 8015 | none |
+| Opt-in GPU TTS | `chatterbox_server`; "weights are NOT downloaded automatically" | n/a | Chatterbox (about 1 GB per file) |
+
+Today the stack runs as Docker services: `docker-compose.yml`, CPU and GPU profiles. As a Mac plugin, the
+same processes would run as **services** (3.3) under the daemon, bound to 127.0.0.1.
+
+- **The bridge's credential to the daemon** must be minted for it, a scoped device token. It must never be
+  the global token. Today it reads `BRIDGE_BACKEND_TOKEN` or `PROMETHEUS_API_TOKEN`.
+- **With nothing downloaded**, spoken replies fall back to macOS's `say`.
+
+### Licence audit: everything the stack would ship
+
+**Rules for this audit.**
+
+- Facts come from package metadata (PyPI JSON and the wheels' own `METADATA` and licence files), from
+  Hugging Face model cards (`cardData.license`) and from repository licence fields. All were read 2026-10-13.
+- Anything those sources do not settle is labelled **UNCLEAR**.
+- Sizes are the wheel or file as published, not installed size.
+- **This is a reading of licence labels, not legal advice.**
+
+The last column says whether the component ships in the plugin on the recommended path, the espeak-free one
+below.
+
+| Component | Licence (source) | Size | Ships |
+|---|---|---|---|
+| `oara_voice` (the plugin's own code) | Apache-2.0 (`pyproject.toml`, `LICENSE`); the repo is not public yet | about 100 KB of source | **yes**, once the repo is public (decision 1 below) |
+| `kokoro-onnx` 0.6.1 | MIT (wheel `LICENSE`; the PyPI licence field is empty) | 0.03 MB | **no, not as packaged**: it imports `phonemizer` and `espeakng_loader` at load (`tokenizer.py`), and `Kokoro()` builds that tokenizer even with `is_phonemes=True` (`__init__.py:78`). A small runner of our own, its ONNX session and vocabulary without espeak, replaces it; its MIT licence allows reuse with attribution |
+| `phonemizer` 3.4.0 | **GPL-3.0-or-later** (PyPI classifier, wheel `LICENSE`) | 0.1 MB | **no** |
+| `phonemizer-fork` 3.3.2 (misaki's `[en]` extra) | **GPL-3.0-or-later** (PyPI classifier) | 0.1 MB | **no** |
+| `espeakng-loader` 0.2.4 | **UNCLEAR**: the wheel declares no licence and carries no licence file. Its repository says MIT, but it bundles `libespeak-ng.dylib` (0.5 MB) and espeak-ng's data, and espeak-ng's repository is **GPL-3.0** | 9.9 MB (macOS arm64) | **no** |
+| `misaki` 0.9.4 (Kokoro's own G2P, English) | Apache-2.0 (PyPI classifier, wheel `LICENSE`) | 3.6 MB | **yes**, on the espeak-free path, without its `[en]` extra (that extra pulls `phonemizer-fork` and `espeakng-loader`) |
+| `spacy` 3.8.16 (misaki's English G2P imports it) | MIT (PyPI) | 6.5 MB wheel, plus its own dependencies, **not measured** | **yes**, on the espeak-free path |
+| `en_core_web_sm` (spaCy English model) | MIT (Hugging Face card `spacy/en_core_web_sm`) | 12.8 MB | **yes**: pinned. Otherwise misaki downloads it at runtime (`misaki/en.py:499-503`) |
+| `num2words` 0.5.14 (misaki's English G2P imports it) | **LGPL** (PyPI classifier; version not stated) | 0.2 MB | **yes**, with its licence text, as the app already does for LGPL packages |
+| `onnxruntime` (1.26.0 in `uv.lock`) | MIT | 18.0 MB | **yes** |
+| `numpy` (2.4.6 in `uv.lock`) | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 (PyPI) | 5.2 MB | **yes** |
+| fastapi, httpx, websockets, pydantic, pyyaml, python-multipart | already in the app's base | n/a | no (already present) |
+| `uvicorn[standard]` extras: uvloop, httptools, watchfiles | MIT / MIT / MIT (PyPI) | about 2 MB | **no**: the app runs plain uvicorn, and the services can too |
+| `whisper-server` (whisper.cpp) | MIT (repository) | **not measured** | **yes**: built from a pinned tag in CI with Metal, signed by our team (today it is a Docker image) |
+| Kokoro-82M v1.0, ONNX | Apache-2.0 (Hugging Face cards `hexgrad/Kokoro-82M`, `onnx-community/Kokoro-82M-v1.0-ONNX`). **UNCLEAR** for the file the plugin downloads today: that GitHub release carries no licence statement of its own | fp32 325.5 MB; fp16 177.5 MB; int8 92.4 MB | **yes**: fetched at add time, pinned. Prefer the `onnx-community` copy, whose card states the licence |
+| `voices-v1.0.bin` | **UNCLEAR**: no licence statement at its release. The voices come from `hexgrad/Kokoro-82M` (Apache-2.0 card) | 28.2 MB (the server's comment says "~5 MB") | **yes**: pinned, once its source is settled |
+| Whisper `ggml-base.bin` | MIT (Hugging Face card `ggerganov/whisper.cpp`) | 148.0 MB | **yes**: fetched at add time, pinned |
+| Silero VAD v5, `silero_vad.onnx` | MIT (repository `snakers4/silero-vad`) | 2.3 MB | **yes**: pinned. Today it is fetched from the repository's `master` branch, which is not a pin |
+| Chatterbox weights | **UNCLEAR**: the Hugging Face card now says MIT, but the plugin's own source says the weights "carry no explicit license tag" | about 1 GB per weight file | **no**: GPU tier |
+| `chatterbox-tts` 0.1.7, plus `torch` 2.6, `torchaudio`, `librosa`, `s3tokenizer`, `resemble-perth` | MIT; torch Apache/BSD family; resemble-perth MIT (PyPI) | torch about 127 MB; resemble-perth 34.4 MB | **no**: GPU tier |
+| macOS `say` | part of macOS | 0 | n/a: nothing distributed |
+
+**Does Kokoro pull in espeak-ng? Yes, as the plugin uses it today.** `kokoro-onnx` 0.6.1 requires `phonemizer`
+(GPL-3.0-or-later) and `espeakng-loader` (bundles espeak-ng, GPL-3.0 upstream), and loads both whenever it
+loads.
+
+**Can it be avoided? Yes:**
+
+1. Phonemize English with misaki's own G2P. Its English class does not import espeak. Its fallback for unknown
+   words is off by default (`misaki/en.py:496`, `:505`); the espeak fallback lives in a separate module.
+2. Feed the phonemes to the Kokoro ONNX model through a small runner of our own.
+
+**What it costs, to be measured before choosing:**
+
+- **Unknown words go unspoken.** Words missing from misaki's lexicon get no pronunciation. The default
+  `unk` is "❓", and that affects names, rare words and code identifiers.
+- **spaCy and its English model come along.** They are about 19 MB of wheels before spaCy's own dependencies,
+  which are not yet measured, plus `num2words` (LGPL).
+- **English only at first.** misaki's other languages bring other dependencies, which this audit did not
+  cover.
+
+**The alternative** is to keep espeak and meet the GPL's terms. Will ruled that out for piper, and the same
+reasoning would apply here.
+
+### Will's decisions on Speech (2026-10-13)
+
+1. **The voice plugin repo becomes public.** Will makes it public himself, after a scan of its full git
+   history for tailnet addresses, hostnames, personal names and secrets. The scan is reported to him; no history
+   is rewritten for him. Building Speech in this repository's release job then needs no private access.
+2. **espeak: measure the espeak-free path first.**
+   - The test set is 50 real assistant replies, heavy on names, places and numbers.
+   - Count the words dropped or mangled, with audio samples to listen to.
+   - If names fail, write up option B: keep espeak, but run speech output in a separate process whose source
+     is published.
+   - Neither is built yet.
+3. **The `[speech]` extra** (terminal installs) gives speech-to-text plus the macOS `say` fallback until the
+   voice plugin is on PyPI. `[voice]` keeps working as an alias. Publishing the voice plugin to PyPI is a
+   checklist item.
+
+### Voice ready to ship: checklist
+
+| Item | State (2026-10-13) |
+|---|---|
+| Beacon desktop 0.4.4: VAD on 8012, set in config | **done** (merged 2026-10-13) |
+| The Android client: its VAD port 8011 → 8012 | **open**: still 8011, in two copies of the client |
+| The voice plugin repo: the VAD port 8011 hard-coded in its config and compose file (its issue 5) | **open** |
+| The licence audit above | **done** |
+| espeak-free measurement: 50 real replies, words dropped or mangled, audio samples (decision 2) | in progress |
+| The espeak-free Kokoro runner, or option B (decision 2) | after the measurement |
+| History scan of the voice plugin repo before it goes public (decision 1) | in progress |
+| The voice plugin repo made public | Will |
+| The voice plugin published to PyPI, so `[speech]` can carry the full stack (decision 3) | not started |
+| `[speech]` = speech-to-text plus `say`, with `[voice]` as an alias (decision 3) | with the plugin core |
+| `say` fallback in `tts.py` (and Telegram voice-note format) | not started |
+| Models pinned (URLs, SHA-256s) and `whisper-server` built and signed in CI | not started |
+| The plugin core (sections 3 to 8) | waits until 0.9.9 is out |
 
 ## 2. PDF: change the library, put it back in the app
 
@@ -335,6 +455,7 @@ already is (`loader.py:38-40`).
 | **Code** (`site-packages/`) | Appended to `sys.path` at start (5.2). Registers nothing | **Never** (10.1) |
 | **Skills** (`skills/<name>/SKILL.md`) | Loaded with `source="plugin"` and `plugin="<id>"`, trusted like builtins, because their bytes are pinned by the signed app. Listed on the Skills shelf as "from the Speech plugin", and each can be switched off | Quarantined in the existing skill-draft flow until a person accepts them, the FOUNDATION 2.3 rule (`FOUNDATION.md:194-196`) |
 | **MCP config** (`.mcp.json`) | A third source in `merged_server_configs` (`mcp/store.py:293-318`), below YAML and the REST store on a name clash, with server names prefixed by the plugin id. Every call is gated like any MCP call | Allowed only with the **global token**. A bundle's `.mcp.json` chooses a command to spawn, which is the reason MCP definitions are global-token-only today (`web/server.py:2638-2651`) |
+| **Services** (`services.json`: first-party processes the daemon starts, watches and stops) | Added for Speech, whose stack runs as separate processes: VAD WebSocket, TTS, `whisper-server` and the bridge. Each listens on 127.0.0.1 only, on a port from config. A crash stays in its own process. Status is the process's own `/health` | **Never**: a service is code |
 | Hooks, commands, agents, `bin/`, LSP, monitors, output styles | **Not accepted**: the build refuses them | **Not accepted.** Hooks would run shell commands at turn events. Prometheus's own extension points for turns are operator hooks and the pillar contract (`docs/contracts/hooks.md`) |
 
 **Compatibility, stated plainly.** Our official plugins load in Claude-style tools as skills and MCP config.
@@ -379,7 +500,10 @@ rules:
 2. **Runtime downloads are pinned in CI.**
    - **Browser:** download the Chromium headless-shell build this Playwright version names, from the URL
      Playwright would use. Record its URL, size and SHA-256, and launch it once on the runner.
-   - **Speech:** pin the Whisper model as a revision plus per-file SHA-256s, like `similarity.py`.
+   - **Speech:** pin each model the stack downloads on first run today: the Kokoro ONNX model, the voices
+     file, the Whisper ggml model, the Silero VAD model and, on the espeak-free path, spaCy's English model.
+     Each is pinned as a URL or revision plus its SHA-256, like `similarity.py`. The URLs and sizes are in
+     section 1a.
    - Prometheus's own downloader fetches them on the user's Mac. Playwright's documentation says nothing about
      verifying its downloads.
 3. **Then the app.** The assembler writes `Contents/Resources/plugins.lock.json` (each plugin's asset, size,
@@ -481,7 +605,8 @@ A plugin is active only when its `app_version` and `lock_sha256` equal the app's
 already records `lock_sha256` (`build_app.py:206`). After an app update:
 
 - **The old plugin shows "update available"** (status `update_available`). It stays on disk, inactive, reported
-  as "The Speech plugin is for 0.9.8; this app is 0.9.9. Update available: 91 MB". Nothing downloads by itself.
+  as "The Speech plugin is for 0.9.8; this app is 0.9.9. Update available (<size>)". Nothing downloads by
+  itself.
 - **Updating.** `oara plugin update`, `/plugin update` or Beacon's Update fetches the matching version by the
   steps above. Once the new version has started cleanly, versions older than the previous one are deleted.
   Moving back to the previous app version reactivates its plugin with no download.
@@ -713,7 +838,7 @@ without Will's go.
 
 **Waits:**
 
-- the Speech plugin, after the Browser plugin;
+- the Speech plugin, right after the Browser plugin (section 1a's checklist);
 - the Computer-use plugin (prove the macOS prompts first);
 - any third-party format;
 - **everything from step 2 on, until 0.9.9 is out** (Will, 2026-10-13). The FOUNDATION Part 2 amendment lands
