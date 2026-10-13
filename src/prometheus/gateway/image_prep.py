@@ -115,7 +115,7 @@ def _downscale_if_needed(data: bytes, media_type: str, p: Path) -> tuple[bytes, 
         return data, media_type
 
     try:
-        img = Image.open(io.BytesIO(data))
+        img: Image.Image = Image.open(io.BytesIO(data))
         width, height = img.size
     except Exception as exc:
         # Unreadable by Pillow but valid by magic bytes (an exotic PNG variant,
