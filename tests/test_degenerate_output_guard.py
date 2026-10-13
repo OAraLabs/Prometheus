@@ -416,3 +416,32 @@ def test_a_background_wake_skips_a_session_whose_last_round_was_dropped(tmp_path
     tel.close()
 
     assert injected == ["beacon:fine"]
+
+
+def test_evidence_uses_the_compactors_own_threshold_resolver(tmp_path):
+    """When the compactor resolves thresholds itself (#773), the evidence row
+    records ITS answer and source — not a re-derivation that can drift."""
+
+    class _Compactor:
+        def limit_for(self, model=None, backend=None):  # noqa: ANN001
+            return 1_000_000
+
+        def is_measured(self, model=None, backend=None):  # noqa: ANN001
+            return False
+
+        def threshold_for(self, model=None, backend=None):  # noqa: ANN001
+            return 200_000, "model tokens"
+
+        async def apply(self, messages, **kw):  # noqa: ANN001, ANN003
+            return messages
+
+    tel = ToolCallTelemetry(tmp_path / "telemetry.db")
+    ctx = _ctx(_Script([_msg(BREAKDOWN_1), _msg("fine")]), tel)
+    ctx.compactor = _Compactor()
+    _drive(ctx, [ConversationMessage.from_user_text("go")])
+    tel.close()
+
+    first = _evidence(tmp_path / "telemetry.db")[0]
+    assert (first["compaction_threshold"], first["compaction_threshold_source"]) == (
+        200_000, "model tokens")
+    assert first["ctx_window"] == 1_000_000

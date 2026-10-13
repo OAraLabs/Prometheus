@@ -2057,14 +2057,23 @@ async def _run_loop(
         ) or type(context.provider).__name__
         _cached = getattr(usage, "cached_input_tokens", None)
         _threshold = None
+        _threshold_source = None
         _comp = context.compactor
         if _comp is not None and _window_now:
             try:
-                from prometheus.context.compactor import compaction_threshold
-                _threshold = compaction_threshold(
-                    _window_now, _comp._reserve_tokens, _comp._threshold_pct)
+                # #773 gives the compactor one resolver for the threshold AND
+                # its source (global pct / model pct / model tokens); before it,
+                # the module function is the same arithmetic the compactor uses.
+                _resolve = getattr(_comp, "threshold_for", None)
+                if callable(_resolve):
+                    _threshold, _threshold_source = _resolve(context.model)
+                else:
+                    from prometheus.context.compactor import compaction_threshold
+                    _threshold = compaction_threshold(
+                        _window_now, _comp._reserve_tokens, _comp._threshold_pct)
+                    _threshold_source = "global_pct"
             except Exception:
-                _threshold = None
+                _threshold, _threshold_source = None, None
         summary = {
             "outcome": outcome,
             "test": found.test if found is not None else None,
@@ -2074,7 +2083,7 @@ async def _run_loop(
             "provider": _provider,
             "ctx_window": _window_now or None,
             "compaction_threshold": _threshold,
-            "compaction_threshold_source": "global_pct" if _threshold is not None else None,
+            "compaction_threshold_source": _threshold_source,
             "turn_id": getattr(turn_record, "turn_id", None),
             "loop_round_id": loop_envelope.last_run_id
             if isinstance(loop_envelope.last_run_id, str) else None,
