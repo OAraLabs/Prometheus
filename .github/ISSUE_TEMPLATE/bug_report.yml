@@ -15,7 +15,7 @@ body:
     attributes:
       label: Prometheus version
       description: The output of `oara --version`.
-      placeholder: Prometheus 0.9.7
+      placeholder: "◉ prometheus 0.9.8 · OAra Labs"
     validations:
       required: true
   - type: dropdown

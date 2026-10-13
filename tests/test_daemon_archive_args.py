@@ -46,6 +46,18 @@ def test_a_bind_that_was_given_is_recorded():
     assert daemon.daemon_start_args(namespace)["bind"] == "127.0.0.1"
 
 
+def test_an_unset_quiet_is_not_recorded():
+    """``--quiet`` only decides whether a banner prints. A run without it must record what every run always recorded."""
+    namespace = daemon.build_parser().parse_args([])
+    assert namespace.quiet is False
+    assert "quiet" not in daemon.daemon_start_args(namespace)
+
+
+def test_a_quiet_that_was_given_is_recorded():
+    namespace = daemon.build_parser().parse_args(["--quiet"])
+    assert daemon.daemon_start_args(namespace)["quiet"] is True
+
+
 def test_every_other_unset_argument_is_still_recorded_as_null():
     """Only ``bind`` is special. ``config: null`` has always been in the record and the goldens depend on it."""
     namespace = argparse.Namespace(config=None, debug=False, telegram_only=False, bind=None)
