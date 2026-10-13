@@ -130,11 +130,11 @@
      "role": "user"
     },
     {
-     "content": "Amber, birch, cobalt",
+     "content": "The three words, in order, are: amber, birch, cobalt.",
      "content_json": {
       "$json": [
        {
-        "text": "Amber, birch, cobalt",
+        "text": "The three words, in order, are: amber, birch, cobalt.",
         "type": "text"
        }
       ]
@@ -145,7 +145,7 @@
     }
    ],
    "op": "chat",
-   "reply": "Amber, birch, cobalt",
+   "reply": "The three words, in order, are: amber, birch, cobalt.",
    "session": "desktop:parity-compact"
   }
  ],
@@ -422,16 +422,16 @@
        "desktop:parity-compact",
        7,
        "assistant",
-       "Amber, birch, cobalt",
+       "The three words, in order, are: amber, birch, cobalt.",
        {
         "$json": [
          {
-          "text": "Amber, birch, cobalt",
+          "text": "The three words, in order, are: amber, birch, cobalt.",
           "type": "text"
          }
         ]
        },
-       5,
+       13,
        "<time>",
        0,
        "user",
@@ -466,7 +466,7 @@
        "What were the three words, in order? Answer in one line."
       ],
       [
-       "Amber, birch, cobalt"
+       "The three words, in order, are: amber, birch, cobalt."
       ]
      ]
     },
@@ -491,7 +491,7 @@
       [
        1,
        {
-        "$bytes_sha256": "bf37c3988f6d7c36",
+        "$bytes_sha256": "c26b9b4fd0ae038f",
         "len": 2
        }
       ],
@@ -554,8 +554,8 @@
       [
        1099511627777,
        {
-        "$bytes_sha256": "43bedeb59450f4fe",
-        "len": 38
+        "$bytes_sha256": "ecfff7d1c979db4a",
+        "len": 94
        }
       ]
      ]
@@ -618,7 +618,7 @@
       [
        8,
        {
-        "$bytes_sha256": "084fed08b978af4d",
+        "$bytes_sha256": "2b4c342f5433ebe5",
         "len": 1
        }
       ]
@@ -817,7 +817,7 @@
      "rows": [
       [
        "desktop:parity-compact",
-       "Memory Game Start",
+       "Memory Game Amber",
        "<time>"
       ]
      ]
@@ -1206,8 +1206,8 @@
        "0ac69752b6f71969",
        "prose",
        0,
-       20,
-       "Amber, birch, cobalt",
+       53,
+       "The three words, in order, are: amber, birch, cobalt.",
        "agent",
        "beacon",
        null
@@ -1266,11 +1266,11 @@
        "context_compaction_noop",
        {
         "$json": {
-         "over_by": 5340,
+         "over_by": 5388,
          "session_id": "desktop:parity-compact",
          "span_messages": 0,
          "threshold": 573,
-         "tokens_before": 5913
+         "tokens_before": 5961
         }
        },
        "context_compactor",
@@ -1282,11 +1282,11 @@
        "context_compaction_noop",
        {
         "$json": {
-         "over_by": 5367,
+         "over_by": 5415,
          "session_id": "desktop:parity-compact",
          "span_messages": 2,
          "threshold": 573,
-         "tokens_before": 5940
+         "tokens_before": 5988
         }
        },
        "context_compactor",
@@ -1301,13 +1301,13 @@
          "cache_hit": false,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 5369,
+         "over_by": 5438,
          "session_id": "desktop:parity-compact",
          "span_messages": 4,
          "summarizer_input_omitted": 0,
          "threshold": 573,
-         "tokens_after": 5942,
-         "tokens_before": 5967
+         "tokens_after": 6011,
+         "tokens_before": 6015
         }
        },
        "context_compactor",
@@ -1322,13 +1322,13 @@
          "cache_hit": false,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 5407,
+         "over_by": 5444,
          "session_id": "desktop:parity-compact",
          "span_messages": 6,
          "summarizer_input_omitted": 0,
          "threshold": 573,
-         "tokens_after": 5980,
-         "tokens_before": 5996
+         "tokens_after": 6017,
+         "tokens_before": 6044
         }
        },
        "context_compactor",
@@ -1988,13 +1988,13 @@
          "stop_reason": "stop"
         }
        },
-       6183,
+       6234,
        3,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4172,
+       4423,
        null,
        "<node>",
        "local",
@@ -2019,7 +2019,7 @@
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       15,
+       78,
        null,
        "<node>",
        "local",
@@ -2066,13 +2066,13 @@
          "stop_reason": "stop"
         }
        },
-       6213,
+       6264,
        3,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6185,
+       6236,
        null,
        "<node>",
        "local",
@@ -2119,11 +2119,11 @@
           "session_id": "desktop:parity-compact",
           "span_messages": 4
          },
-         "output_chars": 70
+         "output_chars": 151
         }
        },
        129,
-       24,
+       48,
        null,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -2147,13 +2147,13 @@
          "stop_reason": "stop"
         }
        },
-       6216,
+       6291,
        3,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4172,
+       4223,
        null,
        "<node>",
        "local",
@@ -2200,11 +2200,11 @@
           "session_id": "desktop:parity-compact",
           "span_messages": 6
          },
-         "output_chars": 216
+         "output_chars": 168
         }
        },
        150,
-       56,
+       50,
        null,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -2228,13 +2228,13 @@
          "stop_reason": "stop"
         }
        },
-       6248,
-       9,
+       6293,
+       18,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4172,
+       4243,
        null,
        "<node>",
        "local",
@@ -2335,7 +2335,7 @@
        "<time>",
        "<time>",
        1,
-       6183,
+       6234,
        3,
        {
         "$json": [
@@ -2363,7 +2363,7 @@
        "<time>",
        "<time>",
        1,
-       6213,
+       6264,
        3,
        {
         "$json": [
@@ -2391,7 +2391,7 @@
        "<time>",
        "<time>",
        1,
-       6216,
+       6291,
        3,
        {
         "$json": [
@@ -2419,8 +2419,8 @@
        "<time>",
        "<time>",
        1,
-       6248,
-       9,
+       6293,
+       18,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"

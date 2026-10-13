@@ -31,6 +31,8 @@ from parity.standin import (  # noqa: E402
     PRE_C2_SKILL_DESCRIPTION,
     StandIn,
     c2_reverted,
+    core_skill_line,
+    without_core_skill,
 )
 
 CORE = "- **commit**: Stage, write, and push a commit."
@@ -231,3 +233,65 @@ def test_the_recorder_settles_seeds_before_reading_anything(monkeypatch, capsys)
     assert "--standin-from plain_chat=" in capsys.readouterr().out
     assert rerecord.main(["plain_chat", "--standin-from", "plain_chat=nothing_recorded"]) == 2
     assert "no committed trace to seed" in capsys.readouterr().out
+
+
+# -- a new core skill: exactly its one prompt line ---------------------------------------------
+
+def _rendered_core_lines() -> list[str]:
+    """The core-skill lines the real assembler renders from the real builtins."""
+    from prometheus.skills.loader import skills_for_prompt
+
+    return [core_skill_line(s["name"], s["description"])
+            for s in (skills_for_prompt() or []) if s.get("core")]
+
+
+def test_the_core_skill_line_is_the_assemblers():
+    """core_skill_line must render what prompt_assembler renders, byte for byte."""
+    src = (REPO / "src/prometheus/context/prompt_assembler.py").read_text()
+    assert 'lines.append(f"- **{name}**: {desc}" if desc else f"- **{name}**")' in src
+    assert core_skill_line("plan", "Do X.") == "- **plan**: Do X."
+    assert core_skill_line("plan", "") == "- **plan**"
+
+
+def _with_core(lines: list[str]) -> str:
+    return (f"You are Prometheus.\n\n# Available Skills\n\n{C2_SKILLS_INTRO}\n{C2_CORE_HEADER}\n"
+            + "\n".join(lines) + "\n\nBe brief.")
+
+
+@pytest.mark.parametrize("position", [0, 1, 2])
+def test_dropping_a_core_skill_line_restores_the_committed_request(position):
+    others = ["- **commit**: C.", "- **debug**: D."]
+    new = "- **beacon-plate**: House style."
+    after = others[:position] + [new] + others[position:]
+    for shape in ("openai", "anthropic"):
+        def req(lines):
+            if shape == "openai":
+                return normalize_request({"messages": [{"role": "system", "content": _with_core(lines)},
+                                                       {"role": "user", "content": "hi"}]})
+            return normalize_request({"model": "hosted",
+                                      "system": [{"type": "text", "text": _with_core(lines)}],
+                                      "messages": [{"role": "user", "content": "hi"}]})
+        reverted = {fingerprint(v) for v in without_core_skill(new)(req(after))}
+        assert fingerprint(req(others)) in reverted
+
+
+def test_a_core_skill_tolerance_refuses_any_other_difference():
+    new = "- **beacon-plate**: House style."
+    committed = normalize_request({"messages": [{"role": "system", "content": _with_core(["- **commit**: C."])},
+                                                {"role": "user", "content": "hi"}]})
+    changed = normalize_request({"messages": [{"role": "system",
+                                               "content": _with_core(["- **commit**: C2.", new])},
+                                              {"role": "user", "content": "hi"}]})
+    assert fingerprint(committed) not in {fingerprint(v) for v in without_core_skill(new)(changed)}
+    other_user = normalize_request({"messages": [{"role": "system", "content": _with_core(["- **commit**: C.", new])},
+                                                 {"role": "user", "content": "hello"}]})
+    assert fingerprint(committed) not in {fingerprint(v) for v in without_core_skill(new)(other_user)}
+
+
+def test_rerecord_renders_the_builtin_line_from_the_package():
+    from parity.rerecord import builtin_core_skill_line
+
+    line = builtin_core_skill_line("beacon-plate")
+    assert line in _rendered_core_lines()
+    with pytest.raises(SystemExit):
+        builtin_core_skill_line("no-such-skill")

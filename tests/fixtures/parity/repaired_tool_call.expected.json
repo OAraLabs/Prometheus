@@ -630,7 +630,7 @@
      "rows": [
       [
        "desktop:parity-repair",
-       "Sandboxed Tool Call Repair Test",
+       "Sandboxed Tool Call Repair",
        "<time>"
       ]
      ]
@@ -1821,7 +1821,7 @@
         }
        },
        160,
-       8,
+       7,
        null,
        "desktop:parity-repair",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",

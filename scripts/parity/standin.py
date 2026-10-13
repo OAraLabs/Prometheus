@@ -14,6 +14,11 @@ list of every request: on the sides named in ``tolerate``, a request is also
 tried with C2's enumerated edits removed (``c2_reverted``), and served only when
 that reverted form is byte-identical to a committed request. Any other
 difference is still refused.
+
+A second, for a change that adds one core skill (beacon-plate, #765): on the
+sides named for it, a request is also tried with exactly that skill's line
+removed from the system prompt (``without_core_skill``). Nothing else is
+touched, so any other difference is still refused.
 """
 
 from __future__ import annotations
@@ -110,6 +115,45 @@ def c2_reverted(norm: Any) -> list[Any]:
                        if not (_tool_name_and_desc(t)[0] == "skill"
                                and _tool_name_and_desc(t)[1] == C2_SKILL_DESCRIPTION)]
     return [described, absent]
+
+
+# ---------------------------------------------------------------------------
+# A new core skill: its one line in the prompt's "## Core skills" list.
+# ---------------------------------------------------------------------------
+
+def core_skill_line(name: str, description: str) -> str:
+    """The line the prompt assembler renders for a core skill."""
+    return f"- **{name}**: {description}" if description else f"- **{name}**"
+
+
+def _drop_line(text: str, line: str) -> str:
+    if f"{line}\n" in text:
+        return text.replace(f"{line}\n", "", 1)
+    if text.endswith(f"\n{line}"):
+        return text[: -len(f"\n{line}")]
+    return text
+
+
+def without_core_skill(line: str) -> Callable[[Any], list[Any]]:
+    """A tolerance: the request with ``line`` removed from its system prompt, once."""
+    def revert(norm: Any) -> list[Any]:
+        if not isinstance(norm, dict):
+            return []
+        base = copy.deepcopy(norm)
+        msgs = base.get("messages")
+        if isinstance(msgs, list):
+            for m in msgs:
+                if isinstance(m, dict) and m.get("role") == "system" and isinstance(m.get("content"), str):
+                    m["content"] = _drop_line(m["content"], line)
+        system = base.get("system")
+        if isinstance(system, str):
+            base["system"] = _drop_line(system, line)
+        elif isinstance(system, list):
+            for block in system:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    block["text"] = _drop_line(block["text"], line)
+        return [base]
+    return revert
 
 
 # ---------------------------------------------------------------------------

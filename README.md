@@ -194,7 +194,7 @@ Beacon's **Loop Manager** turns this into a PM cockpit: register repos, keep a `
 
 ### Skills
 
-The agent writes skills for itself: the SkillCreator turns successful multi-step traces into markdown skill files, the SkillRefiner updates them when better executions come along, and a weekly Curator pass consolidates and prunes (pinned skills are protected; nothing is hard-deleted). Three core skills ship in the package (`commit`, `debug`, `plan`), and the repo carries a **103-file skill library** in [`skills/`](https://github.com/OAraLabs/Prometheus/tree/main/skills) you can drop into `~/.prometheus/skills/` selectively — it's deliberately not auto-loaded, to keep prompts lean.
+The agent writes skills for itself: the SkillCreator turns successful multi-step traces into markdown skill files, the SkillRefiner updates them when better executions come along, and a weekly Curator pass consolidates and prunes (pinned skills are protected; nothing is hard-deleted). Four core skills ship in the package (`commit`, `debug`, `plan`, and `beacon-plate`, the default look for any HTML page, report or PDF the agent makes), and the repo carries a **102-file skill library** in [`skills/`](https://github.com/OAraLabs/Prometheus/tree/main/skills) you can drop into `~/.prometheus/skills/` selectively — it's deliberately not auto-loaded, to keep prompts lean.
 
 ### Record a Skill
 
@@ -634,7 +634,7 @@ prometheus/
 │   ├── telemetry/       # Tool-call tracking + cost
 │   └── config/          # Settings, paths, env overrides, profiles
 ├── templates/           # Identity templates (no personal data)
-├── skills/              # 103-file skill library (.md, opt-in)
+├── skills/              # 102-file skill library (.md, opt-in)
 ├── tests/               # pytest suite (see Tests below)
 ├── docs/                # Guides, architecture, sprint reports
 │   └── guide/           # Install · features · Beacon · coding · skills · memory · providers · API
