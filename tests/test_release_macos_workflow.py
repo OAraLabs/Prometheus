@@ -226,8 +226,8 @@ def test_a_published_release_is_never_modified(wf):
     assert "isDraft" in attach["run"], "check the release is still a draft before replacing assets"
 
 
-def test_the_release_build_cannot_include_pymupdf(wf):
-    """PyMuPDF is AGPL-3.0; the app ships without it by default. CI must not opt back in."""
+def test_the_release_build_names_no_pymupdf(wf):
+    """PyMuPDF (AGPL-3.0) is no dependency since 0.9.9 (tests/test_macos_app_build.py pins the lock). The release
+    step must not mention it either, so nobody reads the workflow as still opting in or out of it."""
     build = next(s for s in _steps(wf) if "--notarize" in s.get("run", ""))
-    assert "--include-pymupdf" not in build["run"]
-    assert "--without" not in build["run"] or "pymupdf" in build["run"]
+    assert "pymupdf" not in build["run"].lower()
