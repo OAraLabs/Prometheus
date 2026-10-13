@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import os
-import select
+import queue
 import signal
 import site
 import socket
@@ -140,7 +140,9 @@ def _stop(proc: subprocess.Popen) -> None:
 def _on_pty(argv, *, env, cwd, stdin_text=None, until=None, timeout=90) -> str:
     """Run *argv* with stdout (and stderr) on a pseudo-terminal; return what it wrote.
 
-    Reads until *until* appears (the process is then stopped) or the process ends.
+    Reads until *until* appears (the process is then stopped) or the process ends. A thread does the
+    reading: select() refuses a descriptor numbered 1024 or more, which a pseudo-terminal opened late in
+    a long suite is.
     """
     master, slave = pty.openpty()
     proc = subprocess.Popen(
@@ -152,21 +154,35 @@ def _on_pty(argv, *, env, cwd, stdin_text=None, until=None, timeout=90) -> str:
     if stdin_text is not None:
         proc.stdin.write(stdin_text.encode())
         proc.stdin.close()
+
+    arrived: queue.Queue[bytes] = queue.Queue()  # b"" marks the end
+
+    def pump() -> None:
+        while True:
+            try:
+                data = os.read(master, 65536)
+            except OSError:  # EIO: the child closed its end
+                data = b""
+            arrived.put(data)
+            if not data:
+                return
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
     chunks: list[bytes] = []
     deadline = time.time() + timeout
     try:
         while time.time() < deadline:
-            if select.select([master], [], [], 0.25)[0]:
-                try:
-                    data = os.read(master, 65536)
-                except OSError:  # EIO: the child closed its end
+            try:
+                data = arrived.get(timeout=0.25)
+            except queue.Empty:
+                if proc.poll() is not None:
                     break
-                if not data:
-                    break
-                chunks.append(data)
-                if until and until in b"".join(chunks).decode("utf-8", "replace"):
-                    break
-            elif proc.poll() is not None:
+                continue
+            if not data:
+                break
+            chunks.append(data)
+            if until and until in b"".join(chunks).decode("utf-8", "replace"):
                 break
         else:
             pytest.fail(f"timed out after {timeout}s; output so far:\n{b''.join(chunks).decode('utf-8', 'replace')[-2000:]}")
@@ -177,16 +193,18 @@ def _on_pty(argv, *, env, cwd, stdin_text=None, until=None, timeout=90) -> str:
             proc.send_signal(signal.SIGTERM)
         stopped = time.time() + 20
         while time.time() < stopped:
-            if select.select([master], [], [], 0.25)[0]:
-                try:
-                    if not os.read(master, 65536):
-                        break
-                except OSError:
+            try:
+                if not arrived.get(timeout=0.25):
                     break
-            elif proc.poll() is not None:
-                break
+            except queue.Empty:
+                if proc.poll() is not None:
+                    break
         _stop(proc)
-        os.close(master)
+        # The reader gets EIO once the child is gone; closing the descriptor under it first could
+        # leave it reading whatever reuses the number.
+        reader.join(timeout=5)
+        if not reader.is_alive():
+            os.close(master)
     return b"".join(chunks).decode("utf-8", "replace").replace("\r\n", "\n")
 
 
@@ -329,3 +347,25 @@ def test_version_does_not_fail_on_an_ascii_stdout(tmp_path):
     )
     assert done.returncode == 0, done.stderr
     assert done.stdout.startswith("prometheus ") and done.stdout.endswith(" - OAra Labs\n")
+
+
+def test_waiting_for_output_does_not_depend_on_the_descriptor_number(tmp_path):
+    """The full suite leaves enough descriptors open that a pseudo-terminal's lands past 1023, where select() refuses it."""
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    needed = 1300
+    if hard != resource.RLIM_INFINITY and hard < needed:
+        pytest.skip(f"cannot raise the descriptor limit to {needed}")
+    held: list[int] = []
+    try:
+        if soft != resource.RLIM_INFINITY and soft < needed:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (needed, hard))
+        while not held or held[-1] < 1100:
+            held.append(os.open(os.devnull, os.O_RDONLY))
+        out = _on_pty([sys.executable, "-c", "print('ok')"], env=_env(tmp_path), cwd=tmp_path)
+    finally:
+        for fd in held:
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+    assert out.strip() == "ok"
