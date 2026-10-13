@@ -22,9 +22,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from prometheus.banner import show_banner
+
 
 def run_setup(args: argparse.Namespace) -> int:
     """Route to the rich wizard or the fast path. Returns an exit code."""
+    if show_banner(quiet=bool(getattr(args, "quiet", False))):
+        print()
     provider = getattr(args, "setup_provider", None)
     fast = bool(getattr(args, "fast", False)) or bool(
         getattr(args, "noninteractive", False)
@@ -68,6 +72,11 @@ def main(argv: list[str] | None = None) -> int:
 
 def add_setup_arguments(parser: argparse.ArgumentParser) -> None:
     """Attach the ``setup`` flags to *parser* (shared with the subparser)."""
+    # SUPPRESS: a subparser's own default would overwrite `oara --quiet setup`.
+    parser.add_argument(
+        "-q", "--quiet", action="store_true", default=argparse.SUPPRESS,
+        help="Do not print the startup banner",
+    )
     parser.add_argument(
         "--fast", action="store_true",
         help="Fast path: probe local servers, write yaml + env template, done "

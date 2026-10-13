@@ -24,6 +24,7 @@ from typing import Any
 
 import yaml
 
+from prometheus.banner import show_banner
 from prometheus.config.paths import (
     get_config_dir,
     get_logs_dir,
@@ -2637,6 +2638,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
 
     # Web bridge (Beacon dashboard backend)
     web_config = config.get("web", {})
+    banner_port: int | None = None
     if web_config.get("enabled", False):
         # ── API token bootstrap (Onboarding Phase 0, item 2) ────────────
         # Web-on must not mean open-by-accident: with no token configured
@@ -3004,12 +3006,23 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 ))
             if web_task is not None:
                 tasks.append(web_task)
+                banner_port = api_port
                 logger.info(
                     "Web bridge started (REST :%d, WS :%d, listening on %s)",
                     api_port, ws_port, web_bind.describe(),
                 )
         except Exception as exc:
             logger.warning("Web bridge not available: %s", exc)
+
+    # The banner says only what is true by now: the port when the web bridge was launched, the
+    # model the server reported. Printed here, after the boot logging, so it is the last thing on the
+    # terminal before "daemon running". Nothing is printed unless stdout is a terminal.
+    show_banner(
+        port=banner_port,
+        model=model_name,
+        backend=model_config.get("provider", "llama_cpp"),
+        quiet=getattr(args, "quiet", False),
+    )
 
     # Managed tasks durability: resume file_watch/poll watchers and reap
     # orphaned process tasks left "running" by a previous daemon process, so no
@@ -3129,6 +3142,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--debug", action="store_true", help="Enable debug logging"
     )
     parser.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="Do not print the startup banner (also off: OARA_NO_BANNER=1, "
+             "and it is never printed when stdout is not a terminal)",
+    )
+    parser.add_argument(
         "--bind", metavar="ADDRESS", default=None,
         help="Address the web API and WebSocket bridge listen on (also in "
              "setup mode): 127.0.0.1 for this machine only, or an IPv4/IPv6 "
@@ -3140,7 +3158,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def daemon_start_args(args: argparse.Namespace) -> dict[str, Any]:
-    """The arguments the ``daemon_start`` archive event records: ``vars(args)``, except an unset ``--bind``.
+    """The arguments the ``daemon_start`` archive event records: ``vars(args)``, except an unset ``--bind`` and ``--quiet``.
 
     The 12 parity traces record this dict and the CI replay compares the daemon's whole archive against them.
     Adding ``--bind`` added ``bind: null`` to every run, so every trace "changed" while nothing the daemon
@@ -3150,6 +3168,9 @@ def daemon_start_args(args: argparse.Namespace) -> dict[str, Any]:
     recorded = dict(vars(args))
     if recorded.get("bind") is None:
         recorded.pop("bind", None)
+    # Presentation only, like `bind` above: a run without it records what it always recorded.
+    if not recorded.get("quiet"):
+        recorded.pop("quiet", None)
     return recorded
 
 
@@ -3211,6 +3232,8 @@ def main() -> None:
         except BindError as exc:
             print(f"{exc}", file=sys.stderr)
             sys.exit(2)
+        # Nothing is known yet, no model and no confirmed listener: the wordmark alone.
+        show_banner(quiet=args.quiet)
         result = run_setup_mode(bind=setup_bind)
         # Phase 2: POST /api/setup/complete exits the serve loop with a
         # restart sentinel. RE-CHECK for config — present now → fall
