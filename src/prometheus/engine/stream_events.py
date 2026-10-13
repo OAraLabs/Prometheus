@@ -54,6 +54,21 @@ class ProviderDegraded:
 
 
 @dataclass(frozen=True)
+class RoundDiscarded:
+    """The round whose text was just streamed is DISCARDED (#772).
+
+    Emitted when the degenerate-output guard drops a round: its visible text
+    already went out as ``AssistantTextDelta`` events, but it is not part of
+    the turn and is never saved. A consumer that accumulates streamed text
+    (the web bridge's reply bubble, push summary and interrupt fallback)
+    drops everything since the last completed round. Consumers that cannot
+    retract (a terminal) may ignore it.
+    """
+
+    reason: str  # the guard test that fired: "control_bytes" | "letter_ratio"
+
+
+@dataclass(frozen=True)
 class ToolExecutionStarted:
     """The engine is about to execute a tool."""
 

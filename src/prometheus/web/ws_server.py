@@ -1595,6 +1595,9 @@ class WebSocketBridge:
         from prometheus.engine.agent_loop import run_loop
 
         accumulated = ""
+        # Where the current round's streamed text starts in ``accumulated`` —
+        # what a RoundDiscarded (#772) cuts back to.
+        round_start = 0
         last_usage: Any = None
         original_len: int | None = None
         messages: list | None = None
@@ -1612,6 +1615,27 @@ class WebSocketBridge:
                 if event_type == "AssistantTurnComplete":
                     # One model call finished; anything further is a new round.
                     progress["round"] = int(progress["round"]) + 1
+                    round_start = len(accumulated)
+
+                if event_type == "RoundDiscarded":
+                    # #772: the degenerate-output guard dropped the round whose
+                    # text was just streamed. Cut it from what this turn keeps
+                    # (the push summary, inject_turn's return, the interrupt
+                    # fallback that SAVES ``accumulated``), and tell clients so
+                    # a bubble can drop it too. ``keep_chars`` is how much of
+                    # this message's streamed text is still the turn's.
+                    accumulated = accumulated[:round_start]
+                    progress["chars"] = len(accumulated)
+                    await self.broadcast({
+                        "type": "chat_discard",
+                        "timestamp": time.time(),
+                        "payload": {
+                            "session_id": session_id,
+                            "message_id": msg_id,
+                            "keep_chars": round_start,
+                            "reason": getattr(event, "reason", None),
+                        },
+                    })
 
                 if event_type == "AssistantTextDelta":
                     accumulated += event.text
@@ -2053,7 +2077,7 @@ class WebSocketBridge:
     # (approval_pending, sentinel_signal, dream_*) are NEVER filtered: they
     # are not session-scoped and the phone wants them all.
     _SESSION_SCOPED_TYPES = frozenset({
-        "chat_message", "chat_delta", "chat_done", "command_done",
+        "chat_message", "chat_delta", "chat_discard", "chat_done", "command_done",
         "agent_progress", "tool_call_start", "tool_call_end",
         "provider_degraded", "error",
     })

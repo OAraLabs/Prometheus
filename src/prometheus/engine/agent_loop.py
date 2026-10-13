@@ -23,8 +23,11 @@ from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, ClassVar
 
 from prometheus.adapter import markup_guard
+from prometheus.engine.degeneration import Degeneration
+from prometheus.engine.degeneration import detect as detect_degeneration
 from prometheus.engine.messages import (
     ConversationMessage,
+    ThinkingBlock,
     ToolResultBlock,
     render_messages_for_model,
 )
@@ -32,6 +35,7 @@ from prometheus.engine.stream_events import (
     AssistantTextDelta,
     ProviderDegraded,
     AssistantTurnComplete,
+    RoundDiscarded,
     StreamEvent,
     ToolExecutionCompleted,
     ToolExecutionStarted,
@@ -110,6 +114,9 @@ class _IterationReason:
     # one. This fires on lack of PROGRESS, regardless of how many rounds in.
     UNPRODUCTIVE_REPEAT = "unproductive_repeat"
     DIVERGENCE_HALT = "divergence_halt"
+    # #772: the round's output was garbage (control bytes, or a one-character
+    # flood) and was dropped before anything kept or ran it.
+    DEGENERATE_OUTPUT = "degenerate_output"
 
 
 _FAILURE_CATEGORIES = (
@@ -952,6 +959,7 @@ class _StopReason:
     REPEAT_DETECTOR = _IterationReason.UNPRODUCTIVE_REPEAT
     DIVERGENCE_HALT = _IterationReason.DIVERGENCE_HALT
     EMPTY_RESPONSE = _IterationReason.EMPTY_RESPONSE
+    DEGENERATE_OUTPUT = _IterationReason.DEGENERATE_OUTPUT
     CONTEXT_PREFLIGHT = "context_preflight_refusal"
     CONTEXT_OVERFLOW = "context_overflow"
     BOUNDARY_ESCAPE = "boundary_escape"
@@ -1956,6 +1964,14 @@ async def _run_loop(
     # session history.
     empty_retried = False
     pending_empty_nudge = False
+    # Degenerate-output guard (#772): a dropped round is retried ONCE; a second
+    # consecutive drop ends the turn. Reset by a clean round, so one recovery
+    # does not use up the guard for the rest of a long turn. The retry's nudge
+    # rides the request only, like the empty retry's — and changing the system
+    # prompt also means the retry cannot be served from the same prompt-cache
+    # entry, one of the two suspects in the incident this guard exists for.
+    degenerate_retried = False
+    pending_degenerate_nudge = False
 
     # SUNRISE PeriodicNudge — completed assistant rounds THIS run, and the
     # nudge text (if any) owed to the next model call. Counted in the loop
@@ -2021,6 +2037,71 @@ async def _run_loop(
             prompt_tokens=usage.input_tokens,
             completion_tokens=usage.output_tokens,
         )
+
+    def _record_degeneration(found: Degeneration | None, outcome: str) -> None:
+        """One evidence row per guard event (#772, #773 section 4).
+
+        ``outcome``: ``retried`` (dropped, retrying), ``retry_ok`` (the retry
+        was clean) or ``turn_ended`` (dropped twice). Written synchronously
+        to ``subsystem_runs`` so a background wake can check it at once and it
+        survives a restart; read back by ``degeneration_summary`` (/health).
+        Never raises — the turn's outcome does not depend on its record.
+        """
+        _deg = degrade_notice_this_turn[0] if degrade_notice_this_turn else None
+        _served = served_model_this_turn or (_deg.model if _deg is not None else None)
+        # Evidence must name SOMETHING: "" (the golden-trace helper's unknown)
+        # would make the per-provider readback useless, so fall back to the class.
+        _provider = (
+            (_deg.provider_name or None) if _deg is not None
+            else _provider_name_for_telemetry(context.provider)
+        ) or type(context.provider).__name__
+        _cached = getattr(usage, "cached_input_tokens", None)
+        _threshold = None
+        _comp = context.compactor
+        if _comp is not None and _window_now:
+            try:
+                from prometheus.context.compactor import compaction_threshold
+                _threshold = compaction_threshold(
+                    _window_now, _comp._reserve_tokens, _comp._threshold_pct)
+            except Exception:
+                _threshold = None
+        summary = {
+            "outcome": outcome,
+            "test": found.test if found is not None else None,
+            "where": found.where if found is not None else None,
+            "detail": found.detail if found is not None else None,
+            "served_model": _served,
+            "provider": _provider,
+            "ctx_window": _window_now or None,
+            "compaction_threshold": _threshold,
+            "compaction_threshold_source": "global_pct" if _threshold is not None else None,
+            "turn_id": getattr(turn_record, "turn_id", None),
+            "loop_round_id": loop_envelope.last_run_id
+            if isinstance(loop_envelope.last_run_id, str) else None,
+        }
+        log.warning(
+            "degenerate output (#772): %s — session=%s round=%d model=%s served=%s "
+            "provider=%s input_tokens=%s cached=%s ctx_window=%s test=%s where=%s",
+            outcome, effective_session_id, turn, context.model, _served, _provider,
+            usage.input_tokens if usage is not None else None, _cached,
+            _window_now or None, summary["test"], summary["where"],
+        )
+        if context.telemetry is None:
+            return
+        try:
+            context.telemetry.record_run(
+                subsystem="agent_loop",
+                operation="degenerate_output",
+                outcome={"retried": "partial", "retry_ok": "success"}.get(outcome, "failed"),
+                session_id=rec_sid,
+                model=context.model,
+                round_index=turn,
+                input_tokens=usage.input_tokens if usage is not None else None,
+                cached_input_tokens=_cached,
+                summary=summary,
+            )
+        except Exception:
+            log.debug("degenerate-output telemetry write failed", exc_info=True)
 
     for turn in range(context.max_turns):
         if turn_record is not None:
@@ -2088,6 +2169,13 @@ async def _run_loop(
                 "call. Respond now with a message or a tool call.]"
             )
             pending_empty_nudge = False
+        if pending_degenerate_nudge:
+            per_call_system_prompt = (
+                f"{per_call_system_prompt}\n\n"
+                "[RETRY: your previous response was unreadable and was discarded. "
+                "Respond again, normally.]"
+            )
+            pending_degenerate_nudge = False
 
         # SUNRISE PeriodicNudge — the same request-only channel as steers,
         # the empty-retry nudge and passive recall. It rides THIS call's
@@ -2468,6 +2556,53 @@ async def _run_loop(
              degrade_notice_this_turn[0].provider_name or "")
             if degrade_notice_this_turn else None
         )
+
+        # DEGENERATE-OUTPUT GUARD (#772). Before ANYTHING keeps or acts on this
+        # round: tool-call extraction below rebuilds final_message without its
+        # thinking, the round is then appended to history (and saved), and its
+        # tool calls dispatched. On 2026-10-13 qwen3.8-max returned token salad
+        # at ~241k tokens of context — once with 28 control bytes in the text,
+        # once as 6,416 tokens of "0 00 000" in the THINKING with the visible
+        # text a single word — and both were saved as ordinary replies, one
+        # read back by the next turn. A degenerate round is dropped and retried
+        # once; twice in a row ends the turn, saying why. Either way it is
+        # recorded with the context size, model and provider it happened at.
+        _thinking = "".join(
+            b.thinking for b in final_message.content if isinstance(b, ThinkingBlock)
+        )
+        _degenerate = detect_degeneration(final_message.text or "", _thinking)
+        if _degenerate is not None:
+            _deg_outcome = "turn_ended" if degenerate_retried else "retried"
+            _record_degeneration(_degenerate, _deg_outcome)
+            # Its own responses row, WITHOUT the prose: the garbage is not kept.
+            _v2_response("error", None)
+            _log_iteration(
+                context, _IterationReason.DEGENERATE_OUTPUT, turn, tool_iteration,
+                f"{_degenerate.test} in {_degenerate.where}",
+            )
+            # What was streamed of it is not part of the turn.
+            yield RoundDiscarded(reason=_degenerate.test), None
+            if not degenerate_retried:
+                degenerate_retried = True
+                pending_degenerate_nudge = True  # rides the retry REQUEST only
+                continue
+            error_msg = _make_assistant_msg(_degenerate_output_text(
+                context.model,
+                _provider_name_for_telemetry(context.provider),
+                usage.input_tokens if usage is not None else 0,
+            ))
+            messages.append(error_msg)
+            # Streamed too: the web bridge shows deltas, not the final message.
+            yield AssistantTextDelta(text=error_msg.text), None
+            if turn_record is not None:
+                turn_record.stop(_StopReason.DEGENERATE_OUTPUT)
+            yield AssistantTurnComplete(
+                message=error_msg, usage=usage,
+                stop_reason=_StopReason.DEGENERATE_OUTPUT), usage
+            return
+        if degenerate_retried:
+            _record_degeneration(None, "retry_ok")
+            degenerate_retried = False
 
         # Golden Trace Capture sprint: capture the model's raw output BEFORE
         # the adapter's extract_tool_calls path rewrites final_message. This
@@ -3364,6 +3499,17 @@ def _boundary_escape_text(escapes: list[str]) -> str:
         f"intended, say so and it can be redone through a permitted path; if "
         f"it was not, the {noun} above need restoring from version control or "
         f"a backup."
+    )
+
+
+def _degenerate_output_text(model: str, provider: str | None, input_tokens: int) -> str:
+    """The note a turn ends on when its output was unreadable twice (#772)."""
+    via = f" via {provider}" if provider else ""
+    return (
+        f"The model returned unreadable output twice in a row at {input_tokens:,} "
+        f"tokens of context ({model}{via}), so I stopped this turn. Nothing it "
+        f"produced was saved. Long sessions on some models break down like this; "
+        f"starting a new session, or compacting this one, usually fixes it."
     )
 
 
