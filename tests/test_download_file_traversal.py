@@ -76,7 +76,7 @@ class TestTheFilenameCannotCarryATraversal:
     def test_the_resolved_destination_stays_in_the_download_dir(self, url):
         """The impact assertion: where would this have WRITTEN?"""
         anchor = _DOWNLOAD_DIR.resolve()
-        dest = _resolve_destination(url, None)
+        dest = _resolve_destination(url, None, base=Path.cwd())
         assert dest.is_relative_to(anchor), (
             f"{url} would write to {dest}, outside {anchor}"
         )
@@ -86,7 +86,7 @@ class TestTheFilenameCannotCarryATraversal:
         in terms a reader recognises rather than "not relative to anchor"."""
         anchor = _DOWNLOAD_DIR.resolve()
         dest = _resolve_destination(
-            "https://evil.example/x%2F..%2F..%2F..%2F.bashrc", None
+            "https://evil.example/x%2F..%2F..%2F..%2F.bashrc", None, base=Path.cwd()
         )
         assert dest != Path.home() / ".bashrc"
         assert dest.is_relative_to(anchor)
@@ -156,7 +156,7 @@ class TestTheContainmentCheckIsTheProperty:
             "https://ok.example/",
             "https://ok.example/..",
         ]:
-            dest = _resolve_destination(url, None)
+            dest = _resolve_destination(url, None, base=Path.cwd())
             assert dest.is_relative_to(anchor), f"{url} -> {dest}"
 
     def test_an_explicit_destination_may_leave_the_download_dir(self):
@@ -164,12 +164,12 @@ class TestTheContainmentCheckIsTheProperty:
         destination is the operator's (or the gate's) business — confining it here
         would break `download_file(url, destination=...)`, which the tool
         advertises."""
-        dest = _resolve_destination("https://ok.example/x.bin", "~/Downloads/chosen.bin")
+        dest = _resolve_destination("https://ok.example/x.bin", "~/Downloads/chosen.bin", base=Path.cwd())
         assert dest == Path.home() / "Downloads" / "chosen.bin"
 
     def test_an_explicit_destination_still_hits_the_protected_paths(self):
         with pytest.raises(ValueError):
-            _resolve_destination("https://x.com/x", str(Path.home() / ".ssh" / "authorized_keys"))
+            _resolve_destination("https://x.com/x", str(Path.home() / ".ssh" / "authorized_keys"), base=Path.cwd())
 
 
 class TestDownloadFileInstallsTheHopGuard:
@@ -238,14 +238,14 @@ class TestTheContainmentBackstopOnItsOwn:
 
         monkeypatch.setattr(mod, "_filename_from_url", lambda url: "../../.bashrc")
         with pytest.raises(ValueError, match="must land under"):
-            mod._resolve_destination("https://evil.example/x", None)
+            mod._resolve_destination("https://evil.example/x", None, base=Path.cwd())
 
     def test_an_absolute_name_from_the_helper_is_still_refused(self, monkeypatch):
         import prometheus.tools.builtin.download_file as mod
 
         monkeypatch.setattr(mod, "_filename_from_url", lambda url: "/etc/cron.d/x")
         with pytest.raises(ValueError):
-            mod._resolve_destination("https://evil.example/x", None)
+            mod._resolve_destination("https://evil.example/x", None, base=Path.cwd())
 
     def test_the_backstop_does_not_fire_for_a_normal_name(self, monkeypatch):
         """And it must not be so tight that it breaks ordinary downloads — a
@@ -253,6 +253,6 @@ class TestTheContainmentBackstopOnItsOwn:
         import prometheus.tools.builtin.download_file as mod
 
         monkeypatch.setattr(mod, "_filename_from_url", lambda url: "report.pdf")
-        dest = mod._resolve_destination("https://ok.example/x", None)
+        dest = mod._resolve_destination("https://ok.example/x", None, base=Path.cwd())
         assert dest.name == "report.pdf"
         assert dest.is_relative_to(_DOWNLOAD_DIR.resolve())

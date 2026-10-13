@@ -216,6 +216,16 @@ class ImageGenerateTool(BaseTool):
         # without ever reaching the write sink. The same guard fires again at
         # the sink (_save_image_bytes) as defense-in-depth.
         if arguments.output_path is not None:
+            # A relative output_path resolves against the tool context's cwd
+            # (the session workspace in a workspace session), like write_file
+            # — made absolute HERE so the guard and every sink rule on the one
+            # path. Left relative, both resolved it against the daemon
+            # PROCESS's directory.
+            requested = Path(arguments.output_path).expanduser()
+            if not requested.is_absolute():
+                arguments = arguments.model_copy(update={
+                    "output_path": str(Path(context.cwd) / requested),
+                })
             try:
                 assert_path_under_roots(
                     arguments.output_path, _allowed_image_roots()

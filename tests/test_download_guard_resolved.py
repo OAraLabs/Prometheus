@@ -64,7 +64,7 @@ PROTECTED_ROOTS = tuple(sorted(
 @pytest.mark.parametrize("root", PROTECTED_ROOTS)
 def test_a_destination_under_each_protected_root_is_refused(root):
     with pytest.raises(ValueError, match="protected path"):
-        _resolve_destination(URL, f"{root}/prometheus-probe.bin")
+        _resolve_destination(URL, f"{root}/prometheus-probe.bin", base=Path.cwd())
 
 
 @pytest.mark.parametrize("root", PROTECTED_ROOTS)
@@ -72,7 +72,7 @@ def test_the_resolved_spelling_of_each_protected_root_is_refused(root):
     """/private/etc/... on macOS: the path the old check actually compared."""
     resolved = Path(root).resolve() / "prometheus-probe.bin"
     with pytest.raises(ValueError, match="protected path"):
-        _resolve_destination(URL, str(resolved))
+        _resolve_destination(URL, str(resolved), base=Path.cwd())
 
 
 @pytest.mark.parametrize("root", PROTECTED_ROOTS)
@@ -81,7 +81,7 @@ def test_a_symlink_into_each_protected_root_is_refused(root, tmp_path):
     alias = tmp_path / "alias"
     alias.symlink_to(root, target_is_directory=True)
     with pytest.raises(ValueError, match="protected path"):
-        _resolve_destination(URL, str(alias / "prometheus-probe.bin"))
+        _resolve_destination(URL, str(alias / "prometheus-probe.bin"), base=Path.cwd())
 
 
 def test_ssh_under_a_symlinked_home_is_refused(tmp_path, monkeypatch):
@@ -96,7 +96,7 @@ def test_ssh_under_a_symlinked_home_is_refused(tmp_path, monkeypatch):
                      str(linked_home / ".ssh" / "authorized_keys"),
                      str(real_home / ".ssh" / "authorized_keys")):
         with pytest.raises(ValueError, match="protected path"):
-            _resolve_destination(URL, spelling)
+            _resolve_destination(URL, spelling, base=Path.cwd())
 
 
 def test_a_case_folded_spelling_of_a_not_yet_created_ssh_is_refused(tmp_path, monkeypatch):
@@ -109,7 +109,7 @@ def test_a_case_folded_spelling_of_a_not_yet_created_ssh_is_refused(tmp_path, mo
     monkeypatch.setenv("HOME", str(home))
     for spelling in ("~/.SSH/authorized_keys", "~/.\u017f\u017fh/authorized_keys"):
         with pytest.raises(ValueError, match="protected path"):
-            _resolve_destination(URL, spelling)
+            _resolve_destination(URL, spelling, base=Path.cwd())
     assert not (home / ".ssh").exists()
 
 
@@ -123,7 +123,7 @@ def test_a_case_folded_spelling_of_ssh_is_refused(tmp_path, monkeypatch):
         pytest.skip("this filesystem is case-sensitive: .SSH is a different "
                     "directory here, not a spelling of .ssh")
     with pytest.raises(ValueError, match="protected path"):
-        _resolve_destination(URL, "~/.SSH/authorized_keys")
+        _resolve_destination(URL, "~/.SSH/authorized_keys", base=Path.cwd())
 
 
 @pytest.mark.skipif(not Path("/System/Volumes/Data/private/etc").is_dir(),
@@ -131,10 +131,10 @@ def test_a_case_folded_spelling_of_ssh_is_refused(tmp_path, monkeypatch):
 def test_the_data_volume_spelling_of_etc_is_refused():
     """/System/Volumes/Data/private/etc is /private/etc through a firmlink."""
     with pytest.raises(ValueError, match="protected path"):
-        _resolve_destination(URL, "/System/Volumes/Data/private/etc/prometheus-probe.bin")
+        _resolve_destination(URL, "/System/Volumes/Data/private/etc/prometheus-probe.bin", base=Path.cwd())
 
 
 def test_an_ordinary_destination_is_still_allowed(tmp_path):
     """The guard refuses protected paths, not everything that resolves."""
     dest = tmp_path / "downloads" / "file.bin"
-    assert _resolve_destination(URL, str(dest)) == dest.resolve()
+    assert _resolve_destination(URL, str(dest), base=Path.cwd()) == dest.resolve()

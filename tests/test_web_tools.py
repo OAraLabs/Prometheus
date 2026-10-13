@@ -346,11 +346,11 @@ class TestFilenameFromUrl:
 class TestPathTraversalGuard:
     def test_etc_path_blocked(self):
         with pytest.raises(ValueError):
-            _resolve_destination("https://x.com/x", "/etc/passwd")
+            _resolve_destination("https://x.com/x", "/etc/passwd", base=Path.cwd())
 
     def test_sys_path_blocked(self):
         with pytest.raises(ValueError):
-            _resolve_destination("https://x.com/x", "/sys/test")
+            _resolve_destination("https://x.com/x", "/sys/test", base=Path.cwd())
 
     def test_traversal_resolves_first(self):
         # Even if the literal string starts safely, ../ should be resolved
@@ -359,17 +359,21 @@ class TestPathTraversalGuard:
             _resolve_destination(
                 "https://x.com/x",
                 "/tmp/../etc/foo",
+                base=Path.cwd(),
             )
 
     def test_default_destination_uses_downloads_dir(self):
-        path = _resolve_destination("https://example.com/test.bin", None)
+        path = _resolve_destination("https://example.com/test.bin", None, base=Path.cwd())
         assert ".prometheus/downloads" in str(path)
         assert path.name == "test.bin"
 
-    def test_relative_path_resolves_to_cwd(self, tmp_path, monkeypatch):
+    def test_relative_path_resolves_to_the_context_cwd(self, tmp_path, monkeypatch):
+        # Against ``base`` (the tool context's cwd), NOT the process cwd — the
+        # daemon's directory is not the session workspace.
+        workspace = tmp_path / "workspace"
         monkeypatch.chdir(tmp_path)
-        path = _resolve_destination("https://x.com/x", "subdir/file.txt")
-        assert path == (tmp_path / "subdir" / "file.txt").resolve()
+        path = _resolve_destination("https://x.com/x", "subdir/file.txt", base=workspace)
+        assert path == (workspace / "subdir" / "file.txt").resolve()
 
 
 # The SSRF predicate now has one home — security/url_guard — and its cases live in

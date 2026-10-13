@@ -86,7 +86,9 @@ class DownloadFileTool(BaseTool):
             )
 
         try:
-            dest = _resolve_destination(arguments.url, arguments.destination)
+            dest = _resolve_destination(
+                arguments.url, arguments.destination, base=context.cwd,
+            )
         except ValueError as exc:
             return ToolResult(output=f"Error: {exc}", is_error=True)
 
@@ -214,9 +216,16 @@ def _protected_prefixes() -> list[Path]:
     return prefixes
 
 
-def _resolve_destination(url: str, requested: str | None) -> Path:
+def _resolve_destination(url: str, requested: str | None, *, base: Path) -> Path:
     """Resolve the destination path. Apply path-traversal guard and reject
     common system paths (``/etc``, ``/sys``, ``/boot``).
+
+    A relative ``requested`` resolves against *base* — the tool context's
+    ``cwd``, which is the session workspace in a workspace session — like
+    write_file/edit_file. It used to resolve against ``Path.cwd()``, the
+    daemon PROCESS's directory, so an approved ``destination="x.bin"`` in a
+    session bound to ``/workspace`` landed beside the daemon instead.
+    ``base`` is required so no caller can fall back to the process cwd.
     """
     derived = requested is None
     if derived:
@@ -224,7 +233,7 @@ def _resolve_destination(url: str, requested: str | None) -> Path:
     else:
         candidate = Path(requested).expanduser()
     candidate = candidate.resolve() if candidate.is_absolute() else (
-        Path.cwd() / candidate
+        Path(base) / candidate
     ).resolve()
 
     prefixes = _protected_prefixes()
