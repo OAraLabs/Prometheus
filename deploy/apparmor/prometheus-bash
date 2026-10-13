@@ -13,7 +13,8 @@
 # agent unusable (fixed deliberately in 1da4dd2). rm, git push, package
 # installs, migrations and repo edits must all keep working with no prompt.
 #
-# It exists to make exactly three paths unreachable, because the permission
+# It exists to make exactly three paths unreachable (and the folder above the
+# third impossible to move out from under it), because the permission
 # gate cannot reach them: SecurityGate._check_denied_path is nested under
 # `if file_path:`, and bash is handed a command string, so the denied-path
 # floor covers the path-declaring tools and misses bash at BOTH origins.
@@ -54,11 +55,21 @@ profile prometheus-bash flags=(attach_disconnected) {
   /** rwlkmix,
 
   # --- THE FLOOR ----------------------------------------------------------
-  # Three patterns, not a category of operations. Deny in AppArmor is
-  # subtractive and unconditional: it wins over any allow above.
+  # Three patterns and one parent, not a category of operations. Deny in
+  # AppArmor is subtractive and unconditional: it wins over any allow above.
   deny @{HOME}/.ssh/{,**}         rwlkmx,
   deny @{HOME}/.gnupg/{,**}       rwlkmx,
   deny @{HOME}/.config/*/*env     rwlkmx,
+
+  # No renaming or replacing ~/.config ITSELF (#766). The env rule names the
+  # files, so `mv ~/.config ~/cfg` was allowed (~/.config matches nothing
+  # above), and `cat ~/cfg/prometheus/env` then printed the file: measured
+  # on Linux 7.0 with this profile loaded, against a dummy env file. `w` on the directory's
+  # own path is what a rename or a replace of it needs; creating, writing and
+  # deleting things INSIDE ~/.config is unaffected, and so is `touch ~/.config`
+  # (both measured). .ssh and .gnupg need no such line: `{,**}` already covers
+  # the directory itself, and renaming either was refused.
+  deny @{HOME}/.config/           w,
 
   # --- NO CARVE-OUT, AND THAT IS NOT AN OVERSIGHT -------------------------
   # There is deliberately no exception here for the second compute backend's

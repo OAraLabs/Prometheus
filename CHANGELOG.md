@@ -4,7 +4,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## 0.9.9 (2026-10-13)
 
-0.9.9 closes a way for a model-written shell on a Mac to reach the same-Mac pairing secret, makes the `agent` tool work, and adds a startup banner. Read "Upgrading from 0.9.8": `--version` prints different text, and an earlier default `denied_paths` list now resolves to the new one.
+0.9.9 closes a way for a model-written shell on a Mac to reach the same-Mac pairing secret, and a way around the read floor on both Mac and Linux, makes the `agent` tool work, and adds a startup banner. Read "Upgrading from 0.9.8": Linux hosts with the AppArmor floor must reload its profile, `--version` prints different text, and an earlier default `denied_paths` list now resolves to the new one.
 
 ### Security (#764)
 
@@ -14,6 +14,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
   - `grep` and `glob` now prune with that built-in floor as well as your `denied_paths`. Before, `denied_paths: []`, or a config holding an earlier list, let `grep --root ~` print a file the gate itself floors.
 - **Renaming a parent folder no longer escapes the Seatbelt floor.** `mv ~/.config ~/cfg && cat ~/cfg/prometheus/env` printed the env file (the master key), because `~/.config` itself matched no rule; moving `Application Support/Prometheus` did the same to the pairing secret. The floor now refuses to rename, replace or re-mode each folder above a protected one (`~/.config`, `~/Library`, `~/Library/Application Support` and its `Prometheus` folder), up to but not including the home folder. Creating, writing and deleting files inside them still works. Hard links, symlinks and moving a prepared folder into place are refused too.
 - **The boot probe now proves both refusals by outcome:** the pairing secret can't be read, and `~/.config` can't be renamed.
+- **On Linux, renaming `~/.config` no longer escapes the AppArmor floor (#766, #776).** The same move worked there: `mv ~/.config ~/cfg && cat ~/cfg/prometheus/env` printed the file (measured on Linux 7.0 with the shipped profile loaded, against a dummy env file). The profile now refuses writes to `~/.config` itself, which a rename or replace needs. Creating, writing and deleting files inside it, and `touch ~/.config`, still work. The boot probe checks the rule by outcome, by renaming `~/.config` onto itself, which is refused under the rule and moves nothing without it. If the loaded profile is older, shells stay confined by it and the daemon logs an ERROR with the reload command, and `oara doctor` shows the same.
 
 ### The agent tool works (#762)
 
@@ -38,12 +39,12 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 - **`oara --version` has new text** (see above). A script that matches the old `Prometheus <version>` should match the first `x.y.z` in the line instead.
 - **A default `denied_paths` list from an earlier release now resolves to the new one (#764).** Setup copies the template, so each install holds the list of its day. A config that holds a previously shipped list exactly, in order, gets the new list, and the daemon logs one INFO line at boot saying so; a config already holding the new list is silent. Any other list, `[]` included, is yours: it is used as written and keeps the override warning. One effect: the oldest shipped list has a relative entry the gate refuses at boot, so a config still carrying it now boots with the new list instead of refusing.
 - **A model's `agent` call now succeeds,** so a turn that used to get an error from it now waits for the subagent.
+- **Linux hosts using the AppArmor floor must reload the profile after upgrading:** `sudo apparmor_parser -r -W /etc/apparmor.d/prometheus-bash`, after copying the new `deploy/apparmor/prometheus-bash` to `/etc/apparmor.d/`. It is a root-loaded file, so upgrading Prometheus doesn't change it. Until it's reloaded, `~/.config` can still be renamed, and the daemon says so at boot. The new profile works with the old daemon, so reload it before restarting the daemon.
 
 ### Known issues
 
 - **Built-in subagent types get no tools.** Their definitions name tools (`Bash`, `FileRead`, ...) this daemon doesn't have, so `general-purpose`, `explorer`, `planner`, `worker` and `verification` subagents answer from the model alone.
 - **How an approval request raised inside a subagent appears in Beacon and Telegram has not been checked.** A subagent has no session of its own.
-- **The Linux AppArmor read floor may have the same `~/.config` rename hole** the Seatbelt floor had. It is unmeasured (#766).
 
 ### PDFs and large images without PyMuPDF
 
