@@ -2838,6 +2838,7 @@ dependencies = [
     { name = "anyio" },
     { name = "croniter" },
     { name = "cryptography" },
+    { name = "distro", marker = "sys_platform == 'linux'" },
     { name = "fastapi" },
     { name = "httpcore" },
     { name = "httpx" },
@@ -2857,9 +2858,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-anthropic = [
-    { name = "anthropic" },
-]
 browser = [
     { name = "playwright" },
 ]
@@ -2888,7 +2886,6 @@ evals = [
 ]
 full = [
     { name = "aiohttp" },
-    { name = "anthropic" },
     { name = "discord-py" },
     { name = "fastapi" },
     { name = "mcp" },
@@ -2950,8 +2947,6 @@ lint = [
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'discord'", specifier = ">=3.14.3" },
     { name = "aiohttp", marker = "extra == 'full'", specifier = ">=3.14.3" },
-    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40" },
-    { name = "anthropic", marker = "extra == 'full'", specifier = ">=0.40" },
     { name = "anyio", specifier = ">=4.14.2" },
     { name = "arize-phoenix", marker = "extra == 'evals'", specifier = ">=16.4.0" },
     { name = "croniter", specifier = ">=2.0" },
@@ -2961,6 +2956,7 @@ requires-dist = [
     { name = "deepeval", marker = "extra == 'evals'", specifier = ">=2.0" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.3.0" },
     { name = "discord-py", marker = "extra == 'full'", specifier = ">=2.3.0" },
+    { name = "distro", marker = "sys_platform == 'linux'", specifier = ">=1.9.0" },
     { name = "fastapi", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'full'", specifier = ">=0.110" },

@@ -79,7 +79,7 @@ jobs:
       - name: Install uv (from PyPI — see ci.yml for why not astral-sh/setup-uv)
         run: python -m pip install --upgrade uv
       - name: Sync dependencies (the same extras the suite uses)
-        run: uv sync --python 3.12 --extra web --extra anthropic --extra mcp --group dev
+        run: uv sync --python 3.12 --extra web --extra mcp --group dev
       - name: Replay every parity trace against this checkout's daemon
         # Exit 0 = parity; 1 = a diff (the report above names the category and
         # the rows); 2 = the harness itself could not run — never a pass.

@@ -85,6 +85,11 @@ dependencies = [
     # range, so without it an upgraded install keeps the vulnerable version,
     # and a future re-resolve can walk straight back onto one.
     "starlette>=1.3.1",
+    # The Linux "- OS:" line of the system prompt's environment section (context/environment.py, detect_os:
+    # "24.04 (Noble Numbat)" rather than a kernel release). It was only ever present because the Anthropic SDK
+    # depended on it; when the `anthropic` extra stopped installing that SDK (0.9.9) the line changed on every
+    # Linux install, which the parity replay caught. Declared where it is used. Apache-2.0, pure Python.
+    "distro>=1.9.0; sys_platform == 'linux'",
 ]
 
 [project.urls]
@@ -94,7 +99,11 @@ Issues = "https://github.com/OAraLabs/Prometheus/issues"
 Documentation = "https://github.com/OAraLabs/Prometheus/tree/main/docs/guide"
 
 [project.optional-dependencies]
-anthropic = ["anthropic>=0.40"]
+# EMPTY ON PURPOSE (0.9.9). This used to install the Anthropic SDK, which nothing imports: the Anthropic
+# provider speaks HTTP itself (providers/anthropic.py, httpx). The name stays so an existing
+# `pip install 'oara-prometheus[anthropic]'` or `uv sync --extra anthropic` keeps working, as `web` does.
+# tests/test_anthropic_sdk_unused.py pins both halves.
+anthropic = []
 # GRAFT-MOBILE-BRIDGE 2: APNs push. ES256 JWT is hand-rolled on cryptography
 # (no APNs library, per the spec); h2 gives httpx its HTTP/2. push.enabled
 # with these missing fails the boot loudly.
@@ -201,7 +210,6 @@ evals = [
 # fastapi/uvicorn/websockets stay listed here although the base now carries
 # them, so `full` never depends on where the base list happens to stand.
 full = [
-    "anthropic>=0.40",
     "playwright>=1.40",
     "mcp>=1.28.1,<2",  # floor and upper bound both load-bearing — see the `mcp` extra above
     "pydantic-settings>=2.14.2",  # mcp's; security floor — see the `mcp` extra

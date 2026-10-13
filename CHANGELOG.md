@@ -20,6 +20,10 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 - **The `agent` tool no longer always fails.** It answered "SubagentSpawner not configured" on every call, because the daemon never gave it a spawner. It now runs a subagent on the same model as the turn that called it and returns the subagent's answer; the calling turn waits for it.
 - **A subagent runs under the same gate as the turn that spawned it.** Its tool calls are checked like any other, approvals apply and a denial stops the call. A subagent can't spawn another.
 
+### The `anthropic` extra installs nothing (#769)
+
+- **`[anthropic]` no longer installs the Anthropic SDK, which nothing in Prometheus imports:** the Anthropic provider speaks HTTP itself. The SDK and three packages only it brought (jiter, docstring-parser, sniffio) leave Prometheus.app, the Docker image and `[full]`. The fourth, `distro`, becomes a declared dependency on Linux: the system prompt's OS line uses it, and it had only ever been installed by accident, through the SDK. The extra's name stays, empty, so `pip install 'oara-prometheus[anthropic]'` and `uv sync --extra anthropic` still work. Nothing changes for using Claude models.
+
 ### Startup banner (#759)
 
 - **`oara daemon`, `oara setup` and the interactive chat open with a banner on a terminal.** It shows the wordmark, the port the daemon listens on and the model it serves, each only once it is known; never an address, a token or a path. Nothing is printed when stdout isn't a terminal, for `oara --once`, with `--quiet` (`-q`) or `OARA_NO_BANNER=1`, and `NO_COLOR` makes it plain text.
