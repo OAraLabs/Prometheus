@@ -32,6 +32,13 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 - **A large image is shrunk to exactly 2,576 px on its long edge,** not by halving, which could leave it up to twice that. Images up to twice the cap are still sent as captured.
 - Scanned PDFs without a text layer still give no text: neither library does OCR.
 
+### A default style for pages, reports and PDFs (#765)
+
+- **`beacon-plate` is now a builtin skill.** When the agent builds an HTML page, report, dashboard or PDF, it loads this house style unless you ask for another one or have your own brand. It was in the copy-in `skills/` library before.
+- It adds one line to every system prompt (its name and one sentence, about 35 words). The full guide, about 2,000 tokens, arrives only when the agent loads it.
+- It covers print and PDF: page backgrounds that reach the sheet edge, page numbers, break rules, and the headless Chrome command.
+- Its Google Fonts link is a request to Google; the guide says so and gives the offline fallback.
+
 ### Startup banner (#759)
 
 - **`oara daemon`, `oara setup` and the interactive chat open with a banner on a terminal.** It shows the wordmark, the port the daemon listens on and the model it serves, each only once it is known; never an address, a token or a path. Nothing is printed when stdout isn't a terminal, for `oara --once`, with `--quiet` (`-q`) or `OARA_NO_BANNER=1`, and `NO_COLOR` makes it plain text.
@@ -45,6 +52,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 - **`oara --version` has new text** (see above). A script that matches the old `Prometheus <version>` should match the first `x.y.z` in the line instead.
 - **A default `denied_paths` list from an earlier release now resolves to the new one (#764).** Setup copies the template, so each install holds the list of its day. A config that holds a previously shipped list exactly, in order, gets the new list, and the daemon logs one INFO line at boot saying so; a config already holding the new list is silent. Any other list, `[]` included, is yours: it is used as written and keeps the override warning. One effect: the oldest shipped list has a relative entry the gate refuses at boot, so a config still carrying it now boots with the new list instead of refusing.
+- **Every system prompt has one more line, for `beacon-plate` (#765).** If you copied `beacon-plate.md` into `~/.prometheus/skills/` earlier, your copy is the one used.
 - **A model's `agent` call now succeeds,** so a turn that used to get an error from it now waits for the subagent.
 - **Linux hosts using the AppArmor floor must reload the profile after upgrading:** `sudo apparmor_parser -r -W /etc/apparmor.d/prometheus-bash`, after copying the new `deploy/apparmor/prometheus-bash` to `/etc/apparmor.d/`. It is a root-loaded file, so upgrading Prometheus doesn't change it. Until it's reloaded, `~/.config` can still be renamed, and the daemon says so at boot. The new profile works with the old daemon, so reload it before restarting the daemon.
 
