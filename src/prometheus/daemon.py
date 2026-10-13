@@ -1385,6 +1385,13 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         compactor=compactor,
     )
 
+    # The `agent` tool reads its spawner from the loop's tool metadata, and nothing ever set it: the tool
+    # was offered to the model and always answered "SubagentSpawner not configured" (#761). Attached here,
+    # right after the loop exists, the way the printing-press registry is attached further down. The
+    # spawner is given the loop's own gate, so a subagent's tool calls are checked like the parent's.
+    from prometheus.coordinator.subagent import attach_subagent_spawner
+    attach_subagent_spawner(agent_loop)
+
     # Shared session manager for all gateways
     from prometheus.engine.session import SessionManager
     session_manager = SessionManager()

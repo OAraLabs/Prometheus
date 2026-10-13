@@ -53,6 +53,7 @@ class SubagentSpawner:
         cwd: Path | None = None,
         adapter: Any | None = None,
         telemetry: Any | None = None,
+        permission_checker: Any | None = None,
     ) -> None:
         self._provider = provider
         self._parent_registry = parent_tool_registry
@@ -61,6 +62,9 @@ class SubagentSpawner:
         self._cwd = cwd or Path.cwd()
         self._adapter = adapter
         self._telemetry = telemetry
+        # The gate each subagent's loop runs under. None keeps the old behaviour (no gate at all); see
+        # attach_subagent_spawner for why the daemon always passes one.
+        self._permission_checker = permission_checker
         self._active: dict[str, asyncio.Task] = {}
 
     def _build_tool_registry(self, tool_names: list[str] | None) -> ToolRegistry | None:
@@ -133,6 +137,7 @@ class SubagentSpawner:
             adapter=self._adapter,
             telemetry=self._telemetry,
             cwd=self._cwd,
+            permission_checker=self._permission_checker,
         )
 
         logger.info(
@@ -178,3 +183,39 @@ class SubagentSpawner:
         """
         coros = [self.spawn(**t) for t in tasks]
         return list(await asyncio.gather(*coros))
+
+
+def attach_subagent_spawner(agent_loop: AgentLoop) -> SubagentSpawner:
+    """Give ``agent_loop``'s tools a spawner, so the ``agent`` tool can run (#761).
+
+    ``AgentTool`` reads ``context.metadata["subagent_spawner"]``. The loop builds that metadata for every
+    tool call from its ``tool_metadata``, so the spawner is attached there once the loop exists, the way
+    ``run_daemon()`` attaches the printing-press registry. Nothing set the key before, so the tool was
+    offered to the model and always answered "SubagentSpawner not configured".
+
+    Everything the spawner needs is read from the loop it serves, so a subagent uses the same provider,
+    model, tools, adapter and telemetry as the turn that spawned it.
+
+    The spawner is also handed the loop's ``permission_checker``. This is a safety property, not a
+    convenience: a loop with no checker skips the permission block altogether, so a subagent built without
+    one would run every tool it is given (an unknown ``subagent_type`` gets the parent's whole registry)
+    with no gate, no approvals, no denied paths and no audit rows. A subagent's loop has no session of
+    its own, so the gate sees it as the stricter ``system`` origin.
+
+    Not covered here: a subagent gets no hooks, and it carries no spawner of its own, so a subagent
+    cannot spawn another (``agent`` inside one answers "not configured").
+    """
+    spawner = SubagentSpawner(
+        provider=agent_loop._provider,
+        parent_tool_registry=agent_loop._tool_registry,
+        model=agent_loop._model,
+        max_tokens=agent_loop._max_tokens,
+        cwd=agent_loop._cwd,
+        adapter=agent_loop._adapter,
+        telemetry=agent_loop._telemetry,
+        permission_checker=agent_loop._permission_checker,
+    )
+    if agent_loop._tool_metadata is None:
+        agent_loop._tool_metadata = {}
+    agent_loop._tool_metadata["subagent_spawner"] = spawner
+    return spawner

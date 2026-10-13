@@ -19,7 +19,7 @@ from prometheus.coordinator.coordinator_mode import (
     get_team_registry,
     is_coordinator_mode,
 )
-from prometheus.coordinator.subagent import SubagentSpawner, SubagentResult
+from prometheus.coordinator.subagent import SubagentSpawner, SubagentResult, attach_subagent_spawner
 from prometheus.coordinator.health import HealthMonitor, HealthStatus
 from prometheus.coordinator.divergence import (
     DivergenceDetector,
@@ -38,6 +38,7 @@ __all__ = [
     "get_team_registry",
     "is_coordinator_mode",
     "SubagentSpawner",
+    "attach_subagent_spawner",
     "SubagentResult",
     "HealthMonitor",
     "HealthStatus",
