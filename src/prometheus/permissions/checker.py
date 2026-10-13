@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from prometheus.config.load import load_config_file
+from prometheus.config.local_pairing import pairing_dir
 from prometheus.config.shipped_defaults import (
     resolve_denied_paths, resolve_workspace_root)
 from prometheus.permissions.audit import AuditDecision, AuditLogger
@@ -158,10 +159,22 @@ _RM_RECURSIVE_FLAG = re.compile(r"(?:^|\s)-(?:-recursive\b|[A-Za-z]*[rR])")
 # name-pattern trap this repo has now hit four times (`_PATH_SHAPED`, deleted
 # in #214). `fnmatch`'s `*` spans `/` here — documented below as deliberate,
 # "broader means MORE denied" — so `/*/.ssh` covers every home at any depth.
+#
+# ⚠ THE SAME-MAC PAIRING SECRET IS ONE OF THESE. ``<pairing dir>/pair.secret``
+# (config/local_pairing.py) is what POST /api/pair/local trades for an OWNER
+# device token when the request is loopback with a loopback Host and no Origin,
+# and every agent on the same Mac is all three. ``read_file`` on it was ALLOW at
+# AUTO trust, and a ``write_file`` of a value the agent chose would be traded
+# just the same, so the directory is floored for reads AND writes: the macOS
+# default and the Linux XDG default, any home. The shell's half is the Seatbelt
+# profile (permissions/confinement.py); a directory moved by
+# PROMETHEUS_LOCAL_PAIRING_DIR is added by the gate itself, like its config file.
 _ALWAYS_DENIED_PATHS: tuple[str, ...] = (
     "/*/.ssh",
     "/*/.gnupg",
     "/*/.config/*/*env",
+    "/*/Library/Application Support/Prometheus/pairing",
+    "/*/.local/share/prometheus/pairing",
 )
 
 # Tools that are always safe for read-only classification
@@ -813,6 +826,12 @@ class SecurityGate:
             resolved_cfg = str(Path(config_path).expanduser().resolve())
             if resolved_cfg not in self._denied_paths:
                 self._denied_paths.append(resolved_cfg)
+        # The same property for the same-Mac pairing secret: the floor names the
+        # default places, and this is the directory THIS process would mint
+        # into, wherever PROMETHEUS_LOCAL_PAIRING_DIR or XDG_DATA_HOME put it.
+        resolved_pairing = str(pairing_dir().expanduser().resolve())
+        if resolved_pairing not in self._denied_paths:
+            self._denied_paths.append(resolved_pairing)
         self._config_path = config_path
         # MULTI-ROOT. A single root did not survive contact: of 871 recorded
         # file-tool calls on the live box only 16 were under ~/projects, so a

@@ -65,6 +65,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from prometheus.config import local_pairing
+
 logger = logging.getLogger(__name__)
 
 PROFILE: Final[str] = "prometheus-bash"
@@ -241,6 +243,12 @@ def refusal_message(profile: str, detail: str) -> str:
 # BY OUTCOME at boot against a scratch home. ``sandbox-exec`` is deprecated by
 # Apple and still ships: if it goes, ``auto`` says so loudly and ``required``
 # refuses, as with a missing AppArmor profile.
+#
+# On a Mac it denies one thing more: the same-Mac pairing directory, whose
+# pair.secret is traded for an OWNER device token over loopback (read it, or
+# plant one, and the shell can pair itself as owner). It also refuses renaming
+# the directories above what it denies, because a path-matched rule is escaped
+# by moving a parent (``mv ~/.config ~/cfg`` was allowed, measured).
 # docs/design/master-key-out-of-agent-shell.md.
 
 SANDBOX_EXEC: Final[str] = "/usr/bin/sandbox-exec"
@@ -274,38 +282,88 @@ def normalise_allow_ssh(value: object) -> bool:
     return False
 
 
+#: Where the Mac app keeps the same-Mac pairing secret, under the home (config/local_pairing.py).
+MAC_PAIRING_DIR: Final[str] = "Library/Application Support/Prometheus/pairing"
+
+
+def _pairing_dirs(home: str) -> list[str]:
+    """The pairing directories to deny, real paths: the Mac app's under *home*, and the one
+    ``PROMETHEUS_LOCAL_PAIRING_DIR`` names when this process was given one."""
+    dirs = [os.path.realpath(os.path.join(home, MAC_PAIRING_DIR))]
+    override = os.environ.get(local_pairing.ENV_DIR)
+    if override:
+        wired = os.path.realpath(os.path.expanduser(override))
+        if wired not in dirs:
+            dirs.append(wired)
+    return dirs
+
+
+def _parents_below(path: str, home: str) -> list[str]:
+    """Every directory above *path*, nearest first, stopping BEFORE *home* when *path* is under it (a user cannot
+    rename their own home: its parent is root's) and before ``/`` otherwise."""
+    stop = home if path.startswith(home.rstrip("/") + "/") else "/"
+    out: list[str] = []
+    parent = os.path.dirname(path)
+    while parent not in (stop, "/", ""):
+        out.append(parent)
+        parent = os.path.dirname(parent)
+    return out
+
+
 def seatbelt_profile(home: str | os.PathLike[str] | None = None, *, allow_ssh: bool = False) -> str:
     """The Seatbelt profile: everything allowed except reading or writing the three families
-    ``deploy/apparmor/prometheus-bash`` denies, ``~/.ssh``, ``~/.gnupg`` and ``~/.config/*/*env``.
+    ``deploy/apparmor/prometheus-bash`` denies, ``~/.ssh``, ``~/.gnupg`` and ``~/.config/*/*env``, and the same-Mac
+    pairing directory (``~/Library/Application Support/Prometheus/pairing``, plus ``PROMETHEUS_LOCAL_PAIRING_DIR``
+    when set), whose ``pair.secret`` mints an owner device token over loopback. Writes count as much as reads there:
+    a secret the shell PLANTED would be traded just the same.
 
     *home* defaults to ``Path.home()`` (``$HOME``, as the daemon and the app's launcher resolve it), resolved,
     because Seatbelt matches the real path a file is opened at.
 
-    The home path only ever appears inside ordinary string literals, where ``\\"`` escapes a quote. It is never
-    put inside the regex literal (``#"..."``): there a quote ends the literal whatever precedes it, so a home
+    A rule matched on a path is escaped by renaming a directory above it: measured, ``mv ~/.config ~/cfg`` was
+    allowed (``~/.config`` itself is not ``~/.config/*/*env``) and ``cat ~/cfg/prometheus/env`` printed the env
+    file. So writes to the directories ABOVE each denied root are refused as well, up to but not including the
+    home: ``~/.config``, ``~/Library``, ``~/Library/Application Support``, ``.../Prometheus``. ``literal`` matches
+    that directory alone: creating, writing or deleting things INSIDE it is unaffected (measured), but renaming,
+    replacing or re-moding the directory itself is not allowed. ``~/.ssh`` and ``~/.gnupg`` have no such parent,
+    and renaming them is renaming a denied ``subpath`` itself.
+
+    The paths only ever appear inside ordinary string literals, where ``\\"`` escapes a quote. They are never put
+    inside the regex literal (``#"..."``): there a quote ends the literal whatever precedes it, so a home
     containing one would break the profile (measured: ``unbound variable``, rc 65). ``~/.config/*/*env`` is
     therefore "under ~/.config" AND "ends in /.config/<one segment>/<name>env", the AppArmor ``*`` that does not
     cross ``/``.
 
     *allow_ssh* (``security.bash_allow_ssh``) drops ONLY the ``~/.ssh`` rule, for ``git`` over SSH:
-    ``~/.gnupg`` and ``~/.config/*/*env`` (the master key, the provider keys, the bot tokens) stay denied.
+    ``~/.gnupg``, ``~/.config/*/*env`` (the master key, the provider keys, the bot tokens) and the pairing
+    directory stay denied.
     """
-    base = _sb_string(os.path.realpath(os.fspath(home) if home is not None else str(Path.home())))
+    real_home = os.path.realpath(os.fspath(home) if home is not None else str(Path.home()))
+    base = _sb_string(real_home)
+    pairing = _pairing_dirs(real_home)
+    parents: list[str] = [os.path.join(real_home, ".config")]
+    for directory in pairing:
+        parents += [p for p in _parents_below(directory, real_home) if p not in parents]
     return (
         "(version 1)\n"
         "(allow default)\n"
         "(deny file-read* file-write*\n"
         + ("" if allow_ssh else f'  (subpath "{base}/.ssh")\n') +
         f'  (subpath "{base}/.gnupg")\n'
+        + "".join(f'  (subpath "{_sb_string(d)}")\n' for d in pairing) +
         f'  (require-all (subpath "{base}/.config") (regex #"/\\.config/[^/]+/[^/]*env$")))\n'
+        "(deny file-write*\n"
+        + "".join(f'  (literal "{_sb_string(p)}")\n' for p in parents) +
+        ")\n"
     )
 
 
 def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
     """Run a shell under the profile against a scratch home and see what it could read.
 
-    Verified BY OUTCOME, as the AppArmor probe is: an ordinary file must be readable and both a ``.ssh`` file
-    and a ``.config/*/env`` file must be refused. ``sandbox-exec`` exiting 0 alone proves only that it ran.
+    Verified BY OUTCOME, as the AppArmor probe is: an ordinary file must be readable, a ``.ssh`` file, a
+    ``.config/*/env`` file and a pairing secret must be refused, and so must renaming ``~/.config`` out from under
+    the env rule. ``sandbox-exec`` exiting 0 alone proves only that it ran.
     """
     if not os.path.exists(SANDBOX_EXEC):
         return False, f"{SANDBOX_EXEC} is not on this Mac"
@@ -314,6 +372,8 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
     script = ('cat "$1/ordinary" >/dev/null || exit 3; '
               + ssh_check +
               'cat "$1/.config/prometheus/env" >/dev/null 2>&1 && exit 5; '
+              f'cat "$1/{MAC_PAIRING_DIR}/pair.secret" >/dev/null 2>&1 && exit 7; '
+              'mv "$1/.config" "$1/moved" >/dev/null 2>&1 && exit 8; '
               'echo FLOOR_HELD')
     try:
         with tempfile.TemporaryDirectory(prefix="prometheus-read-floor-") as tmp:
@@ -322,6 +382,8 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
             (home / ".ssh" / "probe").write_text("x\n")
             (home / ".config" / "prometheus").mkdir(parents=True)
             (home / ".config" / "prometheus" / "env").write_text("x\n")
+            (home / MAC_PAIRING_DIR).mkdir(parents=True)
+            (home / MAC_PAIRING_DIR / "pair.secret").write_text("x\n")
             (home / "ordinary").write_text("x\n")
             proc = subprocess.run(
                 [SANDBOX_EXEC, "-p", seatbelt_profile(home, allow_ssh=allow_ssh), "/bin/sh", "-c", script, "probe",
@@ -331,12 +393,15 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"sandbox-exec could not be run: {exc}"
     if proc.returncode == 0 and "FLOOR_HELD" in (proc.stdout or ""):
-        return True, "seatbelt via sandbox-exec: ~/.ssh and ~/.config/*/*env refused, ordinary reads allowed"
+        return True, ("seatbelt via sandbox-exec: ~/.ssh, ~/.config/*/*env and the pairing secret refused, "
+                      "renaming ~/.config refused, ordinary reads allowed")
     why = {
         3: "an ordinary file could not be read under the profile",
         4: "~/.ssh stayed readable under the profile",
         5: "~/.config/*/*env stayed readable under the profile",
         6: "~/.ssh was refused although security.bash_allow_ssh is on",
+        7: "the pairing secret stayed readable under the profile",
+        8: "~/.config could be renamed out from under the env rule",
     }.get(proc.returncode)
     return False, why or (f"sandbox-exec did not run the probe (rc={proc.returncode})"
                           + (f": {(proc.stderr or '').strip()[:200]}" if (proc.stderr or "").strip() else ""))
@@ -367,8 +432,9 @@ def seatbelt_refusal_message(detail: str) -> str:
         f"Reason: {detail}\n"
         f"Mechanism: Seatbelt ({SANDBOX_EXEC})\n"
         "\n"
-        "The command was NOT run. The floor is what keeps bash out of ~/.ssh, ~/.gnupg and ~/.config/*/*env "
-        "(the master key, the provider keys and the bot tokens live in ~/.config/prometheus/env). The permission "
+        "The command was NOT run. The floor is what keeps bash out of ~/.ssh, ~/.gnupg, ~/.config/*/*env "
+        "(the master key, the provider keys and the bot tokens live in ~/.config/prometheus/env) and the "
+        "same-Mac pairing secret, which mints an owner device token. The permission "
         "gate cannot reach those paths for bash, so running unconfined would remove the floor entirely rather "
         "than degrade it.\n"
         "\n"

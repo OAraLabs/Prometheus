@@ -235,7 +235,8 @@ def announce(floor: ShellFloor | None = None) -> dict[str, object]:
             f"knowingly"))
     exposed = ("every model-written shell (bash, background tasks, poll "
                "predicates, model-created cron jobs, coding runs) can read "
-               "~/.ssh, ~/.gnupg and ~/.config/*/*env")
+               + ("~/.ssh, ~/.gnupg, ~/.config/*/*env and the same-Mac pairing secret" if seatbelt
+                  else "~/.ssh, ~/.gnupg and ~/.config/*/*env"))
     if state == _CONFINE.STATE_DARK:
         log.error(
             "the READ floor is NOT in force: security.bash_confinement is %r and "

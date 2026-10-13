@@ -85,7 +85,7 @@ none either — the key is documented so its absence is visible.
 | `security.workspace_root` | `~/.prometheus/workspace` |
 | `security.dashboard_tool_bind_host` | `127.0.0.1` |
 | `security.denied_commands` | `['DROP TABLE']` |
-| `security.denied_paths` | `['/etc', '/sys', '/boot', '/*/.ssh', '/*/.gnupg', '/*/.config/*/*env']` |
+| `security.denied_paths` | `['/etc', '/sys', '/boot', '/*/.ssh', '/*/.gnupg', '/*/.config/*/*env', '/*/Library/Application Support/Prometheus/pairing', '/*/.local/share/prometheus/pairing']` |
 | `security.bash_confinement` | `auto` |
 | `security.bash_allow_ssh` | `False` |
 | `security.bash_write_confinement` | `auto` |
