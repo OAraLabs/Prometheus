@@ -1,12 +1,23 @@
 # Plugins for Prometheus: optional features, signed, pinned, installed on demand
 
-**Status: design only. Nothing is built.** Nothing in this note has been run except the size arithmetic, which
-comes from `uv.lock`'s recorded wheel sizes, not from a build. Every claim about how Prometheus works today
-cites the file it was read from, at `origin/main` 44c2c41. Claims about Beacon are made without file paths,
-because its repository is private; the internal market note cites them. This note follows Will's decisions of
-2026-10-12: the word is **plugins**; a plugin may carry code, skills and MCP config; v1 is official plugins
-only; voice is the **Speech plugin**; and there are four shelves. Where reading the repo turned up a real
-problem with one of those decisions, it is flagged, not re-opened.
+**Status: design approved by Will on 2026-10-13, with the decisions recorded below. Nothing is built.** The
+plugin core waits until 0.9.9 is released. The PDF swap waits for an extraction comparison on real PDFs, which
+Will approves first.
+
+Nothing in this note has been run except the size arithmetic, which comes from `uv.lock`'s recorded wheel
+sizes, not from a build. Every claim about how Prometheus works today cites the file it was read from, at
+`origin/main` 44c2c41. Claims about Beacon are made without file paths, because its repository is private;
+the internal market note cites them.
+
+This note follows Will's decisions of 2026-10-12:
+
+- the word is **plugins**;
+- a plugin may carry code, skills and MCP config;
+- v1 is official plugins only;
+- voice is the **Speech plugin**;
+- there are four shelves.
+
+Where reading the repo turned up a real problem with one of those decisions, it is flagged, not re-opened.
 
 ## For Will (one page)
 
@@ -50,8 +61,9 @@ Beacon, on the market page and in pip.
      for Beacon.
    - The steps: stage, check the hash, check the signature, smoke-test, then switch on with one atomic rename.
    - A plugin takes effect on the next start (`POST /api/restart` exists).
-   - A plugin must match the app's version and lock exactly. A stale one sits inactive and says so, and the
-     previous version is kept until its replacement passes.
+   - A plugin must match the app's version and lock exactly. After an app update, the old one sits inactive and
+     shows "update available"; nothing downloads until someone asks. The previous version is kept until its
+     replacement passes.
    - It can install offline from a zip.
 6. **Linux and pip.** Same ids, same status words. `oara plugin add speech` prints the right
    `pip install 'oara-prometheus[speech]'` (or uv, brew, Docker line) and does not run it.
@@ -81,40 +93,48 @@ Beacon, on the market page and in pip.
     4. the Browser plugin in CI;
     5. `/api/plugins` for Beacon.
 
-    Speech follows a licence question (below).
+    The Speech plugin (without piper) follows the Browser plugin. All of this waits until 0.9.9 is out.
 
-### Decisions only you can make
+### Will's decisions (2026-10-13)
 
-1. **Third-party plugins: later, or never.** My recommendation:
-   - **never** for third-party *code* inside the daemon;
-   - **later** for third-party bundles' *skills* (quarantined until a person accepts them) and *MCP config*
-     (defined with the master token, like any MCP server today).
-
-   Third-party native code is impossible without the `disable-library-validation` entitlement on the app
-   (cost in 10.1). Pure-Python third-party code would load, but no mechanism can police it in-process
-   (FOUNDATION 2.3a). That is exactly why the repo moved tools to MCP.
-2. **Pricing.** I assume none. Plugins are the MIT app's own extras, and nothing in this design meters,
-   licenses or phones home.
-3. **The PDF library swap.** pypdfium2 + Pillow, as recommended, or pypdf (pure Python, smaller, weaker), or a
-   PDF plugin carrying PyMuPDF and its AGPL obligations.
+1. **Third-party plugins: never for code.**
+   - No plugin code that was not built by this repository's release job is ever loaded into the daemon.
+   - Third-party native code would need the `disable-library-validation` entitlement on the app (cost in
+     10.1).
+   - Pure-Python third-party code would load, but no mechanism can police it in-process (FOUNDATION 2.3a).
+   - Third-party *skills* and *MCP config* are not decided. The shapes for them are in 3.3, and nothing is
+     built for them.
+2. **The Speech plugin ships without piper.** Speech-to-text by faster-whisper (MIT), and spoken replies by
+   macOS's built-in `say`. No GPL code is distributed.
+3. **PDF: pypdfium2 + Pillow, after a comparison.** Extraction is first tested against PyMuPDF on at least
+   five real PDFs (scanned, multi-column, forms), and Will approves that comparison before the swap PR.
+4. **No pricing.**
+5. **Plugin auto-update is off.** After an app update, a plugin built for the previous version shows
+   **"update available"** (5.4). Nothing downloads until someone asks.
+6. **Packs stay working for now.** Plugins are the future user-facing format. The FOUNDATION Part 2
+   amendment lands with the plugin core.
+7. **Order.** The plugin core waits until 0.9.9 is out.
 
 ### Real problems found in the decisions (flagged, not re-opened)
 
 1. **"Packs" already exist, and overlap with plugins.** FOUNDATION Part 2 packs are skills plus panels from
    `~/.prometheus/packs/`, served at `GET /api/packs` (finding 1). With plugins carrying skills, there would
-   be two formats for the same thing. I recommend plugins become the only user-facing format. The pack
-   loader's rule (quarantine until accepted) then becomes the rule for third-party plugin skills, and
-   FOUNDATION Part 2 gets an amendment. Its 2.4 asks for a named mechanism before in-process third-party code
-   lands, and section 10.1 is that mechanism for first-party code.
-2. **The Speech plugin's voice output is GPL.** The locked `piper-tts` 1.4.2 is **GPL-3.0-or-later** (PyPI
-   metadata; the upstream repository is named `piper1-gpl`). Shipping it means distributing GPL code, the same
-   kind of question PyMuPDF raised. I recommend a Speech plugin without piper:
-   - input by faster-whisper (MIT);
-   - output by macOS's built-in `say`, so we distribute nothing for it.
-
-   That needs a `say` path in `tts.py`, which today looks only for espeak and piper (`tools/builtin/tts.py:86-91`).
-   Whether `say`'s audio needs converting for Telegram voice notes is still to be checked. The alternative is
-   to ship piper with its obligations met.
+   be two formats for the same thing.
+   - *Decided:* packs keep working for now; plugins become the user-facing format; and FOUNDATION Part 2 is
+     amended with the plugin core.
+   - The amendment names section 10.1 as the mechanism its 2.4 asks for, for first-party code only.
+   - It also makes the pack loader's rule (quarantine until accepted) the rule for any later third-party plugin
+     skills.
+2. **The Speech plugin's voice output was GPL.** The locked `piper-tts` 1.4.2 is **GPL-3.0-or-later** (PyPI
+   metadata; the upstream repository is named `piper1-gpl`).
+   - *Decided:* Speech ships without piper. Input is faster-whisper (MIT), and output is macOS's built-in
+     `say`.
+   - That needs a `say` path in `tts.py`, which today looks only for espeak and piper
+     (`tools/builtin/tts.py:86-91`).
+   - Whether `say`'s audio needs converting for Telegram voice notes is still to be checked.
+   - `piper-tts` leaves the `speech` extra's plugin build. Whether it also leaves the pip extra for terminal
+     installs, where pip installs it from PyPI and we distribute nothing, is a separate question for the
+     Speech PR.
 3. **"Voice" is still a user-facing word outside the plugin.** `oara`'s interactive chat has a `--voice` flag
    and `:voice on` (`__main__.py:970-979`), and the config section is `gateway.voice` (`cli/voice.py:297-302`).
    Decision 4 covers the plugin's name. Whether those also become "speech" is a later, separate rename.
@@ -197,7 +217,7 @@ before thinning, not a build, not installed size.
 | User-facing name | Id = extra | Beyond the app | Wheels | Also downloads | Recommendation |
 |---|---|---|---|---|---|
 | **Browser plugin** | `browser` (`pyproject.toml:96`) | playwright 1.60.0, greenlet, pyee | **42.6 MB** | Chromium from Playwright's CDN, about 150 MB (measure the headless shell) | **Plugin, first** |
-| **Speech plugin** | `speech` (new; `voice` kept as an alias, `:129-134`) | 21 packages: av, onnxruntime, scipy, numpy, piper-tts, faster-whisper, ctranslate2, tokenizers, huggingface-hub… | **104.7 MB**; about 91 MB without piper-tts | a Whisper model from Hugging Face; a piper voice if piper ships | **Plugin, after the GPL question** |
+| **Speech plugin** | `speech` (new; `voice` kept as an alias, `:129-134`) | 21 packages: av, onnxruntime, scipy, numpy, piper-tts, faster-whisper, ctranslate2, tokenizers, huggingface-hub… | **104.7 MB**; about 91 MB without piper-tts | a Whisper model from Hugging Face | **Plugin, without piper-tts** (decided); spoken replies use macOS `say` |
 | **Computer-use plugin** | `computer` (`:112`, exact pin, not in `full`) | cua-driver 0.28.2, one universal2 wheel | 40.9 MB before thinning | none | **Plugin later**: macOS Accessibility and Screen Recording grants for the app's identity are unproven |
 | *(none: hidden)* | `skill-dedupe` (new; `skills` kept as an alias, `:140`) | numpy, onnxruntime, tokenizers, hub client: 13 packages | 41.2 MB | the encoder, about 134 MB (`similarity.py:12`) | **Not a plugin.** An internal duplicate check, not a feature anyone asks for. Never listed |
 | *(built in)* | `push` (`:95`) | h2, hpack, hyperframe | 0.1 MB | none | **Bundle in the app** (finding 7) |
@@ -460,13 +480,14 @@ hot-loading in v1.
 A plugin is active only when its `app_version` and `lock_sha256` equal the app's. `prometheus-mac.json`
 already records `lock_sha256` (`build_app.py:206`). After an app update:
 
-- **The old plugin is `stale`.** It stays on disk, inactive, reported as "The Speech plugin is for 0.9.8; this
-  app is 0.9.9. Update: 91 MB".
+- **The old plugin shows "update available"** (status `update_available`). It stays on disk, inactive, reported
+  as "The Speech plugin is for 0.9.8; this app is 0.9.9. Update available: 91 MB". Nothing downloads by itself.
 - **Updating.** `oara plugin update`, `/plugin update` or Beacon's Update fetches the matching version by the
   steps above. Once the new version has started cleanly, versions older than the previous one are deleted.
   Moving back to the previous app version reactivates its plugin with no download.
-- **`plugins.auto_update: true`** does this at the first start of a new version. The default is off: a
-  download the person did not ask for at that moment is the kind of traffic the first pillar says to name.
+- **No automatic update** (decided). Nothing downloads at the first start of a new version. A download the
+  person did not ask for at that moment is the kind of traffic the first pillar says to name. A setting for it
+  can come later, if anyone asks.
 
 ### 5.5 Remove
 
@@ -510,7 +531,7 @@ One helper, `prometheus.plugins.fix_for(extra) -> str`:
 
 - **app:**
   - not installed: "Add the Speech plugin: `/plugin add speech`, or Plugins in Beacon";
-  - stale: "The Speech plugin needs updating for this version: `/plugin update`";
+  - update available: "An update to the Speech plugin is available for this version: `/plugin update`";
   - failed: the recorded reason and the retry.
 - **elsewhere:** the exact line from section 6.
 
@@ -544,7 +565,7 @@ operator_only` from the default-deny middleware (`web/server.py:495-501`). None 
 | `POST /api/plugins/{id}` | 202 `{job}`. 409 `already_installing`. 404 for an id this version does not know. On a non-app install: 200 `{action: "command", command}`, and nothing runs |
 | `POST /api/plugins/{id}/file` | the same, from an uploaded zip (multipart; `python-multipart` is base, `pyproject.toml:73`). Refused unless its hash is in the app's table |
 | `DELETE /api/plugins/{id}` | 202 `{state: "removing", restart_required: true}` |
-| `POST /api/plugins/update` | 202; updates every stale plugin |
+| `POST /api/plugins/update` | 202; updates every plugin whose status is `update_available` |
 
 **A row.** `oara doctor` prints the same function's output.
 
@@ -566,7 +587,7 @@ operator_only` from the default-deny middleware (`web/server.py:495-501`). None 
   plus `bytes` and `total`;
 - `installed`;
 - `pending_restart`;
-- `stale`, with `for_version`;
+- `update_available`, with `for_version` (the plugin on disk was built for another app version);
 - `failed`, with `reason` and `step`;
 - `removing`;
 - `unavailable`, with the reason: not built for this platform or install kind.
@@ -675,8 +696,10 @@ plugin's MCP servers are gated like any MCP server: every call asks unless the m
 Each step is a draft PR. The test that fails on today's behaviour is written and run first. Nothing merges
 without Will's go.
 
-1. **PDF without AGPL** (section 2). Measure, then swap. The app gets PDF and better image downscaling back,
-   **with no plugin.**
+1. **PDF without AGPL** (section 2). First, the comparison against PyMuPDF on at least five real PDFs
+   (scanned, multi-column, forms), shown to Will. After he approves it, the swap goes in as its own PR. The app
+   gets PDF and better image downscaling back, **with no plugin.** Beside it goes a small PR that removes the
+   unused `anthropic` extra (finding 10).
 2. **Push in the app, the extra renames (`speech`, `skill-dedupe`, with aliases), and `install_kind()`.**
 3. **The plugin core and the messages.**
    - `prometheus.plugins`: state, activation, verify, smoke, fetch, `fix_for`.
@@ -690,11 +713,11 @@ without Will's go.
 
 **Waits:**
 
-- the Speech plugin (the GPL question);
+- the Speech plugin, after the Browser plugin;
 - the Computer-use plugin (prove the macOS prompts first);
-- automatic updates;
 - any third-party format;
-- the FOUNDATION Part 2 amendment, which can be written alongside step 3.
+- **everything from step 2 on, until 0.9.9 is out** (Will, 2026-10-13). The FOUNDATION Part 2 amendment lands
+  with step 3.
 
 ## What has been proven, and what has not
 
