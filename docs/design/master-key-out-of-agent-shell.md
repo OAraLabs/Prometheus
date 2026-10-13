@@ -40,7 +40,8 @@ instead.
 
 Every shell a model writes is exec'd through `sandbox-exec -p <profile>`. The profile allows everything except
 reading or writing `~/.ssh`, `~/.gnupg` and `~/.config/*/*env`: the same three families as the AppArmor
-profile.
+profile. Since 2026-10-13 it also denies the same-Mac pairing directory and renaming the directories above
+what it denies (below).
 
 - **For: it's the macOS half of a floor that already exists.** It uses the same config key
   (`security.bash_confinement`), the same modes (`auto`/`required`/`off`) and the same doctrine (verify by
@@ -73,6 +74,46 @@ means a hashed token together with a presence-gated client credential, designed 
 local clients have somewhere safe to keep a credential.
 
 **The narrow opt-out (Will, 2026-10-10):** `security.bash_allow_ssh: true` lifts only the `~/.ssh` rule, for `git` over SSH. `~/.gnupg` and `~/.config/*/*env` stay denied, so the master key stays out. Without it, `bash_confinement: off` was the only way, and it opened everything. It works on macOS (Seatbelt). On Linux the AppArmor profile is a file root loaded, so the daemon warns at boot that the key has no effect there.
+
+**The same-Mac pairing secret (2026-10-13).** The app keeps `pair.secret` in
+`~/Library/Application Support/Prometheus/pairing/` (`config/local_pairing.py`). `POST /api/pair/local`, and
+`POST /api/setup/pair` in setup mode, trade it for an owner device token when the request comes from loopback
+with a loopback Host and no Origin. Every model-written shell on the same Mac meets all three conditions, and a
+`python3 -c` with urllib doesn't match the curl/wget approval patterns. So while the secret exists (setup mode
+before Beacon pairs, or after `Prometheus --pair` until it is used), a shell that could read the file could mint
+itself operator-equivalent credentials. Writing to the file is as bad as reading it: a secret the shell planted
+would be accepted just the same. Measured before the fix: under the profile, `cat .../pairing/pair.secret`
+printed the secret, and `read_file` was ALLOW at AUTO trust. The local-pairing module's note that the file
+"widens nothing" holds for a person's processes, not for a shell the floor keeps out of `~/.config/prometheus/env`.
+
+Now:
+
+- The Seatbelt profile denies reading and writing the pairing directory, and also the one
+  `PROMETHEUS_LOCAL_PAIRING_DIR` names when it is set. `security.bash_allow_ssh` doesn't change that.
+- The gate's credential floor (`checker._ALWAYS_DENIED_PATHS`, unoverridable) and the shipped `denied_paths`
+  name `/*/Library/Application Support/Prometheus/pairing` and `/*/.local/share/prometheus/pairing`. The gate
+  also denies the directory this process would actually mint into, as it does its own config file.
+- A config holding, exactly and in order, a `denied_paths` list an earlier version shipped (setup copies the
+  template, so every install has one) is given the new list, with one INFO line at boot. Any other list is the
+  operator's, is used as written and still gets the override WARNING (`DENIED_PATHS_DEFAULTS_SHIPPED`).
+- grep and glob prune the floor out of results under any root, not only the configured list. Before this,
+  `denied_paths: []`, or a config written before an entry joined the floor, let `grep --root ~` print a floored
+  file.
+
+**Renaming a parent escaped the floor (found in the same measurement).** A path-matched rule is escaped by
+moving a directory above it: `mv ~/.config ~/cfg` was allowed, because `~/.config` itself isn't
+`~/.config/*/*env`, and `cat ~/cfg/prometheus/env` then printed the master key. Moving
+`.../Application Support/Prometheus` did the same to the pairing secret. The profile now refuses writes
+(`literal`) to each directory above a denied root, up to but not including the home: `~/.config`, `~/Library`,
+`~/Library/Application Support` and `.../Prometheus`. Creating, writing and deleting things inside those
+directories still works (measured). What's refused is renaming, replacing or re-moding the directory itself, so
+`touch ~/.config` now fails. Hard links and symlinks into a denied path are refused too, and so is moving a
+prepared directory into place. The boot probe checks the pairing secret and the `~/.config` rename by outcome.
+
+**Not covered by this change:** the Linux AppArmor profile (`deploy/apparmor/prometheus-bash`) has the same
+shape (`deny @{HOME}/.config/*/*env`) and is probably open to the same `~/.config` rename. That hasn't been
+measured (#766, which lists what measuring it needs). It is a root-loaded file, so it needs its own change and a reload. The pairing directory only exists
+for the Mac app (`PROMETHEUS_INSTALL_KIND=app`) unless someone names one by hand.
 
 ## What gets built
 

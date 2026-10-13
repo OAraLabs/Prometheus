@@ -123,7 +123,9 @@ def test_the_floor_is_narrower_than_the_shipped_list_and_is_credentials_only():
     """A floor that cannot be overridden must be small enough to deserve it."""
     assert set(_ALWAYS_DENIED_PATHS) < set(SHIPPED_DENIED_PATHS), (
         "the floor is not a strict subset of the shipped policy list")
-    assert all(any(m in p for m in (".ssh", ".gnupg", "env"))
+    # `pairing`: the same-Mac pairing secret is traded for an OWNER device token
+    # (config/local_pairing.py), so its directory is credential material too.
+    assert all(any(m in p for m in (".ssh", ".gnupg", "env", "/pairing"))
                for p in _ALWAYS_DENIED_PATHS), (
         f"{_ALWAYS_DENIED_PATHS} contains something that is POLICY, not "
         f"credential material. The line is not 'how small can the floor be' "

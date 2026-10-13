@@ -53,14 +53,22 @@ class TestPruneKeepsTheToolUsable:
         out = _grep(_tree(tmp_path))
         assert "withheld" in out and "denied_paths" in out
 
-    def test_no_denied_config_prunes_nothing(self, tmp_path):
+    def test_no_denied_config_prunes_only_the_credential_floor(self, tmp_path):
+        """With nothing configured the gate's credential floor still holds here.
+
+        This asserted that ``id_rsa`` came back. The gate floors ``/*/.ssh``
+        whatever the config says, so ``denied_paths: []`` (or a config written
+        before an entry joined the floor) let ``grep --root ~`` print what the
+        gate would refuse to open, one layer down.
+        """
         _tree(tmp_path)
         tool = GrepTool(denied_paths=None)
         out = asyncio.run(tool.execute(
             GrepTool.input_model(pattern="NEEDLE"),
             ToolExecutionContext(cwd=tmp_path),
         )).output
-        assert "id_rsa" in out and "withheld" not in out
+        assert "ok/notes.txt" in out
+        assert "id_rsa" not in out and "withheld" in out
 
     def test_glob_prunes_and_reports(self, tmp_path):
         _tree(tmp_path)
