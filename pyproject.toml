@@ -79,6 +79,11 @@ dependencies = [
     # range, so without it an upgraded install keeps the vulnerable version,
     # and a future re-resolve can walk straight back onto one.
     "starlette>=1.3.1",
+    # The Linux "- OS:" line of the system prompt's environment section (context/environment.py, detect_os:
+    # "24.04 (Noble Numbat)" rather than a kernel release). It was only ever present because the Anthropic SDK
+    # depended on it; when the `anthropic` extra stopped installing that SDK (0.9.9) the line changed on every
+    # Linux install, which the parity replay caught. Declared where it is used. Apache-2.0, pure Python.
+    "distro>=1.9.0; sys_platform == 'linux'",
 ]
 
 [project.urls]

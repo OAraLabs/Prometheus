@@ -6,7 +6,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ### The `anthropic` extra installs nothing
 
-- **`[anthropic]` no longer installs the Anthropic SDK, which nothing in Prometheus imports:** the Anthropic provider speaks HTTP itself. The SDK and the four packages only it brought (jiter, distro, docstring-parser, sniffio) leave Prometheus.app, the Docker image and `[full]`. The extra's name stays, empty, so `pip install 'oara-prometheus[anthropic]'` and `uv sync --extra anthropic` still work. Nothing changes for using Claude models.
+- **`[anthropic]` no longer installs the Anthropic SDK, which nothing in Prometheus imports:** the Anthropic provider speaks HTTP itself. The SDK and three packages only it brought (jiter, docstring-parser, sniffio) leave Prometheus.app, the Docker image and `[full]`. The fourth, `distro`, becomes a declared dependency on Linux: the system prompt's OS line uses it, and it had only ever been installed by accident, through the SDK. The extra's name stays, empty, so `pip install 'oara-prometheus[anthropic]'` and `uv sync --extra anthropic` still work. Nothing changes for using Claude models.
 
 ### Startup banner
 

@@ -1,7 +1,7 @@
 """The `anthropic` extra installed the Anthropic SDK, which nothing in Prometheus imports.
 
 The Anthropic provider speaks HTTP itself (`providers/anthropic.py` imports httpx), so the SDK and the four
-packages it alone brings (jiter, distro, docstring-parser, sniffio) were dead weight in every install that
+packages it alone brought (jiter, docstring-parser, sniffio, and distro) were dead weight in every install that
 asked for the extra, including Prometheus.app and the Docker image. The extra's NAME stays, empty, so an
 existing `pip install 'oara-prometheus[anthropic]'` or `uv sync --extra anthropic` still works (the `web`
 extra is the precedent: kept defined after its packages moved to base).
@@ -36,6 +36,16 @@ def test_no_extra_installs_the_anthropic_sdk():
     extras = _pyproject()["project"]["optional-dependencies"]
     carrying = [name for name, reqs in extras.items() if any(re.match(r"anthropic\b", r) for r in reqs)]
     assert carrying == [], f"extras that still install the unused SDK: {carrying}"
+
+
+def test_distro_is_declared_where_it_is_used():
+    """context/environment.py imports `distro` for the Linux OS line. It arrived only through the Anthropic SDK,
+    so dropping the SDK silently changed the system prompt on every Linux install (the parity replay's
+    compaction token counts moved by one). Anything the code imports for real must be declared."""
+    env = (REPO / "src" / "prometheus" / "context" / "environment.py").read_text(encoding="utf-8")
+    assert "import distro" in env
+    deps = _pyproject()["project"]["dependencies"]
+    assert any(re.match(r"distro\b", d) and "linux" in d for d in deps), deps
 
 
 def test_the_extra_name_still_resolves_for_old_install_commands():
