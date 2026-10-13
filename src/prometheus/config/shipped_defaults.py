@@ -191,8 +191,13 @@ SHIPPED_TELEGRAM_ENABLED: bool = False
 # beneath any config. `.config/*/*env` stays policy-only — env files are
 # credential-bearing but an operator may have a legitimate reason to read one,
 # and the floor should stay small enough to deserve being unoverridable.
+#
+# The pairing directories hold the same-Mac pairing secret, which mints an
+# OWNER device token (config/local_pairing.py); they sit in the floor too.
 SHIPPED_DENIED_PATHS: tuple[str, ...] = (
     "/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
+    "/*/Library/Application Support/Prometheus/pairing",
+    "/*/.local/share/prometheus/pairing",
 )
 
 

@@ -386,6 +386,10 @@ security:
     - "/*/.ssh"
     - "/*/.gnupg"           # GPG keys — the sibling of .ssh
     - "/*/.config/*/*env"   # credential env files (…/prometheus/env, …/oara/middleware.env)
+    # The same-Mac pairing secret (pair.secret), traded for an OWNER device
+    # token: the Mac app's directory, and the XDG default elsewhere.
+    - "/*/Library/Application Support/Prometheus/pairing"
+    - "/*/.local/share/prometheus/pairing"
   # THE ABOVE DOES NOT COVER bash. denied_paths is only consulted when a call
   # passes a file_path, and bash is handed a command string — so at BOTH
   # origins `cat ~/.ssh/id_*` is ALLOW. Measured, not inferred. Any check on

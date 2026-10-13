@@ -52,9 +52,18 @@ def resolve_denied(denied_paths: Iterable[str] | None) -> tuple[str, ...]:
     A relative entry is skipped with a warning rather than resolved: resolving it
     against the daemon's cwd is the exact defect ``_normalise_denied_path``
     raises on at boot, and this layer must not quietly reinstate it.
+
+    The gate's credential floor (``checker._ALWAYS_DENIED_PATHS``) and this
+    process's pairing directory come first, whatever was configured. They were
+    the gate's alone, so ``denied_paths: []``, or a config written before an
+    entry was added to the floor, left ``grep --root ~`` free to print a
+    floored file: the root is not denied, and the prune saw only the config.
     """
+    from prometheus.config.local_pairing import pairing_dir
+    from prometheus.permissions.checker import _ALWAYS_DENIED_PATHS
+
     out: list[str] = []
-    for raw in denied_paths or ():
+    for raw in (*_ALWAYS_DENIED_PATHS, str(pairing_dir().resolve()), *(denied_paths or ())):
         text = str(raw).strip()
         if not text:
             continue
