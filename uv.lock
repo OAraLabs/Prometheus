@@ -2856,9 +2856,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-anthropic = [
-    { name = "anthropic" },
-]
 browser = [
     { name = "playwright" },
 ]
@@ -2887,7 +2884,6 @@ evals = [
 ]
 full = [
     { name = "aiohttp" },
-    { name = "anthropic" },
     { name = "discord-py" },
     { name = "fastapi" },
     { name = "mcp" },
@@ -2949,8 +2945,6 @@ lint = [
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'discord'", specifier = ">=3.14.3" },
     { name = "aiohttp", marker = "extra == 'full'", specifier = ">=3.14.3" },
-    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40" },
-    { name = "anthropic", marker = "extra == 'full'", specifier = ">=0.40" },
     { name = "anyio", specifier = ">=4.14.2" },
     { name = "arize-phoenix", marker = "extra == 'evals'", specifier = ">=16.4.0" },
     { name = "croniter", specifier = ">=2.0" },

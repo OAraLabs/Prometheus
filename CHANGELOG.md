@@ -4,6 +4,10 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## 0.9.9 (unreleased)
 
+### The `anthropic` extra installs nothing
+
+- **`[anthropic]` no longer installs the Anthropic SDK, which nothing in Prometheus imports:** the Anthropic provider speaks HTTP itself. The SDK and the four packages only it brought (jiter, distro, docstring-parser, sniffio) leave Prometheus.app, the Docker image and `[full]`. The extra's name stays, empty, so `pip install 'oara-prometheus[anthropic]'` and `uv sync --extra anthropic` still work. Nothing changes for using Claude models.
+
 ### Startup banner
 
 - **`oara daemon`, `oara setup` and the interactive chat open with a banner on a terminal.** It shows the wordmark, the port the daemon listens on and the model it serves, each only once it is known; never an address, a token or a path. Nothing is printed when stdout isn't a terminal, for `oara --once`, with `--quiet` (`-q`) or `OARA_NO_BANNER=1`, and `NO_COLOR` makes it plain text.

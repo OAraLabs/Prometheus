@@ -2,7 +2,7 @@
 """Build Prometheus.app: a relocatable Python, the pinned wheels, a native launcher, signed.
 
     python packaging/macos/build_app.py --identity <SHA-1 of a Developer ID Application cert> \\
-        [--extras anthropic,mcp,slack,discord,discovery] [--without pymupdf] [--wheel PATH]
+        [--extras mcp,slack,discord,discovery] [--without pymupdf] [--wheel PATH]
         [--notarize --notary-profile NAME [--notary-keychain PATH]]
     python packaging/macos/build_app.py --wheel-only      # just the wheel, into <work>/wheel
 
@@ -78,7 +78,8 @@ PBS_URL = (
 # mDNS announcer (it only runs in home-network mode). Its license text goes into the bundle with every other
 # copyleft package's (ship_copyleft_licenses). The Docker image leaves it out: mDNS does not get through Docker's
 # default bridge network.
-DEFAULT_EXTRAS = ("anthropic", "mcp", "slack", "discord", "discovery")
+# No `anthropic`: that extra only ever installed the Anthropic SDK, which nothing imports (it is empty since 0.9.9).
+DEFAULT_EXTRAS = ("mcp", "slack", "discord", "discovery")
 
 # The wheel's build backend (pyproject.toml [build-system]) and its dependencies, pinned with hashes.
 BUILD_CONSTRAINTS = Path(__file__).resolve().parent / "build-constraints.txt"

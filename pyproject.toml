@@ -88,7 +88,11 @@ Issues = "https://github.com/OAraLabs/Prometheus/issues"
 Documentation = "https://github.com/OAraLabs/Prometheus/tree/main/docs/guide"
 
 [project.optional-dependencies]
-anthropic = ["anthropic>=0.40"]
+# EMPTY ON PURPOSE (0.9.9). This used to install the Anthropic SDK, which nothing imports: the Anthropic
+# provider speaks HTTP itself (providers/anthropic.py, httpx). The name stays so an existing
+# `pip install 'oara-prometheus[anthropic]'` or `uv sync --extra anthropic` keeps working, as `web` does.
+# tests/test_anthropic_sdk_unused.py pins both halves.
+anthropic = []
 # GRAFT-MOBILE-BRIDGE 2: APNs push. ES256 JWT is hand-rolled on cryptography
 # (no APNs library, per the spec); h2 gives httpx its HTTP/2. push.enabled
 # with these missing fails the boot loudly.
@@ -195,7 +199,6 @@ evals = [
 # fastapi/uvicorn/websockets stay listed here although the base now carries
 # them, so `full` never depends on where the base list happens to stand.
 full = [
-    "anthropic>=0.40",
     "playwright>=1.40",
     "mcp>=1.28.1,<2",  # floor and upper bound both load-bearing — see the `mcp` extra above
     "pydantic-settings>=2.14.2",  # mcp's; security floor — see the `mcp` extra

@@ -44,7 +44,7 @@ pip install -e '.[full]'
 Running the tests from a uv-managed venv? Sync it with the same extras CI uses first:
 
 ```bash
-uv sync --extra web --extra anthropic --extra mcp --group dev
+uv sync --extra web --extra mcp --group dev
 ```
 
 That is the environment the CI test job runs in, so a local run exercises the same tests (`pip install -e '.[full]'` above already covers everything).
