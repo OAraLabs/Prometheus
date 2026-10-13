@@ -433,10 +433,13 @@ the espeak-free path failed.
 | espeak-free measurement: 50 real replies, words dropped or mangled, audio samples (decision 2) | **done**: names fail (silent drops); see above |
 | Option B written up (decision 2) | **done**, not built; Will chooses |
 | History scan of the voice plugin repo before it goes public (decision 1) | **done**: git history and CI logs clean; one issue's text to edit before going public (reported to Will) |
+| Issue 5's text made generic before the repo goes public | **done**; the original revision must be deleted from the issue's edit history (Will, in the GitHub UI) |
 | The voice plugin repo made public | Will |
 | The voice plugin published to PyPI, so `[speech]` can carry the full stack (decision 3) | not started |
 | `[speech]` = speech-to-text plus `say`, with `[voice]` as an alias (decision 3) | with the plugin core |
 | `say` fallback in `tts.py` (and Telegram voice-note format) | not started |
+| A **speakable-text pass** before any TTS, needed with every option: skip or summarise hashes, commit ids and file paths; read numbers, units and code identifiers sensibly. The measurement's 259 words missed by *both* pipelines are mostly this. | not started |
+| A third option measured: Kokoro's converter plus a permissively licensed fallback for unknown words only (Will, 2026-10-13: his pick if near espeak on names, otherwise option B) | in progress |
 | Models pinned (URLs, SHA-256s) and `whisper-server` built and signed in CI | not started |
 | The plugin core (sections 3 to 8) | waits until 0.9.9 is out |
 
