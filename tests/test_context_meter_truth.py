@@ -114,13 +114,14 @@ def test_meter_and_compactor_agree_to_the_token():
 
 
 def test_compaction_threshold_has_one_implementation():
-    assert compaction_threshold(32768, 4096, 0.75) == 21504
-    assert compaction_threshold_from_config(32768, CONFIG) == 21504
+    # #773: a plain share of the window; the reserve is no longer subtracted.
+    assert compaction_threshold(32768, 0.75) == 24576
+    assert compaction_threshold_from_config(32768, CONFIG) == (24576, "global pct")
     c = ContextCompactor(
         provider=_Summarizer(), model="m", effective_limit=32768,
         reserve_tokens=4096, threshold_pct=0.75,
     )
-    assert c._threshold_tokens() == compaction_threshold(32768, 4096, 0.75)
+    assert c._threshold_tokens() == compaction_threshold(32768, 0.75)
 
 
 def test_meter_shows_where_compaction_fires():
@@ -182,7 +183,8 @@ async def test_non_convergence_is_reported(caplog):
     warnings = [r.message for r in caplog.records]
     assert any("did NOT converge" in m for m in warnings), warnings
     # and it must name the gap, not merely complain
-    assert any("exceeds the 1000 threshold by" in m for m in warnings), warnings
+    # (1200: 0.4 of the 3000 window — #773 no longer subtracts the reserve.)
+    assert any("exceeds the 1200 threshold by" in m for m in warnings), warnings
 
 
 @pytest.mark.asyncio

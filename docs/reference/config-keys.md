@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **445** of
+Every key in `config/prometheus.yaml.default` — **444** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -42,7 +42,7 @@ none either — the key is documented so its absence is visible.
 | `compaction.max_summary_tokens` | `512` |
 | `compaction.protect_recent_turns` | `8` |
 | `compaction.reserve_tokens` | `4096` |
-| `compaction.threshold_pct` | `0.75` |
+| `compaction.threshold_pct` | `0.8` |
 | `checkpoints` | *(section)* |
 | `checkpoints.enabled` | `True` |
 | `checkpoints.max_file_bytes` | `2000000` |
@@ -54,7 +54,6 @@ none either — the key is documented so its absence is visible.
 | `sessions.rehydrate` | `False` |
 | `context` | *(section)* |
 | `context.effective_limit` | `24000` |
-| `context.compression_trigger` | `0.75` |
 | `context.tool_result_max` | `4000` |
 | `context.tool_results_turn_budget` | `8000` |
 | `context.reserved_output` | `2000` |

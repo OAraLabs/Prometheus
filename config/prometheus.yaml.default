@@ -141,8 +141,14 @@ compaction:
   #    Pinned equal to the readers by tests/test_config_defaults_equality.
   max_summary_tokens: 512
   protect_recent_turns: 8
+  # Output room the projected-overflow rule assumes when a request's own
+  # max_tokens is unknown (#773). No longer subtracted from the threshold.
   reserve_tokens: 4096
-  threshold_pct: 0.75
+  # Compact at this share of the serving model's window (#773). Also fires
+  # earlier when the NEXT round would not fit: current size + the request's
+  # max_tokens + the largest recent tool result over the window. Per-model
+  # thresholds go in context.model_overrides (see there).
+  threshold_pct: 0.8
 
 # Per-turn file checkpoints (item 4, 2026-09-01): the undo an agent that
 # edits your files needs. For a conversation that has a workspace
@@ -173,7 +179,6 @@ sessions:
 
 context:
   effective_limit: 24000
-  compression_trigger: 0.75
   tool_result_max: 4000
   tool_results_turn_budget: 8000            # max tokens across all results per turn
   reserved_output: 2000
@@ -206,6 +211,14 @@ context:
   #       effective_limit: 200000
   #     gpt-4o:
   #       effective_limit: 128000
+  #
+  # An entry can also set WHEN that model compacts, without changing its window
+  # (#773). Set these from evidence — /health lists the context size each model
+  # broke down at (#772). Both set: the smaller wins. None ship by default.
+  #
+  #     some-cloud-model:
+  #       compaction_threshold_tokens: 200000   # an absolute token count
+  #       compaction_threshold_pct: 0.2         # or a share of its window
   model_overrides: {}
 
   # ── Previously undocumented: read by the code, absent from this

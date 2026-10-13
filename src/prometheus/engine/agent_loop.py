@@ -2184,6 +2184,9 @@ async def _run_loop(
                     # session with a far larger context was compacted as if it
                     # were the local GGUF.
                     model=context.model,
+                    # #773: the projected-overflow rule — this request's output
+                    # room is part of whether the next round fits.
+                    max_tokens=context.max_tokens,
                 )
             except Exception:
                 log.exception(
