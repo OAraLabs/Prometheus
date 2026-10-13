@@ -192,13 +192,31 @@ SHIPPED_TELEGRAM_ENABLED: bool = False
 # credential-bearing but an operator may have a legitimate reason to read one,
 # and the floor should stay small enough to deserve being unoverridable.
 #
-# The pairing directories hold the same-Mac pairing secret, which mints an
-# OWNER device token (config/local_pairing.py); they sit in the floor too.
-SHIPPED_DENIED_PATHS: tuple[str, ...] = (
-    "/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
-    "/*/Library/Application Support/Prometheus/pairing",
-    "/*/.local/share/prometheus/pairing",
+# EVERY list Prometheus has shipped as the default, oldest first, read from the
+# template's git history (2026-10-13). The NEWEST is the default. As with
+# ALWAYS_LOADED_DEFAULTS_SHIPPED: to change the default, APPEND a list and leave
+# the old ones. Setup copies the template, so every install holds the list of
+# its day written out, and a config that holds one of them exactly did not
+# choose it. ``resolve_denied_paths`` gives such a config the newest list; any
+# other list, ``[]`` included, is the operator's and is used exactly as written.
+DENIED_PATHS_DEFAULTS_SHIPPED: tuple[tuple[str, ...], ...] = (
+    # The initial commit's template (cfebf6c, 2026-04-20).
+    ("/etc", "/sys", "/boot", "~/.ssh"),
+    # + the config file, relative (647f824, 2026-04-21). The gate now refuses a
+    # relative entry at boot and denies its own config file by itself.
+    ("/etc", "/sys", "/boot", "~/.ssh", "config/prometheus.yaml"),
+    # Absolute-only, + .gnupg and credential env files (b741494, 2026-08-12).
+    ("/etc", "/sys", "/boot", "~/.ssh", "~/.gnupg", "~/.config/*/*env"),
+    # Any home, not just the daemon's (bef0729, 2026-08-15): v0.9.0 to v0.9.8.
+    ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env"),
+    # + the same-Mac pairing directories, whose pair.secret mints an OWNER
+    # device token (config/local_pairing.py); they sit in the floor too.
+    ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
+     "/*/Library/Application Support/Prometheus/pairing",
+     "/*/.local/share/prometheus/pairing"),
 )
+
+SHIPPED_DENIED_PATHS: tuple[str, ...] = DENIED_PATHS_DEFAULTS_SHIPPED[-1]
 
 
 def always_loaded_origin(deferred_cfg: dict | None) -> str:
@@ -235,11 +253,23 @@ def resolve_always_loaded(deferred_cfg: dict | None) -> list[str]:
     return list(SHIPPED_ALWAYS_LOADED)
 
 
+def denied_paths_is_earlier_default(security_cfg: dict | None) -> bool:
+    """The section holds, exactly and in order, a ``denied_paths`` list an EARLIER
+    version shipped as the default (not the newest one, which is simply in force)."""
+    value = (security_cfg or {}).get("denied_paths")
+    return (isinstance(value, list)
+            and tuple(str(v) for v in value) in DENIED_PATHS_DEFAULTS_SHIPPED[:-1])
+
+
 def resolve_denied_paths(security_cfg: dict | None) -> list[str]:
     """The denied-path list for a security config section.
 
     * key ABSENT (or null) -> :data:`SHIPPED_DENIED_PATHS`.
-    * key present as a LIST -> that list verbatim, **including ``[]``**.
+    * a list EQUAL, item for item and in order, to any list in
+      :data:`DENIED_PATHS_DEFAULTS_SHIPPED` -> :data:`SHIPPED_DENIED_PATHS`, the
+      newest. Setup wrote the default of its day into the config; that was not
+      a choice, and pinning it would keep every upgraded install on an old list.
+    * any other LIST -> that list verbatim, **including ``[]``**.
 
     The empty-list case is honoured deliberately, and it is safe here in a way
     it would not have been before: `checker._ALWAYS_DENIED_PATHS` still denies
@@ -253,7 +283,10 @@ def resolve_denied_paths(security_cfg: dict | None) -> list[str]:
     """
     value = (security_cfg or {}).get("denied_paths")
     if isinstance(value, list):
-        return [str(v) for v in value]
+        listed = [str(v) for v in value]
+        if tuple(listed) in DENIED_PATHS_DEFAULTS_SHIPPED:
+            return list(SHIPPED_DENIED_PATHS)
+        return listed
     return list(SHIPPED_DENIED_PATHS)
 
 

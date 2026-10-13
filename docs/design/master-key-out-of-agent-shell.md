@@ -93,6 +93,9 @@ Now:
 - The gate's credential floor (`checker._ALWAYS_DENIED_PATHS`, unoverridable) and the shipped `denied_paths`
   name `/*/Library/Application Support/Prometheus/pairing` and `/*/.local/share/prometheus/pairing`. The gate
   also denies the directory this process would actually mint into, as it does its own config file.
+- A config holding, exactly and in order, a `denied_paths` list an earlier version shipped (setup copies the
+  template, so every install has one) is given the new list, with one INFO line at boot. Any other list is the
+  operator's, is used as written and still gets the override WARNING (`DENIED_PATHS_DEFAULTS_SHIPPED`).
 - grep and glob prune the floor out of results under any root, not only the configured list. Before this,
   `denied_paths: []`, or a config written before an entry joined the floor, let `grep --root ~` print a floored
   file.
@@ -109,7 +112,7 @@ prepared directory into place. The boot probe checks the pairing secret and the 
 
 **Not covered by this change:** the Linux AppArmor profile (`deploy/apparmor/prometheus-bash`) has the same
 shape (`deny @{HOME}/.config/*/*env`) and is probably open to the same `~/.config` rename. That hasn't been
-measured. It is a root-loaded file, so it needs its own change and a reload. The pairing directory only exists
+measured (#766, which lists what measuring it needs). It is a root-loaded file, so it needs its own change and a reload. The pairing directory only exists
 for the Mac app (`PROMETHEUS_INSTALL_KIND=app`) unless someone names one by hand.
 
 ## What gets built

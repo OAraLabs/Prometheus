@@ -57,6 +57,7 @@ from prometheus.config.shipped_defaults import (
     SHIPPED_TELEGRAM_ENABLED,
     SHIPPED_WORKSPACE_ROOT,
     always_loaded_origin,
+    denied_paths_is_earlier_default,
     resolve_always_loaded,
     resolve_denied_paths,
     resolve_max_tool_iterations,
@@ -208,6 +209,7 @@ GOVERNED: tuple[_Governed, ...] = (
     _Governed(
         "security.denied_paths", ("security",), "denied_paths",
         SHIPPED_DENIED_PATHS, resolve_denied_paths, _admits_list,
+        was_shipped=denied_paths_is_earlier_default,
     ),
     _Governed(
         "gateway.media.allowed_image_types", ("gateway", "media"),
