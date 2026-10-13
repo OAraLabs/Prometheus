@@ -36,20 +36,20 @@ def _png(width: int, height: int, path) -> str:
     Generated rather than hand-rolled: the code under test decodes the file and reads
     its true pixel size, so a fixture that only claims a size would test nothing.
     """
-    import fitz
+    from PIL import Image
 
-    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, width, height), False)
-    pix.clear_with(255)
     p = path / f"{width}x{height}.png"
-    p.write_bytes(pix.tobytes(output="png"))
+    Image.new("RGB", (width, height), (255, 255, 255)).save(p, format="PNG")
     return str(p)
 
 
 def _dims(data_b64: str) -> tuple[int, int]:
-    import fitz
+    import io
 
-    pix = fitz.Pixmap(base64.b64decode(data_b64))
-    return pix.width, pix.height
+    from PIL import Image
+
+    with Image.open(io.BytesIO(base64.b64decode(data_b64))) as img:
+        return img.size
 
 
 # ── 2a: the shrink re-tune ──────────────────────────────────────────────────
@@ -77,6 +77,25 @@ def test_an_image_well_over_the_trigger_still_shrinks(tmp_path):
     w, _ = _dims(block.data)
     assert w < image_prep.SHRINK_ABOVE * 2, f"not shrunk at all (w={w})"
     assert w <= image_prep.SHRINK_ABOVE, f"shrunk but still over the trigger (w={w})"
+
+
+def test_a_shrunk_image_lands_exactly_on_the_cap(tmp_path):
+    """Pillow resamples at any ratio, so the long edge is the cap itself. Halving could not hit it: a page
+    rendered at 4896x6336 came out 2448x3168, 23% over (docs/audits/pdf-extraction/)."""
+    src = _png(200, image_prep.SHRINK_ABOVE * 2 + 10, tmp_path)
+    block = image_prep.prepare_image_block(src)
+    w, h = _dims(block.data)
+    assert h == image_prep.MAX_LONG_EDGE, f"long edge {h}, cap {image_prep.MAX_LONG_EDGE}"
+    assert abs(w / h - 200 / (image_prep.SHRINK_ABOVE * 2 + 10)) < 0.01, "aspect ratio changed"
+
+
+def test_downscaling_needs_no_pymupdf(tmp_path, monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "fitz", None)
+    src = _png(image_prep.SHRINK_ABOVE + 1000, 300, tmp_path)
+    block = image_prep.prepare_image_block(src)
+    assert max(_dims(block.data)) == image_prep.MAX_LONG_EDGE
 
 
 def test_a_small_image_is_byte_identical(tmp_path):

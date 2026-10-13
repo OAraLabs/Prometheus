@@ -12,10 +12,10 @@ WHY DOWNSCALE AT ALL, when hosted providers downscale server-side anyway:
   * payload — server-side downscale does not bound what crosses the WS gateway
     and sits in the request body on the way there
 
-WHY PyMuPDF and not Pillow: fitz is already a declared dependency (PDF text
-extraction), so this adds no new one. Its reduction is by powers of two
-(``Pixmap.shrink``), which is coarser than an arbitrary resample but exact on
-aspect ratio and never upscales.
+WHY Pillow: it resamples at any ratio, so a shrunk image lands exactly on the
+cap. Until 0.9.9 this used PyMuPDF (AGPL, absent from the Mac app), whose
+``Pixmap.shrink`` reduces only by powers of two: a page rendered at 4896x6336
+came out 2448x3168, 23% over the cap (docs/audits/pdf-extraction/).
 
 THE ORIGINAL DIMENSIONS ARE LOGGED. "Why did it not see the detail" is a
 question that gets asked weeks later, and the only way to answer it is to know
@@ -25,6 +25,7 @@ what was sent versus what was captured.
 from __future__ import annotations
 
 import base64
+import io
 import logging
 from pathlib import Path
 
@@ -39,18 +40,18 @@ MAX_LONG_EDGE = 2576
 
 # Shrink only ABOVE this, not above the cap itself.
 #
-# WHY, measured. PyMuPDF reduces by powers of two, so shrinking anything merely
-# over the cap overshoots hard: the wire test's 2638x1646 screenshot was 62px
+# WHY, measured. When this shrank by powers of two (PyMuPDF), shrinking anything
+# merely over the cap overshot hard: the wire test's 2638x1646 screenshot was 62px
 # past 2576 and came out 1319x823 — HALF the resolution discarded to clear a 2%
 # overshoot. It cost real legibility: Claude read the sidebar chip "Chats 118"
 # as "Chats 115" and the status pill "LVX" as "LYX". Small UI text is exactly
 # what a screenshot is sent for.
 #
 # Between the cap and this trigger, send as captured and let the provider's own
-# resampler take it down — theirs is arbitrary-ratio, ours is not, and an image
-# in this band is already close enough that the payload is not the problem.
+# resampler take it down: the original bytes are never re-encoded for a 2% gain,
+# and an image in this band is close enough that the payload is not the problem.
 # Above the trigger the payload IS the problem (a 4x-oversized image crossing a
-# WS gateway), and powers of two are the right blunt instrument.
+# WS gateway), and it is resampled to exactly the cap.
 SHRINK_ABOVE = MAX_LONG_EDGE * 2
 
 _MAGIC: tuple[tuple[bytes, str], ...] = (
@@ -101,51 +102,51 @@ def prepare_image_block(path: str | Path) -> ImageBlock | None:
 
 
 def _downscale_if_needed(data: bytes, media_type: str, p: Path) -> tuple[bytes, str]:
-    """Shrink by powers of two until the long edge fits. Original bytes if it fits.
+    """Resample to exactly ``MAX_LONG_EDGE`` above the trigger. Original bytes if it fits.
 
     Returning the ORIGINAL bytes untouched when no shrink is needed matters: a
     re-encode would re-compress a screenshot for no reason, and JPEG artifacts
     on small text are exactly the thing that makes a model misread a UI.
     """
     try:
-        import fitz  # PyMuPDF
+        from PIL import Image
     except ImportError:  # pragma: no cover - declared dependency
-        log.warning("image_prep: PyMuPDF unavailable, sending %s at full size", p)
+        log.warning("image_prep: Pillow unavailable, sending %s at full size", p)
         return data, media_type
 
     try:
-        pix = fitz.Pixmap(data)
+        img: Image.Image = Image.open(io.BytesIO(data))
+        width, height = img.size
     except Exception as exc:
-        # Unreadable by fitz but valid by magic bytes (an exotic PNG variant,
+        # Unreadable by Pillow but valid by magic bytes (an exotic PNG variant,
         # say). Send it as captured rather than dropping the picture.
         log.warning("image_prep: %s not decodable for resize (%s), sending as-is", p, exc)
         return data, media_type
 
-    long_edge = max(pix.width, pix.height)
-    if long_edge <= SHRINK_ABOVE:
+    if max(width, height) <= SHRINK_ABOVE:
         # Includes everything between the cap and 2x it: as-captured beats a
-        # halving that throws away detail the provider would have kept.
+        # re-encode the provider's own resampler makes unnecessary.
         log.info(
             "image_prep: %s %dx%d sent as captured (%d bytes, cap=%d, shrink above %d)",
-            p.name, pix.width, pix.height, len(data), MAX_LONG_EDGE, SHRINK_ABOVE,
+            p.name, width, height, len(data), MAX_LONG_EDGE, SHRINK_ABOVE,
         )
         return data, media_type
 
-    shrink = 0
-    while long_edge > SHRINK_ABOVE:
-        long_edge //= 2
-        shrink += 1
     try:
-        pix.shrink(shrink)
-        out_fmt = "jpg" if media_type == "image/jpeg" else "png"
-        resized = pix.tobytes(output=out_fmt)
+        img.load()
+        img.thumbnail((MAX_LONG_EDGE, MAX_LONG_EDGE), Image.Resampling.LANCZOS)
+        out_fmt = "JPEG" if media_type == "image/jpeg" else "PNG"
+        if out_fmt == "JPEG" and img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format=out_fmt, **({"quality": 90} if out_fmt == "JPEG" else {}))
+        resized = buf.getvalue()
     except Exception as exc:
         log.warning("image_prep: resize of %s failed (%s), sending as-is", p, exc)
         return data, media_type
 
     log.info(
-        "image_prep: %s downscaled %dx%d -> %dx%d (shrink=2^%d, %d -> %d bytes)",
-        p.name, pix.width * (2**shrink), pix.height * (2**shrink),
-        pix.width, pix.height, shrink, len(data), len(resized),
+        "image_prep: %s downscaled %dx%d -> %dx%d (%d -> %d bytes)",
+        p.name, width, height, img.width, img.height, len(data), len(resized),
     )
-    return resized, ("image/jpeg" if out_fmt == "jpg" else "image/png")
+    return resized, ("image/jpeg" if out_fmt == "JPEG" else "image/png")

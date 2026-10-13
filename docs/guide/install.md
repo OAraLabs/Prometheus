@@ -43,7 +43,7 @@ Three things worth knowing about the app install:
 
 - It listens on **this Mac only** until you say otherwise, so nothing on your network can reach it by default. See [Remote access](#remote-access-over-tailscale).
 - It starts in the **`cautious`** permission mode: every shell command the model runs, and every file write, asks you first. `/gate cautious` selects the same mode anywhere. macOS has no kernel write boundary equivalent to the one Linux gets from bubblewrap, so on the app the prompt is the protection.
-- It ships **without PyMuPDF** (its license is AGPL), so PDF text extraction and image downscaling aren't available in the app install. Everything else is.
+- Up to 0.9.8 it ships **without PyMuPDF** (its license is AGPL), so PDF text extraction and image downscaling aren't available in the app install. From 0.9.9 both use pypdfium2 and Pillow (permissive licences), which the app carries, so PDFs and large images work there too.
 
 Beacon on the same Mac pairs with it automatically, using a one-time file secret (`POST /api/pair/local`) — no code to type. If you reinstall Beacon, `Prometheus --pair` writes a fresh secret.
 

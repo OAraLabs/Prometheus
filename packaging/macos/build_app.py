@@ -2,7 +2,7 @@
 """Build Prometheus.app: a relocatable Python, the pinned wheels, a native launcher, signed.
 
     python packaging/macos/build_app.py --identity <SHA-1 of a Developer ID Application cert> \\
-        [--extras mcp,slack,discord,discovery] [--without pymupdf] [--wheel PATH]
+        [--extras mcp,slack,discord,discovery] [--without NAME,...] [--wheel PATH]
         [--notarize --notary-profile NAME [--notary-keychain PATH]]
     python packaging/macos/build_app.py --wheel-only      # just the wheel, into <work>/wheel
 
@@ -84,11 +84,11 @@ DEFAULT_EXTRAS = ("mcp", "slack", "discord", "discovery")
 # The wheel's build backend (pyproject.toml [build-system]) and its dependencies, pinned with hashes.
 BUILD_CONSTRAINTS = Path(__file__).resolve().parent / "build-constraints.txt"
 PACKAGE_NAME = "oara-prometheus"
-# Left out of the app unless someone opts back in with --include-pymupdf. PyMuPDF is AGPL-3.0 (or Artifex
-# commercial); Will's call, 2026-10-08, is that the app ships without it. What degrades without it: PDF text
-# extraction (utils/file_extract.py answers "[PDF file: name ... install PyMuPDF to extract text]") and the
-# downscaling of large images before they are sent to a model (gateway/image_prep.py sends the original bytes).
-DEFAULT_WITHOUT = ("pymupdf",)
+# Distributions to leave out of the bundle by default: none. Until 0.9.9 this was PyMuPDF (AGPL-3.0; Will's call
+# 2026-10-08 kept it out of the app, which cost PDF text and image downscaling). PDF text is now pypdfium2 and
+# downscaling Pillow, and PyMuPDF is no dependency at all (docs/audits/pdf-extraction/). tests/test_macos_app_build.py
+# fails if it ever comes back into the lock.
+DEFAULT_WITHOUT: tuple[str, ...] = ()
 
 # The icon: the OAra "O." mark, 512 px, drawn into macOS's icon shape at each size macOS asks for. No 1024 px
 # slot (icon_512x512@2x): the source has 512 px, and that slot would be an upscale.
@@ -756,9 +756,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--identity", default="", help="SHA-1 fingerprint of the Developer ID Application certificate")
     parser.add_argument("--extras", default=DEFAULT_EXTRAS, type=_csv)
     parser.add_argument("--without", default=DEFAULT_WITHOUT, type=_csv,
-                        help="distributions to leave out of the bundle (default: pymupdf, which is AGPL-3.0)")
-    parser.add_argument("--include-pymupdf", action="store_true",
-                        help="ship PyMuPDF too (AGPL-3.0: only after the licensing decision says so)")
+                        help="distributions to leave out of the bundle (default: none)")
     parser.add_argument("--work", default=str(REPO / "dist" / "macos" / "work"))
     parser.add_argument("--out", default=str(REPO / "dist" / "macos"))
     parser.add_argument("--notarize", action="store_true")
@@ -774,8 +772,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--identity is required (the SHA-1 fingerprint of the Developer ID Application certificate)")
     if args.notarize and not args.notary_profile:
         parser.error("--notarize needs --notary-profile: notarization credentials are a keychain profile only")
-    if args.include_pymupdf:
-        args.without = tuple(x for x in args.without if x != "pymupdf")
     return args
 
 

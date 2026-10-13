@@ -840,7 +840,7 @@ load_user_skills() -> list[SkillDefinition]           # reads ~/.prometheus/skil
 load_skill_registry(cwd=None) -> SkillRegistry        # builtin + user merged
 ```
 
-**Builtin skills** — `src/prometheus/skills/builtin/`: `commit.md`, `debug.md`, `plan.md`
+**Builtin skills** — `src/prometheus/skills/builtin/`: `commit.md`, `debug.md`, `plan.md`, `beacon-plate.md` (default HTML/PDF house style)
 
 **Wires into**: `SkillTool` (`tools/builtin/skill.py`) exposes registry to agent via `skill` tool name.
 

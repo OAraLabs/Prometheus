@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 # PyPI: `prometheus` is taken by prometheus-client; we publish as
 # `oara-prometheus` but the import path / console scripts stay as `prometheus`.
 name = "oara-prometheus"
-version = "0.9.8"
+version = "0.9.9"
 description = "An AI agent daemon that runs on hardware you own."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,7 +43,13 @@ dependencies = [
     "python-telegram-bot>=21.0",
     "croniter>=2.0",
     "python-docx>=1.1.0",
-    "PyMuPDF>=1.24.0",
+    # PDF text (utils/file_extract.py) and image downscaling (gateway/image_prep.py). PyMuPDF did both
+    # until 0.9.9; it is AGPL-3.0, so the Mac app shipped without it and lost both. pypdfium2 is
+    # BSD-3-Clause or Apache-2.0 (PDFium's bundled libraries carry their own licences, listed in its
+    # wheel), Pillow is MIT-CMU. The comparison that justified the swap, on ten real PDFs:
+    # docs/audits/pdf-extraction/.
+    "pypdfium2>=5.14.0",
+    "Pillow>=12.3.0",
     "openpyxl>=3.1.0",
     # piper-tts, sounddevice and scipy are NOT here — see the `voice` extra.
     "watchdog>=4.0",

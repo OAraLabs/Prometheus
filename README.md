@@ -194,7 +194,7 @@ Beacon's **Loop Manager** turns this into a PM cockpit: register repos, keep a `
 
 ### Skills
 
-The agent writes skills for itself: the SkillCreator turns successful multi-step traces into markdown skill files, the SkillRefiner updates them when better executions come along, and a weekly Curator pass consolidates and prunes (pinned skills are protected; nothing is hard-deleted). Three core skills ship in the package (`commit`, `debug`, `plan`), and the repo carries a **103-file skill library** in [`skills/`](https://github.com/OAraLabs/Prometheus/tree/main/skills) you can drop into `~/.prometheus/skills/` selectively — it's deliberately not auto-loaded, to keep prompts lean.
+The agent writes skills for itself: the SkillCreator turns successful multi-step traces into markdown skill files, the SkillRefiner updates them when better executions come along, and a weekly Curator pass consolidates and prunes (pinned skills are protected; nothing is hard-deleted). Four core skills ship in the package (`commit`, `debug`, `plan`, and `beacon-plate`, the default look for any HTML page, report or PDF the agent makes), and the repo carries a **102-file skill library** in [`skills/`](https://github.com/OAraLabs/Prometheus/tree/main/skills) you can drop into `~/.prometheus/skills/` selectively — it's deliberately not auto-loaded, to keep prompts lean.
 
 ### Record a Skill
 
@@ -317,7 +317,7 @@ Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, a
 
 On an Apple silicon Mac the app is the easiest start; everywhere else, pick one of the four terminal routes. All of them install the same daemon.
 
-**The Mac app (no terminal)** — a signed, notarized `Prometheus.app` for Apple silicon on macOS 13 or later, with its own Python 3.12. Download `Prometheus-mac-arm64.zip` from the [latest release](https://github.com/OAraLabs/Prometheus/releases/latest), unzip, drag to Applications, open it. It installs the daemon as a login item, listens on this Mac only until you say otherwise, and starts in the `cautious` permission mode. It ships without PyMuPDF (AGPL), so PDF text extraction and image downscaling aren't available in the app. Details: [the install guide](docs/guide/install.md#the-mac-app-no-terminal).
+**The Mac app (no terminal)** — a signed, notarized `Prometheus.app` for Apple silicon on macOS 13 or later, with its own Python 3.12. Download `Prometheus-mac-arm64.zip` from the [latest release](https://github.com/OAraLabs/Prometheus/releases/latest), unzip, drag to Applications, open it. It installs the daemon as a login item, listens on this Mac only until you say otherwise, and starts in the `cautious` permission mode. Up to 0.9.8 it ships without PyMuPDF (AGPL), so PDF text extraction and image downscaling aren't available in the app; from 0.9.9 they use pypdfium2 and Pillow, which the app carries. Details: [the install guide](docs/guide/install.md#the-mac-app-no-terminal).
 
 Four ways to get it from a terminal:
 
@@ -634,7 +634,7 @@ prometheus/
 │   ├── telemetry/       # Tool-call tracking + cost
 │   └── config/          # Settings, paths, env overrides, profiles
 ├── templates/           # Identity templates (no personal data)
-├── skills/              # 103-file skill library (.md, opt-in)
+├── skills/              # 102-file skill library (.md, opt-in)
 ├── tests/               # pytest suite (see Tests below)
 ├── docs/                # Guides, architecture, sprint reports
 │   └── guide/           # Install · features · Beacon · coding · skills · memory · providers · API

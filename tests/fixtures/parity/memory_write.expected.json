@@ -23,7 +23,7 @@
      "content_json": {
       "$json": [
        {
-        "id": "24NFu6d4sLyce5aO5roS7mnnb1blulFJ",
+        "id": "SGXdWTXzeX8ujuk4KHzIzu8MAy9IKGsW",
         "input": {
          "entry": "The parity canary colour is teal.",
          "operation": "add",
@@ -45,7 +45,7 @@
        {
         "content": "added",
         "is_error": false,
-        "tool_use_id": "24NFu6d4sLyce5aO5roS7mnnb1blulFJ",
+        "tool_use_id": "SGXdWTXzeX8ujuk4KHzIzu8MAy9IKGsW",
         "type": "tool_result"
        }
       ]
@@ -55,11 +55,11 @@
      "role": "user"
     },
     {
-     "content": "Saved to long-term memory: \"The parity canary colour is teal.\" ✅",
+     "content": "Saved to long-term memory: \"The parity canary colour is teal.\"",
      "content_json": {
       "$json": [
        {
-        "text": "Saved to long-term memory: \"The parity canary colour is teal.\" ✅",
+        "text": "Saved to long-term memory: \"The parity canary colour is teal.\"",
         "type": "text"
        }
       ]
@@ -70,7 +70,7 @@
     }
    ],
    "op": "chat",
-   "reply": "Saved to long-term memory: \"The parity canary colour is teal.\" ✅",
+   "reply": "Saved to long-term memory: \"The parity canary colour is teal.\"",
    "session": "desktop:parity-memory"
   }
  ],
@@ -231,7 +231,7 @@
        {
         "$json": [
          {
-          "id": "24NFu6d4sLyce5aO5roS7mnnb1blulFJ",
+          "id": "SGXdWTXzeX8ujuk4KHzIzu8MAy9IKGsW",
           "input": {
            "entry": "The parity canary colour is teal.",
            "operation": "add",
@@ -259,7 +259,7 @@
          {
           "content": "added",
           "is_error": false,
-          "tool_use_id": "24NFu6d4sLyce5aO5roS7mnnb1blulFJ",
+          "tool_use_id": "SGXdWTXzeX8ujuk4KHzIzu8MAy9IKGsW",
           "type": "tool_result"
          }
         ]
@@ -275,16 +275,16 @@
        "desktop:parity-memory",
        3,
        "assistant",
-       "Saved to long-term memory: \"The parity canary colour is teal.\" ✅",
+       "Saved to long-term memory: \"The parity canary colour is teal.\"",
        {
         "$json": [
          {
-          "text": "Saved to long-term memory: \"The parity canary colour is teal.\" ✅",
+          "text": "Saved to long-term memory: \"The parity canary colour is teal.\"",
           "type": "text"
          }
         ]
        },
-       16,
+       15,
        "<time>",
        0,
        "user",
@@ -307,7 +307,7 @@
        ""
       ],
       [
-       "Saved to long-term memory: \"The parity canary colour is teal.\" ✅"
+       "Saved to long-term memory: \"The parity canary colour is teal.\""
       ]
      ]
     },
@@ -540,7 +540,7 @@
      "rows": [
       [
        "desktop:parity-memory",
-       "Parity canary colour is teal",
+       "Save Teal Parity Canary Colour",
        "<time>"
       ]
      ]
@@ -918,8 +918,8 @@
        "0ac69752b6f71969",
        "prose",
        0,
-       64,
-       "Saved to long-term memory: \"The parity canary colour is teal.\" ✅",
+       62,
+       "Saved to long-term memory: \"The parity canary colour is teal.\"",
        "agent",
        "beacon",
        null
@@ -1625,13 +1625,13 @@
          "stop_reason": "tool_calls"
         }
        },
-       6188,
+       6239,
        56,
        0,
        "desktop:parity-memory",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4172,
+       4223,
        null,
        "<node>",
        "local",
@@ -1650,13 +1650,13 @@
          "stop_reason": "stop"
         }
        },
-       6262,
-       17,
+       6313,
+       16,
        1,
        "desktop:parity-memory",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6243,
+       6294,
        null,
        "<node>",
        "local",
@@ -1675,7 +1675,7 @@
          "stop_reason": "stop"
         }
        },
-       102,
+       101,
        8,
        null,
        "desktop:parity-memory",
@@ -1808,7 +1808,7 @@
        "<node>",
        "<turn:1>",
        0,
-       "24NFu6d4sLyce5aO5roS7mnnb1blulFJ",
+       "SGXdWTXzeX8ujuk4KHzIzu8MAy9IKGsW",
        null,
        null,
        0,
@@ -1906,8 +1906,8 @@
        "<time>",
        "<time>",
        2,
-       12450,
-       73,
+       12552,
+       72,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
