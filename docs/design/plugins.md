@@ -321,6 +321,92 @@ loads.
 **The alternative** is to keep espeak and meet the GPL's terms. Will ruled that out for piper, and the same
 reasoning would apply here.
 
+### The espeak-free measurement (2026-10-13)
+
+**Setup.**
+- **Replies:** 50 real assistant replies from the running install's conversation history, picked for names,
+  places and numbers. The texts stayed on Will's Mac; only the counts below are published.
+- **Voice and model:** each reply, with markdown stripped, was spoken by Kokoro v1.0 (fp32 ONNX, voice
+  `af_heart`) twice:
+  - **A**, today's path: `kokoro-onnx` phonemizing with espeak-ng;
+  - **B**, espeak-free: misaki 0.9.4's English G2P with no fallback, the phonemes fed to the same model.
+- **Scoring:** both audios were transcribed by faster-whisper `small.en`, and each source word was aligned to
+  each transcript.
+  - A word counts as **mangled by B** when Whisper heard it in A and not in B.
+  - Words Whisper missed in both are its own noise and are counted separately.
+  - **Dropped** means misaki gave a word no phonemes at all, so it is not spoken.
+
+| 2,740 words | In the text | Dropped by B | Wrong in B only | Wrong in A only | Wrong in both |
+|---|---|---|---|---|---|
+| Names (capitalised, not sentence-initial) | 503 | see below | 30 (6.0%) | 22 (4.4%) | 75 |
+| Numbers | 473 | 0 | 68 (14.4%) | 31 (6.6%) | 73 |
+| Other words | 1,764 | see below | 100 (5.7%) | 42 (2.4%) | 111 |
+| **All** | **2,740** | **49 (1.8%)** | **198** | **95** | **259** |
+
+**What the numbers mean, from listening and reading the transcripts:**
+
+- **Names fail in the way that matters most.**
+  - Misaki has no pronunciation for a name outside its lexicon, and **drops it silently**: the sentence is
+    spoken with the name missing. That happened to project, product and company names, and to a few
+    ordinary words ("verified", "denied", "backends").
+  - espeak at least attempts every word, so a listener hears something name-shaped.
+  - 49 words were dropped across 50 replies, about one per reply.
+- **Numbers were worse on B,** but most of B's number misses sit in hashes, commit ids and file paths, which
+  neither pipeline speaks usefully (259 words were wrong in both).
+  - Plain quantities were mostly fine in both. One long byte count came out wrong in B.
+  - Whatever path is chosen, replies need a speech-text pass that summarises hashes and paths instead of
+    reading them.
+- **Overall, B made about twice as many errors of its own as A:** 198 against 95.
+
+**Verdict: names fail on the espeak-free path,** so option B is written up below, as Will asked. Neither
+option is built.
+
+Not evaluated, and only a candidate: misaki with a *permissive* fallback for unknown words (a CMUdict or
+small neural G2P under a permissive licence), which would keep espeak out and stop the silent drops. It would
+need the same measurement.
+
+Found while measuring: on macOS, espeak-ng exits the process (`Error processing file .../phontab`) when its
+data directory's path is long. It failed at about 200 characters, and a short path worked. Under
+`~/Library/Application Support/Prometheus/plugins/speech/<version>/site-packages/espeakng_loader/espeak-ng-data`
+that limit is close, so option B must install espeak's data at a short, fixed path and test the real one.
+
+### Option B: keep espeak, in a separate process whose source is published
+
+**Shape.**
+- Speech output runs as its own program: the voice plugin's TTS service, which already is one (`kokoro_server`
+  over HTTP).
+- That program is Kokoro plus `kokoro-onnx` plus `phonemizer` (GPL-3.0-or-later) plus espeak-ng (GPL-3.0).
+- It is distributed **as a GPL-3.0-or-later work**, with its complete corresponding source published:
+  - the voice plugin's own code (Apache-2.0, which GPL-3.0 can include);
+  - `kokoro-onnx` (MIT);
+  - `phonemizer`;
+  - the exact espeak-ng source the bundled library was built from.
+- Prometheus talks to it only over HTTP on 127.0.0.1, as it talks to any service, and stays MIT.
+- Whether that boundary is enough is a legal question, not answered here. **This is not legal advice.**
+
+**What it needs:**
+
+1. **A separate signed executable.** The TTS service goes into the plugin as a **service** (3.3): its own
+   process and its own Python environment inside the plugin, signed by our team, never imported into the
+   daemon.
+2. **Source, published with every release that ships it:**
+   - a `Prometheus-plugin-speech-tts-source-<version>.zip` asset beside the plugin zip, holding the TTS
+     service's source, phonemizer's source, and the espeak-ng tag and source the loader wheel was built from;
+   - the GPL text in the plugin;
+   - a line in the market listing saying the speech service is GPL-3.0 and where its source is.
+3. **The espeak data path fix** above, tested on the real install path.
+4. **No GPL code in the daemon's process, ever.** A test fails if the daemon's own environment can import
+   `phonemizer` or `espeakng_loader`.
+
+**What it costs:**
+- A second licence story in the product: "Prometheus is MIT; its speech service is GPL".
+- A source asset to build and check per release.
+- An extra process for a feature that, with option A, would not need one. The voice stack is already
+  separate processes, so the extra process costs little.
+
+**What it keeps:** espeak's handling of any word, including names it has never seen. That is exactly where
+the espeak-free path failed.
+
 ### Will's decisions on Speech (2026-10-13)
 
 1. **The voice plugin repo becomes public.** Will makes it public himself, after a scan of its full git
@@ -344,9 +430,9 @@ reasoning would apply here.
 | The Android client: its VAD port 8011 → 8012 | **open**: still 8011, in two copies of the client |
 | The voice plugin repo: the VAD port 8011 hard-coded in its config and compose file (its issue 5) | **open** |
 | The licence audit above | **done** |
-| espeak-free measurement: 50 real replies, words dropped or mangled, audio samples (decision 2) | in progress |
-| The espeak-free Kokoro runner, or option B (decision 2) | after the measurement |
-| History scan of the voice plugin repo before it goes public (decision 1) | in progress |
+| espeak-free measurement: 50 real replies, words dropped or mangled, audio samples (decision 2) | **done**: names fail (silent drops); see above |
+| Option B written up (decision 2) | **done**, not built; Will chooses |
+| History scan of the voice plugin repo before it goes public (decision 1) | **done**: git history and CI logs clean; one issue's text to edit before going public (reported to Will) |
 | The voice plugin repo made public | Will |
 | The voice plugin published to PyPI, so `[speech]` can carry the full stack (decision 3) | not started |
 | `[speech]` = speech-to-text plus `say`, with `[voice]` as an alias (decision 3) | with the plugin core |
