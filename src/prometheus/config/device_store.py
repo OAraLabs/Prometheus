@@ -183,6 +183,18 @@ class DeviceStore:
         ).fetchone()
         return self._row(row) if row else None
 
+    def lookup_revoked(self, digest: str) -> DeviceRow | None:
+        """The REVOKED device a token digest belongs to, or None (#760).
+
+        For the rejection log only — naming which device a stale client is.
+        Never an authentication path: :meth:`lookup` is, and it excludes these.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM api_devices WHERE token_sha256 = ? AND revoked_at IS NOT NULL",
+            (digest,),
+        ).fetchone()
+        return self._row(row) if row else None
+
     def touch(self, device_id: str) -> None:
         """Stamp last_seen_at, at most once per LAST_SEEN_THROTTLE_SECONDS."""
         now = time.time()
