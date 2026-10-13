@@ -79,7 +79,7 @@ Beacon, on the market page and in pip.
    - Plugins are generated from `plugins.json` at deploy time, so the shelf cannot drift from the release.
    - Connectors and Integrations are short, curated lists.
    - No accounts, no analytics, no tracking parameters, no script on load.
-   - The design is in `oara-site/internal/market.md`.
+   - Its design is a separate note kept with the website, which is not public.
 10. **Security.**
     - Only an operator credential (global token or owner device) may add or remove a plugin. Never a scoped
       device, never the agent.
