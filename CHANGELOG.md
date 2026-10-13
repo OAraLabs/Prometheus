@@ -41,6 +41,13 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 - **How an approval request raised inside a subagent appears in Beacon and Telegram has not been checked.** A subagent has no session of its own.
 - **The Linux AppArmor read floor may have the same `~/.config` rename hole** the Seatbelt floor had. It is unmeasured (#766).
 
+### PDFs and large images without PyMuPDF
+
+- **PDF text comes from pypdfium2 and image downscaling from Pillow; PyMuPDF (AGPL-3.0) is no longer a dependency.** The Mac app, which shipped without PyMuPDF, now reads PDFs and shrinks large images like every other install. The comparison on ten real PDFs (two-column papers, a 59-page IRS publication with tables, forms, scans, Chinese and Japanese) is in `docs/audits/pdf-extraction/`: the same text in the same order once ligatures and line-break hyphens are normalised, and 1.3 to 2 times faster.
+- **A filled PDF form keeps what was typed.** Each page's filled form fields follow its text as a `[Form fields]` block of `name: value` lines (8 of 8 values in the test form; PyMuPDF's text carried 6). Empty fields and unchecked boxes are left out.
+- **A large image is shrunk to exactly 2,576 px on its long edge,** not by halving, which could leave it up to twice that. Images up to twice the cap are still sent as captured.
+- Scanned PDFs without a text layer still give no text: neither library does OCR.
+
 ## 0.9.8
 
 A Beacon on another computer can now become the owner's own device, so it can approve workers. Workers also behave better at the edges: their approval requests end when they do, and their time limit is a setting that counts only working time. Read "Upgrading from 0.9.7": a worker's time limit no longer comes from the model, and a late answer to an approval is now a 410.

@@ -1,0 +1,538 @@
+{
+  "pdfs": [
+    {
+      "file": "irs-p15-long-tables.pdf",
+      "bytes": 1713916,
+      "pymupdf": {
+        "pages": 59,
+        "ms": 270.3,
+        "chars": 307407,
+        "empty_pages": 0,
+        "seen_chars": 30036
+      },
+      "pypdfium2": {
+        "pages": 59,
+        "ms": 213.3,
+        "chars": 304046,
+        "empty_pages": 0,
+        "seen_chars": 30036,
+        "order_full": 0.913,
+        "words_full": 0.958,
+        "order_seen": 0.903,
+        "words_seen": 0.903,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdfium2+fields": {
+        "pages": 59,
+        "ms": 189.6,
+        "chars": 304046,
+        "empty_pages": 0,
+        "seen_chars": 30036,
+        "order_full": 0.913,
+        "words_full": 0.958,
+        "order_seen": 0.903,
+        "words_seen": 0.903,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdf": {
+        "pages": 59,
+        "ms": 1650.0,
+        "chars": 319590,
+        "empty_pages": 0,
+        "seen_chars": 30036,
+        "order_full": 0.925,
+        "words_full": 0.946,
+        "order_seen": 0.88,
+        "words_seen": 0.885,
+        "order_normalised": 0.925,
+        "char_ratio": 0.949
+      }
+    },
+    {
+      "file": "irs-w9-filled.pdf",
+      "bytes": 228392,
+      "pymupdf": {
+        "pages": 6,
+        "ms": 34.3,
+        "chars": 38291,
+        "empty_pages": 0,
+        "seen_chars": 30034,
+        "filled_values_found": 6
+      },
+      "pypdfium2": {
+        "pages": 6,
+        "ms": 16.0,
+        "chars": 38113,
+        "empty_pages": 0,
+        "seen_chars": 30034,
+        "order_full": 0.997,
+        "words_full": 0.997,
+        "order_seen": 0.996,
+        "words_seen": 0.996,
+        "order_normalised": 0.996,
+        "char_ratio": 0.991,
+        "filled_values_found": 0
+      },
+      "pypdfium2+fields": {
+        "pages": 6,
+        "ms": 18.2,
+        "chars": 38324,
+        "empty_pages": 0,
+        "seen_chars": 30034,
+        "order_full": 0.997,
+        "words_full": 0.997,
+        "order_seen": 0.997,
+        "words_seen": 0.997,
+        "order_normalised": 0.996,
+        "char_ratio": 0.992,
+        "filled_values_found": 8
+      },
+      "pypdf": {
+        "pages": 6,
+        "ms": 63.1,
+        "chars": 38179,
+        "empty_pages": 0,
+        "seen_chars": 30034,
+        "order_full": 0.999,
+        "words_full": 0.999,
+        "order_seen": 0.997,
+        "words_seen": 0.997,
+        "order_normalised": 0.998,
+        "char_ratio": 0.991,
+        "filled_values_found": 0
+      }
+    },
+    {
+      "file": "irs-w9-form.pdf",
+      "bytes": 140815,
+      "pymupdf": {
+        "pages": 6,
+        "ms": 34.4,
+        "chars": 38187,
+        "empty_pages": 0,
+        "seen_chars": 30034
+      },
+      "pypdfium2": {
+        "pages": 6,
+        "ms": 16.6,
+        "chars": 38113,
+        "empty_pages": 0,
+        "seen_chars": 30034,
+        "order_full": 0.998,
+        "words_full": 0.998,
+        "order_seen": 0.998,
+        "words_seen": 0.998,
+        "order_normalised": 0.997,
+        "char_ratio": 0.999
+      },
+      "pypdfium2+fields": {
+        "pages": 6,
+        "ms": 16.3,
+        "chars": 38113,
+        "empty_pages": 0,
+        "seen_chars": 30034,
+        "order_full": 0.998,
+        "words_full": 0.998,
+        "order_seen": 0.998,
+        "words_seen": 0.998,
+        "order_normalised": 0.997,
+        "char_ratio": 0.999
+      },
+      "pypdf": {
+        "pages": 6,
+        "ms": 53.7,
+        "chars": 38179,
+        "empty_pages": 0,
+        "seen_chars": 30034,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 0.999,
+        "char_ratio": 0.999
+      }
+    },
+    {
+      "file": "resnet-2col.pdf",
+      "bytes": 819383,
+      "pymupdf": {
+        "pages": 12,
+        "ms": 65.3,
+        "chars": 59435,
+        "empty_pages": 0,
+        "seen_chars": 30037
+      },
+      "pypdfium2": {
+        "pages": 12,
+        "ms": 44.4,
+        "chars": 59164,
+        "empty_pages": 0,
+        "seen_chars": 30037,
+        "order_full": 0.961,
+        "words_full": 0.962,
+        "order_seen": 0.96,
+        "words_seen": 0.96,
+        "order_normalised": 0.998,
+        "char_ratio": 1.0
+      },
+      "pypdfium2+fields": {
+        "pages": 12,
+        "ms": 44.0,
+        "chars": 59164,
+        "empty_pages": 0,
+        "seen_chars": 30037,
+        "order_full": 0.961,
+        "words_full": 0.962,
+        "order_seen": 0.96,
+        "words_seen": 0.96,
+        "order_normalised": 0.998,
+        "char_ratio": 1.0
+      },
+      "pypdf": {
+        "pages": 12,
+        "ms": 264.3,
+        "chars": 59422,
+        "empty_pages": 0,
+        "seen_chars": 30037,
+        "order_full": 0.985,
+        "words_full": 0.985,
+        "order_seen": 0.983,
+        "words_seen": 0.983,
+        "order_normalised": 0.985,
+        "char_ratio": 1.0
+      }
+    },
+    {
+      "file": "scan-francais.pdf",
+      "bytes": 483256,
+      "pymupdf": {
+        "pages": 1,
+        "ms": 4.4,
+        "chars": 0,
+        "empty_pages": 1,
+        "seen_chars": 72
+      },
+      "pypdfium2": {
+        "pages": 1,
+        "ms": 0.6,
+        "chars": 0,
+        "empty_pages": 1,
+        "seen_chars": 72,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdfium2+fields": {
+        "pages": 1,
+        "ms": 0.5,
+        "chars": 0,
+        "empty_pages": 1,
+        "seen_chars": 72,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdf": {
+        "pages": 1,
+        "ms": 0.7,
+        "chars": 0,
+        "empty_pages": 1,
+        "seen_chars": 72,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      }
+    },
+    {
+      "file": "scan-multipage.pdf",
+      "bytes": 1120291,
+      "pymupdf": {
+        "pages": 6,
+        "ms": 2.1,
+        "chars": 111,
+        "empty_pages": 5,
+        "seen_chars": 111
+      },
+      "pypdfium2": {
+        "pages": 6,
+        "ms": 1.1,
+        "chars": 108,
+        "empty_pages": 5,
+        "seen_chars": 108,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdfium2+fields": {
+        "pages": 6,
+        "ms": 0.7,
+        "chars": 108,
+        "empty_pages": 5,
+        "seen_chars": 108,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdf": {
+        "pages": 6,
+        "ms": 3.2,
+        "chars": 109,
+        "empty_pages": 5,
+        "seen_chars": 109,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      }
+    },
+    {
+      "file": "scan-skew.pdf",
+      "bytes": 76013,
+      "pymupdf": {
+        "pages": 1,
+        "ms": 0.5,
+        "chars": 0,
+        "empty_pages": 1,
+        "seen_chars": 68
+      },
+      "pypdfium2": {
+        "pages": 1,
+        "ms": 0.4,
+        "chars": 0,
+        "empty_pages": 1,
+        "seen_chars": 68,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdfium2+fields": {
+        "pages": 1,
+        "ms": 0.3,
+        "chars": 0,
+        "empty_pages": 1,
+        "seen_chars": 68,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdf": {
+        "pages": 1,
+        "ms": 0.6,
+        "chars": 0,
+        "empty_pages": 1,
+        "seen_chars": 68,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      }
+    },
+    {
+      "file": "scan-with-ocr-layer.pdf",
+      "bytes": 37654,
+      "pymupdf": {
+        "pages": 1,
+        "ms": 1.3,
+        "chars": 111,
+        "empty_pages": 0,
+        "seen_chars": 111
+      },
+      "pypdfium2": {
+        "pages": 1,
+        "ms": 0.5,
+        "chars": 108,
+        "empty_pages": 0,
+        "seen_chars": 108,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdfium2+fields": {
+        "pages": 1,
+        "ms": 0.4,
+        "chars": 108,
+        "empty_pages": 0,
+        "seen_chars": 108,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdf": {
+        "pages": 1,
+        "ms": 1.5,
+        "chars": 109,
+        "empty_pages": 0,
+        "seen_chars": 109,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      }
+    },
+    {
+      "file": "udhr-chinese.pdf",
+      "bytes": 479874,
+      "pymupdf": {
+        "pages": 7,
+        "ms": 14.8,
+        "chars": 5920,
+        "empty_pages": 0,
+        "seen_chars": 5920
+      },
+      "pypdfium2": {
+        "pages": 7,
+        "ms": 11.9,
+        "chars": 5763,
+        "empty_pages": 0,
+        "seen_chars": 5763,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdfium2+fields": {
+        "pages": 7,
+        "ms": 11.5,
+        "chars": 5763,
+        "empty_pages": 0,
+        "seen_chars": 5763,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdf": {
+        "pages": 7,
+        "ms": 102.4,
+        "chars": 5914,
+        "empty_pages": 0,
+        "seen_chars": 5914,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      }
+    },
+    {
+      "file": "udhr-japanese.pdf",
+      "bytes": 476291,
+      "pymupdf": {
+        "pages": 9,
+        "ms": 12.1,
+        "chars": 4757,
+        "empty_pages": 0,
+        "seen_chars": 4757
+      },
+      "pypdfium2": {
+        "pages": 9,
+        "ms": 8.1,
+        "chars": 4471,
+        "empty_pages": 0,
+        "seen_chars": 4471,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdfium2+fields": {
+        "pages": 9,
+        "ms": 7.8,
+        "chars": 4471,
+        "empty_pages": 0,
+        "seen_chars": 4471,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      },
+      "pypdf": {
+        "pages": 9,
+        "ms": 38.6,
+        "chars": 4749,
+        "empty_pages": 0,
+        "seen_chars": 4749,
+        "order_full": 1.0,
+        "words_full": 1.0,
+        "order_seen": 1.0,
+        "words_seen": 1.0,
+        "order_normalised": 1.0,
+        "char_ratio": 1.0
+      }
+    }
+  ],
+  "images": [
+    {
+      "input": "4896x6336",
+      "input_bytes": 7149160,
+      "pymupdf": {
+        "out": "2448x3168",
+        "bytes": 2798831,
+        "ms": 640
+      },
+      "pillow": {
+        "out": "1991x2576",
+        "bytes": 2471972,
+        "ms": 609
+      }
+    },
+    {
+      "input": "2448x3168",
+      "input_bytes": 2875015,
+      "pymupdf": {
+        "out": "2448x3168",
+        "bytes": 2815827,
+        "ms": 338
+      },
+      "pillow": {
+        "out": "2448x3168",
+        "bytes": 2875015,
+        "ms": 200
+      }
+    }
+  ]
+}
