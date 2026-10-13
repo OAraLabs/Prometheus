@@ -110,10 +110,7 @@ directories still works (measured). What's refused is renaming, replacing or re-
 `touch ~/.config` now fails. Hard links and symlinks into a denied path are refused too, and so is moving a
 prepared directory into place. The boot probe checks the pairing secret and the `~/.config` rename by outcome.
 
-**Not covered by this change:** the Linux AppArmor profile (`deploy/apparmor/prometheus-bash`) has the same
-shape (`deny @{HOME}/.config/*/*env`) and is probably open to the same `~/.config` rename. That hasn't been
-measured (#766, which lists what measuring it needs). It is a root-loaded file, so it needs its own change and a reload. The pairing directory only exists
-for the Mac app (`PROMETHEUS_INSTALL_KIND=app`) unless someone names one by hand.
+**Linux, measured afterwards (#766):** the AppArmor profile (`deploy/apparmor/prometheus-bash`) had the same hole. With the shipped profile loaded on Linux 7.0, `mv ~/.config ~/cfg && cat ~/cfg/prometheus/env` printed a dummy env file. `deny @{HOME}/.config/ w,` refuses that rename and the move outside the home, and nothing else measured changed (#PRNUM). The boot probe renames `~/.config` onto itself, which is refused under the rule and a no-op without it. A host still on the old profile keeps being confined by it, and the boot logs an ERROR with the reload. The profile is a root-loaded file, so each Linux host runs `sudo apparmor_parser -r -W /etc/apparmor.d/prometheus-bash` after upgrading. The pairing directory only exists for the Mac app (`PROMETHEUS_INSTALL_KIND=app`) unless someone names one by hand.
 
 ## What gets built
 

@@ -174,6 +174,62 @@ def _probe_label(profile: str) -> tuple[bool, str]:
     return True, label
 
 
+#: What an operator runs after the shipped profile changes. Named wherever a stale profile is reported.
+RELOAD_COMMAND: Final[str] = f"sudo apparmor_parser -r -W /etc/apparmor.d/{PROFILE}"
+
+# Rename ~/.config onto itself. The kernel asks the LSM about a rename BEFORE
+# it notices source and target are the same, so under a profile that denies
+# `w` on ~/.config/ this is refused, and anywhere else it is a no-op: the boot
+# probe can test the rule on the real home without moving anything (#766).
+_CONFIG_RENAME_PROBE: Final[str] = (
+    "import os\n"
+    "p = os.path.join(os.path.expanduser('~'), '.config')\n"
+    "try:\n"
+    "    os.rename(p, p)\n"
+    "except FileNotFoundError:\n"
+    "    print('ABSENT')\n"
+    "except PermissionError:\n"
+    "    print('REFUSED')\n"
+    "else:\n"
+    "    print('RENAMED')\n"
+)
+
+
+def _probe_config_rename(profile: str) -> str:
+    """Under *profile*, may ``~/.config`` be renamed? ``refused``, ``renamed``, ``absent`` or ``unknown``.
+
+    Run only once the label check has passed, so the process is known to be confined.
+    """
+    exe = shutil.which("aa-exec")
+    if exe is None:
+        return "unknown"
+    try:
+        proc = subprocess.run([exe, "-p", profile, "--", sys.executable, "-c", _CONFIG_RENAME_PROBE],
+                              capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    out = (proc.stdout or "").strip()
+    return {"REFUSED": "refused", "RENAMED": "renamed", "ABSENT": "absent"}.get(out, "unknown")
+
+
+def _with_rename_check(profile: str, label: str) -> tuple[str, bool]:
+    """The preflight detail for a confined *label*, and whether the profile is STALE.
+
+    A profile loaded before the ``~/.config`` rule (#766) still confines, and still denies everything else, so a
+    stale one is not treated as no profile: ``auto`` would then run shells with no floor at all and ``required``
+    would refuse every one. It is reported, at ERROR, with the reload that fixes it.
+    """
+    rename = _probe_config_rename(profile)
+    if rename == "refused":
+        return f"{label}; renaming ~/.config refused", False
+    if rename == "renamed":
+        return (f"{label}; STALE PROFILE: ~/.config can be renamed out from under the env rule (#766), so a shell "
+                f"can still reach ~/.config/*/*env. Reload the shipped profile: {RELOAD_COMMAND}"), True
+    if rename == "absent":
+        return f"{label}; ~/.config does not exist, so the rename rule was not measured", False
+    return f"{label}; the ~/.config rename check could not run", False
+
+
 def preflight(profile: str = PROFILE, *, force: bool = False) -> tuple[bool, str]:
     """Cached per-process check that confinement genuinely works.
 
@@ -189,11 +245,16 @@ def preflight(profile: str = PROFILE, *, force: bool = False) -> tuple[bool, str
     """
     if force or profile not in _preflight_cache:
         ok, detail = _probe_label(profile)
+        stale = False
+        if ok:
+            detail, stale = _with_rename_check(profile, detail)
         _preflight_cache[profile] = (ok, detail)
         # Record the effective state. A runtime that auto-detects but leaves
         # no record is how an operator ends up believing in a floor that is
         # not there (CROSS-CUTTING §12).
-        if ok:
+        if ok and stale:
+            logger.error("bash confinement ACTIVE but INCOMPLETE: profile %s (%s)", profile, detail)
+        elif ok:
             logger.info("bash confinement ACTIVE: profile %s (%s)", profile, detail)
         else:
             logger.error("bash confinement UNAVAILABLE: %s", detail)
