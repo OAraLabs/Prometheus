@@ -308,8 +308,8 @@ class TestLoop:
         ws = tmp_path / "ws"; ws.mkdir()
         tool = _ProbeWriteTool()
         gate = SecurityGate(workspace_root=str(boot))
-        # Absolute on purpose: a RELATIVE write path prompts by design (#345),
-        # so it would never reach the tool and prove nothing about cwd.
+        # Absolute on purpose: this pins cwd and roots only. Relative writes in
+        # a workspace are tests/test_relative_write_in_workspace.py.
         _drain(self._ctx(_Scripted({"path": str(ws / "notes.md"), "content": "x"}), tool, gate, boot_cwd=boot, workspace=ws))
         assert tool.seen == [(ws.resolve(), (ws.resolve(),))]
 
