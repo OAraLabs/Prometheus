@@ -1041,11 +1041,15 @@ def create_app(
         There is no single "effective" number to report: the guard picks between
         these two per check, on ``adapter.tier == "off"``, because the adapter
         can swap mid-loop via _try_model_fallback. Hence two labelled values.
+
+        ``max_turns`` is the separate ROUND cap (``model.max_turns``, #774): it
+        counts model rounds, not tool calls, and whichever limit is reached
+        first ends the turn.
         """
         bridge = getattr(app.state, "ws_bridge", None)
         ctx = getattr(bridge, "loop_context", None) if bridge else None
         if ctx is None:
-            return {"wired": False, "local": None, "cloud": None}
+            return {"wired": False, "local": None, "cloud": None, "max_turns": None}
         return {
             "wired": True,
             "local": getattr(ctx, "max_tool_iterations", None),
@@ -1053,6 +1057,7 @@ def create_app(
             "cloud_falls_back_to_local": (
                 getattr(ctx, "max_tool_iterations_cloud", None) is None
             ),
+            "max_turns": getattr(ctx, "max_turns", None),
         }
 
     async def _floor_state() -> dict:
