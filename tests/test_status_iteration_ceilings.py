@@ -13,7 +13,10 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from prometheus.config.shipped_defaults import SHIPPED_MAX_TOOL_ITERATIONS  # noqa: E402
+from prometheus.config.shipped_defaults import (  # noqa: E402
+    SHIPPED_MAX_TOOL_ITERATIONS,
+    SHIPPED_MAX_TURNS,
+)
 from prometheus.daemon import loop_ceiling_divergence  # noqa: E402
 from tests.support.real_app import BOUNDARY_DOUBLE, build_real_app  # noqa: E402
 
@@ -21,6 +24,7 @@ from tests.support.real_app import BOUNDARY_DOUBLE, build_real_app  # noqa: E402
 # endpoint echoed config or the shipped constant, these values could not appear.
 LOCAL_OVERRIDE = 137
 CLOUD_OVERRIDE = 42
+ROUNDS_OVERRIDE = 61
 
 
 def _status(h) -> dict:
@@ -92,6 +96,31 @@ def test_null_cloud_means_cloud_uses_the_local_ceiling():
 
 
 @pytest.mark.acceptance(allow_doubles=[BOUNDARY_DOUBLE])
+def test_status_reports_the_live_round_cap():
+    """#774: the round cap (``model.max_turns``) is shown where the tool-call
+    ceilings are, so the limit that stopped a turn can be read off /api/status.
+
+    It counts model ROUNDS, not tool calls, so it gets its own field: the
+    2026-10-13 turn hit 200 rounds while the cloud tool-call ceiling was 500.
+    """
+    h = build_real_app()
+    h.loop_context.max_tool_iterations = LOCAL_OVERRIDE
+    h.loop_context.max_tool_iterations_cloud = CLOUD_OVERRIDE
+    h.loop_context.max_turns = ROUNDS_OVERRIDE
+
+    with h.client:
+        block = _status(h)["iteration_ceilings"]
+
+    assert block.get("max_turns") == ROUNDS_OVERRIDE, (
+        f"expected the LIVE round cap {ROUNDS_OVERRIDE}, got {block.get('max_turns')!r}"
+    )
+    assert ROUNDS_OVERRIDE != SHIPPED_MAX_TURNS, (
+        "test is not discriminating: the override equals the shipped default"
+    )
+    assert (block["local"], block["cloud"]) == (LOCAL_OVERRIDE, CLOUD_OVERRIDE)
+
+
+@pytest.mark.acceptance(allow_doubles=[BOUNDARY_DOUBLE])
 def test_unwired_bridge_reports_unwired_rather_than_guessing():
     """No bridge -> say so. Never invent a plausible number for a dark path."""
     h = build_real_app()
@@ -100,7 +129,7 @@ def test_unwired_bridge_reports_unwired_rather_than_guessing():
     with h.client:
         block = _status(h)["iteration_ceilings"]
 
-    assert block == {"wired": False, "local": None, "cloud": None}
+    assert block == {"wired": False, "local": None, "cloud": None, "max_turns": None}
 
 
 @pytest.mark.acceptance(allow_doubles=[BOUNDARY_DOUBLE])
