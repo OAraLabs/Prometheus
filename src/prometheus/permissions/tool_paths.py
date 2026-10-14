@@ -100,11 +100,20 @@ READ_ONLY_FILE_TARGETS: frozenset[str] = frozenset({"read_file"})
 # base is the daemon's cwd, no write_base is passed, and #345's rule applies.
 #
 # MEMBERSHIP IS CHECKED, NOT CLAIMED. A tool belongs here only if it resolves
-# `<context.cwd>/<relative>`: download_file resolves against Path.cwd() (the
-# process), tts and image_generate hand the string on, so they stay UNKNOWN.
-# tests/test_relative_write_in_workspace.py runs each member and compares.
+# `<context.cwd>/<relative>`; tests/test_relative_write_in_workspace.py runs
+# each member, compares the path it wrote with the one the gate ruled on, and
+# fails if a member is added without being run. download_file, tts and
+# image_generate joined once #771 made them resolve against context.cwd
+# (download_file used Path.cwd(), the process; tts handed the string to its
+# engine subprocess; image_generate's guard resolved it against the process).
+# image_generate stays tighter than the gate: its own allow-list admits only
+# images/ folders (now including the session workspace's), so a relative path
+# the gate allows elsewhere in the workspace is still refused by the tool.
+# Resolving against context.cwd is necessary, not sufficient: youtube_transcript
+# does too, and stays UNKNOWN until it is decided.
 WORKSPACE_RELATIVE_WRITE_TARGETS: frozenset[str] = frozenset({
-    "write_file", "edit_file", "notebook_edit",
+    "write_file", "edit_file", "notebook_edit", "download_file", "tts",
+    "image_generate",
 })
 
 TOOL_PATH_PARAM: dict[str, str] = {
