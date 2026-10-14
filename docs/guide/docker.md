@@ -128,7 +128,7 @@ docker build -t ghcr.io/oaralabs/prometheus:local .
 PROMETHEUS_VERSION=local docker compose -f packaging/docker/compose.yaml up -d
 ```
 
-Other extras: `--build-arg PROMETHEUS_EXTRAS="anthropic mcp slack discord push voice"` (every locked wheel exists for both architectures, but voice also needs audio devices, which a container rarely has). Both architectures at once: `docker buildx build --platform linux/amd64,linux/arm64 .`. Every dependency installs from `uv.lock` by hash, as prebuilt wheels, so an arm64 build compiles nothing.
+Other extras: `--build-arg PROMETHEUS_EXTRAS="mcp slack discord push voice"` (every locked wheel exists for both architectures, but voice also needs audio devices, which a container rarely has). Both architectures at once: `docker buildx build --platform linux/amd64,linux/arm64 .`. Every dependency installs from `uv.lock` by hash, as prebuilt wheels, so an arm64 build compiles nothing.
 
 `packaging/docker/smoke_image.py <image>` is the check CI runs on both architectures: it pairs a fresh container, sets it up against a stub model, takes one agent turn through it, and tries every way the token can arrive.
 

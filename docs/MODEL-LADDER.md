@@ -506,7 +506,9 @@ uv run python scripts/ladder_run.py --provider llama_cpp --base-url "$LADDER_BAS
 - **Relative write paths.** The SecurityGate treats a relative path on a write tool as unknown and
   asks for approval; a ladder run has no one to approve, so the call is denied. Tasks therefore
   name every file to write as `{workspace}/...` (the gym's prompts use absolute paths for the
-  same reason), and denials are counted per run (`tool_calls_denied`).
+  same reason), and denials are counted per run (`tool_calls_denied`). A session bound to a
+  workspace (`/workspace`) resolves a relative `write_file`/`edit_file`/`notebook_edit` path
+  against that workspace instead; a ladder run binds none, so the rule above holds for it.
 - **`lcm_grep` semantics** (for memory tasks, when that class is populated). FTS5 with an implicit AND over every query word: a query with one
   word absent from the history returns nothing. Memory tasks plant facts in natural wording, but
   this is the real tool and small models do trip on it.

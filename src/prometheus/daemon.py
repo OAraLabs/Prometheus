@@ -37,7 +37,11 @@ from prometheus.context.environment import git_head_sha
 from prometheus.context.origin_fetch import fetcher_from_config
 from prometheus.engine.agent_loop import AgentLoop
 from prometheus.config.divergence import warn_on_divergence
-from prometheus.config.shipped_defaults import resolve_max_tool_iterations, resolve_max_tool_iterations_cloud
+from prometheus.config.shipped_defaults import (
+    resolve_max_tool_iterations,
+    resolve_max_tool_iterations_cloud,
+    resolve_max_turns,
+)
 from prometheus.gateway.archive_writer import ArchiveWriter
 from prometheus.gateway.config import Platform, PlatformConfig
 from prometheus.gateway.cron_scheduler import run_scheduler_loop
@@ -601,6 +605,7 @@ def loop_ceiling_divergence(agent_loop: Any, loop_context: Any) -> list[tuple]:
     pairs = (
         ("max_tool_iterations", "_max_tool_iterations"),
         ("max_tool_iterations_cloud", "_max_tool_iterations_cloud"),
+        ("max_turns", "_max_turns"),
     )
     out = []
     for ctx_field, loop_attr in pairs:
@@ -1368,6 +1373,8 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         # max_tool_iterations_cloud: 50 sitting correctly in the config —
         # the config was right, the daemon just never received it.
         max_tool_iterations_cloud=resolve_max_tool_iterations_cloud(model_config),
+        # #774: the ROUND cap, separate from the tool-call caps above.
+        max_turns=resolve_max_turns(model_config),
         tool_loader=tool_loader,
         nudge=nudge,
         file_mutation_verifier=fmv,
@@ -2789,6 +2796,8 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 # it HERE too or Beacon quietly won't have it.
                 max_tool_iterations=resolve_max_tool_iterations(model_config),
                 max_tool_iterations_cloud=resolve_max_tool_iterations_cloud(model_config),
+                # #774: the ROUND cap, separate from the tool-call caps above.
+                max_turns=resolve_max_turns(model_config),
                 tool_loader=tool_loader,
                 # ...and the SAME LESSON, FOURTH TIME. `lsp.enabled: true` is
                 # live, so this list holds the LSPDiagnosticsHook that appends

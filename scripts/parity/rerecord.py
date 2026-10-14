@@ -2,7 +2,8 @@
 
     .venv/bin/python scripts/parity/rerecord.py SCENARIO [SCENARIO ...] \\
         [--live-alt model_switch=http://127.0.0.1:11434] \\
-        [--tolerate-c2 repaired_tool_call:alt --tolerate-c2 hosted_route:hosted]
+        [--tolerate-c2 repaired_tool_call:alt --tolerate-c2 hosted_route:hosted] \\
+        [--tolerate-skill repaired_tool_call:alt=beacon-plate]
 
 Run from a clone's root on the machine that reaches the primary.
 
@@ -16,6 +17,10 @@ Run from a clone's root on the machine that reaches the primary.
   other sides' PROBES (the alt's boot-time /api/tags, /api/ps, /api/show) from RECORDED's
   committed exchanges and nothing else: a completion on a stand-in side is refused, since
   none was ever committed for NEW. Without it a new scenario is refused before any attempt.
+- **A new core skill** (`--tolerate-skill SCENARIO:SIDE=NAME`) adds one line to every
+  system prompt, so a stand-in side would refuse every completion. Its stand-in also tries
+  the request with exactly that line removed; the line is rendered from the builtin skill
+  in this checkout, the way the prompt assembler renders it.
 - **The hosted key.** The harness requires a key for a hosted side. It is given a fake one in
   its own variable (`PARITY_STANDIN_KEY`), which only ever reaches the stand-in; no real key
   is read.
@@ -51,7 +56,7 @@ from parity.instance import DEFAULT_ROOT  # noqa: E402
 from parity.model_server import COMPLETIONS_PATHS, Exchange  # noqa: E402
 from parity.runner import build_config, uses_hosted  # noqa: E402
 from parity.scenarios import BY_NAME  # noqa: E402
-from parity.standin import StandIn, c2_reverted  # noqa: E402
+from parity.standin import StandIn, c2_reverted, core_skill_line, without_core_skill  # noqa: E402
 
 FAKE_KEY_ENV = "PARITY_STANDIN_KEY"
 DEPLOY_CONFIG = Path("~/prometheus-deploy/config/prometheus.yaml").expanduser()
@@ -113,16 +118,41 @@ def _replies(root: Path, name: str) -> list[str]:
     return [str(s.get("reply", "")) for s in steps if s.get("op") == "chat"]
 
 
+def builtin_core_skill_line(name: str) -> str:
+    """The prompt line of the builtin core skill ``name``, from this checkout's package."""
+    from prometheus.skills.loader import get_builtin_skills
+
+    for skill in get_builtin_skills():
+        if skill.name == name:
+            if not skill.core:
+                raise SystemExit(f"[rerecord] {name} is a builtin skill but not tier: core")
+            return core_skill_line(skill.name, skill.description)
+    raise SystemExit(f"[rerecord] no builtin skill named {name}")
+
+
+def _tolerance(label: str, c2: set[str], skills: dict[str, str]):
+    if label in c2 and label in skills:
+        raise SystemExit(f"[rerecord] {label}: --tolerate-c2 and --tolerate-skill on one side")
+    if label in c2:
+        return c2_reverted
+    if label in skills:
+        return without_core_skill(builtin_core_skill_line(skills[label]))
+    return None
+
+
 def record_one(name: str, primary_url: str, *, live_alt: str | None, tolerate: set[str],
-               root: Path, seed: str | None = None) -> tuple[int, bool]:
+               root: Path, seed: str | None = None,
+               skills: dict[str, str] | None = None) -> tuple[int, bool]:
     """One attempt: (the harness's exit code, 0 = saved; whether the parity lock was held)."""
     exchanges = standin_exchanges(name, seed)
     # Whether a hosted side exists is the scenario's to say (the config this
     # recording builds), not a committed trace's: a new scenario has none.
     hosted = uses_hosted(build_config(cli.SRC_ROOT, BY_NAME[name]))
     labels = ["alt"] + (["hosted"] if hosted else [])
+    skills = skills or {}
+    tolerances = {label: _tolerance(label, tolerate, skills) for label in labels}
     standin = StandIn(exchanges, labels,
-                      tolerate={label: c2_reverted for label in labels if label in tolerate})
+                      tolerate={k: fn for k, fn in tolerances.items() if fn is not None})
     standin.start()
     argv = ["--root", str(root), "record", "--scenario", name,
             "--upstream-primary", primary_url,
@@ -131,10 +161,16 @@ def record_one(name: str, primary_url: str, *, live_alt: str | None, tolerate: s
         os.environ[FAKE_KEY_ENV] = "parity-stand-in-no-real-key"
         argv += ["--upstream-hosted", standin.url("hosted"), "--hosted-key-env", FAKE_KEY_ENV]
     strict = "stand-in, strict" + (f", probes from {seed}" if seed else "")
-    sides = {"alt": "live" if live_alt else ("stand-in, C2-tolerant" if "alt" in tolerate
-                                             else strict)}
+
+    def _side(label: str) -> str:
+        if label in tolerate:
+            return "stand-in, C2-tolerant"
+        if label in skills:
+            return f"stand-in, tolerates the {skills[label]} line"
+        return strict
+    sides = {"alt": "live" if live_alt else _side("alt")}
     if hosted:
-        sides["hosted"] = "stand-in, C2-tolerant" if "hosted" in tolerate else strict
+        sides["hosted"] = _side("hosted")
     print(f"[rerecord] {name}: primary live; {sides}", flush=True)
     tee = _Tee(sys.stderr)
     try:
@@ -151,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("scenarios", nargs="+")
     ap.add_argument("--live-alt", action="append", default=[], metavar="SCENARIO=URL")
     ap.add_argument("--tolerate-c2", action="append", default=[], metavar="SCENARIO:SIDE")
+    ap.add_argument("--tolerate-skill", action="append", default=[], metavar="SCENARIO:SIDE=NAME",
+                    help="a stand-in side also matches with builtin core skill NAME's prompt "
+                         "line removed")
     ap.add_argument("--standin-from", action="append", default=[], metavar="NEW=RECORDED",
                     help="a scenario with no committed trace: answer its other sides' probes "
                          "from RECORDED's committed exchanges, and refuse every completion")
@@ -164,6 +203,12 @@ def main(argv: list[str] | None = None) -> int:
     for item in args.tolerate_c2:
         scen, side = item.split(":", 1)
         tolerate.setdefault(scen, set()).add(side)
+    skill_tol: dict[str, dict[str, str]] = {}
+    for item in args.tolerate_skill:
+        where, skill = item.split("=", 1)
+        scen, side = where.split(":", 1)
+        skill_tol.setdefault(scen, {})[side] = skill
+        builtin_core_skill_line(skill)          # refuse a wrong name before anything starts
     seeds = dict(item.split("=", 1) for item in args.standin_from)
     # Settled before anything is read or started: a mistake here costs nothing.
     for name in args.scenarios:
@@ -199,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"{datetime.now():%H:%M:%S}", flush=True)
             rc, lock_held = record_one(name, primary_url, live_alt=live.get(name),
                                        tolerate=tolerate.get(name, set()), root=args.root,
-                                       seed=seeds.get(name))
+                                       seed=seeds.get(name), skills=skill_tol.get(name))
             if lock_held:
                 print("[rerecord] the parity lock is held by another run; waiting 60 s "
                       "(not an attempt)", flush=True)

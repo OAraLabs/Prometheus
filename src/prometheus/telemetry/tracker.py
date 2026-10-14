@@ -1761,6 +1761,59 @@ class ToolCallTelemetry:
             return None
         return {"input_tokens": int(row[0]), "model": row[1], "timestamp": float(row[2])}
 
+    def degeneration_summary(self, since: float | None = None) -> list[dict[str, Any]]:
+        """Degenerate-output guard firings (#772), per model and provider.
+
+        One entry per (requested model, provider): how many rounds were
+        dropped, the LOWEST context size any of them was sent at, and when the
+        last one happened — the evidence a per-model compaction threshold is
+        set from (#773). Counts firings only (``retried`` and ``turn_ended``),
+        not the ``retry_ok`` rows that record a recovery. Lowest first.
+        """
+        sql = (
+            "SELECT model, json_extract(summary_json, '$.provider'), COUNT(*), "
+            "MIN(input_tokens), MAX(timestamp) FROM subsystem_runs "
+            "WHERE subsystem = 'agent_loop' AND operation = 'degenerate_output' "
+            "AND json_extract(summary_json, '$.outcome') IN ('retried', 'turn_ended')"
+        )
+        params: tuple = ()
+        if since is not None:
+            sql += " AND timestamp >= ?"
+            params = (since,)
+        sql += " GROUP BY 1, 2 ORDER BY 4"
+        try:
+            rows = self._conn.execute(sql, params).fetchall()
+        except sqlite3.Error:
+            log.warning("degeneration_summary: query failed", exc_info=True)
+            return []
+        return [
+            {"model": m, "provider": p, "count": int(n),
+             "min_input_tokens": int(lo) if lo is not None else None,
+             "last_at": float(last) if last is not None else None}
+            for m, p, n, lo, last in rows
+        ]
+
+    def session_last_round_dropped(self, session_id: str) -> bool:
+        """True when *session_id*'s most recent round was dropped and ENDED the turn (#772).
+
+        The guard writes its row after the round's own ``loop_round`` row, so
+        the newest of the two kinds says what happened last. A drop that was
+        retried successfully is followed by a newer ``loop_round`` row, and a
+        user's next message adds one too — either clears this.
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT operation, json_extract(summary_json, '$.outcome') FROM subsystem_runs "
+                "WHERE session_id = ? AND subsystem = 'agent_loop' "
+                "AND operation IN ('loop_round', 'degenerate_output') "
+                "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            log.warning("session_last_round_dropped: query failed for %r", session_id, exc_info=True)
+            return False
+        return bool(row) and row[0] == "degenerate_output" and row[1] == "turn_ended"
+
     def usage_rollup(
         self,
         *,

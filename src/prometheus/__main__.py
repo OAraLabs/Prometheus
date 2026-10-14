@@ -24,8 +24,12 @@ from typing import Any
 from prometheus import __version__
 from prometheus.banner import show_banner, write_version
 from prometheus.config.paths import get_config_dir, get_data_dir, get_wiki_root
-from prometheus.engine.agent_loop import run_loop, LoopContext
-from prometheus.config.shipped_defaults import resolve_max_tool_iterations, resolve_max_tool_iterations_cloud
+from prometheus.engine.agent_loop import LoopContext, MaxTurnsExhausted, run_loop
+from prometheus.config.shipped_defaults import (
+    resolve_max_tool_iterations,
+    resolve_max_tool_iterations_cloud,
+    resolve_max_turns,
+)
 from prometheus.engine.messages import ConversationMessage
 from prometheus.engine.stream_events import (
     AssistantTextDelta,
@@ -1086,6 +1090,15 @@ async def run_interactive(
                     if event.message.text and not response_text:
                         print(event.message.text, end="", flush=True)
                         response_text = event.message.text
+        except MaxTurnsExhausted as cap:
+            # #774: a budget stop, not a failure. The turn's rounds are already
+            # on ``messages`` (run_loop appends in place) and stay there, so the
+            # next prompt continues from them; only the note is new.
+            print(f"\n{cap.notice}\n")
+            if lcm_engine:
+                await lcm_engine.ingest(session_id, "assistant", cap.notice)
+                await lcm_engine.maybe_compact(session_id)
+            continue
         except Exception as exc:
             print(f"\n[error] {exc}")
             # Remove the last user message so we can retry
@@ -2272,6 +2285,8 @@ def main() -> None:
         divergence_detector=divergence_detector,
         max_tool_iterations=resolve_max_tool_iterations(config.get("model", {})),
         max_tool_iterations_cloud=resolve_max_tool_iterations_cloud(config.get("model", {})),
+        # #774: the ROUND cap, separate from the tool-call caps above.
+        max_turns=resolve_max_turns(config.get("model", {})),
         tool_result_max=ctx_cfg.get("tool_result_max", 4000),
         tool_results_turn_budget=ctx_cfg.get("tool_results_turn_budget", 8000),
         microcompact_after_turns=ctx_cfg.get("microcompact_after_turns", 3),

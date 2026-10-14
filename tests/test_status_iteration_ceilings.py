@@ -124,10 +124,12 @@ def test_ceiling_divergence_detects_a_mismatch():
     class _Loop:
         _max_tool_iterations = 500
         _max_tool_iterations_cloud = 100
+        _max_turns = 200
 
     class _Ctx:
         max_tool_iterations = 500
         max_tool_iterations_cloud = 100
+        max_turns = 200
 
     assert loop_ceiling_divergence(_Loop(), _Ctx()) == []
 
@@ -143,6 +145,7 @@ def test_ceiling_divergence_treats_a_renamed_attribute_as_divergence():
     class _Ctx:
         max_tool_iterations = 500
         max_tool_iterations_cloud = 100
+        max_turns = 200
 
     out = loop_ceiling_divergence(object(), _Ctx())
-    assert len(out) == 2 and all(a is None for _, a, _ in out), out
+    assert len(out) == 3 and all(a is None for _, a, _ in out), out

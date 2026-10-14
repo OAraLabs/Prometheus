@@ -20,6 +20,7 @@ import asyncio
 import http
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -64,6 +65,64 @@ WS_CLOSE_UNAUTHORIZED = 4401
 # server closes it. Short enough that an idle/probing connection can't sit
 # open; long enough for a real client's first round-trip.
 AUTH_FRAME_TIMEOUT_SECONDS = 5.0
+
+#: A rejection for the same peer host and reason within this window is counted
+#: instead of logged; the next one after it logs with the count (#760). A stale
+#: client retrying every minute is one line plus a count, not hundreds.
+REJECT_SUMMARY_SECONDS = 300.0
+
+
+class _RedactAuthFrames(logging.Filter):
+    """Redact token values from the websockets library's own log records (#760).
+
+    At DEBUG, ``websockets.server`` logs every frame it receives verbatim —
+    including the first-frame ``{"type": "auth", "token": ...}``. Nothing logs
+    at DEBUG by default, but an operator who turns it on to chase a connection
+    problem would write every client's token into the log. The record is
+    rewritten before any handler sees it; nothing else about it changes.
+    """
+
+    _TOKEN = re.compile(r'("token"\s*:\s*")[^"]*(")')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        if '"token"' in message:
+            record.msg = self._TOKEN.sub(r"\1<redacted>\2", message)
+            record.args = None
+        return True
+
+
+_AUTH_FRAME_FILTER = _RedactAuthFrames()
+
+
+def _install_auth_frame_filter() -> None:
+    """Attach the redaction filter to the websockets loggers, once."""
+    for name in ("websockets", "websockets.server", "websockets.protocol"):
+        lg = logging.getLogger(name)
+        if _AUTH_FRAME_FILTER not in lg.filters:
+            lg.addFilter(_AUTH_FRAME_FILTER)
+
+
+def _reject_clock() -> float:
+    """The rejection-log clock (patchable in tests)."""
+    return time.time()
+
+
+def _handshake_header(ws: Any, name: str, limit: int = 80) -> str | None:
+    """One handshake request header, truncated, or None. Never raises."""
+    try:
+        request = getattr(ws, "request", None)
+        headers = getattr(request, "headers", None) or getattr(ws, "request_headers", None)
+        value = headers.get(name) if headers is not None else None
+    except Exception:
+        return None
+    if not value:
+        return None
+    value = str(value).replace("\n", " ").replace("\r", " ")
+    return value if len(value) <= limit else value[:limit] + "…"
 
 # Cadence of the ``agent_progress`` liveness pulse emitted while a turn runs.
 # A turn can legitimately produce NO frames for minutes (a slow local model
@@ -266,18 +325,41 @@ class WebSocketBridge:
         None, so its next connect closes 4401. Any parse error, wrong type, or
         missing/incorrect token is a clean None.
         """
+        return self._auth_decision(raw)[0]
+
+    def _auth_decision(self, raw: str) -> tuple[Any, str, Any]:
+        """``(identity, reason, revoked_device)`` for a first frame (#760).
+
+        ``identity`` is None on rejection, and ``reason`` then says which kind:
+        a malformed frame, a frame that is not an auth frame, a missing token,
+        a revoked device's token (``revoked_device`` names it), or an unknown
+        one. The reason is for the server log; the client is told nothing more
+        than "unauthorized".
+        """
         try:
             msg = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            return None
+            return None, "malformed auth frame", None
         if not isinstance(msg, dict) or msg.get("type") != "auth":
-            return None
+            return None, "not an auth frame", None
         token = msg.get("token")
-        if not isinstance(token, str):
-            return None
+        if not isinstance(token, str) or not token:
+            return None, "missing token", None
         from prometheus.config.api_token import verify_token
 
-        return verify_token(token, self._api_token, self._device_store)
+        identity = verify_token(token, self._api_token, self._device_store)
+        if identity is not None:
+            return identity, "", None
+        revoked = None
+        lookup_revoked = getattr(self._device_store, "lookup_revoked", None)
+        if callable(lookup_revoked):
+            try:
+                from prometheus.config.device_store import token_digest
+
+                revoked = lookup_revoked(token_digest(token))
+            except Exception:
+                revoked = None
+        return None, ("revoked device" if revoked is not None else "unknown token"), revoked
 
     def _session_exists(self, session_id: str) -> bool:
         """Is there already a session by this id — live, or with durable rows?"""
@@ -428,6 +510,7 @@ class WebSocketBridge:
             self.signal_bus.subscribe("*", self._on_signal)
             self._subscribed = True
 
+        _install_auth_frame_filter()
         server = await websockets.serve(  # type: ignore[attr-defined]
             self._handler,
             host,
@@ -565,23 +648,62 @@ class WebSocketBridge:
             # Connection dropped/closed before sending anything.
             return False
 
-        identity = self._auth_identity(raw)
+        identity, reason, revoked = self._auth_decision(raw)
         if identity is not None:
             # Recorded for per-device liveness (Piece 2 reads this); cleaned
             # up in _handler's finally alongside _clients.
             self._ws_identity[websocket] = identity
             return True
-        await self._close_unauthorized(websocket, "invalid or missing auth token")
+        await self._close_unauthorized(websocket, reason, revoked=revoked)
         return False
 
-    async def _close_unauthorized(self, websocket: Any, reason: str) -> None:
+    async def _close_unauthorized(
+        self, websocket: Any, reason: str, *, revoked: Any = None,
+    ) -> None:
         # Generic client-facing reason (no token echo, ever); the specific
         # cause stays in the server log only.
-        logger.info("WS auth rejected: %s", reason)
+        self._log_rejection(websocket, reason, revoked)
         try:
             await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="unauthorized")
         except Exception:
             pass
+
+    def _log_rejection(self, websocket: Any, reason: str, revoked: Any) -> None:
+        """One line saying who was rejected and why (#760) — never token material.
+
+        Peer address, the specific reason, the revoked device's id and name
+        when the token was one, and the handshake's Origin / User-Agent. The
+        same peer host and reason within :data:`REJECT_SUMMARY_SECONDS` are
+        counted, not logged; the next one after the window logs the count.
+        """
+        peer = _client_label(websocket)
+        host = peer.rsplit(":", 1)[0]
+        now = _reject_clock()
+        seen = getattr(self, "_rejections_seen", None)
+        if seen is None:
+            seen = self._rejections_seen = {}
+        key = (host, reason)
+        entry = seen.get(key)
+        if entry is not None and now - entry[0] < REJECT_SUMMARY_SECONDS:
+            entry[1] += 1
+            return
+        suppressed = entry[1] if entry is not None else 0
+        seen[key] = [now, 0]
+        parts = [f"WS auth rejected ({reason}) from {peer}"]
+        if revoked is not None:
+            parts.append(
+                f"device {getattr(revoked, 'id', '?')} "
+                f"\"{getattr(revoked, 'name', '?')}\" (revoked)"
+            )
+        origin = _handshake_header(websocket, "Origin")
+        agent = _handshake_header(websocket, "User-Agent")
+        if origin:
+            parts.append(f"origin={origin}")
+        if agent:
+            parts.append(f"user-agent={agent}")
+        if suppressed:
+            parts.append(f"and {suppressed} more from {host} since the last line")
+        logger.info("; ".join(parts))
 
     async def _handle_client_message(self, websocket: Any, raw: str) -> None:
         """Process a command from the browser client."""
@@ -1592,9 +1714,12 @@ class WebSocketBridge:
         ``_run_agent_turn_locked``). ``original_len`` capture, the in-place
         ``run_loop`` appends, and the LCM tail persist all happen under the
         lock, on BOTH the normal and the interrupted exit paths."""
-        from prometheus.engine.agent_loop import run_loop
+        from prometheus.engine.agent_loop import MaxTurnsExhausted, run_loop
 
         accumulated = ""
+        # Where the current round's streamed text starts in ``accumulated`` —
+        # what a RoundDiscarded (#772) cuts back to.
+        round_start = 0
         last_usage: Any = None
         original_len: int | None = None
         messages: list | None = None
@@ -1612,6 +1737,27 @@ class WebSocketBridge:
                 if event_type == "AssistantTurnComplete":
                     # One model call finished; anything further is a new round.
                     progress["round"] = int(progress["round"]) + 1
+                    round_start = len(accumulated)
+
+                if event_type == "RoundDiscarded":
+                    # #772: the degenerate-output guard dropped the round whose
+                    # text was just streamed. Cut it from what this turn keeps
+                    # (the push summary, inject_turn's return, the interrupt
+                    # fallback that SAVES ``accumulated``), and tell clients so
+                    # a bubble can drop it too. ``keep_chars`` is how much of
+                    # this message's streamed text is still the turn's.
+                    accumulated = accumulated[:round_start]
+                    progress["chars"] = len(accumulated)
+                    await self.broadcast({
+                        "type": "chat_discard",
+                        "timestamp": time.time(),
+                        "payload": {
+                            "session_id": session_id,
+                            "message_id": msg_id,
+                            "keep_chars": round_start,
+                            "reason": getattr(event, "reason", None),
+                        },
+                    })
 
                 if event_type == "AssistantTextDelta":
                     accumulated += event.text
@@ -1748,6 +1894,49 @@ class WebSocketBridge:
             # and whoever pressed stop is by definition at a live client. The asymmetry is the
             # point — emitting here would push a completion notice for something that did not
             # complete.
+            return accumulated, last_usage
+
+        except MaxTurnsExhausted as cap:
+            # #774: the ROUND CAP is a budget stop, not a failure — keep and save
+            # the turn, like the user-stop path above. Before this handler the
+            # generic except below rolled it back, and because this path saves a
+            # turn's rows only at its END, none of them ever reached LCM: on
+            # 2026-10-13 a 200-round / 223-call turn vanished (discarded=400) and
+            # the next turn did not know it had done any of it. The loop has
+            # already answered every tool call and ended the list on cap.notice.
+            logger.warning(
+                "turn reached the round cap (session=%s, max_turns=%d) — keeping "
+                "and saving its work", session_id, cap.max_turns,
+            )
+            notice = ("\n\n" if accumulated else "") + cap.notice
+            accumulated += notice
+            await self.broadcast({
+                "type": "chat_delta",
+                "timestamp": time.time(),
+                "payload": {"session_id": session_id, "content": notice, "message_id": msg_id},
+            })
+            capped_row_id: int | None = None
+            if original_len is not None:
+                capped_row_id = session.persist_loop_result(original_len)
+            done_payload = {
+                "session_id": session_id,
+                "message_id": msg_id,
+                # Additive: older clients ignore it, newer ones can say why.
+                "stop_reason": "max_turns_exhausted",
+                "max_turns": cap.max_turns,
+            }
+            if capped_row_id is not None:
+                done_payload["row_id"] = capped_row_id
+            await self.broadcast({
+                "type": "chat_done",
+                "timestamp": time.time(),
+                "payload": done_payload,
+            })
+            await self._end_live_activity(session_id, done_payload)
+            # Unlike a user stop, nobody is necessarily watching a turn that ran
+            # into its limit, so it is announced like any finished turn.
+            await self._emit_turn_completed(session_id, accumulated)
+            self._schedule_session_title(session_id, session)
             return accumulated, last_usage
 
         except Exception as e:
@@ -2053,7 +2242,7 @@ class WebSocketBridge:
     # (approval_pending, sentinel_signal, dream_*) are NEVER filtered: they
     # are not session-scoped and the phone wants them all.
     _SESSION_SCOPED_TYPES = frozenset({
-        "chat_message", "chat_delta", "chat_done", "command_done",
+        "chat_message", "chat_delta", "chat_discard", "chat_done", "command_done",
         "agent_progress", "tool_call_start", "tool_call_end",
         "provider_degraded", "error",
     })

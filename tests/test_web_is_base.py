@@ -274,8 +274,9 @@ def test_the_extra_only_set_is_what_it_should_be():
     """Guard the guard: a derivation that came back empty, or had swallowed
     the web stack, would make the plain-boot test prove nothing."""
     blocked = _extra_only_imports()
-    assert {"mcp", "anthropic", "playwright", "slack_bolt", "discord",
-            "piper"} <= blocked
+    # No "anthropic": since 0.9.9 no extra installs the Anthropic SDK, which nothing
+    # imports (tests/test_anthropic_sdk_unused.py).
+    assert {"mcp", "playwright", "slack_bolt", "discord", "piper"} <= blocked
     assert not blocked & {"fastapi", "uvicorn", "websockets"}
 
 

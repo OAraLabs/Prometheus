@@ -460,7 +460,7 @@
      "rows": [
       [
        "desktop:parity-hosted",
-       "One Word Harbor Check",
+       "Friendly Parity Check Harbor",
        "<time>"
       ]
      ]
@@ -1525,7 +1525,7 @@
         }
        },
        105,
-       5,
+       6,
        null,
        "desktop:parity-hosted",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",

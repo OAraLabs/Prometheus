@@ -8,8 +8,8 @@ name: CI
 # Provenance: authored in the 2026-06 repo audit (untracked at the repo root
 # because the gh token lacked `workflow` scope), folded into the branch and
 # modernized for Onboarding Phase 3: uv-based install/test invocation matching
-# the project's canonical dev loop (`uv sync --extra web --extra anthropic
-# --extra mcp --group dev` + `PYTHONPATH=$PWD/src uv run pytest`).
+# the project's canonical dev loop (`uv sync --extra web --extra mcp
+# --group dev` + `PYTHONPATH=$PWD/src uv run pytest`).
 
 on:
   push:
@@ -90,7 +90,7 @@ jobs:
         # and the bootstrap silently skipped on every run while the daemon
         # gained MCP as its sanctioned third-party tool path (#315). A
         # subsystem's tests skipping is not the same as passing.
-        run: uv sync --python ${{ matrix.python-version }} --extra web --extra anthropic --extra mcp --group dev
+        run: uv sync --python ${{ matrix.python-version }} --extra web --extra mcp --group dev
       - name: Assert the environment is the interpreter this matrix leg asked for
         # setup-uv took `python-version` directly, so the leg was self-evidently
         # right. Now that selection is uv's, a wrong-but-working interpreter would
@@ -146,7 +146,7 @@ jobs:
       - name: Install uv (from PyPI — see the test job for why not setup-uv)
         run: python -m pip install --upgrade uv
       - name: Sync dependencies (the same extras and group as the test job)
-        run: uv sync --python 3.14 --extra web --extra anthropic --extra mcp --group dev
+        run: uv sync --python 3.14 --extra web --extra mcp --group dev
       - name: Assert this is Python 3.14 on macOS
         run: >
           uv run python -c "import sys, platform;
@@ -186,7 +186,7 @@ jobs:
       - name: Sync dependencies (same extras as the test job, plus the lint group)
         # The SAME extras the suite uses. A narrower env would type-check a
         # different import graph than the one that ships.
-        run: uv sync --extra web --extra anthropic --extra mcp --group dev --group lint
+        run: uv sync --extra web --extra mcp --group dev --group lint
 
       - name: Lint (ruff, src/)
         # Config lives in pyproject [tool.ruff]; scope and next-widening plan
@@ -247,7 +247,7 @@ jobs:
       - name: Install uv
         run: python -m pip install --upgrade uv
       - name: Sync dependencies
-        run: uv sync --extra web --extra anthropic --extra mcp --group dev
+        run: uv sync --extra web --extra mcp --group dev
 
       - name: Install bubblewrap and permit unprivileged namespaces
         run: |

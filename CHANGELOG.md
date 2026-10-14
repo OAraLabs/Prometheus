@@ -2,12 +2,64 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
-## 0.9.9 (unreleased)
+## 0.9.9 (2026-10-13)
 
-### Startup banner
+0.9.9 closes a way for a model-written shell on a Mac to reach the same-Mac pairing secret, and a way around the read floor on both Mac and Linux, makes the `agent` tool work, reads PDFs in the Mac app without PyMuPDF (AGPL), drops the unused Anthropic SDK, and adds a startup banner. Read "Upgrading from 0.9.8": Linux hosts with the AppArmor floor must reload its profile, `--version` prints different text, and an earlier default `denied_paths` list now resolves to the new one.
+
+### Security (#764)
+
+- **A model-written shell on a Mac can no longer read, write or move the same-Mac pairing secret.** `pair.secret`, in `~/Library/Application Support/Prometheus/pairing/`, is what `POST /api/pair/local` (and `POST /api/setup/pair` in setup mode) trades for an owner device token, and the request has to come from loopback, which every shell on the same Mac meets. Measured on macOS 15 before the change: `cat` printed the secret, `read_file` on it was allowed without a prompt, `write_file` could plant a secret of the agent's choosing, and `grep --root ~/Library` returned its contents.
+  - The Seatbelt floor denies reading and writing the pairing folder, and the folder named by `PROMETHEUS_LOCAL_PAIRING_DIR` when it is set. `bash_allow_ssh` does not change this.
+  - The gate's always-denied list, the shipped `denied_paths` and the config template now include the pairing folders for the Mac and Linux locations, and the folder this process would actually mint into. Differently-cased spellings are refused on macOS.
+  - `grep` and `glob` now prune with that built-in floor as well as your `denied_paths`. Before, `denied_paths: []`, or a config holding an earlier list, let `grep --root ~` print a file the gate itself floors.
+- **Renaming a parent folder no longer escapes the Seatbelt floor.** `mv ~/.config ~/cfg && cat ~/cfg/prometheus/env` printed the env file (the master key), because `~/.config` itself matched no rule; moving `Application Support/Prometheus` did the same to the pairing secret. The floor now refuses to rename, replace or re-mode each folder above a protected one (`~/.config`, `~/Library`, `~/Library/Application Support` and its `Prometheus` folder), up to but not including the home folder. Creating, writing and deleting files inside them still works. Hard links, symlinks and moving a prepared folder into place are refused too.
+- **The boot probe now proves both refusals by outcome:** the pairing secret can't be read, and `~/.config` can't be renamed.
+- **On Linux, renaming `~/.config` no longer escapes the AppArmor floor (#766, #776).** The same move worked there: `mv ~/.config ~/cfg && cat ~/cfg/prometheus/env` printed the file (measured on Linux 7.0 with the shipped profile loaded, against a dummy env file). The profile now refuses writes to `~/.config` itself, which a rename or replace needs. Creating, writing and deleting files inside it, and `touch ~/.config`, still work. The boot probe checks the rule by outcome, by renaming `~/.config` onto itself, which is refused under the rule and moves nothing without it. If the loaded profile is older, shells stay confined by it and the daemon logs an ERROR with the reload command, and `oara doctor` shows the same.
+
+### The agent tool works (#762)
+
+- **The `agent` tool no longer always fails.** It answered "SubagentSpawner not configured" on every call, because the daemon never gave it a spawner. It now runs a subagent on the same model as the turn that called it and returns the subagent's answer; the calling turn waits for it.
+- **A subagent runs under the same gate as the turn that spawned it.** Its tool calls are checked like any other, approvals apply and a denial stops the call. A subagent can't spawn another.
+
+### The `anthropic` extra installs nothing (#769)
+
+- **`[anthropic]` no longer installs the Anthropic SDK, which nothing in Prometheus imports:** the Anthropic provider speaks HTTP itself. The SDK and three packages only it brought (jiter, docstring-parser, sniffio) leave Prometheus.app, the Docker image and `[full]`. The fourth, `distro`, becomes a declared dependency on Linux: the system prompt's OS line uses it, and it had only ever been installed by accident, through the SDK. The extra's name stays, empty, so `pip install 'oara-prometheus[anthropic]'` and `uv sync --extra anthropic` still work. Nothing changes for using Claude models.
+
+### PDFs and large images without PyMuPDF (#767)
+
+- **PDF text comes from pypdfium2 and image downscaling from Pillow; PyMuPDF (AGPL-3.0) is no longer a dependency.** The Mac app, which shipped without PyMuPDF, now reads PDFs and shrinks large images like every other install. The comparison on ten real PDFs (two-column papers, a 59-page IRS publication with tables, forms, scans, Chinese and Japanese) is in `docs/audits/pdf-extraction/`: the same text in the same order once ligatures and line-break hyphens are normalised, and 1.3 to 2 times faster.
+- **A filled PDF form keeps what was typed.** Each page's filled form fields follow its text as a `[Form fields]` block of `name: value` lines (8 of 8 values in the test form; PyMuPDF's text carried 6). Empty fields and unchecked boxes are left out.
+- **A large image is shrunk to exactly 2,576 px on its long edge,** not by halving, which could leave it up to twice that. Images up to twice the cap are still sent as captured.
+- Scanned PDFs without a text layer still give no text: neither library does OCR.
+
+### A default style for pages, reports and PDFs (#765)
+
+- **`beacon-plate` is now a builtin skill.** When the agent builds an HTML page, report, dashboard or PDF, it loads this house style unless you ask for another one or have your own brand. It was in the copy-in `skills/` library before.
+- It adds one line to every system prompt (its name and one sentence, about 35 words). The full guide, about 2,000 tokens, arrives only when the agent loads it.
+- It covers print and PDF: page backgrounds that reach the sheet edge, page numbers, break rules, and the headless Chrome command.
+- Its Google Fonts link is a request to Google; the guide says so and gives the offline fallback.
+
+### Startup banner (#759)
 
 - **`oara daemon`, `oara setup` and the interactive chat open with a banner on a terminal.** It shows the wordmark, the port the daemon listens on and the model it serves, each only once it is known; never an address, a token or a path. Nothing is printed when stdout isn't a terminal, for `oara --once`, with `--quiet` (`-q`) or `OARA_NO_BANNER=1`, and `NO_COLOR` makes it plain text.
-- **`oara --version` prints `◉ prometheus <version> · OAra Labs`.** It used to print `Prometheus <version>`; a script that matches the old text needs the new one.
+- **`oara --version` prints `◉ prometheus <version> · OAra Labs`.** It used to print `Prometheus <version>`. On a terminal that can't show `◉` it prints `prometheus <version> - OAra Labs`.
+
+### Fixes
+
+- **A photo described for a model that can't see is described once, not twice (#755).** The description was added to the message twice, glued together.
+
+### Upgrading from 0.9.8
+
+- **`oara --version` has new text** (see above). A script that matches the old `Prometheus <version>` should match the first `x.y.z` in the line instead.
+- **A default `denied_paths` list from an earlier release now resolves to the new one (#764).** Setup copies the template, so each install holds the list of its day. A config that holds a previously shipped list exactly, in order, gets the new list, and the daemon logs one INFO line at boot saying so; a config already holding the new list is silent. Any other list, `[]` included, is yours: it is used as written and keeps the override warning. One effect: the oldest shipped list has a relative entry the gate refuses at boot, so a config still carrying it now boots with the new list instead of refusing.
+- **Every system prompt has one more line, for `beacon-plate` (#765).** If you copied `beacon-plate.md` into `~/.prometheus/skills/` earlier, your copy is the one used.
+- **A model's `agent` call now succeeds,** so a turn that used to get an error from it now waits for the subagent.
+- **Linux hosts using the AppArmor floor must reload the profile after upgrading:** `sudo apparmor_parser -r -W /etc/apparmor.d/prometheus-bash`, after copying the new `deploy/apparmor/prometheus-bash` to `/etc/apparmor.d/`. It is a root-loaded file, so upgrading Prometheus doesn't change it. Until it's reloaded, `~/.config` can still be renamed, and the daemon says so at boot. The new profile works with the old daemon, so reload it before restarting the daemon.
+
+### Known issues
+
+- **Built-in subagent types get no tools.** Their definitions name tools (`Bash`, `FileRead`, ...) this daemon doesn't have, so `general-purpose`, `explorer`, `planner`, `worker` and `verification` subagents answer from the model alone.
+- **How an approval request raised inside a subagent appears in Beacon and Telegram has not been checked.** A subagent has no session of its own.
 
 ## 0.9.8
 

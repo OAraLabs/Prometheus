@@ -577,20 +577,22 @@ def test_the_wheel_only_run_needs_no_signing_identity_and_excludes_a_prebuilt_wh
 
 # ── what the release leaves out, and what it looks like ──────────────────────
 
-def test_pymupdf_is_left_out_unless_someone_asks_for_it(app):
-    """PyMuPDF is AGPL-3.0. Will's call (2026-10-08): the app ships without it. Leaving it out is the default,
-    so a release built by CI or by hand cannot include it by forgetting a flag."""
-    assert app.DEFAULT_WITHOUT == ("pymupdf",)
-    assert app.parse_args(["--identity", FINGERPRINT]).without == ("pymupdf",)
-    assert app.parse_args(["--identity", FINGERPRINT, "--include-pymupdf"]).without == ()
-    assert app.parse_args(["--identity", FINGERPRINT, "--without", "pymupdf,lxml"]).without == ("pymupdf", "lxml")
+def test_pymupdf_is_no_dependency_at_all(app):
+    """PyMuPDF is AGPL-3.0. The app used to leave it out by flag (Will, 2026-10-08); since 0.9.9 nothing depends on
+    it: PDF text is pypdfium2 and downscaling Pillow (docs/audits/pdf-extraction/). So it cannot reach the bundle
+    by any flag, and this fails if anything brings it back into the lock."""
+    lock = (Path(app.REPO) / "uv.lock").read_text(encoding="utf-8")
+    assert 'name = "pymupdf"' not in lock.lower()
+    assert app.DEFAULT_WITHOUT == ()
+    assert app.parse_args(["--identity", FINGERPRINT]).without == ()
+    assert app.parse_args(["--identity", FINGERPRINT, "--without", "lxml,cryptography"]).without == ("lxml", "cryptography")
 
 
 def test_the_manifest_says_what_the_default_build_left_out(app):
     ns = app.parse_args(["--identity", FINGERPRINT])
     m = app.manifest(version="1.2.3", asset="a.zip", sha256="00" * 32, size=1, extras=ns.extras,
                      lock_sha256="11" * 32, without=ns.without)
-    assert m["without"] == ["pymupdf"]
+    assert m["without"] == []
 
 
 def test_the_bundle_names_its_icon(app):

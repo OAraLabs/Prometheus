@@ -120,6 +120,19 @@ SHIPPED_MAX_TOOL_ITERATIONS: int = 500
 #: number. THIS NUMBER IS NOT THE SAFETY MECHANISM; progress is.
 SHIPPED_MAX_TOOL_ITERATIONS_CLOUD: int = 500
 
+#: Model-round ceiling for ONE turn (``LoopContext.max_turns``), local and cloud.
+#:
+#: A different budget from the two above: those count TOOL CALLS, this counts
+#: MODEL ROUNDS, and a round can carry several calls. It was a hard-coded
+#: dataclass default with no config key until #774, so the configured
+#: ``max_tool_iterations_cloud: 500`` never bound a long turn — on 2026-10-13 a
+#: 223-call turn stopped here, at 200 rounds, first.
+#:
+#: Reaching it is a BUDGET stop, not a failure: the turn's work is kept and
+#: saved, and the next message continues from it (#774). 200 is the value the
+#: dataclass always had, so making it configurable changes nothing by itself.
+SHIPPED_MAX_TURNS: int = 200
+
 # gateway.media.allowed_*_types — inbound MIME allowlists on the Telegram
 # surface, the one exposed to the public internet by design. Absent from a
 # config predating PR #141, and the readers' fallback of [] means
@@ -376,6 +389,14 @@ def resolve_max_tool_iterations_cloud(model_cfg: dict | None) -> int:
         (model_cfg or {}).get("max_tool_iterations_cloud"),
         SHIPPED_MAX_TOOL_ITERATIONS_CLOUD,
     )
+
+
+def resolve_max_turns(model_cfg: dict | None) -> int:
+    """The model-round ceiling for one turn. See :data:`SHIPPED_MAX_TURNS`.
+
+    Absent, blank, non-integer, zero or negative -> :data:`SHIPPED_MAX_TURNS`.
+    """
+    return _positive_int((model_cfg or {}).get("max_turns"), SHIPPED_MAX_TURNS)
 
 
 def _positive_int(value: object, fallback: int) -> int:
