@@ -451,7 +451,7 @@ fallback. With Speech they would ship as one data file in the plugin. **No code 
 | Prometheus | | `pɹəmˈiθiəs` | pruh-MEE-thee-us | already right | pin it, so a lexicon update cannot change it |
 | Beacon | | `bˈikən` | BEE-kun | already right | pin it |
 | Qwen | `qwen` | `kwˈɛn` | kwen | **silent** | **decided** (Will, 2026-10-13) |
-| OAra | `oara` (hostnames such as oara-4090) | to be set from Will's answer | open | "OAra" read as OH-ah-ruh; "oara" **silent** | **open**: Will names the pronunciation |
+| OAra | `oara` (hostnames such as oara-4090) | `ˈOɹə` | OH-ruh | "OAra" read as OH-ah-ruh; "oara" **silent** | **decided** (Will, 2026-10-13); through Kokoro, Whisper writes it "Aura", which is the sound |
 | Unsloth | `unsloth` | `ʌnslˈɔθ` | un-SLAWTH | **silent** | proposed |
 | llama.cpp | `llamacpp`; `cpp` on its own | `lˈɑmə` + `sˌipˌipˈi` | llama dot C P P | "cpp" **silent** | proposed |
 
@@ -531,7 +531,7 @@ the espeak-free path failed.
 | The voice plugin published to PyPI, so `[speech]` can carry the full stack (decision 3) | not started |
 | `[speech]` = speech-to-text plus `say`, with `[voice]` as an alias (decision 3) | with the plugin core |
 | `say` fallback in `tts.py` (and Telegram voice-note format) | not started |
-| Our own pronunciations list (draft above): Qwen decided ("kwen"); OAra open | draft |
+| Our own pronunciations list (above): Qwen "kwen" and OAra "OH-ruh" decided; Unsloth and llama.cpp proposed | ships with Speech, after launch |
 | gruut: **out** (Wiktionary / CC BY-SA lineage). Measure a CMUdict-based fallback the same way | after launch |
 | A **speakable-text pass** before any TTS, needed with every option: skip or summarise hashes, commit ids and file paths; read numbers, units and code identifiers sensibly. The measurement's 259 words missed by *both* pipelines are mostly this. | not started |
 | A third option measured: Kokoro's converter plus a permissively licensed fallback for unknown words only (Will, 2026-10-13: his pick if near espeak on names, otherwise option B) | **done**: misaki + gruut is level with espeak on names overall and behind on unknown names (19 against 34); Will decides |
