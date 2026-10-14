@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -69,7 +70,14 @@ class TTSTool(BaseTool):
                 is_error=True,
             )
 
-        out_path = arguments.output_path or tempfile.mktemp(suffix=".wav")
+        # A relative output_path resolves against the tool context's cwd (the
+        # session workspace in a workspace session), like write_file. Handed
+        # on as given, the engine subprocess resolved it against the daemon
+        # PROCESS's directory instead.
+        if arguments.output_path:
+            out_path = str(_resolve_path(context.cwd, arguments.output_path))
+        else:
+            out_path = tempfile.mktemp(suffix=".wav")
 
         if engine == "espeak":
             return await _run_espeak(text, arguments.voice, out_path)
@@ -80,6 +88,13 @@ class TTSTool(BaseTool):
                 output=f"Unknown TTS engine: {engine}. Use 'espeak' or 'piper'.",
                 is_error=True,
             )
+
+
+def _resolve_path(base: Path, candidate: str) -> Path:
+    path = Path(candidate).expanduser()
+    if not path.is_absolute():
+        path = Path(base) / path
+    return path.resolve()
 
 
 def _detect_engine() -> str | None:
