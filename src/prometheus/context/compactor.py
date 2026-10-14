@@ -46,11 +46,13 @@ clean-room, design knowledge only. No source copied.
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import hashlib
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from prometheus.config.ephemeral import recorded_session_id
@@ -135,6 +137,23 @@ RECENT_TOOL_ROUNDS = 5
 SOURCE_GLOBAL_PCT = "global pct"
 SOURCE_MODEL_PCT = "model pct"
 SOURCE_MODEL_TOKENS = "model tokens"
+
+#: Beacon #283: who hears about a compaction pass WHILE it runs. An async
+#: ``(stage, payload)`` callable, set by the surface running the turn (the WS
+#: bridge, around ``run_loop``) and None everywhere else. A ContextVar for the
+#: reason the loop's own per-run state is one: the compactor instance is shared
+#: by every session, and the variable follows the turn that set it and nothing
+#: else, so one session's pass can never report into another's chat.
+#:
+#: Stages: ``start`` (a summary is about to be paid for), ``progress`` (after
+#: each summarizer call: ``chunks_done``/``chunks_total``/``progress``), then
+#: ``done`` or ``failed``; ``noop`` once when the session is over the line and
+#: nothing can be compacted. A pass that pays for no summary (a cached span, a
+#: trim) reports nothing: it takes no time. The SignalBus events stay as they
+#: were: they are the durable telemetry, this is the live view.
+COMPACTION_REPORTER: contextvars.ContextVar[
+    Callable[[str, dict], Awaitable[None]] | None
+] = contextvars.ContextVar("prometheus_compaction_reporter", default=None)
 
 
 def compaction_threshold(
@@ -788,6 +807,7 @@ class ContextCompactor:
 
     async def _summarize_span(
         self, span: list, span_tokens: int, session_id: str,
+        report: Callable[[str, int, int], Awaitable[None]] | None = None,
     ) -> tuple[str | None, int, int]:
         """Chunk-then-combine (#773). Returns ``(summary, chunks, truncated)``.
 
@@ -795,15 +815,34 @@ class ContextCompactor:
         summarizer's own window. One chunk: one call writes the final summary.
         More: each chunk is summarized, then the part summaries are merged —
         in further rounds while they still do not fit one request.
+
+        *report* (Beacon #283) hears ``("start", 0, total)`` once the span is
+        chunked, then ``("progress", done, total)`` after each call. *total*
+        counts summarizer calls: the chunks plus one combine. It grows only if
+        the part summaries need a further combine round, which is known only
+        once they are written.
         """
         final_budget = self._final_budget(span_tokens)
         lines = [self._render_message(m) for m in span]
         budget = self._input_budget(_SUMMARY_PROMPT, max(final_budget, self._max_summary_tokens))
         chunks, truncated = self._chunk_lines(lines, budget)
+        total = len(chunks) + (1 if len(chunks) > 1 else 0)
+        done = 0
+
+        async def _step(stage: str) -> None:
+            nonlocal done
+            if stage == "progress":
+                done += 1
+            if report is not None:
+                await report(stage, done, total)
+
+        await _step("start")
         if len(chunks) == 1:
             summary = await self._call_summarizer(
                 _SUMMARY_PROMPT.format(conversation="\n".join(chunks[0])),
                 final_budget, session_id, len(span), "1/1")
+            if summary is not None:
+                await _step("progress")
             return summary, 1, truncated
         parts: list[str] = []
         for i, chunk in enumerate(chunks, 1):
@@ -813,6 +852,7 @@ class ContextCompactor:
             if part is None:
                 return None, len(chunks), truncated
             parts.append(part)
+            await _step("progress")
         combine_budget = self._input_budget(_COMBINE_PROMPT, final_budget)
         level = 0
         while True:
@@ -823,7 +863,12 @@ class ContextCompactor:
                 summary = await self._call_summarizer(
                     _COMBINE_PROMPT.format(parts="\n".join(groups[0])),
                     final_budget, session_id, len(span), f"combine {level}")
+                if summary is not None:
+                    await _step("progress")
                 return summary, len(chunks), truncated
+            # The single combine counted in *total* became this round's groups,
+            # and at least one more round follows.
+            total += len(groups)
             merged: list[str] = []
             for j, group in enumerate(groups, 1):
                 piece = await self._call_summarizer(
@@ -833,6 +878,7 @@ class ContextCompactor:
                 if piece is None:
                     return None, len(chunks), truncated
                 merged.append(piece)
+                await _step("progress")
             if len(merged) >= len(parts):
                 # A combine round that did not shrink the list would loop forever.
                 return None, len(chunks), truncated
@@ -924,6 +970,21 @@ class ContextCompactor:
                 )
         except Exception:
             log.exception("ContextCompactor: telemetry event write failed")
+
+    @staticmethod
+    async def _report(stage: str, payload: dict) -> None:
+        """Tell the turn running this pass (Beacon #283), if one is listening.
+
+        Never raises: a closed socket must not cost the pass. Cancellation is
+        not caught; it is the turn being stopped.
+        """
+        reporter = COMPACTION_REPORTER.get()
+        if reporter is None:
+            return
+        try:
+            await reporter(stage, payload)
+        except Exception:
+            log.debug("ContextCompactor: compaction reporter failed (%s)", stage, exc_info=True)
 
     async def _fail_loud(self, reason: str, session_id: str, span_len: int) -> None:
         log.error(
@@ -1026,9 +1087,29 @@ class ContextCompactor:
                 if anchored_tokens <= ceiling or frozen:
                     span_end = anchored
 
+        # What the live view (Beacon #283) is told about this pass.
+        live = {
+            "session_id": session_id,
+            "tokens_before": tokens_before,
+            "threshold": threshold,
+            "threshold_source": threshold_source,
+            "trigger": trigger,
+        }
+        calls = {"done": 0, "total": 0}
+
+        async def _live_progress(stage: str, done: int, total: int) -> None:
+            calls["done"], calls["total"] = done, total
+            await self._report(stage, {
+                **live,
+                "chunks_done": done,
+                "chunks_total": total,
+                "progress": round(min(1.0, done / total), 3) if total else 0.0,
+            })
+
         span: list = []
         summary: str | None = None
         cache_hit = False
+        paid = False
         chunks = 0
         truncated = 0
         duration_ms = 0.0
@@ -1039,22 +1120,42 @@ class ContextCompactor:
             summary = self._cache.get(key)
             cache_hit = summary is not None
             if not cache_hit and not frozen:
+                paid = True
                 started = time.time()
-                summary, chunks, truncated = await self._summarize_span(
-                    span, span_tokens, session_id)
+
+                async def _live_failed(reason: str) -> None:
+                    await self._report("failed", {
+                        **live,
+                        "reason": reason,
+                        "duration_ms": round((time.time() - started) * 1000.0, 1),
+                    })
+
+                try:
+                    summary, chunks, truncated = await self._summarize_span(
+                        span, span_tokens, session_id, _live_progress)
+                except asyncio.CancelledError:
+                    # The turn was stopped mid-pass: the bar must still end.
+                    await _live_failed("cancelled")
+                    raise
+                except Exception as exc:
+                    # The type only: exception text can carry hosts, paths, keys.
+                    await _live_failed(f"summarizer raised {type(exc).__name__}")
+                    raise
                 duration_ms = (time.time() - started) * 1000.0
                 # Sanity gate: empty, or not actually smaller than what it
                 # replaces → loud failure + explicit fallback.
                 if summary is None:
-                    await self._fail_loud(
-                        "summarizer returned empty/failed", session_id, len(span))
+                    reason = "summarizer returned empty/failed"
+                    await self._fail_loud(reason, session_id, len(span))
+                    await _live_failed(reason)
                     return messages
                 if estimate_tokens(summary) >= span_tokens:
-                    await self._fail_loud(
+                    reason = (
                         f"summary ({estimate_tokens(summary)} tok) not smaller "
-                        f"than the span it replaces ({span_tokens} tok)",
-                        session_id, len(span),
+                        f"than the span it replaces ({span_tokens} tok)"
                     )
+                    await self._fail_loud(reason, session_id, len(span))
+                    await _live_failed(reason)
                     return messages
                 self._cache[key] = summary
                 while len(self._cache) > _CACHE_MAX_ENTRIES:
@@ -1107,6 +1208,10 @@ class ContextCompactor:
                 "over_by": tokens_before - ceiling,
                 "trigger": trigger,
             })
+            if not frozen:
+                # Once per stuck floor, like the stuck mark: not every round.
+                await self._report("noop", {
+                    **live, "over_by": tokens_before - ceiling, "ceiling": ceiling})
             await self._mark_stuck(session_id, floor_key, frozen, tokens_before, ceiling)
             return messages
 
@@ -1148,6 +1253,17 @@ class ContextCompactor:
             "summarizer_input_truncated": truncated,
             "tool_results_trimmed": trimmed,
         })
+        if paid:
+            await self._report("done", {
+                **live,
+                "tokens_after": tokens_after,
+                "duration_ms": round(duration_ms, 1),
+                "converged": converged,
+                "span_messages": len(span),
+                "chunks_done": calls["done"],
+                "chunks_total": calls["total"],
+                "progress": 1.0,
+            })
         return out
 
     async def _mark_stuck(

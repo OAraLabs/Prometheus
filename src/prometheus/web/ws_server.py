@@ -1639,7 +1639,7 @@ class WebSocketBridge:
         # heartbeat task. A plain dict (not locals) so the heartbeat sees
         # updates without threading state through every branch.
         progress = {
-            "phase": "thinking",   # thinking → generating → tool → …
+            "phase": "thinking",   # thinking → compacting → generating → tool → …
             "tool_name": None,
             "round": 1,            # model calls so far, 1-based (round N in flight)
             "chars": 0,            # assistant characters streamed this turn
@@ -1673,11 +1673,20 @@ class WebSocketBridge:
                 # is not stoppable until it starts (stop it again then).
                 if _task is not None:
                     self._turn_tasks[session_id] = _task
-                return await self._run_agent_locked(
-                    session_id, session, mode=mode, tool_choice=tool_choice,
-                    raise_on_error=raise_on_error, msg_id=msg_id,
-                    progress=progress,
-                )
+                # Beacon #283: a compaction pass inside THIS turn reports here,
+                # and only here (a ContextVar: it follows this turn and no other).
+                from prometheus.context.compactor import COMPACTION_REPORTER
+
+                reporter = COMPACTION_REPORTER.set(
+                    self._compaction_reporter(session_id, msg_id, progress))
+                try:
+                    return await self._run_agent_locked(
+                        session_id, session, mode=mode, tool_choice=tool_choice,
+                        raise_on_error=raise_on_error, msg_id=msg_id,
+                        progress=progress,
+                    )
+                finally:
+                    COMPACTION_REPORTER.reset(reporter)
         finally:
             # Stop the liveness pulse FIRST — a heartbeat outliving its turn
             # would tell clients a finished turn is still running. Cancel
@@ -2015,6 +2024,46 @@ class WebSocketBridge:
                 raise
             return accumulated, last_usage
 
+    def _compaction_reporter(
+        self, session_id: str, message_id: str, progress: dict[str, Any],
+    ) -> Any:
+        """Beacon #283: the turn's ear for its compaction pass.
+
+        Each report becomes a session-scoped ``context_compaction`` frame
+        (``stage``: start / progress / done / failed / noop), tied to the turn's
+        assistant bubble by ``message_id`` and named by THIS turn's session (a
+        nested run's pass, a subagent's, is shown in the chat waiting on it).
+        While a pass runs the pulse says ``compacting``, not ``thinking``: a long
+        chunked pass is many summarizer calls before the model call, and
+        "thinking" for minutes reads as a stall.
+        The SignalBus ``context_compaction*`` events are unchanged; they are the
+        telemetry, this is the live view.
+        """
+        # The phase the pass interrupted, put back when it ends. Usually
+        # "thinking" (the loop compacts just before a model call), but a nested
+        # run (a subagent inside a tool call) compacts while the turn says "tool".
+        before: dict[str, Any] = {"phase": None}
+
+        async def report(stage: str, payload: dict[str, Any]) -> None:
+            if stage == "start":
+                before["phase"] = progress["phase"]
+                progress["phase"] = "compacting"
+            elif stage in ("done", "failed") and progress["phase"] == "compacting":
+                progress["phase"] = before["phase"] or "thinking"
+            await self.broadcast({
+                "type": "context_compaction",
+                "timestamp": time.time(),
+                "payload": {
+                    **payload,
+                    # The turn's own ids: these are what the frame is scoped by.
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "stage": stage,
+                },
+            })
+
+        return report
+
     async def _emit_progress(
         self,
         session_id: str,
@@ -2244,7 +2293,7 @@ class WebSocketBridge:
     _SESSION_SCOPED_TYPES = frozenset({
         "chat_message", "chat_delta", "chat_discard", "chat_done", "command_done",
         "agent_progress", "tool_call_start", "tool_call_end",
-        "provider_degraded", "error",
+        "provider_degraded", "error", "context_compaction",
     })
 
     def _approval_frame_visible(self, ws: Any, event: dict[str, Any]) -> bool:
