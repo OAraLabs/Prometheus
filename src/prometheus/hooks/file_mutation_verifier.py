@@ -195,13 +195,43 @@ def _expand_user(path: str) -> str:
     the permission gate by ``agent_loop._boundary_escapes``, and the floor
     globs (``/*/.ssh``) cannot match a ``~``-prefixed literal.
 
-    Only a leading ``~`` is touched. Relative paths are deliberately left
-    alone: a bash clause can ``cd`` first, so resolving them against the
-    daemon's cwd would invent a path the command never used.
+    Only a leading ``~`` is touched. Relative paths are resolved separately,
+    against the directory the TOOL ran in (:func:`_join`): ``os.stat`` on a
+    bare relative path resolves it against the daemon process's cwd, which is
+    not where a workspace session's tools run — that is how a file sitting in
+    the workspace was reported "CLAIMED but FILE ABSENT" (2026-10-13).
     """
     if not path.startswith("~"):
         return path
     return os.path.expanduser(path)
+
+
+class _UnknownDir:
+    """The working directory became unknowable: a ``cd`` to ``$X``, ``-``, or a
+    ``cd`` whose scope the clause walk cannot follow (a subshell, a pipeline)."""
+
+    def __repr__(self) -> str:
+        return "<unknown dir>"
+
+
+# While a command is walked, its working directory is a path, this marker, or
+# None — "the caller named no cwd", which keeps relative paths as given (the
+# pre-cwd behaviour, for callers outside the loop).
+_UNKNOWN_DIR = _UnknownDir()
+
+
+def _join(base: "str | _UnknownDir | None", path: str) -> str | None:
+    """*path* against *base*, as the tool resolves it. None when unknowable.
+
+    Normalised but NOT symlink-resolved, so the path in the summary is the one
+    the operator knows (``/tmp/ws/x``, not ``/private/tmp/ws/x``); ``os.stat``
+    follows the link either way.
+    """
+    if os.path.isabs(path) or base is None:
+        return path
+    if isinstance(base, _UnknownDir):
+        return None
+    return os.path.normpath(os.path.join(base, path))
 
 
 def _snapshot(path: str) -> _Snapshot:
@@ -232,8 +262,14 @@ def _classify(before: _Snapshot, after: _Snapshot) -> str:
     return "no_change"        # the load-bearing silent-failure case
 
 
-def _extract_paths(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
-    """Best-effort extraction of paths from tool input."""
+def _extract_paths(
+    tool_name: str, tool_input: dict[str, Any], cwd: str | None = None,
+) -> list[str]:
+    """Best-effort extraction of paths from tool input.
+
+    A relative path joins *cwd* — the directory the tool resolves it against
+    (``write_file``/``edit_file``/``notebook_edit`` all use the context cwd).
+    """
     out: list[str] = []
     # file_write / file_edit / notebook_edit all use ``file_path`` (or
     # ``path``) — the Prometheus convention.
@@ -246,7 +282,8 @@ def _extract_paths(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
     for key in ("file_path", "path", "notebook_path"):
         val = tool_input.get(key)
         if isinstance(val, str) and val:
-            expanded = _expand_user(val)
+            # Never None here: _join only returns None for an UNKNOWN base.
+            expanded = _join(cwd, _expand_user(val)) or val
             if expanded not in out:
                 out.append(expanded)
     return out
@@ -633,6 +670,13 @@ def _redirect_kind(token: str) -> str | None:
 
 
 def _clause_token_lists(tokens: list[str]) -> list[list[str]]:
+    """The clauses of a token stream (see :func:`_clauses_with_separators`)."""
+    return [clause for clause, _before, _after in _clauses_with_separators(tokens)]
+
+
+def _clauses_with_separators(
+    tokens: list[str],
+) -> list[tuple[list[str], str | None, str | None]]:
     """Split a token stream into clauses on separator TOKENS, dropping comments.
 
     Quote-blind `re.split` on `;` is what turned `echo "… does not touch them."` into a
@@ -640,9 +684,16 @@ def _clause_token_lists(tokens: list[str]) -> list[list[str]]:
     each half carried an unbalanced quote, and the prose survived as bare shell text. A
     separator that is a token cannot be inside a quoted span, so that cascade is not
     merely fixed — it is unreachable.
+
+    Each clause comes with the separator text before and after it (None at either
+    end of the command; consecutive separators are concatenated, a comment counts
+    as a newline). The ``cd`` walk needs them: a ``cd`` carries over to later
+    clauses only across ``;``, ``&&``, ``||`` or a newline — a pipe, ``&`` or a
+    parenthesis puts it in a subshell.
     """
-    clauses: list[list[str]] = []
+    found: list[tuple[list[str], str | None]] = []
     current: list[str] = []
+    pending = ""                        # separator text since the last clause
     skipping = False
     for token in tokens:
         newline = not _is_quoted(token) and "\n" in token
@@ -651,18 +702,27 @@ def _clause_token_lists(tokens: list[str]) -> list[list[str]]:
         skipping = False
         if _is_separator(token):
             if current:
-                clauses.append(current)
+                found.append((current, pending or None))
+                pending = ""
             current = []
+            pending += token
             continue
         if token == "#":                # an UNQUOTED bare `#` opens a comment
             skipping = True
             if current:
-                clauses.append(current)
+                found.append((current, pending or None))
+                pending = ""
             current = []
+            pending += "\n"
             continue
         current.append(token)
     if current:
-        clauses.append(current)
+        found.append((current, pending or None))
+        pending = ""
+    clauses: list[tuple[list[str], str | None, str | None]] = []
+    for i, (clause, before) in enumerate(found):
+        after = found[i + 1][1] if i + 1 < len(found) else (pending or None)
+        clauses.append((clause, before, after))
     return clauses
 
 
@@ -712,7 +772,9 @@ class _BashAudit:
     unaudited: str | None = None        # reason, when the command could not be lexed
 
 
-def _analyze_clause(tokens: list[str], depth: int = 0) -> tuple[list[tuple[str, str]], bool]:
+def _analyze_clause(
+    tokens: list[str], depth: int = 0, base: "str | _UnknownDir | None" = None,
+) -> tuple[list[tuple[str, str]], bool]:
     """One clause -> (tracked paths, blind).
 
     The invariant is enforced HERE, as a disjunction rather than a list of cases: every
@@ -773,10 +835,12 @@ def _analyze_clause(tokens: list[str], depth: int = 0) -> tuple[list[tuple[str, 
             if word == "-c" and j + 1 < len(after):
                 inner = _unquote(after[j + 1])
                 try:
-                    for clause in _clause_token_lists(_lex(inner)):
-                        inner_tracked, inner_blind = _analyze_clause(clause, depth + 1)
-                        tracked.extend(inner_tracked)
-                        blind = blind or inner_blind
+                    # The child shell starts in the clause's directory, and a
+                    # `cd` inside it ends with it — so the inner script gets its
+                    # own walk from `base`, and returns resolved paths.
+                    inner_tracked, inner_blind = _walk_script(_lex(inner), base, depth + 1)
+                    tracked.extend(inner_tracked)
+                    blind = blind or inner_blind
                 except _Unlexable:
                     blind = True
                 return tracked, blind
@@ -816,24 +880,122 @@ def _analyze_clause(tokens: list[str], depth: int = 0) -> tuple[list[tuple[str, 
     return tracked, blind
 
 
-def audit_bash_command(command: str) -> _BashAudit:
-    """Extract tracked paths and decide auditability for one bash command."""
+def audit_bash_command(command: str, cwd: str | None = None) -> _BashAudit:
+    """Extract tracked paths and decide auditability for one bash command.
+
+    *cwd* is the directory the bash tool runs the command in. Given, relative
+    targets resolve against it — following each ``cd`` the walk can follow — so
+    the path stat'd is the path written. Omitted, relative targets are returned
+    as written (the pre-2026-10-13 behaviour, kept for callers outside the loop).
+    """
     try:
         tokens = _lex(command)
     except _Unlexable as exc:
         return _BashAudit(tracked=[], blind=False, unaudited=str(exc))
-    tracked: list[tuple[str, str]] = []
-    blind = False
-    for clause in _clause_token_lists(tokens):
-        clause_tracked, clause_blind = _analyze_clause(clause)
-        tracked.extend(clause_tracked)
-        blind = blind or clause_blind
+    tracked, blind = _walk_script(tokens, cwd)
     return _BashAudit(tracked=tracked, blind=blind)
 
 
-def _extract_bash_paths(command: str) -> list[tuple[str, str]]:
+# A `cd` carries over to the next clause only across these. Anything else — a
+# pipe, `&`, a parenthesis — means the `cd` ran in a subshell, or the walk
+# cannot tell which clauses shared it.
+_CD_CARRIES = frozenset({";", "&&", "||", "\n"})
+_CD_VERBS = frozenset({"cd", "pushd"})
+
+
+def _separator_carries_cd(sep: str | None) -> bool:
+    """True when every operator in *sep* keeps the shell's cwd for what follows."""
+    if sep is None:
+        return True
+    for part in re.findall(r"&&|\|\||[;\n]|.", sep):
+        if part not in _CD_CARRIES:
+            return False
+    return True
+
+
+def _cd_target(clause: list[str], base: "str | _UnknownDir") -> "str | _UnknownDir | None":
+    """Where a ``cd`` clause leaves the shell, or None when it is not a ``cd``.
+
+    A literal operand joins *base*; ``~`` expands; no operand is ``$HOME``. A
+    ``cd`` the walk cannot evaluate — ``cd -``, ``cd $X``, two operands —
+    leaves the directory UNKNOWN, so later relative targets are reported blind
+    rather than stat'd somewhere the shell never was.
+    """
+    words: list[str] = []
+    i = 0
+    while i < len(clause):
+        if _redirect_kind(clause[i]) is not None:
+            # `cd x 2>/dev/null` — the redirect and its target are not operands,
+            # and neither is the fd digit in front of it.
+            if words and len(words[-1]) == 1 and words[-1].isdigit():
+                words.pop()
+            i += 2
+            continue
+        words.append(clause[i])
+        i += 1
+    index, _ = _command_word_index(words)
+    if index is None:
+        return None
+    verb = os.path.basename(_unquote(words[index]))
+    if verb not in _CD_VERBS:
+        return None
+    operands = [w for w in words[index + 1:]
+                if _is_quoted(w) or w == "-" or not w.startswith("-")]
+    if not operands:
+        # `cd` alone goes home; `pushd` alone swaps with the stack's top.
+        return os.path.expanduser("~") if verb == "cd" else _UNKNOWN_DIR
+    if len(operands) != 1:
+        return _UNKNOWN_DIR
+    target = _expand_user(_unquote(operands[0]))
+    if target == "-" or _is_unresolved(target):
+        return _UNKNOWN_DIR
+    joined = _join(base, target)
+    return _UNKNOWN_DIR if joined is None else joined
+
+
+def _walk_script(
+    tokens: list[str], cwd: "str | _UnknownDir | None", depth: int = 0,
+) -> tuple[list[tuple[str, str]], bool]:
+    """Every clause in order, carrying the shell's working directory along.
+
+    The verifier used to ``os.stat`` a relative target as written — that is,
+    against the DAEMON's cwd — so ``cd <ws> && printf … > greeting.txt`` was
+    reported "CLAIMED but FILE ABSENT" about a file sitting in the workspace,
+    and so was a bare ``> f`` from a bash tool already running there.
+
+    With *cwd* None nothing is resolved (see :func:`audit_bash_command`). A
+    relative target under an UNKNOWN directory is BLIND, never guessed: the
+    contract's honest row instead of a false "FILE ABSENT".
+    """
+    tracked: list[tuple[str, str]] = []
+    blind = False
+    base = cwd
+    for clause, before, after in _clauses_with_separators(tokens):
+        # Every clause is analysed, a `cd` included: `cd x > log` still opens
+        # `log`, and the shell opens it BEFORE the cd runs — so against the old
+        # directory, which is the `base` this clause is analysed under.
+        clause_tracked, clause_blind = _analyze_clause(clause, depth, base)
+        blind = blind or clause_blind
+        for path, action in clause_tracked:
+            resolved = _join(base, path)
+            if resolved is None:
+                blind = True
+            else:
+                tracked.append((resolved, action))
+        # Only followed when the caller named a cwd; then `base` is never None.
+        moved = _cd_target(clause, base) if base is not None else None
+        if moved is not None:
+            # Followed only when the shell that ran it is the one that runs the
+            # next clause. Otherwise the walk cannot say where later clauses
+            # are, so it stops claiming to know.
+            scoped = (_separator_carries_cd(before) and _separator_carries_cd(after))
+            base = moved if scoped else _UNKNOWN_DIR
+    return tracked, blind
+
+
+def _extract_bash_paths(command: str, cwd: str | None = None) -> list[tuple[str, str]]:
     """Return ``(path, claimed_action)`` tuples extracted from a bash line."""
-    return audit_bash_command(command).tracked
+    return audit_bash_command(command, cwd).tracked
 
 
 def _is_device_sink(target: str) -> bool:
@@ -1022,18 +1184,24 @@ class FileMutationVerifier:
         tool_use_id: str,
         *,
         turn_key: str | None = None,
+        cwd: str | os.PathLike[str] | None = None,
     ) -> None:
-        """Snapshot every path the tool is expected to touch."""
+        """Snapshot every path the tool is expected to touch.
+
+        *cwd* is the directory the tool resolves relative paths against — the
+        run's cwd, which in a workspace session is the workspace. Pass the same
+        value to :meth:`post_tool_use`, or the two snapshots name different files.
+        """
         if not self._enabled:
             return
         try:
-            paths = self._paths_for(tool_name, tool_input)
+            paths = self._paths_for(tool_name, tool_input, cwd)
             # A bash command that redirects somewhere unnameable gets recorded even
             # when nothing is trackable — that is EXACTLY the case that used to leave
             # no row at all, indistinguishable from a clean turn.
             if tool_name == "bash":
                 command = str(tool_input.get("command", ""))
-                audit = audit_bash_command(command)
+                audit = audit_bash_command(command, _bash_cwd(tool_input, cwd))
                 if audit.unaudited is not None:
                     with self._lock:
                         self._record(turn_key).unaudited.append(command[:200])
@@ -1059,16 +1227,17 @@ class FileMutationVerifier:
         output: str | None = None,
         is_error: bool = False,
         turn_key: str | None = None,
+        cwd: str | os.PathLike[str] | None = None,
     ) -> None:
         """Diff snapshots and record one ``_Mutation`` per tracked path."""
         if not self._enabled:
             return
         try:
-            paths = self._paths_for(tool_name, tool_input)
+            paths = self._paths_for(tool_name, tool_input, cwd)
             if not paths:
                 return
             claim = self._claim_from(tool_name, tool_input)
-            per_path = self._claim_map(tool_name, tool_input)
+            per_path = self._claim_map(tool_name, tool_input, cwd)
             err = (output or "")[:200] if is_error else None
             with self._lock:
                 turn = self._record(turn_key)
@@ -1172,13 +1341,14 @@ class FileMutationVerifier:
 
     def _paths_for(
         self, tool_name: str, tool_input: dict[str, Any],
+        cwd: str | os.PathLike[str] | None = None,
     ) -> list[str]:
         """Return every path this tool call may touch."""
         if tool_name in _FS_TOOLS:
-            return _extract_paths(tool_name, tool_input)
+            return _extract_paths(tool_name, tool_input, None if cwd is None else os.fspath(cwd))
         if tool_name == "bash":
             command = str(tool_input.get("command", ""))
-            return [p for p, _ in _extract_bash_paths(command)]
+            return [p for p, _ in _extract_bash_paths(command, _bash_cwd(tool_input, cwd))]
         return []
 
     def _claim_from(
@@ -1201,6 +1371,7 @@ class FileMutationVerifier:
 
     def _claim_map(
         self, tool_name: str, tool_input: dict[str, Any],
+        cwd: str | os.PathLike[str] | None = None,
     ) -> dict[str, str]:
         """Per-path action, so one bash call is not described by one joined verb.
 
@@ -1215,7 +1386,7 @@ class FileMutationVerifier:
             return {}
         command = str(tool_input.get("command", ""))
         out: dict[str, str] = {}
-        for path, action in _extract_bash_paths(command):
+        for path, action in _extract_bash_paths(command, _bash_cwd(tool_input, cwd)):
             # LAST write wins, not first. A path can be claimed twice in one
             # command — `rm -f x && echo y > x` yields delete then redirect_write
             # for the same x — and the final on-disk state is the outcome of the
@@ -1323,6 +1494,24 @@ class FileMutationVerifier:
         if status == "missing":
             return "CLAIMED but FILE ABSENT", "⚠"
         return status, "✓"
+
+
+def _bash_cwd(
+    tool_input: dict[str, Any], cwd: str | os.PathLike[str] | None,
+) -> str | None:
+    """The directory the bash tool runs this command in, as the tool decides it.
+
+    ``bash`` takes an optional ``cwd`` argument and resolves it with
+    ``Path(cwd).expanduser().resolve()`` — a relative one against the PROCESS's
+    cwd — and otherwise runs in the context cwd. Mirrored, not improved on: the
+    verifier must stat where the tool wrote. None when the caller named no cwd.
+    """
+    if cwd is None:
+        return None
+    requested = tool_input.get("cwd")
+    if isinstance(requested, str) and requested.strip():
+        return os.path.abspath(os.path.expanduser(requested))
+    return os.fspath(cwd)
 
 
 def _dedupe_with_counts(commands: list[str]) -> list[tuple[str, int]]:
