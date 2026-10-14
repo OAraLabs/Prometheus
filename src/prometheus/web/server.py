@@ -5182,6 +5182,8 @@ def create_app(
         # the 2026-08-11 survey found on web: sessions).
         pre_len = len(session.get_messages())
 
+        from prometheus.engine.agent_loop import MaxTurnsExhausted
+
         try:
             # NO `tools=` ARGUMENT. This line used to read
             #
@@ -5221,6 +5223,16 @@ def create_app(
                     "input_tokens": result.usage.input_tokens,
                     "output_tokens": result.usage.output_tokens,
                 },
+            }
+        except MaxTurnsExhausted as cap:
+        # #774: a turn that hit its round cap kept its work — save it, never
+        # roll it back. run_async handed the loop a COPY of the session list,
+        # so the turn is on the exception, not on the session.
+            session.add_result_messages(cap.messages, pre_len)
+            return {
+                "text": cap.notice,
+                "stop_reason": "max_turns_exhausted",
+                "max_turns": cap.max_turns,
             }
         except Exception as exc:
             return JSONResponse(status_code=500, content={"error": str(exc)})

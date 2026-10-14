@@ -152,9 +152,24 @@ def test_the_interrupt_path_does_not_claim_completion():
 
     import prometheus.web.ws_server as mod
 
-    src = inspect.getsource(mod)
-    # exactly one call site: the completion path. A second would mean the interrupt path
-    # regained it, which would push a completion notice for something that did not complete.
-    assert src.count("await self._emit_turn_completed(") == 1, (
-        "expected exactly one emit call site (the completion path)"
+    src = inspect.getsource(mod.WebSocketBridge._run_agent_locked)
+    emit = "await self._emit_turn_completed("
+
+    def handler(start: str) -> str:
+        """The source of one except-branch of _run_agent_locked."""
+        i = src.index(start)
+        j = src.find("\n        except ", i + len(start))
+        return src[i:j if j != -1 else len(src)]
+
+    # The interrupt branch must never emit: "Turn complete" would be false for a
+    # turn the user stopped, and whoever pressed stop is at a live client.
+    assert emit not in handler("except asyncio.CancelledError:"), (
+        "the interrupt path claims completion"
     )
+    # The turns that DID end on their own emit: the normal completion path, and
+    # a turn that ran into its round cap (#774) — nobody is necessarily watching
+    # that one. Exactly these two; a third would need its own justification.
+    assert emit in handler("except MaxTurnsExhausted as cap:")
+    assert src.count(emit) == 2, "expected the completion path and the round-cap path only"
+    assert "await self._emit_turn_completed(" not in inspect.getsource(mod).split(
+        "async def _run_agent_locked")[0], "an emit outside the turn runner"

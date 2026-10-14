@@ -384,6 +384,39 @@ class TestFloorHolds:
         res = _confined(f"wc -c < {config_env_file}")
         assert_refused_not_missing(res, "read ~/.config/prometheus/env")
 
+    # --- #766: ~/.config could be renamed out from under the env rule -------
+    # Measured on Linux 7.0 before the rule existed: `mv ~/.config ~/cfg` was
+    # allowed and `cat ~/cfg/prometheus/env` printed the file.
+
+    def test_config_cannot_be_renamed_out_from_under_the_env_rule(self, config_env_file):
+        config = config_env_file.parent.parent
+        moved = Path.home() / ".aa-pytest-config-moved"
+        assert not moved.exists(), f"{moved} is left over from an earlier run; remove it first"
+        try:
+            res = _confined(f"mv {config} {moved} && cat {moved}/prometheus/env")
+            assert_refused_not_missing(res, "mv ~/.config, then read the env file")
+            assert config_env_file.exists() and not moved.exists(), "~/.config moved — the floor leaked"
+        finally:
+            # Put the real ~/.config back if the floor did not hold, so a red run
+            # does not leave the box without its config.
+            if moved.exists() and not config.exists():
+                moved.rename(config)
+
+    def test_the_boot_probe_sees_the_rename_refused(self, config_env_file):
+        assert C._probe_config_rename(C.PROFILE) == "refused"
+        ok, detail = C.preflight(C.PROFILE, force=True)
+        assert ok and "renaming ~/.config refused" in detail, detail
+
+    def test_work_inside_config_is_unaffected(self, config_env_file):
+        scratch = config_env_file.parent.parent / "aa-pytest-app"
+        try:
+            res = _confined(f"mkdir {scratch} && echo SETTING > {scratch}/settings && cat {scratch}/settings "
+                            f"&& rm -r {scratch} && touch {scratch.parent}")
+            assert not res.is_error and "SETTING" in res.output, res.output
+        finally:
+            if scratch.exists():
+                shutil.rmtree(scratch)
+
 
 @needs_profile
 class TestAdmissionHalf:

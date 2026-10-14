@@ -724,6 +724,8 @@ class SlackAdapter(BasePlatformAdapter):
         session.add_user_message(text)
         pre_len = len(session.get_messages())
 
+        from prometheus.engine.agent_loop import MaxTurnsExhausted
+
         try:
             result = await self.agent_loop.run_async(
                 system_prompt=self.system_prompt,
@@ -739,6 +741,13 @@ class SlackAdapter(BasePlatformAdapter):
             session.add_result_messages(result.messages, pre_len)
             session.trim(self.session_manager.MAX_SESSION_MESSAGES)
             response_text = result.text or "(no response)"
+        except MaxTurnsExhausted as cap:
+            # #774: a turn that hit its round cap kept its work — save it, never
+            # roll it back. run_async handed the loop a COPY of the session list,
+            # so the turn is on the exception, not on the session.
+            session.add_result_messages(cap.messages, pre_len)
+            session.trim(self.session_manager.MAX_SESSION_MESSAGES)
+            response_text = cap.notice
         except Exception as exc:
             logger.error("Agent error for channel %s: %s", channel, exc)
             session.rollback_last()

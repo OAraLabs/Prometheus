@@ -2040,6 +2040,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "THREAD session=%s messages=%d provenance=%s trusted=%s",
             session_id, pre_len, provenance, is_trusted,
         )
+        from prometheus.engine.agent_loop import MaxTurnsExhausted
+
         try:
             result = await self.agent_loop.run_async(
                 system_prompt=self.system_prompt,
@@ -2130,6 +2132,20 @@ class TelegramAdapter(BasePlatformAdapter):
                 message_count=len(result.messages) - pre_len,
             )
             return response_text
+        except MaxTurnsExhausted as cap:
+        # #774: a turn that hit its round cap kept its work — save it, never
+        # roll it back. run_async handed the loop a COPY of the session list,
+        # so the turn is on the exception, not on the session.
+            session.add_result_messages(cap.messages, pre_len)
+            session.trim(self.session_manager.MAX_SESSION_MESSAGES)
+            await self._emit_turn_completed(
+                session_id=session_id,
+                provenance=provenance,
+                model_name=self._serving_model_name(session_id),
+                model_provider=self._serving_provider_name(session_id),
+                message_count=len(cap.messages) - pre_len,
+            )
+            return cap.notice
         except Exception as exc:
             logger.error("Agent error for session %s: %s", session_id, exc)
             session.rollback_last()

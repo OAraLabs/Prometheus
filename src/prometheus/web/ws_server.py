@@ -1592,9 +1592,12 @@ class WebSocketBridge:
         ``_run_agent_turn_locked``). ``original_len`` capture, the in-place
         ``run_loop`` appends, and the LCM tail persist all happen under the
         lock, on BOTH the normal and the interrupted exit paths."""
-        from prometheus.engine.agent_loop import run_loop
+        from prometheus.engine.agent_loop import MaxTurnsExhausted, run_loop
 
         accumulated = ""
+        # Where the current round's streamed text starts in ``accumulated`` —
+        # what a RoundDiscarded (#772) cuts back to.
+        round_start = 0
         last_usage: Any = None
         original_len: int | None = None
         messages: list | None = None
@@ -1612,6 +1615,27 @@ class WebSocketBridge:
                 if event_type == "AssistantTurnComplete":
                     # One model call finished; anything further is a new round.
                     progress["round"] = int(progress["round"]) + 1
+                    round_start = len(accumulated)
+
+                if event_type == "RoundDiscarded":
+                    # #772: the degenerate-output guard dropped the round whose
+                    # text was just streamed. Cut it from what this turn keeps
+                    # (the push summary, inject_turn's return, the interrupt
+                    # fallback that SAVES ``accumulated``), and tell clients so
+                    # a bubble can drop it too. ``keep_chars`` is how much of
+                    # this message's streamed text is still the turn's.
+                    accumulated = accumulated[:round_start]
+                    progress["chars"] = len(accumulated)
+                    await self.broadcast({
+                        "type": "chat_discard",
+                        "timestamp": time.time(),
+                        "payload": {
+                            "session_id": session_id,
+                            "message_id": msg_id,
+                            "keep_chars": round_start,
+                            "reason": getattr(event, "reason", None),
+                        },
+                    })
 
                 if event_type == "AssistantTextDelta":
                     accumulated += event.text
@@ -1748,6 +1772,49 @@ class WebSocketBridge:
             # and whoever pressed stop is by definition at a live client. The asymmetry is the
             # point — emitting here would push a completion notice for something that did not
             # complete.
+            return accumulated, last_usage
+
+        except MaxTurnsExhausted as cap:
+            # #774: the ROUND CAP is a budget stop, not a failure — keep and save
+            # the turn, like the user-stop path above. Before this handler the
+            # generic except below rolled it back, and because this path saves a
+            # turn's rows only at its END, none of them ever reached LCM: on
+            # 2026-10-13 a 200-round / 223-call turn vanished (discarded=400) and
+            # the next turn did not know it had done any of it. The loop has
+            # already answered every tool call and ended the list on cap.notice.
+            logger.warning(
+                "turn reached the round cap (session=%s, max_turns=%d) — keeping "
+                "and saving its work", session_id, cap.max_turns,
+            )
+            notice = ("\n\n" if accumulated else "") + cap.notice
+            accumulated += notice
+            await self.broadcast({
+                "type": "chat_delta",
+                "timestamp": time.time(),
+                "payload": {"session_id": session_id, "content": notice, "message_id": msg_id},
+            })
+            capped_row_id: int | None = None
+            if original_len is not None:
+                capped_row_id = session.persist_loop_result(original_len)
+            done_payload = {
+                "session_id": session_id,
+                "message_id": msg_id,
+                # Additive: older clients ignore it, newer ones can say why.
+                "stop_reason": "max_turns_exhausted",
+                "max_turns": cap.max_turns,
+            }
+            if capped_row_id is not None:
+                done_payload["row_id"] = capped_row_id
+            await self.broadcast({
+                "type": "chat_done",
+                "timestamp": time.time(),
+                "payload": done_payload,
+            })
+            await self._end_live_activity(session_id, done_payload)
+            # Unlike a user stop, nobody is necessarily watching a turn that ran
+            # into its limit, so it is announced like any finished turn.
+            await self._emit_turn_completed(session_id, accumulated)
+            self._schedule_session_title(session_id, session)
             return accumulated, last_usage
 
         except Exception as e:
@@ -2053,7 +2120,7 @@ class WebSocketBridge:
     # (approval_pending, sentinel_signal, dream_*) are NEVER filtered: they
     # are not session-scoped and the phone wants them all.
     _SESSION_SCOPED_TYPES = frozenset({
-        "chat_message", "chat_delta", "chat_done", "command_done",
+        "chat_message", "chat_delta", "chat_discard", "chat_done", "command_done",
         "agent_progress", "tool_call_start", "tool_call_end",
         "provider_degraded", "error",
     })

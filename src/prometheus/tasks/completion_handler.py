@@ -74,6 +74,22 @@ class TaskCompletionHandler:
             )
             return
 
+        # #772: never start an unattended turn on a session whose last round
+        # was dropped as degenerate output. On 2026-10-13 a task's wake did
+        # exactly that: it re-entered a ~241k-token session that had just
+        # broken down, read the garbage back as history, ran three tool
+        # rounds, and broke down again. The task result still reaches the user
+        # — task_completed/task_failed are notified regardless of on_complete.
+        if _last_round_dropped(session_id):
+            log.warning(
+                "reengage skipped for session %s (task %s): its last round was "
+                "dropped as degenerate output (#772). The result is delivered as "
+                "a notification only; the next turn there starts when the user "
+                "sends a message.",
+                session_id, payload.get("task_id"),
+            )
+            return
+
         content = _build_reengage_content(payload)
         self._inflight[session_id] = current + 1
         try:
@@ -87,6 +103,26 @@ class TaskCompletionHandler:
             log.exception("reengage inject_turn failed for task %s", payload.get("task_id"))
         finally:
             self._inflight[session_id] = max(0, self._inflight.get(session_id, 1) - 1)
+
+
+def _last_round_dropped(session_id: str) -> bool:
+    """True when telemetry says *session_id*'s last round was dropped (#772).
+
+    Durable (``subsystem_runs``), so it survives a restart. With telemetry off
+    or unavailable the answer is False: the guard is then unrecorded, and
+    refusing every wake on a guess would break re-engagement outright.
+    """
+    from prometheus.telemetry.tracker import get_telemetry_handle
+
+    tel = get_telemetry_handle()
+    check = getattr(tel, "session_last_round_dropped", None)
+    if check is None:
+        return False
+    try:
+        return bool(check(session_id))
+    except Exception:
+        log.debug("session_last_round_dropped failed for %s", session_id, exc_info=True)
+        return False
 
 
 def _build_reengage_content(payload: dict[str, Any]) -> str:
@@ -130,6 +166,7 @@ _REASON_WORDS = {
     "timeout": "it ran past its time limit",
     "empty_brief": "it was given an empty brief",
     "daemon_restart": "the daemon restarted while it ran, and its process was stopped",
+    "degenerate_output": "its model's output became unreadable twice in a row",
 }
 
 

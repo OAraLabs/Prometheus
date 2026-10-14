@@ -20,7 +20,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-from prometheus.engine.agent_loop import LoopContext, run_loop
+from prometheus.engine.agent_loop import LoopContext, MaxTurnsExhausted, run_loop
 from prometheus.engine.messages import ConversationMessage
 from prometheus.engine.stream_events import (
     AssistantTextDelta,
@@ -66,6 +66,12 @@ async def run_worker_turn(
                 stop = getattr(event, "stop_reason", None)
                 if stop:
                     status, reason = "failed", str(stop)
+    except MaxTurnsExhausted as cap:
+        # #774: a worker has no next turn to continue in, so "keep it" means
+        # saying honestly why it stopped — not the generic error kind.
+        print(f"\n[stopped] reached the limit of {cap.max_turns} model rounds "
+              f"(model.max_turns)", flush=True)
+        status, reason = "failed", "max_turns_exhausted"
     except Exception as exc:  # noqa: BLE001 — the turn failed; say how, then exit
         kind = str(classify_turn_error(exc).get("kind") or "error")
         print(f"\n[error] {kind}: {exc}", flush=True)
