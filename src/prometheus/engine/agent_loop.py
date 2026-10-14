@@ -3951,9 +3951,10 @@ async def _try_escalate_tool_call(
 
     Spawns a SubagentSpawner with the router's configured escalation provider
     and asks it to execute the failing tool. The subagent runs in isolation
-    (fresh context, curated tool subset = just the failing tool). The main
-    agent loop keeps running on the primary provider; only the single tool
-    call is delegated.
+    (fresh context, curated tool subset = just the failing tool) and under the
+    turn's own permission gate, so an escalated call is approved, denied and
+    audited like any other. The main agent loop keeps running on the primary
+    provider; only the single tool call is delegated.
 
     Returns:
         A ToolResultBlock with the subagent's result (success or error), or
@@ -3988,6 +3989,10 @@ async def _try_escalate_tool_call(
             cwd=context.cwd,
             adapter=decision.adapter,
             telemetry=context.telemetry,
+            # The escalated call runs under the same gate as the turn that failed. A loop with no checker skips
+            # the permission block altogether, so without this the stronger model's bash call ran with no
+            # approval, no denied paths and no audit row (#789).
+            permission_checker=context.permission_checker,
         )
 
         try:
