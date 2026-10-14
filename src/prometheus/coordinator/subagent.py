@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from prometheus.coordinator.agent_definitions import get_agent_definition
+from prometheus.coordinator.agent_definitions import get_agent_definition, get_all_agent_definitions
 from prometheus.engine.agent_loop import AgentLoop, RunResult
 from prometheus.providers.base import ModelProvider
 from prometheus.tools.base import ToolRegistry
@@ -75,10 +75,21 @@ class SubagentSpawner:
             return self._parent_registry
 
         subset = ToolRegistry()
+        unresolved: list[str] = []
         for name in tool_names:
             tool = self._parent_registry.get(name)
             if tool is not None:
                 subset.register(tool)
+            else:
+                unresolved.append(name)
+        if unresolved:
+            # Lookup is exact (the convention in tests/test_tool_name_convention.py), so a miscased or misspelt
+            # name resolves to nothing. Silently dropping it is how every built-in subagent ended up with no
+            # tools at all (#790): say so, once per spawn.
+            logger.warning(
+                "Subagent tool list names tools the parent registry does not have, so they are dropped: %s",
+                ", ".join(unresolved),
+            )
         return subset
 
     async def spawn(
@@ -115,13 +126,30 @@ class SubagentSpawner:
         record_session_id = f"subagent:{parent_session_id or 'none'}:{agent_id}"
         defn = get_agent_definition(agent_type)
 
+        # A subagent only ever gets tools something NAMED. An agent type with no definition and no explicit tool
+        # list used to fall through to the parent's WHOLE registry (``tools_subset`` None), and so did a
+        # definition that listed no tools (``defn.tools or None``): two silent ways to hand a model every tool
+        # the daemon has (#790). The first is refused with the valid types named, so the model can correct
+        # itself; the second is now simply no tools.
+        if defn is None and tools_subset is None:
+            known = ", ".join(sorted(get_all_agent_definitions()))
+            logger.warning("Refusing to spawn a subagent of unlisted type %r (known types: %s)", agent_type, known)
+            return SubagentResult(
+                agent_id=agent_id,
+                agent_type=agent_type,
+                text="",
+                turns=0,
+                success=False,
+                error=f"unknown agent type {agent_type!r}; known types: {known}",
+            )
+
         effective_prompt = system_prompt
         effective_tools = tools_subset
         effective_max_turns = max_turns or 50
 
         if defn is not None:
             effective_prompt = effective_prompt or defn.system_prompt
-            effective_tools = effective_tools if tools_subset is not None else (defn.tools or None)
+            effective_tools = effective_tools if tools_subset is not None else list(defn.tools)
             effective_max_turns = max_turns or defn.max_turns
         else:
             effective_prompt = effective_prompt or "You are a helpful assistant."

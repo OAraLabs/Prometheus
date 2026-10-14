@@ -11,10 +11,10 @@ through the loop's own context path (``AgentLoop`` -> ``LoopContext`` -> ``ToolE
 
 The second half is a safety property. A subagent's loop is built by ``SubagentSpawner.spawn()``, and a
 loop with no ``permission_checker`` skips the whole permission block, so a spawner wired without the
-gate would run every tool it hands out (an unknown ``subagent_type`` hands out the parent's whole
-registry) with no gate, no approvals, no denied paths and no audit rows. The spawner is therefore given
-the parent loop's gate, and a test pins that a subagent's tool call reaches it and that a denial stops
-the call.
+gate would run every tool it hands out (before #790 an unknown ``subagent_type`` handed out the parent's
+whole registry) with no gate, no approvals, no denied paths and no audit rows. The spawner is therefore
+given the parent loop's gate, and a test pins that a subagent's tool call reaches it and that a denial
+stops the call.
 """
 
 from __future__ import annotations
@@ -22,8 +22,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 
+import pytest
 from pydantic import BaseModel
 
+import prometheus.coordinator.agent_definitions as agent_definitions
+from prometheus.coordinator.agent_definitions import AgentDefinition
 from prometheus.engine.agent_loop import AgentLoop
 from prometheus.engine.messages import ConversationMessage, TextBlock, ToolResultBlock, ToolUseBlock
 from prometheus.engine.usage import UsageSnapshot
@@ -36,7 +39,14 @@ from tests.support.doubles import register_double
 PARENT_MARK = "PARENT-TURN"
 SUB_REPLY = "sub-says-hi"
 NOT_WIRED = "SubagentSpawner not configured"
-UNLISTED = "unlisted-agent-type"  # no definition, so the subagent is given the parent's whole registry
+PROBING = "probing-agent"  # a registered definition that names exactly the two test tools it may use
+
+
+@pytest.fixture(autouse=True)
+def _probing_agent_type(monkeypatch):
+    monkeypatch.setattr(agent_definitions, "_BUILTIN_AGENTS", dict(agent_definitions._BUILTIN_AGENTS))
+    agent_definitions.register_agent_definition(
+        AgentDefinition(name=PROBING, description="test agent", tools=["probe", "agent"]))
 
 
 class _NoInput(BaseModel):
@@ -65,9 +75,9 @@ class _TwoLoopProvider(ModelProvider):
     The parent turn calls ``agent`` and then answers; the subagent turn answers ``SUB_REPLY``, optionally
     after calling ``sub_calls`` first. ``parent_saw`` / ``sub_saw`` hold the tool results each loop got.
 
-    ``subagent_type`` picks the subagent's tool set: a type with no definition ("unlisted") gets the parent's
-    WHOLE registry, which is the case the gate has to hold for. (A built-in type like ``general-purpose``
-    names tools such as ``Bash`` and ``FileRead`` that this daemon does not have, so it gets none.)
+    ``subagent_type`` picks the subagent's tool set. The gate and no-recursion tests use ``PROBING``, a definition
+    registered by the fixture below that names exactly ``probe`` and ``agent``; an agent type with no definition is
+    refused outright now (#790), so it can no longer be used to hand a subagent the parent's whole registry.
     """
 
     def __init__(self, sub_calls: str | None = None, subagent_type: str = "general-purpose") -> None:
@@ -151,7 +161,7 @@ def test_a_subagents_tool_call_goes_through_the_parents_gate():
     from prometheus.coordinator.subagent import attach_subagent_spawner
 
     gate, probe = _Gate(), _Probe()
-    provider = _TwoLoopProvider(sub_calls="probe", subagent_type=UNLISTED)
+    provider = _TwoLoopProvider(sub_calls="probe", subagent_type=PROBING)
     loop = _parent_loop(provider, probe, gate)
     attach_subagent_spawner(loop)
     _run(loop)
@@ -165,7 +175,7 @@ def test_a_subagent_cannot_run_what_the_gate_denies():
     from prometheus.coordinator.subagent import attach_subagent_spawner
 
     gate, probe = _Gate(deny_probe=True), _Probe()
-    provider = _TwoLoopProvider(sub_calls="probe", subagent_type=UNLISTED)
+    provider = _TwoLoopProvider(sub_calls="probe", subagent_type=PROBING)
     loop = _parent_loop(provider, probe, gate)
     attach_subagent_spawner(loop)
     _run(loop)
@@ -177,7 +187,7 @@ def test_a_subagent_cannot_spawn_another():
     """By construction the subagent's loop carries no spawner, so ``agent`` inside it is not configured."""
     from prometheus.coordinator.subagent import attach_subagent_spawner
 
-    provider = _TwoLoopProvider(sub_calls="agent", subagent_type=UNLISTED)
+    provider = _TwoLoopProvider(sub_calls="agent", subagent_type=PROBING)
     loop = _parent_loop(provider, _Probe())
     attach_subagent_spawner(loop)
     _run(loop)
