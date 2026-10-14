@@ -168,11 +168,8 @@ class ImageGenerateInput(BaseModel):
         json_schema_extra=PATH_FIELD_WRITE,
         default=None,
         description=(
-            "Optional path to save the image, under an images/ folder: the "
-            "workspace's (a relative path such as images/x.png resolves "
-            "against the working directory) or the image cache. When "
-            "omitted, saves to ~/.prometheus/cache/images/ with a generated "
-            "name."
+            "Optional absolute path to save the image. When omitted, "
+            "saves to ~/.prometheus/cache/images/ with a generated name."
         ),
     )
 
