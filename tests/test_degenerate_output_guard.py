@@ -1,7 +1,8 @@
 """#772 — the degenerate-output guard.
 
-Fixtures are the REAL incident text from 2026-10-13 (qwen3.8-max on DashScope
-at ~241k tokens), shortened, plus the legitimate shapes the letter test must
+Fixtures come from the 2026-10-13 incident (qwen3.8-max on DashScope at ~241k
+tokens): breakdown 1 is the persisted round verbatim, breakdown 2 is rebuilt
+from the shape in the issue. Then the legitimate shapes the letter test must
 never drop (tables, number lists, CSV, hex dumps, code, non-Latin prose, a
 short "OK").
 """
@@ -17,13 +18,18 @@ from prometheus.engine.degeneration import (
     detect,
 )
 
-# Breakdown 1 (240,772 tokens): visible text, verbatim prefix incl. its C0 bytes.
+# Breakdown 1 (240,772 tokens): the visible text, VERBATIM — all 448 characters and
+# 28 C0 bytes of the assistant row the daemon persisted (lcm.db, session
+# beacon:7f590e40…, turn_index 635). Its thinking block was "Button: \n".
 BREAKDOWN_1 = (
-    "- Button0:35.6983.3898\n\n0.\n[16.1199/11,13.2092-21/22/5\n\n[/12/14/21,\n"
-    "[3/2-1.14/4/8/\n\n[3.13/3.321/8/4/2/11/10/2/3/4/6/1/1/6]\n[1/.  5]   ,    / ] "
-    "[ 2  2 — \n  -- -]/   /]:   / \n  [[ \x00  ]     [ [\x00  .26 2:( [8 [2 [[78\x00"
-    " ...0 00    - **20 //5 / []:2[[]0 ]0  5 :[ Z0 0[ - (/  - (  :  -]02]}[-],] 222[ "
-    "]]]]02][]:]_[ ]\x00]-][:]\x00][ ]_13:\x0019,```\n[1]:\x01\x01\x05 \x00 \x00"
+    "- Button0:35.6983.3898\n\n0.\n[16.1199/11,13.2092-21/22/5\n"
+    "\n[/12/14/21,\n[3/2-1.14/4/8/\n\n[3.13/3.321/8/4/2/11/10/2/3/4/6/1/1/6]\n"
+    "[1/.  5]   ,    / ] [ 2  2 — \n  -- -]/   /]:   / \n  [[ \x00  ]     [ [\x00"
+    "  .26 2:( [8 [2 [[78\x002111619026227111820201380848449999983433000000000001"
+    "020200 ...0 00    - **20 //5 / []:2[[]0 ]0  5 :[ Z0 0[ - (/  - (  :  -]02]}["
+    "-],] 222[ ]]]]02][]:]_[ ]\x00]-][:]\x00][ ]_13:\x0019,```\n"
+    "[1]:\x01\x01\x05 \x00 \x00\x02 \x02\x02 \x02\x02\x02 \x02\x02\x02\x02\x02\x02"
+    "\x02\x02\x02:relativeing\tdda warder\n | [\x02\x00"
 )
 # Breakdown 2 (244,459 tokens): the THINKING flood; visible text was "Report".
 BREAKDOWN_2_THINKING = "- Button-4-8:21\n\n-01 " + " ".join(
@@ -60,6 +66,12 @@ LEGITIMATE = {
     # floor is what keeps a banner like this from being dropped.
     "banner": "═" * 300 + "\nRelease notes for version nine point nine\n" + "═" * 10,
 }
+
+
+def test_breakdown_1_is_the_whole_persisted_round():
+    """The fixture is the incident round, not an excerpt: keep it whole."""
+    assert len(BREAKDOWN_1) == 448
+    assert sum(ch < " " and ch not in "\t\n\r" for ch in BREAKDOWN_1) == 28
 
 
 def test_breakdown_1_is_caught_by_its_control_bytes():
