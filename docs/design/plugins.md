@@ -435,9 +435,9 @@ that limit is close, so option B must install espeak's data at a short, fixed pa
     espeak.
   - It would need the same measurement before it could replace gruut.
 
-**Before gruut could ship:** either treat its English data as CC BY-SA (attribution and share-alike for the
-lexicon file, kept separate from our code) or replace it with a CMUdict-based fallback. Will decides after
-launch, with the speech decision.
+**Decided (Will, 2026-10-13): gruut is out,** because of the Wiktionary (CC BY-SA) lineage of its English data.
+After launch, a CMUdict-based fallback (CMU's own BSD-style data, plus a g2p model trained on it) is measured
+the same way: the same kind of 50 replies, filling unknown pieces only, against espeak.
 
 ### Our own pronunciations (draft, 2026-10-13)
 
@@ -450,8 +450,8 @@ fallback. With Speech they would ship as one data file in the plugin. **No code 
 |---|---|---|---|---|---|
 | Prometheus | | `pɹəmˈiθiəs` | pruh-MEE-thee-us | already right | pin it, so a lexicon update cannot change it |
 | Beacon | | `bˈikən` | BEE-kun | already right | pin it |
-| Qwen | `qwen` | `kwˈɛn` | kwen | **silent** | **Will to confirm**: "kwen", or "chwen" (`ʧwˈɛn`) |
-| OAra | `oara` (hostnames such as oara-4090) | `ˈOˌɑɹə` | OH-ah-ruh | "OAra" right; "oara" **silent** | **Will to confirm** how the brand is said; Whisper heard "OR" at normal speed |
+| Qwen | `qwen` | `kwˈɛn` | kwen | **silent** | **decided** (Will, 2026-10-13) |
+| OAra | `oara` (hostnames such as oara-4090) | to be set from Will's answer | open | "OAra" read as OH-ah-ruh; "oara" **silent** | **open**: Will names the pronunciation |
 | Unsloth | `unsloth` | `ʌnslˈɔθ` | un-SLAWTH | **silent** | proposed |
 | llama.cpp | `llamacpp`; `cpp` on its own | `lˈɑmə` + `sˌipˌipˈi` | llama dot C P P | "cpp" **silent** | proposed |
 
@@ -531,8 +531,8 @@ the espeak-free path failed.
 | The voice plugin published to PyPI, so `[speech]` can carry the full stack (decision 3) | not started |
 | `[speech]` = speech-to-text plus `say`, with `[voice]` as an alias (decision 3) | with the plugin core |
 | `say` fallback in `tts.py` (and Telegram voice-note format) | not started |
-| Our own pronunciations list (draft above): Will confirms Qwen and OAra | draft |
-| gruut's English data: Wiktionary-derived (above); keep as CC BY-SA data, or replace with a CMUdict-based fallback | Will, after launch |
+| Our own pronunciations list (draft above): Qwen decided ("kwen"); OAra open | draft |
+| gruut: **out** (Wiktionary / CC BY-SA lineage). Measure a CMUdict-based fallback the same way | after launch |
 | A **speakable-text pass** before any TTS, needed with every option: skip or summarise hashes, commit ids and file paths; read numbers, units and code identifiers sensibly. The measurement's 259 words missed by *both* pipelines are mostly this. | not started |
 | A third option measured: Kokoro's converter plus a permissively licensed fallback for unknown words only (Will, 2026-10-13: his pick if near espeak on names, otherwise option B) | **done**: misaki + gruut is level with espeak on names overall and behind on unknown names (19 against 34); Will decides |
 | Models pinned (URLs, SHA-256s) and `whisper-server` built and signed in CI | not started |
