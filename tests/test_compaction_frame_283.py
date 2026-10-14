@@ -312,10 +312,12 @@ async def test_a_turn_stopped_between_calls_ends_the_bar_and_stays_stopped():
     assert items[-1][1]["reason"] == "cancelled"
 
 
-async def test_a_turn_stopped_during_a_summarizer_call_ends_the_bar():
-    # Cancelled INSIDE a summarizer call. The LLM envelope (on_failure=
-    # return_none) turns that into "no summary", so it surfaces as the pass's
-    # ordinary failure; either way the bar must not be left up.
+async def test_a_turn_stopped_during_a_summarizer_call_ends_the_bar_and_stays_stopped():
+    # Cancelled INSIDE a summarizer call. Since #787 the LLM envelope re-raises a
+    # Stop whatever its on_failure says, so this is the same path as a Stop
+    # between calls: the bar ends with reason "cancelled" and the cancellation
+    # keeps propagating. Before #787 it surfaced as "summarizer returned
+    # empty/failed" and the turn went on to the model call.
     gate = asyncio.Event()
     c = _compactor(_Summarizer(gate=gate))
     reports = _Reports()
@@ -323,11 +325,10 @@ async def test_a_turn_stopped_during_a_summarizer_call_ends_the_bar():
         _apply_reporting(c, _history(90), reports, session_id="s", model="cloud-model"))
     await _until(lambda: reports.stages() == ["start"], "the pass never started")
     task.cancel()
-    try:
+    with pytest.raises(asyncio.CancelledError):
         await task
-    except asyncio.CancelledError:
-        pass
     assert reports.stages() == ["start", "failed"]
+    assert reports.items[-1][1]["reason"] == "cancelled"
 
 
 async def test_nothing_compactable_reports_noop_once_per_stuck_floor():
