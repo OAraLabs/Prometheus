@@ -61,6 +61,9 @@ helpers maps cleanly:
 
 The point is that *failure is always observable* in telemetry.db. The
 caller-visible behaviour stays compatible with the legacy contract.
+
+The policy covers a failed call, never a cancelled one: a Stop
+(``CancelledError``, ``KeyboardInterrupt``) re-raises under every mode.
 """
 
 from __future__ import annotations
@@ -221,6 +224,9 @@ class LLMCallEnvelope:
           - ``"return_none"`` — returns ``str | None`` (None on failure).
           - ``"log_only"``    — returns :class:`LLMCallResult` always.
 
+        A Stop (``CancelledError``, ``KeyboardInterrupt``) is not a failure and
+        always propagates, under every mode, after its ``partial`` run row.
+
         ``operation`` is recorded on both success and failure telemetry
         so a subsystem can distinguish "generate_skill" from "refine_skill"
         when multiple call paths share an envelope.
@@ -268,9 +274,15 @@ class LLMCallEnvelope:
             duration_ms = (time.time() - started) * 1000.0
             if isinstance(exc, _CANCELLATION):
                 # A Stop is not a failure: no silent_failures row, no traceback.
+                # Nor is it this call's to absorb, whatever ``on_failure`` says:
+                # a coroutine that catches CancelledError and returns is never
+                # cancelled again (3.11+), so returning None here swallowed a
+                # user's Stop — the compactor's summarizer, then the turn's own
+                # model call, ran on.
                 self._record_cancelled(operation, exc, duration_ms, model, provider,
                                        session_id=session_id)
                 log.info("%s.%s: LLM call cancelled", self._subsystem, operation)
+                raise
             else:
                 self._record_failure(operation, exc, context, duration_ms, model, provider,
                                      session_id=session_id)
