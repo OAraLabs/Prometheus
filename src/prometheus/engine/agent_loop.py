@@ -3024,7 +3024,11 @@ async def _run_loop(
         if fmv is not None:
             for _tc in tool_calls:
                 try:
-                    fmv.pre_tool_use(_tc.name, _tc.input or {}, _tc.id, **_fmv_kw)
+                    # The run's cwd — the session workspace when there is one —
+                    # is where the tools resolve relative paths, so the
+                    # verifier stats there too, not in the daemon's cwd.
+                    fmv.pre_tool_use(_tc.name, _tc.input or {}, _tc.id,
+                                     cwd=_run_paths(context)[0], **_fmv_kw)
                 except Exception:
                     log.debug(
                         "FileMutationVerifier.pre_tool_use raised",
@@ -3133,7 +3137,7 @@ async def _run_loop(
                     fmv.post_tool_use(
                         _tc.name, _tc.input or {}, _tc.id,
                         output=_r.content, is_error=_r.is_error,
-                        **_fmv_kw,
+                        cwd=_run_paths(context)[0], **_fmv_kw,
                     )
                 except Exception:
                     log.debug(
@@ -5319,8 +5323,13 @@ async def _execute_tool_call(
                     tool_name, exc_info=True,
                 )
         _run_cwd, _run_roots = _run_paths(context)
+        # write_base only in a workspace session: then _run_cwd IS the
+        # workspace, and a relative write resolves there exactly as the tool
+        # will resolve it. Without one, _run_cwd is the daemon's cwd and a
+        # relative write stays unknown (#345).
         _file_path, _path_unknown = gate_path_for(
             tool_name, tool_input, schema=_gate_schema, base=_run_cwd,
+            write_base=_run_cwd if _run_roots else None,
         )
         # Whether that path gets WRITTEN to, from the parameter's own
         # declaration. This is what the workspace boundary keys on; it used to

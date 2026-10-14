@@ -80,6 +80,33 @@ log = logging.getLogger(__name__)
 # read_file approvals, both with zero extents, on every surface at once).
 READ_ONLY_FILE_TARGETS: frozenset[str] = frozenset({"read_file"})
 
+# WRITE tools whose relative path resolves against the tool context's cwd —
+# and so, in a workspace session, against the session's workspace.
+#
+# WHY A WORKSPACE BASE IS NOT THE PROCESS'S CWD. The relative→UNKNOWN rule for
+# writes keeps "where the daemon process happens to be running" from deciding
+# whether a write is allowed. A session workspace is not that: the operator
+# chose it, the system prompt names it to the model as the conversation's
+# working directory, the tool resolves the relative path against it whatever
+# the gate says, and it IS the write boundary the gate enforces. Declining to
+# resolve there made the gate ask about a path it could rule on exactly, and an
+# unattended run (the parity re-record of 2026-10-13) answered "Permission
+# denied for write_file" to a write inside its own workspace — the model then
+# did the same write through bash, where nothing asked.
+#
+# WHAT STILL HOLDS. The resolved path goes through the always-denied floor,
+# denied_paths and the workspace boundary, so `../escape.txt` is a write
+# OUTSIDE the workspace and asks on that ground. With no session workspace the
+# base is the daemon's cwd, no write_base is passed, and #345's rule applies.
+#
+# MEMBERSHIP IS CHECKED, NOT CLAIMED. A tool belongs here only if it resolves
+# `<context.cwd>/<relative>`: download_file resolves against Path.cwd() (the
+# process), tts and image_generate hand the string on, so they stay UNKNOWN.
+# tests/test_relative_write_in_workspace.py runs each member and compares.
+WORKSPACE_RELATIVE_WRITE_TARGETS: frozenset[str] = frozenset({
+    "write_file", "edit_file", "notebook_edit",
+})
+
 TOOL_PATH_PARAM: dict[str, str] = {
     "write_file": "path",
     "edit_file": "path",
@@ -136,6 +163,7 @@ def gate_path_for(
     *,
     schema: dict[str, Any] | None = None,
     base: Path | str | None = None,
+    write_base: Path | str | None = None,
 ) -> tuple[str | None, str | None]:
     """The absolute path this call targets, for the SecurityGate.
 
@@ -153,7 +181,9 @@ def gate_path_for(
     by where the process happens to be running — and reinstating it on the
     input side would be worse, because there it decides whether a write is
     allowed rather than merely which file is protected. A relative write path
-    therefore prompts.
+    therefore prompts — UNLESS the caller passes *write_base*, the session
+    workspace, and the tool is in ``WORKSPACE_RELATIVE_WRITE_TARGETS``: then
+    the path resolves against the workspace and the boundary rules on it.
 
     A relative FILE path on a READ-ONLY tool (``READ_ONLY_FILE_TARGETS``)
     resolves against *base*, like a directory root and for the same reason:
@@ -173,6 +203,10 @@ def gate_path_for(
         base: the directory a relative DIRECTORY param resolves against —
             the same ``context.cwd`` the tool itself resolves against. Omit
             it and directory params fall back to UNKNOWN.
+        write_base: the SESSION WORKSPACE, when the run has one — never the
+            daemon's cwd. A relative FILE path on a
+            ``WORKSPACE_RELATIVE_WRITE_TARGETS`` tool resolves against it.
+            Omit it (no workspace) and relative writes stay UNKNOWN.
     """
     if tool_name in PATH_PARAM_EXEMPT:
         return None, None
@@ -226,10 +260,18 @@ def gate_path_for(
         #   124 real grep/glob roots in telemetry are relative, so UNKNOWN
         #   here would prompt on ~81% of rooted calls and train the model to
         #   route around the tool.
+        #
+        # * A FILE target on a workspace-relative write tool resolves against
+        #   the session workspace when there is one (write_base) — see
+        #   WORKSPACE_RELATIVE_WRITE_TARGETS for why that base is not the
+        #   process's cwd. Never against `base` alone: without a workspace,
+        #   `base` is the daemon's cwd.
         resolvable = (declared.get(param) == PATH_KIND_DIR
                       or tool_name in READ_ONLY_FILE_TARGETS)
         if resolvable and base is not None:
             candidate = (Path(base).expanduser() / candidate)
+        elif tool_name in WORKSPACE_RELATIVE_WRITE_TARGETS and write_base is not None:
+            candidate = (Path(write_base).expanduser() / candidate)
         else:
             return None, (
                 f"{tool_name} target {raw!r} is a relative path; the gate "
