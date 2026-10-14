@@ -361,15 +361,19 @@ def _request(conn: sqlite3.Connection, session_id: str, load_ts: float) -> tuple
     writes skills.
     """
     row = conn.execute(
-        "SELECT content, is_trusted FROM lcm_messages "
+        "SELECT content, is_trusted, provenance FROM lcm_messages "
         "WHERE session_id = ? AND role = 'user' AND timestamp < ? "
         "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
         (session_id, load_ts),
     ).fetchone()
     if row is None:
         return None, False
-    content, is_trusted = row
-    if not is_trusted:
+    content, is_trusted, provenance = row
+    # Trust must be interpreted together with provenance. Real human turns can
+    # have is_trusted=0 in older or inconsistent rows; the conversation renderer
+    # already treats provenance="user" as human-authored. Only withhold content
+    # that is both untrusted and originated outside the user channel.
+    if not is_trusted and provenance != "user":
         return None, True
     text = " ".join(redact_secrets(str(content or "")).split())
     return (_cut(text, REQUEST_CHARS) if text else None), False
