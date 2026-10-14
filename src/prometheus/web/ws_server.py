@@ -1592,7 +1592,7 @@ class WebSocketBridge:
         ``_run_agent_turn_locked``). ``original_len`` capture, the in-place
         ``run_loop`` appends, and the LCM tail persist all happen under the
         lock, on BOTH the normal and the interrupted exit paths."""
-        from prometheus.engine.agent_loop import run_loop
+        from prometheus.engine.agent_loop import MaxTurnsExhausted, run_loop
 
         accumulated = ""
         last_usage: Any = None
@@ -1748,6 +1748,49 @@ class WebSocketBridge:
             # and whoever pressed stop is by definition at a live client. The asymmetry is the
             # point — emitting here would push a completion notice for something that did not
             # complete.
+            return accumulated, last_usage
+
+        except MaxTurnsExhausted as cap:
+            # #774: the ROUND CAP is a budget stop, not a failure — keep and save
+            # the turn, like the user-stop path above. Before this handler the
+            # generic except below rolled it back, and because this path saves a
+            # turn's rows only at its END, none of them ever reached LCM: on
+            # 2026-10-13 a 200-round / 223-call turn vanished (discarded=400) and
+            # the next turn did not know it had done any of it. The loop has
+            # already answered every tool call and ended the list on cap.notice.
+            logger.warning(
+                "turn reached the round cap (session=%s, max_turns=%d) — keeping "
+                "and saving its work", session_id, cap.max_turns,
+            )
+            notice = ("\n\n" if accumulated else "") + cap.notice
+            accumulated += notice
+            await self.broadcast({
+                "type": "chat_delta",
+                "timestamp": time.time(),
+                "payload": {"session_id": session_id, "content": notice, "message_id": msg_id},
+            })
+            capped_row_id: int | None = None
+            if original_len is not None:
+                capped_row_id = session.persist_loop_result(original_len)
+            done_payload = {
+                "session_id": session_id,
+                "message_id": msg_id,
+                # Additive: older clients ignore it, newer ones can say why.
+                "stop_reason": "max_turns_exhausted",
+                "max_turns": cap.max_turns,
+            }
+            if capped_row_id is not None:
+                done_payload["row_id"] = capped_row_id
+            await self.broadcast({
+                "type": "chat_done",
+                "timestamp": time.time(),
+                "payload": done_payload,
+            })
+            await self._end_live_activity(session_id, done_payload)
+            # Unlike a user stop, nobody is necessarily watching a turn that ran
+            # into its limit, so it is announced like any finished turn.
+            await self._emit_turn_completed(session_id, accumulated)
+            self._schedule_session_title(session_id, session)
             return accumulated, last_usage
 
         except Exception as e:

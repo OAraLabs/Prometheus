@@ -103,6 +103,9 @@ KNOWN_DEFAULT_MISMATCHES: dict[str, str] = {
     "model.max_tool_iterations_cloud": "RESOLVER — shipped_defaults."
                                        "resolve_max_tool_iterations_cloud supplies "
                                        "SHIPPED_MAX_TOOL_ITERATIONS_CLOUD (LONGHAUL-1b).",
+    "model.max_turns": "RESOLVER — shipped_defaults.resolve_max_turns supplies "
+                       "SHIPPED_MAX_TURNS (#774). Was a hard-coded LoopContext "
+                       "default with no config key.",
     # ── template ships a real value; the reader has NO literal fallback, so
     #    absence yields None and the documented value is never the effective
     #    one. Category 2 with a non-empty template value.
