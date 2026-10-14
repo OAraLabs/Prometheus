@@ -453,13 +453,8 @@ def cmd_context(
             f"Headroom:        {headroom:,} tokens",
         ]
         try:
-            from prometheus.context.compactor import (
-                compaction_threshold_from_config,
-            )
-
-            threshold = compaction_threshold_from_config(effective_limit, config)
-            over = " — EXCEEDED, compaction fires" if in_use > threshold else ""
-            lines.append(f"Compacts above:  {threshold:,} tokens{over}")
+            lines.append(context_threshold_line(
+                effective_limit, config, model=model_name, in_use=in_use))
         except Exception:  # noqa: BLE001 — a missing budget must not break /context
             log.debug("cmd_context: compaction threshold unavailable", exc_info=True)
 
@@ -478,6 +473,18 @@ def cmd_context(
         lines.append(f"[{bar}] {usage_pct:.0f}% used")
 
     return "\n".join(lines)
+
+
+def context_threshold_line(
+    effective_limit: int, config: dict | None, *, model: str | None = None,
+    in_use: int | None = None,
+) -> str:
+    """The /context line naming when this model compacts, and why that number (#773)."""
+    from prometheus.context.compactor import compaction_threshold_from_config
+
+    threshold, source = compaction_threshold_from_config(effective_limit, config, model)
+    over = " — EXCEEDED, compaction fires" if in_use is not None and in_use > threshold else ""
+    return f"Compacts above:  {threshold:,} tokens ({source}){over}"
 
 
 def cmd_profile(arg: str = "", current: str = "full") -> str:

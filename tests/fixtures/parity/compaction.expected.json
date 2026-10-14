@@ -1266,11 +1266,12 @@
        "context_compaction_noop",
        {
         "$json": {
-         "over_by": 5388,
+         "over_by": 5306,
          "session_id": "desktop:parity-compact",
          "span_messages": 0,
-         "threshold": 573,
-         "tokens_before": 5961
+         "threshold": 655,
+         "tokens_before": 5961,
+         "trigger": "threshold"
         }
        },
        "context_compactor",
@@ -1279,14 +1280,13 @@
       [
        2,
        "<time>",
-       "context_compaction_noop",
+       "context_compaction_stuck",
        {
         "$json": {
-         "over_by": 5415,
+         "ceiling": 655,
+         "over_by": 5306,
          "session_id": "desktop:parity-compact",
-         "span_messages": 2,
-         "threshold": 573,
-         "tokens_before": 5988
+         "tokens": 5961
         }
        },
        "context_compactor",
@@ -1295,19 +1295,15 @@
       [
        3,
        "<time>",
-       "context_compaction",
+       "context_compaction_noop",
        {
         "$json": {
-         "cache_hit": false,
-         "converged": false,
-         "duration_ms": "<ms>",
-         "over_by": 5438,
+         "over_by": 5333,
          "session_id": "desktop:parity-compact",
-         "span_messages": 4,
-         "summarizer_input_omitted": 0,
-         "threshold": 573,
-         "tokens_after": 6011,
-         "tokens_before": 6015
+         "span_messages": 2,
+         "threshold": 655,
+         "tokens_before": 5988,
+         "trigger": "threshold"
         }
        },
        "context_compactor",
@@ -1316,19 +1312,99 @@
       [
        4,
        "<time>",
+       "context_compaction_stuck",
+       {
+        "$json": {
+         "ceiling": 655,
+         "over_by": 5333,
+         "session_id": "desktop:parity-compact",
+         "tokens": 5988
+        }
+       },
+       "context_compactor",
+       null
+      ],
+      [
+       5,
+       "<time>",
+       "context_compaction_stuck",
+       {
+        "$json": {
+         "ceiling": 655,
+         "over_by": 5356,
+         "session_id": "desktop:parity-compact",
+         "tokens": 6011
+        }
+       },
+       "context_compactor",
+       null
+      ],
+      [
+       6,
+       "<time>",
        "context_compaction",
        {
         "$json": {
          "cache_hit": false,
+         "ceiling": 655,
+         "chunks": 1,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 5444,
+         "over_by": 5356,
+         "session_id": "desktop:parity-compact",
+         "span_messages": 4,
+         "summarizer_input_omitted": 0,
+         "summarizer_input_truncated": 0,
+         "target": 458,
+         "threshold": 655,
+         "threshold_source": "global pct",
+         "tokens_after": 6011,
+         "tokens_before": 6015,
+         "tool_results_trimmed": 0,
+         "trigger": "threshold"
+        }
+       },
+       "context_compactor",
+       null
+      ],
+      [
+       7,
+       "<time>",
+       "context_compaction_stuck",
+       {
+        "$json": {
+         "ceiling": 655,
+         "over_by": 5362,
+         "session_id": "desktop:parity-compact",
+         "tokens": 6017
+        }
+       },
+       "context_compactor",
+       null
+      ],
+      [
+       8,
+       "<time>",
+       "context_compaction",
+       {
+        "$json": {
+         "cache_hit": false,
+         "ceiling": 655,
+         "chunks": 1,
+         "converged": false,
+         "duration_ms": "<ms>",
+         "over_by": 5362,
          "session_id": "desktop:parity-compact",
          "span_messages": 6,
          "summarizer_input_omitted": 0,
-         "threshold": 573,
+         "summarizer_input_truncated": 0,
+         "target": 458,
+         "threshold": 655,
+         "threshold_source": "global pct",
          "tokens_after": 6017,
-         "tokens_before": 6044
+         "tokens_before": 6044,
+         "tool_results_trimmed": 0,
+         "trigger": "threshold"
         }
        },
        "context_compactor",
@@ -2116,6 +2192,7 @@
        {
         "$json": {
          "context": {
+          "part": "1/1",
           "session_id": "desktop:parity-compact",
           "span_messages": 4
          },
@@ -2197,6 +2274,7 @@
        {
         "$json": {
          "context": {
+          "part": "1/1",
           "session_id": "desktop:parity-compact",
           "span_messages": 6
          },

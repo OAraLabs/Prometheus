@@ -46,6 +46,10 @@ class _Summarizer:
 
     def __init__(self) -> None:
         self.calls = 0
+        # Paid summarisation PASSES (#773: one pass can be several calls once
+        # a span is chunked to the summarizer's window; the anchor's job is to
+        # avoid paying for a pass at all, so passes are what is counted).
+        self.passes = 0
         self.text = "SUMMARY"
 
     async def stream_message(self, request):  # noqa: ANN001
@@ -62,11 +66,27 @@ def _history(tag: str, n_turns: int, filler: int = 400) -> list[ConversationMess
     return msgs
 
 
+class _PassCounter:
+    """Telemetry stand-in: counts compaction passes that were PAID (not cache hits)."""
+
+    def __init__(self, provider: _Summarizer) -> None:
+        self._provider = provider
+
+    def record_signal_event(self, signal_type, payload, source_subsystem):  # noqa: ANN001
+        if signal_type == "context_compaction" and not payload.get("cache_hit"):
+            self._provider.passes += 1
+
+    def __getattr__(self, name):  # noqa: ANN001
+        return lambda *a, **k: None
+
+
 def _compactor(provider: _Summarizer) -> ContextCompactor:
-    return ContextCompactor(
+    c = ContextCompactor(
         provider=provider, model="test-model", effective_limit=3000,
         reserve_tokens=500, threshold_pct=0.4, protect_recent_turns=3,
     )
+    c._telemetry = _PassCounter(provider)
+    return c
 
 
 def _interleave(compactor: ContextCompactor, ids: tuple[str, str], rounds: int = 6) -> None:
@@ -141,13 +161,15 @@ def test_growth_a_shared_id_pays_double_the_summariser_calls() -> None:
     distinct_prov = _Summarizer()
     _interleave(_compactor(distinct_prov), ("web:alpha", "web:beta"))
 
-    assert distinct_prov.calls == 6, (
-        f"expected one paid call per conversation per round with a correct "
-        f"anchor, got {distinct_prov.calls}"
+    # At most one paid pass per conversation per round. (Fewer than that since
+    # #773: each pass aims at 70% of the line, so the anchor holds for longer.)
+    assert 0 < distinct_prov.passes <= 6, (
+        f"expected at most one paid pass per conversation per round with a "
+        f"correct anchor, got {distinct_prov.passes}"
     )
-    assert shared_prov.calls > distinct_prov.calls, (
-        f"shared id cost {shared_prov.calls} summariser calls, distinct ids "
-        f"{distinct_prov.calls} — if these are equal the anchor has stopped "
+    assert shared_prov.passes >= 2 * distinct_prov.passes, (
+        f"shared id cost {shared_prov.passes} summarisation passes, distinct ids "
+        f"{distinct_prov.passes} — if these are equal the anchor has stopped "
         "being load-bearing and this file's premise is stale"
     )
 
@@ -160,13 +182,13 @@ def test_growth_distinct_ids_hold_their_anchor_across_a_growing_turn() -> None:
 
     asyncio.run(c.apply(_history("ALPHA", 12), session_id="web:alpha"))
     anchored_after_first = c._session_spans["web:alpha"]
-    calls_after_first = prov.calls
+    calls_after_first = prov.passes
 
     # Another session takes a turn in between — the interference that used to
     # destroy the anchor. It pays its own first call; that one is expected.
     asyncio.run(c.apply(_history("BETA", 30), session_id="web:beta"))
-    calls_before_alpha_returns = prov.calls
-    assert calls_before_alpha_returns == calls_after_first + 1, "beta's own first call"
+    calls_before_alpha_returns = prov.passes
+    assert calls_before_alpha_returns == calls_after_first + 1, "beta's own first pass"
     # ...then alpha comes back, one turn longer.
     asyncio.run(c.apply(_history("ALPHA", 13), session_id="web:alpha"))
 
@@ -174,8 +196,8 @@ def test_growth_distinct_ids_hold_their_anchor_across_a_growing_turn() -> None:
         "alpha's anchor moved after an interleaved beta turn — beta's turn is "
         "reaching alpha's anchor slot"
     )
-    assert prov.calls == calls_before_alpha_returns, (
-        "alpha paid a summariser call for a turn its anchor already covered"
+    assert prov.passes == calls_before_alpha_returns, (
+        "alpha paid a summarisation pass for a turn its anchor already covered"
     )
 
 

@@ -144,7 +144,9 @@ HERMES_TO_PROMETHEUS_KEYS: dict[str, str] = {
     "gateway.telegram.token": "gateway.telegram_token",
     "gateway.telegram.enabled": "gateway.telegram_enabled",
     "gateway.telegram.allowed_users": "gateway.allowed_chat_ids",
-    "compression.threshold": "context.compression_trigger",
+    # #773: context.compression_trigger was never read by the loop; the
+    # threshold that acts is compaction.threshold_pct.
+    "compression.threshold": "compaction.threshold_pct",
 }
 
 HERMES_PROVIDER_MAP: dict[str, str] = {

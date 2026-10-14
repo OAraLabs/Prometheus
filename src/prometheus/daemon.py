@@ -1266,18 +1266,29 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 "detected" if _resolved == (detected_ctx_size or -1)
                 else "config"
             )
+            _threshold, _threshold_source = compactor.threshold_for(model_name)
             logger.info(
                 "Context compactor ENABLED (limit=%d [%s], cloud_default=%d, "
-                "threshold=%.0f%%)",
+                "threshold=%d [%s], default %.0f%% of the window)",
                 _resolved,
                 _source,
                 compactor._cloud_default_limit,
+                _threshold,
+                _threshold_source,
                 compactor._threshold_pct * 100,
             )
         else:
             logger.info("Context compactor disabled (compaction.enabled unset)")
     except Exception as exc:
         logger.warning("Context compactor not available: %s", exc)
+    # Retired keys still in the config: said once, not ignored in silence (#773).
+    try:
+        from prometheus.config.retired import retired_key_warnings
+
+        for _retired in retired_key_warnings(config):
+            logger.warning("%s", _retired)
+    except Exception:
+        logger.debug("retired-key check failed", exc_info=True)
 
     # Agent profile state (selector survey 2026-08-11 → wired). ONE holder
     # every surface shares: profiles.default seeds it, /profile and Beacon's
