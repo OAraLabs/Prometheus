@@ -282,7 +282,8 @@ def _extract_paths(
     for key in ("file_path", "path", "notebook_path"):
         val = tool_input.get(key)
         if isinstance(val, str) and val:
-            expanded = _join(cwd, _expand_user(val))
+            # Never None here: _join only returns None for an UNKNOWN base.
+            expanded = _join(cwd, _expand_user(val)) or val
             if expanded not in out:
                 out.append(expanded)
     return out
@@ -912,8 +913,8 @@ def _separator_carries_cd(sep: str | None) -> bool:
     return True
 
 
-def _cd_target(clause: list[str], base: "str | _UnknownDir | None") -> "str | _UnknownDir | None | bool":
-    """Where a ``cd`` clause leaves the shell, or False when it is not a ``cd``.
+def _cd_target(clause: list[str], base: "str | _UnknownDir") -> "str | _UnknownDir | None":
+    """Where a ``cd`` clause leaves the shell, or None when it is not a ``cd``.
 
     A literal operand joins *base*; ``~`` expands; no operand is ``$HOME``. A
     ``cd`` the walk cannot evaluate — ``cd -``, ``cd $X``, two operands —
@@ -934,10 +935,10 @@ def _cd_target(clause: list[str], base: "str | _UnknownDir | None") -> "str | _U
         i += 1
     index, _ = _command_word_index(words)
     if index is None:
-        return False
+        return None
     verb = os.path.basename(_unquote(words[index]))
     if verb not in _CD_VERBS:
-        return False
+        return None
     operands = [w for w in words[index + 1:]
                 if _is_quoted(w) or w == "-" or not w.startswith("-")]
     if not operands:
@@ -981,8 +982,9 @@ def _walk_script(
                 blind = True
             else:
                 tracked.append((resolved, action))
-        moved = _cd_target(clause, base) if cwd is not None else False
-        if moved is not False:
+        # Only followed when the caller named a cwd; then `base` is never None.
+        moved = _cd_target(clause, base) if base is not None else None
+        if moved is not None:
             # Followed only when the shell that ran it is the one that runs the
             # next clause. Otherwise the walk cannot say where later clauses
             # are, so it stops claiming to know.
