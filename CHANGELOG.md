@@ -2,6 +2,73 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## 0.9.10 (2026-10-14)
+
+0.9.10 keeps the work of a turn that hits its round cap, stops a model that breaks down at a very large context from poisoning the conversation, makes compaction cover every message and start earlier on large windows, and closes two gaps around subagents. Read "Upgrading from 0.9.9": the compaction threshold moved, `context.compression_trigger` is retired, and built-in subagents now have tools.
+
+### Turns that run long (#775, #782)
+
+- **A turn that hits its round cap keeps its work (#775).** On 2026-10-13 a Beacon turn ran 200 model rounds and 223 tool calls, hit the cap, and the whole turn was rolled back; on Telegram, Slack and Discord the user's own message went with it. The cap is a budget stop, not a failure, so every round that completed is now kept, the same way a user stop keeps it.
+  - The loop raises `MaxTurnsExhausted` (still a `RuntimeError` with the old message, so gym, ladder and coding mode are unchanged), answers any tool call left without a result, and ends the turn on a plain note naming the limit.
+  - Web and Beacon save the turn, stream the note, and add `stop_reason: "max_turns_exhausted"` and `max_turns` to `chat_done`. Telegram, Slack, Discord and REST `/api/chat` save it and reply with the note. The CLI keeps it. A worker reports `max_turns_exhausted` as its reason instead of a generic error. A real failure still rolls back.
+  - **`model.max_turns` is a config key** (default 200). It counts model rounds, separately from `max_tool_iterations_cloud`, which counts tool calls; that is why a configured 500 never bound the turn above.
+- **`/api/status` reports the live round cap (#782):** `iteration_ceilings.max_turns`, read from the live loop, and `null` when the bridge isn't wired.
+
+### A model that breaks down no longer poisons the conversation (#777, #786)
+
+- **A garbage round is dropped, retried once, and otherwise ends the turn.** On 2026-10-13 `qwen3.8-max` broke down twice at about 241k tokens of context, once with digits and C0 control bytes in the visible text and once with 6,416 tokens of `"0 00 000"` in its thinking. Both rounds were saved as ordinary history, and a background task's completion then woke the session and read them back.
+  - The check runs right after the model returns, before any tool is dispatched or the round is saved, on the visible text and the thinking separately: any C0 control byte except tab, newline and carriage return, or a run of at least 200 non-space characters that is under 5% letters and at least 85% one character.
+  - The first bad round is dropped (never appended, saved or dispatched) and the model is called once more with a nudge. A second in a row ends the turn on a note naming the context size, model and provider, with stop reason `degenerate_output`. A clean round resets it.
+  - Streamed garbage is cut from what the turn keeps: the web bridge sends a `chat_discard` frame.
+  - A background task whose session's last round was dropped and ended no longer re-engages it; its result is still notified.
+- **Every firing is evidence.** Each firing and recovery writes a `subsystem_runs` row (input and cached tokens, window, compaction threshold and its source, requested and served model, provider, which test fired and where) plus a WARNING, and `/health` shows a summary by model and provider. That is the data per-model compaction thresholds get set from.
+- **The incident round is pinned verbatim (#786):** the test now uses the exact 448 characters and 28 C0 bytes the daemon persisted.
+
+### Compaction (#778, #784, #787)
+
+- **The threshold is 80% of the serving model's window (#778).** It was 75% of the window less the output reserve, and on a 1,000,000-token cloud window that meant compacting at 746,928 tokens, long after the model above broke down. Set a model's own line with `context.model_overrides.<model>.compaction_threshold_pct` or `compaction_threshold_tokens` (the smaller wins if both are set; none ship). `/context`, the startup line and every `context_compaction` event name which rule decided.
+  - A pass also runs when the next round would not fit: the current size, plus the request's `max_tokens`, plus the largest tool result of the last five rounds, compared with the window. The event says `trigger=threshold` or `trigger=projected`.
+- **Compaction no longer leaves messages out.** The summarizer used to get one prompt capped at 18,000 characters, and every message past that was dropped: in live telemetry 309 of 3,334 compactions did this, and the worst replaced 1,685 messages with a summary of 46. The span is now packed into chunks that fit the summarizer's own window, each chunk is summarized, and the parts are merged. A single message bigger than a chunk is cut to fit and counted.
+  - **Cost:** on a small local summarizer, a very large span becomes many calls. A span of about 900k tokens is roughly 34 calls before that turn's model call, on the order of ten minutes or more. At ordinary local sizes a span still fits one call, as before.
+- **Passes now get under the line.** A pass aims at 70% of the line, not just under it. The protected tail never starts on a tool result (that left a result whose call had been summarised away, which every provider rejects). If the tail doesn't fit, the largest older tool results in it are trimmed first (marked, and the last complete tool round is kept), then turns are yielded. The question the current turn is answering is never lost: it rides along verbatim. A session that still can't get under is marked stuck once and not re-summarised while the turn is unchanged.
+- **`context.compression_trigger` is retired.** Only a class nothing used ever read it. A config that still sets it gets one startup warning naming `compaction.threshold_pct`, and `migrate` maps Hermes' `compression.threshold` to it.
+- **Beacon can see compaction happen (#784).** A new session-scoped `context_compaction` frame reports `start` (with `chunks_total`), `progress` (`chunks_done`, `chunks_total`, `progress`), `done` (`tokens_before`, `tokens_after`, `duration_ms`, `converged`), `failed` (with a reason that names an exception type only) and `noop`, each with the threshold, its source and the trigger, and `agent_progress.phase` is `compacting` while a pass runs. A pass that pays for no summary reports nothing. The frame is documented in `docs/guide/api.md`; the existing `context_compaction*` telemetry events are unchanged. This is the daemon half of beacon-desktop#283.
+- **A Stop during compaction stops the turn (#787).** A cancellation was caught by the call wrapper and read as "the summarizer returned nothing", so the turn went on to the model. It now propagates under every `on_failure` mode, still after the run row is written. The same fix means a cancelled memory-extraction batch is re-read next pass instead of skipped, and a Stop during a teacher escalation stands instead of being recorded as a failed teacher call.
+
+### Relative paths in a workspace session (#770, #771, #785)
+
+- **A relative output path resolves to the session's workspace and no longer prompts.** In a session bound to a workspace, a relative path on `write_file`, `edit_file` and `notebook_edit` (#770) and now `download_file`, `tts` and `image_generate` (#785) is ruled on, and written, at `<workspace>/<path>`. Before, each prompted ("relative path … target is unknown"), and the model then made the same write through bash where nothing asked.
+  - `../` that escapes the workspace still prompts, on the workspace boundary. With no session workspace a relative path still prompts, as before. Strict and cautious modes still prompt on every write. The resolved path still goes through the always-denied floor and `denied_paths`.
+  - `download_file`, `tts` and `image_generate` now resolve a relative path against the session's working directory (#771). They used the daemon's own, so an approved `destination="x.bin"` landed beside the daemon.
+  - `image_generate` may write under the session workspace's `images/` folder, but only when that folder resolves inside the workspace.
+  - The file-mutation verifier looks for a relative write in the workspace, not in the daemon's directory, so it no longer reports "claimed but file absent" for a file that is there (#770).
+
+### Subagents (#793, #794, #795)
+
+- **The router-escalation subagent runs its tool under the turn's gate (#789, security).** With `router.escalation.enabled`, a tool call that failed validation too often was handed to a subagent on a stronger model whose loop had no permission checker, so its `bash` call ran with no approval for the commands the gate holds, no denied paths and no audit row. It now runs under the same gate. Escalation is off by default.
+- **Built-in subagents have their tools (#790).** Every built-in agent definition named its tools `Bash`, `FileRead` and so on, which this daemon doesn't have, so each ran with none. They now name the real tools: `general-purpose` and `worker` get `bash`, `read_file`, `write_file`, `edit_file`, `glob` and `grep`; `explorer` and `planner` get `read_file`, `glob` and `grep`; `verification` gets `bash` and the read tools. A name that does not resolve is logged.
+  - **A subagent only gets tools something named.** An agent type with no definition is refused with the known types in the error (it used to get every tool the parent has), and a definition that lists no tools gets none (it used to get all of them too). An explicit tool list still works for any type.
+- **Ending a turn withdraws what its subagent was waiting on (#791).** When the parent turn was cancelled while a subagent waited for approval, the request left the queue but no client was told, so a card and a Telegram prompt stayed up. It is now withdrawn the way a worker's request is: `approval_resolved` with `resolution: "withdrawn"`, a notice to the chat that was asked, and a resolution row. A late answer is still 410. An end-to-end test now covers the whole path: it reaches an owner device, blocks until answered, a denial refuses the call, an unanswered request is denied at expiry, and each answer is audited against whoever gave it.
+
+### Rejected WebSocket logins say who (#779)
+
+- **A rejected WebSocket auth now logs which client and why.** Each rejection has its own reason (`malformed auth frame`, `not an auth frame`, `missing token`, `unknown token`, `revoked device`, `auth frame timeout`), and the line names the peer, the revoked device's id and name when the token belonged to one, and the handshake's `Origin` and `User-Agent`, truncated. Repeats from the same peer and reason within five minutes are counted ("and N more"). The client is still told only `unauthorized`.
+- **A token leak found while testing is closed.** At DEBUG level the `websockets` library logs every frame it receives verbatim, including `{"type": "auth", "token": …}`. It is off by default, but anyone who turned DEBUG on to chase a connection problem would have written the token to their log. Auth frames are now redacted from that log.
+
+### Upgrading from 0.9.9
+
+- **The compaction threshold moved to 80% of the window,** with the projected-overflow rule. On a small window that is a few thousand tokens later than before. Pin a model's own line under `context.model_overrides` if you want it earlier.
+- **A config that sets `context.compression_trigger` logs one warning at startup** ("config key context.compression_trigger is retired and does nothing; use compaction.threshold_pct instead"). The key never did anything; remove it.
+- **`chat_done` may carry `stop_reason` and `max_turns`; there are two new session frames,** `context_compaction` and `chat_discard`, and `/api/status` gains `iteration_ceilings.max_turns`. A client that ignores frames it doesn't know is unaffected.
+- **In a workspace session, a relative output path for `download_file`, `tts` and `image_generate` is allowed without a prompt** and written in the workspace.
+- **A model's `agent` call now does something.** An unlisted `subagent_type` is an error naming the known types, and the built-in types now have real tools: `general-purpose` and `worker` can run `bash` and write files, under the gate and as the `system` origin, so a command the gate holds for approval is held.
+
+### Known issues
+
+- **Beacon does not yet use the new frames.** Until it follows (beacon-desktop#283), Beacon shows no compaction progress, and shows a dropped round's text followed by the retry or the error note, because it doesn't handle `chat_discard`.
+- **An approval raised inside a subagent has only been checked as far as the queue, the gate, the REST route and the notifier.** Delivery to a real Beacon and a real Telegram client is unchecked. The request is filed under the subagent's own id (`subagent:<parent conversation>:<id>`), not the parent conversation, so a scoped device that owns the parent conversation does not see it, and the shared API token can answer it as it can any request that isn't a worker's.
+- **`read_only` on an agent definition is a label nothing enforces:** `verification` is marked read-only but has `bash`.
+
 ## 0.9.9 (2026-10-13)
 
 0.9.9 closes a way for a model-written shell on a Mac to reach the same-Mac pairing secret, and a way around the read floor on both Mac and Linux, makes the `agent` tool work, reads PDFs in the Mac app without PyMuPDF (AGPL), drops the unused Anthropic SDK, and adds a startup banner. Read "Upgrading from 0.9.8": Linux hosts with the AppArmor floor must reload its profile, `--version` prints different text, and an earlier default `denied_paths` list now resolves to the new one.
