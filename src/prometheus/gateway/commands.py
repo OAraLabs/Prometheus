@@ -1538,6 +1538,27 @@ def cmd_health(verbose: bool = False, since_hours: float = 24.0) -> str:
             msg = (row.get("exception_msg") or "")[:100]
             lines.append(f"  {when}  {sub}/{op}  {exc_type}: {msg}")
 
+    # #772/#773: where models broke down. The lowest context size each one
+    # was dropped at is the evidence a per-model compaction threshold is set from.
+    try:
+        degenerate = tel.degeneration_summary(since=since_ts)
+    except Exception:
+        degenerate = []
+    if degenerate:
+        lines.append("")
+        lines.append("Degenerate output (rounds dropped, by model):")
+        for row in degenerate:
+            when = (
+                datetime.fromtimestamp(float(row["last_at"])).strftime("%Y-%m-%d %H:%M")
+                if row.get("last_at") else "?"
+            )
+            lowest = row.get("min_input_tokens")
+            lowest_s = f"{lowest:,}" if isinstance(lowest, int) else "?"
+            lines.append(
+                f"  {row.get('model') or '?'} via {row.get('provider') or '?'}: "
+                f"{row['count']}x, lowest at {lowest_s} tokens of context, last {when}"
+            )
+
     if verbose:
         # Add traceback excerpts for the recent failures.
         if recent:

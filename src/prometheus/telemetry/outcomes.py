@@ -79,6 +79,8 @@ ERROR_TERMINAL_REASONS = frozenset({
     # #704: the backend refused the prompt as over its window — the pre-flight's
     # failure, discovered one step later.
     "context_overflow",
+    # #772: the model's output was unreadable twice in a row; nothing was kept.
+    "degenerate_output",
 })
 
 
