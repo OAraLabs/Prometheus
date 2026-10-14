@@ -361,9 +361,46 @@ reasoning would apply here.
 **Verdict: names fail on the espeak-free path,** so option B is written up below, as Will asked. Neither
 option is built.
 
-Not evaluated, and only a candidate: misaki with a *permissive* fallback for unknown words (a CMUdict or
-small neural G2P under a permissive licence), which would keep espeak out and stop the silent drops. It would
-need the same measurement.
+### The third option, measured: misaki plus a permissive fallback for unknown words only (2026-10-13)
+
+**Setup.** The same kind of 50 replies, re-selected by the same query: 2,760 words (496 names, 490 numbers).
+The set is near-identical to the first run's, not identical, so every pipeline was re-run on this one set.
+
+**Candidates**, licences from package metadata and model cards:
+- **gruut 2.4.0.** MIT. A CMUdict-style lexicon plus a CRF model for words outside it; 38 MB of English data.
+  **UNCLEAR:** the `gruut-lang-en` wheel carries no licence file and does not say where its lexicon comes from.
+- **OpenPhonemizer 0.1.2.** BSD-3-Clause-Clear, model weights included. A neural model trained to produce
+  espeak-style IPA. A 175 MB checkpoint, plus PyTorch.
+  - The checkpoint is a pickle. It loads only with PyTorch's safe loader and three allow-listed tokenizer classes;
+    the alternative runs whatever code the file holds.
+- **Ruled out:**
+  - `g2p-en`: Apache-2.0 itself, but depends on `distance`, which is GPL;
+  - the `cmudict` Python package: GPL-3.0-or-later.
+
+**How it was wired.** A fallback passed to misaki's own `fallback=` hook gets *whole compound tokens* (a path, a
+hash, "llama.cpp") whenever any piece of one is unknown. That replaces misaki's own spelling of the known pieces
+and made both candidates worse than no fallback at all. So misaki ran with no fallback, and **only the pieces it
+left without phonemes** went to the candidate. That is 163 pieces, compound pieces included.
+
+| | espeak (A) | no fallback (B) | misaki + gruut | misaki + OpenPhonemizer |
+|---|---|---|---|---|
+| Pieces left silent | 0 | **163** | 0 | 0 |
+| Words worse than espeak / better than espeak | n/a | 194 / 99 | 154 / 112 | 143 / 107 |
+| Names worse / better than espeak (of 496) | n/a | 28 / 22 | **23 / 24** | **21 / 25** |
+| Numbers worse / better than espeak (of 490) | n/a | 70 / 35 | 44 / 39 | 38 / 36 |
+| Unknown word-like names heard exactly (of 107) | **34** | 3 | 19 | 24 |
+
+**What it means:**
+
+- **Silent drops are gone with either fallback.**
+- **Across all names, both are level with espeak.**
+- **On the hardest words, espeak is still ahead.** These are names no dictionary knows, such as model,
+  project and command names: espeak 34, OpenPhonemizer 24, gruut 19. Whisper's exact-match test is strict
+  for words like these, so listen to the samples rather than trust the count alone.
+- **gruut and OpenPhonemizer come out close.** gruut needs no PyTorch and no pickle, which is why Will leans
+  towards it.
+- **The speakable-text pass** (checklist) addresses the remaining number and fragment errors with any option.
+
 
 Found while measuring: on macOS, espeak-ng exits the process (`Error processing file .../phontab`) when its
 data directory's path is long. It failed at about 200 characters, and a short path worked. Under
@@ -439,7 +476,7 @@ the espeak-free path failed.
 | `[speech]` = speech-to-text plus `say`, with `[voice]` as an alias (decision 3) | with the plugin core |
 | `say` fallback in `tts.py` (and Telegram voice-note format) | not started |
 | A **speakable-text pass** before any TTS, needed with every option: skip or summarise hashes, commit ids and file paths; read numbers, units and code identifiers sensibly. The measurement's 259 words missed by *both* pipelines are mostly this. | not started |
-| A third option measured: Kokoro's converter plus a permissively licensed fallback for unknown words only (Will, 2026-10-13: his pick if near espeak on names, otherwise option B) | in progress |
+| A third option measured: Kokoro's converter plus a permissively licensed fallback for unknown words only (Will, 2026-10-13: his pick if near espeak on names, otherwise option B) | **done**: misaki + gruut is level with espeak on names overall and behind on unknown names (19 against 34); Will decides |
 | Models pinned (URLs, SHA-256s) and `whisper-server` built and signed in CI | not started |
 | The plugin core (sections 3 to 8) | waits until 0.9.9 is out |
 
