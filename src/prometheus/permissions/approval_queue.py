@@ -756,9 +756,25 @@ class ApprovalQueue:
         try:
             async with self._worker_clock_for(action):
                 await self._wait_for_answer(action, request_id, target_chat)
+        except asyncio.CancelledError:
+            # The asker was cancelled while it waited: the turn that raised this request ended (a stopped turn, a
+            # parent whose subagent was waiting, a shut-down loop). Nothing is left to act on an answer, so say
+            # so the way a worker's end does (``withdraw``): every client drops the card, the chat that was asked
+            # is told, and a resolution row is written. Until #791 this popped the request silently, so a card
+            # and a Telegram prompt stayed up for a request that was already gone.
+            await self._withdraw_asker_gone(request_id)
+            raise
         finally:
             self.pending.pop(request_id, None)
         return action._result
+
+    async def _withdraw_asker_gone(self, request_id: str) -> None:
+        """Withdraw a request whose asker was cancelled. Shielded, and never raises: this runs on the way out of a
+        cancelled task, and failing to tell the clients must not mask the cancellation."""
+        try:
+            await asyncio.shield(self.withdraw(request_id, why=ASKER_ENDED_REASON))
+        except Exception:  # noqa: BLE001 - best effort on the way out
+            logger.warning("could not withdraw approval %s after its asker ended", request_id, exc_info=True)
 
     async def _wait_for_answer(self, action: PendingAction, request_id: str,
                                target_chat) -> None:
@@ -973,6 +989,9 @@ class ApprovalQueue:
 
 #: Why everything still pending is withdrawn when the daemon stops (a restart re-execs it: the queue is memory only).
 SHUTDOWN_REASON = "the daemon is shutting down"
+
+#: Why a request is withdrawn when whatever was waiting on it is cancelled (a turn that ended, a parent of a subagent).
+ASKER_ENDED_REASON = "the turn that asked ended"
 
 
 async def withdraw_pending_for_shutdown(queues: Any, why: str = SHUTDOWN_REASON) -> None:
