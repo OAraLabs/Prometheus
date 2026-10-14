@@ -367,8 +367,8 @@ option is built.
 The set is near-identical to the first run's, not identical, so every pipeline was re-run on this one set.
 
 **Candidates**, licences from package metadata and model cards:
-- **gruut 2.4.0.** MIT. A CMUdict-style lexicon plus a CRF model for words outside it; 38 MB of English data.
-  **UNCLEAR:** the `gruut-lang-en` wheel carries no licence file and does not say where its lexicon comes from.
+- **gruut 2.4.0.** MIT code; 38 MB of English data. A lexicon plus a CRF model for words outside it. See
+  "gruut's English lexicon: provenance" below: the lexicon was **built from Wiktionary**.
 - **OpenPhonemizer 0.1.2.** BSD-3-Clause-Clear, model weights included. A neural model trained to produce
   espeak-style IPA. A 175 MB checkpoint, plus PyTorch.
   - The checkpoint is a pickle. It loads only with PyTorch's safe loader and three allow-listed tokenizer classes;
@@ -406,6 +406,62 @@ Found while measuring: on macOS, espeak-ng exits the process (`Error processing 
 data directory's path is long. It failed at about 200 characters, and a short path worked. Under
 `~/Library/Application Support/Prometheus/plugins/speech/<version>/site-packages/espeakng_loader/espeak-ng-data`
 that limit is close, so option B must install espeak's data at a short, fixed path and test the real one.
+
+### gruut's English lexicon: provenance (checked 2026-10-13)
+
+**This is a reading of published statements, not legal advice.**
+
+- **The code.** gruut's repository (`rhasspy/gruut`) is MIT, and **archived**: read-only since November 2024,
+  so nothing upstream will change.
+- **The data package.** `gruut-lang-en` 2.0.1 is labelled MIT by classifier. Its wheel carries no licence file,
+  and its README says only "Language-specific files for English".
+- **Where the default English lexicon came from.** gruut's own README said, in every version from 2020-10-06
+  (`ae2f44b`) to at least 2021-03-26 (`cc95116`): "Word pronunciation lexicon built from Wiktionary".
+  - The line disappeared in a docs rewrite (`f1ddc5a`, 2021-09-24, "Working on docs").
+  - None of the 2021 lexicon commits re-sourced the data. They re-ordered entries by frequency, added g2p
+    alignments, and moved files between packages.
+  - So the default lexicon (`gruut_lang_en/lexicon.db`) traces to Wiktionary, and so does the CRF model trained
+    on it (`g2p/model.crf`). That is the configuration the third option measured.
+- **What that means.** Wiktionary's text is published under Creative Commons Attribution-ShareAlike, which
+  requires attribution and share-alike for adaptations. An MIT label on a package built from it does not remove
+  that. Whether individual pronunciations are protectable at all is a legal question this note does not answer.
+- **gruut's second English lexicon** (`gruut_lang_en/espeak/`) was generated from eSpeak's output, by its own
+  commit history ("Add new scripts for building eSpeak lexicons/g2p models", 2021-07-15). The measurement did
+  not use it.
+- **The permissive alternative is CMUdict itself.** `cmusphinx/cmudict` is "Copyright (C) 1993-2015 Carnegie
+  Mellon University" under BSD-2-Clause-style terms. That is not the `cmudict` Python package, which is
+  GPL-3.0-or-later.
+  - A fallback built on CMUdict's own data, plus a g2p model trained on it, would avoid both Wiktionary and
+    espeak.
+  - It would need the same measurement before it could replace gruut.
+
+**Before gruut could ship:** either treat its English data as CC BY-SA (attribution and share-alike for the
+lexicon file, kept separate from our code) or replace it with a CMUdict-based fallback. Will decides after
+launch, with the speech decision.
+
+### Our own pronunciations (draft, 2026-10-13)
+
+A small list of our own terms, so they are said the same way whichever fallback is chosen. These are data for
+misaki's gold lexicon (`G2P.lexicon.golds`, a plain dict of 178,646 entries), which misaki consults before any
+fallback. With Speech they would ship as one data file in the plugin. **No code yet; nothing changes before
+0.9.9 ships.**
+
+| Term | Also matches | misaki phonemes | Said | Today, with no fallback | Status |
+|---|---|---|---|---|---|
+| Prometheus | | `pɹəmˈiθiəs` | pruh-MEE-thee-us | already right | pin it, so a lexicon update cannot change it |
+| Beacon | | `bˈikən` | BEE-kun | already right | pin it |
+| Qwen | `qwen` | `kwˈɛn` | kwen | **silent** | **Will to confirm**: "kwen", or "chwen" (`ʧwˈɛn`) |
+| OAra | `oara` (hostnames such as oara-4090) | `ˈOˌɑɹə` | OH-ah-ruh | "OAra" right; "oara" **silent** | **Will to confirm** how the brand is said; Whisper heard "OR" at normal speed |
+| Unsloth | `unsloth` | `ʌnslˈɔθ` | un-SLAWTH | **silent** | proposed |
+| llama.cpp | `llamacpp`; `cpp` on its own | `lˈɑmə` + `sˌipˌipˈi` | llama dot C P P | "cpp" **silent** | proposed |
+
+**Checked by running it.** The test sentence was "Prometheus runs Qwen on oara-4090 with Unsloth's quant and
+llama.cpp, and Beacon shows it". With these entries, misaki, then Kokoro (`af_heart`), then Whisper `small.en`
+gave back: "Prometheus runs QUEN on OR 4090 with Unsloth's QUANT and LAMADOT CPP, and Beacon shows it".
+Every term is spoken; none is silent.
+
+**Later:** the list belongs with the speakable-text pass (checklist). Hashes, paths and identifiers are its
+job; names it should say are this list's.
 
 ### Option B: keep espeak, in a separate process whose source is published
 
@@ -475,6 +531,8 @@ the espeak-free path failed.
 | The voice plugin published to PyPI, so `[speech]` can carry the full stack (decision 3) | not started |
 | `[speech]` = speech-to-text plus `say`, with `[voice]` as an alias (decision 3) | with the plugin core |
 | `say` fallback in `tts.py` (and Telegram voice-note format) | not started |
+| Our own pronunciations list (draft above): Will confirms Qwen and OAra | draft |
+| gruut's English data: Wiktionary-derived (above); keep as CC BY-SA data, or replace with a CMUdict-based fallback | Will, after launch |
 | A **speakable-text pass** before any TTS, needed with every option: skip or summarise hashes, commit ids and file paths; read numbers, units and code identifiers sensibly. The measurement's 259 words missed by *both* pipelines are mostly this. | not started |
 | A third option measured: Kokoro's converter plus a permissively licensed fallback for unknown words only (Will, 2026-10-13: his pick if near espeak on names, otherwise option B) | **done**: misaki + gruut is level with espeak on names overall and behind on unknown names (19 against 34); Will decides |
 | Models pinned (URLs, SHA-256s) and `whisper-server` built and signed in CI | not started |
