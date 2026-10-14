@@ -39,6 +39,7 @@ both.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import uuid
@@ -167,8 +168,11 @@ class ImageGenerateInput(BaseModel):
         json_schema_extra=PATH_FIELD_WRITE,
         default=None,
         description=(
-            "Optional absolute path to save the image. When omitted, "
-            "saves to ~/.prometheus/cache/images/ with a generated name."
+            "Optional path to save the image, under an images/ folder: the "
+            "workspace's (a relative path such as images/x.png resolves "
+            "against the working directory) or the image cache. When "
+            "omitted, saves to ~/.prometheus/cache/images/ with a generated "
+            "name."
         ),
     )
 
@@ -207,6 +211,23 @@ class ImageGenerateTool(BaseTool):
         return arguments.output_path is None
 
     async def execute(
+        self,
+        arguments: ImageGenerateInput,
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        # The session workspace's images/ folder is an allowed root for THIS
+        # call, when the session has a workspace — see _allowed_image_roots.
+        # Set before the early guard so both checks see the same roots, and
+        # reset on every exit so it never outlives the call.
+        meta = getattr(context, "metadata", None) or {}
+        roots_token = _SESSION_IMAGE_ROOTS.set(
+            _session_image_roots(meta.get("workspace_roots")))
+        try:
+            return await self._execute(arguments, context)
+        finally:
+            _SESSION_IMAGE_ROOTS.reset(roots_token)
+
+    async def _execute(
         self,
         arguments: ImageGenerateInput,
         context: ToolExecutionContext,
@@ -936,6 +957,39 @@ def _ext_from_content_type(content_type: str) -> str:
     }.get(ct, ".jpg")
 
 
+# The session workspace's images/ folder for the call in progress, or () when
+# the session has no workspace. A ContextVar for the reason agent_loop's
+# _RUN_PATHS is one: the tool object is shared by every session, and the sink
+# (_save_image_bytes) runs inside the backends, which are handed no context.
+_SESSION_IMAGE_ROOTS: contextvars.ContextVar[tuple[Path, ...]] = (
+    contextvars.ContextVar("prometheus_session_image_roots", default=()))
+
+
+def _session_image_roots(workspace_roots: Any) -> tuple[Path, ...]:
+    """``<workspace>/images`` for each session workspace root.
+
+    ``workspace_roots`` is ``context.metadata["workspace_roots"]``, which the
+    agent loop fills only in a workspace session (None otherwise), so a
+    session without one gets no extra root and behaves exactly as before.
+
+    An ``images`` that resolves OUTSIDE its workspace is skipped. The session
+    workspace is often a cloned repository, and the guard resolves roots
+    before comparing: an ``images`` symlink to ``~/.prometheus/data`` would
+    otherwise turn ``images/lcm.db`` into an allowed write onto the daemon's
+    state — the defect the narrow allow-list below exists to close.
+    """
+    roots: list[Path] = []
+    for workspace in workspace_roots or ():
+        try:
+            base = Path(workspace).expanduser().resolve()
+            images = (base / "images").resolve()
+        except (OSError, RuntimeError):
+            continue
+        if images.is_relative_to(base):
+            roots.append(base / "images")
+    return tuple(roots)
+
+
 def _allowed_image_roots() -> list[Path]:
     """Directories ``image_generate`` may write to when ``output_path`` is set.
 
@@ -958,6 +1012,9 @@ def _allowed_image_roots() -> list[Path]:
 
       * ``cache/images/`` — where un-overridden output already goes
       * ``<workspace>/images/`` — so a run can keep its pictures beside its work
+      * ``<session workspace>/images/`` — the same, for a session bound to a
+        workspace of its own; set per call by ``execute``, empty otherwise
+        (see ``_session_image_roots``)
 
     Both are created on demand, so a first-time override does not fail on a
     missing directory.
@@ -982,6 +1039,7 @@ def _allowed_image_roots() -> list[Path]:
         roots.append(workspace_images)
     except Exception:  # pragma: no cover - workspace dir is best-effort
         pass
+    roots.extend(_SESSION_IMAGE_ROOTS.get())
     return roots
 
 

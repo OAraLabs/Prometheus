@@ -83,13 +83,15 @@ class _RecordingVerifier(FileMutationVerifier):
         return summary
 
 
-def _run(tmp_path: Path, calls, *, workspace: bool = True):
+def _run(tmp_path: Path, calls, *, workspace: bool = True, extra_tools=()):
     """Daemon cwd ``boot``; session workspace ``ws`` (or none)."""
     boot = tmp_path / "boot"; boot.mkdir()
     ws = tmp_path / "ws"; ws.mkdir()
     registry = ToolRegistry()
     registry.register(FileWriteTool())
     registry.register(BashTool())
+    for tool in extra_tools:
+        registry.register(tool)
     asked: list[tuple[str, str]] = []
 
     async def deny(tool_name, reason, **_kw):  # noqa: ANN001
@@ -157,31 +159,129 @@ def test_without_a_workspace_a_relative_write_still_asks(tmp_path: Path) -> None
     assert results[0].is_error and not (boot / "greeting.txt").exists()
 
 
-@pytest.mark.parametrize("tool", ["download_file", "tts", "image_generate", "youtube_transcript"])
-def test_tools_that_resolve_elsewhere_stay_unknown(tool: str, tmp_path: Path) -> None:
-    """Only tools that resolve a relative path against the tool context's cwd
-    get the workspace base. ``download_file`` resolves against ``Path.cwd()``
-    (the process), so resolving it here would rule on a path it never writes."""
+@pytest.mark.parametrize("tool", ["youtube_transcript"])
+def test_tools_not_in_the_set_stay_unknown(tool: str, tmp_path: Path) -> None:
+    """A tool not in WORKSPACE_RELATIVE_WRITE_TARGETS gets no workspace base,
+    even with one on offer. youtube_transcript resolves against the context
+    cwd, but membership is decided per tool (see the set's comment), not
+    inferred."""
     from prometheus.permissions.tool_paths import TOOL_PATH_PARAM
     param = TOOL_PATH_PARAM[tool]
     path, unknown = gate_path_for(tool, {param: "out.bin"}, base=tmp_path, write_base=tmp_path)
     assert path is None and unknown and "relative path" in unknown
 
 
-@pytest.mark.parametrize("tool", ["write_file", "edit_file", "notebook_edit"])
-def test_workspace_relative_tools_really_resolve_against_the_context_cwd(tool: str, tmp_path: Path) -> None:
+# --------------------------------------------------------------------------- #
+# stand-ins for download_file's network and tts's engine
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def offline_download(monkeypatch):
+    """Serve every GET from memory: no DNS, no network."""
+    import httpx
+    from prometheus.tools.builtin import download_file as dl
+
+    real_client = httpx.AsyncClient
+
+    def client(**kwargs):
+        kwargs.pop("event_hooks", None)  # the SSRF hop guard resolves DNS
+        return real_client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"x")),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(dl, "is_safe_url", lambda url: True)
+    monkeypatch.setattr(dl.httpx, "AsyncClient", client)
+
+
+@pytest.fixture
+def fake_tts_engine(monkeypatch):
+    """Stand in for espeak: write the ``-w`` path RELATIVE TO THE PROCESS CWD,
+    as the real child (which inherits the daemon's cwd) would. No child runs."""
+    from prometheus.tools.builtin import tts
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self, _input):  # noqa: ANN001
+            return b"", b""
+
+    async def exec_(*args, **_kwargs):  # noqa: ANN002
+        with open(args[args.index("-w") + 1], "wb") as fh:
+            fh.write(b"x")
+        return _Proc()
+
+    monkeypatch.setattr(tts.asyncio, "create_subprocess_exec", exec_)
+
+
+@pytest.fixture
+def offline_image(tmp_path, monkeypatch):
+    """Skip generation but keep the write: the stand-in backend hands whatever
+    output_path execute() passes it to the real ``_save_image_bytes``, which
+    checks it against the real ``_allowed_image_roots``. The global image roots
+    live under a throwaway config dir, never ``~/.prometheus``."""
+    from prometheus.tools.base import ToolResult
+    from prometheus.tools.builtin import image_generate as ig
+
+    monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("PROMETHEUS_WORKSPACE_DIR", raising=False)
+
+    async def backend(_requested, _cfg):  # noqa: ANN001
+        return "pollinations"
+
+    async def pollinations(arguments):  # noqa: ANN001
+        path = ig._save_image_bytes(b"x", ext=".png", override_path=arguments.output_path)
+        return ToolResult(output=f"Saved {path}", metadata={"path": path})
+
+    monkeypatch.setattr(ig, "_resolve_backend", backend)
+    monkeypatch.setattr(ig, "_generate_via_pollinations", pollinations)
+
+
+#: Every member of WORKSPACE_RELATIVE_WRITE_TARGETS, each run below.
+_MEMBERS_RUN = [
+    "write_file", "edit_file", "notebook_edit", "download_file", "tts", "image_generate",
+]
+
+
+def test_every_member_of_the_set_is_run() -> None:
+    """A tool cannot join the set by being named there: it must also be run by
+    the membership test, or the claim it makes is unchecked."""
+    from prometheus.permissions.tool_paths import WORKSPACE_RELATIVE_WRITE_TARGETS
+    assert WORKSPACE_RELATIVE_WRITE_TARGETS == frozenset(_MEMBERS_RUN)
+
+
+@pytest.mark.parametrize("tool", _MEMBERS_RUN)
+def test_workspace_relative_tools_really_resolve_against_the_context_cwd(
+    tool: str, tmp_path: Path, monkeypatch, offline_download, fake_tts_engine, offline_image,
+) -> None:
     """The membership claim, checked against each tool rather than asserted:
     a tool in WORKSPACE_RELATIVE_WRITE_TARGETS must write ``<cwd>/<relative>``,
-    or the gate would rule on one path while the tool writes another."""
+    or the gate would rule on one path while the tool writes another. The
+    process cwd is moved elsewhere, so a tool that used it would miss."""
     from prometheus.permissions.tool_paths import WORKSPACE_RELATIVE_WRITE_TARGETS
     from prometheus.tools.base import ToolExecutionContext
+    from prometheus.tools.builtin.download_file import DownloadFileTool
     from prometheus.tools.builtin.file_edit import FileEditTool
+    from prometheus.tools.builtin.image_generate import ImageGenerateTool
     from prometheus.tools.builtin.notebook_edit import NotebookEditTool
+    from prometheus.tools.builtin.tts import TTSTool
 
     assert tool in WORKSPACE_RELATIVE_WRITE_TARGETS
     cwd = tmp_path / "ws"; (cwd / "sub").mkdir(parents=True)
-    ctx = ToolExecutionContext(cwd=cwd)
-    if tool == "write_file":
+    elsewhere = tmp_path / "daemon-cwd"; (elsewhere / "sub").mkdir(parents=True)
+    monkeypatch.chdir(elsewhere)
+    # What the loop hands a tool in a workspace session (agent_loop._run_paths).
+    ctx = ToolExecutionContext(cwd=cwd, metadata={"workspace_roots": (cwd,)})
+    if tool == "image_generate":
+        rel = "images/f.png"
+        t = ImageGenerateTool(); args = {"prompt": "x", "output_path": rel}
+    elif tool == "download_file":
+        rel = "sub/f.bin"
+        t = DownloadFileTool(); args = {"url": "https://example.com/f.bin", "destination": rel}
+    elif tool == "tts":
+        rel = "sub/f.wav"
+        t = TTSTool(); args = {"text": "x", "engine": "espeak", "output_path": rel}
+    elif tool == "write_file":
         rel = "sub/f.txt"
         t = FileWriteTool(); args = {"path": rel, "content": "x"}
     elif tool == "edit_file":
@@ -193,8 +293,133 @@ def test_workspace_relative_tools_really_resolve_against_the_context_cwd(tool: s
     result = asyncio.run(t.execute(t.input_model(**args), ctx))
     assert not result.is_error, result.output
     assert (cwd / rel).is_file() and "x" in (cwd / rel).read_text()
+    assert not (elsewhere / rel).exists()
     gate_path, unknown = gate_path_for(tool, args, base=cwd, write_base=cwd)
     assert unknown is None and gate_path == str((cwd / rel).resolve())
+
+
+#: tool -> (factory, the call's arguments with its output path set to ``p``).
+def _output_tool(tool: str):
+    from prometheus.tools.builtin.download_file import DownloadFileTool
+    from prometheus.tools.builtin.image_generate import ImageGenerateTool
+    from prometheus.tools.builtin.tts import TTSTool
+    return {
+        "download_file": (DownloadFileTool,
+                          lambda p: {"url": "https://example.com/f.bin", "destination": p}),
+        "tts": (TTSTool, lambda p: {"text": "hi", "engine": "espeak", "output_path": p}),
+        "image_generate": (ImageGenerateTool, lambda p: {"prompt": "a fox", "output_path": p}),
+    }[tool]
+
+
+_OUTPUT_TOOLS = ["download_file", "tts", "image_generate"]
+
+#: A relative output path inside the workspace. image_generate's own allow-list
+#: admits only images/; tts (like its engines) creates no parent folders.
+_INSIDE = {"download_file": "f.out", "tts": "f.out", "image_generate": "images/f.out"}
+
+
+@pytest.mark.parametrize("tool", _OUTPUT_TOOLS)
+def test_relative_output_in_the_workspace_lands_there_unasked(
+    tool: str, tmp_path: Path, offline_download, fake_tts_engine, offline_image,
+) -> None:
+    """Through the real loop and gate: a relative output path in a workspace
+    session is a write inside the workspace — allowed with no prompt, like the
+    absolute spelling of the same path, and written there, never in the
+    daemon's cwd."""
+    factory, args = _output_tool(tool)
+    rel = _INSIDE[tool]
+    boot, ws, asked, _summaries, results = _run(
+        tmp_path, [(tool, args(rel))], extra_tools=[factory()],
+    )
+    assert asked == [], asked
+    assert [r.is_error for r in results] == [False], [r.content for r in results]
+    assert (ws / rel).read_bytes() == b"x"
+    assert not (boot / rel).exists()
+
+
+@pytest.mark.parametrize("tool", _OUTPUT_TOOLS)
+def test_relative_output_escaping_the_workspace_still_asks(
+    tool: str, tmp_path: Path, offline_download, fake_tts_engine, offline_image,
+) -> None:
+    factory, args = _output_tool(tool)
+    _boot, _ws, asked, _summaries, results = _run(
+        tmp_path, [(tool, args("../images/f.out"))], extra_tools=[factory()],
+    )
+    assert len(asked) == 1 and "outside workspace" in asked[0][1], asked
+    assert results[0].is_error and not (tmp_path / "images").exists()
+
+
+@pytest.mark.parametrize("tool", _OUTPUT_TOOLS)
+def test_without_a_workspace_a_relative_output_still_asks(
+    tool: str, tmp_path: Path, offline_download, fake_tts_engine, offline_image,
+) -> None:
+    """#345's rule, unchanged: with no session workspace a relative output
+    path is unknown, and the gate asks."""
+    factory, args = _output_tool(tool)
+    rel = _INSIDE[tool]
+    boot, _ws, asked, _summaries, results = _run(
+        tmp_path, [(tool, args(rel))], workspace=False, extra_tools=[factory()],
+    )
+    assert len(asked) == 1 and "relative path" in asked[0][1], asked
+    assert results[0].is_error and not (boot / rel).exists()
+
+
+class TestImageRootsFollowTheSession:
+    """image_generate's own allow-list: the session workspace's images/ joins
+    the global roots for a workspace session's call, and only then."""
+
+    def _execute(self, cwd: Path, output_path: str, metadata: dict):
+        from prometheus.tools.base import ToolExecutionContext
+        from prometheus.tools.builtin.image_generate import ImageGenerateInput, ImageGenerateTool
+        return asyncio.run(ImageGenerateTool().execute(
+            ImageGenerateInput(prompt="a fox", output_path=output_path),
+            ToolExecutionContext(cwd=cwd, metadata=metadata),
+        ))
+
+    def test_without_a_workspace_the_roots_are_exactly_the_global_ones(
+        self, tmp_path: Path, offline_image,
+    ) -> None:
+        """A session with no workspace (metadata None, as the loop sends it)
+        gets no extra root: an absolute path into its cwd's images/ is refused,
+        exactly as before."""
+        from prometheus.tools.builtin import image_generate as ig
+        before = ig._allowed_image_roots()
+        boot = tmp_path / "boot"; boot.mkdir()
+        result = self._execute(boot, str(boot / "images" / "f.png"), {"workspace_roots": None})
+        assert result.is_error and "allowed image directories" in result.output
+        assert not (boot / "images").exists()
+        assert ig._session_image_roots(None) == ()
+        assert ig._allowed_image_roots() == before
+
+    def test_the_session_root_does_not_outlive_the_call(self, tmp_path: Path, offline_image) -> None:
+        from prometheus.tools.builtin import image_generate as ig
+        ws = tmp_path / "ws"; ws.mkdir()
+        before = ig._allowed_image_roots()
+        assert not self._execute(ws, "images/f.png", {"workspace_roots": (ws,)}).is_error
+        assert ig._allowed_image_roots() == before
+        assert ws / "images" not in before
+
+    def test_only_images_is_allowed_inside_the_workspace(self, tmp_path: Path, offline_image) -> None:
+        """The gate allows any write inside the workspace; the tool stays
+        tighter and writes images only under images/."""
+        ws = tmp_path / "ws"; ws.mkdir()
+        result = self._execute(ws, "notes.png", {"workspace_roots": (ws,)})
+        assert result.is_error and "allowed image directories" in result.output
+        assert not (ws / "notes.png").exists()
+
+    def test_an_images_symlink_out_of_the_workspace_is_not_a_root(
+        self, tmp_path: Path, offline_image,
+    ) -> None:
+        """A cloned repo's ``images -> ~/.prometheus/data`` must not make the
+        daemon's state writable: an images/ resolving outside its workspace is
+        skipped, so the write is refused and the target untouched."""
+        state = tmp_path / "state"; state.mkdir()
+        (state / "lcm.db").write_bytes(b"SQLite format 3")
+        ws = tmp_path / "ws"; ws.mkdir()
+        (ws / "images").symlink_to(state, target_is_directory=True)
+        result = self._execute(ws, "images/lcm.db", {"workspace_roots": (ws,)})
+        assert result.is_error and "allowed image directories" in result.output
+        assert (state / "lcm.db").read_bytes() == b"SQLite format 3"
 
 
 # --------------------------------------------------------------------------- #
