@@ -223,8 +223,23 @@ class TestSearch:
         assert "src/calc.py:1:" in r.output
 
     def test_grep_respects_glob(self, registry, box):
+        r = _run(registry, box, "code_grep", pattern=r"def add\(", path_glob="src/**/*.py")
+        assert "src/calc.py:1:" in r.output
         r = _run(registry, box, "code_grep", pattern="demo", path_glob="src/**/*.py")
         assert "NO MATCHES" in r.output
+
+    def test_grep_default_glob_reaches_root_files(self, registry, box):
+        r = _run(registry, box, "code_grep", pattern="demo")
+        assert "README.md:1:" in r.output
+
+    def test_glob_double_star_matches_zero_directories(self, registry, box):
+        (box.root / "export.py").write_text("def dated_name(day):\n    pass\n")
+        r = _run(registry, box, "code_glob", pattern="**/*.py")
+        assert r.output.splitlines() == ["export.py", "src/calc.py"]
+        r = _run(registry, box, "code_glob", pattern="**/export.py")
+        assert r.output.splitlines() == ["export.py"]
+        r = _run(registry, box, "code_glob", pattern="src/**/*.py")
+        assert r.output.splitlines() == ["src/calc.py"]
 
     def test_grep_bad_regex_is_loud(self, registry, box):
         r = _run(registry, box, "code_grep", pattern="(unclosed")

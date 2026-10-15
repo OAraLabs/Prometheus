@@ -23,6 +23,7 @@ otherwise kill the edit→test→re-edit cycle the whole sprint exists to build)
 from __future__ import annotations
 
 import fnmatch
+import functools
 import logging
 import re
 from pathlib import Path
@@ -50,6 +51,25 @@ def _numbered(text: str, start: int = 1) -> str:
 
 def _violation(exc: SandboxViolation) -> ToolResult:
     return ToolResult(output=f"SANDBOX VIOLATION: {exc}", is_error=True)
+
+
+_ANY_DIRS = "\ue000"  # private-use char: never in a real pattern
+
+
+@functools.lru_cache(maxsize=256)
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    """fnmatch's regex for *pattern*, with each ``**/`` also matching zero directories.
+
+    fnmatch alone reads ``**/`` as ``*/``, which needs a ``/`` in the path, so
+    ``**/*.py`` missed ``export.py`` and ``src/**/*.py`` missed ``src/calc.py``.
+    Everything else (``*`` spanning ``/``, ``?``, ``[...]``) stays fnmatch's.
+    """
+    rx = fnmatch.translate(pattern.replace("**/", _ANY_DIRS))
+    return re.compile(rx.replace(_ANY_DIRS, "(?:.*/)?"))
+
+
+def _glob_match(rel: str, pattern: str) -> bool:
+    return _glob_regex(pattern).match(rel) is not None
 
 
 def _iter_files(root: Path):
@@ -298,7 +318,7 @@ class CodeGrepArgs(BaseModel):
     pattern: str = Field(description="Python regular expression to search for.")
     path_glob: str = Field(
         default="**/*",
-        description="Glob filter for files to search (e.g. 'src/**/*.py').",
+        description="Glob filter for files to search, relative to the repo root (e.g. '**/*.py').",
     )
 
 
@@ -309,7 +329,7 @@ class CodeGrepTool(BaseTool):
         "caches, binaries). Returns path:line: text matches."
     )
     input_model = CodeGrepArgs
-    example_call = {"pattern": r"def total\(", "path_glob": "src/**/*.py"}
+    example_call = {"pattern": r"def total\(", "path_glob": "**/*.py"}
 
     def __init__(self, sandbox: Sandbox) -> None:
         self._sandbox = sandbox
@@ -332,7 +352,7 @@ class CodeGrepTool(BaseTool):
         hits: list[str] = []
         for f in _iter_files(root):
             rel = f.relative_to(root).as_posix()
-            if not fnmatch.fnmatch(rel, arguments.path_glob):
+            if not _glob_match(rel, arguments.path_glob):
                 continue
             try:
                 if f.stat().st_size > _GREP_FILE_SIZE_CAP:
@@ -361,7 +381,7 @@ class CodeGrepTool(BaseTool):
 
 
 class CodeGlobArgs(BaseModel):
-    pattern: str = Field(description="Glob pattern relative to the repo root, e.g. 'src/**/*.py'.")
+    pattern: str = Field(description="Glob pattern relative to the repo root, e.g. '**/*.py'.")
 
 
 class CodeGlobTool(BaseTool):
@@ -383,7 +403,7 @@ class CodeGlobTool(BaseTool):
         matches = sorted(
             f.relative_to(root).as_posix()
             for f in _iter_files(root)
-            if fnmatch.fnmatch(f.relative_to(root).as_posix(), arguments.pattern)
+            if _glob_match(f.relative_to(root).as_posix(), arguments.pattern)
         )
         if not matches:
             return ToolResult(output=f"NO FILES match {arguments.pattern!r}")
