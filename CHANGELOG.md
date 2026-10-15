@@ -2,6 +2,25 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## 0.9.11 (2026-10-15)
+
+0.9.11 fixes coding mode on any repo whose code sits at the root: its search tools couldn't see root-level files. It's the one change since 0.9.10, released as a freeze exception.
+
+### Coding mode sees files at the repo root (#802, fixes #801)
+
+- **`code_glob` and `code_grep` now match `**/` against zero directories, too.** They read `**/` as "at least one directory", so `**/*.py` never listed `export.py` at the root, `code_grep`'s default `**/*` never searched a root-level file, and `src/**/*.py` missed the files directly under `src/`. In the runs reported in #801, a model that could see only the test file rewrote it and broke it.
+- Only matches are added: everything else about the patterns is unchanged (`*` still spans `/`, and `?` and `[...]` work as before).
+- The tools' descriptions are unchanged. Their examples still read `src/**/*.py`, which now also matches files directly under `src/`.
+
+### Upgrading from 0.9.10
+
+- Nothing to do. A coding run's `code_glob` and `code_grep` can now return more files than before, never fewer.
+
+### Known issues
+
+- **The memory extractor can save no facts, silently, when the model pretty-prints its JSON (#798).** Each extraction call is recorded as a success and nothing is parsed, so no new facts are saved and the wiki doesn't grow. Seen with a 7B model on Ollama. The log line `MemoryExtractor: persisted 0 memories from N messages` is the only sign.
+- The known issues listed for 0.9.10 still apply.
+
 ## 0.9.10 (2026-10-14)
 
 0.9.10 keeps the work of a turn that hits its round cap, stops a model that breaks down at a very large context from poisoning the conversation, makes compaction cover every message and start earlier on large windows, and closes two gaps around subagents. Read "Upgrading from 0.9.9": the compaction threshold moved, `context.compression_trigger` is retired, and built-in subagents now have tools.
