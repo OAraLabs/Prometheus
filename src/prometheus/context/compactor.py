@@ -132,6 +132,21 @@ TARGET_FRACTION = 0.70
 # most recent tool rounds: the next round can bring back one like it.
 RECENT_TOOL_ROUNDS = 5
 
+# Calibration: every count here is chars/4, and the server's tokenizer counts
+# more. On the 32k box the real/estimate ratio was a median 1.067 over 279 live
+# compactions (up to 1.22), and 1.19-1.32 on web-search results. With the 80%
+# line (#773) that error ate the headroom: a session reached 28,915 real tokens
+# while its estimate never crossed 26,214, and nothing compacted. So the agent
+# loop reports what the server counted for each prompt and the estimate is
+# scaled by that ratio. Never below 1.0 (no later than before; a provider that
+# leaves its cached prefix out of the count reads LOW, Ollama's
+# prompt_eval_count among them), never above the cap (one odd count, an
+# image for example, must not halve the window).
+CALIBRATION_FLOOR = 1.0
+CALIBRATION_CEILING = 1.5
+# Sessions remembered, oldest dropped first: the instance lives as long as the daemon.
+_CALIBRATION_MAX_SESSIONS = 512
+
 # Labels for where a threshold came from (reported on /context, /api/status,
 # the startup line and every context_compaction event).
 SOURCE_GLOBAL_PCT = "global pct"
@@ -327,6 +342,12 @@ class ContextCompactor:
         # under. While the floor is unchanged, no new summary is paid for —
         # re-summarising cannot help, and every attempt loses more history.
         self._stuck: dict[str, str] = {}
+        # Calibration: (session_id, model) -> server count / estimate, last seen;
+        # and model -> the last ratio any session saw, for a session's first round.
+        self._calibration: "OrderedDict[tuple[str, str], float]" = OrderedDict()
+        self._model_calibration: dict[str, float] = {}
+        # model -> the window its provider stated in an over-window refusal.
+        self._learned_windows: dict[str, int] = {}
         # return_none: failures are already loud (silent_failures + failed
         # subsystem_runs); apply() then falls back explicitly. Not redacted:
         # the summary replaces turns of the live conversation, and a token
@@ -494,6 +515,65 @@ class ContextCompactor:
         total += max(0, int(tools_chars)) // 4  # same chars/4 heuristic
         return total
 
+    # -- calibration ---------------------------------------------------------
+
+    def observe_prompt_tokens(
+        self,
+        *,
+        session_id: str,
+        model: str | None,
+        estimated: int,
+        reported: int,
+    ) -> float | None:
+        """Record what the server counted for a prompt this class estimated.
+
+        *estimated* is :meth:`estimate_total` of the request as sent (the render
+        view), *reported* the provider's whole-prompt count for it (the usage
+        contract: cached part included). Returns the ratio kept, clamped to
+        [:data:`CALIBRATION_FLOOR`, :data:`CALIBRATION_CEILING`], or None when
+        either number is missing.
+        """
+        try:
+            est, rep = int(estimated), int(reported)
+        except (TypeError, ValueError):
+            return None
+        if est <= 0 or rep <= 0:
+            return None
+        ratio = min(CALIBRATION_CEILING, max(CALIBRATION_FLOOR, rep / est))
+        name = model or self._model or ""
+        if session_id:
+            key = (session_id, name)
+            self._calibration[key] = ratio
+            self._calibration.move_to_end(key)
+            while len(self._calibration) > _CALIBRATION_MAX_SESSIONS:
+                self._calibration.popitem(last=False)
+        self._model_calibration[name] = ratio
+        return ratio
+
+    def calibration_for(self, session_id: str = "", model: str | None = None) -> float:
+        """The factor this session's estimates are scaled by: its own last ratio,
+        else the model's last, else 1.0 (nothing observed: the bare estimate)."""
+        name = model or self._model or ""
+        ratio = self._calibration.get((session_id, name)) if session_id else None
+        if ratio is None:
+            ratio = self._model_calibration.get(name)
+        return float(ratio) if ratio is not None else CALIBRATION_FLOOR
+
+    def calibrated_total(
+        self,
+        system_prompt: str,
+        messages: list,
+        tools_chars: int = 0,
+        *,
+        session_id: str = "",
+        model: str | None = None,
+    ) -> int:
+        """:meth:`estimate_total` in the server's tokens, as far as it has said."""
+        return int(
+            self.estimate_total(system_prompt, messages, tools_chars)
+            * self.calibration_for(session_id, model)
+        )
+
     def limit_for(self, model: str | None = None, backend: str | None = None) -> int:
         """Context budget for whichever model is serving THIS call.
 
@@ -526,10 +606,48 @@ class ContextCompactor:
         used to be inferred from the fallback target or a named backend, so a
         local box with no fallback configured — the CLI's spawned workers
         among them (#704) — had a measured window and no pre-flight.
+
+        A window the provider stated in an over-window refusal counts: it is
+        the server's own number.
         """
-        return self._resolve_limit(model, backend)[1].startswith("detected")
+        return self._resolve_limit(model, backend)[1].startswith(("detected", "learned"))
+
+    def learn_window(self, model: str | None, window: int) -> bool:
+        """Record the window a provider STATED when it refused a prompt as too long.
+
+        Cloud APIs publish no context length, so an unlisted cloud model is
+        budgeted at ``cloud_default_limit`` and never compacts before the
+        provider refuses. The refusal names the real limit; from then on it
+        caps the budget for that model (for this process: it is not written
+        anywhere). Only ever lowers a window. True when it did.
+        """
+        try:
+            stated = int(window)
+        except (TypeError, ValueError):
+            return False
+        if stated <= 0:
+            return False
+        name = model or self._model or ""
+        if stated >= self._resolve_limit(name, None)[0]:
+            return False
+        self._learned_windows[name] = stated
+        log.warning(
+            "ContextCompactor: %s refused a prompt as over a %d-token window; "
+            "budgeting it at that from now on (was %d)",
+            name, stated, self._resolve_configured_limit(name, None)[0],
+        )
+        return True
 
     def _resolve_limit(self, model: str | None, backend: str | None) -> tuple[int, str]:
+        limit, source = self._resolve_configured_limit(model, backend)
+        learned = self._learned_windows.get(model or self._model or "")
+        if learned is not None and learned < limit:
+            return learned, "learned"
+        return limit, source
+
+    def _resolve_configured_limit(
+        self, model: str | None, backend: str | None,
+    ) -> tuple[int, str]:
         name = model or self._model
         if not name:
             return (int(self._detected_limit or self._effective_limit),
@@ -739,8 +857,13 @@ class ContextCompactor:
         return f"{getattr(msg, 'role', '?')}: {text}"
 
     def _summarizer_window(self) -> int:
-        """The summarizer's OWN context window: the model this compactor calls."""
-        return int(self.limit_for(self._model))
+        """The summarizer's OWN context window: the model this compactor calls.
+
+        In estimate units (the window over the model's calibration), because
+        the chunks it sizes are measured by the estimate: a chunk packed to
+        the bare window was itself refused as too long by the same server.
+        """
+        return int(self.limit_for(self._model) / self.calibration_for("", self._model))
 
     def _final_budget(self, span_tokens: int) -> int:
         """Output budget for the summary that replaces *span_tokens* (#773).
@@ -1036,12 +1159,19 @@ class ContextCompactor:
         round would not fit: current size + this request's *max_tokens* + the
         largest recent tool result over the window (#773). Aims at
         :data:`TARGET_FRACTION` of the line, not just under it.
+
+        Token counts are the estimate scaled by this session's calibration
+        (:meth:`calibration_for`): the window, threshold and output room are
+        the server's tokens, so the request size is put in them too. Message
+        and tail sizes stay in estimate units; the tail budget is converted.
         """
-        tokens_before = self.estimate_total(system_prompt, messages, tools_chars)
+        ratio = self.calibration_for(session_id, model)
+        estimated_before = self.estimate_total(system_prompt, messages, tools_chars)
+        tokens_before = int(estimated_before * ratio)
         threshold, threshold_source = self.threshold_for(model)
         limit = self.limit_for(model)
         out_room = int(max_tokens) if max_tokens else self._reserve_tokens
-        largest = self._largest_recent_result_tokens(messages)
+        largest = int(self._largest_recent_result_tokens(messages) * ratio)
         projected_fits = tokens_before + out_room + largest <= limit
         if tokens_before <= threshold and projected_fits:
             return messages
@@ -1057,7 +1187,7 @@ class ContextCompactor:
         fixed_tokens = (
             estimate_tokens(system_prompt or "") + max(0, int(tools_chars)) // 4
         )
-        tail_budget = max(0, target - fixed_tokens)
+        tail_budget = max(0, int(target / ratio) - fixed_tokens)
 
         # §6: a session marked stuck on this same floor pays for no new summary.
         floor_key = self._floor_key(messages)
@@ -1079,11 +1209,11 @@ class ContextCompactor:
             anchored_key = self._span_key(session_id, messages[:anchored])
             cached = self._cache.get(anchored_key)
             if cached is not None:
-                anchored_tokens = (
-                    tokens_before
+                anchored_tokens = int((
+                    estimated_before
                     - sum(self._message_tokens(m) for m in messages[:anchored])
                     + estimate_tokens(cached)
-                )
+                ) * ratio)
                 if anchored_tokens <= ceiling or frozen:
                     span_end = anchored
 
@@ -1190,7 +1320,7 @@ class ContextCompactor:
         else:
             out = list(view)
 
-        tokens_after = self.estimate_total(system_prompt, out, tools_chars)
+        tokens_after = int(self.estimate_total(system_prompt, out, tools_chars) * ratio)
 
         converged = tokens_after <= ceiling
         if not span and not trimmed:
@@ -1207,6 +1337,8 @@ class ContextCompactor:
                 "span_messages": max_end,
                 "over_by": tokens_before - ceiling,
                 "trigger": trigger,
+                "calibration": round(ratio, 3),
+                "tokens_before_estimated": estimated_before,
             })
             if not frozen:
                 # Once per stuck floor, like the stuck mark: not every round.
@@ -1252,6 +1384,9 @@ class ContextCompactor:
             "summarizer_input_omitted": 0,
             "summarizer_input_truncated": truncated,
             "tool_results_trimmed": trimmed,
+            # The token counts above are the estimate times this ratio.
+            "calibration": round(ratio, 3),
+            "tokens_before_estimated": estimated_before,
         })
         if paid:
             await self._report("done", {

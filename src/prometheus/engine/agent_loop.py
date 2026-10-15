@@ -1972,6 +1972,10 @@ async def _run_loop(
     # entry, one of the two suspects in the incident this guard exists for.
     degenerate_retried = False
     pending_degenerate_nudge = False
+    # Over-window refusal: compacted and retried ONCE per round, on what the
+    # refusal said (the real token count, the real window). Reset by a round
+    # the provider accepts, like the degenerate guard.
+    overflow_retried = False
 
     # SUNRISE PeriodicNudge — completed assistant rounds THIS run, and the
     # nudge text (if any) owed to the next model call. Counted in the loop
@@ -2326,7 +2330,8 @@ async def _run_loop(
             )
             return context.compactor.limit_for(_model, backend=backend), measured
 
-        def _estimate_tokens() -> int:
+        def _estimate_raw() -> int:
+            """The bare chars/4 estimate of this round's request, for calibration."""
             if context.compactor is None:
                 return 0
             return context.compactor.estimate_total(
@@ -2334,6 +2339,19 @@ async def _run_loop(
                 render_source,
                 len(str(_payload_tools)) if _payload_tools else 0,
             )
+
+        def _estimate_tokens() -> int:
+            # In the server's tokens as far as this session has measured them:
+            # the pre-flight and the fallback compare it with a window, which is
+            # the server's count, and the bare estimate reads 7-32% low.
+            if context.compactor is None:
+                return 0
+            _calibration_for = getattr(context.compactor, "calibration_for", None)
+            ratio = (
+                _calibration_for(effective_session_id or "", context.model)
+                if callable(_calibration_for) else 1.0
+            )
+            return int(_estimate_raw() * ratio)
 
         def _on_degrade(_decision) -> None:
             degrade_notice_this_turn.append(_decision)
@@ -2515,11 +2533,68 @@ async def _run_loop(
             if _tail:
                 yield AssistantTextDelta(text=_tail), None
 
+        if overflow_info is not None and not overflow_retried and not degrade_notice_this_turn:
+            # The refusal carries what the estimate got wrong: the real token
+            # count of this prompt, and the real window (an unlisted cloud model
+            # is budgeted at cloud_default_limit). Teach both to the compactor
+            # and run the round again: compaction now sees a prompt over the
+            # line and shrinks it, so the turn is not lost. Once: a second
+            # refusal ends the turn below. Not after a degraded round: the
+            # numbers would be another model's.
+            _needed = overflow_info.get("tokens_needed")
+            _stated = overflow_info.get("window")
+            _learn = getattr(context.compactor, "learn_window", None)
+            _teach = getattr(context.compactor, "observe_prompt_tokens", None)
+            _learned = False
+            if callable(_learn) and callable(_teach):
+                try:
+                    if isinstance(_stated, int) and _stated > 0:
+                        _learn(context.model, _stated)
+                        _learned = True
+                    if isinstance(_needed, int) and _needed > 0:
+                        _teach(
+                            session_id=effective_session_id or "",
+                            model=context.model,
+                            estimated=_estimate_raw(),
+                            reported=_needed,
+                        )
+                        _learned = True
+                except Exception:
+                    log.debug("context overflow: compactor not taught", exc_info=True)
+                    _learned = False
+            if _learned:
+                overflow_retried = True
+                _v2_response("error", None)
+                log.warning(
+                    "context overflow: the backend refused the prompt as over its window "
+                    "(needed=%s window=%s). Compacting with those numbers and retrying "
+                    "the round once. session=%s model=%s",
+                    _needed, _stated, effective_session_id, context.model,
+                )
+                if context.telemetry is not None:
+                    try:
+                        context.telemetry.record_run(
+                            subsystem="agent_loop",
+                            operation="context_overflow_retry",
+                            outcome="partial",
+                            session_id=rec_sid,
+                            model=context.model,
+                            summary={
+                                "tokens_needed": _needed,
+                                "window": _stated,
+                                "provider": overflow_info.get("provider"),
+                            },
+                        )
+                    except Exception:
+                        log.debug("context overflow telemetry write failed", exc_info=True)
+                continue
+
         if overflow_info is not None:
             # #704: the backend refused the prompt as over its window. That ends
             # the TURN with the reason and the way out — the same answer the
-            # #356 pre-flight gives when the estimate catches it first — and
-            # nothing is sent again: the same prompt cannot fit next time.
+            # #356 pre-flight gives when the estimate catches it first. Reached
+            # with no compactor, after a degraded round, or when the one
+            # compacted retry above was refused too.
             _v2_response("error", None)
             if turn_record is not None:
                 turn_record.stop(_StopReason.CONTEXT_OVERFLOW)
@@ -2559,6 +2634,23 @@ async def _run_loop(
             if turn_record is not None:
                 turn_record.stop(_StopReason.NO_FINAL_MESSAGE)
             raise RuntimeError("Model stream finished without a final message")
+
+        # Calibration: tell the compactor what the server counted for the prompt
+        # it estimated, so the next round's estimate is in the server's tokens.
+        # Not after a degraded round: another model (another tokenizer) served it.
+        _observe = getattr(context.compactor, "observe_prompt_tokens", None)
+        if callable(_observe) and not degrade_notice_this_turn and usage is not None:
+            try:
+                _observe(
+                    session_id=effective_session_id or "",
+                    model=context.model,
+                    estimated=_estimate_raw(),
+                    reported=usage.input_tokens,
+                )
+            except Exception:
+                log.debug("compactor calibration: observation not recorded", exc_info=True)
+        # The provider accepted this round's prompt: a later refusal gets its own retry.
+        overflow_retried = False
 
         # Who served THIS round, for every row it writes from here on (T14):
         # the fallback when the round degraded, else the context's own. Set

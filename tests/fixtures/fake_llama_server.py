@@ -6,8 +6,10 @@ that already ends in ``/v1``) — on a loopback port, in a thread of the test
 process, so a spawned ``python -m prometheus`` child can reach it too.
 
 Prompt tokens are estimated as chars/4, the heuristic Prometheus's own
-estimator uses, so an overflow here is never an estimator disagreement. A
-prompt over ``n_ctx`` gets llama.cpp's real ``exceed_context_size_error`` 400.
+estimator uses, so an overflow here is never an estimator disagreement —
+unless ``token_ratio`` says the server's tokenizer counts that many times more,
+as a real one does (the calibration tests). A prompt over ``n_ctx`` gets
+llama.cpp's real ``exceed_context_size_error`` 400.
 
 The scripted "model":
 
@@ -61,8 +63,10 @@ class FakeLlamaServer:
         parent_tool: str = "task_create",
         parent_args: dict[str, Any] | None = None,
         keep_bodies: bool = False,
+        token_ratio: float = 1.0,
     ) -> None:
         self.n_ctx = n_ctx
+        self.token_ratio = token_ratio
         self.model_id = model_id
         self.writes_per_turn = writes_per_turn
         self.work_dir = str(work_dir)
@@ -135,7 +139,7 @@ class FakeLlamaServer:
                         fake.bodies.append(raw)
                 payload = json.loads(raw)
                 msgs = payload.get("messages", [])
-                tokens = _est_tokens(payload)
+                tokens = int(_est_tokens(payload) * fake.token_ratio)
                 has_tools = bool(payload.get("tools"))
                 user_texts = [m for m in msgs if m.get("role") == "user"
                               and isinstance(m.get("content"), str)]
