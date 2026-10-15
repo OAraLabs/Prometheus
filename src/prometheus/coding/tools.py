@@ -318,7 +318,7 @@ class CodeGrepArgs(BaseModel):
     pattern: str = Field(description="Python regular expression to search for.")
     path_glob: str = Field(
         default="**/*",
-        description="Glob filter for files to search, relative to the repo root (e.g. '**/*.py').",
+        description="Glob filter for files to search (e.g. 'src/**/*.py').",
     )
 
 
@@ -329,7 +329,7 @@ class CodeGrepTool(BaseTool):
         "caches, binaries). Returns path:line: text matches."
     )
     input_model = CodeGrepArgs
-    example_call = {"pattern": r"def total\(", "path_glob": "**/*.py"}
+    example_call = {"pattern": r"def total\(", "path_glob": "src/**/*.py"}
 
     def __init__(self, sandbox: Sandbox) -> None:
         self._sandbox = sandbox
@@ -381,7 +381,7 @@ class CodeGrepTool(BaseTool):
 
 
 class CodeGlobArgs(BaseModel):
-    pattern: str = Field(description="Glob pattern relative to the repo root, e.g. '**/*.py'.")
+    pattern: str = Field(description="Glob pattern relative to the repo root, e.g. 'src/**/*.py'.")
 
 
 class CodeGlobTool(BaseTool):
