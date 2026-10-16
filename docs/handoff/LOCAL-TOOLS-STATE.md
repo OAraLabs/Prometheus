@@ -1,60 +1,88 @@
-# Local tools fix stack: state (2026-10-16)
+# Local tools fix stack: state (2026-10-16, evening)
 
-The audit: `docs/audits/local-tools-audit-2026-10-16/README.md` (on #810).
+The audit: `docs/audits/local-tools-audit-2026-10-16/README.md` (merged with #810).
+
+## Files on this branch
+
+| Path | What |
+|---|---|
+| `docs/handoff/runbook-0.9.13/LIVE-CONFIG.md` | The 0.9.13 runbook section for the live config: the deploy edit, what to check after the restart, the rollback, and the day-after cleanup. |
+| `docs/handoff/runbook-0.9.13/retire_workaround.py` | Deploy edit (4 lines): removes the 27B's per-model `max_output_tokens: 4096` and `- agent` from `always_loaded`. |
+| `docs/handoff/runbook-0.9.13/cleanup_dead_config.py` | Day-after cleanup (11 lines): `context.reserved_output` and the 5 `model_overrides` entries that match no served model. |
+| `docs/handoff/release-check/tier.sh` | The 12-request real-model tier on the operator's config (scratch daemon behind the logging proxy). Needs `CHECKOUT` and `WORK`; see its header. |
+| `docs/handoff/release-check/tier_score.py` | Scores a tier run: `python3 tier_score.py "$WORK" <label>`. |
+| `docs/handoff/release-check/idle.sh` | Exits 0 once the live daemon has shown no model activity for 45 s; `tier.sh` waits on it. |
+| `docs/handoff/release-check/context7_stub_tools.json` | The Context7 tool pair the tier's MCP request needs. |
+| `docs/handoff/pr-drafts/fix7.md`, `fix3.md`, `fix6.md` | PR bodies for the three PRs not yet opened. Placeholders left: `FIX7_PR` in fix 3 and `FIX3_PR` in fix 6 (the predecessor PR numbers). |
+
+Both runbook scripts are guarded: each block must occur exactly once, uncommented, where named, with exactly the content expected, or the script refuses and writes nothing. Without `--write`, a script only prints its diff. Both were tested on a copy of the live config, never on the live file.
 
 ## Merge queue
 
-Will's standing approval covers **this stack only, in this order**. Each PR merges only when CI is green on its exact head SHA (squash, pinned with `--match-head-commit`), then the next is retargeted or updated. Anything outside this list, or a PR whose scope changes after Will has seen it, waits for him. No tag, release or deploy.
+Will's standing approval covers this stack only, in this order, now including fix 6 (added 2026-10-16).
 
-| Order | PR | What | Head | Checks |
-|---|---|---|---|---|
-| 1 | #810 | the gate and the audit | `48defb6d` | CI 13/13 green; Will is merging it |
-| 2 | #811 | fix 1: every ending reaches Beacon | `5303d6e6` | CI 14/14 green (parity included); local full suite and parity clean. After #810: `gh pr edit 811 --base main`, then `gh pr update-branch 811` |
-| 3 | #812 | parity: side calls match by kind, in any order | `2166180f` | local: replay 12/12, stability identical, full suite green (2 known host failures), 121 harness tests; CI running |
-| 4 | #813 | fix 2: llama.cpp cap back to 4096, 10 goldens re-recorded | `18e6dfd7` | local: replay 12/12, stability identical, full suite green (2 known host failures); CI running |
-| 5 | not opened | 5a: context windows loud and consistent | `6af54634` | local: replay 12/12, stability identical; full suite running |
-| 6 | not opened | 5b: Ollama on native /api/chat with num_ctx (its own PR; a release may ship 5a without it) | `b3e84637` | real-model check on this box's Ollama 7b passed (tool call, plain reply, thinking control, over-window prompt refused before Ollama); 2 goldens re-recorded with Ollama live; local checks queued |
-| 7 | not opened | 4: tool_search near-miss select, 5-name miss list, find_me | `4fc55aac` | local checks queued |
-| 8 | not opened | 7: telemetry records the tools a round sent | `ebe7b614` | local checks queued |
-| 9 | not opened | 3: every tool callable locally (stubs) | `d3be2a79` | hermetic gate 289 passed, 5 xfailed (fix 1's d, fix 6's e); 11 goldens re-recorded; local checks queued |
-| 10 | not opened | 6: cut round-0 overhead | WIP `2515a694` | see below |
+Rules for each PR:
+- Merge only when CI is green on its exact head SHA (squash, pinned with `--match-head-commit`).
+- After any base change or branch update, every required check needs a non-cancelled run on that SHA before anyone reports "CI is running". Rerun cancelled duplicates with `gh run rerun`.
+- Report the PR number and merge SHA.
+- No tag, release or deploy.
 
-The two known host failures on this box are `test_proc_net_tcp6_addresses` and `test_the_real_session_bus_agrees_with_the_probe`.
+| Fix | PR | State |
+|---|---|---|
+| gate + audit | #810 | merged `2cfdceea` |
+| 1: every ending reaches Beacon | #811 | merged `c571e6bb` |
+| parity: side calls by kind | #812 | merged `83132e29` |
+| 2: llama.cpp cap 4096 | #813 | merged `9bc78930` |
+| 5a: context windows loud and consistent | #814 | merged `8b97c113` |
+| 5b: Ollama native /api/chat with num_ctx | #815 | merged `dc332849` |
+| 4: tool_search finds what the model means | #816 | open, head `d6cb7f9a`, auto-merge pinned; all 7 required checks have a live run |
+| 7: telemetry records what was sent | not opened | branch `fix/telemetry-records-what-was-sent` at `200c86ca`, on fix 4's pre-merge head `6736cda6` |
+| 3: every tool callable locally (stubs) | not opened | `fix/every-tool-callable-locally` at `deea416a`, on fix 7 `200c86ca` |
+| 6: cut round-0 overhead | not opened | `fix/cut-local-overhead` at `e9a3a438`, on fix 3 `deea416a` |
+
+To open the next PR once its predecessor has squash-merged:
+1. Rebase: `git rebase --onto origin/main <predecessor's pre-merge head> <branch>`. The predecessor heads are the "on ..." SHAs in the table.
+2. Check that the tree is unchanged, i.e. the same tree that was checked.
+3. Push, open the PR with its draft body, and pin auto-merge.
+
+Each branch was pre-rebased this way and checked locally: ruff, the mypy gate, its tests, the hermetic gate, parity replay 12/12 and stability identical. Fix 3 and fix 6 also ran their full suites: 14,410 and 14,422 passed, each with only the 2 known host failures.
+
+Required checks on main: test (3.11), test (3.12), quality, security-floors, firstlight (local, editable), firstlight (cloud, editable), firstlight (local, wheel). The two known host failures on this box are `test_proc_net_tcp6_addresses` and `test_the_real_session_bus_agrees_with_the_probe`.
 
 ## What's left
 
-- **Fix 6:**
-  - finish the 12-request real-model tier after cuts A, B, C, E, and compare it with the before run;
-  - commit the thresholds;
-  - re-record the goldens once, at the end;
-  - run the full checks, and open the PR with both tier scores.
-- **Fixes 5a, 5b, 4, 7, 3:** finish the local checks (replay, stability, full suite, ruff, mypy gate), then push and open each PR stacked on the one before.
-- **Merges** in the order above.
-- **Release check** on main with everything merged: the full gate plus the 12-request tier, and a one-page summary for Will.
+1. **Merge the rest of the stack:** #816 (fix 4), then fix 7, fix 3 and fix 6, in that order.
+2. **Release check on main** with everything merged:
+   - the full hermetic gate (`tests/test_local_gate_*`, `tests/test_local_tool_reachability.py`);
+   - parity replay and stability;
+   - the 12-request tier: `CHECKOUT=<main checkout> WORK=<dir> docs/handoff/release-check/tier.sh release`, then `tier_score.py`.
+
+   The tier uses the 10-16 backup config: the live config without the workaround, which is what live becomes after the deploy edit.
+3. **One-page summary for Will,** including the runbook's config change.
 
 ## Decisions
 
-- **Fix 3 is stubs**, not a `call_tool` dispatcher. In the A/B on the 27B (12 requests), the right tool was called 11/12 either way; the right arguments on the first try, 11/12 against 9/12.
-  - Full schema for a fixed ten: bash, read_file, write_file, edit_file, grep, glob, web_search, web_fetch, agent, ask_user.
-  - Every other tool is a stub, listing an enum's values when there are 8 or fewer.
-  - The block is sorted and byte-identical across rounds.
-  - `always_loaded` is inert under `local_catalog: stubs`, and applies only to `names`.
-- **Parity:** main-turn requests keep any-order exact matching, which was intentional. Side calls (titles, summaries) match by kind.
-- **Fix 6:**
-  - **Cuts made:**
-    - A: no Qwen prose tool list on tier light;
-    - B: no deploy-directory project files in the daemon's prompt (a bound workspace still brings its own);
-    - C: saved files as a count;
-    - E: stub string types dropped, stub lines capped at 80 characters.
-  - **D (Documents library) left as is:** it is behaviour guidance, not a listing.
-  - **F skipped:** it would change cloud schemas and need a paid hosted re-record.
-  - **Thresholds:** round 0 on Will's config ≤ 13,500, Prometheus-owned (gate) ≤ 7,000.
-  - **Revisit after launch:** D, F and the 6,200/5,000 targets, with plan-behaviour tests and a cloud A/B first.
-  - **Supersession note:** Will's earlier fix 6 message (D and F approved, owned ≤ 6,200) was superseded by his later answers once D proved to be behaviour guidance and F to need a paid re-record. The stack follows the later answers unless he says otherwise.
-- **Measured (the 27B, daemon run from a deploy-like directory):**
-  - Round 0 on Will's config: 19,198 before fix 6, 13,340 after A, B, C, E.
-  - Gate Prometheus-owned: 8,901 before, 6,840 after.
-  - Tier before fix 6: found 12/12, called 12/12, right tool first 11/12, right arguments 12/12, 0 schema refusals.
-- **Deploy runbook (0.9.13):** retire the 10-16 live workaround.
-  - Remove `agent` from `tools.deferred_loading.always_loaded`, and the per-model `max_output_tokens: 4096` override keyed by the 27B's GGUF path. That is 4 lines in all; the rest of the config stays.
-  - Back up the config first, and restore that backup if 0.9.13 is rolled back.
+- **Fix 3 is stubs.**
+  - Full schema for a fixed ten: bash, read_file, write_file, edit_file, grep, glob, web_search, web_fetch, agent, ask_user. Every other tool is a stub; enum values are listed when there are 8 or fewer.
+  - The tools block is sorted and byte-identical across rounds.
+  - `always_loaded` applies to `local_catalog: names` only.
+  - Commits after the original fix:
+    - stubs-mode tests for every names-pinned test (the map is in the PR body);
+    - a parity rebaseline from the committed exchanges, for the advertisement row's new fields;
+    - the doctor's Advertised tools row, which now counts what a stubs run offers;
+    - **last, revertible alone:** a fallback round's tools follow the model that serves it, tested in both directions in the hermetic gate.
+- **Fix 6** follows Will's later answers.
+  - **Cuts:** A, B, C and E, where E means the 80-character stub line only. Stub argument types are kept: untyped stubs dropped right arguments to 5/12 on the 27B.
+  - **Not done:** D (behaviour guidance) is left as is, and F is skipped.
+  - **Thresholds:** Prometheus-owned ≤ 7,400 and round 0 on Will's config ≤ 14,000.
+  - **Measured:** round 0 went from 19,198 to 13,813; the gate's Prometheus-owned overhead from 8,901 to 7,253. The tier, before → after:
+    - found 12/12 → 12/12;
+    - right tool first 11/12 → 12/12;
+    - right arguments 12/12 → 12/12.
+  - **Goldens:** re-recorded once, at the end (hosted_route unchanged).
+  - **Gate:** the coding session grew to 26 modules so that check c still compacts.
+  - **Revisit after launch:** D, F and the 6,200/5,000 targets.
+- **Parity:** main-turn requests keep any-order exact matching. Side calls (titles, summaries) match by kind.
+- **Deploy (Will's go only):** retire the workaround with the targeted edit in `runbook-0.9.13/`, never by restoring the 10-16 backup.
+  - Live differs from that backup only by the workaround's 4 lines (re-diffed 2026-10-16).
+  - The config cleanup (`reserved_output` and the 5 unmatched overrides) is a separate day-after step, not part of the deploy.
