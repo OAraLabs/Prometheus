@@ -742,9 +742,10 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
         # over the operator's in any process that later runs a model shell.
         registry = create_tool_registry(config.get("security") or {})
         loader = DynamicToolLoader(registry, deferred)
-        advertised = sorted(
-            s.get("name") for s in loader.schemas_for_run(True)
-        )
+        # What a local (deferred) run offers: under local_catalog "stubs"
+        # every tool, some as stubs; under "names" the always_loaded set.
+        full, stubs = loader.offered_for_run(True)
+        advertised = sorted(full + stubs)
         total = len(registry.list_tools())
     except Exception as exc:  # diagnostics must never crash the doctor
         return DiagnosticCheck(
@@ -763,9 +764,16 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
                 "config to get the shipped set, or list the tools you want "
                 "advertised.",
         )
+    case_status, case_text, case_fix = always_loaded_case(config)
+    if stubs:
+        return DiagnosticCheck(
+            name=ADVERTISED_TOOLS_ROW, category="resources", status=case_status,
+            message=f"{len(advertised)} of {total} registered offered to a local model "
+                    f"({len(full)} with their full schema, {len(stubs)} as stubs) — {case_text}",
+            fix=case_fix,
+        )
     preview = ", ".join(advertised[:6])
     more = f" (+{len(advertised) - 6} more)" if len(advertised) > 6 else ""
-    case_status, case_text, case_fix = always_loaded_case(config)
     return DiagnosticCheck(
         name=ADVERTISED_TOOLS_ROW, category="resources", status=case_status,
         message=f"{len(advertised)} of {total} registered offered to the "

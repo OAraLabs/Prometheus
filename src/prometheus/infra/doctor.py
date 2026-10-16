@@ -188,6 +188,10 @@ def always_loaded_case(config: dict | None) -> tuple[str, str, str | None]:
     cannot disagree. A pinned list that leaves out tools the shipped default
     offers is a warning: that is exactly how ``skill`` stayed out of every
     config setup wrote before 0.9.5.
+
+    Under ``local_catalog: stubs`` (the default) the list is not consulted: a
+    local run offers every tool, the ambient ten with their full schema and
+    the rest as stubs (context/tool_stubs.py), so the row says that instead.
     """
     from prometheus.config.shipped_defaults import (
         ALWAYS_LOADED_ABSENT,
@@ -199,6 +203,12 @@ def always_loaded_case(config: dict | None) -> tuple[str, str, str | None]:
     tools_cfg = (config or {}).get("tools")
     deferred = (tools_cfg or {}).get("deferred_loading") if isinstance(tools_cfg, dict) else None
     deferred = deferred if isinstance(deferred, dict) else {}
+    from prometheus.context.tool_stubs import catalog_mode
+
+    if catalog_mode(deferred) == "stubs":
+        return ("ok", "local_catalog stubs: a local run offers every tool, the ambient ten with "
+                "their full schema and the rest as stubs; always_loaded applies to "
+                "local_catalog names only", None)
     origin = always_loaded_origin(deferred)
     shipped = len(SHIPPED_ALWAYS_LOADED)
     if origin == ALWAYS_LOADED_ABSENT:

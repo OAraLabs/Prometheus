@@ -59,8 +59,9 @@ def registry() -> ToolRegistry:
 
 
 def _loader(registry, enabled, always=("bash", "read_file")) -> DynamicToolLoader:
+    # local_catalog "names": the 0.9.12 catalog, whose always_loaded set this test is about (under the default "stubs" every tool is offered: tests/test_tool_stubs.py).
     return DynamicToolLoader(
-        registry, {"enabled": enabled, "always_loaded": list(always)}
+        registry, {"enabled": enabled, "always_loaded": list(always), "local_catalog": "names"}
     )
 
 

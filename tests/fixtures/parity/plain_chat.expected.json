@@ -19,11 +19,11 @@
      "role": "user"
     },
     {
-     "content": "All systems check out — you're like a lighthouse guiding me right on course!",
+     "content": "All systems are green and steady as a lighthouse tonight!",
      "content_json": {
       "$json": [
        {
-        "text": "All systems check out — you're like a lighthouse guiding me right on course!",
+        "text": "All systems are green and steady as a lighthouse tonight!",
         "type": "text"
        }
       ]
@@ -34,7 +34,7 @@
     }
    ],
    "op": "chat",
-   "reply": "All systems check out — you're like a lighthouse guiding me right on course!",
+   "reply": "All systems are green and steady as a lighthouse tonight!",
    "session": "desktop:parity-plain"
   }
  ],
@@ -191,16 +191,16 @@
        "desktop:parity-plain",
        1,
        "assistant",
-       "All systems check out — you're like a lighthouse guiding me right on course!",
+       "All systems are green and steady as a lighthouse tonight!",
        {
         "$json": [
          {
-          "text": "All systems check out — you're like a lighthouse guiding me right on course!",
+          "text": "All systems are green and steady as a lighthouse tonight!",
           "type": "text"
          }
         ]
        },
-       19,
+       14,
        "<time>",
        0,
        "user",
@@ -217,7 +217,7 @@
        "Parity check. Reply with one short friendly sentence that contains the word 'lighthouse'. Do not use any tools."
       ],
       [
-       "All systems check out — you're like a lighthouse guiding me right on course!"
+       "All systems are green and steady as a lighthouse tonight!"
       ]
      ]
     },
@@ -242,7 +242,7 @@
       [
        1,
        {
-        "$bytes_sha256": "901ee131100fc0db",
+        "$bytes_sha256": "cb2828956cb51650",
         "len": 2
        }
       ],
@@ -263,8 +263,8 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "a87996896f567a90",
-        "len": 142
+        "$bytes_sha256": "21bb7e206ac14b27",
+        "len": 106
        }
       ]
      ]
@@ -285,7 +285,7 @@
       [
        2,
        {
-        "$bytes_sha256": "4d7b3ef7300acf70",
+        "$bytes_sha256": "01ba4719c80b6fe9",
         "len": 1
        }
       ]
@@ -436,7 +436,7 @@
      "rows": [
       [
        "desktop:parity-plain",
-       "Parity check with lighthouse",
+       "Parity Check With Lighthouse",
        "<time>"
       ]
      ]
@@ -765,11 +765,11 @@
        "llama_cpp",
        "light",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "prose",
        0,
-       76,
-       "All systems check out — you're like a lighthouse guiding me right on course!",
+       57,
+       "All systems are green and steady as a lighthouse tonight!",
        "agent",
        "beacon",
        null
@@ -1443,11 +1443,13 @@
        "success",
        {
         "$json": {
-         "advertised": 12,
+         "advertised": 51,
+         "catalog": "stubs",
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
-         "source": "auto → enabled (local provider, tier light)"
+         "source": "auto → enabled (local provider, tier light)",
+         "stubs": 41
         }
        },
        null,
@@ -1475,13 +1477,13 @@
          "stop_reason": "stop"
         }
        },
-       6237,
-       18,
+       8818,
+       13,
        0,
        "desktop:parity-plain",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4222,
+       6803,
        null,
        "<node>",
        "local",
@@ -1500,7 +1502,7 @@
          "stop_reason": "stop"
         }
        },
-       102,
+       97,
        7,
        null,
        "desktop:parity-plain",
@@ -1552,24 +1554,63 @@
      ],
      "rows": [
       [
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        {
         "$json": [
+         "agent",
+         "anatomy",
+         "ask_user",
          "bash",
+         "browser",
+         "cron_create",
+         "cron_delete",
+         "cron_list",
+         "dashboard",
+         "download_file",
          "edit_file",
+         "github_search",
          "glob",
          "grep",
+         "image_generate",
+         "lcm_describe",
+         "lcm_expand",
+         "lcm_expand_query",
+         "lcm_grep",
          "memory",
+         "message",
+         "notebook_edit",
          "read_file",
+         "sentinel_status",
+         "sessions_list",
+         "sessions_send",
+         "sessions_spawn",
          "skill",
+         "symbiote_graft",
+         "symbiote_harvest",
+         "symbiote_scout",
+         "symbiote_status",
          "task_create",
+         "task_get",
+         "task_list",
+         "task_output",
+         "task_stop",
+         "task_update",
+         "todo_write",
          "tool_search",
+         "tts",
+         "vault_read",
+         "vault_search",
+         "video_generate",
          "web_fetch",
          "web_search",
-         "write_file"
+         "wiki_compile",
+         "wiki_lint",
+         "wiki_query",
+         "write_file",
+         "youtube_transcript"
         ]
        },
-       12,
+       51,
        "<time>"
       ]
      ]
@@ -1607,8 +1648,8 @@
        "<time>",
        "<time>",
        1,
-       6237,
-       18,
+       8818,
+       13,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"

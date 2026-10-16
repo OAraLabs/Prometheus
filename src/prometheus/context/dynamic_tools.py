@@ -118,6 +118,17 @@ class DynamicToolLoader:
         self._registry = registry
         self._deferred = deferred_config or {}
         self._configured = _normalize_enabled(self._deferred.get("enabled", "auto"))
+        # How a deferred local run offers the tools it does not describe in
+        # full (context/tool_stubs.py): "stubs", or "names" for the 0.9.12
+        # catalog. Anything else is a typo: say so and use the default.
+        from prometheus.context.tool_stubs import CATALOG_MODES, DEFAULT_CATALOG, catalog_mode
+
+        mode = catalog_mode(self._deferred)
+        raw = self._deferred.get("local_catalog")
+        if raw and str(raw) != mode:
+            log.warning("tools.deferred_loading.local_catalog = %r is not one of %s; using %r",
+                        raw, ", ".join(CATALOG_MODES), DEFAULT_CATALOG)
+        self.catalog_mode: str = mode
         # always_loaded is parsed unconditionally now: with mode "auto" the
         # decision isn't known until run start (resolve_deferred), so the set
         # must be ready either way. Do NOT mutate this set per-tier — it is
@@ -250,6 +261,19 @@ class DynamicToolLoader:
         if deferred:
             return self._deferred_schemas()
         return self._registry.to_api_schema()
+
+    def offered_for_run(self, deferred: bool) -> tuple[list[str], list[str]]:
+        """(names with a full schema, names as stubs) that a run with this
+        deferral decision offers: what the loop sends, for the surfaces that
+        report it (the boot line, /api/tools/deferred). Under local_catalog
+        "stubs" a deferred run offers every tool, so always_loaded decides
+        nothing there."""
+        if deferred and self.catalog_mode == "stubs":
+            from prometheus.context.tool_stubs import catalog
+
+            block, stubs = catalog(self.schemas_for_run(False))
+            return [s["name"] for s in block if s["name"] not in stubs], sorted(stubs)
+        return [s["name"] for s in self.schemas_for_run(deferred)], []
 
     def active_schemas(
         self,

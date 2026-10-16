@@ -209,9 +209,10 @@ def _deferred_summary(system: str) -> str:
 # ---------------------------------------------------------------- 1. awareness
 
 
-@pytest.mark.xfail(strict=True, reason="awareness on 0.9.12: the local prompt says nothing about the deferred tools")
 def test_awareness_the_prompt_states_how_many_tools_are_deferred(round_zero):
     deferred = [t for t in TOOLS if t not in round_zero.offered]
+    if not deferred:
+        return  # every tool is in the request (fix 3's stubs): nothing to state
     found = re.search(r"(\d+)\s+(?:more|other|additional|deferred|unloaded)\s+tools", round_zero.system)
     assert found and int(found.group(1)) == len(deferred), (
         f"{len(deferred)} tools are deferred; the prompt states {found.group(0) if found else 'no count'}")

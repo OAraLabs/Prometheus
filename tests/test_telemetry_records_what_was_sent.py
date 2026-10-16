@@ -77,7 +77,9 @@ def _run(tmp_path, *, tool: str, adapter, flip_deferral: bool = False):  # noqa:
     registry = ToolRegistry()
     for name in ("bash", "read_file", "image_generate"):
         registry.register(_tool(name))
-    loader = DynamicToolLoader(registry, {"enabled": "auto", "always_loaded": ["bash", "read_file"]})
+    # local_catalog "names": the 0.9.12 catalog, whose always_loaded set this test is about (under the default "stubs" every tool is offered: tests/test_tool_stubs.py).
+    loader = DynamicToolLoader(registry, {"enabled": "auto", "always_loaded": ["bash", "read_file"],
+                                          "local_catalog": "names"})
     answered = {"yes": False}
     if flip_deferral:
         # Deferral resolves OFF when the run starts (every tool sent) and ON

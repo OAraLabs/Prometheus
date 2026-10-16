@@ -84,8 +84,21 @@ def test_get_reports_auto_resolution_on_local():
     d = client.get("/api/tools/deferred").json()
     assert d["effective"] is True
     assert "local" in d["source"]
-    assert d["advertised_count"] == 2  # the deferred set
+    # local_catalog "stubs" (the default): every tool is offered (all three of
+    # these are among the ambient ten, so all with a full schema); the
+    # always_loaded set no longer decides it.
+    assert (d["advertised_count"], d["full_schema_count"], d["stub_count"]) == (3, 3, 0)
+    assert d["local_catalog"] == "stubs" and d["always_loaded_applies"] is False
     assert d["total_tools"] == 3
+
+
+def test_get_reports_the_always_loaded_set_under_names():
+    cfg = _cfg("auto")
+    cfg["tools"]["deferred_loading"]["local_catalog"] = "names"
+    client, _ = _client(cfg, tier="strict")
+    d = client.get("/api/tools/deferred").json()
+    assert d["advertised_count"] == 2  # the always_loaded set
+    assert d["stub_count"] == 0 and d["always_loaded_applies"] is True
 
 
 def test_get_reports_explicit_override_source():

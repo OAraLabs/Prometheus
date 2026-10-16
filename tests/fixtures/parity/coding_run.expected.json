@@ -12,7 +12,7 @@
      "episodes": 1,
      "model_usage_note": "per-round tokens + thinking flag are in telemetry.subsystem_runs (subsystem='agent_loop', session_id=coding:<task_id>)",
      "reason": "acceptance command exited 0",
-     "rounds_used": 4,
+     "rounds_used": 5,
      "sandbox_root": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>",
      "status": "success",
      "task_id": "cparity01",
@@ -788,7 +788,7 @@
        null,
        "9adc3c23ae3a7bbd",
        "tool_call",
-       2,
+       1,
        0,
        null,
        "agent",
@@ -807,7 +807,7 @@
        null,
        "9adc3c23ae3a7bbd",
        "tool_call",
-       1,
+       2,
        0,
        null,
        "agent",
@@ -844,10 +844,29 @@
        "light",
        null,
        "9adc3c23ae3a7bbd",
+       "tool_call",
+       1,
+       0,
+       null,
+       "agent",
+       "coding_mode",
+       null
+      ],
+      [
+       5,
+       "<time>",
+       "coding:cparity01",
+       "<turn:1>",
+       4,
+       "<uuid:5>",
+       "llama_cpp",
+       "light",
+       null,
+       "9adc3c23ae3a7bbd",
        "prose",
        0,
-       234,
-       "Fixed. `calc.add` was returning `a - b` instead of `a + b` — I changed line 3 in calc.py to `return a + b` and left test_calc.py untouched. The acceptance command `python test_calc.py` ran successfully (exit code 0, output \"calc ok\").",
+       214,
+       "Fixed. The bug was in `calc.py`: `add()` returned `a - b` instead of `a + b`. I changed line 3 to `return a + b` and verified with the acceptance command:\n\n```\n$ python test_calc.py\ncalc ok\n(exit code 0)\n```\n\nDone.",
        "agent",
        "coding_mode",
        null
@@ -938,7 +957,7 @@
      ],
      "rows": [
       [
-       "<uuid:5>",
+       "<uuid:6>",
        "<time>",
        "tool_registration",
        "TaskCreateTool",
@@ -963,7 +982,7 @@
        null
       ],
       [
-       "<uuid:6>",
+       "<uuid:7>",
        "<time>",
        "tool_registration",
        "GitHubSearchTool",
@@ -988,7 +1007,7 @@
        null
       ],
       [
-       "<uuid:7>",
+       "<uuid:8>",
        "<time>",
        "tool_registration",
        "SymbioteScoutTool",
@@ -1013,7 +1032,7 @@
        null
       ],
       [
-       "<uuid:8>",
+       "<uuid:9>",
        "<time>",
        "tool_registration",
        "SymbioteHarvestTool",
@@ -1038,7 +1057,7 @@
        null
       ],
       [
-       "<uuid:9>",
+       "<uuid:10>",
        "<time>",
        "tool_registration",
        "SymbioteGraftTool",
@@ -1063,7 +1082,7 @@
        null
       ],
       [
-       "<uuid:10>",
+       "<uuid:11>",
        "<time>",
        "tool_registration",
        "SymbioteStatusTool",
@@ -1088,7 +1107,7 @@
        null
       ],
       [
-       "<uuid:11>",
+       "<uuid:12>",
        "<time>",
        "tool_registration",
        "SkillTool",
@@ -1113,7 +1132,7 @@
        null
       ],
       [
-       "<uuid:12>",
+       "<uuid:13>",
        "<time>",
        "tool_registration",
        "MemoryTool",
@@ -1138,7 +1157,7 @@
        null
       ],
       [
-       "<uuid:13>",
+       "<uuid:14>",
        "<time>",
        "tool_registration",
        "TodoWriteTool",
@@ -1163,7 +1182,7 @@
        null
       ],
       [
-       "<uuid:14>",
+       "<uuid:15>",
        "<time>",
        "tool_registration",
        "VaultSearchTool",
@@ -1188,7 +1207,7 @@
        null
       ],
       [
-       "<uuid:15>",
+       "<uuid:16>",
        "<time>",
        "tool_registration",
        "VaultReadTool",
@@ -1213,7 +1232,7 @@
        null
       ],
       [
-       "<uuid:16>",
+       "<uuid:17>",
        "<time>",
        "tool_registration",
        "AnatomyTool",
@@ -1238,7 +1257,7 @@
        null
       ],
       [
-       "<uuid:17>",
+       "<uuid:18>",
        "<time>",
        "tool_registration",
        "BrowserTool",
@@ -1263,7 +1282,7 @@
        null
       ],
       [
-       "<uuid:18>",
+       "<uuid:19>",
        "<time>",
        "tool_registration",
        "SessionsListTool",
@@ -1288,7 +1307,7 @@
        null
       ],
       [
-       "<uuid:19>",
+       "<uuid:20>",
        "<time>",
        "tool_registration",
        "SessionsSendTool",
@@ -1313,7 +1332,7 @@
        null
       ],
       [
-       "<uuid:20>",
+       "<uuid:21>",
        "<time>",
        "tool_registration",
        "SessionsSpawnTool",
@@ -1338,7 +1357,7 @@
        null
       ],
       [
-       "<uuid:21>",
+       "<uuid:22>",
        "<time>",
        "tool_registration",
        "TaskGetTool",
@@ -1363,7 +1382,7 @@
        null
       ],
       [
-       "<uuid:22>",
+       "<uuid:23>",
        "<time>",
        "tool_registration",
        "TaskListTool",
@@ -1388,7 +1407,7 @@
        null
       ],
       [
-       "<uuid:23>",
+       "<uuid:24>",
        "<time>",
        "tool_registration",
        "TaskUpdateTool",
@@ -1413,7 +1432,7 @@
        null
       ],
       [
-       "<uuid:24>",
+       "<uuid:25>",
        "<time>",
        "tool_registration",
        "TaskStopTool",
@@ -1438,7 +1457,7 @@
        null
       ],
       [
-       "<uuid:25>",
+       "<uuid:26>",
        "<time>",
        "tool_registration",
        "TaskOutputTool",
@@ -1463,7 +1482,7 @@
        null
       ],
       [
-       "<uuid:26>",
+       "<uuid:27>",
        "<time>",
        "tool_registration",
        "ImageGenerateTool",
@@ -1488,7 +1507,7 @@
        null
       ],
       [
-       "<uuid:27>",
+       "<uuid:28>",
        "<time>",
        "tool_registration",
        "KlingVideoTool",
@@ -1513,7 +1532,7 @@
        null
       ],
       [
-       "<uuid:28>",
+       "<uuid:29>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -1522,10 +1541,12 @@
        {
         "$json": {
          "advertised": 6,
+         "catalog": "full",
          "deferred_active": false,
          "profile": null,
          "registered_total": 6,
-         "source": "no tool loader (registry direct)"
+         "source": "no tool loader (registry direct)",
+         "stubs": 0
         }
        },
        null,
@@ -1554,7 +1575,7 @@
         }
        },
        1808,
-       76,
+       45,
        0,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1578,8 +1599,8 @@
          "stop_reason": "tool_calls"
         }
        },
-       1979,
-       84,
+       1863,
+       66,
        1,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1603,13 +1624,13 @@
          "stop_reason": "tool_calls"
         }
        },
-       2106,
-       38,
+       2034,
+       86,
        2,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        1,
-       1975,
+       1859,
        null,
        "<node>",
        "local",
@@ -1625,23 +1646,48 @@
        {
         "$json": {
          "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-         "stop_reason": "stop"
+         "stop_reason": "tool_calls"
         }
        },
-       2169,
-       82,
+       2161,
+       61,
        3,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        1,
-       2102,
+       2030,
        null,
        "<node>",
        "local",
        null
       ],
       [
-       "<uuid:29>",
+       "<uuid:5>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       2224,
+       84,
+       4,
+       "coding:cparity01",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       1,
+       2157,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:30>",
        "<time>",
        "coding_mode",
        "acceptance",
@@ -1667,7 +1713,7 @@
        null
       ],
       [
-       "<uuid:30>",
+       "<uuid:31>",
        "<time>",
        "coding_mode",
        "run",
@@ -1679,7 +1725,7 @@
          "branch": "coding/cparity01",
          "episodes": 1,
          "reason": "acceptance command exited 0",
-         "rounds": 4,
+         "rounds": 5,
          "status": "success",
          "task_id": "cparity01",
          "wall_seconds": "<ms>"
@@ -1728,7 +1774,101 @@
      ],
      "rows": [
       [
-       "<uuid:31>",
+       "<uuid:32>",
+       "<time>",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "code_view",
+       1,
+       0,
+       "<ms>",
+       null,
+       null,
+       "",
+       {
+        "$json": {
+         "input": {
+          "path": "."
+         },
+         "name": "code_view"
+        }
+       },
+       0,
+       0,
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "coding:cparity01",
+       {
+        "$json": {
+         "description": "View a file with line numbers, or list a directory. Always view a file before editing it — code_str_replace requires the exact current text. Optional view_range narrows to [start, end] lines.",
+         "name": "code_view",
+         "parameters": {
+          "properties": {
+           "path": {
+            "description": "File or directory path, relative to the repo root.",
+            "title": "Path",
+            "type": "string"
+           },
+           "view_range": {
+            "anyOf": [
+             {
+              "items": {
+               "type": "integer"
+              },
+              "type": "array"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": null,
+            "description": "Optional [start_line, end_line] (1-based, inclusive) for files.",
+            "title": "View Range"
+           }
+          },
+          "required": [
+           "path"
+          ],
+          "title": "CodeViewArgs",
+          "type": "object"
+         }
+        }
+       },
+       "<node>",
+       "<turn:1>",
+       0,
+       "B0JdSjXVYOJyUoWRp188qqLXQCik2tJK",
+       null,
+       null,
+       0,
+       "./ (2 entries)\ncalc.py\ntest_calc.py"
+      ],
+      [
+       "<uuid:33>",
+       "<time>",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "_loop_transition",
+       1,
+       0,
+       null,
+       null,
+       null,
+       null,
+       null,
+       0,
+       0,
+       null,
+       "coding:cparity01",
+       null,
+       "<node>",
+       "<turn:1>",
+       0,
+       null,
+       null,
+       null,
+       null,
+       null
+      ],
+      [
+       "<uuid:34>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "code_view",
@@ -1788,15 +1928,15 @@
        },
        "<node>",
        "<turn:1>",
-       0,
-       "9ILnGxU7nOLfGv8rJVgRxGh170iyR8kU",
+       1,
+       "0kkaEj42YlEHro48G1lElmw13vtz0xC7",
        null,
        null,
        0,
        "     1\tdef add(a, b):\n     2\t    \"\"\"Return the sum of a and b.\"\"\"\n     3\t    return a - b"
       ],
       [
-       "<uuid:32>",
+       "<uuid:35>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "code_view",
@@ -1856,15 +1996,15 @@
        },
        "<node>",
        "<turn:1>",
-       0,
-       "Wh4rqrNshgDkgjWHZfvFbm8vqHCEDatR",
+       1,
+       "5LY9SY49P0mMbBrGlOy8VSIxkUNYHe1p",
        null,
        null,
        0,
        "     1\tfrom calc import add\n     2\t\n     3\tassert add(2, 3) == 5, add(2, 3)\n     4\tassert add(-1, 1) == 0, add(-1, 1)\n     5\tprint(\"calc ok\")"
       ],
       [
-       "<uuid:33>",
+       "<uuid:36>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
@@ -1882,7 +2022,7 @@
        null,
        "<node>",
        "<turn:1>",
-       0,
+       1,
        null,
        null,
        null,
@@ -1890,7 +2030,7 @@
        null
       ],
       [
-       "<uuid:34>",
+       "<uuid:37>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "code_str_replace",
@@ -1948,15 +2088,15 @@
        },
        "<node>",
        "<turn:1>",
-       1,
-       "jgFWDk0KVqhgjOR2vd8c7nUhlfppnE3b",
+       2,
+       "KGm0GVgG7Oir6Rle2ZLHZq3KZXn1tItX",
        null,
        null,
        0,
        "OK — replaced 1 occurrence in calc.py (now at line 3):\n     1\tdef add(a, b):\n     2\t    \"\"\"Return the sum of a and b.\"\"\"\n     3\t    return a + b"
       ],
       [
-       "<uuid:35>",
+       "<uuid:38>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
@@ -1974,7 +2114,7 @@
        null,
        "<node>",
        "<turn:1>",
-       1,
+       2,
        null,
        null,
        null,
@@ -1982,7 +2122,7 @@
        null
       ],
       [
-       "<uuid:36>",
+       "<uuid:39>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "code_run",
@@ -2039,15 +2179,15 @@
        },
        "<node>",
        "<turn:1>",
-       2,
-       "BRheNbWetxogflGdb0zmfBN4BxNPg4lT",
+       3,
+       "udKF3aEfLx5qy7SOGQKNfI2MyDfZbSAU",
        null,
        null,
        0,
        "exit code: 0 (in 0.0s)\ncalc ok\n"
       ],
       [
-       "<uuid:37>",
+       "<uuid:40>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
@@ -2065,7 +2205,7 @@
        null,
        "<node>",
        "<turn:1>",
-       2,
+       3,
        null,
        null,
        null,
@@ -2131,9 +2271,9 @@
        "agent",
        "<time>",
        "<time>",
-       4,
-       8062,
-       280,
+       5,
+       10090,
+       342,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
@@ -2147,7 +2287,7 @@
         ]
        },
        0,
-       3,
+       4,
        "prose",
        null,
        null,

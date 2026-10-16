@@ -32,9 +32,9 @@
      "content_json": {
       "$json": [
        {
-        "id": "dUtWIAdUeDnopD7iqVw9w4LHtQ9We1zM",
+        "id": "wRXySYaqu00hFa0qYGD3vLqZYRoRbkPQ",
         "input": {
-         "path": "data.txt"
+         "path": "/tmp/prometheus-parity/ws/atlas/data.txt"
         },
         "name": "read_file",
         "type": "tool_use"
@@ -52,7 +52,7 @@
        {
         "content": "     1\ttally-source\n     2\tred: 4\n     3\tblue: 9\n     4\tgreen: 2",
         "is_error": false,
-        "tool_use_id": "dUtWIAdUeDnopD7iqVw9w4LHtQ9We1zM",
+        "tool_use_id": "wRXySYaqu00hFa0qYGD3vLqZYRoRbkPQ",
         "type": "tool_result"
        }
       ]
@@ -62,11 +62,11 @@
      "role": "user"
     },
     {
-     "content": "The project's codename is **ATLAS-7**.\n\nThe tally for **blue is 9**.",
+     "content": "- Codename: **ATLAS-7**\n- The tally for blue: **9**",
      "content_json": {
       "$json": [
        {
-        "text": "The project's codename is **ATLAS-7**.\n\nThe tally for **blue is 9**.",
+        "text": "- Codename: **ATLAS-7**\n- The tally for blue: **9**",
         "type": "text"
        }
       ]
@@ -77,7 +77,7 @@
     }
    ],
    "op": "chat",
-   "reply": "The project's codename is **ATLAS-7**.\n\nThe tally for **blue is 9**.",
+   "reply": "- Codename: **ATLAS-7**\n- The tally for blue: **9**",
    "session": "desktop:parity-atlas"
   },
   {
@@ -291,9 +291,9 @@
        {
         "$json": [
          {
-          "id": "dUtWIAdUeDnopD7iqVw9w4LHtQ9We1zM",
+          "id": "wRXySYaqu00hFa0qYGD3vLqZYRoRbkPQ",
           "input": {
-           "path": "data.txt"
+           "path": "/tmp/prometheus-parity/ws/atlas/data.txt"
           },
           "name": "read_file",
           "type": "tool_use"
@@ -317,7 +317,7 @@
          {
           "content": "     1\ttally-source\n     2\tred: 4\n     3\tblue: 9\n     4\tgreen: 2",
           "is_error": false,
-          "tool_use_id": "dUtWIAdUeDnopD7iqVw9w4LHtQ9We1zM",
+          "tool_use_id": "wRXySYaqu00hFa0qYGD3vLqZYRoRbkPQ",
           "type": "tool_result"
          }
         ]
@@ -333,16 +333,16 @@
        "desktop:parity-atlas",
        3,
        "assistant",
-       "The project's codename is **ATLAS-7**.\n\nThe tally for **blue is 9**.",
+       "- Codename: **ATLAS-7**\n- The tally for blue: **9**",
        {
         "$json": [
          {
-          "text": "The project's codename is **ATLAS-7**.\n\nThe tally for **blue is 9**.",
+          "text": "- Codename: **ATLAS-7**\n- The tally for blue: **9**",
           "type": "text"
          }
         ]
        },
-       17,
+       12,
        "<time>",
        0,
        "user",
@@ -365,7 +365,7 @@
        ""
       ],
       [
-       "The project's codename is **ATLAS-7**.\n\nThe tally for **blue is 9**."
+       "- Codename: **ATLAS-7**\n- The tally for blue: **9**"
       ]
      ]
     },
@@ -390,7 +390,7 @@
       [
        1,
        {
-        "$bytes_sha256": "45f8b567f2bbd396",
+        "$bytes_sha256": "cdad3a60b3f2f991",
         "len": 2
        }
       ],
@@ -411,8 +411,8 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "33702110b7223ee3",
-        "len": 111
+        "$bytes_sha256": "2726b72464f4df11",
+        "len": 81
        }
       ]
      ]
@@ -447,7 +447,7 @@
       [
        4,
        {
-        "$bytes_sha256": "9d1e0e2d9459d065",
+        "$bytes_sha256": "beead77994cf5733",
         "len": 1
        }
       ]
@@ -598,7 +598,7 @@
      "rows": [
       [
        "desktop:parity-atlas",
-       "ATLAS-7 Blue Tally",
+       "ATLAS-7 Project Codename",
        "<time>"
       ]
      ]
@@ -961,7 +961,7 @@
        "llama_cpp",
        "light",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "tool_call",
        1,
        0,
@@ -980,11 +980,11 @@
        "llama_cpp",
        "light",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "prose",
        0,
-       68,
-       "The project's codename is **ATLAS-7**.\n\nThe tally for **blue is 9**.",
+       51,
+       "- Codename: **ATLAS-7**\n- The tally for blue: **9**",
        "agent",
        "beacon",
        null
@@ -1658,11 +1658,13 @@
        "success",
        {
         "$json": {
-         "advertised": 12,
+         "advertised": 51,
+         "catalog": "stubs",
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
-         "source": "auto → enabled (local provider, tier light)"
+         "source": "auto → enabled (local provider, tier light)",
+         "stubs": 41
         }
        },
        null,
@@ -1690,13 +1692,13 @@
          "stop_reason": "tool_calls"
         }
        },
-       6333,
-       26,
+       8914,
+       34,
        0,
        "desktop:parity-atlas",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4222,
+       6803,
        null,
        "<node>",
        "local",
@@ -1715,13 +1717,13 @@
          "stop_reason": "stop"
         }
        },
-       6407,
-       23,
+       8996,
+       21,
        1,
        "desktop:parity-atlas",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6358,
+       8947,
        null,
        "<node>",
        "local",
@@ -1740,7 +1742,7 @@
          "stop_reason": "stop"
         }
        },
-       106,
+       104,
        8,
        null,
        "desktop:parity-atlas",
@@ -1796,7 +1798,7 @@
        {
         "$json": {
          "input": {
-          "path": "data.txt"
+          "path": "/tmp/prometheus-parity/ws/atlas/data.txt"
          },
          "name": "read_file"
         }
@@ -1846,7 +1848,7 @@
        "<node>",
        "<turn:1>",
        0,
-       "dUtWIAdUeDnopD7iqVw9w4LHtQ9We1zM",
+       "wRXySYaqu00hFa0qYGD3vLqZYRoRbkPQ",
        null,
        null,
        0,
@@ -1889,24 +1891,63 @@
      ],
      "rows": [
       [
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        {
         "$json": [
+         "agent",
+         "anatomy",
+         "ask_user",
          "bash",
+         "browser",
+         "cron_create",
+         "cron_delete",
+         "cron_list",
+         "dashboard",
+         "download_file",
          "edit_file",
+         "github_search",
          "glob",
          "grep",
+         "image_generate",
+         "lcm_describe",
+         "lcm_expand",
+         "lcm_expand_query",
+         "lcm_grep",
          "memory",
+         "message",
+         "notebook_edit",
          "read_file",
+         "sentinel_status",
+         "sessions_list",
+         "sessions_send",
+         "sessions_spawn",
          "skill",
+         "symbiote_graft",
+         "symbiote_harvest",
+         "symbiote_scout",
+         "symbiote_status",
          "task_create",
+         "task_get",
+         "task_list",
+         "task_output",
+         "task_stop",
+         "task_update",
+         "todo_write",
          "tool_search",
+         "tts",
+         "vault_read",
+         "vault_search",
+         "video_generate",
          "web_fetch",
          "web_search",
-         "write_file"
+         "wiki_compile",
+         "wiki_lint",
+         "wiki_query",
+         "write_file",
+         "youtube_transcript"
         ]
        },
-       12,
+       51,
        "<time>"
       ]
      ]
@@ -1944,8 +1985,8 @@
        "<time>",
        "<time>",
        2,
-       12740,
-       49,
+       17910,
+       55,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"

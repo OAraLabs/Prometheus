@@ -227,14 +227,24 @@ def test_beacons_first_run_setup_writes_no_always_loaded(path, env_file, config_
 # ---------------------------------------------------------------------------
 
 
+def _names(config: dict) -> dict:
+    """*config* under local_catalog "names", the catalog always_loaded is read by
+    (under the default "stubs" the rows say every tool is offered: below)."""
+    import copy
+
+    cfg = copy.deepcopy(config)
+    cfg.setdefault("tools", {}).setdefault("deferred_loading", {})["local_catalog"] = "names"
+    return cfg
+
+
 @pytest.mark.parametrize("config, status, says", [
-    ({}, "ok", "follows the shipped default"),
-    (_config(FROM_GIT[0]), "ok", "follows the shipped default"),
-    (_config(V094), "ok", "follows the shipped default"),
-    (_config(FROM_GIT[-1] + ("vault_search",)), "ok", "pinned by"),
-    (_config(V094[:-1]), "warning", "not offered from the shipped default: skill, memory"),
-    (_config(()), "warning", "not offered from the shipped default: bash"),
-    ({"tools": {"deferred_loading": {"always_loaded": "bash, grep"}}}, "warning", "not a list"),
+    (_names({}), "ok", "follows the shipped default"),
+    (_names(_config(FROM_GIT[0])), "ok", "follows the shipped default"),
+    (_names(_config(V094)), "ok", "follows the shipped default"),
+    (_names(_config(FROM_GIT[-1] + ("vault_search",))), "ok", "pinned by"),
+    (_names(_config(V094[:-1])), "warning", "not offered from the shipped default: skill, memory"),
+    (_names(_config(())), "warning", "not offered from the shipped default: bash"),
+    (_names({"tools": {"deferred_loading": {"always_loaded": "bash, grep"}}}), "warning", "not a list"),
 ], ids=["absent", "7-tools", "0.9.4", "superset", "missing-two", "empty", "not-a-list"])
 def test_the_chat_doctor_row_says_which_case_applies(config, status, says):
     from prometheus.infra.doctor import check_always_loaded
@@ -249,12 +259,12 @@ def test_the_chat_doctor_row_says_which_case_applies(config, status, says):
 def test_oara_doctors_row_carries_the_same_case():
     from prometheus.cli.doctor import check_advertised_tools
 
-    following = check_advertised_tools(_config(V094))
+    following = check_advertised_tools(_names(_config(V094)))
     assert following.status == "ok"
     assert "offered to the model" in following.message
     assert "follows the shipped default" in following.message
 
-    pinned = check_advertised_tools(_config(V094[:-1]))
+    pinned = check_advertised_tools(_names(_config(V094[:-1])))
     assert pinned.status == "warning"
     assert "not offered from the shipped default: skill, memory" in pinned.message
 
@@ -266,7 +276,7 @@ async def test_the_chat_doctor_shows_the_row(tmp_path):
     from tests.test_doctor import SAMPLE_REGISTRY, _sample_state
 
     doctor = Doctor.__new__(Doctor)
-    doctor.config = _config(V094)
+    doctor.config = _names(_config(V094))
     doctor.registry = SAMPLE_REGISTRY
     doctor.repo_root = tmp_path
     mock_client = AsyncMock()
@@ -278,3 +288,41 @@ async def test_the_chat_doctor_shows_the_row(tmp_path):
         report = await doctor.diagnose(_sample_state())
     [row] = [c for c in report.checks if c.name == "Advertised tools"]
     assert "follows the shipped default" in row.message
+
+
+# ---------------------------------------------------------------------------
+# Under local_catalog "stubs" (the default) the list is not consulted
+# ---------------------------------------------------------------------------
+
+#: Configs whose always_loaded the names rows judge differently: absent, the
+#: shipped set, a pinned superset (the live box's: + vault_search, vault_read,
+#: agent), a pinned list missing two, and [].
+STUBS_CASES = [{}, _config(V094), _config(FROM_GIT[-1] + ("vault_search", "vault_read", "agent")),
+               _config(V094[:-1]), _config(())]
+STUBS_IDS = ["absent", "0.9.4", "live-superset", "missing-two", "empty"]
+
+
+@pytest.mark.parametrize("config", STUBS_CASES, ids=STUBS_IDS)
+def test_under_stubs_the_chat_row_says_every_tool_is_offered(config):
+    from prometheus.infra.doctor import check_always_loaded
+
+    row = check_always_loaded(config)
+    assert (row.name, row.status, row.fix) == ("Advertised tools", "ok", None)
+    assert "a local run offers every tool" in row.message
+    assert "always_loaded applies to local_catalog names only" in row.message
+
+
+@pytest.mark.parametrize("config", STUBS_CASES, ids=STUBS_IDS)
+def test_under_stubs_oara_doctors_row_counts_what_a_local_run_offers(config):
+    """Counted from the registry, not from the loader the row reads: every
+    registered tool, the ambient ones among them with their full schema."""
+    from prometheus.__main__ import create_tool_registry
+    from prometheus.cli.doctor import check_advertised_tools
+    from prometheus.context.tool_stubs import FULL_SCHEMA_TOOLS
+
+    names = {t.name for t in create_tool_registry({}).list_tools()}
+    full = len(names & set(FULL_SCHEMA_TOOLS))
+    row = check_advertised_tools(config)
+    assert (row.status, row.fix) == ("ok", None)
+    assert (f"{len(names)} of {len(names)} registered offered to a local model "
+            f"({full} with their full schema, {len(names) - full} as stubs)") in row.message, row.message

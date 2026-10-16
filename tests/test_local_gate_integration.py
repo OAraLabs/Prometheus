@@ -25,7 +25,7 @@ import re
 import pytest
 
 from tests.support.gate_daemon import CLOUD_KEY, GateDaemon, build_and_boot
-from tests.support.scripted_llama import ScriptedLlamaServer
+from tests.support.scripted_llama import MODEL_ID, SCRIPTS, ScriptedLlamaServer
 from tests.support.served_template import recorded_props
 
 pytestmark = pytest.mark.integration
@@ -66,6 +66,11 @@ def coding_turn(local):
     return turn, model.exchanges[before:]
 
 
+def _fresh_messages() -> list[dict]:
+    """A conversation in which a script's tool has not run yet (its first move)."""
+    return [{"role": "system", "content": ""}, {"role": "user", "content": "go"}]
+
+
 def _explain(turn, daemon: GateDaemon) -> str:
     return (f"tools started: {turn.tools_started}\nstreamed: {turn.streamed[:300]!r}\n"
             f"final stored: {turn.final_stored_text[:300]!r}\n--- daemon log tail ---\n{daemon.log_tail(25)}")
@@ -74,7 +79,6 @@ def _explain(turn, daemon: GateDaemon) -> str:
 # ---------------------------------------------------------------- (a)
 
 
-@pytest.mark.xfail(strict=True, reason="gate a on 0.9.12: `agent` is deferred and cannot be called on a local turn")
 def test_a_a_sub_agent_is_spawned_and_its_answer_reaches_the_client(local):
     daemon, model = local
     turn = daemon.turn("[gate:agent] Use a sub-agent to list the files in your workspace.")
@@ -86,7 +90,6 @@ def test_a_a_sub_agent_is_spawned_and_its_answer_reaches_the_client(local):
 # ---------------------------------------------------------------- (b)
 
 
-@pytest.mark.xfail(strict=True, reason="gate b on 0.9.12: a selected tool never joins the run's tools")
 @pytest.mark.parametrize("script,tool", [
     ("cron", "cron_create"), ("wiki", "wiki_query"), ("memory", "lcm_grep"), ("mcp", "mcp__docs__lookup"),
 ])
@@ -94,6 +97,11 @@ def test_b_a_deferred_tool_is_found_and_called_in_the_same_turn(local, script, t
     daemon, _ = local
     turn = daemon.turn(f"[gate:{script}] Please take care of this for me.")
     assert tool in turn.tools_started, _explain(turn, daemon)
+    # The call carries its real arguments: the stand-in, like the server's
+    # grammar, lets out only the property names the offered schema declares.
+    want = SCRIPTS[script](_fresh_messages())
+    got = next(p.get("inputs") for p in turn.of("tool_call_start") if p.get("tool_name") == tool)
+    assert got == want.args, f"{tool} was called with {got}, the model meant {want.args}"
     assert turn.selects() <= 1, f"{turn.selects()} tool_search selects\n" + _explain(turn, daemon)
     assert turn.streamed.strip(), _explain(turn, daemon)
 
@@ -128,6 +136,22 @@ def test_c_the_session_finishes_its_task_after_compacting(local, coding_turn):
     billing = (daemon.workspace / "src" / "ledger" / "billing.py").read_text(encoding="utf-8")
     assert '"""Sum one ledger' in billing, "the edit did not land"
     assert "docstring" in turn.streamed, _explain(turn, daemon)
+
+
+def test_c_the_tools_block_is_sorted_and_byte_identical_across_rounds(local, coding_turn):
+    """The prefix cache needs it: the template renders the tools ahead of the
+    system text, so a changed byte re-prefills every token (fix 3). Sorted by
+    name, so the order cannot depend on when a tool registered (an MCP server
+    that connects late)."""
+    _, exchanges = coding_turn
+    rounds = [e for e in exchanges if e.status == 200 and e.request.get("tools")]
+    assert len(rounds) >= 3, f"expected a multi-round turn, saw {len(rounds)}"
+    names = [t["function"]["name"] for t in rounds[0].request["tools"]]
+    assert names == sorted(names), f"the tools block is not sorted: {names}"
+    first = json.dumps(rounds[0].request["tools"], sort_keys=False, ensure_ascii=False)
+    changed = [i for i, e in enumerate(rounds)
+               if json.dumps(e.request["tools"], sort_keys=False, ensure_ascii=False) != first]
+    assert not changed, f"the tools block changed in rounds {changed}"
 
 
 def test_c_the_window_is_never_overrun(local, coding_turn):
@@ -247,3 +271,88 @@ def test_f_a_cloud_turn_offers_every_tool_and_keeps_its_prefix(gate):
         assert later.request.get("tools") == first.request.get("tools"), "the cloud tool list changed mid-turn"
         assert later.cached_tokens >= first.prompt_tokens - 50, "the cached prefix did not survive the round"
     assert not re.search(r"You have access to these tools:", first.system), "a cloud prompt carries the local tool prose"
+
+
+# ---------------------------------------------------------------- fallback (fix 3)
+#
+# A round the primary cannot serve (a terminal failure: auth, billing) is served
+# by the configured fallback, and its tools follow the model that serves it, as
+# routing does at run start (#462). Each test takes a plain turn on each side as
+# the reference: the fallback round must carry, byte for byte, the catalog a
+# normal turn on the serving model gets (the local catalog: sorted, stubs; or
+# every full schema on cloud), not the failed primary's.
+
+
+def _offered(server: ScriptedLlamaServer, script: str, status: int) -> list[dict]:
+    exchanges = [e for e in server.of(script) if e.status == status and e.request.get("tools")]
+    assert exchanges, f"precondition: a {status} {script!r} request with tools"
+    return exchanges[0].request["tools"]
+
+
+def _fallback_turn_and_references(daemon: GateDaemon, sid: str):
+    """The reference turns (one local, one cloud), then the fallback turn on *sid*."""
+    ref_local = daemon.turn("[gate:hello] Hi.", sid="beacon:gate-fb-ref-local")
+    ref_cloud_sid = "beacon:gate-fb-ref-cloud"
+    daemon.use_model(ref_cloud_sid, CLOUD_KEY)
+    ref_cloud = daemon.turn("[gate:hello] Hi.", sid=ref_cloud_sid)
+    assert "Hello." in ref_local.streamed and "Hello." in ref_cloud.streamed, _explain(ref_cloud, daemon)
+    return daemon.turn("[gate:fallback] Hello.", sid=sid)
+
+
+def _assert_catalogs(local: list[dict], cloud: list[dict]) -> None:
+    """Preconditions on the references, so a swap is visible: the local catalog
+    is sorted and stubs cron_create (a stub carries no ``required``); the cloud
+    one sends its full schema; both keep bash and agent full."""
+    def names(tools: list[dict]) -> list[str]:
+        return [t["function"]["name"] for t in tools]
+
+    def params(tools: list[dict], name: str) -> dict:
+        return next(t["function"]["parameters"] for t in tools if t["function"]["name"] == name)
+    assert names(local) == sorted(names(local)), "the local catalog is sorted"
+    assert sorted(names(local)) == sorted(names(cloud)), "both offer every tool"
+    assert "required" not in params(local, "cron_create") and "required" in params(cloud, "cron_create")
+    assert all("required" in params(tools, n) for tools in (local, cloud) for n in ("bash", "agent"))
+
+
+def test_fallback_a_cloud_to_local_fallback_round_gets_the_local_catalog(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("fb-cloud-to-local")
+    ws = str(tmp / "workspace")
+    with ScriptedLlamaServer(props=recorded_props(), workspace=ws) as model, \
+            ScriptedLlamaServer(n_ctx=1_000_000, native_tool_grammar=False, workspace=ws,
+                                fail_script="fallback") as cloud:
+        daemon = build_and_boot(tmp, model.url, cloud_url=cloud.url, extra={"model.fallback": {
+            "enabled": True, "provider": "llama_cpp", "base_url": model.url, "model": MODEL_ID}})
+        try:
+            sid = "beacon:gate-fallback-cloud-to-local"
+            daemon.use_model(sid, CLOUD_KEY)
+            turn = _fallback_turn_and_references(daemon, sid)
+            ref_local, ref_cloud = _offered(model, "hello", 200), _offered(cloud, "hello", 200)
+            _assert_catalogs(ref_local, ref_cloud)
+            assert _offered(cloud, "fallback", 401) == ref_cloud, "the failed cloud round offered every full schema"
+            assert _offered(model, "fallback", 200) == ref_local, (
+                "the local fallback round must carry the local catalog, not the cloud round's full schemas")
+            assert "Answered by the fallback." in turn.streamed, _explain(turn, daemon)
+        finally:
+            daemon.stop()
+
+
+def test_fallback_a_local_to_cloud_fallback_round_gets_every_full_schema(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("fb-local-to-cloud")
+    ws = str(tmp / "workspace")
+    with ScriptedLlamaServer(props=recorded_props(), workspace=ws, fail_script="fallback") as model, \
+            ScriptedLlamaServer(n_ctx=1_000_000, native_tool_grammar=False, workspace=ws) as cloud:
+        daemon = build_and_boot(tmp, model.url, cloud_url=cloud.url, extra={"model.fallback": {
+            "enabled": True, "provider": "qwen", "model": "qwen3.8-max",
+            "api_key_env": "GATE_CLOUD_KEY", "base_url": cloud.url + "/v1"}})
+        try:
+            turn = _fallback_turn_and_references(daemon, "beacon:gate-fallback-local-to-cloud")
+            ref_local, ref_cloud = _offered(model, "hello", 200), _offered(cloud, "hello", 200)
+            _assert_catalogs(ref_local, ref_cloud)
+            assert _offered(model, "fallback", 401) == ref_local, "the failed local round offered the local catalog"
+            served = _offered(cloud, "fallback", 200)
+            assert sorted(served, key=lambda t: t["function"]["name"]) == \
+                sorted(ref_cloud, key=lambda t: t["function"]["name"]), (
+                "the cloud fallback round must carry every full schema, not the local round's stubs")
+            assert "Answered by the fallback." in turn.streamed, _explain(turn, daemon)
+        finally:
+            daemon.stop()

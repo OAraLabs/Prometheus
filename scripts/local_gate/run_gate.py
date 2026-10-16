@@ -107,6 +107,15 @@ SCENARIOS: dict[str, dict] = {
     "r_sessions": {"gate": "r", "message": "Show me my recent chat sessions.", "correct": {"sessions_list"}},
     "r_todo": {"gate": "r", "message": "Keep a to-do list for this conversation: buy milk, then call the bank.",
                "correct": {"todo_write"}},
+    # Five more (12 in all, the fix 3 A/B tier), graded on arguments too.
+    "r_cron_list": {"gate": "r", "message": "Which scheduled jobs do I have set up?", "correct": {"cron_list"}},
+    "r_memory": {"gate": "r", "message": "Please remember for the future that I prefer short answers.",
+                 "correct": {"memory"}},
+    "r_mcp": {"gate": "r", "message": "Find the up-to-date documentation for the httpx library.",
+              "correct": {"mcp__context7__resolve_library_id", "mcp__context7__query_docs"}},
+    "r_tts": {"gate": "r", "message": "Read this sentence out loud for me: the build is green.", "correct": {"tts"}},
+    "r_youtube": {"gate": "r", "message": "Get me the transcript of the YouTube video dQw4w9WgXcQ.",
+                  "correct": {"youtube_transcript"}},
     # Fix 5b (Ollama on its native /api/chat), on an Ollama-served primary:
     # every request names the window it was budgeted for (options.num_ctx), and
     # no prompt fills it (Ollama would cut it from the front, silently).
@@ -292,10 +301,38 @@ def _last_assistant_text(messages: list[dict]) -> str:
     return ""
 
 
+#: Fix 3 A/B: the arguments a correct call must carry, per release-tier request
+#: (on the call's input, after a call_tool dispatch is unwrapped).
+def _text(args: dict) -> str:
+    return json.dumps(args, ensure_ascii=False).lower()
+
+
+ARGS_OK = {
+    "r_cron": lambda a: bool(re.search(r"\b0?9\b", _text(a))) and ("1-5" in _text(a) or "mon" in _text(a)),
+    "r_agent": lambda a: len(_text(a)) > 20,
+    "r_history": lambda a: "release" in _text(a) or "checklist" in _text(a),
+    "r_wiki": lambda a: "deploy" in _text(a),
+    "r_tasks": lambda a: True,
+    "r_sessions": lambda a: True,
+    "r_todo": lambda a: "milk" in _text(a) or "bank" in _text(a),
+    "r_cron_list": lambda a: True,
+    "r_memory": lambda a: "short" in _text(a),
+    "r_mcp": lambda a: "httpx" in _text(a),
+    "r_tts": lambda a: "build is green" in _text(a),
+    "r_youtube": lambda a: "dqw4w9wgxcq" in _text(a),
+}
+
+
+def _unwrap(start: dict) -> tuple[str | None, dict]:
+    """(tool, arguments) of a tool_call_start."""
+    name, args = start.get("tool_name") or start.get("name"), start.get("inputs") or {}
+    return name, args if isinstance(args, dict) else {}
+
+
 def _grade(name: str, spec: dict, run: dict, caps: list[dict], tel: dict, comp: list[dict], work: Path) -> dict:
     frames = run["frames"]
     starts = [f["payload"] for f in frames if f.get("type") == "tool_call_start"]
-    called = [s.get("tool_name") or s.get("name") for s in starts]
+    called = [_unwrap(s)[0] for s in starts]
     selects = sum(1 for s in starts if (s.get("tool_name") == "tool_search"
                                         and (s.get("inputs") or {}).get("action") == "select"))
     # A turn round carries the system prompt; the compactor's summary calls are
@@ -318,7 +355,15 @@ def _grade(name: str, spec: dict, run: dict, caps: list[dict], tel: dict, comp: 
         "chat_done_fields": sorted({k for d in done for k in d}),
         "error_frames": [f["payload"].get("message") for f in frames if f.get("type") == "error"],
     }
+    # Fix 3 item 6: from round 1 on, the server reused the cached prefix
+    # (timings.cache_n) for at least 90% of the round before's prompt.
+    cache_n = [((c["response"].get("timings") or {}).get("cache_n")) for c in rounds]
+    res["cache_reuse"] = [
+        round(cache_n[i] / prompt_tokens[i - 1], 3) if cache_n[i] is not None and prompt_tokens[i - 1] else None
+        for i in range(1, len(rounds))]
     checks: dict[str, bool] = {}
+    if len(rounds) > 1:
+        checks["prefix_cached"] = all(r is not None and r >= 0.9 for r in res["cache_reuse"])
     if spec["gate"] == "o":
         native = [c for c in caps if "options" in c.get("request", {})]
         sent = [((c["request"].get("options") or {}).get("num_ctx"),
@@ -340,7 +385,22 @@ def _grade(name: str, spec: dict, run: dict, caps: list[dict], tel: dict, comp: 
             "correct": bool(called) and next((c for c in called if c not in ("tool_search",)), None) in correct,
             "first_non_search_call": next((c for c in called if c != "tool_search"), None),
         }
-        checks.update({k: v for k, v in res["reach"].items() if k in ("found", "called", "correct")})
+        # Arguments, retries and tokens (fix 3 A/B). A retry is a refused call
+        # of a correct tool before its first accepted one.
+        ends = {f["payload"].get("call_id"): f["payload"] for f in frames if f.get("type") == "tool_call_end"}
+        tries = [(s, ends.get(s.get("call_id")) or {}) for s in starts if _unwrap(s)[0] in correct]
+        ok_args = [_unwrap(s)[1] for s, e in tries if e.get("success")]
+        refused = 0
+        for _s, e in tries:
+            if e.get("success"):
+                break
+            refused += 1
+        res["reach"]["args_ok"] = bool(ok_args) and ARGS_OK.get(name, lambda a: True)(ok_args[0])
+        res["reach"]["retries"] = refused
+        res["reach"]["first_args"] = (_unwrap(tries[0][0])[1] if tries else None)
+        res["reach"]["prompt_tokens_round0"] = prompt_tokens[0] if prompt_tokens else None
+        res["reach"]["prompt_tokens_total"] = sum(t or 0 for t in prompt_tokens)
+        checks.update({k: v for k, v in res["reach"].items() if k in ("found", "called", "correct", "args_ok")})
     want = spec.get("want_tool")
     prefix = spec.get("want_tool_prefix")
     if want or prefix:
@@ -422,6 +482,7 @@ def main() -> None:
     ap.add_argument("--results")
     ap.add_argument("--timeout", type=float, default=420.0)
     ap.add_argument("--overhead", action="store_true", help="measure round 0 of the first scenario per component")
+    ap.add_argument("--project-file", help="a PROMETHEUS.md for the daemon's directory (live: the deploy checkout's)")
     args = ap.parse_args()
 
     checkout, work = Path(args.checkout).resolve(), Path(args.work).resolve()
@@ -441,8 +502,16 @@ def main() -> None:
                         str(Path(args.upstream_config).expanduser())], work / f"proxy-{args.label}.log", work,
                        dict(os.environ))
         time.sleep(2)
-        daemon = _start([str(checkout / ".venv" / "bin" / "python"), "scripts/daemon.py", "--config",
-                         str(work / "prometheus.yaml")], dlog, checkout, env)
+        # The daemon runs from a deploy-like directory, as live does from its
+        # deploy checkout: one PROMETHEUS.md, and no tool writes into the
+        # checkout under test.
+        deploy = work / "deploy"
+        deploy.mkdir(exist_ok=True)
+        if args.project_file:
+            (deploy / "PROMETHEUS.md").write_text(Path(args.project_file).read_text(encoding="utf-8"),
+                                                  encoding="utf-8")
+        daemon = _start([str(checkout / ".venv" / "bin" / "python"), str(checkout / "scripts" / "daemon.py"),
+                         "--config", str(work / "prometheus.yaml")], dlog, deploy, env)
         _wait_up(args.api_port, token, daemon)
         for name in args.scenarios.split(","):
             spec = SCENARIOS[name]

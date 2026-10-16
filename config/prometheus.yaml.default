@@ -260,6 +260,18 @@ tools:
     # full stable catalog cheap). Explicit true/false always wins. The
     # advertised set is frozen per run either way.
     enabled: auto
+    # How a deferred run (every local one, under "auto") offers its tools
+    # (audit 2026-10-16, fix 3):
+    # "stubs" (default) puts every tool in the request — bash, read_file,
+    # write_file, edit_file, grep, glob, web_search, web_fetch, agent and
+    # ask_user with their full schema, every other tool as a one-line stub
+    # with its argument names — so the model can call any of them in the same
+    # turn; a wrong call is answered with the full schema. "names" is the
+    # 0.9.12 catalog: only always_loaded below, the rest reachable through
+    # tool_search alone (which a local model never manages to call).
+    local_catalog: stubs
+    # always_loaded applies to local_catalog "names" only; under "stubs" every
+    # tool is offered.
     # web_search/web_fetch/memory promoted 2026-08-11 (promotion review):
     # "look that up", a bare URL, or "remember that I…" give the model no
     # signal to search its own tool list — the web pair had 180 real calls
