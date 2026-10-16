@@ -741,7 +741,7 @@
      "rows": [
       [
        "desktop:parity-switch",
-       "Single Word Reply",
+       "exactly the word",
        "<time>"
       ]
      ]
@@ -1859,6 +1859,31 @@
        null
       ],
       [
+       "<uuid:35>",
+       "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       69,
+       5,
+       null,
+       "desktop:parity-switch",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       15,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
        "<uuid:8>",
        "<time>",
        "agent_loop",
@@ -1884,7 +1909,7 @@
        null
       ],
       [
-       "<uuid:35>",
+       "<uuid:36>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -1909,56 +1934,6 @@
        null,
        "<node>",
        null,
-       null
-      ],
-      [
-       "<uuid:36>",
-       "<time>",
-       "session_titles",
-       "generate",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-         "stop_reason": "stop"
-        }
-       },
-       69,
-       4,
-       null,
-       "desktop:parity-switch",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       0,
-       15,
-       null,
-       "<node>",
-       "local",
-       null
-      ],
-      [
-       "<uuid:37>",
-       "<time>",
-       "session_titles",
-       "generate",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-         "stop_reason": "stop"
-        }
-       },
-       69,
-       2,
-       null,
-       "desktop:parity-switch",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       0,
-       65,
-       null,
-       "<node>",
-       "local",
        null
       ],
       [
