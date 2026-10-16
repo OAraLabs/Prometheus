@@ -526,10 +526,6 @@ request (gate f, parity).
   cap 4,096 for the 27B by GGUF path). The fix branch
   `fix/local-tool-reach-0913` holds uncommitted fixes 1 and 2. Neither was
   touched by this audit.
-- The daemon's user journal contains a Telegram bot token in plain text, in
-  HTTP request-URL lines from early July. It was not checked whether newer
-  lines still carry it. The value is not repeated here. Consider rotating the
-  token and confirming the logging no longer prints it.
 - The real-model reachability tier is meant to run against the 27B on
   scratch before each release (`scripts/local_gate/run_gate.py --scenarios
   r_cron,r_agent,r_history,r_wiki,r_tasks,r_sessions,r_todo`).
