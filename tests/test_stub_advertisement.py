@@ -245,3 +245,34 @@ def test_a_local_round_never_records_a_lucky_guess(registry, tmp_path):
     ).fetchone()[0]
     assert calls, "precondition: the stubbed tool was called"
     assert guesses == 0
+
+
+# ---------------------------------------------------------------- what a round sent
+
+
+def test_a_round_that_sends_another_set_records_it(registry, tmp_path):
+    """Stubs-mode version of the test of the same name in
+    tests/test_telemetry_records_what_was_sent.py: an adapter that narrows the
+    catalog, and the round's tool_sets row names what it sent."""
+    import json
+
+    from prometheus.adapter import ModelAdapter
+    from prometheus.telemetry.tracker import ToolCallTelemetry
+    from prometheus.telemetry.writer import tool_set_row
+
+    class _Narrowing(ModelAdapter):
+        def format_request(self, system_prompt, tools):  # noqa: ANN001
+            return system_prompt, [t for t in tools if t.get("name") == "bash"]
+
+    tel = ToolCallTelemetry(tmp_path / "telemetry.db")
+    provider = _Provider(first_call="bash")
+    _run(_ctx(registry, provider, adapter=_Narrowing(tier="strict"), telemetry=tel), session="desktop:sent")
+    tel.close()
+    con = sqlite3.connect(tmp_path / "telemetry.db")
+    con.row_factory = sqlite3.Row
+    assert [t["name"] for t in provider.requests[0].tools] == ["bash"]
+    sent = tool_set_row(["bash"])["tool_set_hash"]
+    sets = {r["tool_set_hash"]: json.loads(r["tool_names"]) for r in con.execute("SELECT * FROM tool_sets")}
+    assert sets[sent] == ["bash"]
+    hashes = [r["tool_set_hash"] for r in con.execute("SELECT tool_set_hash FROM responses ORDER BY id")]
+    assert hashes and all(h == sent for h in hashes), (hashes, sets)
