@@ -85,7 +85,9 @@ def _run(tmp_path, tool: str, session_id: str = SESSION) -> sqlite3.Connection:
         registry.register(_tool(name))
     # Deferred loading ON, advertising bash + read_file only: image_generate is
     # registered but not advertised, so calling it is a lucky guess.
-    loader = DynamicToolLoader(registry, {"enabled": True, "always_loaded": ["bash", "read_file"]})
+    # # local_catalog "names": the 0.9.12 catalog, whose always_loaded set this test is about (under the default "stubs" every tool is offered: tests/test_tool_stubs.py).
+    loader = DynamicToolLoader(registry, {"enabled": True, "always_loaded": ["bash", "read_file"],
+                                          "local_catalog": "names"})
     db = tmp_path / "telemetry.db"
     tel = ToolCallTelemetry(db)
     ctx = LoopContext(
