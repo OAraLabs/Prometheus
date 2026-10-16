@@ -30,6 +30,7 @@ class SessionsListTool(BaseTool):
         "and descriptions. Use to discover running agents."
     )
     input_model = SessionsListInput
+    find_me = ("list agent sessions", "show background agent sessions")
 
     def is_read_only(self, arguments: SessionsListInput) -> bool:
         return True

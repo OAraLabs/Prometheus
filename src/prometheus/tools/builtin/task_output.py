@@ -21,6 +21,7 @@ class TaskOutputTool(BaseTool):
     name = "task_output"
     description = "Read the tail of a background task's output log."
     input_model = TaskOutputToolInput
+    find_me = ("read a background task's output", "tail a task log")
 
     def is_read_only(self, arguments: TaskOutputToolInput) -> bool:
         del arguments

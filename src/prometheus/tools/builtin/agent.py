@@ -33,6 +33,7 @@ class AgentTool(BaseTool):
         "The subagent runs with isolated context and returns its result."
     )
     input_model = AgentToolInput
+    find_me = ("delegate a task to a sub-agent", "run a subagent on part of the work")
 
     async def execute(
         self,

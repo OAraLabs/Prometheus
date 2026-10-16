@@ -45,6 +45,10 @@ class BaseTool(ABC):
     # "use LoopContext.tool_timeout_seconds". Tools that legitimately run longer
     # than the global default (e.g. a full test run) set a larger value here.
     execution_timeout_seconds: float | None = None
+    # One or two plain-language requests this tool answers ("schedule a
+    # recurring job"). tool_search ranks on them, so a model that describes
+    # the job finds the tool (audit 2026-10-16). Never sent in the schema.
+    find_me: tuple[str, ...] = ()
 
     @abstractmethod
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:

@@ -46,6 +46,7 @@ class WikiCompileTool(BaseTool):
         "or omit it to compile all facts since the last compilation."
     )
     input_model = WikiCompileInput
+    find_me = ("compile facts into the wiki", "update a wiki page")
 
     async def execute(
         self, arguments: WikiCompileInput, context: ToolExecutionContext

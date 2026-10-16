@@ -109,6 +109,7 @@ class BrowserTool(BaseTool):
         "call returns an error. Use web_fetch instead."
     ))
     input_model = BrowserInput
+    find_me = ("open a JavaScript page in a headless browser", "click and screenshot a web page")
 
     def __init__(self) -> None:
         # These were CLASS attributes assigned through ``self``, so the

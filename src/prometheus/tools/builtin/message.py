@@ -110,6 +110,7 @@ class MessageTool(BaseTool):
         "Telegram (bot API), or a generic webhook endpoint."
     )
     input_model = MessageInput
+    find_me = ("send a message to Telegram or Slack", "post a notification to Discord")
 
     async def execute(
         self, arguments: MessageInput, context: ToolExecutionContext

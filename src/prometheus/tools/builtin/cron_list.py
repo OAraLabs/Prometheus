@@ -24,6 +24,7 @@ class CronListTool(BaseTool):
     name = "cron_list"
     description = "List all registered cron jobs with schedule, status, and next run time."
     input_model = CronListToolInput
+    find_me = ("list scheduled cron jobs", "show the cron schedule")
 
     def is_read_only(self, arguments: BaseModel) -> bool:
         return True

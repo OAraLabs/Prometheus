@@ -20,6 +20,7 @@ class TaskStopTool(BaseTool):
     name = "task_stop"
     description = "Stop (terminate) a background task."
     input_model = TaskStopToolInput
+    find_me = ("stop a background task", "kill a running task")
 
     async def execute(self, arguments: TaskStopToolInput, context: ToolExecutionContext) -> ToolResult:
         del context

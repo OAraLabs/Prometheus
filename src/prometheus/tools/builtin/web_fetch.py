@@ -51,6 +51,7 @@ class WebFetchTool(BaseTool):
         "404/403/private URLs gracefully without crashing."
     )
     input_model = WebFetchInput
+    find_me = ("fetch a web page", "get the text of a URL")
 
     def is_read_only(self, arguments: WebFetchInput) -> bool:
         return True

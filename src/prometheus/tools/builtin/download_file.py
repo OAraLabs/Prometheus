@@ -62,6 +62,7 @@ class DownloadFileTool(BaseTool):
         "Saves to ~/.prometheus/downloads/ by default. Streams with a size limit."
     )
     input_model = DownloadFileInput
+    find_me = ("download a file from a URL", "save a URL to disk")
     example_call = {
         "url": "https://example.com/file.pdf",
         "destination": "~/.prometheus/downloads/file.pdf",

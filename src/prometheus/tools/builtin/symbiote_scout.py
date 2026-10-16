@@ -32,6 +32,7 @@ class SymbioteScoutTool(BaseTool):
         "Returns a ranked candidate list. Read-only; no clones, no writes."
     )
     input_model = SymbioteScoutInput
+    find_me = ("scout GitHub for a capability gap", "find open-source solutions to a gap")
     example_call = {
         "problem_statement": "I need YAML schema validation",
         "language": "Python",

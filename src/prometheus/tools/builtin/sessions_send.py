@@ -28,6 +28,7 @@ class SessionsSendTool(BaseTool):
         "The message is written to the session's stdin."
     )
     input_model = SessionsSendInput
+    find_me = ("send a message to a running agent session", "steer a background session")
 
     async def execute(
         self, arguments: SessionsSendInput, context: ToolExecutionContext

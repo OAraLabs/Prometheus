@@ -268,6 +268,7 @@ class MemoryTool(BaseTool):
         "'list' to read all entries."
     )
     input_model = MemoryToolInput
+    find_me = ("remember a fact about the user", "save to persistent memory")
 
     def is_read_only(self, arguments: MemoryToolInput) -> bool:
         return arguments.operation == "list"

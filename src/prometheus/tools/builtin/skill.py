@@ -31,6 +31,7 @@ class SkillTool(BaseTool):
         "system prompt names the core skills; find others with tool_search."
     )
     input_model = SkillToolInput
+    find_me = ("load a skill's instructions", "use a saved skill")
 
     def is_read_only(self, arguments: SkillToolInput) -> bool:
         del arguments

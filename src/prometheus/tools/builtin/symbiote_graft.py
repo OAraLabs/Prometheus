@@ -33,6 +33,7 @@ class SymbioteGraftTool(BaseTool):
         "PROMETHEUS.md. Requires Trust Level 1 approval upstream."
     )
     input_model = SymbioteGraftInput
+    find_me = ("apply a harvest adaptation plan", "graft harvested code")
     example_call = {}
 
     def is_read_only(self, arguments: BaseModel) -> bool:

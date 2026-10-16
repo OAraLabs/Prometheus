@@ -38,6 +38,7 @@ class FileEditTool(BaseTool):
     name = "edit_file"
     description = "Edit an existing file by replacing a string."
     input_model = FileEditToolInput
+    find_me = ("edit a file by replacing text", "change part of a file")
     example_call = {"path": "/path/to/file", "old_str": "before", "new_str": "after"}
 
     async def execute(

@@ -67,6 +67,7 @@ class BashTool(BaseTool):
         "at the timeout and left untracked."
     )
     input_model = BashToolInput
+    find_me = ("run a shell command", "execute a terminal command")
     example_call = {"command": "ls -la"}
 
     def __init__(

@@ -54,6 +54,7 @@ class YouTubeTranscriptTool(BaseTool):
         "Returns the full text content without downloading the video."
     )
     input_model = YouTubeTranscriptInput
+    find_me = ("get a YouTube transcript", "fetch subtitles for a video")
     example_call = {"url": "https://youtu.be/dQw4w9WgXcQ"}
 
     def is_read_only(self, arguments: YouTubeTranscriptInput) -> bool:

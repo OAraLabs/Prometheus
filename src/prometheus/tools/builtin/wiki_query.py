@@ -67,6 +67,7 @@ class WikiQueryTool(BaseTool):
         "answers are saved to wiki/queries/ for future reference."
     )
     input_model = WikiQueryInput
+    find_me = ("search the wiki", "answer a question from the wiki")
 
     def is_read_only(self, arguments: WikiQueryInput) -> bool:
         del arguments

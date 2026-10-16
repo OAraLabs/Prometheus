@@ -192,6 +192,7 @@ class ImageGenerateTool(BaseTool):
         "for reproducible output."
     )
     input_model = ImageGenerateInput
+    find_me = ("generate an image from a prompt", "create a picture")
     # CLOUD EXPANSION (2026-07): the dashscope path can legitimately run
     # poll-budget (300s) + submit + download — past the agent loop's 300s
     # default tool timeout. Raise the per-tool bar so a slow WAN render

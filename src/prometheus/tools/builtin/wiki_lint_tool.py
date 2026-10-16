@@ -47,6 +47,7 @@ class WikiLintTool(BaseTool):
         "and category imbalance. Optionally auto-fix safe issues."
     )
     input_model = WikiLintInput
+    find_me = ("check the wiki for broken links", "lint the wiki")
 
     def is_read_only(self, arguments: WikiLintInput) -> bool:
         return not arguments.auto_fix

@@ -426,6 +426,7 @@ class VaultSearchTool(BaseTool):
         "wiki (wiki_query) — different knowledge, different root."
     )
     input_model = VaultSearchInput
+    find_me = ("search the brain vault", "search the second brain notes")
     example_call = {"query": "standing principles verification"}
 
     def is_read_only(self, arguments: VaultSearchInput) -> bool:
@@ -679,6 +680,7 @@ class VaultReadTool(BaseTool):
         "to find the path (its context lines carry @offset for jumping)."
     )
     input_model = VaultReadInput
+    find_me = ("read a file from the brain vault", "open a vault note")
     example_call = {"path": "wiki/index.md"}
 
     def is_read_only(self, arguments: VaultReadInput) -> bool:

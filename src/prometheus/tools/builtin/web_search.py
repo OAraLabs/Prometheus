@@ -59,6 +59,7 @@ class WebSearchTool(BaseTool):
         "results, use web_fetch to read its full content. No API key required."
     )
     input_model = WebSearchInput
+    find_me = ("search the web", "look something up online")
 
     def is_read_only(self, arguments: WebSearchInput) -> bool:
         return True

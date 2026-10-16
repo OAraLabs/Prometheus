@@ -39,6 +39,7 @@ class LCMDescribeTool(BaseTool):
         "(total messages, summaries, max depth, compression ratio)."
     )
     input_model = LCMDescribeInput
+    find_me = ("describe a summary node", "show summary node metadata")
 
     def is_read_only(self, arguments: LCMDescribeInput) -> bool:
         return True

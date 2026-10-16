@@ -23,6 +23,7 @@ class TaskListTool(BaseTool):
     name = "task_list"
     description = "List all background tasks, optionally filtered by status."
     input_model = TaskListToolInput
+    find_me = ("list background tasks", "show running tasks")
 
     def is_read_only(self, arguments: TaskListToolInput) -> bool:
         del arguments
