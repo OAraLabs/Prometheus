@@ -205,7 +205,12 @@ def _cloud_three_rounds(messages: list[dict[str, Any]]) -> Call | Text:
     return Call("read_file", {"path": "{workspace}/src/ledger/" + ("accounts.py" if not reads else "audit.py")})
 
 
+def _fallback_answer(messages: list[dict[str, Any]]) -> Call | Text:
+    return Text("Answered by the fallback.")
+
+
 SCRIPTS: dict[str, Callable[[list[dict[str, Any]]], Call | Text]] = {
+    "fallback": _fallback_answer,
     "agent": want_then_answer("agent", {
         "description": "List workspace files",
         "prompt": "[gate:sub] List the files in the workspace and report them.",
@@ -240,8 +245,13 @@ class ScriptedLlamaServer:
         model_id: str = MODEL_ID,
         report_n_ctx: bool = True,
         extra_props: dict[str, Any] | None = None,
+        fail_script: str | None = None,
     ) -> None:
         self.props = dict(props or {})
+        #: A script whose conversations this server refuses with a 401 (an
+        #: auth failure is terminal, so the daemon serves the round from its
+        #: fallback): the fallback tests' failing side.
+        self.fail_script = fail_script
         #: The id /v1/models reports (and llama.cpp echoes per chunk): renaming
         #: the GGUF changes it.
         self.model_id = model_id
@@ -407,6 +417,12 @@ class ScriptedLlamaServer:
                     srv._last_key = key
                 cached = min(prompt, srv.tokens(common))
                 ex = Exchange(script=script, request=payload, prompt_tokens=prompt, cached_tokens=cached, status=200)
+                if srv.fail_script and script == srv.fail_script and payload.get("tools"):
+                    ex.status = 401
+                    with srv._lock:
+                        srv.exchanges.append(ex)
+                    return self._json(401, {"error": {"code": 401, "message": "invalid api key",
+                                                      "type": "authentication_error"}})
                 if prompt > srv.n_ctx:
                     ex.status = 400
                     with srv._lock:

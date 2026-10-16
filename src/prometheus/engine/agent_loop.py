@@ -982,6 +982,41 @@ class _CatalogState:
         self.refusals: dict[str, int] = {}
 
 
+class _ServingTier:
+    """What resolve_deferred() reads off an adapter: its tier ("off" = a cloud API)."""
+
+    __slots__ = ("tier",)
+
+    def __init__(self, tier: str | None) -> None:
+        self.tier = tier
+
+
+def _catalog_for(context: "LoopContext", tier: str | None, active_profile: object
+                 ) -> tuple[list[dict], frozenset[str]] | None:
+    """The tools a run offers a model of *tier*, by the run-start rules (the
+    deferral tri-state, local_catalog, the profile), and the names sent as
+    stubs. None without a tri-state loader. For a mid-turn switch of the
+    serving model (a fallback): the catalog describes the model actually
+    called, as routing does at run start (#462)."""
+    loader = context.tool_loader
+    if loader is None or not hasattr(loader, "resolve_deferred"):
+        return None
+    deferred, _ = loader.resolve_deferred(_ServingTier(tier))
+
+    def _profiled(schemas: list[dict]) -> list[dict]:
+        if active_profile is None:
+            return schemas
+        from prometheus.config.profiles import filter_tools_by_profile
+
+        return filter_tools_by_profile(schemas, active_profile) or schemas
+
+    if deferred and getattr(loader, "catalog_mode", "names") == "stubs":
+        from prometheus.context.tool_stubs import catalog
+
+        return catalog(_profiled(loader.schemas_for_run(False)))
+    return _profiled(loader.schemas_for_run(deferred)), frozenset()
+
+
 # The run's _CatalogState, or None when every offered tool was described in
 # full. One mutable object per run, for _RUN_TURN's reason.
 _RUN_CATALOG: contextvars.ContextVar = contextvars.ContextVar("prometheus_run_catalog", default=None)
@@ -2489,6 +2524,27 @@ async def _run_loop(
                 ),
             )
             active_system_prompt = rewritten
+            # The fallback round's tools follow the model that serves it (fix 3):
+            # a local fallback gets the local catalog (stubs), a cloud one every
+            # full schema. Only this round: the next round asks the primary again.
+            nonlocal _payload_tools
+            _target_local = bool(getattr(context.fallback, "is_local_backend", False))
+            _swap = _catalog_for(context, "light" if _target_local else "off", active_profile) \
+                if tools_enabled and _payload_tools else None
+            if _swap is not None and _swap[0] != _payload_tools:
+                _payload_tools = _swap[0]
+                _cat_now = _RUN_CATALOG.get()
+                if _swap[1]:
+                    _RUN_CATALOG.set(_CatalogState(_swap[1] | (_cat_now.undescribed if _cat_now else frozenset())))
+                _sent = _offered_names(_payload_tools, _payload_tools, tools_enabled)
+                _ROUND_OFFERED.set(_sent)
+                if turn_record is not None and _sent:
+                    from prometheus.telemetry.writer import tool_set_row as _tsr
+                    _fb_set = _tsr(_sent)
+                    turn_record.tool_set(_fb_set)
+                    _v2_round_set[0] = _fb_set
+                log.info("provider fallback: round tools rebuilt for %s (%d tools, %d as stubs)",
+                         "a local model" if _target_local else "a cloud model", len(_payload_tools), len(_swap[1]))
 
         _degrade_announced = False
 
@@ -3377,6 +3433,13 @@ async def _run_loop(
                         context.route_provider = fallback.provider_name or None
                         if fallback.adapter is not None:
                             context.adapter = fallback.adapter
+                            # The catalog follows the model now serving (fix 3):
+                            # rebuilt once, frozen again for the rest of the run.
+                            _swap = _catalog_for(context, getattr(context.adapter, "tier", None), active_profile) \
+                                if tools_enabled else None
+                            if _swap is not None and _swap[0] != tool_schema:
+                                tool_schema = _swap[0]
+                                _RUN_CATALOG.set(_CatalogState(_swap[1]) if _swap[1] else None)
                         circuit_breaker.record_success()
                         # Re-format for the new model's adapter if needed
                         if context.adapter is not None and hasattr(context.adapter, "format_request"):

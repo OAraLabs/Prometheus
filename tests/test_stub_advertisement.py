@@ -276,3 +276,137 @@ def test_a_round_that_sends_another_set_records_it(registry, tmp_path):
     assert sets[sent] == ["bash"]
     hashes = [r["tool_set_hash"] for r in con.execute("SELECT tool_set_hash FROM responses ORDER BY id")]
     assert hashes and all(h == sent for h in hashes), (hashes, sets)
+
+
+# ---------------------------------------------------------------- circuit-breaker model fallback
+
+
+class _Malformed(BaseTool):
+    """image_generate whose every call fails as a formatting error (trips the breaker)."""
+
+    name = "image_generate"
+    description = "image_generate test tool. Longer explanation that a stub leaves out."
+    input_model = _In
+
+    async def execute(self, arguments, context):  # noqa: ANN001
+        return ToolResult(output="malformed arguments", is_error=True)
+
+
+class _AlwaysCalls(_Provider):
+    async def stream_message(self, request):  # noqa: ANN001
+        self.requests.append(request)
+        yield ApiMessageCompleteEvent(
+            message=ConversationMessage(role="assistant", content=[
+                # Arguments vary, as a model's do, or the repeat guard answers first.
+                ToolUseBlock(id=f"t{len(self.requests)}", name="image_generate",
+                             input={"text": f"try {len(self.requests)}"})]),
+            usage=UsageSnapshot(input_tokens=1, output_tokens=1), stop_reason="tool_use",
+        )
+
+
+def _assert_full_catalog(request, registry) -> None:
+    assert {t["name"] for t in request.tools} == set(NAMES)
+    assert all(t["input_schema"] == registry.get(t["name"]).to_api_schema()["input_schema"] for t in request.tools)
+
+
+@pytest.mark.parametrize("primary_tier,fallback_tier", [("strict", "off"), ("off", "strict")],
+                         ids=["local-to-cloud", "cloud-to-local"])
+def test_a_circuit_breaker_model_fallback_rebuilds_the_catalog_for_the_new_model(primary_tier, fallback_tier):
+    """The breaker's model fallback swaps the model for the rest of the run, so
+    the catalog follows it, once: the local catalog for a local model, every
+    full schema for a cloud one (fix 3)."""
+    reg = ToolRegistry()
+    for n in NAMES:
+        reg.register(_Malformed() if n == "image_generate" else _tool(n))
+    fallback = _Provider()
+    unrouted = SimpleNamespace(provider=None, adapter=None, model_name="", provider_name="", reason="primary")
+    router = SimpleNamespace(
+        route=lambda message, context=None: unrouted,
+        get_override_for_session=lambda sid: None,
+        get_fallback=lambda current: SimpleNamespace(
+            provider=fallback, adapter=_adapter(fallback_tier), model_name="fallback-model",
+            provider_name="fallback", reason="fallback"),
+    )
+    primary = _AlwaysCalls()
+    _run(_ctx(reg, primary, adapter=_adapter(primary_tier), router=router))
+    assert primary.requests and fallback.requests, "precondition: the breaker tripped and the fallback model served"
+    check = {"strict": _assert_local_catalog, "off": _assert_full_catalog}
+    check[primary_tier](primary.requests[0], reg)
+    for request in fallback.requests:
+        check[fallback_tier](request, reg)
+
+
+# ---------------------------------------------------------------- per-round provider fallback
+
+
+class _ExpiredCloud(ModelProvider):
+    """A cloud provider whose key has expired: 401 on every call."""
+
+    provider_name = "qwen"
+
+    async def stream_message(self, request):  # noqa: ANN001
+        class R:
+            status_code = 401
+
+        class AuthError(Exception):
+            response = R()
+
+        raise AuthError("expired credential")
+        yield  # pragma: no cover — makes this an async generator
+
+
+def _degraded_run(registry, tmp_path, *, loader=None):
+    """A cloud run whose every round falls back to a local model that calls image_generate."""
+    from prometheus.engine.fallback import FallbackTarget
+    from prometheus.telemetry.tracker import ToolCallTelemetry
+
+    tel = ToolCallTelemetry(tmp_path / "telemetry.db")
+    local = _Provider(first_call="image_generate")
+    ctx = _ctx(registry, _ExpiredCloud(), adapter=_adapter("off"), telemetry=tel, loader=loader,
+               model="qwen3.8-max")
+    ctx.fallback = FallbackTarget(model="Qwen3.8-27B", provider_name="llama_cpp", provider=local,
+                                  is_local_backend=True)
+    _run(ctx, session="desktop:fb")
+    tel.close()
+    con = sqlite3.connect(tmp_path / "telemetry.db")
+    con.row_factory = sqlite3.Row
+    return con, local
+
+
+def _lucky_guesses(con) -> list[tuple[str, str]]:
+    import json
+
+    return [(json.loads(r["summary_json"])["tool"], r["model"]) for r in con.execute(
+        "SELECT summary_json, model FROM subsystem_runs WHERE subsystem = 'agent_loop' AND operation = 'lucky_guess'")]
+
+
+def test_a_local_fallback_round_gets_the_local_catalog_and_records_no_lucky_guess(registry, tmp_path):
+    """Stubs-mode counterpart of test_a_degraded_rounds_lucky_guess_names_the_fallback:
+    a cloud run's round served by a local fallback carries the local catalog,
+    so its call to a stubbed tool is an offered tool, not a guess."""
+    con, local = _degraded_run(registry, tmp_path)
+    assert len(local.requests) >= 2, "precondition: every round was served by the fallback"
+    for request in local.requests:
+        _assert_local_catalog(request, registry)
+    assert [r["model"] for r in con.execute("SELECT model FROM tool_calls WHERE tool_name = 'image_generate'")] == [
+        "Qwen3.8-27B"]
+    assert _lucky_guesses(con) == []
+
+
+def test_a_fallback_round_records_the_set_it_sent(registry, tmp_path):
+    """The fallback round's tool_sets row and lucky-guess check follow what it
+    sent. Visible under local_catalog "names", where the local set differs by
+    name from the cloud run's: the round sends the always_loaded set, records
+    it, and a call outside it is a lucky guess named for the fallback."""
+    from prometheus.telemetry.writer import tool_set_row
+
+    loader = DynamicToolLoader(registry, {"enabled": "auto", "always_loaded": ["bash", "read_file"],
+                                          "local_catalog": "names"})
+    con, local = _degraded_run(registry, tmp_path, loader=loader)
+    assert {t["name"] for t in local.requests[0].tools} == {"bash", "read_file"}
+    sent = tool_set_row(["bash", "read_file"])["tool_set_hash"]
+    assert sent in {r["tool_set_hash"] for r in con.execute("SELECT tool_set_hash FROM tool_sets")}
+    served = [(r["provider"], r["tool_set_hash"]) for r in con.execute(
+        "SELECT provider, tool_set_hash FROM responses ORDER BY id")]
+    assert served and all(h == sent for _, h in served), served
+    assert _lucky_guesses(con) == [("image_generate", "Qwen3.8-27B")]
