@@ -825,9 +825,9 @@
        "light",
        null,
        "9adc3c23ae3a7bbd",
-       "tool_call",
+       "mixed",
        1,
-       0,
+       76,
        null,
        "agent",
        "coding_mode",
@@ -844,9 +844,9 @@
        "light",
        null,
        "9adc3c23ae3a7bbd",
-       "tool_call",
+       "mixed",
        1,
-       0,
+       37,
        null,
        "agent",
        "coding_mode",
@@ -865,8 +865,8 @@
        "9adc3c23ae3a7bbd",
        "prose",
        0,
-       214,
-       "Fixed. The bug was in `calc.py`: `add()` returned `a - b` instead of `a + b`. I changed line 3 to `return a + b` and verified with the acceptance command:\n\n```\n$ python test_calc.py\ncalc ok\n(exit code 0)\n```\n\nDone.",
+       235,
+       "Fixed and verified.\n\n- **Bug:** `add()` in `calc.py` returned `a - b` instead of `a + b`.\n- **Fix:** Changed line 3 to `return a + b` (test file untouched).\n- **Acceptance:** `python test_calc.py` → prints `calc ok`, exit code **0**. ✅",
        "agent",
        "coding_mode",
        null
@@ -1574,8 +1574,8 @@
          "stop_reason": "tool_calls"
         }
        },
-       1808,
-       45,
+       1470,
+       77,
        0,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1599,13 +1599,13 @@
          "stop_reason": "tool_calls"
         }
        },
-       1863,
-       66,
+       1576,
+       120,
        1,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        1,
-       1804,
+       1466,
        null,
        "<node>",
        "local",
@@ -1624,13 +1624,13 @@
          "stop_reason": "tool_calls"
         }
        },
-       2034,
-       86,
+       1800,
+       145,
        2,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        1,
-       1859,
+       1572,
        null,
        "<node>",
        "local",
@@ -1649,13 +1649,13 @@
          "stop_reason": "tool_calls"
         }
        },
-       2161,
-       61,
+       2009,
+       153,
        3,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        1,
-       2030,
+       1796,
        null,
        "<node>",
        "local",
@@ -1674,13 +1674,13 @@
          "stop_reason": "stop"
         }
        },
-       2224,
-       84,
+       2120,
+       97,
        4,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        1,
-       2157,
+       2005,
        null,
        "<node>",
        "local",
@@ -1787,7 +1787,7 @@
        {
         "$json": {
          "input": {
-          "path": "."
+          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>"
          },
          "name": "code_view"
         }
@@ -1835,11 +1835,11 @@
        "<node>",
        "<turn:1>",
        0,
-       "B0JdSjXVYOJyUoWRp188qqLXQCik2tJK",
+       "HOEEFpKs6ye9kvMjPMfKX9mF32KqRf2y",
        null,
        null,
        0,
-       "./ (2 entries)\ncalc.py\ntest_calc.py"
+       "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/ (2 entries)\ncalc.py\ntest_calc.py"
       ],
       [
        "<uuid:33>",
@@ -1881,7 +1881,7 @@
        {
         "$json": {
          "input": {
-          "path": "calc.py"
+          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py"
          },
          "name": "code_view"
         }
@@ -1929,7 +1929,7 @@
        "<node>",
        "<turn:1>",
        1,
-       "0kkaEj42YlEHro48G1lElmw13vtz0xC7",
+       "aYi6H3KeZbaovSXlHEyypkZrBcE0E7VF",
        null,
        null,
        0,
@@ -1949,7 +1949,7 @@
        {
         "$json": {
          "input": {
-          "path": "test_calc.py"
+          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/test_calc.py"
          },
          "name": "code_view"
         }
@@ -1997,7 +1997,7 @@
        "<node>",
        "<turn:1>",
        1,
-       "5LY9SY49P0mMbBrGlOy8VSIxkUNYHe1p",
+       "eSyhB2xMuk1MEKiOqKtvgLdyc6KMuHzt",
        null,
        null,
        0,
@@ -2039,13 +2039,13 @@
        "<ms>",
        null,
        null,
-       "",
+       "The bug is clear: `add` returns `a - b` instead of `a + b`. Fixing it now.\n\n",
        {
         "$json": {
          "input": {
           "new_str": "    return a + b",
           "old_str": "    return a - b",
-          "path": "calc.py"
+          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py"
          },
          "name": "code_str_replace"
         }
@@ -2089,11 +2089,11 @@
        "<node>",
        "<turn:1>",
        2,
-       "KGm0GVgG7Oir6Rle2ZLHZq3KZXn1tItX",
+       "l3LsfRZi5nljhAGQqmNQb2KXkGALoy6p",
        null,
        null,
        0,
-       "OK — replaced 1 occurrence in calc.py (now at line 3):\n     1\tdef add(a, b):\n     2\t    \"\"\"Return the sum of a and b.\"\"\"\n     3\t    return a + b"
+       "OK — replaced 1 occurrence in /tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py (now at line 3):\n     1\tdef add(a, b):\n     2\t    \"\"\"Return the sum of a and b.\"\"\"\n     3\t    return a + b"
       ],
       [
        "<uuid:38>",
@@ -2131,11 +2131,11 @@
        "<ms>",
        null,
        null,
-       "",
+       "Now running the acceptance command.\n\n",
        {
         "$json": {
          "input": {
-          "command": "python test_calc.py"
+          "command": "cd /tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch> && python test_calc.py; echo \"exit: $?\""
          },
          "name": "code_run"
         }
@@ -2180,11 +2180,11 @@
        "<node>",
        "<turn:1>",
        3,
-       "udKF3aEfLx5qy7SOGQKNfI2MyDfZbSAU",
+       "rTGVOrQdT3IhIcq3Z4NNOuzPxXyMgHw1",
        null,
        null,
        0,
-       "exit code: 0 (in 0.0s)\ncalc ok\n"
+       "exit code: 0 (in 0.0s)\ncalc ok\nexit: 0\n"
       ],
       [
        "<uuid:40>",
@@ -2272,8 +2272,8 @@
        "<time>",
        "<time>",
        5,
-       10090,
-       342,
+       8975,
+       592,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"

@@ -817,7 +817,7 @@
      "rows": [
       [
        "desktop:parity-compact",
-       "Memory Game Amber",
+       "Memory Game First Word",
        "<time>"
       ]
      ]
@@ -1267,12 +1267,12 @@
        {
         "$json": {
          "calibration": 1.0,
-         "over_by": 7521,
+         "over_by": 6051,
          "session_id": "desktop:parity-compact",
          "span_messages": 0,
          "threshold": 655,
-         "tokens_before": 8176,
-         "tokens_before_estimated": 8176,
+         "tokens_before": 6706,
+         "tokens_before_estimated": 6706,
          "trigger": "threshold"
         }
        },
@@ -1286,9 +1286,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 7521,
+         "over_by": 6051,
          "session_id": "desktop:parity-compact",
-         "tokens": 8176
+         "tokens": 6706
         }
        },
        "context_compactor",
@@ -1300,13 +1300,13 @@
        "context_compaction_noop",
        {
         "$json": {
-         "calibration": 1.078,
-         "over_by": 8188,
+         "calibration": 1.113,
+         "over_by": 6837,
          "session_id": "desktop:parity-compact",
          "span_messages": 2,
          "threshold": 655,
-         "tokens_before": 8843,
-         "tokens_before_estimated": 8203,
+         "tokens_before": 7492,
+         "tokens_before_estimated": 6733,
          "trigger": "threshold"
         }
        },
@@ -1320,9 +1320,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 8188,
+         "over_by": 6837,
          "session_id": "desktop:parity-compact",
-         "tokens": 8843
+         "tokens": 7492
         }
        },
        "context_compactor",
@@ -1335,9 +1335,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 8189,
+         "over_by": 6853,
          "session_id": "desktop:parity-compact",
-         "tokens": 8844
+         "tokens": 7508
         }
        },
        "context_compactor",
@@ -1350,12 +1350,12 @@
        {
         "$json": {
          "cache_hit": false,
-         "calibration": 1.078,
+         "calibration": 1.113,
          "ceiling": 655,
          "chunks": 1,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 8189,
+         "over_by": 6853,
          "session_id": "desktop:parity-compact",
          "span_messages": 4,
          "summarizer_input_omitted": 0,
@@ -1363,9 +1363,9 @@
          "target": 458,
          "threshold": 655,
          "threshold_source": "global pct",
-         "tokens_after": 8844,
-         "tokens_before": 8873,
-         "tokens_before_estimated": 8230,
+         "tokens_after": 7508,
+         "tokens_before": 7522,
+         "tokens_before_estimated": 6760,
          "tool_results_trimmed": 0,
          "trigger": "threshold"
         }
@@ -1380,9 +1380,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 8211,
+         "over_by": 6849,
          "session_id": "desktop:parity-compact",
-         "tokens": 8866
+         "tokens": 7504
         }
        },
        "context_compactor",
@@ -1395,12 +1395,12 @@
        {
         "$json": {
          "cache_hit": false,
-         "calibration": 1.079,
+         "calibration": 1.112,
          "ceiling": 655,
          "chunks": 1,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 8211,
+         "over_by": 6849,
          "session_id": "desktop:parity-compact",
          "span_messages": 6,
          "summarizer_input_omitted": 0,
@@ -1408,9 +1408,9 @@
          "target": 458,
          "threshold": 655,
          "threshold_source": "global pct",
-         "tokens_after": 8866,
-         "tokens_before": 8909,
-         "tokens_before_estimated": 8259,
+         "tokens_after": 7504,
+         "tokens_before": 7551,
+         "tokens_before_estimated": 6789,
          "tool_results_trimmed": 0,
          "trigger": "threshold"
         }
@@ -2074,13 +2074,13 @@
          "stop_reason": "stop"
         }
        },
-       8814,
+       7462,
        3,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6803,
+       5454,
        null,
        "<node>",
        "local",
@@ -2088,31 +2088,6 @@
       ],
       [
        "<uuid:37>",
-       "<time>",
-       "session_titles",
-       "generate",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-         "stop_reason": "stop"
-        }
-       },
-       82,
-       4,
-       null,
-       "desktop:parity-compact",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       0,
-       15,
-       null,
-       "<node>",
-       "local",
-       null
-      ],
-      [
-       "<uuid:38>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -2142,6 +2117,31 @@
        null
       ],
       [
+       "<uuid:38>",
+       "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       82,
+       5,
+       null,
+       "desktop:parity-compact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       78,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
        "<uuid:10>",
        "<time>",
        "agent_loop",
@@ -2154,13 +2154,13 @@
          "stop_reason": "stop"
         }
        },
-       8844,
+       7492,
        3,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       8816,
+       7464,
        null,
        "<node>",
        "local",
@@ -2210,11 +2210,11 @@
           "session_id": "desktop:parity-compact",
           "span_messages": 4
          },
-         "output_chars": 65
+         "output_chars": 125
         }
        },
        129,
-       26,
+       35,
        null,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -2238,13 +2238,13 @@
          "stop_reason": "stop"
         }
        },
-       8849,
+       7506,
        3,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6803,
+       5451,
        null,
        "<node>",
        "local",
@@ -2294,11 +2294,11 @@
           "session_id": "desktop:parity-compact",
           "span_messages": 6
          },
-         "output_chars": 116
+         "output_chars": 115
         }
        },
        150,
-       33,
+       34,
        null,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -2322,13 +2322,13 @@
          "stop_reason": "stop"
         }
        },
-       8856,
+       7505,
        8,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6803,
+       5458,
        null,
        "<node>",
        "local",
@@ -2468,7 +2468,7 @@
        "<time>",
        "<time>",
        1,
-       8814,
+       7462,
        3,
        {
         "$json": [
@@ -2496,7 +2496,7 @@
        "<time>",
        "<time>",
        1,
-       8844,
+       7492,
        3,
        {
         "$json": [
@@ -2524,7 +2524,7 @@
        "<time>",
        "<time>",
        1,
-       8849,
+       7506,
        3,
        {
         "$json": [
@@ -2552,7 +2552,7 @@
        "<time>",
        "<time>",
        1,
-       8856,
+       7505,
        8,
        {
         "$json": [

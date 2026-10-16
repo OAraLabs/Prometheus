@@ -23,7 +23,7 @@
      "content_json": {
       "$json": [
        {
-        "id": "50hTM4LOsuSqtlJp6x6GzCodcEaBZr4g",
+        "id": "1hnesbqKHsJqSxxbDZ2k0px9T48DNT9B",
         "input": {
          "path": "/etc/prometheus-parity.conf"
         },
@@ -31,7 +31,7 @@
         "type": "tool_use"
        },
        {
-        "id": "goAzWipdzv9T21dXlC8t8ADa9l3xocWV",
+        "id": "sBGDylJCtKVUD8wyXsFElObAwiwKfu6p",
         "input": {
          "command": "echo 'DROP TABLE parity_canary'"
         },
@@ -51,13 +51,13 @@
        {
         "content": "Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'",
         "is_error": true,
-        "tool_use_id": "50hTM4LOsuSqtlJp6x6GzCodcEaBZr4g",
+        "tool_use_id": "1hnesbqKHsJqSxxbDZ2k0px9T48DNT9B",
         "type": "tool_result"
        },
        {
         "content": "Command matches deny list entry: 'DROP TABLE'",
         "is_error": true,
-        "tool_use_id": "goAzWipdzv9T21dXlC8t8ADa9l3xocWV",
+        "tool_use_id": "sBGDylJCtKVUD8wyXsFElObAwiwKfu6p",
         "type": "tool_result"
        }
       ]
@@ -67,11 +67,11 @@
      "role": "user"
     },
     {
-     "content": "Both were refused, as expected for this sandbox test:\n\n1. **`read_file` on `/etc/prometheus-parity.conf`** — blocked with:\n   > `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'`\n\n2. **`bash` running `echo 'DROP TABLE parity_canary'`** — blocked with:\n   > `Command matches deny list entry: 'DROP TABLE'`\n\nNotably, the second refusal is a content-based deny: the command itself was a harmless `echo`, but the security gate pattern-matched the `DROP TABLE` string in the command text and refused it without executing anything. No state was changed and no output was produced from either attempt.",
+     "content": "Both were refused by the security gate, as expected:\n\n1. **read_file** on `/etc/prometheus-parity.conf` → denied: `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'` — the harness blocks reads from the `/etc` prefix.\n2. **bash** `echo 'DROP TABLE parity_canary'` → denied: `Command matches deny list entry: 'DROP TABLE'` — the shell deny list matches the pattern even though the command only *echoes* it (pattern match, not execution).\n\nBoth refusals happened at the tool-execution layer, before any I/O occurred. Nothing was read, printed, or executed.",
      "content_json": {
       "$json": [
        {
-        "text": "Both were refused, as expected for this sandbox test:\n\n1. **`read_file` on `/etc/prometheus-parity.conf`** — blocked with:\n   > `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'`\n\n2. **`bash` running `echo 'DROP TABLE parity_canary'`** — blocked with:\n   > `Command matches deny list entry: 'DROP TABLE'`\n\nNotably, the second refusal is a content-based deny: the command itself was a harmless `echo`, but the security gate pattern-matched the `DROP TABLE` string in the command text and refused it without executing anything. No state was changed and no output was produced from either attempt.",
+        "text": "Both were refused by the security gate, as expected:\n\n1. **read_file** on `/etc/prometheus-parity.conf` → denied: `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'` — the harness blocks reads from the `/etc` prefix.\n2. **bash** `echo 'DROP TABLE parity_canary'` → denied: `Command matches deny list entry: 'DROP TABLE'` — the shell deny list matches the pattern even though the command only *echoes* it (pattern match, not execution).\n\nBoth refusals happened at the tool-execution layer, before any I/O occurred. Nothing was read, printed, or executed.",
         "type": "text"
        }
       ]
@@ -82,7 +82,7 @@
     }
    ],
    "op": "chat",
-   "reply": "Both were refused, as expected for this sandbox test:\n\n1. **`read_file` on `/etc/prometheus-parity.conf`** — blocked with:\n   > `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'`\n\n2. **`bash` running `echo 'DROP TABLE parity_canary'`** — blocked with:\n   > `Command matches deny list entry: 'DROP TABLE'`\n\nNotably, the second refusal is a content-based deny: the command itself was a harmless `echo`, but the security gate pattern-matched the `DROP TABLE` string in the command text and refused it without executing anything. No state was changed and no output was produced from either attempt.",
+   "reply": "Both were refused by the security gate, as expected:\n\n1. **read_file** on `/etc/prometheus-parity.conf` → denied: `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'` — the harness blocks reads from the `/etc` prefix.\n2. **bash** `echo 'DROP TABLE parity_canary'` → denied: `Command matches deny list entry: 'DROP TABLE'` — the shell deny list matches the pattern even though the command only *echoes* it (pattern match, not execution).\n\nBoth refusals happened at the tool-execution layer, before any I/O occurred. Nothing was read, printed, or executed.",
    "session": "desktop:parity-gate"
   }
  ],
@@ -243,7 +243,7 @@
        {
         "$json": [
          {
-          "id": "50hTM4LOsuSqtlJp6x6GzCodcEaBZr4g",
+          "id": "1hnesbqKHsJqSxxbDZ2k0px9T48DNT9B",
           "input": {
            "path": "/etc/prometheus-parity.conf"
           },
@@ -251,7 +251,7 @@
           "type": "tool_use"
          },
          {
-          "id": "goAzWipdzv9T21dXlC8t8ADa9l3xocWV",
+          "id": "sBGDylJCtKVUD8wyXsFElObAwiwKfu6p",
           "input": {
            "command": "echo 'DROP TABLE parity_canary'"
           },
@@ -277,13 +277,13 @@
          {
           "content": "Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'",
           "is_error": true,
-          "tool_use_id": "50hTM4LOsuSqtlJp6x6GzCodcEaBZr4g",
+          "tool_use_id": "1hnesbqKHsJqSxxbDZ2k0px9T48DNT9B",
           "type": "tool_result"
          },
          {
           "content": "Command matches deny list entry: 'DROP TABLE'",
           "is_error": true,
-          "tool_use_id": "goAzWipdzv9T21dXlC8t8ADa9l3xocWV",
+          "tool_use_id": "sBGDylJCtKVUD8wyXsFElObAwiwKfu6p",
           "type": "tool_result"
          }
         ]
@@ -299,16 +299,16 @@
        "desktop:parity-gate",
        3,
        "assistant",
-       "Both were refused, as expected for this sandbox test:\n\n1. **`read_file` on `/etc/prometheus-parity.conf`** — blocked with:\n   > `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'`\n\n2. **`bash` running `echo 'DROP TABLE parity_canary'`** — blocked with:\n   > `Command matches deny list entry: 'DROP TABLE'`\n\nNotably, the second refusal is a content-based deny: the command itself was a harmless `echo`, but the security gate pattern-matched the `DROP TABLE` string in the command text and refused it without executing anything. No state was changed and no output was produced from either attempt.",
+       "Both were refused by the security gate, as expected:\n\n1. **read_file** on `/etc/prometheus-parity.conf` → denied: `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'` — the harness blocks reads from the `/etc` prefix.\n2. **bash** `echo 'DROP TABLE parity_canary'` → denied: `Command matches deny list entry: 'DROP TABLE'` — the shell deny list matches the pattern even though the command only *echoes* it (pattern match, not execution).\n\nBoth refusals happened at the tool-execution layer, before any I/O occurred. Nothing was read, printed, or executed.",
        {
         "$json": [
          {
-          "text": "Both were refused, as expected for this sandbox test:\n\n1. **`read_file` on `/etc/prometheus-parity.conf`** — blocked with:\n   > `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'`\n\n2. **`bash` running `echo 'DROP TABLE parity_canary'`** — blocked with:\n   > `Command matches deny list entry: 'DROP TABLE'`\n\nNotably, the second refusal is a content-based deny: the command itself was a harmless `echo`, but the security gate pattern-matched the `DROP TABLE` string in the command text and refused it without executing anything. No state was changed and no output was produced from either attempt.",
+          "text": "Both were refused by the security gate, as expected:\n\n1. **read_file** on `/etc/prometheus-parity.conf` → denied: `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'` — the harness blocks reads from the `/etc` prefix.\n2. **bash** `echo 'DROP TABLE parity_canary'` → denied: `Command matches deny list entry: 'DROP TABLE'` — the shell deny list matches the pattern even though the command only *echoes* it (pattern match, not execution).\n\nBoth refusals happened at the tool-execution layer, before any I/O occurred. Nothing was read, printed, or executed.",
           "type": "text"
          }
         ]
        },
-       152,
+       142,
        "<time>",
        0,
        "user",
@@ -331,7 +331,7 @@
        ""
       ],
       [
-       "Both were refused, as expected for this sandbox test:\n\n1. **`read_file` on `/etc/prometheus-parity.conf`** — blocked with:\n   > `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'`\n\n2. **`bash` running `echo 'DROP TABLE parity_canary'`** — blocked with:\n   > `Command matches deny list entry: 'DROP TABLE'`\n\nNotably, the second refusal is a content-based deny: the command itself was a harmless `echo`, but the security gate pattern-matched the `DROP TABLE` string in the command text and refused it without executing anything. No state was changed and no output was produced from either attempt."
+       "Both were refused by the security gate, as expected:\n\n1. **read_file** on `/etc/prometheus-parity.conf` → denied: `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'` — the harness blocks reads from the `/etc` prefix.\n2. **bash** `echo 'DROP TABLE parity_canary'` → denied: `Command matches deny list entry: 'DROP TABLE'` — the shell deny list matches the pattern even though the command only *echoes* it (pattern match, not execution).\n\nBoth refusals happened at the tool-execution layer, before any I/O occurred. Nothing was read, printed, or executed."
       ]
      ]
     },
@@ -356,7 +356,7 @@
       [
        1,
        {
-        "$bytes_sha256": "ee250a19c1b396a5",
+        "$bytes_sha256": "495c658c102a8f89",
         "len": 3
        }
       ],
@@ -377,8 +377,8 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "1bff23ff39ee3913",
-        "len": 689
+        "$bytes_sha256": "1426302e77a7083e",
+        "len": 623
        }
       ]
      ]
@@ -413,7 +413,7 @@
       [
        4,
        {
-        "$bytes_sha256": "74cd9ef9c7e15f57",
+        "$bytes_sha256": "4b68ab3847feda7d",
         "len": 1
        }
       ]
@@ -564,7 +564,7 @@
      "rows": [
       [
        "desktop:parity-gate",
-       "Sandbox Security Gate Test",
+       "Security Gate Refusal Test",
        "<time>"
       ]
      ]
@@ -964,8 +964,8 @@
        "ace59500b5eb5a30",
        "prose",
        0,
-       610,
-       "Both were refused, as expected for this sandbox test:\n\n1. **`read_file` on `/etc/prometheus-parity.conf`** — blocked with:\n   > `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'`\n\n2. **`bash` running `echo 'DROP TABLE parity_canary'`** — blocked with:\n   > `Command matches deny list entry: 'DROP TABLE'`\n\nNotably, the second refusal is a content-based deny: the command itself was a harmless `echo`, but the security gate pattern-matched the `DROP TABLE` string in the command text and refused it without executing anything. No state was changed and no output was produced from either attempt.",
+       568,
+       "Both were refused by the security gate, as expected:\n\n1. **read_file** on `/etc/prometheus-parity.conf` → denied: `Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'` — the harness blocks reads from the `/etc` prefix.\n2. **bash** `echo 'DROP TABLE parity_canary'` → denied: `Command matches deny list entry: 'DROP TABLE'` — the shell deny list matches the pattern even though the command only *echoes* it (pattern match, not execution).\n\nBoth refusals happened at the tool-execution layer, before any I/O occurred. Nothing was read, printed, or executed.",
        "agent",
        "beacon",
        null
@@ -1673,13 +1673,13 @@
          "stop_reason": "tool_calls"
         }
        },
-       8860,
+       7508,
        63,
        0,
        "desktop:parity-gate",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6808,
+       5458,
        null,
        "<node>",
        "local",
@@ -1698,13 +1698,13 @@
          "stop_reason": "stop"
         }
        },
-       8971,
-       152,
+       7619,
+       144,
        1,
        "desktop:parity-gate",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       8922,
+       7570,
        null,
        "<node>",
        "local",
@@ -1723,7 +1723,7 @@
          "stop_reason": "stop"
         }
        },
-       259,
+       254,
        6,
        null,
        "desktop:parity-gate",
@@ -1792,7 +1792,7 @@
        "<node>",
        "<turn:1>",
        0,
-       "50hTM4LOsuSqtlJp6x6GzCodcEaBZr4g",
+       "1hnesbqKHsJqSxxbDZ2k0px9T48DNT9B",
        null,
        null,
        0,
@@ -1825,7 +1825,7 @@
        "<node>",
        "<turn:1>",
        0,
-       "goAzWipdzv9T21dXlC8t8ADa9l3xocWV",
+       "sBGDylJCtKVUD8wyXsFElObAwiwKfu6p",
        null,
        null,
        0,
@@ -1962,8 +1962,8 @@
        "<time>",
        "<time>",
        2,
-       17831,
-       215,
+       15127,
+       207,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
