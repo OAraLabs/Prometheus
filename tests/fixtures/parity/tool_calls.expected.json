@@ -1734,10 +1734,12 @@
        {
         "$json": {
          "advertised": 51,
+         "catalog": "stubs",
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
-         "source": "auto → enabled (local provider, tier light)"
+         "source": "auto → enabled (local provider, tier light)",
+         "stubs": 41
         }
        },
        null,

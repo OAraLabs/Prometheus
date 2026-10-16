@@ -2041,10 +2041,12 @@
        {
         "$json": {
          "advertised": 51,
+         "catalog": "stubs",
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
-         "source": "auto → enabled (local provider, tier light)"
+         "source": "auto → enabled (local provider, tier light)",
+         "stubs": 41
         }
        },
        null,
@@ -2087,34 +2089,6 @@
       [
        "<uuid:37>",
        "<time>",
-       "agent_loop",
-       "tool_advertisement",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "advertised": 51,
-         "deferred_active": true,
-         "profile": "full",
-         "registered_total": 51,
-         "source": "auto → enabled (local provider, tier light)"
-        }
-       },
-       null,
-       null,
-       null,
-       "desktop:parity-compact",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       null,
-       null,
-       null,
-       "<node>",
-       null,
-       null
-      ],
-      [
-       "<uuid:38>",
-       "<time>",
        "session_titles",
        "generate",
        "<ms>",
@@ -2135,6 +2109,36 @@
        null,
        "<node>",
        "local",
+       null
+      ],
+      [
+       "<uuid:38>",
+       "<time>",
+       "agent_loop",
+       "tool_advertisement",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "advertised": 51,
+         "catalog": "stubs",
+         "deferred_active": true,
+         "profile": "full",
+         "registered_total": 51,
+         "source": "auto → enabled (local provider, tier light)",
+         "stubs": 41
+        }
+       },
+       null,
+       null,
+       null,
+       "desktop:parity-compact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
        null
       ],
       [
@@ -2172,10 +2176,12 @@
        {
         "$json": {
          "advertised": 51,
+         "catalog": "stubs",
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
-         "source": "auto → enabled (local provider, tier light)"
+         "source": "auto → enabled (local provider, tier light)",
+         "stubs": 41
         }
        },
        null,
@@ -2254,10 +2260,12 @@
        {
         "$json": {
          "advertised": 51,
+         "catalog": "stubs",
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
-         "source": "auto → enabled (local provider, tier light)"
+         "source": "auto → enabled (local provider, tier light)",
+         "stubs": 41
         }
        },
        null,

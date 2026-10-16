@@ -1541,10 +1541,12 @@
        {
         "$json": {
          "advertised": 6,
+         "catalog": "full",
          "deferred_active": false,
          "profile": null,
          "registered_total": 6,
-         "source": "no tool loader (registry direct)"
+         "source": "no tool loader (registry direct)",
+         "stubs": 0
         }
        },
        null,

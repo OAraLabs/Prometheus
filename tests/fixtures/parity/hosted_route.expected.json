@@ -1468,10 +1468,12 @@
        {
         "$json": {
          "advertised": 51,
+         "catalog": "full",
          "deferred_active": false,
          "profile": "full",
          "registered_total": 51,
-         "source": "auto → disabled (cloud provider)"
+         "source": "auto → disabled (cloud provider)",
+         "stubs": 0
         }
        },
        null,

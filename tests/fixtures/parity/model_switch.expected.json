@@ -1787,10 +1787,12 @@
        {
         "$json": {
          "advertised": 51,
+         "catalog": "stubs",
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
-         "source": "auto → enabled (local provider, tier light)"
+         "source": "auto → enabled (local provider, tier light)",
+         "stubs": 41
         }
        },
        null,
@@ -1833,34 +1835,6 @@
       [
        "<uuid:34>",
        "<time>",
-       "agent_loop",
-       "tool_advertisement",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "advertised": 51,
-         "deferred_active": true,
-         "profile": "full",
-         "registered_total": 51,
-         "source": "auto → enabled (local provider, tier full)"
-        }
-       },
-       null,
-       null,
-       null,
-       "desktop:parity-switch",
-       "qwen2.5:7b-instruct",
-       null,
-       null,
-       null,
-       "<node>",
-       null,
-       null
-      ],
-      [
-       "<uuid:35>",
-       "<time>",
        "session_titles",
        "generate",
        "<ms>",
@@ -1881,6 +1855,36 @@
        null,
        "<node>",
        "local",
+       null
+      ],
+      [
+       "<uuid:35>",
+       "<time>",
+       "agent_loop",
+       "tool_advertisement",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "advertised": 51,
+         "catalog": "stubs",
+         "deferred_active": true,
+         "profile": "full",
+         "registered_total": 51,
+         "source": "auto → enabled (local provider, tier full)",
+         "stubs": 41
+        }
+       },
+       null,
+       null,
+       null,
+       "desktop:parity-switch",
+       "qwen2.5:7b-instruct",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
        null
       ],
       [
@@ -1918,10 +1922,12 @@
        {
         "$json": {
          "advertised": 51,
+         "catalog": "stubs",
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
-         "source": "auto → enabled (local provider, tier light)"
+         "source": "auto → enabled (local provider, tier light)",
+         "stubs": 41
         }
        },
        null,
