@@ -18,6 +18,23 @@ uv run python scripts/parity_harness.py bench --runs 10  # overhead per round, p
 uv run python scripts/parity_harness.py normalizations   # every rule that hides a field, and why
 ```
 
+## Side calls
+
+A turn's own model requests are matched exactly. Beside the turn the daemon
+makes calls whose timing no turn decides: the session title, sent after a
+turn's `chat_done` (and twice when turn 2 ends while turn 1's title is still
+being asked), and lone-message summaries (the compactor's, LCM's, the boot
+warm-up). `scripts/parity/sidecalls.py` names them. A side call is matched by
+kind and content in any order, and a repeat of one is answered again. The
+`subsystem_runs` rows the titler writes are checked on their own: every
+replayed one must be a row the recording wrote, and every kind recorded must
+be written at least once (a recording that asked twice and got two answers is
+satisfied by either). The turn's rows are compared as before, with id
+placeholders renumbered past the side rows. A side call whose CONTENT changed
+still fails, and so does any change to a turn request. Both orderings were
+shown on unchanged code (2026-10-16); `tests/test_parity_sidecalls.py` pins
+the rules.
+
 ## When a replay fails
 
 A diff is a behavior change until shown otherwise. The report names the

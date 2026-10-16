@@ -52,6 +52,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from parity.normalize import bind_response, fingerprint, normalize_request
+from parity.sidecalls import MAIN, request_kind
 
 # Model calls: matched, consumed, timed and DIFFED. Everything else is a probe.
 # "/v1/messages" is Anthropic's Messages API — a turn routed to the hosted
@@ -146,25 +147,69 @@ class ServerState:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     # -- replay matching --------------------------------------------------
+    def kind_of(self, i: int) -> str:
+        return request_kind(self.recorded[i].request)
+
     def match(self, path: str, norm: Any, upstream: str) -> tuple[int | None, bool]:
-        """Completions: exact fingerprint first, else the next unconsumed one."""
+        """Completions: exact fingerprint first, else the next unconsumed one.
+
+        The turn's own requests (parity/sidecalls.py ``main``) each answer one
+        recorded request, exactly as before. A SIDE call is matched by kind and
+        content in any order, and a repeat of one already answered is answered
+        again (the session-title race sends one once or twice); one with no
+        recorded twin is diffed against the next unconsumed side call of its
+        kind.
+        """
         fp = fingerprint(norm)
+        kind = request_kind(norm)
         with self.lock:
-            candidates = [
-                i for i, ex in enumerate(self.recorded)
-                if ex.method == "POST" and ex.path == path and i not in self.consumed
-            ]
-            # Exact = same request on the same BACKEND: an identical body that
-            # arrives at the other model is a routing change, not a match.
-            for i in candidates:
-                if self.recorded[i].fp == fp and self.recorded[i].upstream == upstream:
+            if kind == MAIN:
+                candidates = [
+                    i for i, ex in enumerate(self.recorded)
+                    if ex.method == "POST" and ex.path == path and i not in self.consumed
+                ]
+                # Exact = same request on the same BACKEND: an identical body that
+                # arrives at the other model is a routing change, not a match.
+                for i in candidates:
+                    if self.recorded[i].fp == fp and self.recorded[i].upstream == upstream:
+                        self.consumed.add(i)
+                        return i, True
+                same_backend = [i for i in candidates if self.recorded[i].upstream == upstream]
+                main_first = ([i for i in same_backend if self.kind_of(i) == MAIN]
+                              or same_backend or candidates or [None])
+                pick = main_first[0]
+                if pick is not None:
+                    self.consumed.add(pick)
+                return pick, False
+            same = [i for i, ex in enumerate(self.recorded)
+                    if ex.method == "POST" and ex.path == path and ex.upstream == upstream
+                    and self.kind_of(i) == kind]
+            fresh = [i for i in same if i not in self.consumed]
+            for i in fresh:
+                if self.recorded[i].fp == fp:
                     self.consumed.add(i)
                     return i, True
-            same_backend = [i for i in candidates if self.recorded[i].upstream == upstream]
-            pick = (same_backend or candidates or [None])[0]
+            for i in same:
+                if self.recorded[i].fp == fp:   # a repeat of an answered side call
+                    return i, True
+            pick = fresh[0] if fresh else None
             if pick is not None:
                 self.consumed.add(pick)
             return pick, False
+
+    def owed(self) -> list[int]:
+        """Recorded completions no replayed request answered: every unconsumed
+        turn request, and every side call whose content was never asked (a
+        repeat the recording had and the replay did not make is not owed)."""
+        asked = {(self.recorded[i].upstream, self.recorded[i].fp) for i in self.consumed}
+        out = []
+        for i, ex in enumerate(self.recorded):
+            if ex.method != "POST" or ex.path not in COMPLETIONS_PATHS or i in self.consumed:
+                continue
+            if self.kind_of(i) != MAIN and (ex.upstream, ex.fp) in asked:
+                continue
+            out.append(i)
+        return out
 
     def probe(self, method: str, path: str, upstream: str, fp: str = "") -> Exchange | None:
         """Probes (every GET, and POSTs that are not completions) are answered

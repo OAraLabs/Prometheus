@@ -637,7 +637,7 @@ RECORDING_RULES = [
            labels=["primary", "primary", "alt"]), "one, two, three"),
       (_ev(steps=[_chat("one"), _chat("two"), _chat("three")],
            requests=SWITCH_REQS + SWITCH_REQS[1:2], labels=["primary", "primary", "alt", "primary"]),
-       "identical completion request")]),
+       "identical turn request")]),
     ("hosted_route", _ev(steps=[{"op": "model"}, _chat("Welcome to the harbor!")],
                          requests=HOSTED_REQ, labels=["hosted"]),
      [(_ev(steps=[{"op": "model"}, _chat("Welcome aboard!")], requests=HOSTED_REQ, labels=["hosted"]),

@@ -12,8 +12,8 @@ Run from a clone's root on the machine that reaches the primary.
   never appears on a command line or in output.
 - **Every other side** is answered by `parity.standin.StandIn` from the COMMITTED exchanges
   (`git show HEAD:…`), which the recording then overwrites in the working tree. A side named
-  by `--live-alt` goes to that URL instead. `model_switch` needs its alt live for the
-  session-title race; see docs on re-recording.
+  by `--live-alt` goes to that URL instead. A session title sent twice (the title race) is a
+  side call, answered by content on replay (parity/sidecalls.py), so it no longer refuses a sample.
 - **A new scenario** has no committed exchanges. `--standin-from NEW=RECORDED` answers its
   other sides' PROBES (the alt's boot-time /api/tags, /api/ps, /api/show) from RECORDED's
   committed exchanges and nothing else: a completion on a stand-in side is refused, since
