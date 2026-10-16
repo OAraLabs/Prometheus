@@ -127,6 +127,18 @@ def test_minimal_example_uses_an_enums_first_value():
     assert minimal_example({"properties": {"m": {"enum": ["x", "y"]}}, "required": ["m"]}) == {"m": "x"}
 
 
+def test_offered_for_run_reports_what_the_loop_sends(registry):
+    pinned = {"always_loaded": ["bash", "memory", "vault_search"]}
+    full, stubs = DynamicToolLoader(registry, pinned).offered_for_run(True)
+    assert set(full) == set(FULL_SCHEMA_TOOLS) & {t.name for t in registry.list_tools()}
+    assert "memory" in stubs and "vault_search" in stubs        # always_loaded decides nothing here
+    assert len(full) + len(stubs) == len(registry.list_tools())
+    names, none = DynamicToolLoader(registry, {**pinned, "local_catalog": "names"}).offered_for_run(True)
+    assert sorted(names) == ["bash", "memory", "vault_search"] and none == []
+    every, _ = DynamicToolLoader(registry, pinned).offered_for_run(False)
+    assert len(every) == len(registry.list_tools())          # a non-deferred (cloud) run: every schema
+
+
 def test_the_default_catalog_and_a_typo(caplog):
     reg = ToolRegistry()
     assert DynamicToolLoader(reg, {}).catalog_mode == DEFAULT_CATALOG == "stubs"

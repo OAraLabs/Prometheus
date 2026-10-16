@@ -1113,13 +1113,17 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # while the model was being offered 11 tools. A record that describes
     # the config instead of the runtime is CROSS-CUTTING §12, and the
     # upgrade harness caught it by reading this very line.
+    # Under local_catalog "stubs" a deferred run offers every tool (fix 3), so
+    # the line says how many go with a full schema and how many as stubs.
     _dl_cfg = config.get("tools", {}).get("deferred_loading") or {}
+    _full, _stubs = tool_loader.offered_for_run(True)
     logger.info(
-        "Tool advertisement baseline: %d always_loaded of %d registered "
-        "(deferred mode: %s)",
-        len(tool_loader.schemas_for_run(True)),
+        "Tool advertisement baseline: a deferred run offers %d of %d registered, "
+        "%d with a full schema and %d as stubs (deferred mode: %s, local_catalog: %s)",
+        len(_full) + len(_stubs),
         len(registry.list_tools()),
-        _dl_cfg.get("enabled", "auto"),
+        len(_full), len(_stubs),
+        _dl_cfg.get("enabled", "auto"), tool_loader.catalog_mode,
     )
 
     # Sprint 15 wiring fix: daemon was missing adapter, security_gate,

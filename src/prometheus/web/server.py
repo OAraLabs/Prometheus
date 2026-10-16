@@ -3853,9 +3853,15 @@ def create_app(
         cfg = _deferred_cfg()
         configured = _normalize_enabled(cfg.get("enabled", "auto"))
         loader, adapter = _tool_loader()
+        full = stubs = None
+        catalog_mode = getattr(loader, "catalog_mode", None)
         if loader is not None and hasattr(loader, "resolve_deferred"):
             effective, source = loader.resolve_deferred(adapter)
-            advertised = len(loader.schemas_for_run(effective))
+            if hasattr(loader, "offered_for_run"):
+                full, stubs = (len(x) for x in loader.offered_for_run(effective))
+                advertised = full + stubs
+            else:
+                advertised = len(loader.schemas_for_run(effective))
             total = len(loader.schemas_for_run(False))
         else:
             # Web-only mode (no agent loop wired): report config, not effect.
@@ -3865,9 +3871,15 @@ def create_app(
             "configured": configured,
             "effective": effective,
             "source": source,
+            # Tools the next run offers: every one under local_catalog
+            # "stubs" (full schema + stubs), the always_loaded set under "names".
             "advertised_count": advertised,
+            "full_schema_count": full,
+            "stub_count": stubs,
+            "local_catalog": catalog_mode,
             "total_tools": total,
             "always_loaded": list(cfg.get("always_loaded", [])),
+            "always_loaded_applies": catalog_mode == "names" if catalog_mode else None,
             # The UI must repeat this verbatim: nothing here is live-applied.
             "applies": "next run start",
         }

@@ -262,6 +262,19 @@ class DynamicToolLoader:
             return self._deferred_schemas()
         return self._registry.to_api_schema()
 
+    def offered_for_run(self, deferred: bool) -> tuple[list[str], list[str]]:
+        """(names with a full schema, names as stubs) that a run with this
+        deferral decision offers: what the loop sends, for the surfaces that
+        report it (the boot line, /api/tools/deferred). Under local_catalog
+        "stubs" a deferred run offers every tool, so always_loaded decides
+        nothing there."""
+        if deferred and self.catalog_mode == "stubs":
+            from prometheus.context.tool_stubs import catalog
+
+            block, stubs = catalog(self.schemas_for_run(False))
+            return [s["name"] for s in block if s["name"] not in stubs], sorted(stubs)
+        return [s["name"] for s in self.schemas_for_run(deferred)], []
+
     def active_schemas(
         self,
         task_description: str | None = None,

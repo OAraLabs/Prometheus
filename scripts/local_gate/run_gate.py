@@ -482,6 +482,7 @@ def main() -> None:
     ap.add_argument("--results")
     ap.add_argument("--timeout", type=float, default=420.0)
     ap.add_argument("--overhead", action="store_true", help="measure round 0 of the first scenario per component")
+    ap.add_argument("--project-file", help="a PROMETHEUS.md for the daemon's directory (live: the deploy checkout's)")
     args = ap.parse_args()
 
     checkout, work = Path(args.checkout).resolve(), Path(args.work).resolve()
@@ -501,8 +502,16 @@ def main() -> None:
                         str(Path(args.upstream_config).expanduser())], work / f"proxy-{args.label}.log", work,
                        dict(os.environ))
         time.sleep(2)
-        daemon = _start([str(checkout / ".venv" / "bin" / "python"), "scripts/daemon.py", "--config",
-                         str(work / "prometheus.yaml")], dlog, checkout, env)
+        # The daemon runs from a deploy-like directory, as live does from its
+        # deploy checkout: one PROMETHEUS.md, and no tool writes into the
+        # checkout under test.
+        deploy = work / "deploy"
+        deploy.mkdir(exist_ok=True)
+        if args.project_file:
+            (deploy / "PROMETHEUS.md").write_text(Path(args.project_file).read_text(encoding="utf-8"),
+                                                  encoding="utf-8")
+        daemon = _start([str(checkout / ".venv" / "bin" / "python"), str(checkout / "scripts" / "daemon.py"),
+                         "--config", str(work / "prometheus.yaml")], dlog, deploy, env)
         _wait_up(args.api_port, token, daemon)
         for name in args.scenarios.split(","):
             spec = SCENARIOS[name]
