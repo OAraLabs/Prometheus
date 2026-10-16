@@ -261,6 +261,7 @@ def cmd_sentinel() -> str:
 _LIMIT_SOURCE_TEXT = {
     "detected": "detected — the inference server reported it (/props n_ctx)",
     "model_override": "config — an explicit per-model override",
+    "known": "known — the vendor's documented window for this cloud model",
     "cloud_default": "config — cloud_default_limit (this model is not the local one)",
     "config": "config — context.effective_limit; a HINT, the server was not reached",
     "unknown": "unknown — nothing detected and nothing configured",
@@ -307,8 +308,14 @@ def cmd_context(
     config: dict[str, Any] | None = None,
     messages: list[Any] | None = None,
     tools_chars: int = 0,
+    reply_room: int | None = None,
 ) -> str:
     """Return context window usage text for the model SERVING this session.
+
+    The "Reply room" line is the ``max_tokens`` the session's requests ask
+    for, the number the compactor counts (providers/output_caps.reply_room).
+    *reply_room* is that figure from the loop itself, when the caller has it
+    (the web bridge); without it, it is resolved from *config*.
 
     *messages* is the live conversation. WITHOUT IT THIS COMMAND MEASURES
     NOTHING THAT MOVES. It used to take only the system prompt, compute
@@ -365,13 +372,15 @@ def cmd_context(
         if config is not None:
             budget = TokenBudget.from_loaded_config(
                 config, model=model_name, local_model=local_model,
-                detected_limit=detected_limit,
+                detected_limit=detected_limit, reply_room=reply_room,
             )
         else:
             budget = TokenBudget.from_config(
                 model=model_name, local_model=local_model,
                 detected_limit=detected_limit,
             )
+            if reply_room is not None:
+                budget.reserved_output = int(reply_room)
         reserved_output = budget.reserved_output
         limit_source = budget.limit_source
         # limit_source == "unknown" means effective_limit is a placeholder,
@@ -409,7 +418,7 @@ def cmd_context(
             log.debug("cmd_context: ledger write failed", exc_info=True)
 
         effective_limit = None
-        reserved_output = DEFAULT_RESERVED_OUTPUT
+        reserved_output = reply_room if reply_room is not None else DEFAULT_RESERVED_OUTPUT
         limit_source = "unknown"
 
     from prometheus.context.token_estimation import estimate_messages
@@ -428,7 +437,7 @@ def cmd_context(
     if effective_limit is None:
         lines += [
             "Window size:     unknown",
-            f"Reserved output: {reserved_output:,} tokens",
+            f"Reply room:      {reserved_output:,} tokens (max_tokens)",
             "",
             f"System prompt:   {prompt_tokens:,} tokens",
             _conversation_line(conversation_tokens, None),
@@ -440,7 +449,7 @@ def cmd_context(
         usage_pct = (in_use / available * 100) if available > 0 else 0
         lines += [
             f"Window size:     {effective_limit:,} tokens",
-            f"Reserved output: {reserved_output:,} tokens",
+            f"Reply room:      {reserved_output:,} tokens (max_tokens)",
             f"Available:       {available:,} tokens",
             "",
             f"System prompt:   {prompt_tokens:,} tokens",
@@ -1710,6 +1719,10 @@ class CommandContext:
     # Same two values create_app() receives; one detection, one resolution.
     local_model: str | None = None
     detected_limit: int | None = None
+    # The max_tokens this session's requests ask for, from the loop itself
+    # (engine/agent_loop.output_cap_for); None where the surface has no loop
+    # context, and /context then resolves it from config.
+    reply_room: int | None = None
     # Computer use (v1.1, the door): the task runner, or None when computer
     # use is off. Only /computer reads it. The web chat path carries no
     # person credential yet, so there /computer answers status and stop and
@@ -1751,6 +1764,7 @@ async def _fc_context(ctx: CommandContext, args: str) -> str:
         detected_limit=ctx.detected_limit,
         config=ctx.config,
         messages=ctx.session.get_messages() if ctx.session is not None else None,
+        reply_room=ctx.reply_room,
     )
 
 

@@ -23,6 +23,7 @@ CommandContext, so it tests in isolation.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -35,6 +36,8 @@ from prometheus.gateway.commands import (
     run_formatter_command,
     run_session_command,
 )
+
+log = logging.getLogger(__name__)
 
 # Registered in the Telegram gateway but NOT reachable yet: they mutate live
 # daemon state (model routing, the approval queue, benchmark/press/gepa/symbiote/
@@ -147,6 +150,16 @@ async def route_slash(content: str, ctx: CommandContext, *, operator: bool = Tru
     return SlashOutcome(handled=False)
 
 
+def _reply_room(loop_context: Any) -> int | None:
+    from prometheus.engine.agent_loop import output_cap_for
+
+    try:
+        return int(output_cap_for(loop_context))
+    except Exception:  # noqa: BLE001 — /context then resolves it from config
+        log.debug("reply room unavailable from the loop context", exc_info=True)
+        return None
+
+
 def build_command_context(
     loop_context: Any,
     config: dict | None = None,
@@ -181,6 +194,9 @@ def build_command_context(
     provider = getattr(loop_context, "provider", "")
     provider_str = getattr(provider, "value", None) or str(provider or "")
     return CommandContext(
+        # The loop's own reply room for its model: what /context reports and
+        # the request asks for are one number.
+        reply_room=_reply_room(loop_context),
         model_name=getattr(loop_context, "model", "") or "",
         model_provider=provider_str,
         system_prompt=getattr(loop_context, "system_prompt", "") or "",

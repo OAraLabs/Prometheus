@@ -113,7 +113,11 @@ class TestTokenBudget:
         )
         b = TokenBudget.from_config(config_path=str(config))
         assert b.effective_limit == 8000
-        assert b.reserved_output == 500
+        # The reply room is the request's max_tokens, not reserved_output.
+        from prometheus.providers.output_caps import DEFAULT_REPLY_TOKENS
+
+        assert b.reserved_output == DEFAULT_REPLY_TOKENS
+        assert TokenBudget.from_config(config_path=str(config), model="testmodel").reserved_output == DEFAULT_REPLY_TOKENS
 
     def test_from_config_model_override(self, tmp_path):
         config = tmp_path / "prometheus.yaml"

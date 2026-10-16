@@ -56,6 +56,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from prometheus.config.ephemeral import recorded_session_id
+from prometheus.context.model_keys import lookup
 from prometheus.context.budget import (
     LEGACY_FALLBACK_LIMIT,
     resolve_effective_limit,
@@ -218,7 +219,7 @@ def compaction_threshold_from_config(
     cfg = config or {}
     comp = cfg.get("compaction") or {}
     overrides = (cfg.get("context") or {}).get("model_overrides") or {}
-    entry = overrides.get(model) if model else None
+    entry = lookup(model, overrides)
     return resolve_threshold(
         effective_limit,
         global_pct=comp.get("threshold_pct", DEFAULT_THRESHOLD_PCT),
@@ -689,7 +690,7 @@ class ContextCompactor:
         return resolve_threshold(
             self.limit_for(model, backend),
             global_pct=self._threshold_pct,
-            model_entry=self._threshold_overrides.get(name) if name else None,
+            model_entry=lookup(name, self._threshold_overrides),
         )
 
     def _threshold_tokens(self, model: str | None = None) -> int:

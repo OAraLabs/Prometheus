@@ -14,11 +14,15 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from collections.abc import Mapping
 from typing import Any
 
+from prometheus.context.model_keys import override_key
 from prometheus.context.token_estimation import estimate_tokens
+
+log = logging.getLogger(__name__)
 
 # Last-resort figure for callers that must have *a* number. It is deliberately
 # NOT reachable from resolve_effective_limit(): a caller that cannot resolve a
@@ -31,7 +35,33 @@ DEFAULT_RESERVED_OUTPUT = 2000
 # not interpretable: 32768 from the server and 32768 from a config file that
 # happens to agree are different facts, and only the first survives a model
 # swap.
-LIMIT_SOURCES = ("model_override", "detected", "cloud_default", "config", "unknown")
+LIMIT_SOURCES = ("model_override", "detected", "known", "cloud_default", "config", "unknown")
+
+#: The sources that mean nothing measured or declared this window: a guess.
+#: ``/api/status`` reports ``fallback: true`` for them and the daemon warns.
+FALLBACK_SOURCES = ("cloud_default", "config", "unknown")
+
+#: Context windows of cloud models, from the vendor's own documentation, for a
+#: model with no override. Only vendor-confirmed figures go here (audit
+#: 2026-10-16): ``cloud_default_limit``'s 1,000,000 is twice grok-4.5's window
+#: (docs.x.ai: 500k) and four times kimi-k2.6's (Moonshot's model list: 256k).
+KNOWN_CLOUD_WINDOWS: dict[str, int] = {
+    "grok-4.5": 500_000,
+    "kimi-k2.6": 262_144,
+}
+
+_warned_cloud_default: set[str] = set()
+
+
+def _warn_cloud_default(model: str, limit: int) -> None:
+    """Say once per model that its window is the cloud default, not its own."""
+    if model in _warned_cloud_default:
+        return
+    _warned_cloud_default.add(model)
+    log.warning(
+        "context window for %r is cloud_default_limit (%d): no override and no known window. "
+        "Set context.model_overrides.%s.effective_limit to its real window.", model, limit, model,
+    )
 
 
 def _model_overrides(ctx: dict[str, Any]) -> dict[str, int]:
@@ -69,9 +99,12 @@ def resolve_effective_limit(
     Precedence, most specific first — the same order
     :meth:`ContextCompactor.limit_for` enforces:
 
-      1. an explicit per-model override — an operator said so
+      1. an explicit per-model override — an operator said so (matched by
+         id, or by GGUF file name: context/model_keys.py)
       2. the window the local server REPORTED, when *model* is the local one
-      3. ``cloud_default_limit`` for a session routed to a cloud provider
+      3. for a session routed to a cloud provider, the model's documented
+         window (:data:`KNOWN_CLOUD_WINDOWS`, source ``known``), else
+         ``cloud_default_limit``, with a warning once per model
       4. the configured global, which is a HINT: it is the right answer only
          while the backend is unreachable, and the wrong answer the moment
          the served model changes underneath it
@@ -101,8 +134,9 @@ def resolve_effective_limit(
     """
     overrides = _model_overrides(ctx)
 
-    if model and model in overrides:
-        return overrides[model], "model_override"
+    key = override_key(model, overrides)
+    if key is not None:
+        return overrides[key], "model_override"
 
     if backend:
         window = (detected or {}).get(backend)
@@ -137,9 +171,15 @@ def resolve_effective_limit(
 
         configured_cloud = ctx.get("cloud_default_limit", DEFAULT_CLOUD_LIMIT)
         try:
-            return int(configured_cloud), "cloud_default"
+            cloud_default = int(configured_cloud)
         except (TypeError, ValueError):
             return None, "unknown"
+        known = KNOWN_CLOUD_WINDOWS.get(model)
+        if known is not None:
+            # Never above the configured default: lowering it stays a cap.
+            return min(known, cloud_default), "known"
+        _warn_cloud_default(model, cloud_default)
+        return cloud_default, "cloud_default"
 
     configured = ctx.get("effective_limit")
     try:
@@ -157,7 +197,8 @@ class TokenBudget:
 
     Args:
         effective_limit:  Total token budget for this session (model context window).
-        reserved_output:  Tokens reserved for model output (subtracted from headroom).
+        reserved_output:  The reply room, subtracted from headroom: the request's
+                          ``max_tokens`` when built from config.
         model_overrides:  Per-model effective_limit overrides (from prometheus.yaml).
     """
 
@@ -224,8 +265,7 @@ class TokenBudget:
         load = load_config_file(
             config_path,
             subsystem="token_budget",
-            substituting=f"an unresolved window (limit_source='unknown', "
-                         f"reserved_output={DEFAULT_RESERVED_OUTPUT})",
+            substituting="an unresolved window (limit_source='unknown')",
             explicit=explicit,
         )
         ctx = load.section("context")
@@ -245,8 +285,15 @@ class TokenBudget:
         model: str | None = None,
         local_model: str | None = None,
         detected_limit: int | None = None,
+        reply_room: int | None = None,
     ) -> TokenBudget:
         """Same resolution as :meth:`from_config`, from an ALREADY-LOADED dict.
+
+        ``reserved_output`` is the reply room: the ``max_tokens`` a request to
+        *model* asks for (providers/output_caps.reply_room), the same number
+        the compactor counts. A caller that knows the exact figure (the web
+        bridge asks the loop) passes *reply_room*. ``context.reserved_output``
+        is no longer read (audit 2026-10-16).
 
         The daemon has the parsed prometheus.yaml in hand; re-reading it from
         disk would make the reported budget a second, independently-loaded
@@ -267,11 +314,18 @@ class TokenBudget:
             local_model=local_model,
             detected_limit=detected_limit,
         )
+        if reply_room is None:
+            from prometheus.providers.output_caps import reply_room as _reply_room
+
+            reply_room, _ = _reply_room(
+                config, model or "", local=bool(model) and model == local_model,
+                window=limit or 0, window_measured=_source == "detected",
+            )
         return cls(
             effective_limit=(
                 limit if limit is not None else LEGACY_FALLBACK_LIMIT
             ),
-            reserved_output=ctx.get("reserved_output", DEFAULT_RESERVED_OUTPUT),
+            reserved_output=int(reply_room),
             model_overrides=_model_overrides(ctx),
             limit_source=_source,
         )

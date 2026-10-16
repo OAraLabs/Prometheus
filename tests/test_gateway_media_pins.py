@@ -174,10 +174,14 @@ class TestTruncateForContextPins:
         assert adapter._truncate_for_context("short doc") == "short doc"
 
     def test_long_text_truncation_pin(self):
-        """Pin the exact truncation formula + suffix format."""
+        """Pin the exact truncation formula + suffix format.
+
+        The reply room is the request's max_tokens (output_caps.reply_room):
+        the default 4,096 for a model with no cap, not context.reserved_output."""
         import json
 
         from prometheus.context.token_estimation import estimate_tokens
+        from prometheus.providers.output_caps import DEFAULT_REPLY_TOKENS
 
         system_prompt = "You are Prometheus."
         registry = ToolRegistry()
@@ -185,7 +189,7 @@ class TestTruncateForContextPins:
             system_prompt=system_prompt,
             tool_registry=registry,
             prometheus_config={
-                "context": {"effective_limit": 3000, "reserved_output": 100},
+                "context": {"effective_limit": 9000, "reserved_output": 100},
             },
         )
         # No live provider → server_context_size is absent on AsyncMock?
@@ -197,8 +201,9 @@ class TestTruncateForContextPins:
 
         prompt_tokens = estimate_tokens(system_prompt)
         tool_tokens = len(json.dumps(registry.list_schemas())) // 4
-        overhead = prompt_tokens + tool_tokens + 100 + 500
-        max_doc_tokens = max(2000, 3000 - overhead)
+        overhead = prompt_tokens + tool_tokens + DEFAULT_REPLY_TOKENS + 500
+        max_doc_tokens = max(2000, 9000 - overhead)
+        assert max_doc_tokens > 2000, "precondition: the floor must not hide the reply room"
         doc_tokens = estimate_tokens(text)
         expected = text[: max_doc_tokens * 4] + (
             f"\n\n[... truncated to fit context window "

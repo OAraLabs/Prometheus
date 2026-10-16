@@ -126,10 +126,10 @@ def truncate_for_context(
     # config is lower than the detected window, this path deliberately stays
     # conservative about how much document text it admits.
     from prometheus.context.budget import (
-        DEFAULT_RESERVED_OUTPUT,
         LEGACY_FALLBACK_LIMIT,
         resolve_effective_limit,
     )
+    from prometheus.providers.output_caps import reply_room
 
     server_ctx = getattr(provider, "server_context_size", None)
     _model = (prometheus_config.get("model") or {}).get("model") or None
@@ -155,8 +155,11 @@ def truncate_for_context(
     schema_chars = len(json.dumps(tool_registry.list_schemas()))
     tool_tokens = schema_chars // 4  # rough char-to-token ratio
 
-    reserved_output = (prometheus_config.get("context") or {}).get(
-        "reserved_output", DEFAULT_RESERVED_OUTPUT
+    # The reply room is the request's max_tokens, the one rule /context and
+    # the compactor use too (providers/output_caps.reply_room).
+    reserved_output, _ = reply_room(
+        prometheus_config, _model or "", local=bool(server_ctx), provider=provider,
+        window=ctx_limit, window_measured=bool(server_ctx),
     )
     # overhead = system prompt + tools + output reserve + conversation buffer
     overhead = prompt_tokens + tool_tokens + reserved_output + 500

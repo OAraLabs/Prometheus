@@ -69,10 +69,14 @@ class TestTokenBudget:
     def test_reads_effective_limit_instead_of_the_24000_fallback(self, repo_config):
         from prometheus.context.budget import TokenBudget
 
+        from prometheus.providers.output_caps import DEFAULT_REPLY_TOKENS
+
         repo_config({"context": {"effective_limit": 72000, "reserved_output": 3000}})
         budget = TokenBudget.from_config()
         assert budget.effective_limit == 72000
-        assert budget.reserved_output == 3000
+        # The reply room is the request's max_tokens; context.reserved_output
+        # is no longer read (audit 2026-10-16).
+        assert budget.reserved_output == DEFAULT_REPLY_TOKENS
 
     def test_model_overrides_become_reachable(self, repo_config):
         """The whole precedence ladder was dead: with ``ctx = {}`` there were no
@@ -100,9 +104,11 @@ class TestTokenBudget:
     def test_absent_config_still_yields_24000(self, no_config):
         from prometheus.context.budget import TokenBudget
 
+        from prometheus.providers.output_caps import DEFAULT_REPLY_TOKENS
+
         budget = TokenBudget.from_config(model="anything")
         assert budget.effective_limit == 24000
-        assert budget.reserved_output == 2000
+        assert budget.reserved_output == DEFAULT_REPLY_TOKENS
 
 
 # ---------------------------------------------------------------------------

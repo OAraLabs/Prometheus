@@ -215,7 +215,6 @@ def _default_config(server: DetectedServer | None, model: str | None) -> dict[st
         },
         "context": {
             "effective_limit": 24000,
-            "reserved_output": 2000,
         },
         # The tri-state only: always_loaded stays out so the install follows
         # the shipped tool set (see above). The template also carries
