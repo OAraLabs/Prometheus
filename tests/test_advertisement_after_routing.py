@@ -110,7 +110,7 @@ def _router_to_local(registry) -> object:
 
 
 def _ctx(registry, *, ctx_session, router, telemetry, adapter):
-    # # local_catalog "names": the 0.9.12 catalog, whose always_loaded set this test is about (under the default "stubs" every tool is offered: tests/test_tool_stubs.py).
+    # local_catalog "names": the 0.9.12 catalog, whose always_loaded set this test is about (under the default "stubs" every tool is offered: tests/test_tool_stubs.py).
     loader = DynamicToolLoader(
         registry, {"enabled": "auto", "always_loaded": ["bash", "read_file"], "local_catalog": "names"}
     )

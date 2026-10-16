@@ -1897,6 +1897,9 @@ async def _run_loop(
                     "deferred_active": deferred_tools_active,
                     "source": deferred_source,
                     "advertised": len(tool_schema),
+                    # How many of those went as stubs (local_catalog "stubs"); 0 = all full.
+                    "stubs": len(_RUN_CATALOG.get().undescribed) if _RUN_CATALOG.get() is not None else 0,
+                    "catalog": _catalog_mode if deferred_tools_active else "full",
                     "registered_total": _registered_total,
                     "profile": getattr(active_profile, "name", None),
                 },
