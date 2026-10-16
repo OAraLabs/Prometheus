@@ -3,7 +3,8 @@
     .venv/bin/python scripts/parity/rerecord.py SCENARIO [SCENARIO ...] \\
         [--live-alt model_switch=http://127.0.0.1:11434] \\
         [--tolerate-c2 repaired_tool_call:alt --tolerate-c2 hosted_route:hosted] \\
-        [--tolerate-skill repaired_tool_call:alt=beacon-plate]
+        [--tolerate-skill repaired_tool_call:alt=beacon-plate] \\
+        [--tolerate-output-cap hosted_route:hosted]
 
 Run from a clone's root on the machine that reaches the primary.
 
@@ -21,6 +22,8 @@ Run from a clone's root on the machine that reaches the primary.
   system prompt, so a stand-in side would refuse every completion. Its stand-in also tries
   the request with exactly that line removed; the line is rendered from the builtin skill
   in this checkout, the way the prompt assembler renders it.
+- **A per-model output cap** (`--tolerate-output-cap SCENARIO:SIDE`) changes only a request's
+  `max_tokens`; its stand-in also tries the request with that put back to the old flat 4096.
 - **The hosted key.** The harness requires a key for a hosted side. It is given a fake one in
   its own variable (`PARITY_STANDIN_KEY`), which only ever reaches the stand-in; no real key
   is read.
@@ -56,7 +59,13 @@ from parity.instance import DEFAULT_ROOT  # noqa: E402
 from parity.model_server import COMPLETIONS_PATHS, Exchange  # noqa: E402
 from parity.runner import build_config, uses_hosted  # noqa: E402
 from parity.scenarios import BY_NAME  # noqa: E402
-from parity.standin import StandIn, c2_reverted, core_skill_line, without_core_skill  # noqa: E402
+from parity.standin import (  # noqa: E402
+    StandIn,
+    c2_reverted,
+    core_skill_line,
+    with_flat_output_cap,
+    without_core_skill,
+)
 
 FAKE_KEY_ENV = "PARITY_STANDIN_KEY"
 DEPLOY_CONFIG = Path("~/prometheus-deploy/config/prometheus.yaml").expanduser()
@@ -130,9 +139,11 @@ def builtin_core_skill_line(name: str) -> str:
     raise SystemExit(f"[rerecord] no builtin skill named {name}")
 
 
-def _tolerance(label: str, c2: set[str], skills: dict[str, str]):
-    if label in c2 and label in skills:
-        raise SystemExit(f"[rerecord] {label}: --tolerate-c2 and --tolerate-skill on one side")
+def _tolerance(label: str, c2: set[str], skills: dict[str, str], caps: set[str] | None = None):
+    if sum((label in c2, label in skills, label in (caps or set()))) > 1:
+        raise SystemExit(f"[rerecord] {label}: more than one tolerance on one side")
+    if label in (caps or set()):
+        return with_flat_output_cap
     if label in c2:
         return c2_reverted
     if label in skills:
@@ -142,7 +153,8 @@ def _tolerance(label: str, c2: set[str], skills: dict[str, str]):
 
 def record_one(name: str, primary_url: str, *, live_alt: str | None, tolerate: set[str],
                root: Path, seed: str | None = None,
-               skills: dict[str, str] | None = None) -> tuple[int, bool]:
+               skills: dict[str, str] | None = None,
+               caps: set[str] | None = None) -> tuple[int, bool]:
     """One attempt: (the harness's exit code, 0 = saved; whether the parity lock was held)."""
     exchanges = standin_exchanges(name, seed)
     # Whether a hosted side exists is the scenario's to say (the config this
@@ -150,7 +162,8 @@ def record_one(name: str, primary_url: str, *, live_alt: str | None, tolerate: s
     hosted = uses_hosted(build_config(cli.SRC_ROOT, BY_NAME[name]))
     labels = ["alt"] + (["hosted"] if hosted else [])
     skills = skills or {}
-    tolerances = {label: _tolerance(label, tolerate, skills) for label in labels}
+    caps = caps or set()
+    tolerances = {label: _tolerance(label, tolerate, skills, caps) for label in labels}
     standin = StandIn(exchanges, labels,
                       tolerate={k: fn for k, fn in tolerances.items() if fn is not None})
     standin.start()
@@ -167,6 +180,8 @@ def record_one(name: str, primary_url: str, *, live_alt: str | None, tolerate: s
             return "stand-in, C2-tolerant"
         if label in skills:
             return f"stand-in, tolerates the {skills[label]} line"
+        if label in caps:
+            return "stand-in, tolerates the per-model output cap"
         return strict
     sides = {"alt": "live" if live_alt else _side("alt")}
     if hosted:
@@ -190,6 +205,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tolerate-skill", action="append", default=[], metavar="SCENARIO:SIDE=NAME",
                     help="a stand-in side also matches with builtin core skill NAME's prompt "
                          "line removed")
+    ap.add_argument("--tolerate-output-cap", action="append", default=[], metavar="SCENARIO:SIDE",
+                    help="a stand-in side also matches with the request's max_tokens put back to "
+                         "the flat 4096 every request sent before per-model output caps")
     ap.add_argument("--standin-from", action="append", default=[], metavar="NEW=RECORDED",
                     help="a scenario with no committed trace: answer its other sides' probes "
                          "from RECORDED's committed exchanges, and refuse every completion")
@@ -209,6 +227,10 @@ def main(argv: list[str] | None = None) -> int:
         scen, side = where.split(":", 1)
         skill_tol.setdefault(scen, {})[side] = skill
         builtin_core_skill_line(skill)          # refuse a wrong name before anything starts
+    cap_tol: dict[str, set[str]] = {}
+    for item in args.tolerate_output_cap:
+        scen, side = item.split(":", 1)
+        cap_tol.setdefault(scen, set()).add(side)
     seeds = dict(item.split("=", 1) for item in args.standin_from)
     # Settled before anything is read or started: a mistake here costs nothing.
     for name in args.scenarios:
@@ -244,7 +266,8 @@ def main(argv: list[str] | None = None) -> int:
                   f"{datetime.now():%H:%M:%S}", flush=True)
             rc, lock_held = record_one(name, primary_url, live_alt=live.get(name),
                                        tolerate=tolerate.get(name, set()), root=args.root,
-                                       seed=seeds.get(name), skills=skill_tol.get(name))
+                                       seed=seeds.get(name), skills=skill_tol.get(name),
+                                       caps=cap_tol.get(name))
             if lock_held:
                 print("[rerecord] the parity lock is held by another run; waiting 60 s "
                       "(not an attempt)", flush=True)

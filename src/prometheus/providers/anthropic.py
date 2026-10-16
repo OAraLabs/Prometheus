@@ -35,6 +35,8 @@ from prometheus.providers.base import (
     ApiStreamEvent,
     ApiTextDeltaEvent,
     ModelProvider,
+    OUTPUT_LIMIT_STOPS,
+    reads_as_object,
 )
 
 log = logging.getLogger(__name__)
@@ -380,7 +382,10 @@ class AnthropicProvider(ModelProvider):
 
         # Build final ConversationMessage from collected blocks
         msg_content: list[Any] = []
-        for block in content_blocks:
+        unreadable: list[str] = []
+        last_tool_use = max(
+            (i for i, b in enumerate(content_blocks) if b.get("type") == "tool_use"), default=-1)
+        for position, block in enumerate(content_blocks):
             btype = block.get("type", "")
             if btype == "thinking":
                 # #333: persist the span (content_json carries it to every
@@ -427,9 +432,19 @@ class AnthropicProvider(ModelProvider):
                     raw_input = block.get("input") or {}
                     if not isinstance(raw_input, dict):
                         raw_input = {}
+                tool_use_id = block.get("id", f"toolu_{uuid4().hex}")
+                # The {} above stands in for arguments that could not be read:
+                # named so the loop answers the call instead of running it. So
+                # is the last call when max_tokens stopped the reply before any
+                # of its arguments arrived (ApiMessageCompleteEvent.unreadable_tool_calls).
+                if (partial and not reads_as_object(partial)) or (
+                    not partial and position == last_tool_use
+                    and stop_reason in OUTPUT_LIMIT_STOPS and not block.get("input")
+                ):
+                    unreadable.append(tool_use_id)
                 msg_content.append(
                     ToolUseBlock(
-                        id=block.get("id", f"toolu_{uuid4().hex}"),
+                        id=tool_use_id,
                         name=block.get("name", ""),
                         input=raw_input,
                     )
@@ -446,6 +461,7 @@ class AnthropicProvider(ModelProvider):
             ),
             stop_reason=stop_reason,
             served_model=served_model,
+            unreadable_tool_calls=tuple(unreadable),
         )
 
 

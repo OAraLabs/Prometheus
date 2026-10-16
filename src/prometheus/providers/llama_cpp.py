@@ -32,6 +32,7 @@ from prometheus.providers.stub import (
     RETRYABLE_STATUS_CODES,
     _build_openai_messages,
     _parse_assistant_message,
+    _unreadable_call_ids,
 )
 
 log = logging.getLogger(__name__)
@@ -982,5 +983,6 @@ class LlamaCppProvider(ModelProvider):
             ),
             stop_reason=finish_reason,
             dropped_malformed=dropped_malformed,
+            unreadable_tool_calls=_unreadable_call_ids(final_choice, finish_reason),
             served_model=served_model,
         )

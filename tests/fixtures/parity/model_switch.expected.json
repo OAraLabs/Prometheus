@@ -28,7 +28,7 @@
        }
       ]
      },
-     "is_trusted": false,
+     "is_trusted": true,
      "provenance": "user",
      "role": "assistant"
     }
@@ -91,7 +91,7 @@
        }
       ]
      },
-     "is_trusted": false,
+     "is_trusted": true,
      "provenance": "user",
      "role": "assistant"
     }
@@ -153,7 +153,7 @@
        }
       ]
      },
-     "is_trusted": false,
+     "is_trusted": true,
      "provenance": "user",
      "role": "assistant"
     }
@@ -741,7 +741,7 @@
      "rows": [
       [
        "desktop:parity-switch",
-       "Requesting the word one",
+       "one",
        "<time>"
       ]
      ]
@@ -1818,13 +1818,13 @@
          "stop_reason": "stop"
         }
        },
-       6221,
+       6220,
        2,
        0,
        "desktop:parity-switch",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4223,
+       4222,
        null,
        "<node>",
        "local",
@@ -1844,12 +1844,12 @@
         }
        },
        69,
-       6,
+       2,
        null,
        "desktop:parity-switch",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       15,
+       65,
        null,
        "<node>",
        "local",
@@ -1896,7 +1896,7 @@
          "stop_reason": "stop"
         }
        },
-       2729,
+       2728,
        2,
        0,
        "desktop:parity-switch",
@@ -1949,13 +1949,13 @@
          "stop_reason": "stop"
         }
        },
-       6265,
+       6264,
        2,
        0,
        "desktop:parity-switch",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6222,
+       6221,
        null,
        "<node>",
        "local",
@@ -2056,7 +2056,7 @@
        "<time>",
        "<time>",
        1,
-       6221,
+       6220,
        2,
        {
         "$json": [
@@ -2084,7 +2084,7 @@
        "<time>",
        "<time>",
        1,
-       2729,
+       2728,
        2,
        {
         "$json": [
@@ -2112,7 +2112,7 @@
        "<time>",
        "<time>",
        1,
-       6265,
+       6264,
        2,
        {
         "$json": [

@@ -295,3 +295,26 @@ def test_rerecord_renders_the_builtin_line_from_the_package():
     assert line in _rendered_core_lines()
     with pytest.raises(SystemExit):
         builtin_core_skill_line("no-such-skill")
+
+
+# ── the per-model output-cap tolerance (0.9.12) ──────────────────────────────
+
+def test_the_output_cap_tolerance_puts_back_only_max_tokens():
+    from parity.standin import FLAT_OUTPUT_CAP, with_flat_output_cap
+
+    committed = {"model": "claude-haiku-4-5", "max_tokens": FLAT_OUTPUT_CAP,
+                 "messages": [{"role": "user", "content": "hi"}]}
+    capped = dict(committed, max_tokens=16384)
+    assert [fingerprint(v) for v in with_flat_output_cap(capped)] == [fingerprint(committed)]
+    other = dict(capped, messages=[{"role": "user", "content": "hello"}])
+    assert fingerprint(committed) not in {fingerprint(v) for v in with_flat_output_cap(other)}
+    assert with_flat_output_cap(committed) == [], "an unchanged request needs no tolerance"
+    assert with_flat_output_cap({"model": "m"}) == []
+
+
+def test_rerecord_takes_one_tolerance_per_side():
+    import parity.rerecord as rerecord
+
+    assert rerecord._tolerance("hosted", set(), {}, {"hosted"}) is rerecord.with_flat_output_cap
+    with pytest.raises(SystemExit):
+        rerecord._tolerance("hosted", {"hosted"}, {}, {"hosted"})

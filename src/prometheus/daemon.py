@@ -61,6 +61,7 @@ from prometheus.telemetry.tracker import TELEMETRY_OFF_NOTE, ToolCallTelemetry
 from prometheus.tools.base import ToolRegistry
 from prometheus.web.bind import BindError, app_install_lan_guard, resolve_bind
 from prometheus.engine.fallback import build_fallback_target
+from prometheus.providers.output_caps import OutputCaps
 
 logger = logging.getLogger("prometheus.daemon")
 
@@ -618,6 +619,19 @@ def loop_ceiling_divergence(agent_loop: Any, loop_context: Any) -> list[tuple]:
                 None if b is _MISSING else b,
             ))
     return out
+
+
+def loop_tool_metadata_divergence(agent_loop: Any, loop_context: Any) -> list[str]:
+    """Tool-metadata keys one loop construction carries and the other does not.
+
+    The ``agent`` tool finds its spawner in the tool metadata, and so does the printing-press tool its
+    registry. #761 attached both to the AgentLoop only, so Beacon (the separately-built LoopContext) never
+    had a spawner. Empty when the two carry the same keys. Pure and module-level, like
+    :func:`loop_ceiling_divergence`, so it can be tested without running the daemon.
+    """
+    a = set(getattr(agent_loop, "_tool_metadata", None) or {})
+    b = set(getattr(loop_context, "tool_metadata", None) or {})
+    return sorted(a ^ b)
 
 
 def _loaded_config_path(explicit: str | None) -> str | None:
@@ -1358,6 +1372,9 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     agent_loop = AgentLoop(
         provider=provider,
         model=model_name,
+        # Each request asks for its model's output cap, not one flat 4096 (max_tokens is the default for a
+        # model the caps do not know). Built the same way for the web LoopContext below.
+        output_caps=OutputCaps.from_config(config),
         workspace_resolver=_session_workspace,
         boot_project_prompt=_boot_project_prompt,
         project_prompt_builder=_project_prompt_for,
@@ -2729,7 +2746,13 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 fallback=build_fallback_target(model_config, detected_model=model_name, registry=backend_registry),
                 system_prompt=system_prompt,
                 max_tokens=4096,
+                output_caps=OutputCaps.from_config(config),
                 tool_registry=registry,
+                # The SAME dict the AgentLoop's tools read, not a copy: the subagent spawner (#761) and the
+                # printing-press registry are attached there, and a Beacon turn built without them offered the
+                # `agent` tool and always answered "SubagentSpawner not configured". Sharing the object keeps a
+                # later attach reaching both loops. Checked at boot by loop_tool_metadata_divergence below.
+                tool_metadata=agent_loop._tool_metadata,
                 permission_checker=security_gate,
                 hook_executor=hook_executor,
                 adapter=adapter,
@@ -2925,7 +2948,15 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                             "ceiling divergence: telemetry write failed",
                             exc_info=True,
                         )
-            else:
+            _md_diverged = loop_tool_metadata_divergence(agent_loop, loop_context)
+            if _md_diverged:
+                logger.error(
+                    "LOOP TOOL-METADATA DIVERGENCE — the telegram/CLI loop and the web/Beacon loop "
+                    "give their tools different metadata, so a tool that needs one of these keys works "
+                    "on one surface and fails on the other: %s",
+                    ", ".join(_md_diverged),
+                )
+            if not _diverged:
                 logger.info(
                     "Loop ceilings agree across both constructions: "
                     "local=%s cloud=%s",

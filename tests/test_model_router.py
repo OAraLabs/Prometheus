@@ -554,7 +554,7 @@ class TestRuleAndFallbackFields:
 
         assert provider._base_url == "http://rule-host:9000/v1"
         assert provider._timeout == 7.5
-        assert provider._default_max_tokens == 1234
+        assert provider.route_max_tokens == 1234
         assert provider.supports_vision is True
 
     def test_rules_differing_only_in_key_get_their_own_providers(self, monkeypatch):

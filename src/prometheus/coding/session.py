@@ -134,6 +134,7 @@ class CodingSession:
         adapter: Any | None = None,
         telemetry: Any | None = None,
         max_tokens: int = 4096,
+        output_caps: Any | None = None,
         max_rounds: int = 30,
         max_wall_seconds: float = 1_200.0,
         suppress_thinking: bool | None = False,  # coding turns THINK by default
@@ -149,6 +150,7 @@ class CodingSession:
         self._adapter = adapter
         self._telemetry = telemetry
         self._max_tokens = max_tokens
+        self._output_caps = output_caps
         self._suppress_thinking = suppress_thinking
         self._acceptance_timeout = acceptance_timeout_seconds
         self._control = RunControl(control_dir)
@@ -305,6 +307,7 @@ class CodingSession:
                 self._task.description, self._task.acceptance_command
             ),
             max_tokens=self._max_tokens,
+            output_caps=self._output_caps,
             tool_registry=self._registry,
             adapter=self._adapter,
             telemetry=self._telemetry,

@@ -301,6 +301,24 @@ def _routed_path(scope: dict[str, Any]) -> str:
     return path
 
 
+
+def _wire_is_trusted(part: Any) -> bool:
+    """``is_trusted`` as the history API reports a row.
+
+    The flag says whether INJECTED material may be read as instructions; the
+    model only ever sees it on a user-role turn of non-user provenance
+    (engine/messages._needs_banner). Nothing sets it on the model's own replies,
+    so every assistant row since 2026-06-10 is stored with the dataclass default,
+    False, and Beacon badged every reply "untrusted". An assistant row of user
+    provenance, a reply in an ordinary exchange, is reported trusted. Every
+    other row is reported as stored: a tool result or an injected turn keeps
+    its False.
+    """
+    if getattr(part, "role", None) == "assistant" and (getattr(part, "provenance", "user") or "user") == "user":
+        return True
+    return bool(getattr(part, "is_trusted", True))
+
+
 def create_app(
     config: dict[str, Any],
     signal_bus: Any | None = None,
@@ -1666,7 +1684,8 @@ def create_app(
           and a client that renders role alone shows them as chat bubbles the human
           never typed. Filter or badge on ``provenance != "user"``. ``is_trusted``
           distinguishes machinery-authored injections (true) from third-party data
-          the model must treat as untrusted (false).
+          the model must treat as untrusted (false). An ordinary assistant reply is
+          always true (``_wire_is_trusted``); the stored flag is not set on those.
         * ``ordinal`` is ``turn_index``: the message's prompt position, unique within its
           session (docs/audits/LCM-TURN-INDEX-DUPLICATES.md). It orders a session the way
           the model saw it, which can differ from ``message_id`` order when a message
@@ -1778,7 +1797,7 @@ def create_app(
                 # this a client renders them as the user's own chat bubbles.
                 # "user" = a real human. See from_injected / Provenance.
                 "provenance": getattr(p, "provenance", "user") or "user",
-                "is_trusted": bool(getattr(p, "is_trusted", True)),
+                "is_trusted": _wire_is_trusted(p),
                 "timestamp": p.timestamp,
             }
             for p in parts

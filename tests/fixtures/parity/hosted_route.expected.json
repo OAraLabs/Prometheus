@@ -42,7 +42,7 @@
        }
       ]
      },
-     "is_trusted": false,
+     "is_trusted": true,
      "provenance": "user",
      "role": "assistant"
     }
@@ -460,7 +460,7 @@
      "rows": [
       [
        "desktop:parity-hosted",
-       "Friendly Parity Check Harbor",
+       "Harbor Doubts Software Parity Check",
        "<time>"
       ]
      ]
@@ -1525,7 +1525,7 @@
         }
        },
        105,
-       6,
+       9,
        null,
        "desktop:parity-hosted",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",

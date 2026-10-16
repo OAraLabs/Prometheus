@@ -423,7 +423,7 @@ class ProviderRegistry:
                 base_url=_resolve_base_url(config, provider_name),
                 api_key=api_key,
                 model=config.get("model", defaults.get("model", "")),
-                default_max_tokens=config.get("max_tokens", 4096),
+                route_max_tokens=config.get("max_tokens"),
                 timeout=config.get("timeout", 120.0),
                 # The registry is the only place that still knows which
                 # service this is; the provider instance cannot infer it.

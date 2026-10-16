@@ -30,6 +30,8 @@ from prometheus.providers.base import (
     ApiStreamEvent,
     ApiTextDeltaEvent,
     ModelProvider,
+    OUTPUT_LIMIT_STOPS,
+    reads_as_object,
 )
 
 log = logging.getLogger(__name__)
@@ -236,9 +238,11 @@ def _parse_assistant_message(
     flowed through as ``ToolUseBlock(name="")``). Each drop is recorded
     loudly via :func:`_record_malformed_entry`; the count is surfaced on
     ``ApiMessageCompleteEvent.dropped_malformed`` so the loop can give the
-    model structured feedback. A valid name with an empty/unparseable
-    arguments string is NOT dropped — no-arg tools legitimately stream
-    empty arguments; pydantic validation downstream judges those.
+    model structured feedback. A valid name with empty arguments is NOT
+    dropped — no-arg tools legitimately stream empty arguments. Unparseable
+    arguments are not dropped either: the block keeps ``{}`` and
+    :func:`_unreadable_call_ids` names it, so the loop answers it instead of
+    running the tool on arguments the model never sent.
     """
     content_blocks: list[Any] = []
     dropped = 0
@@ -266,19 +270,54 @@ def _parse_assistant_message(
             dropped += 1
             _record_malformed_entry(model, tc)
             continue
-        try:
-            args = json.loads(fn.get("arguments", "{}"))
-        except json.JSONDecodeError:
-            args = {}
+        raw_args = fn.get("arguments", "{}")
+        args: Any = {}
+        if isinstance(raw_args, dict):
+            args = raw_args
+        elif reads_as_object(raw_args) and isinstance(raw_args, str) and raw_args.strip():
+            args = json.loads(raw_args)
+        # Unreadable arguments still become ``{}`` on the block, which is what
+        # history keeps, but the call is named on
+        # ``ApiMessageCompleteEvent.unreadable_tool_calls`` (see
+        # :func:`_unreadable_call_ids`) and the loop never runs it. The id is
+        # written back onto the entry so that helper names this block's id.
         content_blocks.append(
             ToolUseBlock(
-                id=tc.get("id", f"toolu_{uuid4().hex}"),
+                id=tc.setdefault("id", f"toolu_{uuid4().hex}"),
                 name=name,
                 input=args,
             )
         )
 
     return ConversationMessage(role="assistant", content=content_blocks), dropped
+
+
+def _unreadable_call_ids(choice: dict[str, Any], finish_reason: str | None) -> tuple[str, ...]:
+    """``ApiMessageCompleteEvent.unreadable_tool_calls`` for an OpenAI-shape reply.
+
+    Run it on the same ``choice`` after :func:`_parse_assistant_message`, which
+    gives every entry the id its block carries. An entry is named when its
+    arguments do not read as a JSON object, and the reply's LAST entry also when
+    the output limit stopped the reply before any of its arguments arrived (a
+    finished call with no arguments streams nothing too, so empty alone is not
+    enough). An entry with no name names nothing: the parser dropped it as
+    malformed, so there is no block to answer.
+    """
+    entries = (choice.get("message") or {}).get("tool_calls") or []
+    named = [tc for tc in entries if isinstance((tc.get("function") or {}).get("name"), str)
+             and (tc.get("function") or {}).get("name", "").strip()]
+    out: list[str] = []
+    for position, tc in enumerate(named):
+        raw = (tc.get("function") or {}).get("arguments")
+        if not reads_as_object(raw):
+            out.append(str(tc.get("id", "")))
+        elif (
+            position == len(named) - 1
+            and finish_reason in OUTPUT_LIMIT_STOPS
+            and isinstance(raw, str) and not raw.strip()
+        ):
+            out.append(str(tc.get("id", "")))
+    return tuple(out)
 
 
 class StubProvider(ModelProvider):
@@ -432,4 +471,5 @@ class StubProvider(ModelProvider):
             ),
             stop_reason=finish_reason,
             dropped_malformed=dropped_malformed,
+            unreadable_tool_calls=_unreadable_call_ids(final_choice, finish_reason),
         )

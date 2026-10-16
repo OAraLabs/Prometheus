@@ -6,6 +6,7 @@ anthropic.AsyncAnthropic) with a proper ABC that any provider can implement.
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
@@ -66,9 +67,45 @@ class ApiMessageCompleteEvent:
     # string that stopped matching reality when the server was swapped.
     # None for providers that do not echo one; callers must tolerate that.
     served_model: str | None = None
+    # Ids of the tool_use blocks whose arguments did not read as a JSON object
+    # (the block carries ``{}`` in their place), plus the reply's last call when
+    # the output limit stopped the reply before any of its arguments arrived.
+    # The loop never runs these: it answers each with an error saying the call
+    # was cut off at the output limit, or that its arguments were not valid
+    # JSON. Before, the ``{}`` went to the tool, which answered "Field
+    # required", and the model, never told it had run out of room, sent the
+    # same oversized call again.
+    unreadable_tool_calls: tuple[str, ...] = ()
 
 
 ApiStreamEvent = ApiTextDeltaEvent | ApiMessageCompleteEvent
+
+# What each wire calls a reply the output limit stopped: OpenAI-shape servers
+# (the compatible clouds, llama.cpp, Ollama) say "length", Anthropic says
+# "max_tokens". Not every server says it: DashScope reported "tool_calls" on
+# five qwen3.8-max replies cut at 4096 inside a write_file call (2026-10-15), so
+# the loop also counts output tokens at the cap as a stop at the limit.
+OUTPUT_LIMIT_STOPS = frozenset({"length", "max_tokens"})
+
+
+def reads_as_object(raw_arguments: object) -> bool:
+    """Do a tool call's streamed arguments read as a JSON object?
+
+    A dict already is one (Ollama's native shape). Empty or whitespace counts:
+    a finished call with no arguments streams nothing and means ``{}``.
+    """
+    if isinstance(raw_arguments, dict):
+        return True
+    if raw_arguments is None:
+        return True
+    if not isinstance(raw_arguments, str):
+        return False
+    if not raw_arguments.strip():
+        return True
+    try:
+        return isinstance(json.loads(raw_arguments), dict)
+    except json.JSONDecodeError:
+        return False
 
 
 class ModelProvider(ABC):
@@ -91,6 +128,11 @@ class ModelProvider(ABC):
     # probe ran. It decides the adapter tier for a model the registry does not
     # list (WP-X.28). Same posture as ``supports_vision``: recorded, not assumed.
     tool_template: Any = None
+    # The route's own ``max_tokens`` from its config entry (slash_commands.<name>,
+    # a router.fallback entry), or None when it sets none. Not sent as is: the
+    # loop's output-cap resolver ranks it below a per-model override and clamps
+    # it to the model's maximum (providers/output_caps.py).
+    route_max_tokens: int | None = None
 
     async def detect_vision(self) -> bool:
         """Probe whether the provider supports vision. Override in subclasses."""

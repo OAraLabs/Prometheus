@@ -23,16 +23,16 @@
      "content_json": {
       "$json": [
        {
-        "id": "q677Tu0jxCqN6UqBlDgVUJZyVFo2cjoO",
+        "id": "hAocoRg9El2QX7iqrsmX9ec9jrYEOAFl",
         "input": {
-         "pattern": "**/*"
+         "pattern": "*"
         },
         "name": "glob",
         "type": "tool_use"
        }
       ]
      },
-     "is_trusted": false,
+     "is_trusted": true,
      "provenance": "user",
      "role": "assistant"
     },
@@ -43,7 +43,7 @@
        {
         "content": "inventory.txt",
         "is_error": false,
-        "tool_use_id": "q677Tu0jxCqN6UqBlDgVUJZyVFo2cjoO",
+        "tool_use_id": "hAocoRg9El2QX7iqrsmX9ec9jrYEOAFl",
         "type": "tool_result"
        }
       ]
@@ -57,7 +57,7 @@
      "content_json": {
       "$json": [
        {
-        "id": "1rzBDgxjLBoqlRaAhtQwAunM8PIxKJTB",
+        "id": "kmK3EzX9LEJHsLk0rPXftEQzIpqoGIjI",
         "input": {
          "path": "inventory.txt"
         },
@@ -66,7 +66,7 @@
        }
       ]
      },
-     "is_trusted": false,
+     "is_trusted": true,
      "provenance": "user",
      "role": "assistant"
     },
@@ -77,7 +77,7 @@
        {
         "content": "     1\twidgets: 7\n     2\tgears: 3\n     3\tsprockets: 11",
         "is_error": false,
-        "tool_use_id": "1rzBDgxjLBoqlRaAhtQwAunM8PIxKJTB",
+        "tool_use_id": "kmK3EzX9LEJHsLk0rPXftEQzIpqoGIjI",
         "type": "tool_result"
        }
       ]
@@ -87,22 +87,22 @@
      "role": "user"
     },
     {
-     "content": "There's one file in the directory: `inventory.txt`.\n\n**Sprockets: 11** (the file also lists 7 widgets and 3 gears).",
+     "content": "Files in the current directory:\n- `inventory.txt` (only file)\n\n**Sprockets: 11**",
      "content_json": {
       "$json": [
        {
-        "text": "There's one file in the directory: `inventory.txt`.\n\n**Sprockets: 11** (the file also lists 7 widgets and 3 gears).",
+        "text": "Files in the current directory:\n- `inventory.txt` (only file)\n\n**Sprockets: 11**",
         "type": "text"
        }
       ]
      },
-     "is_trusted": false,
+     "is_trusted": true,
      "provenance": "user",
      "role": "assistant"
     }
    ],
    "op": "chat",
-   "reply": "There's one file in the directory: `inventory.txt`.\n\n**Sprockets: 11** (the file also lists 7 widgets and 3 gears).",
+   "reply": "Files in the current directory:\n- `inventory.txt` (only file)\n\n**Sprockets: 11**",
    "session": "desktop:parity-tools"
   }
  ],
@@ -266,9 +266,9 @@
        {
         "$json": [
          {
-          "id": "q677Tu0jxCqN6UqBlDgVUJZyVFo2cjoO",
+          "id": "hAocoRg9El2QX7iqrsmX9ec9jrYEOAFl",
           "input": {
-           "pattern": "**/*"
+           "pattern": "*"
           },
           "name": "glob",
           "type": "tool_use"
@@ -292,7 +292,7 @@
          {
           "content": "inventory.txt",
           "is_error": false,
-          "tool_use_id": "q677Tu0jxCqN6UqBlDgVUJZyVFo2cjoO",
+          "tool_use_id": "hAocoRg9El2QX7iqrsmX9ec9jrYEOAFl",
           "type": "tool_result"
          }
         ]
@@ -312,7 +312,7 @@
        {
         "$json": [
          {
-          "id": "1rzBDgxjLBoqlRaAhtQwAunM8PIxKJTB",
+          "id": "kmK3EzX9LEJHsLk0rPXftEQzIpqoGIjI",
           "input": {
            "path": "inventory.txt"
           },
@@ -338,7 +338,7 @@
          {
           "content": "     1\twidgets: 7\n     2\tgears: 3\n     3\tsprockets: 11",
           "is_error": false,
-          "tool_use_id": "1rzBDgxjLBoqlRaAhtQwAunM8PIxKJTB",
+          "tool_use_id": "kmK3EzX9LEJHsLk0rPXftEQzIpqoGIjI",
           "type": "tool_result"
          }
         ]
@@ -354,16 +354,16 @@
        "desktop:parity-tools",
        5,
        "assistant",
-       "There's one file in the directory: `inventory.txt`.\n\n**Sprockets: 11** (the file also lists 7 widgets and 3 gears).",
+       "Files in the current directory:\n- `inventory.txt` (only file)\n\n**Sprockets: 11**",
        {
         "$json": [
          {
-          "text": "There's one file in the directory: `inventory.txt`.\n\n**Sprockets: 11** (the file also lists 7 widgets and 3 gears).",
+          "text": "Files in the current directory:\n- `inventory.txt` (only file)\n\n**Sprockets: 11**",
           "type": "text"
          }
         ]
        },
-       28,
+       20,
        "<time>",
        0,
        "user",
@@ -392,7 +392,7 @@
        ""
       ],
       [
-       "There's one file in the directory: `inventory.txt`.\n\n**Sprockets: 11** (the file also lists 7 widgets and 3 gears)."
+       "Files in the current directory:\n- `inventory.txt` (only file)\n\n**Sprockets: 11**"
       ]
      ]
     },
@@ -417,7 +417,7 @@
       [
        1,
        {
-        "$bytes_sha256": "71af6419f2fded1a",
+        "$bytes_sha256": "932fa7e598801a70",
         "len": 2
        }
       ],
@@ -438,8 +438,8 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "0f11f59816afb55e",
-        "len": 182
+        "$bytes_sha256": "555fd9eb87d56318",
+        "len": 120
        }
       ]
      ]
@@ -488,7 +488,7 @@
       [
        6,
        {
-        "$bytes_sha256": "83891d7fe85c33e5",
+        "$bytes_sha256": "e7cf46a078fed4fa",
         "len": 1
        }
       ]
@@ -639,7 +639,7 @@
      "rows": [
       [
        "desktop:parity-tools",
-       "Sprocket Count from Inventory",
+       "Checking Sprocket Count",
        "<time>"
       ]
      ]
@@ -1058,8 +1058,8 @@
        "0ac69752b6f71969",
        "prose",
        0,
-       115,
-       "There's one file in the directory: `inventory.txt`.\n\n**Sprockets: 11** (the file also lists 7 widgets and 3 gears).",
+       80,
+       "Files in the current directory:\n- `inventory.txt` (only file)\n\n**Sprockets: 11**",
        "agent",
        "beacon",
        null
@@ -1765,13 +1765,13 @@
          "stop_reason": "tool_calls"
         }
        },
-       6246,
-       27,
+       6245,
+       26,
        0,
        "desktop:parity-tools",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4245,
+       6201,
        null,
        "<node>",
        "local",
@@ -1790,13 +1790,13 @@
          "stop_reason": "tool_calls"
         }
        },
-       6292,
+       6290,
        26,
        1,
        "desktop:parity-tools",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6272,
+       6270,
        null,
        "<node>",
        "local",
@@ -1815,13 +1815,13 @@
          "stop_reason": "stop"
         }
        },
-       6362,
-       37,
+       6360,
+       28,
        2,
        "desktop:parity-tools",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6317,
+       6315,
        null,
        "<node>",
        "local",
@@ -1840,8 +1840,8 @@
          "stop_reason": "stop"
         }
        },
-       129,
-       7,
+       120,
+       6,
        null,
        "desktop:parity-tools",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1896,7 +1896,7 @@
        {
         "$json": {
          "input": {
-          "pattern": "**/*"
+          "pattern": "*"
          },
          "name": "glob"
         }
@@ -1952,7 +1952,7 @@
        "<node>",
        "<turn:1>",
        0,
-       "q677Tu0jxCqN6UqBlDgVUJZyVFo2cjoO",
+       "hAocoRg9El2QX7iqrsmX9ec9jrYEOAFl",
        null,
        null,
        0,
@@ -2048,7 +2048,7 @@
        "<node>",
        "<turn:1>",
        1,
-       "1rzBDgxjLBoqlRaAhtQwAunM8PIxKJTB",
+       "kmK3EzX9LEJHsLk0rPXftEQzIpqoGIjI",
        null,
        null,
        0,
@@ -2146,8 +2146,8 @@
        "<time>",
        "<time>",
        3,
-       18900,
-       90,
+       18895,
+       80,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"

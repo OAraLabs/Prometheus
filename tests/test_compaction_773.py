@@ -333,7 +333,9 @@ async def test_a_pass_aims_at_70_percent_of_the_line_not_just_under_it():
 
 def test_the_loop_passes_the_request_max_tokens_to_the_compactor():
     """The projected-overflow rule needs this request's output room; without the
-    argument it silently falls back to the fixed reserve."""
+    argument it silently falls back to the fixed reserve. Since per-model output
+    caps (0.9.12) that room is the model's own cap, the one _build_request sends;
+    tests/test_output_caps.py checks the two values agree on a real turn."""
     import inspect
 
     from prometheus.engine import agent_loop
@@ -341,7 +343,7 @@ def test_the_loop_passes_the_request_max_tokens_to_the_compactor():
     src = inspect.getsource(agent_loop._run_loop)
     call = src[src.index("context.compactor.apply("):]
     call = call[:call.index("\n            except Exception:")]
-    assert "max_tokens=context.max_tokens" in call
+    assert "max_tokens=_output_cap(context, context.model)" in call
 
 
 def test_the_daemon_reports_retired_keys_at_startup():
