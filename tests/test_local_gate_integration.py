@@ -106,9 +106,6 @@ def _passes(turn) -> list[dict]:
     return [p for p in turn.of("context_compaction") if p.get("stage") in ("start", "noop")]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "gate c on 0.9.12: the 8192 output cap moves the projected-overflow line to 24,576 minus the largest "
-    "recent result, so the session compacts while it is still under the 26,214 line"))
 def test_c_a_long_coding_session_does_not_compact_early(local, coding_turn):
     daemon, _ = local
     turn, _ = coding_turn

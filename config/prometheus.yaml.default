@@ -223,7 +223,7 @@ context:
   #
   # And how many tokens one reply may spend (the request's max_tokens). Each
   # model already gets its own cap: a table for the cloud models we know,
-  # 8192 for llama.cpp, 4096 for anything else, and never more than a quarter
+  # 4096 for anything else (llama.cpp included), and never more than a quarter
   # of a window a local server measured (providers/output_caps.py). Set this
   # to override that for one model; it is clamped to the vendor's maximum.
   #
