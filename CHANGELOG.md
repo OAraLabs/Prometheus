@@ -2,24 +2,62 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
-## 0.9.11 (2026-10-15)
+## 0.9.12 (2026-10-15)
 
-0.9.11 fixes coding mode on any repo whose code sits at the root: its search tools couldn't see root-level files. It's the one change since 0.9.10, released as a freeze exception.
+0.9.12 makes compaction count in the server's own tokens and retry once when a server says the prompt is too long, lets Beacon sessions use subagents, gives each model its own reply-size cap and refuses a tool call that the cap cut off, and fixes two smaller faults: `web_search` failing with a blank error, and Beacon badging every reply "untrusted". It also carries the one change from 0.9.11, which was tagged but never published. Read "Upgrading from 0.9.10": local sessions will compact more often, and the reply cap is no longer a flat 4096.
 
-### Coding mode sees files at the repo root (#802, fixes #801)
+### Compaction counts in the server's tokens, and retries once (#805)
+
+- **What went wrong.** On 2026-10-15 a Beacon session on a local model with a 32,768-token window reached 28,915 prompt tokens by llama.cpp's own count (88%) without compacting. The window was right and so was the threshold (26,214, which is 80%). The trigger compared them with a characters-divided-by-four estimate that reads low: a median of 1.067 against the server's count over 279 compactions on the reference install, and 1.19 to 1.32 on that session's web-search results. Past 32,768 llama.cpp refuses the request; since #716 that ends the turn with "too long… /reset", and the turn's work is lost. There have been 133 such refusals since August.
+- **Calibration.** After each round the loop tells the compactor what the provider counted for the prompt it sent (`usage.input_tokens`). The compactor keeps that ratio over its own estimate, per session; a session's first round borrows the model's last ratio. The ratio is clamped to 1.0 to 1.5: never below 1.0, because Ollama's `prompt_eval_count` leaves a cached prefix out and a low count must not make compaction fire later than before; never above 1.5, so one odd count, such as an image, can't shrink the window to nothing. It is used by the threshold, the projected-overflow rule, the pre-flight check, the fallback window check, and the summarizer's own chunk size. At a ratio of 1.0 every number is what it was, and a degraded round (another model served it) is skipped.
+- **Retry once on a "too long" refusal.** A `context_overflow` (llama.cpp, OpenAI-compatible and Anthropic shapes) carries the prompt's real size and the real window. The real size becomes a calibration observation, and the stated window is learned, which only ever lowers a window and lasts for the process. That covers a cloud model with an unlisted window, which was budgeted at 1,000,000 tokens and never compacted before the provider refused. The round then runs again with compaction seeing the prompt over the line, once per round. A second refusal, a degraded round, or no compactor ends the turn with the same explanation as before; if the pre-flight, now holding the server's numbers, sees that the compacted prompt still can't fit, it ends the turn without a second request. The retry is recorded as a `context_overflow_retry` row in `subsystem_runs`.
+- **Events.** `context_compaction` and `context_compaction_noop` now give token counts in the server's tokens, plus `calibration` and `tokens_before_estimated`.
+- **Not changed.** `/context` and Beacon's meter still show the bare estimate. A steer drained into the refused request isn't re-sent with the retry (the same as the degenerate-output retry). A learned window isn't saved; a restart forgets it until the next refusal.
+
+### Subagents work from Beacon (#806)
+
+- **The `agent` tool from Beacon, REST and WebSocket turns.** `run_daemon()` builds two loops. #761 and #762 attached the subagent spawner to the one that Telegram and the CLI use, but the web context that every Beacon turn runs on had no tool metadata at all, so from Beacon `agent` always answered "SubagentSpawner not configured". The printing-press registry was missing there the same way. The web context now gets the other loop's own metadata, not a copy.
+- **A boot check.** `loop_tool_metadata_divergence` logs an error if the two loops ever carry different keys.
+- **Unchanged.** A subagent runs on the daemon's primary model, as it already does from Telegram; a session's `/qwen` route does not carry over.
+
+### Each model gets its own reply cap; a cut-off tool call is refused and explained (#806)
+
+- **The cap.** `max_tokens` was hard-coded to 4096 for every request. It is now 4096 only for models Prometheus knows nothing about. The order is: `context.model_overrides.<model>.max_output_tokens`; the route's own `max_tokens` (which was ignored until now); a table of known cloud models (qwen3.8-max 16384, and 32768 for models that think inside the cap); 8192 for llama.cpp; then 4096. The result is clamped to the vendor's documented maximum. On a window a local server measured, one reply never asks for more than a quarter of it (32768 gives 8192, 16384 gives 4096). The compactor's projected-overflow rule plans around the cap actually sent. It is wired into both daemon loops, the CLI and coding runs.
+- **A cut-off tool call is never run.** On 2026-10-15 a Beacon session on qwen3.8-max wrote a report into `write_file` and `bash` over five rounds, and each call arrived as `{}`, until the circuit breaker ended the turn. Providers now name every call whose arguments don't read as a JSON object, and the loop never runs one. If the reply ended at the limit, the model is told the call was cut off at N tokens, that nothing ran, and to send it in smaller pieces. "Ended at the limit" means the stop reason says so, or the output tokens reached the cap; the second signal matters because DashScope reported `finish_reason: tool_calls` on all five cut replies. A call with unreadable arguments in a reply that ended normally is refused as "not valid JSON, not run". These refusals stay out of the repeat guard, so a second cut call isn't blocked as a repeat of the first `{}`.
+- **Replaces #685.** That pull request is superseded; its tests are carried over.
+
+### `web_search` names the error and retries once (#806)
+
+- The tool printed only the exception's text, and several httpx errors have an empty one, so every failure read "web_search failed: " with nothing after it. The failures took 60 to 125 ms, against 600 to 900 ms for a good search, and on a scratch daemon the next try a second later worked.
+- It now reads `web_search failed: ReadError (tried 2 times)`, after one retry with a 1 s pause.
+
+### Beacon no longer badges every reply "untrusted" (#806)
+
+- `ConversationMessage.is_trusted` defaults to false and nothing set it on the model's own replies, so every assistant row since 2026-06-10 is stored as untrusted and Beacon badged every reply that way. `GET /api/sessions/{id}/messages` now reports an assistant reply of user provenance as trusted and every other row as stored. There is no migration, and the model never saw the difference: its untrusted banner applies only to user-role turns of non-user provenance.
+
+### Coding mode sees files at the repo root (#802, fixes #801; first tagged as 0.9.11)
 
 - **`code_glob` and `code_grep` now match `**/` against zero directories, too.** They read `**/` as "at least one directory", so `**/*.py` never listed `export.py` at the root, `code_grep`'s default `**/*` never searched a root-level file, and `src/**/*.py` missed the files directly under `src/`. In the runs reported in #801, a model that could see only the test file rewrote it and broke it.
-- Only matches are added: everything else about the patterns is unchanged (`*` still spans `/`, and `?` and `[...]` work as before).
-- The tools' descriptions are unchanged. Their examples still read `src/**/*.py`, which now also matches files directly under `src/`.
+- Only matches are added: everything else about the patterns is unchanged (`*` still spans `/`, and `?` and `[...]` work as before). The tools' descriptions are unchanged.
 
 ### Upgrading from 0.9.10
 
-- Nothing to do. A coding run's `code_glob` and `code_grep` can now return more files than before, never fewer.
+- **Local sessions will compact more often.** On a 32k window about 19k tokens are the system prompt and tool schemas before any conversation, so the 80% line leaves about 7k tokens of real conversation. That is what 80% means once it is measured in the server's units. If it proves too eager, `compaction.threshold_pct`, or a per-model `compaction_threshold_pct`, is the knob. No config change is needed.
+- **The reply cap changed for every request.** A llama.cpp model now asks for up to 8192 tokens (and no more than a quarter of a measured window), a known cloud model gets its table value, and an unknown model keeps 4096. A route that sets its own `max_tokens` now has it honoured. Set `context.model_overrides.<model>.max_output_tokens` to pin one model's cap; `config/prometheus.yaml.default` has a commented example.
+- **Two fields changed on the wire.** `context_compaction` and `context_compaction_noop` carry server-token counts plus `calibration` and `tokens_before_estimated`, and `GET /api/sessions/{id}/messages` reports an assistant reply as `is_trusted: true`. A client that ignores fields it doesn't know is unaffected.
+- **A coding run's `code_glob` and `code_grep` can return more files than before,** never fewer.
 
 ### Known issues
 
+- **A call the cap cuts off can still end the turn.** The circuit breaker counts repeated cut-off refusals like repeated malformed calls: three in a row trip it, and on a local model its remedy is to raise the adapter tier, which doesn't help with length. A model that keeps sending an oversized call may end the turn instead of sending smaller pieces. Not changed here, because loosening the breaker is a gate decision.
+- **Cut-off checking has gaps.** It doesn't cover a call that a local adapter extracts from text, a subagent still runs with a flat 4096-token cap, and MiMo documents `max_completion_tokens`, not the `max_tokens` we send, so our cap may not apply there (#688).
+- **A daemon started with `--config <path>` outside the search path does not hand that path on (#799, #800).** A managed coding run is accepted and then refuses with "coding mode is disabled" (#799). The `prometheus.jobs.daily_briefing` cron job reads its config through the search path instead (#800; found by reading the source, not yet seen in a run). An install whose config is at `config/prometheus.yaml` in the checkout or at `~/.prometheus/prometheus.yaml` is unaffected.
 - **The memory extractor can save no facts, silently, when the model pretty-prints its JSON (#798).** Each extraction call is recorded as a success and nothing is parsed, so no new facts are saved and the wiki doesn't grow. Seen with a 7B model on Ollama. The log line `MemoryExtractor: persisted 0 memories from N messages` is the only sign.
 - The known issues listed for 0.9.10 still apply.
+
+## 0.9.11
+
+0.9.11 was tagged (`v0.9.11`) but never published: there is no release, wheel or app for it. Its one change, the `**/` fix for `code_glob` and `code_grep` (#802), is in 0.9.12.
 
 ## 0.9.10 (2026-10-14)
 
