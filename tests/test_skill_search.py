@@ -104,11 +104,12 @@ class TestSkillSearch:
 
     @pytest.mark.asyncio
     async def test_select_nonexistent_shows_skills(self, tool, ctx):
-        result = await tool.execute(ToolSearchInput(query="nonexistent", action="select"), ctx)
+        # A miss lists the 5 closest names (audit 2026-10-16, fix 4), a skill
+        # among them when one matches the query.
+        result = await tool.execute(ToolSearchInput(query="docker deployment", action="select"), ctx)
         assert result.is_error
         data = json.loads(result.output)
-        # Available list should include skills
-        assert any("[skill]" in item for item in data["available"])
+        assert "[skill] docker-deploy" in data["closest"] and len(data["closest"]) <= 5
 
     @pytest.mark.asyncio
     async def test_empty_query_lists_skills(self, tool, ctx):
