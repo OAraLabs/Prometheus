@@ -66,6 +66,7 @@ class LCMGrepTool(BaseTool):
         "Returns matching messages and/or summary nodes ranked by relevance."
     )
     input_model = LCMGrepInput
+    find_me = ("search conversation history", "full-text search past messages")
 
     def is_read_only(self, arguments: LCMGrepInput) -> bool:
         return True

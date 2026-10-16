@@ -43,6 +43,7 @@ class GlobTool(BaseTool):
     name = "glob"
     description = "List files matching a glob pattern."
     input_model = GlobToolInput
+    find_me = ("find files by name pattern", "list files matching a glob")
     example_call = {"pattern": "**/*.py"}
 
     def __init__(self, denied_paths=None) -> None:

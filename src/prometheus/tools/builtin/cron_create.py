@@ -54,6 +54,7 @@ class CronCreateTool(BaseTool):
         "or 'in 30 minutes'. Jobs are executed by the Prometheus cron scheduler."
     )
     input_model = CronCreateToolInput
+    find_me = ("schedule a recurring job", "create a cron job")
 
     async def execute(
         self,

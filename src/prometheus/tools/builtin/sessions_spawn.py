@@ -37,6 +37,7 @@ class SessionsSpawnTool(BaseTool):
         "Returns the session/task ID for tracking."
     )
     input_model = SessionsSpawnInput
+    find_me = ("start a background agent session", "spawn an agent session")
 
     async def execute(
         self, arguments: SessionsSpawnInput, context: ToolExecutionContext

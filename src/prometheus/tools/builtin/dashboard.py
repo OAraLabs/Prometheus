@@ -150,6 +150,7 @@ class DashboardTool(BaseTool):
         "case the URL names the Tailscale or LAN address."
     )
     input_model = DashboardInput
+    find_me = ("serve an HTML dashboard", "show HTML in a local web page")
 
     #: Class-level so a second DashboardTool instance still finds — and can
     #: stop — a server the first one started on the same port.

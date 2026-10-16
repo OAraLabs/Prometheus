@@ -35,6 +35,7 @@ class SymbioteHarvestTool(BaseTool):
         "relevant modules. Requires Trust Level 1 approval upstream."
     )
     input_model = SymbioteHarvestInput
+    find_me = ("harvest code from a GitHub repository", "clone and scan an approved repository")
     example_call = {"candidate": "owner/repo"}
 
     def is_read_only(self, arguments: BaseModel) -> bool:

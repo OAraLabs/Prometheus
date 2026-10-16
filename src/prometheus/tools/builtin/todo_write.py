@@ -33,6 +33,7 @@ class TodoWriteTool(BaseTool):
     name = "todo_write"
     description = "Append a TODO item to a project markdown checklist."
     input_model = TodoWriteToolInput
+    find_me = ("add a TODO item", "append to a checklist")
 
     async def execute(self, arguments: TodoWriteToolInput, context: ToolExecutionContext) -> ToolResult:
         # CONFINEMENT. `path` is documented as RELATIVE to the working

@@ -27,6 +27,7 @@ class McpStatusTool(BaseTool):
     name = "mcp_status"
     description = "Show MCP server connection status and available tools."
     input_model = McpStatusInput
+    find_me = ("show MCP server status", "list MCP servers and their tools")
 
     def __init__(self, runtime: McpRuntime) -> None:
         self._runtime = runtime

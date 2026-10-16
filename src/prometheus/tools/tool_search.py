@@ -82,6 +82,39 @@ def skill_match_score(query: str, name: str, description: str) -> float:
     return hits / len(words)
 
 
+def _name_words(text: str) -> list[str]:
+    """*text*'s words as a tool name spells them (``cron_create`` -> cron, create)."""
+    return [w for w in re.split(r"[^a-z0-9]+", text.lower()) if w]
+
+
+def _contains_run(words: list[str], run: list[str]) -> bool:
+    n = len(run)
+    return any(words[i:i + n] == run for i in range(len(words) - n + 1))
+
+
+def find_me_score(query_lower: str, queries: tuple[str, ...]) -> float | None:
+    """How well *query_lower* matches a tool's ``find_me`` queries (lower is
+    better), or None when it does not: the query itself 0.25, one inside the
+    other 0.5, else at least 60% of a declared query's words (3+ letters,
+    stopwords out, a 4+ letter word may begin one) between 1.0 and 1.2."""
+    best: float | None = None
+    for declared in queries:
+        d = declared.lower().strip()
+        if not d:
+            continue
+        if query_lower.strip() == d:
+            score = 0.25
+        elif len(query_lower.strip()) >= 4 and (d in query_lower or query_lower.strip() in d):
+            score = 0.5
+        else:
+            share = skill_match_score(d, "", query_lower)
+            if share < 0.6:
+                continue
+            score = 1.5 - share / 2
+        best = score if best is None else min(best, score)
+    return best
+
+
 # ---------------------------------------------------------------------------
 # Input model
 # ---------------------------------------------------------------------------
@@ -114,6 +147,7 @@ class ToolSearchTool(BaseTool):
         "load a specific tool by exact name. Use the skill tool to load a skill's instructions."
     )
     input_model = ToolSearchInput
+    find_me = ("find a tool by description", "load a deferred tool")
 
     def __init__(self) -> None:
         self._registry: ToolRegistry | None = None
@@ -157,13 +191,16 @@ class ToolSearchTool(BaseTool):
     # -- action handlers ----------------------------------------------------
 
     def _handle_select(self, name: str) -> ToolResult:
-        """Exact-name lookup; return the full schema for one tool or skill."""
+        """Name lookup; return the full schema for one tool or skill.
+
+        An exact name, else a near miss ("select cron_create", "cron create",
+        "agent explorer"): the one tool whose name, as words, appears whole in
+        the query (the longest when names nest, as ``grep`` in ``lcm_grep``).
+        Two candidates resolve nothing. A miss lists the 5 closest names."""
         assert self._registry is not None
         tool = self._registry.get(name)
         if tool is not None:
-            result = tool.to_api_schema()
-            result["type"] = "tool"
-            return ToolResult(output=json.dumps(result, indent=2))
+            return self._tool_schema(tool)
 
         # Check skills
         if self._skill_registry is not None:
@@ -178,13 +215,52 @@ class ToolSearchTool(BaseTool):
                     "hint": f'Use skill(name="{skill.name}") to load full instructions.',
                 }, indent=2))
 
-        available = sorted(t.name for t in self._registry.list_tools())
-        if self._skill_registry is not None:
-            available.extend(f"[skill] {s.name}" for s in self._skill_registry.list_skills())
+        # After both exact lookups, so a skill named like a tool stays the skill.
+        near = self._near_miss(name)
+        if near is not None:
+            return self._tool_schema(near, resolved_from=name)
+
         return ToolResult(
-            output=json.dumps({"error": f"No tool or skill named '{name}'.", "available": available}, indent=2),
+            output=json.dumps({
+                "error": f"No tool or skill named '{name}'.",
+                "closest": self._closest(name),
+                "hint": "Select one of these by its exact name, or use action 'search' with a description.",
+            }, indent=2),
             is_error=True,
         )
+
+    @staticmethod
+    def _tool_schema(tool: BaseTool, resolved_from: str | None = None) -> ToolResult:
+        result = tool.to_api_schema()
+        result["type"] = "tool"
+        if resolved_from is not None:
+            result["resolved_from"] = resolved_from
+        return ToolResult(output=json.dumps(result, indent=2))
+
+    def _near_miss(self, query: str) -> BaseTool | None:
+        """The one tool a near-miss *query* names (see :meth:`_handle_select`)."""
+        assert self._registry is not None
+        words = _name_words(query)
+        if not words:
+            return None
+        hits = [(len(run), t) for t in self._registry.list_tools()
+                if (run := _name_words(t.name)) and _contains_run(words, run)]
+        if not hits:
+            return None
+        longest = max(n for n, _ in hits)
+        best = [t for n, t in hits if n == longest]
+        return best[0] if len(best) == 1 else None
+
+    def _closest(self, query: str, limit: int = 5) -> list[str]:
+        """The *limit* names nearest *query*: what a miss lists instead of every
+        tool and skill (all of them came to ~1,700 tokens)."""
+        assert self._registry is not None
+        q = query.lower()
+        scored = [(self._score_tool(t, q), t.name) for t in self._registry.list_tools()]
+        if self._skill_registry is not None:
+            scored += [(self._score_skill(s, q), f"[skill] {s.name}") for s in self._skill_registry.list_skills()
+                       if skill_match_score(query, s.name, s.description) >= SKILL_MIN_MATCH]
+        return [n for _, n in sorted(scored)[:limit]]
 
     def _handle_search(self, query: str) -> ToolResult:
         """Fuzzy search across tool names, descriptions, AND skill names/descriptions."""
@@ -253,9 +329,17 @@ class ToolSearchTool(BaseTool):
         if query_lower == name_lower:
             return 0.0
 
+        # One of the plain-language requests the tool declares it answers.
+        declared = find_me_score(query_lower, tuple(getattr(tool, "find_me", ()) or ()))
+        if declared is not None and declared < 1.0:
+            return declared
+
         # Substring in name
         if query_lower in name_lower:
             return 1.0
+
+        if declared is not None:
+            return declared
 
         # Substring in description
         if query_lower in desc_lower:

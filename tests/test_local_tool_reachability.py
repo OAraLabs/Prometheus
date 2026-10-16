@@ -271,14 +271,12 @@ def test_access_tool_is_found_called_run_and_its_result_reaches_the_client(reach
 
 
 @pytest.mark.parametrize("tool", [t for t in TOOLS if not t.startswith("mcp__")])
-@pytest.mark.xfail(strict=True, reason="choice on 0.9.12: no tool declares find_me queries")
 def test_choice_tool_declares_one_or_two_find_me_queries(tool):
     queries = INVENTORY[tool]["find_me"]
     assert 1 <= len(queries) <= 2, f"tool {tool} declares {len(queries)} find_me queries next to its definition"
 
 
 @pytest.mark.parametrize("tool", [t for t in TOOLS if not t.startswith("mcp__")])
-@pytest.mark.xfail(strict=True, reason="choice on 0.9.12: no tool declares find_me queries to rank")
 def test_choice_tool_is_findable_by_its_own_description(tool):
     ranks = INVENTORY[tool]["ranks"]
     assert ranks, f"tool {tool} not findable by its own description: it declares no find_me queries"
@@ -287,7 +285,6 @@ def test_choice_tool_is_findable_by_its_own_description(tool):
 
 
 @pytest.mark.parametrize("tool", [t for t in TOOLS if not t.startswith("mcp__")])
-@pytest.mark.xfail(strict=True, reason="choice on 0.9.12: select is exact-name only")
 def test_choice_near_miss_names_resolve_to_the_tool(tool):
     near = INVENTORY[tool]["near"]
     unresolved = sorted(m for m, ok in near.items() if not ok)

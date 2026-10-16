@@ -32,6 +32,7 @@ class FileReadTool(BaseTool):
     name = "read_file"
     description = "Read a text file from the local repository."
     input_model = FileReadToolInput
+    find_me = ("read a file", "show the contents of a file")
     example_call = {"path": "/path/to/file"}
 
     def is_read_only(self, arguments: FileReadToolInput) -> bool:

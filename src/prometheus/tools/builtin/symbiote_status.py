@@ -33,6 +33,7 @@ class SymbioteStatusTool(BaseTool):
         "Optionally include the most recent N past sessions."
     )
     input_model = SymbioteStatusInput
+    find_me = ("show SYMBIOTE session state", "check symbiote progress")
     example_call = {}
 
     def is_read_only(self, arguments: BaseModel) -> bool:

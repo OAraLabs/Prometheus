@@ -131,6 +131,7 @@ class TaskCreateTool(BaseTool):
         "have the agent act on the result. Returns a task id immediately."
     )
     input_model = TaskCreateToolInput
+    find_me = ("start a long-running background task", "run a job in the background")
 
     async def execute(
         self, arguments: TaskCreateToolInput, context: ToolExecutionContext

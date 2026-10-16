@@ -53,6 +53,7 @@ class AnatomyTool(BaseTool):
         "VRAM, services, project configurations, and architecture diagrams."
     )
     input_model = AnatomyInput
+    find_me = ("show the hardware and the loaded model", "check GPU VRAM use")
 
     def is_read_only(self, arguments: BaseModel) -> bool:
         action = getattr(arguments, "action", "status")

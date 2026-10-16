@@ -45,6 +45,7 @@ class TTSTool(BaseTool):
         "Returns the path to the generated audio file."
     )
     input_model = TTSInput
+    find_me = ("convert text to speech", "read text aloud")
 
     async def execute(
         self, arguments: TTSInput, context: ToolExecutionContext

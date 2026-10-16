@@ -59,6 +59,7 @@ class GrepTool(BaseTool):
     name = "grep"
     description = "Search file contents with a regular expression."
     input_model = GrepToolInput
+    find_me = ("search file contents with a regex", "find text in files")
     example_call = {"pattern": "TODO", "root": "."}
 
     def __init__(self, denied_paths=None) -> None:

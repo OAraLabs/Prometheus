@@ -50,6 +50,7 @@ class NotebookEditTool(BaseTool):
         "and creates the notebook if it doesn't exist."
     )
     input_model = NotebookEditInput
+    find_me = ("edit a Jupyter notebook cell", "append a cell to an ipynb")
 
     async def execute(
         self, arguments: NotebookEditInput, context: ToolExecutionContext

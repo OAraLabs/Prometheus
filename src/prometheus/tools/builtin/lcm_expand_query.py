@@ -53,6 +53,7 @@ class LCMExpandQueryTool(BaseTool):
         "that may have been compressed by LCM."
     )
     input_model = LCMExpandQueryInput
+    find_me = ("answer from compressed conversation history", "expand history relevant to a question")
 
     def is_read_only(self, arguments: LCMExpandQueryInput) -> bool:
         return True

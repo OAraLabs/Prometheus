@@ -23,6 +23,7 @@ class TaskUpdateTool(BaseTool):
     name = "task_update"
     description = "Update a task's description, progress percentage, or status note."
     input_model = TaskUpdateToolInput
+    find_me = ("update a task's progress", "set a task status note")
 
     async def execute(self, arguments: TaskUpdateToolInput, context: ToolExecutionContext) -> ToolResult:
         del context

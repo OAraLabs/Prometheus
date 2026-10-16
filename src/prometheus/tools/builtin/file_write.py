@@ -42,6 +42,7 @@ class FileWriteTool(BaseTool):
         "(e.g. pandoc, python-docx, libreoffice) — do not refuse these formats."
     )
     input_model = FileWriteToolInput
+    find_me = ("write a new file", "create or overwrite a file")
     example_call = {"path": "/path/to/file", "content": "file contents"}
 
     async def execute(

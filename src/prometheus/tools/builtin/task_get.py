@@ -20,6 +20,7 @@ class TaskGetTool(BaseTool):
     name = "task_get"
     description = "Get the status and details for a background task."
     input_model = TaskGetToolInput
+    find_me = ("get a background task's status", "check on a task")
 
     def is_read_only(self, arguments: TaskGetToolInput) -> bool:
         del arguments

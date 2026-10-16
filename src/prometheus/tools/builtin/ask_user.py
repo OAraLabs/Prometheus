@@ -27,6 +27,7 @@ class AskUserTool(BaseTool):
         "Use when you need clarification before proceeding."
     )
     input_model = AskUserInput
+    find_me = ("ask the user a question", "get confirmation from the user")
 
     async def execute(
         self, arguments: AskUserInput, context: ToolExecutionContext

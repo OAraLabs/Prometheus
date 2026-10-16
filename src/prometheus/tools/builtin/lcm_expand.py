@@ -37,6 +37,7 @@ class LCMExpandTool(BaseTool):
         "higher-depth summaries expand to child summary nodes."
     )
     input_model = LCMExpandInput
+    find_me = ("expand a summary node", "see what a summary was made from")
 
     def is_read_only(self, arguments: LCMExpandInput) -> bool:
         return True

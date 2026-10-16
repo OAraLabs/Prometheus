@@ -180,6 +180,7 @@ class KlingVideoTool(BaseTool):
         "Returns the path to the saved .mp4 in ~/.prometheus/cache/videos/."
     )
     input_model = VideoGenerateInput
+    find_me = ("generate a video from a prompt", "make a video clip")
     # The agent loop kills tools at LoopContext.tool_timeout_seconds (300s
     # default) — but Kling renders take MINUTES and the poll budget alone is
     # 600s. Raise the per-tool bar: poll budget + submit/download margin.

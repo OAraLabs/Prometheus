@@ -253,6 +253,7 @@ class GitHubSearchTool(BaseTool):
         "stars, language, license, and a README excerpt."
     )
     input_model = GitHubSearchInput
+    find_me = ("search GitHub repositories", "find an open-source repository")
     example_call = {
         "query": "yaml schema validation",
         "language": "Python",

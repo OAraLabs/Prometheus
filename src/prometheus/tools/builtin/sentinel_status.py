@@ -54,6 +54,7 @@ class SentinelStatusTool(BaseTool):
         "and last dream cycle results."
     )
     input_model = SentinelStatusInput
+    find_me = ("show SENTINEL status", "check the proactive subsystem")
 
     def is_read_only(self, arguments: SentinelStatusInput) -> bool:
         return True

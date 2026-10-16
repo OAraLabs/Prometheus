@@ -214,8 +214,9 @@ async def test_select_nonexistent_returns_error(tool, ctx):
     data = json.loads(result.output)
     assert "error" in data
     assert "nonexistent_tool" in data["error"]
-    assert "available" in data
-    assert "bash" in data["available"]
+    # The 5 closest names, not every tool and skill (audit 2026-10-16).
+    assert "available" not in data
+    assert 1 <= len(data["closest"]) <= 5
 
 
 # ---------------------------------------------------------------------------

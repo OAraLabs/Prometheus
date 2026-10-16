@@ -25,6 +25,7 @@ class CronDeleteTool(BaseTool):
     name = "cron_delete"
     description = "Delete a local cron job by its unique name."
     input_model = CronDeleteToolInput
+    find_me = ("delete a cron job", "remove a scheduled job")
 
     async def execute(
         self,
