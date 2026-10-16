@@ -28,17 +28,17 @@
      "role": "user"
     },
     {
-     "content": "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"index.txt\"}}\n```",
+     "content": "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/ws/depot/index.txt\"}}\n```",
      "content_json": {
       "$json": [
        {
-        "text": "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"index.txt\"}}\n```",
+        "text": "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/ws/depot/index.txt\"}}\n```",
         "type": "text"
        },
        {
         "id": "<toolu:1>",
         "input": {
-         "path": "index.txt"
+         "path": "/tmp/prometheus-parity/ws/depot/index.txt"
         },
         "name": "read_file",
         "type": "tool_use"
@@ -66,17 +66,17 @@
      "role": "user"
     },
     {
-     "content": "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"bin-7.txt\"}}\n```",
+     "content": "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/ws/depot/bin-7.txt\"}}\n```",
      "content_json": {
       "$json": [
        {
-        "text": "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"bin-7.txt\"}}\n```",
+        "text": "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/ws/depot/bin-7.txt\"}}\n```",
         "type": "text"
        },
        {
         "id": "<toolu:2>",
         "input": {
-         "path": "bin-7.txt"
+         "path": "/tmp/prometheus-parity/ws/depot/bin-7.txt"
         },
         "name": "read_file",
         "type": "tool_use"
@@ -111,7 +111,7 @@
         "id": "<toolu:3>",
         "input": {
          "content": "14\n",
-         "path": "gears.txt"
+         "path": "/tmp/prometheus-parity/ws/depot/gears.txt"
         },
         "name": "write_file",
         "type": "tool_use"
@@ -139,11 +139,11 @@
      "role": "user"
     },
     {
-     "content": "**14 gears**, read from **bin-7.txt** (per index.txt). Written to `gears.txt`.",
+     "content": "The number of gears is **14**, read from **bin-7.txt**. I've written `14` to a new file `gears.txt` in the workspace.",
      "content_json": {
       "$json": [
        {
-        "text": "**14 gears**, read from **bin-7.txt** (per index.txt). Written to `gears.txt`.",
+        "text": "The number of gears is **14**, read from **bin-7.txt**. I've written `14` to a new file `gears.txt` in the workspace.",
         "type": "text"
        }
       ]
@@ -168,7 +168,7 @@
     }
    ],
    "op": "chat",
-   "reply": "**14 gears**, read from **bin-7.txt** (per index.txt). Written to `gears.txt`.",
+   "reply": "The number of gears is **14**, read from **bin-7.txt**. I've written `14` to a new file `gears.txt` in the workspace.",
    "session": "desktop:parity-tierfull"
   }
  ],
@@ -359,24 +359,24 @@
        "desktop:parity-tierfull",
        1,
        "assistant",
-       "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"index.txt\"}}\n```",
+       "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/ws/depot/index.txt\"}}\n```",
        {
         "$json": [
          {
-          "text": "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"index.txt\"}}\n```",
+          "text": "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/ws/depot/index.txt\"}}\n```",
           "type": "text"
          },
          {
           "id": "<toolu:1>",
           "input": {
-           "path": "index.txt"
+           "path": "/tmp/prometheus-parity/ws/depot/index.txt"
           },
           "name": "read_file",
           "type": "tool_use"
          }
         ]
        },
-       17,
+       25,
        "<time>",
        0,
        "user",
@@ -409,24 +409,24 @@
        "desktop:parity-tierfull",
        3,
        "assistant",
-       "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"bin-7.txt\"}}\n```",
+       "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/ws/depot/bin-7.txt\"}}\n```",
        {
         "$json": [
          {
-          "text": "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"bin-7.txt\"}}\n```",
+          "text": "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/ws/depot/bin-7.txt\"}}\n```",
           "type": "text"
          },
          {
           "id": "<toolu:2>",
           "input": {
-           "path": "bin-7.txt"
+           "path": "/tmp/prometheus-parity/ws/depot/bin-7.txt"
           },
           "name": "read_file",
           "type": "tool_use"
          }
         ]
        },
-       17,
+       25,
        "<time>",
        0,
        "user",
@@ -466,7 +466,7 @@
           "id": "<toolu:3>",
           "input": {
            "content": "14\n",
-           "path": "gears.txt"
+           "path": "/tmp/prometheus-parity/ws/depot/gears.txt"
           },
           "name": "write_file",
           "type": "tool_use"
@@ -506,16 +506,16 @@
        "desktop:parity-tierfull",
        7,
        "assistant",
-       "**14 gears**, read from **bin-7.txt** (per index.txt). Written to `gears.txt`.",
+       "The number of gears is **14**, read from **bin-7.txt**. I've written `14` to a new file `gears.txt` in the workspace.",
        {
         "$json": [
          {
-          "text": "**14 gears**, read from **bin-7.txt** (per index.txt). Written to `gears.txt`.",
+          "text": "The number of gears is **14**, read from **bin-7.txt**. I've written `14` to a new file `gears.txt` in the workspace.",
           "type": "text"
          }
         ]
        },
-       19,
+       29,
        "<time>",
        0,
        "user",
@@ -552,13 +552,13 @@
        "Use your tools for this. In the workspace, index.txt says which file holds the stock counts. Read it, then read that file and find the number of gears. Write just that number to a new file gears.txt in the workspace. Then tell me the number of gears and the name of the file you read it from."
       ],
       [
-       "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"index.txt\"}}\n```"
+       "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/ws/depot/index.txt\"}}\n```"
       ],
       [
        ""
       ],
       [
-       "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"bin-7.txt\"}}\n```"
+       "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/ws/depot/bin-7.txt\"}}\n```"
       ],
       [
        ""
@@ -570,7 +570,7 @@
        ""
       ],
       [
-       "**14 gears**, read from **bin-7.txt** (per index.txt). Written to `gears.txt`."
+       "The number of gears is **14**, read from **bin-7.txt**. I've written `14` to a new file `gears.txt` in the workspace."
       ],
       [
        "[FILE MUTATION VERIFIER]\nFiles touched this turn:\n   ✓ /tmp/prometheus-parity/ws/depot/gears.txt — write_file: created (+3 bytes)"
@@ -598,8 +598,8 @@
       [
        1,
        {
-        "$bytes_sha256": "bd33395b87343e75",
-        "len": 2
+        "$bytes_sha256": "782754ea7b8c68ab",
+        "len": 3
        }
       ],
       [
@@ -619,22 +619,22 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "455f3c12e29a6eed",
-        "len": 89
+        "$bytes_sha256": "63dbe2e64abb1c70",
+        "len": 141
        }
       ],
       [
        412316860417,
        {
-        "$bytes_sha256": "961669c301f1cb6d",
-        "len": 94
+        "$bytes_sha256": "01e6a3fa591a84cf",
+        "len": 146
        }
       ],
       [
        549755813889,
        {
-        "$bytes_sha256": "477d3cb72fd4936d",
-        "len": 111
+        "$bytes_sha256": "5766db985a8d600a",
+        "len": 187
        }
       ],
       [
@@ -662,7 +662,7 @@
       [
        2,
        {
-        "$bytes_sha256": "beead77994cf5733",
+        "$bytes_sha256": "9d1e0e2d9459d065",
         "len": 1
        }
       ],
@@ -676,7 +676,7 @@
       [
        4,
        {
-        "$bytes_sha256": "2b4c342f5433ebe5",
+        "$bytes_sha256": "4d7b3ef7300acf70",
         "len": 1
        }
       ],
@@ -704,7 +704,7 @@
       [
        8,
        {
-        "$bytes_sha256": "4d7b3ef7300acf70",
+        "$bytes_sha256": "452ba1ddef80246c",
         "len": 1
        }
       ],
@@ -886,7 +886,7 @@
      "rows": [
       [
        "desktop:parity-tierfull",
-       "Find Gear Count",
+       "Find Gear Count in Depot",
        "<time>"
       ]
      ]
@@ -1315,10 +1315,10 @@
        "llama_cpp",
        "full",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "mixed",
        1,
-       69,
+       101,
        null,
        "agent",
        "beacon",
@@ -1334,10 +1334,10 @@
        "llama_cpp",
        "full",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "mixed",
        1,
-       69,
+       101,
        null,
        "agent",
        "beacon",
@@ -1353,7 +1353,7 @@
        "llama_cpp",
        "full",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "tool_call",
        1,
        0,
@@ -1372,11 +1372,11 @@
        "llama_cpp",
        "full",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "prose",
        0,
-       78,
-       "**14 gears**, read from **bin-7.txt** (per index.txt). Written to `gears.txt`.",
+       117,
+       "The number of gears is **14**, read from **bin-7.txt**. I've written `14` to a new file `gears.txt` in the workspace.",
        "agent",
        "beacon",
        null
@@ -2050,7 +2050,7 @@
        "success",
        {
         "$json": {
-         "advertised": 12,
+         "advertised": 51,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -2082,8 +2082,8 @@
          "stop_reason": "stop"
         }
        },
-       2855,
-       23,
+       3423,
+       32,
        0,
        "desktop:parity-tierfull",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -2107,13 +2107,13 @@
          "stop_reason": "stop"
         }
        },
-       2936,
-       53,
+       3522,
+       71,
        1,
        "desktop:parity-tierfull",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       2877,
+       3454,
        null,
        "<node>",
        "local",
@@ -2132,13 +2132,13 @@
          "stop_reason": "stop"
         }
        },
-       3033,
-       41,
+       3637,
+       50,
        2,
        "desktop:parity-tierfull",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       2988,
+       3592,
        null,
        "<node>",
        "local",
@@ -2157,13 +2157,13 @@
          "stop_reason": "stop"
         }
        },
-       3106,
-       26,
+       3719,
+       38,
        3,
        "desktop:parity-tierfull",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       3073,
+       3686,
        null,
        "<node>",
        "local",
@@ -2182,8 +2182,8 @@
          "stop_reason": "stop"
         }
        },
-       149,
-       4,
+       158,
+       6,
        null,
        "desktop:parity-tierfull",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -2234,11 +2234,11 @@
        "<ms>",
        null,
        null,
-       "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"index.txt\"}}\n```",
+       "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/ws/depot/index.txt\"}}\n```",
        {
         "$json": {
          "input": {
-          "path": "index.txt"
+          "path": "/tmp/prometheus-parity/ws/depot/index.txt"
          },
          "name": "read_file"
         }
@@ -2330,11 +2330,11 @@
        "<ms>",
        null,
        null,
-       "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"bin-7.txt\"}}\n```\n\n<tool_call>\n<function=read_file>\n<parameter=path>\nbin-7.txt\n</parameter>\n</function>\n</tool_call>",
+       "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/ws/depot/bin-7.txt\"}}\n```\n\n<tool_call>\n<function=read_file>\n<parameter=path>\n/tmp/prometheus-parity/ws/depot/bin-7.txt\n</parameter>\n</function>\n</tool_call>",
        {
         "$json": {
          "input": {
-          "path": "bin-7.txt"
+          "path": "/tmp/prometheus-parity/ws/depot/bin-7.txt"
          },
          "name": "read_file"
         }
@@ -2426,12 +2426,12 @@
        "<ms>",
        null,
        null,
-       "<tool_call>\n<function=write_file>\n<parameter=path>\ngears.txt\n</parameter>\n<parameter=content>\n14\n\n</parameter>\n</function>\n</tool_call>",
+       "<tool_call>\n<function=write_file>\n<parameter=path>\n/tmp/prometheus-parity/ws/depot/gears.txt\n</parameter>\n<parameter=content>\n14\n\n</parameter>\n</function>\n</tool_call>",
        {
         "$json": {
          "input": {
           "content": "14\n",
-          "path": "gears.txt"
+          "path": "/tmp/prometheus-parity/ws/depot/gears.txt"
          },
          "name": "write_file"
         }
@@ -2521,24 +2521,63 @@
      ],
      "rows": [
       [
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        {
         "$json": [
+         "agent",
+         "anatomy",
+         "ask_user",
          "bash",
+         "browser",
+         "cron_create",
+         "cron_delete",
+         "cron_list",
+         "dashboard",
+         "download_file",
          "edit_file",
+         "github_search",
          "glob",
          "grep",
+         "image_generate",
+         "lcm_describe",
+         "lcm_expand",
+         "lcm_expand_query",
+         "lcm_grep",
          "memory",
+         "message",
+         "notebook_edit",
          "read_file",
+         "sentinel_status",
+         "sessions_list",
+         "sessions_send",
+         "sessions_spawn",
          "skill",
+         "symbiote_graft",
+         "symbiote_harvest",
+         "symbiote_scout",
+         "symbiote_status",
          "task_create",
+         "task_get",
+         "task_list",
+         "task_output",
+         "task_stop",
+         "task_update",
+         "todo_write",
          "tool_search",
+         "tts",
+         "vault_read",
+         "vault_search",
+         "video_generate",
          "web_fetch",
          "web_search",
-         "write_file"
+         "wiki_compile",
+         "wiki_lint",
+         "wiki_query",
+         "write_file",
+         "youtube_transcript"
         ]
        },
-       12,
+       51,
        "<time>"
       ]
      ]
@@ -2576,8 +2615,8 @@
        "<time>",
        "<time>",
        4,
-       11930,
-       143,
+       14301,
+       191,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"

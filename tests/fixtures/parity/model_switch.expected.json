@@ -741,7 +741,7 @@
      "rows": [
       [
        "desktop:parity-switch",
-       "exactly the word",
+       "one",
        "<time>"
       ]
      ]
@@ -1070,7 +1070,7 @@
        "llama_cpp",
        "light",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "prose",
        0,
        3,
@@ -1089,7 +1089,7 @@
        "ollama",
        "full",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "prose",
        0,
        3,
@@ -1108,7 +1108,7 @@
        "llama_cpp",
        "light",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "prose",
        0,
        5,
@@ -1786,7 +1786,7 @@
        "success",
        {
         "$json": {
-         "advertised": 12,
+         "advertised": 51,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -1818,13 +1818,13 @@
          "stop_reason": "stop"
         }
        },
-       6220,
+       8801,
        2,
        0,
        "desktop:parity-switch",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4222,
+       6803,
        null,
        "<node>",
        "local",
@@ -1839,7 +1839,7 @@
        "success",
        {
         "$json": {
-         "advertised": 12,
+         "advertised": 51,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -1872,7 +1872,7 @@
         }
        },
        69,
-       5,
+       2,
        null,
        "desktop:parity-switch",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1896,7 +1896,7 @@
          "stop_reason": "stop"
         }
        },
-       2728,
+       3262,
        2,
        0,
        "desktop:parity-switch",
@@ -1917,7 +1917,7 @@
        "success",
        {
         "$json": {
-         "advertised": 12,
+         "advertised": 51,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -1949,13 +1949,13 @@
          "stop_reason": "stop"
         }
        },
-       6264,
+       8845,
        2,
        0,
        "desktop:parity-switch",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6221,
+       8802,
        null,
        "<node>",
        "local",
@@ -2001,24 +2001,63 @@
      ],
      "rows": [
       [
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        {
         "$json": [
+         "agent",
+         "anatomy",
+         "ask_user",
          "bash",
+         "browser",
+         "cron_create",
+         "cron_delete",
+         "cron_list",
+         "dashboard",
+         "download_file",
          "edit_file",
+         "github_search",
          "glob",
          "grep",
+         "image_generate",
+         "lcm_describe",
+         "lcm_expand",
+         "lcm_expand_query",
+         "lcm_grep",
          "memory",
+         "message",
+         "notebook_edit",
          "read_file",
+         "sentinel_status",
+         "sessions_list",
+         "sessions_send",
+         "sessions_spawn",
          "skill",
+         "symbiote_graft",
+         "symbiote_harvest",
+         "symbiote_scout",
+         "symbiote_status",
          "task_create",
+         "task_get",
+         "task_list",
+         "task_output",
+         "task_stop",
+         "task_update",
+         "todo_write",
          "tool_search",
+         "tts",
+         "vault_read",
+         "vault_search",
+         "video_generate",
          "web_fetch",
          "web_search",
-         "write_file"
+         "wiki_compile",
+         "wiki_lint",
+         "wiki_query",
+         "write_file",
+         "youtube_transcript"
         ]
        },
-       12,
+       51,
        "<time>"
       ]
      ]
@@ -2056,7 +2095,7 @@
        "<time>",
        "<time>",
        1,
-       6220,
+       8801,
        2,
        {
         "$json": [
@@ -2084,7 +2123,7 @@
        "<time>",
        "<time>",
        1,
-       2728,
+       3262,
        2,
        {
         "$json": [
@@ -2112,7 +2151,7 @@
        "<time>",
        "<time>",
        1,
-       6264,
+       8845,
        2,
        {
         "$json": [

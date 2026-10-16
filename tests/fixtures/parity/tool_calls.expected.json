@@ -23,15 +23,41 @@
      "content_json": {
       "$json": [
        {
-        "id": "K87P9AL0fKmwIXDJtZHeVTWN6K4uInZM",
+        "id": "6LRrNXH2cD298AQjsowOC2PZeTb5akrL",
         "input": {
          "pattern": "*"
         },
         "name": "glob",
         "type": "tool_use"
-       },
+       }
+      ]
+     },
+     "is_trusted": true,
+     "provenance": "user",
+     "role": "assistant"
+    },
+    {
+     "content": "",
+     "content_json": {
+      "$json": [
        {
-        "id": "rY1kjC86KnBWGW4l5ABQDajLLjOo4dWP",
+        "content": "inventory.txt",
+        "is_error": false,
+        "tool_use_id": "6LRrNXH2cD298AQjsowOC2PZeTb5akrL",
+        "type": "tool_result"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "user"
+    },
+    {
+     "content": "",
+     "content_json": {
+      "$json": [
+       {
+        "id": "fpwcTWqk4S1NHZXWcgwwiisH1cYrJHBz",
         "input": {
          "path": "inventory.txt"
         },
@@ -49,15 +75,9 @@
      "content_json": {
       "$json": [
        {
-        "content": "inventory.txt",
-        "is_error": false,
-        "tool_use_id": "K87P9AL0fKmwIXDJtZHeVTWN6K4uInZM",
-        "type": "tool_result"
-       },
-       {
         "content": "     1\twidgets: 7\n     2\tgears: 3\n     3\tsprockets: 11",
         "is_error": false,
-        "tool_use_id": "rY1kjC86KnBWGW4l5ABQDajLLjOo4dWP",
+        "tool_use_id": "fpwcTWqk4S1NHZXWcgwwiisH1cYrJHBz",
         "type": "tool_result"
        }
       ]
@@ -67,11 +87,11 @@
      "role": "user"
     },
     {
-     "content": "Files in the current directory:\n- inventory.txt\n\nThere are **11 sprockets**.",
+     "content": "**11 sprockets.**\n\nFull inventory: widgets 7, gears 3, sprockets 11.",
      "content_json": {
       "$json": [
        {
-        "text": "Files in the current directory:\n- inventory.txt\n\nThere are **11 sprockets**.",
+        "text": "**11 sprockets.**\n\nFull inventory: widgets 7, gears 3, sprockets 11.",
         "type": "text"
        }
       ]
@@ -82,7 +102,7 @@
     }
    ],
    "op": "chat",
-   "reply": "Files in the current directory:\n- inventory.txt\n\nThere are **11 sprockets**.",
+   "reply": "**11 sprockets.**\n\nFull inventory: widgets 7, gears 3, sprockets 11.",
    "session": "desktop:parity-tools"
   }
  ],
@@ -246,19 +266,11 @@
        {
         "$json": [
          {
-          "id": "K87P9AL0fKmwIXDJtZHeVTWN6K4uInZM",
+          "id": "6LRrNXH2cD298AQjsowOC2PZeTb5akrL",
           "input": {
            "pattern": "*"
           },
           "name": "glob",
-          "type": "tool_use"
-         },
-         {
-          "id": "rY1kjC86KnBWGW4l5ABQDajLLjOo4dWP",
-          "input": {
-           "path": "inventory.txt"
-          },
-          "name": "read_file",
           "type": "tool_use"
          }
         ]
@@ -280,13 +292,7 @@
          {
           "content": "inventory.txt",
           "is_error": false,
-          "tool_use_id": "K87P9AL0fKmwIXDJtZHeVTWN6K4uInZM",
-          "type": "tool_result"
-         },
-         {
-          "content": "     1\twidgets: 7\n     2\tgears: 3\n     3\tsprockets: 11",
-          "is_error": false,
-          "tool_use_id": "rY1kjC86KnBWGW4l5ABQDajLLjOo4dWP",
+          "tool_use_id": "6LRrNXH2cD298AQjsowOC2PZeTb5akrL",
           "type": "tool_result"
          }
         ]
@@ -302,16 +308,62 @@
        "desktop:parity-tools",
        3,
        "assistant",
-       "Files in the current directory:\n- inventory.txt\n\nThere are **11 sprockets**.",
+       "",
        {
         "$json": [
          {
-          "text": "Files in the current directory:\n- inventory.txt\n\nThere are **11 sprockets**.",
+          "id": "fpwcTWqk4S1NHZXWcgwwiisH1cYrJHBz",
+          "input": {
+           "path": "inventory.txt"
+          },
+          "name": "read_file",
+          "type": "tool_use"
+         }
+        ]
+       },
+       0,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:5>",
+       "desktop:parity-tools",
+       4,
+       "user",
+       "",
+       {
+        "$json": [
+         {
+          "content": "     1\twidgets: 7\n     2\tgears: 3\n     3\tsprockets: 11",
+          "is_error": false,
+          "tool_use_id": "fpwcTWqk4S1NHZXWcgwwiisH1cYrJHBz",
+          "type": "tool_result"
+         }
+        ]
+       },
+       0,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:6>",
+       "desktop:parity-tools",
+       5,
+       "assistant",
+       "**11 sprockets.**\n\nFull inventory: widgets 7, gears 3, sprockets 11.",
+       {
+        "$json": [
+         {
+          "text": "**11 sprockets.**\n\nFull inventory: widgets 7, gears 3, sprockets 11.",
           "type": "text"
          }
         ]
        },
-       19,
+       17,
        "<time>",
        0,
        "user",
@@ -334,7 +386,13 @@
        ""
       ],
       [
-       "Files in the current directory:\n- inventory.txt\n\nThere are **11 sprockets**."
+       ""
+      ],
+      [
+       ""
+      ],
+      [
+       "**11 sprockets.**\n\nFull inventory: widgets 7, gears 3, sprockets 11."
       ]
      ]
     },
@@ -359,7 +417,7 @@
       [
        1,
        {
-        "$bytes_sha256": "0627a3dd6c43cb7a",
+        "$bytes_sha256": "fb468e7a3d60e614",
         "len": 2
        }
       ],
@@ -380,8 +438,8 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "096e268a098efc64",
-        "len": 121
+        "$bytes_sha256": "eee1dd65d3b6dad6",
+        "len": 92
        }
       ]
      ]
@@ -416,7 +474,21 @@
       [
        4,
        {
-        "$bytes_sha256": "e7cf46a078fed4fa",
+        "$bytes_sha256": "6e340b9cffb37a98",
+        "len": 1
+       }
+      ],
+      [
+       5,
+       {
+        "$bytes_sha256": "6e340b9cffb37a98",
+        "len": 1
+       }
+      ],
+      [
+       6,
+       {
+        "$bytes_sha256": "01ba4719c80b6fe9",
         "len": 1
        }
       ]
@@ -567,7 +639,7 @@
      "rows": [
       [
        "desktop:parity-tools",
-       "Counting Sprockets in Inventory File",
+       "Sprocket Count from Inventory",
        "<time>"
       ]
      ]
@@ -941,13 +1013,13 @@
        "desktop:parity-tools",
        "<turn:1>",
        0,
-       "<uuid:5>",
+       "<uuid:7>",
        "llama_cpp",
        "light",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "tool_call",
-       2,
+       1,
        0,
        null,
        "agent",
@@ -960,15 +1032,34 @@
        "desktop:parity-tools",
        "<turn:1>",
        1,
-       "<uuid:6>",
+       "<uuid:8>",
        "llama_cpp",
        "light",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
+       "tool_call",
+       1,
+       0,
+       null,
+       "agent",
+       "beacon",
+       null
+      ],
+      [
+       3,
+       "<time>",
+       "desktop:parity-tools",
+       "<turn:1>",
+       2,
+       "<uuid:9>",
+       "llama_cpp",
+       "light",
+       32768,
+       "ace59500b5eb5a30",
        "prose",
        0,
-       76,
-       "Files in the current directory:\n- inventory.txt\n\nThere are **11 sprockets**.",
+       68,
+       "**11 sprockets.**\n\nFull inventory: widgets 7, gears 3, sprockets 11.",
        "agent",
        "beacon",
        null
@@ -1059,7 +1150,7 @@
      ],
      "rows": [
       [
-       "<uuid:7>",
+       "<uuid:10>",
        "<time>",
        "tool_registration",
        "TaskCreateTool",
@@ -1084,7 +1175,7 @@
        null
       ],
       [
-       "<uuid:8>",
+       "<uuid:11>",
        "<time>",
        "tool_registration",
        "GitHubSearchTool",
@@ -1109,7 +1200,7 @@
        null
       ],
       [
-       "<uuid:9>",
+       "<uuid:12>",
        "<time>",
        "tool_registration",
        "SymbioteScoutTool",
@@ -1134,7 +1225,7 @@
        null
       ],
       [
-       "<uuid:10>",
+       "<uuid:13>",
        "<time>",
        "tool_registration",
        "SymbioteHarvestTool",
@@ -1159,7 +1250,7 @@
        null
       ],
       [
-       "<uuid:11>",
+       "<uuid:14>",
        "<time>",
        "tool_registration",
        "SymbioteGraftTool",
@@ -1184,7 +1275,7 @@
        null
       ],
       [
-       "<uuid:12>",
+       "<uuid:15>",
        "<time>",
        "tool_registration",
        "SymbioteStatusTool",
@@ -1209,7 +1300,7 @@
        null
       ],
       [
-       "<uuid:13>",
+       "<uuid:16>",
        "<time>",
        "tool_registration",
        "SkillTool",
@@ -1234,7 +1325,7 @@
        null
       ],
       [
-       "<uuid:14>",
+       "<uuid:17>",
        "<time>",
        "tool_registration",
        "MemoryTool",
@@ -1259,7 +1350,7 @@
        null
       ],
       [
-       "<uuid:15>",
+       "<uuid:18>",
        "<time>",
        "tool_registration",
        "TodoWriteTool",
@@ -1284,7 +1375,7 @@
        null
       ],
       [
-       "<uuid:16>",
+       "<uuid:19>",
        "<time>",
        "tool_registration",
        "VaultSearchTool",
@@ -1309,7 +1400,7 @@
        null
       ],
       [
-       "<uuid:17>",
+       "<uuid:20>",
        "<time>",
        "tool_registration",
        "VaultReadTool",
@@ -1334,7 +1425,7 @@
        null
       ],
       [
-       "<uuid:18>",
+       "<uuid:21>",
        "<time>",
        "tool_registration",
        "AnatomyTool",
@@ -1359,7 +1450,7 @@
        null
       ],
       [
-       "<uuid:19>",
+       "<uuid:22>",
        "<time>",
        "tool_registration",
        "BrowserTool",
@@ -1384,7 +1475,7 @@
        null
       ],
       [
-       "<uuid:20>",
+       "<uuid:23>",
        "<time>",
        "tool_registration",
        "SessionsListTool",
@@ -1409,7 +1500,7 @@
        null
       ],
       [
-       "<uuid:21>",
+       "<uuid:24>",
        "<time>",
        "tool_registration",
        "SessionsSendTool",
@@ -1434,7 +1525,7 @@
        null
       ],
       [
-       "<uuid:22>",
+       "<uuid:25>",
        "<time>",
        "tool_registration",
        "SessionsSpawnTool",
@@ -1459,7 +1550,7 @@
        null
       ],
       [
-       "<uuid:23>",
+       "<uuid:26>",
        "<time>",
        "tool_registration",
        "TaskGetTool",
@@ -1484,7 +1575,7 @@
        null
       ],
       [
-       "<uuid:24>",
+       "<uuid:27>",
        "<time>",
        "tool_registration",
        "TaskListTool",
@@ -1509,7 +1600,7 @@
        null
       ],
       [
-       "<uuid:25>",
+       "<uuid:28>",
        "<time>",
        "tool_registration",
        "TaskUpdateTool",
@@ -1534,7 +1625,7 @@
        null
       ],
       [
-       "<uuid:26>",
+       "<uuid:29>",
        "<time>",
        "tool_registration",
        "TaskStopTool",
@@ -1559,7 +1650,7 @@
        null
       ],
       [
-       "<uuid:27>",
+       "<uuid:30>",
        "<time>",
        "tool_registration",
        "TaskOutputTool",
@@ -1584,7 +1675,7 @@
        null
       ],
       [
-       "<uuid:28>",
+       "<uuid:31>",
        "<time>",
        "tool_registration",
        "ImageGenerateTool",
@@ -1609,7 +1700,7 @@
        null
       ],
       [
-       "<uuid:29>",
+       "<uuid:32>",
        "<time>",
        "tool_registration",
        "KlingVideoTool",
@@ -1634,7 +1725,7 @@
        null
       ],
       [
-       "<uuid:30>",
+       "<uuid:33>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -1642,7 +1733,7 @@
        "success",
        {
         "$json": {
-         "advertised": 12,
+         "advertised": 51,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -1662,7 +1753,7 @@
        null
       ],
       [
-       "<uuid:5>",
+       "<uuid:7>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1674,20 +1765,45 @@
          "stop_reason": "tool_calls"
         }
        },
-       6245,
-       52,
+       8826,
+       26,
        0,
        "desktop:parity-tools",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6201,
+       8782,
        null,
        "<node>",
        "local",
        null
       ],
       [
-       "<uuid:6>",
+       "<uuid:8>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "tool_calls"
+        }
+       },
+       8871,
+       26,
+       1,
+       "desktop:parity-tools",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       8851,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:9>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1699,20 +1815,20 @@
          "stop_reason": "stop"
         }
        },
-       6348,
-       21,
-       1,
+       8941,
+       27,
+       2,
        "desktop:parity-tools",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6296,
+       8896,
        null,
        "<node>",
        "local",
        null
       ],
       [
-       "<uuid:31>",
+       "<uuid:34>",
        "<time>",
        "session_titles",
        "generate",
@@ -1724,8 +1840,8 @@
          "stop_reason": "stop"
         }
        },
-       113,
-       10,
+       119,
+       7,
        null,
        "desktop:parity-tools",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1767,7 +1883,7 @@
      ],
      "rows": [
       [
-       "<uuid:32>",
+       "<uuid:35>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "glob",
@@ -1836,14 +1952,40 @@
        "<node>",
        "<turn:1>",
        0,
-       "K87P9AL0fKmwIXDJtZHeVTWN6K4uInZM",
+       "6LRrNXH2cD298AQjsowOC2PZeTb5akrL",
        null,
        null,
        0,
        "inventory.txt"
       ],
       [
-       "<uuid:33>",
+       "<uuid:36>",
+       "<time>",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "_loop_transition",
+       1,
+       0,
+       null,
+       null,
+       null,
+       null,
+       null,
+       0,
+       0,
+       null,
+       "desktop:parity-tools",
+       null,
+       "<node>",
+       "<turn:1>",
+       0,
+       null,
+       null,
+       null,
+       null,
+       null
+      ],
+      [
+       "<uuid:37>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "read_file",
@@ -1905,15 +2047,15 @@
        },
        "<node>",
        "<turn:1>",
-       0,
-       "rY1kjC86KnBWGW4l5ABQDajLLjOo4dWP",
+       1,
+       "fpwcTWqk4S1NHZXWcgwwiisH1cYrJHBz",
        null,
        null,
        0,
        "     1\twidgets: 7\n     2\tgears: 3\n     3\tsprockets: 11"
       ],
       [
-       "<uuid:34>",
+       "<uuid:38>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
@@ -1931,7 +2073,7 @@
        null,
        "<node>",
        "<turn:1>",
-       0,
+       1,
        null,
        null,
        null,
@@ -1949,24 +2091,63 @@
      ],
      "rows": [
       [
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        {
         "$json": [
+         "agent",
+         "anatomy",
+         "ask_user",
          "bash",
+         "browser",
+         "cron_create",
+         "cron_delete",
+         "cron_list",
+         "dashboard",
+         "download_file",
          "edit_file",
+         "github_search",
          "glob",
          "grep",
+         "image_generate",
+         "lcm_describe",
+         "lcm_expand",
+         "lcm_expand_query",
+         "lcm_grep",
          "memory",
+         "message",
+         "notebook_edit",
          "read_file",
+         "sentinel_status",
+         "sessions_list",
+         "sessions_send",
+         "sessions_spawn",
          "skill",
+         "symbiote_graft",
+         "symbiote_harvest",
+         "symbiote_scout",
+         "symbiote_status",
          "task_create",
+         "task_get",
+         "task_list",
+         "task_output",
+         "task_stop",
+         "task_update",
+         "todo_write",
          "tool_search",
+         "tts",
+         "vault_read",
+         "vault_search",
+         "video_generate",
          "web_fetch",
          "web_search",
-         "write_file"
+         "wiki_compile",
+         "wiki_lint",
+         "wiki_query",
+         "write_file",
+         "youtube_transcript"
         ]
        },
-       12,
+       51,
        "<time>"
       ]
      ]
@@ -2003,9 +2184,9 @@
        "agent",
        "<time>",
        "<time>",
-       2,
-       12593,
-       73,
+       3,
+       26638,
+       79,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
@@ -2018,7 +2199,7 @@
         ]
        },
        0,
-       1,
+       2,
        "prose",
        null,
        null,

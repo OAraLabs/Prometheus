@@ -817,7 +817,7 @@
      "rows": [
       [
        "desktop:parity-compact",
-       "Memory Game First Word Amber",
+       "Memory Game Amber",
        "<time>"
       ]
      ]
@@ -1146,7 +1146,7 @@
        "llama_cpp",
        "light",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "prose",
        0,
        5,
@@ -1165,7 +1165,7 @@
        "llama_cpp",
        "light",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "prose",
        0,
        5,
@@ -1184,7 +1184,7 @@
        "llama_cpp",
        "light",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "prose",
        0,
        5,
@@ -1203,7 +1203,7 @@
        "llama_cpp",
        "light",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "prose",
        0,
        20,
@@ -1267,12 +1267,12 @@
        {
         "$json": {
          "calibration": 1.0,
-         "over_by": 5306,
+         "over_by": 7521,
          "session_id": "desktop:parity-compact",
          "span_messages": 0,
          "threshold": 655,
-         "tokens_before": 5961,
-         "tokens_before_estimated": 5961,
+         "tokens_before": 8176,
+         "tokens_before_estimated": 8176,
          "trigger": "threshold"
         }
        },
@@ -1286,9 +1286,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 5306,
+         "over_by": 7521,
          "session_id": "desktop:parity-compact",
-         "tokens": 5961
+         "tokens": 8176
         }
        },
        "context_compactor",
@@ -1300,13 +1300,13 @@
        "context_compaction_noop",
        {
         "$json": {
-         "calibration": 1.046,
-         "over_by": 5606,
+         "calibration": 1.078,
+         "over_by": 8188,
          "session_id": "desktop:parity-compact",
          "span_messages": 2,
          "threshold": 655,
-         "tokens_before": 6261,
-         "tokens_before_estimated": 5988,
+         "tokens_before": 8843,
+         "tokens_before_estimated": 8203,
          "trigger": "threshold"
         }
        },
@@ -1320,9 +1320,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 5606,
+         "over_by": 8188,
          "session_id": "desktop:parity-compact",
-         "tokens": 6261
+         "tokens": 8843
         }
        },
        "context_compactor",
@@ -1335,9 +1335,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 5627,
+         "over_by": 8189,
          "session_id": "desktop:parity-compact",
-         "tokens": 6282
+         "tokens": 8844
         }
        },
        "context_compactor",
@@ -1350,12 +1350,12 @@
        {
         "$json": {
          "cache_hit": false,
-         "calibration": 1.046,
+         "calibration": 1.078,
          "ceiling": 655,
          "chunks": 1,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 5627,
+         "over_by": 8189,
          "session_id": "desktop:parity-compact",
          "span_messages": 4,
          "summarizer_input_omitted": 0,
@@ -1363,9 +1363,9 @@
          "target": 458,
          "threshold": 655,
          "threshold_source": "global pct",
-         "tokens_after": 6282,
-         "tokens_before": 6291,
-         "tokens_before_estimated": 6015,
+         "tokens_after": 8844,
+         "tokens_before": 8873,
+         "tokens_before_estimated": 8230,
          "tool_results_trimmed": 0,
          "trigger": "threshold"
         }
@@ -1380,9 +1380,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 5619,
+         "over_by": 8211,
          "session_id": "desktop:parity-compact",
-         "tokens": 6274
+         "tokens": 8866
         }
        },
        "context_compactor",
@@ -1395,12 +1395,12 @@
        {
         "$json": {
          "cache_hit": false,
-         "calibration": 1.047,
+         "calibration": 1.079,
          "ceiling": 655,
          "chunks": 1,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 5619,
+         "over_by": 8211,
          "session_id": "desktop:parity-compact",
          "span_messages": 6,
          "summarizer_input_omitted": 0,
@@ -1408,9 +1408,9 @@
          "target": 458,
          "threshold": 655,
          "threshold_source": "global pct",
-         "tokens_after": 6274,
-         "tokens_before": 6326,
-         "tokens_before_estimated": 6044,
+         "tokens_after": 8866,
+         "tokens_before": 8909,
+         "tokens_before_estimated": 8259,
          "tool_results_trimmed": 0,
          "trigger": "threshold"
         }
@@ -2040,7 +2040,7 @@
        "success",
        {
         "$json": {
-         "advertised": 12,
+         "advertised": 51,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -2072,13 +2072,13 @@
          "stop_reason": "stop"
         }
        },
-       6233,
+       8814,
        3,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4222,
+       6803,
        null,
        "<node>",
        "local",
@@ -2093,7 +2093,7 @@
        "success",
        {
         "$json": {
-         "advertised": 12,
+         "advertised": 51,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -2126,7 +2126,7 @@
         }
        },
        82,
-       6,
+       4,
        null,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -2150,13 +2150,13 @@
          "stop_reason": "stop"
         }
        },
-       6263,
+       8844,
        3,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6235,
+       8816,
        null,
        "<node>",
        "local",
@@ -2171,7 +2171,7 @@
        "success",
        {
         "$json": {
-         "advertised": 12,
+         "advertised": 51,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -2204,11 +2204,11 @@
           "session_id": "desktop:parity-compact",
           "span_messages": 4
          },
-         "output_chars": 137
+         "output_chars": 65
         }
        },
        129,
-       46,
+       26,
        null,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -2232,13 +2232,13 @@
          "stop_reason": "stop"
         }
        },
-       6288,
+       8849,
        3,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4222,
+       6803,
        null,
        "<node>",
        "local",
@@ -2253,7 +2253,7 @@
        "success",
        {
         "$json": {
-         "advertised": 12,
+         "advertised": 51,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -2286,11 +2286,11 @@
           "session_id": "desktop:parity-compact",
           "span_messages": 6
          },
-         "output_chars": 83
+         "output_chars": 116
         }
        },
        150,
-       24,
+       33,
        null,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -2314,13 +2314,13 @@
          "stop_reason": "stop"
         }
        },
-       6266,
+       8856,
        8,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4240,
+       6803,
        null,
        "<node>",
        "local",
@@ -2366,24 +2366,63 @@
      ],
      "rows": [
       [
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        {
         "$json": [
+         "agent",
+         "anatomy",
+         "ask_user",
          "bash",
+         "browser",
+         "cron_create",
+         "cron_delete",
+         "cron_list",
+         "dashboard",
+         "download_file",
          "edit_file",
+         "github_search",
          "glob",
          "grep",
+         "image_generate",
+         "lcm_describe",
+         "lcm_expand",
+         "lcm_expand_query",
+         "lcm_grep",
          "memory",
+         "message",
+         "notebook_edit",
          "read_file",
+         "sentinel_status",
+         "sessions_list",
+         "sessions_send",
+         "sessions_spawn",
          "skill",
+         "symbiote_graft",
+         "symbiote_harvest",
+         "symbiote_scout",
+         "symbiote_status",
          "task_create",
+         "task_get",
+         "task_list",
+         "task_output",
+         "task_stop",
+         "task_update",
+         "todo_write",
          "tool_search",
+         "tts",
+         "vault_read",
+         "vault_search",
+         "video_generate",
          "web_fetch",
          "web_search",
-         "write_file"
+         "wiki_compile",
+         "wiki_lint",
+         "wiki_query",
+         "write_file",
+         "youtube_transcript"
         ]
        },
-       12,
+       51,
        "<time>"
       ]
      ]
@@ -2421,7 +2460,7 @@
        "<time>",
        "<time>",
        1,
-       6233,
+       8814,
        3,
        {
         "$json": [
@@ -2449,7 +2488,7 @@
        "<time>",
        "<time>",
        1,
-       6263,
+       8844,
        3,
        {
         "$json": [
@@ -2477,7 +2516,7 @@
        "<time>",
        "<time>",
        1,
-       6288,
+       8849,
        3,
        {
         "$json": [
@@ -2505,7 +2544,7 @@
        "<time>",
        "<time>",
        1,
-       6266,
+       8856,
        8,
        {
         "$json": [

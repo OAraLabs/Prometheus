@@ -23,9 +23,9 @@
      "content_json": {
       "$json": [
        {
-        "id": "o7IbnPx8OHa9WvJN6uaW4avEsmKI8FoQ",
+        "id": "J9eQfdkiICyISlaCr8fwQkIlvloxjRWq",
         "input": {
-         "entry": "Parity canary colour is teal.",
+         "entry": "The parity canary colour is teal.",
          "operation": "add",
          "target": "memory"
         },
@@ -45,7 +45,7 @@
        {
         "content": "added",
         "is_error": false,
-        "tool_use_id": "o7IbnPx8OHa9WvJN6uaW4avEsmKI8FoQ",
+        "tool_use_id": "J9eQfdkiICyISlaCr8fwQkIlvloxjRWq",
         "type": "tool_result"
        }
       ]
@@ -55,11 +55,11 @@
      "role": "user"
     },
     {
-     "content": "Saved to long-term memory: \"Parity canary colour is teal.\" ✅",
+     "content": "Saved to long-term memory: \"The parity canary colour is teal.\" ✓",
      "content_json": {
       "$json": [
        {
-        "text": "Saved to long-term memory: \"Parity canary colour is teal.\" ✅",
+        "text": "Saved to long-term memory: \"The parity canary colour is teal.\" ✓",
         "type": "text"
        }
       ]
@@ -70,7 +70,7 @@
     }
    ],
    "op": "chat",
-   "reply": "Saved to long-term memory: \"Parity canary colour is teal.\" ✅",
+   "reply": "Saved to long-term memory: \"The parity canary colour is teal.\" ✓",
    "session": "desktop:parity-memory"
   }
  ],
@@ -79,7 +79,7 @@
    "replaced": "<boot-specific>"
   },
   "home/.prometheus/MEMORY.md": {
-   "text": "Parity canary colour is teal.\n"
+   "text": "The parity canary colour is teal.\n"
   },
   "home/.prometheus/USER.md": {
    "text": ""
@@ -231,9 +231,9 @@
        {
         "$json": [
          {
-          "id": "o7IbnPx8OHa9WvJN6uaW4avEsmKI8FoQ",
+          "id": "J9eQfdkiICyISlaCr8fwQkIlvloxjRWq",
           "input": {
-           "entry": "Parity canary colour is teal.",
+           "entry": "The parity canary colour is teal.",
            "operation": "add",
            "target": "memory"
           },
@@ -259,7 +259,7 @@
          {
           "content": "added",
           "is_error": false,
-          "tool_use_id": "o7IbnPx8OHa9WvJN6uaW4avEsmKI8FoQ",
+          "tool_use_id": "J9eQfdkiICyISlaCr8fwQkIlvloxjRWq",
           "type": "tool_result"
          }
         ]
@@ -275,16 +275,16 @@
        "desktop:parity-memory",
        3,
        "assistant",
-       "Saved to long-term memory: \"Parity canary colour is teal.\" ✅",
+       "Saved to long-term memory: \"The parity canary colour is teal.\" ✓",
        {
         "$json": [
          {
-          "text": "Saved to long-term memory: \"Parity canary colour is teal.\" ✅",
+          "text": "Saved to long-term memory: \"The parity canary colour is teal.\" ✓",
           "type": "text"
          }
         ]
        },
-       15,
+       16,
        "<time>",
        0,
        "user",
@@ -307,7 +307,7 @@
        ""
       ],
       [
-       "Saved to long-term memory: \"Parity canary colour is teal.\" ✅"
+       "Saved to long-term memory: \"The parity canary colour is teal.\" ✓"
       ]
      ]
     },
@@ -332,7 +332,7 @@
       [
        1,
        {
-        "$bytes_sha256": "ad9ae260ecf269e8",
+        "$bytes_sha256": "97b546ef5c0a88a4",
         "len": 2
        }
       ],
@@ -353,8 +353,8 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "92971cfc6b383d1a",
-        "len": 105
+        "$bytes_sha256": "ce2cdebdca61063a",
+        "len": 113
        }
       ]
      ]
@@ -389,7 +389,7 @@
       [
        4,
        {
-        "$bytes_sha256": "01ba4719c80b6fe9",
+        "$bytes_sha256": "e7cf46a078fed4fa",
         "len": 1
        }
       ]
@@ -540,7 +540,7 @@
      "rows": [
       [
        "desktop:parity-memory",
-       "Saved Parity Canary Colour",
+       "Parity canary colour memory saved",
        "<time>"
       ]
      ]
@@ -896,7 +896,7 @@
        "llama_cpp",
        "light",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "tool_call",
        1,
        0,
@@ -915,11 +915,11 @@
        "llama_cpp",
        "light",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "prose",
        0,
-       60,
-       "Saved to long-term memory: \"Parity canary colour is teal.\" ✅",
+       64,
+       "Saved to long-term memory: \"The parity canary colour is teal.\" ✓",
        "agent",
        "beacon",
        null
@@ -1593,7 +1593,7 @@
        "success",
        {
         "$json": {
-         "advertised": 12,
+         "advertised": 51,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -1625,13 +1625,13 @@
          "stop_reason": "tool_calls"
         }
        },
-       6238,
+       8819,
        56,
        0,
        "desktop:parity-memory",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4222,
+       6803,
        null,
        "<node>",
        "local",
@@ -1650,13 +1650,13 @@
          "stop_reason": "stop"
         }
        },
-       6312,
+       8893,
        17,
        1,
        "desktop:parity-memory",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6293,
+       8874,
        null,
        "<node>",
        "local",
@@ -1676,7 +1676,7 @@
         }
        },
        102,
-       6,
+       8,
        null,
        "desktop:parity-memory",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1731,7 +1731,7 @@
        {
         "$json": {
          "input": {
-          "entry": "Parity canary colour is teal.",
+          "entry": "The parity canary colour is teal.",
           "operation": "add",
           "target": "memory"
          },
@@ -1808,7 +1808,7 @@
        "<node>",
        "<turn:1>",
        0,
-       "o7IbnPx8OHa9WvJN6uaW4avEsmKI8FoQ",
+       "J9eQfdkiICyISlaCr8fwQkIlvloxjRWq",
        null,
        null,
        0,
@@ -1851,24 +1851,63 @@
      ],
      "rows": [
       [
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        {
         "$json": [
+         "agent",
+         "anatomy",
+         "ask_user",
          "bash",
+         "browser",
+         "cron_create",
+         "cron_delete",
+         "cron_list",
+         "dashboard",
+         "download_file",
          "edit_file",
+         "github_search",
          "glob",
          "grep",
+         "image_generate",
+         "lcm_describe",
+         "lcm_expand",
+         "lcm_expand_query",
+         "lcm_grep",
          "memory",
+         "message",
+         "notebook_edit",
          "read_file",
+         "sentinel_status",
+         "sessions_list",
+         "sessions_send",
+         "sessions_spawn",
          "skill",
+         "symbiote_graft",
+         "symbiote_harvest",
+         "symbiote_scout",
+         "symbiote_status",
          "task_create",
+         "task_get",
+         "task_list",
+         "task_output",
+         "task_stop",
+         "task_update",
+         "todo_write",
          "tool_search",
+         "tts",
+         "vault_read",
+         "vault_search",
+         "video_generate",
          "web_fetch",
          "web_search",
-         "write_file"
+         "wiki_compile",
+         "wiki_lint",
+         "wiki_query",
+         "write_file",
+         "youtube_transcript"
         ]
        },
-       12,
+       51,
        "<time>"
       ]
      ]
@@ -1906,7 +1945,7 @@
        "<time>",
        "<time>",
        2,
-       12550,
+       17712,
        73,
        {
         "$json": [

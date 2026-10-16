@@ -97,11 +97,11 @@
      "role": "user"
     },
     {
-     "content": "The file `42` contains the text `the answer file says: forty-two`.",
+     "content": "The file `42` contains the following text:\n```\nthe answer file says: forty-two\n```",
      "content_json": {
       "$json": [
        {
-        "text": "The file `42` contains the text `the answer file says: forty-two`.",
+        "text": "The file `42` contains the following text:\n```\nthe answer file says: forty-two\n```",
         "type": "text"
        }
       ]
@@ -112,7 +112,7 @@
     }
    ],
    "op": "chat",
-   "reply": "The file `42` contains the text `the answer file says: forty-two`.",
+   "reply": "The file `42` contains the following text:\n```\nthe answer file says: forty-two\n```",
    "session": "desktop:parity-repair"
   }
  ],
@@ -336,16 +336,16 @@
        "desktop:parity-repair",
        3,
        "assistant",
-       "The file `42` contains the text `the answer file says: forty-two`.",
+       "The file `42` contains the following text:\n```\nthe answer file says: forty-two\n```",
        {
         "$json": [
          {
-          "text": "The file `42` contains the text `the answer file says: forty-two`.",
+          "text": "The file `42` contains the following text:\n```\nthe answer file says: forty-two\n```",
           "type": "text"
          }
         ]
        },
-       16,
+       20,
        "<time>",
        0,
        "user",
@@ -375,7 +375,7 @@
        ""
       ],
       [
-       "The file `42` contains the text `the answer file says: forty-two`."
+       "The file `42` contains the following text:\n```\nthe answer file says: forty-two\n```"
       ]
      ]
     },
@@ -400,7 +400,7 @@
       [
        1,
        {
-        "$bytes_sha256": "75906df1d8a5c529",
+        "$bytes_sha256": "892fc36052eb3e1c",
         "len": 2
        }
       ],
@@ -428,8 +428,8 @@
       [
        412316860417,
        {
-        "$bytes_sha256": "c9b665afd501c8ef",
-        "len": 97
+        "$bytes_sha256": "594ebb3529b48594",
+        "len": 110
        }
       ]
      ]
@@ -464,7 +464,7 @@
       [
        4,
        {
-        "$bytes_sha256": "ef6cbd2161eaea79",
+        "$bytes_sha256": "9d1e0e2d9459d065",
         "len": 1
        }
       ]
@@ -630,7 +630,7 @@
      "rows": [
       [
        "desktop:parity-repair",
-       "Sandboxed Tool-Call Repair Test",
+       "Sandboxed Tool Call Repair Test",
        "<time>"
       ]
      ]
@@ -1041,7 +1041,7 @@
        "ollama",
        "full",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "mixed",
        1,
        48,
@@ -1060,11 +1060,11 @@
        "ollama",
        "full",
        32768,
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        "prose",
        0,
-       66,
-       "The file `42` contains the text `the answer file says: forty-two`.",
+       82,
+       "The file `42` contains the following text:\n```\nthe answer file says: forty-two\n```",
        "agent",
        "beacon",
        null
@@ -1738,7 +1738,7 @@
        "success",
        {
         "$json": {
-         "advertised": 12,
+         "advertised": 51,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -1770,7 +1770,7 @@
          "stop_reason": "stop"
         }
        },
-       2783,
+       3317,
        18,
        0,
        "desktop:parity-repair",
@@ -1795,8 +1795,8 @@
          "stop_reason": "stop"
         }
        },
-       2829,
-       19,
+       3363,
+       23,
        1,
        "desktop:parity-repair",
        "qwen2.5:7b-instruct",
@@ -1821,7 +1821,7 @@
         }
        },
        160,
-       9,
+       8,
        null,
        "desktop:parity-repair",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1983,24 +1983,63 @@
      ],
      "rows": [
       [
-       "0ac69752b6f71969",
+       "ace59500b5eb5a30",
        {
         "$json": [
+         "agent",
+         "anatomy",
+         "ask_user",
          "bash",
+         "browser",
+         "cron_create",
+         "cron_delete",
+         "cron_list",
+         "dashboard",
+         "download_file",
          "edit_file",
+         "github_search",
          "glob",
          "grep",
+         "image_generate",
+         "lcm_describe",
+         "lcm_expand",
+         "lcm_expand_query",
+         "lcm_grep",
          "memory",
+         "message",
+         "notebook_edit",
          "read_file",
+         "sentinel_status",
+         "sessions_list",
+         "sessions_send",
+         "sessions_spawn",
          "skill",
+         "symbiote_graft",
+         "symbiote_harvest",
+         "symbiote_scout",
+         "symbiote_status",
          "task_create",
+         "task_get",
+         "task_list",
+         "task_output",
+         "task_stop",
+         "task_update",
+         "todo_write",
          "tool_search",
+         "tts",
+         "vault_read",
+         "vault_search",
+         "video_generate",
          "web_fetch",
          "web_search",
-         "write_file"
+         "wiki_compile",
+         "wiki_lint",
+         "wiki_query",
+         "write_file",
+         "youtube_transcript"
         ]
        },
-       12,
+       51,
        "<time>"
       ]
      ]
@@ -2038,8 +2077,8 @@
        "<time>",
        "<time>",
        2,
-       5612,
-       37,
+       6680,
+       41,
        {
         "$json": [
          "qwen2.5:7b-instruct"
