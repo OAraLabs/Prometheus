@@ -741,7 +741,7 @@
      "rows": [
       [
        "desktop:parity-switch",
-       "one",
+       "Exactly One",
        "<time>"
       ]
      ]
@@ -1820,13 +1820,13 @@
          "stop_reason": "stop"
         }
        },
-       8801,
+       7449,
        2,
        0,
        "desktop:parity-switch",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6803,
+       5451,
        null,
        "<node>",
        "local",
@@ -1834,31 +1834,6 @@
       ],
       [
        "<uuid:34>",
-       "<time>",
-       "session_titles",
-       "generate",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-         "stop_reason": "stop"
-        }
-       },
-       69,
-       2,
-       null,
-       "desktop:parity-switch",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       0,
-       15,
-       null,
-       "<node>",
-       "local",
-       null
-      ],
-      [
-       "<uuid:35>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -1888,6 +1863,31 @@
        null
       ],
       [
+       "<uuid:35>",
+       "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       69,
+       3,
+       null,
+       "desktop:parity-switch",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       15,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
        "<uuid:8>",
        "<time>",
        "agent_loop",
@@ -1900,7 +1900,7 @@
          "stop_reason": "stop"
         }
        },
-       3262,
+       3193,
        2,
        0,
        "desktop:parity-switch",
@@ -1955,13 +1955,13 @@
          "stop_reason": "stop"
         }
        },
-       8845,
+       7493,
        2,
        0,
        "desktop:parity-switch",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       8802,
+       7450,
        null,
        "<node>",
        "local",
@@ -2101,7 +2101,7 @@
        "<time>",
        "<time>",
        1,
-       8801,
+       7449,
        2,
        {
         "$json": [
@@ -2129,7 +2129,7 @@
        "<time>",
        "<time>",
        1,
-       3262,
+       3193,
        2,
        {
         "$json": [
@@ -2157,7 +2157,7 @@
        "<time>",
        "<time>",
        1,
-       8845,
+       7493,
        2,
        {
         "$json": [

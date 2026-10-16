@@ -86,16 +86,16 @@ def list_user_files() -> list[dict[str, str | int]]:
 
 
 def files_context_block() -> str | None:
-    """Generate a context block listing saved files for system prompt injection.
+    """The saved-files line for the system prompt: how many, and where.
 
-    Returns None if no files are saved.
+    It used to list every file with its size and time (~1,200 tokens for 41
+    files on a live install, audit 2026-10-16 fix 6), which also changed the
+    prompt whenever a file did. The model lists them with glob when it needs
+    a name. None when no files are saved.
     """
     files = list_user_files()
     if not files:
         return None
-
-    lines = ["User's saved files (~/.prometheus/files/):"]
-    for f in files:
-        lines.append(f"  - {f['name']} ({f['size_formatted']}, {f['modified']})")
-
-    return "\n".join(lines)
+    n = len(files)
+    return (f"The user has {n} saved file{'s' if n != 1 else ''} in {_files_dir()}/. "
+            "List them with glob when you need a name.")

@@ -151,7 +151,10 @@ def want_then_answer(name: str, args: dict[str, Any]) -> Callable[[list[dict[str
     return script
 
 
-LEDGER_MODULES = ("accounts", "audit", "billing", "currency", "invoices", "payments", "reports", "taxes", "ledger_io")
+LEDGER_MODULES = ("accounts", "accruals", "allocations", "assets", "audit", "billing", "budgets", "currency",
+                  "deposits", "dividends", "equity", "expenses", "forecasts", "invoices", "journal", "liabilities",
+                  "payments", "payroll", "receivables", "reconciliation", "refunds", "reports", "statements",
+                  "taxes", "transfers", "ledger_io")
 
 
 def _coding(messages: list[dict[str, Any]]) -> Call | Text:

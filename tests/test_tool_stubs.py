@@ -60,7 +60,7 @@ def test_every_tool_keeps_every_argument(registry):
 def test_a_stub_is_name_one_line_and_typed_optional_sorted_properties(registry):
     stub = skeleton(registry.get("cron_create").to_api_schema())
     assert stub["name"] == "cron_create"
-    assert "\n" not in stub["description"] and len(stub["description"]) <= 120
+    assert "\n" not in stub["description"] and len(stub["description"]) <= 80
     props = _props(stub)
     assert list(props) == sorted(props)
     assert "required" not in stub["input_schema"]
@@ -74,6 +74,15 @@ def test_a_short_enum_is_listed_and_a_long_one_is_not():
     props = _props(skeleton(short))
     assert props["mode"] == {"type": "string", "enum": ["messages", "summaries", "both"]}
     assert props["size"] == {"type": "string"}
+
+
+def test_every_stub_argument_is_typed():
+    """Untyped, the grammar admits any JSON value for an argument, and the 27B
+    put every argument into the first one (fix 6's tier: 5/12 right arguments)."""
+    stub = skeleton({"name": "t", "description": "d", "input_schema": {"type": "object", "properties": {
+        "n": {"type": "integer"}, "flag": {"type": "boolean"}, "s": {"type": "string"}, "x": {}}}})
+    assert _props(stub) == {"flag": {"type": "boolean"}, "n": {"type": "integer"}, "s": {"type": "string"},
+                            "x": {"type": "string"}}
 
 
 def test_the_catalog_is_sorted_full_for_the_ambient_tools_and_stubs_for_the_rest(registry):

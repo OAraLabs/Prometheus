@@ -185,6 +185,7 @@ def build_runtime_system_prompt(
     skills: list | None = None,
     task_state: str = "",
     profile: object | None = None,
+    project_files: bool = True,
 ) -> str:
     """Assemble the full runtime system prompt.
 
@@ -208,6 +209,9 @@ def build_runtime_system_prompt(
     cwd:
         Current working directory — used for environment detection and
         PROMETHEUS.md discovery.
+    project_files:
+        False leaves out *cwd*'s project instruction files (the daemon: its
+        cwd is its deploy checkout, and a session's workspace brings its own).
     config:
         Optional configuration dict.  Recognised keys:
 
@@ -377,7 +381,9 @@ def build_runtime_system_prompt(
     # Factored into project_files_section so a session with a workspace of
     # its own (item W) can have the SAME text computed for its cwd and
     # swapped in per run — exact-substring replacement, no prompt parsing.
-    project_prompt = project_files_section(config, cwd)
+    # project_files=False: the daemon, whose cwd is its deploy checkout; a
+    # session's workspace brings its own (agent_loop's item W swap).
+    project_prompt = project_files_section(config, cwd) if project_files else None
     if project_prompt:
         dynamic_sections.append(project_prompt)
 

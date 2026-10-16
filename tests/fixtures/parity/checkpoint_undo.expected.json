@@ -39,7 +39,7 @@
      "content_json": {
       "$json": [
        {
-        "id": "pJOfjb7twm9ZccB8WkWOf2fEKPQCPHeB",
+        "id": "af7rSA4kpWS7QgiOjocOCJbRuQsdJJly",
         "input": {
          "content": "hello parity",
          "path": "/tmp/prometheus-parity/ws/scratch/greeting.txt"
@@ -48,7 +48,7 @@
         "type": "tool_use"
        },
        {
-        "id": "87SPVaG8TZcflvCMzHfhV2dV10eHBK9e",
+        "id": "dWfMTnV9IHSOdist7jeAOeR7oiY95I6I",
         "input": {
          "content": "widgets: 99",
          "path": "/tmp/prometheus-parity/ws/scratch/inventory.txt"
@@ -69,13 +69,13 @@
        {
         "content": "Wrote /tmp/prometheus-parity/ws/scratch/greeting.txt",
         "is_error": false,
-        "tool_use_id": "pJOfjb7twm9ZccB8WkWOf2fEKPQCPHeB",
+        "tool_use_id": "af7rSA4kpWS7QgiOjocOCJbRuQsdJJly",
         "type": "tool_result"
        },
        {
         "content": "Wrote /tmp/prometheus-parity/ws/scratch/inventory.txt",
         "is_error": false,
-        "tool_use_id": "87SPVaG8TZcflvCMzHfhV2dV10eHBK9e",
+        "tool_use_id": "dWfMTnV9IHSOdist7jeAOeR7oiY95I6I",
         "type": "tool_result"
        }
       ]
@@ -85,11 +85,11 @@
      "role": "user"
     },
     {
-     "content": "Done:\n- Created `greeting.txt` with `hello parity`\n- Overwrote `inventory.txt` so it contains only `widgets: 99`",
+     "content": "Done. Created `greeting.txt` with `hello parity` and overwrote `inventory.txt` with `widgets: 99`.",
      "content_json": {
       "$json": [
        {
-        "text": "Done:\n- Created `greeting.txt` with `hello parity`\n- Overwrote `inventory.txt` so it contains only `widgets: 99`",
+        "text": "Done. Created `greeting.txt` with `hello parity` and overwrote `inventory.txt` with `widgets: 99`.",
         "type": "text"
        }
       ]
@@ -114,7 +114,7 @@
     }
    ],
    "op": "chat",
-   "reply": "Done:\n- Created `greeting.txt` with `hello parity`\n- Overwrote `inventory.txt` so it contains only `widgets: 99`",
+   "reply": "Done. Created `greeting.txt` with `hello parity` and overwrote `inventory.txt` with `widgets: 99`.",
    "session": "desktop:parity-undo"
   },
   {
@@ -349,7 +349,7 @@
        {
         "$json": [
          {
-          "id": "pJOfjb7twm9ZccB8WkWOf2fEKPQCPHeB",
+          "id": "af7rSA4kpWS7QgiOjocOCJbRuQsdJJly",
           "input": {
            "content": "hello parity",
            "path": "/tmp/prometheus-parity/ws/scratch/greeting.txt"
@@ -358,7 +358,7 @@
           "type": "tool_use"
          },
          {
-          "id": "87SPVaG8TZcflvCMzHfhV2dV10eHBK9e",
+          "id": "dWfMTnV9IHSOdist7jeAOeR7oiY95I6I",
           "input": {
            "content": "widgets: 99",
            "path": "/tmp/prometheus-parity/ws/scratch/inventory.txt"
@@ -385,13 +385,13 @@
          {
           "content": "Wrote /tmp/prometheus-parity/ws/scratch/greeting.txt",
           "is_error": false,
-          "tool_use_id": "pJOfjb7twm9ZccB8WkWOf2fEKPQCPHeB",
+          "tool_use_id": "af7rSA4kpWS7QgiOjocOCJbRuQsdJJly",
           "type": "tool_result"
          },
          {
           "content": "Wrote /tmp/prometheus-parity/ws/scratch/inventory.txt",
           "is_error": false,
-          "tool_use_id": "87SPVaG8TZcflvCMzHfhV2dV10eHBK9e",
+          "tool_use_id": "dWfMTnV9IHSOdist7jeAOeR7oiY95I6I",
           "type": "tool_result"
          }
         ]
@@ -407,16 +407,16 @@
        "desktop:parity-undo",
        3,
        "assistant",
-       "Done:\n- Created `greeting.txt` with `hello parity`\n- Overwrote `inventory.txt` so it contains only `widgets: 99`",
+       "Done. Created `greeting.txt` with `hello parity` and overwrote `inventory.txt` with `widgets: 99`.",
        {
         "$json": [
          {
-          "text": "Done:\n- Created `greeting.txt` with `hello parity`\n- Overwrote `inventory.txt` so it contains only `widgets: 99`",
+          "text": "Done. Created `greeting.txt` with `hello parity` and overwrote `inventory.txt` with `widgets: 99`.",
           "type": "text"
          }
         ]
        },
-       28,
+       24,
        "<time>",
        0,
        "user",
@@ -459,7 +459,7 @@
        ""
       ],
       [
-       "Done:\n- Created `greeting.txt` with `hello parity`\n- Overwrote `inventory.txt` so it contains only `widgets: 99`"
+       "Done. Created `greeting.txt` with `hello parity` and overwrote `inventory.txt` with `widgets: 99`."
       ],
       [
        "[FILE MUTATION VERIFIER]\nFiles touched this turn:\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: created (+12 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/inventory.txt — write_file: modified (-23 bytes)"
@@ -487,7 +487,7 @@
       [
        1,
        {
-        "$bytes_sha256": "5f65b2b045f27829",
+        "$bytes_sha256": "516b21717b4f1bb4",
         "len": 2
        }
       ],
@@ -508,8 +508,8 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "03ef7f9a87453733",
-        "len": 170
+        "$bytes_sha256": "447832b44d6295e3",
+        "len": 143
        }
       ],
       [
@@ -551,7 +551,7 @@
       [
        4,
        {
-        "$bytes_sha256": "c555eab45d08845a",
+        "$bytes_sha256": "4d7b3ef7300acf70",
         "len": 1
        }
       ],
@@ -717,7 +717,7 @@
      "rows": [
       [
        "desktop:parity-undo",
-       "File Creation And Overwriting",
+       "File Creation and Overwrite Task",
        "<time>"
       ]
      ]
@@ -1168,8 +1168,8 @@
        "ace59500b5eb5a30",
        "prose",
        0,
-       112,
-       "Done:\n- Created `greeting.txt` with `hello parity`\n- Overwrote `inventory.txt` so it contains only `widgets: 99`",
+       98,
+       "Done. Created `greeting.txt` with `hello parity` and overwrote `inventory.txt` with `widgets: 99`.",
        "agent",
        "beacon",
        null
@@ -1877,7 +1877,7 @@
          "stop_reason": "tool_calls"
         }
        },
-       8851,
+       7499,
        101,
        0,
        "desktop:parity-undo",
@@ -1902,13 +1902,13 @@
          "stop_reason": "stop"
         }
        },
-       9002,
-       36,
+       7650,
+       30,
        1,
        "desktop:parity-undo",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       8951,
+       7599,
        null,
        "<node>",
        "local",
@@ -1927,13 +1927,13 @@
          "stop_reason": "stop"
         }
        },
-       133,
-       6,
+       127,
+       7,
        null,
        "desktop:parity-undo",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       15,
+       0,
        null,
        "<node>",
        "local",
@@ -2031,7 +2031,7 @@
        "<node>",
        "<turn:1>",
        0,
-       "pJOfjb7twm9ZccB8WkWOf2fEKPQCPHeB",
+       "af7rSA4kpWS7QgiOjocOCJbRuQsdJJly",
        null,
        null,
        0,
@@ -2099,7 +2099,7 @@
        "<node>",
        "<turn:1>",
        0,
-       "87SPVaG8TZcflvCMzHfhV2dV10eHBK9e",
+       "dWfMTnV9IHSOdist7jeAOeR7oiY95I6I",
        null,
        null,
        0,
@@ -2236,8 +2236,8 @@
        "<time>",
        "<time>",
        2,
-       17853,
-       137,
+       15149,
+       131,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"

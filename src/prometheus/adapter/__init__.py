@@ -143,6 +143,13 @@ class ModelAdapter:
             formatted_tools = self.formatter.format_tools(tools)
         else:
             formatted_tools = tools
+        if self.tier == self.TIER_LIGHT and isinstance(self.formatter, QwenFormatter):
+            # The tools ride the request natively and the served template
+            # renders them (Qwen's XML format). The formatter's prose list
+            # repeated every tool (~1,400 tokens with all of them offered) and
+            # its JSON example contradicted the XML the template asks for
+            # (audit 2026-10-16, fix 6).
+            return system_prompt, formatted_tools
         formatted_system = self.formatter.format_system_prompt(
             system_prompt, tools  # pass original tools for description extraction
         )
