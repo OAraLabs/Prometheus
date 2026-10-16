@@ -178,11 +178,13 @@ def test_d_every_ending_reaches_the_client_with_its_reason(local, script, messag
 
 # ---------------------------------------------------------------- (e)
 
-#: PROPOSED (audit 2026-10-16, pending approval): the most Prometheus itself may
-#: add to round 0 of a local turn, in server tokens: base prompt, environment,
-#: documents, skills, formatter text, framing and the shipped tool schemas,
-#: i.e. everything but the operator's own files and saved-file listing.
-PROMETHEUS_OWNED_TARGET = 5_000
+#: The most Prometheus itself may add to round 0 of a local turn, in server
+#: tokens: base prompt, environment, documents, skills, formatter text, framing
+#: and the shipped tool schemas, i.e. everything but the operator's own files
+#: and saved-file listing. Will's threshold for 0.9.13 (2026-10-16): fix 6's
+#: cuts measure 7,253 here, plus a small margin; 5,000 is revisited after launch
+#: with an A/B.
+PROMETHEUS_OWNED_TARGET = 7_400
 
 
 def _prometheus_owned_tokens(model, ex, operator_texts: list[str]) -> int:
@@ -190,20 +192,21 @@ def _prometheus_owned_tokens(model, ex, operator_texts: list[str]) -> int:
 
     Bootstrap files and project instructions go in verbatim and are cut by
     content. The memory section re-renders its files (one bullet per line),
-    so it is cut by position: it runs from ``# Memory`` to ``# Saved Files``,
-    and the saved-file listing from there to the tool list the formatter
-    appends (prompt_assembler.py's section order)."""
+    so it is cut by position: each runs from its heading to the next
+    top-level heading (or the tool list a formatter appends)."""
     system = ex.system
     for text in operator_texts:
         body = text.strip()
         if body and body in system:
             system = system.replace(body, "", 1)
-    for start, end in (("\n# Memory", "\n# Saved Files"), ("\n# Saved Files", "\nYou have access to these tools:")):
+    for start in ("\n# Memory", "\n# Saved Files"):
         i = system.find(start)
         if i < 0:
             continue
-        j = system.find(end, i + len(start))
-        system = system[:i] + (system[j:] if j >= 0 else "")
+        # To the next top-level heading, or the formatter's tool list.
+        ends = [j for j in (system.find("\n# ", i + len(start)),
+                            system.find("\nYou have access to these tools:", i + len(start))) if j >= 0]
+        system = system[:i] + (system[min(ends):] if ends else "")
     tools = sum(len(json.dumps(t["function"], ensure_ascii=False)) for t in ex.request.get("tools") or [])
     return model.tokens(len(system)) + model.tokens(tools)
 
@@ -241,7 +244,6 @@ def test_e_the_client_can_read_the_overhead_breakdown(local):
     assert ctx.get("overhead_components"), "GET /api/status reports no per-component prompt overhead"
 
 
-@pytest.mark.xfail(strict=True, reason="gate e on 0.9.12: Prometheus's own round-0 overhead is over the proposed target")
 def test_e_prometheus_owned_overhead_is_within_target(local):
     daemon, model = local
     ex = next(e for e in model.of("hello") if e.status == 200) if model.of("hello") else None

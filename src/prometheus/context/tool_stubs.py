@@ -7,9 +7,9 @@ property names. So every tool is in ``tools``:
 
 * the FULL_SCHEMA_TOOLS (the most-used, plus ``agent`` and ``ask_user``, which a
   model must never call with guessed arguments) with their whole schema;
-* every other tool as a SKELETON: its name, one line of description, and its
-  top-level property names with primitive types (and the allowed values of a
-  short enum), all optional, sorted.
+* every other tool as a SKELETON: its name, one line of description (at most
+  80 characters), and its top-level property names with their primitive type
+  and the allowed values of a short enum, all optional, sorted.
 
 The block is sorted by name and built once per run, so it is byte-identical
 across rounds (the template renders it ahead of the system text: one changed
@@ -56,6 +56,8 @@ def catalog_mode(deferred_cfg: Any) -> str:
 #: A stub lists an enum's values only when there are at most this many; a
 #: longer one is left to the refusal, which carries the whole schema.
 MAX_STUB_ENUM = 8
+#: A stub's one line of description, at most this many characters.
+STUB_LINE = 80
 #: Refusals with the full schema per tool per turn; the next one says stop.
 MAX_SCHEMA_RETRIES = 2
 
@@ -158,6 +160,10 @@ def full(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stub_property(prop: Any) -> dict[str, Any]:
+    """A stub argument: its primitive type, always (an untyped argument lets the
+    grammar take any JSON value there, and the 27B then packed every argument
+    into the first one: 5/12 right arguments, 27 refusals, fix 6's tier,
+    2026-10-16), and a short enum's values."""
     out: dict[str, Any] = {"type": primitive_type(prop)}
     enum = prop.get("enum") if isinstance(prop, dict) else None
     if isinstance(enum, list) and 0 < len(enum) <= MAX_STUB_ENUM:
@@ -170,7 +176,7 @@ def skeleton(schema: dict[str, Any]) -> dict[str, Any]:
     props = (sanitize(_input_schema(schema)).get("properties") or {})
     return {
         "name": schema["name"],
-        "description": first_line(schema.get("description", "")),
+        "description": first_line(schema.get("description", ""), STUB_LINE),
         "input_schema": {
             "type": "object",
             "properties": {k: _stub_property(props[k]) for k in sorted(props)},

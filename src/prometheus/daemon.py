@@ -1359,7 +1359,13 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     def _project_prompt_for(cwd: str):
         return _project_files_section(config, cwd)
 
-    _boot_project_prompt = _project_files_section(config, str(Path.cwd()))
+    # The daemon's own directory is its deploy checkout, not a project anyone
+    # is working in: its PROMETHEUS.md (~2.7k tokens of Prometheus's developer
+    # guide) rode every chat (audit 2026-10-16, fix 6). The boot prompt carries
+    # no project files; a session bound to a workspace (/workspace) gets that
+    # workspace's own, appended per run, so a session working in the
+    # Prometheus repo still reads its PROMETHEUS.md.
+    _boot_project_prompt = None
 
     # File memory (MEMORY.md + USER.md): run_loop re-reads it every run and
     # swaps the boot "# Memory" section by exact substring, so a memory-tool
@@ -1654,7 +1660,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             from prometheus.context.prompt_assembler import build_runtime_system_prompt
             from prometheus.skills.loader import skills_for_prompt
             system_prompt = build_runtime_system_prompt(
-                cwd=str(Path.cwd()), config=config,
+                cwd=str(Path.cwd()), config=config, project_files=False,
                 skills=skills_for_prompt(),
                 memory_content=_boot_memory_content,
             )
@@ -1822,7 +1828,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 from prometheus.context.prompt_assembler import build_runtime_system_prompt
                 from prometheus.skills.loader import skills_for_prompt
                 system_prompt = build_runtime_system_prompt(
-                    cwd=str(Path.cwd()), config=config,
+                    cwd=str(Path.cwd()), config=config, project_files=False,
                     skills=skills_for_prompt(),
                     memory_content=_boot_memory_content,
                 )
@@ -1893,7 +1899,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 from prometheus.context.prompt_assembler import build_runtime_system_prompt
                 from prometheus.skills.loader import skills_for_prompt
                 system_prompt = build_runtime_system_prompt(
-                    cwd=str(Path.cwd()), config=config,
+                    cwd=str(Path.cwd()), config=config, project_files=False,
                     skills=skills_for_prompt(),
                     memory_content=_boot_memory_content,
                 )
@@ -2754,7 +2760,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 from prometheus.context.prompt_assembler import build_runtime_system_prompt
                 from prometheus.skills.loader import skills_for_prompt
                 system_prompt = build_runtime_system_prompt(
-                    cwd=str(Path.cwd()), config=config,
+                    cwd=str(Path.cwd()), config=config, project_files=False,
                     skills=skills_for_prompt(),
                     memory_content=_boot_memory_content,
                 )

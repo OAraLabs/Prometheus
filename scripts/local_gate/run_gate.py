@@ -48,6 +48,11 @@ import websockets
 
 HERE = Path(__file__).resolve().parent
 
+#: Round 0 of a local turn on the operator's config, in server tokens (fix 6;
+#: Will's threshold for 0.9.13: 13,813 measured on the 27B, plus a small
+#: margin). Checked when --overhead measures it.
+ROUND0_ON_CONFIG_MAX = 14_000
+
 # The pre-0.9.12 compaction line on a 32,768 window: the 80% threshold, which
 # binds while the output room is 4096 and the largest recent result is under
 # 2,458 tokens (compactor.py projected rule). A pass below it is "early".
@@ -538,6 +543,9 @@ def main() -> None:
             res["session_id"] = sid
             if args.overhead and not results and caps:
                 res["overhead"] = _overhead(args.proxy_port, caps[0])
+                res["checks"]["round0_within_target"] = (
+                    res["overhead"]["server_prompt_tokens"] <= ROUND0_ON_CONFIG_MAX)
+                res["pass"] = all(res["checks"].values())
             results.append(res)
             print(json.dumps({k: res[k] for k in ("scenario", "pass", "checks", "tools_called", "elapsed_s")}))
             with open(work / f"frames-{args.label}-{name}.jsonl", "w", encoding="utf-8") as fh:
