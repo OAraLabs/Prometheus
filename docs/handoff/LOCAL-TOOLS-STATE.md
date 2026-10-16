@@ -1,4 +1,4 @@
-# Local tools fix stack: state (2026-10-16, evening)
+# Local tools fix stack: state (2026-10-16, stack merged, release check done)
 
 The audit: `docs/audits/local-tools-audit-2026-10-16/README.md` (merged with #810).
 
@@ -6,6 +6,7 @@ The audit: `docs/audits/local-tools-audit-2026-10-16/README.md` (merged with #81
 
 | Path | What |
 |---|---|
+| `docs/handoff/RELEASE-CHECK-0.9.13.md` | The one-page release-check summary for Will. |
 | `docs/handoff/runbook-0.9.13/LIVE-CONFIG.md` | The 0.9.13 runbook section for the live config: the deploy edit, what to check after the restart, the rollback, and the day-after cleanup. |
 | `docs/handoff/runbook-0.9.13/retire_workaround.py` | Deploy edit (4 lines): removes the 27B's per-model `max_output_tokens: 4096` and `- agent` from `always_loaded`. |
 | `docs/handoff/runbook-0.9.13/cleanup_dead_config.py` | Day-after cleanup (11 lines): `context.reserved_output` and the 5 `model_overrides` entries that match no served model. |
@@ -35,30 +36,23 @@ Rules for each PR:
 | 2: llama.cpp cap 4096 | #813 | merged `9bc78930` |
 | 5a: context windows loud and consistent | #814 | merged `8b97c113` |
 | 5b: Ollama native /api/chat with num_ctx | #815 | merged `dc332849` |
-| 4: tool_search finds what the model means | #816 | open, head `d6cb7f9a`, auto-merge pinned; all 7 required checks have a live run |
-| 7: telemetry records what was sent | not opened | branch `fix/telemetry-records-what-was-sent` at `200c86ca`, on fix 4's pre-merge head `6736cda6` |
-| 3: every tool callable locally (stubs) | not opened | `fix/every-tool-callable-locally` at `deea416a`, on fix 7 `200c86ca` |
-| 6: cut round-0 overhead | not opened | `fix/cut-local-overhead` at `e9a3a438`, on fix 3 `deea416a` |
+| 4: tool_search finds what the model means | #816 | merged `63c66da4` |
+| 7: telemetry records what was sent | #818 | merged `3bbb7bb7` |
+| 3: every tool callable locally (stubs) | #819 | merged `eb0a988e` |
+| 6: cut round-0 overhead | #820 | merged `1f85ccee` |
 
-To open the next PR once its predecessor has squash-merged:
-1. Rebase: `git rebase --onto origin/main <predecessor's pre-merge head> <branch>`. The predecessor heads are the "on ..." SHAs in the table.
-2. Check that the tree is unchanged, i.e. the same tree that was checked.
-3. Push, open the PR with its draft body, and pin auto-merge.
-
-Each branch was pre-rebased this way and checked locally: ruff, the mypy gate, its tests, the hermetic gate, parity replay 12/12 and stability identical. Fix 3 and fix 6 also ran their full suites: 14,410 and 14,422 passed, each with only the 2 known host failures.
+The stack is complete. Each PR went in only with every required check green and non-cancelled on its exact head SHA, squash-merged with pinned auto-merge.
 
 Required checks on main: test (3.11), test (3.12), quality, security-floors, firstlight (local, editable), firstlight (cloud, editable), firstlight (local, wheel). The two known host failures on this box are `test_proc_net_tcp6_addresses` and `test_the_real_session_bus_agrees_with_the_probe`.
 
 ## What's left
 
-1. **Merge the rest of the stack:** #816 (fix 4), then fix 7, fix 3 and fix 6, in that order.
-2. **Release check on main** with everything merged:
-   - the full hermetic gate (`tests/test_local_gate_*`, `tests/test_local_tool_reachability.py`);
-   - parity replay and stability;
-   - the 12-request tier: `CHECKOUT=<main checkout> WORK=<dir> docs/handoff/release-check/tier.sh release`, then `tier_score.py`.
+The release check on main `1f85ccee` is done: see `RELEASE-CHECK-0.9.13.md`.
+- Hermetic gate: 292 passed, 1 xfail (gate e's breakdown).
+- Parity: 12/12, stability identical. CI is green.
+- Tier: right tool 12/12, right tool first 12/12, right first-call arguments 11/12 (the scorer says 12/12), round 0 13,809.
 
-   The tier uses the 10-16 backup config: the live config without the workaround, which is what live becomes after the deploy edit.
-3. **One-page summary for Will,** including the runbook's config change.
+Still Will's go, and not started: the version bump, tag, release and deploy, including the live-config edit in `runbook-0.9.13/` and its day-after cleanup.
 
 ## Decisions
 
