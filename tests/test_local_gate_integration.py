@@ -117,7 +117,8 @@ def test_c_a_long_coding_session_does_not_compact_early(local, coding_turn):
     # 80% line, so a projected pass means the output cap took the room. (A pass
     # that only trims results sends the client no frame; the summary passes do.)
     early = [p for p in _passes(turn)
-             if int(p.get("tokens_before") or 0) < LINE_32K or p.get("trigger") == "projected"]
+             if int(p.get("tokens_before") or 0) < LINE_32K or p.get("trigger") == "projected"
+             or int(p.get("ceiling") or LINE_32K) < LINE_32K]
     assert not early, f"compaction started early (line {LINE_32K}): " + json.dumps(early)[:600]
 
 

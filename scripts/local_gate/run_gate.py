@@ -330,9 +330,14 @@ def _grade(name: str, spec: dict, run: dict, caps: list[dict], tel: dict, comp: 
         hit = any((c == want) if want else (c or "").startswith(prefix) for c in called)
         checks["tool_called"] = hit
         checks["at_most_one_select"] = selects <= 1
-    # A pass while the request is still under the pre-0.9.12 line is "early",
-    # whichever scenario it happens in.
-    res["early_compaction_passes"] = [p for p in comp if p["before"] < LINE_32K_PRE_0912]
+    # A pass is "early" when it fired under the pre-0.9.12 line, or when the
+    # line it aimed at was pulled under it by the reply room (ceiling below
+    # 26,214: the projected rule binding). The second catches a session whose
+    # request jumps past the line in one round, as a model reading two files
+    # per round does.
+    res["early_compaction_passes"] = [
+        p for p in comp
+        if p["before"] < LINE_32K_PRE_0912 or (p["ceiling"] is not None and p["ceiling"] < LINE_32K_PRE_0912)]
     if spec["gate"] == "c":
         checks["no_early_compaction"] = not res["early_compaction_passes"]
         checks["task_finished"] = _has_docstring(work / spec["edited_file"], "compute_total")
