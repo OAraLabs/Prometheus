@@ -22,7 +22,7 @@ Whatever wins is clamped to the model's documented maximum when one is known,
 so no setting can ask a vendor for more than it serves. Last, on a window the
 server MEASURED (a local box reports n_ctx), the cap never takes more than
 :data:`LOCAL_ROOM_FRACTION` of it, so a small local window keeps most of its
-room for the conversation. A 32768 window allows 8192; a 16384 one, 4096.
+room for the conversation. A 16384 window allows 4096; an 8192 one, 2048.
 """
 
 from __future__ import annotations
@@ -34,11 +34,17 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-#: The cap for a llama.cpp backend, whatever GGUF it serves: a quarter of the
-#: 4090's 32768 window. Ollama is not included: its probe reports the model's
-#: TRAINED context length, not the runtime ``num_ctx``, so the room a reply has
-#: there is not known and it keeps the default.
-LOCAL_OUTPUT_CAP = 8192
+#: The cap for a llama.cpp backend, whatever GGUF it serves: 4096, what every
+#: local request sent before per-model caps. 0.9.12 sent 8192, a quarter of the
+#: 4090's 32768 window, and the compactor's projected-overflow rule (#773)
+#: counts that as room the next round needs: with ~18.6k tokens of system
+#: prompt and tool schemas, the line fell from 26,214 to ~22.3k and a FIRST
+#: turn was summarised after two or three tool results (2026-10-16). A reply
+#: cut at 4096 is told to send its work in smaller pieces. Ollama is not
+#: included: its probe reports the model's TRAINED context length, not the
+#: runtime ``num_ctx``, so the room a reply has there is not known and it keeps
+#: the default.
+LOCAL_OUTPUT_CAP = 4096
 
 #: The most of a MEASURED window one reply may ask for. The compactor's
 #: projected-overflow rule (#773) counts the request's ``max_tokens`` as room

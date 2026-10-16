@@ -74,9 +74,25 @@ def test_a_known_model_gets_its_cap(model, cap):
 
 def test_a_llama_cpp_backend_gets_the_local_cap_whatever_its_model_is_called():
     _table, local = _limits()
-    assert local == 8192
+    assert local == 4096
     for name in ("", "qwen3.8-27b", "/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"):
-        assert _caps().resolve(name, provider=LLAMA, default=4096) == (8192, "local")
+        assert _caps().resolve(name, provider=LLAMA, default=4096) == (4096, "local")
+
+
+def test_on_a_32k_local_window_the_cap_leaves_the_80_percent_line_in_charge():
+    """2026-10-16: with 8192 sent on the 4090's 32768 window, the projected-overflow
+    rule (#773) lowered the compaction line from 26,214 to ~22.3k, and with ~18.6k
+    tokens of system prompt and tool schemas a FIRST turn was summarised after two
+    or three tool results. The rule's line is window - max_tokens - the largest
+    recent tool result; a 2k result is ordinary (a tool_search page)."""
+    from prometheus.context.compactor import compaction_threshold
+
+    window, ordinary_result = 32768, 2000
+    cap, source = _caps().resolve("local-27b", provider=LLAMA, default=4096,
+                                  window=window, window_measured=True)
+    assert (cap, source) == (4096, "local")
+    assert window - cap - ordinary_result >= compaction_threshold(window) == 26214
+    assert window - 8192 - ordinary_result < compaction_threshold(window), "premise: 8192 moved the line"
 
 
 def test_an_unknown_model_keeps_the_default_on_ollama_and_in_the_cloud():
@@ -190,12 +206,13 @@ def _anthropic_sse(text: str) -> str:
     return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events)
 
 
-def _sent_max_tokens(provider, model: str, output_caps, *, tool=None) -> LoopContext:  # noqa: ANN001
+def _sent_max_tokens(provider, model: str, output_caps, *, tool=None,  # noqa: ANN001
+                     max_tokens: int = 4096) -> LoopContext:
     registry = ToolRegistry()
     if tool is not None:
         registry.register(tool)
     ctx = LoopContext(provider=provider, model=model, system_prompt="You are a test.",
-                      max_tokens=4096, tool_registry=registry, output_caps=output_caps)
+                      max_tokens=max_tokens, tool_registry=registry, output_caps=output_caps)
 
     async def drain() -> None:
         async for _ in run_loop(ctx, [ConversationMessage.from_user_text("hi")]):
@@ -223,8 +240,10 @@ def test_an_opus_5_turn_asks_for_room_for_its_thinking(monkeypatch):
 
 def test_a_llama_cpp_turn_asks_for_the_local_cap(monkeypatch):
     seen = _serve(monkeypatch, [_openai_sse(text="ok")])
-    _sent_max_tokens(LlamaCppProvider(base_url="http://unit.test"), "local-27b", _caps())
-    assert [s["max_tokens"] for s in seen] == [8192]
+    # The loop's own max_tokens differs, so 4096 here is the local cap and not the default.
+    _sent_max_tokens(LlamaCppProvider(base_url="http://unit.test"), "local-27b", _caps(),
+                     max_tokens=2000)
+    assert [s["max_tokens"] for s in seen] == [4096]
 
 
 def test_a_route_max_tokens_reaches_the_request(monkeypatch):
@@ -252,9 +271,9 @@ def test_a_fallback_request_asks_for_the_fallback_models_cap():
     fallback = SimpleNamespace(model="qwen3.8-max",
                                provider=SimpleNamespace(provider_name="qwen",
                                                         route_max_tokens=None))
-    ctx = SimpleNamespace(output_caps=_caps(), max_tokens=4096, model="local-27b",
+    ctx = SimpleNamespace(output_caps=_caps(), max_tokens=2000, model="local-27b",
                           provider=primary, fallback=fallback, compactor=None)
-    assert _output_cap(ctx, "local-27b") == 8192
+    assert _output_cap(ctx, "local-27b") == 4096
     assert _output_cap(ctx, "qwen3.8-max") == 16384
 
 
@@ -302,8 +321,10 @@ def test_a_cut_call_is_told_the_cap_that_was_actually_sent(tmp_path, monkeypatch
 
 # ── a measured local window keeps most of its room ───────────────────────────
 
-@pytest.mark.parametrize("window,cap", [(32768, 8192), (16384, 4096), (8192, 2048), (2048, 1024)])
+@pytest.mark.parametrize("window,cap", [(65536, 4096), (32768, 4096), (16384, 4096), (8192, 2048),
+                                        (2048, 1024)])
 def test_a_measured_window_caps_the_reply_at_a_quarter_of_it(window, cap):
+    """The quarter is a ceiling under the local cap: it bites below a 16384 window."""
     assert _caps().resolve("local-27b", provider=LLAMA, default=4096,
                            window=window, window_measured=True)[0] == cap
 
@@ -317,7 +338,7 @@ def test_the_room_rule_applies_to_every_source_but_only_on_a_measured_window():
                         window=16384, window_measured=False) == (20000, "model_override")
     # A window nobody knows (no compactor): no clamp.
     assert _caps().resolve("local-27b", provider=LLAMA, default=4096,
-                           window=0, window_measured=True) == (8192, "local")
+                           window=0, window_measured=True) == (4096, "local")
 
 
 class _Compactor:
@@ -345,17 +366,17 @@ def test_a_small_local_window_sends_and_plans_around_a_quarter_of_it(monkeypatch
     from prometheus.engine.agent_loop import _output_cap
 
     ctx = SimpleNamespace(output_caps=_caps(), max_tokens=4096, model="local-27b",
-                          provider=LLAMA, fallback=None, backend=None, compactor=_Compactor(16384))
-    assert _output_cap(ctx, "local-27b") == 4096
+                          provider=LLAMA, fallback=None, backend=None, compactor=_Compactor(8192))
+    assert _output_cap(ctx, "local-27b") == 2048
     ctx.compactor = _Compactor(65536)
-    assert _output_cap(ctx, "local-27b") == 8192, "a large window still gets the local cap, no more"
+    assert _output_cap(ctx, "local-27b") == 4096, "a large window still gets the local cap, no more"
 
 
 def test_the_compactor_plans_around_the_cap_the_request_sends(monkeypatch):
     """#773's projected-overflow rule counts the request's max_tokens as room the
     next round needs: it must be the cap actually sent, not a flat 4096."""
     seen = _serve(monkeypatch, [_openai_sse(text="ok")])
-    compactor = _Compactor(16384)
+    compactor = _Compactor(8192)
     ctx = LoopContext(provider=LlamaCppProvider(base_url="http://unit.test"), model="local-27b",
                       system_prompt="You are a test.", max_tokens=4096,
                       tool_registry=ToolRegistry(), output_caps=_caps(), compactor=compactor)
@@ -365,8 +386,8 @@ def test_the_compactor_plans_around_the_cap_the_request_sends(monkeypatch):
             pass
 
     asyncio.run(drain())
-    assert [s["max_tokens"] for s in seen] == [4096], "a quarter of the 16384 window"
-    assert compactor.planned == [4096]
+    assert [s["max_tokens"] for s in seen] == [2048], "a quarter of the 8192 window"
+    assert compactor.planned == [2048]
 
 
 # ── every entry point passes the caps in ─────────────────────────────────────

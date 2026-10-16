@@ -817,7 +817,7 @@
      "rows": [
       [
        "desktop:parity-compact",
-       "Memory Game",
+       "Memory Game First Word Amber",
        "<time>"
       ]
      ]
@@ -1335,9 +1335,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 5622,
+         "over_by": 5627,
          "session_id": "desktop:parity-compact",
-         "tokens": 6277
+         "tokens": 6282
         }
        },
        "context_compactor",
@@ -1355,7 +1355,7 @@
          "chunks": 1,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 5622,
+         "over_by": 5627,
          "session_id": "desktop:parity-compact",
          "span_messages": 4,
          "summarizer_input_omitted": 0,
@@ -1363,7 +1363,7 @@
          "target": 458,
          "threshold": 655,
          "threshold_source": "global pct",
-         "tokens_after": 6277,
+         "tokens_after": 6282,
          "tokens_before": 6291,
          "tokens_before_estimated": 6015,
          "tool_results_trimmed": 0,
@@ -1380,9 +1380,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 5611,
+         "over_by": 5619,
          "session_id": "desktop:parity-compact",
-         "tokens": 6266
+         "tokens": 6274
         }
        },
        "context_compactor",
@@ -1395,12 +1395,12 @@
        {
         "$json": {
          "cache_hit": false,
-         "calibration": 1.046,
+         "calibration": 1.047,
          "ceiling": 655,
          "chunks": 1,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 5611,
+         "over_by": 5619,
          "session_id": "desktop:parity-compact",
          "span_messages": 6,
          "summarizer_input_omitted": 0,
@@ -1408,8 +1408,8 @@
          "target": 458,
          "threshold": 655,
          "threshold_source": "global pct",
-         "tokens_after": 6266,
-         "tokens_before": 6319,
+         "tokens_after": 6274,
+         "tokens_before": 6326,
          "tokens_before_estimated": 6044,
          "tool_results_trimmed": 0,
          "trigger": "threshold"
@@ -2087,31 +2087,6 @@
       [
        "<uuid:37>",
        "<time>",
-       "session_titles",
-       "generate",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-         "stop_reason": "stop"
-        }
-       },
-       82,
-       3,
-       null,
-       "desktop:parity-compact",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       0,
-       15,
-       null,
-       "<node>",
-       "local",
-       null
-      ],
-      [
-       "<uuid:38>",
-       "<time>",
        "agent_loop",
        "tool_advertisement",
        "<ms>",
@@ -2135,6 +2110,31 @@
        null,
        "<node>",
        null,
+       null
+      ],
+      [
+       "<uuid:38>",
+       "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       82,
+       6,
+       null,
+       "desktop:parity-compact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       15,
+       null,
+       "<node>",
+       "local",
        null
       ],
       [
@@ -2204,11 +2204,11 @@
           "session_id": "desktop:parity-compact",
           "span_messages": 4
          },
-         "output_chars": 119
+         "output_chars": 137
         }
        },
        129,
-       34,
+       46,
        null,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -2232,7 +2232,7 @@
          "stop_reason": "stop"
         }
        },
-       6276,
+       6288,
        3,
        0,
        "desktop:parity-compact",
@@ -2286,11 +2286,11 @@
           "session_id": "desktop:parity-compact",
           "span_messages": 6
          },
-         "output_chars": 77
+         "output_chars": 83
         }
        },
        150,
-       29,
+       24,
        null,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -2314,13 +2314,13 @@
          "stop_reason": "stop"
         }
        },
-       6271,
+       6266,
        8,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4228,
+       4240,
        null,
        "<node>",
        "local",
@@ -2477,7 +2477,7 @@
        "<time>",
        "<time>",
        1,
-       6276,
+       6288,
        3,
        {
         "$json": [
@@ -2505,7 +2505,7 @@
        "<time>",
        "<time>",
        1,
-       6271,
+       6266,
        8,
        {
         "$json": [
