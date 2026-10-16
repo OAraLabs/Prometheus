@@ -58,7 +58,7 @@
        }
       ]
      },
-     "is_trusted": false,
+     "is_trusted": true,
      "provenance": "user",
      "role": "assistant"
     },
@@ -98,7 +98,7 @@
        }
       ]
      },
-     "is_trusted": false,
+     "is_trusted": true,
      "provenance": "user",
      "role": "assistant"
     },
@@ -128,7 +128,7 @@
        }
       ]
      },
-     "is_trusted": false,
+     "is_trusted": true,
      "provenance": "user",
      "role": "assistant"
     },
