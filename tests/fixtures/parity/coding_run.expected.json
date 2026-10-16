@@ -846,8 +846,8 @@
        "9adc3c23ae3a7bbd",
        "prose",
        0,
-       146,
-       "Fixed. `add()` in calc.py was returning `a - b`; I changed it to `a + b`. The acceptance command `python test_calc.py` now exits 0 with \"calc ok\".",
+       234,
+       "Fixed. `calc.add` was returning `a - b` instead of `a + b` — I changed line 3 in calc.py to `return a + b` and left test_calc.py untouched. The acceptance command `python test_calc.py` ran successfully (exit code 0, output \"calc ok\").",
        "agent",
        "coding_mode",
        null
@@ -1554,7 +1554,7 @@
         }
        },
        1808,
-       66,
+       76,
        0,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1579,7 +1579,7 @@
         }
        },
        1979,
-       81,
+       84,
        1,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1604,7 +1604,7 @@
         }
        },
        2106,
-       40,
+       38,
        2,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1629,7 +1629,7 @@
         }
        },
        2169,
-       53,
+       82,
        3,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1789,7 +1789,7 @@
        "<node>",
        "<turn:1>",
        0,
-       "IyDnJut2pjggyWxqDD9Be6gkuljzaf5G",
+       "9ILnGxU7nOLfGv8rJVgRxGh170iyR8kU",
        null,
        null,
        0,
@@ -1857,7 +1857,7 @@
        "<node>",
        "<turn:1>",
        0,
-       "M6YMy4emkFnWRb6KjqX444Pvi5kONrbm",
+       "Wh4rqrNshgDkgjWHZfvFbm8vqHCEDatR",
        null,
        null,
        0,
@@ -1949,7 +1949,7 @@
        "<node>",
        "<turn:1>",
        1,
-       "JRUpiZmaJDQQSIRKKJ0J2Dg1qmaN7Caw",
+       "jgFWDk0KVqhgjOR2vd8c7nUhlfppnE3b",
        null,
        null,
        0,
@@ -2040,7 +2040,7 @@
        "<node>",
        "<turn:1>",
        2,
-       "noRPAu1RgR93DpKfQgzoOwHiXObHoQmC",
+       "BRheNbWetxogflGdb0zmfBN4BxNPg4lT",
        null,
        null,
        0,
@@ -2133,7 +2133,7 @@
        "<time>",
        4,
        8062,
-       240,
+       280,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
