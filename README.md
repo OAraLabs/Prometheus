@@ -2,8 +2,9 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/OAraLabs/Prometheus?style=social)](https://github.com/OAraLabs/Prometheus/stargazers)
 
-**A fire you own doesn't go out.**\
-Not a local model. A local agent.
+![The banner oara daemon prints on a terminal: the PROMETHEUS wordmark, the line “a fire you own doesn't go out”, then the port it listens on, the model it serves and where to get Beacon](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/term-startup-banner.svg)
+
+**Not a local model. A local agent.**
 
 Pre-1.0 · known limits: [oara.ai/docs/limits/](https://oara.ai/docs/limits/)
 
