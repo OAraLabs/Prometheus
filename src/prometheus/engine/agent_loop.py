@@ -950,6 +950,26 @@ from prometheus.engine.tool_context import RUN_SESSION as _RUN_SESSION  # noqa: 
 # rather than values rebound per round.
 _RUN_TURN: contextvars.ContextVar = contextvars.ContextVar("prometheus_run_turn", default=None)
 
+# The tool names the round in progress OFFERED the model (its payload, or the
+# prompt-listed tools at tier full), a frozenset; None outside a run. Set per
+# round, before the round's calls are dispatched, so a call's lucky-guess
+# check reads what was sent instead of recomputing it (audit 2026-10-16: 25 of
+# 28 recorded lucky guesses were tools the round HAD offered). A ContextVar
+# for _ROUND_SERVING's reason.
+_ROUND_OFFERED: contextvars.ContextVar = contextvars.ContextVar("prometheus_round_offered", default=None)
+
+
+def _offered_names(active_tools: list[dict], payload_tools: list[dict], tools_enabled: bool) -> frozenset[str]:
+    """The tool names one round offers: its payload's, else (tier full: the
+    tools ride the system prompt) the run's formatted list; none on a
+    no-tools round."""
+    if not tools_enabled:
+        return frozenset()
+    source = payload_tools or active_tools or []
+    return frozenset(
+        str(s.get("name") or (s.get("function") or {}).get("name") or "") for s in source
+    ) - {""}
+
 
 class _StopReason:
     """``turns.forced_stop_reason``: why the LOOP ended a turn, not the model.
@@ -1058,6 +1078,7 @@ class _TurnRecord:
         self._prose_kept = False
         self._held: dict | None = None
         self._ended = False
+        self._sets_written: set[str] = set()
 
     # -- writes ----------------------------------------------------------
 
@@ -1084,8 +1105,15 @@ class _TurnRecord:
     def start(self, tool_set: dict | None) -> None:
         """The ``turn_start`` seam: the tools offered, then the turn's first half."""
         if tool_set is not None:
-            self._write("insert", "tool_sets", tool_set, stamp="created_at", or_ignore=True)
+            self.tool_set(tool_set)
         self._write("upsert", "turns", self._identity(), key="turn_id")
+
+    def tool_set(self, tool_set: dict) -> None:
+        """A ``tool_sets`` row, once per distinct set this turn offers."""
+        if tool_set["tool_set_hash"] in self._sets_written:
+            return
+        self._sets_written.add(tool_set["tool_set_hash"])
+        self._write("insert", "tool_sets", tool_set, stamp="created_at", or_ignore=True)
 
     def response(
         self,
@@ -1471,6 +1499,7 @@ async def run_loop(
     # cross-talk this must never allow).
     _paths_token = _RUN_PATHS.set(None)
     _serving_token = _ROUND_SERVING.set(None)
+    _offered_token = _ROUND_OFFERED.set(None)
     _session_token = _RUN_SESSION.set(None if ephemeral else recorded_session_id)
     # Telemetry v2 (WP-X.54 T-3). No telemetry, no record and no writer: with
     # telemetry off nothing reaches the v2 tables.
@@ -1525,6 +1554,7 @@ async def run_loop(
         _RUN_TURN.reset(_turn_token)
         _RUN_PATHS.reset(_paths_token)
         _ROUND_SERVING.reset(_serving_token)
+        _ROUND_OFFERED.reset(_offered_token)
         _RUN_SESSION.reset(_session_token)
         if turn_key is not None:
             try:
@@ -2010,6 +2040,9 @@ async def _run_loop(
         )
     if turn_record is not None:
         turn_record.start(_v2_tool_set)
+    # The set the round in progress offered (telemetry v2): the turn's, unless
+    # a round sent something else (a no-tools or forced round, a fallback).
+    _v2_round_set: list[dict | None] = [_v2_tool_set]
 
     def _v2_response(kind: str, message: ConversationMessage | None) -> None:
         """One ``responses`` row for the round in progress (telemetry v2).
@@ -2037,7 +2070,7 @@ async def _run_loop(
             ),
             adapter_tier=getattr(context.adapter, "tier", None) if context.adapter is not None else None,
             ctx_window=_window_now or None,
-            tool_set_hash=_v2_tool_set["tool_set_hash"] if _v2_tool_set else None,
+            tool_set_hash=_v2_round_set[0]["tool_set_hash"] if _v2_round_set[0] else None,
             forced_tool_choice=(
                 str(_choice.get("tool")) if isinstance(_choice, dict)
                 else (_choice if _choice == "required" else None)
@@ -2250,6 +2283,20 @@ async def _run_loop(
             and context.provider.can_force_via_grammar(round_tool_choice)
         ):
             _payload_tools = []
+
+        # What this round offers, recorded from what it sends: the round's
+        # calls are checked against it (the lucky-guess marker), and its
+        # responses row names its set (a new tool_sets row only when it is not
+        # the turn's).
+        _offered = _offered_names(active_tools, _payload_tools, tools_enabled)
+        _ROUND_OFFERED.set(_offered)
+        if turn_record is not None:
+            from prometheus.telemetry.writer import tool_set_row
+            _round_set = tool_set_row(_offered) if _offered else None
+            if _round_set is not None and (_v2_tool_set is None
+                                           or _round_set["tool_set_hash"] != _v2_tool_set["tool_set_hash"]):
+                turn_record.tool_set(_round_set)
+            _v2_round_set[0] = _round_set
 
         # Visible-stream hygiene: local tiers emit tool calls as inline
         # <tool_call> markup, and the raw token stream goes to every gateway —
@@ -5365,46 +5412,40 @@ async def _execute_tool_call(
             is_error=True,
         )
 
-    # Lucky guess: tool is registered but wasn't in the active prompt schema.
-    # Recomputes the run-start resolution rather than reading stored state:
-    # resolve_deferred(config, adapter) is deterministic within a run, and the
-    # shared LoopContext must not carry per-run mutable state (concurrent
-    # turns cross-talk — see the per-message `mode` precedent). A config flip
-    # mid-run can at worst mislabel THIS telemetry row; it can never change
-    # the advertised catalog, which was frozen at run start.
-    if context.tool_loader is not None and hasattr(context.tool_loader, "resolve_deferred"):
-        _lg_deferred, _ = context.tool_loader.resolve_deferred(context.adapter)
-        if _lg_deferred:
-            loaded_names = {
-                s["name"] for s in context.tool_loader.schemas_for_run(True)
-            }
-            if tool_name not in loaded_names:
-                log.info("Lucky guess: model called deferred tool %s", tool_name)
-                # A MARKER, NOT A CALL, so not a tool_calls row. It used to be
-                # one — success=1, no session — written just before the call's
-                # own row, so every per-call reader counted one call twice and
-                # a failed call half-succeeded (tracker.LUCKY_GUESS_ERROR_TYPE).
-                # The call's own row is written below as usual; this records
-                # only that its tool was not advertised.
-                if context.telemetry is not None and hasattr(context.telemetry, "record_run"):
-                    from prometheus.telemetry.tracker import LUCKY_GUESS_OPERATION
+    # Lucky guess: tool is registered but the round did not offer it. Read
+    # from what the round sent (_ROUND_OFFERED), never recomputed: the old
+    # recomputation used the local deferral while a run routed to a cloud
+    # model had been sent every tool, and 25 of 28 recorded guesses were
+    # mislabels (audit 2026-10-16). Outside a run (a direct call) there is
+    # no round and no marker.
+    _offered_now = _ROUND_OFFERED.get()
+    if _offered_now and tool_name not in _offered_now:
+        log.info("Lucky guess: model called deferred tool %s", tool_name)
+        # A MARKER, NOT A CALL, so not a tool_calls row. It used to be
+        # one — success=1, no session — written just before the call's
+        # own row, so every per-call reader counted one call twice and
+        # a failed call half-succeeded (tracker.LUCKY_GUESS_ERROR_TYPE).
+        # The call's own row is written below as usual; this records
+        # only that its tool was not advertised.
+        if context.telemetry is not None and hasattr(context.telemetry, "record_run"):
+            from prometheus.telemetry.tracker import LUCKY_GUESS_OPERATION
 
-                    context.telemetry.record_run(
-                        subsystem="agent_loop",
-                        operation=LUCKY_GUESS_OPERATION,
-                        outcome="success",
-                        # The call row's own rule: the turn's conversation,
-                        # and none at all on an ephemeral turn. DESCRIPTIVE
-                        # only — never an origin input.
-                        session_id=None if ephemeral else (
-                            effective_session_id if effective_session_id is not None
-                            else context.session_id
-                        ),
-                        # The round's serving model, like the call's own row:
-                        # the fallback's, when it served (T14).
-                        model=_serving_model(context),
-                        summary={"tool": tool_name},
-                    )
+            context.telemetry.record_run(
+                subsystem="agent_loop",
+                operation=LUCKY_GUESS_OPERATION,
+                outcome="success",
+                # The call row's own rule: the turn's conversation,
+                # and none at all on an ephemeral turn. DESCRIPTIVE
+                # only — never an origin input.
+                session_id=None if ephemeral else (
+                    effective_session_id if effective_session_id is not None
+                    else context.session_id
+                ),
+                # The round's serving model, like the call's own row:
+                # the fallback's, when it served (T14).
+                model=_serving_model(context),
+                summary={"tool": tool_name},
+            )
 
     # Content gate. GBNF validated structure, json.loads validated syntax and
     # pydantic is about to validate type — none of the three asks what a string
