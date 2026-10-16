@@ -196,6 +196,13 @@ def _loopback_process_request(connection: Any, request: Any) -> Any:
 _APPROVAL_FRAMES = frozenset({"approval_pending", "approval_resolved"})
 
 
+def _final_text(event: Any) -> str:
+    """The text of an AssistantTurnComplete's message ("" when it has none)."""
+    message = getattr(event, "message", None)
+    text = getattr(message, "text", "") if message is not None else ""
+    return text if isinstance(text, str) else ""
+
+
 class WebSocketBridge:
     """Bridges SignalBus events to WebSocket clients."""
 
@@ -1729,6 +1736,9 @@ class WebSocketBridge:
         # Where the current round's streamed text starts in ``accumulated`` —
         # what a RoundDiscarded (#772) cuts back to.
         round_start = 0
+        # Why the LOOP ended the turn (AssistantTurnComplete.stop_reason), or
+        # None when the model chose to stop. Sent on chat_done.
+        stop_reason: str | None = None
         last_usage: Any = None
         original_len: int | None = None
         messages: list | None = None
@@ -1744,6 +1754,32 @@ class WebSocketBridge:
                 event_type = type(event).__name__
 
                 if event_type == "AssistantTurnComplete":
+                    # An ending the LOOP writes (the repeat guard, the iteration
+                    # cap, an empty reply twice, the context pre-flight, ...) is
+                    # appended to history and yielded here without a single text
+                    # delta. Only deltas reach the client, so those endings were
+                    # saved but never seen live (audit 2026-10-16, gate item d).
+                    # Send whatever of the final text this round did not stream:
+                    # the whole text when nothing streamed, the rest when the
+                    # streamed text is its start, nothing when the final text was
+                    # rewritten (a tool-markup strip) and the stream already
+                    # showed the words. openai_api.py does the same.
+                    final_text = _final_text(event)
+                    streamed = accumulated[round_start:]
+                    rest = ""
+                    if final_text and not streamed:
+                        rest = final_text
+                    elif final_text and final_text.startswith(streamed) and len(final_text) > len(streamed):
+                        rest = final_text[len(streamed):]
+                    if rest:
+                        accumulated += rest
+                        progress["chars"] = len(accumulated)
+                        await self.broadcast({
+                            "type": "chat_delta",
+                            "timestamp": time.time(),
+                            "payload": {"session_id": session_id, "content": rest, "message_id": msg_id},
+                        })
+                    stop_reason = getattr(event, "stop_reason", None) or None
                     # One model call finished; anything further is a new round.
                     progress["round"] = int(progress["round"]) + 1
                     round_start = len(accumulated)
@@ -1851,6 +1887,9 @@ class WebSocketBridge:
             done_payload = {"session_id": session_id, "message_id": msg_id}
             if row_id is not None:
                 done_payload["row_id"] = row_id
+            if stop_reason:
+                # Additive, like the round cap's: why the loop ended the turn.
+                done_payload["stop_reason"] = stop_reason
             await self.broadcast({
                 "type": "chat_done",
                 "timestamp": time.time(),
