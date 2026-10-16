@@ -44,6 +44,15 @@ FULL_SCHEMA_TOOLS: tuple[str, ...] = (
 #: the 0.9.12 catalog (only the always-loaded tools, the rest named nowhere).
 CATALOG_MODES = ("stubs", "names")
 DEFAULT_CATALOG = "stubs"
+
+
+def catalog_mode(deferred_cfg: Any) -> str:
+    """The local catalog a ``tools.deferred_loading`` section selects: its
+    ``local_catalog``, or the default when that is absent or not a known mode.
+    One rule for the loader and the doctor rows, so they cannot disagree."""
+    raw = deferred_cfg.get("local_catalog") if isinstance(deferred_cfg, dict) else None
+    mode = str(raw or DEFAULT_CATALOG)
+    return mode if mode in CATALOG_MODES else DEFAULT_CATALOG
 #: A stub lists an enum's values only when there are at most this many; a
 #: longer one is left to the refusal, which carries the whole schema.
 MAX_STUB_ENUM = 8

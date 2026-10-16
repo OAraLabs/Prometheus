@@ -121,13 +121,13 @@ class DynamicToolLoader:
         # How a deferred local run offers the tools it does not describe in
         # full (context/tool_stubs.py): "stubs", or "names" for the 0.9.12
         # catalog. Anything else is a typo: say so and use the default.
-        from prometheus.context.tool_stubs import CATALOG_MODES, DEFAULT_CATALOG
+        from prometheus.context.tool_stubs import CATALOG_MODES, DEFAULT_CATALOG, catalog_mode
 
-        mode = str(self._deferred.get("local_catalog") or DEFAULT_CATALOG)
-        if mode not in CATALOG_MODES:
+        mode = catalog_mode(self._deferred)
+        raw = self._deferred.get("local_catalog")
+        if raw and str(raw) != mode:
             log.warning("tools.deferred_loading.local_catalog = %r is not one of %s; using %r",
-                        mode, ", ".join(CATALOG_MODES), DEFAULT_CATALOG)
-            mode = DEFAULT_CATALOG
+                        raw, ", ".join(CATALOG_MODES), DEFAULT_CATALOG)
         self.catalog_mode: str = mode
         # always_loaded is parsed unconditionally now: with mode "auto" the
         # decision isn't known until run start (resolve_deferred), so the set
