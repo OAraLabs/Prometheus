@@ -142,7 +142,6 @@ def test_c_the_window_is_never_overrun(local, coding_turn):
 # ---------------------------------------------------------------- (d)
 
 
-@pytest.mark.xfail(strict=True, reason="gate d on 0.9.12: endings the loop writes are saved but never streamed")
 @pytest.mark.parametrize("script,message,expect", [
     ("repeat", "[gate:repeat] Find the gate files.", "Halted: no progress"),
     ("empty", "[gate:empty] Say something.", "empty response twice"),
