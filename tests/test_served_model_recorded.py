@@ -85,14 +85,16 @@ def _recorded_ollama(trace: str) -> list[tuple[dict, str]]:
     data = json.loads((TRACES / f"{trace}.trace.json").read_text(encoding="utf-8"))
     return [(ex["request"], ex["body"]) for ex in data["exchanges"]
             if ex["method"] == "POST" and ex["upstream"] == "alt"
-            and ex["path"] == "/v1/chat/completions" and "data: " in (ex["body"] or "")]
+            and ex["path"] == "/api/chat" and '"done"' in (ex["body"] or "")]
 
 
 def _serve_ollama(monkeypatch, body: str) -> None:
     def handler(req: httpx.Request) -> httpx.Response:
-        if req.url.path.endswith("/chat/completions"):
+        if req.url.path == "/api/chat":
             return httpx.Response(200, content=body.encode(),
-                                  headers={"content-type": "text/event-stream"})
+                                  headers={"content-type": "application/x-ndjson"})
+        if req.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": []})
         # /api/show (the thinking-capability question, #592): unknown here.
         return httpx.Response(404, json={"error": "not found"})
 
@@ -109,8 +111,7 @@ def test_an_ollama_round_records_the_model_its_stream_names(tmp_path, monkeypatc
     streams = _recorded_ollama("model_switch")
     assert streams, "premise: the trace holds the alt model's streamed completion"
     request, body = streams[0]
-    named = {json.loads(line[6:]).get("model") for line in body.splitlines()
-             if line.startswith("data: ") and line[6:].strip() not in ("", "[DONE]")} - {None}
+    named = {json.loads(line).get("model") for line in body.splitlines() if line.strip()} - {None}
     assert len(named) == 1, "premise: the recorded stream names one model"
     _serve_ollama(monkeypatch, body)
     row = _round(tmp_path, OllamaProvider(base_url="http://unit.test:11434"), request["model"])

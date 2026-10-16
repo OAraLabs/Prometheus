@@ -1,15 +1,16 @@
-"""Ollama thinking control (WP-X.35).
+"""Ollama thinking control (WP-X.35), on the native ``/api/chat`` route.
 
 Ollama turns thinking ON for every model whose /api/show capabilities list
-``thinking`` unless the request says otherwise, and its OpenAI-compatible
-route streams the thought as ``delta.reasoning`` — which the provider used to
-drop. Driven through the REAL ``stream_message`` against a fake Ollama that
-answers /api/show and /v1/chat/completions the way 0.23.0 does (and the 0.34
-chunk shape where it differs).
+``thinking`` unless the request says otherwise, and streams the thought as
+``message.thinking``. Driven through the REAL ``stream_message`` against a fake
+Ollama that answers /api/show, /api/ps and /api/chat the way 0.23.0 does.
 
-The byte pins were captured from origin/main's provider (5cb7af0) with httpx
-0.28.1: a model that does not list ``thinking`` — or whose capabilities cannot
-be read — must get exactly those bytes.
+The byte pins are the native request bodies (audit 2026-10-16, fix 5b): a
+model that does not list ``thinking`` — or whose capabilities cannot be read —
+must get exactly those bytes. The /v1 bodies they replace were pinned at
+5cb7af0; the change is the endpoint's own shape (``options.num_predict`` for
+``max_tokens``, ``think: false`` for ``reasoning_effort: "none"``, no
+``stream_options``: the final line always carries the counts).
 """
 
 from __future__ import annotations
@@ -31,16 +32,16 @@ QWEN25 = "qwen2.5:7b-instruct"          # the parity goldens' Ollama model
 QWEN35 = "qwen3.5:9b"                   # the router's fallback: a thinking model
 GPT_OSS = "gpt-oss:20b"
 
-# origin/main's exact request bodies (see the module docstring).
+# The native request bodies (see the module docstring).
 MAIN_BYTES = {
     'plain': (
-        b'{"model":"qwen2.5:7b-instruct","messages":[{"role":"system","content":"You are terse."},{"role":"user","content":"two"}],"stream":true,"max_tokens":64,"stream_options":{"include_usage":true}}'
+        b'{"model":"qwen2.5:7b-instruct","messages":[{"role":"system","content":"You are terse."},{"role":"user","content":"two"}],"stream":true,"options":{"num_predict":64}}'
     ),
     'tools': (
-        b'{"model":"qwen2.5:7b-instruct","messages":[{"role":"user","content":"read a.txt"}],"stream":true,"max_tokens":128,"stream_options":{"include_usage":true},"tools":[{"type":"function","function":{"name":"read_file","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}]}'
+        b'{"model":"qwen2.5:7b-instruct","messages":[{"role":"user","content":"read a.txt"}],"stream":true,"options":{"num_predict":128},"tools":[{"type":"function","function":{"name":"read_file","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}]}'
     ),
     'json_grammar': (
-        b'{"model":"qwen2.5:7b-instruct","messages":[{"role":"user","content":"x"}],"stream":true,"max_tokens":8,"stream_options":{"include_usage":true},"format":"json","grammar":"root ::= \\"x\\""}'
+        b'{"model":"qwen2.5:7b-instruct","messages":[{"role":"user","content":"x"}],"stream":true,"options":{"num_predict":8},"format":"json","grammar":"root ::= \\"x\\""}'
     ),
 }
 
@@ -71,50 +72,37 @@ def _provider(case: str = "plain") -> OllamaProvider:
 # A fake Ollama 0.23.0
 # ---------------------------------------------------------------------------
 
-def _chunk(delta: dict, finish=None) -> dict:
-    return {"id": "chatcmpl-1", "object": "chat.completion.chunk", "model": "m",
-            "system_fingerprint": "fp_ollama",
-            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
-
-
-def sse(*, reasoning: str = "", content: str = "", finish: str = "stop",
-        usage: tuple[int, int] = (30, 5), new_shape: bool = False,
-        tool_call: dict | None = None) -> bytes:
-    """One streamed completion as Ollama sends it: thought chunks first
-    (content "" on 0.23.0, content omitted and role only first on 0.34),
-    then content, then the finish chunk, the usage chunk and [DONE]."""
-    chunks = []
+def ndjson(*, reasoning: str = "", content: str = "", finish: str = "stop",
+           usage: tuple[int, int] = (30, 5), tool_call: dict | None = None) -> bytes:
+    """One streamed completion as Ollama's /api/chat sends it: thought lines
+    first (``message.thinking``), then content, then a call whole, then the
+    final ``done`` line with the counts."""
+    lines = []
     for i, word in enumerate(reasoning.split(" ") if reasoning else []):
         piece = word if i == 0 else " " + word
-        if new_shape:
-            delta = {"reasoning": piece}
-            if i == 0:
-                delta["role"] = "assistant"
-        else:
-            delta = {"role": "assistant", "content": "", "reasoning": piece}
-        chunks.append(_chunk(delta))
+        lines.append({"model": "m", "message": {"role": "assistant", "content": "", "thinking": piece},
+                      "done": False})
     for i, word in enumerate(content.split(" ") if content else []):
         piece = word if i == 0 else " " + word
-        chunks.append(_chunk({"content": piece} if new_shape
-                             else {"role": "assistant", "content": piece}))
+        lines.append({"model": "m", "message": {"role": "assistant", "content": piece}, "done": False})
     if tool_call:
-        chunks.append(_chunk({"role": "assistant", "content": "", "tool_calls": [tool_call]}))
-    chunks.append(_chunk({} if new_shape else {"role": "assistant", "content": ""}, finish))
-    chunks.append({"choices": [], "usage": {"prompt_tokens": usage[0],
-                                            "completion_tokens": usage[1],
-                                            "total_tokens": sum(usage)}})
-    return ("".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n").encode()
+        lines.append({"model": "m", "message": {"role": "assistant", "content": "", "tool_calls": [tool_call]},
+                      "done": False})
+    lines.append({"model": "m", "message": {"role": "assistant", "content": ""}, "done": True,
+                  "done_reason": finish, "prompt_eval_count": usage[0], "eval_count": usage[1]})
+    return "".join(json.dumps(line) + "\n" for line in lines).encode()
 
 
 class FakeOllama:
     """Routes by path. ``show`` maps a model to its /api/show answer: a dict
     (the JSON body), bytes (a raw body), or an int (that HTTP status).
-    ``completions`` is the queue /v1/chat/completions answers with, in order:
-    SSE bytes, an int (that status), or a (status, json body) pair."""
+    ``completions`` is the queue /api/chat answers with, in order: NDJSON
+    bytes, an int (that status), or a (status, json body) pair. /api/ps lists
+    nothing loaded, so no num_ctx is sent unless the request budgeted one."""
 
     def __init__(self, show: dict | None = None, completions: list[bytes] | None = None):
         self.show = show or {}
-        self.completions = list(completions or [sse(content="two")])
+        self.completions = list(completions or [ndjson(content="two")])
         self.show_calls: list[bytes] = []
         self.chat_calls: list[bytes] = []
 
@@ -128,7 +116,10 @@ class FakeOllama:
             if isinstance(answer, bytes):
                 return httpx.Response(200, content=answer)
             return httpx.Response(200, json=answer)
-        assert req.url.path == "/v1/chat/completions", req.url.path
+        if req.url.path == "/api/ps":
+            assert req.method == "GET", req.method
+            return httpx.Response(200, json={"models": []})
+        assert req.url.path == "/api/chat", req.url.path
         assert req.method == "POST", req.method
         self.chat_calls.append(req.content)
         body = self.completions.pop(0)
@@ -136,7 +127,7 @@ class FakeOllama:
             return httpx.Response(body, json={"error": "unavailable"})
         if isinstance(body, tuple):
             return httpx.Response(body[0], json=body[1])
-        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, content=body, headers={"content-type": "application/x-ndjson"})
 
     @property
     def chat_bodies(self) -> list[dict]:
@@ -239,8 +230,8 @@ async def test_a_cloud_model_is_never_asked_and_gets_todays_bytes(fake, name):
 async def test_a_thinking_model_gets_thinking_off_by_default(fake, case, suppress):
     fake.show = {QWEN25: THINKING}
     await run(_provider(case), _request(case, suppress_thinking=suppress))
-    # Exactly today's body plus the one field /v1 honours ("think" is dropped).
-    assert fake.chat_calls == [MAIN_BYTES[case][:-1] + b',"reasoning_effort":"none"}']
+    # Exactly the plain body plus the one field that turns thinking off.
+    assert fake.chat_calls == [MAIN_BYTES[case][:-1] + b',"think":false}']
 
 
 @pytest.mark.asyncio
@@ -253,11 +244,11 @@ async def test_a_caller_that_opts_in_gets_ollamas_own_default_thinking_on(fake, 
 
 @pytest.mark.asyncio
 async def test_a_harmony_model_also_gets_thinking_off_by_default(fake):
-    # gpt-oss is excluded from the RETRY ("none" cannot stop its analysis
-    # channel), not from the default: "none" is valid and drops its Reasoning line.
+    # gpt-oss is excluded from the RETRY (think: false cannot stop its analysis
+    # channel), not from the default: the field is valid and drops its Reasoning line.
     fake.show = {GPT_OSS: show("completion", "tools", "thinking", family="gptoss")}
     await run(_provider(), _request(model=GPT_OSS))
-    assert fake.chat_bodies[0]["reasoning_effort"] == "none"
+    assert fake.chat_bodies[0]["think"] is False
 
 
 @pytest.mark.asyncio
@@ -266,21 +257,21 @@ async def test_a_local_name_that_merely_mentions_cloud_is_still_asked(fake, name
     fake.show = {name: THINKING}
     await run(_provider(), _request(model=name))
     assert [json.loads(b) for b in fake.show_calls] == [{"model": name}]
-    assert fake.chat_bodies[0]["reasoning_effort"] == "none"
+    assert fake.chat_bodies[0]["think"] is False
 
 
 @pytest.mark.asyncio
 async def test_the_capability_is_asked_once_per_model_and_a_failure_is_not_remembered(fake):
     p = _provider()
     fake.show = {QWEN25: 503}
-    fake.completions = [sse(content="a")] * 5
+    fake.completions = [ndjson(content="a")] * 5
     await run(p, _request())                       # unknown: today's bytes
     fake.show = {QWEN25: THINKING, QWEN35: NO_THINKING}
     await run(p, _request())                       # asked again — and now it thinks
     await run(p, _request())                       # cached
     await run(p, _request(model=QWEN35))           # another model: its own question
     assert [json.loads(b)["model"] for b in fake.show_calls] == [QWEN25, QWEN25, QWEN35]
-    assert ["reasoning_effort" in b for b in fake.chat_bodies] == [False, True, True, False]
+    assert ["think" in b for b in fake.chat_bodies] == [False, True, True, False]
 
 
 @pytest.mark.asyncio
@@ -289,20 +280,19 @@ async def test_the_capability_is_asked_once_per_model_and_a_failure_is_not_remem
 async def test_an_unreadable_answer_is_not_remembered_either(fake, unreadable):
     p = _provider()
     fake.show = {QWEN35: unreadable}
-    fake.completions = [sse(content="a")] * 2
+    fake.completions = [ndjson(content="a")] * 2
     await run(p, _request(model=QWEN35))
     fake.show = {QWEN35: THINKING}
     await run(p, _request(model=QWEN35))
     assert len(fake.show_calls) == 2
-    assert ["reasoning_effort" in b for b in fake.chat_bodies] == [False, True]
+    assert ["think" in b for b in fake.chat_bodies] == [False, True]
 
 
 # ---------------------------------------------------------------------------
-# A server that refuses reasoning_effort "none" (Ollama 0.11.5-0.12.3 pass it
-# through as a think level and answer 400 "invalid think value")
+# A server that refuses ``think`` (a 400 naming it)
 # ---------------------------------------------------------------------------
 
-OLD_SERVER_400 = (400, {"error": "invalid think value: \"none\" (must be \"high\", \"medium\", "
+OLD_SERVER_400 = (400, {"error": "invalid think value: false (must be \"high\", \"medium\", "
                                  "\"low\", true, or false)"})
 
 
@@ -310,13 +300,13 @@ OLD_SERVER_400 = (400, {"error": "invalid think value: \"none\" (must be \"high\
 async def test_a_server_that_refuses_the_field_gets_todays_request_from_then_on(fake, tel):
     p = _provider()
     fake.show = {QWEN35: THINKING}
-    fake.completions = [OLD_SERVER_400, sse(content="four"), sse(content="five")]
+    fake.completions = [OLD_SERVER_400, ndjson(content="four"), ndjson(content="five")]
     _, done = await run(p, _request(model=QWEN35))
     assert done.message.text == "four"                       # the turn is answered, not failed
     await run(p, _request(model=QWEN35))
     first, fallback, later = fake.chat_bodies
-    assert first["reasoning_effort"] == "none"
-    assert "reasoning_effort" not in fallback and "reasoning_effort" not in later
+    assert first["think"] is False
+    assert "think" not in fallback and "think" not in later
     assert fake.chat_calls[1] == fake.chat_calls[2] == MAIN_BYTES["plain"].replace(
         QWEN25.encode(), QWEN35.encode())
     assert tel.calls == []
@@ -351,33 +341,21 @@ async def test_no_retry_when_the_server_refuses_thinking_off(fake, tel):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("new_shape", [False, True], ids=["0.23-chunks", "0.34-chunks"])
-async def test_streamed_reasoning_is_a_thinking_block_never_reply_text(fake, new_shape):
+async def test_streamed_reasoning_is_a_thinking_block_never_reply_text(fake):
     fake.show = {QWEN35: THINKING}
-    fake.completions = [sse(reasoning="The user wants two.", content="two",
-                            usage=(40, 17), new_shape=new_shape)]
+    fake.completions = [ndjson(reasoning="The user wants two.", content="two", usage=(40, 17))]
     deltas, done = await run(_provider(), _request(model=QWEN35, suppress_thinking=False))
     assert "".join(deltas) == "two"                 # nothing of the thought streamed
     assert done.message.text == "two"
     assert thinking_blocks(done) == ["The user wants two."]
-    # completion_tokens already counts the thought: reported as the server did.
+    # eval_count already counts the thought: reported as the server did.
     assert (done.usage.input_tokens, done.usage.output_tokens) == (40, 17)
-
-
-@pytest.mark.asyncio
-async def test_reasoning_content_is_accepted_too(fake):
-    chunk = {"choices": [{"index": 0, "delta": {"reasoning_content": "rc thought"},
-                          "finish_reason": None}]}
-    fake.show = {QWEN35: 500}
-    fake.completions = [f"data: {json.dumps(chunk)}\n\n".encode() + sse(content="yes")]
-    _, done = await run(_provider(), _request(model=QWEN35))
-    assert (done.message.text, thinking_blocks(done)) == ("yes", ["rc thought"])
 
 
 @pytest.mark.asyncio
 async def test_a_thought_on_the_message_is_never_sent_back(fake):
     fake.show = {QWEN35: THINKING}
-    fake.completions = [sse(reasoning="Hidden plan.", content="one"), sse(content="two")]
+    fake.completions = [ndjson(reasoning="Hidden plan.", content="one"), ndjson(content="two")]
     p = _provider()
     _, first = await run(p, _request(model=QWEN35, suppress_thinking=False))
     assert thinking_blocks(first) == ["Hidden plan."]           # kept on the message...
@@ -385,7 +363,7 @@ async def test_a_thought_on_the_message_is_never_sent_back(fake):
                ConversationMessage.from_user_text("two?")]
     await run(p, _request(model=QWEN35, messages=history))
     # ...and never sent back to the server.
-    assert b"Hidden plan" not in fake.chat_calls[1] and b"reasoning\"" not in fake.chat_calls[1]
+    assert b"Hidden plan" not in fake.chat_calls[1] and b"thinking\"" not in fake.chat_calls[1]
 
 
 @pytest.mark.asyncio
@@ -393,7 +371,7 @@ async def test_a_model_that_is_not_known_to_think_still_keeps_its_thought(fake, 
     # /api/show failed, so nothing was sent — but the server's default for a
     # thinking model is ON, and what it thought must not leak into the reply.
     fake.show = {QWEN35: 500}
-    fake.completions = [sse(reasoning="Pondering.", content="done")]
+    fake.completions = [ndjson(reasoning="Pondering.", content="done")]
     _, done = await run(_provider(), _request(model=QWEN35))
     assert (done.message.text, thinking_blocks(done)) == ("done", ["Pondering."])
     assert tel.calls == []
@@ -403,18 +381,18 @@ async def test_a_model_that_is_not_known_to_think_still_keeps_its_thought(fake, 
 # 4. Thought, but answered nothing
 # ---------------------------------------------------------------------------
 
-BUDGET_SPENT = sse(reasoning="Let me think about this at length", finish="length", usage=(50, 64))
+BUDGET_SPENT = ndjson(reasoning="Let me think about this at length", finish="length", usage=(50, 64))
 
 
 @pytest.mark.asyncio
 async def test_thinking_on_and_the_budget_spent_is_recorded_and_retried_once_thinking_off(fake, tel):
     fake.show = {QWEN35: THINKING}
-    fake.completions = [BUDGET_SPENT, sse(content="ok", usage=(52, 3))]
+    fake.completions = [BUDGET_SPENT, ndjson(content="ok", usage=(52, 3))]
     deltas, done = await run(_provider(), _request(model=QWEN35, suppress_thinking=False))
 
     first, second = fake.chat_bodies
-    assert "reasoning_effort" not in first                     # thinking was on
-    assert second == {**first, "reasoning_effort": "none"}     # the one retry, thinking off
+    assert "think" not in first                                # thinking was on
+    assert second == {**first, "think": False}                 # the one retry, thinking off
     assert (deltas, done.message.text, done.stop_reason) == (["ok"], "ok", "stop")
     assert thinking_blocks(done) == ["Let me think about this at length"]
     # One prompt (sent twice): input is its size, the meter's figure; both
@@ -436,7 +414,7 @@ async def test_thinking_on_and_the_budget_spent_is_recorded_and_retried_once_thi
 async def test_a_retry_that_still_only_thinks_is_recorded_and_not_retried_again(fake, tel):
     fake.show = {QWEN35: THINKING}
     fake.completions = [BUDGET_SPENT,
-                        sse(reasoning="Still pondering", finish="stop", usage=(51, 9))]
+                        ndjson(reasoning="Still pondering", finish="stop", usage=(51, 9))]
     _, done = await run(_provider(), _request(model=QWEN35, suppress_thinking=False))
     assert len(fake.chat_calls) == 2
     assert [(c["context"]["retried_with_thinking_off"], c["context"]["finish_reason"],
@@ -454,8 +432,8 @@ async def test_a_retry_that_still_only_thinks_is_recorded_and_not_retried_again(
 async def test_a_model_that_stops_mid_thought_is_recorded_and_retried(fake, tel):
     # Not only a spent budget: EOS inside the thought ("stop") answers nothing too.
     fake.show = {QWEN35: THINKING}
-    fake.completions = [sse(reasoning="Hmm", finish="stop", usage=(40, 12)),
-                        sse(content="yes", usage=(41, 2))]
+    fake.completions = [ndjson(reasoning="Hmm", finish="stop", usage=(40, 12)),
+                        ndjson(content="yes", usage=(41, 2))]
     _, done = await run(_provider(), _request(model=QWEN35, suppress_thinking=False))
     assert done.message.text == "yes" and len(fake.chat_calls) == 2
     assert tel.calls[0]["context"]["finish_reason"] == "stop"
@@ -464,9 +442,9 @@ async def test_a_model_that_stops_mid_thought_is_recorded_and_retried(fake, tel)
 @pytest.mark.asyncio
 async def test_whitespace_is_not_an_answer_and_silence_is_not_a_thought(fake, tel):
     fake.show = {QWEN35: THINKING}
-    fake.completions = [sse(reasoning="Thinking", content="\n\n", finish="length"),
-                        sse(content="ok"),
-                        sse(content="", finish="stop")]            # nothing at all
+    fake.completions = [ndjson(reasoning="Thinking", content="\n\n", finish="length"),
+                        ndjson(content="ok"),
+                        ndjson(content="", finish="stop")]            # nothing at all
     p = _provider()
     _, done = await run(p, _request(model=QWEN35, suppress_thinking=False))
     assert done.message.text == "ok" and len(tel.calls) == 1        # "\n\n" was not an answer
@@ -480,19 +458,19 @@ async def test_the_retry_keeps_the_tools(fake, tel):
     # Coding sessions opt in AND carry tools: the retry is the same request,
     # thinking off — never a request that lost its tools.
     fake.show = {QWEN35: THINKING}
-    fake.completions = [BUDGET_SPENT, sse(content="done")]
+    fake.completions = [BUDGET_SPENT, ndjson(content="done")]
     await run(_provider("tools"), _request("tools", model=QWEN35, suppress_thinking=False))
     first, second = fake.chat_bodies
-    assert "tools" in first and second == {**first, "reasoning_effort": "none"}
+    assert "tools" in first and second == {**first, "think": False}
 
 
 @pytest.mark.asyncio
 async def test_a_transient_failure_of_the_retry_never_reruns_the_spent_attempt(fake, tel):
     fake.show = {QWEN35: THINKING}
-    fake.completions = [BUDGET_SPENT, 503, sse(content="ok")]
+    fake.completions = [BUDGET_SPENT, 503, ndjson(content="ok")]
     _, done = await run(_provider(), _request(model=QWEN35, suppress_thinking=False))
     assert done.message.text == "ok"
-    assert ["reasoning_effort" in b for b in fake.chat_bodies] == [False, True, True]
+    assert ["think" in b for b in fake.chat_bodies] == [False, True, True]
     assert len(tel.calls) == 1
 
 
@@ -503,8 +481,8 @@ async def test_a_retry_that_keeps_failing_leaves_the_first_attempt(fake, tel):
     _, done = await run(_provider(), _request(model=QWEN35, suppress_thinking=False))
     assert (done.message.text, done.stop_reason) == ("", "length")
     assert thinking_blocks(done) == ["Let me think about this at length"]
-    assert ["reasoning_effort" in b for b in fake.chat_bodies][0] is False
-    assert all("reasoning_effort" in b for b in fake.chat_bodies[1:])   # attempt 1 never re-run
+    assert ["think" in b for b in fake.chat_bodies][0] is False
+    assert all("think" in b for b in fake.chat_bodies[1:])   # attempt 1 never re-run
     assert len(tel.calls) == 1
 
 
@@ -513,7 +491,7 @@ async def test_a_retry_that_keeps_failing_leaves_the_first_attempt(fake, tel):
 async def test_no_retry_when_thinking_off_is_not_a_fix(fake, tel, setup):
     model, suppress = QWEN35, False
     if setup == "thinking-already-off":
-        fake.show, suppress = {QWEN35: THINKING}, None      # "none" was already sent
+        fake.show, suppress = {QWEN35: THINKING}, None      # think: false was already sent
     elif setup == "gpt-oss":
         model = "my-reasoner:latest"                         # harmony by FAMILY, not by name:
         fake.show = {model: show("completion", "tools", "thinking", family="gptoss")}
@@ -531,13 +509,13 @@ async def test_no_retry_when_thinking_off_is_not_a_fix(fake, tel, setup):
 @pytest.mark.asyncio
 async def test_a_tool_call_with_no_text_is_an_answer_not_a_failure(fake, tel):
     fake.show = {QWEN35: THINKING}
-    call = {"index": 0, "id": "call_1", "type": "function",
-            "function": {"name": "read_file", "arguments": '{"path": "a.txt"}'}}
-    fake.completions = [sse(reasoning="Read it.", tool_call=call, finish="tool_calls")]
+    call = {"id": "call_1", "function": {"index": 0, "name": "read_file", "arguments": {"path": "a.txt"}}}
+    fake.completions = [ndjson(reasoning="Read it.", tool_call=call, finish="stop")]
     _, done = await run(_provider("tools"), _request("tools", model=QWEN35, suppress_thinking=False))
     assert len(fake.chat_calls) == 1 and tel.calls == []
-    assert [b.name for b in done.message.tool_uses] == ["read_file"]
+    assert [(b.name, b.input) for b in done.message.tool_uses] == [("read_file", {"path": "a.txt"})]
     assert (done.message.text, thinking_blocks(done)) == ("", ["Read it."])
+    assert done.stop_reason == "tool_calls"          # what the /v1 route reported for a call
 
 
 @pytest.mark.asyncio

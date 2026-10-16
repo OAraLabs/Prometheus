@@ -48,7 +48,8 @@ OLLAMA_TAGS = {"models": [
     {"name": "qwen2.5:7b-instruct", "size": 4_700_000_000},
     {"name": "qwen3:32b", "size": 20_200_000_000},
 ]}
-OLLAMA_PS = {"models": [{"name": "qwen2.5:7b-instruct", "size_vram": 6_600_000_000}]}
+# /api/ps on 0.23.0 names the window a loaded model SERVES (its num_ctx).
+OLLAMA_PS = {"models": [{"name": "qwen2.5:7b-instruct", "size_vram": 6_600_000_000, "context_length": 8192}]}
 OLLAMA_SHOW = {
     "capabilities": ["completion", "tools"],
     "model_info": {"general.architecture": "qwen2", "qwen2.context_length": 32768},
@@ -197,9 +198,21 @@ async def test_ollama_probe_parses_the_live_payload(patched_client):
     assert st.model == "qwen2.5:14b-instruct"
     assert st.available_models == ("ornith:9b", "qwen2.5:14b-instruct", "qwen2.5:7b-instruct", "qwen3:32b")
     assert st.loaded_models == ("qwen2.5:7b-instruct",)
-    assert st.n_ctx == 32768           # from model_info.<arch>.context_length
+    # Not loaded: the served window is unknown. /api/show's context_length is
+    # the TRAINED length (audit 2026-10-16), kept apart from the window.
+    assert st.n_ctx is None
+    assert st.extra["trained_ctx"] == 32768
     assert st.vision is False          # capabilities present, no "vision"
     assert st.error is None
+
+
+@pytest.mark.asyncio
+async def test_a_loaded_ollama_model_is_sized_at_the_window_it_serves(patched_client):
+    patched_client["transport"] = _ollama_transport()
+    spec = BackendSpec(name="mini", provider="ollama", base_url="http://localhost:11434", model="qwen2.5:7b-instruct")
+    st = await probe_backend(spec, 5.0)
+    assert st.n_ctx == 8192            # /api/ps context_length, not the trained 32768
+    assert st.extra["trained_ctx"] == 32768
 
 
 @pytest.mark.asyncio

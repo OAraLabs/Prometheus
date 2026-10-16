@@ -1,15 +1,17 @@
 """Ollama must be SENT the length limit where its endpoint reads one.
 
-The provider posts to ollama's OpenAI-compatible ``/v1/chat/completions``,
-whose request type has a top-level ``max_tokens`` (mapped server-side to
-``num_predict``) and NO ``options`` field — so ``options.num_predict`` was
-dropped without an error and every ollama turn generated without a limit.
-Measured on ollama 0.23.0 with one prompt: ``options: {num_predict: 5}``
-returned 150 tokens with ``finish_reason: stop``; ``max_tokens: 5`` returned
-5 with ``finish_reason: length``.
+The provider used to post to ollama's OpenAI-compatible ``/v1/chat/completions``,
+whose request type has a top-level ``max_tokens`` and NO ``options`` field, so
+``options.num_predict`` was dropped without an error and every ollama turn
+generated without a limit (ollama 0.23.0: ``options: {num_predict: 5}``
+returned 150 tokens with ``finish_reason: stop``; ``max_tokens: 5`` returned 5
+with ``finish_reason: length``). It now posts to the native ``/api/chat``
+(audit 2026-10-16, for ``options.num_ctx``), where the limit is
+``options.num_predict`` and a top-level ``max_tokens`` is the field ignored.
 
 Driven through the REAL ``_call_once`` against a mock server that behaves as
-that measurement did: it honours ``max_tokens`` and ignores ``options``.
+the native route does: it honours ``options.num_predict`` and ignores
+``max_tokens``.
 """
 
 from __future__ import annotations
@@ -34,17 +36,18 @@ def _mock_ollama(monkeypatch) -> list[dict]:
             # The capability question (WP-X.35): unknown here, so the chat
             # request is exactly the one this test was written against.
             return httpx.Response(404, json={"error": "not found"})
+        if req.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": []})
         body = json.loads(req.content)
         seen.append(body)
-        limit = body.get("max_tokens")  # the only length field the endpoint reads
+        limit = (body.get("options") or {}).get("num_predict")  # the native route's length field
         words = _WORDS if limit is None else _WORDS[:limit]
         finish = "length" if len(words) < len(_WORDS) else "stop"
-        chunks = [{"choices": [{"index": 0, "delta": {"content": w}, "finish_reason": None}]}
-                  for w in words]
-        chunks.append({"choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": finish}]})
-        sse = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
-        return httpx.Response(200, content=sse.encode(),
-                              headers={"content-type": "text/event-stream"})
+        lines = [{"message": {"role": "assistant", "content": w}, "done": False} for w in words]
+        lines.append({"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": finish,
+                      "prompt_eval_count": 9, "eval_count": len(words)})
+        return httpx.Response(200, content="".join(json.dumps(x) + "\n" for x in lines).encode(),
+                              headers={"content-type": "application/x-ndjson"})
 
     real = httpx.AsyncClient
 
@@ -74,7 +77,5 @@ async def test_ollama_length_limit_reaches_the_server(monkeypatch):
     assert (text, done.stop_reason) == ("one two", "length"), (
         f"the length limit never reached ollama: got {text!r}, stop={done.stop_reason!r}"
     )
-    assert seen[0]["max_tokens"] == 2
-    assert "options" not in seen[0], (
-        "ollama's OpenAI-compatible endpoint has no `options` field; anything sent there is dropped"
-    )
+    assert seen[0]["options"]["num_predict"] == 2
+    assert "max_tokens" not in seen[0], "the native route has no top-level max_tokens; it would be dropped"

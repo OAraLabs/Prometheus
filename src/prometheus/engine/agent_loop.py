@@ -2327,6 +2327,8 @@ async def _run_loop(
                 suppress_thinking=context.suppress_thinking,
                 suppress_tools=not tools_enabled,
                 tool_choice=round_tool_choice,
+                # The window this round was budgeted for: Ollama loads exactly it.
+                context_window=_budgeted_window(context, _model),
             )
 
         def _window_for(_model: str) -> tuple[int, bool]:
@@ -3852,6 +3854,15 @@ def _serving_window(context: LoopContext, model: str) -> tuple[int, bool]:
         or (callable(_is_measured) and bool(_is_measured(model, backend=backend)))
     )
     return context.compactor.limit_for(model, backend=backend), measured
+
+
+def _budgeted_window(context: LoopContext, model: str) -> int | None:
+    """The window a request to ``model`` is budgeted for (``ApiMessageRequest.context_window``)."""
+    try:
+        return _serving_window(context, model)[0] or None
+    except Exception:
+        log.debug("budgeted window: lookup failed for %s", model, exc_info=True)
+        return None
 
 
 def _output_cap(context: LoopContext, model: str) -> int:

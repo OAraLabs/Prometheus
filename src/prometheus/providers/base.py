@@ -39,6 +39,11 @@ class ApiMessageRequest:
     # translates per tier — local GBNF grammar SELECTION, cloud native tool_choice. Default
     # "auto" = today's agent path. See prometheus.api.tool_choice.
     tool_choice: Any = "auto"
+    # The context window the caller budgeted this request for, in tokens; None
+    # when it did not size one. A server that loads its window per request
+    # (Ollama's ``options.num_ctx``) is asked for exactly this, so the window
+    # served is the window budgeted. Every other provider ignores it.
+    context_window: int | None = None
 
 
 @dataclass(frozen=True)
