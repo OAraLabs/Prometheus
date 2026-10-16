@@ -620,6 +620,19 @@ def loop_ceiling_divergence(agent_loop: Any, loop_context: Any) -> list[tuple]:
     return out
 
 
+def loop_tool_metadata_divergence(agent_loop: Any, loop_context: Any) -> list[str]:
+    """Tool-metadata keys one loop construction carries and the other does not.
+
+    The ``agent`` tool finds its spawner in the tool metadata, and so does the printing-press tool its
+    registry. #761 attached both to the AgentLoop only, so Beacon (the separately-built LoopContext) never
+    had a spawner. Empty when the two carry the same keys. Pure and module-level, like
+    :func:`loop_ceiling_divergence`, so it can be tested without running the daemon.
+    """
+    a = set(getattr(agent_loop, "_tool_metadata", None) or {})
+    b = set(getattr(loop_context, "tool_metadata", None) or {})
+    return sorted(a ^ b)
+
+
 def _loaded_config_path(explicit: str | None) -> str | None:
     """The config file ``load_config`` read, as a path, or ``None`` when it read none.
 
@@ -2730,6 +2743,11 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 system_prompt=system_prompt,
                 max_tokens=4096,
                 tool_registry=registry,
+                # The SAME dict the AgentLoop's tools read, not a copy: the subagent spawner (#761) and the
+                # printing-press registry are attached there, and a Beacon turn built without them offered the
+                # `agent` tool and always answered "SubagentSpawner not configured". Sharing the object keeps a
+                # later attach reaching both loops. Checked at boot by loop_tool_metadata_divergence below.
+                tool_metadata=agent_loop._tool_metadata,
                 permission_checker=security_gate,
                 hook_executor=hook_executor,
                 adapter=adapter,
@@ -2925,7 +2943,15 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                             "ceiling divergence: telemetry write failed",
                             exc_info=True,
                         )
-            else:
+            _md_diverged = loop_tool_metadata_divergence(agent_loop, loop_context)
+            if _md_diverged:
+                logger.error(
+                    "LOOP TOOL-METADATA DIVERGENCE — the telegram/CLI loop and the web/Beacon loop "
+                    "give their tools different metadata, so a tool that needs one of these keys works "
+                    "on one surface and fails on the other: %s",
+                    ", ".join(_md_diverged),
+                )
+            if not _diverged:
                 logger.info(
                     "Loop ceilings agree across both constructions: "
                     "local=%s cloud=%s",

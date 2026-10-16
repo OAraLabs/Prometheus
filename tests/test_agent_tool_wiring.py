@@ -203,3 +203,86 @@ def test_run_daemon_attaches_the_spawner_right_after_it_builds_the_loop():
     built = src.index("agent_loop = AgentLoop(")
     assert "attach_subagent_spawner(agent_loop)" in src[built:], "run_daemon() never attaches a spawner"
     assert src.index("attach_subagent_spawner(agent_loop)", built) > built
+
+
+# ── The Beacon loop (the daemon's second construction) ──────────────────────────────────────────────────
+#
+# run_daemon() builds the loop twice: the AgentLoop above (telegram, CLI) and a LoopContext that every
+# Beacon, REST and WebSocket turn runs on through ``run_loop``. #761 attached the spawner to the AgentLoop
+# only, so a Beacon turn's ``agent`` call still answered "not configured" on 0.9.10.
+
+
+def _beacon_context(loop: AgentLoop, *, share_metadata: bool):
+    """The web/Beacon LoopContext, built from the same pieces the daemon hands it, and sealed as it is."""
+    from prometheus.engine.agent_loop import LoopContext
+
+    return LoopContext(
+        provider=loop._provider,
+        model=loop._model,
+        system_prompt=PARENT_MARK,
+        max_tokens=4096,
+        tool_registry=loop._tool_registry,
+        tool_metadata=loop._tool_metadata if share_metadata else None,
+        permission_checker=loop._permission_checker,
+    ).seal()
+
+
+def _run_beacon_turn(ctx) -> None:  # noqa: ANN001
+    from prometheus.engine.agent_loop import run_loop
+
+    async def go() -> None:
+        msgs = [ConversationMessage.from_user_text("please delegate")]
+        async for _event, _usage in run_loop(ctx, msgs, session_id="beacon:test", surface="beacon"):
+            pass
+
+    asyncio.run(go())
+
+
+def test_a_beacon_context_without_the_loops_metadata_is_not_configured():
+    """The control: 0.9.10's web LoopContext had no tool metadata, so ``agent`` failed from Beacon."""
+    from prometheus.coordinator.subagent import attach_subagent_spawner
+
+    provider = _TwoLoopProvider()
+    loop = _parent_loop(provider, _Probe())
+    attach_subagent_spawner(loop)
+    _run_beacon_turn(_beacon_context(loop, share_metadata=False))
+    assert provider.parent_saw and NOT_WIRED in provider.parent_saw[0]
+    assert provider.sub_requests == 0
+
+
+def test_a_beacon_turn_runs_a_subagent_through_the_shared_metadata():
+    from prometheus.coordinator.subagent import attach_subagent_spawner
+
+    gate, probe = _Gate(), _Probe()
+    provider = _TwoLoopProvider(sub_calls="probe", subagent_type=PROBING)
+    loop = _parent_loop(provider, probe, gate)
+    attach_subagent_spawner(loop)
+    _run_beacon_turn(_beacon_context(loop, share_metadata=True))
+    assert provider.parent_saw == [SUB_REPLY]
+    assert probe.ran == 1
+    assert "probe" in gate.asked, "a subagent started from Beacon is gated like one started from telegram"
+
+
+def test_run_daemon_hands_the_beacon_context_the_agent_loops_own_metadata():
+    """The production wiring: the web LoopContext gets the AgentLoop's dict itself, after the attach."""
+    import prometheus.daemon as daemon
+
+    src = inspect.getsource(daemon.run_daemon)
+    attached = src.index("attach_subagent_spawner(agent_loop)")
+    ctx_at = src.index("loop_context = LoopContext(")
+    assert ctx_at > attached, "the web LoopContext must be built after the spawner is attached"
+    ctx_src = src[ctx_at:src.index("loop_context.seal()", ctx_at)]
+    assert "tool_metadata=agent_loop._tool_metadata," in ctx_src
+
+
+def test_loop_tool_metadata_divergence_names_the_missing_keys():
+    from types import SimpleNamespace
+
+    from prometheus.daemon import loop_tool_metadata_divergence
+
+    loop = SimpleNamespace(_tool_metadata={"subagent_spawner": object(), "printing_press": object()})
+    assert loop_tool_metadata_divergence(loop, SimpleNamespace(tool_metadata=None)) == [
+        "printing_press", "subagent_spawner"]
+    assert loop_tool_metadata_divergence(loop, SimpleNamespace(tool_metadata=loop._tool_metadata)) == []
+    assert loop_tool_metadata_divergence(SimpleNamespace(_tool_metadata=None),
+                                         SimpleNamespace(tool_metadata=None)) == []
