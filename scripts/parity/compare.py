@@ -22,6 +22,7 @@ from typing import Any
 
 from parity.normalize import normalize_observables
 from parity.runner import RunOutput
+from parity.sidecalls import side_diff, split_stores
 
 # Which stores feed which category. Matched on the dump's path suffix + table.
 CATEGORIES: list[tuple[str, str, str | None]] = [
@@ -172,8 +173,16 @@ def compare(out: RunOutput, expected: dict, root: Path) -> CompareResult:
             cat = "steps"
         res.diffs.setdefault(cat, []).extend(_udiff(e, a, f"step[{i}]"))
 
-    # Stores, per table / file.
-    exp_st, act_st = expected.get("stores", {}), actual.get("stores", {})
+    # Stores, per table / file, with the side calls' rows taken out and
+    # checked on their own, and the placeholders renumbered past them
+    # (parity/sidecalls.py).
+    exp_st, exp_side = split_stores(expected.get("stores", {}))
+    act_st, act_side = split_stores(actual.get("stores", {}))
+    for key in sorted(set(exp_side) | set(act_side)):
+        lines = side_diff(exp_side.get(key), act_side.get(key))
+        if lines:
+            path, _, table = key.rpartition(":")
+            res.diffs.setdefault(categorize(path, table), []).extend(f"{key}: {ln}" for ln in lines)
     for path in sorted(set(exp_st) | set(act_st)):
         e, a = exp_st.get(path), act_st.get(path)
         if e == a:

@@ -346,19 +346,21 @@ def _req_switch(ev: Evidence) -> list[str]:
     replies = [(s.get("reply") or "").lower() for s in ev.steps if s.get("op") == "chat"]
     answered = (len(replies) == 3
                 and all(w in r for w, r in zip(("one", "two", "three"), replies)))
-    # Two identical completion requests are the session-title race: a second
-    # title task scheduled by turn 2's chat_done while turn 1's was still in
-    # flight (engine/session_titles.py checks for an existing title BEFORE
-    # asking the model, and nothing marks one as in flight). A replay
-    # reproduces the second request only when the timing recurs, so such a
-    # sample is refused; record the alt turn live, not from a stand-in.
-    distinct = len({json.dumps(r, sort_keys=True, ensure_ascii=False) for r in ev.requests})
+    # Two identical TURN requests mean the turn repeated itself, which a replay
+    # reproduces only by luck, so such a sample is refused. A repeated SIDE
+    # call is the session-title race (parity/sidecalls.py): a second title task
+    # scheduled by turn 2's chat_done while turn 1's was still in flight. The
+    # replay answers a repeat of a side call by content, so it is kept.
+    from parity.sidecalls import MAIN, request_kind
+
+    turn = [r for r in ev.requests if request_kind(r) == MAIN]
+    distinct = len({json.dumps(r, sort_keys=True, ensure_ascii=False) for r in turn})
     return (_need({"primary", "alt"} <= set(ev.upstream_labels),
                   f"turns were served by {sorted(set(ev.upstream_labels))}, not both models")
             + _need(answered, "the three turns did not answer one, two, three")
-            + _need(distinct == len(ev.requests),
-                    f"{len(ev.requests) - distinct} identical completion request(s) — the "
-                    f"session-title race; a replay reproduces it only by luck"))
+            + _need(distinct == len(turn),
+                    f"{len(turn) - distinct} identical turn request(s); a replay "
+                    f"reproduces them only by luck"))
 
 
 def _req_hosted(ev: Evidence) -> list[str]:

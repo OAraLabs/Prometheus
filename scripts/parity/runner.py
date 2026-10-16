@@ -308,15 +308,12 @@ class Runner:
     def _settle(self) -> None:
         """Let background model calls (session titles) finish before the stop."""
         if self.mode == "replay":
-            want = sum(1 for ex in self.state.recorded
-                       if ex.method == "POST" and ex.path in COMPLETIONS_PATHS)
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 with self.state.lock:
-                    done = sum(1 for i in self.state.consumed
-                               if self.state.recorded[i].path in COMPLETIONS_PATHS)
+                    owed = self.state.owed()
                     busy = self.state.in_flight
-                if done >= want and busy == 0:
+                if not owed and busy == 0:
                     break
                 time.sleep(0.05)
             self._quiet_disk(self.root / "home", quiet_for=1.0, limit=10.0)
@@ -380,9 +377,8 @@ class Runner:
         # Never read a root this run did not prepare (e.g. one prepare refused).
         stores = snapshot(self.root) if prepared and self.root.exists() else {}
         served = list(self.state.served)
-        unconsumed = [i for i, ex in enumerate(self.state.recorded)
-                      if ex.method == "POST" and ex.path in COMPLETIONS_PATHS
-                      and i not in self.state.consumed] if self.mode == "replay" else []
+        with self.state.lock:
+            unconsumed = self.state.owed() if self.mode == "replay" else []
         return RunOutput(
             scenario=self.scenario.name, mode=self.mode, steps=self.steps, stores=stores,
             exchanges=list(self.state.recorded),
