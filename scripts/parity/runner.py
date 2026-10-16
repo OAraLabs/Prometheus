@@ -45,8 +45,9 @@ HARNESS_OVERRIDES: dict[str, Any] = {
     },
     "web": {"enabled": True, "api_port": "{{API_PORT}}", "ws_port": "{{WS_PORT}}",
             "api_token": "{{API_TOKEN}}"},
-    # The second backend, for the model switch. Ollama speaks the same
-    # /v1/chat/completions wire, so one model server stands in for both.
+    # The second backend, for the model switch. Ollama's native /api/chat is
+    # a model call to the model server like /v1/chat/completions, so one model
+    # server stands in for both.
     "backends": {"alt": {"provider": "ollama", "base_url": "{{ALT_URL}}",
                          "model": "qwen2.5:7b-instruct"}},
     # Machine identity (GPU, hosts, addresses) scanned into the system prompt:

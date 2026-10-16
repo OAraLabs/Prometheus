@@ -23,6 +23,8 @@ Pinned here, at both layers:
    parser) names every call whose arguments do not read as a JSON object on
    ``unreadable_tool_calls``, and the last call when the output limit stopped
    the reply before any of its arguments arrived. A complete call is not named.
+   Ollama's native /api/chat sends each call whole, its arguments an object,
+   so a call it streams is never cut; that case is pinned on its own.
 2. ``run_loop`` does not run a named call. When the reply ended at the output
    limit (by its stop reason, or by output tokens at the cap) the result says
    the call was cut off and asks for smaller pieces; otherwise it says the
@@ -69,6 +71,8 @@ def _serve(monkeypatch, bodies: list[str]) -> list[dict]:
     def handler(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/api/show":
             return httpx.Response(404, json={"error": "not found"})
+        if req.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": []})
         seen.append(json.loads(req.content))
         body = bodies[min(len(seen), len(bodies)) - 1]
         return httpx.Response(200, content=body.encode(),
@@ -148,7 +152,6 @@ _OPENAI_SHAPE = {
     "openai_compat": lambda: OpenAICompatProvider(
         base_url="http://unit.test/v1", api_key="test-key", model="m", provider_name="qwen"),
     "llama_cpp": lambda: LlamaCppProvider(base_url="http://unit.test"),
-    "ollama": lambda: OllamaProvider(base_url="http://unit.test"),
     "stub": lambda: StubProvider(base_url="http://unit.test"),
 }
 
@@ -231,6 +234,21 @@ def test_a_length_stop_after_the_last_call_closed_names_nothing(monkeypatch, nam
     _serve(monkeypatch, [_openai_sse([("call_1", "lookup", WHOLE_ARGS)], "length")])
     done = asyncio.run(_complete(_OPENAI_SHAPE[name]()))
     assert done.message.tool_uses[0].input == {"q": "gears"}
+    assert done.unreadable_tool_calls == ()
+
+
+def test_an_ollama_call_arrives_whole_and_a_length_stop_names_nothing(monkeypatch):
+    lines = [
+        {"model": "m", "message": {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_1", "function": {"index": 0, "name": "lookup", "arguments": {"q": "gears"}}}]},
+         "done": False},
+        {"model": "m", "message": {"role": "assistant", "content": ""}, "done": True,
+         "done_reason": "length", "prompt_eval_count": 40, "eval_count": 16},
+    ]
+    _serve(monkeypatch, ["".join(json.dumps(x) + "\n" for x in lines)])
+    done = asyncio.run(_complete(OllamaProvider(base_url="http://unit.test")))
+    assert done.stop_reason == "length"
+    assert [(t.id, t.input) for t in done.message.tool_uses] == [("call_1", {"q": "gears"})]
     assert done.unreadable_tool_calls == ()
 
 

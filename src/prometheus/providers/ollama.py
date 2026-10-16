@@ -1,21 +1,27 @@
 """OllamaProvider — connects to the Ollama API.
 
-Ollama exposes an OpenAI-compatible /v1/chat/completions endpoint as well
-as its own /api/chat endpoint. This provider uses the OpenAI-compatible
-path with `format: "json"` support for structured output.
+Requests go to Ollama's native ``/api/chat`` (audit 2026-10-16). Its
+OpenAI-compatible ``/v1/chat/completions`` has no ``options``, so a request
+could not say which window to load: the model served Ollama's default (its
+VRAM tier, or 4k) while Prometheus budgeted the window ``/api/show`` reports
+as TRAINED (262,144 for qwen3.5:9b), and a prompt over the served window was
+cut from the FRONT with no error. Natively, every request sends
+``options.num_ctx``: the window the loop budgeted
+(``ApiMessageRequest.context_window``), never above the model's trained
+length; a caller that budgeted none gets the window the model is loaded at
+(``/api/ps``), so it never forces a reload; nothing loaded, nothing sent.
 
 Default target: http://localhost:11434
 
 Thinking models (WP-X.35). Ollama turns thinking ON for any model whose
-``/api/show`` capabilities list ``thinking`` unless the request says otherwise,
-and its OpenAI-compatible route streams the thought as ``delta.reasoning``.
+``/api/show`` capabilities list ``thinking`` unless the request says otherwise.
 The provider asks ``/api/show`` once per model and, only for a model that lists
-``thinking``, sends ``reasoning_effort: "none"`` unless the call opted in
+``thinking``, sends ``think: false`` unless the call opted in
 (``ApiMessageRequest.suppress_thinking is False``). Every other model — and any
-model whose capabilities could not be read — gets exactly the request it got
-before. Reasoning is kept as a thinking block, never as reply text. A turn that
-thought but answered nothing is recorded, and retried once with thinking off
-when that can help (``stream_message``).
+model whose capabilities could not be read — gets no ``think`` field. Reasoning
+(``message.thinking``) is kept as a thinking block, never as reply text. A turn
+that thought but answered nothing is recorded, and retried once with thinking
+off when that can help (``stream_message``).
 """
 
 from __future__ import annotations
@@ -52,16 +58,16 @@ log = logging.getLogger(__name__)
 # The /api/show capability that marks a model with a thinking channel; the same
 # spelling from Ollama 0.23.0 to 0.34.4 (types/model/capability.go).
 _THINKING_CAPABILITY = "thinking"
-# The one reasoning_effort value that turns thinking OFF on every Ollama from
-# 0.23.0 on ("none" -> think=false, openai/openai.go). The levels differ by
-# version ("minimal" is a 400 on 0.23.0), so no other value is ever sent. /v1
-# has no ``think`` field: a top-level ``think`` is dropped without an error.
-_THINKING_OFF = "none"
+# Thinking OFF on the native API: ``think: false``. The /v1 route's
+# reasoning_effort "none" was mapped to exactly this (openai/openai.go).
+_THINKING_OFF = False
 # gpt-oss goes through the harmony parser, which keeps its analysis channel
-# whatever the request says: "none" cannot turn its reasoning off, so a retry
-# with thinking off would only repeat the first attempt.
+# whatever the request says: ``think: false`` cannot turn its reasoning off, so
+# a retry with thinking off would only repeat the first attempt.
 _HARMONY_FAMILIES = frozenset({"gptoss", "gpt-oss"})
 _SHOW_TIMEOUT_S = 10.0
+# How long one /api/ps reading of a model's loaded window is reused.
+_PS_TTL_S = 5.0
 
 
 def _is_cloud_model(name: str) -> bool:
@@ -77,10 +83,9 @@ class _ModelThinking:
     """What /api/show said about one model. Only a definitive answer is built:
     an unreadable /api/show leaves the model unknown, never 'not thinking'.
 
-    ``effort_ok`` turns False once this server refused ``reasoning_effort``
-    for the model: Ollama 0.11.5-0.12.3 pass "none" through as a think level
-    and answer 400 "invalid think value" (only 0.12.4 on map it to off). The
-    model then gets the request it always got — thinking on, as before."""
+    ``effort_ok`` turns False once this server refused ``think`` for the
+    model (a 400 that names it). The model then gets no ``think`` field —
+    thinking on, Ollama's own default."""
 
     __slots__ = ("capable", "harmony", "effort_ok")
 
@@ -91,8 +96,13 @@ class _ModelThinking:
 
 
 class _ThinkingOffRefused(RuntimeError):
-    """The server refused the thinking-off retry's reasoning_effort. Not an
-    HTTP error, so the transport retry does not repeat it."""
+    """The server refused the thinking-off retry's ``think``. Not an HTTP
+    error, so the transport retry does not repeat it."""
+
+
+class OllamaStreamError(RuntimeError):
+    """An ``{"error": ...}`` line inside a 200 stream: Ollama's way of failing
+    after the headers were sent."""
 
 
 class _Attempt:
@@ -121,8 +131,8 @@ def _reasoning_only(event: ApiMessageCompleteEvent) -> bool:
 
 
 def _refuses_effort(exc: httpx.HTTPStatusError) -> bool:
-    """A 400 about the thinking value — Ollama 0.11.5-0.12.3's "invalid think
-    value", or a later server's "invalid reasoning value"."""
+    """A 400 about the thinking value ("invalid think value", "does not
+    support thinking", "invalid reasoning value")."""
     if exc.response.status_code != 400:
         return False
     try:
@@ -132,8 +142,58 @@ def _refuses_effort(exc: httpx.HTTPStatusError) -> bool:
     return "think" in body or "reasoning" in body
 
 
+def _native_messages(request: ApiMessageRequest, *, allow_images: bool) -> list[dict[str, Any]]:
+    """The request's messages in ``/api/chat``'s shape.
+
+    Built from the OpenAI-compatible list every local provider sends, then
+    moved to Ollama's own fields, as its /v1 route did (openai/openai.go):
+    text parts joined into ``content``, a picture's base64 into ``images``, a
+    call's arguments as an object, and a tool result naming its call and tool.
+    """
+    names: dict[str, str] = {}
+    out: list[dict[str, Any]] = []
+    for msg in _build_openai_messages(request, allow_images=allow_images):
+        role = msg.get("role")
+        entry: dict[str, Any] = {"role": role}
+        content = msg.get("content")
+        if isinstance(content, list):
+            texts, images = [], []
+            for part in content:
+                if part.get("type") == "text":
+                    texts.append(str(part.get("text") or ""))
+                elif part.get("type") == "image_url":
+                    url = str((part.get("image_url") or {}).get("url") or "")
+                    images.append(url.split(",", 1)[1] if url.startswith("data:") and "," in url else url)
+            entry["content"] = " ".join(texts)
+            if images:
+                entry["images"] = images
+        else:
+            entry["content"] = content if isinstance(content, str) else ("" if content is None else str(content))
+        if msg.get("tool_calls"):
+            calls = []
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function") or {}
+                raw = fn.get("arguments")
+                try:
+                    args = json.loads(raw) if isinstance(raw, str) and raw else (raw or {})
+                except json.JSONDecodeError:
+                    args = {}
+                if tc.get("id"):
+                    names[str(tc["id"])] = str(fn.get("name") or "")
+                calls.append({"id": tc.get("id"), "function": {"name": fn.get("name", ""), "arguments": args}})
+            entry["tool_calls"] = calls
+        if role == "tool":
+            call_id = msg.get("tool_call_id")
+            if call_id:
+                entry["tool_call_id"] = call_id
+                if names.get(str(call_id)):
+                    entry["tool_name"] = names[str(call_id)]
+        out.append(entry)
+    return out
+
+
 class OllamaProvider(ModelProvider):
-    """Provider for Ollama's OpenAI-compatible API.
+    """Provider for Ollama's native chat API (``/api/chat``).
 
     Usage:
         provider = OllamaProvider(base_url="http://localhost:11434")
@@ -162,6 +222,11 @@ class OllamaProvider(ModelProvider):
         # attribute into subsystem_runs.thinking, and one Ollama serves many
         # models, so a provider-wide value would be wrong for most of them.
         self._thinking: dict[str, _ModelThinking] = {}
+        # The trained window /api/show reports, by model: the most num_ctx can ask.
+        self._trained: dict[str, int] = {}
+        # model -> (read at, loaded window or None), from /api/ps.
+        self._loaded: dict[str, tuple[float, int | None]] = {}
+        self._warned_trained: set[tuple[str, int]] = set()
 
     def set_grammar(self, grammar: str | None) -> None:
         """Set GBNF grammar for constrained decoding (llama.cpp extension)."""
@@ -216,7 +281,7 @@ class OllamaProvider(ModelProvider):
 
         A completion that thought but answered nothing is recorded, and — when
         thinking was on and "none" can turn it off (not gpt-oss, not a server
-        that refuses reasoning_effort) — asked once more with thinking off. The
+        that refuses think) — asked once more with thinking off. The
         retry is its own request with its own transport retries, so a failure
         there never re-runs the attempt that already spent its budget; if it
         fails before producing anything, the first attempt's result stands."""
@@ -290,32 +355,23 @@ class OllamaProvider(ModelProvider):
     async def _call_once(
         self, request: ApiMessageRequest, *, thinking_off: bool = False,
     ) -> AsyncIterator[ApiStreamEvent]:
-        """Single attempt to Ollama's /v1/chat/completions.
+        """Single attempt to Ollama's native /api/chat.
 
-        ``thinking_off`` forces reasoning_effort "none" for a thinking model
-        whatever the request says — the reasoning-only retry."""
+        ``thinking_off`` forces ``think: false`` for a thinking model whatever
+        the request says — the reasoning-only retry."""
         # Ollama has no mmproj probe, so `supports_vision` stays at the class
         # default (False) unless something sets it — an ImageBlock then raises
         # rather than being silently paraphrased. Same threading as llama_cpp.
-        messages = _build_openai_messages(request, allow_images=self.supports_vision)
+        messages = _native_messages(request, allow_images=self.supports_vision)
 
+        # num_predict is the reply's cap (the /v1 route's max_tokens). The
+        # final line reports prompt_eval_count / eval_count unasked.
+        options: dict[str, Any] = {"num_predict": request.max_tokens}
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
             "stream": True,
-            # The OpenAI-compatible endpoint reads the top-level max_tokens (and
-            # maps it to num_predict itself); its request has no ``options``
-            # field, so ``options.num_predict`` was dropped silently and every
-            # turn ran unbounded (measured on 0.23.0: options.num_predict=5 ->
-            # 150 tokens, finish "stop"; max_tokens=5 -> 5 tokens, "length").
-            "max_tokens": request.max_tokens,
-            # Ollama's OpenAI-compatible endpoint sends the usage chunk only
-            # when asked (measured on 0.23.0: without this the stream carries
-            # no ``usage`` at all), so every ollama round recorded 0/0 tokens.
-            # The same field llama_cpp and openai_compat send. Accounting-only:
-            # generation is unaffected, and a server that predates
-            # stream_options ignores the unknown field and simply sends none.
-            "stream_options": {"include_usage": True},
+            "options": options,
         }
 
         if self._force_json:
@@ -348,20 +404,23 @@ class OllamaProvider(ModelProvider):
 
         # Decided per model, after the messages are built (an unsendable
         # message still refuses before any request). Nothing is added unless
-        # /api/show says the model thinks, so every other request is the one
-        # this provider always sent.
+        # /api/show says the model thinks.
         thinking = await self._thinking_support(request.model)
         if (thinking is not None and thinking.capable and thinking.effort_ok
                 and (thinking_off or request.suppress_thinking is not False)):
             # A call that opted in (suppress_thinking=False, as coding sessions
             # do) gets nothing: Ollama's own default for a thinking model — on.
-            payload["reasoning_effort"] = _THINKING_OFF
+            payload["think"] = _THINKING_OFF
 
-        url = f"{self._base_url}/v1/chat/completions"
-        log.debug("POST %s model=%s messages=%d tools=%d grammar=%s reasoning_effort=%s",
+        num_ctx = await self._num_ctx(request)
+        if num_ctx:
+            options["num_ctx"] = num_ctx
+
+        url = f"{self._base_url}/api/chat"
+        log.debug("POST %s model=%s messages=%d tools=%d grammar=%s think=%s num_ctx=%s",
                   url, request.model, len(messages),
                   len(payload.get("tools", [])), bool(payload.get("grammar")),
-                  payload.get("reasoning_effort"))
+                  payload.get("think"), num_ctx)
 
         attempt = _Attempt()
         try:
@@ -370,18 +429,28 @@ class OllamaProvider(ModelProvider):
         except httpx.HTTPStatusError as exc:
             # The status is checked before any line is read: nothing was
             # yielded, so sending again replays nothing.
-            if thinking is None or "reasoning_effort" not in payload or not _refuses_effort(exc):
+            if thinking is None or "think" not in payload or not _refuses_effort(exc):
                 raise
             thinking.effort_ok = False
-            log.warning("ollama %s refused reasoning_effort for %s; sending %s without it "
+            log.warning("ollama %s refused think for %s; sending %s without it "
                         "from now on (thinking stays on, as before)",
                         self._base_url, request.model, request.model)
             if thinking_off:
                 raise _ThinkingOffRefused(str(exc)) from exc
-            payload.pop("reasoning_effort")
+            payload.pop("think")
             attempt = _Attempt()
             async for event in self._stream(url, payload, attempt):
                 yield event
+
+        if num_ctx and attempt.input_tokens >= num_ctx:
+            # Ollama cuts an over-window prompt from the FRONT and reports the
+            # window as the prompt size (measured 2026-10-16). The budget should
+            # have prevented it; say so rather than let it pass.
+            log.warning(
+                "ollama %s: the prompt for %s filled the whole %d-token window (prompt_eval_count %d); "
+                "Ollama cuts an over-window prompt from the front, so its start was probably lost",
+                self._base_url, request.model, num_ctx, attempt.input_tokens,
+            )
 
         final_choice: dict[str, Any] = {
             "message": {
@@ -409,11 +478,52 @@ class OllamaProvider(ModelProvider):
             served_model=attempt.served_model,
         )
 
+    async def _num_ctx(self, request: ApiMessageRequest) -> int | None:
+        """The window to ask Ollama for (see the module docstring)."""
+        budget = request.context_window
+        if budget:
+            trained = self._trained.get(request.model)
+            if trained and budget > trained:
+                marker = (request.model, int(budget))
+                if marker not in self._warned_trained:
+                    self._warned_trained.add(marker)
+                    log.warning(
+                        "ollama %s: %s is budgeted at %d tokens but trained for %d; asking for %d. Prompts "
+                        "between the two are cut from the front: set the backend's context_limit to %d.",
+                        self._base_url, request.model, budget, trained, trained, trained,
+                    )
+                return trained
+            return int(budget)
+        return await self._loaded_ctx(request.model)
+
+    async def _loaded_ctx(self, model: str) -> int | None:
+        """The window *model* is loaded at, per /api/ps (None: not loaded, or unknown)."""
+        import time
+
+        now = time.monotonic()
+        cached = self._loaded.get(model)
+        if cached is not None and now - cached[0] < _PS_TTL_S:
+            return cached[1]
+        loaded: int | None = None
+        try:
+            async with httpx.AsyncClient(timeout=_SHOW_TIMEOUT_S) as client:
+                resp = await client.get(f"{self._base_url}/api/ps")
+            if resp.status_code == 200:
+                for row in (resp.json() or {}).get("models") or []:
+                    if row.get("name") == model or row.get("model") == model:
+                        value = row.get("context_length")
+                        loaded = int(value) if isinstance(value, int) and value > 0 else None
+                        break
+        except Exception as exc:  # noqa: BLE001 — unknown, not fatal
+            log.debug("ollama /api/ps %s failed: %s", self._base_url, exc)
+        self._loaded[model] = (now, loaded)
+        return loaded
+
     async def _stream(
         self, url: str, payload: dict[str, Any], attempt: _Attempt,
     ) -> AsyncIterator[ApiStreamEvent]:
         """POST one streamed completion; text deltas are yielded as they come,
-        everything else accumulates on ``attempt``."""
+        everything else accumulates on ``attempt``. One JSON object per line."""
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             async with client.stream("POST", url, json=payload) as response:
                 if response.status_code >= 400:
@@ -423,62 +533,54 @@ class OllamaProvider(ModelProvider):
                     response.raise_for_status()
 
                 async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
+                    if not line.strip():
                         continue
-                    data = line[6:]
-                    if data.strip() == "[DONE]":
-                        break
                     try:
-                        chunk = json.loads(data)
+                        chunk = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(chunk, dict):
+                        continue
+                    if chunk.get("error"):
+                        raise OllamaStreamError(f"ollama {url}: {str(chunk['error'])[:500]}")
 
-                    # What served this call, as Ollama names it on every chunk
+                    # What served this call, as Ollama names it on every line
                     # (WP-X.21 T12b), the way llama_cpp.py reads it.
                     attempt.served_model = chunk.get("model") or attempt.served_model
-                    # Ollama puts usage in the final chunk under prompt_eval_count
-                    if "prompt_eval_count" in chunk:
-                        attempt.input_tokens = chunk.get("prompt_eval_count", 0)
-                        attempt.output_tokens = chunk.get("eval_count", 0)
+                    message = chunk.get("message") or {}
 
-                    if "usage" in chunk:
-                        # completion_tokens already counts the thinking tokens
-                        # (the runner counts every sampled token; the thought is
-                        # split out afterwards) — nothing to add for reasoning.
-                        u = chunk["usage"] or {}
-                        attempt.input_tokens = u.get("prompt_tokens", attempt.input_tokens)
-                        attempt.output_tokens = u.get("completion_tokens", attempt.output_tokens)
+                    thought = message.get("thinking") or ""
+                    if thought:
+                        attempt.reasoning += thought
 
-                    for choice in chunk.get("choices", []):
-                        attempt.finish_reason = choice.get("finish_reason") or attempt.finish_reason
-                        delta = choice.get("delta") or {}
+                    text = message.get("content") or ""
+                    if text:
+                        attempt.text += text
+                        yield ApiTextDeltaEvent(text=text)
 
-                        # Ollama's field is ``reasoning`` (0.23.0 and 0.34.x);
-                        # ``reasoning_content`` is llama.cpp's, accepted too.
-                        thought = delta.get("reasoning") or delta.get("reasoning_content") or ""
-                        if thought:
-                            attempt.reasoning += thought
+                    # A call arrives whole, its arguments an object.
+                    for tc in message.get("tool_calls") or []:
+                        fn = tc.get("function") or {}
+                        args = fn.get("arguments")
+                        attempt.tool_calls[len(attempt.tool_calls)] = {
+                            "id": tc.get("id") or f"toolu_{uuid4().hex}",
+                            "type": "function",
+                            "function": {
+                                "name": str(fn.get("name") or ""),
+                                "arguments": args if isinstance(args, str)
+                                else json.dumps(args if args is not None else {}, ensure_ascii=False),
+                            },
+                        }
 
-                        # Absent, null and "" are all no text (0.34.x omits the
-                        # field on a reasoning chunk; 0.23.0 sends "").
-                        text = delta.get("content") or ""
-                        if text:
-                            attempt.text += text
-                            yield ApiTextDeltaEvent(text=text)
-
-                        for tc in delta.get("tool_calls") or []:
-                            idx = tc.get("index", 0)
-                            if idx not in attempt.tool_calls:
-                                attempt.tool_calls[idx] = {
-                                    "id": tc.get("id", f"toolu_{uuid4().hex}"),
-                                    "type": "function",
-                                    "function": {"name": "", "arguments": ""},
-                                }
-                            fn = tc.get("function", {})
-                            if fn.get("name"):
-                                attempt.tool_calls[idx]["function"]["name"] += fn["name"]
-                            if fn.get("arguments"):
-                                attempt.tool_calls[idx]["function"]["arguments"] += fn["arguments"]
+                    if chunk.get("done"):
+                        attempt.input_tokens = int(chunk.get("prompt_eval_count") or 0)
+                        # eval_count counts every sampled token, the thought included.
+                        attempt.output_tokens = int(chunk.get("eval_count") or 0)
+                        reason = chunk.get("done_reason") or "stop"
+                        # The /v1 route reported a call's end as "tool_calls".
+                        attempt.finish_reason = (
+                            "tool_calls" if reason == "stop" and attempt.tool_calls else reason
+                        )
 
     async def _thinking_support(self, model: str) -> _ModelThinking | None:
         """Does ``model`` think, per this server's ``/api/show``? None = unknown:
@@ -501,6 +603,11 @@ class OllamaProvider(ModelProvider):
         except Exception as exc:  # noqa: BLE001 — unknown, not fatal
             log.debug("ollama /api/show %s for %s failed: %s", url, model, exc)
             return None
+        info = show.get("model_info") if isinstance(show, dict) else None
+        for key, value in (info or {}).items() if isinstance(info, dict) else ():
+            if str(key).endswith(".context_length") and isinstance(value, int) and value > 0:
+                self._trained[model] = value
+                break
         caps = show.get("capabilities") if isinstance(show, dict) else None
         if not isinstance(caps, list):
             return None

@@ -47,11 +47,10 @@ def test_payload_builders_share_the_request(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Ollama — the provider that did not ask. Driven through its REAL _call_once
-# against a mock server that behaves as ollama 0.23.0 was measured to: the
-# final usage chunk (``"choices": []``) is sent only when the request carries
-# ``stream_options.include_usage``. The "older server" mode ignores the field
-# entirely, as a server that predates stream_options does.
+# Ollama — on the native /api/chat route (audit 2026-10-16) the final line
+# always carries prompt_eval_count / eval_count: nothing to ask for. Driven
+# through its REAL _call_once against a mock server that answers as 0.23.0
+# does; the "older server" mode sends a final line with no counts.
 # ---------------------------------------------------------------------------
 
 import json  # noqa: E402
@@ -60,21 +59,15 @@ import httpx  # noqa: E402
 import pytest  # noqa: E402
 
 
-def _ollama_sse(ask_honoured: bool, body: dict) -> bytes:
-    chunks = [
-        {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "hi"},
-                      "finish_reason": None}]},
-        {"choices": [{"index": 0, "delta": {"role": "assistant", "content": ""},
-                      "finish_reason": "stop"}]},
-    ]
-    if ask_honoured and (body.get("stream_options") or {}).get("include_usage"):
-        chunks.append({"choices": [], "usage": {"prompt_tokens": 31, "completion_tokens": 2,
-                                                "total_tokens": 33}})
-    lines = [f"data: {json.dumps(c)}\n\n" for c in chunks] + ["data: [DONE]\n\n"]
-    return "".join(lines).encode()
+def _ollama_lines(counts: bool) -> bytes:
+    final = {"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"}
+    if counts:
+        final.update({"prompt_eval_count": 31, "eval_count": 2})
+    lines = [{"message": {"role": "assistant", "content": "hi"}, "done": False}, final]
+    return "".join(json.dumps(x) + "\n" for x in lines).encode()
 
 
-def _mock_ollama(monkeypatch, *, ask_honoured: bool) -> list[dict]:
+def _mock_ollama(monkeypatch, *, counts: bool) -> list[dict]:
     """Route every httpx.AsyncClient through a mock ollama; returns the list
     the POSTed bodies are captured into."""
     seen: list[dict] = []
@@ -84,10 +77,12 @@ def _mock_ollama(monkeypatch, *, ask_honoured: bool) -> list[dict]:
             # The capability question (WP-X.35): unknown here, so the chat
             # request is exactly the one this test was written against.
             return httpx.Response(404, json={"error": "not found"})
+        if req.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": []})
         body = json.loads(req.content)
         seen.append(body)
-        return httpx.Response(200, content=_ollama_sse(ask_honoured, body),
-                              headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, content=_ollama_lines(counts),
+                              headers={"content-type": "application/x-ndjson"})
 
     real = httpx.AsyncClient
 
@@ -111,22 +106,22 @@ async def _complete(provider):
 
 
 @pytest.mark.asyncio
-async def test_ollama_asks_for_usage_and_records_it(monkeypatch):
+async def test_ollama_records_the_counts_its_final_line_carries(monkeypatch):
     from prometheus.providers.ollama import OllamaProvider
 
-    seen = _mock_ollama(monkeypatch, ask_honoured=True)
+    seen = _mock_ollama(monkeypatch, counts=True)
     done = await _complete(OllamaProvider(base_url="http://unit.test:1"))
-    assert seen[0]["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in seen[0]           # a /v1 field; the native route always counts
     assert (done.usage.input_tokens, done.usage.output_tokens) == (31, 2)
 
 
 @pytest.mark.asyncio
-async def test_ollama_server_without_usage_support_still_streams(monkeypatch):
-    """A server that predates stream_options ignores the field: the turn must
-    complete exactly as before, with usage left at 0/0 (not an error)."""
+async def test_ollama_server_without_counts_still_streams(monkeypatch):
+    """A final line without counts: the turn must complete, with usage left at
+    0/0 (not an error)."""
     from prometheus.providers.ollama import OllamaProvider
 
-    _mock_ollama(monkeypatch, ask_honoured=False)
+    _mock_ollama(monkeypatch, counts=False)
     done = await _complete(OllamaProvider(base_url="http://unit.test:1"))
     assert "".join(b.text for b in done.message.content if hasattr(b, "text")) == "hi"
     assert (done.usage.input_tokens, done.usage.output_tokens) == (0, 0)

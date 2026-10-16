@@ -159,7 +159,6 @@ def test_cw_one_reply_room_everywhere(main):
 # ---------------------------------------------------------------- Ollama
 
 
-@pytest.mark.xfail(strict=True, reason="0.9.12: an Ollama backend is budgeted at its TRAINED length (/api/show)")
 def test_cw_ollama_is_budgeted_at_the_window_it_serves(main):
     daemon, *_, ollama = main
     rows = daemon.get("/api/backends")
@@ -178,14 +177,12 @@ def _ollama_turn(main):
     return ollama.requests
 
 
-@pytest.mark.xfail(strict=True, reason="0.9.12: Prometheus sends Ollama no num_ctx (the OpenAI endpoint has none)")
 def test_cw_prometheus_sends_ollama_the_num_ctx_it_budgets_for(main):
     reqs = _ollama_turn(main)
     assert reqs, "the session never reached the Ollama backend"
     assert all(r["num_ctx"] for r in reqs), f"num_ctx sent: {[r['num_ctx'] for r in reqs]}"
 
 
-@pytest.mark.xfail(strict=True, reason="0.9.12: an Ollama prompt over the served window is cut from the front, silently")
 def test_cw_an_ollama_prompt_is_never_cut_silently(main):
     reqs = main[3].requests or _ollama_turn(main)
     cut = [r for r in reqs if r["kept_tokens"] < r["sent_tokens"]]

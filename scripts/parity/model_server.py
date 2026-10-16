@@ -57,8 +57,10 @@ from parity.sidecalls import MAIN, request_kind
 # Model calls: matched, consumed, timed and DIFFED. Everything else is a probe.
 # "/v1/messages" is Anthropic's Messages API — a turn routed to the hosted
 # provider (a /claude override) is a model call like any other, and filing it as
-# a probe would take it out of the diff entirely.
-COMPLETIONS_PATHS = ("/v1/chat/completions", "/v1/messages")
+# a probe would take it out of the diff entirely. "/api/chat" is Ollama's native
+# chat route, which the Ollama provider uses since it sends options.num_ctx
+# (audit 2026-10-16): the same reason holds.
+COMPLETIONS_PATHS = ("/v1/chat/completions", "/v1/messages", "/api/chat")
 
 # Request headers the proxy passes upstream besides Content-Type: the provider
 # protocol version the hosted API requires. Local providers send none of them,

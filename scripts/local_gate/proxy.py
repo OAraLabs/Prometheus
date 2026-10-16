@@ -1,10 +1,11 @@
-"""Logging reverse proxy between a scratch daemon and a llama.cpp server.
+"""Logging reverse proxy between a scratch daemon and a llama.cpp or Ollama server.
 
 Forwards every request unchanged and streams the reply back. For each
-``POST .../chat/completions`` it appends one JSONL record: the request body as
-sent and a digest of the reply (finish reason, usage, server timings, tool
-calls, content). Everything else (``/props``, ``/tokenize``, ``/health``) is
-forwarded without a record.
+``POST .../chat/completions`` (and Ollama's native ``POST /api/chat``) it
+appends one JSONL record: the request body as sent and a digest of the reply
+(finish reason, usage, server timings, tool calls, content). Everything else
+(``/props``, ``/tokenize``, ``/health``, ``/api/ps``) is forwarded without a
+record.
 
 The upstream address is read in-process from a Prometheus config
 (``model.base_url``) so it never lands in a shell history, a log or this
@@ -84,12 +85,39 @@ def _digest_sse(raw: bytes) -> dict:
     }
 
 
+def _digest_ndjson(raw: bytes) -> dict:
+    """Fold an Ollama /api/chat stream (one JSON object per line) into the same summary."""
+    content: list[str] = []
+    reasoning_chars = 0
+    calls: list[dict] = []
+    finish = usage = None
+    for line in raw.decode("utf-8", "replace").splitlines():
+        try:
+            chunk = json.loads(line) if line.strip() else None
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        msg = chunk.get("message") or {}
+        content.append(msg.get("content") or "")
+        reasoning_chars += len(msg.get("thinking") or "")
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            calls.append({"name": fn.get("name") or "", "arguments": json.dumps(fn.get("arguments") or {})})
+        if chunk.get("done"):
+            finish = chunk.get("done_reason")
+            usage = {"prompt_tokens": chunk.get("prompt_eval_count"), "completion_tokens": chunk.get("eval_count")}
+    return {"finish_reason": finish, "usage": usage, "timings": None, "content": "".join(content),
+            "reasoning_chars": reasoning_chars, "tool_calls": calls}
+
+
 async def proxy(request: Request) -> Response:
     path = request.url.path
     url = UPSTREAM + path + (f"?{request.url.query}" if request.url.query else "")
     body = await request.body()
     headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP}
-    if not (request.method == "POST" and path.endswith("/chat/completions")):
+    native = path == "/api/chat"
+    if not (request.method == "POST" and (path.endswith("/chat/completions") or native)):
         upstream = await _client.request(request.method, url, content=body, headers=headers)
         return Response(
             upstream.content,
@@ -115,7 +143,9 @@ async def proxy(request: Request) -> Response:
                 yield chunk
         finally:
             await upstream.aclose()
-            if req_json.get("stream"):
+            if native and req_json.get("stream", True):
+                digest = _digest_ndjson(bytes(buf))
+            elif req_json.get("stream"):
                 digest = _digest_sse(bytes(buf))
             else:
                 digest = {"raw_chars": len(buf)}

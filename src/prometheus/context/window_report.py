@@ -119,6 +119,13 @@ def report_at_startup(
             b_limit, b_source = resolve_effective_limit(
                 ctx, model=model, backend=spec.name, detected=windows, backend_hint=spec.context_limit,
             )
+            trained = (getattr(st, "extra", None) or {}).get("trained_ctx")
+            if b_limit and isinstance(trained, int) and 0 < trained < b_limit:
+                log.warning(
+                    "context window for backend %r (%s): budgeted at %d tokens but the model is trained for "
+                    "%d, the most Ollama serves. Set backends.%s.context_limit to %d.",
+                    spec.name, model, b_limit, trained, spec.name, trained,
+                )
             if b_source in FALLBACK_SOURCES:
                 log.warning(
                     "context window for backend %r (%s): nothing measured and no context_limit, so it is "

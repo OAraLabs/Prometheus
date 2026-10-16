@@ -15,8 +15,10 @@ Ollama 0.23.0 serving qwen2.5:7b-instruct, asked through its OpenAI-compatible
   is gone (the marker at the top of the system prompt was not recalled), while
   the tool list, which the template renders after the system text, survived.
 
-This fake keeps those rules. ``requests`` records every chat request's
-``num_ctx`` (None when absent), the tokens sent and the tokens it kept.
+This fake keeps those rules, and answers both routes in their own shapes
+(``/api/chat`` one JSON object per line, ``/v1`` server-sent events).
+``requests`` records every chat request's ``num_ctx`` (None when absent), the
+tokens sent and the tokens it kept.
 """
 
 from __future__ import annotations
@@ -106,6 +108,20 @@ class FakeOllama:
                     fake.requests.append({"num_ctx": num_ctx, "sent_tokens": sent, "kept_tokens": kept,
                                           "loaded_ctx": fake.loaded_ctx, "path": self.path,
                                           "max_tokens": payload.get("max_tokens")})
+                if self.path.startswith("/api/chat"):  # native: one JSON object per line
+                    lines = [
+                        {"model": fake.model, "message": {"role": "assistant", "content": "ok"}, "done": False},
+                        {"model": fake.model, "message": {"role": "assistant", "content": ""}, "done": True,
+                         "done_reason": "stop", "prompt_eval_count": kept, "eval_count": 3},
+                    ]
+                    if not payload.get("stream", True):
+                        return self._json(200, {**lines[1], "message": {"role": "assistant", "content": "ok"}})
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/x-ndjson")
+                    self.end_headers()
+                    for line in lines:
+                        self.wfile.write((json.dumps(line) + "\n").encode())
+                    return None
                 usage = {"prompt_tokens": kept, "completion_tokens": 3, "total_tokens": kept + 3}
                 if not payload.get("stream"):
                     return self._json(200, {"model": fake.model, "choices": [

@@ -54,9 +54,10 @@ PROBES
 ------
 * llama.cpp: ``GET /props`` (``default_generation_settings.n_ctx``,
   ``modalities.vision``, ``model_path``) and ``GET /v1/models`` (the id).
-* ollama: ``GET /api/tags`` (pulled), ``GET /api/ps`` (loaded), and
-  ``POST /api/show`` for the spec's default model (``*.context_length`` in
-  ``model_info``, ``capabilities``).
+* ollama: ``GET /api/tags`` (pulled), ``GET /api/ps`` (loaded, and the
+  window a loaded model serves: ``context_length``), and
+  ``POST /api/show`` for the spec's default model (``capabilities``, and the
+  TRAINED ``*.context_length`` in ``model_info``, kept as ``trained_ctx``).
 
 Results are cached per backend with a TTL. A probe that fails records the
 error and keeps the last good ``model``/``n_ctx`` visible as *stale*, so a
@@ -591,11 +592,16 @@ async def _probe_ollama(client: Any, spec: BackendSpec, st: BackendStatus) -> No
     tags_resp.raise_for_status()
     tags = (tags_resp.json() or {}).get("models") or []
     st.available_models = tuple(str(m.get("name") or "") for m in tags if m.get("name"))
+    loaded_ctx: dict[str, int] = {}
     try:
         ps_resp = await client.get(f"{spec.base_url}/api/ps")
         if ps_resp.status_code == 200:
             loaded = (ps_resp.json() or {}).get("models") or []
             st.loaded_models = tuple(str(m.get("name") or "") for m in loaded if m.get("name"))
+            for m in loaded:
+                value = m.get("context_length")
+                if m.get("name") and isinstance(value, int) and value > 0:
+                    loaded_ctx[str(m["name"])] = value
     except Exception as exc:  # noqa: BLE001
         log.debug("backend %s: /api/ps failed (%s)", spec.name, exc)
     # The model this backend will serve for us: the spec's default, else the
@@ -615,8 +621,10 @@ async def _probe_ollama(client: Any, spec: BackendSpec, st: BackendStatus) -> No
                 info = show.get("model_info") or {}
                 for key, value in info.items():
                     if str(key).endswith(".context_length"):
+                        # The TRAINED length: the most num_ctx can ask, not the
+                        # window served (audit 2026-10-16). Kept for /backends.
                         try:
-                            st.n_ctx = int(value)
+                            st.extra["trained_ctx"] = int(value)
                         except (TypeError, ValueError):
                             pass
                         break
@@ -634,6 +642,11 @@ async def _probe_ollama(client: Any, spec: BackendSpec, st: BackendStatus) -> No
                 ).as_dict()
         except Exception as exc:  # noqa: BLE001
             log.debug("backend %s: /api/show failed (%s)", spec.name, exc)
+    # The window SERVED is the loaded model's num_ctx (/api/ps context_length).
+    # Not loaded: unknown here, so the budget comes from the backend's
+    # context_limit or the configured window, and the provider sends that as
+    # num_ctx, which is what Ollama then loads.
+    st.n_ctx = loaded_ctx.get(target) if target else None
     # `ok` = the server answered. A missing model is reported in `error` but the
     # box is up — the distinction /backends needs to show.
     st.ok = True
