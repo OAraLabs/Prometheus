@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **444** of
+Every key in `config/prometheus.yaml.default` — **445** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -70,6 +70,7 @@ none either — the key is documented so its absence is visible.
 | `tools` | *(section)* |
 | `tools.deferred_loading` | *(section)* |
 | `tools.deferred_loading.enabled` | `auto` |
+| `tools.deferred_loading.local_catalog` | `stubs` |
 | `tools.deferred_loading.always_loaded` | `['bash', 'task_create', 'read_file', 'write_file', 'edit_file', 'grep', 'glob', 'tool_search', 'skill', 'web_search', 'web_fetch', 'memory']` |
 | `tools.deferred_loading.mcp_always_deferred` | `False` |
 | `tools.deferred_loading.search_mcp` | `True` |

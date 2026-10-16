@@ -25,7 +25,7 @@ import re
 import pytest
 
 from tests.support.gate_daemon import CLOUD_KEY, GateDaemon, build_and_boot
-from tests.support.scripted_llama import ScriptedLlamaServer
+from tests.support.scripted_llama import SCRIPTS, ScriptedLlamaServer
 from tests.support.served_template import recorded_props
 
 pytestmark = pytest.mark.integration
@@ -66,6 +66,11 @@ def coding_turn(local):
     return turn, model.exchanges[before:]
 
 
+def _fresh_messages() -> list[dict]:
+    """A conversation in which a script's tool has not run yet (its first move)."""
+    return [{"role": "system", "content": ""}, {"role": "user", "content": "go"}]
+
+
 def _explain(turn, daemon: GateDaemon) -> str:
     return (f"tools started: {turn.tools_started}\nstreamed: {turn.streamed[:300]!r}\n"
             f"final stored: {turn.final_stored_text[:300]!r}\n--- daemon log tail ---\n{daemon.log_tail(25)}")
@@ -74,7 +79,6 @@ def _explain(turn, daemon: GateDaemon) -> str:
 # ---------------------------------------------------------------- (a)
 
 
-@pytest.mark.xfail(strict=True, reason="gate a on 0.9.12: `agent` is deferred and cannot be called on a local turn")
 def test_a_a_sub_agent_is_spawned_and_its_answer_reaches_the_client(local):
     daemon, model = local
     turn = daemon.turn("[gate:agent] Use a sub-agent to list the files in your workspace.")
@@ -86,7 +90,6 @@ def test_a_a_sub_agent_is_spawned_and_its_answer_reaches_the_client(local):
 # ---------------------------------------------------------------- (b)
 
 
-@pytest.mark.xfail(strict=True, reason="gate b on 0.9.12: a selected tool never joins the run's tools")
 @pytest.mark.parametrize("script,tool", [
     ("cron", "cron_create"), ("wiki", "wiki_query"), ("memory", "lcm_grep"), ("mcp", "mcp__docs__lookup"),
 ])
@@ -94,6 +97,11 @@ def test_b_a_deferred_tool_is_found_and_called_in_the_same_turn(local, script, t
     daemon, _ = local
     turn = daemon.turn(f"[gate:{script}] Please take care of this for me.")
     assert tool in turn.tools_started, _explain(turn, daemon)
+    # The call carries its real arguments: the stand-in, like the server's
+    # grammar, lets out only the property names the offered schema declares.
+    want = SCRIPTS[script](_fresh_messages())
+    got = next(p.get("inputs") for p in turn.of("tool_call_start") if p.get("tool_name") == tool)
+    assert got == want.args, f"{tool} was called with {got}, the model meant {want.args}"
     assert turn.selects() <= 1, f"{turn.selects()} tool_search selects\n" + _explain(turn, daemon)
     assert turn.streamed.strip(), _explain(turn, daemon)
 
@@ -128,6 +136,22 @@ def test_c_the_session_finishes_its_task_after_compacting(local, coding_turn):
     billing = (daemon.workspace / "src" / "ledger" / "billing.py").read_text(encoding="utf-8")
     assert '"""Sum one ledger' in billing, "the edit did not land"
     assert "docstring" in turn.streamed, _explain(turn, daemon)
+
+
+def test_c_the_tools_block_is_sorted_and_byte_identical_across_rounds(local, coding_turn):
+    """The prefix cache needs it: the template renders the tools ahead of the
+    system text, so a changed byte re-prefills every token (fix 3). Sorted by
+    name, so the order cannot depend on when a tool registered (an MCP server
+    that connects late)."""
+    _, exchanges = coding_turn
+    rounds = [e for e in exchanges if e.status == 200 and e.request.get("tools")]
+    assert len(rounds) >= 3, f"expected a multi-round turn, saw {len(rounds)}"
+    names = [t["function"]["name"] for t in rounds[0].request["tools"]]
+    assert names == sorted(names), f"the tools block is not sorted: {names}"
+    first = json.dumps(rounds[0].request["tools"], sort_keys=False, ensure_ascii=False)
+    changed = [i for i, e in enumerate(rounds)
+               if json.dumps(e.request["tools"], sort_keys=False, ensure_ascii=False) != first]
+    assert not changed, f"the tools block changed in rounds {changed}"
 
 
 def test_c_the_window_is_never_overrun(local, coding_turn):

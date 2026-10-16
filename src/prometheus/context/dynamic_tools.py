@@ -118,6 +118,17 @@ class DynamicToolLoader:
         self._registry = registry
         self._deferred = deferred_config or {}
         self._configured = _normalize_enabled(self._deferred.get("enabled", "auto"))
+        # How a deferred local run offers the tools it does not describe in
+        # full (context/tool_stubs.py): "stubs", or "names" for the 0.9.12
+        # catalog. Anything else is a typo: say so and use the default.
+        from prometheus.context.tool_stubs import CATALOG_MODES, DEFAULT_CATALOG
+
+        mode = str(self._deferred.get("local_catalog") or DEFAULT_CATALOG)
+        if mode not in CATALOG_MODES:
+            log.warning("tools.deferred_loading.local_catalog = %r is not one of %s; using %r",
+                        mode, ", ".join(CATALOG_MODES), DEFAULT_CATALOG)
+            mode = DEFAULT_CATALOG
+        self.catalog_mode: str = mode
         # always_loaded is parsed unconditionally now: with mode "auto" the
         # decision isn't known until run start (resolve_deferred), so the set
         # must be ready either way. Do NOT mutate this set per-tier — it is

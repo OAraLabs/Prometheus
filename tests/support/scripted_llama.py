@@ -315,10 +315,14 @@ class ScriptedLlamaServer:
         return fn(msgs) if fn else Text("I have no script for this conversation.")
 
     def _constrain(self, intent: Call | Text, payload: dict[str, Any]) -> Call | Text:
-        """What the server lets out: an unoffered name never leaves as a call."""
+        """What the server lets out: an unoffered name never leaves as a call,
+        and on Qwen's XML format (``<parameter=NAME>``) the grammar admits only
+        the property names the offered tool declares, so any other argument
+        never leaves either. A property-less tool is called with no arguments."""
         if isinstance(intent, Text):
             return intent
-        offered = {(t.get("function") or {}).get("name") for t in payload.get("tools") or []}
+        tools = {(t.get("function") or {}).get("name"): t.get("function") or {} for t in payload.get("tools") or []}
+        offered = set(tools)
         if offered and self.native_tool_grammar and intent.name not in offered:
             if "tool_search" in offered:
                 return Call("tool_search", {"query": intent.name, "action": "select"})
@@ -328,6 +332,10 @@ class ScriptedLlamaServer:
                 # Prometheus's own GBNF covers every registered tool; the call is text.
                 return Text(json.dumps({"name": intent.name, "arguments": intent.args}))
             return Text(f"(no tools offered; would have called {intent.name})")
+        if self.native_tool_grammar:
+            declared = set(((tools[intent.name].get("parameters") or {}).get("properties") or {}))
+            if set(intent.args) - declared:
+                return Call(intent.name, {k: v for k, v in intent.args.items() if k in declared})
         return intent
 
     def _fill(self, intent: Call | Text) -> Call | Text:

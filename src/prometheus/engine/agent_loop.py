@@ -971,6 +971,22 @@ def _offered_names(active_tools: list[dict], payload_tools: list[dict], tools_en
     ) - {""}
 
 
+class _CatalogState:
+    """A local run's catalog (context/tool_stubs.py): the tools it offered as
+    skeletons, and the schema refusals each has had this turn."""
+
+    __slots__ = ("undescribed", "refusals")
+
+    def __init__(self, undescribed: frozenset[str]) -> None:
+        self.undescribed = undescribed
+        self.refusals: dict[str, int] = {}
+
+
+# The run's _CatalogState, or None when every offered tool was described in
+# full. One mutable object per run, for _RUN_TURN's reason.
+_RUN_CATALOG: contextvars.ContextVar = contextvars.ContextVar("prometheus_run_catalog", default=None)
+
+
 class _StopReason:
     """``turns.forced_stop_reason``: why the LOOP ended a turn, not the model.
 
@@ -1500,6 +1516,7 @@ async def run_loop(
     _paths_token = _RUN_PATHS.set(None)
     _serving_token = _ROUND_SERVING.set(None)
     _offered_token = _ROUND_OFFERED.set(None)
+    _catalog_token = _RUN_CATALOG.set(None)
     _session_token = _RUN_SESSION.set(None if ephemeral else recorded_session_id)
     # Telemetry v2 (WP-X.54 T-3). No telemetry, no record and no writer: with
     # telemetry off nothing reaches the v2 tables.
@@ -1555,6 +1572,7 @@ async def run_loop(
         _RUN_PATHS.reset(_paths_token)
         _ROUND_SERVING.reset(_serving_token)
         _ROUND_OFFERED.reset(_offered_token)
+        _RUN_CATALOG.reset(_catalog_token)
         _RUN_SESSION.reset(_session_token)
         if turn_key is not None:
             try:
@@ -1828,6 +1846,22 @@ async def _run_loop(
                     "names", active_profile.name, len(tool_schema),
                 )
                 active_profile = None
+
+    # A deferred local run offers EVERY tool (audit 2026-10-16, fix 3): the
+    # most-used in full, the rest as skeletons, sorted, frozen for the run
+    # (context/tool_stubs.py). tools.deferred_loading.local_catalog "names"
+    # keeps the old catalog.
+    _catalog_mode = getattr(context.tool_loader, "catalog_mode", "names")
+    if tools_enabled and deferred_tools_active and _catalog_mode == "stubs":
+        from prometheus.context.tool_stubs import catalog as _catalog
+
+        _every = context.tool_loader.schemas_for_run(False)
+        if active_profile is not None:
+            from prometheus.config.profiles import filter_tools_by_profile
+
+            _every = filter_tools_by_profile(_every, active_profile) or _every
+        tool_schema, _undescribed = _catalog(_every)
+        _RUN_CATALOG.set(_CatalogState(_undescribed))
 
     # A/B measurability: one row per run stating what was advertised and why,
     # so deferred-vs-full comparisons come straight out of the DB instead of
@@ -5571,6 +5605,18 @@ async def _execute_tool_call(
                     session_id=_row_session,
                     **_v2_call(tool_name, tool_use_id, success=False,
                                repair_log=repair_log, raw_call=_raw_call),
+                )
+            _cat = _RUN_CATALOG.get()
+            if _cat is not None and tool_name in _cat.undescribed:
+                from prometheus.context.tool_stubs import error_summary as _error_summary
+                from prometheus.context.tool_stubs import refusal as _refusal
+
+                _cat.refusals[tool_name] = _cat.refusals.get(tool_name, 0) + 1
+                return ToolResultBlock(
+                    tool_use_id=tool_use_id,
+                    content=_refusal(tool_name, tool.input_model.model_json_schema(), _error_summary(exc),
+                                     _cat.refusals[tool_name]),
+                    is_error=True,
                 )
             return ToolResultBlock(
                 tool_use_id=tool_use_id,
