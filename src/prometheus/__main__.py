@@ -39,6 +39,7 @@ from prometheus.engine.stream_events import (
 )
 from prometheus.providers.base import ModelProvider
 from prometheus.engine.fallback import build_fallback_target
+from prometheus.providers.output_caps import OutputCaps
 
 log = logging.getLogger("prometheus")
 
@@ -1251,6 +1252,8 @@ def run_coding_task(args) -> int:
     session = CodingSession(
         provider=provider,
         model=model_name,
+        # A coding run writes whole files: it needs its model's output cap most of all.
+        output_caps=OutputCaps.from_config(config),
         sandbox=sandbox,
         task=CodingTask(
             task_id=task_id,
@@ -2273,6 +2276,8 @@ def main() -> None:
         model=model_name,
         system_prompt=system_prompt,
         max_tokens=4096,
+        # Each request asks for its model's output cap; 4096 is the default for a model the caps do not know.
+        output_caps=OutputCaps.from_config(config),
         tool_registry=registry,
         permission_checker=security_gate,
         # A worker asks its parent conversation (cli/worker_approval.py);

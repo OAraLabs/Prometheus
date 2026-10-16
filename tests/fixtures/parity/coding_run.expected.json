@@ -846,8 +846,8 @@
        "9adc3c23ae3a7bbd",
        "prose",
        0,
-       135,
-       "Fixed. `add()` in calc.py now returns `a + b` instead of `a - b`, and the acceptance command `python test_calc.py` exits 0 (\"calc ok\").",
+       146,
+       "Fixed. `add()` in calc.py was returning `a - b`; I changed it to `a + b`. The acceptance command `python test_calc.py` now exits 0 with \"calc ok\".",
        "agent",
        "coding_mode",
        null
@@ -1554,7 +1554,7 @@
         }
        },
        1808,
-       69,
+       66,
        0,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1604,7 +1604,7 @@
         }
        },
        2106,
-       42,
+       40,
        2,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1629,7 +1629,7 @@
         }
        },
        2169,
-       54,
+       53,
        3,
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1789,7 +1789,7 @@
        "<node>",
        "<turn:1>",
        0,
-       "oDh8xHHdUBTtOBZrwvXNiFQUUy9FNuwd",
+       "IyDnJut2pjggyWxqDD9Be6gkuljzaf5G",
        null,
        null,
        0,
@@ -1857,7 +1857,7 @@
        "<node>",
        "<turn:1>",
        0,
-       "YYdn1KNvPWgpelmkQ7dVwYbLlstbAE9a",
+       "M6YMy4emkFnWRb6KjqX444Pvi5kONrbm",
        null,
        null,
        0,
@@ -1949,7 +1949,7 @@
        "<node>",
        "<turn:1>",
        1,
-       "kVtDqiiKvxnfRDzo1W3a4kJ3G129JDRp",
+       "JRUpiZmaJDQQSIRKKJ0J2Dg1qmaN7Caw",
        null,
        null,
        0,
@@ -2040,7 +2040,7 @@
        "<node>",
        "<turn:1>",
        2,
-       "wgTQ0vD5NGIY2vj1A0oFoaiM3Y103Mit",
+       "noRPAu1RgR93DpKfQgzoOwHiXObHoQmC",
        null,
        null,
        0,
@@ -2133,7 +2133,7 @@
        "<time>",
        4,
        8062,
-       246,
+       240,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"

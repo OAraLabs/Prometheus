@@ -44,6 +44,7 @@ from prometheus.providers.stub import (
     RETRYABLE_STATUS_CODES,
     _build_openai_messages,
     _parse_assistant_message,
+    _unreadable_call_ids,
 )
 
 log = logging.getLogger(__name__)
@@ -404,6 +405,7 @@ class OllamaProvider(ModelProvider):
             ),
             stop_reason=attempt.finish_reason,
             dropped_malformed=dropped_malformed,
+            unreadable_tool_calls=_unreadable_call_ids(final_choice, attempt.finish_reason),
             served_model=attempt.served_model,
         )
 

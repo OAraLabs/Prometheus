@@ -23,7 +23,7 @@
      "content_json": {
       "$json": [
        {
-        "id": "SGXdWTXzeX8ujuk4KHzIzu8MAy9IKGsW",
+        "id": "N1O6uC14jHhiJOXpgQb8Nv3LMgPZMxml",
         "input": {
          "entry": "The parity canary colour is teal.",
          "operation": "add",
@@ -45,7 +45,7 @@
        {
         "content": "added",
         "is_error": false,
-        "tool_use_id": "SGXdWTXzeX8ujuk4KHzIzu8MAy9IKGsW",
+        "tool_use_id": "N1O6uC14jHhiJOXpgQb8Nv3LMgPZMxml",
         "type": "tool_result"
        }
       ]
@@ -231,7 +231,7 @@
        {
         "$json": [
          {
-          "id": "SGXdWTXzeX8ujuk4KHzIzu8MAy9IKGsW",
+          "id": "N1O6uC14jHhiJOXpgQb8Nv3LMgPZMxml",
           "input": {
            "entry": "The parity canary colour is teal.",
            "operation": "add",
@@ -259,7 +259,7 @@
          {
           "content": "added",
           "is_error": false,
-          "tool_use_id": "SGXdWTXzeX8ujuk4KHzIzu8MAy9IKGsW",
+          "tool_use_id": "N1O6uC14jHhiJOXpgQb8Nv3LMgPZMxml",
           "type": "tool_result"
          }
         ]
@@ -540,7 +540,7 @@
      "rows": [
       [
        "desktop:parity-memory",
-       "Save Teal Parity Canary Colour",
+       "Parity Canary Colour Teal",
        "<time>"
       ]
      ]
@@ -1625,13 +1625,13 @@
          "stop_reason": "tool_calls"
         }
        },
-       6239,
+       6238,
        56,
        0,
        "desktop:parity-memory",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4223,
+       4222,
        null,
        "<node>",
        "local",
@@ -1650,13 +1650,13 @@
          "stop_reason": "stop"
         }
        },
-       6313,
+       6312,
        16,
        1,
        "desktop:parity-memory",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6294,
+       6293,
        null,
        "<node>",
        "local",
@@ -1676,7 +1676,7 @@
         }
        },
        101,
-       8,
+       7,
        null,
        "desktop:parity-memory",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1808,7 +1808,7 @@
        "<node>",
        "<turn:1>",
        0,
-       "SGXdWTXzeX8ujuk4KHzIzu8MAy9IKGsW",
+       "N1O6uC14jHhiJOXpgQb8Nv3LMgPZMxml",
        null,
        null,
        0,
@@ -1906,7 +1906,7 @@
        "<time>",
        "<time>",
        2,
-       12552,
+       12550,
        72,
        {
         "$json": [

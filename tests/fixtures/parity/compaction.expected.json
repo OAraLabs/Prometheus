@@ -130,11 +130,11 @@
      "role": "user"
     },
     {
-     "content": "The three words, in order, are: amber, birch, cobalt.",
+     "content": "amber, birch, cobalt",
      "content_json": {
       "$json": [
        {
-        "text": "The three words, in order, are: amber, birch, cobalt.",
+        "text": "amber, birch, cobalt",
         "type": "text"
        }
       ]
@@ -145,7 +145,7 @@
     }
    ],
    "op": "chat",
-   "reply": "The three words, in order, are: amber, birch, cobalt.",
+   "reply": "amber, birch, cobalt",
    "session": "desktop:parity-compact"
   }
  ],
@@ -422,16 +422,16 @@
        "desktop:parity-compact",
        7,
        "assistant",
-       "The three words, in order, are: amber, birch, cobalt.",
+       "amber, birch, cobalt",
        {
         "$json": [
          {
-          "text": "The three words, in order, are: amber, birch, cobalt.",
+          "text": "amber, birch, cobalt",
           "type": "text"
          }
         ]
        },
-       13,
+       5,
        "<time>",
        0,
        "user",
@@ -466,7 +466,7 @@
        "What were the three words, in order? Answer in one line."
       ],
       [
-       "The three words, in order, are: amber, birch, cobalt."
+       "amber, birch, cobalt"
       ]
      ]
     },
@@ -491,7 +491,7 @@
       [
        1,
        {
-        "$bytes_sha256": "c26b9b4fd0ae038f",
+        "$bytes_sha256": "bf37c3988f6d7c36",
         "len": 2
        }
       ],
@@ -554,8 +554,8 @@
       [
        1099511627777,
        {
-        "$bytes_sha256": "ecfff7d1c979db4a",
-        "len": 94
+        "$bytes_sha256": "43bedeb59450f4fe",
+        "len": 38
        }
       ]
      ]
@@ -618,7 +618,7 @@
       [
        8,
        {
-        "$bytes_sha256": "2b4c342f5433ebe5",
+        "$bytes_sha256": "084fed08b978af4d",
         "len": 1
        }
       ]
@@ -817,7 +817,7 @@
      "rows": [
       [
        "desktop:parity-compact",
-       "Memory Game Amber",
+       "Memory Game",
        "<time>"
       ]
      ]
@@ -1206,8 +1206,8 @@
        "0ac69752b6f71969",
        "prose",
        0,
-       53,
-       "The three words, in order, are: amber, birch, cobalt.",
+       20,
+       "amber, birch, cobalt",
        "agent",
        "beacon",
        null
@@ -1301,11 +1301,11 @@
        {
         "$json": {
          "calibration": 1.046,
-         "over_by": 5607,
+         "over_by": 5606,
          "session_id": "desktop:parity-compact",
          "span_messages": 2,
          "threshold": 655,
-         "tokens_before": 6262,
+         "tokens_before": 6261,
          "tokens_before_estimated": 5988,
          "trigger": "threshold"
         }
@@ -1320,9 +1320,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 5607,
+         "over_by": 5606,
          "session_id": "desktop:parity-compact",
-         "tokens": 6262
+         "tokens": 6261
         }
        },
        "context_compactor",
@@ -1335,9 +1335,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 5633,
+         "over_by": 5622,
          "session_id": "desktop:parity-compact",
-         "tokens": 6288
+         "tokens": 6277
         }
        },
        "context_compactor",
@@ -1355,7 +1355,7 @@
          "chunks": 1,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 5633,
+         "over_by": 5622,
          "session_id": "desktop:parity-compact",
          "span_messages": 4,
          "summarizer_input_omitted": 0,
@@ -1363,8 +1363,8 @@
          "target": 458,
          "threshold": 655,
          "threshold_source": "global pct",
-         "tokens_after": 6288,
-         "tokens_before": 6292,
+         "tokens_after": 6277,
+         "tokens_before": 6291,
          "tokens_before_estimated": 6015,
          "tool_results_trimmed": 0,
          "trigger": "threshold"
@@ -1380,9 +1380,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 5642,
+         "over_by": 5611,
          "session_id": "desktop:parity-compact",
-         "tokens": 6297
+         "tokens": 6266
         }
        },
        "context_compactor",
@@ -1395,12 +1395,12 @@
        {
         "$json": {
          "cache_hit": false,
-         "calibration": 1.047,
+         "calibration": 1.046,
          "ceiling": 655,
          "chunks": 1,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 5642,
+         "over_by": 5611,
          "session_id": "desktop:parity-compact",
          "span_messages": 6,
          "summarizer_input_omitted": 0,
@@ -1408,8 +1408,8 @@
          "target": 458,
          "threshold": 655,
          "threshold_source": "global pct",
-         "tokens_after": 6297,
-         "tokens_before": 6325,
+         "tokens_after": 6266,
+         "tokens_before": 6319,
          "tokens_before_estimated": 6044,
          "tool_results_trimmed": 0,
          "trigger": "threshold"
@@ -2072,13 +2072,13 @@
          "stop_reason": "stop"
         }
        },
-       6234,
+       6233,
        3,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4423,
+       4222,
        null,
        "<node>",
        "local",
@@ -2098,12 +2098,12 @@
         }
        },
        82,
-       4,
+       3,
        null,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       78,
+       15,
        null,
        "<node>",
        "local",
@@ -2150,13 +2150,13 @@
          "stop_reason": "stop"
         }
        },
-       6264,
+       6263,
        3,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       6236,
+       6235,
        null,
        "<node>",
        "local",
@@ -2204,11 +2204,11 @@
           "session_id": "desktop:parity-compact",
           "span_messages": 4
          },
-         "output_chars": 151
+         "output_chars": 119
         }
        },
        129,
-       48,
+       34,
        null,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -2232,13 +2232,13 @@
          "stop_reason": "stop"
         }
        },
-       6291,
+       6276,
        3,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4223,
+       4222,
        null,
        "<node>",
        "local",
@@ -2286,11 +2286,11 @@
           "session_id": "desktop:parity-compact",
           "span_messages": 6
          },
-         "output_chars": 168
+         "output_chars": 77
         }
        },
        150,
-       50,
+       29,
        null,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -2314,13 +2314,13 @@
          "stop_reason": "stop"
         }
        },
-       6293,
-       18,
+       6271,
+       8,
        0,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4243,
+       4228,
        null,
        "<node>",
        "local",
@@ -2421,7 +2421,7 @@
        "<time>",
        "<time>",
        1,
-       6234,
+       6233,
        3,
        {
         "$json": [
@@ -2449,7 +2449,7 @@
        "<time>",
        "<time>",
        1,
-       6264,
+       6263,
        3,
        {
         "$json": [
@@ -2477,7 +2477,7 @@
        "<time>",
        "<time>",
        1,
-       6291,
+       6276,
        3,
        {
         "$json": [
@@ -2505,8 +2505,8 @@
        "<time>",
        "<time>",
        1,
-       6293,
-       18,
+       6271,
+       8,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"

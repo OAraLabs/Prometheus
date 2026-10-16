@@ -32,6 +32,7 @@ from prometheus.providers.stub import (
     RETRYABLE_STATUS_CODES,
     _build_openai_messages,
     _parse_assistant_message,
+    _unreadable_call_ids,
 )
 
 log = logging.getLogger(__name__)
@@ -170,7 +171,7 @@ class OpenAICompatProvider(ModelProvider):
         base_url: str,
         api_key: "str | Callable[[], str | None]",
         model: str = "",
-        default_max_tokens: int = 4096,
+        route_max_tokens: int | None = None,
         timeout: float = 120.0,
         provider_name: str = "",
         vision: bool = False,
@@ -199,7 +200,11 @@ class OpenAICompatProvider(ModelProvider):
         # at construction — providers here are long-lived and cached.
         self._api_key = api_key
         self._model = model
-        self._default_max_tokens = default_max_tokens
+        # The route's max_tokens (see ModelProvider.route_max_tokens). It used
+        # to be a fallback for a request that named no limit, and the loop's
+        # request always named 4096, so a configured value never reached the
+        # wire. The output-cap resolver reads it now.
+        self.route_max_tokens = route_max_tokens
         self._timeout = timeout
 
     def _resolve_bearer(self) -> str:
@@ -234,7 +239,7 @@ class OpenAICompatProvider(ModelProvider):
         payload: dict[str, Any] = {
             "model": request.model or self._model,
             "messages": messages,
-            "max_tokens": request.max_tokens or self._default_max_tokens,
+            "max_tokens": request.max_tokens or self.route_max_tokens or 4096,
             "stream": True,
             # SPRINT-loop-envelope (F1): OpenAI-compat servers only emit the
             # usage chunk when asked — without this the stream parser's
@@ -408,5 +413,6 @@ class OpenAICompatProvider(ModelProvider):
             ),
             stop_reason=finish_reason,
             dropped_malformed=dropped_malformed,
+            unreadable_tool_calls=_unreadable_call_ids(final_choice, finish_reason),
             served_model=served_model,
         )

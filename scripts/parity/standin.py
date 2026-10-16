@@ -19,6 +19,11 @@ A second, for a change that adds one core skill (beacon-plate, #765): on the
 sides named for it, a request is also tried with exactly that skill's line
 removed from the system prompt (``without_core_skill``). Nothing else is
 touched, so any other difference is still refused.
+
+A third, for per-model output caps (0.9.12): every request used to carry
+``max_tokens: 4096``. On the sides named for it, a request is also tried with
+exactly its ``max_tokens`` put back to 4096 (``with_flat_output_cap``). Nothing
+else is touched, so any other difference is still refused.
 """
 
 from __future__ import annotations
@@ -154,6 +159,19 @@ def without_core_skill(line: str) -> Callable[[Any], list[Any]]:
                     block["text"] = _drop_line(block["text"], line)
         return [base]
     return revert
+
+
+#: The ``max_tokens`` every request carried before per-model output caps.
+FLAT_OUTPUT_CAP = 4096
+
+
+def with_flat_output_cap(norm: Any) -> list[Any]:
+    """A tolerance: the request with only its ``max_tokens`` put back to the flat 4096."""
+    if not isinstance(norm, dict) or norm.get("max_tokens") in (None, FLAT_OUTPUT_CAP):
+        return []
+    base = copy.deepcopy(norm)
+    base["max_tokens"] = FLAT_OUTPUT_CAP
+    return [base]
 
 
 # ---------------------------------------------------------------------------

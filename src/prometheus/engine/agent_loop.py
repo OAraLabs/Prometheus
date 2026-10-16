@@ -29,6 +29,7 @@ from prometheus.engine.messages import (
     ConversationMessage,
     ThinkingBlock,
     ToolResultBlock,
+    ToolUseBlock,
     render_messages_for_model,
 )
 from prometheus.engine.stream_events import (
@@ -701,6 +702,10 @@ class LoopContext:
     # billing — never a 429, which is already retried a layer down). None disables it, which is
     # also the Phase 4 opt-out coding mode relies on to keep its pinned-provider guarantee.
     fallback: object | None = None        # FallbackTarget
+    # Per-model output caps (providers/output_caps.OutputCaps). Each request
+    # asks for the cap of the model serving it, the fallback's included; None
+    # sends ``max_tokens`` for every model, as before (tests, harnesses).
+    output_caps: object | None = None
     # Registry name of the local box serving this context after routing
     # (`/4090` → "4090"); None for the primary and for cloud overrides. The
     # window lookup passes it so the compactor budgets THAT box's reported
@@ -2144,6 +2149,13 @@ async def _run_loop(
         # provider drop and hand the model the wrong instruction.
         stripped_to_empty = 0
         stripped_samples: list[str] = []
+        # The calls whose arguments could not be read this round
+        # (ApiMessageCompleteEvent.unreadable_tool_calls), the stop that ended
+        # the reply, and the max_tokens its request carried (set by
+        # _build_request; a list because that closure rebinds it). Never run.
+        unreadable_calls: frozenset[str] = frozenset()
+        round_stop_reason: str | None = None
+        round_max_tokens: list[int] = [context.max_tokens]
         served_model_this_turn: str | None = None
         # Per-TURN, like served_model above. A list rather than a plain name because the
         # on_degrade callback below is a closure, and rebinding through it would need nonlocal.
@@ -2286,8 +2298,9 @@ async def _run_loop(
                     # were the local GGUF.
                     model=context.model,
                     # #773: the projected-overflow rule — this request's output
-                    # room is part of whether the next round fits.
-                    max_tokens=context.max_tokens,
+                    # room is part of whether the next round fits. The model's
+                    # own cap, the one _build_request sends.
+                    max_tokens=_output_cap(context, context.model),
                 )
             except Exception:
                 log.exception(
@@ -2298,7 +2311,9 @@ async def _run_loop(
         # still observes and re-raises; this is the recovery its docstring says the loop owns.
         def _build_request(_model: str) -> ApiMessageRequest:
             # Rebuilt per attempt: the model name is part of the payload, so reusing the failed
-            # request would ask the local backend to serve the cloud model's name.
+            # request would ask the local backend to serve the cloud model's name. The output
+            # cap follows the model the same way, and the one sent is kept for the round.
+            round_max_tokens[0] = _output_cap(context, _model)
             return ApiMessageRequest(
                 model=_model,
                 # Context-assembly: fence any untrusted injected turns (task
@@ -2307,7 +2322,7 @@ async def _run_loop(
                 # copies stay clean — this projection is per-call only.
                 messages=render_messages_for_model(render_source),
                 system_prompt=per_call_system_prompt,
-                max_tokens=context.max_tokens,
+                max_tokens=round_max_tokens[0],
                 tools=_payload_tools,
                 suppress_thinking=context.suppress_thinking,
                 suppress_tools=not tools_enabled,
@@ -2315,20 +2330,7 @@ async def _run_loop(
             )
 
         def _window_for(_model: str) -> tuple[int, bool]:
-            if context.compactor is None:
-                return 0, False
-            # Measured only for a local backend — llama.cpp publishes n_ctx at /props. Cloud
-            # APIs do not publish context length at all, so that side is a configured floor and
-            # the refusal message must say which it had.
-            backend = getattr(context, "backend", None)
-            # Or the compactor says the number IS a server's report: a local box
-            # with no fallback configured is measured too (#704's workers).
-            _is_measured = getattr(context.compactor, "is_measured", None)
-            measured = (
-                bool(getattr(context.fallback, "is_local_backend", False)) or backend is not None
-                or (callable(_is_measured) and bool(_is_measured(_model, backend=backend)))
-            )
-            return context.compactor.limit_for(_model, backend=backend), measured
+            return _serving_window(context, _model)
 
         def _estimate_raw() -> int:
             """The bare chars/4 estimate of this round's request, for calibration."""
@@ -2522,6 +2524,8 @@ async def _run_loop(
                 # provider dropped at parse time (empty function name).
                 # getattr for providers predating the field.
                 dropped_malformed = getattr(event, "dropped_malformed", 0)
+                unreadable_calls = frozenset(getattr(event, "unreadable_tool_calls", ()))
+                round_stop_reason = event.stop_reason
                 # Per-TURN, never stored on the shared LoopContext: concurrent
                 # turns would cross-talk (the per-message `mode` precedent).
                 # Threaded as a parameter exactly like raw_model_output.
@@ -3135,10 +3139,21 @@ async def _run_loop(
         # again. The blocked result carries a directive telling the model to
         # change approach; the circuit breaker below still sees it as an error
         # and trips, but we no longer pay the tool timeout on every retry.
+        # A call whose arguments could not be read is answered the same way,
+        # ahead of the repeat guard: the {} it carries is not what the model sent.
         _blocked: dict[int, ToolResultBlock] = {}
         _runnable: list = []
         for _i, _tc in enumerate(tool_calls):
-            if failed_call_signatures.get(_tool_call_signature(_tc), 0) >= _REPEAT_FAIL_LIMIT:
+            if _tc.id in unreadable_calls:
+                _blocked[_i] = _refuse_unreadable_call(
+                    context, _tc,
+                    max_tokens=round_max_tokens[0],
+                    stop_reason=round_stop_reason,
+                    output_tokens=usage.output_tokens,
+                    served_model=served_model_this_turn,
+                    session_id=None if ephemeral else rec_sid,
+                )
+            elif failed_call_signatures.get(_tool_call_signature(_tc), 0) >= _REPEAT_FAIL_LIMIT:
                 _n = failed_call_signatures[_tool_call_signature(_tc)]
                 _blocked[_i] = ToolResultBlock(
                     tool_use_id=_tc.id,
@@ -3186,6 +3201,8 @@ async def _run_loop(
         # Update the per-turn failure tally: a fresh failure increments its
         # signature; any success clears it (so a flaky-then-fixed call recovers).
         for _tc, _r in zip(tool_calls, tool_results):
+            if _tc.id in unreadable_calls:
+                continue  # its {} is not the call the model sent; one {} must not block the next
             _sig = _tool_call_signature(_tc)
             if _r.is_error:
                 failed_call_signatures[_sig] = failed_call_signatures.get(_sig, 0) + 1
@@ -3814,6 +3831,134 @@ def _strip_disagreement_feedback(
     if names:
         parts.append(f"Available tools: {names}.")
     return " ".join(parts)
+
+
+def _serving_window(context: LoopContext, model: str) -> tuple[int, bool]:
+    """The window serving ``model`` on this run, and whether a server measured it.
+
+    ``(0, False)`` with no compactor: nothing here knows the window then.
+    """
+    if context.compactor is None:
+        return 0, False
+    # Measured only for a local backend — llama.cpp publishes n_ctx at /props. Cloud
+    # APIs do not publish context length at all, so that side is a configured floor and
+    # the refusal message must say which it had.
+    backend = getattr(context, "backend", None)
+    # Or the compactor says the number IS a server's report: a local box
+    # with no fallback configured is measured too (#704's workers).
+    _is_measured = getattr(context.compactor, "is_measured", None)
+    measured = (
+        bool(getattr(context.fallback, "is_local_backend", False)) or backend is not None
+        or (callable(_is_measured) and bool(_is_measured(model, backend=backend)))
+    )
+    return context.compactor.limit_for(model, backend=backend), measured
+
+
+def _output_cap(context: LoopContext, model: str) -> int:
+    """The ``max_tokens`` a request to ``model`` asks for.
+
+    The model's own cap (``context.output_caps``), or ``context.max_tokens``
+    for a context built without caps. The serving provider decides the
+    route's ``max_tokens`` and whether the local cap applies: the fallback
+    target's when ``model`` is the fallback's model, else the context's own.
+    On a measured window the cap leaves most of it to the conversation
+    (providers/output_caps.room_for_window).
+    """
+    caps = getattr(context, "output_caps", None)
+    if caps is None:
+        return context.max_tokens
+    provider = context.provider
+    target = getattr(context, "fallback", None)
+    if target is not None and model != context.model and model == getattr(target, "model", None):
+        provider = getattr(target, "provider", provider)
+    try:
+        window, measured = _serving_window(context, model)
+    except Exception:
+        log.debug("output cap: window lookup failed for %s", model, exc_info=True)
+        window, measured = 0, False
+    cap, source = caps.resolve(  # type: ignore[attr-defined]
+        model, provider=provider, default=context.max_tokens,
+        window=window, window_measured=measured,
+    )
+    log.debug("output cap for %s: %d (%s)", model, cap, source)
+    return int(cap)
+
+
+def cut_at_output_limit(stop_reason: str | None, output_tokens: int, max_tokens: int) -> bool:
+    """Did the output limit end this reply?
+
+    The stop reason says so on most wires (``OUTPUT_LIMIT_STOPS``), but not on
+    all: DashScope reported ``tool_calls`` on five qwen3.8-max replies cut at
+    4096 inside a write_file call. Output tokens at the cap say so too. Usage
+    can count thinking on top of the cap (Qwen does), so at-or-over counts.
+    """
+    from prometheus.providers.base import OUTPUT_LIMIT_STOPS
+
+    return stop_reason in OUTPUT_LIMIT_STOPS or (max_tokens > 0 and output_tokens >= max_tokens)
+
+
+def _refuse_unreadable_call(
+    context: LoopContext,
+    tc: ToolUseBlock,
+    *,
+    max_tokens: int,
+    stop_reason: str | None,
+    output_tokens: int,
+    served_model: str | None,
+    session_id: str | None,
+) -> ToolResultBlock:
+    """The answer to a call whose arguments could not be read, and its telemetry row.
+
+    The provider named the call on ``unreadable_tool_calls``: its arguments did
+    not read as a JSON object, so the ``{}`` it carries is not what the model
+    meant to send, and it is not run. When the reply ended at the output limit
+    (:func:`cut_at_output_limit`) the arguments were cut off mid-stream and the
+    model is told to send the work in smaller pieces; otherwise they were sent
+    whole but are not valid JSON. The old path passed the ``{}`` to the tool,
+    which answered "Field required", and the model, never told why, sent the
+    same oversized call again until the circuit breaker tripped.
+    """
+    cut = cut_at_output_limit(stop_reason, output_tokens, max_tokens)
+    log.warning(
+        "Tool call %s (%s) not run: arguments unreadable (%s; stop_reason=%s, "
+        "max_tokens=%d, output_tokens=%d)",
+        tc.name, tc.id, "cut off at the output limit" if cut else "not valid JSON",
+        stop_reason, max_tokens, output_tokens,
+    )
+    if context.telemetry is not None:
+        try:
+            context.telemetry.record(
+                model=_serving_model(context),
+                tool_name=tc.name,
+                success=False,
+                error_type="truncated_at_output_limit" if cut else "unreadable_arguments",
+                error_detail=(
+                    f"stop_reason={stop_reason} max_tokens={max_tokens} "
+                    f"output_tokens={output_tokens}"
+                ),
+                served_model=served_model,
+                session_id=session_id,
+                **_v2_call(tc.name, tc.id, success=False),
+            )
+        except Exception:
+            log.debug("unreadable-call telemetry write failed", exc_info=True)
+    if cut:
+        content = (
+            f"Your {tc.name} call was cut off: the reply reached the output limit "
+            f"({max_tokens} tokens) before the call's arguments were complete, so they "
+            f"could not be read and the tool was not run. Nothing was changed. "
+            f"Send it again in smaller pieces so each reply stays under the limit: "
+            f"split the content across several calls (for a long file, write the "
+            f"first part, then add the rest in further calls), or shorten it."
+        )
+    else:
+        content = (
+            f"Your {tc.name} call's arguments were not valid JSON, so they could not "
+            f"be read and the tool was not run. Nothing was changed. Send the call "
+            f"again with arguments that are one valid JSON object; if the content is "
+            f"long, write it in smaller pieces across several calls."
+        )
+    return ToolResultBlock(tool_use_id=tc.id, content=content, is_error=True)
 
 
 def _malformed_retry_feedback(context: LoopContext, dropped: int) -> str:
@@ -5928,10 +6073,13 @@ class AgentLoop:
         memory_prompt_builder: Callable[[], str | None] | None = None,
         checkpoint_store: object | None = None,
         fallback: object | None = None,
+        output_caps: object | None = None,
     ) -> None:
         self._provider = provider
         # SPRINT-provider-fallback: where a terminal provider failure degrades to.
         self._fallback = fallback
+        # Per-model output caps (LoopContext.output_caps).
+        self._output_caps = output_caps
         self._model = model
         self._tool_result_max = tool_result_max
         self._compactor = compactor
@@ -6076,6 +6224,7 @@ class AgentLoop:
             provider=self._provider,
             model=self._model,
             fallback=self._fallback,
+            output_caps=self._output_caps,
             system_prompt=system_prompt,
             max_tokens=self._max_tokens,
             max_turns=self._max_turns,

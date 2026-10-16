@@ -61,6 +61,7 @@ from prometheus.telemetry.tracker import TELEMETRY_OFF_NOTE, ToolCallTelemetry
 from prometheus.tools.base import ToolRegistry
 from prometheus.web.bind import BindError, app_install_lan_guard, resolve_bind
 from prometheus.engine.fallback import build_fallback_target
+from prometheus.providers.output_caps import OutputCaps
 
 logger = logging.getLogger("prometheus.daemon")
 
@@ -1371,6 +1372,9 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     agent_loop = AgentLoop(
         provider=provider,
         model=model_name,
+        # Each request asks for its model's output cap, not one flat 4096 (max_tokens is the default for a
+        # model the caps do not know). Built the same way for the web LoopContext below.
+        output_caps=OutputCaps.from_config(config),
         workspace_resolver=_session_workspace,
         boot_project_prompt=_boot_project_prompt,
         project_prompt_builder=_project_prompt_for,
@@ -2742,6 +2746,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 fallback=build_fallback_target(model_config, detected_model=model_name, registry=backend_registry),
                 system_prompt=system_prompt,
                 max_tokens=4096,
+                output_caps=OutputCaps.from_config(config),
                 tool_registry=registry,
                 # The SAME dict the AgentLoop's tools read, not a copy: the subagent spawner (#761) and the
                 # printing-press registry are attached there, and a Beacon turn built without them offered the

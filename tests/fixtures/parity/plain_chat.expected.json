@@ -19,11 +19,11 @@
      "role": "user"
     },
     {
-     "content": "All systems check out — your lighthouse is shining steady!",
+     "content": "All systems green — I'm your lighthouse on this check, ready to dive in whenever you are!",
      "content_json": {
       "$json": [
        {
-        "text": "All systems check out — your lighthouse is shining steady!",
+        "text": "All systems green — I'm your lighthouse on this check, ready to dive in whenever you are!",
         "type": "text"
        }
       ]
@@ -34,7 +34,7 @@
     }
    ],
    "op": "chat",
-   "reply": "All systems check out — your lighthouse is shining steady!",
+   "reply": "All systems green — I'm your lighthouse on this check, ready to dive in whenever you are!",
    "session": "desktop:parity-plain"
   }
  ],
@@ -191,16 +191,16 @@
        "desktop:parity-plain",
        1,
        "assistant",
-       "All systems check out — your lighthouse is shining steady!",
+       "All systems green — I'm your lighthouse on this check, ready to dive in whenever you are!",
        {
         "$json": [
          {
-          "text": "All systems check out — your lighthouse is shining steady!",
+          "text": "All systems green — I'm your lighthouse on this check, ready to dive in whenever you are!",
           "type": "text"
          }
         ]
        },
-       14,
+       22,
        "<time>",
        0,
        "user",
@@ -217,7 +217,7 @@
        "Parity check. Reply with one short friendly sentence that contains the word 'lighthouse'. Do not use any tools."
       ],
       [
-       "All systems check out — your lighthouse is shining steady!"
+       "All systems green — I'm your lighthouse on this check, ready to dive in whenever you are!"
       ]
      ]
     },
@@ -242,7 +242,7 @@
       [
        1,
        {
-        "$bytes_sha256": "6a94b0ff28c31a56",
+        "$bytes_sha256": "1b416f9db9001459",
         "len": 2
        }
       ],
@@ -263,8 +263,8 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "567038ee62607c90",
-        "len": 103
+        "$bytes_sha256": "8a2e8fc36e928855",
+        "len": 169
        }
       ]
      ]
@@ -285,7 +285,7 @@
       [
        2,
        {
-        "$bytes_sha256": "2b4c342f5433ebe5",
+        "$bytes_sha256": "4a64a107f0cb3253",
         "len": 1
        }
       ]
@@ -436,7 +436,7 @@
      "rows": [
       [
        "desktop:parity-plain",
-       "Lighthouse Parity Check Reply",
+       "Friendly Lighthouse Parity Check",
        "<time>"
       ]
      ]
@@ -768,8 +768,8 @@
        "0ac69752b6f71969",
        "prose",
        0,
-       58,
-       "All systems check out — your lighthouse is shining steady!",
+       89,
+       "All systems green — I'm your lighthouse on this check, ready to dive in whenever you are!",
        "agent",
        "beacon",
        null
@@ -1475,13 +1475,13 @@
          "stop_reason": "stop"
         }
        },
-       6238,
-       13,
+       6237,
+       22,
        0,
        "desktop:parity-plain",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       4223,
+       4222,
        null,
        "<node>",
        "local",
@@ -1500,7 +1500,7 @@
          "stop_reason": "stop"
         }
        },
-       97,
+       106,
        7,
        null,
        "desktop:parity-plain",
@@ -1607,8 +1607,8 @@
        "<time>",
        "<time>",
        1,
-       6238,
-       13,
+       6237,
+       22,
        {
         "$json": [
          "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"

@@ -220,6 +220,15 @@ context:
   #     some-cloud-model:
   #       compaction_threshold_tokens: 200000   # an absolute token count
   #       compaction_threshold_pct: 0.2         # or a share of its window
+  #
+  # And how many tokens one reply may spend (the request's max_tokens). Each
+  # model already gets its own cap: a table for the cloud models we know,
+  # 8192 for llama.cpp, 4096 for anything else, and never more than a quarter
+  # of a window a local server measured (providers/output_caps.py). Set this
+  # to override that for one model; it is clamped to the vendor's maximum.
+  #
+  #     some-cloud-model:
+  #       max_output_tokens: 16384
   model_overrides: {}
 
   # ── Previously undocumented: read by the code, absent from this
