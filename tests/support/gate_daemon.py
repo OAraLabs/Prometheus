@@ -49,6 +49,10 @@ SAVED_FILES = 41
 # ~2.35k server tokens each: a fresh window of three results plus the live
 # overhead crosses the 26,214 line, while the largest recent result stays
 # under the 2,458 at which the projected rule binds with a 4096 reply room.
+# Twenty-six modules (scripted_llama.LEDGER_MODULES). With round 0 cut by fix 6
+# the overhead no longer carries a fresh window over the line: once results are
+# trimmed, the session grows ~200 tokens a round, and nine modules ended under
+# the line without a pass. Twenty-six cross it with ~1.7k tokens of slack.
 LEDGER_MODULE_CHARS = 8800
 
 MCP_TOOLS = [{

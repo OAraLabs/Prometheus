@@ -61,7 +61,7 @@ def coding_turn(local):
     daemon, model = local
     before = len(model.exchanges)
     turn = daemon.turn(
-        "[gate:coding] Read every module in src/ledger/ (nine files, one at a time), then add a one-line "
+        "[gate:coding] Read every module in src/ledger/ (twenty-six files, one at a time), then add a one-line "
         "docstring to compute_total in src/ledger/billing.py. Tell me what you changed.", timeout=420)
     return turn, model.exchanges[before:]
 
@@ -131,7 +131,7 @@ def test_c_the_session_finishes_its_task_after_compacting(local, coding_turn):
     daemon, model = local
     turn, exchanges = coding_turn
     if not _passes(turn):
-        pytest.skip("the session never reached the compaction line; raise LEDGER_MODULE_CHARS")
+        pytest.skip("the session never reached the compaction line; add modules to LEDGER_MODULES")
     assert "edit_file" in turn.tools_started, _explain(turn, daemon)
     billing = (daemon.workspace / "src" / "ledger" / "billing.py").read_text(encoding="utf-8")
     assert '"""Sum one ledger' in billing, "the edit did not land"
