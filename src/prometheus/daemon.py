@@ -985,6 +985,18 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         logger.warning("Backend registry: boot probe did not finish cleanly: %s", exc)
     logger.info("%s", backend_registry.render_table())
 
+    # Where each context window came from, said once at boot: a WARNING for a
+    # window that is a guess and for an override no served model matches
+    # (audit 2026-10-16: both were silent). /api/status carries the result.
+    from prometheus.context.window_report import report_at_startup
+    try:
+        report_at_startup(
+            config, local_model=model_name, detected_limit=detected_ctx_size,
+            registry=backend_registry, local_server=hasattr(provider, "detect_context_size"),
+        )
+    except Exception:  # noqa: BLE001 — a report must never stop a boot
+        logger.warning("context window report failed", exc_info=True)
+
     # Telemetry — shared instance for AgentLoop and SENTINEL digest, or None
     # when infrastructure.telemetry_enabled is false.
     # Wired BEFORE build_tool_registry so per-tool registration failures

@@ -91,7 +91,6 @@ def test_cw_a_per_slot_window_is_budgeted_per_slot(tmp_path_factory):
         server.__exit__()
 
 
-@pytest.mark.xfail(strict=True, reason="0.9.12: a window that falls back to the configured global is logged at INFO")
 def test_cw_a_fallback_window_is_loud(tmp_path_factory):
     tmp, server = _boot_with(tmp_path_factory, "cw-fallback", report_n_ctx=False)
     try:
@@ -118,7 +117,6 @@ def test_cw_an_override_keyed_by_the_served_id_applies(main):
     assert sent and all(m == 3000 for m in sent), sent
 
 
-@pytest.mark.xfail(strict=True, reason="0.9.12: an override no served model matches is silently ignored")
 def test_cw_an_override_matching_no_served_model_is_reported(main):
     daemon, *_ = main
     log = daemon.log.read_text(encoding="utf-8", errors="replace")
@@ -126,8 +124,6 @@ def test_cw_an_override_matching_no_served_model_is_reported(main):
         f"no startup WARNING names the override {STALE_OVERRIDE!r}, which no backend serves")
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "0.9.12: renaming the GGUF changes the served id, the override stops matching, and nothing says so"))
 def test_cw_renaming_the_gguf_keeps_its_override_or_says_why(tmp_path_factory):
     tmp, server = _boot_with(tmp_path_factory, "cw-rename", model_id="/models/Qwen3.8-27B-UD-Q4_K_XL-v2.gguf")
     try:
@@ -149,8 +145,6 @@ def test_cw_renaming_the_gguf_keeps_its_override_or_says_why(tmp_path_factory):
 # ---------------------------------------------------------------- reply room
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "0.9.12: /context reserves context.reserved_output (2000) while the request asks for the output cap"))
 def test_cw_one_reply_room_everywhere(main):
     daemon, model, *_ = main
     sid = "beacon:cw-context"
@@ -201,7 +195,6 @@ def test_cw_an_ollama_prompt_is_never_cut_silently(main):
 # ---------------------------------------------------------------- cloud
 
 
-@pytest.mark.xfail(strict=True, reason="0.9.12: a cloud model on cloud_default_limit is not flagged anywhere")
 def test_cw_a_cloud_model_on_the_default_window_is_flagged(main):
     daemon, *_ = main
     sid = "beacon:cw-cloud"

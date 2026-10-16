@@ -9,7 +9,7 @@ allow, and in whether their thinking spends the same budget, so the cap is
 resolved per model, for each request:
 
 1. ``context.model_overrides.<model>.max_output_tokens``: an operator said so
-   for this model.
+   for this model (matched by id or GGUF file name, context/model_keys.py).
 2. The route's own ``max_tokens`` (``slash_commands.<name>``, a
    ``router.fallback`` entry, any OpenAI-compatible provider entry): an
    operator said so for this route. It reached the provider and was then
@@ -31,6 +31,8 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+
+from prometheus.context.model_keys import override_key
 
 log = logging.getLogger(__name__)
 
@@ -155,8 +157,9 @@ class OutputCaps:
         lowered it and ``+room`` when a measured window did)."""
         known = MODEL_OUTPUT_LIMITS.get(model)
         route = _positive_int(getattr(provider, "route_max_tokens", None))
-        if model in self.model_overrides:
-            cap, source = self.model_overrides[model], "model_override"
+        key = override_key(model, self.model_overrides)
+        if key is not None:
+            cap, source = self.model_overrides[key], "model_override"
         elif route is not None:
             cap, source = route, "route"
         elif known is not None:
@@ -177,6 +180,45 @@ class OutputCaps:
         return cap, source
 
 
+#: The loop's own ``max_tokens`` (daemon.py, __main__.py): step 5 above.
+DEFAULT_REPLY_TOKENS = 4096
+
+
+@dataclass(frozen=True)
+class _ServedBy:
+    """What :meth:`OutputCaps.resolve` reads off a provider, for a caller without one."""
+
+    provider_name: str = ""
+    route_max_tokens: int | None = None
+
+
+def reply_room(
+    config: Mapping[str, Any] | None,
+    model: str,
+    *,
+    local: bool,
+    window: int = 0,
+    window_measured: bool = False,
+    provider: object = None,
+    default: int = DEFAULT_REPLY_TOKENS,
+) -> tuple[int, str]:
+    """The room a reply to ``model`` gets: the ``max_tokens`` its requests ask for.
+
+    One rule for every reader (audit 2026-10-16). It used to be three numbers:
+    the request asked for the output cap, which is also what the compactor's
+    projected rule counts, while ``/context`` and document sizing subtracted
+    ``context.reserved_output`` (2,000) and a call with no cap
+    ``compaction.reserve_tokens``. ``context.reserved_output`` is no longer
+    read. *local* says the model is served by llama.cpp (step 4). A caller
+    with the serving *provider* passes it, which also brings a route's own
+    ``max_tokens`` (step 2); without it that step is skipped.
+    """
+    served = provider if provider is not None else _ServedBy(provider_name="llama_cpp" if local else "")
+    return OutputCaps.from_config(config).resolve(
+        model, provider=served, default=default, window=window, window_measured=window_measured,
+    )
+
+
 def room_for_window(window: int) -> int | None:
     """The most one reply may ask for on a measured ``window``, or None when
     the window is unknown (0)."""
@@ -186,7 +228,9 @@ def room_for_window(window: int) -> int | None:
 
 
 def _positive_int(value: object) -> int | None:
-    if isinstance(value, bool):
+    # Numbers and numeric strings only: anything else (a bool, an object that
+    # happens to define __int__) is not a setting.
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
     try:
         number = int(value)  # type: ignore[call-overload]

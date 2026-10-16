@@ -182,7 +182,6 @@ context:
   effective_limit: 24000
   tool_result_max: 4000
   tool_results_turn_budget: 8000            # max tokens across all results per turn
-  reserved_output: 2000
   fresh_tail_count: 32
   microcompact_after_turns: 3               # compact tool results older than N turns
   microcompact_keep_chars: 200
@@ -201,11 +200,19 @@ context:
   # generous one: over-budgeting cloud fails LOUD (a 400 naming the real
   # limit) while under-budgeting fails SILENT (early compaction quietly
   # summarising context that did not need it).
+  # A model whose window its vendor documents (grok-4.5, kimi-k2.6:
+  # context/budget.py KNOWN_CLOUD_WINDOWS) is budgeted at that window instead,
+  # never above this value. Any other model on this default is named in one
+  # WARNING, and /api/status says `fallback: true`.
   cloud_default_limit: 1000000
 
-  # Per-model context windows, by EXACT model name. Only needed for models
-  # whose window differs from the rules above — i.e. cloud models materially
-  # SMALLER than cloud_default_limit. Example:
+  # Per-model context windows, keyed by the model id the server reports. A
+  # GGUF's id is its path: a key also matches by file name (X.gguf or X), so
+  # moving the file keeps its entry; renaming it does not. At startup a
+  # WARNING names every key no served or routed model matches, and
+  # /api/status lists them (context.unmatched_overrides). Only needed for
+  # models whose window differs from the rules above — i.e. cloud models
+  # materially SMALLER than cloud_default_limit. Example:
   #
   #   model_overrides:
   #     claude-sonnet-4-5:
@@ -226,6 +233,8 @@ context:
   # 4096 for anything else (llama.cpp included), and never more than a quarter
   # of a window a local server measured (providers/output_caps.py). Set this
   # to override that for one model; it is clamped to the vendor's maximum.
+  # This cap is also the reply room /context reports and the compactor counts;
+  # the old context.reserved_output is no longer read.
   #
   #     some-cloud-model:
   #       max_output_tokens: 16384

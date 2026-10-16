@@ -187,18 +187,22 @@ def test_another_sessions_ratio_does_not_compact_this_one_early_once_it_has_its_
 # ---------------------------------------------------------------------------
 
 
+#: A cloud model with no override and no known window (context/budget.py KNOWN_CLOUD_WINDOWS).
+UNLISTED = "unlisted-cloud-model"
+
+
 def test_a_refusal_caps_an_unlisted_cloud_models_window():
     c = _compactor()
-    assert c.limit_for("kimi-k2.6") == 1_000_000  # cloud_default_limit: a guess
-    assert not c.is_measured("kimi-k2.6")
+    assert c.limit_for(UNLISTED) == 1_000_000  # cloud_default_limit: a guess
+    assert not c.is_measured(UNLISTED)
 
-    assert c.learn_window("kimi-k2.6", 131_072) is True
-    assert c.limit_for("kimi-k2.6") == 131_072
-    assert c.is_measured("kimi-k2.6"), "the provider's own number"
-    assert c.threshold_for("kimi-k2.6")[0] == int(131_072 * 0.80)
+    assert c.learn_window(UNLISTED, 131_072) is True
+    assert c.limit_for(UNLISTED) == 131_072
+    assert c.is_measured(UNLISTED), "the provider's own number"
+    assert c.threshold_for(UNLISTED)[0] == int(131_072 * 0.80)
     # Only ever lowers; the local model is untouched.
-    assert c.learn_window("kimi-k2.6", 262_144) is False
-    assert c.limit_for("kimi-k2.6") == 131_072
+    assert c.learn_window(UNLISTED, 262_144) is False
+    assert c.limit_for(UNLISTED) == 131_072
     assert c.limit_for(MODEL) == 32768
 
 

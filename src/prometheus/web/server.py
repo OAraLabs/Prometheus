@@ -881,10 +881,19 @@ def create_app(
         motivated this was three disagreeing values (config 72000, server
         32768, panel 24000) with no surface that showed them together.
         """
+        from prometheus.context.budget import FALLBACK_SOURCES
+        from prometheus.context.window_report import last_report
+
         limit, source = _resolved_context_limit()
         return {
             "limit": limit,
             "source": source,
+            # True when nothing measured or declared this window (a config
+            # global, the cloud default, or nothing): a client can say so.
+            "fallback": source in FALLBACK_SOURCES,
+            # context.model_overrides keys no served model matches (logged as
+            # a WARNING at boot): entries that are never applied.
+            "unmatched_overrides": last_report().get("unmatched_overrides", []),
             # None = detection never ran or the backend was unreachable. The
             # budget then comes from config, which is a HINT: correct only
             # until the served model changes underneath it.

@@ -3884,6 +3884,12 @@ def _output_cap(context: LoopContext, model: str) -> int:
     return int(cap)
 
 
+def output_cap_for(context: LoopContext, model: str | None = None) -> int:
+    """The ``max_tokens`` a request to *model* (default: the context's) asks for: the reply room
+    ``/context`` reports, the same figure the request carries."""
+    return _output_cap(context, model or context.model)
+
+
 def cut_at_output_limit(stop_reason: str | None, output_tokens: int, max_tokens: int) -> bool:
     """Did the output limit end this reply?
 
