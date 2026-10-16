@@ -1266,11 +1266,13 @@
        "context_compaction_noop",
        {
         "$json": {
+         "calibration": 1.0,
          "over_by": 5306,
          "session_id": "desktop:parity-compact",
          "span_messages": 0,
          "threshold": 655,
          "tokens_before": 5961,
+         "tokens_before_estimated": 5961,
          "trigger": "threshold"
         }
        },
@@ -1298,11 +1300,13 @@
        "context_compaction_noop",
        {
         "$json": {
-         "over_by": 5333,
+         "calibration": 1.046,
+         "over_by": 5607,
          "session_id": "desktop:parity-compact",
          "span_messages": 2,
          "threshold": 655,
-         "tokens_before": 5988,
+         "tokens_before": 6262,
+         "tokens_before_estimated": 5988,
          "trigger": "threshold"
         }
        },
@@ -1316,9 +1320,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 5333,
+         "over_by": 5607,
          "session_id": "desktop:parity-compact",
-         "tokens": 5988
+         "tokens": 6262
         }
        },
        "context_compactor",
@@ -1331,9 +1335,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 5356,
+         "over_by": 5633,
          "session_id": "desktop:parity-compact",
-         "tokens": 6011
+         "tokens": 6288
         }
        },
        "context_compactor",
@@ -1346,11 +1350,12 @@
        {
         "$json": {
          "cache_hit": false,
+         "calibration": 1.046,
          "ceiling": 655,
          "chunks": 1,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 5356,
+         "over_by": 5633,
          "session_id": "desktop:parity-compact",
          "span_messages": 4,
          "summarizer_input_omitted": 0,
@@ -1358,8 +1363,9 @@
          "target": 458,
          "threshold": 655,
          "threshold_source": "global pct",
-         "tokens_after": 6011,
-         "tokens_before": 6015,
+         "tokens_after": 6288,
+         "tokens_before": 6292,
+         "tokens_before_estimated": 6015,
          "tool_results_trimmed": 0,
          "trigger": "threshold"
         }
@@ -1374,9 +1380,9 @@
        {
         "$json": {
          "ceiling": 655,
-         "over_by": 5362,
+         "over_by": 5642,
          "session_id": "desktop:parity-compact",
-         "tokens": 6017
+         "tokens": 6297
         }
        },
        "context_compactor",
@@ -1389,11 +1395,12 @@
        {
         "$json": {
          "cache_hit": false,
+         "calibration": 1.047,
          "ceiling": 655,
          "chunks": 1,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 5362,
+         "over_by": 5642,
          "session_id": "desktop:parity-compact",
          "span_messages": 6,
          "summarizer_input_omitted": 0,
@@ -1401,8 +1408,9 @@
          "target": 458,
          "threshold": 655,
          "threshold_source": "global pct",
-         "tokens_after": 6017,
-         "tokens_before": 6044,
+         "tokens_after": 6297,
+         "tokens_before": 6325,
+         "tokens_before_estimated": 6044,
          "tool_results_trimmed": 0,
          "trigger": "threshold"
         }
