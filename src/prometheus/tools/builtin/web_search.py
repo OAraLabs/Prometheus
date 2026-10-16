@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html as html_mod
 import re
 from urllib.parse import parse_qs, unquote, urlparse
@@ -15,6 +16,25 @@ import httpx
 from pydantic import BaseModel, Field
 
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
+
+
+#: Tries after the first, and the pause before each.
+_RETRIES = 1
+_RETRY_DELAY_SECONDS = 1.0
+
+
+def _describe(exc: BaseException | None) -> str:
+    """The error's type, then its message when it has one.
+
+    Several httpx errors carry an EMPTY message (a connection the server closed
+    reads as ``ReadError('')``), and the tool used to print only the message:
+    every failure on the live daemon read "web_search failed: " with nothing
+    after it, so nobody could tell a reset from a timeout from a 403.
+    """
+    if exc is None:
+        return "no response"
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 class WebSearchInput(BaseModel):
@@ -49,18 +69,34 @@ class WebSearchTool(BaseTool):
         context: ToolExecutionContext,
     ) -> ToolResult:
         endpoint = "https://html.duckduckgo.com/html/"
-        try:
-            async with httpx.AsyncClient(
-                follow_redirects=True, timeout=20.0
-            ) as client:
-                response = await client.get(
-                    endpoint,
-                    params={"q": arguments.query},
-                    headers={"User-Agent": "Prometheus/0.1"},
-                )
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            return ToolResult(output=f"web_search failed: {exc}", is_error=True)
+        response = None
+        failure: httpx.HTTPError | None = None
+        # One retry. DuckDuckGo intermittently drops the connection within ~100 ms
+        # (60-125 ms against 600-900 ms for a good search): 3 of 6 searches on
+        # the live daemon on 2026-10-15, 8 of 8 on 10-11, and the next try a
+        # second later usually works.
+        for attempt in range(1 + _RETRIES):
+            if attempt:
+                await asyncio.sleep(_RETRY_DELAY_SECONDS)
+            try:
+                async with httpx.AsyncClient(
+                    follow_redirects=True, timeout=20.0
+                ) as client:
+                    response = await client.get(
+                        endpoint,
+                        params={"q": arguments.query},
+                        headers={"User-Agent": "Prometheus/0.1"},
+                    )
+                    response.raise_for_status()
+                failure = None
+                break
+            except httpx.HTTPError as exc:
+                failure = exc
+        if failure is not None or response is None:
+            return ToolResult(
+                output=f"web_search failed: {_describe(failure)} (tried {1 + _RETRIES} times)",
+                is_error=True,
+            )
 
         results = _parse_search_results(response.text, limit=arguments.max_results)
         if not results:
