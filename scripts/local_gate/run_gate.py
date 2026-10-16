@@ -107,6 +107,13 @@ SCENARIOS: dict[str, dict] = {
     "r_sessions": {"gate": "r", "message": "Show me my recent chat sessions.", "correct": {"sessions_list"}},
     "r_todo": {"gate": "r", "message": "Keep a to-do list for this conversation: buy milk, then call the bank.",
                "correct": {"todo_write"}},
+    # Fix 5b (Ollama on its native /api/chat), on an Ollama-served primary:
+    # every request names the window it was budgeted for (options.num_ctx), and
+    # no prompt fills it (Ollama would cut it from the front, silently).
+    "o_tool": {"gate": "o", "message": "Run the shell command `echo ollama-ok` and tell me exactly what it printed.",
+               "want_tool": "bash"},
+    "o_plain": {"gate": "o", "message": "Say hello in one short sentence."},
+    "o_window": {"gate": "o", "message": "Summarise this log in one line:\n" + ("2026-10-16 build step ok; " * 9000)},
     "d_iteration_cap": {
         "gate": "d",
         "message": "Run the shell command `echo one`, then `echo two`, then `echo three`, as three separate tool calls one at a time, then tell me all three outputs.",
@@ -312,6 +319,16 @@ def _grade(name: str, spec: dict, run: dict, caps: list[dict], tel: dict, comp: 
         "error_frames": [f["payload"].get("message") for f in frames if f.get("type") == "error"],
     }
     checks: dict[str, bool] = {}
+    if spec["gate"] == "o":
+        native = [c for c in caps if "options" in c.get("request", {})]
+        sent = [((c["request"].get("options") or {}).get("num_ctx"),
+                 ((c["response"] or {}).get("usage") or {}).get("prompt_tokens")) for c in native]
+        res["ollama"] = {"requests": len(native), "num_ctx_and_prompt": sent,
+                         "think_sent": [c["request"].get("think") for c in native if "think" in c["request"]]}
+        checks["native_route"] = bool(native)
+        checks["num_ctx_sent"] = bool(native) and all(n for n, _ in sent)
+        checks["never_filled"] = all(p is None or (n and p < n) for n, p in sent)
+        checks["reply_streamed"] = bool(run["streamed"].strip())
     if spec["gate"] == "r":
         correct = spec["correct"]
         searched = " ".join(p.get("result") or "" for p in (f.get("payload") or {} for f in frames
