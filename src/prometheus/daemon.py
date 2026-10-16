@@ -992,7 +992,10 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     try:
         report_at_startup(
             config, local_model=model_name, detected_limit=detected_ctx_size,
-            registry=backend_registry, local_server=hasattr(provider, "detect_context_size"),
+            registry=backend_registry,
+            # A local server (llama.cpp, Ollama) has a window to detect; a cloud primary has none.
+            local_server=(getattr(provider, "provider_name", "") in ("llama_cpp", "ollama")
+                          or hasattr(provider, "detect_context_size")),
         )
     except Exception:  # noqa: BLE001 — a report must never stop a boot
         logger.warning("context window report failed", exc_info=True)
