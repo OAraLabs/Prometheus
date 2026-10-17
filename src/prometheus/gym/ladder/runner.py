@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+from prometheus.context.environment import own_checkout_root
 from prometheus.engine.agent_loop import LoopContext, run_loop
 from prometheus.engine.messages import ConversationMessage, TextBlock, ToolUseBlock
 from prometheus.gym.ladder.fixtures import (
@@ -277,10 +278,15 @@ async def check_judge_pin(
 
 
 def harness_commit() -> str | None:
-    here = Path(__file__).resolve().parent
+    # Only the Prometheus checkout this package came from: an install inside
+    # another repository (Homebrew's prefix, a venv in someone's project) would
+    # otherwise stamp that repository's commit on every row.
+    root = own_checkout_root()
+    if root is None:
+        return None
     try:
         out = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=here,
+            ["git", "rev-parse", "HEAD"], cwd=root,
             capture_output=True, text=True, timeout=5,
         )
         if out.returncode != 0:
@@ -289,7 +295,7 @@ def harness_commit() -> str | None:
         dirty = subprocess.run(
             ["git", "status", "--porcelain", "--", "src/prometheus/gym",
              "src/prometheus/engine", "src/prometheus/adapter", "scripts/ladder_run.py"],
-            cwd=here.parents[3], capture_output=True, text=True, timeout=5,
+            cwd=root, capture_output=True, text=True, timeout=5,
         )
         if sha and dirty.returncode == 0 and dirty.stdout.strip():
             # Rows from modified or untracked harness code must not claim a

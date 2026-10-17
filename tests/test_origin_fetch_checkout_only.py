@@ -26,12 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from prometheus.context.origin_fetch import (
-    PROJECT_NAME,
-    OriginFetcher,
-    fetch_origin_main,
-    source_checkout_root,
-)
+from prometheus.context.environment import PROJECT_NAME, source_checkout_root
+from prometheus.context.origin_fetch import OriginFetcher, fetch_origin_main
 
 REF = "refs/remotes/origin/main"
 
