@@ -52,7 +52,7 @@ The release check on main `1f85ccee` is done: see `RELEASE-CHECK-0.9.13.md`.
 - Parity: 12/12, stability identical. CI is green.
 - Tier: right tool 12/12, right tool first 12/12, right first-call arguments 11/12 (the scorer says 12/12), round 0 13,809.
 
-Still Will's go, and not started: the version bump, tag, release and deploy, including the live-config edit in `runbook-0.9.13/` and its day-after cleanup.
+The version-bump PR is open: #821 (`chore/release-0.9.13`, head `e0770156`), with the version strings and the 0.9.13 CHANGELOG section. Not merged, no auto-merge, not tagged. Still Will's go: merging #821, the tag and release, and the deploy, including the live-config edit in `runbook-0.9.13/` and its day-after cleanup.
 
 ## Decisions
 
