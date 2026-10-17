@@ -21,10 +21,13 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
-# Secrets (PROMETHEUS_API_TOKEN, gateway tokens, provider keys) live in
-# the env file, written by `prometheus setup` / `prometheus token rotate`.
-# The leading "-" makes it optional so a fresh install still boots.
-EnvironmentFile=-%h/.config/prometheus/env
+# The env file (~/.config/prometheus/env, written by `prometheus setup` /
+# `prometheus token rotate`) is NOT passed with EnvironmentFile=. The daemon
+# reads it itself at startup (config/env_file.load_env_file), so the API
+# token, gateway tokens and provider credentials reach the daemon, its child
+# processes and its scheduled jobs exactly as before — but they are not part
+# of the environment the service process is started with. The macOS launcher
+# has always loaded it this way; this makes the two match.
 
 [Install]
 WantedBy=default.target

@@ -1,6 +1,6 @@
 """scripts/deploy.sh — the static half of its contract, and B6 dry runs.
 
-The script's phases need uv, a network, systemd and /proc, so they are
+The script's phases need uv, a network and systemd, so they are
 exercised by running it (phase A end to end, and B0/B6 against a live
 daemon, in the PR that added it), not here. What CAN rot silently is
 checked here: the script parses, refuses bad usage, and the drop-in it
@@ -9,7 +9,9 @@ scripts/deploy_guard.sh compare the venv with the checkout's uv.lock. Drop
 that line and the guard's lock check quietly stops applying.
 
 B6 is the exception: it only talks to the daemon's REST API, so its block is
-cut out of the script and run as-is, by bash, against a stub daemon. Since
+cut out of the script and run as-is, by bash, against a stub daemon. So is
+B5's runtime check, which since the daemon went non-dumpable asks /api/status
+instead of reading /proc/<MainPID>/maps (security/nondumpable.py). Since
 WP-X.7 the daemon keeps model choices across a restart, so B6 CHECKS them
 against B0's record and stops the deploy on a difference; the old re-apply
 runs only under --reapply-model-choices.
@@ -66,8 +68,8 @@ def test_the_embedded_python_compiles():
     mid-deploy, after the daemon was already being switched."""
     text = DEPLOY.read_text(encoding="utf-8")
     blocks = re.findall(r"<<'EOF'[^\n]*\n(.*?)\nEOF\n", text, re.S)
-    assert len(blocks) == 4, (
-        f"expected G1, B0, B6 re-apply and B6 check heredocs, found {len(blocks)}")
+    assert len(blocks) == 5, (
+        f"expected G1, B0, B5 runtime, B6 re-apply and B6 check heredocs, found {len(blocks)}")
     for i, src in enumerate(blocks):
         compile(src, f"deploy.sh heredoc #{i}", "exec")
 
@@ -103,10 +105,12 @@ FIELDS = ("key", "provider", "model", "backend", "is_default")
 
 
 class _StubDaemon:
-    """GET/POST /api/sessions/<id>/model, bearer-checked, every request logged."""
+    """GET/POST /api/sessions/<id>/model and GET /api/status, bearer-checked,
+    every request logged."""
 
-    def __init__(self, live: dict[str, dict]):
+    def __init__(self, live: dict[str, dict], status: dict | None = None):
         self.live = live
+        self.status = status
         self.requests: list[tuple[str, str, dict | None]] = []
         stub = self
 
@@ -137,7 +141,9 @@ class _StubDaemon:
                 sid = self._sid()
                 if not self._authed():
                     return
-                if sid in stub.live:
+                if self.path == "/api/status" and stub.status is not None:
+                    self._send(200, stub.status)
+                elif sid in stub.live:
                     self._send(200, stub.live[sid])
                 else:
                     self._send(404, {"error": f"no session {sid}"})
@@ -164,8 +170,8 @@ class _StubDaemon:
 def stub_daemon():
     made: list[_StubDaemon] = []
 
-    def make(live):
-        made.append(_StubDaemon(live))
+    def make(live, status=None):
+        made.append(_StubDaemon(live, status))
         return made[-1]
 
     yield make
@@ -266,3 +272,112 @@ def test_b6_without_a_record_says_so_and_touches_nothing(tmp_path, stub_daemon):
     assert r.returncode == 0
     assert "B6 skipped" in r.stderr
     assert daemon.requests == []
+
+
+# ---------------------------------------------------------------------------
+# B5 runtime dry runs: the script's own block, by bash, against a stub daemon
+# ---------------------------------------------------------------------------
+
+def _b5_block() -> str:
+    text = DEPLOY.read_text(encoding="utf-8")
+    start = text.index("# B5 runtime.")
+    end = text.index("\nEOF\n", start) + len("\nEOF\n")
+    # deploy.sh's fail() names the unit and drop-in for its rollback hints; the
+    # dry run only needs the refusal and the exit status.
+    return ("set -euo pipefail\n"
+            'fail() { echo "VERIFY FAILED — $*" >&2; exit 1; }\n' + text[start:end])
+
+
+def _runtime(venv: Path, **over):
+    rt = {"pid": 4242, "prefix": str(venv.resolve()), "mapped_from_prefix": True,
+          "user_site_mapped": False, "user_site_modules": 0, "dumpable": False}
+    return {"runtime": {**rt, **over}}
+
+
+def _run_b5(api: str, venv: Path, *, pid: str = "4242"):
+    env = {**os.environ, "API": api, "TOKEN": TOKEN, "PID": pid, "VENV": str(venv)}
+    return subprocess.run(["bash", "-c", _b5_block()], capture_output=True,
+                          text=True, timeout=60, env=env)
+
+
+def test_b5_no_longer_reads_the_daemons_proc_maps():
+    """A non-dumpable daemon's maps are root-owned: reading them would fail
+    every deploy with "nothing mapped from $VENV"."""
+    text = DEPLOY.read_text(encoding="utf-8")
+    assert '"/proc/$PID/maps"' not in text
+
+
+def test_b5_passes_on_a_matching_report(tmp_path, stub_daemon):
+    venv = tmp_path / "venvs" / "abc123"
+    venv.mkdir(parents=True)
+    daemon = stub_daemon({}, _runtime(venv))
+    r = _run_b5(daemon.api, venv)
+    assert r.returncode == 0, r.stderr
+    assert "WARNING" not in r.stderr
+    assert daemon.requests == [("GET", "/api/status", None)]
+
+
+def test_b5_follows_a_symlinked_venv_like_current(tmp_path, stub_daemon):
+    """The unit runs $ROOT/current/bin/python; the daemon reports the resolved
+    prefix and the script compares resolved paths."""
+    venv = tmp_path / "venvs" / "abc123"
+    venv.mkdir(parents=True)
+    (tmp_path / "venvs" / "current").symlink_to(venv)
+    daemon = stub_daemon({}, _runtime(venv))
+    assert _run_b5(daemon.api, tmp_path / "venvs" / "current").returncode == 0
+
+
+def test_b5_stops_the_deploy_listing_each_problem(tmp_path, stub_daemon):
+    venv = tmp_path / "venvs" / "abc123"
+    venv.mkdir(parents=True)
+    other = tmp_path / "venvs" / "old999"
+    other.mkdir()
+    daemon = stub_daemon({}, _runtime(other, pid=777, mapped_from_prefix=False,
+                                      user_site_mapped=True, user_site_modules=3))
+    r = _run_b5(daemon.api, venv)
+    assert r.returncode == 1
+    assert "VERIFY FAILED" in r.stderr
+    for want in ("answered by PID 777, not MainPID 4242", f"its prefix is {other.resolve()}",
+                 "nothing mapped from", "user site in use (mapped=True, modules=3)"):
+        assert want in r.stderr, (want, r.stderr)
+
+
+def test_b5_refuses_an_unknown_answer_as_firmly_as_a_bad_one(tmp_path, stub_daemon):
+    """None (a platform without /proc/self/maps) is not "nothing from ~/.local"."""
+    venv = tmp_path / "venvs" / "abc123"
+    venv.mkdir(parents=True)
+    daemon = stub_daemon({}, _runtime(venv, mapped_from_prefix=None, user_site_mapped=None))
+    r = _run_b5(daemon.api, venv)
+    assert r.returncode == 1
+    assert "mapped_from_prefix=None" in r.stderr and "mapped=None" in r.stderr
+
+
+def test_b5_fails_on_a_daemon_with_no_runtime_report(tmp_path, stub_daemon):
+    venv = tmp_path / "venvs" / "abc123"
+    venv.mkdir(parents=True)
+    daemon = stub_daemon({}, {"state": "idle"})
+    r = _run_b5(daemon.api, venv)
+    assert r.returncode == 1
+    assert "carries no runtime report" in r.stderr
+
+
+def test_b5_fails_when_the_token_is_refused(tmp_path, stub_daemon):
+    venv = tmp_path / "venvs" / "abc123"
+    venv.mkdir(parents=True)
+    daemon = stub_daemon({}, _runtime(venv))
+    env = {**os.environ, "API": daemon.api, "TOKEN": "wrong", "PID": "4242", "VENV": str(venv)}
+    r = subprocess.run(["bash", "-c", _b5_block()], capture_output=True, text=True,
+                       timeout=60, env=env)
+    assert r.returncode == 1
+    assert "401" in r.stderr
+
+
+def test_b5_warns_but_passes_when_the_daemon_is_still_dumpable(tmp_path, stub_daemon):
+    """The venv checks are the deploy's; a failed prctl is a warning with the
+    boot log's reason, not a rollback — rolling back would not fix it."""
+    venv = tmp_path / "venvs" / "abc123"
+    venv.mkdir(parents=True)
+    daemon = stub_daemon({}, _runtime(venv, dumpable=True))
+    r = _run_b5(daemon.api, venv)
+    assert r.returncode == 0, r.stderr
+    assert "B5 WARNING: dumpable=True" in r.stderr

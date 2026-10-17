@@ -668,6 +668,16 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         logger.info(
             "Loaded %d variable(s) from %s", _env_loaded, get_env_file_path()
         )
+    # Set in main(), before logging existed; said here, once, with the outcome.
+    from prometheus.security import nondumpable as _nondumpable
+    if _nondumpable.STATE == "set":
+        logger.info("Daemon process is non-dumpable: another same-user process cannot inspect it")
+    elif _nondumpable.STATE.startswith("failed"):
+        logger.warning(
+            "Could not make the daemon process non-dumpable (%s): the process-hardening "
+            "layer is not active on this host (see security/nondumpable.py)",
+            _nondumpable.STATE,
+        )
 
     # ── Listen address (--bind > PROMETHEUS_WEB_BIND > web.bind > 0.0.0.0) ──
     # Resolved here, after the env file is loaded (so a PROMETHEUS_WEB_BIND kept
@@ -3252,6 +3262,13 @@ def daemon_start_args(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> None:
     """CLI entry point."""
+    # First thing: harden this process so another same-user process cannot
+    # inspect it (Linux; a no-op elsewhere — security/nondumpable.py). Done
+    # before anything else so it covers the whole lifetime of the process.
+    # Logged by run_daemon once logging exists. A restart's execve resets the
+    # flag, and the new image sets it again here.
+    from prometheus.security.nondumpable import make_nondumpable
+    make_nondumpable()
     # Before anything loads the env file: what a restart re-execs with (POST /api/restart).
     snapshot_startup_env()
     parser = build_parser()

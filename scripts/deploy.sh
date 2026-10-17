@@ -59,8 +59,10 @@
 #   B3 write the unit drop-in: run the venv's python, set PROMETHEUS_VENV so
 #      scripts/deploy_guard.sh refuses a venv built from another lock
 #   B4 restart the unit
-#   B5 verify: running from the venv, nothing from ~/.local, 401 without a
-#      token, 401 for a crafted Host header, 200 with the token
+#   B5 verify: running from the venv, nothing from ~/.local (the daemon's own
+#      runtime report on /api/status, its pid = MainPID: the daemon is
+#      non-dumpable, so its /proc maps are root-owned), 401 without a token,
+#      401 for a crafted Host header, 200 with the token
 #   B6 check: since WP-X.7 the daemon stores every choice and restores it
 #      at boot, so each session's live choice must equal B0's record. A match
 #      prints OK; any difference stops the deploy with a list (session id and
@@ -267,8 +269,39 @@ for _ in $(seq 1 60); do
 done
 systemctl --user is-active --quiet "$UNIT" || fail "$UNIT is not active"
 PID="$(systemctl --user show "$UNIT" -p MainPID --value)"
-grep -q "$ROOT/$S/" "/proc/$PID/maps" || fail "PID $PID has nothing mapped from $VENV"
-! grep -q "/.local/lib/python" "/proc/$PID/maps" || fail "PID $PID still maps user-site modules"
+# B5 runtime. The daemon is non-dumpable (security/nondumpable.py), so
+# /proc/$PID/maps is root-owned to this script. The daemon reads its OWN maps
+# and reports them as `runtime` on the bearer-gated /api/status. Its pid must
+# be MainPID, so a stale process still holding the port cannot answer for it.
+API="$API" TOKEN="$TOKEN" PID="$PID" VENV="$VENV" python3 - <<'EOF' || fail "PID $PID's runtime report does not show it running from $VENV with nothing from ~/.local (above)"
+import json, os, sys, urllib.request
+pid, venv = os.environ["PID"], os.environ["VENV"]
+req = urllib.request.Request(os.environ["API"] + "/api/status",
+                             headers={"Authorization": f"Bearer {os.environ['TOKEN']}"})
+try:
+    with urllib.request.urlopen(req, timeout=10) as r:
+        rt = json.load(r).get("runtime")
+except Exception as exc:
+    sys.exit(f"deploy:   B5: /api/status: {exc}")
+if not isinstance(rt, dict):
+    sys.exit("deploy:   B5: /api/status carries no runtime report")
+bad = []
+if str(rt.get("pid")) != pid:
+    bad.append(f"answered by PID {rt.get('pid')}, not MainPID {pid}")
+if os.path.realpath(rt.get("prefix") or "/nonexistent") != os.path.realpath(venv):
+    bad.append(f"its prefix is {rt.get('prefix')}, not {venv}")
+if rt.get("mapped_from_prefix") is not True:
+    bad.append(f"nothing mapped from {venv} (mapped_from_prefix={rt.get('mapped_from_prefix')})")
+if rt.get("user_site_mapped") is not False or rt.get("user_site_modules") != 0:
+    bad.append(f"user site in use (mapped={rt.get('user_site_mapped')}, "
+               f"modules={rt.get('user_site_modules')})")
+for line in bad:
+    print(f"deploy:   B5: {line}", file=sys.stderr)
+if not bad and rt.get("dumpable") is not False:
+    print(f"deploy:   B5 WARNING: dumpable={rt.get('dumpable')} — same-user processes can read "
+          f"/proc/{pid}/environ; the boot log says why", file=sys.stderr)
+sys.exit(1 if bad else 0)
+EOF
 [ "$(code "$API/api/status")" = "401" ] || fail "/api/status without a token did not answer 401"
 [ "$(code -H 'Host: x/abc?' "$API/api/status")" = "401" ] || fail "a crafted Host header did not answer 401"
 # the token goes to curl on stdin, not argv, so it never shows in ps
