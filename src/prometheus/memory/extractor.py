@@ -663,17 +663,43 @@ class MemoryExtractor:
 
     @staticmethod
     def _parse_facts(raw: str) -> list[dict]:
-        """Parse newline-delimited JSON objects from model output."""
+        """Parse fact objects out of model output.
+
+        The prompt asks for newline-delimited JSON, one object per line, and
+        that shape still parses. Small local models do not reliably comply,
+        though: they pretty-print, wrap the payload in a ```json fence, emit
+        one JSON array, or prepend prose. Line-at-a-time ``json.loads`` sees
+        none of that as a complete object and returns [] with no signal —
+        indistinguishable from "nothing worth remembering" (#798).
+
+        So scan for JSON values instead: at every '{' or '[' try a
+        ``raw_decode``, and on success jump past the value it consumed.
+        Prose, fences and stray brackets are skipped over; anything that
+        decodes to a dict carrying the required fields is a fact.
+        """
         facts: list[dict] = []
         required = {"entity_name", "fact"}
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line or not line.startswith("{"):
+        decoder = json.JSONDecoder()
+        idx, end = 0, len(raw)
+        while idx < end:
+            if raw[idx] not in "{[":
+                idx += 1
                 continue
             try:
-                obj = json.loads(line)
-                if required.issubset(obj.keys()):
-                    facts.append(obj)
+                value, idx = decoder.raw_decode(raw, idx)
             except json.JSONDecodeError:
+                idx += 1  # no complete JSON value starts here; keep scanning
                 continue
+            candidates = value if isinstance(value, list) else [value]
+            for obj in candidates:
+                if isinstance(obj, dict) and required.issubset(obj.keys()):
+                    facts.append(obj)
+        if not facts and raw.strip() and "{" in raw:
+            # Non-empty output that looks like JSON but parsed to nothing is
+            # a format failure worth seeing; a prose "nothing to extract"
+            # reply does not trip this.
+            log.warning(
+                "MemoryExtractor: no facts parsed from %d chars of model output; head: %r",
+                len(raw), raw[:120],
+            )
         return facts
