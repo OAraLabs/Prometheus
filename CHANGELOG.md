@@ -2,6 +2,129 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## 0.9.13 (2026-10-16)
+
+0.9.13 fixes tool calling on local models. A local turn can now call every tool, where since late July it could reach only the dozen or so tools always sent to it. It also does the following:
+- shrinks the first request of a local turn from about 19.2k to about 13.8k tokens on the reference install;
+- puts the llama.cpp reply cap back to 4096, so a 32k session no longer compacts early;
+- makes Beacon show the text of turns the loop ends itself;
+- sends Ollama the context window Prometheus plans for;
+- reports context-window guesses and dead overrides at startup;
+- makes `oara doctor` say what a local turn is actually offered.
+
+Read "Upgrading from 0.9.12": the daemon no longer puts project files from its own directory into the prompt, `always_loaded` now applies only to the old catalog, and `context.reserved_output` is no longer read.
+
+### Every tool can be called on a local turn (#819)
+
+- **What went wrong.** Since #121 (31 July), a local turn sent the model only the `always_loaded` tools, about a dozen. The others were meant to be found with `tool_search`, but that never worked on llama.cpp:
+  - A model does not call a tool that isn't in the request's tool list.
+  - llama.cpp's grammar for Qwen's tool format only allows listed tool names and their declared arguments. `tool_search` returned a tool's schema as text, which doesn't add the tool to that list.
+
+  On 0.9.12 the 27B on the reference install called none of 7 plain requests that needed such a tool (scheduling a job, searching past conversations, the wiki, an MCP tool, a subagent, and so on).
+- **What changed.** A local turn now offers every tool:
+  - Ten common tools carry their full schema: `bash`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`, `web_search`, `web_fetch`, `agent` and `ask_user`.
+  - Every other tool is a short stub: its name, a one-line description, and its argument names with their types. An enum's values are listed when there are 8 or fewer.
+  - The list is sorted and built once per turn, so it is the same in every round and the server's prompt cache keeps working.
+  - A call to a stubbed tool is checked against the tool's full schema. A wrong call is refused with the full schema and a minimal valid example, at most twice per tool per turn.
+- **Measured** on the 27B with 12 plain requests, each needing one of the stubbed tools and none naming it:
+  - The right tool was called in 12 of 12, and called first in 12 of 12.
+  - The first call's arguments were right in 11 of 12. The twelfth, a `memory` update, left out an argument and got it right two calls later, after one refusal.
+  - Before choosing stubs we compared them with a single `call_tool` dispatcher. Both found the right tool equally often, but the dispatcher got the arguments right on the first try in 9 of 12, against 11 of 12 for stubs.
+- **Fallback rounds.** When a round is served by another model (the provider fallback after an authentication or billing failure, or the circuit breaker's model fallback), its tools now follow the model that serves it: stubs for a local model, every full schema for a cloud one.
+- **Cloud turns are unchanged.** They still get every tool with its full schema.
+- **To keep the 0.9.12 catalog,** set `tools.deferred_loading.local_catalog: names`.
+
+### Smaller first request on local turns (#820)
+
+- **Round 0** is a turn's first request, before any conversation. With every tool offered, it was 19,198 tokens on the reference install, 59% of a 32k window. It is now 13,809.
+- **What was cut:**
+  - On llama.cpp at tier light, the Qwen formatter no longer adds a prose tool list and a JSON example to the system prompt. The tools are already in the request, and the example contradicted Qwen's own format. About 1.4k tokens.
+  - The daemon no longer puts the project files from the directory it was started in into the prompt (about 2.8k tokens on the reference install, where that directory is the deploy checkout and the file is Prometheus's own developer guide). A session bound to a workspace with `/workspace` still gets that workspace's files.
+  - Saved files appear as a count and a location instead of a full listing. The model lists them with `glob` when it needs a name. About 1.1k tokens.
+  - Stub descriptions are capped at 80 characters.
+- **The project-file and saved-file changes apply to cloud turns too.** The stub cap affects only local turns, the only place stubs are used.
+- **A new check:** the regression gate now fails if Prometheus's own part of round 0 goes over 7,400 tokens. The operator's files (memory, USER.md, SOUL.md and so on) are not counted.
+
+### The llama.cpp reply cap is back to 4096, so a 32k session compacts on time (#813)
+
+- 0.9.12 asked llama.cpp for up to 8,192 reply tokens, a quarter of a 32k window. Compaction keeps room for the next reply, so on the reference install the compaction line fell from 26,214 to about 22.3k tokens, and a first turn was summarised after two or three tool results.
+- The cap is 4096 again, as it was before 0.9.12. A per-model `max_output_tokens` still overrides it, and a reply cut at the cap is still told to send its work in smaller pieces.
+
+### Beacon shows the text of turns the loop ends itself (#811)
+
+- **What went wrong.** Some turns end with text the loop writes rather than the model streams. That happens for the repeat guard, the iteration cap, two empty replies, the context pre-flight, an overflow, the circuit breaker, a boundary escape and the divergence halt. The WebSocket bridge forwarded only streamed text, so Beacon showed an empty reply while the text sat in history.
+- **What changed.** The bridge now sends any part of the final text that didn't stream, and `chat_done` carries the loop's `stop_reason` when the loop ended the turn. The field is absent when the model chose to stop.
+
+### Ollama gets the context window Prometheus plans for (#815)
+
+- **What went wrong.** Prometheus spoke to Ollama through its OpenAI-compatible `/v1` route, which can't set the context window. Prometheus planned for the model's trained length (262,144 tokens for qwen3.5:9b) while Ollama served its default window. A prompt longer than the served window was cut from the front with no error. Measured: 36.8k tokens sent, 32,768 kept, the start of the system prompt gone.
+- **What changed.**
+  - Prometheus now uses Ollama's native `/api/chat` and sends `num_ctx`: the window it planned for, never above the model's trained length.
+  - It also sends `num_predict`, the reply cap.
+  - A request without a planned window uses the window the model is already loaded at, so it doesn't force a reload.
+  - Thinking is still off by default, now as `think: false`.
+  - The backend probe reports the window a loaded model serves.
+
+### Context-window problems are reported at startup (#814)
+
+- **Warnings at boot** for:
+  - a window that is a guess: the local server reported none, or a backend has neither a measured window nor a `context_limit`;
+  - each `context.model_overrides` entry that no served or routed model matches;
+  - a backend planned above its trained length;
+  - `context.reserved_output`, which is no longer read.
+
+  `/api/status` reports them too, in its context block (`fallback`, `unmatched_overrides`).
+- **One way to match overrides.** The window, the reply cap and the compaction threshold all match a model's override the same way: by exact id, then by GGUF file name (`/models/a/X.gguf`, `X.gguf` and `X` are the same model). A moved GGUF keeps its override; a renamed one does not. If two keys name the same file, neither applies, and a warning says so.
+- **Known cloud windows.** grok-4.5 is planned at 500,000 tokens and kimi-k2.6 at 262,144, from the vendors' figures. Before, both got the 1,000,000 default. Any other cloud model on the default gets one warning.
+- **One reply room.** `/context`, document sizing and the token budget now reserve the request's actual reply cap, the same number compaction uses, instead of `reserved_output` (2,000).
+
+### `oara doctor` says what a local turn is offered (#819)
+
+- Under the new catalog, the "Advertised tools" row counts every tool a local turn gets, for example "51 of 51 registered offered to a local model (10 with their full schema, 41 as stubs)". Before, it counted the `always_loaded` list, and it warned about a list that no longer decides anything.
+- The chat `/doctor`, the boot line and `/api/tools/deferred` report the same.
+
+### `tool_search` finds what the model means (#816)
+
+- `select` accepts near misses such as "cron create" or "the lcm_grep tool", and resolves one only when exactly one tool fits.
+- A miss lists the 5 closest names instead of every tool and skill, which was about 1,700 tokens.
+- Each tool declares one or two plain requests it answers ("schedule a recurring job") that the search ranks on. These never reach the schema.
+- This matters less now that every tool is offered, but it still applies under `local_catalog: names` and for skills.
+
+### Telemetry records the tools a round actually sent (#818)
+
+- The lucky-guess marker ("a tool was called without being offered") recomputed what had been offered, and got it wrong after routing or a fallback. 25 of the 28 lucky guesses recorded on the reference install were mislabels.
+- Each round now records the tool names it sent, and a round that sent a different set writes its own `tool_sets` row. Expect far fewer lucky guesses on dashboards.
+
+### Under the hood (#810, #812)
+
+- **A regression gate** for local tool calling and context: hermetic tests run in CI, plus a real-model suite for a local GPU in `scripts/local_gate/`. The audit behind this release is in `docs/audits/local-tools-audit-2026-10-16/`.
+- **The parity harness** matches the session-title and summary side calls by kind, in any order. The turn's own requests still have to match exactly.
+- Hardening: daemon process is non-dumpable on Linux; the service unit no longer passes keys through the environment
+
+### Upgrading from 0.9.12
+
+- **Local turns offer every tool.** No config change is needed.
+  - `tools.deferred_loading.always_loaded` is ignored under the default `local_catalog: stubs`. If you added a tool to it to make it reachable (`agent`, say), that is no longer needed.
+  - `local_catalog: names` brings back the 0.9.12 catalog.
+- **A hand-set 4096 reply cap for a local model** (`context.model_overrides.<model>.max_output_tokens: 4096`) is now the default for llama.cpp, so the override can go.
+- **The daemon no longer reads project files (PROMETHEUS.md, CLAUDE.md, AGENTS.md and the like) from the directory it was started in.** If you started the daemon inside a project to give it that project's instructions, bind a session to the project with `/workspace` instead. The CLI is unchanged.
+- **`context.reserved_output` is no longer read.** It logs a warning at startup and can be removed. The reply room is each model's reply cap.
+- **New startup warnings** for unmatched overrides and guessed windows change nothing at runtime, but they point at config worth checking.
+- **Ollama is reached at `/api/chat`, not `/v1`.** A proxy in front of Ollama has to pass `/api/chat`. Prometheus now asks for a window explicitly: if that differs from the window a model is loaded at, Ollama loads the model again at the requested size, and a larger window uses more memory.
+- **New wire fields:**
+  - `chat_done.stop_reason`;
+  - `/api/tools/deferred`: `full_schema_count`, `stub_count`, `local_catalog`, `always_loaded_applies`;
+  - `/api/status`'s context block: `fallback` and `unmatched_overrides`;
+  - the `tool_advertisement` telemetry row: `catalog` and `stubs`.
+
+  A client that ignores unknown fields is unaffected.
+
+### Known issues
+
+- **Local models still make some argument mistakes on stubbed tools.** In the release run, one first call in 12 left out a required argument. The refusal with the full schema led to a correct call, but it cost two extra calls.
+- **Round 0 is still about 13.8k tokens of a 32k window on the reference install,** about 5.8k of it the operator's own files. Long local sessions still compact. Beacon can't show the breakdown yet: no per-component overhead reaches the client.
+- **The known issues listed for 0.9.12 still apply.** These include a call the cap cuts off still being able to end the turn through the circuit breaker, the gaps in cut-off checking, #798, #799 and #800.
+
 ## 0.9.12 (2026-10-15)
 
 0.9.12 makes compaction count in the server's own tokens and retry once when a server says the prompt is too long, lets Beacon sessions use subagents, gives each model its own reply-size cap and refuses a tool call that the cap cut off, and fixes two smaller faults: `web_search` failing with a blank error, and Beacon badging every reply "untrusted". It also carries the one change from 0.9.11, which was tagged but never published. Read "Upgrading from 0.9.10": local sessions will compact more often, and the reply cap is no longer a flat 4096.
