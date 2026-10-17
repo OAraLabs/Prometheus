@@ -43,6 +43,34 @@ After the restart:
 
 Rollback to 0.9.12: restore the pre-edit backup from step 1 together with the code rollback (0.9.12 needs both lines).
 
+## At the deploy: the installed service unit (after the upgrade)
+
+0.9.13's daemon loads its env file itself at startup (#825), so the service unit should no longer pass it with `EnvironmentFile=`. A code deploy doesn't rewrite the installed unit. Do this inside the maintenance window, after the 0.9.13 restart has been verified.
+
+- **Our boxes:** a targeted edit with `drop_unit_envfile.py`, next to this file.
+  - **Don't use `oara install-service --force` here.** The installed unit is hand-written: it has `WorkingDirectory=`, the deploy guard's `ExecStartPre=`, `Environment=` lines and start limits, plus a drop-in that overrides `ExecStart=` with a path relative to that working directory. `--force` rewrites the whole file to the generic template and would break the daemon.
+- **Checked, read-only, on 2026-10-17:**
+  - **Where the line lives:** the main unit has exactly one `EnvironmentFile=` line; the drop-in (`10-venv.conf`) has none.
+  - **The same file loads either way:** the user manager sets neither `XDG_CONFIG_HOME` nor `PROMETHEUS_ENV_FILE`, so the daemon loads the same `~/.config/prometheus/env` itself.
+  - **The deploy guard is unaffected:** it reads none of that file's variables.
+  - **On a copy of the live unit,** the script removed exactly one line, kept every other directive, and refused a second run.
+
+Steps:
+1. `cp -p ~/.config/systemd/user/prometheus.service ~/.config/systemd/user/prometheus.service.bak-<UTC>-pre-envfile`
+2. `python3 drop_unit_envfile.py` (dry run: exactly the one `EnvironmentFile=` line)
+3. `python3 drop_unit_envfile.py --write`
+4. `systemctl --user daemon-reload`
+5. `systemctl --user restart prometheus` (the maintenance window is still armed)
+6. Verify:
+   - `systemctl --user cat prometheus.service | grep -c '^EnvironmentFile'` prints `0`.
+   - The daemon is active, and `/api/status` answers with the API token: the token is loaded.
+   - `/api/status`'s `runtime` block reports the new `MainPID`.
+   - `oara doctor` shows the same check statuses as before the edit, Telegram and the cloud providers included. Print names and statuses only.
+
+**Rollback:** restore the step-1 backup, `daemon-reload`, restart.
+
+**For users** (release notes and the advisory): after upgrading, a unit written by `oara install-service` is regenerated with `oara install-service --force` (the old unit is kept as `prometheus.service.bak`) and then `systemctl --user restart prometheus`. A hand-written unit gets its `EnvironmentFile=` line deleted, then `systemctl --user daemon-reload` and a restart. macOS needs nothing: its launcher already loads the env file itself.
+
 ## Day after the deploy: config cleanup (separate, not part of the deploy)
 
 cleanup_dead_config.py, guarded the same way (each key once, uncommented, where named, with exactly the child

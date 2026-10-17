@@ -88,6 +88,7 @@ Steps:
 
 - Use `scripts/deploy.sh <sha> --prepare-only` first, and arm the maintenance window before the restart.
 - Inside the window, before the restart, make the live config edit in `LIVE-CONFIG.md`.
+- After the 0.9.13 restart is verified, and still inside the window, remove `EnvironmentFile=` from the installed service unit, then `daemon-reload`, restart and verify. The steps are in `LIVE-CONFIG.md`, using `drop_unit_envfile.py`, not `oara install-service --force`, which would replace this box's hand-written unit.
 - After the restart, check the running SHA, the model choices and `oara doctor`. Print check names and statuses only.
 
 ## 5. Day after
