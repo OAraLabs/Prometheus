@@ -7,6 +7,7 @@ The audit: `docs/audits/local-tools-audit-2026-10-16/README.md` (merged with #81
 | Path | What |
 |---|---|
 | `docs/handoff/RELEASE-CHECK-0.9.13.md` | The one-page release-check summary for Will. |
+| `docs/handoff/runbook-0.9.13/RELEASE.md` | The 0.9.13 release sequence: the bump (#821), tag and publish, the Homebrew tap bump 0.9.8 → 0.9.13 (not only url + sha256: 0.9.9 swapped PyMuPDF for pypdfium2 + Pillow and added distro), the deploy, and the day after. |
 | `docs/handoff/runbook-0.9.13/LIVE-CONFIG.md` | The 0.9.13 runbook section for the live config: the deploy edit, what to check after the restart, the rollback, and the day-after cleanup. |
 | `docs/handoff/runbook-0.9.13/retire_workaround.py` | Deploy edit (4 lines): removes the 27B's per-model `max_output_tokens: 4096` and `- agent` from `always_loaded`. |
 | `docs/handoff/runbook-0.9.13/cleanup_dead_config.py` | Day-after cleanup (11 lines): `context.reserved_output` and the 5 `model_overrides` entries that match no served model. |
