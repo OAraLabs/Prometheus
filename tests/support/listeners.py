@@ -15,6 +15,7 @@ from __future__ import annotations
 import gc
 import ipaddress
 import os
+import re
 import socket
 import subprocess
 from dataclasses import dataclass
@@ -55,6 +56,26 @@ class Listener:
 # ---------------------------------------------------------------------------
 # The kernel's view: which TCP sockets in LISTEN state does a PID own?
 # ---------------------------------------------------------------------------
+
+
+_LOGGED_BIND = re.compile(
+    r"(?:Uvicorn running on|WebSocket bridge listening on) (?:https?|wss?)://"
+    r"(?:\[(?P<v6>[^\]]+)\]|(?P<host>[^:/\s]+)):(?P<port>\d+)")
+
+
+def logged_listeners(text: str) -> list[Listener]:
+    """The binds a daemon REPORTS in its own output: uvicorn's "running on" line
+    for REST (setup mode included) and the bridge's "listening on" line for WS.
+
+    For a daemon run as a separate process. That process is non-dumpable
+    (security/nondumpable.py), so another process cannot list its sockets; the
+    tests take its own report instead, and keep the outside connect checks
+    (loopback answers, a non-loopback address of this machine does not).
+    """
+    return [
+        Listener(m.group("v6") or m.group("host"), int(m.group("port")))
+        for m in _LOGGED_BIND.finditer(text)
+    ]
 
 
 def parse_lsof_listeners(text: str) -> list[Listener]:

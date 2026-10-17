@@ -175,7 +175,12 @@ class TestRenderUnit:
         assert "After=network.target" in content
         assert "Restart=on-failure" in content
         assert "ExecStart=/usr/bin/env oara daemon" in content
-        assert "EnvironmentFile=-%h/.config/prometheus/env" in content
+        # The unit no longer hands the env file to the service with an
+        # EnvironmentFile= directive; the daemon reads it itself at startup, so
+        # the service process is not started with those values in place. (A
+        # comment may still mention the directive by name — check active lines.)
+        active = [ln for ln in content.splitlines() if not ln.lstrip().startswith("#")]
+        assert not any(ln.strip().startswith("EnvironmentFile=") for ln in active)
         assert "WantedBy=default.target" in content
 
     def test_resolves_installed_binary(self, monkeypatch):

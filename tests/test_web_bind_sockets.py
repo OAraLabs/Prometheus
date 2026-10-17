@@ -62,6 +62,7 @@ from tests.support.listeners import (  # noqa: E402
     ipv6_loopback_usable,
     live_instances,
     local_non_loopback_address,
+    logged_listeners,
     package_src_root,
     process_listeners,
     repo_config_of_loaded_package,
@@ -576,16 +577,37 @@ def _stop(proc: subprocess.Popen) -> None:
         proc.wait(timeout=10)
 
 
+def _reported_binds(read_text, since: int, stage: str, *, expect: set[int],
+                    proc: subprocess.Popen, out_path) -> list[Listener]:
+    """The daemon's OWN report of what it bound (logged_listeners over the
+    output written since *since*), once every expected port is in it, plus the
+    outside checks: each port answers on loopback, and a non-loopback address
+    of this machine (when it has one) cannot connect.
+
+    A daemon run as a separate process is non-dumpable (security/nondumpable.py),
+    so these tests cannot list its sockets from outside; they take its report.
+    """
+    def reported() -> list[Listener]:
+        return logged_listeners(read_text()[since:])
+
+    _wait_for(lambda: {x.port for x in reported()} >= expect, timeout=30,
+              what=f"[{stage}] the daemon's bind report for {sorted(expect)}",
+              proc=proc, out_path=out_path)
+    other = local_non_loopback_address()
+    for port in sorted(expect):
+        assert tcp_connects(LOOPBACK_V4, port), f"[{stage}] nothing answers on {LOOPBACK_V4}:{port}"
+        if other is not None:
+            assert not tcp_connects(other, port), (
+                f"[{stage}] {other}:{port} accepted a connection; the bind is not loopback-only")
+    return reported()
+
+
 class TestWholeDaemonProcess:
     def test_the_choice_survives_setup_mode_the_same_process_and_a_restart(self, tmp_path):
         from tests.test_setup_api_phase2 import _FakeLlamaCppHandler, _serve
 
         if repo_config_of_loaded_package().exists():
             pytest.skip("a live repo config exists; a child daemon would boot from it")
-        try:
-            process_listeners()
-        except ListenersUnavailable as exc:
-            pytest.skip(f"cannot list the child's listening sockets: {exc}")
 
         confdir = tmp_path / "confdir"
         api_port, ws_port = free_port(), free_port()
@@ -600,9 +622,10 @@ class TestWholeDaemonProcess:
             "PROMETHEUS_WEB_WS_PORT": str(ws_port),
         })
 
-        def assert_only_loopback(proc: subprocess.Popen, stage: str, *, expect: set[int]) -> None:
-            listeners = process_listeners(proc.pid)
-            assert {x.port for x in listeners} >= expect, (stage, listeners)
+        def assert_only_loopback(proc: subprocess.Popen, out_path, stage: str, *,
+                                 expect: set[int], since: int = 0) -> None:
+            listeners = _reported_binds(lambda: out_path.read_text(errors="replace"), since,
+                                        stage, expect=expect, proc=proc, out_path=out_path)
             wider = [x for x in listeners if not _is_loopback(x.host if x.host != "*" else "0.0.0.0")]
             assert not wider, f"[{stage}] listening beyond loopback: {wider}"
 
@@ -628,7 +651,7 @@ class TestWholeDaemonProcess:
                     code = re.search(r"^\s{4}(\d{6})\s*$", text1(), re.M)
                     assert code, text1()
                     # 1. loopback only, and a foreign Host is refused.
-                    assert_only_loopback(proc, "setup mode", expect={api_port})
+                    assert_only_loopback(proc, out1, "setup mode", expect={api_port})
                     foreign_host_refused(api_port, "/api/setup/status")
                     assert "all interfaces" not in text1(), "warned about a loopback bind"
 
@@ -650,6 +673,7 @@ class TestWholeDaemonProcess:
                     assert cfg["web"]["api_port"] == api_port
 
                     # 3. The same process becomes the real daemon: REST and WS, loopback.
+                    since_complete = len(text1())
                     status, body = _api(api_port, "/api/setup/complete", method="POST",
                                         token=token)
                     assert status == 200 and body["restarting"] is True
@@ -657,7 +681,8 @@ class TestWholeDaemonProcess:
                         lambda: _api(api_port, "/api/status", token=token, timeout=3)[0] == 200,
                         timeout=120, what="the real daemon", proc=proc, out_path=out1)
                     assert_only_loopback(
-                        proc, "real daemon, same process", expect={api_port, ws_port})
+                        proc, out1, "real daemon, same process", expect={api_port, ws_port},
+                        since=since_complete)
                     foreign_host_refused(api_port, "/api/status")
                     assert ws_handshake_status(ws_port, "evil.example") == 403
                     assert ws_handshake_status(ws_port, f"localhost:{ws_port}") == 101
@@ -674,7 +699,7 @@ class TestWholeDaemonProcess:
                         lambda: http_status(api_port, f"localhost:{api_port}") in (200, 401),
                         timeout=120, what="the restarted daemon", proc=proc2, out_path=out2)
                     assert_only_loopback(
-                        proc2, "restarted daemon", expect={api_port, ws_port})
+                        proc2, out2, "restarted daemon", expect={api_port, ws_port})
                     foreign_host_refused(api_port, "/api/status")
                 finally:
                     _stop(proc2)
@@ -696,10 +721,6 @@ class TestPrecedenceInTheRealDaemon:
 
         if repo_config_of_loaded_package().exists():
             pytest.skip("a live repo config exists; a child daemon would boot from it")
-        try:
-            process_listeners()
-        except ListenersUnavailable as exc:
-            pytest.skip(f"cannot list the child's listening sockets: {exc}")
 
         api_port, ws_port = free_port(), free_port()
         env = {k: v for k, v in os.environ.items() if not k.startswith("PROMETHEUS_")}
@@ -734,8 +755,9 @@ class TestPrecedenceInTheRealDaemon:
                     _wait_for(
                         lambda: http_status(api_port, f"localhost:{api_port}") in (200, 401),
                         timeout=120, what="the daemon", proc=proc, out_path=log)
-                    listeners = process_listeners(proc.pid)
-                    assert {x.port for x in listeners} >= {api_port, ws_port}, listeners
+                    listeners = _reported_binds(
+                        lambda: log.read_text(errors="replace"), 0, how,
+                        expect={api_port, ws_port}, proc=proc, out_path=log)
                     wider = [x for x in listeners if x.host != LOOPBACK_V4]
                     assert not wider, f"[{how}] config said 0.0.0.0 and {how} did not win: {wider}"
                     assert http_status(api_port, "evil.example") == 403
