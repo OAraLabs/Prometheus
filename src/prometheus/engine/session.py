@@ -676,7 +676,9 @@ class ChatSession:
                     session_id=self.session_id,
                     role=msg.role,
                     content=msg.text,
-                    content_json=msg.content_json,
+                    # Not content_json: a result microcompaction cut down
+                    # mid-run is stored whole (the store still redacts it).
+                    content_json=msg.durable_content_json,
                     turn_index=requested,
                     # Persist the turn's trust tag so an injected (untrusted)
                     # task result survives the LCM round-trip rather than being
