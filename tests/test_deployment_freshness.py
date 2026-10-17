@@ -267,5 +267,5 @@ def test_readme_claim_names_both_axes_and_the_unknown_answer():
     # the enum cannot drift apart silently.
     assert set(env_mod._FRESHNESS_DETAIL) == {
         "current", "behind_tree", "behind_origin",
-        "ahead_of_origin", "diverged", "unknown",
+        "ahead_of_origin", "diverged", "unknown", "not_checkout",
     }
