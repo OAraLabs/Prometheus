@@ -99,6 +99,7 @@ Read "Upgrading from 0.9.12": the daemon no longer puts project files from its o
 
 - **A regression gate** for local tool calling and context: hermetic tests run in CI, plus a real-model suite for a local GPU in `scripts/local_gate/`. The audit behind this release is in `docs/audits/local-tools-audit-2026-10-16/`.
 - **The parity harness** matches the session-title and summary side calls by kind, in any order. The turn's own requests still have to match exactly.
+- Hardening: daemon process is non-dumpable on Linux; the service unit no longer passes keys through the environment
 
 ### Upgrading from 0.9.12
 
