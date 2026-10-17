@@ -297,7 +297,7 @@ def test_a_disabled_fetch_says_so_rather_than_looking_healthy():
 def test_every_fetch_state_has_a_remedy_sentence():
     from prometheus.context.origin_fetch import _FETCH_DETAIL
 
-    for st in ("ok", "failing", "never", "disabled"):
+    for st in ("ok", "failing", "never", "disabled", "not_checkout"):
         assert _FETCH_DETAIL.get(st), f"{st} has no sentence"
 
 
