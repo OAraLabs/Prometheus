@@ -40,8 +40,19 @@ Steps:
    - Regenerate the resource blocks with `brew update-python-resources --ignore-main-package-cooldown oaralabs/tap/oara`. Don't edit them by hand.
      - The flag exempts only the formula's own package from Homebrew's 24-hour release cooldown, which is hard-coded and has no override. Don't patch Homebrew.
      - Resources come from Homebrew's resolver (the newest versions the constraints allow), not from `uv.lock`, so expect them to move.
-3. **`pypdfium2` is the risk.** It has no core formula, so it becomes a resource built from its sdist. That build may try to download PDFium binaries, which a Homebrew build may not be allowed to do. If the build fails, or the formula needs anything beyond a plain resource, stop and bring it to Will. Don't vendor binaries or work around the sandbox.
-4. **Check the PR branch on a clean install,** on a Linux host with Homebrew. A macOS install is the real gate for Mac users, so run it on the Mac too before Will merges.
+3. **`pypdfium2`: tried on 2026-10-16, it builds.** The trial was 0.9.12 (same dependencies as 0.9.13), on Linux with Homebrew 7.0.6.
+   - **What passed:**
+     - The resource regenerate gave 30 resources: `pypdfium2` 5.14.0 and `distro` 1.9.0 added, and patch bumps to fastapi, opentelemetry-api, starlette and websockets.
+     - `brew audit --strict` and `--strict --online` were clean.
+     - The clean install took about 4 minutes. `oara --version` printed 0.9.12, and `brew test` passed.
+     - Both PDF fixtures extracted through the daemon's own code. Pillow downscaled a 6000×4000 image to 2576×1717.
+   - **How it builds:** pypdfium2's sdist downloads PDFium (chromium/8076) from `github.com/bblanchon/pdfium-binaries` during the build. Its log says "Verification is off", so nothing in the formula checksums those bytes.
+     - Homebrew allows network access during a build by default, for a formula without a `fetch` step, on Linux and macOS alike.
+     - So it should work on the Mac too, but it hasn't been tried there.
+   - **Hardening (recommended, not a launch blocker):** make PDFium a checksummed resource per platform and stage it into pypdfium2's `data/<platform>/` before its build. That means the library, its version file and the headers. pypdfium2's own cache check then uses the staged copy instead of downloading. Build offline to prove it, and test on Linux and the Mac.
+   - **Launch fallback if the Mac build fails:** exclude `pypdfium2` (add it to `exclude_packages`, with no resource). The daemon imports it only to read PDFs; without it a PDF comes back as "[PDF file: … — PDF text extraction is unavailable on this install]", and everything else works. Say so in the tap PR and the release notes for Homebrew users.
+   - **The trial formula** is on the local branch `throwaway/deps-0.9.12` in the tap clone (`brew --repository oaralabs/tap`), commit `8ef1eb0`. It is not pushed.
+4. **Check the PR branch on a clean install,** on a Linux host with Homebrew. `brew uninstall` autoremoves dependencies nothing else needs. Set `HOMEBREW_NO_AUTOREMOVE=1` to keep them, and `HOMEBREW_NO_AUTO_UPDATE=1` so the tap clone stays on the PR branch. A macOS install is the real gate for Mac users, so run it on the Mac too before Will merges.
 
        brew uninstall --force oaralabs/tap/oara; brew untap oaralabs/tap
        brew tap oaralabs/tap
