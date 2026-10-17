@@ -14,6 +14,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -130,6 +131,66 @@ def booted_from() -> dict[str, str | bool]:
         "package": str(pkg),
         "path": str(root),
         "is_git": (root / ".git").exists(),
+    }
+
+
+#: A path under any user's per-user site-packages — the substring deploy.sh's B5
+#: grep used on /proc/<pid>/maps, kept identical so the check means what it did.
+_USER_SITE_MARK = "/.local/lib/python"
+
+
+def _maps_evidence(maps_text: str, prefix: str) -> tuple[bool, bool]:
+    """(something is mapped from under *prefix*, something is mapped from a user
+    site) for the text of a /proc/<pid>/maps file. The path is the sixth field
+    and may contain spaces."""
+    under_prefix = prefix.rstrip("/") + "/"
+    from_prefix = from_user_site = False
+    for line in maps_text.splitlines():
+        parts = line.split(None, 5)
+        if len(parts) < 6:
+            continue
+        path = parts[5]
+        from_prefix = from_prefix or path.startswith(under_prefix)
+        from_user_site = from_user_site or _USER_SITE_MARK in path
+    return from_prefix, from_user_site
+
+
+def runtime_report() -> dict[str, Any]:
+    """What this process has loaded, read from the inside: deploy.sh B5's evidence.
+
+    WHY THIS EXISTS. deploy.sh read ``/proc/<MainPID>/maps`` to prove the
+    restarted daemon runs from the new venv and maps nothing from ``~/.local``.
+    The daemon is non-dumpable (security/nondumpable.py), so that file is
+    root-owned to every other process — but a process may always read its OWN
+    maps. This is the same evidence, read by the one process still allowed to,
+    with ``pid`` so the reader can check it came from the process it meant.
+
+    ``mapped_from_prefix`` / ``user_site_mapped`` are None where there is no
+    ``/proc/self/maps`` (macOS). ``user_site_modules`` counts imported modules
+    whose file is in a user site, on every platform; unlike maps it also sees
+    pure-Python modules. ``dumpable`` is the kernel's answer, None off Linux.
+    """
+    from prometheus.security.nondumpable import is_dumpable
+
+    prefix = os.path.realpath(sys.prefix)
+    from_prefix: bool | None
+    from_user_site: bool | None
+    try:
+        maps = Path("/proc/self/maps").read_text(encoding="utf-8", errors="replace")
+        from_prefix, from_user_site = _maps_evidence(maps, prefix)
+    except OSError:
+        from_prefix = from_user_site = None
+    user_site_modules = sum(
+        1 for mod in list(sys.modules.values())
+        if _USER_SITE_MARK in (getattr(mod, "__file__", None) or "")
+    )
+    return {
+        "pid": os.getpid(),
+        "prefix": prefix,
+        "mapped_from_prefix": from_prefix,
+        "user_site_mapped": from_user_site,
+        "user_site_modules": user_site_modules,
+        "dumpable": is_dumpable(),
     }
 
 

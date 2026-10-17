@@ -48,6 +48,7 @@ from prometheus.context.environment import (
     booted_from as _booted_from,
     deployment_freshness,
     git_head_sha,
+    runtime_report as _runtime_report,
 )
 from prometheus.version import package_version
 
@@ -1271,6 +1272,11 @@ def create_app(
             # agree perfectly while the update sits in a different clone. See
             # environment.booted_from for the incident.
             "checkout": _booted_from(),
+            # WHAT this process loaded, read from the inside: its pid, its venv, whether
+            # anything is mapped from a user site, and whether it is dumpable. deploy.sh B5
+            # reads it because the daemon is non-dumpable and its /proc/<pid>/maps is
+            # root-owned to every other process (security/nondumpable.py).
+            "runtime": _runtime_report(),
             "stale": stale,
             # Full two-axis freshness. `stale` is the process-vs-tree axis
             # restated; `tree_vs_origin` is the one it could never see.

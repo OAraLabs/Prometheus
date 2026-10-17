@@ -668,6 +668,16 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         logger.info(
             "Loaded %d variable(s) from %s", _env_loaded, get_env_file_path()
         )
+    # Set in main(), before logging existed; said here, once, with the outcome.
+    from prometheus.security import nondumpable as _nondumpable
+    if _nondumpable.STATE == "set":
+        logger.info("Process is non-dumpable: other processes cannot read its /proc environ, mem or maps")
+    elif _nondumpable.STATE.startswith("failed"):
+        logger.warning(
+            "Could not make the daemon non-dumpable (%s): a same-user process can read "
+            "/proc/%d/environ, which holds every secret the service manager passed in",
+            _nondumpable.STATE, os.getpid(),
+        )
 
     # ── Listen address (--bind > PROMETHEUS_WEB_BIND > web.bind > 0.0.0.0) ──
     # Resolved here, after the env file is loaded (so a PROMETHEUS_WEB_BIND kept
@@ -3252,6 +3262,13 @@ def daemon_start_args(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> None:
     """CLI entry point."""
+    # First: under systemd the secrets are already in this process's starting
+    # environment, readable at /proc/<pid>/environ by any same-user process —
+    # a model's shell included — until this runs (security/nondumpable.py).
+    # Logged by run_daemon once logging exists. A restart's execve resets the
+    # flag and the new image sets it again here.
+    from prometheus.security.nondumpable import make_nondumpable
+    make_nondumpable()
     # Before anything loads the env file: what a restart re-execs with (POST /api/restart).
     snapshot_startup_env()
     parser = build_parser()
