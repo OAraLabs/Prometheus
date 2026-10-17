@@ -62,6 +62,21 @@ interval, and the subprocess goes off the event loop
 (``asyncio.to_thread``) — the daemon has already paid for that lesson once,
 when three synchronous phases in a 30-minute periodic task produced the idle
 loop-watchdog stalls fixed in #416.
+
+ONLY IN A PROMETHEUS CHECKOUT
+-----------------------------
+The fetch used to run in ``parents[3]`` of this file, whatever repository git
+found there. On a Homebrew install that path is inside ``/opt/homebrew``, which
+is Homebrew's own repository, so every interval the daemon fetched
+github.com/Homebrew/brew and wrote ``refs/remotes/origin/main`` into it. A
+package installed into a venv inside a user's own project would have done the
+same to that project. :func:`source_checkout_root` now decides: the package must
+sit at ``<root>/src/prometheus``, ``<root>/pyproject.toml`` must name this
+project, and git's toplevel from ``<root>`` must be ``<root>`` itself — not an
+enclosing repository. Anything else (Homebrew, pip, ``uv tool``, the Mac app)
+is not a checkout, and the refresh is skipped without a word in the log; the
+status block says ``not_checkout``. A fork still counts: it is a Prometheus
+checkout whose origin is the fork.
 """
 
 from __future__ import annotations
@@ -70,6 +85,7 @@ import asyncio
 import logging
 import subprocess
 import time
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -117,6 +133,9 @@ class FetchState:
     """
 
     enabled: bool = True
+    #: False once the fetcher has looked and found no Prometheus checkout
+    #: (source_checkout_root). Then there is no origin to refresh.
+    checkout: bool = True
     interval_seconds: int = DEFAULT_INTERVAL_SECONDS
     stale_after_seconds: int = DEFAULT_STALE_AFTER_SECONDS
     last_attempt_ts: float | None = None
@@ -132,9 +151,11 @@ class FetchState:
         return max(0, int(self._now() - self.last_success_ts))
 
     def state(self) -> str:
-        """``ok`` | ``failing`` | ``never`` | ``disabled``."""
+        """``ok`` | ``failing`` | ``never`` | ``disabled`` | ``not_checkout``."""
         if not self.enabled:
             return "disabled"
+        if not self.checkout:
+            return "not_checkout"
         if self.last_success_ts is None:
             # Distinct from `failing`: nothing has succeeded YET, which on a
             # fresh boot is a normal transient and not the same claim as
@@ -183,7 +204,54 @@ _FETCH_DETAIL: dict[str, str] = {
         "what the last deploy happened to cache — set "
         "deployment.origin_fetch.enabled to restore it."
     ),
+    "not_checkout": (
+        "This install is not a Prometheus source checkout (a Homebrew, pip, "
+        "uv tool or app install), so there is no origin to refresh and "
+        "tree_vs_origin does not apply. Nothing to fix."
+    ),
 }
+
+#: The distribution name a Prometheus checkout's pyproject.toml declares.
+PROJECT_NAME = "oara-prometheus"
+
+
+def source_checkout_root(package_file: str | Path | None = None) -> Path | None:
+    """The Prometheus checkout this package was loaded from, or None.
+
+    All three must hold, so that a repository which merely CONTAINS the
+    installed package is never taken for one (Homebrew's ``/opt/homebrew``, a
+    user's own project with a venv inside it):
+
+    * the package is ``<root>/src/prometheus`` (the source layout);
+    * ``<root>/pyproject.toml`` names :data:`PROJECT_NAME`;
+    * ``git rev-parse --show-toplevel`` run from ``<root>`` is ``<root>``.
+
+    *package_file* stands in for this module's own path (tests point it at a
+    fake install). Never raises: anything unreadable is "not a checkout".
+    """
+    here = Path(package_file or __file__).resolve()
+    root = here.parents[3]
+    if here.parents[1] != (root / "src" / "prometheus").resolve():
+        return None
+    try:
+        project = tomllib.loads(
+            (root / "pyproject.toml").read_text(encoding="utf-8")).get("project") or {}
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+    if project.get("name") != PROJECT_NAME:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=str(root),
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    if Path(proc.stdout.strip()).resolve() != root:
+        return None
+    return root
 
 
 def fetch_origin_main(
@@ -195,9 +263,14 @@ def fetch_origin_main(
     SYNCHRONOUS AND BLOCKING BY DESIGN — callers put it on a worker thread.
     Kept sync so it is testable without an event loop and so the one place
     that must not block (the request path) cannot call it by accident.
+
+    With no *repo_dir* it fetches only in the checkout this package came from
+    (:func:`source_checkout_root`), and does nothing if there is none.
     """
     if repo_dir is None:
-        repo_dir = Path(__file__).resolve().parents[3]
+        repo_dir = source_checkout_root()
+        if repo_dir is None:
+            return False, "not a Prometheus source checkout"
     cmd = [
         "git", "fetch", "--no-tags", "--no-write-fetch-head",
         "origin", MAIN_REFSPEC,
@@ -228,8 +301,14 @@ class OriginFetcher:
         stale_after_seconds: int = DEFAULT_STALE_AFTER_SECONDS,
         enabled: bool = True,
         now: Any = time.time,
+        package_file: str | Path | None = None,
     ) -> None:
-        self._repo_dir = repo_dir
+        # An explicit repo_dir is the caller's knowledge and is used as given.
+        # Without one, the checkout is found from this package's own location,
+        # once and off the event loop (run_forever), never at construction.
+        self._repo_dir: str | Path | None = repo_dir
+        self._resolved = repo_dir is not None
+        self._package_file = package_file
         self._now = now
         self.state = FetchState(
             enabled=enabled,
@@ -238,10 +317,28 @@ class OriginFetcher:
             _now=now,
         )
 
+    def repo(self) -> str | Path | None:
+        """The repository to fetch, or None when this is not a checkout.
+
+        Resolved once. Synchronous (it may run ``git rev-parse``), so
+        run_forever calls it on a worker thread.
+        """
+        if not self._resolved:
+            self._repo_dir = source_checkout_root(self._package_file)
+            self._resolved = True
+            self.state.checkout = self._repo_dir is not None
+        return self._repo_dir
+
     def fetch_once(self) -> bool:
-        """One attempt, recording the outcome. Synchronous."""
+        """One attempt, recording the outcome. Synchronous.
+
+        Not a checkout: nothing is run and nothing is logged.
+        """
+        repo = self.repo()
+        if repo is None:
+            return False
         self.state.last_attempt_ts = self._now()
-        ok, error = fetch_origin_main(self._repo_dir)
+        ok, error = fetch_origin_main(repo)
         if ok:
             self.state.last_success_ts = self._now()
             self.state.consecutive_failures = 0
@@ -270,6 +367,11 @@ class OriginFetcher:
         if not self.state.enabled:
             logger.info("origin fetch disabled by config; tree_vs_origin will "
                         "degrade to unknown once its cached ref goes stale")
+            return
+        if await asyncio.to_thread(self.repo) is None:
+            # Not a Prometheus checkout (Homebrew, pip, the Mac app): there is
+            # no origin of ours to refresh. Silent by design; the status block
+            # says not_checkout.
             return
         while True:
             try:
