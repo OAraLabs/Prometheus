@@ -2,6 +2,47 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## 0.9.14 (2026-10-17)
+
+0.9.14 fixes two faults that appear when Prometheus is installed as a package rather than run from a Prometheus checkout, for example with Homebrew. The daemon no longer runs `git fetch` in whatever repository happens to surround its install, and its status no longer reports that repository's commit as its own. A Prometheus checkout, such as a deploy clone, behaves exactly as before.
+
+### The origin refresh runs only in a Prometheus checkout (#826)
+
+- **What went wrong.** Every 5 minutes the daemon refreshed `origin/main` by running `git fetch` three directories above its own code, in whatever repository git found there.
+  - On a Homebrew install that is Homebrew's own repository (`/opt/homebrew`), so a brew-installed daemon fetched Homebrew's repository and wrote `refs/remotes/origin/main` into it every 5 minutes.
+  - A package installed into a virtual environment inside one of your own projects did the same to that project.
+  - No credentials were involved.
+- **What changed.** The refresh runs only from a Prometheus checkout, which must pass three checks:
+  - the code sits at `<root>/src/prometheus`;
+  - `<root>/pyproject.toml` names `oara-prometheus`;
+  - git's top level is `<root>` itself.
+
+  Anywhere else (Homebrew, pip, `uv tool`, the Mac app), the refresh is skipped without a log line, and `/api/status` reports `origin_fetch.state: "not_checkout"`.
+
+### Status reports commits only from a Prometheus checkout (#827)
+
+- **What went wrong.** The same lookup fed `/api/status`: `running_sha`, `tree_head`, `stale` and the deployment block all described the surrounding repository. On a Homebrew install:
+  - they showed Homebrew's commit, and Beacon on iOS displayed it as the RUNNING version;
+  - after `brew update`, the heartbeat sent "new code on disk this process isn't executing. Restart to go live." when nothing about Prometheus had changed.
+- **What changed.**
+  - Outside a Prometheus checkout, `running_sha` and `tree_head` are `null`, `stale` is `false`, and the deployment state reads `not_checkout`, so the false restart nudge is gone.
+  - If git can't be run to decide, the fields read `unknown`, as before.
+  - In a checkout nothing changes.
+
+### Upgrading from 0.9.13
+
+- **On an install that isn't a Prometheus checkout** (Homebrew, pip, `uv tool`, the Mac app), `/api/status` changes:
+  - `running_sha` and `tree_head` are `null`, where they read Homebrew's commit or `"unknown"`;
+  - `deployment.state`, and `/health`'s `deployment_state`, read `not_checkout`;
+  - `checkout` gains `source_checkout`: `false`, or `null` when git could not be asked.
+
+  Beacon on iOS hides its RUNNING row instead of showing another repository's commit. A client that ignores unknown fields and accepts `null` there is unaffected.
+- **No config change and no migration.** A Prometheus checkout, such as a deploy clone, is unaffected.
+
+### Known issues
+
+- The known issues listed for 0.9.13 still apply.
+
 ## 0.9.13 (2026-10-16)
 
 0.9.13 fixes tool calling on local models. A local turn can now call every tool, where since late July it could reach only the dozen or so tools always sent to it. It also does the following:
