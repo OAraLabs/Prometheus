@@ -70,8 +70,9 @@ found there. On a Homebrew install that path is inside ``/opt/homebrew``, which
 is Homebrew's own repository, so every interval the daemon fetched
 github.com/Homebrew/brew and wrote ``refs/remotes/origin/main`` into it. A
 package installed into a venv inside a user's own project would have done the
-same to that project. :func:`source_checkout_root` now decides: the package must
-sit at ``<root>/src/prometheus``, ``<root>/pyproject.toml`` must name this
+same to that project. ``environment.source_checkout_root`` now decides, and
+the read side (the shas on /api/status) asks the same question: the package
+must sit at ``<root>/src/prometheus``, ``<root>/pyproject.toml`` must name this
 project, and git's toplevel from ``<root>`` must be ``<root>`` itself — not an
 enclosing repository. Anything else (Homebrew, pip, ``uv tool``, the Mac app)
 is not a checkout, and the refresh is skipped without a word in the log; the
@@ -85,10 +86,11 @@ import asyncio
 import logging
 import subprocess
 import time
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from prometheus.context.environment import own_checkout_root, source_checkout_root
 
 logger = logging.getLogger(__name__)
 
@@ -211,49 +213,6 @@ _FETCH_DETAIL: dict[str, str] = {
     ),
 }
 
-#: The distribution name a Prometheus checkout's pyproject.toml declares.
-PROJECT_NAME = "oara-prometheus"
-
-
-def source_checkout_root(package_file: str | Path | None = None) -> Path | None:
-    """The Prometheus checkout this package was loaded from, or None.
-
-    All three must hold, so that a repository which merely CONTAINS the
-    installed package is never taken for one (Homebrew's ``/opt/homebrew``, a
-    user's own project with a venv inside it):
-
-    * the package is ``<root>/src/prometheus`` (the source layout);
-    * ``<root>/pyproject.toml`` names :data:`PROJECT_NAME`;
-    * ``git rev-parse --show-toplevel`` run from ``<root>`` is ``<root>``.
-
-    *package_file* stands in for this module's own path (tests point it at a
-    fake install). Never raises: anything unreadable is "not a checkout".
-    """
-    here = Path(package_file or __file__).resolve()
-    root = here.parents[3]
-    if here.parents[1] != (root / "src" / "prometheus").resolve():
-        return None
-    try:
-        project = tomllib.loads(
-            (root / "pyproject.toml").read_text(encoding="utf-8")).get("project") or {}
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-        return None
-    if project.get("name") != PROJECT_NAME:
-        return None
-    try:
-        proc = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"], cwd=str(root),
-            capture_output=True, text=True, timeout=10, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if proc.returncode != 0 or not proc.stdout.strip():
-        return None
-    if Path(proc.stdout.strip()).resolve() != root:
-        return None
-    return root
-
-
 def fetch_origin_main(
     repo_dir: str | Path | None = None,
     timeout: int = FETCH_TIMEOUT_SECONDS,
@@ -265,10 +224,11 @@ def fetch_origin_main(
     that must not block (the request path) cannot call it by accident.
 
     With no *repo_dir* it fetches only in the checkout this package came from
-    (:func:`source_checkout_root`), and does nothing if there is none.
+    (:func:`~prometheus.context.environment.own_checkout_root`), and does
+    nothing if there is none.
     """
     if repo_dir is None:
-        repo_dir = source_checkout_root()
+        repo_dir = own_checkout_root()
         if repo_dir is None:
             return False, "not a Prometheus source checkout"
     cmd = [
@@ -324,7 +284,10 @@ class OriginFetcher:
         run_forever calls it on a worker thread.
         """
         if not self._resolved:
-            self._repo_dir = source_checkout_root(self._package_file)
+            # The process's own answer, the one the read side uses too
+            # (environment.own_checkout_root).
+            self._repo_dir = (own_checkout_root() if self._package_file is None
+                              else source_checkout_root(self._package_file))
             self._resolved = True
             self.state.checkout = self._repo_dir is not None
         return self._repo_dir

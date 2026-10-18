@@ -48,6 +48,7 @@ from prometheus.context.environment import (
     booted_from as _booted_from,
     deployment_freshness,
     git_head_sha,
+    is_source_checkout,
     runtime_report as _runtime_report,
 )
 from prometheus.version import package_version
@@ -939,7 +940,11 @@ def create_app(
     # running_sha = repo HEAD captured at process boot (frozen on app.state);
     # tree_head = live repo HEAD now. They differ when new code is on disk that
     # this process hasn't loaded. "unknown" on either side → never stale.
-    def _staleness() -> tuple[str, str, bool]:
+    # Not a Prometheus checkout (Homebrew, pip, the Mac app) → both null: any
+    # repository above the package is someone else's (environment.py).
+    def _staleness() -> tuple[str | None, str | None, bool]:
+        if is_source_checkout() is False:
+            return None, None, False
         running = getattr(app.state, "boot_sha", "unknown")
         tree = git_head_sha()
         stale = running != "unknown" and tree != "unknown" and running != tree

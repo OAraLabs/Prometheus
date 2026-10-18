@@ -15,6 +15,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,7 +106,106 @@ def detect_git_info(cwd: str) -> tuple[bool, str | None]:
     return True, branch
 
 
-def booted_from() -> dict[str, str | bool]:
+# ── Is this process running from a Prometheus checkout? ──────────────────
+#
+# WHY THIS EXISTS. Every git read below used to run in ``parents[3]`` of this
+# file and trust whatever repository git found there. On a Homebrew install
+# that path is inside ``/opt/homebrew`` — Homebrew's own repository — so
+# ``running_sha``, ``tree_head``, ``stale`` and the deployment block described
+# Homebrew's HEAD, and ``brew update`` moving it read as "new code on disk this
+# process isn't executing". A venv inside a user's own project did the same
+# with that project. The origin refresh had the write-side form of the same
+# bug (origin_fetch.py, #826), and both now ask this one question.
+
+#: The distribution name a Prometheus checkout's pyproject.toml declares.
+PROJECT_NAME = "oara-prometheus"
+
+#: The file every "which checkout am I" read is anchored on: this module, inside
+#: the loaded package. A module name rather than ``__file__`` inline so a test
+#: can stand the process inside a fake install.
+_PACKAGE_FILE = __file__
+
+
+def _locate_checkout(package_file: str | Path | None) -> tuple[Path | None, bool]:
+    """``(root or None, settled)``. *settled* is False only when git itself
+    could not be run, so "could not tell" is never taken for "not a checkout"."""
+    here = Path(package_file or __file__).resolve()
+    root = here.parents[3]
+    if here.parents[1] != (root / "src" / "prometheus").resolve():
+        return None, True
+    try:
+        project = tomllib.loads(
+            (root / "pyproject.toml").read_text(encoding="utf-8")).get("project") or {}
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None, True
+    if project.get("name") != PROJECT_NAME:
+        return None, True
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=str(root),
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, False
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None, True
+    if Path(proc.stdout.strip()).resolve() != root:
+        return None, True
+    return root, True
+
+
+def source_checkout_root(package_file: str | Path | None = None) -> Path | None:
+    """The Prometheus checkout this package was loaded from, or None.
+
+    All three must hold, so that a repository which merely CONTAINS the
+    installed package is never taken for one (Homebrew's ``/opt/homebrew``, a
+    user's own project with a venv inside it):
+
+    * the package is ``<root>/src/prometheus`` (the source layout);
+    * ``<root>/pyproject.toml`` names :data:`PROJECT_NAME`;
+    * ``git rev-parse --show-toplevel`` run from ``<root>`` is ``<root>``.
+
+    *package_file* stands in for a module at ``prometheus/<sub>/<file>.py``
+    (tests point it at a fake install). Never raises: anything unreadable is
+    "not a checkout". Uncached; this process's own answer is
+    :func:`own_checkout_root`.
+    """
+    return _locate_checkout(package_file)[0]
+
+
+#: This process's answer, per anchor. Only a SETTLED answer is kept: a git that
+#: could not be run is asked again next time rather than being remembered as
+#: "not a checkout" — on the deploy clone that would switch the freshness
+#: signal off until a restart, without a word.
+_OWN_CHECKOUT: dict[str, Path | None] = {}
+
+
+def _own_checkout() -> tuple[Path | None, bool]:
+    key = str(_PACKAGE_FILE)
+    if key in _OWN_CHECKOUT:
+        return _OWN_CHECKOUT[key], True
+    root, settled = _locate_checkout(_PACKAGE_FILE)
+    if settled:
+        _OWN_CHECKOUT[key] = root
+    return root, settled
+
+
+def own_checkout_root() -> Path | None:
+    """The checkout the loaded package came from, or None (not one, or git
+    could not be asked). Resolved once per process; may run ``git rev-parse``
+    the first time."""
+    return _own_checkout()[0]
+
+
+def is_source_checkout() -> bool | None:
+    """True / False, or None when git could not be run to tell."""
+    root, settled = _own_checkout()
+    if root is not None:
+        return True
+    return False if settled else None
+
+
+def booted_from() -> dict[str, str | bool | None]:
     """Which checkout is this process actually running, on disk.
 
     WHY THIS EXISTS. ``stale`` compares ``running_sha`` (boot) to ``tree_head``
@@ -124,13 +224,20 @@ def booted_from() -> dict[str, str | bool]:
     ``package`` is the decisive field: it is the directory Python actually
     imported, not a working directory or a config value, so a reader can
     compare it against the tree they pushed to instead of inferring.
+
+    ``source_checkout`` says whether ``path`` is a Prometheus checkout at all
+    (:func:`is_source_checkout`; None = git could not be asked). When it is
+    false — Homebrew, pip, ``uv tool``, the Mac app — ``path`` is just three
+    directories above the package, and the shas beside this block are null.
     """
-    pkg = Path(__file__).resolve().parents[1]      # …/src/prometheus
-    root = Path(__file__).resolve().parents[3]     # repo root
+    here = Path(_PACKAGE_FILE).resolve()
+    pkg = here.parents[1]      # …/src/prometheus
+    root = here.parents[3]     # repo root, in a checkout
     return {
         "package": str(pkg),
         "path": str(root),
         "is_git": (root / ".git").exists(),
+        "source_checkout": is_source_checkout(),
     }
 
 
@@ -197,14 +304,17 @@ def runtime_report() -> dict[str, Any]:
 def git_head_sha(repo_dir: str | Path | None = None) -> str:
     """Return the HEAD commit SHA of the git repo containing *repo_dir*.
 
-    Defaults to the repository this package is checked out in (anchored from
-    this file: ``context/environment.py`` → ``parents[3]`` = repo root). ``git
-    rev-parse`` walks up to ``.git`` regardless, so any in-repo path works.
-    Returns ``"unknown"`` if git is unavailable or the path is not a git
+    Defaults to the Prometheus checkout this package was loaded from
+    (:func:`own_checkout_root`) — never to a repository that merely encloses an
+    installed package. ``git rev-parse`` walks up to ``.git`` regardless, so
+    any in-repo path works. Returns ``"unknown"`` if git is unavailable, the
+    path is not a git checkout, or (by default) this is not a Prometheus
     checkout — callers treat that as "can't determine staleness" (never stale).
     """
     if repo_dir is None:
-        repo_dir = Path(__file__).resolve().parents[3]
+        repo_dir = own_checkout_root()
+        if repo_dir is None:
+            return "unknown"
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -286,10 +396,13 @@ def _git(args: list[str], repo_dir: str | Path | None) -> str | None:
     ``None`` means "could not determine", never "zero" and never "equal" —
     the distinction ``deploy_guard.sh`` makes with its ``'?'`` sentinel and
     for the same reason (CROSS-CUTTING §8: a detector that broke must not
-    fall through into the permissive branch).
+    fall through into the permissive branch). With no *repo_dir* it runs only
+    in this package's own checkout (:func:`own_checkout_root`).
     """
     if repo_dir is None:
-        repo_dir = Path(__file__).resolve().parents[3]
+        repo_dir = own_checkout_root()
+        if repo_dir is None:
+            return None
     try:
         result = subprocess.run(
             ["git", *args],
@@ -368,10 +481,15 @@ def deployment_freshness(
                          at boot; here it is reported, not enforced).
     ``diverged``         histories have forked — not a fast-forward gap.
     ``unknown``          at least one axis could not be determined.
+    ``not_checkout``     this install is not a Prometheus checkout (Homebrew,
+                         pip, the Mac app), so neither axis applies. Both axes
+                         say ``not_checkout`` too, and every sha is null.
 
     ``unknown`` is a THIRD ANSWER and never collapses into ``current``. That
     collapse is the entire failure class this function was written for: a
     check that cannot see a problem must say so, not report clean.
+    ``not_checkout`` is not a weaker ``unknown``: it is a settled answer
+    (:func:`is_source_checkout` is False), given only with no *repo_dir*.
 
     Precedence when several are true at once is by remedy urgency:
     ``diverged`` > ``ahead_of_origin`` > ``behind_tree`` > ``behind_origin``.
@@ -379,6 +497,25 @@ def deployment_freshness(
     cheaper, faster fix and pulling first would discard the running process's
     own provenance.
     """
+    if repo_dir is None and is_source_checkout() is False:
+        # Any repository git would find above the package is someone else's
+        # (Homebrew's, the user's own project): its shas are not ours to
+        # report, and comparing them would be the bug, not the answer.
+        return {
+            "state": "not_checkout",
+            "process_vs_tree": "not_checkout",
+            "tree_vs_origin": "not_checkout",
+            "running_sha": None,
+            "tree_head": None,
+            "origin_main": None,
+            "ahead_of_origin": None,
+            "behind_origin": None,
+            "origin_ref_age_seconds": None,
+            "origin_evidence_age_seconds": None,
+            "origin_fetch": _fetch_block(fetch_state),
+            "detail": _FRESHNESS_DETAIL["not_checkout"],
+        }
+
     tree = git_head_sha(repo_dir)
     origin = origin_main_sha(repo_dir)
 
@@ -528,5 +665,10 @@ _FRESHNESS_DETAIL: dict[str, str] = {
         "Freshness could NOT be determined; this is not the same as up to "
         "date. If origin_fetch is failing or disabled, the comparison "
         "against origin/main is the part that cannot be trusted."
+    ),
+    "not_checkout": (
+        "This install is not a Prometheus source checkout (a Homebrew, pip, "
+        "uv tool or app install), so there are no commits to compare; the "
+        "package version (GET /) says what is running. Nothing to fix."
     ),
 }
