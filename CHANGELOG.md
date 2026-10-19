@@ -2,6 +2,36 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## 0.9.15 (2026-10-19)
+
+0.9.15 raises the aiohttp floor to 3.14.4, which fixes three advisories against 3.14.3 and earlier, and makes the `slack` extra install aiohttp, which the Slack gateway needs. Example device names in the docs and tests are now generic.
+
+### aiohttp 3.14.4 (#829)
+
+- **What changed.** uv.lock moves aiohttp from 3.14.3 to 3.14.4, and yarl from 1.24.2 to 1.25.1 (aiohttp 3.14.4 requires it). 3.14.4 fixes CVE-2026-111063, CVE-2026-111064 and GHSA-2g87-pp6c-29x5.
+- **The floor.** The `discord` and `full` extras now require `aiohttp>=3.14.4`, so `pip install -U` cannot keep an installed 3.14.3.
+- **Where it applies.** Prometheus uses aiohttp only as a client: discord.py for the Discord gateway, and slack-bolt for the Slack gateway. It runs no aiohttp server. The 0.9.14 Mac app and Docker image shipped 3.14.3; the 0.9.15 builds ship 3.14.4.
+
+### The `slack` extra installs aiohttp (#PR)
+
+- **What went wrong.** The Slack gateway uses slack-bolt's `AsyncApp` with Socket Mode, which imports aiohttp. Neither slack-bolt nor slack-sdk declares aiohttp, and the `slack` extra didn't either, so `pip install 'oara-prometheus[slack]'` without `discord` or `full` installed none. The gateway then failed to start with "slack-bolt is required", although slack-bolt was installed. The Mac app and Docker image install the `discord` extra too, so they were not affected.
+- **What changed.**
+  - The `slack` extra requires `aiohttp>=3.14.4`, the same floor as `discord` and `full`.
+  - When a module the Slack gateway needs is missing, the error names that module and points at `pip install 'oara-prometheus[slack]'`.
+
+### Generic example device name (#829)
+
+- Pairing docs, comments, tests and fixtures use "Alex's MacBook" as the example device name. The pairing seal test vector was re-sealed with its own key and nonce, so only its plaintext and ciphertext changed.
+
+### Upgrading from 0.9.14
+
+- **No config change and no migration.**
+- A pip install with the `slack` extra gains aiohttp on upgrade.
+
+### Known issues
+
+- The known issues listed for 0.9.13 still apply.
+
 ## 0.9.14 (2026-10-17)
 
 0.9.14 fixes two faults that appear when Prometheus is installed as a package rather than run from a Prometheus checkout, for example with Homebrew. The daemon no longer runs `git fetch` in whatever repository happens to surround its install, and its status no longer reports that repository's commit as its own. A Prometheus checkout, such as a deploy clone, behaves exactly as before.
