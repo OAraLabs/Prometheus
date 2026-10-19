@@ -70,7 +70,7 @@ def test_list_shows_what_the_owner_needs_to_decide(world):
     created, _, _ = world.created(source="192.0.2.42")
     code, out = run(world, "list")
     assert code == 0
-    for needle in (created["request_id"][:8], "Jennifer's MacBook", "macos", "192.0.2.42", created["match_code"], "5 min"):
+    for needle in (created["request_id"][:8], "Alex's MacBook", "macos", "192.0.2.42", created["match_code"], "5 min"):
         assert needle in out, needle
     assert created["poll_secret"] not in out
 
@@ -80,7 +80,7 @@ def test_list_shows_what_the_owner_needs_to_decide(world):
 def test_approve_by_full_id_mints_a_scoped_device_and_prints_no_token(world):
     created, requester, _ = world.created()
     code, out = run(world, "approve", created["request_id"])
-    assert code == 0 and "Approved" in out and "Jennifer's MacBook" in out
+    assert code == 0 and "Approved" in out and "Alex's MacBook" in out
     polled = world.poll(created).json()          # once: a second poll in the same second is refused
     token = requester.unseal(created["request_id"], polled["sealed"])["token"]
     assert token not in out and created["poll_secret"] not in out
@@ -146,7 +146,7 @@ def test_deny(world):
 def test_a_whole_id_still_shows_the_name_when_it_is_waiting(world):
     created, _, _ = world.created()
     code, out = run(world, "deny", created["request_id"])
-    assert code == 0 and "Jennifer's MacBook" in out
+    assert code == 0 and "Alex's MacBook" in out
 
 
 def test_a_whole_id_that_is_no_longer_waiting_is_denied_by_the_daemon_not_by_us(world):

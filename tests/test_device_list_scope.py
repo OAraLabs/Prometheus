@@ -2,7 +2,7 @@
 
 #692 scoped a device to its own conversations and left the device LIST open (its contract, section 4: "still
 lists every enrolled device"). That was written when the only holders of a device token were the operator's
-own phones. Approval changes who holds one: Jennifer's MacBook, approved from Will's, is an ordinary scoped
+own phones. Approval changes who holds one: Alex's MacBook, approved from Will's, is an ordinary scoped
 device, and it could read the name, platform, last-seen time, push status, owner flag and owner source of
 every other device on the daemon, including whether one is the owner's cockpit. The Beacon session found it
 testing an approved device against the real daemon.

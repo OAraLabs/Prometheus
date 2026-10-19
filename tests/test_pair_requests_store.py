@@ -70,7 +70,7 @@ def store(devices, clock):
     return pr.PairRequestStore(devices, settings=pr.PairingSettings(), clock=clock)
 
 
-def _create(store, *, source="192.0.2.10", name="Jennifer's MacBook", platform="macos", requester=None):
+def _create(store, *, source="192.0.2.10", name="Alex's MacBook", platform="macos", requester=None):
     requester = requester or Requester()
     created = store.create(device_name=name, platform=platform, public_key=requester.public_b64,
                            source=source, instance_public_key_der=INSTANCE_DER)
@@ -160,7 +160,7 @@ def test_a_request_has_a_128_bit_id_a_256_bit_secret_and_the_documented_code(sto
     assert req.state == "pending" and req.expires_at == clock.now + 300 and req.created_at == clock.now
     assert req.match_code == pair_seal.match_code(
         pair_seal.b64url_decode(requester.public_b64), INSTANCE_DER, req.id)
-    assert (req.device_name, req.platform, req.source) == ("Jennifer's MacBook", "macos", "192.0.2.10")
+    assert (req.device_name, req.platform, req.source) == ("Alex's MacBook", "macos", "192.0.2.10")
 
 
 def test_two_requests_never_share_an_id_or_a_secret(store):
@@ -289,10 +289,10 @@ def test_the_sweep_records_expiry_and_says_which_requests(store, clock):
 # ── approve ──────────────────────────────────────────────────────────────────
 
 def test_approving_mints_an_ordinary_scoped_device_never_an_owner(store, devices, tmp_path):
-    created, requester = _create(store, name="Jennifer's MacBook", platform="windows")
+    created, requester = _create(store, name="Alex's MacBook", platform="windows")
     approved = store.approve(created.request.id, name=None, decided_by="beacon:Will's Mac")
     device = next(d for d in devices.list_devices() if d.id == approved.device_id)
-    assert device.name == "Jennifer's MacBook"
+    assert device.name == "Alex's MacBook"
     assert device.platform == "other", "the registry keeps ios/macos/other; the request row keeps 'windows'"
     assert store.get(created.request.id).platform == "windows"
     assert devices.is_owner(device.id) is False
@@ -300,9 +300,9 @@ def test_approving_mints_an_ordinary_scoped_device_never_an_owner(store, devices
 
 
 def test_an_operator_may_rename_at_approval(store, devices):
-    created, _ = _create(store, name="Jennifer's MacBook")
-    approved = store.approve(created.request.id, name="Jennifer's MacBook (kitchen)", decided_by="beacon:x")
-    assert next(d for d in devices.list_devices() if d.id == approved.device_id).name == "Jennifer's MacBook (kitchen)"
+    created, _ = _create(store, name="Alex's MacBook")
+    approved = store.approve(created.request.id, name="Alex's MacBook (kitchen)", decided_by="beacon:x")
+    assert next(d for d in devices.list_devices() if d.id == approved.device_id).name == "Alex's MacBook (kitchen)"
 
 
 def test_the_token_leaves_sealed_and_authenticates_the_new_device(store, devices):

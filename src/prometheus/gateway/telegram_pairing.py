@@ -3,7 +3,7 @@
 Contract: docs/PAIRING-APPROVAL-API.md, 5.2. When a new device asks to join and the owner turned
 ``pairing.telegram_prompts`` on, each of their private chats gets
 
-    Jennifer's MacBook wants to connect.
+    Alex's MacBook wants to connect.
     Code 4821
 
     macOS · 192.168.1.42 · expires in 5 min

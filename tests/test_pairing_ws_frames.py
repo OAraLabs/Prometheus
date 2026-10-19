@@ -104,7 +104,7 @@ async def test_the_frame_is_what_the_contract_says(world):
     (frame,) = op.frames
     assert set(frame) == {"type", "timestamp", "payload"} and isinstance(frame["timestamp"], float)
     assert frame["payload"] == {
-        "request_id": created["request_id"], "device_name": "Jennifer's MacBook", "platform": "macos",
+        "request_id": created["request_id"], "device_name": "Alex's MacBook", "platform": "macos",
         "source_ip": "192.0.2.42", "match_code": created["match_code"],
         "created_at": int(T0), "expires_at": int(T0) + 300, "ttl_seconds": 300}
 

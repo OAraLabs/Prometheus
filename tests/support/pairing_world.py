@@ -83,7 +83,7 @@ class World:
 
     def request(self, requester=None, *, source="192.0.2.10", **body):
         requester = requester or Requester()
-        payload = {"device_name": "Jennifer's MacBook", "platform": "macos", "public_key": requester.public_b64}
+        payload = {"device_name": "Alex's MacBook", "platform": "macos", "public_key": requester.public_b64}
         payload.update(body)
         client = TestClient(self.app, client=(source, 50000))
         return client.post("/api/pair/requests", json=payload), requester, client

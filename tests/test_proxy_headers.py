@@ -86,7 +86,7 @@ def serving(app, config=None):
         thread.join(15)
 
 
-def _ask(url: str, *, forwarded: str | None = None, source_name: str = "Jennifer's MacBook") -> httpx.Response:
+def _ask(url: str, *, forwarded: str | None = None, source_name: str = "Alex's MacBook") -> httpx.Response:
     headers = {"X-Forwarded-For": forwarded} if forwarded else {}
     return httpx.post(f"{url}/api/pair/requests", headers=headers, json={
         "device_name": source_name, "platform": "macos", "public_key": Requester().public_b64})

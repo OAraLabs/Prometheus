@@ -11,7 +11,7 @@
 ## 0. In brief
 
 1. A new device asks to join with `POST /api/pair/requests` (no credentials). It gets a request id, a poll secret and a 4-digit code, and shows the code on its own screen.
-2. The operator sees "Jennifer's MacBook wants to connect. Code 4821" with Approve and Deny in every connected Beacon whose token is an operator's (`identity.is_operator`: the global token or an owner device). Telegram buttons exist too but are **opt-in and off by default** (`pairing.telegram_prompts`). They compare the code with the one on the new device and tap.
+2. The operator sees "Alex's MacBook wants to connect. Code 4821" with Approve and Deny in every connected Beacon whose token is an operator's (`identity.is_operator`: the global token or an owner device). Telegram buttons exist too but are **opt-in and off by default** (`pairing.telegram_prompts`). They compare the code with the one on the new device and tap.
 3. On approval the daemon mints an ordinary, **always scoped** device token through `DeviceStore.mint` (never an owner device: that tier comes only from the person at the machine, by same-Mac pairing or an owner code from `oara pair --owner`). The new device owns no conversations and sees only what it creates. The token is **sealed to a public key the new device sent** and handed over on its next poll. It is never in plaintext on the wire and never stored in plaintext on the daemon.
 4. A request lives 5 minutes. Approve, deny, cancel and expiry are one-way and atomic; the first decision wins.
 5. Only four routes are reachable without a bearer token: `GET /api/hello` and the three requester routes under `/api/pair/requests`. They are an exact allowlist, tested.
@@ -71,7 +71,7 @@ What the unauthenticated surface can be used to do, and what stops it:
 |---|---|
 | Flood the operator with prompts | Limits (4.5): 1 pending per source, 3 pending overall, 10 per source per hour. Optional pairing window (D4). |
 | Occupy all three pending slots so the real device cannot ask | Same limits. Known trade-off, written down in 4.5. The window (D4) removes it. |
-| Pretend to be "Jennifer's MacBook" | The name is typed on the requester and is not verified. The prompt says so, shows the source address, and the operator compares the code against the screen in front of them. |
+| Pretend to be "Alex's MacBook" | The name is typed on the requester and is not verified. The prompt says so, shows the source address, and the operator compares the code against the screen in front of them. |
 | Read the token off the Wi-Fi at pairing | Token sealed to the requester's key (4.3). |
 | Read the bearer token off the Wi-Fi afterwards | TLS with a pinned certificate (section 7). **Sealing alone does not help here.** |
 | Browser page posts to `localhost` or a LAN address | No CORS headers on these routes, any request carrying `Origin` is refused, and the loopback Host guard from #693. |
@@ -233,7 +233,7 @@ A pairing request is not a device and touches no conversation: until it is appro
      |  GET /api/hello  ----------------> |   (discovery confirms it is a Prometheus)
      |  POST /api/pair/requests --------> |   store request (pending, 5 min)
      | <-- {request_id, poll_secret,      |   -- pairing_pending frame / Telegram message ------->
-     |      match_code, ...}              |      "Jennifer's MacBook wants to connect. Code 4821"
+     |      match_code, ...}              |      "Alex's MacBook wants to connect. Code 4821"
      |  shows "Code 4821, waiting..."     |
      |  GET .../{id}  (every 2 s) ------> |  <-- Approve tapped
      | <-- {status: approved, sealed}     |      mint device, seal token to the device key
@@ -247,7 +247,7 @@ A pairing request is not a device and touches no conversation: until it is appro
 
 ```json
 {
-  "device_name": "Jennifer's MacBook",
+  "device_name": "Alex's MacBook",
   "platform": "macos",
   "public_key": "<base64url, 32 raw bytes, X25519>"
 }
@@ -314,7 +314,7 @@ GET /api/pair/requests
                    "created_at", "expires_at", "ttl_seconds"}]}      // pending only, newest first; never a poll secret
 
 POST /api/pair/requests/{request_id}/approve
-body (optional)  {"name": "Jennifer's MacBook (kitchen)", "match_code": "4821"}
+body (optional)  {"name": "Alex's MacBook (kitchen)", "match_code": "4821"}
 200 {"request_id", "status": "approved", "device_id", "name", "platform"}      // never the token
 
 POST /api/pair/requests/{request_id}/deny        body: none or {}
@@ -375,7 +375,7 @@ Approval calls **one function**, `mint_paired_device(name, platform)`, which nar
 
 What the new device therefore is, by #692 and #696, with nothing special-cased here:
 
-* **It owns no conversations.** It sees only the sessions it creates (`device_sessions`, #692). Conversations that predate #692 are operator-only. The first thing Jennifer's Mac shows is an empty list, which is correct, and clients should say so rather than show an error.
+* **It owns no conversations.** It sees only the sessions it creates (`device_sessions`, #692). Conversations that predate #692 are operator-only. The first thing Alex's Mac shows is an empty list, which is correct, and clients should say so rather than show an error.
 * **It is not an operator.** `is_operator` is false, so it cannot approve or deny, cannot list or revoke other devices, and receives no `pairing_*` frame. It can revoke itself (`DELETE /api/devices/{its own id}`).
 * **Still the global token's alone:** `POST /api/devices` and defining an MCP server. An owner device cannot do those either (#696).
 * It appears in an operator's `GET /api/devices` (not `owner`), and an operator revokes it with the existing `DELETE /api/devices/{id}`; the socket closes at once (4401). **It lists only itself**: `GET /api/devices` from a scoped device returns its own row (`is_self: true`) and nothing about who else is enrolled, which an approved device used to be handed (found by the Beacon session).
@@ -413,7 +413,7 @@ Two frame types, sent **only to sockets whose identity has `is_operator`** (the 
 
 ```json
 {"type": "pairing_pending", "timestamp": 1760000000.0,
- "payload": {"request_id": "...", "device_name": "Jennifer's MacBook", "platform": "macos",
+ "payload": {"request_id": "...", "device_name": "Alex's MacBook", "platform": "macos",
              "source_ip": "192.168.1.42", "match_code": "4821",
              "created_at": 1760000000, "expires_at": 1760000300, "ttl_seconds": 300}}
 
@@ -427,7 +427,7 @@ Two frame types, sent **only to sockets whose identity has `is_operator`** (the 
 * The frames go straight to those sockets through a **new targeted send on the bridge** (`send_to_operators(frame)`: iterate `_ws_identity`, keep `identity.is_operator`), **not through the SignalBus and not through `broadcast`.** The SignalBus tail is durable and replayed to any authenticated client by the activity feed. And #692's `_wants` filter drops a frame for a device socket only when the frame *names a session it does not own*; a pairing frame names none, so `broadcast` would deliver it, source address and code included, to every scoped device. A test connects a scoped device and an owner device and requires the first to receive nothing.
 * A socket that is revoked mid-request is already detached by #696's listener, so a frame is never sent to a token that no longer exists.
 * The send is awaited inside the request that caused it (`PairingNotifier.emit` runs its listeners side by side, each cut off after 3 s), so a frame has been sent, or has failed, before the requester's 201 returns, and `notified` is the truth: true only if an operator socket (or Telegram) actually took it. A socket whose send fails is dropped, as `broadcast` does.
-* Beacon renders `device_name` as text, never markup. Suggested copy: "**Jennifer's MacBook** wants to connect. Code **4821**" with platform and source address underneath, "Approve" and "Deny".
+* Beacon renders `device_name` as text, never markup. Suggested copy: "**Alex's MacBook** wants to connect. Code **4821**" with platform and source address underneath, "Approve" and "Deny".
 * Optionally the operator may type the code instead of just tapping: `approve` accepts `{"match_code": "4821"}` and answers `422 code_mismatch` when it differs. Clients may offer that stronger UX; the API does not require it.
 * Phone push: if APNs push is configured, `pairing_pending` also goes through the existing push dispatcher (alert text only, no code). Today the dispatcher sends to every registered device (#692 lists this under what scoping does not cover), so a scoped device would get the alert; the follow-up must restrict it to operator devices, and **until that exists this contract sends no pairing push** rather than leak the existence of a request. No OAra relay (Will's ruling Q3).
 
@@ -438,7 +438,7 @@ Two frame types, sent **only to sockets whose identity has `is_operator`** (the 
 Today the adapter has **no callback-query handler** (its only inline buttons are URL buttons): approvals are `/approve` text commands. This adds one, registered only when the setting is on.
 
 ```
-Jennifer's MacBook wants to connect.
+Alex's MacBook wants to connect.
 Code 4821
 
 macOS · 192.168.1.42 · expires in 5 min

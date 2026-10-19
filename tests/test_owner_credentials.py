@@ -314,11 +314,11 @@ def test_owner_devices_come_only_from_this_mac(world):
     """Will, 2026-10-08: owner tokens come only from same-Mac pairing. Another computer is enrolled as an
     ordinary, scoped device — even by the global token."""
     before = len(world.devices.list_devices())
-    refused = mint_owner_via_api(world, peer="192.168.1.20", name="Jennifer's Mac")
+    refused = mint_owner_via_api(world, peer="192.168.1.20", name="Alex's Mac")
     assert refused.status_code == 403 and "this Mac" in refused.json()["error"]
     assert len(world.devices.list_devices()) == before, "a refused owner mint created a device"
     # the ordinary route from the same address is fine, and is scoped
-    plain = call(world, GLOBAL, "POST", "/api/devices", json={"name": "Jennifer's Mac", "platform": "macos"})
+    plain = call(world, GLOBAL, "POST", "/api/devices", json={"name": "Alex's Mac", "platform": "macos"})
     assert plain.status_code == 201
     assert verify_token(plain.json()["token"], GLOBAL, world.devices).is_operator is False
 

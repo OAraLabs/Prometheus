@@ -17,11 +17,11 @@
   "nonce_hex": "447508f06a9288dac8a0cdca",
   "shared_secret_hex": "8947732b295671945a3ca2dcf4581ec11065c60014a48242db75a3bb3ecb9c7b",
   "derived_key_hex": "d1536f20d3de2dad35333777aa255a25ca7933c673b23eb2274547633c43fbed",
-  "plaintext": "{\"token\":\"tok-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"device_id\":\"9b2e5c7a41d84f0aa13c6e8d2b07f5e9\",\"name\":\"Jennifer's MacBook\"}",
+  "plaintext": "{\"token\":\"tok-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"device_id\":\"9b2e5c7a41d84f0aa13c6e8d2b07f5e9\",\"name\":\"Alex's MacBook\"}",
   "sealed": {
     "alg": "x25519-hkdf-sha256-chacha20poly1305",
     "ephemeral_public_key": "gGtDvizDjHc0GDziRZ6kY-KYUymC_No3wkMdydn3Wkg",
     "nonce": "RHUI8GqSiNrIoM3K",
-    "ciphertext": "YZH1w4ch3QhVLDxtAW0iodiJZGrrVVSLz-RGRKsAM4z7nc0KrRGQJHdMzlu3FInkTl0d0Wa4lWDV92x7wvT3Fdap1lm6Wg1dO24JccNTzOn-vYD0jdBrOA2OosR39oTb2ENdrs-cUF4D2A9OLgycxZQBvjgniv2lkkC2Bjl65jR5u64BBBEyf1skn0ejVOOzGe0"
+    "ciphertext": "YZH1w4ch3QhVLDxtAW0iodiJZGrrVVSLz-RGRKsAM4z7nc0KrRGQJHdMzlu3FInkTl0d0Wa4lWDV92x7wvT3Fdap1lm6Wg1dO24JccNTzOn-vYD0jdBrOA2OosR39oTb2ENdrs-cUF4D2A9OLgyXzJ8X8C1itbu18GK4DlloViAQR1_ncyn7eykNHxHUhQ"
   }
 }

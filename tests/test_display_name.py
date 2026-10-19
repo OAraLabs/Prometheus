@@ -27,7 +27,7 @@ def _fresh(monkeypatch):
     dn.reset_cache()
 
 
-def _darwin(monkeypatch, computer_name: str | None = "Jennifer's MacBook\n", host: str = "jen-mac.local"):
+def _darwin(monkeypatch, computer_name: str | None = "Alex's MacBook\n", host: str = "alex-mac.local"):
     """Make this a Mac whose ``scutil`` answers *computer_name* (``None`` = it is not there)."""
     calls: list[list[str]] = []
 
@@ -52,25 +52,25 @@ def test_the_owners_setting_wins_and_nothing_is_spawned(monkeypatch):
 @pytest.mark.parametrize("value", [None, "", "   ", 7, ["x"]])
 def test_an_unusable_setting_falls_through_to_the_computer_name(monkeypatch, value):
     _darwin(monkeypatch)
-    assert dn.display_name({"pairing": {"display_name": value}}) == "Jennifer's MacBook"
+    assert dn.display_name({"pairing": {"display_name": value}}) == "Alex's MacBook"
 
 
 def test_a_missing_pairing_section_or_config_is_fine(monkeypatch):
     _darwin(monkeypatch)
-    assert dn.display_name({}) == "Jennifer's MacBook"
-    assert dn.display_name(None) == "Jennifer's MacBook"
+    assert dn.display_name({}) == "Alex's MacBook"
+    assert dn.display_name(None) == "Alex's MacBook"
 
 
 def test_the_computer_name_comes_from_scutil_on_a_mac(monkeypatch):
     calls = _darwin(monkeypatch)
-    assert dn.display_name({}) == "Jennifer's MacBook"
+    assert dn.display_name({}) == "Alex's MacBook"
     assert calls == [["scutil", "--get", "ComputerName"]]
 
 
 @pytest.mark.parametrize("failure", ["missing", "nonzero", "timeout", "blank"])
 def test_a_scutil_that_does_not_help_falls_back_to_the_host_name(monkeypatch, failure):
     monkeypatch.setattr(dn.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(dn.platform, "node", lambda: "jen-mac.local")
+    monkeypatch.setattr(dn.platform, "node", lambda: "alex-mac.local")
 
     def fake_run(cmd, **kwargs):
         if failure == "missing":
@@ -82,7 +82,7 @@ def test_a_scutil_that_does_not_help_falls_back_to_the_host_name(monkeypatch, fa
         return SimpleNamespace(returncode=0, stdout="  \n")
 
     monkeypatch.setattr(dn.subprocess, "run", fake_run)
-    assert dn.display_name({}) == "jen-mac.local"
+    assert dn.display_name({}) == "alex-mac.local"
 
 
 def test_nothing_is_spawned_off_a_mac(monkeypatch):
@@ -114,7 +114,7 @@ def test_a_renamed_computer_is_noticed_after_the_cache_expires(monkeypatch):
 
 
 @pytest.mark.parametrize("raw, shown", [
-    ("Jen\nnifer", "Jennifer"),
+    ("Al\nex", "Alex"),
     ("Mac\x07\x1b[31mred", "Mac[31mred"),
     ("tab\tsep", "tabsep"),
     ("nul\x00byte", "nulbyte"),
