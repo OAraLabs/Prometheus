@@ -38,8 +38,8 @@ FLOORS = [
     ("full", "pydantic-settings", "2.14.1", "2.14.2"),
     ("mcp", "pyjwt", "2.14.0", "2.15.1"),               # CVE-2026-101918, fixed in 2.15.0
     ("full", "pyjwt", "2.14.0", "2.15.1"),
-    ("discord", "aiohttp", "3.14.2", "3.14.3"),         # CVE-2026-69244, the last of 3.13.x's
-    ("full", "aiohttp", "3.14.2", "3.14.3"),
+    ("discord", "aiohttp", "3.14.3", "3.14.4"),         # CVE-2026-111063, CVE-2026-111064, GHSA-2g87-pp6c-29x5
+    ("full", "aiohttp", "3.14.3", "3.14.4"),
     # phoenix pins strawberry-graphql exactly: <16.4.0 pins 0.314.3 (3
     # advisories), 16.4.0 pins 0.316.0
     ("evals", "arize-phoenix", "16.3.0", "16.4.0"),
