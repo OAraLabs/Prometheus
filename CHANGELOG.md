@@ -12,7 +12,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 - **The floor.** The `discord` and `full` extras now require `aiohttp>=3.14.4`, so `pip install -U` cannot keep an installed 3.14.3.
 - **Where it applies.** Prometheus uses aiohttp only as a client: discord.py for the Discord gateway, and slack-bolt for the Slack gateway. It runs no aiohttp server. The 0.9.14 Mac app and Docker image shipped 3.14.3; the 0.9.15 builds ship 3.14.4.
 
-### The `slack` extra installs aiohttp (#PR)
+### The `slack` extra installs aiohttp (#830)
 
 - **What went wrong.** The Slack gateway uses slack-bolt's `AsyncApp` with Socket Mode, which imports aiohttp. Neither slack-bolt nor slack-sdk declares aiohttp, and the `slack` extra didn't either, so `pip install 'oara-prometheus[slack]'` without `discord` or `full` installed none. The gateway then failed to start with "slack-bolt is required", although slack-bolt was installed. The Mac app and Docker image install the `discord` extra too, so they were not affected.
 - **What changed.**
