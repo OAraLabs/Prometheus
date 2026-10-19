@@ -80,7 +80,7 @@ def test_a_browser_is_refused_and_the_refusal_carries_no_cors_headers(world):
     ({"device_name": "   "}, "device_name"),
     ({"device_name": "x" * 65}, "device_name"),
     ({"device_name": 7}, "device_name"),
-    ({"device_name": "Jen\nnifer"}, "device_name"),
+    ({"device_name": "Al\nex"}, "device_name"),
     ({"device_name": "Mac\x07"}, "device_name"),
     ({"device_name": "evil‮gnp.exe"}, "device_name"),
     ({"public_key": ""}, "public_key"),
@@ -97,8 +97,8 @@ def test_a_bad_field_is_a_400_that_names_it_and_creates_nothing(world, body, fie
 
 
 def test_a_name_is_trimmed_not_rewritten(world):
-    created, _, _ = world.created(device_name="  Jennifer's MacBook  ")
-    assert world.as_("global", "GET", "/api/pair/requests").json()["requests"][0]["device_name"] == "Jennifer's MacBook"
+    created, _, _ = world.created(device_name="  Alex's MacBook  ")
+    assert world.as_("global", "GET", "/api/pair/requests").json()["requests"][0]["device_name"] == "Alex's MacBook"
     assert created
 
 
@@ -313,7 +313,7 @@ def test_the_operator_sees_the_pending_request_with_its_code_and_source_and_no_s
     listing = world.as_("global", "GET", "/api/pair/requests")
     assert listing.status_code == 200
     (item,) = listing.json()["requests"]
-    assert item == {"request_id": created["request_id"], "device_name": "Jennifer's MacBook", "platform": "macos",
+    assert item == {"request_id": created["request_id"], "device_name": "Alex's MacBook", "platform": "macos",
                     "source_ip": "192.0.2.42", "match_code": created["match_code"],
                     "created_at": int(T0), "expires_at": int(T0) + 300, "ttl_seconds": 300}
     assert created["poll_secret"] not in listing.text
@@ -334,7 +334,7 @@ def test_approving_answers_with_the_device_and_never_the_token(world):
     assert response.status_code == 200
     body = response.json()
     assert set(body) == {"request_id", "status", "device_id", "name", "platform"}
-    assert body["status"] == "approved" and body["name"] == "Jennifer's MacBook"
+    assert body["status"] == "approved" and body["name"] == "Alex's MacBook"
     sealed = world.poll(created).json()["sealed"]
     token = requester.unseal(created["request_id"], sealed)["token"]
     assert token not in response.text
@@ -349,7 +349,7 @@ def test_the_requester_collects_the_token_sealed_and_it_authenticates(world):
         "status", "device_id", "sealed", "endpoints", "tls", "approved_at"}
     assert set(body["sealed"]) == {"alg", "ephemeral_public_key", "nonce", "ciphertext"}
     opened = requester.unseal(created["request_id"], body["sealed"])
-    assert opened["device_id"] == body["device_id"] and opened["name"] == "Jennifer's MacBook"
+    assert opened["device_id"] == body["device_id"] and opened["name"] == "Alex's MacBook"
     assert opened["token"] not in polled.text, "the poll carries the token only sealed"
     assert world.client.get("/api/sessions", headers={"Authorization": f"Bearer {opened['token']}"}).status_code == 200
     assert polled.headers["cache-control"] == "no-store"
@@ -392,10 +392,10 @@ def test_a_host_that_is_not_a_host_yields_no_endpoints(world, host):
 
 def test_an_operator_may_rename_at_approval_and_the_prompt_code_may_be_retyped(world):
     created, requester, _ = world.created()
-    response = world.approve(created, name="Jennifer's MacBook (kitchen)", match_code=created["match_code"])
-    assert response.status_code == 200 and response.json()["name"] == "Jennifer's MacBook (kitchen)"
+    response = world.approve(created, name="Alex's MacBook (kitchen)", match_code=created["match_code"])
+    assert response.status_code == 200 and response.json()["name"] == "Alex's MacBook (kitchen)"
     assert requester.unseal(created["request_id"], world.poll(created).json()["sealed"])["name"] == \
-        "Jennifer's MacBook (kitchen)"
+        "Alex's MacBook (kitchen)"
 
 
 def test_a_retyped_code_that_differs_is_a_422_and_decides_nothing(world):
@@ -499,7 +499,7 @@ def test_an_approved_device_is_scoped_and_cannot_do_what_a_stolen_phone_must_not
     assert mine("DELETE", f"/api/devices/{other['id']}").status_code == 403
     # It is on the list as an ordinary device.
     row = next(d for d in world.as_("global", "GET", "/api/devices").json()
-               if d["name"] == "Jennifer's MacBook")
+               if d["name"] == "Alex's MacBook")
     assert row["owner"] is False and row["owner_source"] is None
     assert world.devices.is_owner(row["id"]) is False
 
@@ -549,7 +549,7 @@ def test_creation_is_announced_with_what_the_operator_needs_and_no_secret(world)
     created, _, _ = world.created(source="192.0.2.42")
     kind, payload = world.events[0]
     assert kind == "pending"
-    assert payload == {"request_id": created["request_id"], "device_name": "Jennifer's MacBook",
+    assert payload == {"request_id": created["request_id"], "device_name": "Alex's MacBook",
                        "platform": "macos", "source_ip": "192.0.2.42", "match_code": created["match_code"],
                        "created_at": int(T0), "expires_at": int(T0) + 300, "ttl_seconds": 300}
 
@@ -598,7 +598,7 @@ def test_every_step_leaves_a_pairing_audit_line_and_no_line_holds_a_secret(world
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("pairing:")]
     kinds = [re.match(r"pairing: (\w+)", ln).group(1) for ln in lines]
     assert {"created", "approved", "delivered", "denied"} <= set(kinds), lines
-    assert any("192.0.2.42" in ln and "Jennifer's MacBook" in ln and created["request_id"] in ln for ln in lines)
+    assert any("192.0.2.42" in ln and "Alex's MacBook" in ln and created["request_id"] in ln for ln in lines)
     everything = caplog.text
     for secret in (created["poll_secret"], token, sealed["ciphertext"], other["poll_secret"]):
         assert secret not in everything

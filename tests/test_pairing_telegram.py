@@ -129,7 +129,7 @@ async def test_a_request_is_sent_to_each_private_chat_as_plain_text_with_two_but
     message = adapter.sent[0]
     assert message["parse_mode"] is None, "explicitly plain text, never the config's MarkdownV2"
     assert message["text"] == (
-        "Jennifer's MacBook wants to connect.\n"
+        "Alex's MacBook wants to connect.\n"
         f"Code {created['match_code']}\n\n"
         "macOS · 192.0.2.42 · expires in 5 min\n"
         "The name is typed on the new device and is not checked. "
@@ -222,10 +222,10 @@ async def test_approve_from_an_allowed_private_chat_decides_as_that_chat(tmp_pat
     await prompts.on_callback(update, MagicMock())
     polled = world.poll(created).json()
     assert polled["status"] == "approved"
-    assert requester.unseal(created["request_id"], polled["sealed"])["name"] == "Jennifer's MacBook"
+    assert requester.unseal(created["request_id"], polled["sealed"])["name"] == "Alex's MacBook"
     query.answer.assert_awaited_once()
     kwargs = query.edit_message_text.await_args.kwargs
-    assert re.fullmatch(r"Jennifer's MacBook — approved from Telegram at \d\d:\d\d", kwargs["text"])
+    assert re.fullmatch(r"Alex's MacBook — approved from Telegram at \d\d:\d\d", kwargs["text"])
     assert kwargs["parse_mode"] is None and kwargs["reply_markup"] is None, "plain text, and the buttons are gone"
     row = next(d for d in world.devices.list_devices() if d.id == polled["device_id"])
     assert world.devices.is_owner(row.id) is False, "an approval from Telegram is a scoped device like any other"
@@ -359,7 +359,7 @@ async def test_a_decision_made_elsewhere_edits_every_message_and_removes_the_but
     assert sorted(c.kwargs["chat_id"] for c in edits) == [OWNER, SECOND_OWNER]
     for call in edits:
         assert call.kwargs["parse_mode"] is None and call.kwargs.get("reply_markup") is None
-        assert call.kwargs["text"].startswith("Jennifer's MacBook — approved on Beacon at ")
+        assert call.kwargs["text"].startswith("Alex's MacBook — approved on Beacon at ")
         assert call.kwargs["message_id"] in sent.values()
 
 
@@ -378,7 +378,7 @@ async def test_each_final_state_is_worded(tmp_path):
     texts = [c.kwargs["text"] for c in adapter._app.bot.edit_message_text.await_args_list]
     assert any("denied in the terminal" in t for t in texts)
     assert any("cancelled by the new device" in t for t in texts)
-    assert any(t.startswith("Jennifer's MacBook — expired") for t in texts)
+    assert any(t.startswith("Alex's MacBook — expired") for t in texts)
     assert three
 
 

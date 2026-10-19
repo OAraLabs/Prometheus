@@ -220,7 +220,7 @@ async def test_over_real_uvicorn_listeners_the_tls_one_answers_tls_and_the_plain
         requester = Requester()
         async with httpx.AsyncClient(verify=False) as client:
             made = await client.post(f"http://127.0.0.1:{plain_port}/api/pair/requests", json={
-                "device_name": "Jennifer's MacBook", "platform": "macos", "public_key": requester.public_b64})
+                "device_name": "Alex's MacBook", "platform": "macos", "public_key": requester.public_b64})
             assert made.status_code == 201, made.text
             created = made.json()
             approved = await client.post(

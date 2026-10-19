@@ -168,11 +168,12 @@ mcp = ["mcp>=1.28.1,<2", "pydantic-settings>=2.14.2", "pyjwt>=2.15.1"]
 slack = ["slack-bolt>=1.18.0", "slack-sdk>=3.27.0"]
 # SPRINT G2: Discord gateway adapter. Optional so base installs stay slim
 # (discord.py pulls aiohttp); import-guarded exactly like the slack extra.
-# >=3.14.3: aiohttp is discord.py's HTTP and gateway client, and 3.14.3 is the
-# first release with every advisory against 3.13.x fixed (the last,
-# CVE-2026-69244). discord.py's own range admits older ones, and pip keeps an
-# installed version that satisfies it — so the floor has to be ours.
-discord = ["discord.py>=2.3.0", "aiohttp>=3.14.3"]
+# >=3.14.4: aiohttp is discord.py's HTTP and gateway client, and 3.14.4 is the
+# first release with every advisory against 3.14.3 and earlier fixed (the last
+# three: CVE-2026-111063, CVE-2026-111064 and GHSA-2g87-pp6c-29x5). discord.py's
+# own range admits older ones, and pip keeps an installed version that
+# satisfies it — so the floor has to be ours.
+discord = ["discord.py>=2.3.0", "aiohttp>=3.14.4"]
 # Announce this Prometheus on the home network (mDNS _prometheus._tcp, web/discovery.py)
 # so a phone on the same Wi-Fi finds it without an address. Optional on purpose:
 # zeroconf is LGPL-2.1-or-later and has one dependency of its own (ifaddr, MIT), and
@@ -217,7 +218,7 @@ full = [
     "slack-bolt>=1.18.0",
     "slack-sdk>=3.27.0",
     "discord.py>=2.3.0",
-    "aiohttp>=3.14.3",  # discord.py's; security floor — see the `discord` extra
+    "aiohttp>=3.14.4",  # discord.py's; security floor — see the `discord` extra
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "websockets>=12",
