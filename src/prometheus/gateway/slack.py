@@ -391,11 +391,16 @@ class SlackAdapter(BasePlatformAdapter):
             from slack_bolt.adapter.socket_mode.async_handler import (
                 AsyncSocketModeHandler,
             )
-        except ImportError:
+        except ImportError as exc:
+            # Name the module that is actually missing: slack-bolt's async
+            # handler needs aiohttp, which slack-bolt does not declare, so
+            # "slack-bolt is required" was wrong whenever only aiohttp was gone.
+            missing = getattr(exc, "name", None) or "slack_bolt"
             raise ImportError(
-                "slack-bolt is required for Slack support. "
-                "Install it with: pip install slack-bolt slack-sdk"
-            )
+                f"Slack support needs the '{missing}' module, which is not "
+                "installed. Install it with: pip install 'oara-prometheus[slack]'",
+                name=missing,
+            ) from exc
 
         if not self.config.token:
             raise ValueError("Slack bot token (xoxb-...) is required")

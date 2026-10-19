@@ -165,7 +165,11 @@ skills = ["numpy>=1.26", "onnxruntime>=1.18", "tokenizers>=0.15"]
 # (CVE-2026-58203). So does pyjwt, also mcp's: >=2.15.1 (CVE-2026-101918,
 # fixed in 2.15.0; 2.15.1 is the version uv.lock resolves and audits clean).
 mcp = ["mcp>=1.28.1,<2", "pydantic-settings>=2.14.2", "pyjwt>=2.15.1"]
-slack = ["slack-bolt>=1.18.0", "slack-sdk>=3.27.0"]
+# aiohttp: the Slack gateway runs slack-bolt's AsyncApp over Socket Mode, and
+# both need it (slack_bolt's async handler and slack_sdk's async web client
+# import it) without declaring it, so slack-bolt alone installs none. The
+# floor is the same security floor as the `discord` extra below.
+slack = ["slack-bolt>=1.18.0", "slack-sdk>=3.27.0", "aiohttp>=3.14.4"]
 # SPRINT G2: Discord gateway adapter. Optional so base installs stay slim
 # (discord.py pulls aiohttp); import-guarded exactly like the slack extra.
 # >=3.14.4: aiohttp is discord.py's HTTP and gateway client, and 3.14.4 is the
@@ -218,7 +222,7 @@ full = [
     "slack-bolt>=1.18.0",
     "slack-sdk>=3.27.0",
     "discord.py>=2.3.0",
-    "aiohttp>=3.14.4",  # discord.py's; security floor — see the `discord` extra
+    "aiohttp>=3.14.4",  # discord.py's and the Slack gateway's; security floor — see the `discord` extra
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "websockets>=12",

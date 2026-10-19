@@ -953,3 +953,31 @@ class TestSlackStartNonBlocking:
         with pytest.raises(Exception, match="invalid_auth"):
             await asyncio.wait_for(adapter.start(), timeout=5)
         assert adapter._running is False
+
+    @pytest.mark.asyncio
+    async def test_missing_aiohttp_is_named_not_blamed_on_slack_bolt(
+        self, monkeypatch, slack_config,
+    ):
+        """slack-bolt installed, aiohttp not: the error names aiohttp."""
+        import builtins
+
+        self._fake_slack_bolt(monkeypatch)
+        real_import = builtins.__import__
+
+        def no_aiohttp(name, *args, **kwargs):
+            # What the real async_handler does: `from .aiohttp import ...`
+            # ends in `import aiohttp`, which fails when it isn't installed.
+            if name == "slack_bolt.adapter.socket_mode.async_handler":
+                raise ModuleNotFoundError(
+                    "No module named 'aiohttp'", name="aiohttp")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", no_aiohttp)
+        adapter = self._adapter(slack_config)
+        with pytest.raises(ImportError) as info:
+            await adapter.start()
+        assert info.value.name == "aiohttp"
+        assert "'aiohttp'" in str(info.value)
+        assert "slack-bolt is required" not in str(info.value)
+        assert "oara-prometheus[slack]" in str(info.value)
+        assert adapter._running is False
