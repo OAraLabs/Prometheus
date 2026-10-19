@@ -40,6 +40,7 @@ FLOORS = [
     ("full", "pyjwt", "2.14.0", "2.15.1"),
     ("discord", "aiohttp", "3.14.3", "3.14.4"),         # CVE-2026-111063, CVE-2026-111064, GHSA-2g87-pp6c-29x5
     ("full", "aiohttp", "3.14.3", "3.14.4"),
+    ("slack", "aiohttp", "3.14.3", "3.14.4"),
     # phoenix pins strawberry-graphql exactly: <16.4.0 pins 0.314.3 (3
     # advisories), 16.4.0 pins 0.316.0
     ("evals", "arize-phoenix", "16.3.0", "16.4.0"),
@@ -63,3 +64,13 @@ def test_the_extra_floors_its_vulnerable_dependency(extra, dist, last_bad, first
     assert not spec.contains(last_bad), (
         f"`{extra}`: {dist}{spec} admits {last_bad}, which has known advisories")
     assert spec.contains(first_good), f"`{extra}`: {dist}{spec} excludes {first_good}"
+
+
+def test_the_slack_extra_declares_aiohttp():
+    """The Slack gateway's AsyncApp + AsyncSocketModeHandler import aiohttp,
+    and neither slack-bolt nor slack-sdk declares it — so unless the `slack`
+    extra does, `pip install 'oara-prometheus[slack]'` installs no aiohttp
+    and the gateway cannot start."""
+    assert "aiohttp" in _extra("slack"), (
+        "`slack` must declare aiohttp: slack_bolt's async Socket Mode handler "
+        "and slack_sdk's async web client import it without declaring it")
