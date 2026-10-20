@@ -64,6 +64,7 @@ For each fact, output a JSON object on its own line with these fields:
 
 Rules:
 - Only extract facts that are clearly stated, not inferred.
+-Extract important information about entity or entity mention or talk about it.
 - One fact per JSON object. Multiple objects for multiple facts.
 - Skip generic statements ("the user said hello").
 - Confidence >= 0.8: explicitly stated. 0.5-0.8: implied. < 0.5: uncertain.
@@ -75,6 +76,12 @@ Messages:
 
 _BATCH_SIZE = 15  # messages per extraction call
 _DEFAULT_CADENCE_SECONDS = 1800  # 30 minutes
+
+# A failed extraction batch HOLDS the cursor so its rows are retried next pass.
+# If the very same batch keeps failing (a message the provider always rejects),
+# give up on that one batch after this many passes so it cannot wedge
+# extraction forever. 6 passes = 3 hours at the default cadence.
+_MAX_BATCH_RETRIES = 6
 
 # ------------------------------------------------------------------
 # Extraction hygiene (2026-07 wiki-quality audit)
@@ -121,26 +128,52 @@ _FACT_STOPWORDS = frozenset({
     "also", "appear", "appears", "based", "called", "indicates", "indicating",
     "likely", "named", "seems", "suggesting", "suggests",
 })
-_FACT_TOKEN_RE = re.compile(r"[a-z0-9.]+")
+# Unicode-aware: runs of letters/digits (any script) joined by single dots, so
+# "10.0.0.5" / "v1.2" stay whole while a sentence-final period is dropped.
+# The old ``[a-z0-9.]+`` silently discarded every non-ASCII character, so two
+# different non-Latin facts sharing one Latin word could look identical.
+_FACT_TOKEN_RE = re.compile(r"[^\W_]+(?:\.[^\W_]+)*")
+_CONTRACTION_NOT_RE = re.compile(r"n['\u2019]t\b")
+
+# Tokens that flip a fact's meaning. If one side has them and the other does
+# not, the two facts are NOT paraphrases, however much else they share.
+_NEGATION_TOKENS = frozenset({"not", "no", "never", "none", "without", "cannot"})
 
 
 def _fact_token_set(fact: str) -> frozenset[str]:
-    """Content tokens of a fact: lowercased, stopwords dropped, edge dots
-    stripped (keeps IPs/versions whole while shedding sentence periods)."""
-    tokens = (t.strip(".") for t in _FACT_TOKEN_RE.findall((fact or "").lower()))
+    """Content tokens of a fact: casefolded, stopwords dropped, n't -> not,
+    edge dots stripped (keeps IPs/versions whole while shedding sentence periods)."""
+    text = _CONTRACTION_NOT_RE.sub(" not", (fact or "").casefold())
+    tokens = (t.strip(".") for t in _FACT_TOKEN_RE.findall(text))
     return frozenset(t for t in tokens if t and t not in _FACT_STOPWORDS)
 
 
-def _near_dup_similarity(a: frozenset[str], b: frozenset[str]) -> float:
-    """max(Jaccard, containment) over two token sets.
+def _near_dup_similarity(new: frozenset[str], existing: frozenset[str]) -> float:
+    """Directional similarity of a NEW fact against an EXISTING one.
 
-    Containment catches "same fact plus extra inferred fluff", which pure
-    Jaccard under-scores.
+    ``max(Jaccard, share of NEW already present in EXISTING)``. Folding is only
+    safe when the new fact adds (almost) nothing, so containment is measured
+    from the new fact's side. The old ``overlap / min(len(a), len(b))`` was
+    symmetric: a richer new fact that merely *contained* a short stored one
+    scored 1.0 and was rewritten to the short text, losing its extra detail.
     """
-    if not a or not b:
+    if not new or not existing:
         return 0.0
-    overlap = len(a & b)
-    return max(overlap / len(a | b), overlap / min(len(a), len(b)))
+    overlap = len(new & existing)
+    return max(overlap / len(new | existing), overlap / len(new))
+
+
+def _changes_meaning(new: frozenset[str], existing: frozenset[str]) -> bool:
+    """True if the tokens the two facts DON'T share would change what is true.
+
+    A differing number / version / IP ("32gb" vs "64gb") is a correction, not a
+    paraphrase; a negation on only one side is a contradiction. Both must stay
+    separate rows instead of reinforcing the stale one.
+    """
+    diff = new ^ existing
+    if diff & _NEGATION_TOKENS:
+        return True
+    return any(ch.isdigit() for tok in diff for ch in tok)
 
 
 class MemoryExtractor:
@@ -180,6 +213,9 @@ class MemoryExtractor:
         # replaced was a single value serving two scopes, and it failed in both
         # directions at once — see :meth:`_cursor_for` and the module history.
         self._seeded = False
+        # Consecutive-failure tracking for the batch that is holding the cursor.
+        self._fail_floor: int | None = None
+        self._fail_count = 0
         # PR fix/memory-lcm-full-rewire (2026-05-26): conversation reads
         # now come from LCM, not MemoryStore.messages (which was unwired
         # — nothing produced to it). If ``lcm_conversation_store`` is
@@ -269,6 +305,7 @@ class MemoryExtractor:
         # aren't re-scanned on each cadence. Computed from the unfiltered read
         # for exactly that reason, and per session, because that is the scope
         # the cursor is keyed on.
+        rows_read = parts  # unfiltered read, kept for the post-batch advance
         max_row_by_scope = self._max_row_by_scope(parts, session_id)
 
         # A sweep's single global-floor query cannot express each session's own
@@ -313,6 +350,7 @@ class MemoryExtractor:
                 "role": part.role,
                 "content": part.content,
                 "timestamp": part.timestamp,
+                "row_id": int(getattr(part, "row_id", 0) or 0),
             }
             for part in conversational_parts
         ]
@@ -325,15 +363,33 @@ class MemoryExtractor:
 
         total_persisted = 0
         all_facts: list[dict] = []
+        failed_span: tuple[int, int] | None = None
         for i in range(0, len(messages), self._batch_size):
             batch = messages[i : i + self._batch_size]
-            persisted, facts = await self._process_batch(batch)
+            ok, persisted, facts = await self._extract_batch(batch)
+            if not ok:
+                # The model call failed. Do NOT advance past this batch (that
+                # would mark never-mined rows as consumed = permanent loss),
+                # and stop: later batches would only hammer a failing provider
+                # and could not be advanced past this one anyway.
+                rows = [m["row_id"] for m in batch if m["row_id"]]
+                failed_span = (min(rows), max(rows)) if rows else None
+                log.warning(
+                    "MemoryExtractor: batch of %d message(s) failed; holding "
+                    "the cursor so they are retried next pass", len(batch),
+                )
+                break
             total_persisted += persisted
             all_facts.extend(facts)
 
-        # Advance over all rows seen this pass (mined + skipped), so a trailing
-        # run of skipped task turns isn't re-read on the next pass.
-        self._advance_cursors(max_row_by_scope)
+        # Advance over rows seen this pass (mined + skipped), so a trailing run
+        # of skipped task turns isn't re-read on the next pass — but only up to
+        # the first failed batch, if there was one.
+        ceiling = self._cursor_ceiling(failed_span)
+        self._advance_cursors(
+            self._max_row_by_scope(rows_read, session_id, below=ceiling)
+            if ceiling is not None else max_row_by_scope
+        )
         self._last_run = time.time()
         log.info("MemoryExtractor: persisted %d memories from %d messages", total_persisted, len(messages))
 
@@ -435,8 +491,36 @@ class MemoryExtractor:
             )
         return kept
 
+    def _cursor_ceiling(self, failed_span: tuple[int, int] | None) -> int | None:
+        """Exclusive rowid ceiling for this pass's cursor advance, or ``None``.
+
+        ``None`` = no failure, advance over everything read. Otherwise rows at
+        or above the returned id stay unconsumed. If the same batch has failed
+        ``_MAX_BATCH_RETRIES`` passes running, skip just that batch (ceiling
+        just past its last row) rather than wedge extraction on it forever.
+        """
+        if failed_span is None:
+            self._fail_floor, self._fail_count = None, 0
+            return None
+        lo, hi = failed_span
+        if lo == self._fail_floor:
+            self._fail_count += 1
+        else:
+            self._fail_floor, self._fail_count = lo, 1
+        if self._fail_count >= _MAX_BATCH_RETRIES:
+            log.error(
+                "MemoryExtractor: batch starting at rowid %d failed %d passes "
+                "in a row; skipping it so extraction can continue",
+                lo, self._fail_count,
+            )
+            self._fail_floor, self._fail_count = None, 0
+            return hi + 1
+        return lo
+
     @staticmethod
-    def _max_row_by_scope(parts: list, session_id: str | None) -> dict[str, int]:
+    def _max_row_by_scope(
+        parts: list, session_id: str | None, below: int | None = None,
+    ) -> dict[str, int]:
         """``{scope: max rowid seen}`` for the rows this pass read.
 
         A sweep touches many sessions, so it advances each session's own cursor
@@ -450,6 +534,8 @@ class MemoryExtractor:
             row_id = int(getattr(part, "row_id", 0) or 0)
             if not row_id:
                 continue
+            if below is not None and row_id >= below:
+                continue  # at/after a failed batch: not consumed
             sid = part.session_id
             if sid:
                 out[sid] = max(out.get(sid, 0), row_id)
@@ -526,7 +612,20 @@ class MemoryExtractor:
     async def _process_batch(self, messages: list[dict]) -> tuple[int, list[dict]]:
         """Send one batch to the LLM and persist extracted facts.
 
-        Returns ``(count_persisted, list_of_persisted_fact_dicts)``.
+        Returns ``(count_persisted, list_of_persisted_fact_dicts)``. Kept with
+        its original contract; ``run_once`` uses :meth:`_extract_batch`, which
+        also reports whether the model call succeeded.
+        """
+        _ok, persisted, facts = await self._extract_batch(messages)
+        return persisted, facts
+
+    async def _extract_batch(
+        self, messages: list[dict],
+    ) -> tuple[bool, int, list[dict]]:
+        """Like :meth:`_process_batch` but returns ``(ok, persisted, facts)``.
+
+        ``ok`` is False only when the model call itself failed. "The model
+        returned no facts" is ok=True: that batch was genuinely consumed.
         """
         formatted = self._format_messages(messages)
         prompt = _EXTRACTION_PROMPT.format(messages=formatted)
@@ -535,7 +634,7 @@ class MemoryExtractor:
         # Drops the redundant outer try/except per Sprint 4 audit.
         raw = await self._call_model(prompt)
         if raw is None:
-            return 0, []
+            return False, 0, []
 
         facts = self._parse_facts(raw)
         source_ids = [m["id"] for m in messages]
@@ -576,7 +675,7 @@ class MemoryExtractor:
                 persisted_facts.append(fact)
             except Exception:
                 log.exception("MemoryExtractor: failed to persist fact: %s", fact)
-        return persisted, persisted_facts
+        return True, persisted, persisted_facts
 
     def _fold_near_duplicate(self, entity_name: str, fact: object) -> str | None:
         """Return the stored fact text *fact* is a near-duplicate of, or ``None``.
@@ -599,7 +698,10 @@ class MemoryExtractor:
                 if (row.get("entity_name") or "").strip().lower() != target:
                     continue
                 existing = row.get("fact") or ""
-                sim = _near_dup_similarity(new_tokens, _fact_token_set(existing))
+                existing_tokens = _fact_token_set(existing)
+                if _changes_meaning(new_tokens, existing_tokens):
+                    continue
+                sim = _near_dup_similarity(new_tokens, existing_tokens)
                 if sim >= _NEAR_DUP_THRESHOLD:
                     if existing != fact:
                         log.debug(
