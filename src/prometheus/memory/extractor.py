@@ -663,17 +663,62 @@ class MemoryExtractor:
 
     @staticmethod
     def _parse_facts(raw: str) -> list[dict]:
-        """Parse newline-delimited JSON objects from model output."""
-        facts: list[dict] = []
+        """Parse facts from JSON, fenced JSON, or newline-delimited JSON.
+
+        Models commonly pretty-print JSON across multiple lines or wrap it in
+        Markdown fences. Parsing one line at a time silently discarded those
+        valid responses, leaving memory extraction with zero facts.
+        """
         required = {"entity_name", "fact"}
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line or not line.startswith("{"):
-                continue
+        text = raw.strip()
+        if not text:
+            return []
+
+        # Markdown fences are presentation, not part of the JSON payload.
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].lstrip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+
+        def valid_facts(value: object) -> list[dict]:
+            if isinstance(value, dict):
+                # Accept either one fact or a common {"facts": [...]} envelope.
+                nested = value.get("facts")
+                candidates = nested if isinstance(nested, list) else [value]
+            elif isinstance(value, list):
+                candidates = value
+            else:
+                return []
+            return [
+                item for item in candidates
+                if isinstance(item, dict) and required.issubset(item)
+            ]
+
+        # Preferred path: one complete JSON document (object or array).
+        try:
+            parsed = valid_facts(json.loads(text))
+            if parsed:
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback: decode consecutive JSON values from prose/NDJSON. Unlike
+        # splitlines(), raw_decode supports pretty-printed, multi-line objects.
+        decoder = json.JSONDecoder()
+        facts: list[dict] = []
+        pos = 0
+        while pos < len(text):
+            start = text.find("{", pos)
+            if start < 0:
+                break
             try:
-                obj = json.loads(line)
-                if required.issubset(obj.keys()):
-                    facts.append(obj)
+                obj, end = decoder.raw_decode(text, start)
             except json.JSONDecodeError:
+                pos = start + 1
                 continue
+            facts.extend(valid_facts(obj))
+            pos = end
         return facts
