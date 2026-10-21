@@ -369,7 +369,7 @@ oara setup --gateway-only    # add/change Telegram, Slack, or Discord later
 oara setup --provider anthropic --api-key-env ANTHROPIC_API_KEY --model claude-sonnet-5   # no local GPU yet: start on a cloud model, switch later
 ```
 
-Prefer doing setup from a couch? Skip `oara setup`, run `oara daemon` bare, and it boots in **setup mode** — a pairing-only API that prints a one-time 6-digit code. Beacon's wizard takes it from there (detects backends, names the agent, configures gateways) and the daemon wakes fully configured:
+Prefer doing setup from Beacon? Skip `oara setup`, run `oara daemon` bare, and it boots in **setup mode** — a pairing-only API that prints a one-time 6-digit code and listens on this machine only. Beacon's wizard takes it from there (detects backends, names the agent, configures gateways) and the daemon wakes fully configured. To set up a headless box from another computer, start it with `oara daemon --bind 0.0.0.0` instead: setup mode then listens on every interface, and so does the daemon it becomes (the pairing code is the only lock until setup finishes, so do this on a network you trust):
 
 ![Setup-mode pairing banner](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/term-pairing-banner.svg)
 
