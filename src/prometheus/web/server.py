@@ -5356,11 +5356,25 @@ def create_app(
         # provider would actually use, so UIs can say how it's connected.
         from prometheus.providers.credentials import credential_status
 
+        from prometheus.providers.backends import ENGINE_NAMES, _short_model
+
         primary_model = config.get("model", {}).get("model", "unknown")
         primary_provider = config.get("model", {}).get("provider", "local")
+        # The primary as the registry last saw it (list_models re-probes it first when stale). Reachability, the
+        # model it serves and its path come from that probe, as for the backend rows; a primary the registry does not
+        # probe (no registry; LM Studio, vLLM or a cloud primary) has no health to go by and stays available.
+        reg = _registry()
+        st = reg.status(_LOCAL_MODEL_KEY) if reg is not None else None
+        probed = st if st is not None and st.probed else None
+        served = (probed.model_path or probed.model) if probed is not None else None
+        engine = ENGINE_NAMES.get(primary_provider) or _PRESET_LABELS.get(primary_provider) or primary_provider
         catalog = [{
-            "key": _LOCAL_MODEL_KEY, "label": "Local", "provider": primary_provider,
-            "model": primary_model, "is_default": True, "available": True,
+            "key": _LOCAL_MODEL_KEY,
+            "label": f"{engine} · {_short_model(served or primary_model) or '?'}",
+            "detail": probed.model_path if probed is not None else None,
+            "provider": primary_provider,
+            "model": primary_model, "is_default": True,
+            "available": bool(probed.ok) if probed is not None else True,
             "auth": None,
             # DETECTED, never asserted. This flag gates the image-block path, and
             # the value is the boot provider's own `supports_vision` — the mmproj
@@ -5751,6 +5765,11 @@ def create_app(
     async def list_models():
         if getattr(app.state, "model_router", None) is None:
             return JSONResponse(status_code=503, content={"error": "model router unavailable"})
+        # The Local row reports the primary's reachability: ask it again first when the last answer is past the TTL
+        # (bounded by the probe timeout; concurrent requests share one probe).
+        reg = _registry()
+        if reg is not None and reg.get(_LOCAL_MODEL_KEY) is not None and reg.is_stale(_LOCAL_MODEL_KEY):
+            await reg.probe(_LOCAL_MODEL_KEY)
         return {
             "models": _model_catalog(),
             "default_key": _LOCAL_MODEL_KEY,
