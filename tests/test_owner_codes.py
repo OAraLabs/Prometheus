@@ -248,6 +248,12 @@ def test_the_redeemer_is_recorded_by_its_own_address_not_its_prefix(codes):
     assert codes.status(record.id).source == "2001:db8:0:7::42"
 
 
+def test_whether_the_redeemer_was_this_host_is_recorded(codes):
+    record, code = codes.issue()
+    assert codes.redeem(code, Minter(), source="127.0.0.1", this_host=True) is not None
+    assert codes.status(record.id).this_host is True
+
+
 def test_five_wrong_tries_shut_that_source_out_and_no_one_else(codes, caplog):
     caplog.set_level(logging.INFO)
     record, code = codes.issue()

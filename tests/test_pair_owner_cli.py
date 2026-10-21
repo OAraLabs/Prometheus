@@ -54,8 +54,9 @@ def printed_code(lines: list[str]) -> str:
     raise AssertionError(f"no code was printed: {lines}")
 
 
-def beacon_redeems(world: World, lines: list[str], peer: str = MACBOOK, name: str = "Will's MacBook Pro"):
-    client = TestClient(world.app, base_url="http://192.0.2.50:8005", client=(peer, 50000))
+def beacon_redeems(world: World, lines: list[str], peer: str = MACBOOK, name: str = "Will's MacBook Pro",
+                   headers: dict[str, str] | None = None):
+    client = TestClient(world.app, base_url="http://192.0.2.50:8005", client=(peer, 50000), headers=headers or {})
     return client.post("/api/pair/owner", json={"code": printed_code(lines), "device_name": name, "platform": "macos"})
 
 
@@ -237,6 +238,83 @@ def test_ctrl_c_cancels_the_code(world):
     code = run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, interactive=True, sleep=sleep)
     assert code == 130 and "cancel" in "\n".join(lines).lower()
     assert beacon_redeems(world, lines).status_code == 401
+
+
+# ── the words fit this Mac and another computer ───────────────────────────────
+#
+# The code can make a Beacon on this very computer the owner's device as well as one elsewhere, so the banner, printed
+# before anyone has used the code, names neither. The line after it says which it was, from the daemon's own
+# is_this_host() at redeem time (a loopback peer is not enough: Tailscale serve or cloudflared relay from 127.0.0.1).
+
+_ELSEWHERE = ("other computer", "another computer")
+
+
+def redeemed_lines(world: World, **redeem) -> list[str]:
+    lines: list[str] = []
+    done: list[int] = []
+
+    def sleep(_seconds: float) -> None:
+        if not done:
+            response = beacon_redeems(world, lines, **redeem)
+            assert response.status_code == 200, response.text
+            done.append(1)
+
+    code = run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, interactive=True, sleep=sleep)
+    assert code == 0, lines
+    return lines
+
+
+def done_line(lines: list[str]) -> str:
+    return next(line for line in lines if line.startswith("Done:"))
+
+
+def test_the_banner_names_neither_this_computer_nor_another(world):
+    lines = redeemed_lines(world)
+    banner = "\n".join(lines[: next(i for i, line in enumerate(lines) if line.startswith("Waiting"))]).lower()
+    assert not any(word in banner for word in _ELSEWHERE), banner
+    assert "beacon" in banner and "owner device" in banner
+
+
+def test_a_beacon_on_this_computer_is_said_to_be_on_this_computer(world):
+    line = done_line(redeemed_lines(world, peer="127.0.0.1", name="Studio Beacon"))
+    assert ("this Mac" in line or "this computer" in line) and not any(w in line.lower() for w in _ELSEWHERE), line
+
+
+def test_a_beacon_reaching_the_daemon_s_own_address_is_on_this_computer(world):
+    line = done_line(redeemed_lines(world, peer="192.0.2.50", name="Studio Beacon"))
+    assert "this Mac" in line or "this computer" in line, line
+
+
+def test_a_beacon_elsewhere_is_said_to_be_on_another_computer_with_its_address(world):
+    line = done_line(redeemed_lines(world))
+    assert "another computer" in line and MACBOOK in line and "this Mac" not in line, line
+
+
+def test_a_relayed_loopback_is_never_called_this_computer(world):
+    """The alarm line must not reassure: through a relay on this Mac, the Beacon is somewhere else."""
+    line = done_line(redeemed_lines(world, peer="127.0.0.1", headers={"X-Forwarded-For": MACBOOK}))
+    assert "this Mac" not in line and "this computer" not in line.replace("on this computer from", ""), line
+    assert "relay" in line.lower(), line
+
+
+def test_the_expiry_line_names_neither(world):
+    def sleep(_seconds: float) -> None:
+        world.clock.now += 61
+
+    code, lines = run(world, "--owner", sleep=sleep)
+    text = "\n".join(lines).lower()
+    assert "expired" in text and not any(word in text for word in _ELSEWHERE), text
+
+
+def test_the_help_names_neither():
+    import io
+
+    parser = argparse.ArgumentParser(prog="oara")
+    add_pair_subparser(parser.add_subparsers(dest="command"))
+    out = io.StringIO()
+    parser._subparsers._group_actions[0].choices["pair"].print_help(out)
+    text = " ".join(out.getvalue().split()).lower()
+    assert "owner" in text and "another computer your own" not in text, text
 
 
 # ── when it cannot ───────────────────────────────────────────────────────────

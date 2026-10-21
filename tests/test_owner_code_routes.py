@@ -318,7 +318,21 @@ def test_the_terminal_learns_who_redeemed_it_and_from_where(world):
         "wrong_attempts": 0}
     device_id = redeem(world, body["code"]).json()["device_id"]
     assert status(world, body["code_id"]).json()["redeemed_by"] == {
-        "id": device_id, "name": "Will's MacBook Pro", "platform": "macos", "source": MACBOOK}
+        "id": device_id, "name": "Will's MacBook Pro", "platform": "macos", "source": MACBOOK, "this_host": False}
+
+
+@pytest.mark.parametrize("who,client_for,this_host", [
+    ("a loopback Beacon", lambda w: here(w), True),
+    ("a Beacon reaching the daemon's own address", lambda w: own_address(w), True),
+    ("a Beacon on another computer", lambda w: remote(w), False),
+    ("a relay on this machine", lambda w: TestClient(w.app, base_url="http://127.0.0.1:8005", client=("127.0.0.1", 50126),
+                                                      headers={"X-Forwarded-For": MACBOOK}), False),
+])
+def test_redeemed_by_says_whether_it_was_this_host(world, who, client_for, this_host):
+    """is_this_host() at redeem time: oara pair --owner says "this Mac" only when it was, never for a relayed loopback."""
+    body = minted(world)
+    assert redeem(world, body["code"], client=client_for(world)).status_code == 200, who
+    assert status(world, body["code_id"]).json()["redeemed_by"]["this_host"] is this_host, who
 
 
 def test_an_unknown_code_id_is_a_404(world):
@@ -416,7 +430,7 @@ def test_every_operator_socket_hears_a_code_issued_and_redeemed_and_a_scoped_one
         assert issued == {"event": "issued", "code_id": body["code_id"], "expires_at": body["expires_at"],
                           "redeemed_by": None}
         assert done["redeemed_by"] == {"id": redeemed["device_id"], "name": "Will's MacBook Pro",
-                                       "platform": "macos", "source": MACBOOK}
+                                       "platform": "macos", "source": MACBOOK, "this_host": False}
     assert socks["scoped"].frames == []
 
 
