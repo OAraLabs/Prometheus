@@ -377,8 +377,18 @@ class TestCompatibility:
                 assert await asyncio.to_thread(
                     ws_handshake_status, run.ws[1], host) == 101, host
 
-    async def test_setup_mode_without_web_bind_still_binds_every_interface(self):
+    async def test_setup_mode_without_web_bind_listens_on_this_machine_only(self):
+        """Unchosen, setup mode is loopback on every install kind, and refuses a foreign Host (DNS rebinding)."""
         async with setup_mode() as (server, _pairing):
+            host, port = sockname(server.servers[0].sockets[0])
+            assert host == "127.0.0.1"
+            assert await asyncio.to_thread(http_status, port, f"127.0.0.1:{port}",
+                                           path="/api/setup/status") == 200
+            assert await asyncio.to_thread(http_status, port, "evil.example",
+                                           path="/api/setup/status") != 200
+
+    async def test_setup_mode_with_every_interface_chosen_binds_every_interface(self):
+        async with setup_mode("0.0.0.0") as (server, _pairing):
             host, port = sockname(server.servers[0].sockets[0])
             assert host == "0.0.0.0"
             assert await asyncio.to_thread(http_status, port, "evil.example",
