@@ -877,6 +877,9 @@ Run this wizard again after you're ready:
         self._apply_wizard_fields(base)
         if is_new_install:
             base["web"]["bind"] = FRESH_INSTALL_BIND
+            # A new install starts from {}, not the template: write its compactor switch, or there is none
+            # (tests/test_fresh_install_compacts.py).
+            base.setdefault("compaction", {"enabled": True})
             # A new app install asks before every shell command and file write (permissions/modes.py).
             from prometheus.permissions.modes import fresh_install_mode
 
