@@ -168,7 +168,7 @@ def parse_target(text: str) -> tuple[str | None, str, int | None] | None:
     if "://" in t:
         try:
             parts = urlsplit(t)
-            port_text = parts.port  # raises ValueError when out of range
+            url_port = parts.port  # raises ValueError when out of range
         except ValueError:
             return None
         if parts.scheme.lower() not in ("http", "https") or parts.username is not None or parts.password is not None:
@@ -177,9 +177,9 @@ def parse_target(text: str) -> tuple[str | None, str, int | None] | None:
             return None
         scheme = parts.scheme.lower()
         host = (parts.hostname or "").lower()
-        if port_text is not None and not 1 <= port_text <= 65535:
+        if url_port is not None and not 1 <= url_port <= 65535:
             return None
-        port = port_text
+        port = url_port
         if ":" in host:
             try:
                 ipaddress.IPv6Address(host)
@@ -206,11 +206,11 @@ def parse_target(text: str) -> tuple[str | None, str, int | None] | None:
     host, _, port_text = t.lower().partition(":")
     if ":" in port_text:
         return None
-    port = None
+    bare_port: int | None = None
     if port_text or t.endswith(":"):
-        if (port := _port_ok(port_text)) is None:
+        if (bare_port := _port_ok(port_text)) is None:
             return None
-    return (None, host, port) if _host_ok(host) else None
+    return (None, host, bare_port) if _host_ok(host) else None
 
 
 # ---------------------------------------------------------------------------
@@ -414,12 +414,13 @@ def identify(place: _Place) -> Found | None:
         return _lm_studio(place, entries)
     props = place.ask("/props")
     settings = _dict((_dict(props.json) or {}).get("default_generation_settings")) if props else None
-    if settings is not None:
-        n_ctx = _int(settings.get("n_ctx")) or _int((_dict(props.json) or {}).get("n_ctx"))
-        data = _openai_models(place) or []
-        ids = [str(d.get("id") or "") for d in data if d.get("id")][:MAX_MODELS]
+    if settings is not None and props is not None:
+        top = _dict(props.json) or {}
+        n_ctx = _int(settings.get("n_ctx")) or _int(top.get("n_ctx"))
+        listed = _openai_models(place) or []
+        ids = [str(d.get("id") or "") for d in listed if d.get("id")][:MAX_MODELS]
         if not ids:
-            path = (_dict(props.json) or {}).get("model_path")
+            path = top.get("model_path")
             ids = [path.rsplit("/", 1)[-1]] if isinstance(path, str) and path else []
         models = [_model(i, loaded=True, chat=None, window=n_ctx, source="served", needs_loading=False) for i in ids]
         return Found("llama_cpp", "llama_cpp", place.base_url, None, place.first_ms or 0.0, models)
@@ -452,7 +453,7 @@ def _resolve(host: str) -> list[tuple[int, str]] | None:
 
     def lookup(family: int) -> list[tuple[int, str]]:
         try:
-            return [(family, info[4][0]) for info in socket.getaddrinfo(host, None, family, socket.SOCK_STREAM)]
+            return [(family, str(info[4][0])) for info in socket.getaddrinfo(host, None, family, socket.SOCK_STREAM)]
         except (socket.gaierror, OSError):
             return []
 
@@ -468,8 +469,10 @@ def _resolve(host: str) -> list[tuple[int, str]] | None:
                 pass
     finally:
         pool.shutdown(wait=False)
-    seen: set[str] = set()
-    out = [(f, a) for f, a in addrs if not (a in seen or seen.add(a))]
+    out: list[tuple[int, str]] = []
+    for family, addr in addrs:
+        if all(addr != a for _, a in out):
+            out.append((family, addr))
     return out or None
 
 
