@@ -67,8 +67,11 @@ the config/identity files that call exists to write. Port:
 that's the point).
 
 Listen address: ``--bind`` > ``PROMETHEUS_WEB_BIND`` (process environment, then
-the env file) > ``0.0.0.0`` — :func:`resolve_setup_choice`, one resolver with the
-real daemon (web/bind.py), minus the config tier that does not exist yet. On a
+the env file) > ``127.0.0.1`` — :func:`resolve_setup_choice`, one resolver with the
+real daemon (web/bind.py), minus the config tier that does not exist yet, and with
+this machine only as the unchosen answer on every install kind (the pairing route
+is unauthenticated: on every interface, anyone who guesses the code becomes the
+owner, and five wrong guesses lock the owner out). On a
 loopback address the Host-header check (web/loopback.py) also runs in front of
 every route, the unauthenticated pairing endpoint included. ``configure`` writes
 ``web.bind`` into the new config: the address somebody CHOSE (``--bind`` or the
@@ -96,7 +99,6 @@ from prometheus.config.defaults import config_search_paths
 from prometheus.web.bind import (
     app_install_lan_guard,
     BIND_ENV_VAR,
-    DEFAULT_BIND,
     FRESH_INSTALL_BIND,
     BindError,
     ResolvedBind,
@@ -176,7 +178,7 @@ def resolve_setup_ws_port() -> int:
 
 
 def resolve_setup_choice(flag: str | None = None) -> ResolvedBind:
-    """The address setup mode listens on, and what decided it: ``--bind`` > ``PROMETHEUS_WEB_BIND`` > 0.0.0.0.
+    """The address setup mode listens on, and what decided it: ``--bind`` > ``PROMETHEUS_WEB_BIND`` > 127.0.0.1.
 
     There is no config yet, so no ``web.bind`` tier. The variable is read from
     the process environment first and then from the env file, the same two
@@ -203,8 +205,13 @@ def resolve_setup_choice(flag: str | None = None) -> ResolvedBind:
             ) from exc
         if BIND_ENV_VAR in from_file:
             env[BIND_ENV_VAR] = from_file[BIND_ENV_VAR]
+    resolved = resolve_bind(None, flag=flag, env=env)
+    if resolved.source == "default":
+        # Nobody chose: this machine only, on every install kind. Setting a box up from another computer is
+        # `oara daemon --bind 0.0.0.0` (the banner says so), and configure then keeps that address.
+        return ResolvedBind(FRESH_INSTALL_BIND, "default")
     # The Mac app: plain HTTP on the LAN only if the owner opted in; setup mode has no config, so never.
-    return app_install_lan_guard(resolve_bind(None, flag=flag, env=env), None, env=env)
+    return app_install_lan_guard(resolved, None, env=env)
 
 
 def resolve_setup_bind(flag: str | None = None) -> str:
@@ -440,7 +447,7 @@ def _apply_configure(
     *,
     api_port: int,
     ws_port: int,
-    bind: str = DEFAULT_BIND,
+    bind: str = FRESH_INSTALL_BIND,
     bind_source: str = "default",
     state: SetupModeState,
 ) -> "JSONResponse":
@@ -1091,6 +1098,8 @@ def format_pairing_banner(code: str, api_port: int, bind: str | None = None) -> 
         where = (
             f"  Pair from Beacon on THIS machine: address {format_host_port(bind, api_port)}\n"
             "  (setup is listening on this machine only) + the code above.\n"
+            "  Setting it up from another computer? Restart with\n"
+            "  `oara daemon --bind 0.0.0.0` (it keeps listening there afterwards).\n"
         )
     else:
         where = (
