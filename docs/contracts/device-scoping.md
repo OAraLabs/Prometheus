@@ -118,7 +118,7 @@ Minting an owner device **for this Mac** replaces the earlier owner credentials 
 
 The global token stays valid and stays in `~/.config/prometheus/env`, where the bash tool can read it, and macOS has no shell floor. This change stops a paired **device** from holding the master key. It does not stop a **model** from reading it; that needs the restrictive default permission mode, which is separate work.
 
-### 6.5 Owner codes: the owner's device on another computer (`device-scoping/1.3`)
+### 6.5 Owner codes: the owner's device, on this computer or another (`device-scoping/1.3`)
 
 Same-Mac pairing reaches only a Beacon on the daemon's own machine. A Beacon on another computer (a MacBook reaching a Mac mini over Tailscale) could hold the API token, which #744 refuses for a worker's approval because a model can read it, or a scoped token, which sees only its own conversations. Neither can approve a worker. So the person at the machine hands that Beacon a one-time code (`web/owner_code_routes.py`, `config/owner_codes.py`):
 

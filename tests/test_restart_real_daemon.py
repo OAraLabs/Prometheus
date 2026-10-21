@@ -117,6 +117,10 @@ def test_a_real_daemon_restarted_over_http_comes_back_with_the_same_fp(tmp_path)
         second = wait_for(lambda: _hello(api_port), "hello after the restart")
         assert second["fp"] == first["fp"], "the restarted daemon is not the same instance"
         assert proc.poll() is None, "it exited instead of re-exec'ing in place"
+        # The first boot's web bridge was stopped by cancelling its task: uvicorn's lifespan must still finish, not
+        # leave a CancelledError traceback for asyncio.run's teardown (tests/test_web_shutdown_lifespan.py).
+        text = log_path.read_text()
+        assert "CancelledError" not in text and "lifespan.shutdown.failed" not in text, text[-2000:]
     finally:
         if proc.poll() is None:
             proc.send_signal(signal.SIGTERM)

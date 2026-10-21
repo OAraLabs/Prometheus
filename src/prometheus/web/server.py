@@ -6868,4 +6868,14 @@ async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005,
         app.state.http_server = server
     else:
         app.state.https_server = server
-    await server.serve()
+    try:
+        await server.serve()
+    except asyncio.CancelledError:
+        # The daemon stops the web bridge by cancelling its task. Cancelled mid-serve, uvicorn never runs its own
+        # shutdown, so lifespan.shutdown is never sent: the app's shutdown handlers would run only when asyncio.run
+        # cancels the orphaned lifespan task at teardown, which uvicorn logs as a CancelledError traceback at ERROR.
+        # Shut it down properly here (bounded by timeout_graceful_shutdown), then let the cancel go on.
+        if server.started:
+            server.should_exit = True
+            await server.shutdown()
+        raise

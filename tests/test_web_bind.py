@@ -513,8 +513,29 @@ class TestSetupResolution:
 
         return resolve_setup_bind(flag)
 
-    def test_nothing_set_is_the_default(self, envfile):
-        assert self._resolve() == "0.0.0.0"
+    def test_nothing_set_is_this_machine_only(self, envfile):
+        """Setup mode, unchosen, listens on this machine only on every install kind, not just the app: an
+        unauthenticated pairing route on every interface is a stranger's chance to become the owner (or to lock the
+        owner out with five wrong codes), and a fresh install ends up on 127.0.0.1 anyway (configure writes it)."""
+        from prometheus.web.setup_server import resolve_setup_choice
+
+        got = resolve_setup_choice()
+        assert (got.address, got.source) == ("127.0.0.1", "default")
+
+    def test_every_interface_is_still_one_flag_away(self, envfile):
+        """Setting a headless box up from another computer: the person says so (and the box keeps listening there)."""
+        from prometheus.web.setup_server import resolve_setup_choice
+
+        got = resolve_setup_choice("0.0.0.0")
+        assert (got.address, got.source) == ("0.0.0.0", "flag")
+
+    def test_or_one_variable_away(self, envfile, monkeypatch):
+        """The container image sets PROMETHEUS_WEB_BIND=0.0.0.0 (its -p decides who reaches it): unchanged."""
+        from prometheus.web.setup_server import resolve_setup_choice
+
+        monkeypatch.setenv(BIND_ENV, "0.0.0.0")
+        got = resolve_setup_choice()
+        assert (got.address, got.source) == ("0.0.0.0", "env")
 
     def test_the_env_file_is_read(self, envfile):
         envfile.write_text(f"OTHER=1\n{BIND_ENV}=127.0.0.1\n", encoding="utf-8")
@@ -558,6 +579,10 @@ class TestPairingBanner:
         from prometheus.web.setup_server import format_pairing_banner
 
         return format_pairing_banner("123456", 8005, *args)
+
+    def test_on_this_machine_only_it_says_how_to_set_up_from_another_computer(self):
+        banner = self._banner("127.0.0.1")
+        assert "oara daemon --bind 0.0.0.0" in banner, banner
 
     def test_unchanged_unless_the_bind_is_loopback(self):
         default = self._banner()
