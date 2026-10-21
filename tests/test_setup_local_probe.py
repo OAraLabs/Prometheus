@@ -149,11 +149,12 @@ def serve(handler_cls):
 def places(monkeypatch):
     """Point this machine's known places at stand-ins: places({"ollama": port, ...}); a missing app gets a closed port."""
 
+    monkeypatch.setattr(local_probe, "THIS_MACHINE", "127.0.0.1")
+    monkeypatch.setattr(local_probe, "MIN_WINDOW", MIN)
+
     def point(ports: dict[str, int]) -> None:
-        monkeypatch.setattr(local_probe, "THIS_MACHINE", "127.0.0.1")
         monkeypatch.setattr(local_probe, "KNOWN_PLACES",
                             [{"app": app, "port": ports.get(app) or _free_port()} for app in ("llama_cpp", "ollama", "lm_studio", "vllm")])
-        monkeypatch.setattr(local_probe, "MIN_WINDOW", MIN)
 
     return point
 
@@ -309,6 +310,12 @@ class TestWhatAProbeMayDo:
             took = time.monotonic() - t0
         assert a.reason == "no_answer", "every place was asked, and each timed out"
         assert took < 2.0, f"four places took {took:.1f}s: one after another, not in parallel"
+
+    def test_detect_s_old_answer_asks_the_same_places_unchanged_by_default(self):
+        """backends and local describe the same ports, and with the defaults backends asks exactly what it always did."""
+        from prometheus.cli.init import KNOWN_LOCAL_SERVERS
+
+        assert local_probe.legacy_candidates() == KNOWN_LOCAL_SERVERS
 
     def test_look_here_finds_each_app_where_it_is(self, places):
         with serve(_handler(QWEN_LOADED)) as o, serve(_handler(LLAMA_CPP)) as lc:
