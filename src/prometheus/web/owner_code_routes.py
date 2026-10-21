@@ -93,7 +93,8 @@ TELL_TIMEOUT_SECONDS = 3.0
 def _redeemed_by(record: OwnerCode) -> dict[str, Any] | None:
     if record.device_id is None:
         return None
-    return {"id": record.device_id, "name": record.device_name, "platform": record.platform, "source": record.source}
+    return {"id": record.device_id, "name": record.device_name, "platform": record.platform, "source": record.source,
+            "this_host": record.this_host}
 
 
 def _status_payload(record: OwnerCode) -> dict[str, Any]:
@@ -214,7 +215,7 @@ def register_owner_code_routes(
         minted = codes.redeem(
             body["code"],
             lambda: devices().mint_owner(name, platform, by=OWNER_SOURCE_OWNER_CODE),
-            source=_peer(request))
+            source=_peer(request), this_host=is_this_host(request))
         if minted is None:
             return _json(401, _INVALID_CODE)
         done = codes.status(live.id) if live is not None else None
