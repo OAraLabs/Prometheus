@@ -23,6 +23,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def no_base_url_variables(monkeypatch):
+    """Hermetic: a *_BASE_URL in the shell (ANTHROPIC_BASE_URL in a Claude Code shell, for one) is an address the
+    resolver would take, and it hid the cloud case's failure locally while CI, with none set, failed it."""
+    import os
+
+    for name in [n for n in os.environ if n.endswith("_BASE_URL")]:
+        monkeypatch.delenv(name, raising=False)
+
+
 def _free_port() -> int:
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
