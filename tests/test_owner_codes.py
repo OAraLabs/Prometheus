@@ -51,7 +51,7 @@ class Minter:
         self.calls += 1
         if self.fail:
             raise RuntimeError("the registry is locked")
-        return {"id": f"dev{self.calls:029d}", "name": "Will's MacBook Pro", "platform": "macos",
+        return {"id": f"dev{self.calls:029d}", "name": "Alex's MacBook Pro", "platform": "macos",
                 "token": f"tok-{self.calls}"}
 
 
@@ -123,7 +123,7 @@ def test_the_right_code_mints_once_and_records_who(codes):
     after = codes.status(record.id)
     assert after.status == oc.REDEEMED
     assert (after.device_id, after.device_name, after.platform, after.source) == (
-        minted["id"], "Will's MacBook Pro", "macos", "100.64.0.7")
+        minted["id"], "Alex's MacBook Pro", "macos", "100.64.0.7")
 
 
 def test_it_works_once(codes):

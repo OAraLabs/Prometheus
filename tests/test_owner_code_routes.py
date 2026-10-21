@@ -3,7 +3,7 @@
 THE GAP
 -------
 An owner device (operator-equivalent; "a person" for a worker's approval since #744) came only from same-Mac
-pairing. Will's MacBook Beacon reaches the Mac mini over Tailscale with the API token, which #744 refuses for a
+pairing. Alex's MacBook Beacon reaches the Mac mini over Tailscale with the API token, which #744 refuses for a
 worker's approval (a model can read it), and an approved device is scoped to its own conversations. So nothing
 on another computer could approve a worker.
 
@@ -85,7 +85,7 @@ def minted(world: World) -> dict:
 
 
 def redeem(world: World, code: str, client: TestClient | None = None, **body):
-    payload = {"code": code, "device_name": "Will's MacBook Pro", "platform": "macos", **body}
+    payload = {"code": code, "device_name": "Alex's MacBook Pro", "platform": "macos", **body}
     return (client or remote(world)).post("/api/pair/owner", json=payload)
 
 
@@ -169,7 +169,7 @@ def test_the_code_makes_the_remote_beacon_an_owner_device_of_its_own(world):
     assert response.status_code == 200, response.text
     body = response.json()
     assert set(body) == {"token", "device_id", "name", "owner", "endpoints", "tls"}
-    assert body["owner"] is True and body["name"] == "Will's MacBook Pro"
+    assert body["owner"] is True and body["name"] == "Alex's MacBook Pro"
     assert body["token"] != GLOBAL
     identity = verify_token(body["token"], GLOBAL, world.devices)
     assert identity is not None and identity.id == body["device_id"]
@@ -318,7 +318,7 @@ def test_the_terminal_learns_who_redeemed_it_and_from_where(world):
         "wrong_attempts": 0}
     device_id = redeem(world, body["code"]).json()["device_id"]
     assert status(world, body["code_id"]).json()["redeemed_by"] == {
-        "id": device_id, "name": "Will's MacBook Pro", "platform": "macos", "source": MACBOOK, "this_host": False}
+        "id": device_id, "name": "Alex's MacBook Pro", "platform": "macos", "source": MACBOOK, "this_host": False}
 
 
 @pytest.mark.parametrize("who,client_for,this_host", [
@@ -429,7 +429,7 @@ def test_every_operator_socket_hears_a_code_issued_and_redeemed_and_a_scoped_one
         issued, done = (f["payload"] for f in frames)
         assert issued == {"event": "issued", "code_id": body["code_id"], "expires_at": body["expires_at"],
                           "redeemed_by": None}
-        assert done["redeemed_by"] == {"id": redeemed["device_id"], "name": "Will's MacBook Pro",
+        assert done["redeemed_by"] == {"id": redeemed["device_id"], "name": "Alex's MacBook Pro",
                                        "platform": "macos", "source": MACBOOK, "this_host": False}
     assert socks["scoped"].frames == []
 

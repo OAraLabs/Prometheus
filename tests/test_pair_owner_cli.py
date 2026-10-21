@@ -54,7 +54,7 @@ def printed_code(lines: list[str]) -> str:
     raise AssertionError(f"no code was printed: {lines}")
 
 
-def beacon_redeems(world: World, lines: list[str], peer: str = MACBOOK, name: str = "Will's MacBook Pro",
+def beacon_redeems(world: World, lines: list[str], peer: str = MACBOOK, name: str = "Alex's MacBook Pro",
                    headers: dict[str, str] | None = None):
     client = TestClient(world.app, base_url="http://192.0.2.50:8005", client=(peer, 50000), headers=headers or {})
     return client.post("/api/pair/owner", json={"code": printed_code(lines), "device_name": name, "platform": "macos"})
@@ -128,7 +128,7 @@ def test_it_prints_the_code_waits_and_reports_who_used_it(world):
     code = run_pair_command(_args("--owner"), CONFIG, client=loopback(world), out=lines.append, interactive=True, sleep=sleep)
     text = "\n".join(lines)
     assert code == 0, text
-    assert "Will's MacBook Pro" in text and MACBOOK in text and redeemed[0]["device_id"][:8] in text
+    assert "Alex's MacBook Pro" in text and MACBOOK in text and redeemed[0]["device_id"][:8] in text
     assert "owner device" in text
     assert redeemed[0]["token"] not in text and GLOBAL not in text
 
