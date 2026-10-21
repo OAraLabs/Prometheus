@@ -56,8 +56,8 @@ Ollama is budgeted at its trained length because Prometheus asks it to load at t
                  "usable": false, "problem": "short_context"}]}
   ],
   "reason": "short_context",
-  "detail": "LM Studio at http://studio-mac.local:1234: 0 of 1 usable (gemma-3-12b with a window under 16,384; Prometheus needs 16,384)",
-  "min_window": 16384
+  "detail": "LM Studio at http://studio-mac.local:1234: 0 of 1 usable (gemma-3-12b with a window under 24,576; Prometheus needs 24,576)",
+  "min_window": 24576
 }
 ```
 
@@ -102,5 +102,6 @@ A client must read a `reason` it does not know as "could not check", never as fo
 ## `min_window`
 
 `local_probe.MIN_WINDOW` is round 0 of a fresh install's first turn, plus the local reply cap (4,096), plus 4,096 of
-conversation, rounded up to 8,192, 16,384, 32,768 or 65,536. It is set only from `MIN_WINDOW_MEASURED`, which records
-the commit, the method and round 0 per server (`scripts/local_gate/measure_floor.py`).
+conversation, rounded up to the next multiple of 4,096, plus 4,096 of headroom (`min_window_for`). It is set only from
+`MIN_WINDOW_MEASURED`, which records the commit, the method and round 0 per server (`scripts/local_gate/measure_floor.py`).
+Measured 2026-10-20: round 0 is 8,253 tokens on llama.cpp (27B), so the need is 16,445 and the floor is **24,576**.

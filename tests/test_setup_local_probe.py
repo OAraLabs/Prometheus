@@ -358,8 +358,12 @@ class TestMinWindow:
         round0 = m.get("round0") or {}
         assert set(round0) >= {"llama_cpp", "ollama"} and all(isinstance(v, int) and v > 0 for v in round0.values())
         need = max(round0.values()) + 4096 + 4096
-        want = next(w for w in (8192, 16384, 32768, 65536) if w >= need)
+        want = -(-need // 4096) * 4096 + 4096  # up to the next 4,096, plus 4,096 of headroom
         assert local_probe.MIN_WINDOW == want
+
+    @pytest.mark.parametrize("round0,floor", [(8253, 24576), (8192, 20480), (8193, 24576), (1, 16384)])
+    def test_the_rule(self, round0, floor):
+        assert local_probe.min_window_for(round0) == floor
 
 
 # ---------------------------------------------------------------------------

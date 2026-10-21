@@ -78,11 +78,32 @@ APP_NAMES = {
 #: OpenAI-shaped client; the old wizard called every typed address llama_cpp).
 OPENAI_FAMILY = frozenset({"llama_cpp", "lm_studio", "vllm", "openai_compatible"})
 
-#: The smallest window Prometheus can hold a conversation in: round 0 of a fresh install's first turn + the local reply
-#: cap (4,096) + 4,096 of conversation, rounded up to 8,192 / 16,384 / 32,768 / 65,536. Set only from
-#: MIN_WINDOW_MEASURED, which records how it was measured (``scripts/local_gate/measure_floor.py``).
-MIN_WINDOW: int = 0
-MIN_WINDOW_MEASURED: dict[str, Any] | None = None
+#: The smallest window Prometheus can hold a conversation in: round 0 of a fresh install's first turn, plus the local
+#: reply cap (4,096), plus 4,096 of conversation, rounded up to the next multiple of 4,096, plus 4,096 of headroom
+#: (``min_window_for``). Set only from MIN_WINDOW_MEASURED, which records how round 0 was measured
+#: (``scripts/local_gate/measure_floor.py``: real setup mode, then one first message, through the logging proxy).
+STEP = 4096
+
+
+def min_window_for(round0: int) -> int:
+    """The floor for a measured round 0: (round 0 + reply cap + 4,096) up to the next 4,096, plus 4,096 headroom."""
+    need = round0 + 4096 + 4096
+    return -(-need // STEP) * STEP + STEP
+
+
+MIN_WINDOW_MEASURED: dict[str, Any] | None = {
+    "method": "scripts/local_gate/measure_floor.py: a fresh install (setup mode, no config) configured for the server, "
+              "then Beacon's first suggestion, 'What can you help me with?'; round 0 = the first request that offers "
+              "tools, usage.prompt_tokens (Ollama: prompt_eval_count), cache_n 0",
+    "commit": "f085eba (+ this branch's setup changes; prompt assembly is main 2502c5a's)",
+    "date": "2026-10-20",
+    "round0": {
+        "llama_cpp": 8253,  # Qwen3.8-27B-UD-Q4_K_XL.gguf, 51 tools offered, served n_ctx 32768
+        # "ollama": pending — the GPU box's Ollama was stuck on a CPU-offloaded load; measured with qwen3.5:0.8b,
+        # whose chat template is byte-identical to qwen3.5:9b's.
+    },
+}
+MIN_WINDOW: int = min_window_for(max(MIN_WINDOW_MEASURED["round0"].values()))
 
 
 @dataclass(frozen=True)
