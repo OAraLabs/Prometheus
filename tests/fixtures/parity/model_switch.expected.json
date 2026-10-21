@@ -116,9 +116,10 @@
      "probed_at": "<time>",
      "stale": false
     },
+    "detail": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
     "is_default": true,
     "key": "local",
-    "label": "Local",
+    "label": "llama.cpp · Qwen3.8-27B-UD-Q4_K_XL",
     "model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
     "provider": "llama_cpp",
     "vision": true
