@@ -51,7 +51,7 @@ class Minter:
         self.calls += 1
         if self.fail:
             raise RuntimeError("the registry is locked")
-        return {"id": f"dev{self.calls:029d}", "name": "Will's MacBook Pro", "platform": "macos",
+        return {"id": f"dev{self.calls:029d}", "name": "Alex's MacBook Pro", "platform": "macos",
                 "token": f"tok-{self.calls}"}
 
 
@@ -123,7 +123,7 @@ def test_the_right_code_mints_once_and_records_who(codes):
     after = codes.status(record.id)
     assert after.status == oc.REDEEMED
     assert (after.device_id, after.device_name, after.platform, after.source) == (
-        minted["id"], "Will's MacBook Pro", "macos", "100.64.0.7")
+        minted["id"], "Alex's MacBook Pro", "macos", "100.64.0.7")
 
 
 def test_it_works_once(codes):
@@ -246,6 +246,12 @@ def test_the_redeemer_is_recorded_by_its_own_address_not_its_prefix(codes):
     record, code = codes.issue()
     assert codes.redeem(code, Minter(), source="2001:db8:0:7::42") is not None
     assert codes.status(record.id).source == "2001:db8:0:7::42"
+
+
+def test_whether_the_redeemer_was_this_host_is_recorded(codes):
+    record, code = codes.issue()
+    assert codes.redeem(code, Minter(), source="127.0.0.1", this_host=True) is not None
+    assert codes.status(record.id).this_host is True
 
 
 def test_five_wrong_tries_shut_that_source_out_and_no_one_else(codes, caplog):

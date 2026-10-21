@@ -5,7 +5,7 @@
     oara pair deny <id>
     oara pair --owner
 
-``--owner`` makes a Beacon on ANOTHER computer the owner's own device (an owner device: the operator, and a person
+``--owner`` makes a Beacon (on this computer or another) the owner's own device (an owner device: the operator, and a person
 for a worker's approval). It asks the daemon for a one-time code (8 digits, 5 minutes, once; only the API token from
 this machine may), prints it, and waits to say what became of it: who used it and from which address, or that it
 expired or was replaced, and how many wrong tries there were. The report is the alarm: a code someone else typed
@@ -53,7 +53,7 @@ def add_pair_subparser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``pair`` subcommand on the main CLI parser."""
     pair = subparsers.add_parser("pair", help="List, approve or deny devices asking to join this Prometheus")
     pair.add_argument("--owner", action="store_true",
-                      help="print a one-time code that makes a Beacon on another computer your own (owner) device")
+                      help="print a one-time code that makes a Beacon (on this computer or another) your own (owner) device")
     sub = pair.add_subparsers(dest="pair_action")
     sub.add_parser("list", help="Show the devices waiting for a decision")
     approve = sub.add_parser("approve", help="Let a waiting device join (it gets its own scoped token)")
@@ -265,8 +265,9 @@ def _owner_code(client: Any, headers: dict[str, str], out: Callable[[str], None]
     until = time.strftime("%H:%M", time.localtime(int(issued["expires_at"])))
     out(f"Owner code:  {format_code(issued['code'])}")
     out("")
-    out(f"Type it into Beacon on the other computer. It works once, for {minutes} minutes (until {until}).")
-    out("That computer becomes an OWNER device: it sees every conversation and can approve tool calls, workers "
+    out(f"Type it into the Beacon you want as your own, on this computer or another. It works once, for {minutes} "
+        f"minutes (until {until}).")
+    out("That Beacon becomes an OWNER device: it sees every conversation and can approve tool calls, workers "
         "and new devices. Give the code to no one else.")
     out("")
     out("Waiting for it to be used (Ctrl-C cancels it)...")
@@ -314,17 +315,33 @@ def _owner_code(client: Any, headers: dict[str, str], out: Callable[[str], None]
         return 130
 
 
+def _where(device: dict[str, Any]) -> str:
+    """Where the Beacon that used the code is, from what the daemon saw at redeem time. A daemon that predates
+    ``this_host`` gets the address alone, as before."""
+    source = device.get("source")
+    if "this_host" not in device:
+        return f"from {source}"
+    if device["this_host"]:
+        return "on this Mac" if sys.platform == "darwin" else "on this computer"
+    from prometheus.web.loopback import is_loopback_address
+
+    if isinstance(source, str) and is_loopback_address(source):
+        # Loopback, but not this host: a relay on this machine (Tailscale serve, cloudflared) brought it in.
+        return f"through a relay on this machine from {source}, so on another computer"
+    return f"another computer at {source}"
+
+
 def _owner_outcome(body: dict[str, Any], out: Callable[[str], None]) -> int:
     status = body["status"]
     device = body.get("redeemed_by") or {}
     if status == "redeemed":
-        out(f"Done: {device.get('name')!r} ({device.get('platform')}, from {device.get('source')}) is now an owner "
+        out(f"Done: {device.get('name')!r} ({device.get('platform')}, {_where(device)}) is now an owner "
             f"device (id {str(device.get('id'))[:8]}).")
         out("If that was not you, revoke it now: in Beacon's device list, or "
             f"DELETE /api/devices/{device.get('id')} with the API token.")
         return 0
     if status == "expired":
-        out("The code expired unused. Run oara pair --owner again when the other computer is ready.")
+        out("The code expired unused. Run oara pair --owner again when that Beacon is ready.")
     elif status == "replaced":
         out("A newer owner code replaced this one (oara pair --owner was run again). Only the newest works.")
     elif status == "canceled":

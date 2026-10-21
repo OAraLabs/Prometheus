@@ -197,7 +197,7 @@ If the second computer needs real authority — to approve a worker's request, t
 
 > *An owner Beacon can approve worker requests. On the computer running Prometheus, run `oara pair --owner` and type the code it shows here. It works once, within 5 minutes.*
 
-So: run `oara pair --owner` on the daemon's machine, which prints an 8-digit code (shown as `1234-5678`); type those eight digits into this Beacon. A 200 that says `owner: true` is the promotion — every other outcome (wrong, expired, used, replaced) is the one honest "that code didn't work" message, so a stale code can't look like success. The full command-side behavior — terminal-only printing, rate-limiting of wrong guesses, what can and can't mint a code — is in the [install guide](install.md#make-a-beacon-on-another-computer-the-owner).
+So: run `oara pair --owner` on the daemon's machine, which prints an 8-digit code (shown as `1234-5678`); type those eight digits into this Beacon. A 200 that says `owner: true` is the promotion — every other outcome (wrong, expired, used, replaced) is the one honest "that code didn't work" message, so a stale code can't look like success. The full command-side behavior — terminal-only printing, rate-limiting of wrong guesses, what can and can't mint a code — is in the [install guide](install.md#make-a-beacon-your-own-owner-device).
 
 ### Pair a phone with the QR
 

@@ -211,8 +211,26 @@ def _sentinel_enabled(sentinel_config: dict[str, Any]) -> bool:
 _ABSENT_GATE_WARNINGS: tuple[tuple[str, str, str, bool], ...] = (
     ("web", "enabled", "the web API does not start", True),
     ("trajectory_export", "enabled", "no trajectory export runs", False),
-    ("compaction", "enabled", "no compactor is constructed", True),
 )
+
+
+def _follow_shipped_compaction(config: dict[str, Any]) -> bool:
+    """An absent ``compaction.enabled`` follows the template (true) at boot; True when it did.
+
+    No longer shape B. Every config Prometheus itself wrote until now left the section out (setup mode's
+    configure, ``oara setup --fast``, the interactive wizard), so "absent" was never the operator's choice: it was
+    our writer's omission, and those installs ran with no compactor. Unlike a web server or an exporter, the compactor
+    starts nothing and reaches nothing; it keeps a turn inside the model's window. The file is not edited: an explicit
+    ``false`` is a decision and stays off, quietly.
+    """
+    section = config.get("compaction")
+    if isinstance(section, dict) and "enabled" in section:
+        return False
+    logger.warning(
+        "compaction.enabled is ABSENT from config — following the shipped template: the context compactor is ON. "
+        "Write `compaction.enabled: true` to say so, or `false` to turn it off.")
+    config["compaction"] = {**(section if isinstance(section, dict) else {}), "enabled": True}
+    return True
 
 
 def _warn_absent_gating_keys(config: dict[str, Any]) -> None:
@@ -803,7 +821,9 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # Ollama, Anthropic, etc. are unaffected.
     apply_config_pins(config, get_config_dir() / "config_pins.yaml")
 
+    # An absent compactor switch follows the template (every config our own writers made lacked it), then the
     # PR-B shape-B ruling: absent gates that fail closed say so at boot.
+    _follow_shipped_compaction(config)
     _warn_absent_gating_keys(config)
     # Phase C: the config analogue of deploy_guard.sh's staleness check.
     # _warn_absent_gating_keys covers a key that is MISSING; this covers a key

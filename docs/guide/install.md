@@ -285,7 +285,7 @@ A second computer that joins over TLS is told to connect back on `https://` and 
 
 `web.bind` picks the interface: `0.0.0.0` for every interface, `127.0.0.1` for this machine only, or one specific address such as a tailnet IP or `192.168.1.20`. Precedence is `--bind` > `PROMETHEUS_WEB_BIND` > `web.bind` > `0.0.0.0`, and an invalid value refuses to start rather than guessing. One specific address has a consequence worth knowing before you pick it — see [Known issues](#known-issues).
 
-## Make a Beacon on another computer the owner
+## Make a Beacon your own owner device
 
 A Beacon on the machine the daemon runs on pairs automatically. A Beacon on a **second** computer can join too, but by default it gets an ordinary *scoped* device: it sees only the conversations it creates, and — the part that matters — it **cannot approve a worker's request**. The API token can't either, because a model can read it.
 
@@ -295,7 +295,7 @@ To give that second Beacon real authority, run this on the machine Prometheus ru
 oara pair --owner
 ```
 
-It prints a one-time code — 8 digits, shown as `1234-5678` — good for **5 minutes** and one use, then waits and tells you who used it and from which address. Type the code into **Settings** on the other computer's Beacon. That Beacon gets its own owner device token, and the terminal warns as soon as anyone types a wrong code. Ctrl-C cancels.
+It prints a one-time code — 8 digits, shown as `1234-5678` — good for **5 minutes** and one use, then waits and tells you who used it and from which address. Type the code into **Settings** in the Beacon you want as your own, on this computer or another. That Beacon gets its own owner device token, the terminal says whether it was on this Mac or another computer (and from which address), and it warns as soon as anyone types a wrong code. Ctrl-C cancels.
 
 Worth knowing:
 

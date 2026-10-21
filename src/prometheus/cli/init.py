@@ -216,6 +216,11 @@ def _default_config(server: DetectedServer | None, model: str | None) -> dict[st
         "context": {
             "effective_limit": 24000,
         },
+        # The template's value. Absent, from_config builds no compactor: every config this wrote ran without one
+        # (tests/test_fresh_install_compacts.py holds the writers to the template).
+        "compaction": {
+            "enabled": True,
+        },
         # The tri-state only: always_loaded stays out so the install follows
         # the shipped tool set (see above). The template also carries
         # mcp_always_deferred / search_mcp — read by mcp.bootstrap since

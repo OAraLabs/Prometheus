@@ -52,14 +52,16 @@ class TestShapeA_SentinelAbsence:
 
 
 class TestShapeB_AbsentGateWarnings:
-    def test_empty_config_names_all_three_gates(
+    def test_empty_config_names_both_gates(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         with caplog.at_level(logging.WARNING):
             _warn_absent_gating_keys({})
-        for key in ("web.enabled", "trajectory_export.enabled",
-                    "compaction.enabled"):
+        for key in ("web.enabled", "trajectory_export.enabled"):
             assert key in caplog.text
+        # compaction.enabled left shape B: an absent switch follows the template (on), and says so in its own
+        # warning (tests/test_fresh_install_compacts.py), because every config our own writers made lacked it.
+        assert "compaction.enabled" not in caplog.text
 
     def test_fully_keyed_config_is_silent(
         self, caplog: pytest.LogCaptureFixture
@@ -255,7 +257,7 @@ class TestShapeB_TemplateValuesAreReal:
             + "\n  ".join(wrong)
         )
 
-    def test_the_three_gates_are_not_all_the_same(self) -> None:
+    def test_the_gates_are_not_all_the_same(self) -> None:
         """Guards the REASON the table exists.
 
         If someone flips trajectory_export on in the template, a single
@@ -266,7 +268,7 @@ class TestShapeB_TemplateValuesAreReal:
 
         values = {shipped for *_rest, shipped in _ABSENT_GATE_WARNINGS}
         assert values == {True, False}, (
-            "the three shape-B gates now ship the SAME template value. The "
+            "the shape-B gates now ship the SAME template value. The "
             "per-key value in _ABSENT_GATE_WARNINGS exists because they "
             "differed (web/compaction true, trajectory_export false) and a "
             "blanket claim was wrong for one of them. If that is genuinely "

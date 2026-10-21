@@ -79,6 +79,10 @@ def uvicorn_proxy_options(config: Mapping[str, Any] | None) -> dict[str, Any]:
     return {"proxy_headers": True, "forwarded_allow_ips": ",".join(named)}
 
 
+#: How long a stopping listener waits for open requests (a streaming reply) before closing them.
+GRACEFUL_SHUTDOWN_SECONDS = 5
+
+
 def serve_config(app: Any, host: str, port: int, config: Mapping[str, Any] | None = None, *,
                  tls: Any = None) -> Any:
     """The ``uvicorn.Config`` the daemon (and setup mode) serves *app* with, on *host*.
@@ -99,6 +103,8 @@ def serve_config(app: Any, host: str, port: int, config: Mapping[str, Any] | Non
         tls_options = {"ssl_certfile": str(tls.certfile), "ssl_keyfile": str(tls.keyfile), "ssl_ciphers": AEAD_CIPHERS}
     server_config = uvicorn.Config(
         guard_if_loopback(app, host), host=host, port=port, log_level="info", log_config=None,
+        # Bounded: an open stream must not hold a shutdown forever (the daemon exits within 15 s, FL-1).
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
         **uvicorn_proxy_options(config), **tls_options,
     )
     if tls is not None:
