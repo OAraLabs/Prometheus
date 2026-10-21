@@ -458,6 +458,16 @@ class Doctor:
         ``install_log_redaction`` does not cover. The REQUEST below still uses
         the real URL — redaction is display-only.
         """
+        engine = state.inference_engine.replace("_", ".")
+        from prometheus.providers.registry import ProviderRegistry
+
+        if ProviderRegistry.is_cloud(state.inference_engine):
+            # Before the address check: a cloud provider has no local server to reach (and usually no base_url at
+            # all); its key is the Cloud keys row's.
+            return DiagnosticCheck(
+                name="Inference", category="connectivity", status="info",
+                message=f"{engine} is a cloud provider: nothing on this machine to probe",
+            )
         url = state.inference_url
         if not url:
             return DiagnosticCheck(
@@ -465,16 +475,7 @@ class Doctor:
                 message="No inference URL configured",
                 fix="Set model.base_url in prometheus.yaml.",
             )
-        engine = state.inference_engine.replace("_", ".")
         from prometheus.providers.openai_compat import models_url
-        from prometheus.providers.registry import ProviderRegistry
-
-        if ProviderRegistry.is_cloud(state.inference_engine):
-            # A cloud provider has no local server to reach; its key is the Cloud keys row's.
-            return DiagnosticCheck(
-                name="Inference", category="connectivity", status="info",
-                message=f"{engine} is a cloud provider: nothing on this machine to probe",
-            )
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 # By the exact engine: Ollama's own list, the OpenAI-shaped one for llama.cpp, LM Studio, vLLM and the
