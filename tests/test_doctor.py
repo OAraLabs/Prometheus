@@ -1096,16 +1096,13 @@ class TestInferenceUrlLeaksNoCredential:
         A fix applied to one branch would leave the other printing the
         credential — they share one URL variable but two message lines.
 
-        NOTE on which engine reaches the else branch: ``_check_inference``
-        selects it with ``"llama" in state.inference_engine``, which is True
-        for "ollama" too (it CONTAINS "llama"). So this test uses "vllm" to
-        actually reach the ``/api/tags`` branch, and the assertion below pins
-        the substring quirk for ollama so it cannot change unnoticed. That
-        quirk is pre-existing and out of scope here — recorded in the report.
+        The dispatch is by the exact engine (it used to be ``"llama" in engine``, which sent Ollama to llama.cpp's
+        path and everything else to Ollama's): "ollama" reaches the ``/api/tags`` branch, every other local engine the
+        OpenAI-shaped ``/v1/models`` one, which the test below pins.
         """
         url = f"http://{_FAKE_USER}:{_FAKE_PASS}@127.0.0.1:11434"
         client = _mock_client()
-        state = _sample_state(inference_url=url, inference_engine="vllm")
+        state = _sample_state(inference_url=url, inference_engine="ollama")
         with patch("prometheus.infra.doctor.httpx.AsyncClient", return_value=client):
             check = await self.doctor._check_inference(state)
         _assert_no_fragment(check.message, _FAKE_PASS, tmp_path)
@@ -1113,17 +1110,16 @@ class TestInferenceUrlLeaksNoCredential:
         assert client.get.await_args[0][0] == f"{url}/api/tags"
 
     @pytest.mark.asyncio
-    async def test_ollama_takes_the_llama_endpoint_branch(self):
-        """Pins the ``"llama" in engine`` substring quirk (pre-existing).
-
-        Ollama's engine string contains "llama", so it is routed to
-        ``/v1/models`` rather than ``/api/tags``. Asserted here so a future
-        change to that dispatch is a deliberate one, and so the redaction test
-        above is not silently relying on a branch it never reaches.
-        """
-        client = _mock_client()
-        state = _sample_state(inference_url="http://127.0.0.1:11434",
-                              inference_engine="ollama")
-        with patch("prometheus.infra.doctor.httpx.AsyncClient", return_value=client):
-            await self.doctor._check_inference(state)
-        assert client.get.await_args[0][0] == "http://127.0.0.1:11434/v1/models"
+    async def test_each_engine_takes_its_own_endpoint(self):
+        """By the exact engine: Ollama its own list, the OpenAI-shaped ones /v1/models, once even for a /v1 base."""
+        for engine, url, want in (
+            ("ollama", "http://127.0.0.1:11434", "http://127.0.0.1:11434/api/tags"),
+            ("llama_cpp", "http://127.0.0.1:8080", "http://127.0.0.1:8080/v1/models"),
+            ("vllm", "http://127.0.0.1:8000/v1", "http://127.0.0.1:8000/v1/models"),
+            ("lm_studio", "http://127.0.0.1:1234", "http://127.0.0.1:1234/v1/models"),
+        ):
+            client = _mock_client()
+            state = _sample_state(inference_url=url, inference_engine=engine)
+            with patch("prometheus.infra.doctor.httpx.AsyncClient", return_value=client):
+                await self.doctor._check_inference(state)
+            assert client.get.await_args[0][0] == want, engine

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from typing import Any
 
 from prometheus.providers.base import ModelProvider
@@ -209,6 +210,20 @@ def _provider_defaults(provider_name: str) -> dict[str, Any]:
         or LOCAL_OPENAI_COMPAT_DEFAULTS.get(provider_name)
         or {}
     )
+
+
+def resolve_model_base_url(model_cfg: Mapping[str, Any] | None) -> str:
+    """The address the configured provider is reached at, for a caller that probes it (doctor): ``model.base_url``,
+    else the provider's base-URL variable, else its default (llama.cpp :8080, Ollama :11434, LM Studio :1234/v1,
+    vLLM :8000/v1). The same answers ``create()`` and the backend registry reach it at. Empty for a cloud provider
+    with none configured."""
+    cfg = dict(model_cfg or {})
+    provider = str(cfg.get("provider") or "llama_cpp")
+    if provider == "llama_cpp":
+        return str(cfg.get("base_url") or "http://localhost:8080").rstrip("/")
+    if provider == "ollama":
+        return str(cfg.get("base_url") or "http://localhost:11434").rstrip("/")
+    return _resolve_base_url(cfg, provider).rstrip("/")
 
 
 def _resolve_base_url(config: dict[str, Any], provider_name: str) -> str:
