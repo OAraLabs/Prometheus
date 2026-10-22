@@ -699,11 +699,18 @@ class MemoryExtractor:
 
         # Preferred path: one complete JSON document (object or array).
         try:
-            parsed = valid_facts(json.loads(text))
-            if parsed:
-                return parsed
+            document = json.loads(text)
         except json.JSONDecodeError:
             pass
+        else:
+            parsed = valid_facts(document)
+            if parsed:
+                return parsed
+            if document == [] or (
+                isinstance(document, dict) and document.get("facts") == []
+            ):
+                # The model's way of saying "nothing here", not a format failure.
+                return []
 
         # Fallback: decode consecutive JSON values from prose/NDJSON. Unlike
         # splitlines(), raw_decode supports pretty-printed, multi-line objects.
@@ -721,4 +728,13 @@ class MemoryExtractor:
                 continue
             facts.extend(valid_facts(obj))
             pos = end
+        if not facts and "{" in text:
+            # JSON-shaped output that yields nothing is a format failure, and
+            # without this it reads exactly like "nothing worth remembering"
+            # (#798). A prose reply carries no brace and does not trip it.
+            log.warning(
+                "MemoryExtractor: no facts parsed from %d chars of JSON-shaped "
+                "model output; head: %r",
+                len(raw), raw[:120],
+            )
         return facts
