@@ -412,6 +412,15 @@ class DiscordAdapter(BasePlatformAdapter):
         # for the daemon's lifetime, so it goes to a background task (the
         # Slack Socket Mode handler makes the same non-blocking start).
         await client.login(self.config.token)
+        if not self.config.owner_user_ids:
+            # D1: with no owner named, the owner is whoever owns the bot's Discord application. Asked before the
+            # gateway connects, so no message arrives while it is unknown; a failure leaves nobody as the owner.
+            try:
+                self._learn_application_owner(await client.application_info())
+            except Exception:
+                logger.warning(
+                    "Discord: could not read the bot application's owner, so nobody on Discord can approve or "
+                    "teach until gateway.discord.owner_user_ids is set", exc_info=True)
         self._connect_task = asyncio.create_task(
             client.connect(reconnect=True), name="discord_gateway",
         )
@@ -1110,6 +1119,17 @@ class DiscordAdapter(BasePlatformAdapter):
             channel_id=channel_id or 0,
             user_id=getattr(user, "id", None),
         )
+
+    def _learn_application_owner(self, app_info: Any) -> None:
+        """Record the bot application's owner (its team's owner, for a team-owned app) as the fallback owner."""
+        team = getattr(app_info, "team", None)
+        owner_id = getattr(team, "owner_id", None) if team is not None else None
+        if owner_id is None:
+            owner_id = getattr(getattr(app_info, "owner", None), "id", None)
+        self.config.application_owner_ids = frozenset({str(owner_id)}) if owner_id is not None else frozenset()
+        if owner_id is not None and not self.config.owner_user_ids:
+            logger.info("Discord: the bot application's owner is this gateway's owner "
+                        "(set gateway.discord.owner_user_ids to name someone else)")
 
     def _owner_refusal_for_command(self, interaction: Any, name: str, args: str) -> str | None:
         """The reply when *name* is a command only the owner may run and the interaction's user is not the owner;

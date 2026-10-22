@@ -366,6 +366,17 @@ def _wire_skill_creator(
     return skill_creator
 
 
+def gateway_owner_warnings(config: dict | None) -> list[str]:
+    """One startup WARNING per enabled chat gateway with no owner named, each naming the key to set.
+
+    Same answer as ``oara doctor`` (gateway/owners.py). A pure function so the startup path is testable without
+    running the daemon.
+    """
+    from prometheus.gateway.owners import ownerless_gateways
+
+    return [f"{gap.gateway} gateway: {gap.message}. {gap.fix}" for gap in ownerless_gateways(config)]
+
+
 def telegram_gateway_decision(
     gateway_config: dict[str, Any] | None,
     token: str,
@@ -1167,10 +1178,11 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # NOTHING either way (tests/test_computer_registration_pin.py).
     from prometheus.computer.wiring import wire_computer_use
     from prometheus.config.shipped_defaults import (
-        resolve_allowed_chat_ids as _computer_people,
+        resolve_telegram_owner_ids as _computer_people,
     )
     computer = wire_computer_use(
         config, gate=security_gate, registry=registry,
+        # The Telegram owner, the same one who approves tool calls (gateway trust).
         telegram_user_ids=_computer_people(gateway_config),
         integration=computer_integration,
     )
@@ -1626,9 +1638,12 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # Telegram adapter
     telegram: TelegramAdapter | None = None
     telegram_token = gateway_config.get("telegram_token", "") or os.environ.get("PROMETHEUS_TELEGRAM_TOKEN", "")
-    from prometheus.config.shipped_defaults import resolve_allowed_chat_ids
+    from prometheus.config.shipped_defaults import resolve_allowed_chat_ids, resolve_owner_user_ids
 
     _tg_chat_ids = resolve_allowed_chat_ids(gateway_config)
+    # Gateway trust: say plainly which gateway has no owner, and the key that names one.
+    for _owner_warning in gateway_owner_warnings(config):
+        logger.warning("%s", _owner_warning)
 
     # ABSENCE IS NOT PERMISSION. This block used to read
     # `gateway_config.get("telegram_enabled", True)`, so a config that merely
@@ -1660,6 +1675,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 platform=Platform.TELEGRAM,
                 token=telegram_token,
                 allowed_chat_ids=_tg_chat_ids,
+                owner_user_ids=resolve_owner_user_ids(gateway_config),
                 proxy_url=gateway_config.get("proxy_url"),
                 max_file_size_mb=_media_cfg.get("max_file_size_mb", 20),
                 media_cache_dir=_media_cfg.get("cache_dir"),
@@ -1848,6 +1864,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 platform=Platform.SLACK,
                 token=slack_bot_token,
                 app_token=slack_app_token,
+                owner_user_ids=resolve_owner_user_ids(slack_nested),
                 allowed_channels=(
                     gateway_config.get("slack_channels")
                     or (slack_nested or {}).get("allowed_channels", [])
@@ -1924,6 +1941,8 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 allowed_user_ids=[
                     int(u) for u in (discord_nested or {}).get("user_ids", []) or []
                 ],
+                # The owner (gateway trust). Empty: the bot application's owner, learned at connect.
+                owner_user_ids=resolve_owner_user_ids(discord_nested),
             )
             if "system_prompt" not in dir():
                 from prometheus.context.prompt_assembler import build_runtime_system_prompt

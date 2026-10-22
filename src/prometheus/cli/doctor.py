@@ -719,6 +719,23 @@ def check_gateways(config: dict[str, Any]) -> list[DiagnosticCheck]:
     return [telegram, slack, discord]
 
 
+def check_gateway_owners(config: dict[str, Any]) -> list[DiagnosticCheck]:
+    """One row per enabled chat gateway with no owner named, saying what that means and which key to set.
+
+    The owner is the only person who may approve tool calls or teach Prometheus from a chat; everyone else in an
+    allowed chat may still chat. Same answer as the daemon's startup warning (gateway/owners.py).
+    """
+    from prometheus.gateway.owners import ownerless_gateways
+
+    return [
+        DiagnosticCheck(
+            name=f"{gap.gateway} owner", category="connectivity", status="warning",
+            message=gap.message, fix=gap.fix,
+        )
+        for gap in ownerless_gateways(config)
+    ]
+
+
 def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
     """How many tools the model is actually OFFERED (FIRSTLIGHT FL-2u / A).
 
@@ -1442,6 +1459,7 @@ def run_extended_checks(
         *([network_row] if network_row is not None else []),
         check_token(config),
         *check_gateways(config),
+        *check_gateway_owners(config),
         check_advertised_tools(config),
         check_coding_sandbox(config),
         *check_bash_floors(config),

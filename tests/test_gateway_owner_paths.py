@@ -480,11 +480,11 @@ def test_desktop_tasks_and_pairing_use_the_same_owner():
     assert resolve_telegram_owner_ids(gateway) == [OWNER]
     assert resolve_telegram_owner_ids({"allowed_chat_ids": [OWNER, 777, GROUP]}) == [OWNER, 777]
 
-    from prometheus.gateway.telegram_pairing import TelegramPairing
+    from prometheus.gateway.telegram_pairing import TelegramPairingPrompts
 
     adapter = SimpleNamespace(config=PlatformConfig(platform=Platform.TELEGRAM, token="t",
                                                     allowed_chat_ids=[OWNER, 777], owner_user_ids=[str(OWNER)]))
-    pairing = TelegramPairing.__new__(TelegramPairing)
+    pairing = TelegramPairingPrompts.__new__(TelegramPairingPrompts)
     pairing.adapter = adapter
     assert pairing.private_chat_ids() == [OWNER], "a pairing prompt would go to a private chat that is not the owner"
 
@@ -524,3 +524,60 @@ async def test_an_owner_only_session_s_summary_stays_trusted():
         msgs.append(ConversationMessage(role="assistant", content=[TextBlock(text=f"answer {i} " + "y" * 400)]))
     out = await _compactor(protect_recent_turns=2).apply(msgs, session_id="telegram:456")
     assert out[0].provenance == "compactor" and out[0].is_trusted is True
+
+
+# --------------------------------------------------------------------------- #
+# 10. Config: the owner keys reach the gateways, setup writes them, doctor reads them
+# --------------------------------------------------------------------------- #
+
+
+def test_the_owner_keys_resolve_to_text_ids_and_absent_is_empty():
+    from prometheus.config.shipped_defaults import resolve_owner_user_ids
+
+    assert resolve_owner_user_ids({"owner_user_ids": [123, " U0ABC ", ""]}) == ["123", "U0ABC"]
+    assert resolve_owner_user_ids({}) == [] and resolve_owner_user_ids(None) == []
+    assert resolve_owner_user_ids({"owner_user_ids": "123"}) == [], "a bare string is not a list: it names nobody"
+
+
+def test_doctor_flags_a_telegram_gateway_that_only_allows_groups():
+    from prometheus.cli.doctor import check_gateway_owners
+
+    groups_only = {"gateway": {"telegram_enabled": True, "allowed_chat_ids": [GROUP]}}
+    flagged = [r for r in check_gateway_owners(groups_only) if r.status == "warning"]
+    assert flagged and "gateway.owner_user_ids" in (flagged[0].fix or "")
+    named = {"gateway": {"telegram_enabled": True, "allowed_chat_ids": [GROUP], "owner_user_ids": [OWNER]}}
+    assert not check_gateway_owners(named)
+    private = {"gateway": {"telegram_enabled": True, "allowed_chat_ids": [OWNER, GROUP]}}
+    assert not check_gateway_owners(private), "a private chat is the owner: nothing to set"
+
+
+def test_setup_writes_the_owner_it_was_given(tmp_path, monkeypatch, request):
+    import os
+
+    import yaml
+    from fastapi.testclient import TestClient
+
+    from prometheus.web.setup_server import PairingState, SetupModeState, create_setup_app
+    from tests.test_fresh_install_compacts import CODE, TOKEN_ENV_VAR, _server
+
+    monkeypatch.setenv("PROMETHEUS_ENV_FILE", str(tmp_path / "env"))
+    monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / "confdir"))
+    # setenv (not delenv) for the gateway tokens: a value configure exports into os.environ is put back afterwards.
+    for name in ("PROMETHEUS_TELEGRAM_TOKEN", "PROMETHEUS_DISCORD_TOKEN"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.delenv(TOKEN_ENV_VAR, raising=False)
+    request.addfinalizer(lambda: os.environ.pop(TOKEN_ENV_VAR, None))  # pairing exports the minted token
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(create_setup_app(PairingState(code=CODE), api_port=8123, ws_port=8124,
+                                         state=SetupModeState()))
+    token = client.post("/api/setup/pair", json={"code": CODE}).json()["token"]
+    with _server() as url:
+        resp = client.post("/api/setup/configure", headers={"Authorization": f"Bearer {token}"}, json={
+            "provider": "llama_cpp", "base_url": url, "model": "qwen3-8b",
+            "telegram_token": "test-telegram-token", "telegram_chat_ids": [GROUP], "telegram_owner_ids": [OWNER],
+            "discord_token": "test-discord-token", "discord_owner_user_ids": [4242],
+        })
+    assert resp.status_code == 200, resp.text
+    gw = yaml.safe_load((tmp_path / "confdir" / "prometheus.yaml").read_text(encoding="utf-8"))["gateway"]
+    assert gw["owner_user_ids"] == [OWNER]
+    assert gw["discord"]["owner_user_ids"] == [4242]

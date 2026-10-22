@@ -591,6 +591,12 @@ gateway:
   telegram_enabled: false
   telegram_token: ""                # Set via PROMETHEUS_TELEGRAM_TOKEN env var
   allowed_chat_ids: []
+  # The owner: the only person on Telegram who can approve tool calls, change
+  # settings, or teach Prometheus (memory, skills). Others in an allowed group
+  # can chat, and anything their message asks Prometheus to run waits for the
+  # owner's approval. Empty = the private chats in allowed_chat_ids (a private
+  # chat's id is your user id), so allowing only your own chat needs nothing here.
+  owner_user_ids: []                # e.g. [123456789]
   proxy_url: null
   heartbeat_interval: 30
   cron_enabled: true
@@ -684,6 +690,9 @@ gateway:
     # for every working install and needs the same boot-refusal + doctor + wizard
     # treatment before it can be honest.
     allowed_channels: []              # e.g. [C0123456789]
+    # The owner (your Slack member ID): the only person on Slack who can approve
+    # tool calls, change settings or teach Prometheus. Empty = nobody, so set it.
+    owner_user_ids: []                # e.g. [U0123456789]
 
   # SPRINT G2: Discord gateway (optional extra: pip install 'oara-prometheus[discord]').
   # Whitelist semantics: DMs are allowed unless user_ids restricts them (see
@@ -714,6 +723,10 @@ gateway:
     # #219) is a deliberate follow-up: it changes behaviour for every existing
     # operator and needs the same boot-refusal + doctor + wizard treatment.
     user_ids: []
+    # The owner (your Discord user ID): the only person on Discord who can
+    # approve tool calls, change settings or teach Prometheus. Empty = the owner
+    # of the bot's Discord application.
+    owner_user_ids: []                 # e.g. [123456789012345678]
     skill_event_notifications: quiet   # off | quiet | verbose
     long_reply_threshold: 800          # chars; longer replies open a thread
 

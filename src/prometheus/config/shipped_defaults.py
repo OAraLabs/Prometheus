@@ -356,6 +356,34 @@ def resolve_allowed_chat_ids(gateway_cfg: dict | None) -> list[int]:
     return out
 
 
+def resolve_owner_user_ids(section: dict | None) -> list[str]:
+    """``owner_user_ids`` from a gateway config section, as platform user ids (text). Empty when absent.
+
+    The owner is the only person on a chat gateway who may approve tool calls, change what the agent may do, or
+    teach it (gateway trust). What empty means differs per gateway, and is decided in ``PlatformConfig.owner_ids``:
+    Telegram falls back to the private chats in ``allowed_chat_ids``, Discord to the bot application's owner,
+    Slack to nobody.
+    """
+    value = (section or {}).get("owner_user_ids")
+    if not isinstance(value, list):
+        return []
+    return [str(v).strip() for v in value if str(v).strip()]
+
+
+def resolve_telegram_owner_ids(gateway_cfg: dict | None) -> list[int]:
+    """The Telegram owner's user ids: ``gateway.owner_user_ids``, else the positive ``allowed_chat_ids`` (a private
+    chat's id IS its user's id). One answer for approvals, desktop tasks and pairing prompts."""
+    explicit: list[int] = []
+    for v in resolve_owner_user_ids(gateway_cfg):
+        try:
+            explicit.append(int(v))
+        except ValueError:
+            continue  # not a Telegram id: it names nobody, which shrinks the owner set (fail closed)
+    if explicit:
+        return explicit
+    return [chat for chat in resolve_allowed_chat_ids(gateway_cfg) if chat > 0]
+
+
 # ---------------------------------------------------------------------------
 # Resolvers — THE single reader for each absence-hostile key.
 #
