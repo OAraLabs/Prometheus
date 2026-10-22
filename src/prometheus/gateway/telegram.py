@@ -867,6 +867,7 @@ class TelegramAdapter(BasePlatformAdapter):
         if chat is None:
             return  # nothing to authorize; no handler acts without a chat
         if self.config.chat_allowed(chat.id):
+            await self._refuse_owner_only_command(update)
             return
         user = update.effective_user
         # Log the command name only — never the text, which for an
@@ -886,6 +887,27 @@ class TelegramAdapter(BasePlatformAdapter):
             getattr(user, "id", "?"),
             shown,
         )
+        raise ApplicationHandlerStop
+
+    async def _refuse_owner_only_command(self, update: Update) -> None:
+        """Stop a command only the owner may run, when someone else in an allowed chat sends it.
+
+        Part of the group -1 check, so it runs before every command handler, and covers one added later as soon as
+        it is listed in ``commands.owner_only_command``. The SENDER is checked, not the chat: an allowed group has
+        many members, and only the owner approves, changes settings or teaches.
+        """
+        from prometheus.gateway.commands import owner_only_command, owner_only_reply
+
+        text = (update.message.text or "") if update.message else ""
+        if not text.startswith("/"):
+            return
+        parts = text.split(maxsplit=1)
+        name, args = parts[0], (parts[1] if len(parts) > 1 else "")
+        if not owner_only_command(name, args):
+            return
+        if self.config.is_owner(getattr(update.effective_user, "id", None)):
+            return
+        await self.send(update.effective_chat.id, owner_only_reply(name), parse_mode=None)
         raise ApplicationHandlerStop
 
     async def on_message(self, event: MessageEvent) -> None:

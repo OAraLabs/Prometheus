@@ -41,6 +41,9 @@ IN_PROCESS = "in-process"
 
 UNKNOWN_ID = "unknown"
 
+#: The chat gateways: their answers come from a person in a chat, and only the gateway's owner may give one.
+CHAT_KINDS = frozenset({TELEGRAM, SLACK, DISCORD})
+
 
 @dataclass(frozen=True)
 class Approver:
@@ -53,6 +56,12 @@ class Approver:
     #: A chat gateway's answer: True when the sender is the gateway's owner, False when not. None for every other
     #: surface (REST, in-process), whose own rules decide. The shared /approve and /deny core refuses False.
     owner: bool | None = field(default=None, compare=False)
+
+    @property
+    def not_the_owner(self) -> bool:
+        """A chat answer that is not known to be the owner's. ``owner=None`` on a chat kind means the gateway never
+        asked, so it is refused too: the approval queue's backstop under the /approve and /deny core."""
+        return self.kind in CHAT_KINDS and self.owner is not True
 
     @property
     def label(self) -> str:

@@ -1088,6 +1088,16 @@ class SlackAdapter(BasePlatformAdapter):
         """
         from slack_bolt.response import BoltResponse
 
+        from prometheus.gateway.commands import owner_only_command, owner_only_reply
+
+        # Owner-only commands, by the SENDER (any channel, including DMs): only the owner approves, changes settings
+        # or teaches. One check for every slash command, present and future (commands.owner_only_command).
+        command = body.get("command") or ""
+        if command and owner_only_command(command, body.get("text") or "") and not self.config.is_owner(
+                body.get("user_id")):
+            logger.warning("Refused Slack %s from a user who is not the owner", command[:32])
+            return BoltResponse(status=200, body=owner_only_reply(command))
+
         channel_id = body.get("channel_id") or ""
         # No channel to authorize: url-verification / ssl_check / OAuth
         # callbacks. They act on nothing — let them through.

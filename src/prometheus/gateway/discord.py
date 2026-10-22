@@ -963,6 +963,10 @@ class DiscordAdapter(BasePlatformAdapter):
                     "channel. The operator's allowlist does not include it."
                 ))
                 return
+            refusal = self._owner_refusal_for_command(interaction, name, args or "")
+            if refusal:
+                await self._respond(interaction, refusal)
+                return
             await handler(interaction, (args or "").strip())
 
         _callback.__name__ = f"prometheus_{group.name}_{name}"
@@ -1105,6 +1109,16 @@ class DiscordAdapter(BasePlatformAdapter):
             channel_id=channel_id or 0,
             user_id=getattr(user, "id", None),
         )
+
+    def _owner_refusal_for_command(self, interaction: Any, name: str, args: str) -> str | None:
+        """The reply when *name* is a command only the owner may run and the interaction's user is not the owner;
+        None otherwise. Called from ``_register``'s callback, the one place every app command goes through."""
+        from prometheus.gateway.commands import owner_only_command, owner_only_reply
+
+        if not owner_only_command(name, args):
+            return None
+        user = getattr(interaction, "user", None)
+        return None if self.config.is_owner(getattr(user, "id", None)) else owner_only_reply(name)
 
     async def _respond(self, interaction: Any, text: str) -> None:
         """Reply to an interaction, chunked at the 2000-char limit.

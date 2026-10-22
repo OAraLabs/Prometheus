@@ -105,7 +105,7 @@ class TestTheQueueNamesWhoAnswered:
         queue = _queue(tmp_path)
         _pending(queue)
         _pending(queue, rid="def67890")
-        assert await queue.approve(RID, by=Approver("telegram", "456", "will"))
+        assert await queue.approve(RID, by=Approver("telegram", "456", "will", owner=True))
         assert await queue.deny("def67890", by=Approver("device-token", "d1", "iPhone"))
         assert _answered_by(queue) == ["telegram:456", "device-token:d1"]
 
@@ -117,8 +117,8 @@ class TestTheQueueNamesWhoAnswered:
         queue.signal_bus = bus = _Bus()
         _pending(queue)
         _pending(queue, rid="def67890")
-        await queue.approve(RID, scope="once", by=Approver("slack", "U1", "will"))
-        await queue.deny("def67890", by=Approver("discord", "789", "will"))
+        await queue.approve(RID, scope="once", by=Approver("slack", "U1", "will", owner=True))
+        await queue.deny("def67890", by=Approver("discord", "789", "will", owner=True))
         resolved = [p for k, p in bus.emitted if k == "approval_resolved"]
         assert resolved[0]["approved_by"] == {
             "kind": "slack", "id": "U1", "name": "will"}

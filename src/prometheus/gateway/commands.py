@@ -10,7 +10,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from prometheus.config.paths import get_wiki_root
 from prometheus.permissions.approver import Approver
@@ -2881,6 +2881,44 @@ async def approve_detail(
 #: default, the private chats in ``allowed_chat_ids``). Group members may chat; they may not approve or teach.
 NOT_OWNER_APPROVE = "Only the owner can approve or deny tool calls."
 OWNER_ONLY_REPLY = "Only the owner can do that."
+
+# The commands only a gateway's owner may run: anything that answers an approval, changes what the agent may do or
+# where it writes, or changes what it learns. ONE rule, consulted at each gateway's single chokepoint (Telegram's
+# group -1 handler, Slack's global middleware, Discord's command callback), so a command added later is covered the
+# moment it is listed here. Reading (status, lists, help) and chatting stay open to everyone in an allowed chat.
+_OWNER_ALWAYS = frozenset({"approve", "deny", "revoke", "note", "steer"})
+_OWNER_TO_CHANGE = frozenset({"workspace", "profile", "model", "route"})   # bare = show
+_OWNER_SUBCOMMANDS: dict[str, Callable[[str], bool]] = {
+    "gate": lambda sub: sub not in ("", "status"),
+    "gepa": lambda sub: sub not in ("", "status", "history"),
+    "skills": lambda sub: sub in ("pin", "unpin"),
+    "curator": lambda sub: sub == "run",
+    "symbiote": lambda sub: sub not in ("", "status", "history", "backups", "help"),
+    "press": lambda sub: sub in ("install", "update"),
+}
+
+
+def _command_name(name: str) -> str:
+    """``/approve@my_bot``, ``/prometheus-approve`` and ``approve`` are all ``approve``."""
+    name = (name or "").strip().lower().lstrip("/").split("@", 1)[0]
+    return name[len("prometheus-"):] if name.startswith("prometheus-") else name
+
+
+def owner_only_command(name: str, args: str = "") -> bool:
+    """True when only the gateway's owner may run ``name`` with ``args``."""
+    command = _command_name(name)
+    args = (args or "").strip()
+    if command in _OWNER_ALWAYS:
+        return True
+    if command in _OWNER_TO_CHANGE:
+        return bool(args)
+    check = _OWNER_SUBCOMMANDS.get(command)
+    return bool(check and check(args.split(maxsplit=1)[0].lower() if args else ""))
+
+
+def owner_only_reply(name: str) -> str:
+    """What a non-owner is told when ``name`` is refused."""
+    return NOT_OWNER_APPROVE if _command_name(name) in ("approve", "deny") else OWNER_ONLY_REPLY
 
 
 async def cmd_approve(
