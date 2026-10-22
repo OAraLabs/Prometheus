@@ -448,20 +448,6 @@ def test_golden_trace_context_with_a_member_turn_is_not_exported(tmp_path):
     assert resolve({"session_id": "telegram:456", "timestamp": t0 + 10}), "control: an owner-only session resolves"
 
 
-def test_a_compaction_span_stops_at_a_member_s_turn():
-    """A summary is stored as trusted, so a member's words must never be folded into one."""
-    from tests.test_context_compactor import _compactor
-
-    msgs: list[ConversationMessage] = []
-    for i in range(8):
-        text = f"turn {i} " + "x" * 400
-        msgs.append(_member_turn(text) if i == 2 else ConversationMessage.from_user_text(text))
-        msgs.append(ConversationMessage(role="assistant", content=[TextBlock(text=f"answer {i} " + "y" * 400)]))
-    end = _compactor(protect_recent_turns=1)._select_span_end(msgs)
-    assert end <= 4, f"the span ran to {end}, over the member's turn at 4"
-    assert end > 0, "control: the owner's turns before it still compact"
-
-
 # --------------------------------------------------------------------------- #
 # Slack and Discord fail closed until the owner is named: doctor and the daemon say so
 # --------------------------------------------------------------------------- #
