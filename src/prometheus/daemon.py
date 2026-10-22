@@ -2193,12 +2193,8 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             from prometheus.infra.project_configs import ProjectConfigStore
             from prometheus.tools.builtin.anatomy import set_anatomy_components
 
-            scanner = AnatomyScanner(
-                llama_cpp_url=model_config.get("base_url", "http://localhost:8080"),
-                ollama_url=model_config.get("fallback_url", "http://localhost:11434"),
-                inference_engine=model_config.get("provider", "llama_cpp"),
-                ssh_user=anatomy_config.get("ssh_user"),
-                ssh_key=anatomy_config.get("ssh_key"),
+            scanner = AnatomyScanner.from_config(
+                config,
                 # Model facts come from the registry's probe — one implementation,
                 # shared with the catalog and /api/backends; ANATOMY.md gains the
                 # backends table. The SSH GPU leg stays the scanner's.

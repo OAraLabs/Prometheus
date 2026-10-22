@@ -44,6 +44,15 @@ log = logging.getLogger(__name__)
 _VERSIONED_BASE_RE = re.compile(r"/v\d+[a-z0-9]*$")
 
 
+def models_url(base_url: str) -> str:
+    """``/models`` under a base by the same rule as :func:`_chat_completions_url`: a base ending in a version segment
+    is the API root (``…/v1`` → ``…/v1/models``), anything else gets ``/v1/models``."""
+    base = base_url.rstrip("/")
+    if _VERSIONED_BASE_RE.search(base):
+        return f"{base}/models"
+    return f"{base}/v1/models"
+
+
 def _chat_completions_url(base_url: str) -> str:
     """Join a provider base URL with the chat-completions path.
 

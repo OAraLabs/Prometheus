@@ -291,11 +291,14 @@ def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[Diagn
     # base_url is used for the REQUEST as written — userinfo included, since
     # httpx turns ``user:pass@`` into a Basic auth header. Only what is
     # DISPLAYED goes through redact_url below.
-    base_url = (model_cfg.get("base_url") or "http://localhost:8080").rstrip("/")
+    from prometheus.providers.openai_compat import models_url
+    from prometheus.providers.registry import resolve_model_base_url
+
+    base_url = resolve_model_base_url(model_cfg)
     detected: list[str] = []
     error: str | None = None
     try:
-        resp = httpx.get(f"{base_url}/v1/models", timeout=timeout)
+        resp = httpx.get(models_url(base_url), timeout=timeout)
         resp.raise_for_status()
         detected = [str(m.get("id", "")) for m in resp.json().get("data", [])]
     except Exception as exc:
@@ -1459,15 +1462,7 @@ def run_anatomy_checks(config: dict[str, Any]) -> list[DiagnosticCheck]:
         from prometheus.infra.anatomy import AnatomyScanner
         from prometheus.infra.doctor import Doctor
 
-        model_cfg = config.get("model", {}) or {}
-        anatomy_cfg = config.get("anatomy", {}) or {}
-        scanner = AnatomyScanner(
-            llama_cpp_url=model_cfg.get("base_url", "http://localhost:8080"),
-            ollama_url=model_cfg.get("fallback_url", "http://localhost:11434"),
-            inference_engine=model_cfg.get("provider", "llama_cpp"),
-            ssh_user=anatomy_cfg.get("ssh_user"),
-            ssh_key=anatomy_cfg.get("ssh_key"),
-        )
+        scanner = AnatomyScanner.from_config(config)
 
         async def _scan_and_diagnose():
             state = await scanner.scan()
