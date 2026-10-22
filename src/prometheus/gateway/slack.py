@@ -1246,7 +1246,7 @@ class SlackAdapter(BasePlatformAdapter):
         # /queue creates the session if missing so a queued prompt on a
         # quiet channel fires when the user kicks off their first message.
         session = self.session_manager.get_or_create(f"slack:{channel}")
-        if not session.enqueue_prompt(text_arg):
+        if not session.enqueue_prompt(text_arg, sender=command.get("user_id")):
             await respond(text="Empty prompt — nothing queued.")
             return
         preview = text_arg if len(text_arg) <= 80 else text_arg[:77] + "..."

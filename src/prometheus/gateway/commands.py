@@ -1999,7 +1999,7 @@ def cmd_steer(session: Any, text: str) -> str:
     )
 
 
-def cmd_queue(session: Any, text: str) -> str:
+def cmd_queue(session: Any, text: str, *, sender: Any = None) -> str:
     """Queue ``text`` as a fresh turn after the current one ends.
 
     ``session`` should be a get_or_created ChatSession (a queued prompt on a
@@ -2015,7 +2015,7 @@ def cmd_queue(session: Any, text: str) -> str:
         )
     if session is None:
         return "No active session."
-    if not session.enqueue_prompt(text):
+    if not session.enqueue_prompt(text, **({"sender": sender} if sender is not None else {})):
         return "Empty prompt — nothing queued."
     return (
         f"📥 Queued: {_preview(text)}\n"

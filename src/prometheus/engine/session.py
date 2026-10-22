@@ -216,6 +216,20 @@ def _restore_newest_turn(
     return [request, *turn[start:]], info
 
 
+class QueuedPrompt(str):
+    """A queued prompt's text, carrying who queued it (``sender``, a platform user id, or None when unknown).
+
+    A ``str`` so every reader of ``queued_prompts`` (previews, /unqueue, status lists) works unchanged.
+    """
+
+    sender: object
+
+    def __new__(cls, text: str, *, sender: object = None) -> "QueuedPrompt":
+        obj = super().__new__(cls, text)
+        obj.sender = sender
+        return obj
+
+
 class ChatSession:
     """Per-chat conversation state.
 
@@ -314,13 +328,18 @@ class ChatSession:
         self.queued_steers.clear()
         return n
 
-    def enqueue_prompt(self, text: str) -> bool:
+    def enqueue_prompt(self, text: str, *, sender: object = None) -> bool:
         """Append ``text`` to the queued-prompts list. Returns False
-        if empty."""
+        if empty.
+
+        ``sender`` is the platform user id of whoever queued it (gateway
+        trust): the turn it later fires is theirs, not the person whose turn
+        happened to drain it.
+        """
         cleaned = (text or "").strip()
         if not cleaned:
             return False
-        self.queued_prompts.append(cleaned)
+        self.queued_prompts.append(QueuedPrompt(cleaned, sender=sender))
         return True
 
     def drain_prompt(self) -> str | None:
@@ -689,7 +708,8 @@ class ChatSession:
                     # silently dropped to the trusted default.
                     provenance=msg.provenance,
                     is_trusted=msg.is_trusted,
-                    author=getattr(msg, "author", None),
+                    # Only when there is one: an engine that predates authors (or a duck-typed one) still persists.
+                    **({"author": msg.author} if getattr(msg, "author", None) else {}),
                 )
                 stored = getattr(self._lcm_engine, "last_ingested_turn_index", None)
                 if _is_int(stored) and stored != requested:

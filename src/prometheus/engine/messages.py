@@ -189,7 +189,8 @@ class ConversationMessage(BaseModel):
     is_trusted: bool = False
     # Who wrote a chat-gateway turn: "telegram:<user id>", "slack:<user id>", "discord:<user id>". None for every other
     # surface. With provenance it says owner ("user", trusted) or group member ("member", untrusted).
-    author: str | None = None
+    # Excluded from model_dump: it is persisted as its own LCM column, and the provider payload stays byte-identical.
+    author: str | None = Field(default=None, exclude=True)
 
     @classmethod
     def from_member_text(cls, text: str, *, author: str) -> "ConversationMessage":

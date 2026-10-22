@@ -1609,7 +1609,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 f"telegram:{update.effective_chat.id}"
             )
         await self.send(
-            update.effective_chat.id, _cmds.cmd_queue(session, text), parse_mode=None
+            update.effective_chat.id,
+            _cmds.cmd_queue(session, text, sender=getattr(update.effective_user, "id", None)),
+            parse_mode=None,
         )
 
     async def _cmd_unqueue(
@@ -2138,17 +2140,20 @@ class TelegramAdapter(BasePlatformAdapter):
             # SPRINT-TEACHER-ESCALATION Phase 3: same post-turn anchor as the
             # honesty validator. The engine fails loud in telemetry; the hook
             # itself must never break the reply path.
-            try:
-                response_text = await self._maybe_escalate_turn(
-                    session=session,
-                    session_id=session_id,
-                    response_text=response_text,
-                    new_messages=result.messages[pre_len:],
-                    user_request=content,
-                )
-            except Exception:
-                logger.exception(
-                    "teacher escalation hook failed (local reply unaffected)")
+            # Escalation writes a skill from this turn's request, so only the owner's own words may start it: never a
+            # group member's (gateway trust), nor an injected task result.
+            if provenance == "user" and is_trusted:
+                try:
+                    response_text = await self._maybe_escalate_turn(
+                        session=session,
+                        session_id=session_id,
+                        response_text=response_text,
+                        new_messages=result.messages[pre_len:],
+                        user_request=content,
+                    )
+                except Exception:
+                    logger.exception(
+                        "teacher escalation hook failed (local reply unaffected)")
             # Emit turn_completed so Beacon sees Telegram-originated turns.
             # The WS server's generic signal forwarder (_on_signal) picks this
             # up and broadcasts it to all connected clients — no WS-side
@@ -2447,7 +2452,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 break
             queued_event = MessageEvent(
                 chat_id=event.chat_id,
-                user_id=event.user_id,
+                # Whoever QUEUED it, not whoever's turn drained it (gateway trust); unknown = nobody's, never the owner.
+                user_id=getattr(next_prompt, "sender", None) or 0,
                 text=next_prompt,
                 message_id=event.message_id,
                 platform=event.platform,

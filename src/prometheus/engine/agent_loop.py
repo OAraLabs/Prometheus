@@ -4265,6 +4265,8 @@ def _capture_success_pairs(
     """On a successful execution: complete any pending pairs + cloud goldens.
 
     Fail-loud-but-non-blocking (pair_capture handles the loudness)."""
+    if not _turn_trust()[0]:
+        return  # gateway trust: a turn a group member wrote is never training data
     try:
         from prometheus.learning.pair_capture import (
             capture_pair,
@@ -5867,6 +5869,17 @@ async def _execute_tool_call(
             # defect this whole change closes.
             from prometheus.permissions.checker import PermissionDecision
             decision = PermissionDecision.approve(_path_unknown)
+        _turn_teaches, _turn_author = _turn_trust()
+        if decision.allowed and not _turn_teaches:
+            # GATEWAY TRUST: a turn a group member wrote (not the gateway's owner) never runs a tool on its own: not a
+            # read-only one (reading the owner's files and replying in the group is the leak), not under a remembered
+            # grant, not with the gate off. Every call waits for the owner, and only the owner can answer (the
+            # approval queue refuses anyone else from a chat). A denial stays a denial.
+            from prometheus.permissions.checker import PermissionDecision
+            decision = PermissionDecision.approve(
+                f"{_turn_author or 'a member of this chat'} asked for this, not the owner: "
+                f"{tool_name} runs only if the owner approves"
+            )
         if not decision.allowed:
             # The gate's own queue is the fallback prompt. Resolved HERE, in
             # the one function every surface goes through, rather than wired
@@ -6505,10 +6518,19 @@ class AgentLoop:
         # ``skill_created`` signal whose payload carries ``trigger_task`` (the
         # message's first 200 chars) into ``telemetry.signal_events``. The
         # trace is still drained below so it cannot leak into the next turn.
+        from prometheus.engine.tool_context import turn_trust_of as _turn_trust_of
+
         if self._post_task_hooks and self._tool_trace:
             if is_session_ephemeral(session_id):
                 log.debug(
                     "Ephemeral session %s — skipping %d post-task hook(s)",
+                    session_id, len(self._post_task_hooks),
+                )
+            elif not _turn_trust_of(messages or [])[0]:
+                # Gateway trust: SkillCreator / SkillRefiner learn only from the owner's own requests, never from a
+                # turn a group member wrote.
+                log.debug(
+                    "Turn in %s was a group member's — skipping %d post-task hook(s)",
                     session_id, len(self._post_task_hooks),
                 )
             else:

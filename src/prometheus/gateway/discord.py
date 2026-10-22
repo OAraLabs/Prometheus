@@ -661,7 +661,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 break
             queued_event = MessageEvent(
                 chat_id=event.chat_id,
-                user_id=event.user_id,
+                # Whoever QUEUED it, not whoever's turn drained it (gateway trust); unknown = nobody's, never the owner.
+                user_id=getattr(next_prompt, "sender", None) or 0,
                 text=next_prompt,
                 message_id=event.message_id,
                 platform=event.platform,
@@ -1574,7 +1575,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # queue creates the session if missing so a queued prompt on a quiet
         # channel fires when the user kicks off their first message.
         session = self.session_manager.get_or_create(f"discord:{channel}")
-        if not session.enqueue_prompt(args):
+        if not session.enqueue_prompt(args, sender=getattr(getattr(interaction, "user", None), "id", None)):
             await self._respond(interaction, "Empty prompt — nothing queued.")
             return
         preview = args if len(args) <= 80 else args[:77] + "..."
