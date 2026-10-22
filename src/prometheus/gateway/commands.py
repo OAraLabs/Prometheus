@@ -2877,6 +2877,12 @@ async def approve_detail(
         grant_id=effective.grant_id,
     )
 
+#: What a chat gateway says to someone who is not its owner (the gateway's ``owner_user_ids``; on Telegram, by
+#: default, the private chats in ``allowed_chat_ids``). Group members may chat; they may not approve or teach.
+NOT_OWNER_APPROVE = "Only the owner can approve or deny tool calls."
+OWNER_ONLY_REPLY = "Only the owner can do that."
+
+
 async def cmd_approve(
     queue: Any, arg_text: str, *, by: Approver, prefix: str = "/",
 ) -> str:
@@ -2887,7 +2893,12 @@ async def cmd_approve(
     the structured facts to the REST surface. ONE core, two projections: a
     second implementation is exactly what drifted the verb list from the REST
     validator the day #232 landed.
+
+    A gateway sender who is not the owner (``by.owner is False``) is refused before the queue is touched, whatever
+    the form: an id, a bare /approve, ``all``, ``always``, ``until-restart``.
     """
+    if by.owner is False:
+        return NOT_OWNER_APPROVE
     return (await approve_detail(queue, arg_text, by=by, prefix=prefix)).message
 
 
@@ -2958,7 +2969,11 @@ async def cmd_deny(
     only when exactly one request is pending. Denying is the safe direction,
     but it stays symmetrical on purpose: an operator who learns the shortcut
     from one command should not be surprised by the other.
+
+    Owner-only on a chat gateway, as /approve is.
     """
+    if by.owner is False:
+        return NOT_OWNER_APPROVE
     request_id = (request_id or "").strip()
     if queue is None:
         return "Approval queue not active."

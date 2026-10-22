@@ -43,6 +43,7 @@ def _tg_adapter(**kw):
 
     adapter = _make_adapter(**kw)
     adapter.config.allowed_chat_ids = [OWNER, GROUP]
+    adapter.config.owner_user_ids = []   # the default rule: the owner is the positive allowed_chat_ids
     return adapter
 
 

@@ -1345,7 +1345,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         await self._defer(interaction)
         await self._respond(interaction, await cmd_computer(
-            None, args, by=_approver.discord(interaction), surface="discord",
+            None, args, by=_approver.discord(interaction, owners=self.config.owner_ids()), surface="discord",
             session_id=""))
 
     async def _app_backends(self, interaction: Any, args: str) -> None:
@@ -1375,6 +1375,10 @@ class DiscordAdapter(BasePlatformAdapter):
         from prometheus.gateway.commands import cmd_note
         from prometheus.tools.builtin.wiki_compile import _memory_store
 
+        refused = self.owner_refusal(getattr(getattr(interaction, "user", None), "id", None))
+        if refused:
+            await self._respond(interaction, refused)
+            return
         await self._respond(interaction, cmd_note(_memory_store, args))
 
     async def _app_sentinel(self, interaction: Any, args: str) -> None:
@@ -1597,7 +1601,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # invoking USER is recorded, not the channel (W4).
         text = await _cmds.cmd_approve(
             getattr(self, "_approval_queue", None), args,
-            by=_approver.discord(interaction), prefix=OPS_PREFIX,
+            by=_approver.discord(interaction, owners=self.config.owner_ids()), prefix=OPS_PREFIX,
         )
         await self._respond(interaction, text)
 
@@ -1618,7 +1622,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         text = await _cmds.cmd_deny(
             getattr(self, "_approval_queue", None), request_id,
-            by=_approver.discord(interaction), prefix=OPS_PREFIX,
+            by=_approver.discord(interaction, owners=self.config.owner_ids()), prefix=OPS_PREFIX,
         )
         await self._respond(interaction, text)
 
@@ -1640,6 +1644,10 @@ class DiscordAdapter(BasePlatformAdapter):
         """Revoke a remembered grant by id (SPRINT-CONSENT Phase 2)."""
         from prometheus.gateway import commands as _cmds
 
+        refused = self.owner_refusal(getattr(getattr(interaction, "user", None), "id", None))
+        if refused:
+            await self._respond(interaction, refused)
+            return
         await self._respond(
             interaction,
             _cmds.cmd_revoke(getattr(self, "_approval_queue", None), args or ""),
@@ -1656,6 +1664,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
         await self._defer(interaction)
         sub = args.split()[0] if args else "status"
+        if sub.lower() not in ("status", "history"):
+            refused = self.owner_refusal(getattr(getattr(interaction, "user", None), "id", None))
+            if refused:
+                await self._respond(interaction, refused)
+                return
         text = await _cmds.cmd_gepa(
             getattr(self, "_gepa_engine", None),
             getattr(self, "_approval_queue", None),

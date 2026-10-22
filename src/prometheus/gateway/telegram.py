@@ -1442,6 +1442,11 @@ class TelegramAdapter(BasePlatformAdapter):
         if update.effective_chat is None:
             return
         chat_id = update.effective_chat.id
+        # A max-trust fact: the owner's to write, not a group member's.
+        refused = self.owner_refusal(getattr(update.effective_user, "id", None))
+        if refused:
+            await self.send(chat_id, refused, parse_mode=None)
+            return
         raw = " ".join(context.args or [])
         from prometheus.gateway import commands as _cmds
         from prometheus.tools.builtin.wiki_compile import _memory_store
@@ -2600,6 +2605,12 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = update.effective_chat.id
         args = (update.message.text or "").split(maxsplit=1)
         arg = args[1].strip() if len(args) > 1 else ""
+        # Reading the gate is anyone's; changing it is the owner's.
+        if arg.lower() not in ("", "status"):
+            refused = self.owner_refusal(getattr(update.effective_user, "id", None))
+            if refused:
+                await self.send(chat_id, refused, parse_mode=None)
+                return
         gate = getattr(self.agent_loop, "permission_checker", None)
         await self.send(chat_id, cmd_gate(gate, arg), parse_mode=None)
 
@@ -2625,7 +2636,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # The SENDER, not the chat: an allowed group chat has many members
         # (W4 — recorded now, checked later).
         text = await _cmds.cmd_approve(
-            queue, arg_text, by=_approver.telegram(update.effective_user))
+            queue, arg_text, by=_approver.telegram(update.effective_user, owners=self.config.owner_ids()))
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_computer(
@@ -2651,7 +2662,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
         reply = await _cmds.cmd_computer(
             getattr(self, "_computer_runner", None), arg_text,
-            by=_approver.telegram(update.effective_user), surface="telegram",
+            by=_approver.telegram(update.effective_user, owners=self.config.owner_ids()), surface="telegram",
             session_id=f"{Platform.TELEGRAM.value}:{chat_id}", chat_id=chat_id,
             notify=notify)
         await self.send(chat_id, reply, parse_mode=None)
@@ -2728,7 +2739,7 @@ class TelegramAdapter(BasePlatformAdapter):
         from prometheus.permissions import approver as _approver
 
         text = await _cmds.cmd_deny(
-            queue, request_id, by=_approver.telegram(update.effective_user))
+            queue, request_id, by=_approver.telegram(update.effective_user, owners=self.config.owner_ids()))
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_pending(
@@ -2763,6 +2774,10 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         from prometheus.gateway import commands as _cmds
 
+        refused = self.owner_refusal(getattr(update.effective_user, "id", None))
+        if refused:
+            await self.send(update.effective_chat.id, refused, parse_mode=None)
+            return
         queue = getattr(self, "_approval_queue", None)
         arg = " ".join((update.message.text or "").split()[1:])
         text = _cmds.cmd_revoke(queue, arg)
@@ -2783,6 +2798,11 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = update.effective_chat.id
         args = (update.message.text or "").split()
         sub = args[1].strip().lower() if len(args) > 1 else "status"
+        if sub not in ("status", "history"):
+            refused = self.owner_refusal(getattr(update.effective_user, "id", None))
+            if refused:
+                await self.send(chat_id, refused, parse_mode=None)
+                return
 
         text = await _cmds.cmd_gepa(
             getattr(self, "_gepa_engine", None),

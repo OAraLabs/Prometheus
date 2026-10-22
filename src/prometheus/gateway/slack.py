@@ -1352,7 +1352,7 @@ class SlackAdapter(BasePlatformAdapter):
         from prometheus.permissions import approver as _approver
 
         await respond(text=await cmd_computer(
-            None, self._cmd_text(command), by=_approver.slack(command),
+            None, self._cmd_text(command), by=_approver.slack(command, owners=self.config.owner_ids()),
             surface="slack", session_id=""))
 
     async def _slash_backends(self, ack: Any, command: Any, respond: Any) -> None:
@@ -1426,6 +1426,10 @@ class SlackAdapter(BasePlatformAdapter):
         from prometheus.gateway.commands import cmd_note
         from prometheus.tools.builtin.wiki_compile import _memory_store
 
+        refused = self.owner_refusal((command or {}).get("user_id") if hasattr(command, "get") else None)
+        if refused:
+            await respond(text=refused)
+            return
         await respond(text=cmd_note(_memory_store, self._cmd_text(command)))
 
     async def _slash_pairs(self, ack: Any, respond: Any) -> None:
@@ -1447,7 +1451,7 @@ class SlackAdapter(BasePlatformAdapter):
         # The SENDER (the payload's user_id), not the channel (W4).
         text = await _cmds.cmd_approve(
             getattr(self, "_approval_queue", None), text_arg,
-            by=_approver.slack(command), prefix=SLACK_COMMAND_PREFIX,
+            by=_approver.slack(command, owners=self.config.owner_ids()), prefix=SLACK_COMMAND_PREFIX,
         )
         await respond(text=text)
 
@@ -1473,7 +1477,7 @@ class SlackAdapter(BasePlatformAdapter):
 
         text = await _cmds.cmd_deny(
             getattr(self, "_approval_queue", None), request_id,
-            by=_approver.slack(command), prefix=SLACK_COMMAND_PREFIX,
+            by=_approver.slack(command, owners=self.config.owner_ids()), prefix=SLACK_COMMAND_PREFIX,
         )
         await respond(text=text)
 
@@ -1496,6 +1500,10 @@ class SlackAdapter(BasePlatformAdapter):
         await ack()
         from prometheus.gateway import commands as _cmds
 
+        refused = self.owner_refusal((command or {}).get("user_id") if hasattr(command, "get") else None)
+        if refused:
+            await respond(text=refused)
+            return
         arg = (command or {}).get("text", "") if isinstance(command, dict) else ""
         await respond(
             text=_cmds.cmd_revoke(getattr(self, "_approval_queue", None), arg)
@@ -1522,6 +1530,11 @@ class SlackAdapter(BasePlatformAdapter):
 
         text_arg = self._cmd_text(command)
         sub = text_arg.split()[0] if text_arg else "status"
+        if sub.lower() not in ("status", "history"):
+            refused = self.owner_refusal((command or {}).get("user_id") if hasattr(command, "get") else None)
+            if refused:
+                await respond(text=refused)
+                return
         text = await _cmds.cmd_gepa(
             getattr(self, "_gepa_engine", None),
             getattr(self, "_approval_queue", None),
