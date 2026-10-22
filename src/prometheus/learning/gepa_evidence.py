@@ -353,12 +353,16 @@ def _calls_after(
 
 
 def _request(conn: sqlite3.Connection, session_id: str, load_ts: float) -> tuple[str | None, bool]:
-    """``(request text, withheld)`` — the newest user row persisted before the load.
+    """``(request text, withheld)`` — the user's request that preceded the load.
 
-    An injected turn (a task result, provenance other than the user, stored
-    untrusted) that started the run is withheld rather than shown: its text
-    came from outside, and it is about to be put in front of a model that
-    writes skills.
+    Tool results can be persisted as ``role='user'`` rows, including rows whose
+    provenance is ``user``. An untrusted tool result must not be shown as a
+    request, nor should it erase the actual request that preceded it. Skip such
+    rows and recover the newest trusted, user-provenance message instead.
+
+    An untrusted injected turn from another provenance (for example a task
+    result) is different: it can itself start a run, so withhold the request
+    rather than falling back to an older human message.
     """
     row = conn.execute(
         "SELECT content, is_trusted, provenance FROM lcm_messages "
@@ -369,12 +373,21 @@ def _request(conn: sqlite3.Connection, session_id: str, load_ts: float) -> tuple
     if row is None:
         return None, False
     content, is_trusted, provenance = row
-    # Trust must be interpreted together with provenance. Real human turns can
-    # have is_trusted=0 in older or inconsistent rows; the conversation renderer
-    # already treats provenance="user" as human-authored. Only withhold content
-    # that is both untrusted and originated outside the user channel.
-    if not is_trusted and provenance != "user":
-        return None, True
+    if not is_trusted:
+        if provenance != "user":
+            return None, True
+        # A tool result may be stored as an untrusted user-role row. Do not
+        # relax the trust check: find the latest actual, trusted user request.
+        row = conn.execute(
+            "SELECT content FROM lcm_messages "
+            "WHERE session_id = ? AND role = 'user' AND timestamp < ? "
+            "AND provenance = 'user' AND is_trusted = 1 "
+            "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+            (session_id, load_ts),
+        ).fetchone()
+        if row is None:
+            return None, False
+        content = row[0]
     text = " ".join(redact_secrets(str(content or "")).split())
     return (_cut(text, REQUEST_CHARS) if text else None), False
 
