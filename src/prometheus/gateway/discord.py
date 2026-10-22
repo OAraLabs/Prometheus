@@ -611,7 +611,10 @@ class DiscordAdapter(BasePlatformAdapter):
         # its next tick, so AutoDream pauses. Never raises.
         activity.note_user_activity()
         outcomes.note_user_message(session_id, event.text)
-        session.add_user_message(event.text)
+        # Gateway trust: the owner's words are the owner's; anyone else's are theirs, untrusted, never teaching.
+        owner = self.config.is_owner(event.user_id)
+        session.add_user_message(event.text, provenance="user" if owner else "member", is_trusted=owner,
+                                 author=f"discord:{event.user_id}")
         pre_len = len(session.get_messages())
 
         from prometheus.engine.agent_loop import MaxTurnsExhausted

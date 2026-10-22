@@ -2009,6 +2009,7 @@ class TelegramAdapter(BasePlatformAdapter):
         session_id: str,
         provenance: str = "user",
         is_trusted: bool = True,
+        author: str | None = None,
     ) -> str:
         """Shared agent-turn core: append the turn, run the loop, persist, return text.
 
@@ -2026,7 +2027,7 @@ class TelegramAdapter(BasePlatformAdapter):
         async with self._turn_lock_for(session_id):
             return await self._run_agent_turn_locked(
                 session, content, session_id=session_id,
-                provenance=provenance, is_trusted=is_trusted,
+                provenance=provenance, is_trusted=is_trusted, author=author,
             )
 
     async def _run_agent_turn_locked(
@@ -2037,9 +2038,10 @@ class TelegramAdapter(BasePlatformAdapter):
         session_id: str,
         provenance: str = "user",
         is_trusted: bool = True,
+        author: str | None = None,
     ) -> str:
         """Serialized core of :meth:`_run_agent_turn` (holds the session lock)."""
-        session.add_user_message(content, provenance=provenance, is_trusted=is_trusted)
+        session.add_user_message(content, provenance=provenance, is_trusted=is_trusted, author=author)
         pre_len = len(session.get_messages())
         logger.debug(
             "THREAD session=%s messages=%d provenance=%s trusted=%s",
@@ -2344,6 +2346,13 @@ class TelegramAdapter(BasePlatformAdapter):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
+    def _turn_trust(self, event: MessageEvent) -> dict:
+        """provenance / is_trusted / author for an inbound chat message: the owner's, or a group member's."""
+        author = f"telegram:{event.user_id}"
+        if self.config.is_owner(event.user_id):
+            return {"provenance": "user", "is_trusted": True, "author": author}
+        return {"provenance": "member", "is_trusted": False, "author": author}
+
     async def _dispatch_to_agent(self, event: MessageEvent) -> None:
         """Route a message through AgentLoop and send the response."""
         # feat/session-rehydrate — cold-start restore before the turn, same
@@ -2373,8 +2382,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 session,
                 event.text,
                 session_id=event.session_key(),
-                provenance="user",
-                is_trusted=True,
+                # Gateway trust: the owner's words are the owner's; a group member's are theirs, untrusted, and
+                # never teach (memory, skills, GEPA, training data). Both are answered.
+                **self._turn_trust(event),
             )
 
         # Voice-mode routing — prefer voice reply when the chat is in

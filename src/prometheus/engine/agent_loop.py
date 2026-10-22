@@ -941,6 +941,12 @@ _ROUND_SERVING: contextvars.ContextVar = contextvars.ContextVar("prometheus_roun
 # engine/tool_context.py so the approval queue can read it too (it stamps each
 # pending request with the session that raised it); this is that same object.
 from prometheus.engine.tool_context import RUN_SESSION as _RUN_SESSION  # noqa: E402
+from prometheus.engine.tool_context import TURN_TRUST as _TURN_TRUST_VAR  # noqa: E402
+
+
+def _turn_trust() -> tuple[bool, str | None]:
+    return _TURN_TRUST_VAR.get()
+
 
 # The turn the run is recording into telemetry v2 (WP-X.54 T-3): a _TurnRecord,
 # or None when the run has no telemetry. Beside _RUN_SESSION for the same
@@ -1553,6 +1559,9 @@ async def run_loop(
     _offered_token = _ROUND_OFFERED.set(None)
     _catalog_token = _RUN_CATALOG.set(None)
     _session_token = _RUN_SESSION.set(None if ephemeral else recorded_session_id)
+    # Gateway trust: a turn a group member asked for teaches nothing (training pairs read it; tools get it below).
+    from prometheus.engine.tool_context import TURN_TRUST as _TURN_TRUST, turn_trust_of as _turn_trust_of
+    _turn_trust_token = _TURN_TRUST.set(_turn_trust_of(messages))
     # Telemetry v2 (WP-X.54 T-3). No telemetry, no record and no writer: with
     # telemetry off nothing reaches the v2 tables.
     turn_record: _TurnRecord | None = None
@@ -1609,6 +1618,7 @@ async def run_loop(
         _ROUND_OFFERED.reset(_offered_token)
         _RUN_CATALOG.reset(_catalog_token)
         _RUN_SESSION.reset(_session_token)
+        _TURN_TRUST.reset(_turn_trust_token)
         if turn_key is not None:
             try:
                 fmv.discard_turn(turn_key=turn_key)
@@ -5977,6 +5987,10 @@ async def _execute_tool_call(
                         # Public facts only: never a URL or a credential.
                         "serving_route": _serving_route(context),
                         "context_window_for": _context_window_for(context),
+                        # Gateway trust: whether the turn's request was the owner's (a group member's teaches
+                        # nothing: the memory tool refuses), and who wrote it.
+                        "turn_trusted": _turn_trust()[0],
+                        "turn_author": _turn_trust()[1],
                         **(context.tool_metadata or {}),
                     },
                 ),

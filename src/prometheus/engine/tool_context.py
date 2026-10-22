@@ -35,6 +35,35 @@ RUN_SESSION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "prometheus_run_session", default=None)
 
 
+#: Gateway trust (0.9.17): who asked for the turn in progress. (teaches, author): ``teaches`` is False when a group
+#: member who is not the owner wrote the turn's request, so nothing in it may teach (memory, skills, GEPA, training
+#: data); ``author`` names them. Set by the agent loop around a run; (True, None) outside one.
+TURN_TRUST: contextvars.ContextVar[tuple[bool, str | None]] = contextvars.ContextVar(
+    "prometheus_turn_trust", default=(True, None))
+
+
+def turn_trust_of(messages: list) -> tuple[bool, str | None]:
+    """(teaches, author) for a turn: from its request, the latest user message a person wrote (an owner's,
+    provenance "user", or a group member's, "member"). Tool results and injected turns are skipped: they are not
+    the request."""
+    for msg in reversed(messages or []):
+        if getattr(msg, "role", "") != "user":
+            continue
+        if any(getattr(block, "type", "") == "tool_result" for block in getattr(msg, "content", []) or []):
+            continue
+        provenance = getattr(msg, "provenance", "user")
+        if provenance == "member":
+            return False, getattr(msg, "author", None)
+        if provenance == "user":
+            return True, getattr(msg, "author", None)
+    return True, None
+
+
+def turn_teaches() -> bool:
+    """May what this turn produces teach (memory, skills, GEPA, training data)?"""
+    return TURN_TRUST.get()[0]
+
+
 def in_tool_execution() -> bool:
     """True inside any tool call the agent loop is running."""
     return TOOL_EXECUTION.get() is not None

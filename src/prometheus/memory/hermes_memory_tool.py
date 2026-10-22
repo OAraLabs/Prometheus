@@ -274,7 +274,14 @@ class MemoryTool(BaseTool):
         return arguments.operation == "list"
 
     async def execute(self, arguments: MemoryToolInput, context: ToolExecutionContext) -> ToolResult:
-        del context
+        # Gateway trust (0.9.17): only the owner changes what the agent remembers. A turn a group member asked for
+        # may list memory, never add, replace or remove.
+        if arguments.operation != "list" and (context.metadata or {}).get("turn_trusted") is False:
+            return ToolResult(
+                output="Not saved: only your owner can change what I remember. This request came from "
+                       f"{(context.metadata or {}).get('turn_author') or 'someone else in this chat'}.",
+                is_error=True,
+            )
         store = get_memory_store() if arguments.target == "memory" else get_user_store()
 
         target_label = "MEMORY.md" if arguments.target == "memory" else "USER.md"

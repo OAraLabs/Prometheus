@@ -726,7 +726,10 @@ class SlackAdapter(BasePlatformAdapter):
         # its next tick, so AutoDream pauses. Never raises.
         activity.note_user_activity()
         outcomes.note_user_message(session_id, text)
-        session.add_user_message(text)
+        # Gateway trust: the owner's words are the owner's; anyone else's are theirs, untrusted, never teaching.
+        owner = self.config.is_owner(user)
+        session.add_user_message(text, provenance="user" if owner else "member", is_trusted=owner,
+                                 author=f"slack:{user}")
         pre_len = len(session.get_messages())
 
         from prometheus.engine.agent_loop import MaxTurnsExhausted

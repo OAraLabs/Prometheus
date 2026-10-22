@@ -105,7 +105,7 @@ def _message_from_part(part: object) -> ConversationMessage:
         content_json=part.content_json,  # type: ignore[attr-defined]
         provenance=getattr(part, "provenance", "user"),
         is_trusted=getattr(part, "is_trusted", True),
-    )
+    ).model_copy(update={"author": getattr(part, "author", None)})
 
 
 def _estimated_tokens(message: ConversationMessage) -> int:
@@ -344,6 +344,7 @@ class ChatSession:
         provenance: str = "user",
         is_trusted: bool = True,
         blocks: list | None = None,
+        author: str | None = None,
     ) -> int:
         """Append a user-role message to the conversation. Returns its ``turn_index``.
 
@@ -382,10 +383,15 @@ class ChatSession:
             )
         elif provenance == "user" and is_trusted:
             message = ConversationMessage.from_user_text(text)
+        elif provenance == "member":
+            # Gateway trust: a group member who is not the owner. Never trusted, whatever the caller passed.
+            message = ConversationMessage.from_member_text(text, author=author or "unknown")
         else:
             message = ConversationMessage.from_injected(
                 text, provenance=provenance, is_trusted=is_trusted
             )
+        if author is not None:
+            message.author = author
         self.messages.append(message)
         # seal=False: this writes ONE row that may sit ABOVE a running
         # turn's still-unpersisted tail (Beacon sends mid-turn; the echo
@@ -683,6 +689,7 @@ class ChatSession:
                     # silently dropped to the trusted default.
                     provenance=msg.provenance,
                     is_trusted=msg.is_trusted,
+                    author=getattr(msg, "author", None),
                 )
                 stored = getattr(self._lcm_engine, "last_ingested_turn_index", None)
                 if _is_int(stored) and stored != requested:

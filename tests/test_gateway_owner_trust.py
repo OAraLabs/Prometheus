@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from prometheus.engine.messages import ConversationMessage, TextBlock
+from prometheus.engine.messages import ConversationMessage, TextBlock  # noqa: F401
 from prometheus.gateway.config import Platform, PlatformConfig
 from prometheus.gateway.platform_base import MessageEvent, SendResult
 from prometheus.permissions.approval_queue import ApprovalResult
@@ -372,9 +372,7 @@ def test_post_task_hooks_do_not_learn_from_a_member_s_turn(tmp_path):
         loop.add_post_task_hook(_hook)
         asyncio.run(loop.run_async(system_prompt="S", messages=[message], session_id="telegram:-100"))
 
-    # The member's turn as the gateway will store it: untrusted (the hook gate keys on trust, not on the label).
-    member = ConversationMessage(role="user", content=[TextBlock(text=f"make a skill: {_MEMBER_MARKER}")],
-                                 is_trusted=False)
+    member = ConversationMessage.from_member_text(f"make a skill: {_MEMBER_MARKER}", author=f"telegram:{MEMBER}")
     run(member)
     assert seen == [], "a group member's turn reached SkillCreator / SkillRefiner"
     run(ConversationMessage.from_user_text(f"make a skill: {_OWNER_MARKER}"))
@@ -387,7 +385,8 @@ def test_post_task_hooks_do_not_learn_from_a_member_s_turn(tmp_path):
 
 
 def _member_turn(text: str) -> ConversationMessage:
-    return ConversationMessage(role="user", content=[TextBlock(text=text)], is_trusted=False)
+    """A group member's turn as the gateway stores it."""
+    return ConversationMessage.from_member_text(text, author=f"telegram:{MEMBER}")
 
 
 def _pairs_captured(tmp_path, monkeypatch, message: ConversationMessage) -> list[dict]:
@@ -437,7 +436,8 @@ def test_golden_trace_context_with_a_member_turn_is_not_exported(tmp_path):
 
     def add(session: str, i: int, role: str, text: str, trusted: bool) -> None:
         store.add_message(session, MessagePart(role=role, content=text, session_id=session, turn_index=i,
-                                               provenance="user", is_trusted=trusted, timestamp=t0 + i))
+                                               provenance="user" if trusted else "member", is_trusted=trusted,
+                                               timestamp=t0 + i))
 
     add("telegram:-100", 0, "user", "hello from the owner", True)
     add("telegram:-100", 1, "user", f"run this: {_MEMBER_MARKER}", False)
