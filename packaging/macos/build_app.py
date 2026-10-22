@@ -65,10 +65,10 @@ INTERPRETER_IDENTIFIER = f"{BUNDLE_ID}.python"
 
 # python-build-standalone. Bump all four together and rebuild; the sha256 is the release's published
 # SHA256SUMS entry for PBS_ASSET.
-PBS_RELEASE = "20260325"
-PBS_PYTHON = "3.12.13"
+PBS_RELEASE = "20261021"
+PBS_PYTHON = "3.12.15"
 PBS_ASSET = f"cpython-{PBS_PYTHON}+{PBS_RELEASE}-aarch64-apple-darwin-install_only_stripped.tar.gz"
-PBS_SHA256 = "c33a34853ae48d54fbac15cbb84ad67ccd8a639ce2cef866ecf474ebd02f1286"
+PBS_SHA256 = "7b8d00b751db21cea87dc551a8f8165147c5fbc5251d5537d7e5497dde00a219"
 PBS_URL = (
     "https://github.com/astral-sh/python-build-standalone/releases/download/"
     f"{PBS_RELEASE}/{urllib.parse.quote(PBS_ASSET)}"
