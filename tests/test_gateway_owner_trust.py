@@ -378,3 +378,120 @@ def test_post_task_hooks_do_not_learn_from_a_member_s_turn(tmp_path):
     assert seen == [], "a group member's turn reached SkillCreator / SkillRefiner"
     run(ConversationMessage.from_user_text(f"make a skill: {_OWNER_MARKER}"))
     assert seen and _OWNER_MARKER in seen[-1], "control: the owner's turn still reaches the hooks"
+
+
+# --------------------------------------------------------------------------- #
+# Training data, golden traces and compaction summaries learn nothing from a member
+# --------------------------------------------------------------------------- #
+
+
+def _member_turn(text: str) -> ConversationMessage:
+    return ConversationMessage(role="user", content=[TextBlock(text=text)], is_trusted=False)
+
+
+def _pairs_captured(tmp_path, monkeypatch, message: ConversationMessage) -> list[dict]:
+    """A repair pair the loop would capture for this turn (training.db), as test_ephemeral_mode drives it."""
+    import time
+
+    from prometheus.engine.agent_loop import LoopContext
+    from prometheus.learning import pair_capture
+    from prometheus.telemetry.tracker import ToolCallTelemetry
+    from tests.test_ephemeral_mode import _drive, _registry, _ScriptedProvider, _text_round, _tool_round
+
+    store = pair_capture.PairStore(db_path=tmp_path / f"training-{time.monotonic_ns()}.db")
+    monkeypatch.setattr(pair_capture, "_store", store)
+    captured: list[dict] = []
+    real_add = store.add_pair
+
+    def _spy(**kwargs):
+        captured.append(kwargs)
+        return real_add(**kwargs)
+
+    monkeypatch.setattr(store, "add_pair", _spy)
+    context = LoopContext(provider=_ScriptedProvider([_tool_round("t1"), _text_round()]), model="test",
+                          system_prompt="S", max_tokens=256, tool_registry=_registry(),
+                          telemetry=ToolCallTelemetry(db_path=tmp_path / f"tel-{time.monotonic_ns()}.db"))
+    context.pair_pending = {"echo": {"rejected": {"name": "echo", "input": {"txt": "x"}},
+                                     "error": "unknown field", "ts": time.time(), "source": "self_correction"}}
+    _drive(context, [message], "telegram:-100")
+    return captured
+
+
+def test_no_training_pair_is_captured_for_a_member_s_turn(tmp_path, monkeypatch):
+    assert _pairs_captured(tmp_path, monkeypatch, _member_turn("go")) == [], "a member's turn became training data"
+    assert _pairs_captured(tmp_path, monkeypatch, ConversationMessage.from_user_text("go")), (
+        "control: the owner's turn is still captured")
+
+
+def test_golden_trace_context_with_a_member_turn_is_not_exported(tmp_path):
+    """The example would teach the model to answer a member as if they were the owner: none is exported."""
+    import time
+
+    from prometheus.memory.lcm_conversation_store import LCMConversationStore
+    from prometheus.memory.lcm_types import MessagePart
+    from prometheus.sentinel.golden_trace_exporter import lcm_context_resolver
+
+    store = LCMConversationStore(db_path=tmp_path / "lcm.db")
+    t0 = time.time() - 60
+
+    def add(session: str, i: int, role: str, text: str, trusted: bool) -> None:
+        store.add_message(session, MessagePart(role=role, content=text, session_id=session, turn_index=i,
+                                               provenance="user", is_trusted=trusted, timestamp=t0 + i))
+
+    add("telegram:-100", 0, "user", "hello from the owner", True)
+    add("telegram:-100", 1, "user", f"run this: {_MEMBER_MARKER}", False)
+    add("telegram:456", 0, "user", "hello from the owner", True)
+    add("telegram:456", 1, "user", "list my files", True)
+    resolve = lcm_context_resolver(store)
+    assert resolve({"session_id": "telegram:-100", "timestamp": t0 + 10}) == []
+    assert resolve({"session_id": "telegram:456", "timestamp": t0 + 10}), "control: an owner-only session resolves"
+
+
+def test_a_compaction_span_stops_at_a_member_s_turn():
+    """A summary is stored as trusted, so a member's words must never be folded into one."""
+    from tests.test_context_compactor import _compactor
+
+    msgs: list[ConversationMessage] = []
+    for i in range(8):
+        text = f"turn {i} " + "x" * 400
+        msgs.append(_member_turn(text) if i == 2 else ConversationMessage.from_user_text(text))
+        msgs.append(ConversationMessage(role="assistant", content=[TextBlock(text=f"answer {i} " + "y" * 400)]))
+    end = _compactor(protect_recent_turns=1)._select_span_end(msgs)
+    assert end <= 4, f"the span ran to {end}, over the member's turn at 4"
+    assert end > 0, "control: the owner's turns before it still compact"
+
+
+# --------------------------------------------------------------------------- #
+# Slack and Discord fail closed until the owner is named: doctor and the daemon say so
+# --------------------------------------------------------------------------- #
+
+
+_SLACK_ON = {"gateway": {"slack": {"enabled": True, "allowed_channels": ["C1"]}}}
+_DISCORD_ON = {"gateway": {"discord": {"enabled": True, "guild_ids": [1]}}}
+
+
+@pytest.mark.parametrize("config,key", [(_SLACK_ON, "gateway.slack.owner_user_ids"),
+                                        (_DISCORD_ON, "gateway.discord.owner_user_ids")])
+def test_doctor_flags_a_gateway_with_no_owner_and_says_how(config, key):
+    from prometheus.cli.doctor import check_gateway_owners
+
+    rows = check_gateway_owners(config)
+    flagged = [r for r in rows if r.status in ("warning", "error")]
+    assert flagged, rows
+    assert key in (flagged[0].fix or ""), flagged[0]
+
+
+def test_doctor_is_quiet_when_the_owner_is_named():
+    from prometheus.cli.doctor import check_gateway_owners
+
+    config = {"gateway": {"slack": {"enabled": True, "allowed_channels": ["C1"], "owner_user_ids": ["U1"]}}}
+    assert not [r for r in check_gateway_owners(config) if r.status in ("warning", "error")]
+
+
+@pytest.mark.parametrize("config,key", [(_SLACK_ON, "gateway.slack.owner_user_ids"),
+                                        (_DISCORD_ON, "gateway.discord.owner_user_ids")])
+def test_the_daemon_warns_at_startup_with_the_key_to_set(config, key):
+    from prometheus.daemon import gateway_owner_warnings
+
+    warnings = gateway_owner_warnings(config)
+    assert warnings and any(key in w for w in warnings), warnings
