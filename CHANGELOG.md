@@ -2,6 +2,68 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## 0.9.16 (2026-10-21)
+
+0.9.16 makes a fresh setup listen on this machine only until you choose otherwise, and turns on the context compactor that installs made by `oara setup`, setup mode and Beacon's first run never had. It updates certifi and Pillow for published advisories. It also:
+- makes Beacon's model list show whether your own AI is reachable, and name it;
+- makes `oara doctor` and the boot check look for your model server where the config says it is;
+- removes the `CancelledError` traceback that every shutdown and restart logged;
+- makes `oara pair --owner` fit a Beacon on this Mac as well as one on another computer.
+
+### Security
+
+- **Setup mode listens on this machine only unless you choose otherwise (#833).**
+  - **Before:** a daemon started with no config and no `--bind` (pip, brew, source, `oara install-service`) listened on every interface until setup finished. Anyone on the same network could try the six-digit pairing code. A right guess (5 tries in a million per start, within the code's 15 minutes) returned the daemon's API token, and five wrong guesses locked the owner out until a restart.
+  - **Not affected:** the Mac app (always loopback), the container image (it sets `PROMETHEUS_WEB_BIND` on purpose), and anyone who ran `oara setup` first.
+  - **Now:** to set up a headless box from another computer, start it with `oara daemon --bind 0.0.0.0`. Setup mode then listens on every interface, and so does the daemon it becomes.
+- **certifi 2026.10.19 and Pillow 13.0.0 (#839).** They fix PYSEC-2026-4320 (certifi) and CVE-2026-112395, -112397, -112400, -112404, -112895, -112896, -112897 and -112899 (Pillow). Only `uv.lock` changes; the floors in `pyproject.toml` are unchanged.
+
+### The context compactor is on for installs Prometheus set up (#834)
+
+- **What went wrong.** No config written by `oara setup` (interactive or `--fast`), by setup mode, or by Beacon's first run turned the compactor on. Without `compaction.enabled` it is not built, so those installs have run without it since it shipped in June. The template ships it on. LCM still summarised history between turns, but nothing kept a long multi-round tool turn inside a small local window.
+- **What changed.**
+  - Every writer now writes `compaction: {enabled: true}`.
+  - At start, a config with no `compaction.enabled` follows the template, turns the compactor on, and logs a warning naming the line to write. The file is not edited.
+  - An explicit `compaction.enabled: false` stays off.
+
+### Beacon's model list tells the truth about your own AI (#835)
+
+- The Local row's `available` follows the last probe of the primary. It was always `true`.
+- `GET /api/models` re-probes the primary when that probe is older than `backend_probe.ttl_s`.
+- The row is labelled with the engine and the model it serves, for example "llama.cpp · Qwen3.8-27B", instead of "Local".
+- A primary the registry does not probe (LM Studio, vLLM, a cloud primary) stays available, as before.
+
+### Doctor probes the configured address (#836)
+
+- **What went wrong.** The boot check and the chat `/doctor` used `model.base_url` only for llama.cpp. For every other provider they probed `model.fallback_url`, by default `localhost:11434`. So an Ollama, LM Studio or vLLM server at any other address, and any cloud model, was reported "not responding". `oara doctor` defaulted every local provider to `:8080`, and asked `/v1/v1/models` for a base ending in `/v1`.
+- **What changed.**
+  - Every check probes the address the provider is reached at: `model.base_url`, else its base-URL variable, else its default.
+  - Ollama is asked `/api/tags`. The OpenAI-shaped servers are asked `/v1/models`, once.
+  - A cloud primary gets an info row instead of a probe.
+
+### Clean shutdown (#837)
+
+- **What went wrong.** Stopping or restarting the daemon logged a `CancelledError` traceback at ERROR. The daemon cancelled the web server's task, so uvicorn never ran its own shutdown, and its shutdown steps (withdrawing the network announcement, stopping the pairing sweeper) ran only as the process exited.
+- **What changed.** The web server now shuts down properly when it is stopped. It waits at most 5 seconds for open requests.
+
+### `oara pair --owner` fits this Mac and another computer (#838)
+
+- The code banner and the expiry line no longer say "the other computer".
+- When the code is used, the terminal says whether that Beacon was on this Mac or on another computer, from what the daemon saw. A relay on this machine, such as Tailscale serve or cloudflared, counts as another computer.
+- The `owner_code` frame's `redeemed_by` gains `this_host`.
+- The example device name in the owner-code tests and docs is "Alex's MacBook Pro".
+
+### Upgrading from 0.9.15
+
+- **Setup from another computer:** start the daemon with `oara daemon --bind 0.0.0.0` (or set `PROMETHEUS_WEB_BIND`). Without either, setup mode now listens on this machine only.
+- **Compactor:** an install whose config has no `compaction.enabled` gets the compactor at its next start, with a warning naming the line to write. To keep it off, write `compaction.enabled: false`.
+- **Beacon and other API clients:** the Local row of `GET /api/models` is labelled with the engine and the model it serves, and carries `detail` (the served path) when the primary was probed. Its `available` can now be `false`.
+- **No migration.**
+
+### Known issues
+
+- The known issues listed for 0.9.13 still apply.
+
 ## 0.9.15 (2026-10-19)
 
 0.9.15 raises the aiohttp floor to 3.14.4, which fixes three advisories against 3.14.3 and earlier, and makes the `slack` extra install aiohttp, which the Slack gateway needs. Example device names in the docs and tests are now generic.
