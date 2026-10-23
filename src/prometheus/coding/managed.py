@@ -46,8 +46,15 @@ def build_coding_command(
     Uses the running interpreter so the managed subprocess gets the same
     environment (venv) the daemon runs under.
     """
+    # Global CLI options must precede the `code` subcommand; argparse does not
+    # accept the daemon's --config after the subcommand-specific arguments.
     parts: list[str] = [
-        *prometheus_argv("code"),   # -P -s: nothing in the repo shadows a module (utils/child_python.py)
+        *prometheus_argv(),
+    ]
+    if config_path:
+        parts += ["--config", config_path]
+    parts += [
+        "code",
         "--repo", repo,
         "--task", description,
         "--acceptance", acceptance_command,
@@ -59,8 +66,6 @@ def build_coding_command(
         parts += ["--sandbox-parent", sandbox_parent]
     if control_dir:
         parts += ["--control-dir", control_dir]
-    if config_path:
-        parts += ["--config", config_path]
     if suppress_thinking:
         parts += ["--suppress-thinking"]
     return " ".join(shlex.quote(p) for p in parts)
@@ -88,6 +93,12 @@ async def create_coding_managed_task(
     the wall cap plus headroom so the manager's own watchdog backstops a
     hung run without racing the session's honest abandonment.
     """
+    # Coding subprocesses must load the same configuration as the daemon.
+    # Otherwise a daemon started with --config can accept a run, while the child
+    # silently falls back to defaults (often coding.enabled: false).
+    if config_path is None:
+        config_path = getattr(manager, "child_config_path", None)
+
     command = build_coding_command(
         repo=repo,
         description=description,
