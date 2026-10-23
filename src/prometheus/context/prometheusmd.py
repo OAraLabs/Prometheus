@@ -57,6 +57,23 @@ _MIN_PARTIAL_CHARS = 1000
 _PROMETHEUS_RULES_DIR = ".prometheus/rules"
 
 
+def is_instruction_file(path: Path) -> bool:
+    """Would :func:`discover_project_files` load *path* as a project instruction file?
+
+    The permission gate asks before a file tool writes one (permissions/checker.py), and reads the answer HERE, so
+    a convention added to :data:`CONVENTION_FILES` is guarded with no second list to forget. Case is folded: on a
+    volume that folds it, the lookup above finds ``claude.md`` as ``CLAUDE.md``.
+    """
+    parts = [p.casefold() for p in Path(path).parts]
+    for name in CONVENTION_FILES:
+        want = [p.casefold() for p in Path(name).parts]
+        if parts[-len(want):] == want:
+            return True
+    rules = [p.casefold() for p in Path(_PROMETHEUS_RULES_DIR).parts]
+    return (len(parts) > len(rules) and parts[-len(rules) - 1:-1] == rules
+            and parts[-1].endswith(".md"))
+
+
 def discover_project_files(
     cwd: str | Path,
     stack: bool = True,

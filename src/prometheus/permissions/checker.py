@@ -1096,6 +1096,24 @@ class SecurityGate:
         # as in DEFAULT, so `/gate off` neither waives nor tightens it.
         # Ordinary tools are untouched — tests/test_gate_computer_floor.py
         # holds them to a golden table captured before this line existed.
+        # PROJECT INSTRUCTION FILES: the assembler loads PROMETHEUS.md, CLAUDE.md, AGENTS.md and the rest from the
+        # session's workspace upward into the next run's system prompt, so a write to one is a write to the agent's
+        # own future instructions. It asks the owner, whatever the mode, the workspace or a remembered grant says:
+        # before the AUTONOMOUS return and before grants, for that reason, and after the floor.
+        writes = path_is_write if path_is_write is not None else not is_read_only
+        if file_path and writes:
+            from prometheus.context.prometheusmd import is_instruction_file
+
+            reason = self._check_denied_path(file_path)
+            if reason:
+                self._audit_log(tool_name, AuditDecision.DENY, reason, file_path)
+                return PermissionDecision.deny(reason)
+            if is_instruction_file(Path(file_path).expanduser()):
+                reason = (f"{file_path} is a project instruction file, loaded into the agent's prompt on its next "
+                          f"run: a write there needs the owner's approval")
+                self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason, file_path)
+                return PermissionDecision.approve(reason)
+
         if self._mode == PermissionMode.AUTONOMOUS and not is_computer:
             if command and self._is_always_blocked(command):
                 reason = f"Blocked command pattern: {command!r}"
