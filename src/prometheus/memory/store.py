@@ -14,6 +14,7 @@ import string
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from uuid import uuid4
 
@@ -844,6 +845,141 @@ class MemoryStore:
             conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
 
         self._write(_op)
+
+    # ------------------------------------------------------------------
+    # Retraction (an owner's explicit purge of a chat)
+    # ------------------------------------------------------------------
+
+    def legacy_rows_for_session(
+        self, session_id: str, purged_message_ids: Iterable[str]
+    ) -> dict[str, list[str]]:
+        """What the deprecated ``messages`` / ``summaries`` tables hold for a chat.
+
+        Both tables are superseded by LCM and nothing writes them any more, but an install that
+        ran before the supersession still has rows, and "this must not be on the disk" has no
+        exception for old tables. A summary is the chat's when every message it was drawn from is
+        the chat's: the legacy messages in this table, or the LCM ids being purged.
+        """
+        def _op(conn):
+            message_ids = [
+                r["id"] for r in conn.execute(
+                    "SELECT id FROM messages WHERE session_id = ?", (session_id,))
+            ]
+            gone = set(message_ids) | set(purged_message_ids)
+            summary_ids = []
+            for r in conn.execute("SELECT id, source_message_ids FROM summaries"):
+                sources = json.loads(r["source_message_ids"] or "[]")
+                if sources and all(s in gone for s in sources):
+                    summary_ids.append(r["id"])
+            return message_ids, summary_ids
+
+        message_ids, summary_ids = self._read(_op)
+        return {"message_ids": message_ids, "summary_ids": summary_ids}
+
+    def retract(
+        self,
+        *,
+        delete_ids: Iterable[str] = (),
+        strip_fact_ids: Iterable[str] = (),
+        strip_message_ids: Iterable[str] = (),
+        legacy_session_id: str | None = None,
+        legacy_summary_ids: Iterable[str] = (),
+        cursor_scope: str | None = None,
+        marks: Mapping[str, float] | None = None,
+    ) -> dict[str, int]:
+        """Undo what was learned from a purged chat, in ONE transaction, then scrub the file.
+
+        ``delete_ids`` are facts to remove. For each fact in ``strip_fact_ids`` the fact stays and
+        ``strip_message_ids`` (the purged chat's messages) stop being among its sources; its
+        ``mention_count`` is scaled by the share of sources that survive, floor 1. The strip is done
+        against the row AS IT IS INSIDE THE TRANSACTION, not against a list computed earlier: the
+        extractor may have merged a new source into the fact since the plan was made, and writing
+        the planned list back would erase it. A fact left with no source at all is deleted, since
+        provenance is mandatory and nothing supports it.
+        ``legacy_*`` clear the deprecated tables, ``cursor_scope`` drops the chat's extractor
+        cursor, and ``marks`` are named marks written in the same transaction (the purge uses one
+        to remember that the wiki still has to be rebuilt).
+
+        Raises on any failure and rolls the whole thing back: a half-retracted store would tell the
+        owner a fact was gone while it was not. The scrub is not optional. A plain DELETE leaves the
+        row's bytes in freed pages, and FTS5 keeps the TERM in the index after its document is
+        unlinked (``optimize`` merges it away), and in WAL mode the rows live in the ``-wal``
+        sidecar until it is checkpointed. Same three steps as ``LCMConversationStore.purge_session``,
+        for the same reasons.
+        """
+        delete_list = list(dict.fromkeys(delete_ids))
+        strip_list = list(dict.fromkeys(strip_fact_ids))
+        strip_set = set(strip_message_ids)
+        summary_list = list(dict.fromkeys(legacy_summary_ids))
+
+        def _op(conn):
+            counts = {"deleted": 0, "rewritten": 0, "legacy_messages": 0,
+                      "legacy_summaries": 0, "cursors": 0}
+            for start in range(0, len(delete_list), 500):
+                chunk = delete_list[start : start + 500]
+                counts["deleted"] += conn.execute(
+                    f"DELETE FROM memories WHERE id IN ({','.join('?' * len(chunk))})",  # noqa: S608
+                    chunk,
+                ).rowcount
+            for memory_id in strip_list:
+                row = conn.execute(
+                    "SELECT source_event_ids, mention_count FROM memories WHERE id = ?",
+                    (memory_id,),
+                ).fetchone()
+                if row is None:
+                    continue  # already gone: a retry, or a concurrent delete
+                sources = json.loads(row["source_event_ids"] or "[]")
+                remaining = [s for s in sources if s not in strip_set]
+                if not remaining:
+                    counts["deleted"] += conn.execute(
+                        "DELETE FROM memories WHERE id = ?", (memory_id,)).rowcount
+                    continue
+                scaled = max(1, round(int(row["mention_count"] or 1) * len(remaining) / len(sources)))
+                counts["rewritten"] += conn.execute(
+                    "UPDATE memories SET source_event_ids = ?, mention_count = ? WHERE id = ?",
+                    (json.dumps(sorted(remaining)), scaled, memory_id),
+                ).rowcount
+            if legacy_session_id is not None:
+                counts["legacy_messages"] = conn.execute(
+                    "DELETE FROM messages WHERE session_id = ?", (legacy_session_id,)
+                ).rowcount
+            for start in range(0, len(summary_list), 500):
+                chunk = summary_list[start : start + 500]
+                counts["legacy_summaries"] += conn.execute(
+                    f"DELETE FROM summaries WHERE id IN ({','.join('?' * len(chunk))})",  # noqa: S608
+                    chunk,
+                ).rowcount
+            if cursor_scope is not None:
+                counts["cursors"] = conn.execute(
+                    "DELETE FROM extractor_cursors WHERE scope = ?", (cursor_scope,)
+                ).rowcount
+            now = time.time()
+            for name, value in (marks or {}).items():
+                conn.execute(
+                    "INSERT INTO store_marks (name, value, updated_at) VALUES (?, ?, ?)"
+                    " ON CONFLICT(name) DO UPDATE SET"
+                    "   value = excluded.value, updated_at = excluded.updated_at",
+                    (name, float(value), now),
+                )
+            # fts5's 'delete' (the triggers' doing) unlinks a document but leaves its TERM in the
+            # index b-tree; 'optimize' merges the segments and drops it for real.
+            conn.execute("INSERT INTO memories_fts (memories_fts) VALUES ('optimize')")
+            conn.execute("INSERT INTO messages_fts (messages_fts) VALUES ('optimize')")
+            return counts
+
+        with self._lock:
+            prior = self._conn.execute("PRAGMA secure_delete").fetchone()[0]
+            self._conn.execute("PRAGMA secure_delete = ON")
+            try:
+                counts = self._write(_op)
+            finally:
+                self._conn.execute(f"PRAGMA secure_delete = {'ON' if prior else 'OFF'}")
+            # Reclaim the freed pages and empty the WAL sidecar, or the purged text is still in a
+            # file next to the database.
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._conn.execute("VACUUM")
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return counts
 
     def get_memory(self, memory_id: str) -> dict | None:
         """Return a single memory by ID."""

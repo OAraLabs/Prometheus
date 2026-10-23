@@ -1844,6 +1844,58 @@ def create_app(
             store.tombstone_session(session_id)
         return {"ok": True}
 
+    _NO_MEMORY_STORE = (
+        "no memory store is running, so facts learned from this chat could not be listed or retracted"
+    )
+
+    def _derived_handles():
+        """The memory store and wiki compiler the daemon built, or ``(None, None)`` when memory is off."""
+        memory_store = getattr(app.state, "memory_store", None)
+        if memory_store is None:
+            return None, None
+        wiki_compiler = getattr(app.state, "wiki_compiler", None)
+        if wiki_compiler is None:
+            from prometheus.memory.wiki_compiler import WikiCompiler
+
+            wiki_compiler = WikiCompiler(store=memory_store)
+        return memory_store, wiki_compiler
+
+    @app.get("/api/sessions/{session_id}/purge-preview")
+    async def purge_preview(session_id: str):
+        """What ``POST /api/sessions/{id}/purge`` would remove, without removing anything.
+
+        A purge is irreversible, so a client shows this and asks again before confirming. Besides the
+        chat itself it lists what the assistant LEARNED from it: facts learned only from this chat
+        (they go), facts a surviving chat also supports (they stay, minus this chat as a source), the
+        wiki and insight pages that follow, and filed answers that mention a removed entity and are
+        left for the owner to review. ``not_covered`` says what a purge does not reach.
+
+        Read-only by construction: planning writes no row and no file.
+        """
+        from prometheus.memory.purge_derived import NOT_COVERED, plan_retraction
+
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        if store is None:
+            return JSONResponse(status_code=503, content={
+                "error": "no LCM store; nothing to preview", "session_id": session_id})
+        memory_store, wiki_compiler = _derived_handles()
+        if memory_store is None:
+            derived: dict[str, Any] = {"available": False, "reason": _NO_MEMORY_STORE}
+        else:
+            plan = await asyncio.to_thread(
+                plan_retraction, session_id, conversation_store=store,
+                memory_store=memory_store, wiki_root=wiki_compiler.wiki_root)
+            derived = plan.to_preview()
+        return {
+            "session_id": session_id,
+            "messages": store.count_all(session_id),
+            "branches": [f["session_id"] for f in store.list_session_forks(session_id)],
+            "derived": derived,
+            "not_covered": list(NOT_COVERED),
+            "reversible": False,
+        }
+
     @app.post("/api/sessions/{session_id}/purge")
     async def purge_session(session_id: str, request: Request):
         """IRREVERSIBLY delete a session's content (#353). Body: {"confirm": "<session_id>"}.
@@ -1860,6 +1912,12 @@ def create_app(
         Forks are NOT followed. A branch holds its own copies, so it survives —
         reported as `branches` so the caller can purge those too rather than
         discover them later.
+
+        What the assistant LEARNED from the chat goes with it: a fact learned only
+        from this chat is deleted, a fact a surviving chat also supports stays
+        without this chat as a source, and the wiki and insight pages follow
+        (memory/purge_derived.py). That runs first, so a failure leaves the chat
+        untouched; ``GET .../purge-preview`` shows it before the owner confirms.
         """
         try:
             body = await request.json()
@@ -1877,12 +1935,53 @@ def create_app(
             # otherwise is the failure #349 was about.
             return JSONResponse(status_code=503, content={
                 "error": "no LCM store; nothing was purged", "session_id": session_id})
+        from prometheus.memory.purge_derived import (
+            NOT_COVERED,
+            retract_before_purge,
+            sweep_after_purge,
+        )
+
         branches = [f["session_id"] for f in store.list_session_forks(session_id)]
+
+        # What the assistant LEARNED from this chat goes first. The chat's message ids are how a fact
+        # names its sources, and they cannot be mapped back to a chat once the rows are deleted. A
+        # failure here stops the purge before it starts: the chat is untouched and a retry is safe.
+        memory_store, wiki_compiler = _derived_handles()
+        plan = None
+        derived: dict[str, Any]
+        if memory_store is None:
+            logger.warning(
+                "purge %s: %s; facts learned from it were NOT retracted", session_id, _NO_MEMORY_STORE)
+            derived = {"available": False, "reason": _NO_MEMORY_STORE}
+        else:
+            try:
+                plan, applied = await asyncio.to_thread(
+                    retract_before_purge, session_id, conversation_store=store,
+                    memory_store=memory_store, wiki_compiler=wiki_compiler)
+            except Exception:
+                logger.exception(
+                    "purge %s: retracting what was learned from it failed; nothing was purged", session_id)
+                return JSONResponse(status_code=500, content={
+                    "error": "what was learned from this chat could not be retracted; nothing was purged",
+                    "session_id": session_id})
+            derived = {"available": True, **applied}
+
         counts = store.purge_session(session_id)
+        if plan is not None:
+            # A fact the extractor wrote from these messages while the purge was running.
+            try:
+                late = await asyncio.to_thread(
+                    sweep_after_purge, plan, conversation_store=store,
+                    memory_store=memory_store, wiki_compiler=wiki_compiler)
+                derived["late_sweep"] = {"ok": True, "facts_removed": late["facts_removed"]}
+            except Exception:
+                logger.exception("purge %s: the final sweep for late-written facts failed", session_id)
+                derived["late_sweep"] = {
+                    "ok": False, "error": "the final sweep for facts written during the purge failed"}
         if session_mgr:
             session_mgr.remove(session_id)
-        return {"ok": True, "session_id": session_id, "purged": counts,
-                "branches": branches, "reversible": False}
+        return {"ok": True, "session_id": session_id, "purged": counts, "derived": derived,
+                "not_covered": list(NOT_COVERED), "branches": branches, "reversible": False}
 
     @app.put("/api/sessions/{session_id}/title")
     async def set_session_title(session_id: str, request: Request):

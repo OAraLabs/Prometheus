@@ -253,6 +253,7 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/sessions/{session_id}/profile"),
     ("PUT", "/api/sessions/{session_id}/profile"),
     ("POST", "/api/sessions/{session_id}/purge"),
+    ("GET", "/api/sessions/{session_id}/purge-preview"),
     ("DELETE", "/api/sessions/{session_id}/workspace"),
     ("GET", "/api/sessions/{session_id}/workspace"),
     ("PUT", "/api/sessions/{session_id}/workspace"),
