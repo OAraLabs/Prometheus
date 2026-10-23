@@ -2,6 +2,10 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## Unreleased
+
+- Computer use: an app whose process name Linux cuts at 15 characters (GNOME Terminal is "gnome-terminal-") can be used after you pick it. Before, its window reported "Gnome-terminal" and every task in it was refused.
+
 ## 0.9.16 (2026-10-21)
 
 0.9.16 makes a fresh setup listen on this machine only until you choose otherwise, and turns on the context compactor that installs made by `oara setup`, setup mode and Beacon's first run never had. It updates certifi and Pillow for published advisories. It also:
