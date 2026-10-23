@@ -100,6 +100,68 @@ def memory_section(memory_content: str | None = None) -> str | None:
     return f"# Memory\n\n{_MEMORY_ETIQUETTE}\n\n{memory_content}"
 
 
+#: The machine-and-network section is fenced, so a request to a hosted model
+#: can drop it exactly (``infrastructure_for_route``). It names this machine's
+#: hardware, services, network and tailnet peers: fine for a model on the
+#: owner's own hardware, not something to send to a hosted provider on every
+#: turn. A hosted model gets it on demand from the ``anatomy`` tool instead.
+INFRASTRUCTURE_START = "<!-- Bootstrap: ~/.prometheus/ANATOMY.md -->"
+INFRASTRUCTURE_END = "<!-- /Bootstrap: ANATOMY.md -->"
+INFRASTRUCTURE_ON_DEMAND = (
+    "## Infrastructure\n"
+    "_This machine's hardware, services and network are not in this prompt. "
+    "Call the `anatomy` tool when a task needs them._"
+)
+
+
+def _infrastructure_block(body: str) -> str:
+    return f"{INFRASTRUCTURE_START}\n{body}\n{INFRASTRUCTURE_END}"
+
+
+def is_hosted_provider(provider_name: str | None) -> bool:
+    """Does a request to this provider leave the owner's hardware?
+
+    Local means one of the providers that serve from a machine the owner runs
+    (llama.cpp, Ollama, LM Studio, vLLM). Anything else, an unknown or missing
+    name included, is hosted: the safe answer when the machine's layout is at
+    stake.
+    """
+    from prometheus.providers.registry import _LOCAL_PROVIDERS
+
+    return str(provider_name or "").strip().lower() not in _LOCAL_PROVIDERS
+
+
+def include_infrastructure_in_hosted_prompt(config: dict | None) -> bool:
+    """``anatomy.include_in_hosted_prompt``: only a literal ``true`` turns it
+    on, so a typo or a quoted value keeps the layout off hosted prompts."""
+    anatomy = (config or {}).get("anatomy") or {}
+    return isinstance(anatomy, dict) and anatomy.get("include_in_hosted_prompt", False) is True
+
+
+def infrastructure_for_route(
+    prompt: str, *, hosted: bool, include_on_hosted: bool = False,
+) -> str:
+    """*prompt* as a request to this route may carry it.
+
+    A local route, or a hosted one with ``anatomy.include_in_hosted_prompt``
+    on, gets the prompt unchanged. A hosted route gets every fenced
+    infrastructure section replaced by a one-line pointer to the ``anatomy``
+    tool. A start marker with no end is left alone: it is not a section this
+    module wrote, and cutting to the end would drop the rest of the prompt.
+    """
+    if not hosted or include_on_hosted:
+        return prompt
+    while True:
+        start = prompt.find(INFRASTRUCTURE_START)
+        if start < 0:
+            return prompt
+        end = prompt.find(INFRASTRUCTURE_END, start)
+        if end < 0:
+            return prompt
+        prompt = (prompt[:start] + INFRASTRUCTURE_ON_DEMAND
+                  + prompt[end + len(INFRASTRUCTURE_END):])
+
+
 def _load_anatomy_summary() -> str | None:
     """Load compact infrastructure summary from ANATOMY.md for the system prompt.
 
@@ -267,7 +329,9 @@ def build_runtime_system_prompt(
         # Profile controls which bootstrap files load
         for filename in profile_bootstrap:
             content = _load_bootstrap_file(filename)
-            if content:
+            if content and filename == "ANATOMY.md":
+                static_sections.append(_infrastructure_block(content))
+            elif content:
                 static_sections.append(
                     f"<!-- Bootstrap: ~/.prometheus/{filename} -->\n{content}"
                 )
@@ -292,9 +356,7 @@ def build_runtime_system_prompt(
         if anatomy_cfg.get("include_in_system_prompt", True):
             anatomy_summary = _load_anatomy_summary()
             if anatomy_summary:
-                static_sections.append(
-                    f"<!-- Bootstrap: ~/.prometheus/ANATOMY.md -->\n{anatomy_summary}"
-                )
+                static_sections.append(_infrastructure_block(anatomy_summary))
 
     # 3-4. Base system prompt + environment info
     custom_prompt = config.get("system_prompt")
