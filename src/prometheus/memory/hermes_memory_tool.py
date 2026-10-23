@@ -18,6 +18,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from prometheus.config.paths import get_config_dir
+from prometheus.security.invisible_text import describe_invisible, find_invisible
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 # ------------------------------------------------------------------
@@ -118,6 +119,9 @@ class FileMemoryStore:
         consolidation prompt and retry. Normal (smaller) entries still
         prune-oldest silently — that's the existing contract.
         """
+        hidden = find_invisible(entry or "")
+        if hidden:
+            return f"refused: the entry contains {describe_invisible(hidden)}, which hide text from a person reading it"
         entry = self._sanitize(entry)
         if not entry:
             return "entry is empty or contained prohibited content"
@@ -133,6 +137,10 @@ class FileMemoryStore:
 
     def replace(self, old_text: str, new_text: str) -> str:
         """Replace the first entry containing *old_text*. Returns status."""
+        hidden = find_invisible(new_text or "")
+        if hidden:
+            return (f"refused: the new entry contains {describe_invisible(hidden)}, which hide text from a person "
+                    "reading it")
         new_entry = self._sanitize(new_text)
         if not new_entry:
             return "new entry is empty or contained prohibited content"
