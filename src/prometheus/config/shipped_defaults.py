@@ -29,6 +29,10 @@ that must remember to run). See ``tests/test_absence_hostile_keys.py``.
 
 from __future__ import annotations
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 # tools.deferred_loading.always_loaded — EVERY tool set Prometheus has shipped
 # as the default, oldest first, read from git history (2026-09-28): the
 # template's list since the initial commit, and this module's constant since
@@ -382,6 +386,36 @@ def resolve_telegram_owner_ids(gateway_cfg: dict | None) -> list[int]:
     if explicit:
         return explicit
     return [chat for chat in resolve_allowed_chat_ids(gateway_cfg) if chat > 0]
+
+
+def resolve_notify_chat_id(gateway_cfg: dict | None) -> int | None:
+    """Where the daemon sends its own Telegram notices — cron-failure notices and the heartbeat's task
+    notices — or ``None`` to send none.
+
+    This is ``gateway.briefing_chat_id`` and ONLY when it is a private chat. A Telegram private chat's id is
+    positive and equals the user's own id; a group or channel id is negative and shared. The target used to fall
+    back to ``allowed_chat_ids[0]`` when ``briefing_chat_id`` was unset, so on a bot whose first allowed chat was
+    a group, failure notices — which can quote a command, a path, or an error — went to that whole group. There
+    is no configuration in which broadcasting the owner's operational notices to a group is the intent, so the
+    fallback is gone: absent, blank, unparseable, zero or negative -> ``None`` (send nothing), and a negative
+    (group/channel) ``briefing_chat_id`` is refused with a WARNING rather than obeyed.
+
+    A quoted number is accepted (``"456"`` -> 456), matching :func:`_positive_int`.
+    """
+    raw = (gateway_cfg or {}).get("briefing_chat_id")
+    try:
+        chat = int(raw)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return None
+    if chat > 0:
+        return chat
+    if chat < 0:
+        _log.warning(
+            "gateway.briefing_chat_id is a group or channel (%d); the daemon's own notices go only to a "
+            "private chat, so none will be sent. Set briefing_chat_id to your private chat's id.",
+            chat,
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------

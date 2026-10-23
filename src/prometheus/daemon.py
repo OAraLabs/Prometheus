@@ -1991,9 +1991,11 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     from prometheus.tasks.manager import get_task_manager
     from prometheus.tasks.store import TaskStore
     tasks_config = config.get("tasks", {})
-    _notify_chat = gateway_config.get("briefing_chat_id") or (
-        gateway_config.get("allowed_chat_ids") or [None]
-    )[0]
+    # The daemon's own notices (cron failures, task finish/fail) go only to the owner's PRIVATE chat, and
+    # nowhere if none is configured. The old `briefing_chat_id or allowed_chat_ids[0]` fallback could send
+    # them to a group when the first allowed chat was one. See resolve_notify_chat_id.
+    from prometheus.config.shipped_defaults import resolve_notify_chat_id
+    _notify_chat = resolve_notify_chat_id(gateway_config)
     # Managed tasks: configure the singleton manager with durability (TaskStore)
     # and system-trust command vetting (same SecurityGate as cron/agent). The
     # SignalBus is wired later (after SENTINEL init) so task_completed/_failed
