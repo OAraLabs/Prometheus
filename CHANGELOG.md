@@ -2,6 +2,10 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## Unreleased
+
+- Computer use: a GTK4 app's text fields can be set. GTK4 reports them as "text box", a role the candidate table did not offer, so a task could never type into GNOME Text Editor or any other GTK4 field.
+
 ## 0.9.16 (2026-10-21)
 
 0.9.16 makes a fresh setup listen on this machine only until you choose otherwise, and turns on the context compactor that installs made by `oara setup`, setup mode and Beacon's first run never had. It updates certifi and Pillow for published advisories. It also:
