@@ -115,6 +115,56 @@ def test_the_gate_follows_a_moved_data_directory(monkeypatch, tmp_path):
     assert not decision.allowed and not decision.requires_confirmation, decision
 
 
+def test_a_model_s_write_file_on_the_registry_is_refused_through_the_loop(monkeypatch, tmp_path):
+    """The real path: a scripted model asks write_file for the registry, the loop asks the gate, nothing lands.
+
+    The data directory AND the workspace are a temporary folder, so even a failing floor writes nothing real, and
+    the workspace covering it is the case the floor exists for (an ordinary write there is allowed)."""
+    import asyncio
+
+    from prometheus.engine.agent_loop import LoopContext, run_loop
+    from prometheus.engine.messages import ConversationMessage, TextBlock, ToolUseBlock
+    from prometheus.providers.base import ApiMessageCompleteEvent, ModelProvider
+    from prometheus.engine.usage import UsageSnapshot
+    from prometheus.tools.base import ToolRegistry
+    from prometheus.tools.builtin.file_write import FileWriteTool
+
+    data = tmp_path.resolve() / "data"
+    data.mkdir()
+    registry_file = data / "devices.db"
+    registry_file.write_bytes(b"REAL REGISTRY")
+    monkeypatch.setenv("PROMETHEUS_DATA_DIR", str(data))
+
+    class _Scripted(ModelProvider):
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            self.n = 0
+
+        async def stream_message(self, request):  # noqa: ANN001
+            self.n += 1
+            content = ([ToolUseBlock(id="t1", name="write_file", input={"path": str(self.path), "content": "evil"})]
+                       if self.n == 1 else [TextBlock(text="done")])
+            yield ApiMessageCompleteEvent(message=ConversationMessage(role="assistant", content=content),
+                                          usage=UsageSnapshot(input_tokens=1, output_tokens=1), stop_reason="stop")
+
+    def drive(path: Path) -> None:
+        tools = ToolRegistry()
+        tools.register(FileWriteTool())
+        gate = create_security_gate({"workspace_root": str(tmp_path.resolve())})
+        ctx = LoopContext(provider=_Scripted(path), model="stub", system_prompt="S", max_tokens=64,
+                          tool_registry=tools, permission_checker=gate, cwd=tmp_path.resolve())
+
+        async def go():
+            async for _ in run_loop(ctx, [ConversationMessage.from_user_text("go")], session_id="cli"):
+                pass
+        asyncio.run(go())
+
+    drive(registry_file)
+    assert registry_file.read_bytes() == b"REAL REGISTRY", "write_file changed the registry through the loop"
+    drive(data / "notes.txt")
+    assert (data / "notes.txt").read_text() == "evil", "control: an ordinary write in the workspace still lands"
+
+
 # ── AppArmor: the profile text, and the boot probe's logic ───────────────────
 
 def _active_rules() -> list[str]:
@@ -215,7 +265,7 @@ def _sql(db: Path, statement: str) -> str:
     "insert into api_devices (id, name, platform, token_sha256, created_at) values ('evil', 'x', 'x', 'h', 0)",
     "insert into owner_devices (device_id, marked_at, marked_by) values ('evil', 0, 'shell')",
     "insert into computer_devices (device_id, marked_at, marked_by) values ('evil', 0, 'shell')",
-], ids=["device", "owner-device", "desktop-mark"])
+], ids=["api-device", "owner-device", "desktop-mark"])
 def test_a_shell_cannot_insert_a_row(tmp_path, statement):
     home = tmp_path.resolve()
     db = _registry(home)

@@ -353,6 +353,14 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
         "the direct calls are the table and the dispatch tests are the proof. Registered, not exempted: if that "
         "file stops calling evaluate directly this entry fails as stale."
     ),
+    "test_devices_db_floor.py": (
+        "the device registry joins the always-denied floor: direct evaluate(file_path=…) calls read the gate's "
+        "decision for each spelling of the registry (default home, -wal, a Linux home, a moved data directory, a "
+        "workspace covering it), so the floor table is the subject. The same file drives write_file through "
+        "run_loop → _execute_tool_call against a real registry and asserts nothing landed (and that an ordinary "
+        "write beside it did), so the direct calls are the table and the loop test is the proof. Registered, not "
+        "exempted: if that file stops calling evaluate directly this entry fails as stale."
+    ),
     "test_denied_prune.py": (
         "P4.1 matcher-drift fix: THREE readers share one deny list — the gate, "
         "the grep/glob prune layer, and the /workspace validator — and they used "
