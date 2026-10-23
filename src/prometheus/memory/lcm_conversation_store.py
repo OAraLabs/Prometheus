@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from uuid import uuid4
 
@@ -919,6 +920,37 @@ class LCMConversationStore:
                 chunk,
             ).fetchall()
             out.update({r["id"]: int(r["rowid"]) for r in rows})
+        return out
+
+    def message_ids_for_session(self, session_id: str) -> list[str]:
+        """Every message id the session holds, oldest first.
+
+        Read BEFORE :meth:`purge_session` by anything that has to undo what was derived from the
+        chat: the ids are how a memory fact names its sources, and they cannot be mapped back to a
+        session once the rows are gone.
+        """
+        rows = self._conn.execute(
+            "SELECT id FROM lcm_messages WHERE session_id = ? ORDER BY rowid", (session_id,)
+        ).fetchall()
+        return [r["id"] for r in rows]
+
+    def sessions_and_text_for_message_ids(
+        self, message_ids: Iterable[str]
+    ) -> dict[str, tuple[str, str]]:
+        """Map message ids to ``(session_id, content)``. Ids with no persisted row are absent.
+
+        Chunked like :meth:`rowids_for_message_ids`, for the same SQLITE_MAX_VARIABLE_NUMBER reason.
+        """
+        ids = list(dict.fromkeys(i for i in message_ids if i))
+        out: dict[str, tuple[str, str]] = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start : start + 500]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                f"SELECT id, session_id, content FROM lcm_messages WHERE id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            out.update({r["id"]: (r["session_id"], r["content"]) for r in rows})
         return out
 
     # ------------------------------------------------------------------
