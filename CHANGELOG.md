@@ -2,6 +2,10 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## Unreleased
+
+- Computer use: no thumbnail is taken of a window that may show a GTK4 password field. GTK4 reports a password entry as an unnamed text field, which the password check did not catch, so a picture of a GTK4 sign-in window was sent to Beacon. Any unnamed text field now skips the picture.
+
 ## 0.9.16 (2026-10-21)
 
 0.9.16 makes a fresh setup listen on this machine only until you choose otherwise, and turns on the context compactor that installs made by `oara setup`, setup mode and Beacon's first run never had. It updates certifi and Pillow for published advisories. It also:
