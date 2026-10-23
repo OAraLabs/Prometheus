@@ -193,6 +193,7 @@ def build_candidates(
     }
     out: list[Candidate] = []
     by_index = {el.element_index: el for el in observation.elements}
+    wrappers = _clickable_wrappers(observation.elements)
 
     for el in observation.elements:
         if len(out) >= max_candidates:
@@ -200,7 +201,7 @@ def build_candidates(
         if _inside_web_content(el, by_index):
             continue  # v1.1 offers no web content (§5.4.3)
         role = el.role.lower()
-        if role in _CLICKABLE_ROLES:
+        if role in _CLICKABLE_ROLES and el.element_index not in wrappers:
             out.append(Candidate(
                 candidate_id=f"click-{el.element_index}",
                 tool_name="computer_click",
@@ -243,6 +244,26 @@ def build_candidates(
             ))
 
     _assert_unique_ids(out)
+    return out
+
+
+def _clickable_wrappers(elements: tuple[Element, ...] | list[Element]) -> set[int]:
+    """Clickable elements that only wrap a clickable child of the same name.
+
+    GTK4 exposes each menu button twice: a "button" with no actions and,
+    inside it, a "toggle button" with the same label that carries "click"
+    (GNOME Text Editor's "Main menu", "Open", "View"; seen on the computer-use
+    rig). Offering both made two rows that read alike, so every such button
+    was a tie the rule chooser abstains on. The child is the one that acts;
+    the wrapper is not offered.
+    """
+    clickable = {el.element_index: el for el in elements
+                 if el.role.lower() in _CLICKABLE_ROLES}
+    out: set[int] = set()
+    for el in clickable.values():
+        parent = clickable.get(el.parent_index) if el.parent_index is not None else None
+        if parent is not None and parent.label and parent.label == el.label:
+            out.add(parent.element_index)
     return out
 
 
