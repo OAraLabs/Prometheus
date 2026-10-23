@@ -210,6 +210,29 @@ def assert_refused_not_missing(res, what: str) -> None:
     )
 
 
+# A denied WRITE surfaces differently by tool: a direct open is EACCES ("Permission denied"),
+# but sqlite reports "attempt to write a readonly database", and a read-only mount is EROFS. The
+# credential-READ tests keep the strict _REFUSED check (a wrong failure there must not pass); a
+# write test proves the floor by the file staying unchanged AND one of these refusal shapes.
+_WRITE_REFUSED = (
+    _REFUSED,                               # EACCES — a direct open
+    "Read-only file system",                # EROFS
+    "readonly database",                    # sqlite, write denied under it
+    "unable to open database file",         # sqlite, open-for-write denied
+    "Operation not permitted",              # EPERM — a rename/link denied
+)
+
+
+def assert_write_refused(res, what: str) -> None:
+    """A write the floor denies: it ran, it errored, not on ENOENT, and the tool named a write refusal."""
+    assert SENTINEL in res.output, f"{what}: never ran — not containment"
+    assert res.is_error, f"{what}: the command SUCCEEDED — the floor leaked"
+    assert _NOT_FOUND not in res.output, (
+        f"{what}: failed with ENOENT, not a refusal — the subject was absent:\n{res.output}")
+    assert any(s in res.output for s in _WRITE_REFUSED), (
+        f"{what}: errored, but not with a recognised write refusal {_WRITE_REFUSED}:\n{res.output}")
+
+
 # --------------------------------------------------------------------------- #
 # Fail loud — runs everywhere, needs no profile
 # --------------------------------------------------------------------------- #
@@ -432,7 +455,7 @@ class TestFloorHolds:
         before = registry.read_bytes()
         try:
             res = self._aa_only(command.format(db=registry, data=registry.parent))
-            assert_refused_not_missing(res, what)
+            assert_write_refused(res, what)
             assert registry.read_bytes() == before, f"{what}: the registry changed — the floor leaked"
         finally:
             Path(f"{registry}-wal").unlink(missing_ok=True)
@@ -447,7 +470,12 @@ class TestFloorHolds:
                             f".execute('select count(*) from sqlite_master').fetchone())\"")
         assert not res.is_error and "ROWS" in res.output, res.output
 
-    def test_the_boot_probe_sees_the_registry_refused(self, registry):
+    def test_the_boot_probe_sees_the_registry_refused(self, registry, monkeypatch):
+        # conftest redirects PROMETHEUS_DATA_DIR/CONFIG_DIR to a tmp; the probe (and a real boot) measure the live
+        # ~/.prometheus, which is where the registry fixture seeds the subject. Clear the redirect for the probe.
+        monkeypatch.delenv("PROMETHEUS_DATA_DIR", raising=False)
+        monkeypatch.delenv("PROMETHEUS_CONFIG_DIR", raising=False)
+        C.reset_cache()
         assert C._probe_registry_rename(C.PROFILE) == "refused"
         ok, detail = C.preflight(C.PROFILE, force=True)
         assert ok and "writing the device registry refused" in detail, detail
@@ -466,14 +494,14 @@ class TestFloorHolds:
     def test_an_identity_file_cannot_be_written(self, identity_file):
         before = identity_file.read_bytes()
         res = self._aa_only(f"printf injected >> {identity_file}")
-        assert_refused_not_missing(res, "append to ~/.prometheus/AGENTS.md")
+        assert_write_refused(res, "append to ~/.prometheus/AGENTS.md")
         assert identity_file.read_bytes() == before, "the identity file changed — the floor leaked"
 
     def test_a_skill_cannot_be_planted(self, skills_dir):
         planted = skills_dir / "aa-pytest-planted.md"
         try:
             res = self._aa_only(f"printf x > {planted}")
-            assert_refused_not_missing(res, "plant a skill")
+            assert_write_refused(res, "plant a skill")
             assert not planted.exists(), "a skill was planted — the floor leaked"
         finally:
             planted.unlink(missing_ok=True)
@@ -482,7 +510,10 @@ class TestFloorHolds:
         res = self._aa_only(f"cat {identity_file}")
         assert not res.is_error, res.output
 
-    def test_the_boot_probe_sees_trusted_state_refused(self, skills_dir):
+    def test_the_boot_probe_sees_trusted_state_refused(self, skills_dir, monkeypatch):
+        monkeypatch.delenv("PROMETHEUS_DATA_DIR", raising=False)
+        monkeypatch.delenv("PROMETHEUS_CONFIG_DIR", raising=False)
+        C.reset_cache()
         assert C._probe_trusted_rename(C.PROFILE) == "refused"
         ok, detail = C.preflight(C.PROFILE, force=True)
         assert ok and "writing trusted state refused" in detail, detail
