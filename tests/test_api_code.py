@@ -120,6 +120,25 @@ def test_create_launches_managed_task(monkeypatch, tmp_path, repo):
     assert mgr.created_with["timeout_seconds"] == 1500  # wall cap + headroom
 
 
+def test_create_forwards_daemon_config_before_subcommand(monkeypatch, tmp_path, repo):
+    mgr = _StubManager(tmp_path)
+    mgr.child_config_path = str(tmp_path / "custom-prometheus.yaml")
+    c = _client_with(monkeypatch, mgr)
+
+    r = c.post("/api/code", json={
+        "repo": str(repo),
+        "description": "use daemon config",
+        "acceptance_command": "python3 -m pytest -q",
+        "task_id": "config-forward",
+    })
+
+    assert r.status_code == 200
+    cmd = mgr.created_with["command"]
+    assert "--config" in cmd
+    assert str(tmp_path / "custom-prometheus.yaml") in cmd
+    assert cmd.index("--config") < cmd.index("code")
+
+
 def test_validation_rejects_missing_fields_and_non_repo(monkeypatch, tmp_path, repo):
     c = _client_with(monkeypatch, _StubManager(tmp_path))
     assert c.post("/api/code", json={"repo": str(repo)}).status_code == 400
