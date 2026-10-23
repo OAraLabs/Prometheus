@@ -2164,7 +2164,11 @@ def main() -> None:
     lcm_engine = create_lcm_engine(provider)
     # File memory is re-read every turn (LoopContext.memory_prompt_builder);
     # one read here so the boot section run_loop looks for is the one built in.
-    from prometheus.context.prompt_assembler import _load_memory_and_user, memory_section
+    from prometheus.context.prompt_assembler import (
+        _load_memory_and_user,
+        include_infrastructure_in_hosted_prompt,
+        memory_section,
+    )
     boot_memory_content = _load_memory_and_user()
     system_prompt = build_system_prompt(config, memory_content=boot_memory_content)
 
@@ -2296,6 +2300,7 @@ def main() -> None:
         tool_results_turn_budget=ctx_cfg.get("tool_results_turn_budget", 8000),
         microcompact_after_turns=ctx_cfg.get("microcompact_after_turns", 3),
         microcompact_on_cloud=ctx_cfg.get("microcompact_on_cloud", False),
+        infrastructure_in_hosted_prompt=include_infrastructure_in_hosted_prompt(config),
         microcompact_keep_chars=ctx_cfg.get("microcompact_keep_chars", 200),
         microcompact_keep_chars_no_lcm=ctx_cfg.get("microcompact_keep_chars_no_lcm", 500),
         tool_loader=tool_loader,

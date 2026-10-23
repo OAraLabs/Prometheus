@@ -1404,6 +1404,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # both loops are told to look for is the one the prompt carries.
     from prometheus.context.prompt_assembler import _load_memory_and_user
     from prometheus.context.prompt_assembler import memory_section as _memory_section
+    from prometheus.context.prompt_assembler import include_infrastructure_in_hosted_prompt
 
     _boot_memory_content = _load_memory_and_user()
     _boot_memory_prompt = _memory_section(_boot_memory_content)
@@ -1471,6 +1472,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         tool_results_turn_budget=config.get("context", {}).get("tool_results_turn_budget", 8000),
         microcompact_after_turns=config.get("context", {}).get("microcompact_after_turns", 3),
         microcompact_on_cloud=config.get("context", {}).get("microcompact_on_cloud", False),
+        infrastructure_in_hosted_prompt=include_infrastructure_in_hosted_prompt(config),
         microcompact_keep_chars=config.get("context", {}).get("microcompact_keep_chars", 200),
         microcompact_keep_chars_no_lcm=config.get("context", {}).get("microcompact_keep_chars_no_lcm", 500),
         compactor=compactor,
@@ -2823,6 +2825,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 tool_results_turn_budget=config.get("context", {}).get("tool_results_turn_budget", 8000),
                 microcompact_after_turns=config.get("context", {}).get("microcompact_after_turns", 3),
                 microcompact_on_cloud=config.get("context", {}).get("microcompact_on_cloud", False),
+                infrastructure_in_hosted_prompt=include_infrastructure_in_hosted_prompt(config),
                 microcompact_keep_chars=config.get("context", {}).get("microcompact_keep_chars", 200),
                 microcompact_keep_chars_no_lcm=config.get("context", {}).get("microcompact_keep_chars_no_lcm", 500),
                 # Phase 3.5: web bridge is its own session namespace.
