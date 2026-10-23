@@ -452,6 +452,41 @@ class TestFloorHolds:
         ok, detail = C.preflight(C.PROFILE, force=True)
         assert ok and "writing the device registry refused" in detail, detail
 
+    # --- trusted state (config, identity, memory, skills): writes refused ----
+    # Measured on macOS under the Seatbelt twin; the Linux measurement, write floor off as above.
+
+    @pytest.fixture()
+    def identity_file(self):
+        return require_floor_subject(Path.home() / ".prometheus" / "AGENTS.md")
+
+    @pytest.fixture()
+    def skills_dir(self):
+        return require_floor_subject(Path.home() / ".prometheus" / "skills")
+
+    def test_an_identity_file_cannot_be_written(self, identity_file):
+        before = identity_file.read_bytes()
+        res = self._aa_only(f"printf injected >> {identity_file}")
+        assert_refused_not_missing(res, "append to ~/.prometheus/AGENTS.md")
+        assert identity_file.read_bytes() == before, "the identity file changed — the floor leaked"
+
+    def test_a_skill_cannot_be_planted(self, skills_dir):
+        planted = skills_dir / "aa-pytest-planted.md"
+        try:
+            res = self._aa_only(f"printf x > {planted}")
+            assert_refused_not_missing(res, "plant a skill")
+            assert not planted.exists(), "a skill was planted — the floor leaked"
+        finally:
+            planted.unlink(missing_ok=True)
+
+    def test_trusted_state_can_still_be_read(self, identity_file):
+        res = self._aa_only(f"cat {identity_file}")
+        assert not res.is_error, res.output
+
+    def test_the_boot_probe_sees_trusted_state_refused(self, skills_dir):
+        assert C._probe_trusted_rename(C.PROFILE) == "refused"
+        ok, detail = C.preflight(C.PROFILE, force=True)
+        assert ok and "writing trusted state refused" in detail, detail
+
     def test_work_inside_config_is_unaffected(self, config_env_file):
         scratch = config_env_file.parent.parent / "aa-pytest-app"
         try:

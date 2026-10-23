@@ -58,6 +58,7 @@ def _label_ok(monkeypatch, rename: str):
     monkeypatch.setattr(C, "_probe_config_rename", lambda profile: rename)
     # The device-registry half is tests/test_devices_db_floor.py's; held current here.
     monkeypatch.setattr(C, "_registry_detail", lambda profile: ("; writing the device registry refused", False))
+    monkeypatch.setattr(C, "_trusted_detail", lambda profile: ("; writing trusted state refused", False))
 
 
 def test_a_current_profile_is_active_and_says_the_rename_is_refused(monkeypatch, caplog):

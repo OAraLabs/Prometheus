@@ -66,7 +66,7 @@ from pathlib import Path
 from typing import Final
 
 from prometheus.config import local_pairing
-from prometheus.config.paths import data_dir_path
+from prometheus.config.paths import config_dir_path, data_dir_path
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +270,63 @@ def _registry_detail(profile: str) -> tuple[str, bool]:
     return "; the device-registry check could not run", False
 
 
+#: The loaded configs the shipped AppArmor profile names: the default config dir's, and the deploy clone's
+#: (scripts/deploy.sh's default ``$HOME/prometheus-deploy``).
+_PROFILE_CONFIGS: Final[tuple[str, ...]] = (
+    os.path.join("~", ".prometheus", "prometheus.yaml"),
+    os.path.join("~", "prometheus-deploy", "config", "prometheus.yaml"),
+)
+
+
+def _trusted_outside_profile() -> list[str]:
+    """Trusted state the static profile cannot name: a moved config dir, or a loaded config elsewhere."""
+    named = {os.path.realpath(os.path.expanduser(p)) for p in _PROFILE_CONFIGS}
+    outside = [p for p in _loaded_configs if p not in named]
+    default_dir = os.path.realpath(os.path.join(os.path.expanduser("~"), ".prometheus"))
+    wired = os.path.realpath(os.path.expanduser(str(config_dir_path())))
+    if wired != default_dir:
+        outside.append(wired)
+    return outside
+
+
+def _probe_trusted_rename(profile: str) -> str:
+    """Under *profile*, may trusted state be written? Renames the first that exists onto itself (skills/, then each
+    trusted file): ``refused``, ``renamed``, ``absent`` or ``unknown``."""
+    exe = shutil.which("aa-exec")
+    if exe is None:
+        return "unknown"
+    base = os.path.expanduser(str(config_dir_path()))
+    candidates = [os.path.join(base, n) for n in (*TRUSTED_DIRS, *TRUSTED_FILES)]
+    target = next((c for c in candidates if os.path.exists(c)), None)
+    if target is None:
+        return "absent"
+    try:
+        proc = subprocess.run([exe, "-p", profile, "--", sys.executable, "-c", _REGISTRY_RENAME_PROBE, target],
+                              capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    out = (proc.stdout or "").strip()
+    return {"REFUSED": "refused", "RENAMED": "renamed", "ABSENT": "absent"}.get(out, "unknown")
+
+
+def _trusted_detail(profile: str) -> tuple[str, bool]:
+    """The trusted-state half of the preflight detail, and whether it makes the profile incomplete."""
+    outside = _trusted_outside_profile()
+    note = ""
+    if outside:
+        note = ("; the loaded config or config directory is outside the profile's rule (" + ", ".join(outside)
+                + "), so a shell can write it unless the write floor covers it")
+    trusted = _probe_trusted_rename(profile)
+    if trusted == "refused":
+        return f"; writing trusted state refused{note}", bool(outside)
+    if trusted == "renamed":
+        return ("; STALE PROFILE: trusted state (the config, identity files, memory or skills) is writable, so a "
+                f"shell can rewrite what Prometheus trusts. Reload the shipped profile: {RELOAD_COMMAND}{note}"), True
+    if trusted == "absent":
+        return f"; no trusted state exists yet, so its rule was not measured{note}", bool(outside)
+    return f"; the trusted-state check could not run{note}", bool(outside)
+
+
 def _with_rename_check(profile: str, label: str) -> tuple[str, bool]:
     """The preflight detail for a confined *label*, and whether the profile is STALE.
 
@@ -279,6 +336,8 @@ def _with_rename_check(profile: str, label: str) -> tuple[str, bool]:
     """
     rename = _probe_config_rename(profile)
     registry, registry_stale = _registry_detail(profile)
+    trusted, trusted_stale = _trusted_detail(profile)
+    registry, registry_stale = registry + trusted, registry_stale or trusted_stale
     if rename == "refused":
         return f"{label}; renaming ~/.config refused{registry}", registry_stale
     if rename == "renamed":
@@ -424,6 +483,46 @@ REGISTRY_NAME: Final[str] = "devices.db"
 _REGISTRY_REGEX: Final[str] = '(regex #"/devices\\.db[^/]*$")'
 
 
+#: Prometheus's TRUSTED STATE in the config directory: what the daemon reads as its own. The config file (the
+#: permission mode, the floors' modes, allowed commands and persisted grants), the identity files that go into every
+#: prompt, MEMORY.md and USER.md (every prompt, refreshed per turn), and the skills. The daemon's own writers (the
+#: memory tool, the skill writers and their scanners) are unconfined; a model's shell must not write any of it.
+#: The gate asks the owner before a file tool does (permissions/checker.py reads these same names).
+TRUSTED_FILES: Final[tuple[str, ...]] = (
+    "prometheus.yaml", "SOUL.md", "AGENTS.md", "ANATOMY.md", "MEMORY.md", "USER.md",
+)
+TRUSTED_DIRS: Final[tuple[str, ...]] = ("skills",)
+
+#: The config file(s) this process actually loaded, wherever they are (a repo-local ``config/prometheus.yaml`` in a
+#: checkout or a deploy clone). Registered by the gate when it is built (``SecurityGate.__init__``).
+_loaded_configs: list[str] = []
+
+
+def protect_loaded_config(path: str | os.PathLike[str]) -> None:
+    """Put the config file this process loaded under the shell floor too, wherever it lives."""
+    real = os.path.realpath(os.path.expanduser(os.fspath(path)))
+    if real not in _loaded_configs:
+        _loaded_configs.append(real)
+
+
+def reset_loaded_config() -> None:
+    _loaded_configs.clear()
+
+
+def loaded_configs() -> tuple[str, ...]:
+    return tuple(_loaded_configs)
+
+
+def _config_dirs(home: str) -> list[str]:
+    """The config directories whose trusted state to protect, real paths: the default under *home*, and the one
+    this process uses when ``PROMETHEUS_CONFIG_DIR`` moved it."""
+    dirs = [os.path.realpath(os.path.join(home, ".prometheus"))]
+    wired = os.path.realpath(os.path.expanduser(str(config_dir_path())))
+    if wired not in dirs:
+        dirs.append(wired)
+    return dirs
+
+
 def _data_dirs(home: str) -> list[str]:
     """The data directories whose device registry to protect, real paths: the default under *home*, and the one
     this process uses when ``PROMETHEUS_DATA_DIR`` or ``PROMETHEUS_CONFIG_DIR`` moved it."""
@@ -485,6 +584,13 @@ def seatbelt_profile(home: str | os.PathLike[str] | None = None, *, allow_ssh: b
         # The data directory itself and every one above it: renaming any of them would move the registry out from
         # under its rule. Files beside the registry stay writable (``literal`` is the directory alone).
         parents += [p for p in _parents_below(os.path.join(directory, REGISTRY_NAME), real_home) if p not in parents]
+    config_dirs = _config_dirs(real_home)
+    trusted_files = [os.path.join(d, name) for d in config_dirs for name in TRUSTED_FILES]
+    trusted_files += [p for p in _loaded_configs if p not in trusted_files]
+    trusted_dirs = [os.path.join(d, name) for d in config_dirs for name in TRUSTED_DIRS]
+    for path in trusted_files:
+        # Each file's folders too, for the same reason as the registry's.
+        parents += [p for p in _parents_below(path, real_home) if p not in parents]
     return (
         "(version 1)\n"
         "(allow default)\n"
@@ -495,6 +601,8 @@ def seatbelt_profile(home: str | os.PathLike[str] | None = None, *, allow_ssh: b
         f'  (require-all (subpath "{base}/.config") (regex #"/\\.config/[^/]+/[^/]*env$")))\n'
         "(deny file-write*\n"
         + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_REGISTRY_REGEX})\n' for d in data_dirs)
+        + "".join(f'  (literal "{_sb_string(p)}")\n' for p in trusted_files)
+        + "".join(f'  (subpath "{_sb_string(d)}")\n' for d in trusted_dirs)
         + "".join(f'  (literal "{_sb_string(p)}")\n' for p in parents) +
         ")\n"
     )
@@ -519,6 +627,8 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
               f'printf x >> "$1/.prometheus/data/{REGISTRY_NAME}" 2>/dev/null && exit 9; '
               'mv "$1/.prometheus/data" "$1/moved-data" >/dev/null 2>&1 && exit 10; '
               'printf x > "$1/.prometheus/data/beside" || exit 11; '
+              'printf x >> "$1/.prometheus/AGENTS.md" 2>/dev/null && exit 12; '
+              'printf x > "$1/.prometheus/skills/planted.md" 2>/dev/null && exit 13; '
               'echo FLOOR_HELD')
     try:
         with tempfile.TemporaryDirectory(prefix="prometheus-read-floor-") as tmp:
@@ -531,6 +641,8 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
             (home / MAC_PAIRING_DIR / "pair.secret").write_text("x\n")
             (home / ".prometheus" / "data").mkdir(parents=True)
             (home / ".prometheus" / "data" / REGISTRY_NAME).write_text("x\n")
+            (home / ".prometheus" / "AGENTS.md").write_text("x\n")
+            (home / ".prometheus" / "skills").mkdir()
             (home / "ordinary").write_text("x\n")
             proc = subprocess.run(
                 [SANDBOX_EXEC, "-p", seatbelt_profile(home, allow_ssh=allow_ssh), "/bin/sh", "-c", script, "probe",
@@ -541,7 +653,8 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
         return False, f"sandbox-exec could not be run: {exc}"
     if proc.returncode == 0 and "FLOOR_HELD" in (proc.stdout or ""):
         return True, ("seatbelt via sandbox-exec: ~/.ssh, ~/.config/*/*env and the pairing secret refused, "
-                      "renaming ~/.config refused, writing the device registry refused, ordinary reads allowed")
+                      "renaming ~/.config refused, writing the device registry refused, writing trusted state "
+                      "(config, identity, memory, skills) refused, ordinary reads allowed")
     why = {
         3: "an ordinary file could not be read under the profile",
         4: "~/.ssh stayed readable under the profile",
@@ -552,6 +665,8 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
         9: "the device registry stayed writable under the profile",
         10: "the data directory could be renamed out from under the device-registry rule",
         11: "a file beside the device registry could not be written under the profile",
+        12: "the trusted state (the identity files) stayed writable under the profile",
+        13: "a skill could be planted in the trusted state's skills/ under the profile",
     }.get(proc.returncode)
     return False, why or (f"sandbox-exec did not run the probe (rc={proc.returncode})"
                           + (f": {(proc.stderr or '').strip()[:200]}" if (proc.stderr or "").strip() else ""))

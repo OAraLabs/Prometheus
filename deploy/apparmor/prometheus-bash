@@ -14,9 +14,10 @@
 # installs, migrations and repo edits must all keep working with no prompt.
 #
 # It exists to make three paths unreachable (and the folder above the third
-# impossible to move out from under it), and one file unwritable (the device
-# registry, and the folders above it), because the permission gate cannot
-# reach them: SecurityGate._check_denied_path is nested under
+# impossible to move out from under it), and Prometheus's own trusted state
+# unwritable (the device registry, the config, identity, memory and skills,
+# and the folders above them), because the permission gate cannot reach
+# them: SecurityGate._check_denied_path is nested under
 # `if file_path:`, and bash is handed a command string, so the denied-path
 # floor covers the path-declaring tools and misses bash at BOTH origins.
 # Every check on the command string is defeated by ordinary shell
@@ -90,6 +91,22 @@ profile prometheus-bash flags=(attach_disconnected) {
   deny @{HOME}/.prometheus/data/devices.db* wl,
   deny @{HOME}/.prometheus/data/  w,
   deny @{HOME}/.prometheus/       w,
+
+  # Prometheus's trusted state: what the daemon reads as its own. The config
+  # file (the permission mode, these floors' modes, allowed commands and
+  # persisted grants, read at boot), the identity files that go into every
+  # prompt, MEMORY.md and USER.md (every prompt), and the skills. The
+  # daemon's own writers (the memory tool, the skill writers and their
+  # scanners) are unconfined; a shell a model wrote bypassed every one of
+  # them. Reading is not refused.
+  #
+  # The deploy clone's config (scripts/deploy.sh's default) is the loaded
+  # config on a deployed box. A config loaded from anywhere else, or a config
+  # directory moved by PROMETHEUS_CONFIG_DIR, is outside these rules, and the
+  # boot probe says so.
+  deny @{HOME}/.prometheus/{prometheus.yaml,SOUL.md,AGENTS.md,ANATOMY.md,MEMORY.md,USER.md} wl,
+  deny @{HOME}/.prometheus/skills/{,**} wl,
+  deny @{HOME}/prometheus-deploy/config/prometheus.yaml wl,
 
   # --- NO CARVE-OUT, AND THAT IS NOT AN OVERSIGHT -------------------------
   # There is deliberately no exception here for the second compute backend's

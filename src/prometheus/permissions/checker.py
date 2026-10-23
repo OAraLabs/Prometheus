@@ -27,7 +27,7 @@ from typing import Any
 
 from prometheus.config.load import load_config_file
 from prometheus.config.local_pairing import pairing_dir
-from prometheus.config.paths import data_dir_path
+from prometheus.config.paths import config_dir_path, data_dir_path
 from prometheus.config.shipped_defaults import (
     resolve_denied_paths, resolve_workspace_root)
 from prometheus.permissions.audit import AuditDecision, AuditLogger
@@ -838,6 +838,14 @@ class SecurityGate:
             resolved_cfg = str(Path(config_path).expanduser().resolve())
             if resolved_cfg not in self._denied_paths:
                 self._denied_paths.append(resolved_cfg)
+            # And the shell's half: a model's shell must not rewrite it either (permissions/confinement.py).
+            from prometheus.permissions.confinement import protect_loaded_config
+            protect_loaded_config(resolved_cfg)
+        # TRUSTED STATE (permissions/confinement.py): a file tool's WRITE to the config directory's identity files,
+        # MEMORY.md, USER.md or skills asks the owner, always. Any home, and this process's own config directory.
+        from prometheus.permissions.confinement import TRUSTED_DIRS, TRUSTED_FILES
+        cfg_dirs = ["/*/.prometheus", str(config_dir_path().expanduser().resolve())]
+        self._trusted_paths: list[str] = [f"{d}/{n}" for d in cfg_dirs for n in (*TRUSTED_FILES, *TRUSTED_DIRS)]
         # The same property for the same-Mac pairing secret: the floor names the
         # default places, and this is the directory THIS process would mint
         # into, wherever PROMETHEUS_LOCAL_PAIRING_DIR or XDG_DATA_HOME put it.
@@ -1112,6 +1120,22 @@ class SecurityGate:
         # as in DEFAULT, so `/gate off` neither waives nor tightens it.
         # Ordinary tools are untouched — tests/test_gate_computer_floor.py
         # holds them to a golden table captured before this line existed.
+        # TRUSTED STATE: a write to Prometheus's own config, identity files, memory or skills asks the owner,
+        # whatever the mode, the workspace or a remembered grant says. Before the AUTONOMOUS return and before
+        # grants, for that reason; after the floor, so the config file (denied) is still refused outright.
+        writes = path_is_write if path_is_write is not None else not is_read_only
+        if file_path and writes:
+            reason = self._check_denied_path(file_path)
+            if reason:
+                self._audit_log(tool_name, AuditDecision.DENY, reason, file_path)
+                return PermissionDecision.deny(reason)
+            trusted = denying_entry(str(Path(file_path).expanduser().resolve()), self._trusted_paths)
+            if trusted is not None:
+                reason = (f"{file_path} is Prometheus's trusted state (its config, identity files, memory or "
+                          f"skills): a write there needs the owner's approval")
+                self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason, file_path)
+                return PermissionDecision.approve(reason)
+
         if self._mode == PermissionMode.AUTONOMOUS and not is_computer:
             if command and self._is_always_blocked(command):
                 reason = f"Blocked command pattern: {command!r}"

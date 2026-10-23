@@ -184,6 +184,8 @@ def _label_ok(monkeypatch, *, config: str = "refused", registry: str = "refused"
     monkeypatch.setattr(C, "_probe_label", lambda profile: (True, f"{profile} (enforce)"))
     monkeypatch.setattr(C, "_probe_config_rename", lambda profile: config)
     monkeypatch.setattr(C, "_probe_registry_rename", lambda profile: registry)
+    # The trusted-state half is tests/test_trusted_state_floor.py's; held current here.
+    monkeypatch.setattr(C, "_trusted_detail", lambda profile: ("; writing trusted state refused", False))
 
 
 def test_a_current_profile_says_the_registry_is_refused(monkeypatch, caplog):
