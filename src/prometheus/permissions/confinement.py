@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import Final
 
 from prometheus.config import local_pairing
+from prometheus.config.paths import data_dir_path
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +213,63 @@ def _probe_config_rename(profile: str) -> str:
     return {"REFUSED": "refused", "RENAMED": "renamed", "ABSENT": "absent"}.get(out, "unknown")
 
 
+# Rename the device registry onto itself, the same trick: refused under a profile that denies `w` on it, a no-op
+# anywhere else, so the boot probe tests the rule on the real file without changing it.
+_REGISTRY_RENAME_PROBE: Final[str] = (
+    "import os, sys\n"
+    "p = sys.argv[1]\n"
+    "try:\n"
+    "    os.rename(p, p)\n"
+    "except FileNotFoundError:\n"
+    "    print('ABSENT')\n"
+    "except PermissionError:\n"
+    "    print('REFUSED')\n"
+    "else:\n"
+    "    print('RENAMED')\n"
+)
+
+
+def _registry_path() -> str:
+    return os.path.join(os.path.expanduser(str(data_dir_path())), REGISTRY_NAME)
+
+
+def _registry_outside_profile() -> bool:
+    """The AppArmor profile names ``@{HOME}/.prometheus/data/devices.db*``: a data directory moved elsewhere is not
+    covered by it, whatever the probe says."""
+    default = os.path.realpath(os.path.join(os.path.expanduser("~"), ".prometheus", "data"))
+    return os.path.realpath(os.path.dirname(_registry_path())) != default
+
+
+def _probe_registry_rename(profile: str) -> str:
+    """Under *profile*, may the device registry be written? ``refused``, ``renamed``, ``absent`` or ``unknown``."""
+    exe = shutil.which("aa-exec")
+    if exe is None:
+        return "unknown"
+    try:
+        proc = subprocess.run([exe, "-p", profile, "--", sys.executable, "-c", _REGISTRY_RENAME_PROBE,
+                               _registry_path()], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    out = (proc.stdout or "").strip()
+    return {"REFUSED": "refused", "RENAMED": "renamed", "ABSENT": "absent"}.get(out, "unknown")
+
+
+def _registry_detail(profile: str) -> tuple[str, bool]:
+    """The device-registry half of the preflight detail, and whether it makes the profile STALE."""
+    if _registry_outside_profile():
+        return (f"; the device registry is outside the profile's rule (PROMETHEUS_DATA_DIR or PROMETHEUS_CONFIG_DIR "
+                f"moved it to {os.path.dirname(_registry_path())}), so a shell can write it"), True
+    registry = _probe_registry_rename(profile)
+    if registry == "refused":
+        return "; writing the device registry refused", False
+    if registry == "renamed":
+        return ("; STALE PROFILE: the device registry (devices.db) is writable, so a shell can add a device, an "
+                f"owner or a desktop mark. Reload the shipped profile: {RELOAD_COMMAND}"), True
+    if registry == "absent":
+        return "; the device registry does not exist yet, so its rule was not measured", False
+    return "; the device-registry check could not run", False
+
+
 def _with_rename_check(profile: str, label: str) -> tuple[str, bool]:
     """The preflight detail for a confined *label*, and whether the profile is STALE.
 
@@ -220,14 +278,15 @@ def _with_rename_check(profile: str, label: str) -> tuple[str, bool]:
     would refuse every one. It is reported, at ERROR, with the reload that fixes it.
     """
     rename = _probe_config_rename(profile)
+    registry, registry_stale = _registry_detail(profile)
     if rename == "refused":
-        return f"{label}; renaming ~/.config refused", False
+        return f"{label}; renaming ~/.config refused{registry}", registry_stale
     if rename == "renamed":
         return (f"{label}; STALE PROFILE: ~/.config can be renamed out from under the env rule (#766), so a shell "
-                f"can still reach ~/.config/*/*env. Reload the shipped profile: {RELOAD_COMMAND}"), True
+                f"can still reach ~/.config/*/*env. Reload the shipped profile: {RELOAD_COMMAND}{registry}"), True
     if rename == "absent":
-        return f"{label}; ~/.config does not exist, so the rename rule was not measured", False
-    return f"{label}; the ~/.config rename check could not run", False
+        return f"{label}; ~/.config does not exist, so the rename rule was not measured{registry}", registry_stale
+    return f"{label}; the ~/.config rename check could not run{registry}", registry_stale
 
 
 def preflight(profile: str = PROFILE, *, force: bool = False) -> tuple[bool, str]:
@@ -359,6 +418,22 @@ def _pairing_dirs(home: str) -> list[str]:
     return dirs
 
 
+#: The device registry's file name in the data directory (config/paths.py), and the Seatbelt match for it and its
+#: -wal / -shm / -journal files. A constant: paths never go inside a regex literal (see :func:`seatbelt_profile`).
+REGISTRY_NAME: Final[str] = "devices.db"
+_REGISTRY_REGEX: Final[str] = '(regex #"/devices\\.db[^/]*$")'
+
+
+def _data_dirs(home: str) -> list[str]:
+    """The data directories whose device registry to protect, real paths: the default under *home*, and the one
+    this process uses when ``PROMETHEUS_DATA_DIR`` or ``PROMETHEUS_CONFIG_DIR`` moved it."""
+    dirs = [os.path.realpath(os.path.join(home, ".prometheus", "data"))]
+    wired = os.path.realpath(os.path.expanduser(str(data_dir_path())))
+    if wired not in dirs:
+        dirs.append(wired)
+    return dirs
+
+
 def _parents_below(path: str, home: str) -> list[str]:
     """Every directory above *path*, nearest first, stopping BEFORE *home* when *path* is under it (a user cannot
     rename their own home: its parent is root's) and before ``/`` otherwise."""
@@ -402,9 +477,14 @@ def seatbelt_profile(home: str | os.PathLike[str] | None = None, *, allow_ssh: b
     real_home = os.path.realpath(os.fspath(home) if home is not None else str(Path.home()))
     base = _sb_string(real_home)
     pairing = _pairing_dirs(real_home)
+    data_dirs = _data_dirs(real_home)
     parents: list[str] = [os.path.join(real_home, ".config")]
     for directory in pairing:
         parents += [p for p in _parents_below(directory, real_home) if p not in parents]
+    for directory in data_dirs:
+        # The data directory itself and every one above it: renaming any of them would move the registry out from
+        # under its rule. Files beside the registry stay writable (``literal`` is the directory alone).
+        parents += [p for p in _parents_below(os.path.join(directory, REGISTRY_NAME), real_home) if p not in parents]
     return (
         "(version 1)\n"
         "(allow default)\n"
@@ -414,6 +494,7 @@ def seatbelt_profile(home: str | os.PathLike[str] | None = None, *, allow_ssh: b
         + "".join(f'  (subpath "{_sb_string(d)}")\n' for d in pairing) +
         f'  (require-all (subpath "{base}/.config") (regex #"/\\.config/[^/]+/[^/]*env$")))\n'
         "(deny file-write*\n"
+        + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_REGISTRY_REGEX})\n' for d in data_dirs)
         + "".join(f'  (literal "{_sb_string(p)}")\n' for p in parents) +
         ")\n"
     )
@@ -435,6 +516,9 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
               'cat "$1/.config/prometheus/env" >/dev/null 2>&1 && exit 5; '
               f'cat "$1/{MAC_PAIRING_DIR}/pair.secret" >/dev/null 2>&1 && exit 7; '
               'mv "$1/.config" "$1/moved" >/dev/null 2>&1 && exit 8; '
+              f'printf x >> "$1/.prometheus/data/{REGISTRY_NAME}" 2>/dev/null && exit 9; '
+              'mv "$1/.prometheus/data" "$1/moved-data" >/dev/null 2>&1 && exit 10; '
+              'printf x > "$1/.prometheus/data/beside" || exit 11; '
               'echo FLOOR_HELD')
     try:
         with tempfile.TemporaryDirectory(prefix="prometheus-read-floor-") as tmp:
@@ -445,6 +529,8 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
             (home / ".config" / "prometheus" / "env").write_text("x\n")
             (home / MAC_PAIRING_DIR).mkdir(parents=True)
             (home / MAC_PAIRING_DIR / "pair.secret").write_text("x\n")
+            (home / ".prometheus" / "data").mkdir(parents=True)
+            (home / ".prometheus" / "data" / REGISTRY_NAME).write_text("x\n")
             (home / "ordinary").write_text("x\n")
             proc = subprocess.run(
                 [SANDBOX_EXEC, "-p", seatbelt_profile(home, allow_ssh=allow_ssh), "/bin/sh", "-c", script, "probe",
@@ -455,7 +541,7 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
         return False, f"sandbox-exec could not be run: {exc}"
     if proc.returncode == 0 and "FLOOR_HELD" in (proc.stdout or ""):
         return True, ("seatbelt via sandbox-exec: ~/.ssh, ~/.config/*/*env and the pairing secret refused, "
-                      "renaming ~/.config refused, ordinary reads allowed")
+                      "renaming ~/.config refused, writing the device registry refused, ordinary reads allowed")
     why = {
         3: "an ordinary file could not be read under the profile",
         4: "~/.ssh stayed readable under the profile",
@@ -463,6 +549,9 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
         6: "~/.ssh was refused although security.bash_allow_ssh is on",
         7: "the pairing secret stayed readable under the profile",
         8: "~/.config could be renamed out from under the env rule",
+        9: "the device registry stayed writable under the profile",
+        10: "the data directory could be renamed out from under the device-registry rule",
+        11: "a file beside the device registry could not be written under the profile",
     }.get(proc.returncode)
     return False, why or (f"sandbox-exec did not run the probe (rc={proc.returncode})"
                           + (f": {(proc.stderr or '').strip()[:200]}" if (proc.stderr or "").strip() else ""))

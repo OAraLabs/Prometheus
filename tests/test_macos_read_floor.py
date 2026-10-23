@@ -63,8 +63,11 @@ def test_the_profile_denies_the_three_families_apparmor_denies_and_allows_the_re
 def test_a_home_path_cannot_break_out_of_the_profile():
     profile = C.seatbelt_profile('/Users/odd "name" (x)')
     assert '(subpath "/Users/odd \\"name\\" (x)/.ssh")' in profile
-    # The home never enters the regex literal, where a quote would end it whatever escapes it.
-    assert profile.count('#"') == 1 and r'#"/\.config/[^/]+/[^/]*env$"' in profile
+    # The home never enters a regex literal, where a quote would end it whatever escapes it: every regex in the
+    # profile is one of the two fixed patterns (the env files; the device registry, once per data directory).
+    import re as _re
+    regexes = _re.findall(r'#"[^"]*"', profile)
+    assert regexes and set(regexes) <= {r'#"/\.config/[^/]+/[^/]*env$"', r'#"/devices\.db[^/]*$"'}, regexes
 
 
 # ── apply_floors and floor_report on a Mac ───────────────────────────────────

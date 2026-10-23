@@ -227,6 +227,13 @@ DENIED_PATHS_DEFAULTS_SHIPPED: tuple[tuple[str, ...], ...] = (
     ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
      "/*/Library/Application Support/Prometheus/pairing",
      "/*/.local/share/prometheus/pairing"),
+    # + the device registry (devices.db and its -wal/-shm/-journal), which says
+    # who may call the API, who is an owner and which device may run desktop
+    # tasks; it sits in the floor too.
+    ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
+     "/*/Library/Application Support/Prometheus/pairing",
+     "/*/.local/share/prometheus/pairing",
+     "/*/.prometheus/data/devices.db*"),
 )
 
 SHIPPED_DENIED_PATHS: tuple[str, ...] = DENIED_PATHS_DEFAULTS_SHIPPED[-1]

@@ -434,6 +434,9 @@ security:
     # token: the Mac app's directory, and the XDG default elsewhere.
     - "/*/Library/Application Support/Prometheus/pairing"
     - "/*/.local/share/prometheus/pairing"
+    # The device registry (devices.db, with its -wal/-shm/-journal): who may
+    # call the API, who is an owner, which device may run desktop tasks.
+    - "/*/.prometheus/data/devices.db*"
   # THE ABOVE DOES NOT COVER bash. denied_paths is only consulted when a call
   # passes a file_path, and bash is handed a command string — so at BOTH
   # origins `cat ~/.ssh/id_*` is ALLOW. Measured, not inferred. Any check on

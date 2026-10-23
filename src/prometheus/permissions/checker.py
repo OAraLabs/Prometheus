@@ -27,6 +27,7 @@ from typing import Any
 
 from prometheus.config.load import load_config_file
 from prometheus.config.local_pairing import pairing_dir
+from prometheus.config.paths import data_dir_path
 from prometheus.config.shipped_defaults import (
     resolve_denied_paths, resolve_workspace_root)
 from prometheus.permissions.audit import AuditDecision, AuditLogger
@@ -169,12 +170,23 @@ _RM_RECURSIVE_FLAG = re.compile(r"(?:^|\s)-(?:-recursive\b|[A-Za-z]*[rR])")
 # default and the Linux XDG default, any home. The shell's half is the Seatbelt
 # profile (permissions/confinement.py); a directory moved by
 # PROMETHEUS_LOCAL_PAIRING_DIR is added by the gate itself, like its config file.
+#
+# ⚠ SO IS THE DEVICE REGISTRY. ``<data dir>/devices.db`` (config/paths.py) says who
+# may call the API (a sha256 of each token), who is an owner and which device may
+# run desktop tasks, and the daemon reads it live: a row written by anything but
+# the daemon is trusted at once. ``devices.db*`` covers its -wal, -shm and
+# -journal files too (a planted -wal is replayed on the next open). Reads are
+# floored with writes, as for the rest of this list; nothing an agent does needs
+# either. A data directory moved by PROMETHEUS_DATA_DIR or PROMETHEUS_CONFIG_DIR is
+# added by the gate itself, like the pairing directory. The shell's half is the
+# Seatbelt profile and the AppArmor profile (permissions/confinement.py).
 _ALWAYS_DENIED_PATHS: tuple[str, ...] = (
     "/*/.ssh",
     "/*/.gnupg",
     "/*/.config/*/*env",
     "/*/Library/Application Support/Prometheus/pairing",
     "/*/.local/share/prometheus/pairing",
+    "/*/.prometheus/data/devices.db*",
 )
 
 # Tools that are always safe for read-only classification
@@ -832,6 +844,10 @@ class SecurityGate:
         resolved_pairing = str(pairing_dir().expanduser().resolve())
         if resolved_pairing not in self._denied_paths:
             self._denied_paths.append(resolved_pairing)
+        # And the device registry THIS process reads, wherever the data directory is.
+        resolved_registry = str(data_dir_path().expanduser().resolve() / "devices.db") + "*"
+        if resolved_registry not in self._denied_paths:
+            self._denied_paths.append(resolved_registry)
         self._config_path = config_path
         # MULTI-ROOT. A single root did not survive contact: of 871 recorded
         # file-tool calls on the live box only 16 were under ~/projects, so a

@@ -13,9 +13,10 @@
 # agent unusable (fixed deliberately in 1da4dd2). rm, git push, package
 # installs, migrations and repo edits must all keep working with no prompt.
 #
-# It exists to make exactly three paths unreachable (and the folder above the
-# third impossible to move out from under it), because the permission
-# gate cannot reach them: SecurityGate._check_denied_path is nested under
+# It exists to make three paths unreachable (and the folder above the third
+# impossible to move out from under it), and one file unwritable (the device
+# registry, and the folders above it), because the permission gate cannot
+# reach them: SecurityGate._check_denied_path is nested under
 # `if file_path:`, and bash is handed a command string, so the denied-path
 # floor covers the path-declaring tools and misses bash at BOTH origins.
 # Every check on the command string is defeated by ordinary shell
@@ -27,7 +28,7 @@
 # are different mechanisms. This profile touches only the second. Nothing
 # here introduces a prompt: the command runs, and open() returns EACCES.
 #
-# The three patterns mirror _ALWAYS_DENIED_PATHS in
+# The patterns mirror _ALWAYS_DENIED_PATHS in
 # src/prometheus/permissions/checker.py.
 # ---------------------------------------------------------------------------
 
@@ -70,6 +71,25 @@ profile prometheus-bash flags=(attach_disconnected) {
   # (both measured). .ssh and .gnupg need no such line: `{,**}` already covers
   # the directory itself, and renaming either was refused.
   deny @{HOME}/.config/           w,
+
+  # The device registry: who may call the API (a sha256 of each token), who is
+  # an owner, and which device may run desktop tasks. The daemon reads it
+  # live, so a row a shell wrote would be trusted at once. `devices.db*` takes
+  # its -wal, -shm and -journal files too (a planted -wal is replayed on the
+  # next open); `l` refuses a hard link to it, written through a second name.
+  # Reading it is not refused: it holds hashes, not tokens.
+  #
+  # The two folders above it cannot be renamed or replaced either, for the
+  # reason ~/.config cannot: a rule on the file is escaped by moving its
+  # parent. As for ~/.config, `w` on the folder's own path refuses only that;
+  # files beside the registry stay writable.
+  #
+  # This names the default place only. A data directory moved by
+  # PROMETHEUS_DATA_DIR or PROMETHEUS_CONFIG_DIR is outside it, and the boot
+  # probe says so at ERROR (permissions/confinement.py).
+  deny @{HOME}/.prometheus/data/devices.db* wl,
+  deny @{HOME}/.prometheus/data/  w,
+  deny @{HOME}/.prometheus/       w,
 
   # --- NO CARVE-OUT, AND THAT IS NOT AN OVERSIGHT -------------------------
   # There is deliberately no exception here for the second compute backend's
