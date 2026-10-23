@@ -407,6 +407,51 @@ class TestFloorHolds:
         ok, detail = C.preflight(C.PROFILE, force=True)
         assert ok and "renaming ~/.config refused" in detail, detail
 
+    # --- the device registry (devices.db): writes refused, reads kept --------
+    # Measured on macOS under the Seatbelt twin of this rule; these are the Linux measurement. The write floor is
+    # OFF here on purpose: bwrap alone already refuses the data directory outside a workspace, so with it on these
+    # would pass without proving the AppArmor rule.
+
+    @pytest.fixture()
+    def registry(self):
+        return require_floor_subject(Path.home() / ".prometheus" / "data" / "devices.db")
+
+    def _aa_only(self, command: str):
+        tool = BashTool(confinement="required", write_confinement="off")
+        return _run(tool, f"set -o pipefail; echo {SENTINEL}; {command}")
+
+    @pytest.mark.parametrize("command, what", [
+        ("printf x >> {db}", "append to the registry"),
+        ("python3 -c \"import sqlite3; c = sqlite3.connect('{db}'); "
+         "c.execute('create table if not exists aa_probe (x)'); c.commit()\"", "write a table into the registry"),
+        ("printf x > {db}-wal", "plant a -wal file"),
+        ("ln {db} $HOME/.aa-pytest-registry-link", "hard-link the registry"),
+        ("mv {data} $HOME/.aa-pytest-data-moved", "rename the data directory"),
+    ])
+    def test_the_registry_cannot_be_written(self, registry, command, what):
+        before = registry.read_bytes()
+        try:
+            res = self._aa_only(command.format(db=registry, data=registry.parent))
+            assert_refused_not_missing(res, what)
+            assert registry.read_bytes() == before, f"{what}: the registry changed — the floor leaked"
+        finally:
+            Path(f"{registry}-wal").unlink(missing_ok=True)
+            (Path.home() / ".aa-pytest-registry-link").unlink(missing_ok=True)
+            moved = Path.home() / ".aa-pytest-data-moved"
+            if moved.exists() and not registry.parent.exists():
+                moved.rename(registry.parent)
+
+    def test_the_registry_can_still_be_read_and_backed_up(self, registry, tmp_path):
+        res = self._aa_only(f"cp {registry} {tmp_path}/copy.db && python3 -c \"import sqlite3; "
+                            f"print('ROWS', sqlite3.connect('file:{registry}?mode=ro', uri=True)"
+                            f".execute('select count(*) from sqlite_master').fetchone())\"")
+        assert not res.is_error and "ROWS" in res.output, res.output
+
+    def test_the_boot_probe_sees_the_registry_refused(self, registry):
+        assert C._probe_registry_rename(C.PROFILE) == "refused"
+        ok, detail = C.preflight(C.PROFILE, force=True)
+        assert ok and "writing the device registry refused" in detail, detail
+
     def test_work_inside_config_is_unaffected(self, config_env_file):
         scratch = config_env_file.parent.parent / "aa-pytest-app"
         try:

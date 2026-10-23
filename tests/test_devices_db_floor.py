@@ -245,13 +245,39 @@ def test_a_shell_cannot_change_the_registry_by_any_route(tmp_path, command):
 
 
 @real
-def test_a_shell_can_still_read_it_and_write_beside_it(tmp_path):
+@pytest.mark.parametrize("route", [
+    "{py} -c \"import sqlite3; print(sqlite3.connect('file:{db}?mode=ro', uri=True)"
+    ".execute('select count(*) from api_devices').fetchone())\"",
+    "{py} -c \"import sqlite3; print(sqlite3.connect('{db}').execute('select count(*) from owner_devices').fetchone())\"",
+    "{py} -c \"import sqlite3; sqlite3.connect('file:{db}?mode=ro', uri=True).backup(sqlite3.connect('{out}/b.db'))\"",
+    'cp "{db}" "{out}/copy.db"',
+    'tar -cf "{out}/data.tar" -C "{home}/.prometheus" data',
+], ids=["read-only-select", "plain-select", "sqlite-backup", "cp", "tar"])
+def test_a_shell_can_still_read_it_and_back_it_up(tmp_path, route):
+    """Backups, health checks and cron jobs read the registry; the floor takes writes only."""
     home = tmp_path.resolve()
     db = _registry(home)
-    read = (f'{sys.executable} -c "import sqlite3; '
-            f"print(sqlite3.connect('file:{db}?mode=ro', uri=True).execute('select count(*) from api_devices').fetchone())\"")
-    assert _sh(home, read) == 0
+    out = home / "backups"
+    out.mkdir()
+    assert _sh(home, route.format(py=sys.executable, db=db, out=out, home=home)) == 0
+
+
+@real
+def test_a_shell_can_still_write_beside_it(tmp_path):
+    home = tmp_path.resolve()
+    db = _registry(home)
     assert _sh(home, f'printf ok > "{db.parent}/notes.txt" && printf ok > "{home}/.prometheus/notes.txt"') == 0
+
+
+def test_the_registry_stays_in_rollback_journal_mode(tmp_path):
+    """Why reading needs no write: in WAL mode every reader writes the -shm file, which the floor refuses, so a
+    backup or cron job reading the registry would break. Switching the registry to WAL must change the floor too."""
+    from prometheus.config.device_store import DeviceStore
+
+    store = DeviceStore(db_path=tmp_path / "devices.db")
+    store.mint("Phone", "ios")
+    mode = sqlite3.connect(tmp_path / "devices.db").execute("pragma journal_mode").fetchone()[0]
+    assert mode == "delete", mode
 
 
 @real
