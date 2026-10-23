@@ -89,6 +89,9 @@ profile prometheus-bash flags=(attach_disconnected) {
   # PROMETHEUS_DATA_DIR or PROMETHEUS_CONFIG_DIR is outside it, and the boot
   # probe says so at ERROR (permissions/confinement.py).
   deny @{HOME}/.prometheus/data/devices.db* wl,
+  # The scheduled-jobs schedule (re-read every tick, so a planted job runs as the owner with no restart) and
+  # its append-only logs. The daemon writes them; a shell must not.
+  deny @{HOME}/.prometheus/data/{cron_jobs.json,cron_history.jsonl,cron_undelivered.jsonl} wl,
   deny @{HOME}/.prometheus/data/  w,
   deny @{HOME}/.prometheus/       w,
 

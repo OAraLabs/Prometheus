@@ -234,6 +234,14 @@ DENIED_PATHS_DEFAULTS_SHIPPED: tuple[tuple[str, ...], ...] = (
      "/*/Library/Application Support/Prometheus/pairing",
      "/*/.local/share/prometheus/pairing",
      "/*/.prometheus/data/devices.db*"),
+    # + the scheduled-jobs schedule and its logs, read live by the cron scheduler; a planted job runs as the owner.
+    ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
+     "/*/Library/Application Support/Prometheus/pairing",
+     "/*/.local/share/prometheus/pairing",
+     "/*/.prometheus/data/devices.db*",
+     "/*/.prometheus/data/cron_jobs.json",
+     "/*/.prometheus/data/cron_history.jsonl",
+     "/*/.prometheus/data/cron_undelivered.jsonl"),
 )
 
 SHIPPED_DENIED_PATHS: tuple[str, ...] = DENIED_PATHS_DEFAULTS_SHIPPED[-1]

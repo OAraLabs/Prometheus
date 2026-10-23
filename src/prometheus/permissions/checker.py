@@ -187,6 +187,9 @@ _ALWAYS_DENIED_PATHS: tuple[str, ...] = (
     "/*/Library/Application Support/Prometheus/pairing",
     "/*/.local/share/prometheus/pairing",
     "/*/.prometheus/data/devices.db*",
+    "/*/.prometheus/data/cron_jobs.json",
+    "/*/.prometheus/data/cron_history.jsonl",
+    "/*/.prometheus/data/cron_undelivered.jsonl",
 )
 
 # Tools that are always safe for read-only classification
@@ -856,6 +859,12 @@ class SecurityGate:
         resolved_registry = str(data_dir_path().expanduser().resolve() / "devices.db") + "*"
         if resolved_registry not in self._denied_paths:
             self._denied_paths.append(resolved_registry)
+        # The scheduled-jobs files this process reads, wherever the data directory is.
+        from prometheus.permissions.confinement import DATA_TRUSTED_FILES
+        for _cron in DATA_TRUSTED_FILES:
+            _p = str(data_dir_path().expanduser().resolve() / _cron)
+            if _p not in self._denied_paths:
+                self._denied_paths.append(_p)
         self._config_path = config_path
         # MULTI-ROOT. A single root did not survive contact: of 871 recorded
         # file-tool calls on the live box only 16 were under ~/projects, so a

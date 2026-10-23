@@ -75,7 +75,7 @@ def test_every_earlier_shipped_list_is_an_old_default(earlier):
 
 @pytest.mark.parametrize("changed", [
     list(reversed(PREVIOUS)),           # same entries, the operator's order
-    list(PREVIOUS[:-1]),                # one taken out
+    list(PREVIOUS[1:]),                 # one taken out (the first, so it cannot coincide with an earlier shipped list)
     [],                                 # the documented "no policy denials"
 ], ids=["reordered", "trimmed", "empty"])
 def test_anything_but_an_exact_shipped_list_is_the_operators(changed, caplog):

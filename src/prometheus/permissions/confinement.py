@@ -482,6 +482,10 @@ def _pairing_dirs(home: str) -> list[str]:
 REGISTRY_NAME: Final[str] = "devices.db"
 _REGISTRY_REGEX: Final[str] = '(regex #"/devices\\.db[^/]*$")'
 
+#: Other trusted files in the data directory: the scheduled-jobs schedule (re-read every tick, so a planted job
+#: runs as the owner with no restart) and its append-only logs. The daemon writes them; a shell must not.
+DATA_TRUSTED_FILES: Final[tuple[str, ...]] = ("cron_jobs.json", "cron_history.jsonl", "cron_undelivered.jsonl")
+
 
 #: Prometheus's TRUSTED STATE in the config directory: what the daemon reads as its own. The config file (the
 #: permission mode, the floors' modes, allowed commands and persisted grants), the identity files that go into every
@@ -601,6 +605,7 @@ def seatbelt_profile(home: str | os.PathLike[str] | None = None, *, allow_ssh: b
         f'  (require-all (subpath "{base}/.config") (regex #"/\\.config/[^/]+/[^/]*env$")))\n'
         "(deny file-write*\n"
         + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_REGISTRY_REGEX})\n' for d in data_dirs)
+        + "".join(f'  (literal "{_sb_string(os.path.join(d, n))}")\n' for d in data_dirs for n in DATA_TRUSTED_FILES)
         + "".join(f'  (literal "{_sb_string(p)}")\n' for p in trusted_files)
         + "".join(f'  (subpath "{_sb_string(d)}")\n' for d in trusted_dirs)
         + "".join(f'  (literal "{_sb_string(p)}")\n' for p in parents) +
@@ -629,6 +634,7 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
               'printf x > "$1/.prometheus/data/beside" || exit 11; '
               'printf x >> "$1/.prometheus/AGENTS.md" 2>/dev/null && exit 12; '
               'printf x > "$1/.prometheus/skills/planted.md" 2>/dev/null && exit 13; '
+              'printf x >> "$1/.prometheus/data/cron_jobs.json" 2>/dev/null && exit 14; '
               'echo FLOOR_HELD')
     try:
         with tempfile.TemporaryDirectory(prefix="prometheus-read-floor-") as tmp:
@@ -643,6 +649,7 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
             (home / ".prometheus" / "data" / REGISTRY_NAME).write_text("x\n")
             (home / ".prometheus" / "AGENTS.md").write_text("x\n")
             (home / ".prometheus" / "skills").mkdir()
+            (home / ".prometheus" / "data" / "cron_jobs.json").write_text("{}\n")
             (home / "ordinary").write_text("x\n")
             proc = subprocess.run(
                 [SANDBOX_EXEC, "-p", seatbelt_profile(home, allow_ssh=allow_ssh), "/bin/sh", "-c", script, "probe",
@@ -667,6 +674,7 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
         11: "a file beside the device registry could not be written under the profile",
         12: "the trusted state (the identity files) stayed writable under the profile",
         13: "a skill could be planted in the trusted state's skills/ under the profile",
+        14: "the scheduled-jobs schedule stayed writable under the profile",
     }.get(proc.returncode)
     return False, why or (f"sandbox-exec did not run the probe (rc={proc.returncode})"
                           + (f": {(proc.stderr or '').strip()[:200]}" if (proc.stderr or "").strip() else ""))

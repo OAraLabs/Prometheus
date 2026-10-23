@@ -369,6 +369,12 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
         "landed nothing and an approved one landed. Registered, not exempted: if that file stops calling evaluate "
         "directly this entry fails as stale."
     ),
+    "test_cron_floor.py": (
+        "the scheduled-jobs files join the always-denied floor: direct evaluate(file_path=...) calls read the "
+        "gate's decision for each cron file under each config shape (default, gate off, a workspace covering it), "
+        "so the floor table is the subject. The real shell refusal is proven on macOS in the same file. "
+        "Registered, not exempted: if that file stops calling evaluate directly this entry fails as stale."
+    ),
     "test_denied_prune.py": (
         "P4.1 matcher-drift fix: THREE readers share one deny list — the gate, "
         "the grep/glob prune layer, and the /workspace validator — and they used "
