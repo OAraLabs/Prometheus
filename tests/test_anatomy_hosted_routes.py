@@ -176,7 +176,7 @@ def _calls_in(func_name: str, callee: str) -> int:
 
 def test_a_hosted_fallback_is_treated_like_a_hosted_route():
     """_on_degrade rebinds the prompt the fallback request reads; both copies pass the rule."""
-    assert _calls_in("_on_degrade", "infrastructure_for_route") == 2
+    assert _calls_in("_on_degrade", "prompt_for_route") == 2
     assert _calls_in("_on_degrade", "is_hosted_provider") == 1
 
 
