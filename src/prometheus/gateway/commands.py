@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from prometheus.config.paths import get_wiki_root
+from prometheus.memory.store import MANUAL_SOURCE
 from prometheus.permissions.approver import Approver
 
 if TYPE_CHECKING:
@@ -184,7 +185,7 @@ def cmd_note(store, raw: str) -> str:
             entity,
             text,
             1.0,
-            source_event_ids=["manual"],
+            source_event_ids=[MANUAL_SOURCE],
             manual=True,
         )
     except Exception as exc:  # noqa: BLE001 — surface, never false-ack

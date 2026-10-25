@@ -34,7 +34,7 @@ from prometheus.memory.purge_derived import (
     sweep_after_purge,
 )
 from prometheus.memory.retention import DAY_SECONDS, apply_retention, plan_retention
-from prometheus.memory.store import MemoryStore
+from prometheus.memory.store import MANUAL_SOURCE, MemoryStore
 from prometheus.memory.wiki_compiler import WikiCompiler
 from prometheus.sentinel.knowledge_synth import KnowledgeSynthesizer, SynthInsight
 
@@ -88,9 +88,22 @@ def world(tmp_path: Path) -> SimpleNamespace:
         bystander=_fact(mem, "Gardens", "Gardens need water", [k2], count=2),
         # a source that exists in no chat is not support
         orphan=_fact(mem, "Orphaned Thing", "Orphaned Thing was mentioned", [d3, "ghost-id-0001"]),
-        # a human-asserted note whose only source is the purged chat
-        note=_fact(mem, "Note Thing", "Note Thing is a thing", [d3], manual=True),
     )
+    # Notes. A /note records ONE source, MANUAL_SOURCE, which names no chat. The only way a note is
+    # tied to a chat is dedup: it is merged into a fact the extractor had already learned there.
+    _fact(mem, "Note Thing", "Note Thing is a thing", [d3])
+    ids.note = mem.persist_memory(                      # merged: sources are [d3, "manual"]
+        "note", "Note Thing", "Note Thing is a thing", 1.0,
+        source_event_ids=[MANUAL_SOURCE], manual=True)
+    _fact(mem, "Marlowe", "Marlowe has a sister", [d1, k1], kind="person")
+    ids.shared_note = mem.persist_memory(               # merged, and a surviving chat names Marlowe
+        "note", "Marlowe", "Marlowe has a sister", 1.0,
+        source_event_ids=[MANUAL_SOURCE], manual=True)
+    ids.lone_note = _fact(                              # flagged manual with only the purged source
+        mem, "Lone Note", "Lone Note is a thing", [d3], manual=True)
+    ids.plain_note = mem.persist_memory(                # a /note that was never merged into anything
+        "note", "Notes", "Renew the passport in March", 1.0,
+        source_event_ids=[MANUAL_SOURCE], manual=True)
     # Two entities at 2+ mentions (and the manual one) get pages.
     compiler = WikiCompiler(store=mem, wiki_root=wiki)
     compiler.regenerate_all()
@@ -186,12 +199,138 @@ def test_ids_that_exist_in_no_chat_are_not_support(world):
     assert world.ids.orphan in _removed_ids(plan)
 
 
-def test_a_manual_note_is_treated_like_any_other_fact_and_flagged(world):
+# ── notes (/note) ──────────────────────────────────────────────────────
+#
+# The owner's rule: a purge keeps notes by default, lists them in the preview, and forgets them only
+# when asked. A note names no chat (its one source is MANUAL_SOURCE), so the only notes a purge can
+# even see are those merged into a fact the chat taught.
+
+def _notes_kept_ids(plan) -> set[str]:
+    return {f["id"] for f in plan.notes_kept}
+
+
+def test_a_note_merged_into_a_fact_from_the_purged_chat_is_kept_by_default(world):
+    before = world.mem.get_memory(world.ids.note)
+    assert sorted(before["source_event_ids"]) == sorted([world.d[2], MANUAL_SOURCE]), "precondition"
+
     plan = _plan(world)
-    entry = next(f for f in plan.removed if f["id"] == world.ids.note)
-    assert entry["manual"] is True
+
+    assert world.ids.note in _notes_kept_ids(plan)
+    assert world.ids.note not in _removed_ids(plan)
+    apply_retraction(plan, memory_store=world.mem, wiki_compiler=world.compiler)
+    after = world.mem.get_memory(world.ids.note)
+    assert after is not None and after["manual"] == 1
+    assert after["fact"] == "Note Thing is a thing"
+    assert after["source_event_ids"] == [MANUAL_SOURCE], "the purged chat is no longer a source"
+
+
+def test_a_note_flagged_manual_with_only_the_purged_source_keeps_a_manual_source(world):
+    """Provenance is mandatory, and a human (not a chat) is what supports a note."""
+    plan = _plan(world)
+    assert world.ids.lone_note in _notes_kept_ids(plan)
+
+    apply_retraction(plan, memory_store=world.mem, wiki_compiler=world.compiler)
+
+    kept = world.mem.get_memory(world.ids.lone_note)
+    assert kept is not None
+    assert kept["source_event_ids"] == [MANUAL_SOURCE]
+    assert kept["mention_count"] >= 1
+
+
+def test_a_note_that_names_no_chat_is_never_touched(world):
+    before = world.mem.get_memory(world.ids.plain_note)
+    plan = _plan(world)
+    for group in (plan.removed, plan.kept, plan.notes_kept):
+        assert world.ids.plain_note not in {f["id"] for f in group}
+    apply_retraction(plan, memory_store=world.mem, wiki_compiler=world.compiler)
+    assert world.mem.get_memory(world.ids.plain_note) == before
+    forgetting = _plan(world, forget_notes=True)
+    assert world.ids.plain_note not in _removed_ids(forgetting), "it cannot be tied to this chat"
+
+
+def test_the_preview_lists_the_notes_that_stay_and_says_which_choice_it_assumes(world):
+    preview = _plan(world).to_preview()
+
+    listed = {n["id"]: n for n in preview["notes_kept"]}
+    assert set(listed) == {world.ids.note, world.ids.shared_note, world.ids.lone_note}
+    assert listed[world.ids.note]["entity_name"] == "Note Thing"
+    assert listed[world.ids.note]["fact"] == "Note Thing is a thing"
+    assert preview["totals"]["notes_kept"] == 3
+    assert preview["forget_notes"] is False
+    assert not {world.ids.note, world.ids.lone_note} & {f["id"] for f in preview["facts_removed"]}
+
+
+def test_forgetting_notes_removes_a_note_nothing_else_supports(world):
+    plan = _plan(world, forget_notes=True)
+
+    removed = {f["id"]: f for f in plan.removed}
+    assert {world.ids.note, world.ids.lone_note} <= set(removed)
+    assert removed[world.ids.note]["manual"] is True
+    assert "note" in removed[world.ids.note]["reason"]
+    assert plan.notes_kept == ()
+    assert plan.to_preview()["forget_notes"] is True
+
     apply_retraction(plan, memory_store=world.mem, wiki_compiler=world.compiler)
     assert world.mem.get_memory(world.ids.note) is None
+    assert world.mem.get_memory(world.ids.lone_note) is None
+    assert world.mem.get_memory(world.ids.plain_note) is not None
+
+
+def test_forgetting_notes_judges_a_note_like_any_other_fact(world):
+    """A surviving chat that names Marlowe supports the note, so it stays either way."""
+    plan = _plan(world, forget_notes=True)
+    assert world.ids.shared_note not in _removed_ids(plan)
+    kept = next(f for f in plan.kept if f["id"] == world.ids.shared_note)
+    assert kept["manual"] is True
+
+    apply_retraction(plan, memory_store=world.mem, wiki_compiler=world.compiler)
+    survivor = world.mem.get_memory(world.ids.shared_note)
+    assert sorted(survivor["source_event_ids"]) == sorted([world.k[0], MANUAL_SOURCE])
+
+
+def test_the_notes_option_changes_only_notes(world):
+    default = _plan(world)
+    forgetting = _plan(world, forget_notes=True)
+    note_ids = {world.ids.note, world.ids.lone_note}
+    assert _removed_ids(forgetting) - _removed_ids(default) == note_ids
+    assert _removed_ids(default) - _removed_ids(forgetting) == set()
+
+
+def test_the_preview_and_the_apply_agree_when_notes_are_forgotten(world):
+    plan = _plan(world, forget_notes=True)
+    shown = {f["id"] for f in plan.to_preview()["facts_removed"]}
+    before = {m["id"] for m in world.mem.get_all_memories(limit=1000)}
+    apply_retraction(plan, memory_store=world.mem, wiki_compiler=world.compiler)
+    after = {m["id"] for m in world.mem.get_all_memories(limit=1000)}
+    assert before - after == shown
+
+
+def test_a_kept_note_keeps_its_page_and_the_page_no_longer_cites_the_chat(world):
+    page = next(world.wiki.rglob("Note Thing.md"))
+    assert world.d[2][:8] in page.read_text(encoding="utf-8"), "precondition: cites the chat"
+
+    apply_retraction(_plan(world), memory_store=world.mem, wiki_compiler=world.compiler)
+
+    text = page.read_text(encoding="utf-8")
+    assert "Note Thing is a thing" in text, "a manual fact earns a page on its own"
+    assert world.d[2][:8] not in text
+
+
+@pytest.mark.parametrize("forget", [False, True])
+def test_the_final_sweep_follows_the_same_choice_as_the_first_pass(world, forget):
+    plan, _ = retract_before_purge(DOOMED, conversation_store=world.lcm, memory_store=world.mem,
+                                   wiki_compiler=world.compiler, forget_notes=forget)
+    assert plan.forget_notes is forget
+    world.lcm.purge_session(DOOMED)
+    # the extractor was mid-batch: a note was merged into a fact citing a now-gone message
+    late = _fact(world.mem, "Latecomer", "Latecomer is a thing", [sorted(plan.purged_ids)[0]])
+    world.mem.persist_memory("note", "Latecomer", "Latecomer is a thing", 1.0,
+                             source_event_ids=[MANUAL_SOURCE], manual=True)
+
+    sweep_after_purge(plan, conversation_store=world.lcm, memory_store=world.mem,
+                      wiki_compiler=world.compiler)
+
+    assert (world.mem.get_memory(late) is None) is forget
 
 
 def test_facts_that_cite_no_purged_message_are_left_exactly_as_they_were(world):

@@ -36,6 +36,10 @@ _DB_NAME = "memory.db"
 # entire store.
 EXTRACTOR_GLOBAL_SCOPE = "*"
 
+# The one ``source_event_ids`` entry a ``/note`` records. It names no chat, so a note cannot be
+# traced to the conversation it was typed in, only to the fact it was merged into.
+MANUAL_SOURCE = "manual"
+
 _DEDUP_TRAILING = string.punctuation + " "
 
 
@@ -895,7 +899,9 @@ class MemoryStore:
         against the row AS IT IS INSIDE THE TRANSACTION, not against a list computed earlier: the
         extractor may have merged a new source into the fact since the plan was made, and writing
         the planned list back would erase it. A fact left with no source at all is deleted, since
-        provenance is mandatory and nothing supports it.
+        provenance is mandatory and nothing supports it; except a ``manual`` one (a ``/note`` the
+        owner asserted), which keeps :data:`MANUAL_SOURCE` as its source because a human, not a
+        chat, is what supports it.
         ``legacy_*`` clear the deprecated tables, ``cursor_scope`` drops the chat's extractor
         cursor, and ``marks`` are named marks written in the same transaction (the purge uses one
         to remember that the wiki still has to be rebuilt).
@@ -923,18 +929,21 @@ class MemoryStore:
                 ).rowcount
             for memory_id in strip_list:
                 row = conn.execute(
-                    "SELECT source_event_ids, mention_count FROM memories WHERE id = ?",
+                    "SELECT source_event_ids, mention_count, manual FROM memories WHERE id = ?",
                     (memory_id,),
                 ).fetchone()
                 if row is None:
                     continue  # already gone: a retry, or a concurrent delete
                 sources = json.loads(row["source_event_ids"] or "[]")
                 remaining = [s for s in sources if s not in strip_set]
+                scale_from = len(remaining)
+                if not remaining and row["manual"]:
+                    remaining = [MANUAL_SOURCE]
                 if not remaining:
                     counts["deleted"] += conn.execute(
                         "DELETE FROM memories WHERE id = ?", (memory_id,)).rowcount
                     continue
-                scaled = max(1, round(int(row["mention_count"] or 1) * len(remaining) / len(sources)))
+                scaled = max(1, round(int(row["mention_count"] or 1) * scale_from / len(sources)))
                 counts["rewritten"] += conn.execute(
                     "UPDATE memories SET source_event_ids = ?, mention_count = ? WHERE id = ?",
                     (json.dumps(sorted(remaining)), scaled, memory_id),

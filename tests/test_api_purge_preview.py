@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from prometheus.engine.session import SessionManager  # noqa: E402
 from prometheus.memory.lcm_conversation_store import LCMConversationStore  # noqa: E402
 from prometheus.memory.lcm_types import MessagePart  # noqa: E402
-from prometheus.memory.store import MemoryStore  # noqa: E402
+from prometheus.memory.store import MANUAL_SOURCE, MemoryStore  # noqa: E402
 from prometheus.memory.wiki_compiler import WikiCompiler  # noqa: E402
 from prometheus.web.server import create_app  # noqa: E402
 
@@ -56,6 +56,7 @@ def world(tmp_path: Path) -> SimpleNamespace:
     wiki = tmp_path / "wiki"
     d1 = _say(lcm, DOOMED, f"Zephyr Corp card is {SECRET}", "a0000001")
     d2 = _say(lcm, DOOMED, "Zephyr Corp again", "a0000002")
+    d3 = _say(lcm, DOOMED, "The Bluebird club meets on Fridays", "a0000003")
     k1 = _say(lcm, KEEPER, "Marlowe moved to Lisbon", "b0000001")
     only = mem.persist_memory("organization", "Zephyr Corp", f"Zephyr Corp card is {SECRET}", 0.9,
                               source_event_ids=[d1, d2])
@@ -63,6 +64,12 @@ def world(tmp_path: Path) -> SimpleNamespace:
     shared = mem.persist_memory("person", "Marlowe", "Marlowe lives in Lisbon", 0.9,
                                 source_event_ids=[d1, k1])
     mem.update_memory(shared, mention_count=2)
+    # A /note records the source "manual"; it is tied to this chat only because it was merged into a
+    # fact the extractor learned here.
+    mem.persist_memory("topic", "Bluebird club", "Bluebird club meets on Fridays", 0.9,
+                       source_event_ids=[d3])
+    note = mem.persist_memory("note", "Bluebird club", "Bluebird club meets on Fridays", 1.0,
+                              source_event_ids=[MANUAL_SOURCE], manual=True)
     compiler = WikiCompiler(store=mem, wiki_root=wiki)
     compiler.regenerate_all()
 
@@ -75,7 +82,7 @@ def world(tmp_path: Path) -> SimpleNamespace:
     client.app.state.memory_store = mem
     client.app.state.wiki_compiler = compiler
     return SimpleNamespace(client=client, lcm=lcm, mem=mem, wiki=wiki, compiler=compiler,
-                           only=only, shared=shared, tmp=tmp_path)
+                           only=only, shared=shared, note=note, tmp=tmp_path)
 
 
 def _wiki_bytes(wiki: Path) -> dict[str, bytes]:
@@ -193,3 +200,67 @@ def test_a_purge_that_taught_nothing_leaves_the_wiki_alone(world):
     assert r.status_code == 200
     assert r.json()["derived"]["facts_removed"] == 0
     assert _wiki_bytes(world.wiki) == before, "no fact changed, so no page should be rewritten"
+
+
+# ── notes (/note) ──────────────────────────────────────────────────────
+
+def test_the_preview_lists_the_notes_that_would_stay(world):
+    body = world.client.get(f"/api/sessions/{DOOMED}/purge-preview").json()
+
+    derived = body["derived"]
+    assert derived["forget_notes"] is False
+    assert [n["id"] for n in derived["notes_kept"]] == [world.note]
+    assert derived["notes_kept"][0]["fact"] == "Bluebird club meets on Fridays"
+    assert derived["totals"]["notes_kept"] == 1
+    assert world.note not in [f["id"] for f in derived["facts_removed"]]
+
+
+def test_the_preview_can_show_the_purge_that_also_forgets_notes_and_changes_nothing(world):
+    wiki_before = _wiki_bytes(world.wiki)
+    facts_before = world.mem.get_all_memories(limit=100)
+
+    body = world.client.get(f"/api/sessions/{DOOMED}/purge-preview?forget_notes=true").json()
+
+    derived = body["derived"]
+    assert derived["forget_notes"] is True
+    assert derived["notes_kept"] == []
+    removed = {f["id"]: f for f in derived["facts_removed"]}
+    assert world.note in removed and removed[world.note]["manual"] is True
+    assert world.mem.get_all_memories(limit=100) == facts_before
+    assert _wiki_bytes(world.wiki) == wiki_before
+
+
+def test_purge_keeps_notes_unless_asked_to_forget_them(world):
+    r = world.client.post(f"/api/sessions/{DOOMED}/purge", json={"confirm": DOOMED})
+
+    assert r.status_code == 200, r.text
+    derived = r.json()["derived"]
+    assert derived["notes_kept"] == 1 and derived["forget_notes"] is False
+    assert world.mem.get_memory(world.note)["source_event_ids"] == [MANUAL_SOURCE]
+    assert world.lcm.message_ids_for_session(DOOMED) == []
+
+
+def test_purge_forgets_notes_when_the_request_says_so(world):
+    r = world.client.post(f"/api/sessions/{DOOMED}/purge",
+                          json={"confirm": DOOMED, "forget_notes": True})
+
+    assert r.status_code == 200, r.text
+    derived = r.json()["derived"]
+    assert derived["forget_notes"] is True and derived["notes_kept"] == 0
+    assert derived["facts_removed"] == 2, "the Zephyr Corp fact and the note"
+    assert world.mem.get_memory(world.note) is None
+    assert world.lcm.message_ids_for_session(DOOMED) == []
+
+
+@pytest.mark.parametrize("value", ["yes", "true", 1, None, [True]])
+def test_a_forget_notes_that_is_not_a_boolean_is_refused_before_anything_is_touched(world, value):
+    messages_before = len(world.lcm.message_ids_for_session(DOOMED))
+
+    r = world.client.post(f"/api/sessions/{DOOMED}/purge",
+                          json={"confirm": DOOMED, "forget_notes": value})
+
+    assert r.status_code == 400
+    assert "forget_notes" in r.json()["error"] and "nothing was purged" in r.json()["error"]
+    assert len(world.lcm.message_ids_for_session(DOOMED)) == messages_before
+    assert world.mem.get_memory(world.only) is not None
+    assert world.mem.get_memory(world.note) is not None

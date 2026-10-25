@@ -1861,14 +1861,16 @@ def create_app(
         return memory_store, wiki_compiler
 
     @app.get("/api/sessions/{session_id}/purge-preview")
-    async def purge_preview(session_id: str):
+    async def purge_preview(session_id: str, forget_notes: bool = False):
         """What ``POST /api/sessions/{id}/purge`` would remove, without removing anything.
 
         A purge is irreversible, so a client shows this and asks again before confirming. Besides the
         chat itself it lists what the assistant LEARNED from it: facts learned only from this chat
         (they go), facts a surviving chat also supports (they stay, minus this chat as a source), the
         wiki and insight pages that follow, and filed answers that mention a removed entity and are
-        left for the owner to review. ``not_covered`` says what a purge does not reach.
+        left for the owner to review. ``/note`` facts tied to the chat stay and are listed as
+        ``notes_kept``; ``?forget_notes=true`` previews the purge that also forgets them.
+        ``not_covered`` says what a purge does not reach.
 
         Read-only by construction: planning writes no row and no file.
         """
@@ -1885,7 +1887,8 @@ def create_app(
         else:
             plan = await asyncio.to_thread(
                 plan_retraction, session_id, conversation_store=store,
-                memory_store=memory_store, wiki_root=wiki_compiler.wiki_root)
+                memory_store=memory_store, wiki_root=wiki_compiler.wiki_root,
+                forget_notes=forget_notes)
             derived = plan.to_preview()
         return {
             "session_id": session_id,
@@ -1899,6 +1902,9 @@ def create_app(
     @app.post("/api/sessions/{session_id}/purge")
     async def purge_session(session_id: str, request: Request):
         """IRREVERSIBLY delete a session's content (#353). Body: {"confirm": "<session_id>"}.
+
+        Optional ``"forget_notes": true`` also forgets the ``/note`` facts tied to the chat (default
+        false: notes stay). Anything but a boolean there is a 400, and nothing is purged.
 
         DELETE /api/sessions/{id} is a tombstone: it hides a session and leaves
         the rows. That is the right answer to "clear my list" and the wrong one
@@ -1926,6 +1932,12 @@ def create_app(
         if not isinstance(body, dict) or body.get("confirm") != session_id:
             return JSONResponse(status_code=400, content={
                 "error": "purge requires {\"confirm\": \"<session_id>\"} matching the path",
+                "session_id": session_id,
+            })
+        forget_notes = body.get("forget_notes", False)
+        if not isinstance(forget_notes, bool):
+            return JSONResponse(status_code=400, content={
+                "error": "forget_notes must be true or false; nothing was purged",
                 "session_id": session_id,
             })
         lcm = getattr(app.state, "lcm_engine", None)
@@ -1957,7 +1969,8 @@ def create_app(
             try:
                 plan, applied = await asyncio.to_thread(
                     retract_before_purge, session_id, conversation_store=store,
-                    memory_store=memory_store, wiki_compiler=wiki_compiler)
+                    memory_store=memory_store, wiki_compiler=wiki_compiler,
+                    forget_notes=forget_notes)
             except Exception:
                 logger.exception(
                     "purge %s: retracting what was learned from it failed; nothing was purged", session_id)
