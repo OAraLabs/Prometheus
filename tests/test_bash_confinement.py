@@ -518,6 +518,68 @@ class TestFloorHolds:
         ok, detail = C.preflight(C.PROFILE, force=True)
         assert ok and "writing trusted state refused" in detail, detail
 
+    # --- the scheduled-jobs files: writes and links refused, reads kept ------
+    # Measured on macOS under the Seatbelt twin (tests/test_cron_floor.py); the Linux measurement, write floor off
+    # as above. The schedule's .tmp and .corrupt side files and the PID file are matched by the rule's prefix.
+
+    @pytest.fixture()
+    def schedule(self):
+        return require_floor_subject(Path.home() / ".prometheus" / "data" / "cron_jobs.json")
+
+    @pytest.mark.parametrize("command, what", [
+        ("printf x >> {s}", "append to the schedule"),
+        ("cp {s} $HOME/.aa-pytest-c && mv $HOME/.aa-pytest-c {s}", "replace the schedule"),
+        ("rm {s}", "delete the schedule"),
+        ("printf x > {s}.tmp", "create the schedule's temp file"),
+        ("ln -s $HOME/.aa-pytest-target {s}.tmp", "plant the temp file as a symlink"),
+        ("ln $HOME/.aa-pytest-target {s}.tmp", "plant the temp file as a hard link"),
+        ("printf x > {s}.corrupt", "plant a corrupt-file backup"),
+        ("printf 1 > {data}/cron_scheduler.pid", "plant the PID file"),
+        ("printf x > {data}/cron_undelivered.jsonl", "write the resend queue"),
+        ("ln -s $HOME/.aa-pytest-target {data}/cron_history.jsonl", "plant the history as a symlink"),
+    ])
+    def test_the_schedule_cannot_be_written(self, schedule, command, what):
+        data = schedule.parent
+        side = [data / n for n in ("cron_jobs.json.tmp", "cron_jobs.json.corrupt", "cron_scheduler.pid",
+                                   "cron_undelivered.jsonl", "cron_history.jsonl")]
+        existed = {p for p in side if p.exists() or p.is_symlink()}
+        target = Path.home() / ".aa-pytest-target"
+        target.write_text("keep\n")
+        before = schedule.read_bytes()
+        try:
+            res = self._aa_only(command.format(s=schedule, data=data))
+            assert_write_refused(res, what)
+            assert schedule.read_bytes() == before, f"{what}: the schedule changed — the floor leaked"
+            planted = [p for p in side if p not in existed and (p.exists() or p.is_symlink())]
+            assert not planted, f"{what}: {planted} appeared — the floor leaked"
+            assert target.read_text() == "keep\n"
+        finally:
+            for p in side:
+                if p not in existed and (p.exists() or p.is_symlink()):
+                    p.unlink()
+            target.unlink(missing_ok=True)
+            (Path.home() / ".aa-pytest-c").unlink(missing_ok=True)
+
+    def test_the_schedule_can_still_be_read(self, schedule):
+        res = self._aa_only(f"cat {schedule}")
+        assert not res.is_error, res.output
+
+    def test_a_file_beside_the_schedule_can_still_be_written(self, schedule):
+        beside = schedule.parent / "aa-pytest-beside.txt"
+        try:
+            res = self._aa_only(f"printf x > {beside} && cat {beside}")
+            assert not res.is_error, res.output
+        finally:
+            beside.unlink(missing_ok=True)
+
+    def test_the_boot_probe_sees_the_schedule_refused(self, schedule, monkeypatch):
+        monkeypatch.delenv("PROMETHEUS_DATA_DIR", raising=False)
+        monkeypatch.delenv("PROMETHEUS_CONFIG_DIR", raising=False)
+        C.reset_cache()
+        assert C._probe_cron_rename(C.PROFILE) == "refused"
+        ok, detail = C.preflight(C.PROFILE, force=True)
+        assert ok and "writing the scheduled-jobs files refused" in detail, detail
+
     def test_work_inside_config_is_unaffected(self, config_env_file):
         scratch = config_env_file.parent.parent / "aa-pytest-app"
         try:
