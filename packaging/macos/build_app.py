@@ -65,10 +65,10 @@ INTERPRETER_IDENTIFIER = f"{BUNDLE_ID}.python"
 
 # python-build-standalone. Bump all four together and rebuild; the sha256 is the release's published
 # SHA256SUMS entry for PBS_ASSET.
-PBS_RELEASE = "20260325"
-PBS_PYTHON = "3.12.13"
+PBS_RELEASE = "20261021"
+PBS_PYTHON = "3.12.15"
 PBS_ASSET = f"cpython-{PBS_PYTHON}+{PBS_RELEASE}-aarch64-apple-darwin-install_only_stripped.tar.gz"
-PBS_SHA256 = "c33a34853ae48d54fbac15cbb84ad67ccd8a639ce2cef866ecf474ebd02f1286"
+PBS_SHA256 = "7b8d00b751db21cea87dc551a8f8165147c5fbc5251d5537d7e5497dde00a219"
 PBS_URL = (
     "https://github.com/astral-sh/python-build-standalone/releases/download/"
     f"{PBS_RELEASE}/{urllib.parse.quote(PBS_ASSET)}"
@@ -425,13 +425,17 @@ _PRUNE_STDLIB = (
     "site-packages/pip", "site-packages/setuptools", "site-packages/_distutils_hack",
 )
 _PRUNE_TOP = ("include", "share")
-_PRUNE_LIB_GLOBS = ("tcl*", "tk*", "itcl*", "tdbc*", "thread*", "Tix*")
+# libpython3.12.dylib: since python-build-standalone 20261021 bin/python3.12 has libpython linked in statically
+# (the 20260325 one was a 49 KB stub that loaded it through @rpath), so the 18 MB shared library is loaded by
+# nothing. require_not_linked fails the build if a later release links it again.
+LIBPYTHON = "libpython3.12.dylib"
+_PRUNE_LIB_GLOBS = ("tcl*", "tk*", "itcl*", "tdbc*", "thread*", "Tix*", LIBPYTHON)
 _PRUNE_BIN_GLOBS = ("idle3*", "pip*", "2to3*", "pydoc*", "python3-config", "python3.12-config")
 
 
 def prune_python(root: Path) -> None:
-    """Remove what a daemon never runs: IDLE, Tk, pip, headers, man pages, and all bytecode (it is
-    recompiled after pruning, so nothing stale from the archive is signed)."""
+    """Remove what a daemon never runs: IDLE, Tk, pip, headers, man pages, the unused shared libpython, and all
+    bytecode (it is recompiled after pruning, so nothing stale from the archive is signed)."""
     lib = root / "lib" / "python3.12"
     for rel in _PRUNE_STDLIB:
         shutil.rmtree(lib / rel, ignore_errors=True)
@@ -451,6 +455,14 @@ def prune_python(root: Path) -> None:
             path.unlink()
     for cache in list(root.rglob("__pycache__")):
         shutil.rmtree(cache, ignore_errors=True)
+
+
+def require_not_linked(files: Iterable[Path], library: str, runner: Runner = subprocess.run) -> None:
+    """No Mach-O may load a library the build pruned: an interpreter that links one would not start."""
+    for path in files:
+        linked = _run(["otool", "-L", path], runner).splitlines()[1:]
+        if any(Path(line.strip().split(" (", 1)[0]).name == library for line in linked):
+            raise BuildError(f"{path.name} links {library}, which pruning removes: keep it in the bundle ({path})")
 
 
 def strip_build_traces(site_packages: Path) -> int:
@@ -643,6 +655,7 @@ def assemble(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover - 
 
     prune_python(py_root)
     machos = find_macho(py_root)
+    require_not_linked(machos, LIBPYTHON)
     thin_to_arm64(machos)
     require_arm64_only(find_macho(py_root))
 
