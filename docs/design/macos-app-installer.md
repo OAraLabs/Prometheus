@@ -19,7 +19,7 @@ carry a "Download Prometheus for Mac" button next to Beacon's.
 
 ### What it weighs and how long it takes
 
-arm64 only. Python 3.12.13 (python-build-standalone) plus every wheel pinned by `uv.lock`, pruned,
+arm64 only. Python 3.12.15 (python-build-standalone) plus every wheel pinned by `uv.lock`, pruned,
 thinned to arm64 and precompiled.
 
 | Bundle | Installed | Zip (the download) | Files | Mach-O to sign |
