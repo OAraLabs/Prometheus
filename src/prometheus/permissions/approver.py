@@ -23,7 +23,8 @@ gateway cannot name is recorded as ``unknown`` — honestly, and still answered.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from collections.abc import Collection
 from typing import Any
 
 #: The kinds. For REST, the kind is the CREDENTIAL that answered (a device's
@@ -40,6 +41,9 @@ IN_PROCESS = "in-process"
 
 UNKNOWN_ID = "unknown"
 
+#: The chat gateways: their answers come from a person in a chat, and only the gateway's owner may give one.
+CHAT_KINDS = frozenset({TELEGRAM, SLACK, DISCORD})
+
 
 @dataclass(frozen=True)
 class Approver:
@@ -49,6 +53,15 @@ class Approver:
     kind: str
     id: str
     name: str = ""
+    #: A chat gateway's answer: True when the sender is the gateway's owner, False when not. None for every other
+    #: surface (REST, in-process), whose own rules decide. The shared /approve and /deny core refuses False.
+    owner: bool | None = field(default=None, compare=False)
+
+    @property
+    def not_the_owner(self) -> bool:
+        """A chat answer that is not known to be the owner's. ``owner=None`` on a chat kind means the gateway never
+        asked, so it is refused too: the approval queue's backstop under the /approve and /deny core."""
+        return self.kind in CHAT_KINDS and self.owner is not True
 
     @property
     def label(self) -> str:
@@ -83,30 +96,37 @@ def from_request(request: Any) -> Approver:
     return from_device_identity(getattr(state, "device_identity", None))
 
 
-def telegram(user: Any) -> Approver:
-    """The sender (``update.effective_user``), not the chat."""
+def _owned(owners: Collection[str] | None, user_id: str | None) -> bool | None:
+    """Whether *user_id* is the gateway's owner; None when the caller passed no owner list (record only)."""
+    if owners is None:
+        return None
+    return user_id is not None and user_id in owners
+
+
+def telegram(user: Any, *, owners: Collection[str] | None = None) -> Approver:
+    """The sender (``update.effective_user``), not the chat. *owners*: the gateway's owner ids."""
     if user is None or getattr(user, "id", None) is None:
-        return Approver(TELEGRAM, UNKNOWN_ID)
+        return Approver(TELEGRAM, UNKNOWN_ID, owner=_owned(owners, None))
     name = getattr(user, "username", None) or getattr(user, "full_name", None)
-    return Approver(TELEGRAM, str(user.id), str(name or ""))
+    return Approver(TELEGRAM, str(user.id), str(name or ""), owner=_owned(owners, str(user.id)))
 
 
-def slack(command: Any) -> Approver:
+def slack(command: Any, *, owners: Collection[str] | None = None) -> Approver:
     """The sender of a slash command (its payload's ``user_id``)."""
     get = command.get if hasattr(command, "get") else (lambda k: None)
     user_id = get("user_id")
     if not user_id:
-        return Approver(SLACK, UNKNOWN_ID)
-    return Approver(SLACK, str(user_id), str(get("user_name") or ""))
+        return Approver(SLACK, UNKNOWN_ID, owner=_owned(owners, None))
+    return Approver(SLACK, str(user_id), str(get("user_name") or ""), owner=_owned(owners, str(user_id)))
 
 
-def discord(interaction: Any) -> Approver:
+def discord(interaction: Any, *, owners: Collection[str] | None = None) -> Approver:
     """The user who invoked the interaction."""
     user = getattr(interaction, "user", None)
     user_id = getattr(user, "id", None)
     if user_id is None:
-        return Approver(DISCORD, UNKNOWN_ID)
-    return Approver(DISCORD, str(user_id), str(getattr(user, "name", "") or ""))
+        return Approver(DISCORD, UNKNOWN_ID, owner=_owned(owners, None))
+    return Approver(DISCORD, str(user_id), str(getattr(user, "name", "") or ""), owner=_owned(owners, str(user_id)))
 
 
 def in_process(name: str) -> Approver:

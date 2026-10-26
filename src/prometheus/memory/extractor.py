@@ -143,6 +143,22 @@ def _near_dup_similarity(a: frozenset[str], b: frozenset[str]) -> float:
     return max(overlap / len(a | b), overlap / min(len(a), len(b)))
 
 
+def _is_member_turn(part: object) -> bool:
+    """A user row a group member who is not the owner wrote (gateway trust): provenance "member"."""
+    # By provenance only: tool-result rows are user-role and untrusted too, and are not a member's.
+    return getattr(part, "role", "") == "user" and (getattr(part, "provenance", "user") or "user") == "member"
+
+
+def _has_member_turns(conv_store: object, session_id: str) -> bool:
+    """Has a group member ever spoken in *session_id*? Read from the store, so an earlier batch counts too."""
+    check = getattr(conv_store, "has_member_turns", None)
+    try:
+        return bool(check(session_id)) if callable(check) else False
+    except Exception:
+        log.debug("MemoryExtractor: member-turn check failed for %s", session_id, exc_info=True)
+        return True  # cannot tell: treat it as a group session and mine no assistant rows
+
+
 class MemoryExtractor:
     """Extract structured entity facts from conversation history.
 
@@ -285,6 +301,18 @@ class MemoryExtractor:
         user_parts = [
             part for part in parts
             if (getattr(part, "provenance", "user") or "user") == "user"
+        ]
+        # GATEWAY TRUST (0.9.17): only the owner teaches. A user row that is not trusted is a group member's (or an
+        # injected turn's), whatever its provenance column says; and in a session where a member has spoken, the
+        # assistant's replies are not mined either, because they can repeat what the member said.
+        group_sessions = {part.session_id for part in parts if _is_member_turn(part)} | {
+            sid for sid in {part.session_id for part in parts}
+            if sid and _has_member_turns(conv_store, sid)
+        }
+        user_parts = [
+            part for part in user_parts
+            if not (getattr(part, "role", "") == "user" and not getattr(part, "is_trusted", True))
+            and not (getattr(part, "role", "") == "assistant" and part.session_id in group_sessions)
         ]
         skipped = len(parts) - len(user_parts)
         if skipped:

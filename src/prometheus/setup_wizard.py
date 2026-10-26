@@ -203,6 +203,10 @@ class SetupWizard:
         self._discord_token: str = ""
         self._discord_guild_ids: list[int] = []
         self._discord_bot_name: str = ""
+        # The owner per gateway (gateway trust): the only person there who approves tool calls or teaches.
+        self._telegram_owner_ids: list[int] = []
+        self._slack_owner_user_ids: list[str] = []
+        self._discord_owner_user_ids: list[int] = []
 
     @property
     def _config_path(self) -> Path:
@@ -678,6 +682,21 @@ Run this wizard again after you're ready:
                       f"(it may start with '-' for a group).")
                 if attempt == 2:
                     break
+        if self._telegram_chat_ids and self._telegram_chat_ids[0] < 0:
+            # A group: its id is not a person, so ask who the owner is.
+            print(
+                "\n  That is a group chat. Everyone in it can chat with Prometheus,"
+                "\n  but only the owner can approve tool calls or teach it."
+                "\n  Your own Telegram user ID (find it with @userinfobot):"
+            )
+            owner_str = _input("Your user ID", "").strip()
+            try:
+                self._telegram_owner_ids = [int(owner_str)] if owner_str else []
+            except ValueError:
+                self._telegram_owner_ids = []
+            if not self._telegram_owner_ids:
+                print("  ! No owner: nobody on Telegram will be able to approve tool calls."
+                      "\n    Add your id to gateway.owner_user_ids later, or re-run setup.")
         if not self._telegram_chat_ids:
             print(
                 "  ! No chat ID. The token is saved and gateway.telegram_enabled\n"
@@ -742,6 +761,17 @@ Run this wizard again after you're ready:
                 c.strip() for c in channels_str.split(",") if c.strip()
             ]
 
+        print(
+            "\n  Your Slack member ID (starts with U; your profile → ⋮ → Copy member ID)."
+            "\n  You are the owner: the only person who can approve tool calls or"
+            "\n  teach Prometheus from Slack. Others in the channel can still chat."
+        )
+        owner_str = _input("Member ID", "").strip()
+        self._slack_owner_user_ids = [owner_str] if owner_str else []
+        if not self._slack_owner_user_ids:
+            print("  ! No owner: nobody on Slack will be able to approve tool calls."
+                  "\n    Add your member ID to gateway.slack.owner_user_ids later.")
+
     def _setup_discord(self) -> None:
         """Collect and validate Discord bot token (SPRINT G3)."""
         print(
@@ -795,6 +825,19 @@ Run this wizard again after you're ready:
                 ]
             except ValueError:
                 print("  Invalid guild ID list, skipping the whitelist (DMs-only).")
+
+        print(
+            "\n  Optional: your Discord user ID (Developer Mode on, then right-click"
+            "\n  your name → Copy User ID). The owner is the only person who can"
+            "\n  approve tool calls or teach Prometheus from Discord. Leave blank"
+            "\n  to use the owner of the bot's Discord application."
+        )
+        owner_str = _input("Your user ID", "").strip()
+        try:
+            self._discord_owner_user_ids = [int(owner_str)] if owner_str else []
+        except ValueError:
+            print("  Not a Discord user ID; the bot application's owner will be used.")
+            self._discord_owner_user_ids = []
 
     def _test_discord_token(self, token: str) -> str | None:
         """Test a Discord bot token via /users/@me. Returns bot name or None."""
@@ -941,6 +984,8 @@ Run this wizard again after you're ready:
             gateway["telegram_enabled"] = True
             gateway["telegram_token"] = self._telegram_token
             gateway["allowed_chat_ids"] = self._telegram_chat_ids
+            if self._telegram_owner_ids:
+                gateway["owner_user_ids"] = self._telegram_owner_ids
         else:
             gateway["telegram_enabled"] = False
 
@@ -951,6 +996,10 @@ Run this wizard again after you're ready:
             gateway["slack_bot_token"] = self._slack_bot_token
             gateway["slack_app_token"] = self._slack_app_token
             gateway["slack_channels"] = self._slack_channels
+            if self._slack_owner_user_ids:
+                slack = gateway.get("slack") if isinstance(gateway.get("slack"), dict) else {}
+                slack["owner_user_ids"] = self._slack_owner_user_ids
+                gateway["slack"] = slack
         else:
             gateway["slack_enabled"] = False
 
@@ -964,6 +1013,8 @@ Run this wizard again after you're ready:
             discord["token"] = self._discord_token
             discord["guild_ids"] = self._discord_guild_ids
             discord.setdefault("channel_ids", [])
+            if self._discord_owner_user_ids:
+                discord["owner_user_ids"] = self._discord_owner_user_ids
             gateway["discord"] = discord
         elif discord:
             discord["enabled"] = False
@@ -1483,3 +1534,6 @@ Run this wizard again after you're ready:
         self._slack_channels = gw.get("slack_channels") or (slack_nested or {}).get("allowed_channels", []) or []
         self._discord_token = (discord_cfg or {}).get("token", "")
         self._discord_guild_ids = (discord_cfg or {}).get("guild_ids", []) or []
+        self._telegram_owner_ids = gw.get("owner_user_ids", []) or []
+        self._slack_owner_user_ids = (slack_nested or {}).get("owner_user_ids", []) or []
+        self._discord_owner_user_ids = (discord_cfg or {}).get("owner_user_ids", []) or []
