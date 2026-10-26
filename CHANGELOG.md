@@ -5,6 +5,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 ## Unreleased
 
 - Computer use: an app whose process name Linux cuts at 15 characters (GNOME Terminal is "gnome-terminal-") can be used after you pick it. Before, its window reported "Gnome-terminal" and every task in it was refused.
+- Computer use: the desktop cockpit works with SENTINEL off, the shipped default. Before, Beacon never saw its own app pick, any step, the end of a task or a thumbnail, because only SENTINEL built the signal bus the cockpit rides.
 
 ## 0.9.16 (2026-10-21)
 
