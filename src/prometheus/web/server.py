@@ -1138,6 +1138,30 @@ def create_app(
             # render as "nothing is wrong".
             return {"error": f"floor state unavailable: {exc}", "dark": None}
 
+    def _status_warnings(security_state: dict) -> list[dict[str, str]]:
+        """The ``warnings`` list of /api/status. Today one finding: the API token where a floored shell can read
+        it (config/api_token.py). Judged on the read-floor state this request already probed, so it costs nothing
+        and says exactly what ``security`` says. Never names the token or a token file's path."""
+        from prometheus.config.api_token import (
+            TOKEN_LOCATION_WARNING_CODE,
+            token_location_fix,
+            token_location_warning,
+        )
+        from prometheus.permissions import confinement as _confinement
+
+        cfg = app.state.config if isinstance(app.state.config, dict) else {}
+        read_state = ((security_state or {}).get("bash_read_floor") or {}).get("state")
+        items: list[dict[str, str]] = []
+        try:
+            message = token_location_warning(cfg, read_floor_active=read_state == _confinement.STATE_ACTIVE)
+        except Exception as exc:  # noqa: BLE001 — status must still render
+            logger.warning("token-location check failed: %s", exc)
+            message = None
+        if message:
+            items.append({"code": TOKEN_LOCATION_WARNING_CODE, "level": "warning", "message": message,
+                          "fix": token_location_fix()})
+        return items
+
     async def _computer_state() -> dict:
         """The ``computer`` block, probed off the loop like the bash floors.
 
@@ -1237,9 +1261,14 @@ def create_app(
         _live_state = (
             _state_ref.get("state") if isinstance(_state_ref, dict) else None
         ) or getattr(app.state, "agent_state", "idle")
+        security_state = await _floor_state()
         return {
             "state": _live_state,
             "model": app.state.current_model,
+            # WHAT NEEDS THE OPERATOR, as a list a client can show as-is: {code, level, message, fix}. Each item
+            # comes from a probe or a check, never from config read back. The bash floors' own `dark` stays in
+            # `security` below; this is for findings with no other home.
+            "warnings": _status_warnings(security_state),
             # Full config_pins detail: bearer-gated, unlike /health's counts.
             "config_pins": _config_pins_detail(),
             # WS delivery counters. Monotonic since boot. One line an
@@ -1302,7 +1331,7 @@ def create_app(
             #
             # `dark` is the field to alert on: asked for, not happening, and
             # bash running anyway.
-            "security": await _floor_state(),
+            "security": security_state,
             # COMPUTER USE — the substrate, probed, both halves separately.
             # Same law as `security` above: a key saying a capability is on is
             # not evidence it is on. Stronger here, because the two halves

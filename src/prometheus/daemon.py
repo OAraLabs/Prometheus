@@ -2735,6 +2735,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             describe_web_auth,
             ensure_api_token,
             format_minted_banner,
+            warn_if_token_shell_readable,
             web_refused_on_bootstrap_failure,
         )
         # A bootstrap RAISE (unwritable env-file dir → a minted token cannot
@@ -2755,6 +2756,10 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         except Exception:
             _token_bootstrap_failed = True
             logger.error("API token bootstrap failed", exc_info=True)
+        # The token's LOCATION, not only its presence: web.api_token in prometheus.yaml, a token file outside
+        # ~/.config/*/*env, or a moved env file leave it readable by a floored shell. Said loudly at startup.
+        # A task, not awaited: the floor probe can take seconds, and the check never raises.
+        _token_location_check = asyncio.create_task(warn_if_token_shell_readable(config))
 
         # Refuse-to-serve: could not establish a token AND none is configured.
         # Serving now would expose the control plane unauthenticated, so the
