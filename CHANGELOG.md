@@ -2,6 +2,10 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## Unreleased
+
+- Daily briefing: with `gateway.briefing_chat_id` unset, the briefing goes to your private chat (`gateway.owner_user_ids`, else the private chats in `gateway.allowed_chat_ids`), then to `TELEGRAM_CHAT_ID`, and otherwise nowhere, with an error. Before, it went to the first allowed chat, which could be a group. A `briefing_chat_id` you set, a group included, is used as before.
+
 ## 0.9.17 (2026-10-25)
 
 0.9.17 fixes two security issues: chat gateways let anyone in an allowed group approve tool calls and change what the agent remembers, and a shell command the model ran could rewrite the files Prometheus trusts as its own. It pins the Mac app's bundled Python at 3.12.15 (OpenSSL 3.5.9), and updates opentelemetry, filelock and setuptools for published advisories. It also:

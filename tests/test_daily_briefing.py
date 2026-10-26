@@ -158,11 +158,45 @@ def test_resolve_chat_id_precedence(monkeypatch) -> None:
     assert resolve_chat_id(
         {"gateway": {"briefing_chat_id": 999, "allowed_chat_ids": [111]}}
     ) == "999"
-    # falls back to allowed_chat_ids[0] (the daemon's source)
+    # then the owner's private chat
     assert resolve_chat_id({"gateway": {"allowed_chat_ids": [111, 222]}}) == "111"
     # then TELEGRAM_CHAT_ID env
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "777")
     assert resolve_chat_id({"gateway": {}}) == "777"
+
+
+def test_resolve_chat_id_keeps_an_explicit_group(monkeypatch) -> None:
+    # A group someone wrote into briefing_chat_id is where they asked the briefing to go.
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    assert resolve_chat_id(
+        {"gateway": {"briefing_chat_id": -100123, "allowed_chat_ids": [111]}}
+    ) == "-100123"
+
+
+def test_resolve_chat_id_unset_skips_a_group_listed_first(monkeypatch) -> None:
+    # Unset means the owner's private chat: never whichever allowed chat comes first.
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    assert resolve_chat_id(
+        {"gateway": {"allowed_chat_ids": [-100555, 111]}}
+    ) == "111"
+
+
+def test_resolve_chat_id_unset_uses_owner_user_ids(monkeypatch) -> None:
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    assert resolve_chat_id(
+        {"gateway": {"owner_user_ids": [42], "allowed_chat_ids": [-100555]}}
+    ) == "42"
+
+
+def test_resolve_chat_id_unset_with_only_groups_sends_nowhere(monkeypatch) -> None:
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    with pytest.raises(BriefingError, match="private chat"):
+        resolve_chat_id({"gateway": {"allowed_chat_ids": [-100555, -100666]}})
+
+
+def test_resolve_chat_id_only_groups_still_honours_the_env(monkeypatch) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "777")
+    assert resolve_chat_id({"gateway": {"allowed_chat_ids": [-100555]}}) == "777"
 
 
 def test_resolve_chat_id_fails_loud_when_unconfigured(monkeypatch) -> None:
