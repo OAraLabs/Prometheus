@@ -8,6 +8,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 - warns when the web API token sits where the agent's shell can read it;
 - asks before a file tool writes a project instruction file, and refuses invisible text in skills and memory;
 - keeps the memory extractor from skipping messages when its model call fails;
+- makes computer use work with SENTINEL off, and type into GTK4 text fields;
 - keeps genuine user requests in self-improvement evidence (#788, by @sepehrtaji-dev).
 
 ### Security
@@ -44,6 +45,11 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 ### Self-improvement keeps genuine user requests (#788, by @sepehrtaji-dev)
 
 - GEPA's request evidence no longer drops a message whose `provenance` is `user` just because its trust flag is false. Untrusted messages from other sources are still withheld.
+
+### Computer use (#845, #846)
+
+- **The desktop cockpit works with SENTINEL off (#845),** the shipped default. Before, Beacon never saw its own app pick, any step, the end of a task or a thumbnail, because only SENTINEL built the signal bus the cockpit rides.
+- **A GTK4 app's text fields can be set (#846).** GTK4 reports them as "text box", a role the candidate table did not offer, so a task could never type into GNOME Text Editor or any other GTK4 field.
 
 ### Upgrading from 0.9.16
 
