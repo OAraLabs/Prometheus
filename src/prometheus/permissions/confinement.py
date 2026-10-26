@@ -257,8 +257,9 @@ def _probe_registry_rename(profile: str) -> str:
 def _registry_detail(profile: str) -> tuple[str, bool]:
     """The device-registry half of the preflight detail, and whether it makes the profile STALE."""
     if _registry_outside_profile():
-        return (f"; the device registry is outside the profile's rule (PROMETHEUS_DATA_DIR or PROMETHEUS_CONFIG_DIR "
-                f"moved it to {os.path.dirname(_registry_path())}), so a shell can write it"), True
+        return (f"; the device registry and the scheduled-jobs files are outside the profile's rule "
+                f"(PROMETHEUS_DATA_DIR or PROMETHEUS_CONFIG_DIR moved them to {os.path.dirname(_registry_path())}), "
+                f"so a shell can write them"), True
     registry = _probe_registry_rename(profile)
     if registry == "refused":
         return "; writing the device registry refused", False
@@ -327,6 +328,40 @@ def _trusted_detail(profile: str) -> tuple[str, bool]:
     return f"; the trusted-state check could not run{note}", bool(outside)
 
 
+def _probe_cron_rename(profile: str) -> str:
+    """Under *profile*, may the scheduled-jobs files be written? Renames the first that exists onto itself:
+    ``refused``, ``renamed``, ``absent`` or ``unknown``. A profile with the registry rule but not this one (loaded
+    before the cron rule shipped) would otherwise pass the registry probe and leave the schedule writable."""
+    exe = shutil.which("aa-exec")
+    if exe is None:
+        return "unknown"
+    base = os.path.expanduser(str(data_dir_path()))
+    target = next((p for p in (os.path.join(base, n) for n in DATA_TRUSTED_FILES) if os.path.exists(p)), None)
+    if target is None:
+        return "absent"
+    try:
+        proc = subprocess.run([exe, "-p", profile, "--", sys.executable, "-c", _REGISTRY_RENAME_PROBE, target],
+                              capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    out = (proc.stdout or "").strip()
+    return {"REFUSED": "refused", "RENAMED": "renamed", "ABSENT": "absent"}.get(out, "unknown")
+
+
+def _cron_detail(profile: str) -> tuple[str, bool]:
+    """The scheduled-jobs half of the preflight detail, and whether it makes the profile STALE. A moved data
+    directory is reported by :func:`_registry_detail`, which shares it."""
+    cron = _probe_cron_rename(profile)
+    if cron == "refused":
+        return "; writing the scheduled-jobs files refused", False
+    if cron == "renamed":
+        return ("; STALE PROFILE: the scheduled-jobs files (cron_jobs.json and its logs) are writable, so a shell can "
+                f"plant a job that runs as the owner. Reload the shipped profile: {RELOAD_COMMAND}"), True
+    if cron == "absent":
+        return "; no scheduled-jobs file exists yet, so its rule was not measured", False
+    return "; the scheduled-jobs check could not run", False
+
+
 def _with_rename_check(profile: str, label: str) -> tuple[str, bool]:
     """The preflight detail for a confined *label*, and whether the profile is STALE.
 
@@ -337,7 +372,8 @@ def _with_rename_check(profile: str, label: str) -> tuple[str, bool]:
     rename = _probe_config_rename(profile)
     registry, registry_stale = _registry_detail(profile)
     trusted, trusted_stale = _trusted_detail(profile)
-    registry, registry_stale = registry + trusted, registry_stale or trusted_stale
+    cron, cron_stale = _cron_detail(profile)
+    registry, registry_stale = registry + trusted + cron, registry_stale or trusted_stale or cron_stale
     if rename == "refused":
         return f"{label}; renaming ~/.config refused{registry}", registry_stale
     if rename == "renamed":
@@ -483,8 +519,18 @@ REGISTRY_NAME: Final[str] = "devices.db"
 _REGISTRY_REGEX: Final[str] = '(regex #"/devices\\.db[^/]*$")'
 
 #: Other trusted files in the data directory: the scheduled-jobs schedule (re-read every tick, so a planted job
-#: runs as the owner with no restart) and its append-only logs. The daemon writes them; a shell must not.
-DATA_TRUSTED_FILES: Final[tuple[str, ...]] = ("cron_jobs.json", "cron_history.jsonl", "cron_undelivered.jsonl")
+#: runs as the owner with no restart), its logs (the resend queue is sent to the owner verbatim) and the
+#: scheduler's PID file. The daemon writes them; a shell must not. Each is floored BY PREFIX, like the registry:
+#: the daemon also writes ``cron_jobs.json.tmp`` (then ``os.replace``) and ``cron_jobs.json.corrupt``
+#: (gateway/cron_service.py), and ``open(tmp, "w")`` follows a symlink, so a planted side file would make the
+#: daemon write job JSON through it.
+DATA_TRUSTED_FILES: Final[tuple[str, ...]] = (
+    "cron_jobs.json", "cron_history.jsonl", "cron_undelivered.jsonl", "cron_scheduler.pid",
+)
+#: The Seatbelt match for :data:`DATA_TRUSTED_FILES` and anything they are a prefix of (``.tmp``, ``.corrupt``).
+_CRON_REGEX: Final[str] = (
+    '(regex #"/cron_(jobs\\.json|history\\.jsonl|undelivered\\.jsonl|scheduler\\.pid)[^/]*$")'
+)
 
 
 #: Prometheus's TRUSTED STATE in the config directory: what the daemon reads as its own. The config file (the
@@ -605,7 +651,7 @@ def seatbelt_profile(home: str | os.PathLike[str] | None = None, *, allow_ssh: b
         f'  (require-all (subpath "{base}/.config") (regex #"/\\.config/[^/]+/[^/]*env$")))\n'
         "(deny file-write*\n"
         + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_REGISTRY_REGEX})\n' for d in data_dirs)
-        + "".join(f'  (literal "{_sb_string(os.path.join(d, n))}")\n' for d in data_dirs for n in DATA_TRUSTED_FILES)
+        + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_CRON_REGEX})\n' for d in data_dirs)
         + "".join(f'  (literal "{_sb_string(p)}")\n' for p in trusted_files)
         + "".join(f'  (subpath "{_sb_string(d)}")\n' for d in trusted_dirs)
         + "".join(f'  (literal "{_sb_string(p)}")\n' for p in parents) +
