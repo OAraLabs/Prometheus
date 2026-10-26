@@ -5,6 +5,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 ## Unreleased
 
 - Computer use: a GTK4 app's text fields can be set. GTK4 reports them as "text box", a role the candidate table did not offer, so a task could never type into GNOME Text Editor or any other GTK4 field.
+- Computer use: the desktop cockpit works with SENTINEL off, the shipped default. Before, Beacon never saw its own app pick, any step, the end of a task or a thumbnail, because only SENTINEL built the signal bus the cockpit rides.
 
 ## 0.9.16 (2026-10-21)
 
