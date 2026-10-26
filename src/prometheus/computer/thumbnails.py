@@ -233,7 +233,7 @@ def decide_capture(
     if not walk_is_positive_evidence(capture):
         return "incomplete_walk", None
     if (walk_hides_a_password(getattr(capture, "roles", None))
-            or getattr(capture, "unnamed_text_fields", 0)):
+            or int(getattr(capture, "unnamed_text_fields", 0) or 0) > 0):
         # An unnamed GTK4 "text box" may be a password entry: GTK4 reports
         # both alike, so any doubt skips the picture.
         return "password_field", None
