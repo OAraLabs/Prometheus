@@ -388,32 +388,48 @@ def resolve_telegram_owner_ids(gateway_cfg: dict | None) -> list[int]:
     return [chat for chat in resolve_allowed_chat_ids(gateway_cfg) if chat > 0]
 
 
-def resolve_notify_chat_id(gateway_cfg: dict | None) -> int | None:
-    """Where the daemon sends its own Telegram notices — cron-failure notices and the heartbeat's task
-    notices — or ``None`` to send none.
+def resolve_owner_chat_id(gateway_cfg: dict | None) -> int | None:
+    """The Telegram chat for what is the owner's alone and has no chat of its own, or ``None`` to send none:
+    tool-approval prompts for a request raised elsewhere (a worker's, a non-Telegram session's), cron-failure
+    notices with the resend queue, and the heartbeat's background-task notices.
 
-    This is ``gateway.briefing_chat_id`` and ONLY when it is a private chat. A Telegram private chat's id is
-    positive and equals the user's own id; a group or channel id is negative and shared. The target used to fall
-    back to ``allowed_chat_ids[0]`` when ``briefing_chat_id`` was unset, so on a bot whose first allowed chat was
-    a group, failure notices — which can quote a command, a path, or an error — went to that whole group. There
-    is no configuration in which broadcasting the owner's operational notices to a group is the intent, so the
-    fallback is gone: absent, blank, unparseable, zero or negative -> ``None`` (send nothing), and a negative
-    (group/channel) ``briefing_chat_id`` is refused with a WARNING rather than obeyed.
+    Always a PRIVATE chat. A Telegram private chat's id is positive and equals the user's own id; a group,
+    supergroup or channel id is negative, and everything sent there is read by its members. In order:
 
-    A quoted number is accepted (``"456"`` -> 456), matching :func:`_positive_int`.
+    1. ``gateway.briefing_chat_id``, when it is private. A group there is refused for these, with a WARNING.
+    2. the owner's private chat: the first of :func:`resolve_telegram_owner_ids` (``gateway.owner_user_ids``,
+       else the private chats in ``allowed_chat_ids``).
+    3. nothing — with a WARNING when Telegram has allowed chats but none of them is private and no owner is set.
+       An approval prompt then still waits in Beacon and the API; it is just not posted.
+
+    This replaces ``allowed_chat_ids[0]`` (the approvals chat) and ``briefing_chat_id or allowed_chat_ids[0]``
+    (the notices chat), which took a group whenever one was listed first. A quoted number is accepted
+    (``"456"`` -> 456), matching :func:`_positive_int`; a bool is not a chat id.
     """
-    raw = (gateway_cfg or {}).get("briefing_chat_id")
-    try:
-        chat = int(raw)  # type: ignore[call-overload]
-    except (TypeError, ValueError):
-        return None
-    if chat > 0:
-        return chat
-    if chat < 0:
+    cfg = gateway_cfg or {}
+    raw = cfg.get("briefing_chat_id")
+    briefing = 0
+    if not isinstance(raw, bool):
+        try:
+            briefing = int(raw)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            briefing = 0
+    if briefing > 0:
+        return briefing
+    if briefing < 0:
         _log.warning(
-            "gateway.briefing_chat_id is a group or channel (%d); the daemon's own notices go only to a "
-            "private chat, so none will be sent. Set briefing_chat_id to your private chat's id.",
-            chat,
+            "gateway.briefing_chat_id is a group or channel (%d): approval prompts and the daemon's own notices "
+            "go only to a private chat, so it is not used for them. Set briefing_chat_id to your private chat's id.",
+            briefing,
+        )
+    owners = [o for o in resolve_telegram_owner_ids(cfg) if o > 0]
+    if owners:
+        return owners[0]
+    if resolve_allowed_chat_ids(cfg):
+        _log.warning(
+            "No private Telegram chat for approval prompts and the daemon's own notices: gateway.allowed_chat_ids "
+            "lists only groups and gateway.owner_user_ids is empty, so none will be sent. Set "
+            "gateway.briefing_chat_id (or gateway.owner_user_ids) to your private chat's id.",
         )
     return None
 
