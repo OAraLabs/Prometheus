@@ -5,6 +5,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 ## Unreleased
 
 - Hosted models no longer receive this machine's hardware, services and network (the anatomy section, which could include tailnet peer names) in every prompt. They get a pointer to the `anatomy` tool and call it when a task needs the layout. Local models are unchanged. `anatomy.include_in_hosted_prompt: true` restores the old behaviour.
+- Computer use: the desktop cockpit works with SENTINEL off, the shipped default. Before, Beacon never saw its own app pick, any step, the end of a task or a thumbnail, because only SENTINEL built the signal bus the cockpit rides.
 
 ## 0.9.16 (2026-10-21)
 
