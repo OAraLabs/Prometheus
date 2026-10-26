@@ -301,6 +301,9 @@ jobs:
           # Matches the trusted-state rules: an inert placeholder identity file the tests must be refused on.
           printf '# placeholder for CI. Exists so the trusted-state floor test has a real file to be refused on.\n' > "$HOME/.prometheus/AGENTS.md"
           python3 -c "import sqlite3; c = sqlite3.connect('$HOME/.prometheus/data/devices.db'); c.execute('create table ci_placeholder (x)'); c.commit()"
+          # Matches the profile's `deny @{HOME}/.prometheus/data/cron_{jobs.json,history.jsonl,undelivered.jsonl,scheduler.pid}* wl`
+          # rule: an inert, empty schedule (no jobs), so the tests can show writes, links and side files refused and reads kept.
+          printf '{"jobs": []}\n' > "$HOME/.prometheus/data/cron_jobs.json"
 
       - name: Refuse to continue if the floors are not actually active
         # THE POINT OF THE JOB. Without this, a future runner image that blocks
