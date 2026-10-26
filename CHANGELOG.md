@@ -5,6 +5,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 ## Unreleased
 
 - Computer use: a text field is no longer described by the text it holds. GTK4 names a text view by its contents, so a document's text, including text typed in an earlier task, reached the desktop prompt, the action log and every Beacon. Such fields are now named by their kind alone.
+- Computer use: the desktop cockpit works with SENTINEL off, the shipped default. Before, Beacon never saw its own app pick, any step, the end of a task or a thumbnail, because only SENTINEL built the signal bus the cockpit rides.
 
 ## 0.9.16 (2026-10-21)
 
