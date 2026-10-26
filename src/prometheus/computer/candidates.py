@@ -53,6 +53,10 @@ _CLICKABLE_ROLES: frozenset[str] = frozenset({
 
 _EDITABLE_ROLES: frozenset[str] = frozenset({
     "text", "entry", "password text", "paragraph", "document text",
+    # GTK4 reports its text views and entries as "text box" (seen in GNOME
+    # Text Editor's document through cua-driver 0.28.2); without it a GTK4
+    # app had no field a task could set.
+    "text box",
 })
 
 #: Words in an app's name that mark it as a browser, an Electron app or a
