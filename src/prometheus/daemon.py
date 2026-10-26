@@ -3049,6 +3049,15 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             except Exception:
                 web_skill_registry = None
 
+            # The desktop cockpit (computer-use v1.1 PR 6) rides the SignalBus:
+            # the binding, every step, the end of a task, thumbnails, and the
+            # desktop prompts' push to Beacon. SENTINEL builds the bus, and it
+            # ships off, so a daemon with computer use on and SENTINEL off had
+            # NO cockpit — Beacon never saw its own app pick. Computer use
+            # gets a bus of its own then; nothing else is wired to it.
+            if computer.runner is not None and "signal_bus" not in dir():
+                signal_bus = computer.cockpit_bus(telemetry=telemetry)
+
             if _web_refused:
                 # Token bootstrap failed and nothing is configured: do NOT bind
                 # the control plane. The refusal was logged CRITICAL above.
