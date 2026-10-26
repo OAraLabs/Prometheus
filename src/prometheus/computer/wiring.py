@@ -63,6 +63,25 @@ class ComputerWiring:
         if self.channel is not None:
             self.channel.signal_bus = bus
 
+    def cockpit_bus(self, telemetry: Any = None) -> Any:
+        """A SignalBus for the cockpit when the daemon built none.
+
+        The cockpit (the binding, each step, the task's end, thumbnails, and
+        desktop prompts pushed to Beacon) rides the SignalBus, and SENTINEL —
+        which ships off — is what builds it. With computer use on and
+        SENTINEL off, Beacon never saw even its own app pick. Off, this
+        returns None and builds nothing.
+        """
+        if self.runner is None:
+            return None
+        from prometheus.sentinel.signals import SignalBus
+
+        bus = SignalBus(telemetry=telemetry)
+        self.attach_signal_bus(bus)
+        logger.info("Computer use: the cockpit has its own signal bus "
+                    "(SENTINEL is off)")
+        return bus
+
     def close(self) -> None:
         """Daemon shutdown: stop every task, then the runtime."""
         if self.runner is not None:
