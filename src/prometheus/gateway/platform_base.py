@@ -67,6 +67,13 @@ class SendResult:
 class BasePlatformAdapter(ABC):
     """Abstract base for all platform adapters."""
 
+    def owner_refusal(self, user_id: Any) -> str | None:
+        """None when *user_id* is this gateway's owner, else the reply for a command only the owner may run
+        (/gate, /note, /revoke, /gepa, /computer). Approve and deny are refused in the shared core instead."""
+        from prometheus.gateway.commands import OWNER_ONLY_REPLY
+
+        return None if self.config.is_owner(user_id) else OWNER_ONLY_REPLY
+
     def __init__(self, config: PlatformConfig) -> None:
         self.config = config
         self._running = False

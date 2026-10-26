@@ -26,6 +26,7 @@ from dataclasses import dataclass as _dataclass
 
 import logging
 import os
+import re
 import secrets
 from typing import Any
 
@@ -69,6 +70,99 @@ def mint_api_token() -> str:
 def token_file_path() -> str:
     """The file ``PROMETHEUS_API_TOKEN_FILE`` names, or ``""`` when it is unset."""
     return os.environ.get(TOKEN_FILE_ENV_VAR, "")
+
+
+#: The read-denied env-file pattern the shell floors share — the Seatbelt rule in permissions/confinement.py, the
+#: AppArmor ``@{HOME}/.config/*/*env`` rule and the gate's ``/*/.config/*/*env``: under the home's ``.config``, one
+#: folder down, a name ending in ``env``. A token in such a file is out of a floored shell's reach.
+_FLOORED_ENV_FILE = re.compile(r"/\.config/[^/]+/[^/]*env$")
+#: Where the token belongs: the default env file, which the daemon loads and the floors cover.
+_TOKEN_HOME = "~/.config/prometheus/env"
+#: The ``code`` of the token-location item in ``/api/status`` ``warnings``.
+TOKEN_LOCATION_WARNING_CODE = "api_token_shell_readable"
+
+
+def _under_the_env_floor(path: str | os.PathLike[str]) -> bool:
+    real = os.path.realpath(os.path.expanduser(str(path)))
+    home = os.path.realpath(os.path.expanduser("~"))
+    return real.startswith(os.path.join(home, ".config") + os.sep) and bool(_FLOORED_ENV_FILE.search(real))
+
+
+def token_exposure(config: dict[str, Any] | None) -> list[str]:
+    """The settings that put the web API token where a model's shell can read it even with the bash read floor
+    on. Each names a SETTING — never the token, and never the token file's path (secret-shaped, like every
+    ``*_TOKEN_FILE``). Empty when the token is only in a floored env file, or nowhere.
+
+    Any one is enough: whichever source :func:`resolve_api_token` picks, a readable copy is a readable token.
+    """
+    reasons: list[str] = []
+    in_config = ((config or {}).get("web") or {}).get("api_token")
+    if isinstance(in_config, str) and in_config.strip():
+        reasons.append("web.api_token is set in prometheus.yaml, which the shell can read")
+    named = token_file_path()
+    if named.strip() and not _under_the_env_floor(named):
+        reasons.append(f"{TOKEN_FILE_ENV_VAR} names a file outside ~/.config/<name>/*env, which the shell can read")
+    env_path = get_env_file_path()
+    if not _under_the_env_floor(env_path):
+        try:
+            holds_token = bool(parse_env_file(env_path).get(TOKEN_ENV_VAR, "").strip())
+        except OSError:
+            holds_token = False
+        if holds_token:
+            moved_by = "PROMETHEUS_ENV_FILE" if os.environ.get("PROMETHEUS_ENV_FILE") else "XDG_CONFIG_HOME"
+            reasons.append(f"the env file holding {TOKEN_ENV_VAR} is outside ~/.config/<name>/ ({moved_by} moved "
+                           "it), so the shell can read it")
+    return reasons
+
+
+def token_location_fix() -> str:
+    return (f"Put the token in {_TOKEN_HOME} as {TOKEN_ENV_VAR}=<token> (`oara token show` prints it), then remove "
+            f"web.api_token from prometheus.yaml and unset {TOKEN_FILE_ENV_VAR}, PROMETHEUS_ENV_FILE or "
+            "XDG_CONFIG_HOME as they apply, and restart.")
+
+
+def token_location_warning(config: dict[str, Any] | None, *, read_floor_active: bool) -> str | None:
+    """The loud warning for :func:`token_exposure`, or ``None``.
+
+    ``None`` without an active bash read floor: then the default env file is readable too, so "move it there"
+    would be false advice, and running without the floor is the operator's choice. That includes a container,
+    whose documented secret is ``/run/secrets/<name>`` and which runs no read floor.
+    """
+    if not read_floor_active:
+        return None
+    reasons = token_exposure(config)
+    if not reasons:
+        return None
+    return ("SECURITY: the web API token is readable by the agent's shell even with the bash read floor on: "
+            + "; ".join(reasons) + ". A command a model is talked into running could read it and use every "
+            f"authenticated API route. Move it to {_TOKEN_HOME}.")
+
+
+def read_floor_is_active(config: dict[str, Any] | None) -> bool:
+    """Is the bash READ floor actually enforcing here (probed, as /api/status and doctor report it)?"""
+    from prometheus.permissions import confinement as _c
+
+    sec = (config or {}).get("security", {}) or {}
+    rep = _c.floor_report(read_mode=sec.get("bash_confinement", "auto"),
+                          write_mode=sec.get("bash_write_confinement", "auto"))
+    block = rep.get("bash_read_floor")
+    return isinstance(block, dict) and block.get("state") == _c.STATE_ACTIVE
+
+
+async def warn_if_token_shell_readable(config: dict[str, Any] | None) -> None:
+    """The daemon's startup check: log :func:`token_location_warning` once. The floor probe can take seconds (an
+    ``aa-exec`` timeout is 15 s), so it runs off the event loop, as a task that does not hold up startup. Never
+    raises: a broken probe must not take the daemon down, and doctor and /api/status say the same thing."""
+    import asyncio
+
+    try:
+        active = await asyncio.to_thread(read_floor_is_active, config)
+        message = token_location_warning(config, read_floor_active=active)
+    except Exception as exc:  # noqa: BLE001 — a startup advisory, never a startup failure
+        logger.debug("token-location check could not run: %s", exc)
+        return
+    if message:
+        logger.warning("%s %s", message, token_location_fix())
 
 
 def token_from_file() -> str:

@@ -867,6 +867,7 @@ class TelegramAdapter(BasePlatformAdapter):
         if chat is None:
             return  # nothing to authorize; no handler acts without a chat
         if self.config.chat_allowed(chat.id):
+            await self._refuse_owner_only_command(update)
             return
         user = update.effective_user
         # Log the command name only — never the text, which for an
@@ -886,6 +887,27 @@ class TelegramAdapter(BasePlatformAdapter):
             getattr(user, "id", "?"),
             shown,
         )
+        raise ApplicationHandlerStop
+
+    async def _refuse_owner_only_command(self, update: Update) -> None:
+        """Stop a command only the owner may run, when someone else in an allowed chat sends it.
+
+        Part of the group -1 check, so it runs before every command handler, and covers one added later as soon as
+        it is listed in ``commands.owner_only_command``. The SENDER is checked, not the chat: an allowed group has
+        many members, and only the owner approves, changes settings or teaches.
+        """
+        from prometheus.gateway.commands import owner_only_command, owner_only_reply
+
+        text = (update.message.text or "") if update.message else ""
+        if not text.startswith("/"):
+            return
+        parts = text.split(maxsplit=1)
+        name, args = parts[0], (parts[1] if len(parts) > 1 else "")
+        if not owner_only_command(name, args):
+            return
+        if self.config.is_owner(getattr(update.effective_user, "id", None)):
+            return
+        await self.send(update.effective_chat.id, owner_only_reply(name), parse_mode=None)
         raise ApplicationHandlerStop
 
     async def on_message(self, event: MessageEvent) -> None:
@@ -1442,6 +1464,11 @@ class TelegramAdapter(BasePlatformAdapter):
         if update.effective_chat is None:
             return
         chat_id = update.effective_chat.id
+        # A max-trust fact: the owner's to write, not a group member's.
+        refused = self.owner_refusal(getattr(update.effective_user, "id", None))
+        if refused:
+            await self.send(chat_id, refused, parse_mode=None)
+            return
         raw = " ".join(context.args or [])
         from prometheus.gateway import commands as _cmds
         from prometheus.tools.builtin.wiki_compile import _memory_store
@@ -1582,7 +1609,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 f"telegram:{update.effective_chat.id}"
             )
         await self.send(
-            update.effective_chat.id, _cmds.cmd_queue(session, text), parse_mode=None
+            update.effective_chat.id,
+            _cmds.cmd_queue(session, text, sender=getattr(update.effective_user, "id", None)),
+            parse_mode=None,
         )
 
     async def _cmd_unqueue(
@@ -2004,6 +2033,7 @@ class TelegramAdapter(BasePlatformAdapter):
         session_id: str,
         provenance: str = "user",
         is_trusted: bool = True,
+        author: str | None = None,
     ) -> str:
         """Shared agent-turn core: append the turn, run the loop, persist, return text.
 
@@ -2021,7 +2051,7 @@ class TelegramAdapter(BasePlatformAdapter):
         async with self._turn_lock_for(session_id):
             return await self._run_agent_turn_locked(
                 session, content, session_id=session_id,
-                provenance=provenance, is_trusted=is_trusted,
+                provenance=provenance, is_trusted=is_trusted, author=author,
             )
 
     async def _run_agent_turn_locked(
@@ -2032,9 +2062,10 @@ class TelegramAdapter(BasePlatformAdapter):
         session_id: str,
         provenance: str = "user",
         is_trusted: bool = True,
+        author: str | None = None,
     ) -> str:
         """Serialized core of :meth:`_run_agent_turn` (holds the session lock)."""
-        session.add_user_message(content, provenance=provenance, is_trusted=is_trusted)
+        session.add_user_message(content, provenance=provenance, is_trusted=is_trusted, author=author)
         pre_len = len(session.get_messages())
         logger.debug(
             "THREAD session=%s messages=%d provenance=%s trusted=%s",
@@ -2109,17 +2140,20 @@ class TelegramAdapter(BasePlatformAdapter):
             # SPRINT-TEACHER-ESCALATION Phase 3: same post-turn anchor as the
             # honesty validator. The engine fails loud in telemetry; the hook
             # itself must never break the reply path.
-            try:
-                response_text = await self._maybe_escalate_turn(
-                    session=session,
-                    session_id=session_id,
-                    response_text=response_text,
-                    new_messages=result.messages[pre_len:],
-                    user_request=content,
-                )
-            except Exception:
-                logger.exception(
-                    "teacher escalation hook failed (local reply unaffected)")
+            # Escalation writes a skill from this turn's request, so only the owner's own words may start it: never a
+            # group member's (gateway trust), nor an injected task result.
+            if provenance == "user" and is_trusted:
+                try:
+                    response_text = await self._maybe_escalate_turn(
+                        session=session,
+                        session_id=session_id,
+                        response_text=response_text,
+                        new_messages=result.messages[pre_len:],
+                        user_request=content,
+                    )
+                except Exception:
+                    logger.exception(
+                        "teacher escalation hook failed (local reply unaffected)")
             # Emit turn_completed so Beacon sees Telegram-originated turns.
             # The WS server's generic signal forwarder (_on_signal) picks this
             # up and broadcasts it to all connected clients — no WS-side
@@ -2339,6 +2373,13 @@ class TelegramAdapter(BasePlatformAdapter):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
+    def _turn_trust(self, event: MessageEvent) -> dict:
+        """provenance / is_trusted / author for an inbound chat message: the owner's, or a group member's."""
+        author = f"telegram:{event.user_id}"
+        if self.config.is_owner(event.user_id):
+            return {"provenance": "user", "is_trusted": True, "author": author}
+        return {"provenance": "member", "is_trusted": False, "author": author}
+
     async def _dispatch_to_agent(self, event: MessageEvent) -> None:
         """Route a message through AgentLoop and send the response."""
         # feat/session-rehydrate — cold-start restore before the turn, same
@@ -2368,8 +2409,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 session,
                 event.text,
                 session_id=event.session_key(),
-                provenance="user",
-                is_trusted=True,
+                # Gateway trust: the owner's words are the owner's; a group member's are theirs, untrusted, and
+                # never teach (memory, skills, GEPA, training data). Both are answered.
+                **self._turn_trust(event),
             )
 
         # Voice-mode routing — prefer voice reply when the chat is in
@@ -2410,7 +2452,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 break
             queued_event = MessageEvent(
                 chat_id=event.chat_id,
-                user_id=event.user_id,
+                # Whoever QUEUED it, not whoever's turn drained it (gateway trust); unknown = nobody's, never the owner.
+                user_id=getattr(next_prompt, "sender", None) or 0,
                 text=next_prompt,
                 message_id=event.message_id,
                 platform=event.platform,
@@ -2600,6 +2643,12 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = update.effective_chat.id
         args = (update.message.text or "").split(maxsplit=1)
         arg = args[1].strip() if len(args) > 1 else ""
+        # Reading the gate is anyone's; changing it is the owner's.
+        if arg.lower() not in ("", "status"):
+            refused = self.owner_refusal(getattr(update.effective_user, "id", None))
+            if refused:
+                await self.send(chat_id, refused, parse_mode=None)
+                return
         gate = getattr(self.agent_loop, "permission_checker", None)
         await self.send(chat_id, cmd_gate(gate, arg), parse_mode=None)
 
@@ -2625,7 +2674,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # The SENDER, not the chat: an allowed group chat has many members
         # (W4 — recorded now, checked later).
         text = await _cmds.cmd_approve(
-            queue, arg_text, by=_approver.telegram(update.effective_user))
+            queue, arg_text, by=_approver.telegram(update.effective_user, owners=self.config.owner_ids()))
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_computer(
@@ -2651,7 +2700,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
         reply = await _cmds.cmd_computer(
             getattr(self, "_computer_runner", None), arg_text,
-            by=_approver.telegram(update.effective_user), surface="telegram",
+            by=_approver.telegram(update.effective_user, owners=self.config.owner_ids()), surface="telegram",
             session_id=f"{Platform.TELEGRAM.value}:{chat_id}", chat_id=chat_id,
             notify=notify)
         await self.send(chat_id, reply, parse_mode=None)
@@ -2728,7 +2777,7 @@ class TelegramAdapter(BasePlatformAdapter):
         from prometheus.permissions import approver as _approver
 
         text = await _cmds.cmd_deny(
-            queue, request_id, by=_approver.telegram(update.effective_user))
+            queue, request_id, by=_approver.telegram(update.effective_user, owners=self.config.owner_ids()))
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_pending(
@@ -2763,6 +2812,10 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         from prometheus.gateway import commands as _cmds
 
+        refused = self.owner_refusal(getattr(update.effective_user, "id", None))
+        if refused:
+            await self.send(update.effective_chat.id, refused, parse_mode=None)
+            return
         queue = getattr(self, "_approval_queue", None)
         arg = " ".join((update.message.text or "").split()[1:])
         text = _cmds.cmd_revoke(queue, arg)
@@ -2783,6 +2836,11 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = update.effective_chat.id
         args = (update.message.text or "").split()
         sub = args[1].strip().lower() if len(args) > 1 else "status"
+        if sub not in ("status", "history"):
+            refused = self.owner_refusal(getattr(update.effective_user, "id", None))
+            if refused:
+                await self.send(chat_id, refused, parse_mode=None)
+                return
 
         text = await _cmds.cmd_gepa(
             getattr(self, "_gepa_engine", None),
