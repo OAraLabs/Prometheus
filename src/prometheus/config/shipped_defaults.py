@@ -227,6 +227,23 @@ DENIED_PATHS_DEFAULTS_SHIPPED: tuple[tuple[str, ...], ...] = (
     ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
      "/*/Library/Application Support/Prometheus/pairing",
      "/*/.local/share/prometheus/pairing"),
+    # + the device registry (devices.db and its -wal/-shm/-journal), which says
+    # who may call the API, who is an owner and which device may run desktop
+    # tasks; it sits in the floor too.
+    ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
+     "/*/Library/Application Support/Prometheus/pairing",
+     "/*/.local/share/prometheus/pairing",
+     "/*/.prometheus/data/devices.db*"),
+    # + the scheduled-jobs schedule, its logs and the scheduler's PID file, read live by the cron scheduler; a
+    # planted job runs as the owner. By prefix, so the schedule's .tmp and .corrupt side files are covered.
+    ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
+     "/*/Library/Application Support/Prometheus/pairing",
+     "/*/.local/share/prometheus/pairing",
+     "/*/.prometheus/data/devices.db*",
+     "/*/.prometheus/data/cron_jobs.json*",
+     "/*/.prometheus/data/cron_history.jsonl*",
+     "/*/.prometheus/data/cron_undelivered.jsonl*",
+     "/*/.prometheus/data/cron_scheduler.pid*"),
 )
 
 SHIPPED_DENIED_PATHS: tuple[str, ...] = DENIED_PATHS_DEFAULTS_SHIPPED[-1]

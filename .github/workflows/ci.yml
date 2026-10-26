@@ -295,6 +295,12 @@ jobs:
           printf '# placeholder for CI. No credentials. Exists so the confinement\n# floor test has a real file to be refused on.\n' > "$HOME/.config/prometheus/env"
           chmod 600 "$HOME/.config/prometheus/env"
           git clone --depth 1 "${{ github.server_url }}/${{ github.repository }}" "$HOME/prometheus-deploy"
+          # Matches the profile's `deny @{HOME}/.prometheus/data/devices.db* wl` rule: a real, EMPTY SQLite
+          # database (no devices, no tokens), so the tests can show writes refused and reads kept.
+          mkdir -p "$HOME/.prometheus/data" "$HOME/.prometheus/skills"
+          # Matches the trusted-state rules: an inert placeholder identity file the tests must be refused on.
+          printf '# placeholder for CI. Exists so the trusted-state floor test has a real file to be refused on.\n' > "$HOME/.prometheus/AGENTS.md"
+          python3 -c "import sqlite3; c = sqlite3.connect('$HOME/.prometheus/data/devices.db'); c.execute('create table ci_placeholder (x)'); c.commit()"
 
       - name: Refuse to continue if the floors are not actually active
         # THE POINT OF THE JOB. Without this, a future runner image that blocks

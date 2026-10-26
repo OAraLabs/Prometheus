@@ -13,9 +13,11 @@
 # agent unusable (fixed deliberately in 1da4dd2). rm, git push, package
 # installs, migrations and repo edits must all keep working with no prompt.
 #
-# It exists to make exactly three paths unreachable (and the folder above the
-# third impossible to move out from under it), because the permission
-# gate cannot reach them: SecurityGate._check_denied_path is nested under
+# It exists to make three paths unreachable (and the folder above the third
+# impossible to move out from under it), and Prometheus's own trusted state
+# unwritable (the device registry, the config, identity, memory and skills,
+# and the folders above them), because the permission gate cannot reach
+# them: SecurityGate._check_denied_path is nested under
 # `if file_path:`, and bash is handed a command string, so the denied-path
 # floor covers the path-declaring tools and misses bash at BOTH origins.
 # Every check on the command string is defeated by ordinary shell
@@ -27,7 +29,7 @@
 # are different mechanisms. This profile touches only the second. Nothing
 # here introduces a prompt: the command runs, and open() returns EACCES.
 #
-# The three patterns mirror _ALWAYS_DENIED_PATHS in
+# The patterns mirror _ALWAYS_DENIED_PATHS in
 # src/prometheus/permissions/checker.py.
 # ---------------------------------------------------------------------------
 
@@ -70,6 +72,46 @@ profile prometheus-bash flags=(attach_disconnected) {
   # (both measured). .ssh and .gnupg need no such line: `{,**}` already covers
   # the directory itself, and renaming either was refused.
   deny @{HOME}/.config/           w,
+
+  # The device registry: who may call the API (a sha256 of each token), who is
+  # an owner, and which device may run desktop tasks. The daemon reads it
+  # live, so a row a shell wrote would be trusted at once. `devices.db*` takes
+  # its -wal, -shm and -journal files too (a planted -wal is replayed on the
+  # next open); `l` refuses a hard link to it, written through a second name.
+  # Reading it is not refused: it holds hashes, not tokens.
+  #
+  # The two folders above it cannot be renamed or replaced either, for the
+  # reason ~/.config cannot: a rule on the file is escaped by moving its
+  # parent. As for ~/.config, `w` on the folder's own path refuses only that;
+  # files beside the registry stay writable.
+  #
+  # This names the default place only. A data directory moved by
+  # PROMETHEUS_DATA_DIR or PROMETHEUS_CONFIG_DIR is outside it, and the boot
+  # probe says so at ERROR (permissions/confinement.py).
+  deny @{HOME}/.prometheus/data/devices.db* wl,
+  # The scheduled-jobs schedule (re-read every tick, so a planted job runs as the owner with no restart), its
+  # logs (the resend queue is sent to the owner verbatim) and the scheduler's PID file. The daemon writes them;
+  # a shell must not. The trailing * covers the schedule's .tmp and .corrupt side files: the daemon's
+  # open(tmp, "w") follows a symlink, so a planted one would redirect its write. `l` refuses the link itself.
+  deny @{HOME}/.prometheus/data/cron_{jobs.json,history.jsonl,undelivered.jsonl,scheduler.pid}* wl,
+  deny @{HOME}/.prometheus/data/  w,
+  deny @{HOME}/.prometheus/       w,
+
+  # Prometheus's trusted state: what the daemon reads as its own. The config
+  # file (the permission mode, these floors' modes, allowed commands and
+  # persisted grants, read at boot), the identity files that go into every
+  # prompt, MEMORY.md and USER.md (every prompt), and the skills. The
+  # daemon's own writers (the memory tool, the skill writers and their
+  # scanners) are unconfined; a shell a model wrote bypassed every one of
+  # them. Reading is not refused.
+  #
+  # The deploy clone's config (scripts/deploy.sh's default) is the loaded
+  # config on a deployed box. A config loaded from anywhere else, or a config
+  # directory moved by PROMETHEUS_CONFIG_DIR, is outside these rules, and the
+  # boot probe says so.
+  deny @{HOME}/.prometheus/{prometheus.yaml,SOUL.md,AGENTS.md,ANATOMY.md,MEMORY.md,USER.md} wl,
+  deny @{HOME}/.prometheus/skills/{,**} wl,
+  deny @{HOME}/prometheus-deploy/config/prometheus.yaml wl,
 
   # --- NO CARVE-OUT, AND THAT IS NOT AN OVERSIGHT -------------------------
   # There is deliberately no exception here for the second compute backend's

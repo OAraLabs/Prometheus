@@ -27,6 +27,7 @@ from typing import Any
 
 from prometheus.config.load import load_config_file
 from prometheus.config.local_pairing import pairing_dir
+from prometheus.config.paths import config_dir_path, data_dir_path
 from prometheus.config.shipped_defaults import (
     resolve_denied_paths, resolve_workspace_root)
 from prometheus.permissions.audit import AuditDecision, AuditLogger
@@ -169,12 +170,27 @@ _RM_RECURSIVE_FLAG = re.compile(r"(?:^|\s)-(?:-recursive\b|[A-Za-z]*[rR])")
 # default and the Linux XDG default, any home. The shell's half is the Seatbelt
 # profile (permissions/confinement.py); a directory moved by
 # PROMETHEUS_LOCAL_PAIRING_DIR is added by the gate itself, like its config file.
+#
+# ⚠ SO IS THE DEVICE REGISTRY. ``<data dir>/devices.db`` (config/paths.py) says who
+# may call the API (a sha256 of each token), who is an owner and which device may
+# run desktop tasks, and the daemon reads it live: a row written by anything but
+# the daemon is trusted at once. ``devices.db*`` covers its -wal, -shm and
+# -journal files too (a planted -wal is replayed on the next open). Reads are
+# floored with writes, as for the rest of this list; nothing an agent does needs
+# either. A data directory moved by PROMETHEUS_DATA_DIR or PROMETHEUS_CONFIG_DIR is
+# added by the gate itself, like the pairing directory. The shell's half is the
+# Seatbelt profile and the AppArmor profile (permissions/confinement.py).
 _ALWAYS_DENIED_PATHS: tuple[str, ...] = (
     "/*/.ssh",
     "/*/.gnupg",
     "/*/.config/*/*env",
     "/*/Library/Application Support/Prometheus/pairing",
     "/*/.local/share/prometheus/pairing",
+    "/*/.prometheus/data/devices.db*",
+    "/*/.prometheus/data/cron_jobs.json*",
+    "/*/.prometheus/data/cron_history.jsonl*",
+    "/*/.prometheus/data/cron_undelivered.jsonl*",
+    "/*/.prometheus/data/cron_scheduler.pid*",
 )
 
 # Tools that are always safe for read-only classification
@@ -826,12 +842,31 @@ class SecurityGate:
             resolved_cfg = str(Path(config_path).expanduser().resolve())
             if resolved_cfg not in self._denied_paths:
                 self._denied_paths.append(resolved_cfg)
+            # And the shell's half: a model's shell must not rewrite it either (permissions/confinement.py).
+            from prometheus.permissions.confinement import protect_loaded_config
+            protect_loaded_config(resolved_cfg)
+        # TRUSTED STATE (permissions/confinement.py): a file tool's WRITE to the config directory's identity files,
+        # MEMORY.md, USER.md or skills asks the owner, always. Any home, and this process's own config directory.
+        from prometheus.permissions.confinement import TRUSTED_DIRS, TRUSTED_FILES
+        cfg_dirs = ["/*/.prometheus", str(config_dir_path().expanduser().resolve())]
+        self._trusted_paths: list[str] = [f"{d}/{n}" for d in cfg_dirs for n in (*TRUSTED_FILES, *TRUSTED_DIRS)]
         # The same property for the same-Mac pairing secret: the floor names the
         # default places, and this is the directory THIS process would mint
         # into, wherever PROMETHEUS_LOCAL_PAIRING_DIR or XDG_DATA_HOME put it.
         resolved_pairing = str(pairing_dir().expanduser().resolve())
         if resolved_pairing not in self._denied_paths:
             self._denied_paths.append(resolved_pairing)
+        # And the device registry THIS process reads, wherever the data directory is.
+        resolved_registry = str(data_dir_path().expanduser().resolve() / "devices.db") + "*"
+        if resolved_registry not in self._denied_paths:
+            self._denied_paths.append(resolved_registry)
+        # The scheduled-jobs files this process reads, wherever the data directory is — by prefix, so the
+        # schedule's .tmp and .corrupt side files are covered too.
+        from prometheus.permissions.confinement import DATA_TRUSTED_FILES
+        for _cron in DATA_TRUSTED_FILES:
+            _p = str(data_dir_path().expanduser().resolve() / _cron) + "*"
+            if _p not in self._denied_paths:
+                self._denied_paths.append(_p)
         self._config_path = config_path
         # MULTI-ROOT. A single root did not survive contact: of 871 recorded
         # file-tool calls on the live box only 16 were under ~/projects, so a
@@ -1096,6 +1131,22 @@ class SecurityGate:
         # as in DEFAULT, so `/gate off` neither waives nor tightens it.
         # Ordinary tools are untouched — tests/test_gate_computer_floor.py
         # holds them to a golden table captured before this line existed.
+        # TRUSTED STATE: a write to Prometheus's own config, identity files, memory or skills asks the owner,
+        # whatever the mode, the workspace or a remembered grant says. Before the AUTONOMOUS return and before
+        # grants, for that reason; after the floor, so the config file (denied) is still refused outright.
+        writes = path_is_write if path_is_write is not None else not is_read_only
+        if file_path and writes:
+            reason = self._check_denied_path(file_path)
+            if reason:
+                self._audit_log(tool_name, AuditDecision.DENY, reason, file_path)
+                return PermissionDecision.deny(reason)
+            trusted = denying_entry(str(Path(file_path).expanduser().resolve()), self._trusted_paths)
+            if trusted is not None:
+                reason = (f"{file_path} is Prometheus's trusted state (its config, identity files, memory or "
+                          f"skills): a write there needs the owner's approval")
+                self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason, file_path)
+                return PermissionDecision.approve(reason)
+
         if self._mode == PermissionMode.AUTONOMOUS and not is_computer:
             if command and self._is_always_blocked(command):
                 reason = f"Blocked command pattern: {command!r}"
