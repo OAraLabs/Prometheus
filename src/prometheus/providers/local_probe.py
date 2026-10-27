@@ -94,13 +94,13 @@ def min_window_for(round0: int) -> int:
 MIN_WINDOW_MEASURED: dict[str, Any] | None = {
     "method": "scripts/local_gate/measure_floor.py: a fresh install (setup mode, no config) configured for the server, "
               "then Beacon's first suggestion, 'What can you help me with?'; round 0 = the first request that offers "
-              "tools, usage.prompt_tokens (Ollama: prompt_eval_count), cache_n 0",
-    "commit": "f085eba (+ this branch's setup changes; prompt assembly is main 2502c5a's)",
-    "date": "2026-10-20",
+              "tools, usage.prompt_tokens (Ollama: prompt_eval_count, nothing cached); a scratch instance with its "
+              "own data dir and the app's extras (web, mcp, discovery)",
+    "commit": "650e865 (this branch on main 1e36960)",
+    "date": "2026-10-27",
     "round0": {
-        "llama_cpp": 8253,  # Qwen3.8-27B-UD-Q4_K_XL.gguf, 51 tools offered, served n_ctx 32768
-        # "ollama": pending — the GPU box's Ollama was stuck on a CPU-offloaded load; measured with qwen3.5:0.8b,
-        # whose chat template is byte-identical to qwen3.5:9b's.
+        "llama_cpp": 8178,  # Underdog-Saluki-27B-1.0-IQ2-mix.gguf, 51 tools offered, served n_ctx 65536
+        "ollama": 6417,     # qwen2.5:7b-instruct (Q4_K_M) on Ollama 0.23.0, 51 tools offered
     },
 }
 MIN_WINDOW: int = min_window_for(max(MIN_WINDOW_MEASURED["round0"].values()))
