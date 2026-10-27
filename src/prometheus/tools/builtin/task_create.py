@@ -136,6 +136,14 @@ class TaskCreateTool(BaseTool):
     async def execute(
         self, arguments: TaskCreateToolInput, context: ToolExecutionContext
     ) -> ToolResult:
+        # The conversation's profile holds here too: local_bash and poll run shell commands, and local_agent
+        # starts a worker process that has every tool (config/profiles.spawn_refusal).
+        from prometheus.config.profiles import spawn_refusal
+
+        _starts = {"local_bash": "shell", "poll": "shell", "local_agent": "worker"}.get(arguments.type)
+        _refused = spawn_refusal("task_create", starts=_starts) if _starts else None
+        if _refused:
+            return ToolResult(output=_refused, is_error=True)
         manager = get_task_manager()
 
         # Trusted context — NOT from arguments. The TURN's own conversation:

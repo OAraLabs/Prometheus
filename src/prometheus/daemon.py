@@ -2240,7 +2240,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 if doctor_cfg.get("startup_check", True):
                     try:
                         from prometheus.infra.doctor import Doctor
-                        doctor = Doctor(config)
+                        doctor = Doctor(config, config_path=args.config)
                         report = await doctor.diagnose(state)
                         for check in report.checks:
                             if check.status == "error":
