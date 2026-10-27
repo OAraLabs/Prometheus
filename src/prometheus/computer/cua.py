@@ -479,28 +479,7 @@ class CuaDriverAdapter:
         # Whatever came back, the OLD snapshot is superseded: fail closed.
         self._forget(key)
 
-        raw = list(getattr(out, "elements", None) or [])
-        images = list(getattr(out, "images", None) or [])
-        first = images[0] if images else None
-        data = getattr(first, "data_base64", None) if first else None
-        mime = getattr(first, "mime_type", None) if first else None
-        return WindowCapture(
-            target=target, app=app, pid=pid, window_id=window_id,
-            # ⚠ THE DRIVER'S ANSWER OR NONE (D19). Never `or app`: an empty
-            # app_name makes the identity gate skip as window_changed, which
-            # is the fail-closed answer, not the caller's claim.
-            app_name=_opt_str(getattr(out, "app_name", None)),
-            # The WHOLE walk's roles, tokenless included — see the docstring.
-            roles=tuple(str(getattr(e, "role", "") or "") for e in raw),
-            degraded=bool(getattr(out, "degraded", False)),
-            truncated=bool(getattr(out, "truncated", False)),
-            frame_valid=_opt_bool(
-                getattr(out, "screenshot_frame_valid", None)),
-            image_mime=_opt_str(mime),
-            image_base64=data if isinstance(data, str) else None,
-            image_width=_opt_int(getattr(out, "screenshot_width", None)),
-            image_height=_opt_int(getattr(out, "screenshot_height", None)),
-        )
+        return _window_capture(out, target, app, pid, window_id)
 
     def act(self, verb: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Dispatch one bounded action, and rule on what came back."""
@@ -659,6 +638,37 @@ def _opt_int(value: Any) -> int | None:
 
 def _opt_str(value: Any) -> str | None:
     return None if value is None else str(value)
+
+
+def _window_capture(out: Any, target: str, app: str, pid: int,
+                    window_id: int) -> WindowCapture:
+    """A ``WindowCapture`` from one ``get_window_state`` answer with pixels."""
+    raw = list(getattr(out, "elements", None) or [])
+    images = list(getattr(out, "images", None) or [])
+    first = images[0] if images else None
+    data = getattr(first, "data_base64", None) if first else None
+    mime = getattr(first, "mime_type", None) if first else None
+    return WindowCapture(
+        target=target, app=app, pid=pid, window_id=window_id,
+        # ⚠ THE DRIVER'S ANSWER OR NONE (D19). Never `or app`: an empty
+        # app_name makes the identity gate skip as window_changed, which
+        # is the fail-closed answer, not the caller's claim.
+        app_name=_opt_str(getattr(out, "app_name", None)),
+        # The WHOLE walk's roles, tokenless included — see the docstring.
+        roles=tuple(str(getattr(e, "role", "") or "") for e in raw),
+        unnamed_text_fields=sum(
+            1 for e in raw
+            if str(getattr(e, "role", "") or "").lower() == "text box"
+            and not str(getattr(e, "label", "") or "").strip()),
+        degraded=bool(getattr(out, "degraded", False)),
+        truncated=bool(getattr(out, "truncated", False)),
+        frame_valid=_opt_bool(
+            getattr(out, "screenshot_frame_valid", None)),
+        image_mime=_opt_str(mime),
+        image_base64=data if isinstance(data, str) else None,
+        image_width=_opt_int(getattr(out, "screenshot_width", None)),
+        image_height=_opt_int(getattr(out, "screenshot_height", None)),
+    )
 
 
 def _element(e: Any) -> Element:

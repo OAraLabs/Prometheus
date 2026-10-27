@@ -4,6 +4,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Computer use: no thumbnail is taken of a window that may show a GTK4 password field. GTK4 reports a password entry as an unnamed text field, which the password check did not catch, so a picture of a GTK4 sign-in window was sent to Beacon. Any unnamed text field now skips the picture.
 - Computer use: a text field is no longer described by the text it holds. GTK4 names a text view by its contents, so a document's text, including text typed in an earlier task, reached the desktop prompt, the action log and every Beacon. Such fields are now named by their kind alone.
 - Computer use: an app whose process name Linux cuts at 15 characters (GNOME Terminal is "gnome-terminal-") can be used after you pick it. Before, its window reported "Gnome-terminal" and every task in it was refused.
 - Computer use: a GTK4 menu button ("Main menu", "Open", "View") can be clicked by name. GTK4 shows each one twice, a wrapper and the toggle inside it, so the two matching rows tied and the task did nothing. Only the toggle that acts is offered now.
