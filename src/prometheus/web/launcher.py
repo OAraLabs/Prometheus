@@ -311,6 +311,9 @@ async def launch_web(
             keep_per_session=keep_per_session_from(config),
             thumbnail_sink=bridge, thumb_config=thumb_config,
             thumbnail_data_dir=str(data_dir_path()))
+        # No pick survives a restart: end the ones the durable log still
+        # shows as on, so a reconnecting Beacon does not show a stale pick.
+        await computer_runner.live.end_stale_picks()
 
     # GRAFT Piece 2: APNs push. Enabled-but-broken fails the BOOT, loudly —
     # a missing key or missing deps must not degrade to silent no-pushes
