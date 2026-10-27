@@ -4,6 +4,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Security: authlib 1.9.1 and dnspython 2.9.0 in the lock, for CVE-2026-96760, CVE-2026-114614 to CVE-2026-114618 and CVE-2026-114620 (authlib) and CVE-2026-114605 (dnspython). Both reach Prometheus only through the `evals` extra (arize-phoenix). Only `uv.lock` changes.
 - API clients: `GET /api/status` gains `name` and `fp`, the same values `GET /api/hello` answers, beside `node_pub` and `instance_id`, so a client paired with several Prometheus instances can tell them apart. Additive only; `/health` still carries no identity.
 - Identity: `POST /api/identity/challenge` lets a paired app check it reached the Prometheus it paired with before it sends its token. The daemon signs the app's 32-byte nonce with its node key, binding the instance id, the node key, and on the TLS port the certificate's SPKI digest. No token, no cookie, nothing written; hello's rate limit. FOUNDATION is now Version 4: the node key may sign identity challenges, and is still never proof of the user (the bearer token is).
 - Pairing: every route a device joins through (an approved request, an owner code, same-Mac pairing) now hands it `instance_id` and `node_pub`, the key it pins to check the identity challenge on later connects. A request that sends `match_code_version: 2` gets a 4-digit code that also covers the node key, so the owner's check confirms it; requests that don't send it get the same code as before. Contract `pairing/0.2`.
