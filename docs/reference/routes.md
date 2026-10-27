@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 124 paths
+## Daemon app — 125 paths
 
 | Path | Methods |
 |---|---|
@@ -56,6 +56,7 @@ one is the explanation.
 | `/api/files` | GET |
 | `/api/files/read` | GET |
 | `/api/hello` | GET |
+| `/api/identity/challenge` | POST |
 | `/api/integrations/computer` | GET |
 | `/api/integrations/computer/probe` | POST |
 | `/api/lcm/{session_id}` | GET |

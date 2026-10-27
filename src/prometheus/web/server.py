@@ -996,6 +996,19 @@ def create_app(
         tls = request.url.scheme == "https"
         return hello_mod.hello_response(request, _hello_limiter, lambda: _hello_payload(tls))
 
+    # ── Identity challenge (unauthenticated: a paired client checks who it reached BEFORE sending its token) ──
+    # web/identity_challenge.py. Hello's limiter and browser refusal; stateless, writes nothing.
+    @app.post("/api/identity/challenge")
+    async def identity_challenge(request: Request):
+        from prometheus.web import identity_challenge as challenge_mod
+
+        tls = request.url.scheme == "https"
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - no body or not JSON: the nonce check refuses it
+            body = None
+        return hello_mod.guarded_response(request, _hello_limiter, lambda: challenge_mod.answer(body, tls=tls))
+
     # ── Root ────────────────────────────────────────────────────────
 
     @app.get("/")

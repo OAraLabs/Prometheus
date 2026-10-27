@@ -24,6 +24,9 @@ from __future__ import annotations
 PUBLIC_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/api/pair/local"),   # same-Mac pairing with the one-time file secret (config/local_pairing.py)
     ("GET", "/api/hello"),         # "is there a Prometheus here": six fields, no credentials (web/hello.py)
+    # A paired client checks it reached the Prometheus it paired with BEFORE it sends its token: the node key
+    # signs the client's nonce (web/identity_challenge.py). Hello's limiter; writes nothing.
+    ("POST", "/api/identity/challenge"),
     # The requester's three pairing routes: a new device has no credential yet and proves itself with the
     # poll secret it was given (web/pairing_routes.py). The operator's list/approve/deny are NOT here.
     ("POST", "/api/pair/requests"),
