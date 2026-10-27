@@ -40,6 +40,8 @@ async def launch_web(
     mcp_runtime: Any | None = None,
     on_tools_changed: Any | None = None,
     checkpoint_store: Any | None = None,
+    memory_store: Any | None = None,
+    wiki_compiler: Any | None = None,
     static_dir: str | None = None,
     detected_context_size: int | None = None,
     local_model: str | None = None,
@@ -160,6 +162,12 @@ async def launch_web(
         computer_integration=computer_integration,
         computer_runner=computer_runner,
     )
+
+    # The facts store and the wiki built from it. A session purge reads and retracts both so that
+    # what was learned from a purged chat goes with it. None when memory is not running; the purge
+    # route then says so instead of reporting a retraction that did not happen.
+    app.state.memory_store = memory_store
+    app.state.wiki_compiler = wiki_compiler
 
     # Wire agent state ref into the app
     app.state.agent_state_ref = agent_state_ref

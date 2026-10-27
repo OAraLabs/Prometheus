@@ -1502,6 +1502,12 @@ anatomy:
   scan_on_startup: true
 
   include_in_system_prompt: true
+  # The machine-and-network section (hardware, services, network, tailnet
+  # peers) goes into every prompt sent to a LOCAL model. To a HOSTED model
+  # (a cloud provider, or a /claude, /qwen, … session) it is replaced by a
+  # pointer to the anatomy tool, which the model calls when a task needs it.
+  # true sends the full layout to hosted models on every turn too.
+  include_in_hosted_prompt: false
   # Local infrastructure identity. Values are machine-specific and MUST stay
   # in the live config only — the pre-commit hook blocks real hosts/IPs here.
   ssh_user: ""

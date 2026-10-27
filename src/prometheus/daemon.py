@@ -1416,6 +1416,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # both loops are told to look for is the one the prompt carries.
     from prometheus.context.prompt_assembler import _load_memory_and_user
     from prometheus.context.prompt_assembler import memory_section as _memory_section
+    from prometheus.context.prompt_assembler import include_infrastructure_in_hosted_prompt
 
     _boot_memory_content = _load_memory_and_user()
     _boot_memory_prompt = _memory_section(_boot_memory_content)
@@ -1483,6 +1484,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         tool_results_turn_budget=config.get("context", {}).get("tool_results_turn_budget", 8000),
         microcompact_after_turns=config.get("context", {}).get("microcompact_after_turns", 3),
         microcompact_on_cloud=config.get("context", {}).get("microcompact_on_cloud", False),
+        infrastructure_in_hosted_prompt=include_infrastructure_in_hosted_prompt(config),
         microcompact_keep_chars=config.get("context", {}).get("microcompact_keep_chars", 200),
         microcompact_keep_chars_no_lcm=config.get("context", {}).get("microcompact_keep_chars_no_lcm", 500),
         compactor=compactor,
@@ -2851,6 +2853,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 tool_results_turn_budget=config.get("context", {}).get("tool_results_turn_budget", 8000),
                 microcompact_after_turns=config.get("context", {}).get("microcompact_after_turns", 3),
                 microcompact_on_cloud=config.get("context", {}).get("microcompact_on_cloud", False),
+                infrastructure_in_hosted_prompt=include_infrastructure_in_hosted_prompt(config),
                 microcompact_keep_chars=config.get("context", {}).get("microcompact_keep_chars", 200),
                 microcompact_keep_chars_no_lcm=config.get("context", {}).get("microcompact_keep_chars_no_lcm", 500),
                 # Phase 3.5: web bridge is its own session namespace.
@@ -3123,6 +3126,10 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                     on_tools_changed=_on_tools_changed,
                     # Item 4: the checkpoint routes read/restore through the same store.
                     checkpoint_store=checkpoint_store,
+                    # A session purge retracts what was learned from the chat. Unbound
+                    # when the extractor block failed to come up, and the route says so.
+                    memory_store=memory_store if "memory_store" in dir() else None,
+                    wiki_compiler=wiki_compiler if "wiki_compiler" in dir() else None,
                     # The window the server actually reported, and the model it
                     # reported it for. Same two values the compactor and the
                     # Telegram /context command are built from, so every surface

@@ -42,6 +42,17 @@ RESERVED_CANDIDATE_IDS: frozenset[str] = frozenset(
 )
 
 
+#: Roles whose accessible NAME can be the text they hold. GTK4 names a text
+#: view by its contents (GNOME Text Editor's document arrived as
+#: "text box 'Rig note: water the plants…'"), so describing one by its label
+#: put a document's text — including text a person typed in an earlier task —
+#: into the chooser's view, the approval prompt, the persisted action log and
+#: every Beacon. These are described by their role alone.
+CONTENT_NAMED_ROLES: frozenset[str] = frozenset({
+    "text box", "document text", "paragraph",
+})
+
+
 @dataclass(frozen=True)
 class Element:
     """One accessible element from a window snapshot."""
@@ -73,6 +84,8 @@ class Element:
         Role first, then label: a chooser scanning ten candidates is looking
         for "the button" or "the text field" before it is looking for a name.
         """
+        if self.role.lower() in CONTENT_NAMED_ROLES:
+            return self.role.strip()
         label = f" {self.label!r}" if self.label else ""
         return f"{self.role}{label}".strip()
 
@@ -157,6 +170,11 @@ class WindowCapture:
     #: check reads the whole walk: a password field is exactly the kind of node
     #: a filter drops from the clickable set.
     roles: tuple[str, ...] = ()
+    #: Text fields in the walk that carry no name. GTK4 reports a password
+    #: entry as an unnamed "text box", exactly like an empty entry, so one of
+    #: these may be a password field the roles cannot show (computer-use rig,
+    #: 2026-10-23): the picture is skipped.
+    unnamed_text_fields: int = 0
     degraded: bool = False
     truncated: bool = False
     #: The driver's own verdict on whether the frame is trustworthy. None
