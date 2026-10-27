@@ -25,7 +25,7 @@ from __future__ import annotations
 import base64
 import binascii
 import time
-from typing import Any
+from typing import Any, TypeGuard
 
 #: The first line of every signed challenge. A signature made here can't be replayed as another kind of
 #: signature (an audit record's, say), and the reverse, because the domain line differs.
@@ -50,7 +50,7 @@ def challenge_message(
     ).encode("utf-8")
 
 
-def valid_nonce(value: Any) -> bool:
+def valid_nonce(value: Any) -> TypeGuard[str]:
     """Whether *value* is base64url text for exactly :data:`NONCE_BYTES` bytes (padding optional)."""
     if not isinstance(value, str) or not value or len(value) > _MAX_NONCE_CHARS:
         return False
