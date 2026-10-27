@@ -492,7 +492,10 @@ an identity, nothing more:
 - **Nothing is transmitted anywhere.** The key exists locally and is inert
   until you deliberately turn on something that uses it. There is no
   telemetry-home, no registration, no callback. The public half is shown on
-  your own daemon's `/api/status` and that is all.
+  your own daemon's `/api/status`, and an app you paired (Beacon) can ask
+  the daemon to sign a one-time challenge with it, to check it reached the
+  right Prometheus before it sends its token. That signature proves which
+  machine answered; it never stands in for your token.
 - **It never encrypts your data.** Losing the key can never make local files
   unreadable.
 - Your **vault** carries a separate `instance_id` (a UUID in
