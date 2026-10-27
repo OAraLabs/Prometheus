@@ -399,11 +399,17 @@ def _request(conn: sqlite3.Connection, session_id: str, load_ts: float) -> tuple
     return None, False
 
 
-def _reply(conn: sqlite3.Connection, session_id: str, load_ts: float, end: float) -> tuple[bool, str]:
+def _reply(
+    conn: sqlite3.Connection, session_id: str, load_ts: float, end: float, *, withheld: bool = False,
+) -> tuple[bool, str]:
     """``(found, reply text)`` — the last assistant row the run persisted.
 
     A turn's rows are persisted when it ends, which is before the session's
     next run starts, so the window up to *end* holds them.
+
+    *withheld*: the run's request was withheld (untrusted: an injected turn, or
+    a group member who is not the owner). The reply answers that request and can
+    repeat it, so its text is withheld too; whether there was one still counts.
     """
     row = conn.execute(
         "SELECT content FROM lcm_messages "
@@ -413,6 +419,8 @@ def _reply(conn: sqlite3.Connection, session_id: str, load_ts: float, end: float
     ).fetchone()
     if row is None:
         return False, ""
+    if withheld:
+        return True, ""
     text = " ".join(redact_secrets(str(row[0] or "")).split())
     return True, _cut(text, REPLY_CHARS)
 
@@ -442,7 +450,7 @@ def run_for_load(
     if lcm is not None:
         try:
             request, withheld = _request(lcm, session_id, event.timestamp)
-            found, reply = _reply(lcm, session_id, event.timestamp, end)
+            found, reply = _reply(lcm, session_id, event.timestamp, end, withheld=withheld)
             # No reply inside an unbounded window is not "no reply": the run
             # may have outlasted the cap, or not have ended yet.
             replied = True if found else (False if bounded else None)

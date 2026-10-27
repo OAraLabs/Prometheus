@@ -86,7 +86,14 @@ log = logging.getLogger(__name__)
 # The single-layer guarantee is untouched — it rests on "compactor" being a
 # barrier, and compactor summaries are substituted at assembly time and never
 # stored, so one can never re-enter a span regardless.
-_SPAN_TRANSPARENT = frozenset({"user", "file_mutation_verifier"})
+#
+# "member" (gateway trust) is here too: a group member's turn in an allowed chat.
+# As a barrier it would pin the compactable prefix at the first message anyone
+# else in the group sent, so an active group conversation could never compact
+# again. It is summarized instead, and a summary whose span holds one is NOT
+# trusted (see the substitution in :meth:`ContextCompactor.apply`), so a
+# member's words never come back with the owner's authority.
+_SPAN_TRANSPARENT = frozenset({"user", "file_mutation_verifier", "member"})
 
 # #773: compact at 80% of the serving model's window. Per-model thresholds
 # (``context.model_overrides.<model>.compaction_threshold_pct`` /
@@ -1299,7 +1306,8 @@ class ContextCompactor:
         if span and summary is not None:
             # Build the substitution — a single clearly-marked synthetic message,
             # tagged compactor-generated (closed Provenance enum), trusted (the
-            # agent's own machinery; untrusted turns can never be IN a span).
+            # agent's own machinery; injected untrusted turns are barriers and
+            # never IN a span) unless a group member's turn is in it.
             from prometheus.engine.messages import ConversationMessage, TextBlock
 
             text = f"{SUMMARY_MARKER_PREFIX} 1–{len(span)}] {summary}"
@@ -1315,7 +1323,12 @@ class ContextCompactor:
                 role="user",
                 content=[TextBlock(text=text)],
                 provenance="compactor",
-                is_trusted=True,
+                # The agent's own machinery, so trusted, unless the span holds
+                # a group member's words: then the summary is theirs as much as
+                # the owner's, and is shown to the model as untrusted.
+                is_trusted=not any(
+                    getattr(m, "provenance", "user") == "member" for m in span
+                ),
             )
             out = [synthetic] + list(view[len(span):])
         else:
