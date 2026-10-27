@@ -1,4 +1,4 @@
-# Prometheus Foundation Spec, Version 3
+# Prometheus Foundation Spec, Version 4
 
 **Status:** Adopted, pre-Beacon-release
 **Scope:** The three architectural decisions that become irreversible once Beacon ships and third parties accumulate data.
@@ -352,14 +352,16 @@ Generated at first run. Ed25519 keypair. (`cryptography` moves to the base depen
   node.pub      public, this is the node ID
 ```
 
-Public key exposed on `/api/status` — the bearer-gated side. The unauthenticated `/health` endpoint does not carry it; that split is a standing security decision.
+Public key exposed on `/api/status` — the bearer-gated side. The unauthenticated `/health` endpoint does not carry it; that split is a standing security decision. It is also answered, with a signature, by the identity challenge (rule 2).
 
 **Rules, binding:**
 
 1. **The key is identity, never encryption.** No local file is ever encrypted with it. Losing the key must never make local data unreadable.
 2. **The key is never the sole proof of anything.** Any future hosted service has an account layer above it with independent recovery. Keys enroll to accounts, many per account, revocable.
+   *Amended in v4:* the node key signs **identity challenges**, and nothing else yet. A paired client (Beacon) sends a fresh nonce to `POST /api/identity/challenge` before it sends its token, and checks the signature against the node key it pinned at pairing, so it knows it reached the Prometheus it paired with. That proves the server's identity to a client. It is never proof of the user: every authenticated route still needs that client's own bearer token. The signed message starts with a domain line (`prometheus-identity-challenge/v1`), so a challenge signature can never stand in for any other kind of signature.
 3. **Identity is not derived from hardware.** Swapping one GPU for another does not change the node. Generated key, not GPU fingerprint.
 4. **Nothing is transmitted without opt-in.** The key exists locally and is inert until a user turns on something that uses it. Say this in the README before anyone asks.
+   *Amended in v4:* the public half is sent in a challenge answer, before a token, because that is when a client has to check it. This stays opt-in: the challenge exists for clients the owner paired, and pairing is owner-initiated. The public half identifies this machine, as hello's `fp` already does on the network; it is not a secret, and the private half never leaves the machine. Nothing is sent anywhere unasked: the daemon only answers a request that reaches it.
 
 Rule 4 exists because a self-hosted audience will see a keypair and ask what is phoning home. Answer it before the question is asked in public.
 
@@ -413,6 +415,8 @@ Today Tailscale provides this implicitly and that is acceptable. When the fleet 
 ### 3.7 Deliberately deferred
 
 - **Signing.** Traces and vault writes could be signed. They will not be, yet. Signing means every write path touches crypto and signature verification becomes a new failure mode. Generate the key, expose the public half, sign nothing until there is a reason.
+  *Amended in v4:* identity challenges are the first reason (rule 2). They sign a client's nonce on request and touch no write path. Traces, vault writes and audit records are still not signed; a signed audit trail is a separate, later change.
+- **Two keys per machine.** Besides the node key (Ed25519, `node/node.key`), each machine has an **instance key** (P-256, `config/instance_key.py`), behind hello's `fp` and the TLS certificate. Despite its name it is per-machine too: both keys stay when you copy the vault, so both change when an instance moves to new hardware, and only `instance_id` moves with the vault. A client pins both: the TLS SPKI pin, and the node key.
 - **Key rotation.** Needed before any hosted service. Not needed for a single local user.
 - **Anatomy history.** Worth having eventually so benchmark runs can be attributed to the hardware that existed at the time. Currently a snapshot only. Noted, not scheduled.
 
