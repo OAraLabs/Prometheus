@@ -49,7 +49,8 @@ def _adapter(allowed: list[int] | None) -> TelegramAdapter:
 def _update(chat_id: int, text: str = "/gate off"):
     upd = MagicMock()
     upd.effective_chat = MagicMock(id=chat_id)
-    upd.effective_user = MagicMock(id=4242)
+    # A private chat's id is its user's id: the sender of an allowed private chat is the owner (gateway trust).
+    upd.effective_user = MagicMock(id=chat_id)
     upd.message = MagicMock(text=text)
     return upd
 
