@@ -5,6 +5,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 ## Unreleased
 
 - Computer use: no thumbnail is taken of a window that may show a GTK4 password field. GTK4 reports a password entry as an unnamed text field, which the password check did not catch, so a picture of a GTK4 sign-in window was sent to Beacon. Any unnamed text field now skips the picture.
+- Computer use: when an app pick ends without being turned off (the daemon restarted, or the pick expired after 8 hours), the action log now says so. Before, a reconnecting Beacon kept showing the app as picked, its picker never opened, and "Change / clear" changed nothing.
 - Daily briefing: with `gateway.briefing_chat_id` unset, the briefing goes to your private chat (`gateway.owner_user_ids`, else the private chats in `gateway.allowed_chat_ids`), then to `TELEGRAM_CHAT_ID`, and otherwise nowhere, with an error. Before, it went to the first allowed chat, which could be a group. A `briefing_chat_id` you set, a group included, is used as before.
 
 ## 0.9.17 (2026-10-25)
