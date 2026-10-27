@@ -42,6 +42,17 @@ RESERVED_CANDIDATE_IDS: frozenset[str] = frozenset(
 )
 
 
+#: Roles whose accessible NAME can be the text they hold. GTK4 names a text
+#: view by its contents (GNOME Text Editor's document arrived as
+#: "text box 'Rig note: water the plants…'"), so describing one by its label
+#: put a document's text — including text a person typed in an earlier task —
+#: into the chooser's view, the approval prompt, the persisted action log and
+#: every Beacon. These are described by their role alone.
+CONTENT_NAMED_ROLES: frozenset[str] = frozenset({
+    "text box", "document text", "paragraph",
+})
+
+
 @dataclass(frozen=True)
 class Element:
     """One accessible element from a window snapshot."""
@@ -73,6 +84,8 @@ class Element:
         Role first, then label: a chooser scanning ten candidates is looking
         for "the button" or "the text field" before it is looking for a name.
         """
+        if self.role.lower() in CONTENT_NAMED_ROLES:
+            return self.role.strip()
         label = f" {self.label!r}" if self.label else ""
         return f"{self.role}{label}".strip()
 
