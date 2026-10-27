@@ -59,6 +59,9 @@ from prometheus.computer.thumbnails import (
 logger = logging.getLogger(__name__)
 
 #: Every SignalBus kind this module emits — THE declaration ws_server promotes.
+#: How many logged picks the start-up pass reads (newest first).
+STALE_PICK_SCAN = 5000
+
 COMPUTER_FRAME_KINDS = (
     "computer_binding",
     "computer_task_started",
@@ -324,6 +327,45 @@ class ComputerLiveStream:
         await self._emit("computer_binding", payload)
         if state == "off":
             self._prune(binding.session_id)
+
+    async def binding_off(self, session_id: str, *, reason: str) -> None:
+        """An "off" for a pick that ended without a frame of its own.
+
+        A pick lives in memory, so it ends silently when it expires, when the
+        daemon restarts, or when a client clears one the daemon no longer
+        holds. A client that saw the "on" (live, or by backfill) kept showing
+        the app as picked, and hid the picker it needed to pick again.
+        """
+        await self._emit("computer_binding", {
+            "session_id": session_id, "state": "off", "reason": reason})
+        self._prune(session_id)
+
+    async def end_stale_picks(self) -> int:
+        """At start: an "off" for every session whose last logged pick is "on".
+
+        No pick survives a restart (they live in memory), so the durable log
+        must not say one is still on. Returns how many were ended.
+        """
+        tel = self._telemetry
+        if tel is None:
+            return 0
+        try:
+            rows = tel.signal_events_since(signal_type="computer_binding",
+                                           limit=STALE_PICK_SCAN)
+        except Exception:  # noqa: BLE001 - a failed read leaves the log as it was
+            logger.warning("computer action log: could not read the logged picks",
+                           exc_info=True)
+            return 0
+        last_state: dict[str, Any] = {}
+        for row in rows:  # newest first
+            payload = row.get("payload") or {}
+            sid = payload.get("session_id")
+            if isinstance(sid, str) and sid and sid not in last_state:
+                last_state[sid] = payload.get("state")
+        stale = [sid for sid, state in last_state.items() if state == "on"]
+        for sid in stale:
+            await self.binding_off(sid, reason="restart")
+        return len(stale)
 
     # ── a task ──────────────────────────────────────────────────────────
 
