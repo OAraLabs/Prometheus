@@ -139,6 +139,23 @@ def _keys_of(app: AppRecord) -> set[str]:
     return {_fold(name) for name in _identifiers(app)}
 
 
+#: Linux keeps a process name to 15 characters (TASK_COMM_LEN - 1).
+_PROCESS_NAME_MAX = 15
+
+
+def _completes_a_cut_process_name(name: str | None, window_app: str | None) -> bool:
+    """``name`` is a process name Linux cut at 15 characters, and the
+    window's own app name is how it begins ("gnome-terminal-" and
+    "Gnome-terminal"). Only then is the window's name another name of the
+    same app: any other name a window gives would let a pick — which has no
+    pid — cover a different app."""
+    name, window_app = _fold(name), _fold(window_app)
+    if len(name) != _PROCESS_NAME_MAX or not window_app:
+        return False
+    stem = name.rstrip("-_.")
+    return bool(stem) and (window_app.startswith(stem) or stem.startswith(window_app))
+
+
 @dataclass(frozen=True)
 class AppIdentity:
     """The app the door resolved: every identifier it is known by, and its
@@ -161,9 +178,19 @@ class AppIdentity:
     pid: int | None = None
 
     @classmethod
-    def of(cls, app: AppRecord) -> AppIdentity:
-        return cls(names=_identifiers(app),
-                   pid=app.pid if app.pid and app.pid > 0 else None)
+    def of(cls, app: AppRecord, window: WindowRecord | None = None) -> AppIdentity:
+        """``window``: the window the door resolved for this app. Its own app
+        name is added when it is the SAME process — the driver's name for the
+        app, not an alias. On Linux ``list_apps`` can name an app by its
+        process name, cut at 15 characters ("gnome-terminal-"), while the
+        window names it "Gnome-terminal"; without the window's name, check 1b
+        refused every task in the app the person picked."""
+        names = _identifiers(app)
+        if (window is not None and app.pid and window.pid == app.pid
+                and _completes_a_cut_process_name(app.name, window.app_name)
+                and _fold(window.app_name) not in {_fold(n) for n in names}):
+            names = (*names, str(window.app_name).strip())
+        return cls(names=names, pid=app.pid if app.pid and app.pid > 0 else None)
 
     def matches(self, reported: str | None, reported_pid: int | None) -> bool:
         """The driver's report is this app: it names it by one of its
