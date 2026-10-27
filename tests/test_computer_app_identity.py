@@ -355,7 +355,7 @@ async def _run_task(runner, channel, *, answer: str | None,
     from prometheus.computer.task import ComputerTaskInput
     from prometheus.permissions.approver import Approver
 
-    person = Approver("telegram", "456", "will")
+    person = Approver("telegram", "456", "will", owner=True)
     binding = await runner.bind("telegram:456", app, scope="task", by=person,
                                 surface="telegram")
     task = await runner.start(

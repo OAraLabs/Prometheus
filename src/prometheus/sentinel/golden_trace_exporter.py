@@ -116,6 +116,10 @@ def lcm_context_resolver(store: object, *, limit: int = CONTEXT_MESSAGE_LIMIT):
             log.debug("LCM lookup failed for session %s", session_id, exc_info=True)
             return []
 
+        # Gateway trust: a conversation a group member took part in teaches nothing. Exporting it would train the
+        # model to answer a member as if they were the owner.
+        if any(getattr(msg, "provenance", "user") == "member" for msg in messages):
+            return []
         out: list[dict[str, str]] = []
         for msg in messages:
             # STRICTLY BEFORE the call: a message at or after it can include

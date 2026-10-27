@@ -125,7 +125,11 @@ def test_the_floor_is_narrower_than_the_shipped_list_and_is_credentials_only():
         "the floor is not a strict subset of the shipped policy list")
     # `pairing`: the same-Mac pairing secret is traded for an OWNER device token
     # (config/local_pairing.py), so its directory is credential material too.
-    assert all(any(m in p for m in (".ssh", ".gnupg", "env", "/pairing"))
+    # `devices.db`: the device registry is the list of credentials the API
+    # accepts (token hashes), owners and desktop marks.
+    # `cron_`: the scheduled-jobs schedule and its logs. Not a credential, but equally never a legitimate target
+    # for a shell write — a planted job runs as the owner on the next tick, with no restart.
+    assert all(any(m in p for m in (".ssh", ".gnupg", "env", "/pairing", "/devices.db", "/cron_"))
                for p in _ALWAYS_DENIED_PATHS), (
         f"{_ALWAYS_DENIED_PATHS} contains something that is POLICY, not "
         f"credential material. The line is not 'how small can the floor be' "
