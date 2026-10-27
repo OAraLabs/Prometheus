@@ -150,7 +150,9 @@ _OPENAI_COMPAT_PROVIDERS = {
 # membership is what `is_cloud()` answers (cost accounting, teacher/student
 # corpus labelling) and what routes key resolution through `_resolve_api_key`,
 # which RAISES when no key is configured. Neither server needs a key.
-_LOCAL_OPENAI_COMPAT_PROVIDERS = {"lm_studio", "vllm"}
+# openai_compatible: an app that answers only as OpenAI-compatible (setup's probe
+# could not say which app it is). Always configured with its own base_url.
+_LOCAL_OPENAI_COMPAT_PROVIDERS = {"lm_studio", "vllm", "openai_compatible"}
 
 # Endpoints for the pair above. Separate from CLOUD_DEFAULTS on purpose: that
 # dict is iterated as "the cloud catalogue" (web/server.py builds /api/models
@@ -165,6 +167,10 @@ LOCAL_OPENAI_COMPAT_DEFAULTS: dict[str, dict[str, Any]] = {
     "vllm": {
         "base_url": "http://localhost:8000/v1",
         "default_base_url_env": "VLLM_BASE_URL",
+    },
+    "openai_compatible": {
+        "base_url": "",
+        "default_base_url_env": "OPENAI_COMPATIBLE_BASE_URL",
     },
 }
 
@@ -518,7 +524,7 @@ class ProviderRegistry:
     def list_providers() -> list[str]:
         """Return all supported provider names."""
         return [
-            "llama_cpp", "ollama", "lm_studio", "vllm", "stub", "openai",
+            "llama_cpp", "ollama", "lm_studio", "vllm", "openai_compatible", "stub", "openai",
             "anthropic", "gemini", "xai", "deepseek", "kimi", "glm", "mimo",
             "qwen", "openrouter",
         ]

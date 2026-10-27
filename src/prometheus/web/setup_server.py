@@ -469,7 +469,6 @@ def _apply_configure(
         _cloud_default_config,
         _default_config,
         apply_permission_mode_policy,
-        probe_backend,
         write_config,
     )
     from prometheus.config.paths import get_config_dir
@@ -484,7 +483,7 @@ def _apply_configure(
     model = str(body.get("model") or "").strip()
     api_key = str(body.get("api_key") or "").strip()
     is_cloud = provider in _CLOUD_FAST_PROVIDERS
-    local_providers = sorted({spec["provider"] for spec in KNOWN_LOCAL_SERVERS})
+    local_providers = sorted({spec["provider"] for spec in KNOWN_LOCAL_SERVERS} | {"openai_compatible"})
     if provider and not is_cloud and provider not in local_providers:
         return refuse(
             "unsupported_provider",
@@ -605,17 +604,39 @@ def _apply_configure(
         config = _cloud_default_config(provider, cloud_key_env, model)
     else:
         # Dead-end rule (Phase 0): never write a config pointing at a backend
-        # that is not there. Re-probe the exact provider+URL the client chose.
-        server = probe_backend(provider, base_url)
-        if server is None:
+        # that is not there. Re-probe the exact provider+URL the client chose,
+        # and the model on it: present, able to chat, loaded where the app
+        # needs loading, and with a window Prometheus fits in.
+        from prometheus.cli.init import DetectedServer
+        from prometheus.providers import local_probe
+
+        ok, reason, found = local_probe.probe_choice(provider, base_url, model)
+        if not ok and reason is None:
+            served = ", ".join(m.id for m in found.models[:10]) if found else ""
+            return refuse(
+                "model_not_served",
+                f"{base_url} does not serve {model[:80]!r} (it serves: {served or 'nothing'}) "
+                "— configure refused (a config written now would be known-broken)",
+                fields=["model"])
+        if not ok:
             return refuse(
                 "backend_unreachable",
-                f"{base_url} did not answer like a {provider} "
-                "inference server — configure refused (a config "
+                f"{base_url} did not answer like a usable {provider} "
+                f"inference server ({reason}) — configure refused (a config "
                 "written now would be known-broken)",
-                fields=["base_url"])
-
+                fields=["base_url"], reason=reason)
+        assert found is not None
+        server = DetectedServer(
+            name=local_probe.APP_NAMES.get(found.app, provider), url=base_url,
+            provider=provider, models=[m.id for m in found.models],
+            response_ms=found.latency_ms,
+        )
         config = _default_config(server, model)
+        # LM Studio and vLLM report no window at boot: budget the one the probe
+        # measured when it is smaller than the default.
+        window = next((m.window for m in found.models if m.id == model), None)
+        if window and window < int(config["context"]["effective_limit"]):
+            config["context"]["effective_limit"] = window
     # The paired client reached setup mode on THESE ports — the real
     # daemon must come up on the same ones so the client's address keeps
     # working after the flip. Defaults (8005/8010) are unchanged.
@@ -849,6 +870,9 @@ def create_setup_app(
             "configured": state.configured,
             "pairing": pairing.status(),
             "version": __version__,
+            # What this setup can do that an older one cannot, so a client offers it only here (Beacon's local
+            # choice, docs/contracts/setup-probe.md).
+            "features": ["local_probe"],
         }
 
     @app.post("/api/setup/pair")
@@ -915,16 +939,27 @@ def create_setup_app(
             remote_server_candidates,
         )
 
-        if base_url is not None:
-            url = base_url.strip().rstrip("/")
-            if not url.startswith(("http://", "https://")):
-                return refuse("bad_base_url", "base_url must start with http:// or https://",
-                              fields=["base_url"])
-            servers = detect_local_servers(
-                timeout=3.0, candidates=remote_server_candidates(url),
-            )
-        else:
-            servers = detect_local_servers(timeout=1.0)
+        from concurrent.futures import ThreadPoolExecutor
+
+        from prometheus.providers import local_probe
+
+        # `backends` is the old detector's answer, unchanged for clients that read it; `local` is the look (or the
+        # probe of the one address) that says what each app is and why nothing is usable (docs/contracts/
+        # setup-probe.md). Both run at once.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            if base_url is not None:
+                url = base_url.strip().rstrip("/")
+                if not url.startswith(("http://", "https://")):
+                    return refuse("bad_base_url", "base_url must start with http:// or https://",
+                                  fields=["base_url"])
+                look = pool.submit(local_probe.probe_target, url)
+                servers = detect_local_servers(
+                    timeout=3.0, candidates=remote_server_candidates(url),
+                )
+            else:
+                look = pool.submit(local_probe.look_here)
+                servers = detect_local_servers(timeout=1.0, candidates=local_probe.legacy_candidates())
+            local = look.result().as_dict()
         # The cloud presets ride along so a client can offer "no GPU? use a
         # cloud provider" without a second round-trip. Names only:
         # key_present says whether the daemon already holds the key, the
@@ -951,7 +986,35 @@ def create_setup_app(
         return JSONResponse(status_code=200, content={
             "backends": [_backend_payload(s) for s in servers],
             "cloud_providers": cloud,
+            "local": local,
         })
+
+    @app.post("/api/setup/probe")
+    async def setup_probe(request: Request) -> JSONResponse:
+        """What AI app runs on the one computer someone typed, and whether it is usable (docs/contracts/setup-probe.md).
+
+        Probing is blocking socket work, so it runs in a thread. GETs to fixed paths only, no redirects, a size cap,
+        and only parsed fields come back: the route cannot be used to read pages it was not built for.
+        """
+        denied = _setup_auth_error(request)
+        if denied is not None:
+            return denied
+        try:
+            body = await request.json()
+        except Exception:
+            return refuse("bad_request", "send JSON: {\"target\": \"<a computer's name or address>\"}")
+        target = body.get("target") if isinstance(body, dict) else None
+        if not isinstance(target, str) or not target.strip():
+            return refuse("bad_request", "target is required, as text", fields=["target"])
+        import asyncio
+
+        from prometheus.providers import local_probe
+
+        if local_probe.parse_target(target) is None:
+            return refuse("bad_target", "a target names one computer: a name or an address, with an optional port, "
+                          "or an http(s) address with no path", fields=["target"])
+        answer = await asyncio.to_thread(local_probe.probe_target, target)
+        return JSONResponse(status_code=200, content=answer.as_dict())
 
     @app.post("/api/setup/check-key")
     async def setup_check_key(request: Request) -> JSONResponse:

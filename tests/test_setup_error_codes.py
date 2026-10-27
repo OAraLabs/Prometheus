@@ -157,6 +157,25 @@ class TestConfigureRefusals:
         configure_error(world, body, 400, "backend_unreachable", ["base_url"])
 
 
+    def test_a_model_the_address_does_not_serve(self, world):
+        """The app answered; the model named is not one it serves (docs/contracts/setup-probe.md)."""
+        with _serve(_FakeLlamaCppHandler) as url:
+            out = configure_error(world, {"provider": "llama_cpp", "base_url": url, "model": "not-served-here"},
+                                  400, "model_not_served", ["model"])
+        assert "gemma4-26b" in out["detail"], "it says what the app does serve"
+
+    def test_an_address_that_answers_with_nothing_usable_says_why(self, world):
+        out = configure_error(world, {"provider": "llama_cpp", "base_url": f"http://127.0.0.1:{_free_port()}",
+                                      "model": "m"}, 400, "backend_unreachable", ["base_url"])
+        assert out["reason"] == "refused", "the probe's reason rides along"
+
+    def test_a_probe_target_that_is_not_a_computer(self, world):
+        resp = world.post("/api/setup/probe", {"target": "user:pass@studio-mac"})
+        assert (resp.status_code, resp.json()["error"], resp.json().get("fields")) == (400, "bad_target", ["target"])
+        resp = world.post("/api/setup/probe", {"target": 7})
+        assert (resp.status_code, resp.json()["error"], resp.json().get("fields")) == (400, "bad_request", ["target"])
+
+
 class TestWhatUsedToSlipThrough:
     def test_a_provider_nobody_supports_is_refused_even_where_its_address_answers(self, world):
         """It used to be probed as if it were one, then written into the config for the daemon to fail on."""
@@ -338,7 +357,7 @@ ELSEWHERE = {"browser_not_allowed", "host_not_allowed", "rate_limited", "not_loo
 DRIVEN_HERE = {
     "bad_request", "bad_base_url", "unexpected_base_url", "cloud_key_missing", "slack_token_pair_incomplete",
     "bad_discord_guild_ids", "backend_unreachable", "unsupported_provider", "invalid_key", "invalid_token",
-    "bad_model", "config_write_failed", "internal_error", "not_configured", "not_paired", "unauthorized",
+    "bad_model", "bad_target", "model_not_served", "config_write_failed", "internal_error", "not_configured", "not_paired", "unauthorized",
     "setup_mode", "pairing_unavailable", "invalid_code", "pairing_used", "pairing_expired", "pairing_locked",
 }
 
