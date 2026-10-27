@@ -1275,6 +1275,7 @@ def create_app(
             _state_ref.get("state") if isinstance(_state_ref, dict) else None
         ) or getattr(app.state, "agent_state", "idle")
         security_state = await _floor_state()
+        hello_now = _hello_payload()
         return {
             "state": _live_state,
             "model": app.state.current_model,
@@ -1399,6 +1400,11 @@ def create_app(
             # Bearer-gated deliberately: neither belongs on /health.
             "node_pub": get_node_pubkey(),
             "instance_id": get_instance_id(),
+            # The name and fp hello advertises, from hello's own builder, so the two routes cannot drift
+            # (fp is "" until the instance key exists; reading it mints nothing). Siblings of the two
+            # above, for a client that tells several Prometheus instances apart.
+            "name": hello_now["name"],
+            "fp": hello_now["fp"],
         }
 
     # ── Sessions ────────────────────────────────────────────────────
