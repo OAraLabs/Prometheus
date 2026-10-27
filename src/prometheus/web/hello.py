@@ -117,6 +117,16 @@ def hello_response(
     payload: Callable[[], dict[str, Any]],
 ) -> "JSONResponse":
     """The whole route: refuse a browser, limit the peer, answer with ``payload()``."""
+    return guarded_response(request, limiter, lambda: (200, payload()))
+
+
+def guarded_response(
+    request: "Request",
+    limiter: SourceLimiter,
+    answer: Callable[[], tuple[int, dict[str, Any]]],
+) -> "JSONResponse":
+    """Hello's guard for any credential-free route: refuse a browser, limit the peer, then answer with
+    ``answer()``'s ``(status, body)``. Never cached. The identity challenge shares it, and hello's limiter."""
     from fastapi.responses import JSONResponse
 
     if request.headers.get("origin"):
@@ -135,4 +145,5 @@ def hello_response(
                      "retry_after_seconds": decision.retry_after},
             headers={**_NO_STORE, "Retry-After": str(decision.retry_after)},
         )
-    return JSONResponse(payload(), headers=_NO_STORE)
+    status, content = answer()
+    return JSONResponse(content, status_code=status, headers=_NO_STORE)
