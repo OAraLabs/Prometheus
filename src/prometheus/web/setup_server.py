@@ -505,6 +505,11 @@ def _apply_configure(
     slack_app_token = str(body.get("slack_app_token") or "").strip()
     slack_channels = _string_list(body.get("slack_channels"))
     discord_token = str(body.get("discord_token") or "").strip()
+    # The owner per gateway (gateway trust): the only person there who approves tool calls or teaches. Optional:
+    # Telegram falls back to the private chats above, Discord to the bot application's owner, Slack to nobody.
+    telegram_owner_ids = _int_list(body.get("telegram_owner_ids"))
+    slack_owner_user_ids = _string_list(body.get("slack_owner_user_ids"))
+    discord_owner_user_ids = _int_list(body.get("discord_owner_user_ids"))
 
     # A cloud provider has no base_url to probe and a key instead. The
     # key goes to the env file (the daemon's secret store, mode 0600),
@@ -652,17 +657,23 @@ def _apply_configure(
             # is a config the operator can see and fix; a key that is absent is
             # the thing that made absence mean permission in the first place.
             config["gateway"]["allowed_chat_ids"] = telegram_chat_ids
+            if telegram_owner_ids:
+                config["gateway"]["owner_user_ids"] = telegram_owner_ids
             gateways_enabled.append("telegram")
         if slack_bot_token and slack_app_token:
             set_env_value("PROMETHEUS_SLACK_BOT_TOKEN", slack_bot_token)
             set_env_value("PROMETHEUS_SLACK_APP_TOKEN", slack_app_token)
             config["gateway"]["slack"]["enabled"] = True
             config["gateway"]["slack"]["allowed_channels"] = slack_channels
+            if slack_owner_user_ids:
+                config["gateway"]["slack"]["owner_user_ids"] = slack_owner_user_ids
             gateways_enabled.append("slack")
         if discord_token:
             set_env_value("PROMETHEUS_DISCORD_TOKEN", discord_token)
             config["gateway"]["discord"]["enabled"] = True
             config["gateway"]["discord"]["guild_ids"] = discord_guild_ids
+            if discord_owner_user_ids:
+                config["gateway"]["discord"]["owner_user_ids"] = discord_owner_user_ids
             gateways_enabled.append("discord")
     telegram_token_saved = "telegram" in gateways_enabled
 
@@ -996,7 +1007,9 @@ def create_setup_app(
                 '"model", "agent_name"?, "persona"?, '
                 '"telegram_token"?, "slack_bot_token"?, '
                 '"slack_app_token"?, "slack_channels"?, '
-                '"discord_token"?, "discord_guild_ids"?}')
+                '"discord_token"?, "discord_guild_ids"?, '
+                '"telegram_owner_ids"?, "slack_owner_user_ids"?, '
+                '"discord_owner_user_ids"?}')
         # Blocking work (backend re-probe, file writes) off the event loop.
         try:
             return await asyncio.to_thread(

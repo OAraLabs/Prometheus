@@ -230,7 +230,8 @@
       "timestamp",
       "compacted",
       "provenance",
-      "is_trusted"
+      "is_trusted",
+      "author"
      ],
      "rows": [
       [
@@ -251,7 +252,8 @@
        "<time>",
        0,
        "user",
-       1
+       1,
+       null
       ],
       [
        "<uuid:2>",
@@ -279,7 +281,8 @@
        "<time>",
        0,
        "user",
-       0
+       0,
+       null
       ],
       [
        "<uuid:3>",
@@ -301,7 +304,8 @@
        "<time>",
        0,
        "user",
-       0
+       0,
+       null
       ],
       [
        "<uuid:4>",
@@ -321,7 +325,8 @@
        "<time>",
        0,
        "user",
-       0
+       0,
+       null
       ]
      ]
     },

@@ -412,6 +412,15 @@ class DiscordAdapter(BasePlatformAdapter):
         # for the daemon's lifetime, so it goes to a background task (the
         # Slack Socket Mode handler makes the same non-blocking start).
         await client.login(self.config.token)
+        if not self.config.owner_user_ids:
+            # D1: with no owner named, the owner is whoever owns the bot's Discord application. Asked before the
+            # gateway connects, so no message arrives while it is unknown; a failure leaves nobody as the owner.
+            try:
+                self._learn_application_owner(await client.application_info())
+            except Exception:
+                logger.warning(
+                    "Discord: could not read the bot application's owner, so nobody on Discord can approve or "
+                    "teach until gateway.discord.owner_user_ids is set", exc_info=True)
         self._connect_task = asyncio.create_task(
             client.connect(reconnect=True), name="discord_gateway",
         )
@@ -611,7 +620,10 @@ class DiscordAdapter(BasePlatformAdapter):
         # its next tick, so AutoDream pauses. Never raises.
         activity.note_user_activity()
         outcomes.note_user_message(session_id, event.text)
-        session.add_user_message(event.text)
+        # Gateway trust: the owner's words are the owner's; anyone else's are theirs, untrusted, never teaching.
+        owner = self.config.is_owner(event.user_id)
+        session.add_user_message(event.text, provenance="user" if owner else "member", is_trusted=owner,
+                                 author=f"discord:{event.user_id}")
         pre_len = len(session.get_messages())
 
         from prometheus.engine.agent_loop import MaxTurnsExhausted
@@ -658,7 +670,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 break
             queued_event = MessageEvent(
                 chat_id=event.chat_id,
-                user_id=event.user_id,
+                # Whoever QUEUED it, not whoever's turn drained it (gateway trust); unknown = nobody's, never the owner.
+                user_id=getattr(next_prompt, "sender", None) or 0,
                 text=next_prompt,
                 message_id=event.message_id,
                 platform=event.platform,
@@ -960,6 +973,10 @@ class DiscordAdapter(BasePlatformAdapter):
                     "channel. The operator's allowlist does not include it."
                 ))
                 return
+            refusal = self._owner_refusal_for_command(interaction, name, args or "")
+            if refusal:
+                await self._respond(interaction, refusal)
+                return
             await handler(interaction, (args or "").strip())
 
         _callback.__name__ = f"prometheus_{group.name}_{name}"
@@ -1102,6 +1119,27 @@ class DiscordAdapter(BasePlatformAdapter):
             channel_id=channel_id or 0,
             user_id=getattr(user, "id", None),
         )
+
+    def _learn_application_owner(self, app_info: Any) -> None:
+        """Record the bot application's owner (its team's owner, for a team-owned app) as the fallback owner."""
+        team = getattr(app_info, "team", None)
+        owner_id = getattr(team, "owner_id", None) if team is not None else None
+        if owner_id is None:
+            owner_id = getattr(getattr(app_info, "owner", None), "id", None)
+        self.config.application_owner_ids = frozenset({str(owner_id)}) if owner_id is not None else frozenset()
+        if owner_id is not None and not self.config.owner_user_ids:
+            logger.info("Discord: the bot application's owner is this gateway's owner "
+                        "(set gateway.discord.owner_user_ids to name someone else)")
+
+    def _owner_refusal_for_command(self, interaction: Any, name: str, args: str) -> str | None:
+        """The reply when *name* is a command only the owner may run and the interaction's user is not the owner;
+        None otherwise. Called from ``_register``'s callback, the one place every app command goes through."""
+        from prometheus.gateway.commands import owner_only_command, owner_only_reply
+
+        if not owner_only_command(name, args):
+            return None
+        user = getattr(interaction, "user", None)
+        return None if self.config.is_owner(getattr(user, "id", None)) else owner_only_reply(name)
 
     async def _respond(self, interaction: Any, text: str) -> None:
         """Reply to an interaction, chunked at the 2000-char limit.
@@ -1345,7 +1383,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         await self._defer(interaction)
         await self._respond(interaction, await cmd_computer(
-            None, args, by=_approver.discord(interaction), surface="discord",
+            None, args, by=_approver.discord(interaction, owners=self.config.owner_ids()), surface="discord",
             session_id=""))
 
     async def _app_backends(self, interaction: Any, args: str) -> None:
@@ -1375,6 +1413,10 @@ class DiscordAdapter(BasePlatformAdapter):
         from prometheus.gateway.commands import cmd_note
         from prometheus.tools.builtin.wiki_compile import _memory_store
 
+        refused = self.owner_refusal(getattr(getattr(interaction, "user", None), "id", None))
+        if refused:
+            await self._respond(interaction, refused)
+            return
         await self._respond(interaction, cmd_note(_memory_store, args))
 
     async def _app_sentinel(self, interaction: Any, args: str) -> None:
@@ -1553,7 +1595,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # queue creates the session if missing so a queued prompt on a quiet
         # channel fires when the user kicks off their first message.
         session = self.session_manager.get_or_create(f"discord:{channel}")
-        if not session.enqueue_prompt(args):
+        if not session.enqueue_prompt(args, sender=getattr(getattr(interaction, "user", None), "id", None)):
             await self._respond(interaction, "Empty prompt — nothing queued.")
             return
         preview = args if len(args) <= 80 else args[:77] + "..."
@@ -1597,7 +1639,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # invoking USER is recorded, not the channel (W4).
         text = await _cmds.cmd_approve(
             getattr(self, "_approval_queue", None), args,
-            by=_approver.discord(interaction), prefix=OPS_PREFIX,
+            by=_approver.discord(interaction, owners=self.config.owner_ids()), prefix=OPS_PREFIX,
         )
         await self._respond(interaction, text)
 
@@ -1618,7 +1660,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         text = await _cmds.cmd_deny(
             getattr(self, "_approval_queue", None), request_id,
-            by=_approver.discord(interaction), prefix=OPS_PREFIX,
+            by=_approver.discord(interaction, owners=self.config.owner_ids()), prefix=OPS_PREFIX,
         )
         await self._respond(interaction, text)
 
@@ -1640,6 +1682,10 @@ class DiscordAdapter(BasePlatformAdapter):
         """Revoke a remembered grant by id (SPRINT-CONSENT Phase 2)."""
         from prometheus.gateway import commands as _cmds
 
+        refused = self.owner_refusal(getattr(getattr(interaction, "user", None), "id", None))
+        if refused:
+            await self._respond(interaction, refused)
+            return
         await self._respond(
             interaction,
             _cmds.cmd_revoke(getattr(self, "_approval_queue", None), args or ""),
@@ -1656,6 +1702,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
         await self._defer(interaction)
         sub = args.split()[0] if args else "status"
+        if sub.lower() not in ("status", "history"):
+            refused = self.owner_refusal(getattr(getattr(interaction, "user", None), "id", None))
+            if refused:
+                await self._respond(interaction, refused)
+                return
         text = await _cmds.cmd_gepa(
             getattr(self, "_gepa_engine", None),
             getattr(self, "_approval_queue", None),

@@ -5,8 +5,69 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 ## Unreleased
 
 - Computer use: a GTK4 menu button ("Main menu", "Open", "View") can be clicked by name. GTK4 shows each one twice, a wrapper and the toggle inside it, so the two matching rows tied and the task did nothing. Only the toggle that acts is offered now.
-- Computer use: a GTK4 app's text fields can be set. GTK4 reports them as "text box", a role the candidate table did not offer, so a task could never type into GNOME Text Editor or any other GTK4 field.
-- Computer use: the desktop cockpit works with SENTINEL off, the shipped default. Before, Beacon never saw its own app pick, any step, the end of a task or a thumbnail, because only SENTINEL built the signal bus the cockpit rides.
+- Daily briefing: with `gateway.briefing_chat_id` unset, the briefing goes to your private chat (`gateway.owner_user_ids`, else the private chats in `gateway.allowed_chat_ids`), then to `TELEGRAM_CHAT_ID`, and otherwise nowhere, with an error. Before, it went to the first allowed chat, which could be a group. A `briefing_chat_id` you set, a group included, is used as before.
+
+## 0.9.17 (2026-10-25)
+
+0.9.17 fixes two security issues: chat gateways let anyone in an allowed group approve tool calls and change what the agent remembers, and a shell command the model ran could rewrite the files Prometheus trusts as its own. It pins the Mac app's bundled Python at 3.12.15 (OpenSSL 3.5.9), and updates opentelemetry, filelock and setuptools for published advisories. It also:
+- warns when the web API token sits where the agent's shell can read it;
+- asks before a file tool writes a project instruction file, and refuses invisible text in skills and memory;
+- keeps the memory extractor from skipping messages when its model call fails;
+- makes computer use work with SENTINEL off, and type into GTK4 text fields;
+- keeps genuine user requests in self-improvement evidence (#788, by @sepehrtaji-dev).
+
+### Security
+
+- **Only a chat gateway's owner approves and teaches ([GHSA-c3c2-8vrj-x346](https://github.com/OAraLabs/Prometheus/security/advisories/GHSA-c3c2-8vrj-x346)).**
+  - **Before:** the Telegram, Slack and Discord gateways went by which chat a message came from, not who sent it. In an allowed group chat, Slack channel or Discord server, any member could approve or deny the agent's tool calls (including `/approve always` and `/gate off`), have their message run as if the owner had typed it, and add to memory, skills and self-improvement data. Approval prompts and the daemon's own notices that had no chat of their own went to the first allowed chat, so a group listed first saw them.
+  - **Now:** each gateway has an owner. Only the owner approves tool calls or uses the owner-only commands. Members can still chat: their messages are recorded as theirs, any tool their message asks for waits for the owner, and nothing they say goes into memory, skills, self-improvement or training data. Approval prompts, cron-failure notices and background-task notices go only to the owner's private chat.
+  - **Not affected:** Telegram with only your own private chat allowed, and Beacon and the REST and WebSocket API, which authenticate devices rather than chats.
+- **A model's shell can't rewrite Prometheus's trusted state ([GHSA-wq93-7fvg-53pj](https://github.com/OAraLabs/Prometheus/security/advisories/GHSA-wq93-7fvg-53pj)).**
+  - **Before:** none of the shell's floors (the macOS sandbox profile, the Linux AppArmor profile, the permission gate's always-denied list) covered the device registry, the config file, the identity files, `MEMORY.md` and `USER.md`, skills, or the scheduled-jobs files. A shell command the model was talked into running could create a trusted device token, rewrite the config, plant lasting instructions, or plant a cron job that runs as the owner. Mainly macOS, where the shell has no write floor.
+  - **Now:** these files are under the same floors as your keys. Writing, appending, replacing, deleting, linking, planting a side file and renaming their folders are refused; reading still works, and so do Prometheus's own writers. The file tools refuse the device registry, the config file and the scheduled-jobs files, and ask before writing the identity files, memory or skills. The daemon tests the floor at startup and reports a stale AppArmor profile at ERROR.
+- **The Mac app's build pins CPython 3.12.15 and OpenSSL 3.5.9 (#843).** The 0.9.16 app was rebuilt with them by hand; from 0.9.17 every build gets them. They fix CVE-2026-19445 and CVE-2026-19553 (ssl), CVE-2026-82049, CVE-2026-19672 and CVE-2026-87910 (tarfile), CVE-2026-15310 (zipfile), CVE-2026-15806 (urllib) and CVE-2026-17084 (StringPrep). The unused libpython dylib is no longer shipped.
+- **opentelemetry 1.45.1 and arize-phoenix-otel 0.17.2 (#844)** fix CVE-2026-114603, in the `evals` extra only. **filelock 4.2.4 and setuptools 84.2.1 (#857)** fix CVE-2026-112940, CVE-2026-112913 and CVE-2026-112907 (filelock) and GHSA-xmj3-9gf7-h52w (setuptools). Only `uv.lock` changes.
+
+### The API token's location is checked
+
+- **What changed.** At startup, in `GET /api/status` and in `oara doctor`, Prometheus says so loudly when the web API token sits where the agent's shell can read it even with the bash read floor on:
+  - `web.api_token` is set in `prometheus.yaml`;
+  - `PROMETHEUS_API_TOKEN_FILE` names a file outside `~/.config/<name>/*env`;
+  - the env file holding the token was moved out of that pattern by `PROMETHEUS_ENV_FILE` or `XDG_CONFIG_HOME`.
+- **What to do.** Move the token to `~/.config/prometheus/env` as `PROMETHEUS_API_TOKEN=<token>` (`oara token show` prints it), then remove the setting that held it, and restart.
+- Without an active read floor (it is off, or the daemon runs in a container) every location is readable alike, so nothing is said. The warning never names the token or the token file's path.
+
+### Hardening shipped with GHSA-wq93-7fvg-53pj
+
+- **Project instruction files ask first.** A file tool's write to a project instruction file asks the owner, even inside the workspace, with approvals off or under a saved grant. These are the files the prompt assembler loads from the session's workspace upward (`PROMETHEUS.md`, `AGENTS.md` and the other convention files the README lists) and `.prometheus/rules/*.md`.
+- **Skills and memory refuse invisible text.** Characters that hide text from a person reading it are refused: tag characters, bidi embeddings, overrides and isolates, the zero-width space, the word joiner, invisible operators, a byte-order mark mid-text, and the supplementary variation selectors. The zero-width joiner and non-joiner, LRM and RLM, the emoji variation selector and a leading byte-order mark stay allowed.
+
+### Memory extraction (#841, #842)
+
+- **A failed model call no longer loses messages (#842, from #832 by @sepehrtaji-dev).** An outage, rate limit or timeout used to look the same as "nothing to remember", so the extractor's cursor moved past the batch. Now the cursor stays where it was and the next pass retries the batch.
+- **JSON-shaped output with no facts is logged (#841, from #807 by @lijinhongucl-pixel).** A reply that looks like JSON but yields no facts logs a WARNING. Prose with no brace, `[]` and `{"facts": []}` stay quiet.
+
+### Self-improvement keeps genuine user requests (#788, by @sepehrtaji-dev)
+
+- GEPA's request evidence no longer drops a message whose `provenance` is `user` just because its trust flag is false. Untrusted messages from other sources are still withheld.
+
+### Computer use (#845, #846)
+
+- **The desktop cockpit works with SENTINEL off (#845),** the shipped default. Before, Beacon never saw its own app pick, any step, the end of a task or a thumbnail, because only SENTINEL built the signal bus the cockpit rides.
+- **A GTK4 app's text fields can be set (#846).** GTK4 reports them as "text box", a role the candidate table did not offer, so a task could never type into GNOME Text Editor or any other GTK4 field.
+
+### Upgrading from 0.9.16
+
+- **Linux with the AppArmor profile:** reload it BEFORE restarting the daemon. Until you do, the daemon reports a STALE PROFILE at ERROR:
+  ```
+  sudo apparmor_parser -r -W /etc/apparmor.d/prometheus-bash
+  ```
+- **Telegram:** if you allow only your own private chat, nothing changes. If you allow a group, set `gateway.owner_user_ids` to your Telegram user id.
+- **Slack:** set `gateway.slack.owner_user_ids`. Until you do, nobody on Slack can approve, and Slack messages don't add to memory.
+- **Discord:** the owner of the bot's Discord application is the owner unless you set `gateway.discord.owner_user_ids`.
+- **Telegram notices:** approval prompts with no chat of their own, cron-failure notices and task notices go to `gateway.briefing_chat_id` when it is a private chat, else to your private chat, else nowhere. A group `briefing_chat_id` is not used for them, with a warning.
+- **File-tool writes to identity files, memory, skills and project instruction files now ask you,** even with approvals off or under a saved grant.
+- **API clients:** `GET /api/status` gains a top-level `warnings` list of `{code, level, message, fix}`.
 
 ## 0.9.16 (2026-10-21)
 

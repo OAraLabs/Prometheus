@@ -29,6 +29,10 @@ that must remember to run). See ``tests/test_absence_hostile_keys.py``.
 
 from __future__ import annotations
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 # tools.deferred_loading.always_loaded — EVERY tool set Prometheus has shipped
 # as the default, oldest first, read from git history (2026-09-28): the
 # template's list since the initial commit, and this module's constant since
@@ -227,6 +231,23 @@ DENIED_PATHS_DEFAULTS_SHIPPED: tuple[tuple[str, ...], ...] = (
     ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
      "/*/Library/Application Support/Prometheus/pairing",
      "/*/.local/share/prometheus/pairing"),
+    # + the device registry (devices.db and its -wal/-shm/-journal), which says
+    # who may call the API, who is an owner and which device may run desktop
+    # tasks; it sits in the floor too.
+    ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
+     "/*/Library/Application Support/Prometheus/pairing",
+     "/*/.local/share/prometheus/pairing",
+     "/*/.prometheus/data/devices.db*"),
+    # + the scheduled-jobs schedule, its logs and the scheduler's PID file, read live by the cron scheduler; a
+    # planted job runs as the owner. By prefix, so the schedule's .tmp and .corrupt side files are covered.
+    ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
+     "/*/Library/Application Support/Prometheus/pairing",
+     "/*/.local/share/prometheus/pairing",
+     "/*/.prometheus/data/devices.db*",
+     "/*/.prometheus/data/cron_jobs.json*",
+     "/*/.prometheus/data/cron_history.jsonl*",
+     "/*/.prometheus/data/cron_undelivered.jsonl*",
+     "/*/.prometheus/data/cron_scheduler.pid*"),
 )
 
 SHIPPED_DENIED_PATHS: tuple[str, ...] = DENIED_PATHS_DEFAULTS_SHIPPED[-1]
@@ -354,6 +375,80 @@ def resolve_allowed_chat_ids(gateway_cfg: dict | None) -> list[int]:
             # (CROSS-CUTTING §8 — a control must not fail by exception).
             continue
     return out
+
+
+def resolve_owner_user_ids(section: dict | None) -> list[str]:
+    """``owner_user_ids`` from a gateway config section, as platform user ids (text). Empty when absent.
+
+    The owner is the only person on a chat gateway who may approve tool calls, change what the agent may do, or
+    teach it (gateway trust). What empty means differs per gateway, and is decided in ``PlatformConfig.owner_ids``:
+    Telegram falls back to the private chats in ``allowed_chat_ids``, Discord to the bot application's owner,
+    Slack to nobody.
+    """
+    value = (section or {}).get("owner_user_ids")
+    if not isinstance(value, list):
+        return []
+    return [str(v).strip() for v in value if str(v).strip()]
+
+
+def resolve_telegram_owner_ids(gateway_cfg: dict | None) -> list[int]:
+    """The Telegram owner's user ids: ``gateway.owner_user_ids``, else the positive ``allowed_chat_ids`` (a private
+    chat's id IS its user's id). One answer for approvals, desktop tasks and pairing prompts."""
+    explicit: list[int] = []
+    for v in resolve_owner_user_ids(gateway_cfg):
+        try:
+            explicit.append(int(v))
+        except ValueError:
+            continue  # not a Telegram id: it names nobody, which shrinks the owner set (fail closed)
+    if explicit:
+        return explicit
+    return [chat for chat in resolve_allowed_chat_ids(gateway_cfg) if chat > 0]
+
+
+def resolve_owner_chat_id(gateway_cfg: dict | None) -> int | None:
+    """The Telegram chat for what is the owner's alone and has no chat of its own, or ``None`` to send none:
+    tool-approval prompts for a request raised elsewhere (a worker's, a non-Telegram session's), cron-failure
+    notices with the resend queue, and the heartbeat's background-task notices.
+
+    Always a PRIVATE chat. A Telegram private chat's id is positive and equals the user's own id; a group,
+    supergroup or channel id is negative, and everything sent there is read by its members. In order:
+
+    1. ``gateway.briefing_chat_id``, when it is private. A group there is refused for these, with a WARNING.
+    2. the owner's private chat: the first of :func:`resolve_telegram_owner_ids` (``gateway.owner_user_ids``,
+       else the private chats in ``allowed_chat_ids``).
+    3. nothing — with a WARNING when Telegram has allowed chats but none of them is private and no owner is set.
+       An approval prompt then still waits in Beacon and the API; it is just not posted.
+
+    This replaces ``allowed_chat_ids[0]`` (the approvals chat) and ``briefing_chat_id or allowed_chat_ids[0]``
+    (the notices chat), which took a group whenever one was listed first. A quoted number is accepted
+    (``"456"`` -> 456), matching :func:`_positive_int`; a bool is not a chat id.
+    """
+    cfg = gateway_cfg or {}
+    raw = cfg.get("briefing_chat_id")
+    briefing = 0
+    if not isinstance(raw, bool):
+        try:
+            briefing = int(raw)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            briefing = 0
+    if briefing > 0:
+        return briefing
+    if briefing < 0:
+        _log.warning(
+            "gateway.briefing_chat_id is a group or channel (%d): approval prompts and the daemon's own notices "
+            "go only to a private chat, so it is not used for them. Set briefing_chat_id to your private chat's id.",
+            briefing,
+        )
+    owners = [o for o in resolve_telegram_owner_ids(cfg) if o > 0]
+    if owners:
+        return owners[0]
+    if resolve_allowed_chat_ids(cfg):
+        _log.warning(
+            "No private Telegram chat for approval prompts and the daemon's own notices: gateway.allowed_chat_ids "
+            "lists only groups and gateway.owner_user_ids is empty, so none will be sent. Set "
+            "gateway.briefing_chat_id (or gateway.owner_user_ids) to your private chat's id.",
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------

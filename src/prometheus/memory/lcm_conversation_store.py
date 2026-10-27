@@ -54,7 +54,7 @@ TURN_INDEX_GUARD_SQL = (
 
 _INSERT_COLUMNS = (
     "(id, session_id, turn_index, role, content, content_json, token_count, timestamp,"
-    " compacted, provenance, is_trusted)"
+    " compacted, provenance, is_trusted, author)"
 )
 
 # ON CONFLICT(id) DO NOTHING: re-inserting an id that is already stored is a
@@ -63,7 +63,7 @@ _INSERT_COLUMNS = (
 # guard trigger) still raises and is resolved in :meth:`insert_message`.
 _INSERT_SQL = (
     f"INSERT INTO lcm_messages {_INSERT_COLUMNS}"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)"
     " ON CONFLICT(id) DO NOTHING"
 )
 
@@ -73,7 +73,7 @@ _INSERT_SQL = (
 # upsert after an INSERT ... SELECT.)
 _INSERT_APPENDING_SQL = (
     f"INSERT INTO lcm_messages {_INSERT_COLUMNS}"
-    " SELECT ?, ?, COALESCE(MAX(turn_index), -1) + 1, ?, ?, ?, ?, ?, 0, ?, ?"
+    " SELECT ?, ?, COALESCE(MAX(turn_index), -1) + 1, ?, ?, ?, ?, ?, 0, ?, ?, ?"
     " FROM lcm_messages WHERE session_id = ?"
     " ON CONFLICT(id) DO NOTHING"
 )
@@ -120,7 +120,8 @@ class LCMConversationStore:
                 timestamp   REAL NOT NULL,
                 compacted   INTEGER NOT NULL DEFAULT 0,
                 provenance  TEXT NOT NULL DEFAULT 'user',
-                is_trusted  INTEGER NOT NULL DEFAULT 1
+                is_trusted  INTEGER NOT NULL DEFAULT 1,
+                author      TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_lcm_messages_session
@@ -301,6 +302,11 @@ class LCMConversationStore:
                 "ALTER TABLE lcm_messages ADD COLUMN is_trusted INTEGER NOT NULL DEFAULT 1"
             )
             changed = True
+        if "author" not in cols:
+            # Who wrote a gateway turn (gateway trust, 0.9.17). NULL for every row before it: those predate the
+            # owner/member split and stay as they were.
+            self._conn.execute("ALTER TABLE lcm_messages ADD COLUMN author TEXT")
+            changed = True
         if changed:
             self._conn.commit()
 
@@ -332,6 +338,7 @@ class LCMConversationStore:
                 if "is_trusted" in keys and row["is_trusted"] is not None
                 else True
             ),
+            author=row["author"] if "author" in keys else None,
         )
 
     # ------------------------------------------------------------------
@@ -392,7 +399,7 @@ class LCMConversationStore:
         # silently up-tagged to the trusted default on insert.
         values = (
             msg.role, content, content_json, msg.token_count, ts,
-            msg.provenance, 1 if msg.is_trusted else 0,
+            msg.provenance, 1 if msg.is_trusted else 0, msg.author,
         )
         collision: sqlite3.IntegrityError | None = None
         inserted = False
@@ -766,6 +773,15 @@ class LCMConversationStore:
             (session_id,),
         ).fetchone()
         return float(row["mx"]) if row and row["mx"] is not None else 0.0
+
+    def has_member_turns(self, session_id: str) -> bool:
+        """Has a group member who is not the owner written in *session_id*? (Gateway trust: their words and the
+        replies around them never teach.)"""
+        row = self._conn.execute(
+            "SELECT 1 FROM lcm_messages WHERE session_id = ? AND role = 'user' AND provenance = 'member' LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return row is not None
 
     def messages_after_id(
         self,
@@ -1202,7 +1218,7 @@ class LCMConversationStore:
         """
         rows = self._conn.execute(
             "SELECT rowid AS row_id, id, turn_index, role, content, content_json,"
-            " token_count, timestamp, provenance, is_trusted"
+            " token_count, timestamp, provenance, is_trusted, author"
             " FROM lcm_messages WHERE session_id = ? AND rowid <= ?"
             " ORDER BY rowid",
             (origin_session, int(at_rowid)),
@@ -1225,6 +1241,7 @@ class LCMConversationStore:
                 timestamp=r["timestamp"],
                 provenance=r["provenance"],
                 is_trusted=bool(r["is_trusted"]),
+                author=r["author"],
             ))
 
         created = time.time()

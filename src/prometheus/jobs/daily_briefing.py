@@ -20,8 +20,9 @@ Credential resolution (see PHASE-0 notes on branch fix/cron-briefing-tz):
   * Bot token: ``gateway.telegram_token`` or ``PROMETHEUS_TELEGRAM_TOKEN`` (the
     daemon's source). It is bridged into ``TELEGRAM_BOT_TOKEN`` because
     ``MessageTool`` reads the token only from that env var.
-  * Chat id: ``gateway.briefing_chat_id`` -> ``gateway.allowed_chat_ids[0]`` (the
-    daemon's source) -> ``TELEGRAM_CHAT_ID``. Fails loud if none is configured.
+  * Chat id: ``gateway.briefing_chat_id`` (as written, a group included) -> the
+    owner's private chat (``resolve_telegram_owner_ids``) -> ``TELEGRAM_CHAT_ID``.
+    Fails loud if none is configured.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from prometheus.config.shipped_defaults import resolve_telegram_owner_ids
 from prometheus.engine.messages import ConversationMessage
 from prometheus.providers.base import (
     ApiMessageCompleteEvent,
@@ -110,20 +112,27 @@ def resolve_telegram_token(config: dict[str, Any]) -> str:
 
 
 def resolve_chat_id(config: dict[str, Any]) -> str:
-    """Destination chat id with daemon-compatible precedence. Fails loud if none."""
+    """Destination chat id. Fails loud if none.
+
+    An explicit ``briefing_chat_id`` is used as written, a group included. Unset, the briefing goes to the
+    owner's private chat (``owner_user_ids``, else the private chats in ``allowed_chat_ids``), then to
+    ``TELEGRAM_CHAT_ID``. It never falls back to the first allowed chat, which may be a group.
+    """
     gateway = config.get("gateway", {}) or {}
     explicit = gateway.get("briefing_chat_id")
     if explicit:
         return str(explicit)
-    allowed = gateway.get("allowed_chat_ids") or []
-    if allowed:
-        return str(allowed[0])
+    owners = [o for o in resolve_telegram_owner_ids(gateway) if o > 0]
+    if owners:
+        return str(owners[0])
     env_chat = os.environ.get("TELEGRAM_CHAT_ID", "")
     if env_chat:
         return env_chat
     raise BriefingError(
-        "No Telegram chat target: set gateway.briefing_chat_id, add an id to "
-        "gateway.allowed_chat_ids, or set TELEGRAM_CHAT_ID."
+        "No Telegram chat target: set gateway.briefing_chat_id, add your private "
+        "chat to gateway.allowed_chat_ids (or gateway.owner_user_ids), or set "
+        "TELEGRAM_CHAT_ID. A group in allowed_chat_ids is used only when it is "
+        "named in briefing_chat_id."
     )
 
 
