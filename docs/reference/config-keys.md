@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **449** of
+Every key in `config/prometheus.yaml.default` — **460** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -167,6 +167,17 @@ none either — the key is documented so its absence is visible.
 | `whisper.model` | `base` |
 | `whisper.device` | `auto` |
 | `whisper.language` | `en` |
+| `stt` | *(section)* |
+| `stt.url` | `` |
+| `stt.api_key_env` | `` |
+| `stt.model` | `whisper-1` |
+| `stt.timeout_seconds` | `60` |
+| `tts` | *(section)* |
+| `tts.url` | `` |
+| `tts.api_key_env` | `` |
+| `tts.model` | `tts-1` |
+| `tts.voice` | `alloy` |
+| `tts.timeout_seconds` | `60` |
 | `router` | *(section)* |
 | `router.overrides` | *(section)* |
 | `router.overrides.enabled` | `True` |
