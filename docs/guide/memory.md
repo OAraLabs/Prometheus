@@ -120,4 +120,19 @@ Each concern gets its own database — conversations, facts, telemetry, and audi
 
 The fact store is also **self-healing**: full-text search indexes are kept in sync by SQLite triggers (they can't drift from the tables they index), schema migrations are versioned and applied once per database, and every migration snapshots a `memory.db.backup-<timestamp>` copy before touching anything.
 
+### Purging a conversation
+
+Deleting a conversation only hides it. **Purging** it (`POST /api/sessions/{id}/purge`) removes it from the database file, and removes what the assistant learned from it:
+
+- a fact learned **only** from that conversation is deleted;
+- a fact another conversation **also** supports stays, without the purged conversation as one of its sources;
+- a note you saved with `/note` stays, unless you choose to forget notes too (see below);
+- the wiki pages and insight pages built from the deleted facts are rebuilt or removed.
+
+`GET /api/sessions/{id}/purge-preview` lists all of it before you confirm, including the notes that will stay. A fact counts as supported by another conversation only if a message there actually mentions the thing the fact is about, because a fact records every message in the batch it was extracted from, not just the one that taught it.
+
+**Notes.** A `/note` records no conversation, so a purge can only tie a note to a conversation when the note matched a fact the assistant had already learned there and was merged into it. Those notes are kept by default, listed in the preview as `notes_kept`, and lose the purged conversation as a source (a note keeps `manual` as its source, so it never ends up with none). To forget them as well, send `"forget_notes": true` with the purge (`?forget_notes=true` on the preview shows the result first). Forgetting notes treats them like any other fact: one that another conversation also supports still stays. A note that was never merged into such a fact is never touched either way.
+
+A purge does **not** reach notes the assistant wrote into `MEMORY.md` or `USER.md` itself, skills drafted from the conversation, telemetry rows, forks of the conversation (each is purged separately), or answers filed under `wiki/queries/` (those are listed for you to review). Automatic cleanup of old forgotten conversations never removes facts: what was learned outlives the chat, and only your explicit purge retracts it.
+
 `oara --reset-data` deletes all of it — `telemetry.db`, `memory.db`, `lcm.db`, the audit log, `eval_results/`, `wiki/`, `sentinel/`, and auto-generated skills (`skills/auto/`) — after listing exactly what it found and asking for confirmation. Your config files are preserved. (`--reset-telemetry` wipes only the telemetry database.)

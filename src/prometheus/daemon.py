@@ -3126,6 +3126,10 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                     on_tools_changed=_on_tools_changed,
                     # Item 4: the checkpoint routes read/restore through the same store.
                     checkpoint_store=checkpoint_store,
+                    # A session purge retracts what was learned from the chat. Unbound
+                    # when the extractor block failed to come up, and the route says so.
+                    memory_store=memory_store if "memory_store" in dir() else None,
+                    wiki_compiler=wiki_compiler if "wiki_compiler" in dir() else None,
                     # The window the server actually reported, and the model it
                     # reported it for. Same two values the compactor and the
                     # Telegram /context command are built from, so every surface
