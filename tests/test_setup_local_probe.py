@@ -358,8 +358,20 @@ class TestMinWindow:
         round0 = m.get("round0") or {}
         assert set(round0) >= {"llama_cpp", "ollama"} and all(isinstance(v, int) and v > 0 for v in round0.values())
         need = max(round0.values()) + 4096 + 4096
-        want = -(-need // 4096) * 4096 + 4096  # up to the next 4,096, plus 4,096 of headroom
-        assert local_probe.MIN_WINDOW == want
+        computed = -(-need // 4096) * 4096 + 4096  # up to the next 4,096, plus 4,096 of headroom
+        assert local_probe.MIN_WINDOW == computed + 4096, "the computed floor plus the one-step safety margin"
+
+    def test_the_safety_margin_is_one_named_step_on_top_of_the_computed_floor(self):
+        # Will's rule (2026-10-27): the computed floor sat 14 tokens under a step, and small windows already feel
+        # tight in practice, so one whole step is added on top. Named, so it can't vanish in a refactor.
+        assert local_probe.SAFETY_MARGIN == local_probe.STEP == 4096
+        round0 = max(local_probe.MIN_WINDOW_MEASURED["round0"].values())
+        assert local_probe.MIN_WINDOW == local_probe.min_window_for(round0) + local_probe.SAFETY_MARGIN
+
+    def test_todays_measurement_keeps_the_floor_at_24576(self):
+        # 2026-10-27: round 0 8,178 (llama.cpp) computes 20,480; the margin makes it 24,576.
+        assert local_probe.min_window_for(8178) == 20480
+        assert local_probe.MIN_WINDOW == 24576
 
     @pytest.mark.parametrize("round0,floor", [(8253, 24576), (8192, 20480), (8193, 24576), (1, 16384)])
     def test_the_rule(self, round0, floor):

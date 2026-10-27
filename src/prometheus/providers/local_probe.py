@@ -78,11 +78,17 @@ APP_NAMES = {
 #: OpenAI-shaped client; the old wizard called every typed address llama_cpp).
 OPENAI_FAMILY = frozenset({"llama_cpp", "lm_studio", "vllm", "openai_compatible"})
 
-#: The smallest window Prometheus can hold a conversation in: round 0 of a fresh install's first turn, plus the local
-#: reply cap (4,096), plus 4,096 of conversation, rounded up to the next multiple of 4,096, plus 4,096 of headroom
-#: (``min_window_for``). Set only from MIN_WINDOW_MEASURED, which records how round 0 was measured
-#: (``scripts/local_gate/measure_floor.py``: real setup mode, then one first message, through the logging proxy).
+#: The smallest window Prometheus can hold a conversation in (``MIN_WINDOW``): the computed floor for round 0 of a
+#: fresh install's first turn (``min_window_for``: round 0, plus the local reply cap of 4,096, plus 4,096 of
+#: conversation, rounded up to the next multiple of 4,096, plus 4,096 of headroom), plus ``SAFETY_MARGIN``. Set only
+#: from MIN_WINDOW_MEASURED, which records how round 0 was measured (``scripts/local_gate/measure_floor.py``: real
+#: setup mode, then one first message, through the logging proxy).
 STEP = 4096
+
+#: One whole step on top of the computed floor (Will's rule, 2026-10-27). The 2026-10-27 measurement computed a floor
+#: of 20,480 that sat 14 tokens under a step, so a slightly longer first prompt would have raised it, and small windows
+#: already feel tight in practice. The margin keeps the floor at 24,576 for that measurement.
+SAFETY_MARGIN = STEP
 
 
 def min_window_for(round0: int) -> int:
@@ -103,7 +109,7 @@ MIN_WINDOW_MEASURED: dict[str, Any] = {
         "ollama": 6417,     # qwen2.5:7b-instruct (Q4_K_M) on Ollama 0.23.0, 51 tools offered
     },
 }
-MIN_WINDOW: int = min_window_for(max(MIN_WINDOW_MEASURED["round0"].values()))
+MIN_WINDOW: int = min_window_for(max(MIN_WINDOW_MEASURED["round0"].values())) + SAFETY_MARGIN
 
 
 @dataclass(frozen=True)

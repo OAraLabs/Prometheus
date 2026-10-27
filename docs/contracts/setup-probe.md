@@ -56,8 +56,8 @@ Ollama is budgeted at its trained length because Prometheus asks it to load at t
                  "usable": false, "problem": "short_context"}]}
   ],
   "reason": "short_context",
-  "detail": "LM Studio at http://studio-mac.local:1234: 0 of 1 usable (gemma-3-12b with a window under 20,480; Prometheus needs 20,480)",
-  "min_window": 20480
+  "detail": "LM Studio at http://studio-mac.local:1234: 0 of 1 usable (gemma-3-12b with a window under 24,576; Prometheus needs 24,576)",
+  "min_window": 24576
 }
 ```
 
@@ -101,7 +101,6 @@ A client must read a `reason` it does not know as "could not check", never as fo
 
 ## `min_window`
 
-`local_probe.MIN_WINDOW` is round 0 of a fresh install's first turn, plus the local reply cap (4,096), plus 4,096 of
-conversation, rounded up to the next multiple of 4,096, plus 4,096 of headroom (`min_window_for`). It is set only from
-`MIN_WINDOW_MEASURED`, which records the commit, the method and round 0 per server (`scripts/local_gate/measure_floor.py`).
-Measured 2026-10-27 on this branch over main `1e36960`, through a scratch instance: round 0 is 8,178 tokens on llama.cpp (a 27B, 51 tools offered) and 6,417 on Ollama (`qwen2.5:7b-instruct`, 51 tools), so the need is 16,370 and the floor is **20,480**. That is 14 tokens under the step: a round 0 that grows past 8,192 raises the floor to 24,576, so measure again after a change that adds to the first prompt (a tool, a longer system prompt).
+`local_probe.MIN_WINDOW` is the computed floor plus a safety margin. The computed floor (`min_window_for`) is round 0 of a fresh install's first turn, plus the local reply cap (4,096), plus 4,096 of conversation, rounded up to the next multiple of 4,096, plus 4,096 of headroom. **The safety margin (`SAFETY_MARGIN`) is one more step of 4,096 on top**, because the computed floor can sit just under a step (the 2026-10-27 measurement was 14 tokens under one) and small windows already feel tight in practice. It is set only from `MIN_WINDOW_MEASURED`, which records the commit, the method and round 0 per server (`scripts/local_gate/measure_floor.py`).
+
+Measured 2026-10-27 on this branch over main `1e36960`, through a scratch instance: round 0 is 8,178 tokens on llama.cpp (a 27B, 51 tools offered) and 6,417 on Ollama (`qwen2.5:7b-instruct`, 51 tools). The need is 16,370, the computed floor 20,480, and with the margin the floor is **24,576**. Measure again after a change that adds to the first prompt (a tool, a longer system prompt).
