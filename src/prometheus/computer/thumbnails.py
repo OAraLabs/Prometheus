@@ -204,7 +204,8 @@ def decide_capture(
        window we did not prove is ours.
     2. ``incomplete_walk`` — degraded or truncated, so a password field cannot
        be ruled out.
-    3. ``password_field`` — anywhere in the walk, tokenless nodes included.
+    3. ``password_field`` — anywhere in the walk, tokenless nodes included,
+       or an unnamed GTK4 text box, which may be one.
     4. ``frame_invalid`` — the driver says the frame is not trustworthy.
     5. ``capture_failed`` — no usable inline image.
     6. ``too_large`` — over the byte floor.
@@ -231,7 +232,10 @@ def decide_capture(
         return "window_changed", None
     if not walk_is_positive_evidence(capture):
         return "incomplete_walk", None
-    if walk_hides_a_password(getattr(capture, "roles", None)):
+    if (walk_hides_a_password(getattr(capture, "roles", None))
+            or int(getattr(capture, "unnamed_text_fields", 0) or 0) > 0):
+        # An unnamed GTK4 "text box" may be a password entry: GTK4 reports
+        # both alike, so any doubt skips the picture.
         return "password_field", None
     if not frame_valid(capture):
         return "frame_invalid", None

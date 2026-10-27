@@ -170,6 +170,11 @@ class WindowCapture:
     #: check reads the whole walk: a password field is exactly the kind of node
     #: a filter drops from the clickable set.
     roles: tuple[str, ...] = ()
+    #: Text fields in the walk that carry no name. GTK4 reports a password
+    #: entry as an unnamed "text box", exactly like an empty entry, so one of
+    #: these may be a password field the roles cannot show (computer-use rig,
+    #: 2026-10-23): the picture is skipped.
+    unnamed_text_fields: int = 0
     degraded: bool = False
     truncated: bool = False
     #: The driver's own verdict on whether the frame is trustworthy. None
