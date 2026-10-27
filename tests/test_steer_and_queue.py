@@ -368,6 +368,10 @@ class TestQueueFiresAsNextTurn:
         session.enqueue_prompt("follow-up task")
 
         adapter = TelegramAdapter.__new__(TelegramAdapter)
+        # The sender (user 1) is the owner: whose words a turn carries is decided from the config (gateway trust).
+        from prometheus.gateway.config import PlatformConfig
+        adapter.config = PlatformConfig(platform=Platform.TELEGRAM, token="t", allowed_chat_ids=[chat_id],
+                                        owner_user_ids=["1"])
         adapter.session_manager = sm
         adapter.agent_loop = _StubAgentLoop()
         adapter.system_prompt = "sys"

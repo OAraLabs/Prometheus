@@ -318,13 +318,33 @@ def test_prune_removes_dev_weight_and_keeps_the_daemon(app, tmp_path):
             "site-packages/prometheus/__pycache__"]
     for rel in gone:
         assert not (lib / rel).exists(), rel
-    for rel in ("include", "share", "lib/tcl9.0", "lib/tk9.0", "bin/idle3", "bin/pip3"):
+    for rel in ("include", "share", "lib/tcl9.0", "lib/tk9.0", "bin/idle3", "bin/pip3", "lib/libpython3.12.dylib"):
         assert not (root / rel).exists(), rel
     for rel in ("site-packages/prometheus/web/server.py", "lib-dynload/_sqlite3.cpython-312-darwin.so",
                 "os.py", "site-packages/pymupdf/__init__.py"):
         assert (lib / rel).exists(), f"pruning must keep {rel}"
-    for rel in ("bin/python3.12", "lib/libpython3.12.dylib"):
-        assert (root / rel).exists(), f"pruning must keep {rel}"
+    assert (root / "bin" / "python3.12").exists(), "pruning must keep the interpreter"
+
+
+def test_a_pruned_library_that_something_still_links_refuses_the_build(app, tmp_path):
+    # The 20260325 interpreter was a stub that loaded libpython through @rpath; the 20261021 one links it in
+    # statically, which is what lets pruning drop the 18 MB dylib. A release that goes back to the stub must
+    # fail the build, not ship an interpreter that cannot start.
+    python = tmp_path / "python3.12"
+    stub = (f"{python}:\n"
+            "\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0)\n"
+            "\t@rpath/libpython3.12.dylib (compatibility version 3.12.0, current version 3.12.0)\n"
+            "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)\n")
+    with pytest.raises(app.BuildError, match="links libpython3.12.dylib"):
+        app.require_not_linked([python], app.LIBPYTHON, runner=_Runner([(("otool", "-L", str(python)), 0, stub)]))
+    static = (f"{python}:\n"
+              "\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0)\n"
+              "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)\n"
+              "\t/usr/lib/libedit.3.dylib (compatibility version 2.0.0, current version 3.0.0)\n")
+    app.require_not_linked([python], app.LIBPYTHON, runner=_Runner([(("otool", "-L", str(python)), 0, static)]))
+    # otool -L's first line is the file's own path; a library named like the pruned one is not a match by accident.
+    own = tmp_path / "libpython3.12.dylib"
+    app.require_not_linked([own], app.LIBPYTHON, runner=_Runner([(("otool", "-L", str(own)), 0, f"{own}:\n")]))
 
 
 # ── signing ──────────────────────────────────────────────────────────────────
@@ -357,18 +377,19 @@ def test_sign_plan_signs_all_code_then_the_app_last_once_each(app, tmp_path):
     py = bundle / "Contents" / "Resources" / "python"
     (py / "bin").mkdir(parents=True)
     (py / "bin" / "python3.12").write_bytes(MACHO_ARM64)
-    (py / "lib").mkdir()
-    (py / "lib" / "libpython3.12.dylib").write_bytes(MACHO_ARM64)
     sp = py / "lib" / "python3.12" / "site-packages" / "lxml"
     sp.mkdir(parents=True)
     (sp / "etree.cpython-312-darwin.so").write_bytes(MACHO_ARM64)
+    pil = py / "lib" / "python3.12" / "site-packages" / "PIL" / ".dylibs"
+    pil.mkdir(parents=True)
+    (pil / "libjpeg.62.4.0.dylib").write_bytes(MACHO_ARM64)
 
     plan = app.sign_plan(bundle)
     assert plan[-1] == bundle, "the enclosing bundle is signed after everything inside it"
     assert len(plan) == len(set(plan)), "nothing is signed twice"
     names = {p.name for p in plan[:-1]}
-    assert names == {"Prometheus", "python3.12", "libpython3.12.dylib", "etree.cpython-312-darwin.so"}
-    assert plan.index(py / "lib" / "libpython3.12.dylib") < len(plan) - 1
+    assert names == {"Prometheus", "python3.12", "libjpeg.62.4.0.dylib", "etree.cpython-312-darwin.so"}
+    assert plan.index(pil / "libjpeg.62.4.0.dylib") < len(plan) - 1
 
 
 def test_the_interpreter_gets_its_own_identifier(app):

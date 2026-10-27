@@ -524,6 +524,10 @@ def get_registry() -> BackendRegistry | None:
     return _REGISTRY
 
 
+#: Local engines by the name a person knows them by, for a row's label ("llama.cpp · Qwen3.8-27B").
+ENGINE_NAMES = {"llama_cpp": "llama.cpp", "ollama": "Ollama", "lm_studio": "LM Studio", "vllm": "vLLM"}
+
+
 def _short_model(identity: str | None) -> str | None:
     """`/home/x/models/Qwen3.8-27B-UD-Q4_K_XL.gguf` → `Qwen3.8-27B-UD-Q4_K_XL`."""
     if not identity:

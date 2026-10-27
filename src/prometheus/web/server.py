@@ -1138,6 +1138,30 @@ def create_app(
             # render as "nothing is wrong".
             return {"error": f"floor state unavailable: {exc}", "dark": None}
 
+    def _status_warnings(security_state: dict) -> list[dict[str, str]]:
+        """The ``warnings`` list of /api/status. Today one finding: the API token where a floored shell can read
+        it (config/api_token.py). Judged on the read-floor state this request already probed, so it costs nothing
+        and says exactly what ``security`` says. Never names the token or a token file's path."""
+        from prometheus.config.api_token import (
+            TOKEN_LOCATION_WARNING_CODE,
+            token_location_fix,
+            token_location_warning,
+        )
+        from prometheus.permissions import confinement as _confinement
+
+        cfg = app.state.config if isinstance(app.state.config, dict) else {}
+        read_state = ((security_state or {}).get("bash_read_floor") or {}).get("state")
+        items: list[dict[str, str]] = []
+        try:
+            message = token_location_warning(cfg, read_floor_active=read_state == _confinement.STATE_ACTIVE)
+        except Exception as exc:  # noqa: BLE001 — status must still render
+            logger.warning("token-location check failed: %s", exc)
+            message = None
+        if message:
+            items.append({"code": TOKEN_LOCATION_WARNING_CODE, "level": "warning", "message": message,
+                          "fix": token_location_fix()})
+        return items
+
     async def _computer_state() -> dict:
         """The ``computer`` block, probed off the loop like the bash floors.
 
@@ -1237,9 +1261,14 @@ def create_app(
         _live_state = (
             _state_ref.get("state") if isinstance(_state_ref, dict) else None
         ) or getattr(app.state, "agent_state", "idle")
+        security_state = await _floor_state()
         return {
             "state": _live_state,
             "model": app.state.current_model,
+            # WHAT NEEDS THE OPERATOR, as a list a client can show as-is: {code, level, message, fix}. Each item
+            # comes from a probe or a check, never from config read back. The bash floors' own `dark` stays in
+            # `security` below; this is for findings with no other home.
+            "warnings": _status_warnings(security_state),
             # Full config_pins detail: bearer-gated, unlike /health's counts.
             "config_pins": _config_pins_detail(),
             # WS delivery counters. Monotonic since boot. One line an
@@ -1302,7 +1331,7 @@ def create_app(
             #
             # `dark` is the field to alert on: asked for, not happening, and
             # bash running anyway.
-            "security": await _floor_state(),
+            "security": security_state,
             # COMPUTER USE — the substrate, probed, both halves separately.
             # Same law as `security` above: a key saying a capability is on is
             # not evidence it is on. Stronger here, because the two halves
@@ -1844,9 +1873,67 @@ def create_app(
             store.tombstone_session(session_id)
         return {"ok": True}
 
+    _NO_MEMORY_STORE = (
+        "no memory store is running, so facts learned from this chat could not be listed or retracted"
+    )
+
+    def _derived_handles():
+        """The memory store and wiki compiler the daemon built, or ``(None, None)`` when memory is off."""
+        memory_store = getattr(app.state, "memory_store", None)
+        if memory_store is None:
+            return None, None
+        wiki_compiler = getattr(app.state, "wiki_compiler", None)
+        if wiki_compiler is None:
+            from prometheus.memory.wiki_compiler import WikiCompiler
+
+            wiki_compiler = WikiCompiler(store=memory_store)
+        return memory_store, wiki_compiler
+
+    @app.get("/api/sessions/{session_id}/purge-preview")
+    async def purge_preview(session_id: str, forget_notes: bool = False):
+        """What ``POST /api/sessions/{id}/purge`` would remove, without removing anything.
+
+        A purge is irreversible, so a client shows this and asks again before confirming. Besides the
+        chat itself it lists what the assistant LEARNED from it: facts learned only from this chat
+        (they go), facts a surviving chat also supports (they stay, minus this chat as a source), the
+        wiki and insight pages that follow, and filed answers that mention a removed entity and are
+        left for the owner to review. ``/note`` facts tied to the chat stay and are listed as
+        ``notes_kept``; ``?forget_notes=true`` previews the purge that also forgets them.
+        ``not_covered`` says what a purge does not reach.
+
+        Read-only by construction: planning writes no row and no file.
+        """
+        from prometheus.memory.purge_derived import NOT_COVERED, plan_retraction
+
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        if store is None:
+            return JSONResponse(status_code=503, content={
+                "error": "no LCM store; nothing to preview", "session_id": session_id})
+        memory_store, wiki_compiler = _derived_handles()
+        if memory_store is None:
+            derived: dict[str, Any] = {"available": False, "reason": _NO_MEMORY_STORE}
+        else:
+            plan = await asyncio.to_thread(
+                plan_retraction, session_id, conversation_store=store,
+                memory_store=memory_store, wiki_root=wiki_compiler.wiki_root,
+                forget_notes=forget_notes)
+            derived = plan.to_preview()
+        return {
+            "session_id": session_id,
+            "messages": store.count_all(session_id),
+            "branches": [f["session_id"] for f in store.list_session_forks(session_id)],
+            "derived": derived,
+            "not_covered": list(NOT_COVERED),
+            "reversible": False,
+        }
+
     @app.post("/api/sessions/{session_id}/purge")
     async def purge_session(session_id: str, request: Request):
         """IRREVERSIBLY delete a session's content (#353). Body: {"confirm": "<session_id>"}.
+
+        Optional ``"forget_notes": true`` also forgets the ``/note`` facts tied to the chat (default
+        false: notes stay). Anything but a boolean there is a 400, and nothing is purged.
 
         DELETE /api/sessions/{id} is a tombstone: it hides a session and leaves
         the rows. That is the right answer to "clear my list" and the wrong one
@@ -1860,6 +1947,12 @@ def create_app(
         Forks are NOT followed. A branch holds its own copies, so it survives —
         reported as `branches` so the caller can purge those too rather than
         discover them later.
+
+        What the assistant LEARNED from the chat goes with it: a fact learned only
+        from this chat is deleted, a fact a surviving chat also supports stays
+        without this chat as a source, and the wiki and insight pages follow
+        (memory/purge_derived.py). That runs first, so a failure leaves the chat
+        untouched; ``GET .../purge-preview`` shows it before the owner confirms.
         """
         try:
             body = await request.json()
@@ -1870,6 +1963,12 @@ def create_app(
                 "error": "purge requires {\"confirm\": \"<session_id>\"} matching the path",
                 "session_id": session_id,
             })
+        forget_notes = body.get("forget_notes", False)
+        if not isinstance(forget_notes, bool):
+            return JSONResponse(status_code=400, content={
+                "error": "forget_notes must be true or false; nothing was purged",
+                "session_id": session_id,
+            })
         lcm = getattr(app.state, "lcm_engine", None)
         store = lcm.conversation_store if lcm is not None else None
         if store is None:
@@ -1877,12 +1976,54 @@ def create_app(
             # otherwise is the failure #349 was about.
             return JSONResponse(status_code=503, content={
                 "error": "no LCM store; nothing was purged", "session_id": session_id})
+        from prometheus.memory.purge_derived import (
+            NOT_COVERED,
+            retract_before_purge,
+            sweep_after_purge,
+        )
+
         branches = [f["session_id"] for f in store.list_session_forks(session_id)]
+
+        # What the assistant LEARNED from this chat goes first. The chat's message ids are how a fact
+        # names its sources, and they cannot be mapped back to a chat once the rows are deleted. A
+        # failure here stops the purge before it starts: the chat is untouched and a retry is safe.
+        memory_store, wiki_compiler = _derived_handles()
+        plan = None
+        derived: dict[str, Any]
+        if memory_store is None:
+            logger.warning(
+                "purge %s: %s; facts learned from it were NOT retracted", session_id, _NO_MEMORY_STORE)
+            derived = {"available": False, "reason": _NO_MEMORY_STORE}
+        else:
+            try:
+                plan, applied = await asyncio.to_thread(
+                    retract_before_purge, session_id, conversation_store=store,
+                    memory_store=memory_store, wiki_compiler=wiki_compiler,
+                    forget_notes=forget_notes)
+            except Exception:
+                logger.exception(
+                    "purge %s: retracting what was learned from it failed; nothing was purged", session_id)
+                return JSONResponse(status_code=500, content={
+                    "error": "what was learned from this chat could not be retracted; nothing was purged",
+                    "session_id": session_id})
+            derived = {"available": True, **applied}
+
         counts = store.purge_session(session_id)
+        if plan is not None:
+            # A fact the extractor wrote from these messages while the purge was running.
+            try:
+                late = await asyncio.to_thread(
+                    sweep_after_purge, plan, conversation_store=store,
+                    memory_store=memory_store, wiki_compiler=wiki_compiler)
+                derived["late_sweep"] = {"ok": True, "facts_removed": late["facts_removed"]}
+            except Exception:
+                logger.exception("purge %s: the final sweep for late-written facts failed", session_id)
+                derived["late_sweep"] = {
+                    "ok": False, "error": "the final sweep for facts written during the purge failed"}
         if session_mgr:
             session_mgr.remove(session_id)
-        return {"ok": True, "session_id": session_id, "purged": counts,
-                "branches": branches, "reversible": False}
+        return {"ok": True, "session_id": session_id, "purged": counts, "derived": derived,
+                "not_covered": list(NOT_COVERED), "branches": branches, "reversible": False}
 
     @app.put("/api/sessions/{session_id}/title")
     async def set_session_title(session_id: str, request: Request):
@@ -5356,11 +5497,25 @@ def create_app(
         # provider would actually use, so UIs can say how it's connected.
         from prometheus.providers.credentials import credential_status
 
+        from prometheus.providers.backends import ENGINE_NAMES, _short_model
+
         primary_model = config.get("model", {}).get("model", "unknown")
         primary_provider = config.get("model", {}).get("provider", "local")
+        # The primary as the registry last saw it (list_models re-probes it first when stale). Reachability, the
+        # model it serves and its path come from that probe, as for the backend rows; a primary the registry does not
+        # probe (no registry; LM Studio, vLLM or a cloud primary) has no health to go by and stays available.
+        reg = _registry()
+        st = reg.status(_LOCAL_MODEL_KEY) if reg is not None else None
+        probed = st if st is not None and st.probed else None
+        served = (probed.model_path or probed.model) if probed is not None else None
+        engine = ENGINE_NAMES.get(primary_provider) or _PRESET_LABELS.get(primary_provider) or primary_provider
         catalog = [{
-            "key": _LOCAL_MODEL_KEY, "label": "Local", "provider": primary_provider,
-            "model": primary_model, "is_default": True, "available": True,
+            "key": _LOCAL_MODEL_KEY,
+            "label": f"{engine} · {_short_model(served or primary_model) or '?'}",
+            "detail": probed.model_path if probed is not None else None,
+            "provider": primary_provider,
+            "model": primary_model, "is_default": True,
+            "available": bool(probed.ok) if probed is not None else True,
             "auth": None,
             # DETECTED, never asserted. This flag gates the image-block path, and
             # the value is the boot provider's own `supports_vision` — the mmproj
@@ -5751,6 +5906,11 @@ def create_app(
     async def list_models():
         if getattr(app.state, "model_router", None) is None:
             return JSONResponse(status_code=503, content={"error": "model router unavailable"})
+        # The Local row reports the primary's reachability: ask it again first when the last answer is past the TTL
+        # (bounded by the probe timeout; concurrent requests share one probe).
+        reg = _registry()
+        if reg is not None and reg.get(_LOCAL_MODEL_KEY) is not None and reg.is_stale(_LOCAL_MODEL_KEY):
+            await reg.probe(_LOCAL_MODEL_KEY)
         return {
             "models": _model_catalog(),
             "default_key": _LOCAL_MODEL_KEY,
@@ -6849,4 +7009,14 @@ async def start_web(app: FastAPI, host: str = DEFAULT_BIND, port: int = 8005,
         app.state.http_server = server
     else:
         app.state.https_server = server
-    await server.serve()
+    try:
+        await server.serve()
+    except asyncio.CancelledError:
+        # The daemon stops the web bridge by cancelling its task. Cancelled mid-serve, uvicorn never runs its own
+        # shutdown, so lifespan.shutdown is never sent: the app's shutdown handlers would run only when asyncio.run
+        # cancels the orphaned lifespan task at teardown, which uvicorn logs as a CancelledError traceback at ERROR.
+        # Shut it down properly here (bounded by timeout_graceful_shutdown), then let the cancel go on.
+        if server.started:
+            server.should_exit = True
+            await server.shutdown()
+        raise

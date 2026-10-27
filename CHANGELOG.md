@@ -2,6 +2,143 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## Unreleased
+
+- Tool descriptions no longer name a person: the brain-vault tool now says "the owner's second brain". Hosted models are sent paths under your home folder as `~/…` instead of absolute paths, which included your account name. Local models are unchanged.
+- Doctor: the Config check looks for `prometheus.yaml` where the daemon does (`--config`, then the checkout's `config/prometheus.yaml`, then `$PROMETHEUS_CONFIG_DIR`, default `~/.prometheus`) and names the file it found. Before, it looked only in the checkout, so a daemon running on `~/.prometheus/prometheus.yaml` logged "config/prometheus.yaml not found" at every start, and so did the chat `/doctor` command.
+- Security: an agent profile's tool list now limits what a conversation can run, not only what it is shown. Before, a model that named a tool its profile left out (`research` has no file writes; `exclude_tools: [bash]` drops bash) ran it, under the same approvals and floors as the `full` profile. Now such a call is refused with an error naming the profile. A subagent gets only the tools both its type and the conversation's profile allow, `task_create` runs a shell command (`local_bash`, `poll`) only when the profile includes `bash`, and a profile that leaves any tool out starts no worker process (`task_create` `local_agent`, `sessions_spawn`); its subagents keep the limits instead. Deferred tools the profile allows, and tools left out only by `max_tool_schemas`, still run.
+- Hosted models no longer receive this machine's hardware, services and network (the anatomy section, which could include tailnet peer names) in every prompt. They get a pointer to the `anatomy` tool and call it when a task needs the layout. Local models are unchanged. `anatomy.include_in_hosted_prompt: true` restores the old behaviour.
+- Computer use: no thumbnail is taken of a window that may show a GTK4 password field. GTK4 reports a password entry as an unnamed text field, which the password check did not catch, so a picture of a GTK4 sign-in window was sent to Beacon. Any unnamed text field now skips the picture.
+- Computer use: a text field is no longer described by the text it holds. GTK4 names a text view by its contents, so a document's text, including text typed in an earlier task, reached the desktop prompt, the action log and every Beacon. Such fields are now named by their kind alone.
+- Computer use: an app whose process name Linux cuts at 15 characters (GNOME Terminal is "gnome-terminal-") can be used after you pick it. Before, its window reported "Gnome-terminal" and every task in it was refused.
+- Computer use: a GTK4 menu button ("Main menu", "Open", "View") can be clicked by name. GTK4 shows each one twice, a wrapper and the toggle inside it, so the two matching rows tied and the task did nothing. Only the toggle that acts is offered now.
+- Computer use: when an app pick ends without being turned off (the daemon restarted, or the pick expired after 8 hours), the action log now says so. Before, a reconnecting Beacon kept showing the app as picked, its picker never opened, and "Change / clear" changed nothing.
+- Daily briefing: with `gateway.briefing_chat_id` unset, the briefing goes to your private chat (`gateway.owner_user_ids`, else the private chats in `gateway.allowed_chat_ids`), then to `TELEGRAM_CHAT_ID`, and otherwise nowhere, with an error. Before, it went to the first allowed chat, which could be a group. A `briefing_chat_id` you set, a group included, is used as before.
+
+## 0.9.17 (2026-10-25)
+
+0.9.17 fixes two security issues: chat gateways let anyone in an allowed group approve tool calls and change what the agent remembers, and a shell command the model ran could rewrite the files Prometheus trusts as its own. It pins the Mac app's bundled Python at 3.12.15 (OpenSSL 3.5.9), and updates opentelemetry, filelock and setuptools for published advisories. It also:
+- warns when the web API token sits where the agent's shell can read it;
+- asks before a file tool writes a project instruction file, and refuses invisible text in skills and memory;
+- keeps the memory extractor from skipping messages when its model call fails;
+- makes computer use work with SENTINEL off, and type into GTK4 text fields;
+- keeps genuine user requests in self-improvement evidence (#788, by @sepehrtaji-dev).
+
+### Security
+
+- **Only a chat gateway's owner approves and teaches ([GHSA-c3c2-8vrj-x346](https://github.com/OAraLabs/Prometheus/security/advisories/GHSA-c3c2-8vrj-x346)).**
+  - **Before:** the Telegram, Slack and Discord gateways went by which chat a message came from, not who sent it. In an allowed group chat, Slack channel or Discord server, any member could approve or deny the agent's tool calls (including `/approve always` and `/gate off`), have their message run as if the owner had typed it, and add to memory, skills and self-improvement data. Approval prompts and the daemon's own notices that had no chat of their own went to the first allowed chat, so a group listed first saw them.
+  - **Now:** each gateway has an owner. Only the owner approves tool calls or uses the owner-only commands. Members can still chat: their messages are recorded as theirs, any tool their message asks for waits for the owner, and nothing they say goes into memory, skills, self-improvement or training data. Approval prompts, cron-failure notices and background-task notices go only to the owner's private chat.
+  - **Not affected:** Telegram with only your own private chat allowed, and Beacon and the REST and WebSocket API, which authenticate devices rather than chats.
+- **A model's shell can't rewrite Prometheus's trusted state ([GHSA-wq93-7fvg-53pj](https://github.com/OAraLabs/Prometheus/security/advisories/GHSA-wq93-7fvg-53pj)).**
+  - **Before:** none of the shell's floors (the macOS sandbox profile, the Linux AppArmor profile, the permission gate's always-denied list) covered the device registry, the config file, the identity files, `MEMORY.md` and `USER.md`, skills, or the scheduled-jobs files. A shell command the model was talked into running could create a trusted device token, rewrite the config, plant lasting instructions, or plant a cron job that runs as the owner. Mainly macOS, where the shell has no write floor.
+  - **Now:** these files are under the same floors as your keys. Writing, appending, replacing, deleting, linking, planting a side file and renaming their folders are refused; reading still works, and so do Prometheus's own writers. The file tools refuse the device registry, the config file and the scheduled-jobs files, and ask before writing the identity files, memory or skills. The daemon tests the floor at startup and reports a stale AppArmor profile at ERROR.
+- **The Mac app's build pins CPython 3.12.15 and OpenSSL 3.5.9 (#843).** The 0.9.16 app was rebuilt with them by hand; from 0.9.17 every build gets them. They fix CVE-2026-19445 and CVE-2026-19553 (ssl), CVE-2026-82049, CVE-2026-19672 and CVE-2026-87910 (tarfile), CVE-2026-15310 (zipfile), CVE-2026-15806 (urllib) and CVE-2026-17084 (StringPrep). The unused libpython dylib is no longer shipped.
+- **opentelemetry 1.45.1 and arize-phoenix-otel 0.17.2 (#844)** fix CVE-2026-114603, in the `evals` extra only. **filelock 4.2.4 and setuptools 84.2.1 (#857)** fix CVE-2026-112940, CVE-2026-112913 and CVE-2026-112907 (filelock) and GHSA-xmj3-9gf7-h52w (setuptools). Only `uv.lock` changes.
+
+### The API token's location is checked
+
+- **What changed.** At startup, in `GET /api/status` and in `oara doctor`, Prometheus says so loudly when the web API token sits where the agent's shell can read it even with the bash read floor on:
+  - `web.api_token` is set in `prometheus.yaml`;
+  - `PROMETHEUS_API_TOKEN_FILE` names a file outside `~/.config/<name>/*env`;
+  - the env file holding the token was moved out of that pattern by `PROMETHEUS_ENV_FILE` or `XDG_CONFIG_HOME`.
+- **What to do.** Move the token to `~/.config/prometheus/env` as `PROMETHEUS_API_TOKEN=<token>` (`oara token show` prints it), then remove the setting that held it, and restart.
+- Without an active read floor (it is off, or the daemon runs in a container) every location is readable alike, so nothing is said. The warning never names the token or the token file's path.
+
+### Hardening shipped with GHSA-wq93-7fvg-53pj
+
+- **Project instruction files ask first.** A file tool's write to a project instruction file asks the owner, even inside the workspace, with approvals off or under a saved grant. These are the files the prompt assembler loads from the session's workspace upward (`PROMETHEUS.md`, `AGENTS.md` and the other convention files the README lists) and `.prometheus/rules/*.md`.
+- **Skills and memory refuse invisible text.** Characters that hide text from a person reading it are refused: tag characters, bidi embeddings, overrides and isolates, the zero-width space, the word joiner, invisible operators, a byte-order mark mid-text, and the supplementary variation selectors. The zero-width joiner and non-joiner, LRM and RLM, the emoji variation selector and a leading byte-order mark stay allowed.
+
+### Memory extraction (#841, #842)
+
+- **A failed model call no longer loses messages (#842, from #832 by @sepehrtaji-dev).** An outage, rate limit or timeout used to look the same as "nothing to remember", so the extractor's cursor moved past the batch. Now the cursor stays where it was and the next pass retries the batch.
+- **JSON-shaped output with no facts is logged (#841, from #807 by @lijinhongucl-pixel).** A reply that looks like JSON but yields no facts logs a WARNING. Prose with no brace, `[]` and `{"facts": []}` stay quiet.
+
+### Self-improvement keeps genuine user requests (#788, by @sepehrtaji-dev)
+
+- GEPA's request evidence no longer drops a message whose `provenance` is `user` just because its trust flag is false. Untrusted messages from other sources are still withheld.
+
+### Computer use (#845, #846)
+
+- **The desktop cockpit works with SENTINEL off (#845),** the shipped default. Before, Beacon never saw its own app pick, any step, the end of a task or a thumbnail, because only SENTINEL built the signal bus the cockpit rides.
+- **A GTK4 app's text fields can be set (#846).** GTK4 reports them as "text box", a role the candidate table did not offer, so a task could never type into GNOME Text Editor or any other GTK4 field.
+
+### Upgrading from 0.9.16
+
+- **Linux with the AppArmor profile:** reload it BEFORE restarting the daemon. Until you do, the daemon reports a STALE PROFILE at ERROR:
+  ```
+  sudo apparmor_parser -r -W /etc/apparmor.d/prometheus-bash
+  ```
+- **Telegram:** if you allow only your own private chat, nothing changes. If you allow a group, set `gateway.owner_user_ids` to your Telegram user id.
+- **Slack:** set `gateway.slack.owner_user_ids`. Until you do, nobody on Slack can approve, and Slack messages don't add to memory.
+- **Discord:** the owner of the bot's Discord application is the owner unless you set `gateway.discord.owner_user_ids`.
+- **Telegram notices:** approval prompts with no chat of their own, cron-failure notices and task notices go to `gateway.briefing_chat_id` when it is a private chat, else to your private chat, else nowhere. A group `briefing_chat_id` is not used for them, with a warning.
+- **File-tool writes to identity files, memory, skills and project instruction files now ask you,** even with approvals off or under a saved grant.
+- **API clients:** `GET /api/status` gains a top-level `warnings` list of `{code, level, message, fix}`.
+
+## 0.9.16 (2026-10-21)
+
+0.9.16 makes a fresh setup listen on this machine only until you choose otherwise, and turns on the context compactor that installs made by `oara setup`, setup mode and Beacon's first run never had. It updates certifi and Pillow for published advisories. It also:
+- makes Beacon's model list show whether your own AI is reachable, and name it;
+- makes `oara doctor` and the boot check look for your model server where the config says it is;
+- removes the `CancelledError` traceback that every shutdown and restart logged;
+- makes `oara pair --owner` fit a Beacon on this Mac as well as one on another computer.
+
+### Security
+
+- **Setup mode listens on this machine only unless you choose otherwise (#833).**
+  - **Before:** a daemon started with no config and no `--bind` (pip, brew, source, `oara install-service`) listened on every interface until setup finished. Anyone on the same network could try the six-digit pairing code. A right guess (5 tries in a million per start, within the code's 15 minutes) returned the daemon's API token, and five wrong guesses locked the owner out until a restart.
+  - **Not affected:** the Mac app (always loopback), the container image (it sets `PROMETHEUS_WEB_BIND` on purpose), and anyone who ran `oara setup` first.
+  - **Now:** to set up a headless box from another computer, start it with `oara daemon --bind 0.0.0.0`. Setup mode then listens on every interface, and so does the daemon it becomes.
+- **certifi 2026.10.19 and Pillow 13.0.0 (#839).** They fix PYSEC-2026-4320 (certifi) and CVE-2026-112395, -112397, -112400, -112404, -112895, -112896, -112897 and -112899 (Pillow). Only `uv.lock` changes; the floors in `pyproject.toml` are unchanged.
+
+### The context compactor is on for installs Prometheus set up (#834)
+
+- **What went wrong.** No config written by `oara setup` (interactive or `--fast`), by setup mode, or by Beacon's first run turned the compactor on. Without `compaction.enabled` it is not built, so those installs have run without it since it shipped in June. The template ships it on. LCM still summarised history between turns, but nothing kept a long multi-round tool turn inside a small local window.
+- **What changed.**
+  - Every writer now writes `compaction: {enabled: true}`.
+  - At start, a config with no `compaction.enabled` follows the template, turns the compactor on, and logs a warning naming the line to write. The file is not edited.
+  - An explicit `compaction.enabled: false` stays off.
+
+### Beacon's model list tells the truth about your own AI (#835)
+
+- The Local row's `available` follows the last probe of the primary. It was always `true`.
+- `GET /api/models` re-probes the primary when that probe is older than `backend_probe.ttl_s`.
+- The row is labelled with the engine and the model it serves, for example "llama.cpp · Qwen3.8-27B", instead of "Local".
+- A primary the registry does not probe (LM Studio, vLLM, a cloud primary) stays available, as before.
+
+### Doctor probes the configured address (#836)
+
+- **What went wrong.** The boot check and the chat `/doctor` used `model.base_url` only for llama.cpp. For every other provider they probed `model.fallback_url`, by default `localhost:11434`. So an Ollama, LM Studio or vLLM server at any other address, and any cloud model, was reported "not responding". `oara doctor` defaulted every local provider to `:8080`, and asked `/v1/v1/models` for a base ending in `/v1`.
+- **What changed.**
+  - Every check probes the address the provider is reached at: `model.base_url`, else its base-URL variable, else its default.
+  - Ollama is asked `/api/tags`. The OpenAI-shaped servers are asked `/v1/models`, once.
+  - A cloud primary gets an info row instead of a probe.
+
+### Clean shutdown (#837)
+
+- **What went wrong.** Stopping or restarting the daemon logged a `CancelledError` traceback at ERROR. The daemon cancelled the web server's task, so uvicorn never ran its own shutdown, and its shutdown steps (withdrawing the network announcement, stopping the pairing sweeper) ran only as the process exited.
+- **What changed.** The web server now shuts down properly when it is stopped. It waits at most 5 seconds for open requests.
+
+### `oara pair --owner` fits this Mac and another computer (#838)
+
+- The code banner and the expiry line no longer say "the other computer".
+- When the code is used, the terminal says whether that Beacon was on this Mac or on another computer, from what the daemon saw. A relay on this machine, such as Tailscale serve or cloudflared, counts as another computer.
+- The `owner_code` frame's `redeemed_by` gains `this_host`.
+- The example device name in the owner-code tests and docs is "Alex's MacBook Pro".
+
+### Upgrading from 0.9.15
+
+- **Setup from another computer:** start the daemon with `oara daemon --bind 0.0.0.0` (or set `PROMETHEUS_WEB_BIND`). Without either, setup mode now listens on this machine only.
+- **Compactor:** an install whose config has no `compaction.enabled` gets the compactor at its next start, with a warning naming the line to write. To keep it off, write `compaction.enabled: false`.
+- **Beacon and other API clients:** the Local row of `GET /api/models` is labelled with the engine and the model it serves, and carries `detail` (the served path) when the primary was probed. Its `available` can now be `false`.
+- **No migration.**
+
+### Known issues
+
+- The known issues listed for 0.9.13 still apply.
+
 ## 0.9.15 (2026-10-19)
 
 0.9.15 raises the aiohttp floor to 3.14.4, which fixes three advisories against 3.14.3 and earlier, and makes the `slack` extra install aiohttp, which the Slack gateway needs. Example device names in the docs and tests are now generic.

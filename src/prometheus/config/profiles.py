@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import contextvars
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -248,6 +249,62 @@ class ActiveProfileState:
                         session_id, bound, self._name,
                     )
         return self._store.get(self._name)
+
+
+# The profile THIS run is held to, or None for no limit. A profile used to filter only what a run
+# advertised: the call path looked tools up in the full registry, so a model that named a tool the profile
+# left out ran it. The loop sets this once it has resolved the run's profile (agent_loop.run_loop), and
+# everything that runs or hands out tools during the run reads it: the call path, the subagent spawner, and
+# the tools that start shells or worker processes. It lives here, not in the loop, so those readers do not
+# import the engine.
+RUN_PROFILE: contextvars.ContextVar["AgentProfile | None"] = contextvars.ContextVar(
+    "prometheus_run_profile", default=None,
+)
+
+
+def current_run_profile() -> AgentProfile | None:
+    """The profile the current run is held to, or None (no run, or a run with no limit)."""
+    return RUN_PROFILE.get()
+
+
+def profile_permits(profile: AgentProfile | None, tool_name: str) -> bool:
+    """Whether *profile* lets a run call *tool_name*.
+
+    ``tools`` and ``exclude_tools`` are permissions. ``max_tool_schemas`` is not: it caps how many schemas
+    a run is SENT (a context budget, like deferral), so a tool it cut off is still callable.
+    """
+    if profile is None:
+        return True
+    if profile.tools is not None and tool_name not in profile.tools:
+        return False
+    return tool_name not in (profile.exclude_tools or [])
+
+
+def profile_restricts(profile: AgentProfile | None) -> bool:
+    """Whether *profile* leaves any tool out. A worker process cannot be held to a profile (it builds its
+    own registry), so a run whose profile restricts tools does not start one."""
+    return profile is not None and (profile.tools is not None or bool(profile.exclude_tools))
+
+
+def spawn_refusal(tool_name: str, *, starts: str) -> str | None:
+    """Why the current run's profile stops *tool_name* starting a shell or a worker process, or None.
+
+    *starts* is ``"shell"`` (a shell command: task_create's local_bash and poll), which needs the profile to
+    allow ``bash``, or ``"worker"`` (a separate Prometheus process with a registry of its own: task_create's
+    local_agent, sessions_spawn), which no restricting profile can follow, so only an unrestricted run starts
+    one. Either way the tool is only a second door to what the profile left out.
+    """
+    profile = current_run_profile()
+    if profile is None:
+        return None
+    if starts == "shell" and not profile_permits(profile, "bash"):
+        return (f"{tool_name} refused: this conversation's profile {profile.name!r} does not include bash, "
+                f"so it cannot run a shell command this way either.")
+    if starts == "worker" and profile_restricts(profile):
+        return (f"{tool_name} refused: this conversation's profile {profile.name!r} limits its tools, and a "
+                f"worker process would have all of them. Use the agent tool instead: its subagent keeps the "
+                f"profile's limits.")
+    return None
 
 
 def filter_tools_by_profile(

@@ -726,7 +726,10 @@ class SlackAdapter(BasePlatformAdapter):
         # its next tick, so AutoDream pauses. Never raises.
         activity.note_user_activity()
         outcomes.note_user_message(session_id, text)
-        session.add_user_message(text)
+        # Gateway trust: the owner's words are the owner's; anyone else's are theirs, untrusted, never teaching.
+        owner = self.config.is_owner(user)
+        session.add_user_message(text, provenance="user" if owner else "member", is_trusted=owner,
+                                 author=f"slack:{user}")
         pre_len = len(session.get_messages())
 
         from prometheus.engine.agent_loop import MaxTurnsExhausted
@@ -1085,6 +1088,16 @@ class SlackAdapter(BasePlatformAdapter):
         """
         from slack_bolt.response import BoltResponse
 
+        from prometheus.gateway.commands import owner_only_command, owner_only_reply
+
+        # Owner-only commands, by the SENDER (any channel, including DMs): only the owner approves, changes settings
+        # or teaches. One check for every slash command, present and future (commands.owner_only_command).
+        command = body.get("command") or ""
+        if command and owner_only_command(command, body.get("text") or "") and not self.config.is_owner(
+                body.get("user_id")):
+            logger.warning("Refused Slack %s from a user who is not the owner", command[:32])
+            return BoltResponse(status=200, body=owner_only_reply(command))
+
         channel_id = body.get("channel_id") or ""
         # No channel to authorize: url-verification / ssl_check / OAuth
         # callbacks. They act on nothing — let them through.
@@ -1233,7 +1246,7 @@ class SlackAdapter(BasePlatformAdapter):
         # /queue creates the session if missing so a queued prompt on a
         # quiet channel fires when the user kicks off their first message.
         session = self.session_manager.get_or_create(f"slack:{channel}")
-        if not session.enqueue_prompt(text_arg):
+        if not session.enqueue_prompt(text_arg, sender=command.get("user_id")):
             await respond(text="Empty prompt — nothing queued.")
             return
         preview = text_arg if len(text_arg) <= 80 else text_arg[:77] + "..."
@@ -1352,7 +1365,7 @@ class SlackAdapter(BasePlatformAdapter):
         from prometheus.permissions import approver as _approver
 
         await respond(text=await cmd_computer(
-            None, self._cmd_text(command), by=_approver.slack(command),
+            None, self._cmd_text(command), by=_approver.slack(command, owners=self.config.owner_ids()),
             surface="slack", session_id=""))
 
     async def _slash_backends(self, ack: Any, command: Any, respond: Any) -> None:
@@ -1426,6 +1439,10 @@ class SlackAdapter(BasePlatformAdapter):
         from prometheus.gateway.commands import cmd_note
         from prometheus.tools.builtin.wiki_compile import _memory_store
 
+        refused = self.owner_refusal((command or {}).get("user_id") if hasattr(command, "get") else None)
+        if refused:
+            await respond(text=refused)
+            return
         await respond(text=cmd_note(_memory_store, self._cmd_text(command)))
 
     async def _slash_pairs(self, ack: Any, respond: Any) -> None:
@@ -1447,7 +1464,7 @@ class SlackAdapter(BasePlatformAdapter):
         # The SENDER (the payload's user_id), not the channel (W4).
         text = await _cmds.cmd_approve(
             getattr(self, "_approval_queue", None), text_arg,
-            by=_approver.slack(command), prefix=SLACK_COMMAND_PREFIX,
+            by=_approver.slack(command, owners=self.config.owner_ids()), prefix=SLACK_COMMAND_PREFIX,
         )
         await respond(text=text)
 
@@ -1473,7 +1490,7 @@ class SlackAdapter(BasePlatformAdapter):
 
         text = await _cmds.cmd_deny(
             getattr(self, "_approval_queue", None), request_id,
-            by=_approver.slack(command), prefix=SLACK_COMMAND_PREFIX,
+            by=_approver.slack(command, owners=self.config.owner_ids()), prefix=SLACK_COMMAND_PREFIX,
         )
         await respond(text=text)
 
@@ -1496,6 +1513,10 @@ class SlackAdapter(BasePlatformAdapter):
         await ack()
         from prometheus.gateway import commands as _cmds
 
+        refused = self.owner_refusal((command or {}).get("user_id") if hasattr(command, "get") else None)
+        if refused:
+            await respond(text=refused)
+            return
         arg = (command or {}).get("text", "") if isinstance(command, dict) else ""
         await respond(
             text=_cmds.cmd_revoke(getattr(self, "_approval_queue", None), arg)
@@ -1522,6 +1543,11 @@ class SlackAdapter(BasePlatformAdapter):
 
         text_arg = self._cmd_text(command)
         sub = text_arg.split()[0] if text_arg else "status"
+        if sub.lower() not in ("status", "history"):
+            refused = self.owner_refusal((command or {}).get("user_id") if hasattr(command, "get") else None)
+            if refused:
+                await respond(text=refused)
+                return
         text = await _cmds.cmd_gepa(
             getattr(self, "_gepa_engine", None),
             getattr(self, "_approval_queue", None),

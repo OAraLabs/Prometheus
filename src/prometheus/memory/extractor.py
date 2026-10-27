@@ -143,6 +143,22 @@ def _near_dup_similarity(a: frozenset[str], b: frozenset[str]) -> float:
     return max(overlap / len(a | b), overlap / min(len(a), len(b)))
 
 
+def _is_member_turn(part: object) -> bool:
+    """A user row a group member who is not the owner wrote (gateway trust): provenance "member"."""
+    # By provenance only: tool-result rows are user-role and untrusted too, and are not a member's.
+    return getattr(part, "role", "") == "user" and (getattr(part, "provenance", "user") or "user") == "member"
+
+
+def _has_member_turns(conv_store: object, session_id: str) -> bool:
+    """Has a group member ever spoken in *session_id*? Read from the store, so an earlier batch counts too."""
+    check = getattr(conv_store, "has_member_turns", None)
+    try:
+        return bool(check(session_id)) if callable(check) else False
+    except Exception:
+        log.debug("MemoryExtractor: member-turn check failed for %s", session_id, exc_info=True)
+        return True  # cannot tell: treat it as a group session and mine no assistant rows
+
+
 class MemoryExtractor:
     """Extract structured entity facts from conversation history.
 
@@ -188,9 +204,9 @@ class MemoryExtractor:
         # ``LCMEngine.conversation_store`` if a wired engine is later
         # set on the daemon. The injection point keeps unit tests simple.
         self._lcm_conv_store = lcm_conversation_store
-        # Sprint S4 A1: shared LLMCallEnvelope. on_failure="return_none" so
-        # _process_batch preserves its "returns (0, []) on failure" contract
-        # without the redundant try/except. Failures still land in
+        # Sprint S4 A1: shared LLMCallEnvelope. on_failure="return_none", and
+        # _process_batch passes that None up so run_once can hold the cursor
+        # (no redundant try/except). Failures still land in
         # telemetry.silent_failures with full traceback.
         self._telemetry = telemetry
         self._envelope = LLMCallEnvelope(
@@ -262,6 +278,7 @@ class MemoryExtractor:
             since_row_id, limit=500, session_id=session_id,
             include_compacted=False,
         )
+        rows_read = parts  # the unfiltered read, for a held advance below
 
         # The cursor advances over EVERY row READ this pass — including rows
         # dropped just below as already-consumed, and the non-user /
@@ -284,6 +301,18 @@ class MemoryExtractor:
         user_parts = [
             part for part in parts
             if (getattr(part, "provenance", "user") or "user") == "user"
+        ]
+        # GATEWAY TRUST (0.9.17): only the owner teaches. A user row that is not trusted is a group member's (or an
+        # injected turn's), whatever its provenance column says; and in a session where a member has spoken, the
+        # assistant's replies are not mined either, because they can repeat what the member said.
+        group_sessions = {part.session_id for part in parts if _is_member_turn(part)} | {
+            sid for sid in {part.session_id for part in parts}
+            if sid and _has_member_turns(conv_store, sid)
+        }
+        user_parts = [
+            part for part in user_parts
+            if not (getattr(part, "role", "") == "user" and not getattr(part, "is_trusted", True))
+            and not (getattr(part, "role", "") == "assistant" and part.session_id in group_sessions)
         ]
         skipped = len(parts) - len(user_parts)
         if skipped:
@@ -313,6 +342,7 @@ class MemoryExtractor:
                 "role": part.role,
                 "content": part.content,
                 "timestamp": part.timestamp,
+                "row_id": int(getattr(part, "row_id", 0) or 0),
             }
             for part in conversational_parts
         ]
@@ -327,12 +357,31 @@ class MemoryExtractor:
         all_facts: list[dict] = []
         for i in range(0, len(messages), self._batch_size):
             batch = messages[i : i + self._batch_size]
-            persisted, facts = await self._process_batch(batch)
+            result = await self._process_batch(batch)
+            if result is None:
+                # The model call failed (outage, rate limit, timeout). Advancing
+                # past this batch would mark rows that were never mined as
+                # consumed, a permanent loss. So the cursor stops just below it,
+                # and the pass stops too: a later batch mined now could not be
+                # advanced past this one, and would be mined again on the retry.
+                # No retry limit: a long outage must not end in skipped rows.
+                held_at = min(m["row_id"] for m in batch)
+                max_row_by_scope = self._max_row_by_scope(
+                    rows_read, session_id, below=held_at,
+                )
+                log.warning(
+                    "MemoryExtractor: model call failed for a batch of %d "
+                    "message(s); holding the cursor below rowid %d so they "
+                    "are retried next pass", len(batch), held_at,
+                )
+                break
+            persisted, facts = result
             total_persisted += persisted
             all_facts.extend(facts)
 
         # Advance over all rows seen this pass (mined + skipped), so a trailing
-        # run of skipped task turns isn't re-read on the next pass.
+        # run of skipped task turns isn't re-read on the next pass, but never
+        # past a failed batch.
         self._advance_cursors(max_row_by_scope)
         self._last_run = time.time()
         log.info("MemoryExtractor: persisted %d memories from %d messages", total_persisted, len(messages))
@@ -436,7 +485,9 @@ class MemoryExtractor:
         return kept
 
     @staticmethod
-    def _max_row_by_scope(parts: list, session_id: str | None) -> dict[str, int]:
+    def _max_row_by_scope(
+        parts: list, session_id: str | None, below: int | None = None,
+    ) -> dict[str, int]:
         """``{scope: max rowid seen}`` for the rows this pass read.
 
         A sweep touches many sessions, so it advances each session's own cursor
@@ -444,11 +495,14 @@ class MemoryExtractor:
         — deliberately NOT the global floor, which is the whole fix: a
         pre-compaction flush must not move the value every other session is
         read against.
+
+        ``below`` excludes rows at or above that rowid: the first row of a batch
+        whose model call failed, so nothing from it onward counts as consumed.
         """
         out: dict[str, int] = {}
         for part in parts:
             row_id = int(getattr(part, "row_id", 0) or 0)
-            if not row_id:
+            if not row_id or (below is not None and row_id >= below):
                 continue
             sid = part.session_id
             if sid:
@@ -523,10 +577,14 @@ class MemoryExtractor:
     # Internal
     # ------------------------------------------------------------------
 
-    async def _process_batch(self, messages: list[dict]) -> tuple[int, list[dict]]:
+    async def _process_batch(
+        self, messages: list[dict],
+    ) -> tuple[int, list[dict]] | None:
         """Send one batch to the LLM and persist extracted facts.
 
-        Returns ``(count_persisted, list_of_persisted_fact_dicts)``.
+        Returns ``(count_persisted, list_of_persisted_fact_dicts)``, or ``None``
+        when the model call failed. ``None`` is not ``(0, [])``: "the model
+        found nothing" consumes the batch, a failed call must not.
         """
         formatted = self._format_messages(messages)
         prompt = _EXTRACTION_PROMPT.format(messages=formatted)
@@ -535,7 +593,7 @@ class MemoryExtractor:
         # Drops the redundant outer try/except per Sprint 4 audit.
         raw = await self._call_model(prompt)
         if raw is None:
-            return 0, []
+            return None
 
         facts = self._parse_facts(raw)
         source_ids = [m["id"] for m in messages]
@@ -699,11 +757,18 @@ class MemoryExtractor:
 
         # Preferred path: one complete JSON document (object or array).
         try:
-            parsed = valid_facts(json.loads(text))
-            if parsed:
-                return parsed
+            document = json.loads(text)
         except json.JSONDecodeError:
             pass
+        else:
+            parsed = valid_facts(document)
+            if parsed:
+                return parsed
+            if document == [] or (
+                isinstance(document, dict) and document.get("facts") == []
+            ):
+                # The model's way of saying "nothing here", not a format failure.
+                return []
 
         # Fallback: decode consecutive JSON values from prose/NDJSON. Unlike
         # splitlines(), raw_decode supports pretty-printed, multi-line objects.
@@ -721,4 +786,13 @@ class MemoryExtractor:
                 continue
             facts.extend(valid_facts(obj))
             pos = end
+        if not facts and "{" in text:
+            # JSON-shaped output that yields nothing is a format failure, and
+            # without this it reads exactly like "nothing worth remembering"
+            # (#798). A prose reply carries no brace and does not trip it.
+            log.warning(
+                "MemoryExtractor: no facts parsed from %d chars of JSON-shaped "
+                "model output; head: %r",
+                len(raw), raw[:120],
+            )
         return facts

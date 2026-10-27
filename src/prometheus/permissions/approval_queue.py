@@ -877,10 +877,17 @@ class ApprovalQueue:
     ) -> bool:
         """Approve a pending action. Returns True if found and approved.
 
-        ``by`` is REQUIRED: every answer records who gave it (W4). Nothing is
-        refused on its account in this step — see permissions/approver.py.
+        ``by`` is REQUIRED: every answer records who gave it (W4). A chat
+        gateway's answer counts only when it is the owner's
+        (:attr:`Approver.not_the_owner`): the backstop for any path that
+        reaches the queue without the /approve core's own check. REST answers
+        are not refused here.
         """
         from prometheus.permissions.audit import AuditDecision
+
+        if by.not_the_owner:
+            logger.warning("approval %s: refused an answer from %s, who is not the owner", request_id, by.label)
+            return False
 
         # BEFORE any mutation, so a raise leaves the request PENDING and it
         # times out into a denial rather than half-resolving. Unreachable
@@ -917,10 +924,14 @@ class ApprovalQueue:
     async def deny(self, request_id: str, *, by: Approver) -> bool:
         """Deny a pending action. Returns True if found and denied.
 
-        ``by`` is REQUIRED, as for :meth:`approve`.
+        ``by`` is REQUIRED, as for :meth:`approve`, and a chat gateway's
+        answer counts only when it is the owner's.
         """
         from prometheus.permissions.audit import AuditDecision
 
+        if by.not_the_owner:
+            logger.warning("approval %s: refused a denial from %s, who is not the owner", request_id, by.label)
+            return False
         action = self.pending.get(request_id)
         if action is None or request_id in self._finished:
             return False
@@ -1082,13 +1093,13 @@ class ApprovalQueues:
     async def approve(self, request_id: str, *, by: Approver,
                       scope: str | None = None, grant=None) -> bool:
         owner = self.owner_of(request_id)
-        if owner is None:
+        if owner is None or by.not_the_owner:  # the desktop channel included: a chat answer is the owner's or nothing
             return False
         return await owner.approve(request_id, by=by, scope=scope, grant=grant)
 
     async def deny(self, request_id: str, *, by: Approver) -> bool:
         owner = self.owner_of(request_id)
-        if owner is None:
+        if owner is None or by.not_the_owner:
             return False
         return await owner.deny(request_id, by=by)
 

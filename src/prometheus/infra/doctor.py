@@ -247,20 +247,22 @@ def check_always_loaded(config: dict | None) -> DiagnosticCheck:
 class Doctor:
     """Diagnoses Prometheus configuration against model capabilities."""
 
-    def __init__(self, config: dict | None = None) -> None:
+    def __init__(
+        self, config: dict | None = None, config_path: str | Path | None = None,
+    ) -> None:
         self.config = config or {}
+        # The ``--config`` the daemon was started with, so the Config row
+        # checks the file the daemon read. None searches the usual places.
+        self.config_path = config_path
         self.registry = self._load_registry()
 
     def _repo_root(self) -> Path:
-        """Project root used to locate the bundled config files
-        (``config/prometheus.yaml``, ``config/model_registry.yaml``).
+        """Project root used to locate ``config/model_registry.yaml``.
 
         Defaults to the package's repo root, but is overridable via a
-        ``repo_root`` attribute so tests can point the config checks at a
-        fixture. Otherwise they depend on a gitignored ``config/prometheus.yaml``
-        existing at the real repo root — absent in any linked git worktree (and
-        in an installed package), which made ``test_full_diagnose_all_ok`` fail
-        outside the daemon's checkout.
+        ``repo_root`` attribute so tests can point the registry lookup at a
+        fixture. The Config row does not use it: it follows
+        ``config_search_paths``, like ``load_config``.
         """
         return getattr(self, "repo_root", None) or Path(__file__).resolve().parents[3]
 
@@ -365,19 +367,29 @@ class Doctor:
         )
 
     def _check_config_valid(self) -> DiagnosticCheck:
-        """Does prometheus.yaml parse without errors?"""
-        config_path = self._repo_root() / "config" / "prometheus.yaml"
-        if not config_path.exists():
+        """Does prometheus.yaml parse without errors?
+
+        Checks the file ``load_config`` reads, found by the same search
+        (:func:`prometheus.config.defaults.config_search_paths`). It used to
+        look only at ``<repo>/config/prometheus.yaml``, so a daemon running on
+        ``~/.prometheus/prometheus.yaml`` reported its config missing.
+        """
+        from prometheus.config.defaults import config_search_paths, resolve_config_path
+
+        explicit = getattr(self, "config_path", None)
+        config_path = resolve_config_path(explicit)
+        if not config_path.is_file():
+            searched = ", ".join(str(p) for p in config_search_paths(explicit))
             return DiagnosticCheck(
                 name="Config", category="platform", status="error",
-                message="config/prometheus.yaml not found",
-                fix="Run `python -m prometheus --setup` or copy prometheus.yaml.default",
+                message=f"prometheus.yaml not found (searched: {searched})",
+                fix="Run `oara setup` to create one.",
             )
         try:
             yaml.safe_load(config_path.read_text(encoding="utf-8"))
             return DiagnosticCheck(
                 name="Config", category="platform", status="ok",
-                message="valid",
+                message=f"loaded {config_path}",
             )
         except yaml.YAMLError as exc:
             return DiagnosticCheck(
@@ -387,7 +399,7 @@ class Doctor:
                 # prometheus.yaml keeps credentials inline. See
                 # yaml_error_summary.
                 message=f"YAML parse error: {yaml_error_summary(exc)}",
-                fix="Fix syntax errors in config/prometheus.yaml",
+                fix=f"Fix syntax errors in {config_path}",
             )
 
     def _check_data_dir(self) -> DiagnosticCheck:
@@ -458,6 +470,16 @@ class Doctor:
         ``install_log_redaction`` does not cover. The REQUEST below still uses
         the real URL — redaction is display-only.
         """
+        engine = state.inference_engine.replace("_", ".")
+        from prometheus.providers.registry import ProviderRegistry
+
+        if ProviderRegistry.is_cloud(state.inference_engine):
+            # Before the address check: a cloud provider has no local server to reach (and usually no base_url at
+            # all); its key is the Cloud keys row's.
+            return DiagnosticCheck(
+                name="Inference", category="connectivity", status="info",
+                message=f"{engine} is a cloud provider: nothing on this machine to probe",
+            )
         url = state.inference_url
         if not url:
             return DiagnosticCheck(
@@ -465,13 +487,16 @@ class Doctor:
                 message="No inference URL configured",
                 fix="Set model.base_url in prometheus.yaml.",
             )
-        engine = state.inference_engine.replace("_", ".")
+        from prometheus.providers.openai_compat import models_url
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                if "llama" in state.inference_engine:
-                    resp = await client.get(f"{url}/v1/models")
-                else:
+                # By the exact engine: Ollama's own list, the OpenAI-shaped one for llama.cpp, LM Studio, vLLM and the
+                # rest (a base ending in /v1 is already the API root). "llama" in "ollama" used to send Ollama to
+                # llama.cpp's path, and everything else to Ollama's.
+                if state.inference_engine == "ollama":
                     resp = await client.get(f"{url}/api/tags")
+                else:
+                    resp = await client.get(models_url(url))
                 resp.raise_for_status()
             return DiagnosticCheck(
                 name="Inference", category="connectivity", status="ok",

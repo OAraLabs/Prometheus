@@ -127,10 +127,15 @@ class AnatomyScanner:
         ssh_user: str | None = None,
         ssh_key: str | None = None,
         registry: Any | None = None,
+        inference_url: str | None = None,
     ) -> None:
         self._llama_url = llama_cpp_url.rstrip("/")
         self._ollama_url = ollama_url.rstrip("/")
         self._engine = inference_engine
+        # Where the configured engine is reached (from_config: model.base_url by the provider registry's rule). None:
+        # the historical choice, llama.cpp's URL for llama_cpp and the Ollama URL for everything else.
+        self._inference_url = inference_url.rstrip("/") if inference_url is not None else (
+            self._llama_url if inference_engine == "llama_cpp" else self._ollama_url)
         self._ssh_user = ssh_user
         self._ssh_key = str(Path(ssh_key).expanduser()) if ssh_key else None
         # The backend registry, when the daemon built one. With it, model
@@ -142,6 +147,26 @@ class AnatomyScanner:
         # only and carries no credentials. Without a registry the scanner's
         # own probe still runs, so the CLI and tests are unchanged.
         self._registry = registry
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any], *, registry: Any | None = None) -> "AnatomyScanner":
+        """The scanner for a daemon's config: the boot check, the chat /doctor and ``oara doctor`` build it here, so
+        the Inference row probes the address the config names (``model.base_url``), not ``model.fallback_url``."""
+        from prometheus.providers.registry import resolve_model_base_url
+
+        model_cfg = config.get("model", {}) or {}
+        anatomy_cfg = config.get("anatomy", {}) or {}
+        engine = str(model_cfg.get("provider", "llama_cpp"))
+        url = resolve_model_base_url(model_cfg)
+        return cls(
+            llama_cpp_url=url if engine == "llama_cpp" else "http://localhost:8080",
+            ollama_url=url if engine == "ollama" else "http://localhost:11434",
+            inference_engine=engine,
+            ssh_user=anatomy_cfg.get("ssh_user"),
+            ssh_key=anatomy_cfg.get("ssh_key"),
+            registry=registry,
+            inference_url=url,
+        )
 
     async def scan(self) -> AnatomyState:
         """Full infrastructure scan."""
@@ -160,9 +185,7 @@ class AnatomyScanner:
 
         self._detect_whisper(state)
         state.inference_engine = self._engine
-        state.inference_url = (
-            self._llama_url if self._engine == "llama_cpp" else self._ollama_url
-        )
+        state.inference_url = self._inference_url
         return state
 
     async def quick_scan(self) -> AnatomyState:
@@ -174,9 +197,7 @@ class AnatomyScanner:
         await self._detect_gpu(state)
         await self._detect_model(state)
         state.inference_engine = self._engine
-        state.inference_url = (
-            self._llama_url if self._engine == "llama_cpp" else self._ollama_url
-        )
+        state.inference_url = self._inference_url
         return state
 
     # ------------------------------------------------------------------
@@ -272,7 +293,7 @@ class AnatomyScanner:
         """
         from urllib.parse import urlparse
 
-        url = self._llama_url if self._engine == "llama_cpp" else self._ollama_url
+        url = self._inference_url
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
         local_host_aliases = {

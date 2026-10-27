@@ -255,22 +255,69 @@ class TestDoctorChecks:
 
     # -- config valid --
 
-    def test_check_config_valid(self, tmp_path: Path) -> None:
-        config_file = tmp_path / "config" / "prometheus.yaml"
-        config_file.parent.mkdir(parents=True)
-        config_file.write_text("model:\n  provider: llama_cpp\n", encoding="utf-8")
-        with patch.object(Path, "resolve", return_value=tmp_path / "src" / "prometheus" / "infra" / "doctor.py"):
-            # Patch the path calculation — easier to just patch the file existence check
-            with patch("prometheus.infra.doctor.Path.__truediv__", side_effect=lambda self, other: tmp_path / other if "config" in str(other) else Path.__truediv__(self, other)):
-                pass  # Complex path mocking — test via integration instead
+    # The Config row searches where load_config searches
+    # (config_search_paths): --config, then the repo-local file, then
+    # $PROMETHEUS_CONFIG_DIR (default ~/.prometheus). It used to look only at
+    # <repo>/config/prometheus.yaml, so a daemon that loaded
+    # ~/.prometheus/prometheus.yaml logged "config/prometheus.yaml not found"
+    # at every start. conftest already points REPO_CONFIG_PATH and
+    # PROMETHEUS_CONFIG_DIR at tmp; each case below sets only what it needs.
 
-    def test_check_config_valid_ok(self) -> None:
-        """Config check should pass when prometheus.yaml exists and parses."""
-        check = self.doctor._check_config_valid()
-        # In the test env, config/prometheus.yaml exists in the project
-        assert check.category == "platform"
-        # Status depends on whether the file is found relative to the module
-        assert check.status in ("ok", "error")
+    @staticmethod
+    def _write_config(path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("model:\n  provider: llama_cpp\n", encoding="utf-8")
+        return path
+
+    def test_config_check_uses_an_explicit_config(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        explicit = self._write_config(tmp_path / "elsewhere" / "custom.yaml")
+        # A repo-local file exists too: --config still wins, as in load_config.
+        repo_local = self._write_config(tmp_path / "repo" / "config" / "prometheus.yaml")
+        monkeypatch.setattr("prometheus.config.defaults.REPO_CONFIG_PATH", repo_local)
+        check = Doctor({}, config_path=str(explicit))._check_config_valid()
+        assert check.status == "ok"
+        assert str(explicit) in check.message
+        assert str(repo_local) not in check.message
+
+    def test_config_check_finds_the_repo_local_config(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo_local = self._write_config(tmp_path / "repo" / "config" / "prometheus.yaml")
+        monkeypatch.setattr("prometheus.config.defaults.REPO_CONFIG_PATH", repo_local)
+        check = Doctor({})._check_config_valid()
+        assert check.status == "ok"
+        assert str(repo_local) in check.message
+
+    def test_config_check_finds_the_config_dir_config(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_dir = tmp_path / "custom-config-dir"
+        loaded = self._write_config(config_dir / "prometheus.yaml")
+        monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(config_dir))
+        check = Doctor({})._check_config_valid()
+        assert check.status == "ok"
+        assert str(loaded) in check.message
+
+    def test_config_check_finds_the_home_default(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        home = tmp_path / "home"
+        loaded = self._write_config(home / ".prometheus" / "prometheus.yaml")
+        monkeypatch.delenv("PROMETHEUS_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        check = Doctor({})._check_config_valid()
+        assert check.status == "ok"
+        assert str(loaded) in check.message
+
+    def test_config_check_with_no_config_says_not_found(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # conftest leaves both searched places empty under tmp_path.
+        repo_local = tmp_path / "no-repo-config" / "prometheus.yaml"
+        config_dir_file = tmp_path / "prom-config" / "prometheus.yaml"
+        assert not repo_local.exists() and not config_dir_file.exists()
+        check = Doctor({})._check_config_valid()
+        assert check.status == "error"
+        assert "not found" in check.message
+        assert str(repo_local) in check.message
+        assert str(config_dir_file) in check.message
 
     @pytest.mark.parametrize("broken", [
         'gateway:\n  telegram_token: "{token}\n',   # the snippet quotes it
@@ -283,7 +330,7 @@ class TestDoctorChecks:
         ``_check_config_valid`` feeds the chat ``/doctor`` command and the
         daemon's startup check. It rendered ``str(exc)`` until it switched to
         ``yaml_error_summary``, and nothing held that in place: reverting it
-        left every test green. ``repo_root`` points the check at a fixture
+        left every test green. ``config_path`` points the check at a fixture
         instead of the real checkout.
         """
         # Built by concatenation so the pre-commit secret scanner does not
@@ -292,7 +339,7 @@ class TestDoctorChecks:
         config_file = tmp_path / "config" / "prometheus.yaml"
         config_file.parent.mkdir(parents=True)
         config_file.write_text(broken.format(token=fake), encoding="utf-8")
-        self.doctor.repo_root = tmp_path
+        self.doctor.config_path = config_file
         check = self.doctor._check_config_valid()
         assert check.status == "error"
         assert "YAML parse error" in check.message
@@ -645,7 +692,8 @@ class TestDoctorDiagnose:
         # linked git worktree, which made this test fail outside the daemon checkout.
         doctor.repo_root = tmp_path
         (tmp_path / "config").mkdir()
-        (tmp_path / "config" / "prometheus.yaml").write_text(
+        doctor.config_path = tmp_path / "config" / "prometheus.yaml"
+        doctor.config_path.write_text(
             "model:\n  provider: llama_cpp\n", encoding="utf-8"
         )
 
@@ -1096,16 +1144,13 @@ class TestInferenceUrlLeaksNoCredential:
         A fix applied to one branch would leave the other printing the
         credential — they share one URL variable but two message lines.
 
-        NOTE on which engine reaches the else branch: ``_check_inference``
-        selects it with ``"llama" in state.inference_engine``, which is True
-        for "ollama" too (it CONTAINS "llama"). So this test uses "vllm" to
-        actually reach the ``/api/tags`` branch, and the assertion below pins
-        the substring quirk for ollama so it cannot change unnoticed. That
-        quirk is pre-existing and out of scope here — recorded in the report.
+        The dispatch is by the exact engine (it used to be ``"llama" in engine``, which sent Ollama to llama.cpp's
+        path and everything else to Ollama's): "ollama" reaches the ``/api/tags`` branch, every other local engine the
+        OpenAI-shaped ``/v1/models`` one, which the test below pins.
         """
         url = f"http://{_FAKE_USER}:{_FAKE_PASS}@127.0.0.1:11434"
         client = _mock_client()
-        state = _sample_state(inference_url=url, inference_engine="vllm")
+        state = _sample_state(inference_url=url, inference_engine="ollama")
         with patch("prometheus.infra.doctor.httpx.AsyncClient", return_value=client):
             check = await self.doctor._check_inference(state)
         _assert_no_fragment(check.message, _FAKE_PASS, tmp_path)
@@ -1113,17 +1158,16 @@ class TestInferenceUrlLeaksNoCredential:
         assert client.get.await_args[0][0] == f"{url}/api/tags"
 
     @pytest.mark.asyncio
-    async def test_ollama_takes_the_llama_endpoint_branch(self):
-        """Pins the ``"llama" in engine`` substring quirk (pre-existing).
-
-        Ollama's engine string contains "llama", so it is routed to
-        ``/v1/models`` rather than ``/api/tags``. Asserted here so a future
-        change to that dispatch is a deliberate one, and so the redaction test
-        above is not silently relying on a branch it never reaches.
-        """
-        client = _mock_client()
-        state = _sample_state(inference_url="http://127.0.0.1:11434",
-                              inference_engine="ollama")
-        with patch("prometheus.infra.doctor.httpx.AsyncClient", return_value=client):
-            await self.doctor._check_inference(state)
-        assert client.get.await_args[0][0] == "http://127.0.0.1:11434/v1/models"
+    async def test_each_engine_takes_its_own_endpoint(self):
+        """By the exact engine: Ollama its own list, the OpenAI-shaped ones /v1/models, once even for a /v1 base."""
+        for engine, url, want in (
+            ("ollama", "http://127.0.0.1:11434", "http://127.0.0.1:11434/api/tags"),
+            ("llama_cpp", "http://127.0.0.1:8080", "http://127.0.0.1:8080/v1/models"),
+            ("vllm", "http://127.0.0.1:8000/v1", "http://127.0.0.1:8000/v1/models"),
+            ("lm_studio", "http://127.0.0.1:1234", "http://127.0.0.1:1234/v1/models"),
+        ):
+            client = _mock_client()
+            state = _sample_state(inference_url=url, inference_engine=engine)
+            with patch("prometheus.infra.doctor.httpx.AsyncClient", return_value=client):
+                await self.doctor._check_inference(state)
+            assert client.get.await_args[0][0] == want, engine

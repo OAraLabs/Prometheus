@@ -326,6 +326,83 @@ def test_catalogue_marks_a_down_backend_unavailable(monkeypatch):
     assert rows["4090"]["vision"] is False
 
 
+# ── the Local row tells the truth (0.9.16) ───────────────────────────────────
+#
+# It used to hard-code available: true and the label "Local", and GET /api/models never probed, so after the boot
+# probe its health went stale and a dead primary still read as available everywhere but health.ok.
+
+
+def _rows(reg: BackendRegistry | None) -> dict:
+    app = create_app(CFG, model_router=_router(), backend_registry=reg, local_model="qwen3.8-27b")
+    return {m["key"]: m for m in TestClient(app).get("/api/models").json()["models"]}
+
+
+def test_a_down_primary_is_an_unavailable_local_row(monkeypatch):
+    import asyncio
+    reg = _registry(down={"local"})
+    asyncio.run(reg.probe_all())
+    monkeypatch.setattr(backends_mod, "_REGISTRY", reg)
+    local = _rows(reg)["local"]
+    assert local["available"] is False and "connect timeout" in local["health"]["error"], local
+
+
+def test_an_up_primary_is_an_available_local_row(live_registry):
+    assert _rows(live_registry)["local"]["available"] is True
+
+
+def test_the_local_row_is_labeled_with_its_engine_and_the_model_it_serves(live_registry):
+    """The served model (the probe's), not config's model.model, and the engine by name: like the backend rows."""
+    local = _rows(live_registry)["local"]
+    assert local["label"] == "llama.cpp · Qwen3.8-27B", local["label"]
+    assert local["detail"] == "/models/Qwen3.8-27B.gguf", local
+
+
+def test_a_stale_primary_is_reprobed_by_the_catalogue(monkeypatch):
+    import asyncio
+    calls: list[str] = []
+    now = [0.0]
+    reg = BackendRegistry.from_config(CFG, probe=_probe_factory(calls), clock=lambda: now[0])
+    asyncio.run(reg.probe_all())
+    monkeypatch.setattr(backends_mod, "_REGISTRY", reg)
+    first = calls.count("local")
+    now[0] = 10.0                                   # inside the TTL: the cached answer stands
+    _rows(reg)
+    assert calls.count("local") == first, calls
+    now[0] = 10_000.0                               # past it: asked again before answering
+    local = _rows(reg)["local"]
+    assert calls.count("local") == first + 1, calls
+    assert local["health"]["stale"] is False, local["health"]
+
+
+def test_a_primary_that_dies_after_boot_reads_unavailable_once_stale(monkeypatch):
+    import asyncio
+    calls: list[str] = []
+    now = [0.0]
+    down: set[str] = set()
+
+    async def probe(spec, timeout):
+        if spec.name in down:
+            calls.append(spec.name)
+            raise ConnectionError("connect timeout")
+        return await _probe_factory(calls)(spec, timeout)
+
+    reg = BackendRegistry.from_config(CFG, probe=probe, clock=lambda: now[0])
+    asyncio.run(reg.probe_all())
+    monkeypatch.setattr(backends_mod, "_REGISTRY", reg)
+    down.add("local")
+    now[0] = 10_000.0
+    assert _rows(reg)["local"]["available"] is False
+
+
+def test_with_no_registry_the_local_row_stays_available_and_says_its_engine(monkeypatch):
+    """A primary the registry does not probe (no registry at all, or LM Studio / vLLM / a cloud primary) has no
+    health to go by: it stays available, as before, and still says what it is."""
+    monkeypatch.setattr(backends_mod, "_REGISTRY", None)
+    local = _rows(None)["local"]
+    assert local["available"] is True and local["health"] is None, local
+    assert local["label"] == "llama.cpp · qwen3.8-27b", local["label"]
+
+
 def test_post_probes_before_switching_and_refuses_a_down_box(monkeypatch):
     import asyncio
     calls: list[str] = []

@@ -352,34 +352,64 @@ def _calls_after(
     return calls, total - len(calls)
 
 
-def _request(conn: sqlite3.Connection, session_id: str, load_ts: float) -> tuple[str | None, bool]:
-    """``(request text, withheld)`` — the newest user row persisted before the load.
+def _is_tool_result_row(content: Any, content_json: Any) -> bool:
+    """A user-role row that is only the results of the agent's own tool calls.
 
-    An injected turn (a task result, provenance other than the user, stored
-    untrusted) that started the run is withheld rather than shown: its text
-    came from outside, and it is about to be put in front of a model that
-    writes skills.
+    Recognised by what it holds, not by its trust tags: no flat text (only text
+    blocks are flattened into ``content``) and a ``content_json`` made entirely
+    of ``tool_result`` blocks.
     """
-    row = conn.execute(
-        "SELECT content, is_trusted FROM lcm_messages "
+    if str(content or "").strip():
+        return False
+    try:
+        blocks = json.loads(content_json or "")
+    except (TypeError, ValueError):
+        return False
+    return (
+        isinstance(blocks, list) and bool(blocks)
+        and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks)
+    )
+
+
+def _request(conn: sqlite3.Connection, session_id: str, load_ts: float) -> tuple[str | None, bool]:
+    """``(request text, withheld)`` — the user's request that preceded the load.
+
+    Tool results are persisted as ``role='user'`` rows, and a run that called
+    tools before loading the skill has them newest. They are not the request,
+    so walk back past them (and only them) to the turn that started the run,
+    then apply the trust check to that turn: a trusted one is the request; an
+    untrusted one (an injected task result, say) is withheld rather than shown,
+    because its text came from outside and is about to be put in front of a
+    model that writes skills. Never reach past it to an older request: that one
+    did not start this run.
+    """
+    rows = conn.execute(
+        "SELECT content, content_json, is_trusted FROM lcm_messages "
         "WHERE session_id = ? AND role = 'user' AND timestamp < ? "
-        "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+        "ORDER BY timestamp DESC, rowid DESC",
         (session_id, load_ts),
-    ).fetchone()
-    if row is None:
-        return None, False
-    content, is_trusted = row
-    if not is_trusted:
-        return None, True
-    text = " ".join(redact_secrets(str(content or "")).split())
-    return (_cut(text, REQUEST_CHARS) if text else None), False
+    )
+    for content, content_json, is_trusted in rows:
+        if _is_tool_result_row(content, content_json):
+            continue
+        if not is_trusted:
+            return None, True
+        text = " ".join(redact_secrets(str(content or "")).split())
+        return (_cut(text, REQUEST_CHARS) if text else None), False
+    return None, False
 
 
-def _reply(conn: sqlite3.Connection, session_id: str, load_ts: float, end: float) -> tuple[bool, str]:
+def _reply(
+    conn: sqlite3.Connection, session_id: str, load_ts: float, end: float, *, withheld: bool = False,
+) -> tuple[bool, str]:
     """``(found, reply text)`` — the last assistant row the run persisted.
 
     A turn's rows are persisted when it ends, which is before the session's
     next run starts, so the window up to *end* holds them.
+
+    *withheld*: the run's request was withheld (untrusted: an injected turn, or
+    a group member who is not the owner). The reply answers that request and can
+    repeat it, so its text is withheld too; whether there was one still counts.
     """
     row = conn.execute(
         "SELECT content FROM lcm_messages "
@@ -389,6 +419,8 @@ def _reply(conn: sqlite3.Connection, session_id: str, load_ts: float, end: float
     ).fetchone()
     if row is None:
         return False, ""
+    if withheld:
+        return True, ""
     text = " ".join(redact_secrets(str(row[0] or "")).split())
     return True, _cut(text, REPLY_CHARS)
 
@@ -418,7 +450,7 @@ def run_for_load(
     if lcm is not None:
         try:
             request, withheld = _request(lcm, session_id, event.timestamp)
-            found, reply = _reply(lcm, session_id, event.timestamp, end)
+            found, reply = _reply(lcm, session_id, event.timestamp, end, withheld=withheld)
             # No reply inside an unbounded window is not "no reply": the run
             # may have outlasted the cap, or not have ended yet.
             replied = True if found else (False if bounded else None)

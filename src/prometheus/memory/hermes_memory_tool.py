@@ -18,6 +18,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from prometheus.config.paths import get_config_dir
+from prometheus.security.invisible_text import describe_invisible, find_invisible
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 # ------------------------------------------------------------------
@@ -118,6 +119,9 @@ class FileMemoryStore:
         consolidation prompt and retry. Normal (smaller) entries still
         prune-oldest silently — that's the existing contract.
         """
+        hidden = find_invisible(entry or "")
+        if hidden:
+            return f"refused: the entry contains {describe_invisible(hidden)}, which hide text from a person reading it"
         entry = self._sanitize(entry)
         if not entry:
             return "entry is empty or contained prohibited content"
@@ -133,6 +137,10 @@ class FileMemoryStore:
 
     def replace(self, old_text: str, new_text: str) -> str:
         """Replace the first entry containing *old_text*. Returns status."""
+        hidden = find_invisible(new_text or "")
+        if hidden:
+            return (f"refused: the new entry contains {describe_invisible(hidden)}, which hide text from a person "
+                    "reading it")
         new_entry = self._sanitize(new_text)
         if not new_entry:
             return "new entry is empty or contained prohibited content"
@@ -274,7 +282,14 @@ class MemoryTool(BaseTool):
         return arguments.operation == "list"
 
     async def execute(self, arguments: MemoryToolInput, context: ToolExecutionContext) -> ToolResult:
-        del context
+        # Gateway trust (0.9.17): only the owner changes what the agent remembers. A turn a group member asked for
+        # may list memory, never add, replace or remove.
+        if arguments.operation != "list" and (context.metadata or {}).get("turn_trusted") is False:
+            return ToolResult(
+                output="Not saved: only your owner can change what I remember. This request came from "
+                       f"{(context.metadata or {}).get('turn_author') or 'someone else in this chat'}.",
+                is_error=True,
+            )
         store = get_memory_store() if arguments.target == "memory" else get_user_store()
 
         target_label = "MEMORY.md" if arguments.target == "memory" else "USER.md"

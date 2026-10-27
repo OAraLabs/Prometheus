@@ -42,6 +42,12 @@ class SessionsSpawnTool(BaseTool):
     async def execute(
         self, arguments: SessionsSpawnInput, context: ToolExecutionContext
     ) -> ToolResult:
+        # A worker process has every tool, so a conversation whose profile limits its tools does not start one.
+        from prometheus.config.profiles import spawn_refusal
+
+        _refused = spawn_refusal("sessions_spawn", starts="worker")
+        if _refused:
+            return ToolResult(output=_refused, is_error=True)
         manager = get_task_manager()
         # The worker runs on this turn's route, or on the one the operator set;
         # never on one the model picked, and never on a substitute.

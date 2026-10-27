@@ -134,6 +134,10 @@ class OwnerCode:
     device_name: str | None = None
     platform: str | None = None
     source: str | None = None
+    #: Whether the redeemer was on the daemon's own machine (``loopback.is_this_host`` at redeem time), so the terminal
+    #: can say "this Mac" or "another computer" truthfully. An address alone cannot: a relay on this machine
+    #: (Tailscale serve, cloudflared) brings another computer in from 127.0.0.1.
+    this_host: bool = False
     finished_at: float | None = None
 
 
@@ -195,7 +199,7 @@ class OwnerCodes:
         logger.info("pairing: owner-code issued id=%s ttl=%ds", record.id, TTL_SECONDS)
         return record, code
 
-    def redeem(self, presented: object, mint: Callable[[], dict], *, source: str) -> dict | None:
+    def redeem(self, presented: object, mint: Callable[[], dict], *, source: str, this_host: bool = False) -> dict | None:
         """Use the live code once. For the right code, call ``mint`` and return what it minted; otherwise None.
 
         ``mint`` runs under the lock, so two right answers at once mint one device. If it raises, the exception
@@ -233,7 +237,7 @@ class OwnerCodes:
                 return None
             minted = mint()
             self._finish(live.id, REDEEMED, now, device_id=str(minted["id"]), device_name=str(minted["name"]),
-                         platform=str(minted["platform"]), source=source)
+                         platform=str(minted["platform"]), source=source, this_host=bool(this_host))
         logger.info("pairing: owner-code redeemed id=%s device=%s name=%r platform=%s source=%s",
                     live.id, minted["id"], minted["name"], minted["platform"], source)
         return minted

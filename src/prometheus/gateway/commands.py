@@ -10,9 +10,10 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from prometheus.config.paths import get_wiki_root
+from prometheus.memory.store import MANUAL_SOURCE
 from prometheus.permissions.approver import Approver
 
 if TYPE_CHECKING:
@@ -184,7 +185,7 @@ def cmd_note(store, raw: str) -> str:
             entity,
             text,
             1.0,
-            source_event_ids=["manual"],
+            source_event_ids=[MANUAL_SOURCE],
             manual=True,
         )
     except Exception as exc:  # noqa: BLE001 — surface, never false-ack
@@ -1999,7 +2000,7 @@ def cmd_steer(session: Any, text: str) -> str:
     )
 
 
-def cmd_queue(session: Any, text: str) -> str:
+def cmd_queue(session: Any, text: str, *, sender: Any = None) -> str:
     """Queue ``text`` as a fresh turn after the current one ends.
 
     ``session`` should be a get_or_created ChatSession (a queued prompt on a
@@ -2015,7 +2016,7 @@ def cmd_queue(session: Any, text: str) -> str:
         )
     if session is None:
         return "No active session."
-    if not session.enqueue_prompt(text):
+    if not session.enqueue_prompt(text, **({"sender": sender} if sender is not None else {})):
         return "Empty prompt — nothing queued."
     return (
         f"📥 Queued: {_preview(text)}\n"
@@ -2877,6 +2878,50 @@ async def approve_detail(
         grant_id=effective.grant_id,
     )
 
+#: What a chat gateway says to someone who is not its owner (the gateway's ``owner_user_ids``; on Telegram, by
+#: default, the private chats in ``allowed_chat_ids``). Group members may chat; they may not approve or teach.
+NOT_OWNER_APPROVE = "Only the owner can approve or deny tool calls."
+OWNER_ONLY_REPLY = "Only the owner can do that."
+
+# The commands only a gateway's owner may run: anything that answers an approval, changes what the agent may do or
+# where it writes, or changes what it learns. ONE rule, consulted at each gateway's single chokepoint (Telegram's
+# group -1 handler, Slack's global middleware, Discord's command callback), so a command added later is covered the
+# moment it is listed here. Reading (status, lists, help) and chatting stay open to everyone in an allowed chat.
+_OWNER_ALWAYS = frozenset({"approve", "deny", "revoke", "note", "steer"})
+_OWNER_TO_CHANGE = frozenset({"workspace", "profile", "model", "route"})   # bare = show
+_OWNER_SUBCOMMANDS: dict[str, Callable[[str], bool]] = {
+    "gate": lambda sub: sub not in ("", "status"),
+    "gepa": lambda sub: sub not in ("", "status", "history"),
+    "skills": lambda sub: sub in ("pin", "unpin"),
+    "curator": lambda sub: sub == "run",
+    "symbiote": lambda sub: sub not in ("", "status", "history", "backups", "help"),
+    "press": lambda sub: sub in ("install", "update"),
+}
+
+
+def _command_name(name: str) -> str:
+    """``/approve@my_bot``, ``/prometheus-approve`` and ``approve`` are all ``approve``."""
+    name = (name or "").strip().lower().lstrip("/").split("@", 1)[0]
+    return name[len("prometheus-"):] if name.startswith("prometheus-") else name
+
+
+def owner_only_command(name: str, args: str = "") -> bool:
+    """True when only the gateway's owner may run ``name`` with ``args``."""
+    command = _command_name(name)
+    args = (args or "").strip()
+    if command in _OWNER_ALWAYS:
+        return True
+    if command in _OWNER_TO_CHANGE:
+        return bool(args)
+    check = _OWNER_SUBCOMMANDS.get(command)
+    return bool(check and check(args.split(maxsplit=1)[0].lower() if args else ""))
+
+
+def owner_only_reply(name: str) -> str:
+    """What a non-owner is told when ``name`` is refused."""
+    return NOT_OWNER_APPROVE if _command_name(name) in ("approve", "deny") else OWNER_ONLY_REPLY
+
+
 async def cmd_approve(
     queue: Any, arg_text: str, *, by: Approver, prefix: str = "/",
 ) -> str:
@@ -2887,7 +2932,12 @@ async def cmd_approve(
     the structured facts to the REST surface. ONE core, two projections: a
     second implementation is exactly what drifted the verb list from the REST
     validator the day #232 landed.
+
+    A gateway sender who is not the owner (``by.owner is False``) is refused before the queue is touched, whatever
+    the form: an id, a bare /approve, ``all``, ``always``, ``until-restart``.
     """
+    if by.owner is False:
+        return NOT_OWNER_APPROVE
     return (await approve_detail(queue, arg_text, by=by, prefix=prefix)).message
 
 
@@ -2958,7 +3008,11 @@ async def cmd_deny(
     only when exactly one request is pending. Denying is the safe direction,
     but it stays symmetrical on purpose: an operator who learns the shortcut
     from one command should not be surprised by the other.
+
+    Owner-only on a chat gateway, as /approve is.
     """
+    if by.owner is False:
+        return NOT_OWNER_APPROVE
     request_id = (request_id or "").strip()
     if queue is None:
         return "Approval queue not active."

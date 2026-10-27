@@ -86,6 +86,14 @@ class Daemon:
         return set(self.queue.pending)
 
 
+def test_a_scoped_device_cannot_preview_a_purge_of_its_own_session(tmp_path) -> None:
+    """The preview lists the facts the assistant learned from a chat, so it is the owner's, like the purge."""
+    daemon = Daemon(tmp_path)
+    r = daemon.as_("alice", "GET", f"/api/sessions/{ALICE_SESSION}/purge-preview")
+    assert r.status_code == 403
+    assert "operator_only" in r.text
+
+
 @pytest.fixture
 def d(tmp_path) -> Daemon:
     return Daemon(tmp_path)

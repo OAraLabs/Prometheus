@@ -126,8 +126,8 @@ def test_the_issued_token_is_a_registered_owner_device_of_its_own(world, secret)
 
 
 def test_the_device_name_may_be_chosen_by_the_client_and_is_bounded(world, secret, pairing_dir):
-    token = pair_local(world, secret, name="Will's MacBook Pro")["token"]
-    assert [d["name"] for d in call(world, token, "GET", "/api/devices").json() if d["is_self"]] == ["Will's MacBook Pro"]
+    token = pair_local(world, secret, name="Alex's MacBook Pro")["token"]
+    assert [d["name"] for d in call(world, token, "GET", "/api/devices").json() if d["is_self"]] == ["Alex's MacBook Pro"]
 
     fresh = lp.replace_secret(pairing_dir)
     token2 = pair_local(world, fresh, name="x" * 500)["token"]

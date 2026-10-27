@@ -211,8 +211,26 @@ def _sentinel_enabled(sentinel_config: dict[str, Any]) -> bool:
 _ABSENT_GATE_WARNINGS: tuple[tuple[str, str, str, bool], ...] = (
     ("web", "enabled", "the web API does not start", True),
     ("trajectory_export", "enabled", "no trajectory export runs", False),
-    ("compaction", "enabled", "no compactor is constructed", True),
 )
+
+
+def _follow_shipped_compaction(config: dict[str, Any]) -> bool:
+    """An absent ``compaction.enabled`` follows the template (true) at boot; True when it did.
+
+    No longer shape B. Every config Prometheus itself wrote until now left the section out (setup mode's
+    configure, ``oara setup --fast``, the interactive wizard), so "absent" was never the operator's choice: it was
+    our writer's omission, and those installs ran with no compactor. Unlike a web server or an exporter, the compactor
+    starts nothing and reaches nothing; it keeps a turn inside the model's window. The file is not edited: an explicit
+    ``false`` is a decision and stays off, quietly.
+    """
+    section = config.get("compaction")
+    if isinstance(section, dict) and "enabled" in section:
+        return False
+    logger.warning(
+        "compaction.enabled is ABSENT from config — following the shipped template: the context compactor is ON. "
+        "Write `compaction.enabled: true` to say so, or `false` to turn it off.")
+    config["compaction"] = {**(section if isinstance(section, dict) else {}), "enabled": True}
+    return True
 
 
 def _warn_absent_gating_keys(config: dict[str, Any]) -> None:
@@ -346,6 +364,17 @@ def _wire_skill_creator(
     agent_loop.add_post_task_hook(skill_creator.maybe_create)
     logger.info("SkillCreator wired to agent loop post-task hook")
     return skill_creator
+
+
+def gateway_owner_warnings(config: dict | None) -> list[str]:
+    """One startup WARNING per enabled chat gateway with no owner named, each naming the key to set.
+
+    Same answer as ``oara doctor`` (gateway/owners.py). A pure function so the startup path is testable without
+    running the daemon.
+    """
+    from prometheus.gateway.owners import ownerless_gateways
+
+    return [f"{gap.gateway} gateway: {gap.message}. {gap.fix}" for gap in ownerless_gateways(config)]
 
 
 def telegram_gateway_decision(
@@ -803,7 +832,9 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # Ollama, Anthropic, etc. are unaffected.
     apply_config_pins(config, get_config_dir() / "config_pins.yaml")
 
+    # An absent compactor switch follows the template (every config our own writers made lacked it), then the
     # PR-B shape-B ruling: absent gates that fail closed say so at boot.
+    _follow_shipped_compaction(config)
     _warn_absent_gating_keys(config)
     # Phase C: the config analogue of deploy_guard.sh's staleness check.
     # _warn_absent_gating_keys covers a key that is MISSING; this covers a key
@@ -1147,10 +1178,11 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # NOTHING either way (tests/test_computer_registration_pin.py).
     from prometheus.computer.wiring import wire_computer_use
     from prometheus.config.shipped_defaults import (
-        resolve_allowed_chat_ids as _computer_people,
+        resolve_telegram_owner_ids as _computer_people,
     )
     computer = wire_computer_use(
         config, gate=security_gate, registry=registry,
+        # The Telegram owner, the same one who approves tool calls (gateway trust).
         telegram_user_ids=_computer_people(gateway_config),
         integration=computer_integration,
     )
@@ -1384,6 +1416,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # both loops are told to look for is the one the prompt carries.
     from prometheus.context.prompt_assembler import _load_memory_and_user
     from prometheus.context.prompt_assembler import memory_section as _memory_section
+    from prometheus.context.prompt_assembler import include_infrastructure_in_hosted_prompt
 
     _boot_memory_content = _load_memory_and_user()
     _boot_memory_prompt = _memory_section(_boot_memory_content)
@@ -1451,6 +1484,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         tool_results_turn_budget=config.get("context", {}).get("tool_results_turn_budget", 8000),
         microcompact_after_turns=config.get("context", {}).get("microcompact_after_turns", 3),
         microcompact_on_cloud=config.get("context", {}).get("microcompact_on_cloud", False),
+        infrastructure_in_hosted_prompt=include_infrastructure_in_hosted_prompt(config),
         microcompact_keep_chars=config.get("context", {}).get("microcompact_keep_chars", 200),
         microcompact_keep_chars_no_lcm=config.get("context", {}).get("microcompact_keep_chars_no_lcm", 500),
         compactor=compactor,
@@ -1606,9 +1640,12 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # Telegram adapter
     telegram: TelegramAdapter | None = None
     telegram_token = gateway_config.get("telegram_token", "") or os.environ.get("PROMETHEUS_TELEGRAM_TOKEN", "")
-    from prometheus.config.shipped_defaults import resolve_allowed_chat_ids
+    from prometheus.config.shipped_defaults import resolve_allowed_chat_ids, resolve_owner_user_ids
 
     _tg_chat_ids = resolve_allowed_chat_ids(gateway_config)
+    # Gateway trust: say plainly which gateway has no owner, and the key that names one.
+    for _owner_warning in gateway_owner_warnings(config):
+        logger.warning("%s", _owner_warning)
 
     # ABSENCE IS NOT PERMISSION. This block used to read
     # `gateway_config.get("telegram_enabled", True)`, so a config that merely
@@ -1640,6 +1677,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 platform=Platform.TELEGRAM,
                 token=telegram_token,
                 allowed_chat_ids=_tg_chat_ids,
+                owner_user_ids=resolve_owner_user_ids(gateway_config),
                 proxy_url=gateway_config.get("proxy_url"),
                 max_file_size_mb=_media_cfg.get("max_file_size_mb", 20),
                 media_cache_dir=_media_cfg.get("cache_dir"),
@@ -1703,6 +1741,12 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             )
             telegram = None
 
+    # Where what is the owner's alone goes when it has no chat of its own: approval prompts for a request raised
+    # elsewhere, cron-failure notices and the heartbeat's task notices. Only ever the owner's PRIVATE chat, or
+    # nowhere; the old `allowed_chat_ids[0]` took a group whenever one was listed first. One answer for all three.
+    from prometheus.config.shipped_defaults import resolve_owner_chat_id
+    _owner_chat = resolve_owner_chat_id(gateway_config)
+
     if telegram is not None:
         # Sprint 15b GRAFT: wire approval queue if enabled.
         # NOTE: the queue's *prompt delivery* transport is still the Telegram
@@ -1712,7 +1756,6 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         approval_cfg = security_config.get("approval_queue", {})
         if approval_cfg.get("enabled", False):
             from prometheus.permissions.approval_queue import ApprovalQueue
-            default_chat = (gateway_config.get("allowed_chat_ids") or [None])[0]
             approval_queue = ApprovalQueue(
                 # The failing-OPEN hop, so it is a constructor argument and
                 # not a later assignment. Without it this queue records no
@@ -1727,7 +1770,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 # DEFAULT_APPROVAL_TIMEOUT_SECONDS by
                 # test_daemon_fallback_matches_the_named_default.
                 timeout_seconds=approval_cfg.get("timeout_seconds", 1800),
-                default_chat_id=default_chat,
+                default_chat_id=_owner_chat,
             )
             # The failing-CLOSED hop stays late-bound: absent,
             # request_approval returns False and the action is DENIED, which
@@ -1828,6 +1871,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 platform=Platform.SLACK,
                 token=slack_bot_token,
                 app_token=slack_app_token,
+                owner_user_ids=resolve_owner_user_ids(slack_nested),
                 allowed_channels=(
                     gateway_config.get("slack_channels")
                     or (slack_nested or {}).get("allowed_channels", [])
@@ -1904,6 +1948,8 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 allowed_user_ids=[
                     int(u) for u in (discord_nested or {}).get("user_ids", []) or []
                 ],
+                # The owner (gateway trust). Empty: the bot application's owner, learned at connect.
+                owner_user_ids=resolve_owner_user_ids(discord_nested),
             )
             if "system_prompt" not in dir():
                 from prometheus.context.prompt_assembler import build_runtime_system_prompt
@@ -1952,9 +1998,8 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     from prometheus.tasks.manager import get_task_manager
     from prometheus.tasks.store import TaskStore
     tasks_config = config.get("tasks", {})
-    _notify_chat = gateway_config.get("briefing_chat_id") or (
-        gateway_config.get("allowed_chat_ids") or [None]
-    )[0]
+    # The daemon's own notices (cron failures, task finish/fail): the owner's private chat, or nowhere.
+    _notify_chat = _owner_chat
     # Managed tasks: configure the singleton manager with durability (TaskStore)
     # and system-trust command vetting (same SecurityGate as cron/agent). The
     # SignalBus is wired later (after SENTINEL init) so task_completed/_failed
@@ -2173,12 +2218,8 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             from prometheus.infra.project_configs import ProjectConfigStore
             from prometheus.tools.builtin.anatomy import set_anatomy_components
 
-            scanner = AnatomyScanner(
-                llama_cpp_url=model_config.get("base_url", "http://localhost:8080"),
-                ollama_url=model_config.get("fallback_url", "http://localhost:11434"),
-                inference_engine=model_config.get("provider", "llama_cpp"),
-                ssh_user=anatomy_config.get("ssh_user"),
-                ssh_key=anatomy_config.get("ssh_key"),
+            scanner = AnatomyScanner.from_config(
+                config,
                 # Model facts come from the registry's probe — one implementation,
                 # shared with the catalog and /api/backends; ANATOMY.md gains the
                 # backends table. The SSH GPU leg stays the scanner's.
@@ -2199,7 +2240,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 if doctor_cfg.get("startup_check", True):
                     try:
                         from prometheus.infra.doctor import Doctor
-                        doctor = Doctor(config)
+                        doctor = Doctor(config, config_path=args.config)
                         report = await doctor.diagnose(state)
                         for check in report.checks:
                             if check.status == "error":
@@ -2719,6 +2760,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             describe_web_auth,
             ensure_api_token,
             format_minted_banner,
+            warn_if_token_shell_readable,
             web_refused_on_bootstrap_failure,
         )
         # A bootstrap RAISE (unwritable env-file dir → a minted token cannot
@@ -2739,6 +2781,10 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         except Exception:
             _token_bootstrap_failed = True
             logger.error("API token bootstrap failed", exc_info=True)
+        # The token's LOCATION, not only its presence: web.api_token in prometheus.yaml, a token file outside
+        # ~/.config/*/*env, or a moved env file leave it readable by a floored shell. Said loudly at startup.
+        # A task, not awaited: the floor probe can take seconds, and the check never raises.
+        _token_location_check = asyncio.create_task(warn_if_token_shell_readable(config))
 
         # Refuse-to-serve: could not establish a token AND none is configured.
         # Serving now would expose the control plane unauthenticated, so the
@@ -2807,6 +2853,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 tool_results_turn_budget=config.get("context", {}).get("tool_results_turn_budget", 8000),
                 microcompact_after_turns=config.get("context", {}).get("microcompact_after_turns", 3),
                 microcompact_on_cloud=config.get("context", {}).get("microcompact_on_cloud", False),
+                infrastructure_in_hosted_prompt=include_infrastructure_in_hosted_prompt(config),
                 microcompact_keep_chars=config.get("context", {}).get("microcompact_keep_chars", 200),
                 microcompact_keep_chars_no_lcm=config.get("context", {}).get("microcompact_keep_chars_no_lcm", 500),
                 # Phase 3.5: web bridge is its own session namespace.
@@ -3033,6 +3080,15 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             except Exception:
                 web_skill_registry = None
 
+            # The desktop cockpit (computer-use v1.1 PR 6) rides the SignalBus:
+            # the binding, every step, the end of a task, thumbnails, and the
+            # desktop prompts' push to Beacon. SENTINEL builds the bus, and it
+            # ships off, so a daemon with computer use on and SENTINEL off had
+            # NO cockpit — Beacon never saw its own app pick. Computer use
+            # gets a bus of its own then; nothing else is wired to it.
+            if computer.runner is not None and "signal_bus" not in dir():
+                signal_bus = computer.cockpit_bus(telemetry=telemetry)
+
             if _web_refused:
                 # Token bootstrap failed and nothing is configured: do NOT bind
                 # the control plane. The refusal was logged CRITICAL above.
@@ -3070,6 +3126,10 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                     on_tools_changed=_on_tools_changed,
                     # Item 4: the checkpoint routes read/restore through the same store.
                     checkpoint_store=checkpoint_store,
+                    # A session purge retracts what was learned from the chat. Unbound
+                    # when the extractor block failed to come up, and the route says so.
+                    memory_store=memory_store if "memory_store" in dir() else None,
+                    wiki_compiler=wiki_compiler if "wiki_compiler" in dir() else None,
                     # The window the server actually reported, and the model it
                     # reported it for. Same two values the compactor and the
                     # Telegram /context command are built from, so every surface

@@ -662,7 +662,7 @@ class ComputerTaskRunner:
             target=target, app=res.app.name, scope=scope,
             set_by={"surface": surface, "by": by.label},
             created_at=now, expires_at=now + MAX_BINDING_SECONDS,
-            identity=AppIdentity.of(res.app))
+            identity=AppIdentity.of(res.app, res.window))
         self._bindings[session_id] = binding
         self._audit_note(by, f"computer binding {binding.binding_id} on: "
                              f"{binding.app} ({scope}) for {session_id}")
@@ -674,12 +674,18 @@ class ComputerTaskRunner:
         binding = self._bindings.get(session_id)
         if binding is not None and binding.expired(self._wall()):
             self._bindings.pop(session_id, None)
+            if self.live is not None:
+                self._spawn(self.live.binding_off(session_id, reason="expired"))
             return None
         return binding
 
     def unbind(self, session_id: str) -> bool:
         binding = self._bindings.pop(session_id, None)
         if binding is None:
+            # Nothing held here, but a client may still show a pick (one from
+            # before a restart): say "off" so it can pick again.
+            if self.live is not None:
+                self._spawn(self.live.binding_off(session_id, reason="cleared"))
             return False
         if self.live is not None:
             self._spawn(self.live.binding(binding, "off"))
@@ -741,7 +747,7 @@ class ComputerTaskRunner:
                 chooser=str(getattr(chooser, "name", "rule")))
         task._handle = asyncio.create_task(
             self._run(task, driver, binding, res.app.pid, notify, chooser,
-                      identity=AppIdentity.of(res.app)),
+                      identity=AppIdentity.of(res.app, res.window)),
             name=f"computer-task-{task.task_id}")
         return task
 

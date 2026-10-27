@@ -67,8 +67,11 @@ the config/identity files that call exists to write. Port:
 that's the point).
 
 Listen address: ``--bind`` > ``PROMETHEUS_WEB_BIND`` (process environment, then
-the env file) > ``0.0.0.0`` — :func:`resolve_setup_choice`, one resolver with the
-real daemon (web/bind.py), minus the config tier that does not exist yet. On a
+the env file) > ``127.0.0.1`` — :func:`resolve_setup_choice`, one resolver with the
+real daemon (web/bind.py), minus the config tier that does not exist yet, and with
+this machine only as the unchosen answer on every install kind (the pairing route
+is unauthenticated: on every interface, anyone who guesses the code becomes the
+owner, and five wrong guesses lock the owner out). On a
 loopback address the Host-header check (web/loopback.py) also runs in front of
 every route, the unauthenticated pairing endpoint included. ``configure`` writes
 ``web.bind`` into the new config: the address somebody CHOSE (``--bind`` or the
@@ -96,7 +99,6 @@ from prometheus.config.defaults import config_search_paths
 from prometheus.web.bind import (
     app_install_lan_guard,
     BIND_ENV_VAR,
-    DEFAULT_BIND,
     FRESH_INSTALL_BIND,
     BindError,
     ResolvedBind,
@@ -176,7 +178,7 @@ def resolve_setup_ws_port() -> int:
 
 
 def resolve_setup_choice(flag: str | None = None) -> ResolvedBind:
-    """The address setup mode listens on, and what decided it: ``--bind`` > ``PROMETHEUS_WEB_BIND`` > 0.0.0.0.
+    """The address setup mode listens on, and what decided it: ``--bind`` > ``PROMETHEUS_WEB_BIND`` > 127.0.0.1.
 
     There is no config yet, so no ``web.bind`` tier. The variable is read from
     the process environment first and then from the env file, the same two
@@ -203,8 +205,13 @@ def resolve_setup_choice(flag: str | None = None) -> ResolvedBind:
             ) from exc
         if BIND_ENV_VAR in from_file:
             env[BIND_ENV_VAR] = from_file[BIND_ENV_VAR]
+    resolved = resolve_bind(None, flag=flag, env=env)
+    if resolved.source == "default":
+        # Nobody chose: this machine only, on every install kind. Setting a box up from another computer is
+        # `oara daemon --bind 0.0.0.0` (the banner says so), and configure then keeps that address.
+        return ResolvedBind(FRESH_INSTALL_BIND, "default")
     # The Mac app: plain HTTP on the LAN only if the owner opted in; setup mode has no config, so never.
-    return app_install_lan_guard(resolve_bind(None, flag=flag, env=env), None, env=env)
+    return app_install_lan_guard(resolved, None, env=env)
 
 
 def resolve_setup_bind(flag: str | None = None) -> str:
@@ -440,7 +447,7 @@ def _apply_configure(
     *,
     api_port: int,
     ws_port: int,
-    bind: str = DEFAULT_BIND,
+    bind: str = FRESH_INSTALL_BIND,
     bind_source: str = "default",
     state: SetupModeState,
 ) -> "JSONResponse":
@@ -497,6 +504,11 @@ def _apply_configure(
     slack_app_token = str(body.get("slack_app_token") or "").strip()
     slack_channels = _string_list(body.get("slack_channels"))
     discord_token = str(body.get("discord_token") or "").strip()
+    # The owner per gateway (gateway trust): the only person there who approves tool calls or teaches. Optional:
+    # Telegram falls back to the private chats above, Discord to the bot application's owner, Slack to nobody.
+    telegram_owner_ids = _int_list(body.get("telegram_owner_ids"))
+    slack_owner_user_ids = _string_list(body.get("slack_owner_user_ids"))
+    discord_owner_user_ids = _int_list(body.get("discord_owner_user_ids"))
 
     # A cloud provider has no base_url to probe and a key instead. The
     # key goes to the env file (the daemon's secret store, mode 0600),
@@ -666,17 +678,23 @@ def _apply_configure(
             # is a config the operator can see and fix; a key that is absent is
             # the thing that made absence mean permission in the first place.
             config["gateway"]["allowed_chat_ids"] = telegram_chat_ids
+            if telegram_owner_ids:
+                config["gateway"]["owner_user_ids"] = telegram_owner_ids
             gateways_enabled.append("telegram")
         if slack_bot_token and slack_app_token:
             set_env_value("PROMETHEUS_SLACK_BOT_TOKEN", slack_bot_token)
             set_env_value("PROMETHEUS_SLACK_APP_TOKEN", slack_app_token)
             config["gateway"]["slack"]["enabled"] = True
             config["gateway"]["slack"]["allowed_channels"] = slack_channels
+            if slack_owner_user_ids:
+                config["gateway"]["slack"]["owner_user_ids"] = slack_owner_user_ids
             gateways_enabled.append("slack")
         if discord_token:
             set_env_value("PROMETHEUS_DISCORD_TOKEN", discord_token)
             config["gateway"]["discord"]["enabled"] = True
             config["gateway"]["discord"]["guild_ids"] = discord_guild_ids
+            if discord_owner_user_ids:
+                config["gateway"]["discord"]["owner_user_ids"] = discord_owner_user_ids
             gateways_enabled.append("discord")
     telegram_token_saved = "telegram" in gateways_enabled
 
@@ -1052,7 +1070,9 @@ def create_setup_app(
                 '"model", "agent_name"?, "persona"?, '
                 '"telegram_token"?, "slack_bot_token"?, '
                 '"slack_app_token"?, "slack_channels"?, '
-                '"discord_token"?, "discord_guild_ids"?}')
+                '"discord_token"?, "discord_guild_ids"?, '
+                '"telegram_owner_ids"?, "slack_owner_user_ids"?, '
+                '"discord_owner_user_ids"?}')
         # Blocking work (backend re-probe, file writes) off the event loop.
         try:
             return await asyncio.to_thread(
@@ -1154,6 +1174,8 @@ def format_pairing_banner(code: str, api_port: int, bind: str | None = None) -> 
         where = (
             f"  Pair from Beacon on THIS machine: address {format_host_port(bind, api_port)}\n"
             "  (setup is listening on this machine only) + the code above.\n"
+            "  Setting it up from another computer? Restart with\n"
+            "  `oara daemon --bind 0.0.0.0` (it keeps listening there afterwards).\n"
         )
     else:
         where = (
