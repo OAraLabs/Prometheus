@@ -1558,6 +1558,10 @@ async def run_loop(
     _serving_token = _ROUND_SERVING.set(None)
     _offered_token = _ROUND_OFFERED.set(None)
     _catalog_token = _RUN_CATALOG.set(None)
+    # The profile this run is held to; _run_loop sets it once the profile is resolved (None until then,
+    # and for a nested subagent run, whose registry the spawner already cut to its parent's profile).
+    from prometheus.config.profiles import RUN_PROFILE as _RUN_PROFILE
+    _profile_token = _RUN_PROFILE.set(None)
     _session_token = _RUN_SESSION.set(None if ephemeral else recorded_session_id)
     # Gateway trust: a turn a group member asked for teaches nothing (training pairs read it; tools get it below).
     from prometheus.engine.tool_context import TURN_TRUST as _TURN_TRUST, turn_trust_of as _turn_trust_of
@@ -1617,6 +1621,7 @@ async def run_loop(
         _ROUND_SERVING.reset(_serving_token)
         _ROUND_OFFERED.reset(_offered_token)
         _RUN_CATALOG.reset(_catalog_token)
+        _RUN_PROFILE.reset(_profile_token)
         _RUN_SESSION.reset(_session_token)
         _TURN_TRUST.reset(_turn_trust_token)
         if turn_key is not None:
@@ -1891,6 +1896,14 @@ async def _run_loop(
                     "names", active_profile.name, len(tool_schema),
                 )
                 active_profile = None
+        if active_profile is not None:
+            # What the run advertises and what it may CALL now follow the same profile: before this, the
+            # call path read the full registry, so a tool the profile left out ran when the model named
+            # it. Set after the empty-filter fallback above, so a profile that matches no tool limits
+            # neither.
+            from prometheus.config.profiles import RUN_PROFILE
+
+            RUN_PROFILE.set(active_profile)
 
     # A deferred local run offers EVERY tool (audit 2026-10-16, fix 3): the
     # most-used in full, the rest as skeletons, sorted, frozen for the run
@@ -5523,6 +5536,35 @@ async def _execute_tool_call(
             content=f"Unknown tool: {tool_name}",
             is_error=True,
         )
+
+    # The run's profile is a permission, not just a view. A tool it leaves out is refused here, before the
+    # lucky-guess note below: that path exists for DEFERRED tools (allowed, just not sent), and it used to run
+    # every registered tool, so a profile that dropped bash or write_file only hid them. A policy refusal like
+    # the gate's, so it is recorded as permission_denied and never counts against the model.
+    from prometheus.config.profiles import current_run_profile, profile_permits
+
+    _run_profile = current_run_profile()
+    if _run_profile is not None and not profile_permits(_run_profile, tool_name):
+        _refusal = (
+            f"{tool_name} is not available in this conversation: its profile {_run_profile.name!r} does not "
+            f"include it. Use one of the tools you were given, or ask the owner to switch profiles (/profile)."
+        )
+        log.info("Refused %s: not in profile %r", tool_name, _run_profile.name)
+        if context.telemetry is not None:
+            context.telemetry.record(
+                model=_serving_model(context),
+                tool_name=tool_name,
+                success=False,
+                error_type="permission_denied",
+                error_detail=f"not in profile {_run_profile.name!r}",
+                repairs=len(repair_log),
+                served_model=served_model,
+                parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
+                session_id=_row_session,
+                **_v2_call(tool_name, tool_use_id, success=False,
+                           repair_log=repair_log, raw_call=_raw_call),
+            )
+        return ToolResultBlock(tool_use_id=tool_use_id, content=_refusal, is_error=True)
 
     # Lucky guess: tool is registered but the round did not offer it. Read
     # from what the round sent (_ROUND_OFFERED), never recomputed: the old
