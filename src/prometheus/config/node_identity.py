@@ -148,3 +148,12 @@ def set_instance_id(instance_id: str | None) -> None:
 
 def get_instance_id() -> str | None:
     return _instance_id
+
+
+def identity_fields() -> dict[str, str | None]:
+    """``instance_id`` and ``node_pub``, as ``/api/status`` reports them, for every answer that pairs a device.
+
+    A paired client pins ``node_pub`` to check the identity challenge on every later connect, so it gets it the
+    moment it joins, from the same reads ``/api/status`` makes. Reads only: never mints the node identity.
+    """
+    return {"instance_id": get_instance_id(), "node_pub": get_node_pubkey()}

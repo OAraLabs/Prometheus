@@ -222,7 +222,7 @@ class TestPairLocalOnTheRunningDaemon:
         resp = _client(_daemon_app()).post("/api/pair/local", json={"code": secret})
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert set(body) == {"token", "api_base_port", "ws_port", "revoked_previous"}
+        assert set(body) == {"token", "api_base_port", "ws_port", "revoked_previous", "instance_id", "node_pub"}
         assert (body["api_base_port"], body["ws_port"]) == (8123, 8124)
         assert body["token"] != DAEMON_TOKEN, "a device paired here must not hold the master key"
         assert not (pairing_dir / "pair.secret").exists()

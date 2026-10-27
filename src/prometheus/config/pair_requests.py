@@ -348,12 +348,16 @@ class PairRequestStore:
     # -- create -----------------------------------------------------------
 
     def create(self, *, device_name: str, platform: str, public_key: str, source: str,
-               instance_public_key_der: bytes) -> Created:
-        """Record a request, or raise :class:`LimitExceeded`. *public_key* is base64url, already validated."""
+               instance_public_key_der: bytes, node_pub: bytes | None = None, match_code_version: int = 1) -> Created:
+        """Record a request, or raise :class:`LimitExceeded`. *public_key* is base64url, already validated.
+
+        *match_code_version* 2 also hashes *node_pub* (the node key's 32 raw bytes) into the code the owner compares.
+        """
         now = self._clock()
         request_id = secrets.token_hex(16)
         poll_secret = secrets.token_urlsafe(32)
-        code = pair_seal.match_code(pair_seal.b64url_decode(public_key), instance_public_key_der, request_id)
+        code = pair_seal.match_code(pair_seal.b64url_decode(public_key), instance_public_key_der, request_id,
+                                    node_pub=node_pub, version=match_code_version)
         with self._write() as conn:
             self._check_limits(conn, source, now)
             conn.execute(
