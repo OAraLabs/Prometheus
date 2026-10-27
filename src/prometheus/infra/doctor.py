@@ -247,20 +247,22 @@ def check_always_loaded(config: dict | None) -> DiagnosticCheck:
 class Doctor:
     """Diagnoses Prometheus configuration against model capabilities."""
 
-    def __init__(self, config: dict | None = None) -> None:
+    def __init__(
+        self, config: dict | None = None, config_path: str | Path | None = None,
+    ) -> None:
         self.config = config or {}
+        # The ``--config`` the daemon was started with, so the Config row
+        # checks the file the daemon read. None searches the usual places.
+        self.config_path = config_path
         self.registry = self._load_registry()
 
     def _repo_root(self) -> Path:
-        """Project root used to locate the bundled config files
-        (``config/prometheus.yaml``, ``config/model_registry.yaml``).
+        """Project root used to locate ``config/model_registry.yaml``.
 
         Defaults to the package's repo root, but is overridable via a
-        ``repo_root`` attribute so tests can point the config checks at a
-        fixture. Otherwise they depend on a gitignored ``config/prometheus.yaml``
-        existing at the real repo root — absent in any linked git worktree (and
-        in an installed package), which made ``test_full_diagnose_all_ok`` fail
-        outside the daemon's checkout.
+        ``repo_root`` attribute so tests can point the registry lookup at a
+        fixture. The Config row does not use it: it follows
+        ``config_search_paths``, like ``load_config``.
         """
         return getattr(self, "repo_root", None) or Path(__file__).resolve().parents[3]
 
@@ -365,19 +367,29 @@ class Doctor:
         )
 
     def _check_config_valid(self) -> DiagnosticCheck:
-        """Does prometheus.yaml parse without errors?"""
-        config_path = self._repo_root() / "config" / "prometheus.yaml"
-        if not config_path.exists():
+        """Does prometheus.yaml parse without errors?
+
+        Checks the file ``load_config`` reads, found by the same search
+        (:func:`prometheus.config.defaults.config_search_paths`). It used to
+        look only at ``<repo>/config/prometheus.yaml``, so a daemon running on
+        ``~/.prometheus/prometheus.yaml`` reported its config missing.
+        """
+        from prometheus.config.defaults import config_search_paths, resolve_config_path
+
+        explicit = getattr(self, "config_path", None)
+        config_path = resolve_config_path(explicit)
+        if not config_path.is_file():
+            searched = ", ".join(str(p) for p in config_search_paths(explicit))
             return DiagnosticCheck(
                 name="Config", category="platform", status="error",
-                message="config/prometheus.yaml not found",
-                fix="Run `python -m prometheus --setup` or copy prometheus.yaml.default",
+                message=f"prometheus.yaml not found (searched: {searched})",
+                fix="Run `oara setup` to create one.",
             )
         try:
             yaml.safe_load(config_path.read_text(encoding="utf-8"))
             return DiagnosticCheck(
                 name="Config", category="platform", status="ok",
-                message="valid",
+                message=f"loaded {config_path}",
             )
         except yaml.YAMLError as exc:
             return DiagnosticCheck(
@@ -387,7 +399,7 @@ class Doctor:
                 # prometheus.yaml keeps credentials inline. See
                 # yaml_error_summary.
                 message=f"YAML parse error: {yaml_error_summary(exc)}",
-                fix="Fix syntax errors in config/prometheus.yaml",
+                fix=f"Fix syntax errors in {config_path}",
             )
 
     def _check_data_dir(self) -> DiagnosticCheck:
