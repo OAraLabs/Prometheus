@@ -168,7 +168,7 @@ def test_the_code_makes_the_remote_beacon_an_owner_device_of_its_own(world):
     response = redeem(world, code)
     assert response.status_code == 200, response.text
     body = response.json()
-    assert set(body) == {"token", "device_id", "name", "owner", "endpoints", "tls"}
+    assert set(body) == {"token", "device_id", "name", "owner", "endpoints", "tls", "instance_id", "node_pub"}
     assert body["owner"] is True and body["name"] == "Alex's MacBook Pro"
     assert body["token"] != GLOBAL
     identity = verify_token(body["token"], GLOBAL, world.devices)

@@ -221,7 +221,10 @@ def register_owner_code_routes(
         done = codes.status(live.id) if live is not None else None
         if done is not None:
             await _tell_operators(request, "redeemed", done)
+        from prometheus.config.node_identity import identity_fields
+
         return _json(200, {"token": minted["token"], "device_id": minted["id"], "name": minted["name"],
-                           "owner": True, "endpoints": _endpoints(request, web_config), "tls": _tls_pin(request)})
+                           "owner": True, "endpoints": _endpoints(request, web_config), "tls": _tls_pin(request),
+                           **identity_fields()})
 
     return codes

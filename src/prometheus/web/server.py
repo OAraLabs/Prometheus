@@ -42,7 +42,7 @@ from prometheus.web.strict_query import StrictQueryRoute
 from prometheus.config import api_token as api_token_module
 from prometheus.config import local_pairing
 from prometheus.config.device_store import registry_platform
-from prometheus.config.node_identity import get_instance_id, get_node_pubkey
+from prometheus.config.node_identity import get_instance_id, get_node_pubkey, identity_fields
 from prometheus.config.paths import get_wiki_root
 from prometheus.context.environment import (
     booted_from as _booted_from,
@@ -568,6 +568,8 @@ def create_app(
             "api_base_port": bound_port(getattr(request.app.state, "http_server", None))
                              or int(web_cfg.get("api_port", 8005) or 8005),
             "ws_port": getattr(bridge, "bound_port", None) or int(web_cfg.get("ws_port", 8010) or 8010),
+            # The node key to pin for the identity challenge, and the instance it belongs to (as /api/status).
+            **identity_fields(),
         }
 
     def _clean_device_name(raw: Any, default: str) -> str:

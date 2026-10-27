@@ -39,6 +39,11 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 ALG = "x25519-hkdf-sha256-chacha20poly1305"
 
 _MATCH_DOMAIN = b"prometheus-pair-v1"
+#: Version 2 of the match code also hashes the node key (Ed25519, 32 raw bytes), so the owner comparing four
+#: digits confirms the key the device pins for the identity challenge, not only the instance key.
+_MATCH_DOMAIN_V2 = b"prometheus-pair-v2"
+#: The match code versions a requester may ask for (docs/PAIRING-APPROVAL-API.md 4.4).
+MATCH_CODE_VERSIONS = (1, 2)
 _SEAL_INFO = b"prometheus-pair-v1/seal"
 _NONCE_BYTES = 12
 _KEY_BYTES = 32
@@ -68,11 +73,25 @@ def check_requester_key(raw: bytes) -> None:
     X25519PrivateKey.generate().exchange(X25519PublicKey.from_public_bytes(bytes(raw)))   # ValueError if low order
 
 
-def match_code(device_public_key: bytes, instance_public_key_der: bytes, request_id: str) -> str:
-    """The 4-digit code both sides compute: SHA-256 over both keys and the request id, mod 10,000."""
-    digest = hashlib.sha256(
-        _MATCH_DOMAIN + b"\x00" + bytes(device_public_key) + bytes(instance_public_key_der) + request_id.encode("ascii")
-    ).digest()
+def match_code(
+    device_public_key: bytes, instance_public_key_der: bytes, request_id: str,
+    *, node_pub: bytes | None = None, version: int = 1,
+) -> str:
+    """The 4-digit code both sides compute: SHA-256 over the keys and the request id, mod 10,000.
+
+    Version 1 hashes the device's key and the instance key. Version 2 adds the node key's 32 raw bytes after the
+    instance key, under its own domain, so the two versions can never give the same code by construction.
+    """
+    if version == 1:
+        material = _MATCH_DOMAIN + b"\x00" + bytes(device_public_key) + bytes(instance_public_key_der)
+    elif version == 2:
+        if node_pub is None or len(node_pub) != 32:
+            raise ValueError("match code version 2 needs the node key's 32 raw bytes")
+        material = (_MATCH_DOMAIN_V2 + b"\x00" + bytes(device_public_key) + bytes(instance_public_key_der)
+                    + bytes(node_pub))
+    else:
+        raise ValueError(f"unknown match code version {version!r}")
+    digest = hashlib.sha256(material + request_id.encode("ascii")).digest()
     return f"{int.from_bytes(digest[:4], 'big') % 10000:04d}"
 
 
