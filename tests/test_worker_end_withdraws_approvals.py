@@ -241,22 +241,53 @@ async def test_a_worker_out_of_time_tells_the_listeners_so(tmp_path, monkeypatch
         await mgr.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_a_worker_that_finishes_tells_the_listeners_so(tmp_path, monkeypatch):
+# A stand-in for a worker that finishes. It must READ ITS BRIEF before it exits, as a real worker does:
+# create_agent_task starts the process and only then writes the brief to stdin, and a process that is gone
+# by then is restarted to take it (write_to_task -> _restart_agent_task). A bare "exit 0" therefore raced
+# the brief: under full-suite load the child sometimes exited first, ran a second time, and the listener
+# heard "it finished" twice for one task (#783).
+_FINISHING_WORKER = "cat >/dev/null; exit 0"   # reads the brief to EOF (a worker's stdin closes after it)
+
+
+async def _finishing_worker_run(tmp_path, monkeypatch, *, brief_delay: float = 0.0):
     from prometheus.tasks import manager as mgr_mod
     from prometheus.tasks.manager import BackgroundTaskManager
 
-    monkeypatch.setattr(mgr_mod, "prometheus_argv", lambda *a: ["/bin/sh", "-c", "exit 0", "standin", *a])
+    monkeypatch.setattr(mgr_mod, "prometheus_argv",
+                        lambda *a: ["/bin/sh", "-c", _FINISHING_WORKER, "standin", *a])
     mgr = BackgroundTaskManager()
+    if brief_delay:
+        # What load does: the child gets ahead of the brief.
+        write = mgr.write_to_task
+
+        async def slow_write(task_id: str, data: str) -> None:
+            await asyncio.sleep(brief_delay)
+            await write(task_id, data)
+
+        monkeypatch.setattr(mgr, "write_to_task", slow_write)
     heard: list[tuple[str, str]] = []
     mgr.add_process_end_listener(lambda task_id, why: heard.append((task_id, why)))
     try:
         rec = await mgr.create_agent_task(prompt="p", description="quick", cwd=str(tmp_path), route="local",
                                           worker=True, session_id="beacon:abc")
         await _until(lambda: heard)
-        assert heard == [(rec.id, "it finished")], heard
+        await asyncio.sleep(0.3)  # long enough for a second, restarted process to end and be heard too
+        return rec, heard
     finally:
         await mgr.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_worker_that_finishes_tells_the_listeners_so(tmp_path, monkeypatch):
+    rec, heard = await _finishing_worker_run(tmp_path, monkeypatch)
+    assert heard == [(rec.id, "it finished")], heard
+
+
+@pytest.mark.asyncio
+async def test_the_finishing_stand_in_is_heard_once_even_when_its_brief_is_slow(tmp_path, monkeypatch):
+    # The order full-suite load produced, made certain: the brief arrives 0.5 s after the process started.
+    rec, heard = await _finishing_worker_run(tmp_path, monkeypatch, brief_delay=0.5)
+    assert heard == [(rec.id, "it finished")], heard
 
 
 @pytest.mark.asyncio
