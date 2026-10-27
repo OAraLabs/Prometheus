@@ -38,6 +38,9 @@ class MessagePart:
     # Appended last so positional MessagePart construction stays valid.
     provenance: str = "user"
     is_trusted: bool = True
+    # Who wrote a gateway turn ("telegram:<user id>", ...): the owner or a member of a group chat. None for every
+    # other surface and for rows written before it existed. Appended last, like the fields above.
+    author: str | None = None
 
 
 @dataclass
