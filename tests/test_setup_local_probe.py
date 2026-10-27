@@ -335,7 +335,7 @@ class TestTargets:
     @pytest.mark.parametrize("text,want", [
         ("studio-mac", (None, "studio-mac", None)),
         ("Studio-Mac.local", (None, "studio-mac.local", None)),
-        ("192.168.1.20:11434", (None, "192.168.1.20", 11434)),
+        ("192.0.2.20:11434", (None, "192.0.2.20", 11434)),
         ("[fd00::20]:1234", (None, "fd00::20", 1234)),
         ("http://studio-mac.local:1234/", ("http", "studio-mac.local", 1234)),
     ])
