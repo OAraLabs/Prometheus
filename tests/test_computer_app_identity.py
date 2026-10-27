@@ -437,3 +437,41 @@ async def test_the_door_refuses_another_app(tmp_path):
     done, _ = await _run_task(runner, channel, answer=None)
     assert "belongs to 'Firefox', not 'Text Editor'" in done.reason
     assert driver.dispatched == []
+
+
+# ── A PROCESS NAME CUT AT 15 CHARACTERS (computer-use rig, 2026-10-23) ──────
+#
+# Linux keeps a process name to 15 characters, so ``list_apps`` named GNOME
+# Terminal "gnome-terminal-" (its server process) while its window said
+# "Gnome-terminal". The pick recorded only the first, so check 1b refused
+# every task in the app the person had picked.
+
+TERMINAL = AppRecord(pid=PID, name="gnome-terminal-", running=True, active=False)
+
+
+def test_the_resolved_windows_own_app_name_is_one_of_the_apps_names():
+    window = WindowRecord(window_id=WID, pid=PID, app_name="Gnome-terminal", z_index=1)
+    assert AppIdentity.of(TERMINAL, window).names == ("gnome-terminal-", "Gnome-terminal")
+    assert AppIdentity.of(TERMINAL).names == ("gnome-terminal-",)
+
+
+def test_a_window_of_another_process_adds_no_name():
+    window = WindowRecord(window_id=WID, pid=PID + 1, app_name="Gnome-terminal", z_index=1)
+    assert AppIdentity.of(TERMINAL, window).names == ("gnome-terminal-",)
+
+
+def test_a_window_that_names_another_app_adds_no_name():
+    """A pick has no pid, so a window calling itself something else must not
+    widen what the pick covers — only a cut process name is completed."""
+    firefox = WindowRecord(window_id=WID, pid=PID, app_name="Firefox", z_index=1)
+    assert AppIdentity.of(TEXT_EDITOR, firefox).names == AppIdentity.of(TEXT_EDITOR).names
+    other = WindowRecord(window_id=WID, pid=PID, app_name="Firefox", z_index=1)
+    assert AppIdentity.of(TERMINAL, other).names == ("gnome-terminal-",)
+
+
+async def test_a_task_in_the_terminal_the_person_picked_is_not_refused(tmp_path):
+    runner, channel, driver, gate = _door(tmp_path, "Gnome-terminal", app=TERMINAL)
+    done, binding = await _run_task(runner, channel, answer=None, app="gnome-terminal-")
+    assert "belongs to" not in done.reason, done.reason
+    assert [v for v, _ in driver.dispatched] == ["click"]
+    assert done.approvals == 0, "the pick covers a click in that app"
