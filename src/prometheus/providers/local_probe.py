@@ -91,7 +91,7 @@ def min_window_for(round0: int) -> int:
     return -(-need // STEP) * STEP + STEP
 
 
-MIN_WINDOW_MEASURED: dict[str, Any] | None = {
+MIN_WINDOW_MEASURED: dict[str, Any] = {
     "method": "scripts/local_gate/measure_floor.py: a fresh install (setup mode, no config) configured for the server, "
               "then Beacon's first suggestion, 'What can you help me with?'; round 0 = the first request that offers "
               "tools, usage.prompt_tokens (Ollama: prompt_eval_count, nothing cached); a scratch instance with its "
