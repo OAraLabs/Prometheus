@@ -105,7 +105,7 @@ def _message_from_part(part: object) -> ConversationMessage:
         content_json=part.content_json,  # type: ignore[attr-defined]
         provenance=getattr(part, "provenance", "user"),
         is_trusted=getattr(part, "is_trusted", True),
-    )
+    ).model_copy(update={"author": getattr(part, "author", None)})
 
 
 def _estimated_tokens(message: ConversationMessage) -> int:
@@ -216,6 +216,20 @@ def _restore_newest_turn(
     return [request, *turn[start:]], info
 
 
+class QueuedPrompt(str):
+    """A queued prompt's text, carrying who queued it (``sender``, a platform user id, or None when unknown).
+
+    A ``str`` so every reader of ``queued_prompts`` (previews, /unqueue, status lists) works unchanged.
+    """
+
+    sender: object
+
+    def __new__(cls, text: str, *, sender: object = None) -> "QueuedPrompt":
+        obj = super().__new__(cls, text)
+        obj.sender = sender
+        return obj
+
+
 class ChatSession:
     """Per-chat conversation state.
 
@@ -314,13 +328,18 @@ class ChatSession:
         self.queued_steers.clear()
         return n
 
-    def enqueue_prompt(self, text: str) -> bool:
+    def enqueue_prompt(self, text: str, *, sender: object = None) -> bool:
         """Append ``text`` to the queued-prompts list. Returns False
-        if empty."""
+        if empty.
+
+        ``sender`` is the platform user id of whoever queued it (gateway
+        trust): the turn it later fires is theirs, not the person whose turn
+        happened to drain it.
+        """
         cleaned = (text or "").strip()
         if not cleaned:
             return False
-        self.queued_prompts.append(cleaned)
+        self.queued_prompts.append(QueuedPrompt(cleaned, sender=sender))
         return True
 
     def drain_prompt(self) -> str | None:
@@ -344,6 +363,7 @@ class ChatSession:
         provenance: str = "user",
         is_trusted: bool = True,
         blocks: list | None = None,
+        author: str | None = None,
     ) -> int:
         """Append a user-role message to the conversation. Returns its ``turn_index``.
 
@@ -382,10 +402,15 @@ class ChatSession:
             )
         elif provenance == "user" and is_trusted:
             message = ConversationMessage.from_user_text(text)
+        elif provenance == "member":
+            # Gateway trust: a group member who is not the owner. Never trusted, whatever the caller passed.
+            message = ConversationMessage.from_member_text(text, author=author or "unknown")
         else:
             message = ConversationMessage.from_injected(
                 text, provenance=provenance, is_trusted=is_trusted
             )
+        if author is not None:
+            message.author = author
         self.messages.append(message)
         # seal=False: this writes ONE row that may sit ABOVE a running
         # turn's still-unpersisted tail (Beacon sends mid-turn; the echo
@@ -683,6 +708,8 @@ class ChatSession:
                     # silently dropped to the trusted default.
                     provenance=msg.provenance,
                     is_trusted=msg.is_trusted,
+                    # Only when there is one: an engine that predates authors (or a duck-typed one) still persists.
+                    **({"author": msg.author} if getattr(msg, "author", None) else {}),
                 )
                 stored = getattr(self._lcm_engine, "last_ingested_turn_index", None)
                 if _is_int(stored) and stored != requested:

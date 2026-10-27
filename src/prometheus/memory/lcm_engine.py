@@ -238,6 +238,7 @@ class LCMEngine:
         content_json: str | None = None,
         provenance: str = "user",
         is_trusted: bool = True,
+        author: str | None = None,
     ) -> str:
         """Persist a new message and return its ID.
 
@@ -265,6 +266,7 @@ class LCMEngine:
             turn_index=turn_index if turn_index is not None else 0,
             token_count=estimate_tokens(content),
             content_json=content_json,
+            author=author,
             provenance=provenance,
             is_trusted=is_trusted,
         )
@@ -283,6 +285,7 @@ class LCMEngine:
         content_json: str | None = None,
         provenance: str = "user",
         is_trusted: bool = True,
+        author: str | None = None,
     ) -> str:
         """Synchronous sibling of :meth:`ingest` for sync call sites.
 
@@ -309,6 +312,7 @@ class LCMEngine:
             turn_index=turn_index if turn_index is not None else 0,
             token_count=estimate_tokens(content),
             content_json=content_json,
+            author=author,
             provenance=provenance,
             is_trusted=is_trusted,
         )
