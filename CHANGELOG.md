@@ -5,6 +5,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 ## Unreleased
 
 - Hosted models no longer receive this machine's hardware, services and network (the anatomy section, which could include tailnet peer names) in every prompt. They get a pointer to the `anatomy` tool and call it when a task needs the layout. Local models are unchanged. `anatomy.include_in_hosted_prompt: true` restores the old behaviour.
+- Computer use: an app whose process name Linux cuts at 15 characters (GNOME Terminal is "gnome-terminal-") can be used after you pick it. Before, its window reported "Gnome-terminal" and every task in it was refused.
 - Computer use: a GTK4 menu button ("Main menu", "Open", "View") can be clicked by name. GTK4 shows each one twice, a wrapper and the toggle inside it, so the two matching rows tied and the task did nothing. Only the toggle that acts is offered now.
 - Computer use: when an app pick ends without being turned off (the daemon restarted, or the pick expired after 8 hours), the action log now says so. Before, a reconnecting Beacon kept showing the app as picked, its picker never opened, and "Change / clear" changed nothing.
 - Daily briefing: with `gateway.briefing_chat_id` unset, the briefing goes to your private chat (`gateway.owner_user_ids`, else the private chats in `gateway.allowed_chat_ids`), then to `TELEGRAM_CHAT_ID`, and otherwise nowhere, with an error. Before, it went to the first allowed chat, which could be a group. A `briefing_chat_id` you set, a group included, is used as before.
