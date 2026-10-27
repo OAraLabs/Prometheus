@@ -210,6 +210,29 @@ def assert_refused_not_missing(res, what: str) -> None:
     )
 
 
+# A denied WRITE surfaces differently by tool: a direct open is EACCES ("Permission denied"),
+# but sqlite reports "attempt to write a readonly database", and a read-only mount is EROFS. The
+# credential-READ tests keep the strict _REFUSED check (a wrong failure there must not pass); a
+# write test proves the floor by the file staying unchanged AND one of these refusal shapes.
+_WRITE_REFUSED = (
+    _REFUSED,                               # EACCES — a direct open
+    "Read-only file system",                # EROFS
+    "readonly database",                    # sqlite, write denied under it
+    "unable to open database file",         # sqlite, open-for-write denied
+    "Operation not permitted",              # EPERM — a rename/link denied
+)
+
+
+def assert_write_refused(res, what: str) -> None:
+    """A write the floor denies: it ran, it errored, not on ENOENT, and the tool named a write refusal."""
+    assert SENTINEL in res.output, f"{what}: never ran — not containment"
+    assert res.is_error, f"{what}: the command SUCCEEDED — the floor leaked"
+    assert _NOT_FOUND not in res.output, (
+        f"{what}: failed with ENOENT, not a refusal — the subject was absent:\n{res.output}")
+    assert any(s in res.output for s in _WRITE_REFUSED), (
+        f"{what}: errored, but not with a recognised write refusal {_WRITE_REFUSED}:\n{res.output}")
+
+
 # --------------------------------------------------------------------------- #
 # Fail loud — runs everywhere, needs no profile
 # --------------------------------------------------------------------------- #
@@ -406,6 +429,156 @@ class TestFloorHolds:
         assert C._probe_config_rename(C.PROFILE) == "refused"
         ok, detail = C.preflight(C.PROFILE, force=True)
         assert ok and "renaming ~/.config refused" in detail, detail
+
+    # --- the device registry (devices.db): writes refused, reads kept --------
+    # Measured on macOS under the Seatbelt twin of this rule; these are the Linux measurement. The write floor is
+    # OFF here on purpose: bwrap alone already refuses the data directory outside a workspace, so with it on these
+    # would pass without proving the AppArmor rule.
+
+    @pytest.fixture()
+    def registry(self):
+        return require_floor_subject(Path.home() / ".prometheus" / "data" / "devices.db")
+
+    def _aa_only(self, command: str):
+        tool = BashTool(confinement="required", write_confinement="off")
+        return _run(tool, f"set -o pipefail; echo {SENTINEL}; {command}")
+
+    @pytest.mark.parametrize("command, what", [
+        ("printf x >> {db}", "append to the registry"),
+        ("python3 -c \"import sqlite3; c = sqlite3.connect('{db}'); "
+         "c.execute('create table if not exists aa_probe (x)'); c.commit()\"", "write a table into the registry"),
+        ("printf x > {db}-wal", "plant a -wal file"),
+        ("ln {db} $HOME/.aa-pytest-registry-link", "hard-link the registry"),
+        ("mv {data} $HOME/.aa-pytest-data-moved", "rename the data directory"),
+    ])
+    def test_the_registry_cannot_be_written(self, registry, command, what):
+        before = registry.read_bytes()
+        try:
+            res = self._aa_only(command.format(db=registry, data=registry.parent))
+            assert_write_refused(res, what)
+            assert registry.read_bytes() == before, f"{what}: the registry changed — the floor leaked"
+        finally:
+            Path(f"{registry}-wal").unlink(missing_ok=True)
+            (Path.home() / ".aa-pytest-registry-link").unlink(missing_ok=True)
+            moved = Path.home() / ".aa-pytest-data-moved"
+            if moved.exists() and not registry.parent.exists():
+                moved.rename(registry.parent)
+
+    def test_the_registry_can_still_be_read_and_backed_up(self, registry, tmp_path):
+        res = self._aa_only(f"cp {registry} {tmp_path}/copy.db && python3 -c \"import sqlite3; "
+                            f"print('ROWS', sqlite3.connect('file:{registry}?mode=ro', uri=True)"
+                            f".execute('select count(*) from sqlite_master').fetchone())\"")
+        assert not res.is_error and "ROWS" in res.output, res.output
+
+    def test_the_boot_probe_sees_the_registry_refused(self, registry, monkeypatch):
+        # conftest redirects PROMETHEUS_DATA_DIR/CONFIG_DIR to a tmp; the probe (and a real boot) measure the live
+        # ~/.prometheus, which is where the registry fixture seeds the subject. Clear the redirect for the probe.
+        monkeypatch.delenv("PROMETHEUS_DATA_DIR", raising=False)
+        monkeypatch.delenv("PROMETHEUS_CONFIG_DIR", raising=False)
+        C.reset_cache()
+        assert C._probe_registry_rename(C.PROFILE) == "refused"
+        ok, detail = C.preflight(C.PROFILE, force=True)
+        assert ok and "writing the device registry refused" in detail, detail
+
+    # --- trusted state (config, identity, memory, skills): writes refused ----
+    # Measured on macOS under the Seatbelt twin; the Linux measurement, write floor off as above.
+
+    @pytest.fixture()
+    def identity_file(self):
+        return require_floor_subject(Path.home() / ".prometheus" / "AGENTS.md")
+
+    @pytest.fixture()
+    def skills_dir(self):
+        return require_floor_subject(Path.home() / ".prometheus" / "skills")
+
+    def test_an_identity_file_cannot_be_written(self, identity_file):
+        before = identity_file.read_bytes()
+        res = self._aa_only(f"printf injected >> {identity_file}")
+        assert_write_refused(res, "append to ~/.prometheus/AGENTS.md")
+        assert identity_file.read_bytes() == before, "the identity file changed — the floor leaked"
+
+    def test_a_skill_cannot_be_planted(self, skills_dir):
+        planted = skills_dir / "aa-pytest-planted.md"
+        try:
+            res = self._aa_only(f"printf x > {planted}")
+            assert_write_refused(res, "plant a skill")
+            assert not planted.exists(), "a skill was planted — the floor leaked"
+        finally:
+            planted.unlink(missing_ok=True)
+
+    def test_trusted_state_can_still_be_read(self, identity_file):
+        res = self._aa_only(f"cat {identity_file}")
+        assert not res.is_error, res.output
+
+    def test_the_boot_probe_sees_trusted_state_refused(self, skills_dir, monkeypatch):
+        monkeypatch.delenv("PROMETHEUS_DATA_DIR", raising=False)
+        monkeypatch.delenv("PROMETHEUS_CONFIG_DIR", raising=False)
+        C.reset_cache()
+        assert C._probe_trusted_rename(C.PROFILE) == "refused"
+        ok, detail = C.preflight(C.PROFILE, force=True)
+        assert ok and "writing trusted state refused" in detail, detail
+
+    # --- the scheduled-jobs files: writes and links refused, reads kept ------
+    # Measured on macOS under the Seatbelt twin (tests/test_cron_floor.py); the Linux measurement, write floor off
+    # as above. The schedule's .tmp and .corrupt side files and the PID file are matched by the rule's prefix.
+
+    @pytest.fixture()
+    def schedule(self):
+        return require_floor_subject(Path.home() / ".prometheus" / "data" / "cron_jobs.json")
+
+    @pytest.mark.parametrize("command, what", [
+        ("printf x >> {s}", "append to the schedule"),
+        ("cp {s} $HOME/.aa-pytest-c && mv $HOME/.aa-pytest-c {s}", "replace the schedule"),
+        ("rm {s}", "delete the schedule"),
+        ("printf x > {s}.tmp", "create the schedule's temp file"),
+        ("ln -s $HOME/.aa-pytest-target {s}.tmp", "plant the temp file as a symlink"),
+        ("ln $HOME/.aa-pytest-target {s}.tmp", "plant the temp file as a hard link"),
+        ("printf x > {s}.corrupt", "plant a corrupt-file backup"),
+        ("printf 1 > {data}/cron_scheduler.pid", "plant the PID file"),
+        ("printf x > {data}/cron_undelivered.jsonl", "write the resend queue"),
+        ("ln -s $HOME/.aa-pytest-target {data}/cron_history.jsonl", "plant the history as a symlink"),
+    ])
+    def test_the_schedule_cannot_be_written(self, schedule, command, what):
+        data = schedule.parent
+        side = [data / n for n in ("cron_jobs.json.tmp", "cron_jobs.json.corrupt", "cron_scheduler.pid",
+                                   "cron_undelivered.jsonl", "cron_history.jsonl")]
+        existed = {p for p in side if p.exists() or p.is_symlink()}
+        target = Path.home() / ".aa-pytest-target"
+        target.write_text("keep\n")
+        before = schedule.read_bytes()
+        try:
+            res = self._aa_only(command.format(s=schedule, data=data))
+            assert_write_refused(res, what)
+            assert schedule.read_bytes() == before, f"{what}: the schedule changed — the floor leaked"
+            planted = [p for p in side if p not in existed and (p.exists() or p.is_symlink())]
+            assert not planted, f"{what}: {planted} appeared — the floor leaked"
+            assert target.read_text() == "keep\n"
+        finally:
+            for p in side:
+                if p not in existed and (p.exists() or p.is_symlink()):
+                    p.unlink()
+            target.unlink(missing_ok=True)
+            (Path.home() / ".aa-pytest-c").unlink(missing_ok=True)
+
+    def test_the_schedule_can_still_be_read(self, schedule):
+        res = self._aa_only(f"cat {schedule}")
+        assert not res.is_error, res.output
+
+    def test_a_file_beside_the_schedule_can_still_be_written(self, schedule):
+        beside = schedule.parent / "aa-pytest-beside.txt"
+        try:
+            res = self._aa_only(f"printf x > {beside} && cat {beside}")
+            assert not res.is_error, res.output
+        finally:
+            beside.unlink(missing_ok=True)
+
+    def test_the_boot_probe_sees_the_schedule_refused(self, schedule, monkeypatch):
+        monkeypatch.delenv("PROMETHEUS_DATA_DIR", raising=False)
+        monkeypatch.delenv("PROMETHEUS_CONFIG_DIR", raising=False)
+        C.reset_cache()
+        assert C._probe_cron_rename(C.PROFILE) == "refused"
+        ok, detail = C.preflight(C.PROFILE, force=True)
+        assert ok and "writing the scheduled-jobs files refused" in detail, detail
 
     def test_work_inside_config_is_unaffected(self, config_env_file):
         scratch = config_env_file.parent.parent / "aa-pytest-app"

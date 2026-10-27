@@ -45,6 +45,14 @@ class PlatformConfig:
     # with a loud boot refusal like Telegram's #219 — is a deliberate follow-up,
     # not bundled here, because it changes behaviour for every working install.
     allowed_user_ids: list[int] = field(default_factory=list)
+    # The owner: the only person on this gateway who may approve or deny a tool call, change the gate, /note, /revoke,
+    # /gepa or /computer, and whose messages the agent learns from. Platform user ids, as text. Empty: Telegram falls
+    # back to the positive allowed_chat_ids (a private chat's id IS the user's id); Slack and Discord have no owner,
+    # so nobody there can approve or teach until it is set (doctor and the daemon's startup warning say so).
+    owner_user_ids: list[str] = field(default_factory=list)
+    # Discord only, learned at connect (never from config): the bot application's owner, or its team's owner. The
+    # owner when owner_user_ids is empty; empty until the adapter has asked Discord, so nobody is the owner before.
+    application_owner_ids: frozenset[str] = field(default_factory=frozenset)
     proxy_url: str | None = None
     max_message_length: int = 4096
     parse_mode: str = "MarkdownV2"
@@ -72,6 +80,31 @@ class PlatformConfig:
         default_factory=lambda: list(SHIPPED_ALLOWED_AUDIO_TYPES))
     allowed_document_types: list[str] = field(
         default_factory=lambda: list(SHIPPED_ALLOWED_DOCUMENT_TYPES))
+
+    def owner_ids(self) -> frozenset[str]:
+        """The owner's user ids on this gateway (see ``owner_user_ids``)."""
+        explicit = frozenset(str(x).strip() for x in (self.owner_user_ids or []) if str(x).strip())
+        if explicit:
+            return explicit
+        if self.platform == Platform.DISCORD:
+            return frozenset(self.application_owner_ids)
+        if self.platform != Platform.TELEGRAM:
+            return explicit
+        positive: set[str] = set()
+        for chat_id in self.allowed_chat_ids or []:
+            try:
+                if int(chat_id) > 0:
+                    positive.add(str(int(chat_id)))
+            except (TypeError, ValueError):
+                continue
+        return frozenset(positive)
+
+    def is_owner(self, user_id: Any) -> bool:
+        """Is this sender the owner? An unknown sender never is."""
+        if user_id is None:
+            return False
+        uid = str(user_id).strip()
+        return bool(uid) and uid != "0" and uid in self.owner_ids()
 
     @property
     def is_restricted(self) -> bool:

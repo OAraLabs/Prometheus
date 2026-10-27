@@ -179,6 +179,7 @@ def _make_slack_adapter(**kwargs):
         platform=Platform.SLACK,
         token="xoxb-test-token",
         app_token="xapp-test-token",
+        owner_user_ids=["UOWNER"],
     )
     agent_loop = kwargs.pop("agent_loop", None)
     if agent_loop is None:
@@ -194,7 +195,8 @@ def _make_slack_adapter(**kwargs):
 
 
 def _cmd(text: str = "", channel: str = "C123"):
-    return {"text": text, "channel_id": channel}
+    # The sender is the adapter's owner (_make_slack_adapter): approvals and owner-only commands are theirs.
+    return {"text": text, "channel_id": channel, "user_id": "UOWNER"}
 
 
 class _Respond:
@@ -248,12 +250,12 @@ class TestSlackApprovalHandlers:
         assert respond.messages == ["Approved: abc123"]
         # SPRINT-CONSENT: approve() now carries the scope and the derived
         # grant so the resolution audit row can name them — and (W4) who
-        # answered: this fake command carries no user_id, so "unknown".
+        # answered: the fake command's sender, the owner.
         from prometheus.permissions.approver import Approver
 
         queue.approve.assert_awaited_once_with(
             "abc123", scope="once", grant=None,
-            by=Approver("slack", "unknown"),
+            by=Approver("slack", "UOWNER"),
         )
 
     @pytest.mark.asyncio

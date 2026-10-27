@@ -43,7 +43,8 @@ def _make_context(args: list[str] | None = None) -> MagicMock:
 
 
 def _make_adapter(**kwargs) -> TelegramAdapter:
-    config = PlatformConfig(platform=Platform.TELEGRAM, token="test")
+    # The fake update's sender (456) is the owner: approvals and owner-only commands are theirs.
+    config = PlatformConfig(platform=Platform.TELEGRAM, token="test", owner_user_ids=["456"])
     agent_loop = kwargs.pop("agent_loop", None)
     if agent_loop is None:
         agent_loop = AsyncMock()

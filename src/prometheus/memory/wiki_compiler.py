@@ -12,6 +12,7 @@ import logging
 import re
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 import yaml
@@ -41,6 +42,16 @@ _SUBDIRS = ("people", "clients", "projects", "topics", "queries")
 def _safe_filename(name: str) -> str:
     """Sanitise an entity name for use as a filename (no extension)."""
     return re.sub(r'[<>:"/\\|?*]', "_", name)
+
+
+def entity_page_relpath(entity_type: str, entity_name: str) -> str:
+    """Wiki-relative path of an entity's page, e.g. ``people/Ada.md``.
+
+    One definition for the compiler and for anything that has to name a page without writing it
+    (the purge preview lists the pages a retraction would remove).
+    """
+    subdir = _TYPE_TO_SUBDIR.get(entity_type, _DEFAULT_SUBDIR)
+    return f"{subdir}/{_safe_filename(entity_name)}.md"
 
 
 def _today() -> str:
@@ -246,8 +257,7 @@ class WikiCompiler:
     # -- Page creation / update -----------------------------------------
 
     def _entity_page_path(self, entity_type: str, entity_name: str) -> Path:
-        subdir = _TYPE_TO_SUBDIR.get(entity_type, _DEFAULT_SUBDIR)
-        return self._wiki / subdir / f"{_safe_filename(entity_name)}.md"
+        return self._wiki / entity_page_relpath(entity_type, entity_name)
 
     def _prune_case_variants(self, linkable: dict[str, str]) -> None:
         """Delete entity pages that are stale case-variants of a canonical page.
@@ -293,9 +303,18 @@ class WikiCompiler:
         canonical page absorbs every spelling's facts. Without this grouping the
         compiler manufactures one page per case variant. (wiki-dedupe 2026-08)
         """
+        return self.page_entities_for(self._store.get_all_memories(limit=1_000_000))
+
+    @staticmethod
+    def page_entities_for(memories: Iterable[dict]) -> dict[str, str]:
+        """:meth:`_page_having_entities` over any list of memory rows, not just the store's.
+
+        Pure: it reads nothing and writes nothing, so a caller can ask "which pages would exist if
+        these facts were different?" without changing the facts. The purge preview does exactly that.
+        """
         agg: dict[str, dict] = {}
         order = 0
-        for r in self._store.get_all_memories(limit=1_000_000):
+        for r in memories:
             name = r.get("entity_name") or "Unknown"
             key = name.casefold()
             if key not in agg:

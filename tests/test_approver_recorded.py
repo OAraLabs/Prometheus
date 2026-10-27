@@ -105,7 +105,7 @@ class TestTheQueueNamesWhoAnswered:
         queue = _queue(tmp_path)
         _pending(queue)
         _pending(queue, rid="def67890")
-        assert await queue.approve(RID, by=Approver("telegram", "456", "will"))
+        assert await queue.approve(RID, by=Approver("telegram", "456", "will", owner=True))
         assert await queue.deny("def67890", by=Approver("device-token", "d1", "iPhone"))
         assert _answered_by(queue) == ["telegram:456", "device-token:d1"]
 
@@ -117,8 +117,8 @@ class TestTheQueueNamesWhoAnswered:
         queue.signal_bus = bus = _Bus()
         _pending(queue)
         _pending(queue, rid="def67890")
-        await queue.approve(RID, scope="once", by=Approver("slack", "U1", "will"))
-        await queue.deny("def67890", by=Approver("discord", "789", "will"))
+        await queue.approve(RID, scope="once", by=Approver("slack", "U1", "will", owner=True))
+        await queue.deny("def67890", by=Approver("discord", "789", "will", owner=True))
         resolved = [p for k, p in bus.emitted if k == "approval_resolved"]
         assert resolved[0]["approved_by"] == {
             "kind": "slack", "id": "U1", "name": "will"}
@@ -258,6 +258,7 @@ class TestChatGatewaysRecordThePerson:
             return None
 
         adapter = _make_slack_adapter()
+        adapter.config.owner_user_ids = ["U42"]
         adapter._approval_queue = queue = _queue(tmp_path)
         _pending(queue)
         _pending(queue, rid="def67890")
@@ -271,6 +272,7 @@ class TestChatGatewaysRecordThePerson:
         from tests.test_discord import _FakeInteraction, _make_adapter
 
         adapter = _make_adapter()
+        adapter.config.owner_user_ids = ["789"]
         adapter._approval_queue = queue = _queue(tmp_path)
         _pending(queue)
         _pending(queue, rid="def67890")
@@ -281,18 +283,21 @@ class TestChatGatewaysRecordThePerson:
         assert _answered_by(queue) == ["discord:789", "discord:789"]
 
     @pytest.mark.asyncio
-    async def test_a_sender_the_gateway_cannot_name_is_recorded_as_unknown(
+    async def test_a_sender_the_gateway_cannot_name_cannot_answer(
         self, tmp_path,
     ):
-        """Recorded honestly as unknown, and still answered."""
+        """An unknown sender is never the owner (0.9.17, gateway trust): refused, and nothing is recorded as an
+        answer. It used to be answered and recorded as "discord:unknown"."""
         from tests.test_discord import _FakeInteraction, _make_adapter
 
         adapter = _make_adapter()
         adapter._approval_queue = queue = _queue(tmp_path)
         action = _pending(queue)
-        await adapter._app_approve(_FakeInteraction(), RID)
-        assert action._result is ApprovalResult.APPROVED
-        assert _answered_by(queue) == ["discord:unknown"]
+        interaction = _FakeInteraction()
+        interaction.user = None
+        await adapter._app_approve(interaction, RID)
+        assert action._result is not ApprovalResult.APPROVED
+        assert _answered_by(queue) == []
 
 
 def test_no_surface_calls_the_queue_without_naming_the_approver():
