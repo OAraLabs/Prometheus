@@ -48,7 +48,7 @@ SESSION = "telegram:456"
 TYPED = "hello from the test"
 
 #: The person: a Telegram user whose own id is on the allowlist.
-PERSON = Approver("telegram", "456", "will")
+PERSON = Approver("telegram", "456", "will", owner=True)  # the owner: only their chat answers count
 #: What a prompt-injected model can hold: the daemon's API token.
 MODEL = Approver("global-token", "global", "API token")
 

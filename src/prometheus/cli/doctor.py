@@ -502,6 +502,36 @@ def check_token(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+def check_token_location(config: dict[str, Any]) -> DiagnosticCheck:
+    """Is the API token somewhere a floored shell can still read it?
+
+    ``check_token`` says whether there is a token; this says where it sits. ``web.api_token`` in prometheus.yaml,
+    a ``PROMETHEUS_API_TOKEN_FILE`` outside ``~/.config/*/*env`` and a moved env file all leave it readable by
+    the agent's shell even with the read floor on — and the token reaches every authenticated route. Without
+    an active read floor every place is readable alike, so the row says that instead of judging.
+    """
+    from prometheus.config.api_token import read_floor_is_active, token_location_fix, token_location_warning
+
+    name = "API token location"
+    try:
+        active = read_floor_is_active(config)
+    except Exception as exc:  # noqa: BLE001 — a doctor row, never a doctor crash
+        return DiagnosticCheck(name=name, category="connectivity", status="info",
+                               message=f"not checked: the bash read floor could not be probed ({exc})")
+    if not active:
+        return DiagnosticCheck(
+            name=name, category="connectivity", status="info",
+            message="not judged: the bash read floor is not active, so the shell can read every place a token "
+                    "could be (see the Bash read floor row)",
+        )
+    message = token_location_warning(config, read_floor_active=True)
+    if message:
+        return DiagnosticCheck(name=name, category="connectivity", status="warning", message=message,
+                               fix=token_location_fix())
+    return DiagnosticCheck(name=name, category="connectivity", status="ok",
+                           message="the token is only where the bash read floor keeps the shell out")
+
+
 def check_dirs_writable() -> DiagnosticCheck:
     """~/.prometheus (or $PROMETHEUS_CONFIG_DIR) data dirs writable?"""
     failures: list[str] = []
@@ -717,6 +747,23 @@ def check_gateways(config: dict[str, Any]) -> list[DiagnosticCheck]:
         library_fix="pip install 'oara-prometheus[discord]'",
     )
     return [telegram, slack, discord]
+
+
+def check_gateway_owners(config: dict[str, Any]) -> list[DiagnosticCheck]:
+    """One row per enabled chat gateway with no owner named, saying what that means and which key to set.
+
+    The owner is the only person who may approve tool calls or teach Prometheus from a chat; everyone else in an
+    allowed chat may still chat. Same answer as the daemon's startup warning (gateway/owners.py).
+    """
+    from prometheus.gateway.owners import ownerless_gateways
+
+    return [
+        DiagnosticCheck(
+            name=f"{gap.gateway} owner", category="connectivity", status="warning",
+            message=gap.message, fix=gap.fix,
+        )
+        for gap in ownerless_gateways(config)
+    ]
 
 
 def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
@@ -1441,7 +1488,9 @@ def run_extended_checks(
         *([pairing_row] if pairing_row is not None else []),
         *([network_row] if network_row is not None else []),
         check_token(config),
+        check_token_location(config),
         *check_gateways(config),
+        *check_gateway_owners(config),
         check_advertised_tools(config),
         check_coding_sandbox(config),
         *check_bash_floors(config),

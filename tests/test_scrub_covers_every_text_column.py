@@ -151,6 +151,8 @@ _n = {
     ("lcm.db", "lcm_messages", "session_id"): SESSION,
     ("lcm.db", "lcm_messages", "role"): ENUM,
     ("lcm.db", "lcm_messages", "provenance"): ENUM,
+    ("lcm.db", "lcm_messages", "author"): "who wrote a gateway turn: <platform>:<the sender's platform user id>, "
+                                          "built by the gateway from the sender's id, never message text",
     ("lcm.db", "lcm_summaries", "id"): ROW_ID,
     ("lcm.db", "lcm_summaries", "session_id"): SESSION,
     ("lcm.db", "lcm_summaries", "parent_ids"): ID_LIST,

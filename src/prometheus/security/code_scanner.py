@@ -189,12 +189,21 @@ class DangerousCodeScanner:
 
         Used by GEPA's promotion gate and SkillRefiner before writing
         AI-generated skill variants to disk.
-        """
-        blocks = _PY_FENCED_BLOCK_RE.findall(content)
-        if not blocks:
-            return ScanResult(verdict=ScanVerdict.CLEAN, file_path=file_path)
 
-        all_findings: list[ScanFinding] = []
+        One check reads the WHOLE markdown, prose included: characters that
+        hide text from a person reading the skill while the model still reads
+        it (security/invisible_text.py) are DANGEROUS wherever they are.
+        """
+        from prometheus.security.invisible_text import find_invisible
+
+        all_findings: list[ScanFinding] = [
+            ScanFinding(severity="dangerous", rule="invisible_text", line=hit.line,
+                        detail=f"{hit.describe()}: hides text from a person reading the skill")
+            for hit in find_invisible(content)
+        ]
+        blocks = _PY_FENCED_BLOCK_RE.findall(content)
+        if not blocks and not all_findings:
+            return ScanResult(verdict=ScanVerdict.CLEAN, file_path=file_path)
         for i, block in enumerate(blocks):
             # Pass file_path=None so scan_content runs the AST pass instead
             # of short-circuiting on the .md extension. Tag findings with

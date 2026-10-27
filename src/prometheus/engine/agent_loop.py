@@ -950,6 +950,12 @@ _ROUND_SERVING: contextvars.ContextVar = contextvars.ContextVar("prometheus_roun
 # engine/tool_context.py so the approval queue can read it too (it stamps each
 # pending request with the session that raised it); this is that same object.
 from prometheus.engine.tool_context import RUN_SESSION as _RUN_SESSION  # noqa: E402
+from prometheus.engine.tool_context import TURN_TRUST as _TURN_TRUST_VAR  # noqa: E402
+
+
+def _turn_trust() -> tuple[bool, str | None]:
+    return _TURN_TRUST_VAR.get()
+
 
 # The turn the run is recording into telemetry v2 (WP-X.54 T-3): a _TurnRecord,
 # or None when the run has no telemetry. Beside _RUN_SESSION for the same
@@ -1562,6 +1568,9 @@ async def run_loop(
     _offered_token = _ROUND_OFFERED.set(None)
     _catalog_token = _RUN_CATALOG.set(None)
     _session_token = _RUN_SESSION.set(None if ephemeral else recorded_session_id)
+    # Gateway trust: a turn a group member asked for teaches nothing (training pairs read it; tools get it below).
+    from prometheus.engine.tool_context import TURN_TRUST as _TURN_TRUST, turn_trust_of as _turn_trust_of
+    _turn_trust_token = _TURN_TRUST.set(_turn_trust_of(messages))
     # Telemetry v2 (WP-X.54 T-3). No telemetry, no record and no writer: with
     # telemetry off nothing reaches the v2 tables.
     turn_record: _TurnRecord | None = None
@@ -1618,6 +1627,7 @@ async def run_loop(
         _ROUND_OFFERED.reset(_offered_token)
         _RUN_CATALOG.reset(_catalog_token)
         _RUN_SESSION.reset(_session_token)
+        _TURN_TRUST.reset(_turn_trust_token)
         if turn_key is not None:
             try:
                 fmv.discard_turn(turn_key=turn_key)
@@ -4281,6 +4291,8 @@ def _capture_success_pairs(
     """On a successful execution: complete any pending pairs + cloud goldens.
 
     Fail-loud-but-non-blocking (pair_capture handles the loudness)."""
+    if not _turn_trust()[0]:
+        return  # gateway trust: a turn a group member wrote is never training data
     try:
         from prometheus.learning.pair_capture import (
             capture_pair,
@@ -5883,6 +5895,17 @@ async def _execute_tool_call(
             # defect this whole change closes.
             from prometheus.permissions.checker import PermissionDecision
             decision = PermissionDecision.approve(_path_unknown)
+        _turn_teaches, _turn_author = _turn_trust()
+        if decision.allowed and not _turn_teaches:
+            # GATEWAY TRUST: a turn a group member wrote (not the gateway's owner) never runs a tool on its own: not a
+            # read-only one (reading the owner's files and replying in the group is the leak), not under a remembered
+            # grant, not with the gate off. Every call waits for the owner, and only the owner can answer (the
+            # approval queue refuses anyone else from a chat). A denial stays a denial.
+            from prometheus.permissions.checker import PermissionDecision
+            decision = PermissionDecision.approve(
+                f"{_turn_author or 'a member of this chat'} asked for this, not the owner: "
+                f"{tool_name} runs only if the owner approves"
+            )
         if not decision.allowed:
             # The gate's own queue is the fallback prompt. Resolved HERE, in
             # the one function every surface goes through, rather than wired
@@ -6003,6 +6026,10 @@ async def _execute_tool_call(
                         # Public facts only: never a URL or a credential.
                         "serving_route": _serving_route(context),
                         "context_window_for": _context_window_for(context),
+                        # Gateway trust: whether the turn's request was the owner's (a group member's teaches
+                        # nothing: the memory tool refuses), and who wrote it.
+                        "turn_trusted": _turn_trust()[0],
+                        "turn_author": _turn_trust()[1],
                         **(context.tool_metadata or {}),
                     },
                 ),
@@ -6520,10 +6547,19 @@ class AgentLoop:
         # ``skill_created`` signal whose payload carries ``trigger_task`` (the
         # message's first 200 chars) into ``telemetry.signal_events``. The
         # trace is still drained below so it cannot leak into the next turn.
+        from prometheus.engine.tool_context import turn_trust_of as _turn_trust_of
+
         if self._post_task_hooks and self._tool_trace:
             if is_session_ephemeral(session_id):
                 log.debug(
                     "Ephemeral session %s — skipping %d post-task hook(s)",
+                    session_id, len(self._post_task_hooks),
+                )
+            elif not _turn_trust_of(messages or [])[0]:
+                # Gateway trust: SkillCreator / SkillRefiner learn only from the owner's own requests, never from a
+                # turn a group member wrote.
+                log.debug(
+                    "Turn in %s was a group member's — skipping %d post-task hook(s)",
                     session_id, len(self._post_task_hooks),
                 )
             else:
