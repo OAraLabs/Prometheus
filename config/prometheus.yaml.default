@@ -1508,6 +1508,13 @@ anatomy:
   # pointer to the anatomy tool, which the model calls when a task needs it.
   # true sends the full layout to hosted models on every turn too.
   include_in_hosted_prompt: false
+  # What the model is told about the machines, on any route and from the
+  # anatomy tool: what they can do (CPU, RAM, GPU and VRAM, the model, its
+  # engine, context window and vision), not where they are. Hostnames,
+  # addresses, URLs, the tailnet peer list and a model file's directory are
+  # withheld. true (a literal true) lets them through. The /anatomy command
+  # you run yourself always shows everything.
+  include_addresses: false
   # Local infrastructure identity. Values are machine-specific and MUST stay
   # in the live config only — the pre-commit hook blocks real hosts/IPs here.
   ssh_user: ""
