@@ -23,8 +23,10 @@ bootstrap:
   load_agents: true     # ~/.prometheus/AGENTS.md
 
 model:
-  # Env var holding this provider's API key (cloud providers only; local
-  # llama_cpp / ollama / lm_studio / vllm need none). Resolved by
+  # Env var holding this provider's API key (cloud providers; local
+  # ollama / lm_studio / vllm need none, and llama_cpp needs one only when
+  # its server was started with --api-key, then sent as a bearer token on
+  # every request; empty means no key). Resolved by
   # providers/registry.py::_resolve_api_key and reported by
   # cli/doctor.py::_cloud_key_source, which look in the same order:
   # api_key below, then this variable, then the provider's built-in default
@@ -1423,6 +1425,8 @@ profiles:
 #     4090:
 #       provider: llama_cpp
 #       base_url: http://gpu-box:8080
+#       api_key_env: GPU_BOX_LLAMA_KEY       # only for a server started with --api-key: the
+#                                            # variable's NAME; the key goes in the env file
 #     mini:
 #       provider: ollama
 #       base_url: http://localhost:11434
@@ -1432,7 +1436,8 @@ profiles:
 backends: {}
 
 # How the registry probes. A probe is HTTP only (llama.cpp /props + /v1/models;
-# ollama /api/tags, /api/ps, /api/show) — no SSH, no credentials.
+# ollama /api/tags, /api/ps, /api/show) — no SSH. A llama.cpp backend with
+# api_key_env sends its key as a bearer token; nothing else is sent.
 backend_probe:
   ttl_s: 60          # a read older than this re-probes; /backends refresh forces it
   timeout_s: 5.0     # per backend; a dead box costs one timeout, never a hang

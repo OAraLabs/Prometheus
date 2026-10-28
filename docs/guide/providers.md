@@ -8,7 +8,7 @@ Prometheus is built for local inference first — llama.cpp or Ollama on your ow
 
 Prometheus talks to any inference server over HTTP; localhost or remote, it doesn't care.
 
-- **llama.cpp** (`provider: llama_cpp`, default port 8080) — the first-class backend. This is the only backend that gets **GBNF grammar enforcement**: when the server isn't parsing the model's tool calls natively (adapter tier `full`, or a round that forces a tool), Prometheus sends a grammar, so tool calls are constrained while the model is still generating. Models the server parses natively (tier `light`) send their tools in the request and get no Prometheus grammar. Controlled by `model.grammar_enforcement: true` (the default). The loaded model is auto-detected from the server at startup — swap the GGUF, restart, done.
+- **llama.cpp** (`provider: llama_cpp`, default port 8080) — the first-class backend. This is the only backend that gets **GBNF grammar enforcement**: when the server isn't parsing the model's tool calls natively (adapter tier `full`, or a round that forces a tool), Prometheus sends a grammar, so tool calls are constrained while the model is still generating. Models the server parses natively (tier `light`) send their tools in the request and get no Prometheus grammar. Controlled by `model.grammar_enforcement: true` (the default). The loaded model is auto-detected from the server at startup — swap the GGUF, restart, done. A llama-server started with `--api-key` works too: put the key in the env file and name its variable in `model.api_key_env` (or a backend's `api_key_env`); it is sent as a bearer token on every request, and never logged. Without one, no `Authorization` header is sent.
 - **Ollama** (`provider: ollama`, default port 11434) — fully supported, and the default fallback (`model.fallback_provider`).
 - **LM Studio, vLLM, LiteLLM, Together, …** — anything that serves the OpenAI-compatible chat API works: use `provider: openai` with a `base_url` pointing at it. `oara setup` probes the standard ports for all four local servers (llama.cpp :8080, Ollama :11434, LM Studio :1234, vLLM :8000) and writes the config for whichever it finds.
 
@@ -39,6 +39,7 @@ backends:
   4090:
     provider: llama_cpp
     base_url: http://gpu-box:8080
+    api_key_env: GPU_BOX_LLAMA_KEY                       # only if llama-server runs with --api-key
   mini:
     provider: ollama
     base_url: http://localhost:11434
@@ -320,7 +321,7 @@ router:
 
 **Defaults, honestly:** the router object is built on every boot — that is what makes the override commands above work out of the box — but its autonomous halves ship **inert**: `rules` and `fallback` are empty, `smart_routing` and `escalation` are off. The per-chat overrides (`router.overrides`) are a separate, lightweight mechanism and ship **on**.
 
-**Rules and fallback entries take a provider config** — `provider`, `model`, plus whatever that provider reads (`api_key_env`, `base_url`, `timeout`, …), and a rule adds `task_type` and `min_confidence`. An entry with no `provider`, an unknown one, or a key its provider never reads is skipped at boot. It gets one WARNING naming the entry and the key, and the same line appears under **Router** in `/doctor` and `oara doctor`. The daemon still starts with everything else. This catches a misspelt `api_key_env`, or one on a `llama_cpp` entry, which sends no key.
+**Rules and fallback entries take a provider config** — `provider`, `model`, plus whatever that provider reads (`api_key_env`, `base_url`, `timeout`, …), and a rule adds `task_type` and `min_confidence`. An entry with no `provider`, an unknown one, or a key its provider never reads is skipped at boot. It gets one WARNING naming the entry and the key, and the same line appears under **Router** in `/doctor` and `oara doctor`. The daemon still starts with everything else. This catches a misspelt `api_key_env`, or one on an `ollama` entry, which sends no key.
 
 **How the fallback chain is walked:** when the circuit breaker trips on tool-call formatting errors, the turn moves to the first `fallback` entry that is not the provider that just failed, and each later trip moves on again. The failed provider is known only by its provider name, so a failed `ollama` skips *every* `ollama` entry, including one on another box. List a chain whose neighbours are different providers. When no entry is left, a WARNING names the provider that failed and why each entry was skipped.
 

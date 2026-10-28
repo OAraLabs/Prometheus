@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from collections.abc import Mapping
@@ -90,6 +91,12 @@ PRIMARY_NAME = "local"
 
 #: Telegram's command grammar — a backend name IS a slash command.
 NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
+
+#: What ``api_key_env`` must look like: the NAME of an environment variable, never the key itself.
+ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+#: Providers whose server can be started with a key (llama.cpp's ``--api-key``). Ollama has none of its own.
+KEYED_PROVIDERS = frozenset({"llama_cpp"})
 
 #: Provider names this registry knows how to probe. Anything else is refused
 #: at load: a "backend" the registry cannot ask is a URL, not a backend.
@@ -125,6 +132,7 @@ class BackendSpec:
     models: tuple[str, ...] = ()
     context_limit: int | None = None   # operator HINT; a probe result outranks it
     is_primary: bool = False
+    api_key_env: str | None = None     # the variable holding the server's key, never the key
 
     def provider_config(self, model: str | None = None) -> dict[str, Any]:
         """The provider-config tuple the router/registry build from — the same
@@ -138,6 +146,8 @@ class BackendSpec:
         chosen = model or self.model
         if chosen:
             cfg["model"] = chosen
+        if self.api_key_env:
+            cfg["api_key_env"] = self.api_key_env
         return cfg
 
 
@@ -256,10 +266,26 @@ def _validate_spec(name: object, raw: object, reserved: frozenset[str]) -> Backe
             raise BackendConfigError(f"backends.{sname}: context_limit must be an integer") from None
         if context_limit <= 0:
             raise BackendConfigError(f"backends.{sname}: context_limit must be positive")
+    api_key_env = _key_env(raw.get("api_key_env"), provider, f"backends.{sname}")
     return BackendSpec(
         name=sname, provider=provider, base_url=base_url, model=model,
-        models=models, context_limit=context_limit,
+        models=models, context_limit=context_limit, api_key_env=api_key_env,
     )
+
+
+def _key_env(raw: Any, provider: str, where: str) -> str | None:
+    """``api_key_env`` checked: empty is no key; a name for a provider that sends none, or something that is not
+    a variable's name (a pasted key, say), is refused. The refusal never repeats the value."""
+    if raw is None or raw == "":
+        return None
+    if provider not in KEYED_PROVIDERS:
+        raise BackendConfigError(f"{where}: api_key_env is not read for provider {provider} (its server takes no key)")
+    if not isinstance(raw, str) or not ENV_NAME_RE.match(raw):
+        raise BackendConfigError(
+            f"{where}: api_key_env must be the name of an environment variable (letters, digits, underscore), "
+            "not the key itself"
+        )
+    return raw
 
 
 class BackendRegistry:
@@ -313,6 +339,9 @@ class BackendRegistry:
                 base_url=str(model_cfg.get("base_url") or default_url).rstrip("/"),
                 model=(str(model_cfg.get("model")).strip() or None) if model_cfg.get("model") else None,
                 is_primary=True,
+                # The primary's key variable rides along, so switching a session back to `local` keeps it. A bad
+                # name here is the provider's to refuse at boot; the registry just does not carry it.
+                api_key_env=_primary_key_env(model_cfg, primary_provider),
             ))
         # A cloud primary has no local backend to probe; the registry then holds
         # only the configured backends. `local` stays reserved either way.
@@ -539,13 +568,28 @@ def _short_model(identity: str | None) -> str | None:
 # ── the default probe ───────────────────────────────────────────────────────
 
 
+def _primary_key_env(model_cfg: Mapping[str, Any], provider: str) -> str | None:
+    try:
+        return _key_env(model_cfg.get("api_key_env"), provider, "model")
+    except BackendConfigError:
+        return None
+
+
 async def probe_backend(spec: BackendSpec, timeout_s: float) -> BackendStatus:
-    """Ask the box what it serves. HTTP only — no SSH, no credentials."""
+    """Ask the box what it serves. HTTP only — no SSH. A server started with a key gets it as a bearer token; a
+    key variable that is not set is reported, and the box is not asked without it."""
     import httpx
 
     st = BackendStatus(name=spec.name, provider=spec.provider, base_url=spec.base_url)
+    headers: dict[str, str] = {}
+    if spec.api_key_env:
+        key = os.environ.get(spec.api_key_env, "")
+        if not key:
+            st.error = f"{spec.api_key_env} is not set (the key for this server)"
+            return st
+        headers["Authorization"] = f"Bearer {key}"
     started = time.monotonic()
-    async with httpx.AsyncClient(timeout=timeout_s) as client:
+    async with httpx.AsyncClient(timeout=timeout_s, headers=headers) as client:
         if spec.provider == "llama_cpp":
             await _probe_llama_cpp(client, spec, st)
         elif spec.provider == "ollama":
