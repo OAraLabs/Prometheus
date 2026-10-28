@@ -42,7 +42,7 @@ from prometheus.web.strict_query import StrictQueryRoute
 from prometheus.config import api_token as api_token_module
 from prometheus.config import local_pairing
 from prometheus.config.device_store import registry_platform
-from prometheus.config.node_identity import get_instance_id, get_node_pubkey
+from prometheus.config.node_identity import get_instance_id, get_node_pubkey, identity_fields
 from prometheus.config.paths import get_wiki_root
 from prometheus.context.environment import (
     booted_from as _booted_from,
@@ -568,6 +568,8 @@ def create_app(
             "api_base_port": bound_port(getattr(request.app.state, "http_server", None))
                              or int(web_cfg.get("api_port", 8005) or 8005),
             "ws_port": getattr(bridge, "bound_port", None) or int(web_cfg.get("ws_port", 8010) or 8010),
+            # The node key to pin for the identity challenge, and the instance it belongs to (as /api/status).
+            **identity_fields(),
         }
 
     def _clean_device_name(raw: Any, default: str) -> str:
@@ -994,6 +996,19 @@ def create_app(
         tls = request.url.scheme == "https"
         return hello_mod.hello_response(request, _hello_limiter, lambda: _hello_payload(tls))
 
+    # ── Identity challenge (unauthenticated: a paired client checks who it reached BEFORE sending its token) ──
+    # web/identity_challenge.py. Hello's limiter and browser refusal; stateless, writes nothing.
+    @app.post("/api/identity/challenge")
+    async def identity_challenge(request: Request):
+        from prometheus.web import identity_challenge as challenge_mod
+
+        tls = request.url.scheme == "https"
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - no body or not JSON: the nonce check refuses it
+            body = None
+        return hello_mod.guarded_response(request, _hello_limiter, lambda: challenge_mod.answer(body, tls=tls))
+
     # ── Root ────────────────────────────────────────────────────────
 
     @app.get("/")
@@ -1262,6 +1277,7 @@ def create_app(
             _state_ref.get("state") if isinstance(_state_ref, dict) else None
         ) or getattr(app.state, "agent_state", "idle")
         security_state = await _floor_state()
+        hello_now = _hello_payload()
         return {
             "state": _live_state,
             "model": app.state.current_model,
@@ -1386,6 +1402,11 @@ def create_app(
             # Bearer-gated deliberately: neither belongs on /health.
             "node_pub": get_node_pubkey(),
             "instance_id": get_instance_id(),
+            # The name and fp hello advertises, from hello's own builder, so the two routes cannot drift
+            # (fp is "" until the instance key exists; reading it mints nothing). Siblings of the two
+            # above, for a client that tells several Prometheus instances apart.
+            "name": hello_now["name"],
+            "fp": hello_now["fp"],
         }
 
     # ── Sessions ────────────────────────────────────────────────────

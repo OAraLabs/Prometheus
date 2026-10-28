@@ -1570,8 +1570,8 @@ def run_anatomy_checks(config: dict[str, Any]) -> list[DiagnosticCheck]:
         for check in report.checks:
             # The extended checks above already cover these with the
             # documented search order / live probe — don't double-report
-            # (the class's Config check is also repo-root-relative, which
-            # is wrong for pip installs). "Telegram" is superseded by the
+            # (check_config also catches a config that is not a mapping).
+            # "Telegram" is superseded by the
             # per-gateway checks (SPRINT G3). "Router" is the same
             # check_router row the extended checks already carry, and
             # "Advertised tools" is check_advertised_tools' row, which adds

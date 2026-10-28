@@ -69,7 +69,7 @@ _CLOUD_PROVIDERS: frozenset[str] = frozenset(
 # as cloud is the worse direction — it would file student output as teacher
 # exemplars and quietly poison the training corpus.
 _LOCAL_PROVIDERS: frozenset[str] = frozenset(
-    {"llama_cpp", "ollama", "lm_studio", "vllm", "stub"}
+    {"llama_cpp", "ollama", "lm_studio", "vllm", "openai_compatible", "stub"}
 )
 
 

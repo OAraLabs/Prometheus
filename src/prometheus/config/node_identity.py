@@ -8,15 +8,21 @@ Two identities with different lifetimes, deliberately separate:
 - **Instance** (the vault marker, ``config/vault_marker.py``): which
   deployment is this. A UUID that travels with the vault.
 
-Binding rules from the spec, restated where they are enforced:
+Binding rules from the spec (v4), restated where they are enforced:
 
 1. The key is identity, never encryption — nothing here encrypts anything,
    and losing the key can never make local data unreadable.
-2. The key is never the sole proof of anything — nothing consumes it yet
-   beyond display on ``/api/status``.
+2. The key is never the sole proof of anything. It signs one thing: an
+   identity challenge (``web/identity_challenge.py``), so a paired client
+   can check it is talking to the Prometheus it paired with before it sends
+   its token. It is never proof of the user: every authenticated route still
+   needs that client's bearer token.
 3. Identity is not derived from hardware — a generated key, so a GPU swap
    changes nothing.
-4. Nothing is transmitted without opt-in — the keypair is inert local state.
+4. Nothing is transmitted without opt-in. The public half is shown on
+   ``/api/status`` and answered in a challenge, which exists for clients the
+   owner paired; pairing is owner-initiated. The private half never leaves
+   this machine.
 
 Source: Prometheus (OAra Labs)
 License: MIT
@@ -27,6 +33,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from cryptography.hazmat.primitives import serialization
@@ -130,6 +137,27 @@ def get_node_pubkey() -> str | None:
     return value or None
 
 
+def load_node_signer() -> tuple[str, Callable[[bytes], bytes]] | None:
+    """The node key's public half and a function that signs with it, or ``None`` before first run.
+
+    Read path, like :func:`get_node_pubkey`: a request that asks for a signature must never be what mints the
+    identity. The public half is derived from the private key itself, not read from ``node.pub``, so what a
+    signature is checked against is always the key that made it.
+    """
+    key_path = get_node_dir() / NODE_KEY_FILENAME
+    if not key_path.exists():
+        return None
+    try:
+        private_key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+    except (OSError, ValueError, TypeError):
+        logger.warning("node.key at %s could not be read; nothing is signed", key_path)
+        return None
+    if not isinstance(private_key, Ed25519PrivateKey):
+        logger.warning("node.key at %s is not an Ed25519 key; nothing is signed", key_path)
+        return None
+    return _pub_b64(private_key), private_key.sign
+
+
 # ---------------------------------------------------------------------------
 # Process-pinned instance identity (read from the vault marker at startup).
 #
@@ -148,3 +176,12 @@ def set_instance_id(instance_id: str | None) -> None:
 
 def get_instance_id() -> str | None:
     return _instance_id
+
+
+def identity_fields() -> dict[str, str | None]:
+    """``instance_id`` and ``node_pub``, as ``/api/status`` reports them, for every answer that pairs a device.
+
+    A paired client pins ``node_pub`` to check the identity challenge on every later connect, so it gets it the
+    moment it joins, from the same reads ``/api/status`` makes. Reads only: never mints the node identity.
+    """
+    return {"instance_id": get_instance_id(), "node_pub": get_node_pubkey()}

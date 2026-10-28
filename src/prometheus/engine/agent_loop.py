@@ -51,8 +51,8 @@ from prometheus.providers.base import (
     ModelProvider,
 )
 from prometheus.context.prompt_assembler import (
-    infrastructure_for_route,
     is_hosted_provider,
+    prompt_for_route,
 )
 from prometheus.context.system_prompt import (
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
@@ -2019,13 +2019,14 @@ async def _run_loop(
         active_system_prompt = _refresh_memory_section(
             active_system_prompt, context.boot_memory_prompt, context.memory_prompt_builder,
         )
-    # This machine's layout stays off a hosted model's prompt unless the owner
-    # asked for it; the anatomy tool answers when a task needs it.
-    active_system_prompt = infrastructure_for_route(
+    # A hosted model gets this machine's layout only on demand (the anatomy
+    # tool) unless the owner asked otherwise, and paths without the account
+    # name (~/…). A local route is sent the prompt unchanged.
+    active_system_prompt = prompt_for_route(
         active_system_prompt,
         hosted=is_hosted_provider(
             context.route_provider or _provider_name_for_telemetry(context.provider)),
-        include_on_hosted=context.infrastructure_in_hosted_prompt,
+        include_infrastructure=context.infrastructure_in_hosted_prompt,
     )
     # The base prompt for THIS run — workspace-swapped when the session has
     # one. The adapter's format_request (below, and again on model fallback
@@ -2564,15 +2565,15 @@ async def _run_loop(
                 ),
             )
             active_system_prompt = rewritten
-            # A hosted fallback must not receive the layout a local primary
-            # carried (the same rule as the run's own route, above).
+            # A hosted fallback must not receive what a local primary carried
+            # (the same rule as the run's own route, above).
             _fallback_hosted = is_hosted_provider(_decision.provider_name)
-            active_system_prompt = infrastructure_for_route(
+            active_system_prompt = prompt_for_route(
                 active_system_prompt, hosted=_fallback_hosted,
-                include_on_hosted=context.infrastructure_in_hosted_prompt)
-            per_call_system_prompt = infrastructure_for_route(
+                include_infrastructure=context.infrastructure_in_hosted_prompt)
+            per_call_system_prompt = prompt_for_route(
                 per_call_system_prompt, hosted=_fallback_hosted,
-                include_on_hosted=context.infrastructure_in_hosted_prompt)
+                include_infrastructure=context.infrastructure_in_hosted_prompt)
             # The fallback round's tools follow the model that serves it (fix 3):
             # a local fallback gets the local catalog (stubs), a cloud one every
             # full schema. Only this round: the next round asks the primary again.

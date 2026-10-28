@@ -162,6 +162,41 @@ def infrastructure_for_route(
                   + prompt[end + len(INFRASTRUCTURE_END):])
 
 
+def home_relative(prompt: str, home: str | Path | None = None) -> str:
+    """*prompt* with the home directory written as ``~``.
+
+    The working directory, the documents root, a session workspace and its
+    project files are absolute paths, and an absolute path under the home
+    directory carries the account's username (``/home/<user>/…``,
+    ``/Users/<user>/…``). ``~`` names the same place to every tool here: the
+    file tools and the gate expand it. Only a whole path segment is replaced,
+    so ``/home/alex`` never matches ``/home/alexandra``.
+    """
+    import re
+
+    root = str(Path(home) if home is not None else Path.home()).rstrip("/")
+    if not root or root == "/" or root == "~":
+        return prompt
+    return re.sub(re.escape(root) + r"(?=/|[\s`'\")\],;:]|$)", "~", prompt)
+
+
+def prompt_for_route(
+    prompt: str, *, hosted: bool, include_infrastructure: bool = False,
+    home: str | Path | None = None,
+) -> str:
+    """The system prompt as a request to this route may carry it.
+
+    Local: unchanged. Hosted: the machine-and-network section becomes a
+    pointer to the anatomy tool (unless ``include_infrastructure``), and paths
+    under the home directory are written ``~/…``.
+    """
+    if not hosted:
+        return prompt
+    out = infrastructure_for_route(prompt, hosted=True,
+                                   include_on_hosted=include_infrastructure)
+    return home_relative(out, home)
+
+
 def _load_anatomy_summary() -> str | None:
     """Load compact infrastructure summary from ANATOMY.md for the system prompt.
 

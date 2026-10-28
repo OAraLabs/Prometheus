@@ -16,7 +16,7 @@ clients that have no copy for a code yet.
 - `detail` is English for this occurrence. It can change between versions. Do not parse it.
 - `fields` is there when the failure is about particular inputs, so a client can mark the right boxes; it is absent
   when the failure is about the request as a whole. The names are the request's own field names.
-- A few codes carry machine data next to these (`attempts_remaining`, `retry_after_seconds`).
+- A few codes carry machine data next to these (`attempts_remaining`, `retry_after_seconds`, `reason`).
 - Each code has exactly one status. The same code never means a 400 on one route and a 409 on another.
 
 Setup mode is `/api/setup/*` on a daemon with no configuration yet. After setup the full daemon speaks the
@@ -28,17 +28,19 @@ vocabulary in the API guide (`docs/guide/api.md`); `GET`/`PUT /api/model` uses `
 
 | Code | Status | What it means | Fields | Raised by |
 |---|---|---|---|---|
-| `bad_request` | 400 | The request was not the JSON this route expects, or a field is missing or of the wrong type. | per field, or none | pair, check-key, configure |
+| `bad_request` | 400 | The request was not the JSON this route expects, or a field is missing or of the wrong type. | per field, or none | pair, check-key, configure, probe |
 | `bad_base_url` | 400 | An address has to start with http:// or https://. | `base_url` | detect, configure |
 | `unexpected_base_url` | 400 | A cloud provider is called at its own address and takes none of yours. | `base_url` | check-key, configure |
 | `unsupported_provider` | 400 | That provider is not one setup offers. | `provider` | check-key, configure |
 | `bad_model` | 400 | The model name has a control character or is far too long. | `model` | configure |
+| `bad_target` | 400 | A computer to look at is a name or an address, with an optional port, or an http(s) address with no path. | `target` | probe |
 | `cloud_key_missing` | 400 | A cloud provider needs an API key, and none was sent or is already saved. | `api_key` | configure |
 | `invalid_key` | 400 | That cannot be an API key: it is empty, far too long, or has a line break. | `api_key` | configure |
 | `invalid_token` | 400 | A messaging token has a line break in it or is far too long. | the token's own field | configure |
 | `slack_token_pair_incomplete` | 400 | Slack needs both its bot token and its app token, and only one was sent. | `slack_bot_token`, `slack_app_token` | configure |
 | `bad_discord_guild_ids` | 400 | Discord server ids are whole numbers. | `discord_guild_ids` | configure |
-| `backend_unreachable` | 400 | Nothing at that address answered like an inference server of that kind. | `base_url` | configure |
+| `backend_unreachable` | 400 | Nothing at that address answered like a usable inference server of that kind; `reason` says why, in the probe's words (docs/contracts/setup-probe.md). | `base_url` | configure |
+| `model_not_served` | 400 | The app at that address answered, and does not serve that model. | `model` | configure |
 | `config_write_failed` | 500 | The settings could not be written to disk (permissions, a full disk or a read-only folder). | none | configure |
 | `internal_error` | 500 | Something unexpected went wrong inside the daemon; the cause is in its log, not in this answer. | none | any route |
 | `not_configured` | 409 | Setup cannot finish yet: there is no valid configuration. | none | complete |

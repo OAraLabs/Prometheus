@@ -174,7 +174,9 @@ class TestProviderRegistry:
         assert "lm_studio" in providers
         assert "vllm" in providers
         # OpenRouter (2026-10): +openrouter → 15.
-        assert len(providers) == 15
+        # Setup's probe (2026-10): +openai_compatible → 16, a local app that answers only as OpenAI-compatible.
+        assert "openai_compatible" in providers
+        assert len(providers) == 16
 
     def test_qwen_is_openai_compat_not_local_adapter(self):
         """A provider NAMED qwen must not fall through to QwenFormatter.

@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import inspect
+import base64
 import json
 import logging
 import math
@@ -50,6 +51,7 @@ from fastapi.responses import JSONResponse
 from prometheus.config import pair_seal
 from prometheus.config.device_store import DeviceStore
 from prometheus.config.instance_key import instance_public_key_der
+from prometheus.config.node_identity import identity_fields
 from prometheus.config.pair_requests import (
     APPROVED,
     CANCELED,
@@ -473,6 +475,13 @@ def register_pairing_routes(
                 pair_seal.check_requester_key(pair_seal.b64url_decode(public_key))
             except ValueError:
                 fields.append("public_key")
+        # Which match code the requester computes (docs/PAIRING-APPROVAL-API.md 4.4). Absent or null: version 1,
+        # for requesters that predate version 2. A requester that asks for 2 refuses an answer that says 1.
+        version = body.get("match_code_version")
+        if version is None:
+            version = 1
+        elif isinstance(version, bool) or not isinstance(version, int) or version not in pair_seal.MATCH_CODE_VERSIONS:
+            fields.append("match_code_version")
         if fields or name is None or not isinstance(public_key, str):
             return _json(400, {"error": "invalid_request", "fields": fields})
 
@@ -481,11 +490,18 @@ def register_pairing_routes(
             logger.warning("pairing: a request was refused because this daemon has no readable instance key")
             return _json(503, {"error": "identity_unavailable",
                                "detail": "this daemon has no instance key yet; restart it"})
+        identity = identity_fields()
+        node_pub_raw = base64.b64decode(identity["node_pub"]) if identity["node_pub"] else None
+        if version == 2 and node_pub_raw is None:
+            logger.warning("pairing: a version-2 request was refused because this daemon has no node key")
+            return _json(503, {"error": "identity_unavailable",
+                               "detail": "this daemon has no node key yet; restart it"})
         await runtime.sweep()
         try:
             created = runtime.store().create(
                 device_name=name, platform=platform, public_key=public_key,
-                source=_peer(request), instance_public_key_der=instance_key)
+                source=_peer(request), instance_public_key_der=instance_key,
+                node_pub=node_pub_raw, match_code_version=version)
         except LimitExceeded as exc:
             logger.info("pairing: refused source=%s reason=%s", _peer(request), exc.reason)
             return _rate_limited(exc.reason, exc.retry_after)
@@ -496,7 +512,9 @@ def register_pairing_routes(
             runtime.mark_notified(req.id)
         return _json(201, {
             "request_id": req.id, "poll_secret": created.poll_secret, "match_code": req.match_code,
+            "match_code_version": version,
             "instance_public_key": pair_seal.b64url_encode(instance_key),
+            **identity,
             "expires_at": int(req.expires_at), "ttl_seconds": runtime.settings.request_ttl_seconds,
             "poll_interval_seconds": POLL_INTERVAL_SECONDS, "notified": notified,
         })
@@ -523,7 +541,7 @@ def register_pairing_routes(
                 return _json(200, {
                     "status": APPROVED, "device_id": req.device_id, "sealed": sealed,
                     "endpoints": _endpoints(request, runtime.web_config), "tls": _tls_pin(request),
-                    "approved_at": int(req.decided_at or 0)})
+                    "approved_at": int(req.decided_at or 0), **identity_fields()})
         status = EXPIRED if req.state in (UNCOLLECTED, APPROVED) else req.state
         return _json(200, {"status": status})
 

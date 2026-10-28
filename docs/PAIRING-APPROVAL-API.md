@@ -1,7 +1,7 @@
-# Pairing and discovery API, v0.1 (draft for review)
+# Pairing and discovery API, v0.2
 
 **Status:** APPROVED by Will on 2026-10-08 with the rulings recorded in 0.1 (D5, D10, D11 and the 403). Implementation is in progress as a stack of draft PRs; this document is PR 1's first commits.
-**Contract id:** `pairing/0.1`
+**Contract id:** `pairing/0.2`. 0.2 (2026-10-27) adds match code version 2, which also covers the node key (4.4), and hands every pairing device `instance_id` and `node_pub` to pin for the identity challenge. All of it is additive: a 0.1 requester sends no `match_code_version` and gets exactly the 0.1 code.
 **Scope:** how a new device finds a Prometheus on the home network and joins it without typing an address or a token: discovery (mDNS and `GET /api/hello`), approval requests, the operator prompt in Beacon (and in Telegram, only if the owner turns it on), token delivery, and the network setting that decides who can reach the daemon at all.
 **Not in scope:** the first device (setup-mode pairing and `POST /api/pair/local`, #694), 6-digit codes (Beacon's P4), per-device conversation scoping (#692), owner device credentials (#696), `web.bind` itself (#693), the Mac app (#695). Section 11 says what this contract takes from each.
 **References:** names, not line numbers (they drift). Reconciled on 2026-10-08 against the heads of the draft PRs this builds on: #692 `f2bf233` (device scoping), #693 `6b80bca` (`web.bind`), #694 `364c0bf` (same-Mac pairing, `public_routes.py`), #696 `7ca285c` (owner credentials, `identity.is_operator`), #695 `4cfe78c` (Prometheus.app); and `origin/main` at `411c63b`. Those are the stack: #693, then #694, then #696 (and #695 beside it); this work sits on #696. Beacon's side is its onboarding spec (tasks P3, P4, P5, P6, P13); the installer's is `docs/design/macos-app-installer.md` on #695.
@@ -249,12 +249,14 @@ A pairing request is not a device and touches no conversation: until it is appro
 {
   "device_name": "Alex's MacBook",
   "platform": "macos",
-  "public_key": "<base64url, 32 raw bytes, X25519>"
+  "public_key": "<base64url, 32 raw bytes, X25519>",
+  "match_code_version": 2
 }
 ```
 
 * `device_name`: 1 to 64 characters after trimming; control characters and newlines are rejected, not stripped, so what the operator sees is what was sent.
 * `platform`: one of `ios`, `macos`, `windows`, `linux`, `android`, `other`. Anything else is stored as `other`. The device registry keeps only `ios`, `macos` and `other`, and that narrowing happens in the `POST /api/devices` route, not in `DeviceStore.mint`, so `mint_paired_device` (4.6) applies the same narrowing (one shared helper, not a second copy); the request row keeps the real value for the prompt.
+* `match_code_version` (0.2): `1` or `2`; absent or `null` means `1`, the 0.1 code. `2` asks for the code that also covers the node key (4.4). Anything else is a 400 naming the field. Version 2 on a daemon with no node key yet is `503 identity_unavailable`, and the request never makes the key.
 * Unknown keys are ignored (forward compatibility). Body at most 4 KiB, `Content-Type: application/json`.
 
 `201`:
@@ -264,7 +266,10 @@ A pairing request is not a device and touches no conversation: until it is appro
   "request_id": "c3f1a9e07b2d4a6831ff09aa5e2b7c44",
   "poll_secret": "<43 chars, base64url, 256 bits>",
   "match_code": "4821",
+  "match_code_version": 2,
   "instance_public_key": "<base64url SPKI DER of the instance key>",
+  "instance_id": "<uuid, or null when no vault is adopted this boot>",
+  "node_pub": "<base64 of the node key's 32 raw Ed25519 bytes>",
   "expires_at": 1760000300,
   "ttl_seconds": 300,
   "poll_interval_seconds": 2,
@@ -292,7 +297,9 @@ A pairing request is not a device and touches no conversation: until it is appro
   },
   "endpoints": {"rest": "https://192.168.1.20:8006", "ws": "wss://192.168.1.20:8011"},
   "tls": {"spki_sha256": "<hex, 64 chars>"},       // null on a plain-HTTP instance
-  "approved_at": 1760000042
+  "approved_at": 1760000042,
+  "instance_id": "<uuid or null>",
+  "node_pub": "<base64>"
 }
 ```
 
@@ -347,6 +354,17 @@ digest = SHA-256( "prometheus-pair-v1" || 0x00 || device_public_key (32 bytes)
                   || instance_public_key (SPKI DER) || request_id (ASCII hex) )
 match_code = (big-endian uint32 of digest[0:4]) mod 10000, zero-padded to 4 digits
 ```
+
+**Version 2 (0.2)** adds the node key, so the owner comparing four digits confirms the key the device then pins for the identity challenge (`POST /api/identity/challenge`), and that pin is not trust-on-first-use:
+
+```
+digest = SHA-256( "prometheus-pair-v2" || 0x00 || device_public_key (32 bytes)
+                  || instance_public_key (SPKI DER) || node_pub (32 raw bytes) || request_id (ASCII hex) )
+```
+
+The same reduction to four digits. The daemon uses the version the request asked for and says which in `match_code_version`. **A requester that asked for version 2 refuses an answer that says version 1, or none**: a relay that strips the field from the request cannot quietly fall back to the code that does not cover the node key. A version-2 requester computes its own code from the `node_pub` in the 201 and displays it, as for version 1.
+
+Every route a device joins through hands over `instance_id` and `node_pub`, equal to `GET /api/status`'s: the 201 and the approved poll here, `POST /api/pair/owner`, and `POST /api/pair/local`. A client pins `node_pub` beside its TLS pin and checks it on every later connect.
 
 The server returns it in the `201` and shows it to the operator. The requester **also computes it locally** from its own key and the values it received, and displays its own result. That makes the code catch a naive relay that swapped the key. Read 7.5 before relying on it for more than that.
 
@@ -605,7 +623,7 @@ All JSON bodies are `{"error": "<code>", ...}`.
 | 500 | `persist_failed` | `PUT /api/network`: the edit did not verify or the write failed; the file is untouched |
 | 410 | `expired` | decision arrived after the TTL |
 | 413 | `too_large` | body over 4 KiB |
-| 503 | `identity_unavailable` | `POST /api/pair/requests` and the daemon has no readable instance key (it is made at boot, never on a request); nothing is created |
+| 503 | `identity_unavailable` | `POST /api/pair/requests` and the daemon has no readable instance key, or (match code version 2) no node key; both are made at boot, never on a request; nothing is created |
 | 422 | `code_mismatch` | optional `match_code` on approve differs |
 | 429 | `rate_limited` | see 4.5 (`reason`, `retry_after_seconds`, `Retry-After`) |
 

@@ -255,22 +255,69 @@ class TestDoctorChecks:
 
     # -- config valid --
 
-    def test_check_config_valid(self, tmp_path: Path) -> None:
-        config_file = tmp_path / "config" / "prometheus.yaml"
-        config_file.parent.mkdir(parents=True)
-        config_file.write_text("model:\n  provider: llama_cpp\n", encoding="utf-8")
-        with patch.object(Path, "resolve", return_value=tmp_path / "src" / "prometheus" / "infra" / "doctor.py"):
-            # Patch the path calculation — easier to just patch the file existence check
-            with patch("prometheus.infra.doctor.Path.__truediv__", side_effect=lambda self, other: tmp_path / other if "config" in str(other) else Path.__truediv__(self, other)):
-                pass  # Complex path mocking — test via integration instead
+    # The Config row searches where load_config searches
+    # (config_search_paths): --config, then the repo-local file, then
+    # $PROMETHEUS_CONFIG_DIR (default ~/.prometheus). It used to look only at
+    # <repo>/config/prometheus.yaml, so a daemon that loaded
+    # ~/.prometheus/prometheus.yaml logged "config/prometheus.yaml not found"
+    # at every start. conftest already points REPO_CONFIG_PATH and
+    # PROMETHEUS_CONFIG_DIR at tmp; each case below sets only what it needs.
 
-    def test_check_config_valid_ok(self) -> None:
-        """Config check should pass when prometheus.yaml exists and parses."""
-        check = self.doctor._check_config_valid()
-        # In the test env, config/prometheus.yaml exists in the project
-        assert check.category == "platform"
-        # Status depends on whether the file is found relative to the module
-        assert check.status in ("ok", "error")
+    @staticmethod
+    def _write_config(path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("model:\n  provider: llama_cpp\n", encoding="utf-8")
+        return path
+
+    def test_config_check_uses_an_explicit_config(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        explicit = self._write_config(tmp_path / "elsewhere" / "custom.yaml")
+        # A repo-local file exists too: --config still wins, as in load_config.
+        repo_local = self._write_config(tmp_path / "repo" / "config" / "prometheus.yaml")
+        monkeypatch.setattr("prometheus.config.defaults.REPO_CONFIG_PATH", repo_local)
+        check = Doctor({}, config_path=str(explicit))._check_config_valid()
+        assert check.status == "ok"
+        assert str(explicit) in check.message
+        assert str(repo_local) not in check.message
+
+    def test_config_check_finds_the_repo_local_config(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo_local = self._write_config(tmp_path / "repo" / "config" / "prometheus.yaml")
+        monkeypatch.setattr("prometheus.config.defaults.REPO_CONFIG_PATH", repo_local)
+        check = Doctor({})._check_config_valid()
+        assert check.status == "ok"
+        assert str(repo_local) in check.message
+
+    def test_config_check_finds_the_config_dir_config(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_dir = tmp_path / "custom-config-dir"
+        loaded = self._write_config(config_dir / "prometheus.yaml")
+        monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(config_dir))
+        check = Doctor({})._check_config_valid()
+        assert check.status == "ok"
+        assert str(loaded) in check.message
+
+    def test_config_check_finds_the_home_default(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        home = tmp_path / "home"
+        loaded = self._write_config(home / ".prometheus" / "prometheus.yaml")
+        monkeypatch.delenv("PROMETHEUS_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        check = Doctor({})._check_config_valid()
+        assert check.status == "ok"
+        assert str(loaded) in check.message
+
+    def test_config_check_with_no_config_says_not_found(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # conftest leaves both searched places empty under tmp_path.
+        repo_local = tmp_path / "no-repo-config" / "prometheus.yaml"
+        config_dir_file = tmp_path / "prom-config" / "prometheus.yaml"
+        assert not repo_local.exists() and not config_dir_file.exists()
+        check = Doctor({})._check_config_valid()
+        assert check.status == "error"
+        assert "not found" in check.message
+        assert str(repo_local) in check.message
+        assert str(config_dir_file) in check.message
 
     @pytest.mark.parametrize("broken", [
         'gateway:\n  telegram_token: "{token}\n',   # the snippet quotes it
@@ -283,7 +330,7 @@ class TestDoctorChecks:
         ``_check_config_valid`` feeds the chat ``/doctor`` command and the
         daemon's startup check. It rendered ``str(exc)`` until it switched to
         ``yaml_error_summary``, and nothing held that in place: reverting it
-        left every test green. ``repo_root`` points the check at a fixture
+        left every test green. ``config_path`` points the check at a fixture
         instead of the real checkout.
         """
         # Built by concatenation so the pre-commit secret scanner does not
@@ -292,7 +339,7 @@ class TestDoctorChecks:
         config_file = tmp_path / "config" / "prometheus.yaml"
         config_file.parent.mkdir(parents=True)
         config_file.write_text(broken.format(token=fake), encoding="utf-8")
-        self.doctor.repo_root = tmp_path
+        self.doctor.config_path = config_file
         check = self.doctor._check_config_valid()
         assert check.status == "error"
         assert "YAML parse error" in check.message
@@ -645,7 +692,8 @@ class TestDoctorDiagnose:
         # linked git worktree, which made this test fail outside the daemon checkout.
         doctor.repo_root = tmp_path
         (tmp_path / "config").mkdir()
-        (tmp_path / "config" / "prometheus.yaml").write_text(
+        doctor.config_path = tmp_path / "config" / "prometheus.yaml"
+        doctor.config_path.write_text(
             "model:\n  provider: llama_cpp\n", encoding="utf-8"
         )
 
