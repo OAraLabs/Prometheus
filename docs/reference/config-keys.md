@@ -423,6 +423,7 @@ none either — the key is documented so its absence is visible.
 | `anatomy.scan_on_startup` | `True` |
 | `anatomy.include_in_system_prompt` | `True` |
 | `anatomy.include_in_hosted_prompt` | `False` |
+| `anatomy.include_addresses` | `False` |
 | `anatomy.ssh_user` | `` |
 | `anatomy.ssh_key` | `` |
 | `mcp_servers` | `{}` *(open map)* |

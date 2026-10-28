@@ -114,8 +114,16 @@ INFRASTRUCTURE_ON_DEMAND = (
 )
 
 
-def _infrastructure_block(body: str) -> str:
-    return f"{INFRASTRUCTURE_START}\n{body}\n{INFRASTRUCTURE_END}"
+def _infrastructure_block(body: str, config: dict | None) -> str:
+    """The fenced Infrastructure section, as the model may see it.
+
+    Hosts, addresses, URLs and the tailnet peer list are taken out unless
+    ``anatomy.include_addresses`` is a literal true (``infra/model_view.py``):
+    the model needs what the machines can do, not where they are.
+    """
+    from prometheus.infra.model_view import for_model
+
+    return f"{INFRASTRUCTURE_START}\n{for_model(body, config)}\n{INFRASTRUCTURE_END}"
 
 
 def is_hosted_provider(provider_name: str | None) -> bool:
@@ -365,7 +373,7 @@ def build_runtime_system_prompt(
         for filename in profile_bootstrap:
             content = _load_bootstrap_file(filename)
             if content and filename == "ANATOMY.md":
-                static_sections.append(_infrastructure_block(content))
+                static_sections.append(_infrastructure_block(content, config))
             elif content:
                 static_sections.append(
                     f"<!-- Bootstrap: ~/.prometheus/{filename} -->\n{content}"
@@ -391,7 +399,7 @@ def build_runtime_system_prompt(
         if anatomy_cfg.get("include_in_system_prompt", True):
             anatomy_summary = _load_anatomy_summary()
             if anatomy_summary:
-                static_sections.append(_infrastructure_block(anatomy_summary))
+                static_sections.append(_infrastructure_block(anatomy_summary, config))
 
     # 3-4. Base system prompt + environment info
     custom_prompt = config.get("system_prompt")
