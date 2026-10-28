@@ -281,7 +281,8 @@ All routes are operator-only. JSON in and out; errors are `{"error": <code>, "de
      "offers": [{"kind": "stt", "api": "openai.audio.transcriptions", "url": "http://<address>:<port>/v1/audio/transcriptions"}],
      "uses": ["stt"],
      "health": {"state": "online", "since": "2026-10-27T14:02:11Z"},
-     "approved_at": "2026-10-27T13:58:40Z", "last_seen": "2026-10-27T14:05:00Z"}
+     "created_at": "2026-10-27T13:58:40Z", "updated_at": "2026-10-27T13:58:40Z",
+     "last_seen": "2026-10-27T14:05:00Z"}
   ],
   "pending_limit": 16
 }
@@ -294,6 +295,8 @@ All routes are operator-only. JSON in and out; errors are `{"error": <code>, "de
   answers it `409 config_file_entry`.
 - `verified`: false shows as the "not verified" label.
 - `health.state`: `unknown`, `online`, `offline`, `refused` (the piece rejected the key) or `key_changed`.
+- `created_at`, `updated_at`: when the row was first stored and last changed (UTC, ISO 8601); `last_seen`: the last
+  good answer from the piece, or null. A pending piece has no row: its `created_at` is when it was noticed.
 
 WebSocket frames, to operators only: `piece_found` (a piece became pending; the same object as one `pieces[]` entry,
 plus the prompt sentence), `piece_resolved` (`{id, state}` after approve, deny, ignore or expiry),
@@ -351,6 +354,7 @@ pieces (
   state            TEXT NOT NULL,                -- 'approved' | 'ignored'
   name             TEXT NOT NULL,
   address          TEXT NOT NULL,                -- scheme://host[:port]
+  address_class    TEXT NOT NULL,                -- 'loopback' | 'mesh' | 'lan' | 'public' (section 5.1)
   node_pub         TEXT UNIQUE,                  -- NULL when not verified
   tls_spki_sha256  TEXT,
   card_sha256      TEXT,
