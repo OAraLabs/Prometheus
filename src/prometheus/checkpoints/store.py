@@ -26,6 +26,14 @@ This store does, for sessions that have a workspace (item W):
   files created since the checkpoint (under the workspace, outside skip
   dirs), reports every path per category. ``dry_run`` reports without
   touching anything. Naming the checkpoint twice is the confirmation.
+* **What a restore trusts**: nothing in the manifest. The daemon runs it
+  unconfined, so a manifest that named a path would otherwise be a write
+  anywhere the daemon can write. The caller names the workspace (the
+  session's own binding) and a checkpoint recorded for another is refused;
+  a manifest that names ``..`` or an absolute path is refused whole; every
+  path is walked from that workspace one component at a time without
+  following a symlink, so a link planted since cannot leave it; and nothing that is Prometheus's own state is written or
+  deleted, wherever the workspace is (``checker.own_state_entries``).
 * **Retention**: the newest ``keep_per_session`` per session; blobs no
   checkpoint references are garbage-collected on prune.
 
@@ -45,7 +53,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 log = logging.getLogger(__name__)
 
@@ -109,7 +117,52 @@ class CheckpointRecord:
 
 
 class CheckpointRefused(RuntimeError):
-    """The workspace could not be checkpointed; the message says why."""
+    """The workspace could not be checkpointed, or a checkpoint not restored; the message says why."""
+
+
+class _Escapes(ValueError):
+    """A recorded path that does not stay inside the workspace."""
+
+
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _NOFOLLOW
+
+
+def _parts(rel: str) -> list[str]:
+    """*rel* as path components, or _Escapes: it must be relative, name a file, and never climb."""
+    if not rel or "\x00" in rel or os.path.isabs(rel):
+        raise _Escapes("not a relative path")
+    parts = rel.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        raise _Escapes("a component is empty, '.' or '..'")
+    return parts
+
+
+def _open_parent(ws_fd: int, parts: list[str], *, create: bool) -> int:
+    """A descriptor for the directory that holds ``parts[-1]``, walked from the workspace one component at a time
+    with O_NOFOLLOW: a symlinked directory anywhere on the way is refused (_Escapes), never followed. With *create*,
+    missing directories are made as it goes."""
+    fd = os.dup(ws_fd)
+    try:
+        for name in parts[:-1]:
+            try:
+                try:
+                    nxt = os.open(name, _DIR_FLAGS, dir_fd=fd)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    os.mkdir(name, 0o755, dir_fd=fd)
+                    nxt = os.open(name, _DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                raise
+            except OSError as exc:
+                raise _Escapes(f"{name!r} is a symlink or not a directory ({exc.strerror})") from exc
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 class FileCheckpointStore:
@@ -296,45 +349,148 @@ class FileCheckpointStore:
 
     # --------------------------------------------------------------- restore
 
-    def restore(self, cid: str, *, dry_run: bool = False) -> dict[str, Any]:
-        """Put the workspace back to the checkpoint. Returns what was (or
-        would be) restored, deleted and left alone — every path named."""
+    def _check_workspace(self, rec: CheckpointRecord, workspace: str | Path) -> Path:
+        """The workspace a restore may write: the caller's, which must be the one the checkpoint was taken in, and
+        must not be (or be inside) Prometheus's own state or this store. CheckpointRefused otherwise."""
+        from prometheus.permissions.checker import own_state_entries
+        from prometheus.security.path_guard import denying_entry
+
+        ws = Path(workspace).expanduser().resolve()
+        if Path(rec.workspace) != ws:
+            raise CheckpointRefused(
+                f"checkpoint {rec.id} was taken in {rec.workspace}, and this conversation works in {ws}: point the "
+                f"conversation back at {rec.workspace} to restore it"
+            )
+        if not ws.is_dir():
+            raise CheckpointRefused(f"workspace {rec.workspace} no longer exists")
+        own = denying_entry(str(ws), [*own_state_entries(), str(self.root.resolve())])
+        if own is not None:
+            raise CheckpointRefused(f"workspace {ws} is Prometheus's own state ({own!r}): a restore never writes there")
+        return ws
+
+    def _target_refusal(self, ws: Path, rel: str, own: Sequence[str]) -> str | None:
+        """Why *rel* must not be written or deleted, or None. The path is checked as the kernel would resolve it
+        (after the walk below has refused symlinks on the way), against Prometheus's own state."""
+        from prometheus.security.path_guard import denying_entry
+
+        try:
+            _parts(rel)
+        except _Escapes as exc:
+            return f"refused: the recorded path leaves the workspace ({exc})"
+        hit = denying_entry(os.path.realpath(ws / rel), own)
+        if hit is not None:
+            return f"refused: Prometheus's own state ({hit!r}) is never restored"
+        return None
+
+    def _write_back(self, ws_fd: int, rel: str, data: bytes, mode: int) -> None:
+        parts = _parts(rel)
+        fd = _open_parent(ws_fd, parts, create=True)
+        try:
+            name = parts[-1]
+            tmp = f".{name}.{uuid.uuid4().hex[:8]}.prometheus-restore.tmp"
+            # O_EXCL | O_NOFOLLOW: a fresh file, never one a link already names. os.replace swaps the NAME, so a
+            # symlink sitting at the target is replaced, not written through.
+            out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600, dir_fd=fd)
+            try:
+                with os.fdopen(out, "wb", closefd=False) as fh:
+                    fh.write(data)
+                try:
+                    os.fchmod(out, mode & 0o7777)
+                except OSError:
+                    pass
+            finally:
+                os.close(out)
+            try:
+                os.replace(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
+            except BaseException:
+                os.unlink(tmp, dir_fd=fd)
+                raise
+        finally:
+            os.close(fd)
+
+    def _delete(self, ws_fd: int, rel: str) -> None:
+        parts = _parts(rel)
+        try:
+            fd = _open_parent(ws_fd, parts, create=False)
+        except FileNotFoundError:
+            return
+        try:
+            os.unlink(parts[-1], dir_fd=fd)
+        except FileNotFoundError:
+            pass
+        finally:
+            os.close(fd)
+
+    def restore(self, cid: str, *, workspace: str | Path, dry_run: bool = False) -> dict[str, Any]:
+        """Put *workspace* back to the checkpoint. Returns what was (or would
+        be) restored, deleted and left alone — every path named.
+
+        *workspace* is the caller's, never the manifest's: the conversation's
+        own binding. See "What a restore trusts" above."""
+        from prometheus.permissions.checker import own_state_entries
+
         rec = self.get(cid)
         if rec is None:
             raise KeyError(cid)
+        ws = self._check_workspace(rec, workspace)
+        for f in rec.files_detail:
+            try:
+                _parts(f["rel_path"])
+            except _Escapes as exc:
+                raise CheckpointRefused(
+                    f"checkpoint {cid} names {f['rel_path']!r}, which is not a path inside its workspace ({exc}): "
+                    f"its manifest was not written by this store, and nothing was restored"
+                ) from exc
         d = self.diff(cid)
         if d.get("workspace_missing"):
             raise CheckpointRefused(f"workspace {rec.workspace} no longer exists")
-        ws = Path(rec.workspace)
+        own = [*own_state_entries(), str(self.root.resolve())]
         meta = {f["rel_path"]: f for f in rec.files_detail}
-        result = {"checkpoint": cid, "dry_run": dry_run,
-                  "restored": [], "deleted": [], "unchanged": d["unchanged"],
-                  "uncaptured": d["uncaptured"], "errors": []}
-        for rel in d["changed"] + d["deleted"]:
-            m = meta[rel]
-            blob = self._blob_path(m["sha256"])
-            if not blob.exists():
-                result["errors"].append({"path": rel, "error": "blob missing from the store"})
-                continue
-            result["restored"].append(rel)
-            if dry_run:
-                continue
-            target = ws / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_name(target.name + ".prometheus-restore.tmp")
-            tmp.write_bytes(blob.read_bytes())
-            os.replace(tmp, target)
-            try:
-                os.chmod(target, m["mode"] & 0o7777)
-            except OSError:
-                pass
-        for rel in d["added"]:
-            result["deleted"].append(rel)
-            if not dry_run:
+        result: dict[str, Any] = {"checkpoint": cid, "dry_run": dry_run,
+                                  "restored": [], "deleted": [], "unchanged": d["unchanged"],
+                                  "uncaptured": d["uncaptured"], "errors": []}
+        ws_fd = os.open(ws, _DIR_FLAGS)
+        try:
+            for rel in d["changed"] + d["deleted"]:
+                m = meta[rel]
+                why = self._target_refusal(ws, rel, own)
+                if why is not None:
+                    result["errors"].append({"path": rel, "error": why})
+                    continue
+                blob = self._blob_path(m["sha256"])
+                if not blob.exists():
+                    result["errors"].append({"path": rel, "error": "blob missing from the store"})
+                    continue
+                if dry_run:
+                    result["restored"].append(rel)
+                    continue
                 try:
-                    (ws / rel).unlink()
-                except FileNotFoundError:
-                    pass
+                    self._write_back(ws_fd, rel, blob.read_bytes(), m["mode"])
+                except _Escapes as exc:
+                    result["errors"].append({"path": rel, "error": f"refused: the path leaves the workspace ({exc})"})
+                    continue
+                except OSError as exc:
+                    result["errors"].append({"path": rel, "error": f"not restored: {exc.strerror or exc}"})
+                    continue
+                result["restored"].append(rel)
+            for rel in d["added"]:
+                why = self._target_refusal(ws, rel, own)
+                if why is not None:
+                    result["errors"].append({"path": rel, "error": why})
+                    continue
+                if not dry_run:
+                    try:
+                        self._delete(ws_fd, rel)
+                    except _Escapes as exc:
+                        result["errors"].append({"path": rel,
+                                                 "error": f"refused: the path leaves the workspace ({exc})"})
+                        continue
+                    except OSError as exc:
+                        result["errors"].append({"path": rel, "error": f"not deleted: {exc.strerror or exc}"})
+                        continue
+                result["deleted"].append(rel)
+        finally:
+            os.close(ws_fd)
         return result
 
     # ------------------------------------------------------------- retention

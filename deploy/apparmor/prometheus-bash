@@ -13,10 +13,12 @@
 # agent unusable (fixed deliberately in 1da4dd2). rm, git push, package
 # installs, migrations and repo edits must all keep working with no prompt.
 #
-# It exists to make three paths unreachable (and the folder above the third
-# impossible to move out from under it), and Prometheus's own trusted state
-# unwritable (the device registry, the config, identity, memory and skills,
-# and the folders above them), because the permission gate cannot reach
+# It exists to make three paths and the machine's private keys unreachable
+# (and the folder above the third impossible to move out from under it), and
+# Prometheus's own trusted state and launch configuration unwritable (the
+# device registry, the config, identity, memory, skills and profiles, what
+# the daemon starts or pins at boot, and the folders above them), because
+# the permission gate cannot reach
 # them: SecurityGate._check_denied_path is nested under
 # `if file_path:`, and bash is handed a command string, so the denied-path
 # floor covers the path-declaring tools and misses bash at BOTH origins.
@@ -112,6 +114,32 @@ profile prometheus-bash flags=(attach_disconnected) {
   deny @{HOME}/.prometheus/{prometheus.yaml,SOUL.md,AGENTS.md,ANATOMY.md,MEMORY.md,USER.md} wl,
   deny @{HOME}/.prometheus/skills/{,**} wl,
   deny @{HOME}/prometheus-deploy/config/prometheus.yaml wl,
+
+  # The machine's private keys: node.key signs the identity challenge a
+  # paired client checks, and instance.key is the TLS key a paired client
+  # pins. A copy of both answers as this Prometheus, so reading is refused
+  # too, like ~/.ssh. The daemon reads them itself, unconfined. `{,**}` takes
+  # the directory itself, so it cannot be renamed out from under the rule.
+  deny @{HOME}/.prometheus/node/{,**} rwlkmx,
+  # The MCP store: servers the daemon STARTS at boot, outside this profile,
+  # and their own credentials. Read and write; the * takes its .tmp file.
+  deny @{HOME}/.prometheus/data/mcp_servers.json* rwlk,
+
+  # Launch configuration: what the daemon runs, or binds a conversation to.
+  # Reading is not refused. job-python/ is first on PATH for the owner's cron
+  # jobs (a planted `curl` there runs as the owner); lcm.db holds each
+  # conversation's workspace and profile binding (the * takes -wal, -shm and
+  # -journal); config_pins.yaml is re-applied over the config at every boot,
+  # any key; an owner's checkpoint restore writes what checkpoints/ names; and
+  # profiles/ limits a conversation's tools.
+  #
+  # Like the rules above, these name the default places. A node, data or
+  # config directory moved by PROMETHEUS_NODE_DIR, PROMETHEUS_DATA_DIR or
+  # PROMETHEUS_CONFIG_DIR is outside them, and the boot probe says so.
+  deny @{HOME}/.prometheus/data/job-python/{,**} wl,
+  deny @{HOME}/.prometheus/data/lcm.db* wl,
+  deny @{HOME}/.prometheus/config_pins.yaml wl,
+  deny @{HOME}/.prometheus/{checkpoints,profiles}/{,**} wl,
 
   # --- NO CARVE-OUT, AND THAT IS NOT AN OVERSIGHT -------------------------
   # There is deliberately no exception here for the second compute backend's

@@ -375,6 +375,14 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
         "so the floor table is the subject. The real shell refusal is proven on macOS in the same file. "
         "Registered, not exempted: if that file stops calling evaluate directly this entry fails as stale."
     ),
+    "test_state_floor_keys_launch.py": (
+        "the node keys, the MCP store and launch configuration join the floor: direct evaluate(file_path=...) calls "
+        "read the gate's decision for each file under each config shape (default, gate off, a workspace covering "
+        "it, any home, a moved config or node directory), so the floor table is the subject. The same file drives "
+        "write_file through run_loop → _execute_tool_call against a scratch config directory and asserts nothing "
+        "landed (and that an ordinary write beside it did), and proves the shell refusal on macOS. Registered, not "
+        "exempted: if that file stops calling evaluate directly this entry fails as stale."
+    ),
     "test_instruction_file_writes.py": (
         "project instruction files (the assembler's CONVENTION_FILES and .prometheus/rules/*.md): direct "
         "evaluate(file_path=…) calls read the gate's decision for each name, nesting, case and config shape, so "

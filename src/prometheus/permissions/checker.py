@@ -191,7 +191,57 @@ _ALWAYS_DENIED_PATHS: tuple[str, ...] = (
     "/*/.prometheus/data/cron_history.jsonl*",
     "/*/.prometheus/data/cron_undelivered.jsonl*",
     "/*/.prometheus/data/cron_scheduler.pid*",
+    # The machine's private keys (node.key signs the identity challenge, instance.key is the TLS key a paired
+    # client pins) and the MCP store (servers the daemon starts at boot, outside the floor, with their own
+    # credentials). A node directory moved by PROMETHEUS_NODE_DIR, and this process's data directory, are added
+    # by the gate itself. The shell's half is permissions/confinement.py.
+    "/*/.prometheus/node",
+    "/*/.prometheus/data/mcp_servers.json*",
 )
+
+# ⚠ LAUNCH CONFIGURATION: refused for WRITES, whatever the mode, the workspace or a grant says. Reading stays
+# allowed (nothing secret is in them). What the daemon runs, or binds a conversation to, from these:
+# ``job-python/`` is first on PATH for the owner's cron jobs, which run outside the floor; ``lcm.db`` holds each
+# conversation's workspace binding (its write area) and profile binding (its tool limits); ``config_pins.yaml`` is
+# re-applied over the config at every boot, any key; an owner's restore writes what ``checkpoints/`` names. The
+# daemon writes them itself; no file tool needs to. Moved directories are added by the gate, as above.
+_ALWAYS_WRITE_DENIED_PATHS: tuple[str, ...] = (
+    "/*/.prometheus/data/job-python",
+    "/*/.prometheus/data/lcm.db*",
+    "/*/.prometheus/config_pins.yaml",
+    "/*/.prometheus/checkpoints",
+)
+
+
+def _this_process_state(*, writes: bool) -> list[str]:
+    """The floored paths THIS process uses, wherever PROMETHEUS_CONFIG_DIR, PROMETHEUS_DATA_DIR or
+    PROMETHEUS_NODE_DIR put them, resolved: for reads and writes (*writes* False), or for writes only."""
+    from prometheus.config.paths import lcm_db_path, node_dir_path
+    from prometheus.permissions.confinement import (
+        CONFIG_LAUNCH_DIRS, CONFIG_LAUNCH_FILES, JOB_SHIM_DIR_NAME, MCP_STORE_NAME, NODE_DIR_NAME,
+    )
+
+    cfg = config_dir_path().expanduser().resolve()
+    data = data_dir_path().expanduser().resolve()
+    if not writes:
+        return [str(cfg / NODE_DIR_NAME), str(node_dir_path().expanduser().resolve()),
+                str(data / MCP_STORE_NAME) + "*"]
+    return [str(data / JOB_SHIM_DIR_NAME), str(lcm_db_path().expanduser().resolve()) + "*",
+            *(str(cfg / n) for n in (*CONFIG_LAUNCH_FILES, *CONFIG_LAUNCH_DIRS))]
+
+
+def own_state_entries() -> list[str]:
+    """Every path a write by the daemon ON SOMEONE ELSE'S SAY must never touch: the floor for reads and writes, the
+    write floor, all of Prometheus's config directory (any home, and this process's), its data and node directories
+    and pairing directory, and the config file it loaded. For a writer that runs unconfined and is steered by stored
+    data (a checkpoint restore), so that the data cannot point it at Prometheus's own state."""
+    from prometheus.config.paths import node_dir_path
+    from prometheus.permissions.confinement import loaded_configs
+
+    out = [*_ALWAYS_DENIED_PATHS, *_ALWAYS_WRITE_DENIED_PATHS, "/*/.prometheus"]
+    out += [str(p.expanduser().resolve()) for p in (config_dir_path(), data_dir_path(), node_dir_path(), pairing_dir())]
+    out += list(loaded_configs())
+    return list(dict.fromkeys(out))
 
 # Tools that are always safe for read-only classification
 _READONLY_TOOLS: frozenset[str] = frozenset(
@@ -867,6 +917,14 @@ class SecurityGate:
             _p = str(data_dir_path().expanduser().resolve() / _cron) + "*"
             if _p not in self._denied_paths:
                 self._denied_paths.append(_p)
+        # The node keys and the MCP store this process reads, and its launch configuration (writes only).
+        for _p in _this_process_state(writes=False):
+            if _p not in self._denied_paths:
+                self._denied_paths.append(_p)
+        self._write_denied_paths: list[str] = list(_ALWAYS_WRITE_DENIED_PATHS)
+        for _p in _this_process_state(writes=True):
+            if _p not in self._write_denied_paths:
+                self._write_denied_paths.append(_p)
         self._config_path = config_path
         # MULTI-ROOT. A single root did not survive contact: of 871 recorded
         # file-tool calls on the live box only 16 were under ~/projects, so a
@@ -1145,10 +1203,15 @@ class SecurityGate:
             if reason:
                 self._audit_log(tool_name, AuditDecision.DENY, reason, file_path)
                 return PermissionDecision.deny(reason)
+            launch = denying_entry(str(Path(file_path).expanduser().resolve()), self._write_denied_paths)
+            if launch is not None:
+                reason = (f"{file_path} is Prometheus's launch configuration ({launch!r}): only the daemon writes it")
+                self._audit_log(tool_name, AuditDecision.DENY, reason, file_path)
+                return PermissionDecision.deny(reason)
             trusted = denying_entry(str(Path(file_path).expanduser().resolve()), self._trusted_paths)
             if trusted is not None:
-                reason = (f"{file_path} is Prometheus's trusted state (its config, identity files, memory or "
-                          f"skills): a write there needs the owner's approval")
+                reason = (f"{file_path} is Prometheus's trusted state (its config, identity files, memory, skills "
+                          f"or agent profiles): a write there needs the owner's approval")
                 self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason, file_path)
                 return PermissionDecision.approve(reason)
             if is_instruction_file(Path(file_path).expanduser()):

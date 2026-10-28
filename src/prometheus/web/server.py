@@ -2321,9 +2321,19 @@ def create_app(
         dry_run = bool(body.get("dry_run", False))
         if not dry_run and body.get("confirm") != checkpoint_id:
             return JSONResponse({"error": "confirm must equal the checkpoint id — a restore overwrites files"}, status_code=400)
+        # The workspace a restore writes is the conversation's own binding, never the one the checkpoint records:
+        # the store refuses a checkpoint taken anywhere else (checkpoints/store.py, "What a restore trusts").
+        lcm = getattr(app.state, "lcm_engine", None)
+        conversations = lcm.conversation_store if lcm is not None else None
+        if conversations is None:
+            return JSONResponse({"error": "no durable store — session workspaces unavailable"}, status_code=503)
+        workspace = conversations.get_session_workspace(session_id)
+        if not workspace:
+            return JSONResponse({"error": f"session {session_id!r} has no workspace now: bind it to {rec.workspace} "
+                                          "to restore this checkpoint"}, status_code=409)
         import asyncio as _asyncio
         try:
-            result = await _asyncio.to_thread(store.restore, checkpoint_id, dry_run=dry_run)
+            result = await _asyncio.to_thread(store.restore, checkpoint_id, workspace=workspace, dry_run=dry_run)
         except Exception as exc:
             return JSONResponse({"error": f"restore refused: {exc}"}, status_code=409)
         if not dry_run:

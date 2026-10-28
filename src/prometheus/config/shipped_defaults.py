@@ -248,6 +248,18 @@ DENIED_PATHS_DEFAULTS_SHIPPED: tuple[tuple[str, ...], ...] = (
      "/*/.prometheus/data/cron_history.jsonl*",
      "/*/.prometheus/data/cron_undelivered.jsonl*",
      "/*/.prometheus/data/cron_scheduler.pid*"),
+    # + the machine's private keys (node/: node.key and instance.key, which paired apps pin) and the MCP store,
+    # whose servers the daemon starts at boot with their own credentials; both sit in the floor too.
+    ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
+     "/*/Library/Application Support/Prometheus/pairing",
+     "/*/.local/share/prometheus/pairing",
+     "/*/.prometheus/data/devices.db*",
+     "/*/.prometheus/data/cron_jobs.json*",
+     "/*/.prometheus/data/cron_history.jsonl*",
+     "/*/.prometheus/data/cron_undelivered.jsonl*",
+     "/*/.prometheus/data/cron_scheduler.pid*",
+     "/*/.prometheus/node",
+     "/*/.prometheus/data/mcp_servers.json*"),
 )
 
 SHIPPED_DENIED_PATHS: tuple[str, ...] = DENIED_PATHS_DEFAULTS_SHIPPED[-1]
