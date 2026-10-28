@@ -966,8 +966,6 @@ Run this wizard again after you're ready:
             else:
                 # Local provider: store URL
                 model["base_url"] = self._base_url
-                if self._provider == "ollama":
-                    model["fallback_url"] = self._base_url
                 model.pop("api_key_env", None)
 
             if self._model_name:
