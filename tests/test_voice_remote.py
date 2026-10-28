@@ -61,10 +61,16 @@ class _Server:
 
     def __init__(self, status: int = 200) -> None:
         self.status = status
+        # path -> status for a route that answers differently from the rest
+        # (a server with only /health, one without /health, ...).
+        self.routes: dict[str, int] = {}
         self.requests: list[httpx.Request] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        if request.url.path in self.routes:
+            code = self.routes[request.url.path]
+            return httpx.Response(code, json={"status": "ok"} if code == 200 else {})
         if self.status != 200:
             return httpx.Response(self.status, json={"error": "nope"})
         if request.url.path.endswith("/audio/transcriptions"):
@@ -344,11 +350,51 @@ class TestDoctorRow:
         assert [(r.name, r.status) for r in rows] == [
             ("Remote STT", "ok"), ("Remote TTS", "ok")]
         assert "reachable" in rows[0].message
-        # The probe is a read, sent with the key the daemon would send.
-        assert [r.method for r in server.requests] == ["GET", "GET"]
-        assert {str(r.url) for r in server.requests} == {"http://voice.test/v1/models"}
+        # Health first (at the server root, beside /v1), then the models list
+        # to check the key. Every probe is a GET sent with the daemon's key.
+        assert [str(r.url) for r in server.requests] == [
+            "http://voice.test/health", "http://voice.test/v1/models"] * 2
+        assert all(r.method == "GET" for r in server.requests)
         assert all(r.headers["authorization"] == f"Bearer {env_key}"
                    for r in server.requests)
+
+    def test_health_only_server_is_reachable(self, server, env_key):
+        """A voice server that serves /health and no /v1/models is up."""
+        from prometheus.cli.doctor import check_voice_remotes
+
+        server.status = 404
+        server.routes = {"/health": 200}
+        cfg = {**_cfg("stt", "http://voice.test/v1/audio/transcriptions"),
+               **_cfg("tts", "http://voice.test/v1/audio/speech")}
+        rows = check_voice_remotes(cfg)
+        assert [(r.name, r.status) for r in rows] == [
+            ("Remote STT", "ok"), ("Remote TTS", "ok")]
+        assert all("reachable" in r.message for r in rows)
+        assert server.requests[0].url.path == "/health"
+
+    def test_server_without_health_falls_back_to_models(self, server, env_key):
+        from prometheus.cli.doctor import check_voice_remotes
+
+        server.routes = {"/health": 404}
+        [row] = check_voice_remotes(_cfg("tts", "http://voice.test/v1/audio/speech"))
+        assert (row.name, row.status) == ("Remote TTS", "ok")
+        assert [r.url.path for r in server.requests] == ["/health", "/v1/models"]
+
+    def test_unhealthy_server_warns(self, server):
+        from prometheus.cli.doctor import check_voice_remotes
+
+        server.routes = {"/health": 503}
+        [row] = check_voice_remotes({"stt": {"url": "http://voice.test/v1/audio/transcriptions"}})
+        assert (row.name, row.status) == ("Remote STT", "warning")
+        assert "503" in row.message
+
+    def test_health_ok_but_key_refused_errors(self, server, env_key):
+        from prometheus.cli.doctor import check_voice_remotes
+
+        server.routes = {"/health": 200, "/v1/models": 401}
+        [row] = check_voice_remotes(_cfg("stt", "http://voice.test/v1/audio/transcriptions"))
+        assert (row.name, row.status) == ("Remote STT", "error")
+        assert "401" in row.message
 
     def test_unreachable_row_warns(self):
         from prometheus.cli.doctor import check_voice_remotes

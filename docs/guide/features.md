@@ -215,7 +215,7 @@ The local engines stay as the fallback:
 - **Server unreachable, timed out or failing:** that request runs locally, and the log gets one line about it.
 - **Key refused (401 or 403):** that request runs locally too, but the log gets an ERROR, because a wrong key does not fix itself.
 
-`oara doctor` shows a **Remote STT** or **Remote TTS** row for each url you set. The row reports whether the server answers (it asks for the server's `/v1/models` list, sending the key) and whether it refused the key. The key is sent as you configured it, so use https or a private network for a server on another machine.
+`oara doctor` shows a **Remote STT** or **Remote TTS** row for each url you set. It reports whether the server answers and whether it refused the key. Doctor asks for the server's `/health` first, at the server root beside `/v1`. It then asks for the `/v1/models` list, if the server has one, to check the key. A server that serves only `/health` counts as reachable. The key is sent as you configured it, so use https or a private network for a server on another machine.
 
 ### Paperclip gateway — Default: off. Experimental
 

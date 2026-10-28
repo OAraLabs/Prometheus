@@ -225,26 +225,54 @@ async def synthesize_remote(
     return True
 
 
-def probe_url(settings: RemoteVoice) -> str:
-    """Where doctor checks the server: its ``/models`` listing, a read that
-    OpenAI-compatible servers answer and authenticate like the audio routes."""
+def probe_urls(settings: RemoteVoice) -> tuple[str, str]:
+    """Where doctor checks the server: ``(health, models)``.
+
+    ``/health`` sits at the server root, beside ``/v1`` — it is what voice
+    servers reliably serve, and it answers without touching a model.
+    ``/v1/models`` is optional: an OpenAI-compatible server that has it
+    authenticates it like the audio routes, so it is the one read that can
+    tell a refused key apart from a healthy server.
+    """
+    api_base = settings.url.rstrip("/")
     for suffix in ("/audio/transcriptions", "/audio/speech"):
-        if settings.url.rstrip("/").endswith(suffix):
-            return settings.url.rstrip("/")[: -len(suffix)] + "/models"
-    return settings.url
+        if api_base.endswith(suffix):
+            api_base = api_base[: -len(suffix)]
+            break
+    root = api_base[: -len("/v1")] if api_base.endswith("/v1") else api_base
+    return root + "/health", api_base + "/models"
 
 
 def probe(settings: RemoteVoice, timeout: float = 5.0) -> tuple[str, int | None]:
-    """``("ok"|"refused"|"unreachable", status)`` for a doctor row."""
-    try:
-        with _sync_client(settings.timeout(timeout)) as client:
-            resp = client.get(probe_url(settings), headers=settings.headers())
-    except httpx.HTTPError:
-        return "unreachable", None
-    if resp.status_code in (401, 403):
-        return "refused", resp.status_code
-    if resp.status_code >= 500:
-        return "unreachable", resp.status_code
-    # Any other answer — even a 404 from a server without /models — means
+    """``("ok"|"refused"|"unreachable", status)`` for a doctor row.
+
+    ``/health`` first. A 2xx there means the server is up whatever
+    ``/v1/models`` says, except that a 401/403 from it still reports the key
+    as refused. Without ``/health`` (404 or similar), the models answer
+    decides alone, as any reply from a listening server does.
+    """
+    health_url, models_url = probe_urls(settings)
+    headers = settings.headers()
+    with _sync_client(settings.timeout(timeout)) as client:
+        try:
+            health = client.get(health_url, headers=headers)
+        except httpx.HTTPError:
+            return "unreachable", None
+        if health.status_code in (401, 403):
+            return "refused", health.status_code
+        if health.status_code >= 500:
+            return "unreachable", health.status_code
+        healthy = health.is_success
+        try:
+            models = client.get(models_url, headers=headers)
+        except httpx.HTTPError:
+            return ("ok", health.status_code) if healthy else ("unreachable", None)
+    if models.status_code in (401, 403):
+        return "refused", models.status_code
+    if healthy:
+        return "ok", health.status_code
+    if models.status_code >= 500:
+        return "unreachable", models.status_code
+    # Any other answer — even a 404 from a server with neither route — means
     # something is listening there.
-    return "ok", resp.status_code
+    return "ok", models.status_code
