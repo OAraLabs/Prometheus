@@ -318,7 +318,7 @@ class HookExecutor:
     async def execute(event: HookEvent, payload: dict) -> AggregatedHookResult
     def update_registry(registry: HookRegistry) -> None
     # Runs all hooks registered for event whose matcher matches payload["tool_name"]
-    # Command hooks: /bin/bash -lc; sets PROMETHEUS_HOOK_EVENT + PROMETHEUS_HOOK_PAYLOAD env vars;
+    # Command hooks: /bin/bash --noprofile --norc -c (never a login shell); sets PROMETHEUS_HOOK_EVENT + PROMETHEUS_HOOK_PAYLOAD env vars;
     #   env is PATH, HOME, USER, LANG, LC_*, TMPDIR, SHELL + the hook's env_allowlist, nothing inherited
     # Prompt/agent hooks: bounded by timeout_seconds; a timeout or raise is a failed HookResult
     #   (blocked = block_on_failure) and one WARNING, never an exception out of execute()
@@ -1165,7 +1165,7 @@ def is_scheduler_running() -> bool
 def stop_scheduler() -> bool
 
 # Job execution
-async def execute_job(job: dict) -> dict        # /bin/bash -lc, 300s timeout
+async def execute_job(job: dict) -> dict        # operator jobs: bash --noprofile --norc -c; 300s timeout
 async def run_scheduler_loop(*, once=False) -> None   # main loop, signal-aware
 def scheduler_status() -> dict
 ```

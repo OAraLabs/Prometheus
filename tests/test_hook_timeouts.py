@@ -443,7 +443,7 @@ async def test_a_hook_killed_by_a_signal_reports_only_what_it_printed(
         command, printed, quiet_home, tmp_path):
     """The session's leader is a bash that waits for the command. A bash whose
     child dies from a signal writes a job-status line to its stderr
-    ("... Killed: 9  /bin/bash -lc "$1""), which would become the hook's output
+    ("... Killed: 9  /bin/bash -c "$1""), which would become the hook's output
     and, under block_on_failure, the reason the model is shown."""
     hook = CommandHookDefinition(command=command, timeout_seconds=10, block_on_failure=True)
 
@@ -479,21 +479,21 @@ async def test_a_hook_does_not_source_bashrc_when_stdin_is_a_socket(quiet_home, 
 
 
 @pytest.mark.asyncio
-async def test_an_allowlisted_bash_env_runs_once_after_the_profile(
+async def test_neither_the_profile_nor_an_allowlisted_bash_env_runs(
         quiet_home, tmp_path, monkeypatch):
-    """A non-interactive bash sources $BASH_ENV before its script. Read by the
-    leader too, it would run twice, first without anything the operator's
-    profile sets (and a `set -e` in it could stop the command running at all)."""
+    """A hook runs outside the floor, and a login file or a $BASH_ENV script is a
+    file a floored shell could write (GHSA-9ff8-vhh2-r2cw): neither bash is a
+    login shell, and BASH_ENV is dropped even when the hook allowlists it."""
     bash_env = tmp_path / "bash_env.sh"
-    bash_env.write_text('echo "sourced, FROM_PROFILE=${FROM_PROFILE-unset}"\n')
+    bash_env.write_text('echo sourced\n')
     monkeypatch.setenv("BASH_ENV", str(bash_env))
-    hook = CommandHookDefinition(command='echo "BASH_ENV=$BASH_ENV"', timeout_seconds=10,
-                                 env_allowlist=["BASH_ENV"])
+    hook = CommandHookDefinition(command='echo "FROM_PROFILE=${FROM_PROFILE-unset} BASH_ENV=${BASH_ENV-unset}"',
+                                 timeout_seconds=10, env_allowlist=["BASH_ENV"])
 
     _, result = await _run(hook, tmp_path)
 
     [one] = result.results
-    assert one.output.splitlines() == ["sourced, FROM_PROFILE=yes", f"BASH_ENV={bash_env}"]
+    assert one.output.splitlines() == ["FROM_PROFILE=unset BASH_ENV=unset"]
 
 
 @pytest.mark.asyncio

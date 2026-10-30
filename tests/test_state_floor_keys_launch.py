@@ -199,6 +199,8 @@ def _label_ok(monkeypatch, *, keys: str = "refused", launch: str = "refused"):
     monkeypatch.setattr(C, "_cron_detail", lambda profile: ("; writing the scheduled-jobs files refused", False))
     monkeypatch.setattr(C, "_probe_node_read", lambda profile: keys)
     monkeypatch.setattr(C, "_probe_launch_write", lambda profile: launch)
+    # The what-starts-Prometheus half is tests/test_startup_floor.py's.
+    monkeypatch.setattr(C, "_startup_detail", lambda profile: ("; writing what starts Prometheus refused", False))
 
 
 def test_a_current_profile_says_the_keys_and_launch_configuration_are_refused(monkeypatch, caplog):

@@ -479,6 +479,55 @@ def _keys_and_launch_detail(profile: str) -> tuple[str, bool]:
     return "".join(parts), stale
 
 
+def _probe_startup_write(profile: str) -> str:
+    """Under *profile*, may what starts Prometheus be written? Renames each service file and install folder that
+    exists onto itself: ``refused``, ``renamed``, ``absent`` or ``unknown``. Only the places the profile names are
+    asked; :func:`_install_outside_profile` reports the rest."""
+    home = os.path.realpath(os.path.expanduser("~"))
+    covered = [p for p in (*startup_files(home), *startup_dirs(home)) if _under_profile_startup(p, home)]
+    return _run_probe(profile, _RENAME_ALL_PROBE, covered)
+
+
+def _under_profile_startup(path: str, home: str) -> bool:
+    """Whether the shipped AppArmor profile names *path* (the default unit, its drop-ins, the default installs)."""
+    units = os.path.join(home, ".config", "systemd", "user")
+    named = [os.path.join(units, SYSTEMD_UNIT), os.path.join(units, f"{SYSTEMD_UNIT}.d"),
+             *(os.path.join(home, d) for d in _STARTUP_HOME_DIRS)]
+    return any(path == n or path.startswith(n + "/") for n in named)
+
+
+def _install_outside_profile() -> list[str]:
+    """This process's own install folders that the shipped profile does not name and this user can write, so a shell
+    can write them whatever the profile says. A root-owned install (a system package) is not listed."""
+    home = os.path.realpath(os.path.expanduser("~"))
+    return [d for d in _install_dirs()
+            if not _under_profile_startup(d, home) and os.path.isdir(d) and os.access(d, os.W_OK)]
+
+
+def _startup_detail(profile: str) -> tuple[str, bool]:
+    """The what-starts-Prometheus half of the preflight detail, and whether it makes the profile STALE. An install
+    the profile does not name is reported, not called stale: the profile cannot name every venv."""
+    parts: list[str] = []
+    stale = False
+    startup = _probe_startup_write(profile)
+    if startup == "refused":
+        parts.append("; writing what starts Prometheus refused")
+    elif startup == "renamed":
+        parts.append("; STALE PROFILE: what starts Prometheus (its systemd unit or drop-ins, the deploy's venvs, "
+                     "clone or scripts) is writable, so a shell can change what the daemon runs at boot. Reload the "
+                     f"shipped profile: {RELOAD_COMMAND}")
+        stale = True
+    elif startup == "absent":
+        parts.append("; no service file or default install exists, so the startup rule was not measured")
+    else:
+        parts.append("; the startup-file check could not run")
+    outside = _install_outside_profile()
+    if outside:
+        parts.append(f"; this install ({', '.join(outside)}) is outside the profile's rules, so a shell can write "
+                     "it (file tools are still refused)")
+    return "".join(parts), stale
+
+
 def _with_rename_check(profile: str, label: str) -> tuple[str, bool]:
     """The preflight detail for a confined *label*, and whether the profile is STALE.
 
@@ -491,8 +540,9 @@ def _with_rename_check(profile: str, label: str) -> tuple[str, bool]:
     trusted, trusted_stale = _trusted_detail(profile)
     cron, cron_stale = _cron_detail(profile)
     keys, keys_stale = _keys_and_launch_detail(profile)
-    registry = registry + trusted + cron + keys
-    registry_stale = registry_stale or trusted_stale or cron_stale or keys_stale
+    startup, startup_stale = _startup_detail(profile)
+    registry = registry + trusted + cron + keys + startup
+    registry_stale = registry_stale or trusted_stale or cron_stale or keys_stale or startup_stale
     if rename == "refused":
         return f"{label}; renaming ~/.config refused{registry}", registry_stale
     if rename == "renamed":
@@ -691,6 +741,82 @@ _LCM_REGEX: Final[str] = '(regex #"/lcm\\.db[^/]*$")'
 CONFIG_LAUNCH_FILES: Final[tuple[str, ...]] = ("config_pins.yaml",)
 CONFIG_LAUNCH_DIRS: Final[tuple[str, ...]] = ("checkpoints",)
 
+#: WHAT STARTS PROMETHEUS: refused for writes, never for reads. The service files that say what to run at boot (the
+#: LaunchAgent plist, the systemd unit and its drop-in folder, where ``scripts/deploy.sh`` writes ``ExecStart=``), and
+#: the install it runs: ``sys.prefix``, the venv root a deploy switches with its ``current`` link, the folder the
+#: ``prometheus`` package is imported from (a deploy clone's ``src/`` runs from there), and that clone's ``scripts/``
+#: (``deploy_guard.sh`` is the unit's ``ExecStartPre``). The owner's installers write them, unconfined; no shell or file
+#: tool a model drives needs to. The names are the installers' own (cli/launchd.py, cli/service.py; test-pinned).
+LAUNCH_AGENT_NAME: Final[str] = "com.oaralabs.prometheus.daemon.plist"
+SYSTEMD_UNIT: Final[str] = "prometheus.service"
+#: The default places, relative to the home, that the static AppArmor profile names too: the deploy's venv root and
+#: clone (scripts/deploy.sh), and a pipx or ``uv tool`` install of the distribution.
+_STARTUP_HOME_DIRS: Final[tuple[str, ...]] = (
+    "prometheus-venvs", "prometheus-deploy/scripts", "prometheus-deploy/src",
+    ".local/share/pipx/venvs/oara-prometheus", ".local/share/uv/tools/oara-prometheus",
+)
+
+
+def _package_dir() -> str:
+    """The folder the ``prometheus`` package is imported from, real path."""
+    import prometheus
+
+    return os.path.realpath(os.path.dirname(prometheus.__file__))
+
+
+def _install_dirs() -> list[str]:
+    """This process's own install, real paths: ``sys.prefix`` (the whole Homebrew keg when it is one's ``libexec``,
+    the whole ``.app`` when it is inside one), the folder ``PROMETHEUS_VENV``'s link lives in (the deploy's venv
+    root), the package folder, and the ``scripts/`` beside a source tree's ``src/``."""
+    prefix = os.path.realpath(sys.prefix)
+    dirs = [prefix]
+    if os.path.basename(prefix) == "libexec":
+        dirs.append(os.path.dirname(prefix))
+    bundle = next((p for p in [prefix, *_parents_below(prefix, "/")] if p.endswith(".app")), None)
+    if bundle:
+        dirs.append(bundle)
+    venv = os.environ.get("PROMETHEUS_VENV")
+    if venv:
+        dirs.append(os.path.realpath(os.path.dirname(os.path.abspath(os.path.expanduser(venv)))))
+    pkg = _package_dir()
+    dirs.append(pkg)
+    src = os.path.dirname(pkg)
+    if os.path.basename(src) == "src" and os.path.isdir(os.path.join(os.path.dirname(src), "scripts")):
+        dirs.append(os.path.join(os.path.dirname(src), "scripts"))
+    return list(dict.fromkeys(dirs))
+
+
+def _service_dirs(home: str) -> tuple[list[str], list[str]]:
+    """The LaunchAgents and systemd user directories: the defaults under *home*, and any the installers' overrides
+    (``PROMETHEUS_LAUNCH_AGENTS_DIR``, ``PROMETHEUS_SYSTEMD_USER_DIR``) name, real paths."""
+    agents = [os.path.join(home, "Library", "LaunchAgents")]
+    units = [os.path.join(home, ".config", "systemd", "user")]
+    for env, out in (("PROMETHEUS_LAUNCH_AGENTS_DIR", agents), ("PROMETHEUS_SYSTEMD_USER_DIR", units)):
+        wired = os.environ.get(env)
+        if wired:
+            real = os.path.realpath(os.path.expanduser(wired))
+            if real not in out:
+                out.append(real)
+    return agents, units
+
+
+def startup_files(home: str | os.PathLike[str] | None = None) -> list[str]:
+    """The service files that start Prometheus (see LAUNCH_AGENT_NAME above), real paths."""
+    real_home = os.path.realpath(os.fspath(home) if home is not None else str(Path.home()))
+    agents, units = _service_dirs(real_home)
+    return [*(os.path.join(d, LAUNCH_AGENT_NAME) for d in agents), *(os.path.join(d, SYSTEMD_UNIT) for d in units)]
+
+
+def startup_dirs(home: str | os.PathLike[str] | None = None) -> list[str]:
+    """The folders whose contents start Prometheus: the unit's drop-in folder, the default install places, and this
+    process's own install. Real paths."""
+    real_home = os.path.realpath(os.fspath(home) if home is not None else str(Path.home()))
+    _agents, units = _service_dirs(real_home)
+    dirs = [os.path.join(d, f"{SYSTEMD_UNIT}.d") for d in units]
+    dirs += [os.path.join(real_home, d) for d in _STARTUP_HOME_DIRS]
+    dirs += [d for d in _install_dirs() if d not in dirs]
+    return dirs
+
 #: The config file(s) this process actually loaded, wherever they are (a repo-local ``config/prometheus.yaml`` in a
 #: checkout or a deploy clone). Registered by the gate when it is built (``SecurityGate.__init__``).
 _loaded_configs: list[str] = []
@@ -806,6 +932,11 @@ def seatbelt_profile(home: str | os.PathLike[str] | None = None, *, allow_ssh: b
     for path in trusted_files:
         # Each file's folders too, for the same reason as the registry's.
         parents += [p for p in _parents_below(path, real_home) if p not in parents]
+    boot_files, boot_dirs = startup_files(real_home), startup_dirs(real_home)
+    for path in (*boot_files, *boot_dirs):
+        # What starts Prometheus, and the folders above it: moving the drop-in folder or the deploy clone aside and
+        # putting another in its place is a write to the folder's own path.
+        parents += [p for p in _parents_below(path, real_home) if p not in parents]
     return (
         "(version 1)\n"
         "(allow default)\n"
@@ -823,6 +954,8 @@ def seatbelt_profile(home: str | os.PathLike[str] | None = None, *, allow_ssh: b
         + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_LCM_REGEX})\n' for d in data_dirs)
         + "".join(f'  (literal "{_sb_string(p)}")\n' for p in trusted_files)
         + "".join(f'  (subpath "{_sb_string(d)}")\n' for d in trusted_dirs)
+        + "".join(f'  (literal "{_sb_string(p)}")\n' for p in boot_files)
+        + "".join(f'  (subpath "{_sb_string(d)}")\n' for d in boot_dirs)
         + "".join(f'  (literal "{_sb_string(p)}")\n' for p in parents) +
         ")\n"
     )
@@ -859,6 +992,10 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
               'printf x > "$1/.prometheus/checkpoints/planted" 2>/dev/null && exit 21; '
               'printf x > "$1/.prometheus/profiles/planted.yaml" 2>/dev/null && exit 22; '
               f'cat "$1/.prometheus/{XAI_OAUTH_NAME}" >/dev/null 2>&1 && exit 23; '
+              f'printf x >> "$1/Library/LaunchAgents/{LAUNCH_AGENT_NAME}" 2>/dev/null && exit 24; '
+              f'printf x > "$1/.config/systemd/user/{SYSTEMD_UNIT}.d/planted.conf" 2>/dev/null && exit 25; '
+              'ln -sfn /tmp "$1/prometheus-venvs/current" >/dev/null 2>&1 && exit 26; '
+              'printf x >> "$1/prometheus-deploy/scripts/deploy_guard.sh" 2>/dev/null && exit 27; '
               'echo FLOOR_HELD')
     try:
         with tempfile.TemporaryDirectory(prefix="prometheus-read-floor-") as tmp:
@@ -883,6 +1020,13 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
             (home / ".prometheus" / "checkpoints").mkdir()
             (home / ".prometheus" / "profiles").mkdir()
             (home / ".prometheus" / XAI_OAUTH_NAME).write_text("{}\n")
+            (home / "Library" / "LaunchAgents").mkdir(parents=True)
+            (home / "Library" / "LaunchAgents" / LAUNCH_AGENT_NAME).write_text("<plist/>\n")
+            (home / ".config" / "systemd" / "user" / f"{SYSTEMD_UNIT}.d").mkdir(parents=True)
+            (home / "prometheus-venvs" / "abc").mkdir(parents=True)
+            (home / "prometheus-venvs" / "current").symlink_to(home / "prometheus-venvs" / "abc")
+            (home / "prometheus-deploy" / "scripts").mkdir(parents=True)
+            (home / "prometheus-deploy" / "scripts" / "deploy_guard.sh").write_text("#!/bin/sh\n")
             (home / "ordinary").write_text("x\n")
             proc = subprocess.run(
                 [SANDBOX_EXEC, "-p", seatbelt_profile(home, allow_ssh=allow_ssh), "/bin/sh", "-c", script, "probe",
@@ -896,7 +1040,8 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
                       "renaming ~/.config refused, writing the device registry refused, writing trusted state "
                       "(config, identity, memory, skills) refused, reading the node keys refused, and the MCP store and the "
                       "xAI tokens, "
-                      "writing launch configuration refused, ordinary reads allowed")
+                      "writing launch configuration refused, writing what starts Prometheus refused, "
+                      "ordinary reads allowed")
     why = {
         3: "an ordinary file could not be read under the profile",
         4: "~/.ssh stayed readable under the profile",
@@ -919,6 +1064,10 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
         21: "the file checkpoints stayed writable under the profile",
         22: "a custom agent profile could be planted under the profile",
         23: "the xAI OAuth tokens stayed readable under the profile",
+        24: "the LaunchAgent plist stayed writable under the profile",
+        25: "a systemd drop-in could be planted for the daemon's unit under the profile",
+        26: "the deploy's current-venv link could be re-pointed under the profile",
+        27: "the deploy clone's scripts/ stayed writable under the profile",
     }.get(proc.returncode)
     return False, why or (f"sandbox-exec did not run the probe (rc={proc.returncode})"
                           + (f": {(proc.stderr or '').strip()[:200]}" if (proc.stderr or "").strip() else ""))

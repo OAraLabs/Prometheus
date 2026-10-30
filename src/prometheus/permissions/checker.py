@@ -214,6 +214,30 @@ _ALWAYS_WRITE_DENIED_PATHS: tuple[str, ...] = (
     "/*/.prometheus/checkpoints",
 )
 
+# ⚠ WHAT STARTS PROMETHEUS: refused for WRITES, whatever the mode, the workspace or a grant says; reading stays
+# allowed. Its service files (the LaunchAgent plist, the systemd unit and its drop-in folder) and its install (a
+# deploy's venv root and clone, a pipx or ``uv tool`` install). This process's own install, wherever it is
+# (``sys.prefix``, the package folder), is added by the gate itself (``confinement.startup_dirs``). The owner's
+# installers write them, unconfined; no file tool needs to. The shell's half is permissions/confinement.py.
+_STARTUP_PATHS: tuple[str, ...] = (
+    "/*/Library/LaunchAgents/com.oaralabs.prometheus.daemon.plist",
+    "/*/.config/systemd/user/prometheus.service",
+    "/*/.config/systemd/user/prometheus.service.d",
+    "/*/prometheus-venvs",
+    "/*/prometheus-deploy/scripts",
+    "/*/prometheus-deploy/src",
+    "/*/.local/share/pipx/venvs/oara-prometheus",
+    "/*/.local/share/uv/tools/oara-prometheus",
+)
+
+
+def _this_process_startup() -> list[str]:
+    """What starts THIS process, real paths: its service files wherever the installers' overrides put them, and its
+    own install."""
+    from prometheus.permissions.confinement import startup_dirs, startup_files
+
+    return [*startup_files(), *startup_dirs()]
+
 
 def _this_process_state(*, writes: bool) -> list[str]:
     """The floored paths THIS process uses, wherever PROMETHEUS_CONFIG_DIR, PROMETHEUS_DATA_DIR or
@@ -240,7 +264,8 @@ def own_state_entries() -> list[str]:
     from prometheus.config.paths import node_dir_path
     from prometheus.permissions.confinement import loaded_configs
 
-    out = [*_ALWAYS_DENIED_PATHS, *_ALWAYS_WRITE_DENIED_PATHS, "/*/.prometheus"]
+    out = [*_ALWAYS_DENIED_PATHS, *_ALWAYS_WRITE_DENIED_PATHS, *_STARTUP_PATHS, *_this_process_startup(),
+           "/*/.prometheus"]
     out += [str(p.expanduser().resolve()) for p in (config_dir_path(), data_dir_path(), node_dir_path(), pairing_dir())]
     out += list(loaded_configs())
     return list(dict.fromkeys(out))
@@ -927,6 +952,10 @@ class SecurityGate:
         for _p in _this_process_state(writes=True):
             if _p not in self._write_denied_paths:
                 self._write_denied_paths.append(_p)
+        self._startup_paths: list[str] = list(_STARTUP_PATHS)
+        for _p in _this_process_startup():
+            if _p not in self._startup_paths:
+                self._startup_paths.append(_p)
         self._config_path = config_path
         # MULTI-ROOT. A single root did not survive contact: of 871 recorded
         # file-tool calls on the live box only 16 were under ~/projects, so a
@@ -1208,6 +1237,12 @@ class SecurityGate:
             launch = denying_entry(str(Path(file_path).expanduser().resolve()), self._write_denied_paths)
             if launch is not None:
                 reason = (f"{file_path} is Prometheus's launch configuration ({launch!r}): only the daemon writes it")
+                self._audit_log(tool_name, AuditDecision.DENY, reason, file_path)
+                return PermissionDecision.deny(reason)
+            startup = denying_entry(str(Path(file_path).expanduser().resolve()), self._startup_paths)
+            if startup is not None:
+                reason = (f"{file_path} is part of what starts Prometheus ({startup!r}): its service files and its "
+                          f"install are written by its installers, never by an agent tool")
                 self._audit_log(tool_name, AuditDecision.DENY, reason, file_path)
                 return PermissionDecision.deny(reason)
             trusted = denying_entry(str(Path(file_path).expanduser().resolve()), self._trusted_paths)

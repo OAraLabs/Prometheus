@@ -375,6 +375,14 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
         "so the floor table is the subject. The real shell refusal is proven on macOS in the same file. "
         "Registered, not exempted: if that file stops calling evaluate directly this entry fails as stale."
     ),
+    "test_startup_floor.py": (
+        "what starts Prometheus joins the write floor: direct evaluate(file_path=...) calls read the gate's decision "
+        "for each service file and install folder under each config shape (default, autonomous, a workspace covering "
+        "it, this process's own install), so the floor table is the subject. The same file drives write_file "
+        "through run_loop → _execute_tool_call against scratch unit, LaunchAgents and venv folders and asserts "
+        "nothing landed (and that an ordinary write beside them did), and proves the shell refusal on macOS. "
+        "Registered, not exempted: if that file stops calling evaluate directly this entry fails as stale."
+    ),
     "test_state_floor_keys_launch.py": (
         "the node keys, the MCP store and launch configuration join the floor: direct evaluate(file_path=...) calls "
         "read the gate's decision for each file under each config shape (default, gate off, a workspace covering "

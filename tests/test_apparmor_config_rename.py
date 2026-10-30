@@ -62,6 +62,8 @@ def _label_ok(monkeypatch, rename: str):
     # The node-key and launch-configuration half is tests/test_state_floor_keys_launch.py's.
     monkeypatch.setattr(C, "_keys_and_launch_detail",
                         lambda profile: ("; reading the node keys refused; writing launch configuration refused", False))
+    # The what-starts-Prometheus half is tests/test_startup_floor.py's.
+    monkeypatch.setattr(C, "_startup_detail", lambda profile: ("; writing what starts Prometheus refused", False))
 
 
 def test_a_current_profile_is_active_and_says_the_rename_is_refused(monkeypatch, caplog):

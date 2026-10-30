@@ -17,8 +17,8 @@
 # (and the folder above the third impossible to move out from under it), and
 # Prometheus's own trusted state and launch configuration unwritable (the
 # device registry, the config, identity, memory, skills and profiles, what
-# the daemon starts or pins at boot, and the folders above them), because
-# the permission gate cannot reach
+# the daemon starts or pins at boot, its service files and install, and the
+# folders above them), because the permission gate cannot reach
 # them: SecurityGate._check_denied_path is nested under
 # `if file_path:`, and bash is handed a command string, so the denied-path
 # floor covers the path-declaring tools and misses bash at BOTH origins.
@@ -142,6 +142,27 @@ profile prometheus-bash flags=(attach_disconnected) {
   deny @{HOME}/.prometheus/data/lcm.db* wl,
   deny @{HOME}/.prometheus/config_pins.yaml wl,
   deny @{HOME}/.prometheus/{checkpoints,profiles}/{,**} wl,
+
+  # What starts Prometheus: the systemd unit and its drop-in folder (where
+  # scripts/deploy.sh writes ExecStart=), the deploy's venv root (its
+  # `current` link picks the venv) and clone (src/ is the code it runs,
+  # scripts/deploy_guard.sh its ExecStartPre), and a pipx or `uv tool`
+  # install. Reading and running them is not refused. The folders above
+  # the unit and the clone cannot be renamed or replaced either, for the
+  # reason ~/.config cannot; files beside them stay writable.
+  #
+  # These name the default places. An install anywhere else (a venv of
+  # your own, a unit dir moved by PROMETHEUS_SYSTEMD_USER_DIR) is outside
+  # them, and the boot probe names it.
+  deny @{HOME}/.config/systemd/user/prometheus.service wl,
+  deny @{HOME}/.config/systemd/user/prometheus.service.d/{,**} wl,
+  deny @{HOME}/.config/systemd/      w,
+  deny @{HOME}/.config/systemd/user/ w,
+  deny @{HOME}/prometheus-venvs/{,**} wl,
+  deny @{HOME}/prometheus-deploy/{scripts,src}/{,**} wl,
+  deny @{HOME}/prometheus-deploy/   w,
+  deny @{HOME}/.local/share/pipx/venvs/oara-prometheus/{,**} wl,
+  deny @{HOME}/.local/share/uv/tools/oara-prometheus/{,**} wl,
 
   # --- NO CARVE-OUT, AND THAT IS NOT AN OVERSIGHT -------------------------
   # There is deliberately no exception here for the second compute backend's
