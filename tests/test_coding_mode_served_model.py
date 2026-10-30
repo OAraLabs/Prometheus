@@ -61,8 +61,8 @@ def _drive(monkeypatch, tmp_path, cfg_text: str, detected: str | None):
         seen["provider_cfg_model"] = cfg.get("model", "")
         return object(), cfg.get("model", "")
 
-    def _detect(base_url, config_model):
-        seen["asked_base_url"] = base_url
+    def _detect(model_cfg, config_model):
+        seen["asked_base_url"] = model_cfg.get("base_url")
         return detected if detected is not None else config_model
 
     def _create_adapter(model_cfg, adapter_cfg=None, **kwargs):

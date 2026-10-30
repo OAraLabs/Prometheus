@@ -332,6 +332,44 @@ def _resolve_optional_key(config: Mapping[str, Any]) -> str | None:
     return None
 
 
+def read_key_variable(name: str) -> str:
+    """A key variable's value where the daemon finds it: the environment, then the env file.
+
+    For callers that run without the env file loaded into the environment (``oara doctor``, the terminal chat).
+    Empty when it is set in neither.
+    """
+    value = os.environ.get(name, "")
+    if value:
+        return value
+    try:
+        from prometheus.config.env_file import parse_env_file
+
+        return parse_env_file().get(name, "")
+    except OSError as exc:
+        log.warning("cannot read the env file for $%s (%s)", name, type(exc).__name__)
+        return ""
+
+
+def local_server_headers(model_cfg: Mapping[str, Any] | None) -> dict[str, str]:
+    """The ``Authorization`` header a probe of the configured local server sends, or none.
+
+    The same key the provider sends (``api_key``, else the variable ``api_key_env`` names), for llama.cpp and the
+    local OpenAI-compatible servers; Ollama takes no key, so it gets none. The variable is read from the environment,
+    then the env file. A named variable set in neither is a ``ValueError`` naming it, so a probe can say that instead
+    of "not responding".
+    """
+    cfg = model_cfg or {}
+    provider = str(cfg.get("provider") or "llama_cpp")
+    if provider != "llama_cpp" and provider not in _LOCAL_OPENAI_COMPAT_PROVIDERS:
+        return {}
+    direct = cfg.get("api_key", "")
+    env_name = cfg.get("api_key_env", "")
+    key = str(direct) if direct else (read_key_variable(str(env_name)) if env_name else "")
+    if env_name and not key:
+        raise ValueError(f"the key variable {env_name} is set neither in the environment nor in the env file")
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
 def _resolve_local_bearer(config: dict[str, Any], provider_name: str) -> str:
     """Bearer for a local OpenAI-compatible server.
 
