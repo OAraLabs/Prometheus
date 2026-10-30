@@ -178,11 +178,6 @@ KNOWN_UNREAD: dict[str, str] = {
     # shrinks.)
     "gateway.heartbeat_interval": "DECIDE — heartbeat uses its own interval",
     "infrastructure.archive_enabled": "DECIDE — the archive lives in the voice stack, not here",
-    # ── DOCUMENTED-ONLY: recorded so the topology is not lost. Values live
-    # only in the local config; the template carries empty placeholders.
-    "infrastructure.gpu_host": "DOCUMENTED-ONLY — local topology, empty in template",
-    "infrastructure.mini_host": "DOCUMENTED-ONLY — local topology, empty in template",
-    "infrastructure.mini_port": "DOCUMENTED-ONLY — local topology",
 }
 
 

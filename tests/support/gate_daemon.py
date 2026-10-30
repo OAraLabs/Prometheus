@@ -285,10 +285,10 @@ def build_and_boot(tmp: Path, model_url: str, *, cloud_url: str | None = None,
         "infrastructure.archive_enabled": False,
         "security.workspace_root": [str(work)], "security.bash_write_allow": [str(work)],
         # Local services on this box are reachable over loopback, which the
-        # dead proxy below does not cover: the shipped fallback (ollama on
-        # :11434) and image backend (ComfyUI on :8188) point at real servers,
-        # so they are pointed at a dead port instead.
-        "model.fallback.enabled": False, "model.fallback_url": "http://127.0.0.1:9",
+        # dead proxy below does not cover: the model fallback is turned off and
+        # the shipped image backend (ComfyUI on :8188), which points at a real
+        # server, is pointed at a dead port instead.
+        "model.fallback.enabled": False,
         "image_generation.default_backend": "comfyui", "image_generation.comfyui.base_url": "http://127.0.0.1:9",
         "evals.judge_base_url": "http://127.0.0.1:9",
         # The MCP tool is the deferred one gate (b) reaches for.
