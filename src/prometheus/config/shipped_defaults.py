@@ -248,8 +248,9 @@ DENIED_PATHS_DEFAULTS_SHIPPED: tuple[tuple[str, ...], ...] = (
      "/*/.prometheus/data/cron_history.jsonl*",
      "/*/.prometheus/data/cron_undelivered.jsonl*",
      "/*/.prometheus/data/cron_scheduler.pid*"),
-    # + the machine's private keys (node/: node.key and instance.key, which paired apps pin) and the MCP store,
-    # whose servers the daemon starts at boot with their own credentials; both sit in the floor too.
+    # + the machine's private keys (node/: node.key and instance.key, which paired apps pin), the MCP store,
+    # whose servers the daemon starts at boot with their own credentials, and the xAI OAuth tokens; all three
+    # sit in the floor too.
     ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
      "/*/Library/Application Support/Prometheus/pairing",
      "/*/.local/share/prometheus/pairing",
@@ -259,7 +260,8 @@ DENIED_PATHS_DEFAULTS_SHIPPED: tuple[tuple[str, ...], ...] = (
      "/*/.prometheus/data/cron_undelivered.jsonl*",
      "/*/.prometheus/data/cron_scheduler.pid*",
      "/*/.prometheus/node",
-     "/*/.prometheus/data/mcp_servers.json*"),
+     "/*/.prometheus/data/mcp_servers.json*",
+     "/*/.prometheus/xai_oauth.json*"),
 )
 
 SHIPPED_DENIED_PATHS: tuple[str, ...] = DENIED_PATHS_DEFAULTS_SHIPPED[-1]

@@ -124,6 +124,8 @@ profile prometheus-bash flags=(attach_disconnected) {
   # The MCP store: servers the daemon STARTS at boot, outside this profile,
   # and their own credentials. Read and write; the * takes its .tmp file.
   deny @{HOME}/.prometheus/data/mcp_servers.json* rwlk,
+  # The xAI OAuth tokens (and their .tmp file): a credential, read and write.
+  deny @{HOME}/.prometheus/xai_oauth.json* rwlk,
 
   # Launch configuration: what the daemon runs, or binds a conversation to.
   # Reading is not refused. job-python/ is first on PATH for the owner's cron

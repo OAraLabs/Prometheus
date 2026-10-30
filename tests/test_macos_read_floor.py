@@ -65,7 +65,7 @@ def test_a_home_path_cannot_break_out_of_the_profile():
     assert '(subpath "/Users/odd \\"name\\" (x)/.ssh")' in profile
     # The home never enters a regex literal, where a quote would end it whatever escapes it: every regex in the
     # profile is one of the fixed patterns (the env files; the device registry, the scheduled-jobs files, the MCP
-    # store and lcm.db, each once per data directory).
+    # store and lcm.db, each once per data directory; the xAI tokens, once per config directory).
     import re as _re
     regexes = _re.findall(r'#"[^"]*"', profile)
     assert regexes and set(regexes) <= {
@@ -73,6 +73,7 @@ def test_a_home_path_cannot_break_out_of_the_profile():
         r'#"/devices\.db[^/]*$"',
         r'#"/cron_(jobs\.json|history\.jsonl|undelivered\.jsonl|scheduler\.pid)[^/]*$"',
         r'#"/mcp_servers\.json[^/]*$"',
+        r'#"/xai_oauth\.json[^/]*$"',
         r'#"/lcm\.db[^/]*$"',
     }, regexes
 

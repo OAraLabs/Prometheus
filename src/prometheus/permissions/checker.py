@@ -197,6 +197,8 @@ _ALWAYS_DENIED_PATHS: tuple[str, ...] = (
     # by the gate itself. The shell's half is permissions/confinement.py.
     "/*/.prometheus/node",
     "/*/.prometheus/data/mcp_servers.json*",
+    # The xAI OAuth tokens (providers/xai_oauth.py), and their .tmp side file.
+    "/*/.prometheus/xai_oauth.json*",
 )
 
 # ⚠ LAUNCH CONFIGURATION: refused for WRITES, whatever the mode, the workspace or a grant says. Reading stays
@@ -218,14 +220,14 @@ def _this_process_state(*, writes: bool) -> list[str]:
     PROMETHEUS_NODE_DIR put them, resolved: for reads and writes (*writes* False), or for writes only."""
     from prometheus.config.paths import lcm_db_path, node_dir_path
     from prometheus.permissions.confinement import (
-        CONFIG_LAUNCH_DIRS, CONFIG_LAUNCH_FILES, JOB_SHIM_DIR_NAME, MCP_STORE_NAME, NODE_DIR_NAME,
+        CONFIG_LAUNCH_DIRS, CONFIG_LAUNCH_FILES, JOB_SHIM_DIR_NAME, MCP_STORE_NAME, NODE_DIR_NAME, XAI_OAUTH_NAME,
     )
 
     cfg = config_dir_path().expanduser().resolve()
     data = data_dir_path().expanduser().resolve()
     if not writes:
         return [str(cfg / NODE_DIR_NAME), str(node_dir_path().expanduser().resolve()),
-                str(data / MCP_STORE_NAME) + "*"]
+                str(data / MCP_STORE_NAME) + "*", str(cfg / XAI_OAUTH_NAME) + "*"]
     return [str(data / JOB_SHIM_DIR_NAME), str(lcm_db_path().expanduser().resolve()) + "*",
             *(str(cfg / n) for n in (*CONFIG_LAUNCH_FILES, *CONFIG_LAUNCH_DIRS))]
 

@@ -421,6 +421,7 @@ def _probe_node_read(profile: str) -> str:
     node = _node_dir()
     paths = [os.path.join(node, n) for n in ("node.key", "instance.key")]
     paths.append(os.path.join(os.path.expanduser(str(data_dir_path())), MCP_STORE_NAME))
+    paths.append(os.path.join(os.path.expanduser(str(config_dir_path())), XAI_OAUTH_NAME))
     return _run_probe(profile, _READ_PROBE, paths)
 
 
@@ -454,10 +455,10 @@ def _keys_and_launch_detail(profile: str) -> tuple[str, bool]:
         stale = True
     keys = _probe_node_read(profile)
     if keys == "refused":
-        parts.append("; reading the node keys refused, and the MCP store")
+        parts.append("; reading the node keys refused, and the MCP store and the xAI tokens")
     elif keys == "readable":
-        parts.append("; STALE PROFILE: the node keys or the MCP store are readable, so a shell can copy this "
-                     f"machine's identity or an MCP server's credentials. Reload the shipped profile: {RELOAD_COMMAND}")
+        parts.append("; STALE PROFILE: the node keys, the MCP store or the xAI tokens are readable, so a shell can "
+                     f"copy this machine's identity or a credential. Reload the shipped profile: {RELOAD_COMMAND}")
         stale = True
     elif keys == "absent":
         parts.append("; no node key exists yet, so its rule was not measured")
@@ -678,6 +679,10 @@ MCP_STORE_NAME: Final[str] = "mcp_servers.json"
 JOB_SHIM_DIR_NAME: Final[str] = "job-python"
 LCM_NAME: Final[str] = lcm_db_path().name  # the one resolver names it (tests/test_lcm_db_path_resolution.py)
 _MCP_STORE_REGEX: Final[str] = '(regex #"/mcp_servers\\.json[^/]*$")'
+#: The xAI OAuth tokens in the config directory (providers/xai_oauth.py), and their .tmp side file: a credential,
+#: floored for reads and writes like the MCP store.
+XAI_OAUTH_NAME: Final[str] = "xai_oauth.json"
+_XAI_OAUTH_REGEX: Final[str] = '(regex #"/xai_oauth\\.json[^/]*$")'
 _LCM_REGEX: Final[str] = '(regex #"/lcm\\.db[^/]*$")'
 
 #: Launch configuration in the config directory: ``config_pins.yaml`` (daemon.py ``apply_config_pins``, re-applied over
@@ -809,7 +814,8 @@ def seatbelt_profile(home: str | os.PathLike[str] | None = None, *, allow_ssh: b
         f'  (subpath "{base}/.gnupg")\n'
         + "".join(f'  (subpath "{_sb_string(d)}")\n' for d in pairing)
         + "".join(f'  (subpath "{_sb_string(d)}")\n' for d in nodes)
-        + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_MCP_STORE_REGEX})\n' for d in data_dirs) +
+        + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_MCP_STORE_REGEX})\n' for d in data_dirs)
+        + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_XAI_OAUTH_REGEX})\n' for d in config_dirs) +
         f'  (require-all (subpath "{base}/.config") (regex #"/\\.config/[^/]+/[^/]*env$")))\n'
         "(deny file-write*\n"
         + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_REGISTRY_REGEX})\n' for d in data_dirs)
@@ -852,6 +858,7 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
               'printf x >> "$1/.prometheus/config_pins.yaml" 2>/dev/null && exit 20; '
               'printf x > "$1/.prometheus/checkpoints/planted" 2>/dev/null && exit 21; '
               'printf x > "$1/.prometheus/profiles/planted.yaml" 2>/dev/null && exit 22; '
+              f'cat "$1/.prometheus/{XAI_OAUTH_NAME}" >/dev/null 2>&1 && exit 23; '
               'echo FLOOR_HELD')
     try:
         with tempfile.TemporaryDirectory(prefix="prometheus-read-floor-") as tmp:
@@ -875,6 +882,7 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
             (home / ".prometheus" / "config_pins.yaml").write_text("{}\n")
             (home / ".prometheus" / "checkpoints").mkdir()
             (home / ".prometheus" / "profiles").mkdir()
+            (home / ".prometheus" / XAI_OAUTH_NAME).write_text("{}\n")
             (home / "ordinary").write_text("x\n")
             proc = subprocess.run(
                 [SANDBOX_EXEC, "-p", seatbelt_profile(home, allow_ssh=allow_ssh), "/bin/sh", "-c", script, "probe",
@@ -886,7 +894,8 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
     if proc.returncode == 0 and "FLOOR_HELD" in (proc.stdout or ""):
         return True, ("seatbelt via sandbox-exec: ~/.ssh, ~/.config/*/*env and the pairing secret refused, "
                       "renaming ~/.config refused, writing the device registry refused, writing trusted state "
-                      "(config, identity, memory, skills) refused, reading the node keys refused, and the MCP store, "
+                      "(config, identity, memory, skills) refused, reading the node keys refused, and the MCP store and the "
+                      "xAI tokens, "
                       "writing launch configuration refused, ordinary reads allowed")
     why = {
         3: "an ordinary file could not be read under the profile",
@@ -909,6 +918,7 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
         20: "config_pins.yaml stayed writable under the profile",
         21: "the file checkpoints stayed writable under the profile",
         22: "a custom agent profile could be planted under the profile",
+        23: "the xAI OAuth tokens stayed readable under the profile",
     }.get(proc.returncode)
     return False, why or (f"sandbox-exec did not run the probe (rc={proc.returncode})"
                           + (f": {(proc.stderr or '').strip()[:200]}" if (proc.stderr or "").strip() else ""))

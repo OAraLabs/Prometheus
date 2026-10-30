@@ -48,7 +48,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import sqlite3
+import stat
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -125,6 +127,7 @@ class _Escapes(ValueError):
 
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _NOFOLLOW
 
 
@@ -206,34 +209,65 @@ class FileCheckpointStore:
 
     # ------------------------------------------------------------------ walk
 
-    def _walk(self, workspace: Path) -> Iterator[tuple[Path, str]]:
+    def _walk(self, workspace: Path) -> Iterator[tuple[int, str, str, os.stat_result]]:
+        """``(dir_fd, name, rel, stat)`` for each regular file under *workspace*, skip dirs left out.
+
+        The walk and every open below go through directory descriptors and never follow a symlink (``os.fwalk``,
+        ``O_NOFOLLOW``): this runs unconfined, so a name the turn's shell swapped for a link between listing and
+        reading must not make it read, and store, a file outside the workspace."""
         skip = set(self.cfg["skip_dirs"])
-        for dirpath, dirnames, filenames in os.walk(workspace):
+        for dirpath, dirnames, filenames, dir_fd in os.fwalk(workspace, follow_symlinks=False):
             dirnames[:] = sorted(d for d in dirnames if d not in skip)
             for name in sorted(filenames):
-                full = Path(dirpath) / name
-                if full.is_symlink() or not full.is_file():
+                try:
+                    st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                except OSError:
                     continue
-                yield full, str(full.relative_to(workspace))
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                yield dir_fd, name, os.path.relpath(os.path.join(dirpath, name), workspace), st
 
     @staticmethod
-    def _sha256(path: Path) -> str:
-        h = hashlib.sha256()
-        with path.open("rb") as fh:
-            for chunk in iter(lambda: fh.read(1 << 20), b""):
+    def _open_regular(dir_fd: int, name: str) -> int | None:
+        """A read descriptor for *name* if it is still a regular file and not a link, else None."""
+        try:
+            fd = os.open(name, os.O_RDONLY | _NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=dir_fd)
+        except OSError:
+            return None
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        return fd
+
+    @staticmethod
+    def _read_fd(fd: int) -> bytes:
+        chunks = []
+        while chunk := os.read(fd, 1 << 20):
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    def _sha256_at(self, dir_fd: int, name: str) -> str | None:
+        fd = self._open_regular(dir_fd, name)
+        if fd is None:
+            return None
+        try:
+            h = hashlib.sha256()
+            while chunk := os.read(fd, 1 << 20):
                 h.update(chunk)
-        return h.hexdigest()
+            return h.hexdigest()
+        finally:
+            os.close(fd)
 
     def _blob_path(self, sha: str) -> Path:
         return self.blobs / sha[:2] / sha
 
-    def _store_blob(self, path: Path, sha: str) -> None:
+    def _store_blob(self, data: bytes, sha: str) -> None:
         dest = self._blob_path(sha)
         if dest.exists():
             return
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(".tmp")
-        tmp.write_bytes(path.read_bytes())
+        tmp.write_bytes(data)
         os.replace(tmp, dest)
 
     # ---------------------------------------------------------------- create
@@ -244,13 +278,23 @@ class FileCheckpointStore:
         ws = Path(workspace).expanduser().resolve()
         if not ws.is_dir():
             raise CheckpointRefused(f"workspace {ws} is not a directory")
+        from prometheus.permissions.checker import own_state_entries
+        from prometheus.security.path_guard import denying_entry
+
+        own = [*own_state_entries(), str(self.root.resolve())]
         cid = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
-        files: list[tuple[str, str, int, float, int, Path]] = []
+        max_file = int(self.cfg["max_file_bytes"])
+        captured: set[str] = set()
         skipped: list[tuple[str, str]] = []
         total = 0
-        for full, rel in self._walk(ws):
-            st = full.stat()
-            if st.st_size > int(self.cfg["max_file_bytes"]):
+        # Pass 1: the caps, so a refused checkpoint writes nothing.
+        for _dir_fd, _name, rel, st in self._walk(ws):
+            if denying_entry(str(ws / rel), own) is not None:
+                # Prometheus's own state (a workspace that holds it, with the skip dirs changed): never copied into
+                # the store, whose blobs a shell can read.
+                skipped.append((rel, "Prometheus's own state, never captured"))
+                continue
+            if st.st_size > max_file:
                 skipped.append((rel, f"larger than max_file_bytes ({st.st_size} > {self.cfg['max_file_bytes']})"))
                 continue
             total += st.st_size
@@ -258,16 +302,32 @@ class FileCheckpointStore:
                 raise CheckpointRefused(
                     f"workspace exceeds max_total_bytes ({self.cfg['max_total_bytes']}) — not checkpointed"
                 )
-            files.append((rel, "", st.st_size, st.st_mtime, st.st_mode, full))
-            if len(files) > int(self.cfg["max_files"]):
+            captured.add(rel)
+            if len(captured) > int(self.cfg["max_files"]):
                 raise CheckpointRefused(
                     f"workspace has more than max_files ({self.cfg['max_files']}) files — not checkpointed"
                 )
+        # Pass 2: read each file once, from a descriptor that is the regular file the walk found.
         rows = []
-        for rel, _sha, size, mtime, mode, full in files:
-            sha = self._sha256(full)
-            self._store_blob(full, sha)
-            rows.append((cid, rel, sha, size, mtime, mode))
+        total = 0
+        for dir_fd, name, rel, _st in self._walk(ws):
+            if rel not in captured:
+                continue
+            fd = self._open_regular(dir_fd, name)
+            if fd is None:
+                continue  # gone, or no longer a regular file: a later turn's checkpoint sees it
+            try:
+                st = os.fstat(fd)
+                if st.st_size > max_file:
+                    skipped.append((rel, f"larger than max_file_bytes ({st.st_size} > {max_file})"))
+                    continue
+                data = self._read_fd(fd)
+            finally:
+                os.close(fd)
+            sha = hashlib.sha256(data).hexdigest()
+            self._store_blob(data, sha)
+            total += len(data)
+            rows.append((cid, rel, sha, len(data), st.st_mtime, st.st_mode))
         with self._conn:
             self._conn.execute(
                 "INSERT INTO checkpoints (id, session_id, workspace, label, created_at, files, bytes, skipped)"
@@ -330,20 +390,20 @@ class FileCheckpointStore:
             return {"workspace_missing": True, "changed": [], "deleted": [], "added": [], "unchanged": 0}
         recorded = {f["rel_path"]: f for f in rec.files_detail}
         skipped = {s["rel_path"] for s in rec.skipped_detail}
-        current: dict[str, Path] = {rel: full for full, rel in self._walk(ws)}
         changed, deleted, added = [], [], []
         unchanged = 0
-        for rel, meta in recorded.items():
-            full = current.get(rel)
-            if full is None:
-                deleted.append(rel)
-            elif full.stat().st_size != meta["size"] or self._sha256(full) != meta["sha256"]:
+        seen: set[str] = set()
+        for dir_fd, name, rel, st in self._walk(ws):
+            seen.add(rel)
+            meta = recorded.get(rel)
+            if meta is None:
+                if rel not in skipped:
+                    added.append(rel)
+            elif st.st_size != meta["size"] or self._sha256_at(dir_fd, name) != meta["sha256"]:
                 changed.append(rel)
             else:
                 unchanged += 1
-        for rel in current:
-            if rel not in recorded and rel not in skipped:
-                added.append(rel)
+        deleted = [rel for rel in recorded if rel not in seen]
         return {"workspace_missing": False, "changed": sorted(changed), "deleted": sorted(deleted),
                 "added": sorted(added), "unchanged": unchanged, "uncaptured": sorted(skipped)}
 
@@ -395,7 +455,7 @@ class FileCheckpointStore:
                 with os.fdopen(out, "wb", closefd=False) as fh:
                     fh.write(data)
                 try:
-                    os.fchmod(out, mode & 0o7777)
+                    os.fchmod(out, mode & 0o777)  # never setuid, setgid or sticky, whatever was recorded
                 except OSError:
                     pass
             finally:
@@ -436,9 +496,11 @@ class FileCheckpointStore:
         for f in rec.files_detail:
             try:
                 _parts(f["rel_path"])
+                if not _SHA256_RE.fullmatch(str(f["sha256"])):
+                    raise _Escapes(f"its blob id {str(f['sha256'])[:80]!r} is not a sha256")
             except _Escapes as exc:
                 raise CheckpointRefused(
-                    f"checkpoint {cid} names {f['rel_path']!r}, which is not a path inside its workspace ({exc}): "
+                    f"checkpoint {cid} names {f['rel_path']!r}, which it cannot restore ({exc}): "
                     f"its manifest was not written by this store, and nothing was restored"
                 ) from exc
         d = self.diff(cid)

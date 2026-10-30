@@ -447,6 +447,7 @@ security:
     # servers the daemon starts at boot with their own credentials.
     - "/*/.prometheus/node"
     - "/*/.prometheus/data/mcp_servers.json*"
+    - "/*/.prometheus/xai_oauth.json*"   # the xAI OAuth tokens
   # THE ABOVE DOES NOT COVER bash. denied_paths is only consulted when a call
   # passes a file_path, and bash is handed a command string — so at BOTH
   # origins `cat ~/.ssh/id_*` is ALLOW. Measured, not inferred. Any check on

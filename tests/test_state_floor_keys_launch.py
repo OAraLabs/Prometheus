@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -61,7 +62,8 @@ GATE_IDS = ["default", "autonomous", "workspace-covers-it"]
 
 # (path parts under ~/.prometheus, is a read refused too)
 SECRET = [("node", "node.key"), ("node", "instance.key"), ("node", "instance.crt"),
-          ("data", "mcp_servers.json"), ("data", "mcp_servers.json.tmp")]
+          ("data", "mcp_servers.json"), ("data", "mcp_servers.json.tmp"), ("xai_oauth.json",),
+          ("xai_oauth.json.tmp",)]
 LAUNCH = [("data", "job-python", "curl"), ("data", "job-python", "python3"), ("data", "lcm.db"),
           ("data", "lcm.db-wal"), ("config_pins.yaml",), ("checkpoints", "checkpoints.db"),
           ("checkpoints", "blobs", "ab", "abcdef")]
@@ -135,6 +137,7 @@ def test_the_profile_refuses_reading_and_writing_the_keys_and_the_mcp_store():
     rw, _ = _blocks(C.seatbelt_profile(HOME))
     assert f'(subpath "{NODE}")' in rw, rw
     assert f'(require-all (subpath "{DATA}") {C._MCP_STORE_REGEX})' in rw, rw
+    assert f'(require-all (subpath "{CFG}") {C._XAI_OAUTH_REGEX})' in rw, rw
 
 
 def test_the_profile_refuses_writing_launch_configuration():
@@ -176,6 +179,7 @@ def _active_rules() -> list[str]:
 @pytest.mark.parametrize("rule", [
     "deny @{HOME}/.prometheus/node/{,**} rwlkmx,",
     "deny @{HOME}/.prometheus/data/mcp_servers.json* rwlk,",
+    "deny @{HOME}/.prometheus/xai_oauth.json* rwlk,",
     "deny @{HOME}/.prometheus/data/job-python/{,**} wl,",
     "deny @{HOME}/.prometheus/data/lcm.db* wl,",
     "deny @{HOME}/.prometheus/config_pins.yaml wl,",
@@ -229,6 +233,7 @@ def _seed(home: Path) -> Path:
     (cfg / "node" / "node.key").write_text("private\n")
     (cfg / "node" / "instance.key").write_text("private\n")
     (cfg / "data" / "mcp_servers.json").write_text("{}\n")
+    (cfg / "xai_oauth.json").write_text("{}\n")
     (cfg / "data" / "lcm.db").write_text("x\n")
     (cfg / "data" / "job-python" / "python3").write_text("#!/bin/sh\n")
     (cfg / "config_pins.yaml").write_text("model.provider: llama_cpp\n")
@@ -243,7 +248,7 @@ def _sh(home: Path, command: str) -> int:
 
 
 @real
-@pytest.mark.parametrize("rel", ["node/node.key", "node/instance.key", "data/mcp_servers.json"])
+@pytest.mark.parametrize("rel", ["node/node.key", "node/instance.key", "data/mcp_servers.json", "xai_oauth.json"])
 def test_a_shell_cannot_read_a_key_or_the_mcp_store(tmp_path, rel):
     home = tmp_path.resolve()
     cfg = _seed(home)
@@ -404,6 +409,72 @@ def test_a_checkpoint_restore_replaces_a_symlinked_file_rather_than_writing_thro
     store.restore(rec.id, workspace=ws)
     assert victim.read_text() == "keep"
     assert not (ws / "a.txt").is_symlink() and (ws / "a.txt").read_text() == "one"
+
+
+@pytest.mark.parametrize("sha", ["../../../outside", "/etc/hosts", "AB" * 32, "ab" * 31])
+def test_a_checkpoint_restore_refuses_a_blob_id_that_is_not_a_sha256(tmp_path, sha):
+    from prometheus.checkpoints.store import CheckpointRefused
+
+    ws, store, rec = _checkpoint(tmp_path)
+    (tmp_path / "outside").write_text("not the workspace's")
+    _tamper(store, "UPDATE checkpoint_files SET sha256 = ? WHERE checkpoint_id = ? AND rel_path = 'a.txt'",
+            sha, rec.id)
+    (ws / "a.txt").unlink()
+    with pytest.raises(CheckpointRefused, match="not a sha256"):
+        store.restore(rec.id, workspace=ws)
+    assert not (ws / "a.txt").exists()
+
+
+def test_a_checkpoint_restore_never_sets_setuid_setgid_or_sticky(tmp_path):
+    ws, store, rec = _checkpoint(tmp_path)
+    _tamper(store, "UPDATE checkpoint_files SET mode = ? WHERE checkpoint_id = ? AND rel_path = 'a.txt'",
+            0o107755, rec.id)
+    (ws / "a.txt").unlink()
+    store.restore(rec.id, workspace=ws)
+    assert (ws / "a.txt").stat().st_mode & 0o7777 == 0o755
+
+
+def test_a_checkpoint_never_captures_a_link_or_prometheus_state(tmp_path, monkeypatch):
+    from prometheus.checkpoints.store import FileCheckpointStore
+
+    ws = (tmp_path / "ws").resolve()
+    (ws / "cfg" / "node").mkdir(parents=True)
+    (ws / "cfg" / "node" / "node.key").write_text("PRIVATE")
+    (ws / "ordinary.txt").write_text("ok")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("PRIVATE")
+    (ws / "link.txt").symlink_to(secret)
+    monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(ws / "cfg"))
+    store = FileCheckpointStore(tmp_path / "cp", config={"skip_dirs": []})
+    rec = store.create("s", ws)
+    assert [f["rel_path"] for f in rec.files_detail] == ["ordinary.txt"], rec.files_detail
+    assert ["cfg/node/node.key"] == [s["rel_path"] for s in rec.skipped_detail if "own state" in s["reason"]]
+    blobs = [b.read_bytes() for b in (tmp_path / "cp" / "blobs").rglob("*") if b.is_file()]
+    assert b"PRIVATE" not in blobs and blobs == [b"ok"]
+
+
+def test_a_checkpoint_reads_the_file_it_checked_not_one_swapped_in(tmp_path, monkeypatch):
+    """The window the walk used to leave: a name checked as a regular file, then swapped for a link to a secret
+    before it was read. Captured from a descriptor opened without following links, the swap is never read."""
+    from prometheus.checkpoints import store as S
+
+    ws = (tmp_path / "ws").resolve()
+    ws.mkdir()
+    (ws / "a.txt").write_text("ok")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("PRIVATE")
+    real_open = S.FileCheckpointStore._open_regular
+
+    def swap_then_open(dir_fd, name):
+        os.unlink(name, dir_fd=dir_fd)
+        os.symlink(str(secret), name, dir_fd=dir_fd)
+        return real_open(dir_fd, name)
+
+    monkeypatch.setattr(S.FileCheckpointStore, "_open_regular", staticmethod(swap_then_open))
+    store = S.FileCheckpointStore(tmp_path / "cp")
+    rec = store.create("s", ws)
+    assert rec.files_detail == []
+    assert not [b for b in (tmp_path / "cp" / "blobs").rglob("*") if b.is_file()]
 
 
 # ── PROMETHEUS_NODE_DIR ──────────────────────────────────────────────────────
