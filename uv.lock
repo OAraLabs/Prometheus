@@ -2936,7 +2936,7 @@ dependencies = [
     { name = "rich" },
     { name = "starlette" },
     { name = "uvicorn" },
-    { name = "watchdog" },
+    { name = "watchdog", marker = "python_full_version < '3.14' or sys_platform != 'darwin'" },
     { name = "websockets" },
 ]
 
@@ -3091,7 +3091,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.27" },
     { name = "uvicorn", marker = "extra == 'full'", specifier = ">=0.27" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.27" },
-    { name = "watchdog", specifier = ">=4.0" },
+    { name = "watchdog", marker = "python_full_version < '3.14' or sys_platform != 'darwin'", specifier = ">=4.0" },
     { name = "websockets", specifier = ">=12" },
     { name = "websockets", marker = "extra == 'full'", specifier = ">=12" },
     { name = "websockets", marker = "extra == 'web'", specifier = ">=12" },

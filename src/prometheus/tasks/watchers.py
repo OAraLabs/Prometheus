@@ -7,7 +7,9 @@ state transitions and signal emission. Three detection modes:
 
 - process : ``await proc.wait()`` — lives in the manager (already event-driven).
 - file    : :func:`watch_for_file` — watchdog.Observer + PatternMatchingEventHandler
-            (inotify on Linux, FSEvents/kqueue on macOS). Event-driven.
+            (inotify on Linux, FSEvents/kqueue on macOS). Event-driven. Without
+            watchdog (not installed on macOS with Python 3.14+, where it has no
+            wheel: pyproject.toml), the directory is polled instead.
 - poll    : :func:`poll_until` — exponential-backoff fallback ONLY, for
             conditions you can neither ``wait()`` on nor watch.
 """
@@ -19,10 +21,44 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 
-from watchdog.events import PatternMatchingEventHandler
-from watchdog.observers import Observer
-
 log = logging.getLogger(__name__)
+
+#: How often :func:`watch_for_file` looks again when watchdog is not installed.
+POLL_INTERVAL_SECONDS = 0.5
+
+
+def _observer_class():
+    """watchdog's ``Observer``, or None when watchdog is not installed.
+
+    Imported here, not at module level: watchdog is not installed on macOS with Python 3.14+ (no wheel; see the
+    marker in pyproject.toml), and this module must still import there. Remove this indirection once watchdog
+    publishes macOS cp314 wheels and the marker goes.
+    """
+    try:
+        from watchdog.observers import Observer
+    except ImportError:
+        return None
+    return Observer
+
+
+async def _poll_for_file(directory: str, pattern: str, timeout_seconds: float | None) -> str | None:
+    """:func:`watch_for_file` without watchdog: look every :data:`POLL_INTERVAL_SECONDS` until a match or the timeout."""
+    if not Path(directory).is_dir():
+        log.warning("watch_for_file: cannot watch %s: not a directory", directory)
+        return None
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
+    while True:
+        existing = _first_glob_match(directory, pattern)
+        if existing:
+            return existing
+        wait = POLL_INTERVAL_SECONDS
+        if deadline is not None:
+            left = deadline - loop.time()
+            if left <= 0:
+                return None
+            wait = min(wait, left)
+        await asyncio.sleep(wait)
 
 
 def _first_glob_match(directory: str, pattern: str) -> str | None:
@@ -50,6 +86,11 @@ async def watch_for_file(
     own thread; the first match is bridged to this event loop via
     ``loop.call_soon_threadsafe``.
     """
+    observer_class = _observer_class()
+    if observer_class is None:
+        return await _poll_for_file(directory, pattern, timeout_seconds)
+    from watchdog.events import PatternMatchingEventHandler
+
     loop = asyncio.get_running_loop()
     found: asyncio.Event = asyncio.Event()
     matched: list[str] = []
@@ -78,7 +119,7 @@ async def watch_for_file(
                 _record(getattr(event, "dest_path", None) or event.src_path)
 
     handler = _Handler(patterns=[pattern], ignore_directories=True)
-    observer = Observer()
+    observer = observer_class()
     try:
         observer.schedule(handler, directory, recursive=False)
         observer.start()
