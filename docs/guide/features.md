@@ -75,7 +75,7 @@ The engine that drives everything: streaming deltas and tool events, a circuit b
 
 **File & shell:** `bash`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`, `notebook_edit`
 
-**Web & media:** `web_search`, `web_fetch`, `youtube_transcript`, `download_file`, `browser` (Playwright), `message` (send to Telegram/Slack), `tts` (Piper text-to-speech), `image_generate` (Pollinations free / ComfyUI local / WAN 2.5 paid), `video_generate` (Kling 3.0, paid), `dashboard` (serve a live HTML dashboard over your LAN or tailnet)
+**Web & media:** `web_search`, `web_fetch`, `youtube_transcript`, `download_file`, `browser` (Playwright), `message` (send to Telegram/Slack), `tts` (Piper text-to-speech, or a [remote voice server](#voice--default-local-engines)), `image_generate` (Pollinations free / ComfyUI local / WAN 2.5 paid), `video_generate` (Kling 3.0, paid), `dashboard` (serve a live HTML dashboard over your LAN or tailnet)
 
 **Memory & knowledge:** `lcm_grep`, `lcm_expand`, `lcm_expand_query`, `lcm_describe`, `wiki_compile`, `wiki_query`, `wiki_lint`, `sentinel_status`, `audit_query`, the file-memory tool (MEMORY.md / USER.md), `todo_write`, `skill`, `anatomy`
 
@@ -190,6 +190,33 @@ Socket Mode app exposing the command layer as `/prometheus-*` workspace slash co
 ### Discord — Default: off until you add a token
 
 `/prometheus` app commands with four sub-groups — `/prometheus core help`, `/prometheus ops approve`, `/prometheus provider backends`, `/prometheus session steer` — covering every command but the Telegram-only `/gate` and `/ephemeral`, always-on DMs plus guild/channel whitelists, and threaded long replies. Optional install: `pip install 'oara-prometheus[discord]'`.
+
+### Voice — Default: local engines
+
+Voice notes on Telegram and Discord, `oara --voice` in the terminal, and the `tts` tool all listen and speak on this machine by default. Speech-to-text runs faster-whisper (the `voice` extra, `pip install 'oara-prometheus[voice]'`) or a `whisper` CLI. Text-to-speech runs piper with the model in `gateway.voice.model_path`, or espeak. Telegram voice replies follow `/voice auto | on | off`.
+
+**Remote voice servers (optional).** To run voice on another machine, for example one with a GPU, set `stt.url` to an OpenAI-compatible speech-to-text server (`POST /v1/audio/transcriptions`), `tts.url` to a text-to-speech server (`POST /v1/audio/speech`), or both. A url can be just the server (`http://127.0.0.1:8001` or `http://127.0.0.1:8001/v1`), in which case Prometheus adds the route. A full route is used as written. `whisper.url` works as another name for `stt.url`, and `stt.url` wins when both are set. Each section also takes `model` (the name the server expects), `tts.voice` (empty lets the server pick its default voice), and `timeout_seconds`.
+
+```yaml
+stt:
+  url: "http://127.0.0.1:8001"
+tts:
+  url: "http://127.0.0.1:8003"
+  voice: ""            # empty = the server's default voice
+```
+
+The key never goes in `prometheus.yaml`. Prometheus reads it from the environment and then from `~/.config/prometheus/env`, under `PROMETHEUS_STT_API_KEY` and `PROMETHEUS_TTS_API_KEY`, or under whatever name you give in `api_key_env`. It is sent as `Authorization: Bearer <key>`. If the variable is not set, no key is sent. An `api_key` written in the yaml is ignored, and the daemon logs a warning about it.
+
+The `tts` tool's `voice` argument names a local espeak or piper voice, so it is not sent to the remote server. The server speaks with `tts.voice`.
+
+The local engines stay as the fallback:
+
+- **url empty:** nothing changes. Voice runs locally, exactly as before.
+- **Server unreachable, timed out or failing:** that request runs locally, and the log gets one line about it.
+- **Key refused (401 or 403):** that request runs locally too, but the log gets an ERROR, because a wrong key does not fix itself.
+- **Request rejected (400, such as an unknown voice or model):** the same, with an ERROR that quotes the server's reason.
+
+`oara doctor` shows a **Remote STT** or **Remote TTS** row for each url you set. It reports whether the server answers and whether it refused the key. Doctor asks for the server's `/health` first, at the server root beside `/v1`. It then asks for the `/v1/models` list, if the server has one, to check the key. A server that serves only `/health` counts as reachable. The key is sent as you configured it, so use https or a private network for a server on another machine.
 
 ### Paperclip gateway — Default: off. Experimental
 
@@ -341,7 +368,7 @@ Counts and per-gateway spellings are generated from the registration calls, not 
 
 One reference config (`config/prometheus.yaml.default`, heavily commented) documents every section:
 
-`system, bootstrap, model, backends, backend_probe, compaction, context, tools, adapter, security, infrastructure, gateway (telegram/slack/discord/paperclip), whisper, router, slash_commands, divergence, learning (nudge/skill/curator/gepa), trajectory_export, training, symbiote, sentinel, heartbeat, escalation, memory, memory.recall, wiki, web, documents, sessions, tasks, workers, checkpoints, coding, computer_use, push, vault, doctor, pairing, network, discovery, image_generation, video_generation.kling, web_tools, printing_press, lsp, profiles, anatomy, mcp_servers, mcp, hooks, evals, tracing`
+`system, bootstrap, model, backends, backend_probe, compaction, context, tools, adapter, security, infrastructure, gateway (telegram/slack/discord/paperclip), whisper, stt, tts, router, slash_commands, divergence, learning (nudge/skill/curator/gepa), trajectory_export, training, symbiote, sentinel, heartbeat, escalation, memory, memory.recall, wiki, web, documents, sessions, tasks, workers, checkpoints, coding, computer_use, push, vault, doctor, pairing, network, discovery, image_generation, video_generation.kling, web_tools, printing_press, lsp, profiles, anatomy, mcp_servers, mcp, hooks, evals, tracing`
 
 That list is the one thing on this page that has now gone stale twice within days of being corrected, because a new subsystem adds a section and nothing checks this paragraph. The [config key reference](../reference/config-keys.md) is generated from the template and pinned by a test — read the section list there, and treat the line above as an orientation aid.
 
