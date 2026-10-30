@@ -78,3 +78,6 @@ config/*.backup*
 # artifact contains belongs in version control, where every clone and every
 # tool sees the same answer.
 .claude/
+
+# Distillation runbook: derived data, logs, checkpoints (never committed)
+/data/distill/
