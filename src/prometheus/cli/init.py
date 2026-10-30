@@ -274,7 +274,7 @@ _ENV_TEMPLATE = """# Prometheus environment file — secrets live here, not in p
 # Telegram — get a token by messaging @BotFather (/newbot); also set
 # gateway.telegram_enabled: true in prometheus.yaml:
 #   PROMETHEUS_TELEGRAM_TOKEN=
-#   PROMETHEUS_TELEGRAM_CHAT_IDS=
+# and list the chats it may answer in gateway.allowed_chat_ids (prometheus.yaml).
 #
 # Slack — create an app at https://api.slack.com/apps, enable Socket Mode,
 # install it; needs BOTH tokens (bot xoxb-... + app xapp-...) and

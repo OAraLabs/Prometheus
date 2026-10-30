@@ -126,8 +126,6 @@ model:
   max_tool_iterations: 500              # Max tool calls per user message before hard stop (local/llama)
   max_tool_iterations_cloud: 500        # Cloud (tier=off) cap. EQUAL to local since 2026-09-07: one ceiling per session, so a turn that routes to cloud mid-run does not change its iteration budget. Cost is governed by the budget/quota layer + the provider plan, not by this backstop.
   max_turns: 200                        # Max MODEL ROUNDS in one turn (a round can carry several tool calls). Reaching it is a budget stop, not a failure: the turn's work is kept and saved, and the next message continues from it (#774).
-  fallback_provider: "ollama"
-  fallback_url: "http://localhost:11434"
 
 # Assembly-time context compaction (the relief valve). Sprint 2 (OAra):
 # this was config-dark since birth — the compactor only exists when
@@ -590,12 +588,6 @@ security:
 infrastructure:
   archive_enabled: true
   telemetry_enabled: true
-
-  # Local topology. Values are machine-specific and MUST stay in the live
-  # config only — the pre-commit hook blocks real hosts/IPs in this template.
-  gpu_host: ""
-  mini_host: ""
-  mini_port: 8005
 gateway:
   telegram_enabled: false
   telegram_token: ""                # Set via PROMETHEUS_TELEGRAM_TOKEN env var
