@@ -111,7 +111,7 @@ def _llama_headers(model_cfg: dict[str, Any]) -> dict[str, str]:
 def _detect_served_model(model_cfg: dict[str, Any]) -> str | None:
     """The model the configured llama.cpp server reports at /v1/models, or None."""
     import httpx as _httpx
-    base_url = str(model_cfg.get("base_url") or "http://localhost:8080")
+    base_url = str(model_cfg.get("base_url", "http://localhost:8080"))
     url = f"{base_url.rstrip('/')}/v1/models"
     try:
         resp = _httpx.get(url, timeout=10.0, headers=_llama_headers(model_cfg))
