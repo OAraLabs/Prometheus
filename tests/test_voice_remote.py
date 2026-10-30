@@ -48,6 +48,13 @@ def _cfg(kind: str, url: str, **extra: Any) -> dict[str, Any]:
     return {kind: {"url": url, "api_key_env": KEY_ENV, **extra}}
 
 
+@pytest.fixture(autouse=True)
+def _no_default_keys(monkeypatch):
+    """The default key names must come from the test, never the shell."""
+    for name in ("PROMETHEUS_STT_API_KEY", "PROMETHEUS_TTS_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def env_key(tmp_path, monkeypatch):
     """The key lives in the env file only (conftest points it at tmp)."""
@@ -429,3 +436,144 @@ class TestDoctorRow:
         from prometheus.cli import doctor
 
         assert "check_voice_remotes(config" in inspect.getsource(doctor.run_extended_checks)
+
+
+# ---------------------------------------------------------------------------
+# The server contract: base URLs, the server's own default voice, 400 as a
+# configuration error, the default key variable, and whisper.url
+# ---------------------------------------------------------------------------
+
+STT_ROUTE = "http://voice.test/v1/audio/transcriptions"
+TTS_ROUTE = "http://voice.test/v1/audio/speech"
+
+
+class TestBaseUrl:
+    """A url may name the server (root or /v1) instead of the full route."""
+
+    @pytest.mark.parametrize("url", [
+        "http://voice.test", "http://voice.test/", "http://voice.test/v1",
+        "http://voice.test/v1/", STT_ROUTE,
+    ])
+    def test_stt_base_url_gets_the_route(self, url, tmp_path, server):
+        text, used_local = _run_stt({"stt": {"url": url}}, tmp_path)
+        assert (text, used_local) == ("remote words", False)
+        assert [str(r.url) for r in server.requests] == [STT_ROUTE]
+
+    @pytest.mark.parametrize("site", TTS_SITES)
+    def test_tts_base_url_gets_the_route(self, site, tmp_path, server):
+        audio, used_local = site({"tts": {"url": "http://voice.test"}}, tmp_path)
+        assert (audio, used_local) == (WAV, False)
+        assert [str(r.url) for r in server.requests] == [TTS_ROUTE]
+
+    def test_doctor_probes_the_root_of_a_base_url(self, server):
+        from prometheus.cli.doctor import check_voice_remotes
+
+        [row] = check_voice_remotes({"stt": {"url": "http://voice.test:8001"}})
+        assert row.status == "ok"
+        assert [str(r.url) for r in server.requests] == [
+            "http://voice.test:8001/health", "http://voice.test:8001/v1/models"]
+
+
+class TestVoice:
+
+    @pytest.mark.parametrize("site", TTS_SITES)
+    def test_no_voice_configured_lets_the_server_choose(self, site, tmp_path, server):
+        site({"tts": {"url": TTS_ROUTE}}, tmp_path)
+        [req] = server.requests
+        assert "voice" not in json.loads(req.content)
+
+    def test_tool_voice_argument_stays_with_the_local_engines(self, tmp_path, server):
+        """The tts tool's voice is engine-specific ('en-us+f3' for espeak);
+        the remote gets tts.voice instead."""
+        from prometheus.tools.builtin.tts import TTSInput, TTSTool
+
+        cfg_dir = tmp_path / "prom-config"
+        cfg_dir.mkdir(exist_ok=True)
+        (cfg_dir / "prometheus.yaml").write_text(
+            yaml.safe_dump({"tts": {"url": TTS_ROUTE, "voice": "nova"}}))
+        result = asyncio.run(TTSTool().execute(
+            TTSInput(text="hi", voice="en-us+f3", output_path=str(tmp_path / "o.wav")),
+            ToolExecutionContext(cwd=tmp_path),
+        ))
+        assert not result.is_error
+        assert json.loads(server.requests[0].content)["voice"] == "nova"
+
+
+class TestBadRequest:
+    """400 is a configuration error (unknown voice or model): ERROR, then local."""
+
+    def test_stt_400_logs_error(self, tmp_path, server, caplog):
+        server.status = 400
+        caplog.set_level(logging.DEBUG, logger=LOGGER)
+        text, used_local = _run_stt({"stt": {"url": STT_ROUTE}}, tmp_path)
+        assert (text, used_local) == ("local words", True)
+        [rec] = [r for r in _records(caplog) if r.levelno >= logging.INFO]
+        assert rec.levelno == logging.ERROR
+        assert "400" in rec.getMessage()
+
+    @pytest.mark.parametrize("site", TTS_SITES)
+    def test_tts_400_logs_error(self, site, tmp_path, server, caplog):
+        server.status = 400
+        caplog.set_level(logging.DEBUG, logger=LOGGER)
+        audio, used_local = site({"tts": {"url": TTS_ROUTE, "voice": "nope"}}, tmp_path)
+        assert (audio, used_local) == (b"local-audio", True)
+        [rec] = [r for r in _records(caplog) if r.levelno >= logging.INFO]
+        assert rec.levelno == logging.ERROR
+        assert "400" in rec.getMessage()
+
+
+class TestDefaultKeyVariable:
+    """With api_key_env unset, the key is looked for under a default name."""
+
+    @pytest.mark.parametrize(("kind", "url", "default"), [
+        ("stt", STT_ROUTE, "PROMETHEUS_STT_API_KEY"),
+        ("tts", TTS_ROUTE, "PROMETHEUS_TTS_API_KEY"),
+    ])
+    def test_default_name_is_read(self, kind, url, default, tmp_path, server, monkeypatch):
+        from prometheus.infra.voice_remote import remote_settings
+
+        monkeypatch.delenv(default, raising=False)
+        (tmp_path / "prom-env").write_text(f"{default}=from-default-name\n")
+        settings = remote_settings(kind, {kind: {"url": url}})
+        assert settings is not None and settings.api_key_env == default
+        assert settings.headers() == {"Authorization": "Bearer from-default-name"}
+
+    def test_stt_request_carries_the_default_key(self, tmp_path, server, monkeypatch):
+        monkeypatch.setenv("PROMETHEUS_STT_API_KEY", "k-default")
+        _run_stt({"stt": {"url": STT_ROUTE}}, tmp_path)
+        assert server.requests[0].headers["authorization"] == "Bearer k-default"
+
+    def test_named_variable_wins(self, tmp_path, server, env_key, monkeypatch):
+        monkeypatch.setenv("PROMETHEUS_STT_API_KEY", "k-default")
+        _run_stt(_cfg("stt", STT_ROUTE), tmp_path)
+        assert server.requests[0].headers["authorization"] == f"Bearer {env_key}"
+
+    def test_no_key_anywhere_sends_none(self, tmp_path, server, monkeypatch):
+        monkeypatch.delenv("PROMETHEUS_STT_API_KEY", raising=False)
+        _run_stt({"stt": {"url": STT_ROUTE}}, tmp_path)
+        assert "authorization" not in server.requests[0].headers
+
+
+class TestWhisperUrlAlias:
+    """whisper.url means stt.url; stt.url wins when both are set."""
+
+    def test_whisper_url_reaches_the_remote(self, tmp_path, server):
+        text, used_local = _run_stt({"whisper": {"url": "http://voice.test"}}, tmp_path)
+        assert (text, used_local) == ("remote words", False)
+        assert [str(r.url) for r in server.requests] == [STT_ROUTE]
+
+    def test_stt_url_wins_over_whisper_url(self, tmp_path, server):
+        _run_stt({"stt": {"url": STT_ROUTE},
+                  "whisper": {"url": "http://other.test"}}, tmp_path)
+        assert [str(r.url) for r in server.requests] == [STT_ROUTE]
+
+    def test_stt_settings_still_apply_with_whisper_url(self, tmp_path, server):
+        _run_stt({"whisper": {"url": "http://voice.test"},
+                  "stt": {"model": "large-v3"}}, tmp_path)
+        assert b"large-v3" in server.requests[0].content
+
+    def test_doctor_row_for_whisper_url(self, server):
+        from prometheus.cli.doctor import check_voice_remotes
+
+        [row] = check_voice_remotes({"whisper": {"url": "http://voice.test"}})
+        assert (row.name, row.status) == ("Remote STT", "ok")

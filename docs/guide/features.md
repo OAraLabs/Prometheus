@@ -195,25 +195,26 @@ Socket Mode app exposing the command layer as `/prometheus-*` workspace slash co
 
 Voice notes on Telegram and Discord, `oara --voice` in the terminal, and the `tts` tool all listen and speak on this machine by default. Speech-to-text runs faster-whisper (the `voice` extra, `pip install 'oara-prometheus[voice]'`) or a `whisper` CLI. Text-to-speech runs piper with the model in `gateway.voice.model_path`, or espeak. Telegram voice replies follow `/voice auto | on | off`.
 
-**Remote voice servers (optional).** To run voice on another machine, for example one with a GPU, set `stt.url` to an OpenAI-compatible `POST /v1/audio/transcriptions` endpoint, `tts.url` to a `POST /v1/audio/speech` endpoint, or both. Give the full endpoint URL. Each section also takes `model` (the name the server expects), `tts.voice`, and `timeout_seconds`.
+**Remote voice servers (optional).** To run voice on another machine, for example one with a GPU, set `stt.url` to an OpenAI-compatible speech-to-text server (`POST /v1/audio/transcriptions`), `tts.url` to a text-to-speech server (`POST /v1/audio/speech`), or both. A url can be just the server (`http://127.0.0.1:8001` or `http://127.0.0.1:8001/v1`), in which case Prometheus adds the route. A full route is used as written. `whisper.url` works as another name for `stt.url`, and `stt.url` wins when both are set. Each section also takes `model` (the name the server expects), `tts.voice` (empty lets the server pick its default voice), and `timeout_seconds`.
 
 ```yaml
 stt:
-  url: "http://<voice-host>:8000/v1/audio/transcriptions"
-  api_key_env: PROMETHEUS_STT_API_KEY
+  url: "http://127.0.0.1:8001"
 tts:
-  url: "http://<voice-host>:8000/v1/audio/speech"
-  api_key_env: PROMETHEUS_TTS_API_KEY
-  voice: "alloy"
+  url: "http://127.0.0.1:8003"
+  voice: ""            # empty = the server's default voice
 ```
 
-The key never goes in `prometheus.yaml`. `api_key_env` names a variable, and Prometheus looks for it in the environment and then in `~/.config/prometheus/env` (`PROMETHEUS_STT_API_KEY=...`). If `api_key_env` is empty, no key is sent. An `api_key` written in the yaml is ignored, and the daemon logs a warning about it.
+The key never goes in `prometheus.yaml`. Prometheus reads it from the environment and then from `~/.config/prometheus/env`, under `PROMETHEUS_STT_API_KEY` and `PROMETHEUS_TTS_API_KEY`, or under whatever name you give in `api_key_env`. It is sent as `Authorization: Bearer <key>`. If the variable is not set, no key is sent. An `api_key` written in the yaml is ignored, and the daemon logs a warning about it.
+
+The `tts` tool's `voice` argument names a local espeak or piper voice, so it is not sent to the remote server. The server speaks with `tts.voice`.
 
 The local engines stay as the fallback:
 
 - **url empty:** nothing changes. Voice runs locally, exactly as before.
 - **Server unreachable, timed out or failing:** that request runs locally, and the log gets one line about it.
 - **Key refused (401 or 403):** that request runs locally too, but the log gets an ERROR, because a wrong key does not fix itself.
+- **Request rejected (400, such as an unknown voice or model):** the same, with an ERROR that quotes the server's reason.
 
 `oara doctor` shows a **Remote STT** or **Remote TTS** row for each url you set. It reports whether the server answers and whether it refused the key. Doctor asks for the server's `/health` first, at the server root beside `/v1`. It then asks for the `/v1/models` list, if the server has one, to check the key. A server that serves only `/health` counts as reachable. The key is sent as you configured it, so use https or a private network for a server on another machine.
 
