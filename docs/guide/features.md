@@ -216,6 +216,8 @@ The local engines stay as the fallback:
 - **Key refused (401 or 403):** that request runs locally too, but the log gets an ERROR, because a wrong key does not fix itself.
 - **Request rejected (400, such as an unknown voice or model):** the same, with an ERROR that quotes the server's reason.
 
+You are told too, not just the log. The first time a server stops answering (or refuses the key, or rejects the request), you get one line saying so, for example "Your speech-to-text server isn't answering, so this computer's own speech-to-text is being used until it is back." When it answers again you get one more line saying so. Nothing is said while it stays down. Telegram and Discord send the line to the chat that used voice, `oara --voice` prints it, and the `tts` tool adds it to its result. Restarting the daemon forgets the outage.
+
 `oara doctor` shows a **Remote STT** or **Remote TTS** row for each url you set. It reports whether the server answers and whether it refused the key. Doctor asks for the server's `/health` first, at the server root beside `/v1`. It then asks for the `/v1/models` list, if the server has one, to check the key. A server that serves only `/health` counts as reachable. The key is sent as you configured it, so use https or a private network for a server on another machine.
 
 ### Paperclip gateway — Default: off. Experimental

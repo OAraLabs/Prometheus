@@ -2419,9 +2419,10 @@ class TelegramAdapter(BasePlatformAdapter):
         # any failure so a missing piper binary or bad model path never
         # silences the bot. See _voice_should_reply / _synthesize_voice.
         sent_voice = False
+        voice_notices: list[str] = []
         if self._voice_should_reply(event):
             try:
-                ogg_path = await self._synthesize_voice(response_text)
+                ogg_path = await self._synthesize_voice(response_text, notices=voice_notices)
             except Exception as exc:
                 logger.warning(
                     "Voice synthesis raised for chat %d: %s",
@@ -2440,6 +2441,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 strip_markdown(response_text),
                 reply_to=event.message_id,
             )
+        # The remote voice server went down or came back: said once, after the reply.
+        for notice in voice_notices:
+            await self.send(event.chat_id, notice)
 
         # SPRINT-2 WS1: after the turn ends, drain any queued prompts and
         # fire the next one as a fresh user turn. Loop until the queue is
@@ -3088,9 +3092,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 "transcribed]"
             )
         else:
-            transcription = await self._transcribe_audio(cached_path)
+            notices: list[str] = []
+            transcription = await self._transcribe_audio(cached_path, notices=notices)
             if not transcription:
                 transcription = "[Voice memo received but transcription unavailable]"
+            # The remote speech-to-text server went down or came back: said once, in this chat.
+            for notice in notices:
+                await self.send(update.effective_chat.id, notice)
 
         event = MessageEvent(
             chat_id=update.effective_chat.id,
@@ -3302,16 +3310,18 @@ class TelegramAdapter(BasePlatformAdapter):
 
         return await describe_image(image_path, provider=self._get_provider())
 
-    async def _transcribe_audio(self, audio_path: str) -> str | None:
+    async def _transcribe_audio(self, audio_path: str, notices: list[str] | None = None) -> str | None:
         """Run audio through WhisperSTT for transcription. Returns None on failure.
 
         SPRINT G2: delegates to the shared media_services module (same
         service Discord uses); behaviour pinned in test_gateway_media_pins.py.
+        *notices* collects the "speech-to-text server down / back" sentence.
         """
         from prometheus.gateway.media_services import transcribe_audio
 
         return await transcribe_audio(
             audio_path, config=getattr(self, "_prometheus_config", None) or {},
+            notices=notices,
         )
 
     def _get_provider(self):
@@ -3424,7 +3434,7 @@ class TelegramAdapter(BasePlatformAdapter):
         text = re.sub(r"\s+", " ", text).strip()
         return text
 
-    async def _synthesize_voice(self, text: str) -> str | None:
+    async def _synthesize_voice(self, text: str, notices: list[str] | None = None) -> str | None:
         """Synthesize *text* to an opus-encoded .ogg file for Telegram.
 
         Returns the absolute path on success, None on any failure
@@ -3451,7 +3461,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # tts.url first when set; the configured engine is the fallback.
         prom_cfg = getattr(self, "_prometheus_config", None)
         remote = remote_settings("tts", prom_cfg if isinstance(prom_cfg, dict) else {})
-        if remote is not None and await synthesize_remote(remote, clean, wav_path):
+        if remote is not None and await synthesize_remote(remote, clean, wav_path, notices=notices):
             ok = True
         elif engine == "piper":
             ok = await self._run_piper(clean, wav_path, cfg.get("model_path"))

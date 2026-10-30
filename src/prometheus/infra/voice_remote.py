@@ -20,6 +20,12 @@ and keeps its local path as the fallback:
 * 400 — the same: the server rejected what was configured (an unknown voice
   or model), which is a configuration error, not an outage
 
+When a remote stops answering, the person is told once, and once more when it
+is back (``notices``: the call that crosses either line gets the sentence; a
+gateway sends it to the chat, the terminal prints it, a tool's result carries
+it). The state is only which remotes are down; every failed request still
+leaves its own log line, as above.
+
 The bearer key is read from the environment or the env file
 (``~/.config/prometheus/env``) under the name ``api_key_env`` gives, the same
 way model providers name theirs. Unset, it defaults to
@@ -52,6 +58,12 @@ DEFAULT_KEY_ENV = {"stt": "PROMETHEUS_STT_API_KEY", "tts": "PROMETHEUS_TTS_API_K
 # A refused connection should fail over to the local engine at once, so the
 # connect phase gets its own short limit; timeout_seconds bounds the rest.
 _CONNECT_TIMEOUT = 5.0
+
+# Which remotes are down, by (kind, url): the whole per-outage state. A remote
+# enters on a failed request and leaves on a good one; each move makes one
+# sentence for the person (docs/contracts/pieces.md, section 9).
+_down: set[tuple[str, str]] = set()
+_OWN = {"stt": "this computer's own speech-to-text", "tts": "this computer's own voice"}
 
 # Same shape test doctor applies to a provider's api_key_env.
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,30}")
@@ -200,12 +212,41 @@ def _log_failure(settings: RemoteVoice, detail: str, status: int | None = None) 
                    settings.label, settings.shown_url(), detail)
 
 
-async def _post(settings: RemoteVoice, **kwargs: Any) -> httpx.Response | None:
+def _went_down(settings: RemoteVoice, notices: list[str] | None, status: int | None = None) -> None:
+    """A request to *settings* failed. The first failure of an outage makes the one sentence."""
+    key = (settings.kind, settings.url)
+    if key in _down:
+        return
+    _down.add(key)
+    if notices is None:
+        return
+    what = f"Your {_LABEL[settings.kind]} server"
+    if status in (401, 403):
+        why = "refused its key"
+    elif status == 400:
+        why = "rejected the request (check its model and voice settings)"
+    else:
+        why = "isn't answering"
+    notices.append(f"{what} {why}, so {_OWN[settings.kind]} is being used until it is back.")
+
+
+def _came_back(settings: RemoteVoice, notices: list[str] | None) -> None:
+    """A request to *settings* succeeded. If it was down, that is the one sentence saying it is back."""
+    key = (settings.kind, settings.url)
+    if key not in _down:
+        return
+    _down.discard(key)
+    if notices is not None:
+        notices.append(f"Your {_LABEL[settings.kind]} server is answering again.")
+
+
+async def _post(settings: RemoteVoice, notices: list[str] | None, **kwargs: Any) -> httpx.Response | None:
     try:
         async with _async_client(settings.timeout()) as client:
             resp = await client.post(settings.url, headers=settings.headers(), **kwargs)
     except httpx.HTTPError as exc:
         _log_failure(settings, f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__)
+        _went_down(settings, notices)
         return None
     if resp.status_code != 200:
         detail = f"HTTP {resp.status_code}"
@@ -213,14 +254,20 @@ async def _post(settings: RemoteVoice, **kwargs: Any) -> httpx.Response | None:
             # The server's reason ("unknown voice") is the useful part.
             detail += f": {resp.text.strip()[:200]}"
         _log_failure(settings, detail, resp.status_code)
+        _went_down(settings, notices, resp.status_code)
         return None
     return resp
 
 
 async def transcribe_remote(
     settings: RemoteVoice, audio_path: str | Path, language: str | None = None,
+    *, notices: list[str] | None = None,
 ) -> str | None:
-    """Transcribe *audio_path* on the remote server. None means use local."""
+    """Transcribe *audio_path* on the remote server. None means use local.
+
+    A sentence for the person is appended to *notices* when this call finds the
+    server down after it was up, or answering after it was down.
+    """
     path = Path(audio_path)
     try:
         audio = path.read_bytes()
@@ -231,7 +278,7 @@ async def transcribe_remote(
     if language:
         data["language"] = language
     files = {"file": (path.name, audio, _MIME.get(path.suffix.lower(), "application/octet-stream"))}
-    resp = await _post(settings, data=data, files=files)
+    resp = await _post(settings, notices, data=data, files=files)
     if resp is None:
         return None
     try:
@@ -240,23 +287,31 @@ async def transcribe_remote(
         text = resp.text
     if not isinstance(text, str):
         _log_failure(settings, "response carried no transcription text")
+        _went_down(settings, notices)
         return None
+    _came_back(settings, notices)
     return text.strip()
 
 
 async def synthesize_remote(
     settings: RemoteVoice, text: str, out_path: str | Path,
+    *, notices: list[str] | None = None,
 ) -> bool:
-    """Write a WAV of *text* to *out_path* from the remote server. False means use local."""
+    """Write a WAV of *text* to *out_path* from the remote server. False means use local.
+
+    *notices* as for :func:`transcribe_remote`.
+    """
     payload = {"model": settings.model, "input": text, "response_format": "wav"}
     if settings.voice:
         payload["voice"] = settings.voice
-    resp = await _post(settings, json=payload)
+    resp = await _post(settings, notices, json=payload)
     if resp is None:
         return False
     if not resp.content:
         _log_failure(settings, "response carried no audio")
+        _went_down(settings, notices)
         return False
+    _came_back(settings, notices)
     try:
         Path(out_path).write_bytes(resp.content)
     except OSError as exc:

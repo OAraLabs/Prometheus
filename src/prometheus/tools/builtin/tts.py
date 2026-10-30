@@ -66,42 +66,55 @@ class TTSTool(BaseTool):
         # for by name. Any failure falls through to the local engines below.
         # The voice argument is engine-specific (an espeak or piper voice), so
         # it stays with the local engines; the remote speaks with tts.voice.
+        notices: list[str] = []
         if arguments.engine is None:
             from prometheus.infra.voice_remote import remote_settings, synthesize_remote
 
             remote = remote_settings("tts")
-            if remote is not None and await synthesize_remote(remote, text, out_path):
-                return ToolResult(output=f"Audio saved to {out_path}")
+            if remote is not None and await synthesize_remote(remote, text, out_path, notices=notices):
+                return _noted(ToolResult(output=f"Audio saved to {out_path}"), notices)
+        return _noted(await _speak_locally(arguments, text, out_path), notices)
 
-        engine = arguments.engine or _detect_engine()
-        if engine is None:
-            return ToolResult(
-                output=(
-                    "No TTS engine found. Install espeak-ng, or piper with: "
-                    "pip install 'oara-prometheus[voice]'"
-                ),
-                is_error=True,
-            )
-        if engine == "piper" and not shutil.which("piper"):
-            # Asked for by name: without this the exec below raises
-            # FileNotFoundError instead of saying what to install.
-            return ToolResult(
-                output=(
-                    "piper is not installed. "
-                    "Fix: pip install 'oara-prometheus[voice]'"
-                ),
-                is_error=True,
-            )
 
-        if engine == "espeak":
-            return await _run_espeak(text, arguments.voice, out_path)
-        elif engine == "piper":
-            return await _run_piper(text, arguments.voice, out_path)
-        else:
-            return ToolResult(
-                output=f"Unknown TTS engine: {engine}. Use 'espeak' or 'piper'.",
-                is_error=True,
-            )
+def _noted(result: ToolResult, notices: list[str]) -> ToolResult:
+    """*result* with the "your voice server isn't answering / is back" sentence at its end, for the model to pass on."""
+    if not notices:
+        return result
+    return ToolResult(output=f"{result.output}\n\n[Note: {' '.join(notices)}]", is_error=result.is_error,
+                      metadata=result.metadata)
+
+
+async def _speak_locally(arguments: TTSInput, text: str, out_path: str) -> ToolResult:
+    """This computer's own engines: the one asked for by name, else whichever is installed."""
+    engine = arguments.engine or _detect_engine()
+    if engine is None:
+        return ToolResult(
+            output=(
+                "No TTS engine found. Install espeak-ng, or piper with: "
+                "pip install 'oara-prometheus[voice]'"
+            ),
+            is_error=True,
+        )
+    if engine == "piper" and not shutil.which("piper"):
+        # Asked for by name: without this the exec below raises
+        # FileNotFoundError instead of saying what to install.
+        return ToolResult(
+            output=(
+                "piper is not installed. "
+                "Fix: pip install 'oara-prometheus[voice]'"
+            ),
+            is_error=True,
+        )
+
+    if engine == "espeak":
+        return await _run_espeak(text, arguments.voice, out_path)
+    elif engine == "piper":
+        return await _run_piper(text, arguments.voice, out_path)
+    else:
+        return ToolResult(
+            output=f"Unknown TTS engine: {engine}. Use 'espeak' or 'piper'.",
+            is_error=True,
+        )
 
 
 def _resolve_path(base: Path, candidate: str) -> Path:
