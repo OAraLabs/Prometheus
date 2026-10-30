@@ -1,6 +1,6 @@
 # Distillation + flywheel — status
 
-_Updated 2026-10-30 19:50 ET. Refreshed on every check-in. Details: `DISTILL-LOG.md`; decisions: `DISTILL-OPEN-QUESTIONS.md`._
+_Updated 2026-10-30 19:48 ET. Refreshed on every check-in. Details: `DISTILL-LOG.md`; decisions: `DISTILL-OPEN-QUESTIONS.md`._
 
 ## In one paragraph
 
@@ -21,10 +21,18 @@ existing Max traces can't be used for training. Then the 9B student trains on th
 - **Plan terms checked.** The Qwen Max key is a Token Plan: interactive use only. It is never used for batch work
   here, and 0 Max calls have been made.
 
+## Answers from the earlier session's notes (done)
+
+- **Qwen key:** a Token Plan (interactive only). Your own Oct 25 ruling was "nothing automated on it", so Max stays out of
+  batch judging and generation.
+- **4090:** it now serves only the business tunnel: about 5 requests a day, none overnight. The overnight benchmark has
+  never actually run. The 4090's nights are free if you want them; until you say so, it stays untouched.
+- **~22K traces:** a double count. Each of the 11,152 traces has a twin copy in another database. There are 11,207 distinct
+  teacher calls from about 300 tasks.
+
 ## Running now
 
 - **Saluki baseline prep.** The probe-guard fix is in its final rehearsal; timers arm after review. Windows: 01:00–02:45, 03:45–05:45 and 06:15–06:59 ET.
-- **Research on the mini's earlier Claude session:** Qwen plan, 4090 tunnel and night job, and the ~22K vs 11,152 trace count.
 - **Prep for the 3090 Ti swap:** teacher model download, the daemon Saluki↔Max switch with exact restore, the gym teacher
   pipeline, and keeping Max traces out of training.
 - **New since your last message:** a confidence-interval long-context gate (your Q8 approval), and a task generator built
