@@ -96,12 +96,25 @@ def _worker_permission_prompt(args: Any) -> Any:
     return approval_prompt_from_env(os.environ)
 
 
-def _detect_served_model(base_url: str) -> str | None:
-    """The model a llama.cpp server reports at /v1/models, or None."""
+def _llama_headers(model_cfg: dict[str, Any]) -> dict[str, str]:
+    """The key a llama.cpp server started with --api-key needs, as a header; none when it is set nowhere (the
+    provider's own build then says which variable is missing)."""
+    from prometheus.providers.registry import local_server_headers
+
+    try:
+        return local_server_headers(model_cfg)
+    except ValueError as exc:
+        log.warning("%s; asking the server without a key", exc)
+        return {}
+
+
+def _detect_served_model(model_cfg: dict[str, Any]) -> str | None:
+    """The model the configured llama.cpp server reports at /v1/models, or None."""
     import httpx as _httpx
+    base_url = str(model_cfg.get("base_url") or "http://localhost:8080")
     url = f"{base_url.rstrip('/')}/v1/models"
     try:
-        resp = _httpx.get(url, timeout=10.0)
+        resp = _httpx.get(url, timeout=10.0, headers=_llama_headers(model_cfg))
         resp.raise_for_status()
         models = resp.json().get("data", [])
         if models:
@@ -114,9 +127,9 @@ def _detect_served_model(base_url: str) -> str | None:
     return None
 
 
-def _detect_model_or_fallback(base_url: str, config_model: str) -> str:
+def _detect_model_or_fallback(model_cfg: dict[str, Any], config_model: str) -> str:
     """Query /v1/models to discover the loaded model; fall back to config value."""
-    detected = _detect_served_model(base_url)
+    detected = _detect_served_model(model_cfg)
     if detected:
         return detected
     log.info("Using model name from config: %s", config_model)
@@ -777,7 +790,8 @@ def _detect_tool_template_or_none(model_cfg: dict[str, Any]) -> Any:
     base_url = (model_cfg.get("base_url") or "").rstrip("/")
     try:
         if provider == "llama_cpp":
-            resp = _httpx.get(f"{base_url or 'http://localhost:8080'}/props", timeout=10.0)
+            resp = _httpx.get(f"{base_url or 'http://localhost:8080'}/props", timeout=10.0,
+                              headers=_llama_headers(model_cfg))
             resp.raise_for_status()
             props = resp.json()
             props = props if isinstance(props, dict) else {}
@@ -1184,9 +1198,7 @@ def run_coding_task(args) -> int:
     # telemetry row of the run. An unreachable server keeps the hint, as the
     # CLI does; Ollama serves the name it is asked for, so nothing to detect.
     if model_cfg.get("provider", "llama_cpp") == "llama_cpp":
-        model_name = _detect_model_or_fallback(
-            model_cfg.get("base_url", "http://localhost:8080"), model_name,
-        )
+        model_name = _detect_model_or_fallback(model_cfg, model_name)
         model_cfg["model"] = model_name
     # And the served template's verdict, read the way the interactive CLI reads
     # it, so a model the registry does not list (Bonsai, Ornith) resolves its
@@ -2139,7 +2151,7 @@ def main() -> None:
     # REFUSED, never run under the asked-for name (it used to be overwritten
     # silently, so `--model qwen3.8-max` ran the local GGUF).
     if model_cfg.get("provider", "llama_cpp") in ("llama_cpp",):
-        served = _detect_served_model(model_cfg.get("base_url", "http://localhost:8080"))
+        served = _detect_served_model(model_cfg)
         if explicit_model and served and served != explicit_model:
             print(
                 f"error: model {explicit_model!r} is not what the llama_cpp server serves "

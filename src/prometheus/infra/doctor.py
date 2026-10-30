@@ -488,8 +488,18 @@ class Doctor:
                 fix="Set model.base_url in prometheus.yaml.",
             )
         from prometheus.providers.openai_compat import models_url
+        from prometheus.providers.registry import local_server_headers
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            # A server started with a key (llama.cpp's --api-key) answers only with it.
+            headers = local_server_headers(self.config.get("model") or {})
+        except ValueError as exc:
+            return DiagnosticCheck(
+                name="Inference", category="connectivity", status="error",
+                message=f"{engine} at {redact_url(url)}: {exc}",
+                fix="Add the key to the env file, or clear model.api_key_env if the server takes none.",
+            )
+        try:
+            async with httpx.AsyncClient(timeout=5.0, headers=headers) as client:
                 # By the exact engine: Ollama's own list, the OpenAI-shaped one for llama.cpp, LM Studio, vLLM and the
                 # rest (a base ending in /v1 is already the API root). "llama" in "ollama" used to send Ollama to
                 # llama.cpp's path, and everything else to Ollama's.
