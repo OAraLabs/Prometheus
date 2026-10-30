@@ -3310,7 +3310,9 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         from prometheus.gateway.media_services import transcribe_audio
 
-        return await transcribe_audio(audio_path)
+        return await transcribe_audio(
+            audio_path, config=getattr(self, "_prometheus_config", None) or {},
+        )
 
     def _get_provider(self):
         """Return the model provider from the agent loop (for vision analysis)."""
@@ -3426,8 +3428,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """Synthesize *text* to an opus-encoded .ogg file for Telegram.
 
         Returns the absolute path on success, None on any failure
-        (caller should fall back to text). Uses piper if configured,
-        else espeak. Output is an opus-encoded ogg suitable for
+        (caller should fall back to text). Uses the remote server when
+        ``tts.url`` is set, then piper if configured, else espeak. Output is an opus-encoded ogg suitable for
         bot.send_voice() — Telegram voice messages require this format
         for the in-app waveform/playback UI.
         """
@@ -3444,7 +3446,14 @@ class TelegramAdapter(BasePlatformAdapter):
         engine = (cfg.get("engine") or "piper").lower()
         wav_path = tempfile.mktemp(suffix=".wav")
 
-        if engine == "piper":
+        from prometheus.infra.voice_remote import remote_settings, synthesize_remote
+
+        # tts.url first when set; the configured engine is the fallback.
+        prom_cfg = getattr(self, "_prometheus_config", None)
+        remote = remote_settings("tts", prom_cfg if isinstance(prom_cfg, dict) else {})
+        if remote is not None and await synthesize_remote(remote, clean, wav_path):
+            ok = True
+        elif engine == "piper":
             ok = await self._run_piper(clean, wav_path, cfg.get("model_path"))
         elif engine == "espeak":
             ok = await self._run_espeak(clean, wav_path)
