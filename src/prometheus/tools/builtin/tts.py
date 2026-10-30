@@ -64,13 +64,13 @@ class TTSTool(BaseTool):
 
         # tts.url, when set, is tried first unless a local engine was asked
         # for by name. Any failure falls through to the local engines below.
+        # The voice argument is engine-specific (an espeak or piper voice), so
+        # it stays with the local engines; the remote speaks with tts.voice.
         if arguments.engine is None:
             from prometheus.infra.voice_remote import remote_settings, synthesize_remote
 
             remote = remote_settings("tts")
-            if remote is not None and await synthesize_remote(
-                remote, text, out_path, arguments.voice,
-            ):
+            if remote is not None and await synthesize_remote(remote, text, out_path):
                 return ToolResult(output=f"Audio saved to {out_path}")
 
         engine = arguments.engine or _detect_engine()
