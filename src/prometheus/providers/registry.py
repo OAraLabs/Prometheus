@@ -187,8 +187,8 @@ _LOCAL_PROVIDERS = {"llama_cpp", "ollama"} | _LOCAL_OPENAI_COMPAT_PROVIDERS
 
 # Every key ProviderRegistry.create reads, per provider. A router rule or
 # fallback entry carrying any other key is refused at load: a key create()
-# never reads is a setting that silently does nothing (an `api_key_env` on a
-# llama.cpp entry sends no key at all). Pinned to create() itself by
+# never reads is a setting that silently does nothing (an `api_key_env` on an
+# Ollama entry sends no key at all). Pinned to create() itself by
 # tests/test_model_router.py, which records the keys it actually reads.
 _KEYED_ENDPOINT_KEYS = frozenset({
     "provider", "api_key", "api_key_env", "base_url", "base_url_env", "model", "timeout",
@@ -199,7 +199,7 @@ PROVIDER_CONFIG_KEYS: dict[str, frozenset[str]] = {
         for name in _OPENAI_COMPAT_PROVIDERS | _LOCAL_OPENAI_COMPAT_PROVIDERS
     },
     "anthropic": _KEYED_ENDPOINT_KEYS | {"prompt_caching"},
-    "llama_cpp": frozenset({"provider", "base_url", "timeout", "suppress_thinking"}),
+    "llama_cpp": frozenset({"provider", "base_url", "timeout", "suppress_thinking", "api_key", "api_key_env"}),
     "ollama": frozenset({"provider", "base_url", "timeout"}),
     "stub": frozenset({"provider", "base_url", "timeout"}),
 }
@@ -308,6 +308,28 @@ def _resolve_api_key(config: dict[str, Any], provider_name: str) -> str:
         )
 
     raise ValueError(f"No API key source found for provider {provider_name}")
+
+
+def _resolve_optional_key(config: Mapping[str, Any]) -> str | None:
+    """An optional key for a server you own that may be started with one (llama.cpp's ``--api-key``).
+
+    ``api_key`` (direct), else the variable ``api_key_env`` names. A named variable that is unset raises, as it
+    does for every provider: asking for a key and getting silence is a mistake worth hearing about. Neither set
+    (or both empty, as a template leaves them) means no key, the normal state of a server on your own desk.
+    """
+    direct = config.get("api_key", "")
+    env_name = config.get("api_key_env", "")
+    if direct:
+        return str(direct)
+    if env_name:
+        key = os.environ.get(env_name, "")
+        if key:
+            return key
+        raise ValueError(
+            f"Environment variable {env_name} is not set. "
+            f"Set it with: export {env_name}=your-key"
+        )
+    return None
 
 
 def _resolve_local_bearer(config: dict[str, Any], provider_name: str) -> str:
@@ -492,6 +514,7 @@ class ProviderRegistry:
                 # burning their token budgets on a thought channel and emitting
                 # empty content (briefing, memory extractor, tool calls).
                 suppress_thinking=config.get("suppress_thinking", True),
+                api_key=_resolve_optional_key(config),
             )
 
         if provider_name == "ollama":
