@@ -219,7 +219,9 @@ def redact_unit_text(text: str) -> str:
     """
     red = "<redacted>"
     word = r"(?:key|token|secret|passw|passph|pass(?![a-z0-9_-])|auth|cred)"
-    val = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"']+)"
+    # A value: \"escaped quotes\" (inside an sh -c "..." string, up to the first
+    # closing \" and never past the string's own "), "quoted", 'quoted' or bare.
+    val = r"(?:\\\"[^\"\n]*\\\"|\\'[^'\n]*\\'|\"[^\"]*\"|'[^']*'|[^\s\"']+)"
     # scheme://user:pass@host -> scheme://<redacted>@host
     text = re.sub(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s@\"']+@", r"\g<1>" + red + "@", text)
     # Authorization: Bearer x / X-Api-Key: x, and -H 'X-Api-Key:x' (curl needs no
@@ -232,7 +234,7 @@ def redact_unit_text(text: str) -> str:
     # Environment="API_TOKEN=two words": on an Environment= line the quotes wrap one
     # whole assignment. Elsewhere they may wrap a command (sh -c "TOKEN=x exec srv
     # --port 1"), so there the NAME=value rule below stops at the first space.
-    quoted = re.compile(r"(?i)(\"[A-Za-z0-9_]*" + word + r"[A-Za-z0-9_]*=)[^\"]*\"")
+    quoted = re.compile(r"(?i)(\"[A-Za-z0-9_]*" + word + r"[A-Za-z0-9_]*=)(?:[^\"\\\n]|\\.)*\"")
     text = re.sub(r"(?m)^[ \t]*Environment=.*$",
                   lambda m: quoted.sub(r"\g<1>" + red + '"', m.group(0)), text)
     # NAME=value, --name=value
@@ -487,20 +489,27 @@ def is_never_stop(unit: str, guard: tuple[str, ...] = NEVER_STOP) -> bool:
     return any(fnmatch.fnmatch(unit, pat) for pat in guard)
 
 
+_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash"})
+
+
 def guess_model(exec_start: list[str]) -> str | None:
     try:
         toks = shlex.split(" ".join(exec_start))
     except ValueError:
         toks = " ".join(exec_start).split()
     flat: list[str] = []
-    for t in toks:  # a token with spaces is a shell string (sh -c "... -m x ...")
-        if any(c.isspace() for c in t):
+    shell = False
+    for i, t in enumerate(toks):
+        # Only a shell's -c string is a command to split again (sh -c "... -m x ...");
+        # any other quoted token, such as -m "/models/my model.gguf", is one argument.
+        if shell and i and re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", toks[i - 1]):
             try:
                 flat += shlex.split(t)
             except ValueError:
                 flat += t.split()
         else:
             flat.append(t)
+        shell = shell or os.path.basename(t.lstrip("@-+!:")) in _SHELLS
     toks = flat
     for i, t in enumerate(toks[:-1]):
         if t in ("-m", "--model", "-hf", "--hf-repo"):

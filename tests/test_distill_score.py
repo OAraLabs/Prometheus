@@ -586,6 +586,12 @@ REFUSED_SCHEMAS = [
     pytest.param({"type": "object", "properties": {"x": {"minimum": "1"}}}, id="minimum a string"),
     pytest.param({"type": "object", "properties": {"x": 5}}, id="property schema not an object"),
     pytest.param({"type": "object", "properties": {"x": {"$ref": 5}}}, id="$ref not a string"),
+    # jsonschema's validator_for raised AttributeError/TypeError on these, not SchemaError
+    pytest.param({"type": "object", "$schema": 5}, id="$schema a number"),
+    pytest.param({"type": "object", "$schema": ["x"]}, id="$schema a list"),
+    pytest.param({"type": "object", "$schema": {"a": 1}}, id="$schema an object"),
+    pytest.param({"type": "object", "$schema": None}, id="$schema null"),
+    pytest.param({"type": "object", "properties": {"x": {"$schema": 5}}}, id="nested $schema a number"),
     pytest.param("object", id="parameters not a schema"),
 ]
 
@@ -602,6 +608,18 @@ def _validators(monkeypatch: Any, validator: str) -> None:
 def test_invalid_tool_schemas_are_refused_at_load_by_both_validators(validator, params, monkeypatch):
     """A case file loads or fails the same with and without jsonschema."""
     _validators(monkeypatch, validator)
+    with pytest.raises(score.CaseError, match="invalid parameters schema"):
+        score.parse_case(_one_tool_case(params), "f:1")
+
+
+def test_load_uses_jsonschemas_metaschema_check_when_importable():
+    """Fails if schema_problem's jsonschema branch is swapped for the built-in subset."""
+    if score._jsonschema is None:
+        pytest.skip("jsonschema is not importable here")
+    params = {"type": "object", "description": 5}
+    # the premise: the subset does not check "description"; pick another schema if it starts to
+    assert score._subset_schema_problems(params, score.schema_dialect(params)) == []
+    assert score.schema_problem(params)
     with pytest.raises(score.CaseError, match="invalid parameters schema"):
         score.parse_case(_one_tool_case(params), "f:1")
 

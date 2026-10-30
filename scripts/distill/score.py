@@ -146,9 +146,11 @@ emits); the draft-07 tuple ``items`` and the draft-04 boolean
 the cases load, by jsonschema's metaschema check or, without it, the built-in
 subset's check of the same rules for the keywords it applies (JSON type names,
 those dialect forms, numbers where numbers go, a ``pattern`` Python can
-compile), so a case file loads or fails the same either way, and a bad schema
-fails when the set is validated (``build_eval_sets.py validate`` loads every
-case through this parser), not at the start of a scoring run.
+compile), so a case file loads or fails the same either way. The check is in
+``parse_case``, so it runs whenever a case file loads. ``build_eval_sets.py
+validate`` does not load the eval-tools or val case files: their schemas are
+checked at load time by ``parse_case``, so a bad one fails ``run`` (or
+``summarize``) as the cases load, before any request is sent.
 
 Metrics (Wilson 95% intervals on every rate)
 --------------------------------------------
@@ -581,6 +583,8 @@ def _subset_schema_problems(schema: Any, dialect: str, path: str = "parameters",
         probs.append(f"{path}.enum is not a list")
     if "$ref" in schema and not isinstance(schema["$ref"], str):
         probs.append(f"{path}.$ref is not a string")
+    if "$schema" in schema and not isinstance(schema["$schema"], str):
+        probs.append(f"{path}.$schema {schema['$schema']!r} is not a string")
 
     def walk(sub: Any, p: str) -> None:
         probs.extend(_subset_schema_problems(sub, dialect, p, depth + 1))
@@ -629,6 +633,11 @@ def schema_problem(schema: Any) -> str:
     if not isinstance(schema, (dict, bool)):
         return f"{type(schema).__name__} is not a schema object"
     if _jsonschema is not None:
+        uri = schema.get("$schema", "") if isinstance(schema, dict) else ""
+        if not isinstance(uri, str):
+            # validator_for raises AttributeError/TypeError on 5 or ["x"] (and warns
+            # on null, which a later jsonschema will raise on): a schema problem.
+            return f"parameters.$schema {uri!r} is not a string"
         try:
             _jsonschema.validators.validator_for(schema).check_schema(schema)
         except _jsonschema.exceptions.SchemaError as exc:

@@ -221,9 +221,40 @@ def test_redact_sh_c_assignment_keeps_the_command(assign):
     assert S.guess_model(execs) == "org/m"
 
 
+@pytest.mark.parametrize("inner, secret", [
+    ('HF_TOKEN=\\"hf_ESC1\\" exec /opt/llama-server -hf org/m', "hf_ESC1"),
+    ('exec /opt/llama-server --api-key \\"ESC2\\" -hf org/m', "ESC2"),
+    ('HF_TOKEN=\\"two ESC3\\" exec /opt/llama-server -hf org/m', "ESC3"),
+    ("exec /opt/llama-server --api-key \\'ESC4\\' -hf org/m", "ESC4"),
+])
+def test_redact_escaped_quotes_inside_sh_c_keeps_the_command(inner, secret):
+    text = f'ExecStart=/bin/sh -c "{inner} --port 8080"\n'
+    out = S.redact_unit_text(text)
+    assert secret not in out and "<redacted>" in out
+    execs = S.parse_unit_cat(out)["exec_start"]
+    assert "llama-server" in execs[0] and "--port 8080" in execs[0]
+    assert S.guess_health("llm.service", execs, []) == {"type": "http",
+                                                        "url": "http://127.0.0.1:8080/health"}
+    assert S.guess_model(execs) == "org/m"
+
+
 def test_redact_environment_quotes_still_wrap_the_whole_value():
     out = S.redact_unit_text('Environment="A=1" "API_TOKEN=two words25" "B=2"\n')
     assert "words25" not in out and '"A=1"' in out and '"B=2"' in out
+    out = S.redact_unit_text('Environment="HF_TOKEN=\\"esc words26\\"" "B=2"\n')
+    assert "words26" not in out and '"B=2"' in out
+
+
+@pytest.mark.parametrize("execs, model", [
+    (['/opt/llama-server -m "/models/my model.gguf" --port 8080'], "/models/my model.gguf"),
+    (["/opt/llama-server -c 4096 --model '/models/my model.gguf'"], "/models/my model.gguf"),
+    (['/bin/sh -c "exec /opt/llama-server -m \'/models/my model.gguf\' --port 8080"'],
+     "/models/my model.gguf"),
+    (['/usr/bin/env bash -lc "exec /opt/llama-server -m /models/a.gguf --port 8080"'], "/models/a.gguf"),
+])
+def test_guess_model_keeps_a_quoted_path_with_a_space(execs, model):
+    # Only a shell's -c string is split again; a quoted argument stays whole.
+    assert S.guess_model(execs) == model
 
 
 def test_guess_health():
