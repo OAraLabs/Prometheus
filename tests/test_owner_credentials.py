@@ -96,7 +96,7 @@ def test_pair_local_does_not_hand_back_the_master_key(world, secret):
 
 def test_pair_local_response_keeps_the_three_keys_beacon_parses_and_adds_a_count(world, secret):
     body = pair_local(world, secret)
-    assert set(body) == {"token", "api_base_port", "ws_port", "revoked_previous"}
+    assert set(body) == {"token", "api_base_port", "ws_port", "revoked_previous", "instance_id", "node_pub"}
     assert body["revoked_previous"] == 0 and isinstance(body["revoked_previous"], int)
 
 

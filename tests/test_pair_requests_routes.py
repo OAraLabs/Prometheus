@@ -48,8 +48,8 @@ def test_a_stranger_can_ask_to_join_and_gets_what_the_contract_says(world):
     response, requester, _ = world.request()
     assert response.status_code == 201, response.text
     body = response.json()
-    assert set(body) == {"request_id", "poll_secret", "match_code", "instance_public_key", "expires_at",
-                         "ttl_seconds", "poll_interval_seconds", "notified"}
+    assert set(body) == {"request_id", "poll_secret", "match_code", "match_code_version", "instance_public_key",
+                         "instance_id", "node_pub", "expires_at", "ttl_seconds", "poll_interval_seconds", "notified"}
     assert re.fullmatch(r"[0-9a-f]{32}", body["request_id"])
     assert re.fullmatch(r"[A-Za-z0-9_-]{43}", body["poll_secret"])
     assert body["instance_public_key"] == pair_seal.b64url_encode(world.der)
@@ -346,7 +346,7 @@ def test_the_requester_collects_the_token_sealed_and_it_authenticates(world):
     polled = world.poll(created)
     body = polled.json()
     assert body["status"] == "approved" and set(body) == {
-        "status", "device_id", "sealed", "endpoints", "tls", "approved_at"}
+        "status", "device_id", "sealed", "endpoints", "tls", "approved_at", "instance_id", "node_pub"}
     assert set(body["sealed"]) == {"alg", "ephemeral_public_key", "nonce", "ciphertext"}
     opened = requester.unseal(created["request_id"], body["sealed"])
     assert opened["device_id"] == body["device_id"] and opened["name"] == "Alex's MacBook"

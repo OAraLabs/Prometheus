@@ -6,8 +6,8 @@ Two tools, no writes, no embeddings, no vector store:
   page paths plus the matching context.
 * ``vault_read``   — return one page's contents.
 
-WHAT THE BRAIN VAULT IS. A git repo of compiled knowledge from Will's full
-claude.ai and Claude Code history — 95 wiki pages over ~340 raw source files.
+WHAT THE BRAIN VAULT IS. The owner's git repo of compiled knowledge: wiki
+pages compiled from raw sources such as past AI-assistant conversations.
 It is NOT the Prometheus wiki (``get_wiki_root()``, default
 ``~/.prometheus/wiki``), which is a machine-owned projection of ``memory.db``.
 Two roots, two idioms, deliberately not conflated; see ``config.paths``.
@@ -418,8 +418,8 @@ class VaultSearchTool(BaseTool):
 
     name = "vault_search"
     description = (
-        "Search the BRAIN VAULT — Will's second brain, compiled "
-        "from his full claude.ai and Claude Code history: projects, decisions, "
+        "Search the BRAIN VAULT — the owner's second brain, compiled "
+        "from their notes and past conversations: projects, decisions, "
         "people, companies and standing engineering principles. Returns "
         "matching page paths with context; read a full page with vault_read. "
         "Searches the vault's compiled wiki/ tree. This is NOT the Prometheus "

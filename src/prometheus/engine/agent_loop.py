@@ -50,6 +50,10 @@ from prometheus.providers.base import (
     ApiTextDeltaEvent,
     ModelProvider,
 )
+from prometheus.context.prompt_assembler import (
+    is_hosted_provider,
+    prompt_for_route,
+)
 from prometheus.context.system_prompt import (
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
     rewrite_model_identity,
@@ -729,6 +733,11 @@ class LoopContext:
     # one (see _microcompact_old_results), so cloud tiers skip it by default.
     # Set True to force the old behavior everywhere.
     microcompact_on_cloud: bool = False
+    # anatomy.include_in_hosted_prompt. Off: a request to a hosted model gets
+    # the machine-and-network section replaced by a pointer to the anatomy
+    # tool (prompt_assembler.infrastructure_for_route). Local routes always
+    # carry it.
+    infrastructure_in_hosted_prompt: bool = False
     microcompact_keep_chars: int = 200    # chars to keep per compacted result
     microcompact_keep_chars_no_lcm: int = 500  # chars if LCM hasn't ingested
     lcm_engine: object | None = None      # LCMEngine for microcompaction checks
@@ -941,6 +950,12 @@ _ROUND_SERVING: contextvars.ContextVar = contextvars.ContextVar("prometheus_roun
 # engine/tool_context.py so the approval queue can read it too (it stamps each
 # pending request with the session that raised it); this is that same object.
 from prometheus.engine.tool_context import RUN_SESSION as _RUN_SESSION  # noqa: E402
+from prometheus.engine.tool_context import TURN_TRUST as _TURN_TRUST_VAR  # noqa: E402
+
+
+def _turn_trust() -> tuple[bool, str | None]:
+    return _TURN_TRUST_VAR.get()
+
 
 # The turn the run is recording into telemetry v2 (WP-X.54 T-3): a _TurnRecord,
 # or None when the run has no telemetry. Beside _RUN_SESSION for the same
@@ -1552,7 +1567,14 @@ async def run_loop(
     _serving_token = _ROUND_SERVING.set(None)
     _offered_token = _ROUND_OFFERED.set(None)
     _catalog_token = _RUN_CATALOG.set(None)
+    # The profile this run is held to; _run_loop sets it once the profile is resolved (None until then,
+    # and for a nested subagent run, whose registry the spawner already cut to its parent's profile).
+    from prometheus.config.profiles import RUN_PROFILE as _RUN_PROFILE
+    _profile_token = _RUN_PROFILE.set(None)
     _session_token = _RUN_SESSION.set(None if ephemeral else recorded_session_id)
+    # Gateway trust: a turn a group member asked for teaches nothing (training pairs read it; tools get it below).
+    from prometheus.engine.tool_context import TURN_TRUST as _TURN_TRUST, turn_trust_of as _turn_trust_of
+    _turn_trust_token = _TURN_TRUST.set(_turn_trust_of(messages))
     # Telemetry v2 (WP-X.54 T-3). No telemetry, no record and no writer: with
     # telemetry off nothing reaches the v2 tables.
     turn_record: _TurnRecord | None = None
@@ -1608,7 +1630,9 @@ async def run_loop(
         _ROUND_SERVING.reset(_serving_token)
         _ROUND_OFFERED.reset(_offered_token)
         _RUN_CATALOG.reset(_catalog_token)
+        _RUN_PROFILE.reset(_profile_token)
         _RUN_SESSION.reset(_session_token)
+        _TURN_TRUST.reset(_turn_trust_token)
         if turn_key is not None:
             try:
                 fmv.discard_turn(turn_key=turn_key)
@@ -1881,6 +1905,14 @@ async def _run_loop(
                     "names", active_profile.name, len(tool_schema),
                 )
                 active_profile = None
+        if active_profile is not None:
+            # What the run advertises and what it may CALL now follow the same profile: before this, the
+            # call path read the full registry, so a tool the profile left out ran when the model named
+            # it. Set after the empty-filter fallback above, so a profile that matches no tool limits
+            # neither.
+            from prometheus.config.profiles import RUN_PROFILE
+
+            RUN_PROFILE.set(active_profile)
 
     # A deferred local run offers EVERY tool (audit 2026-10-16, fix 3): the
     # most-used in full, the rest as skeletons, sorted, frozen for the run
@@ -1987,6 +2019,15 @@ async def _run_loop(
         active_system_prompt = _refresh_memory_section(
             active_system_prompt, context.boot_memory_prompt, context.memory_prompt_builder,
         )
+    # A hosted model gets this machine's layout only on demand (the anatomy
+    # tool) unless the owner asked otherwise, and paths without the account
+    # name (~/…). A local route is sent the prompt unchanged.
+    active_system_prompt = prompt_for_route(
+        active_system_prompt,
+        hosted=is_hosted_provider(
+            context.route_provider or _provider_name_for_telemetry(context.provider)),
+        include_infrastructure=context.infrastructure_in_hosted_prompt,
+    )
     # The base prompt for THIS run — workspace-swapped when the session has
     # one. The adapter's format_request (below, and again on model fallback
     # and malformed-call retries) must start from this, not from
@@ -2524,6 +2565,15 @@ async def _run_loop(
                 ),
             )
             active_system_prompt = rewritten
+            # A hosted fallback must not receive what a local primary carried
+            # (the same rule as the run's own route, above).
+            _fallback_hosted = is_hosted_provider(_decision.provider_name)
+            active_system_prompt = prompt_for_route(
+                active_system_prompt, hosted=_fallback_hosted,
+                include_infrastructure=context.infrastructure_in_hosted_prompt)
+            per_call_system_prompt = prompt_for_route(
+                per_call_system_prompt, hosted=_fallback_hosted,
+                include_infrastructure=context.infrastructure_in_hosted_prompt)
             # The fallback round's tools follow the model that serves it (fix 3):
             # a local fallback gets the local catalog (stubs), a cloud one every
             # full schema. Only this round: the next round asks the primary again.
@@ -4255,6 +4305,8 @@ def _capture_success_pairs(
     """On a successful execution: complete any pending pairs + cloud goldens.
 
     Fail-loud-but-non-blocking (pair_capture handles the loudness)."""
+    if not _turn_trust()[0]:
+        return  # gateway trust: a turn a group member wrote is never training data
     try:
         from prometheus.learning.pair_capture import (
             capture_pair,
@@ -5512,6 +5564,35 @@ async def _execute_tool_call(
             is_error=True,
         )
 
+    # The run's profile is a permission, not just a view. A tool it leaves out is refused here, before the
+    # lucky-guess note below: that path exists for DEFERRED tools (allowed, just not sent), and it used to run
+    # every registered tool, so a profile that dropped bash or write_file only hid them. A policy refusal like
+    # the gate's, so it is recorded as permission_denied and never counts against the model.
+    from prometheus.config.profiles import current_run_profile, profile_permits
+
+    _run_profile = current_run_profile()
+    if _run_profile is not None and not profile_permits(_run_profile, tool_name):
+        _refusal = (
+            f"{tool_name} is not available in this conversation: its profile {_run_profile.name!r} does not "
+            f"include it. Use one of the tools you were given, or ask the owner to switch profiles (/profile)."
+        )
+        log.info("Refused %s: not in profile %r", tool_name, _run_profile.name)
+        if context.telemetry is not None:
+            context.telemetry.record(
+                model=_serving_model(context),
+                tool_name=tool_name,
+                success=False,
+                error_type="permission_denied",
+                error_detail=f"not in profile {_run_profile.name!r}",
+                repairs=len(repair_log),
+                served_model=served_model,
+                parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
+                session_id=_row_session,
+                **_v2_call(tool_name, tool_use_id, success=False,
+                           repair_log=repair_log, raw_call=_raw_call),
+            )
+        return ToolResultBlock(tool_use_id=tool_use_id, content=_refusal, is_error=True)
+
     # Lucky guess: tool is registered but the round did not offer it. Read
     # from what the round sent (_ROUND_OFFERED), never recomputed: the old
     # recomputation used the local deferral while a run routed to a cloud
@@ -5857,6 +5938,17 @@ async def _execute_tool_call(
             # defect this whole change closes.
             from prometheus.permissions.checker import PermissionDecision
             decision = PermissionDecision.approve(_path_unknown)
+        _turn_teaches, _turn_author = _turn_trust()
+        if decision.allowed and not _turn_teaches:
+            # GATEWAY TRUST: a turn a group member wrote (not the gateway's owner) never runs a tool on its own: not a
+            # read-only one (reading the owner's files and replying in the group is the leak), not under a remembered
+            # grant, not with the gate off. Every call waits for the owner, and only the owner can answer (the
+            # approval queue refuses anyone else from a chat). A denial stays a denial.
+            from prometheus.permissions.checker import PermissionDecision
+            decision = PermissionDecision.approve(
+                f"{_turn_author or 'a member of this chat'} asked for this, not the owner: "
+                f"{tool_name} runs only if the owner approves"
+            )
         if not decision.allowed:
             # The gate's own queue is the fallback prompt. Resolved HERE, in
             # the one function every surface goes through, rather than wired
@@ -5977,6 +6069,10 @@ async def _execute_tool_call(
                         # Public facts only: never a URL or a credential.
                         "serving_route": _serving_route(context),
                         "context_window_for": _context_window_for(context),
+                        # Gateway trust: whether the turn's request was the owner's (a group member's teaches
+                        # nothing: the memory tool refuses), and who wrote it.
+                        "turn_trusted": _turn_trust()[0],
+                        "turn_author": _turn_trust()[1],
                         **(context.tool_metadata or {}),
                     },
                 ),
@@ -6232,6 +6328,7 @@ class AgentLoop:
         tool_results_turn_budget: int = 8000,
         microcompact_after_turns: int = 3,
         microcompact_on_cloud: bool = False,
+        infrastructure_in_hosted_prompt: bool = False,
         microcompact_keep_chars: int = 200,
         microcompact_keep_chars_no_lcm: int = 500,
         lcm_engine: object | None = None,
@@ -6261,6 +6358,7 @@ class AgentLoop:
         self._tool_results_turn_budget = tool_results_turn_budget
         self._microcompact_after_turns = microcompact_after_turns
         self._microcompact_on_cloud = microcompact_on_cloud
+        self._infrastructure_in_hosted_prompt = infrastructure_in_hosted_prompt
         self._microcompact_keep_chars = microcompact_keep_chars
         self._microcompact_keep_chars_no_lcm = microcompact_keep_chars_no_lcm
         self._profile_resolver = profile_resolver
@@ -6418,6 +6516,7 @@ class AgentLoop:
             tool_results_turn_budget=self._tool_results_turn_budget,
             microcompact_after_turns=self._microcompact_after_turns,
             microcompact_on_cloud=self._microcompact_on_cloud,
+            infrastructure_in_hosted_prompt=self._infrastructure_in_hosted_prompt,
             microcompact_keep_chars=self._microcompact_keep_chars,
             microcompact_keep_chars_no_lcm=self._microcompact_keep_chars_no_lcm,
             compactor=self._compactor,
@@ -6491,10 +6590,19 @@ class AgentLoop:
         # ``skill_created`` signal whose payload carries ``trigger_task`` (the
         # message's first 200 chars) into ``telemetry.signal_events``. The
         # trace is still drained below so it cannot leak into the next turn.
+        from prometheus.engine.tool_context import turn_trust_of as _turn_trust_of
+
         if self._post_task_hooks and self._tool_trace:
             if is_session_ephemeral(session_id):
                 log.debug(
                     "Ephemeral session %s — skipping %d post-task hook(s)",
+                    session_id, len(self._post_task_hooks),
+                )
+            elif not _turn_trust_of(messages or [])[0]:
+                # Gateway trust: SkillCreator / SkillRefiner learn only from the owner's own requests, never from a
+                # turn a group member wrote.
+                log.debug(
+                    "Turn in %s was a group member's — skipping %d post-task hook(s)",
                     session_id, len(self._post_task_hooks),
                 )
             else:

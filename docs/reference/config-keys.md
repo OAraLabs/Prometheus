@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **445** of
+Every key in `config/prometheus.yaml.default` — **460** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -85,7 +85,7 @@ none either — the key is documented so its absence is visible.
 | `security.workspace_root` | `~/.prometheus/workspace` |
 | `security.dashboard_tool_bind_host` | `127.0.0.1` |
 | `security.denied_commands` | `['DROP TABLE']` |
-| `security.denied_paths` | `['/etc', '/sys', '/boot', '/*/.ssh', '/*/.gnupg', '/*/.config/*/*env', '/*/Library/Application Support/Prometheus/pairing', '/*/.local/share/prometheus/pairing']` |
+| `security.denied_paths` | `['/etc', '/sys', '/boot', '/*/.ssh', '/*/.gnupg', '/*/.config/*/*env', '/*/Library/Application Support/Prometheus/pairing', '/*/.local/share/prometheus/pairing', '/*/.prometheus/data/devices.db*', '/*/.prometheus/data/cron_jobs.json*', '/*/.prometheus/data/cron_history.jsonl*', '/*/.prometheus/data/cron_undelivered.jsonl*', '/*/.prometheus/data/cron_scheduler.pid*']` |
 | `security.bash_confinement` | `auto` |
 | `security.bash_allow_ssh` | `False` |
 | `security.bash_write_confinement` | `auto` |
@@ -111,6 +111,7 @@ none either — the key is documented so its absence is visible.
 | `gateway.telegram_enabled` | `False` |
 | `gateway.telegram_token` | `` |
 | `gateway.allowed_chat_ids` | `[]` |
+| `gateway.owner_user_ids` | `[]` |
 | `gateway.proxy_url` | *(empty — no code default)* |
 | `gateway.heartbeat_interval` | `30` |
 | `gateway.cron_enabled` | `True` |
@@ -133,12 +134,14 @@ none either — the key is documented so its absence is visible.
 | `gateway.slack.bot_token` | `` |
 | `gateway.slack.app_token` | `` |
 | `gateway.slack.allowed_channels` | `[]` |
+| `gateway.slack.owner_user_ids` | `[]` |
 | `gateway.discord` | *(section)* |
 | `gateway.discord.enabled` | `False` |
 | `gateway.discord.token` | `` |
 | `gateway.discord.guild_ids` | `[]` |
 | `gateway.discord.channel_ids` | `[]` |
 | `gateway.discord.user_ids` | `[]` |
+| `gateway.discord.owner_user_ids` | `[]` |
 | `gateway.discord.skill_event_notifications` | `quiet` |
 | `gateway.discord.long_reply_threshold` | `800` |
 | `gateway.paperclip` | *(section)* |
@@ -164,6 +167,17 @@ none either — the key is documented so its absence is visible.
 | `whisper.model` | `base` |
 | `whisper.device` | `auto` |
 | `whisper.language` | `en` |
+| `stt` | *(section)* |
+| `stt.url` | `` |
+| `stt.api_key_env` | `` |
+| `stt.model` | `whisper-1` |
+| `stt.timeout_seconds` | `60` |
+| `tts` | *(section)* |
+| `tts.url` | `` |
+| `tts.api_key_env` | `` |
+| `tts.model` | `tts-1` |
+| `tts.voice` | `alloy` |
+| `tts.timeout_seconds` | `60` |
 | `router` | *(section)* |
 | `router.overrides` | *(section)* |
 | `router.overrides.enabled` | `True` |
@@ -419,6 +433,7 @@ none either — the key is documented so its absence is visible.
 | `anatomy.enabled` | `True` |
 | `anatomy.scan_on_startup` | `True` |
 | `anatomy.include_in_system_prompt` | `True` |
+| `anatomy.include_in_hosted_prompt` | `False` |
 | `anatomy.ssh_user` | `` |
 | `anatomy.ssh_key` | `` |
 | `mcp_servers` | `{}` *(open map)* |

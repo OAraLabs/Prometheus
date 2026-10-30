@@ -2,6 +2,90 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## Unreleased
+
+- Voice: speech-to-text and text-to-speech can use a voice server on another machine. Set `stt.url` (an OpenAI-compatible `/v1/audio/transcriptions` endpoint) or `tts.url` (`/v1/audio/speech`). The key comes from the variable named in `api_key_env`, read from the environment or the env file and never from `prometheus.yaml`. If the server can't be reached, that request runs on the local engines and leaves one log line. A refused key also falls back to local, but logs an ERROR. `oara doctor` shows whether each configured server answers. With no url set, voice runs locally as before. This covers Telegram and Discord voice notes, Telegram voice replies, `oara --voice` and the `tts` tool.
+- Security: joserfc 1.7.7 in the lock, for CVE-2026-119284. joserfc comes only with the `evals` extra (through authlib), so the daemon never loads it.
+- Docs: a contract for pieces (`docs/contracts/pieces.md`, `pieces/0.1`), the services Prometheus connects out to, such as a voice box or a model server on another computer. It describes how one joins with no config file edited: Prometheus notices it on the local network or at an address you type, you approve it once, its key is pinned and checked before anything is sent, and when it stops answering Prometheus falls back and says so. Nothing is built yet; later changes build it in the order the contract lists.
+- Security: authlib 1.9.1 and dnspython 2.9.0 in the lock, for CVE-2026-96760, CVE-2026-114614 to CVE-2026-114618 and CVE-2026-114620 (authlib) and CVE-2026-114605 (dnspython). Both reach Prometheus only through the `evals` extra (arize-phoenix). Only `uv.lock` changes.
+- Setup: when Prometheus looks for an AI app on this computer (`GET /api/setup/detect`) or on one you name (`POST /api/setup/probe`), it now says which app answered (Ollama, LM Studio, llama.cpp, vLLM or another OpenAI-compatible app), which models it serves, and why none is usable when none is: too short a context window, nothing loaded, no chat model, needs a key, or no answer. Configure checks the chosen model the same way. A model needs a window of at least 24,576 tokens: the floor measured from a fresh install's first turn (20,480) plus one step of safety margin. `GET /api/setup/status` lists `local_probe` in `features`.
+- API clients: `GET /api/status` gains `name` and `fp`, the same values `GET /api/hello` answers, beside `node_pub` and `instance_id`, so a client paired with several Prometheus instances can tell them apart. Additive only; `/health` still carries no identity.
+- Identity: `POST /api/identity/challenge` lets a paired app check it reached the Prometheus it paired with before it sends its token. The daemon signs the app's 32-byte nonce with its node key, binding the instance id, the node key, and on the TLS port the certificate's SPKI digest. No token, no cookie, nothing written; hello's rate limit. FOUNDATION is now Version 4: the node key may sign identity challenges, and is still never proof of the user (the bearer token is).
+- Pairing: every route a device joins through (an approved request, an owner code, same-Mac pairing) now hands it `instance_id` and `node_pub`, the key it pins to check the identity challenge on later connects. A request that sends `match_code_version: 2` gets a 4-digit code that also covers the node key, so the owner's check confirms it; requests that don't send it get the same code as before. Contract `pairing/0.2`.
+- Tool descriptions no longer name a person: the brain-vault tool now says "the owner's second brain". Hosted models are sent paths under your home folder as `~/…` instead of absolute paths, which included your account name. Local models are unchanged.
+- Doctor: the Config check looks for `prometheus.yaml` where the daemon does (`--config`, then the checkout's `config/prometheus.yaml`, then `$PROMETHEUS_CONFIG_DIR`, default `~/.prometheus`) and names the file it found. Before, it looked only in the checkout, so a daemon running on `~/.prometheus/prometheus.yaml` logged "config/prometheus.yaml not found" at every start, and so did the chat `/doctor` command.
+- Tests: the worker end-listener test no longer fails now and then under full-suite load (#783). Its stand-in worker exited without reading its brief, so under load it was restarted to take the brief and reported finishing twice. The stand-in now reads its brief first, as a real worker does. Nothing outside the tests changes.
+- Security: an agent profile's tool list now limits what a conversation can run, not only what it is shown. Before, a model that named a tool its profile left out (`research` has no file writes; `exclude_tools: [bash]` drops bash) ran it, under the same approvals and floors as the `full` profile. Now such a call is refused with an error naming the profile. A subagent gets only the tools both its type and the conversation's profile allow, `task_create` runs a shell command (`local_bash`, `poll`) only when the profile includes `bash`, and a profile that leaves any tool out starts no worker process (`task_create` `local_agent`, `sessions_spawn`); its subagents keep the limits instead. Deferred tools the profile allows, and tools left out only by `max_tool_schemas`, still run.
+- Hosted models no longer receive this machine's hardware, services and network (the anatomy section, which could include tailnet peer names) in every prompt. They get a pointer to the `anatomy` tool and call it when a task needs the layout. Local models are unchanged. `anatomy.include_in_hosted_prompt: true` restores the old behaviour.
+- Computer use: no thumbnail is taken of a window that may show a GTK4 password field. GTK4 reports a password entry as an unnamed text field, which the password check did not catch, so a picture of a GTK4 sign-in window was sent to Beacon. Any unnamed text field now skips the picture.
+- Computer use: a text field is no longer described by the text it holds. GTK4 names a text view by its contents, so a document's text, including text typed in an earlier task, reached the desktop prompt, the action log and every Beacon. Such fields are now named by their kind alone.
+- Computer use: an app whose process name Linux cuts at 15 characters (GNOME Terminal is "gnome-terminal-") can be used after you pick it. Before, its window reported "Gnome-terminal" and every task in it was refused.
+- Computer use: a GTK4 menu button ("Main menu", "Open", "View") can be clicked by name. GTK4 shows each one twice, a wrapper and the toggle inside it, so the two matching rows tied and the task did nothing. Only the toggle that acts is offered now.
+- Computer use: when an app pick ends without being turned off (the daemon restarted, or the pick expired after 8 hours), the action log now says so. Before, a reconnecting Beacon kept showing the app as picked, its picker never opened, and "Change / clear" changed nothing.
+- Daily briefing: with `gateway.briefing_chat_id` unset, the briefing goes to your private chat (`gateway.owner_user_ids`, else the private chats in `gateway.allowed_chat_ids`), then to `TELEGRAM_CHAT_ID`, and otherwise nowhere, with an error. Before, it went to the first allowed chat, which could be a group. A `briefing_chat_id` you set, a group included, is used as before.
+
+## 0.9.17 (2026-10-25)
+
+0.9.17 fixes two security issues: chat gateways let anyone in an allowed group approve tool calls and change what the agent remembers, and a shell command the model ran could rewrite the files Prometheus trusts as its own. It pins the Mac app's bundled Python at 3.12.15 (OpenSSL 3.5.9), and updates opentelemetry, filelock and setuptools for published advisories. It also:
+- warns when the web API token sits where the agent's shell can read it;
+- asks before a file tool writes a project instruction file, and refuses invisible text in skills and memory;
+- keeps the memory extractor from skipping messages when its model call fails;
+- makes computer use work with SENTINEL off, and type into GTK4 text fields;
+- keeps genuine user requests in self-improvement evidence (#788, by @sepehrtaji-dev).
+
+### Security
+
+- **Only a chat gateway's owner approves and teaches ([GHSA-c3c2-8vrj-x346](https://github.com/OAraLabs/Prometheus/security/advisories/GHSA-c3c2-8vrj-x346)).**
+  - **Before:** the Telegram, Slack and Discord gateways went by which chat a message came from, not who sent it. In an allowed group chat, Slack channel or Discord server, any member could approve or deny the agent's tool calls (including `/approve always` and `/gate off`), have their message run as if the owner had typed it, and add to memory, skills and self-improvement data. Approval prompts and the daemon's own notices that had no chat of their own went to the first allowed chat, so a group listed first saw them.
+  - **Now:** each gateway has an owner. Only the owner approves tool calls or uses the owner-only commands. Members can still chat: their messages are recorded as theirs, any tool their message asks for waits for the owner, and nothing they say goes into memory, skills, self-improvement or training data. Approval prompts, cron-failure notices and background-task notices go only to the owner's private chat.
+  - **Not affected:** Telegram with only your own private chat allowed, and Beacon and the REST and WebSocket API, which authenticate devices rather than chats.
+- **A model's shell can't rewrite Prometheus's trusted state ([GHSA-wq93-7fvg-53pj](https://github.com/OAraLabs/Prometheus/security/advisories/GHSA-wq93-7fvg-53pj)).**
+  - **Before:** none of the shell's floors (the macOS sandbox profile, the Linux AppArmor profile, the permission gate's always-denied list) covered the device registry, the config file, the identity files, `MEMORY.md` and `USER.md`, skills, or the scheduled-jobs files. A shell command the model was talked into running could create a trusted device token, rewrite the config, plant lasting instructions, or plant a cron job that runs as the owner. Mainly macOS, where the shell has no write floor.
+  - **Now:** these files are under the same floors as your keys. Writing, appending, replacing, deleting, linking, planting a side file and renaming their folders are refused; reading still works, and so do Prometheus's own writers. The file tools refuse the device registry, the config file and the scheduled-jobs files, and ask before writing the identity files, memory or skills. The daemon tests the floor at startup and reports a stale AppArmor profile at ERROR.
+- **The Mac app's build pins CPython 3.12.15 and OpenSSL 3.5.9 (#843).** The 0.9.16 app was rebuilt with them by hand; from 0.9.17 every build gets them. They fix CVE-2026-19445 and CVE-2026-19553 (ssl), CVE-2026-82049, CVE-2026-19672 and CVE-2026-87910 (tarfile), CVE-2026-15310 (zipfile), CVE-2026-15806 (urllib) and CVE-2026-17084 (StringPrep). The unused libpython dylib is no longer shipped.
+- **opentelemetry 1.45.1 and arize-phoenix-otel 0.17.2 (#844)** fix CVE-2026-114603, in the `evals` extra only. **filelock 4.2.4 and setuptools 84.2.1 (#857)** fix CVE-2026-112940, CVE-2026-112913 and CVE-2026-112907 (filelock) and GHSA-xmj3-9gf7-h52w (setuptools). Only `uv.lock` changes.
+
+### The API token's location is checked
+
+- **What changed.** At startup, in `GET /api/status` and in `oara doctor`, Prometheus says so loudly when the web API token sits where the agent's shell can read it even with the bash read floor on:
+  - `web.api_token` is set in `prometheus.yaml`;
+  - `PROMETHEUS_API_TOKEN_FILE` names a file outside `~/.config/<name>/*env`;
+  - the env file holding the token was moved out of that pattern by `PROMETHEUS_ENV_FILE` or `XDG_CONFIG_HOME`.
+- **What to do.** Move the token to `~/.config/prometheus/env` as `PROMETHEUS_API_TOKEN=<token>` (`oara token show` prints it), then remove the setting that held it, and restart.
+- Without an active read floor (it is off, or the daemon runs in a container) every location is readable alike, so nothing is said. The warning never names the token or the token file's path.
+
+### Hardening shipped with GHSA-wq93-7fvg-53pj
+
+- **Project instruction files ask first.** A file tool's write to a project instruction file asks the owner, even inside the workspace, with approvals off or under a saved grant. These are the files the prompt assembler loads from the session's workspace upward (`PROMETHEUS.md`, `AGENTS.md` and the other convention files the README lists) and `.prometheus/rules/*.md`.
+- **Skills and memory refuse invisible text.** Characters that hide text from a person reading it are refused: tag characters, bidi embeddings, overrides and isolates, the zero-width space, the word joiner, invisible operators, a byte-order mark mid-text, and the supplementary variation selectors. The zero-width joiner and non-joiner, LRM and RLM, the emoji variation selector and a leading byte-order mark stay allowed.
+
+### Memory extraction (#841, #842)
+
+- **A failed model call no longer loses messages (#842, from #832 by @sepehrtaji-dev).** An outage, rate limit or timeout used to look the same as "nothing to remember", so the extractor's cursor moved past the batch. Now the cursor stays where it was and the next pass retries the batch.
+- **JSON-shaped output with no facts is logged (#841, from #807 by @lijinhongucl-pixel).** A reply that looks like JSON but yields no facts logs a WARNING. Prose with no brace, `[]` and `{"facts": []}` stay quiet.
+
+### Self-improvement keeps genuine user requests (#788, by @sepehrtaji-dev)
+
+- GEPA's request evidence no longer drops a message whose `provenance` is `user` just because its trust flag is false. Untrusted messages from other sources are still withheld.
+
+### Computer use (#845, #846)
+
+- **The desktop cockpit works with SENTINEL off (#845),** the shipped default. Before, Beacon never saw its own app pick, any step, the end of a task or a thumbnail, because only SENTINEL built the signal bus the cockpit rides.
+- **A GTK4 app's text fields can be set (#846).** GTK4 reports them as "text box", a role the candidate table did not offer, so a task could never type into GNOME Text Editor or any other GTK4 field.
+
+### Upgrading from 0.9.16
+
+- **Linux with the AppArmor profile:** reload it BEFORE restarting the daemon. Until you do, the daemon reports a STALE PROFILE at ERROR:
+  ```
+  sudo apparmor_parser -r -W /etc/apparmor.d/prometheus-bash
+  ```
+- **Telegram:** if you allow only your own private chat, nothing changes. If you allow a group, set `gateway.owner_user_ids` to your Telegram user id.
+- **Slack:** set `gateway.slack.owner_user_ids`. Until you do, nobody on Slack can approve, and Slack messages don't add to memory.
+- **Discord:** the owner of the bot's Discord application is the owner unless you set `gateway.discord.owner_user_ids`.
+- **Telegram notices:** approval prompts with no chat of their own, cron-failure notices and task notices go to `gateway.briefing_chat_id` when it is a private chat, else to your private chat, else nowhere. A group `briefing_chat_id` is not used for them, with a warning.
+- **File-tool writes to identity files, memory, skills and project instruction files now ask you,** even with approvals off or under a saved grant.
+- **API clients:** `GET /api/status` gains a top-level `warnings` list of `{code, level, message, fix}`.
+
 ## 0.9.16 (2026-10-21)
 
 0.9.16 makes a fresh setup listen on this machine only until you choose otherwise, and turns on the context compactor that installs made by `oara setup`, setup mode and Beacon's first run never had. It updates certifi and Pillow for published advisories. It also:

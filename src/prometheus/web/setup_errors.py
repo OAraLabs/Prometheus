@@ -51,6 +51,8 @@ CATALOG: dict[str, SetupError] = {
                                            "yours."),
     "unsupported_provider": SetupError(400, "That provider is not one setup offers."),
     "bad_model": SetupError(400, "The model name has a control character or is far too long."),
+    "bad_target": SetupError(400, "A computer to look at is a name or an address, with an optional port, or an "
+                                  "http(s) address with no path."),
     # ── secrets ──
     "cloud_key_missing": SetupError(400, "A cloud provider needs an API key, and none was sent or is already "
                                          "saved."),
@@ -60,8 +62,9 @@ CATALOG: dict[str, SetupError] = {
                                                    "one was sent."),
     "bad_discord_guild_ids": SetupError(400, "Discord server ids are whole numbers."),
     # ── the machine ──
-    "backend_unreachable": SetupError(400, "Nothing at that address answered like an inference server of that "
-                                           "kind."),
+    "backend_unreachable": SetupError(400, "Nothing at that address answered like a usable inference server of that "
+                                           "kind; `reason` says why, in the probe's words."),
+    "model_not_served": SetupError(400, "The app at that address answered, and does not serve that model."),
     "config_write_failed": SetupError(500, "The settings could not be written to disk (permissions, a full disk or "
                                            "a read-only folder)."),
     "internal_error": SetupError(500, "Something unexpected went wrong inside the daemon; the cause is in its "

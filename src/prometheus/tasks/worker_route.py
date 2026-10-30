@@ -39,7 +39,7 @@ from typing import Any
 PRIMARY_KEY = "local"
 
 #: Providers that serve from a box this install runs (no cloud credential).
-_LOCAL_PROVIDERS = frozenset({"llama_cpp", "ollama", "lm_studio", "vllm"})
+_LOCAL_PROVIDERS = frozenset({"llama_cpp", "ollama", "lm_studio", "vllm", "openai_compatible"})
 
 #: Where the operator chooses a different route for every worker.
 SETTING_HINT = "Settings → Worker model (workers.model)"

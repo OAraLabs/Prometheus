@@ -75,7 +75,7 @@ The engine that drives everything: streaming deltas and tool events, a circuit b
 
 **File & shell:** `bash`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`, `notebook_edit`
 
-**Web & media:** `web_search`, `web_fetch`, `youtube_transcript`, `download_file`, `browser` (Playwright), `message` (send to Telegram/Slack), `tts` (Piper text-to-speech), `image_generate` (Pollinations free / ComfyUI local / WAN 2.5 paid), `video_generate` (Kling 3.0, paid), `dashboard` (serve a live HTML dashboard over your LAN or tailnet)
+**Web & media:** `web_search`, `web_fetch`, `youtube_transcript`, `download_file`, `browser` (Playwright), `message` (send to Telegram/Slack), `tts` (Piper text-to-speech, or a [remote voice server](#voice--default-local-engines)), `image_generate` (Pollinations free / ComfyUI local / WAN 2.5 paid), `video_generate` (Kling 3.0, paid), `dashboard` (serve a live HTML dashboard over your LAN or tailnet)
 
 **Memory & knowledge:** `lcm_grep`, `lcm_expand`, `lcm_expand_query`, `lcm_describe`, `wiki_compile`, `wiki_query`, `wiki_lint`, `sentinel_status`, `audit_query`, the file-memory tool (MEMORY.md / USER.md), `todo_write`, `skill`, `anatomy`
 
@@ -179,6 +179,8 @@ These are the proactive subsystems that act while you are idle. They are the mar
 
 The most complete chat surface. Beyond text it handles inbound photos (vision captioning), voice notes (Whisper speech-to-text), documents in 20+ formats, and stickers. The command surface is the full 56-command set of the [generated command reference](../reference/commands.md) — session control (`/reset /clear /steer /queue /unqueue /clearsteers /workspace /ephemeral`), status (`/status /model /route /backends /context /health /events /doctor /anatomy /beacon`), memory and skills (`/wiki /note /memory /skills /curator /notifications`), approvals and grants (`/approve /deny /pending /remember /grants /revoke /gate`), subsystems (`/sentinel /gepa /symbiote /audit /press /escalations /tools /pairs`), `/computer` (the desktop-task door), and the provider overrides `/claude /gpt /gemini /xai /grok /deepseek /kimi /glm /mimo /qwen /local`.
 
+**The owner.** On Telegram, Slack and Discord, only the owner can approve or deny tool calls, change settings (`/gate`, `/workspace`, `/profile`, `/model`, `/route`, `/steer`) or teach Prometheus (`/note`, the memory tool, skills, self-improvement). Other people in an allowed group or channel can still chat. Anything their message asks Prometheus to run waits for the owner's approval, and what they say never goes into memory, skills or training data. The owner is `gateway.owner_user_ids` (Telegram), `gateway.slack.owner_user_ids` and `gateway.discord.owner_user_ids`. Left empty, Telegram uses the private chats in `allowed_chat_ids` (a private chat's id is your user id), Discord uses the owner of the bot's Discord application, and Slack has no owner until you set one. `oara doctor` and the daemon's startup log say when a gateway has no owner.
+
 The standouts: `/steer` injects a course-correction into a turn that is already running, `/queue` and `/unqueue` line up follow-up turns while the agent is busy, `/computer <goal>` opens the desktop-task door (only from here and Beacon — see [Computer use](#computer-use)), and the provider overrides switch a single chat to a cloud model and back. The full table with descriptions is in [Commands](#commands) below.
 
 ### Slack — Default: off until you add tokens
@@ -188,6 +190,32 @@ Socket Mode app exposing the command layer as `/prometheus-*` workspace slash co
 ### Discord — Default: off until you add a token
 
 `/prometheus` app commands with four sub-groups — `/prometheus core help`, `/prometheus ops approve`, `/prometheus provider backends`, `/prometheus session steer` — covering every command but the Telegram-only `/gate` and `/ephemeral`, always-on DMs plus guild/channel whitelists, and threaded long replies. Optional install: `pip install 'oara-prometheus[discord]'`.
+
+### Voice — Default: local engines
+
+Voice notes on Telegram and Discord, `oara --voice` in the terminal, and the `tts` tool all listen and speak on this machine by default. Speech-to-text runs faster-whisper (the `voice` extra, `pip install 'oara-prometheus[voice]'`) or a `whisper` CLI. Text-to-speech runs piper with the model in `gateway.voice.model_path`, or espeak. Telegram voice replies follow `/voice auto | on | off`.
+
+**Remote voice servers (optional).** To run voice on another machine, for example one with a GPU, set `stt.url` to an OpenAI-compatible `POST /v1/audio/transcriptions` endpoint, `tts.url` to a `POST /v1/audio/speech` endpoint, or both. Give the full endpoint URL. Each section also takes `model` (the name the server expects), `tts.voice`, and `timeout_seconds`.
+
+```yaml
+stt:
+  url: "http://<voice-host>:8000/v1/audio/transcriptions"
+  api_key_env: PROMETHEUS_STT_API_KEY
+tts:
+  url: "http://<voice-host>:8000/v1/audio/speech"
+  api_key_env: PROMETHEUS_TTS_API_KEY
+  voice: "alloy"
+```
+
+The key never goes in `prometheus.yaml`. `api_key_env` names a variable, and Prometheus looks for it in the environment and then in `~/.config/prometheus/env` (`PROMETHEUS_STT_API_KEY=...`). If `api_key_env` is empty, no key is sent. An `api_key` written in the yaml is ignored, and the daemon logs a warning about it.
+
+The local engines stay as the fallback:
+
+- **url empty:** nothing changes. Voice runs locally, exactly as before.
+- **Server unreachable, timed out or failing:** that request runs locally, and the log gets one line about it.
+- **Key refused (401 or 403):** that request runs locally too, but the log gets an ERROR, because a wrong key does not fix itself.
+
+`oara doctor` shows a **Remote STT** or **Remote TTS** row for each url you set. It reports whether the server answers and whether it refused the key. Doctor asks for the server's `/health` first, at the server root beside `/v1`. It then asks for the `/v1/models` list, if the server has one, to check the key. A server that serves only `/health` counts as reachable. The key is sent as you configured it, so use https or a private network for a server on another machine.
 
 ### Paperclip gateway — Default: off. Experimental
 
@@ -315,7 +343,7 @@ Counts and per-gateway spellings are generated from the registration calls, not 
 - **AGENTS.md** — the agent registry with specializations used for subagent spawning.
 - **ANATOMY.md** — a live infrastructure snapshot: the AnatomyScanner scans CPU/RAM/GPU VRAM, the loaded model and its quantization, Tailscale peers, and disk, and renders Mermaid diagrams. Queryable via `/anatomy` or the `anatomy` tool, and it validates named project configs against available VRAM.
 - **PROMETHEUS.md** — per-project agent instructions, the CLAUDE.md equivalent. Discovery walks upward from the daemon's cwd (or from a conversation's own workspace once `/workspace` is set) and takes the highest-priority convention file at each level — `PROMETHEUS.md`, `HERMES.md`, `.hermes.md`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.windsurfrules`, `.github/copilot-instructions.md` — plus every `.prometheus/rules/*.md`. All levels stack (`context.stack_project_files`), each file is capped at `context.project_file_max_chars` (12000) and the whole section at `context.project_files_max_total_chars` (48000); nearest files are admitted first and anything that does not fit is omitted **and named in the section**. A repo's own `AGENTS.md` is a project file like any other — it is distinct from the subagent registry at `~/.prometheus/AGENTS.md`, which `bootstrap.load_agents` gates.
-- **Agent profiles** — `full | coder | research | assistant | minimal`, switched with `/profile`, trading tool breadth for context budget.
+- **Agent profiles** — `full | coder | research | assistant | minimal`, switched with `/profile`, trading tool breadth for context budget. A profile's `tools` and `exclude_tools` are enforced, not just advertised: a call to a tool the profile leaves out is refused, a subagent gets only the tools the profile allows, and a profile that leaves any tool out starts no worker process (`task_create` `local_agent`, `sessions_spawn`). `max_tool_schemas` only caps what is sent.
 - **Node & instance identity** ([FOUNDATION](../FOUNDATION.md) Part 3) — two identities with different lifetimes. The **node** is an Ed25519 keypair under `~/.prometheus/node/` (private key mode `0600`), generated at first run, never transmitted anywhere, and never copied to another machine; the base64 public key is the node ID, visible on the bearer-gated `/api/status` as `node_pub`. The **instance** is a UUID in the vault's `.prometheus-vault` marker that travels *with the data* when you move machines. `oara vault status` shows the marker; `oara vault adopt` mints it once for a pre-marker vault — the daemon warns until you do (`vault.format_check: off | warn | refuse`) and never adopts silently. A vault marker with a **newer** format than the running build refuses the boot regardless of that setting: a newer vault under an older binary would be silently misread, and refusing loudly is the point.
 
 ---
@@ -339,7 +367,7 @@ Counts and per-gateway spellings are generated from the registration calls, not 
 
 One reference config (`config/prometheus.yaml.default`, heavily commented) documents every section:
 
-`system, bootstrap, model, backends, backend_probe, compaction, context, tools, adapter, security, infrastructure, gateway (telegram/slack/discord/paperclip), whisper, router, slash_commands, divergence, learning (nudge/skill/curator/gepa), trajectory_export, training, symbiote, sentinel, heartbeat, escalation, memory, memory.recall, wiki, web, documents, sessions, tasks, workers, checkpoints, coding, computer_use, push, vault, doctor, pairing, network, discovery, image_generation, video_generation.kling, web_tools, printing_press, lsp, profiles, anatomy, mcp_servers, mcp, hooks, evals, tracing`
+`system, bootstrap, model, backends, backend_probe, compaction, context, tools, adapter, security, infrastructure, gateway (telegram/slack/discord/paperclip), whisper, stt, tts, router, slash_commands, divergence, learning (nudge/skill/curator/gepa), trajectory_export, training, symbiote, sentinel, heartbeat, escalation, memory, memory.recall, wiki, web, documents, sessions, tasks, workers, checkpoints, coding, computer_use, push, vault, doctor, pairing, network, discovery, image_generation, video_generation.kling, web_tools, printing_press, lsp, profiles, anatomy, mcp_servers, mcp, hooks, evals, tracing`
 
 That list is the one thing on this page that has now gone stale twice within days of being corrected, because a new subsystem adds a section and nothing checks this paragraph. The [config key reference](../reference/config-keys.md) is generated from the template and pinned by a test — read the section list there, and treat the line above as an orientation aid.
 

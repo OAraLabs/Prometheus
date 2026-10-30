@@ -68,14 +68,31 @@ class SubagentSpawner:
         self._active: dict[str, asyncio.Task] = {}
 
     def _build_tool_registry(self, tool_names: list[str] | None) -> ToolRegistry | None:
-        """Build a subset registry from the parent, or return the full parent."""
+        """Build a subset registry from the parent, or return the full parent.
+
+        Cut to the spawning run's profile as well: a subagent's loop resolves no profile of its own, so its
+        registry is the only place the parent's limits can hold. Without this a session whose profile left
+        out bash and write_file could spawn a ``worker`` and get both.
+        """
+        from prometheus.config.profiles import current_run_profile, profile_permits
+
         if self._parent_registry is None:
             return None
+        profile = current_run_profile()
         if tool_names is None:
-            return self._parent_registry
+            if profile is None:
+                return self._parent_registry
+            tool_names = [t.name for t in self._parent_registry.list_tools()]
 
         subset = ToolRegistry()
         unresolved: list[str] = []
+        withheld = [name for name in tool_names if not profile_permits(profile, name)]
+        if withheld:
+            logger.info(
+                "Subagent tools withheld by profile %r: %s",
+                profile.name if profile is not None else None, ", ".join(withheld),
+            )
+            tool_names = [name for name in tool_names if name not in withheld]
         for name in tool_names:
             tool = self._parent_registry.get(name)
             if tool is not None:

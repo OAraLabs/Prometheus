@@ -103,8 +103,10 @@ class TelegramPairingPrompts:
         self._messages: OrderedDict[str, tuple[str, list[tuple[int, int]]]] = OrderedDict()
 
     def private_chat_ids(self) -> list[int]:
-        """The allowed chats that are PRIVATE (a positive id). Groups, supergroups and channels are negative."""
-        return [chat for chat in self.adapter.config.allowed_chat_ids if chat > 0]
+        """The owner's private chats: the allowed chats that are PRIVATE (a positive id; groups, supergroups and
+        channels are negative) and belong to the owner (a private chat's id is its user's id)."""
+        config = self.adapter.config
+        return [chat for chat in config.allowed_chat_ids if chat > 0 and config.is_owner(chat)]
 
     def attach(self) -> bool:
         """Register the tap handler and subscribe to pairing events, if the owner opted in and it can work.
@@ -167,7 +169,8 @@ class TelegramPairingPrompts:
                 await query.answer()
             return
         chat = update.effective_chat
-        if chat is None or getattr(chat, "type", None) != "private" or not self.adapter.config.chat_allowed(chat.id):
+        if (chat is None or getattr(chat, "type", None) != "private" or not self.adapter.config.chat_allowed(chat.id)
+                or not self.adapter.config.is_owner(chat.id)):  # the owner's own private chat, nobody else's
             await query.answer("Not allowed.")
             return
         action, request_id = data[5], data[7:]

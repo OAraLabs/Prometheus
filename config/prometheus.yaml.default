@@ -434,6 +434,15 @@ security:
     # token: the Mac app's directory, and the XDG default elsewhere.
     - "/*/Library/Application Support/Prometheus/pairing"
     - "/*/.local/share/prometheus/pairing"
+    # The device registry (devices.db, with its -wal/-shm/-journal): who may
+    # call the API, who is an owner, which device may run desktop tasks.
+    - "/*/.prometheus/data/devices.db*"
+    # The scheduled-jobs schedule (read live each tick), its logs and the scheduler's PID file: a planted job
+    # runs as the owner. By prefix, so the schedule's .tmp and .corrupt side files are covered.
+    - "/*/.prometheus/data/cron_jobs.json*"
+    - "/*/.prometheus/data/cron_history.jsonl*"
+    - "/*/.prometheus/data/cron_undelivered.jsonl*"
+    - "/*/.prometheus/data/cron_scheduler.pid*"
   # THE ABOVE DOES NOT COVER bash. denied_paths is only consulted when a call
   # passes a file_path, and bash is handed a command string — so at BOTH
   # origins `cat ~/.ssh/id_*` is ALLOW. Measured, not inferred. Any check on
@@ -591,6 +600,12 @@ gateway:
   telegram_enabled: false
   telegram_token: ""                # Set via PROMETHEUS_TELEGRAM_TOKEN env var
   allowed_chat_ids: []
+  # The owner: the only person on Telegram who can approve tool calls, change
+  # settings, or teach Prometheus (memory, skills). Others in an allowed group
+  # can chat, and anything their message asks Prometheus to run waits for the
+  # owner's approval. Empty = the private chats in allowed_chat_ids (a private
+  # chat's id is your user id), so allowing only your own chat needs nothing here.
+  owner_user_ids: []                # e.g. [123456789]
   proxy_url: null
   heartbeat_interval: 30
   cron_enabled: true
@@ -684,6 +699,9 @@ gateway:
     # for every working install and needs the same boot-refusal + doctor + wizard
     # treatment before it can be honest.
     allowed_channels: []              # e.g. [C0123456789]
+    # The owner (your Slack member ID): the only person on Slack who can approve
+    # tool calls, change settings or teach Prometheus. Empty = nobody, so set it.
+    owner_user_ids: []                # e.g. [U0123456789]
 
   # SPRINT G2: Discord gateway (optional extra: pip install 'oara-prometheus[discord]').
   # Whitelist semantics: DMs are allowed unless user_ids restricts them (see
@@ -714,6 +732,10 @@ gateway:
     # #219) is a deliberate follow-up: it changes behaviour for every existing
     # operator and needs the same boot-refusal + doctor + wizard treatment.
     user_ids: []
+    # The owner (your Discord user ID): the only person on Discord who can
+    # approve tool calls, change settings or teach Prometheus. Empty = the owner
+    # of the bot's Discord application.
+    owner_user_ids: []                 # e.g. [123456789012345678]
     skill_event_notifications: quiet   # off | quiet | verbose
     long_reply_threshold: 800          # chars; longer replies open a thread
 
@@ -758,6 +780,31 @@ whisper:
   model: "base"
   device: "auto"
   language: "en"
+
+# Remote voice servers — optional. Empty url (the default) keeps voice on
+# this machine: faster-whisper / whisper for speech-to-text, piper / espeak
+# for text-to-speech. Set a url to an OpenAI-compatible voice server on
+# another machine and Prometheus tries it first, everywhere it listens or
+# speaks (Telegram and Discord voice notes, `oara --voice`, the tts tool):
+#   - unreachable or failing -> the local engine, and one log line
+#   - 401 / 403 (key refused) -> the local engine, and an ERROR in the log
+# `oara doctor` shows a row for each url that is set.
+#
+# The key is NEVER read from this file. api_key_env names the variable that
+# holds it, in the environment or in ~/.config/prometheus/env, e.g.
+#   PROMETHEUS_STT_API_KEY=...
+# Empty api_key_env sends no key. An api_key written here is ignored.
+stt:
+  url: ""                  # full endpoint: http(s)://<host>:<port>/v1/audio/transcriptions
+  api_key_env: ""          # e.g. PROMETHEUS_STT_API_KEY
+  model: "whisper-1"       # the model name the server expects
+  timeout_seconds: 60
+tts:
+  url: ""                  # full endpoint: http(s)://<host>:<port>/v1/audio/speech
+  api_key_env: ""          # e.g. PROMETHEUS_TTS_API_KEY
+  model: "tts-1"           # the model name the server expects
+  voice: "alloy"           # the server's voice name (the tts tool's voice argument overrides)
+  timeout_seconds: 60
 
 # NOTE — this section was named `model_router:` before GRAFT-ROUTER-WIRE v3.
 # The old key is no longer shipped here because nothing reads it: a config
@@ -1480,6 +1527,12 @@ anatomy:
   scan_on_startup: true
 
   include_in_system_prompt: true
+  # The machine-and-network section (hardware, services, network, tailnet
+  # peers) goes into every prompt sent to a LOCAL model. To a HOSTED model
+  # (a cloud provider, or a /claude, /qwen, … session) it is replaced by a
+  # pointer to the anatomy tool, which the model calls when a task needs it.
+  # true sends the full layout to hosted models on every turn too.
+  include_in_hosted_prompt: false
   # Local infrastructure identity. Values are machine-specific and MUST stay
   # in the live config only — the pre-commit hook blocks real hosts/IPs here.
   ssh_user: ""

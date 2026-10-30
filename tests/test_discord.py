@@ -11,6 +11,7 @@ inheritance.
 from __future__ import annotations
 
 import builtins
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -42,6 +43,8 @@ def _discord_config(**kwargs) -> PlatformConfig:
         token=kwargs.pop("token", "fake-discord-token"),
         allowed_guild_ids=kwargs.pop("allowed_guild_ids", []),
         allowed_channel_ids=kwargs.pop("allowed_channel_ids", []),
+        # The fake interaction's user (below) is the owner: approvals and owner-only commands are theirs.
+        owner_user_ids=kwargs.pop("owner_user_ids", ["4242"]),
         **kwargs,
     )
 
@@ -91,6 +94,7 @@ class _FakeInteraction:
     def __init__(self, channel_id: int | None = 123, channel=None):
         self.channel_id = channel_id
         self.channel = channel
+        self.user = SimpleNamespace(id=4242, name="owner")
         self.response = _FakeResponse()
         self.followup = _FakeFollowup()
 
@@ -439,12 +443,12 @@ class TestApprovalHandlers:
         assert interaction.all_messages == ["Approved: abc123"]
         # SPRINT-CONSENT: approve() now carries the scope and the derived
         # grant so the resolution audit row can name them — and (W4) who
-        # answered: this fake interaction names no user, so "unknown".
+        # answered: the fake interaction's user, the owner.
         from prometheus.permissions.approver import Approver
 
         queue.approve.assert_awaited_once_with(
             "abc123", scope="once", grant=None,
-            by=Approver("discord", "unknown"),
+            by=Approver("discord", "4242", "owner"),
         )
 
     @pytest.mark.asyncio
@@ -748,7 +752,9 @@ class TestMediaRouting:
         text, urls, types, mtype = await adapter._ingest_attachments(
             [att], caption="", chat_id=1,
         )
-        transcribe.assert_awaited_once_with(str(cached))
+        transcribe.assert_awaited_once_with(
+            str(cached), config=adapter._prometheus_config,
+        )
         assert text == "hello prometheus"
         assert mtype == MessageType.VOICE
 

@@ -975,6 +975,7 @@ async def run_interactive(
     *,
     voice_mode: bool = False,
     voice_config: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
 ) -> None:
     """Run an interactive conversation loop with streaming output.
 
@@ -982,7 +983,8 @@ async def run_interactive(
     every turn captures mic audio, transcribes via Whisper, and speaks
     the agent reply via piper. ``:voice`` / ``:v`` does a single voice
     turn from text mode without flipping the sticky flag. ``:text`` or
-    ``:voice off`` leaves voice mode.
+    ``:voice off`` leaves voice mode. *config* (the loaded prometheus.yaml)
+    carries the optional ``stt.url`` / ``tts.url`` remote servers.
     """
     messages: list[ConversationMessage] = []
     voice_config = voice_config or {}
@@ -1022,7 +1024,7 @@ async def run_interactive(
                     continue
                 # Anything else (including empty): start the capture
                 from prometheus.cli.voice import cli_voice_capture
-                user_input = await cli_voice_capture()
+                user_input = await cli_voice_capture(config=config)
                 if not user_input:
                     continue
             else:
@@ -1035,7 +1037,7 @@ async def run_interactive(
                     break
                 if lower in (":voice", ":v"):
                     from prometheus.cli.voice import cli_voice_capture
-                    user_input = await cli_voice_capture()
+                    user_input = await cli_voice_capture(config=config)
                     voice_this_turn = True
                     if not user_input:
                         continue
@@ -1120,7 +1122,7 @@ async def run_interactive(
         if voice_this_turn and response_text:
             try:
                 from prometheus.cli.voice import cli_voice_speak
-                await cli_voice_speak(response_text, voice_config)
+                await cli_voice_speak(response_text, voice_config, config)
             except Exception as exc:
                 log.debug("Voice playback failed: %s", exc)
 
@@ -2164,7 +2166,11 @@ def main() -> None:
     lcm_engine = create_lcm_engine(provider)
     # File memory is re-read every turn (LoopContext.memory_prompt_builder);
     # one read here so the boot section run_loop looks for is the one built in.
-    from prometheus.context.prompt_assembler import _load_memory_and_user, memory_section
+    from prometheus.context.prompt_assembler import (
+        _load_memory_and_user,
+        include_infrastructure_in_hosted_prompt,
+        memory_section,
+    )
     boot_memory_content = _load_memory_and_user()
     system_prompt = build_system_prompt(config, memory_content=boot_memory_content)
 
@@ -2296,6 +2302,7 @@ def main() -> None:
         tool_results_turn_budget=ctx_cfg.get("tool_results_turn_budget", 8000),
         microcompact_after_turns=ctx_cfg.get("microcompact_after_turns", 3),
         microcompact_on_cloud=ctx_cfg.get("microcompact_on_cloud", False),
+        infrastructure_in_hosted_prompt=include_infrastructure_in_hosted_prompt(config),
         microcompact_keep_chars=ctx_cfg.get("microcompact_keep_chars", 200),
         microcompact_keep_chars_no_lcm=ctx_cfg.get("microcompact_keep_chars_no_lcm", 500),
         tool_loader=tool_loader,
@@ -2372,6 +2379,7 @@ def main() -> None:
                     context, lcm_engine, session_id,
                     voice_mode=bool(getattr(args, "voice", False)),
                     voice_config=voice_cfg,
+                    config=config,
                 )
         finally:
             if mcp_runtime:

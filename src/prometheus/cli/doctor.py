@@ -11,6 +11,7 @@ checks a fresh install actually trips over:
 - API token set (auth ENABLED vs OPEN)
 - ~/.prometheus data dirs writable
 - whisper available when voice is enabled
+- a configured remote voice server (``stt.url`` / ``tts.url``) reachable
 
 Output is human-readable ✓/✗ lines; the exit code is nonzero when any
 check errors — "run oara doctor" is the eternal support answer.
@@ -502,6 +503,36 @@ def check_token(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+def check_token_location(config: dict[str, Any]) -> DiagnosticCheck:
+    """Is the API token somewhere a floored shell can still read it?
+
+    ``check_token`` says whether there is a token; this says where it sits. ``web.api_token`` in prometheus.yaml,
+    a ``PROMETHEUS_API_TOKEN_FILE`` outside ``~/.config/*/*env`` and a moved env file all leave it readable by
+    the agent's shell even with the read floor on — and the token reaches every authenticated route. Without
+    an active read floor every place is readable alike, so the row says that instead of judging.
+    """
+    from prometheus.config.api_token import read_floor_is_active, token_location_fix, token_location_warning
+
+    name = "API token location"
+    try:
+        active = read_floor_is_active(config)
+    except Exception as exc:  # noqa: BLE001 — a doctor row, never a doctor crash
+        return DiagnosticCheck(name=name, category="connectivity", status="info",
+                               message=f"not checked: the bash read floor could not be probed ({exc})")
+    if not active:
+        return DiagnosticCheck(
+            name=name, category="connectivity", status="info",
+            message="not judged: the bash read floor is not active, so the shell can read every place a token "
+                    "could be (see the Bash read floor row)",
+        )
+    message = token_location_warning(config, read_floor_active=True)
+    if message:
+        return DiagnosticCheck(name=name, category="connectivity", status="warning", message=message,
+                               fix=token_location_fix())
+    return DiagnosticCheck(name=name, category="connectivity", status="ok",
+                           message="the token is only where the bash read floor keeps the shell out")
+
+
 def check_dirs_writable() -> DiagnosticCheck:
     """~/.prometheus (or $PROMETHEUS_CONFIG_DIR) data dirs writable?"""
     failures: list[str] = []
@@ -717,6 +748,23 @@ def check_gateways(config: dict[str, Any]) -> list[DiagnosticCheck]:
         library_fix="pip install 'oara-prometheus[discord]'",
     )
     return [telegram, slack, discord]
+
+
+def check_gateway_owners(config: dict[str, Any]) -> list[DiagnosticCheck]:
+    """One row per enabled chat gateway with no owner named, saying what that means and which key to set.
+
+    The owner is the only person who may approve tool calls or teach Prometheus from a chat; everyone else in an
+    allowed chat may still chat. Same answer as the daemon's startup warning (gateway/owners.py).
+    """
+    from prometheus.gateway.owners import ownerless_gateways
+
+    return [
+        DiagnosticCheck(
+            name=f"{gap.gateway} owner", category="connectivity", status="warning",
+            message=gap.message, fix=gap.fix,
+        )
+        for gap in ownerless_gateways(config)
+    ]
 
 
 def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
@@ -1313,6 +1361,52 @@ def check_whisper(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+def check_voice_remotes(
+    config: dict[str, Any], timeout: float = 5.0,
+) -> list[DiagnosticCheck]:
+    """One row per configured remote voice server: does it answer?
+
+    No row when ``stt.url`` / ``tts.url`` are unset — local voice is the
+    default, not a missing piece. An unreachable server is a warning because
+    voice still works on the local engines; a refused key is an error because
+    it will not fix itself, matching the ERROR the daemon logs for it.
+    """
+    from prometheus.infra.voice_remote import KINDS, probe, remote_settings
+
+    rows: list[DiagnosticCheck] = []
+    for kind in KINDS:
+        settings = remote_settings(kind, config)
+        if settings is None:
+            continue
+        name = f"Remote {kind.upper()}"
+        shown = settings.shown_url()
+        state, status = probe(settings, timeout=timeout)
+        if state == "ok":
+            rows.append(DiagnosticCheck(
+                name=name, category="connectivity", status="ok",
+                message=f"reachable at {shown}",
+            ))
+        elif state == "refused":
+            key = (f"${settings.api_key_env}" if settings.api_key_env
+                   else f"{kind}.api_key_env (unset, so no key was sent)")
+            rows.append(DiagnosticCheck(
+                name=name, category="connectivity", status="error",
+                message=f"{shown} refused the key (HTTP {status}) — "
+                        f"{settings.label} falls back to the local engine",
+                fix=f"Check {key} in the environment or {get_env_file_path()}.",
+            ))
+        else:
+            why = f"HTTP {status}" if status else "no answer"
+            rows.append(DiagnosticCheck(
+                name=name, category="connectivity", status="warning",
+                message=f"not reachable at {shown} ({why}) — "
+                        f"{settings.label} falls back to the local engine",
+                fix=f"Start the voice server, or fix {kind}.url in prometheus.yaml "
+                    f"(empty = local only).",
+            ))
+    return rows
+
+
 def check_pairing_telegram(config: dict[str, Any]) -> DiagnosticCheck | None:
     """Telegram prompts for pairing requests are opt-in; say so when they are on but nothing could get one.
 
@@ -1441,7 +1535,9 @@ def run_extended_checks(
         *([pairing_row] if pairing_row is not None else []),
         *([network_row] if network_row is not None else []),
         check_token(config),
+        check_token_location(config),
         *check_gateways(config),
+        *check_gateway_owners(config),
         check_advertised_tools(config),
         check_coding_sandbox(config),
         *check_bash_floors(config),
@@ -1449,6 +1545,7 @@ def run_extended_checks(
         check_config_pins(),
         check_trajectory_export(config),
         check_whisper(config),
+        *check_voice_remotes(config, timeout=timeout),
     ]
 
 
@@ -1473,8 +1570,8 @@ def run_anatomy_checks(config: dict[str, Any]) -> list[DiagnosticCheck]:
         for check in report.checks:
             # The extended checks above already cover these with the
             # documented search order / live probe — don't double-report
-            # (the class's Config check is also repo-root-relative, which
-            # is wrong for pip installs). "Telegram" is superseded by the
+            # (check_config also catches a config that is not a mapping).
+            # "Telegram" is superseded by the
             # per-gateway checks (SPRINT G3). "Router" is the same
             # check_router row the extended checks already carry, and
             # "Advertised tools" is check_advertised_tools' row, which adds

@@ -42,7 +42,7 @@ from prometheus.web.strict_query import StrictQueryRoute
 from prometheus.config import api_token as api_token_module
 from prometheus.config import local_pairing
 from prometheus.config.device_store import registry_platform
-from prometheus.config.node_identity import get_instance_id, get_node_pubkey
+from prometheus.config.node_identity import get_instance_id, get_node_pubkey, identity_fields
 from prometheus.config.paths import get_wiki_root
 from prometheus.context.environment import (
     booted_from as _booted_from,
@@ -568,6 +568,8 @@ def create_app(
             "api_base_port": bound_port(getattr(request.app.state, "http_server", None))
                              or int(web_cfg.get("api_port", 8005) or 8005),
             "ws_port": getattr(bridge, "bound_port", None) or int(web_cfg.get("ws_port", 8010) or 8010),
+            # The node key to pin for the identity challenge, and the instance it belongs to (as /api/status).
+            **identity_fields(),
         }
 
     def _clean_device_name(raw: Any, default: str) -> str:
@@ -994,6 +996,19 @@ def create_app(
         tls = request.url.scheme == "https"
         return hello_mod.hello_response(request, _hello_limiter, lambda: _hello_payload(tls))
 
+    # ── Identity challenge (unauthenticated: a paired client checks who it reached BEFORE sending its token) ──
+    # web/identity_challenge.py. Hello's limiter and browser refusal; stateless, writes nothing.
+    @app.post("/api/identity/challenge")
+    async def identity_challenge(request: Request):
+        from prometheus.web import identity_challenge as challenge_mod
+
+        tls = request.url.scheme == "https"
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - no body or not JSON: the nonce check refuses it
+            body = None
+        return hello_mod.guarded_response(request, _hello_limiter, lambda: challenge_mod.answer(body, tls=tls))
+
     # ── Root ────────────────────────────────────────────────────────
 
     @app.get("/")
@@ -1138,6 +1153,30 @@ def create_app(
             # render as "nothing is wrong".
             return {"error": f"floor state unavailable: {exc}", "dark": None}
 
+    def _status_warnings(security_state: dict) -> list[dict[str, str]]:
+        """The ``warnings`` list of /api/status. Today one finding: the API token where a floored shell can read
+        it (config/api_token.py). Judged on the read-floor state this request already probed, so it costs nothing
+        and says exactly what ``security`` says. Never names the token or a token file's path."""
+        from prometheus.config.api_token import (
+            TOKEN_LOCATION_WARNING_CODE,
+            token_location_fix,
+            token_location_warning,
+        )
+        from prometheus.permissions import confinement as _confinement
+
+        cfg = app.state.config if isinstance(app.state.config, dict) else {}
+        read_state = ((security_state or {}).get("bash_read_floor") or {}).get("state")
+        items: list[dict[str, str]] = []
+        try:
+            message = token_location_warning(cfg, read_floor_active=read_state == _confinement.STATE_ACTIVE)
+        except Exception as exc:  # noqa: BLE001 — status must still render
+            logger.warning("token-location check failed: %s", exc)
+            message = None
+        if message:
+            items.append({"code": TOKEN_LOCATION_WARNING_CODE, "level": "warning", "message": message,
+                          "fix": token_location_fix()})
+        return items
+
     async def _computer_state() -> dict:
         """The ``computer`` block, probed off the loop like the bash floors.
 
@@ -1237,9 +1276,15 @@ def create_app(
         _live_state = (
             _state_ref.get("state") if isinstance(_state_ref, dict) else None
         ) or getattr(app.state, "agent_state", "idle")
+        security_state = await _floor_state()
+        hello_now = _hello_payload()
         return {
             "state": _live_state,
             "model": app.state.current_model,
+            # WHAT NEEDS THE OPERATOR, as a list a client can show as-is: {code, level, message, fix}. Each item
+            # comes from a probe or a check, never from config read back. The bash floors' own `dark` stays in
+            # `security` below; this is for findings with no other home.
+            "warnings": _status_warnings(security_state),
             # Full config_pins detail: bearer-gated, unlike /health's counts.
             "config_pins": _config_pins_detail(),
             # WS delivery counters. Monotonic since boot. One line an
@@ -1302,7 +1347,7 @@ def create_app(
             #
             # `dark` is the field to alert on: asked for, not happening, and
             # bash running anyway.
-            "security": await _floor_state(),
+            "security": security_state,
             # COMPUTER USE — the substrate, probed, both halves separately.
             # Same law as `security` above: a key saying a capability is on is
             # not evidence it is on. Stronger here, because the two halves
@@ -1357,6 +1402,11 @@ def create_app(
             # Bearer-gated deliberately: neither belongs on /health.
             "node_pub": get_node_pubkey(),
             "instance_id": get_instance_id(),
+            # The name and fp hello advertises, from hello's own builder, so the two routes cannot drift
+            # (fp is "" until the instance key exists; reading it mints nothing). Siblings of the two
+            # above, for a client that tells several Prometheus instances apart.
+            "name": hello_now["name"],
+            "fp": hello_now["fp"],
         }
 
     # ── Sessions ────────────────────────────────────────────────────
@@ -1844,9 +1894,67 @@ def create_app(
             store.tombstone_session(session_id)
         return {"ok": True}
 
+    _NO_MEMORY_STORE = (
+        "no memory store is running, so facts learned from this chat could not be listed or retracted"
+    )
+
+    def _derived_handles():
+        """The memory store and wiki compiler the daemon built, or ``(None, None)`` when memory is off."""
+        memory_store = getattr(app.state, "memory_store", None)
+        if memory_store is None:
+            return None, None
+        wiki_compiler = getattr(app.state, "wiki_compiler", None)
+        if wiki_compiler is None:
+            from prometheus.memory.wiki_compiler import WikiCompiler
+
+            wiki_compiler = WikiCompiler(store=memory_store)
+        return memory_store, wiki_compiler
+
+    @app.get("/api/sessions/{session_id}/purge-preview")
+    async def purge_preview(session_id: str, forget_notes: bool = False):
+        """What ``POST /api/sessions/{id}/purge`` would remove, without removing anything.
+
+        A purge is irreversible, so a client shows this and asks again before confirming. Besides the
+        chat itself it lists what the assistant LEARNED from it: facts learned only from this chat
+        (they go), facts a surviving chat also supports (they stay, minus this chat as a source), the
+        wiki and insight pages that follow, and filed answers that mention a removed entity and are
+        left for the owner to review. ``/note`` facts tied to the chat stay and are listed as
+        ``notes_kept``; ``?forget_notes=true`` previews the purge that also forgets them.
+        ``not_covered`` says what a purge does not reach.
+
+        Read-only by construction: planning writes no row and no file.
+        """
+        from prometheus.memory.purge_derived import NOT_COVERED, plan_retraction
+
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        if store is None:
+            return JSONResponse(status_code=503, content={
+                "error": "no LCM store; nothing to preview", "session_id": session_id})
+        memory_store, wiki_compiler = _derived_handles()
+        if memory_store is None:
+            derived: dict[str, Any] = {"available": False, "reason": _NO_MEMORY_STORE}
+        else:
+            plan = await asyncio.to_thread(
+                plan_retraction, session_id, conversation_store=store,
+                memory_store=memory_store, wiki_root=wiki_compiler.wiki_root,
+                forget_notes=forget_notes)
+            derived = plan.to_preview()
+        return {
+            "session_id": session_id,
+            "messages": store.count_all(session_id),
+            "branches": [f["session_id"] for f in store.list_session_forks(session_id)],
+            "derived": derived,
+            "not_covered": list(NOT_COVERED),
+            "reversible": False,
+        }
+
     @app.post("/api/sessions/{session_id}/purge")
     async def purge_session(session_id: str, request: Request):
         """IRREVERSIBLY delete a session's content (#353). Body: {"confirm": "<session_id>"}.
+
+        Optional ``"forget_notes": true`` also forgets the ``/note`` facts tied to the chat (default
+        false: notes stay). Anything but a boolean there is a 400, and nothing is purged.
 
         DELETE /api/sessions/{id} is a tombstone: it hides a session and leaves
         the rows. That is the right answer to "clear my list" and the wrong one
@@ -1860,6 +1968,12 @@ def create_app(
         Forks are NOT followed. A branch holds its own copies, so it survives —
         reported as `branches` so the caller can purge those too rather than
         discover them later.
+
+        What the assistant LEARNED from the chat goes with it: a fact learned only
+        from this chat is deleted, a fact a surviving chat also supports stays
+        without this chat as a source, and the wiki and insight pages follow
+        (memory/purge_derived.py). That runs first, so a failure leaves the chat
+        untouched; ``GET .../purge-preview`` shows it before the owner confirms.
         """
         try:
             body = await request.json()
@@ -1870,6 +1984,12 @@ def create_app(
                 "error": "purge requires {\"confirm\": \"<session_id>\"} matching the path",
                 "session_id": session_id,
             })
+        forget_notes = body.get("forget_notes", False)
+        if not isinstance(forget_notes, bool):
+            return JSONResponse(status_code=400, content={
+                "error": "forget_notes must be true or false; nothing was purged",
+                "session_id": session_id,
+            })
         lcm = getattr(app.state, "lcm_engine", None)
         store = lcm.conversation_store if lcm is not None else None
         if store is None:
@@ -1877,12 +1997,54 @@ def create_app(
             # otherwise is the failure #349 was about.
             return JSONResponse(status_code=503, content={
                 "error": "no LCM store; nothing was purged", "session_id": session_id})
+        from prometheus.memory.purge_derived import (
+            NOT_COVERED,
+            retract_before_purge,
+            sweep_after_purge,
+        )
+
         branches = [f["session_id"] for f in store.list_session_forks(session_id)]
+
+        # What the assistant LEARNED from this chat goes first. The chat's message ids are how a fact
+        # names its sources, and they cannot be mapped back to a chat once the rows are deleted. A
+        # failure here stops the purge before it starts: the chat is untouched and a retry is safe.
+        memory_store, wiki_compiler = _derived_handles()
+        plan = None
+        derived: dict[str, Any]
+        if memory_store is None:
+            logger.warning(
+                "purge %s: %s; facts learned from it were NOT retracted", session_id, _NO_MEMORY_STORE)
+            derived = {"available": False, "reason": _NO_MEMORY_STORE}
+        else:
+            try:
+                plan, applied = await asyncio.to_thread(
+                    retract_before_purge, session_id, conversation_store=store,
+                    memory_store=memory_store, wiki_compiler=wiki_compiler,
+                    forget_notes=forget_notes)
+            except Exception:
+                logger.exception(
+                    "purge %s: retracting what was learned from it failed; nothing was purged", session_id)
+                return JSONResponse(status_code=500, content={
+                    "error": "what was learned from this chat could not be retracted; nothing was purged",
+                    "session_id": session_id})
+            derived = {"available": True, **applied}
+
         counts = store.purge_session(session_id)
+        if plan is not None:
+            # A fact the extractor wrote from these messages while the purge was running.
+            try:
+                late = await asyncio.to_thread(
+                    sweep_after_purge, plan, conversation_store=store,
+                    memory_store=memory_store, wiki_compiler=wiki_compiler)
+                derived["late_sweep"] = {"ok": True, "facts_removed": late["facts_removed"]}
+            except Exception:
+                logger.exception("purge %s: the final sweep for late-written facts failed", session_id)
+                derived["late_sweep"] = {
+                    "ok": False, "error": "the final sweep for facts written during the purge failed"}
         if session_mgr:
             session_mgr.remove(session_id)
-        return {"ok": True, "session_id": session_id, "purged": counts,
-                "branches": branches, "reversible": False}
+        return {"ok": True, "session_id": session_id, "purged": counts, "derived": derived,
+                "not_covered": list(NOT_COVERED), "branches": branches, "reversible": False}
 
     @app.put("/api/sessions/{session_id}/title")
     async def set_session_title(session_id: str, request: Request):

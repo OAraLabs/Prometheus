@@ -214,3 +214,19 @@ def test_the_loop_sets_the_field_the_operator_approved():
     assert "no lasting grant is offered" in reason
     assert driver.dispatched == [("set_value", {
         **args, "element_token": "tok-field-s1", "text": "hello"})]
+
+
+def test_a_gtk4_text_box_is_a_field_the_table_can_set():
+    """GTK4 reports a text view or entry as "text box" (GNOME Text Editor's
+    document, seen on the computer-use rig). It is offered like any field."""
+    obs = Observation(
+        target="box", app="gnome-text-editor", pid=1, window_id=2,
+        snapshot_id="s1",
+        elements=(Element(2, "tok-doc", "text box", ""),
+                  Element(3, "tok-open", "button", "Open")),
+    )
+    rows = {c.candidate_id: c for c in build_candidates(obs, text_to_type="a note")}
+    assert "set-2" in rows
+    assert rows["set-2"].tool_name == "computer_set_value"
+    assert rows["set-2"].arguments["element_token"] == "tok-doc"
+    assert "set-3" not in rows, "a button is never a field"
