@@ -1,0 +1,1044 @@
+{
+ "schema": "distill-tool-snapshot/1",
+ "source": "prometheus tool registry: BaseTool.to_openai_schema of each class",
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a short shell command in the local repository. For work that outlives this turn (long builds, downloads, file watches) use task_create instead of 'nohup … &' — a backgrounded Bash job is killed at the timeout and left untracked.",
+    "parameters": {
+     "description": "Arguments for the bash tool.",
+     "properties": {
+      "command": {
+       "description": "Shell command to execute",
+       "title": "Command",
+       "type": "string"
+      },
+      "cwd": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Working directory override",
+       "title": "Cwd"
+      },
+      "timeout_seconds": {
+       "default": 30,
+       "description": "Seconds before the command is killed. Raise it for a known-slow command rather than retrying after a timeout.",
+       "maximum": 600,
+       "minimum": 1,
+       "title": "Timeout Seconds",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "command"
+     ],
+     "title": "BashToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "read_file",
+    "description": "Read a text file from the local repository.",
+    "parameters": {
+     "description": "Arguments for the file read tool.",
+     "properties": {
+      "path": {
+       "description": "Path of the file to read",
+       "title": "Path",
+       "type": "string",
+       "x-prometheus-path": "file",
+       "x-prometheus-path-access": "read"
+      },
+      "offset": {
+       "default": 0,
+       "description": "Zero-based starting line",
+       "minimum": 0,
+       "title": "Offset",
+       "type": "integer"
+      },
+      "limit": {
+       "default": 200,
+       "description": "Number of lines to return",
+       "maximum": 2000,
+       "minimum": 1,
+       "title": "Limit",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "title": "FileReadToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write_file",
+    "description": "Create or overwrite a file with UTF-8 text content, written verbatim. Handles any text-based format (.md, .py, .json, .csv, .svg, .html). For binary or converted formats (.pdf, .docx, .xlsx, images), write the source as text with this tool, then convert it via bash (e.g. pandoc, python-docx, libreoffice) — do not refuse these formats.",
+    "parameters": {
+     "description": "Arguments for the file write tool.",
+     "properties": {
+      "path": {
+       "description": "Path of the file to write",
+       "title": "Path",
+       "type": "string",
+       "x-prometheus-path": "file",
+       "x-prometheus-path-access": "write"
+      },
+      "content": {
+       "description": "Full file contents",
+       "title": "Content",
+       "type": "string"
+      },
+      "create_directories": {
+       "default": true,
+       "description": "Missing parent directories are created by default, so a write to a new folder succeeds without a preceding mkdir.",
+       "title": "Create Directories",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ],
+     "title": "FileWriteToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit_file",
+    "description": "Edit an existing file by replacing a string.",
+    "parameters": {
+     "description": "Arguments for the file edit tool.",
+     "properties": {
+      "path": {
+       "description": "Path of the file to edit",
+       "title": "Path",
+       "type": "string",
+       "x-prometheus-path": "file",
+       "x-prometheus-path-access": "write"
+      },
+      "old_str": {
+       "description": "Existing text to replace",
+       "title": "Old Str",
+       "type": "string"
+      },
+      "new_str": {
+       "description": "Replacement text",
+       "title": "New Str",
+       "type": "string"
+      },
+      "replace_all": {
+       "default": false,
+       "description": "By default ONLY THE FIRST occurrence of old_str is replaced, and the edit fails if old_str is not unique. Set true to replace every occurrence.",
+       "title": "Replace All",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "path",
+      "old_str",
+      "new_str"
+     ],
+     "title": "FileEditToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "description": "Arguments for the grep tool.",
+     "properties": {
+      "pattern": {
+       "description": "Regular expression to search for",
+       "title": "Pattern",
+       "type": "string"
+      },
+      "root": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Search root directory",
+       "title": "Root",
+       "x-prometheus-path": "dir",
+       "x-prometheus-path-access": "read"
+      },
+      "file_glob": {
+       "default": "**/*",
+       "description": "Which files to search, relative to root. Default searches every file recursively. Must be RELATIVE — an absolute pattern raises.",
+       "title": "File Glob",
+       "type": "string"
+      },
+      "case_sensitive": {
+       "default": true,
+       "description": "Matching is case-SENSITIVE by default. To match any casing, set this to false — do NOT retry the search with different casings of the pattern. (A live turn burned 7 of its 25 tool calls permuting SYMBIOTE/symbiote/Symbiote/symbi before falling back to `bash grep -i`, and hit the iteration cap.)",
+       "title": "Case Sensitive",
+       "type": "boolean"
+      },
+      "limit": {
+       "default": 200,
+       "description": "Maximum matching lines to return.",
+       "maximum": 2000,
+       "minimum": 1,
+       "title": "Limit",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "pattern"
+     ],
+     "title": "GrepToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "List files matching a glob pattern.",
+    "parameters": {
+     "description": "Arguments for the glob tool.",
+     "properties": {
+      "pattern": {
+       "description": "Glob pattern relative to the working directory",
+       "title": "Pattern",
+       "type": "string"
+      },
+      "root": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Optional search root",
+       "title": "Root",
+       "x-prometheus-path": "dir",
+       "x-prometheus-path-access": "read"
+      },
+      "limit": {
+       "default": 200,
+       "description": "Maximum paths to return.",
+       "maximum": 5000,
+       "minimum": 1,
+       "title": "Limit",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "pattern"
+     ],
+     "title": "GlobToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "web_fetch",
+    "description": "Fetch any URL (web page, GitHub repo, API endpoint, raw file) and return its text content. Use this for: fetching GitHub repos, reading documentation, calling JSON APIs, reading any public URL. Handles 404/403/private URLs gracefully without crashing.",
+    "parameters": {
+     "description": "Arguments for fetching one web page.",
+     "properties": {
+      "url": {
+       "description": "HTTP or HTTPS URL to fetch",
+       "title": "Url",
+       "type": "string"
+      },
+      "max_chars": {
+       "default": 30000,
+       "description": "Maximum characters to return",
+       "maximum": 80000,
+       "minimum": 500,
+       "title": "Max Chars",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "url"
+     ],
+     "title": "WebFetchInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "web_search",
+    "description": "Search the web via DuckDuckGo and return top results with titles, URLs, and snippets. Use this when you don't know a specific URL: finding documentation, looking up current facts (versions, prices, news), discovering libraries or repositories, comparing options, or researching unfamiliar topics. Once you have a URL from search results, use web_fetch to read its full content. No API key required.",
+    "parameters": {
+     "description": "Arguments for a web search.",
+     "properties": {
+      "query": {
+       "description": "Search query",
+       "title": "Query",
+       "type": "string"
+      },
+      "max_results": {
+       "default": 5,
+       "description": "Maximum number of results to return",
+       "maximum": 10,
+       "minimum": 1,
+       "title": "Max Results",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "query"
+     ],
+     "title": "WebSearchInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "wiki_query",
+    "description": "Search the Prometheus wiki for answers to knowledge questions. Returns relevant wiki page content. Substantial multi-page answers are saved to wiki/queries/ for future reference.",
+    "parameters": {
+     "description": "Arguments for wiki_query.",
+     "properties": {
+      "query": {
+       "description": "Knowledge question to answer from the wiki.",
+       "title": "Query",
+       "type": "string"
+      }
+     },
+     "required": [
+      "query"
+     ],
+     "title": "WikiQueryInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "memory",
+    "description": "Manage persistent memory entries. Call 'add' when the user shares a durable fact about themselves (preferences, key contacts, ongoing projects) or about the system (infrastructure, conventions, decisions) that should persist across sessions. Use 'replace' to update, 'remove' to delete, 'list' to read all entries.",
+    "parameters": {
+     "description": "Arguments for memory management.",
+     "properties": {
+      "operation": {
+       "description": "Operation: 'add', 'replace', 'remove', or 'list'.",
+       "enum": [
+        "add",
+        "replace",
+        "remove",
+        "list"
+       ],
+       "title": "Operation",
+       "type": "string"
+      },
+      "target": {
+       "default": "memory",
+       "description": "File target: 'memory' (MEMORY.md) or 'user' (USER.md).",
+       "enum": [
+        "memory",
+        "user"
+       ],
+       "title": "Target",
+       "type": "string"
+      },
+      "entry": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Entry text for add/remove, or new entry text for replace.",
+       "title": "Entry"
+      },
+      "old_entry": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Existing entry text to match for replace.",
+       "title": "Old Entry"
+      }
+     },
+     "required": [
+      "operation"
+     ],
+     "title": "MemoryToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "message",
+    "description": "Send a text message to Discord (webhook), Slack (webhook/bot), Telegram (bot API), or a generic webhook endpoint.",
+    "parameters": {
+     "$defs": {
+      "MessagePlatform": {
+       "enum": [
+        "discord",
+        "slack",
+        "telegram",
+        "webhook"
+       ],
+       "title": "MessagePlatform",
+       "type": "string"
+      }
+     },
+     "description": "Arguments for sending a message.",
+     "properties": {
+      "platform": {
+       "$ref": "#/$defs/MessagePlatform",
+       "description": "Target platform"
+      },
+      "content": {
+       "description": "Message text to send",
+       "title": "Content",
+       "type": "string"
+      },
+      "recipient": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Channel ID, chat ID, or webhook URL depending on platform",
+       "title": "Recipient"
+      }
+     },
+     "required": [
+      "platform",
+      "content"
+     ],
+     "title": "MessageInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "cron_create",
+    "description": "Create or replace a local cron job. Accepts standard 5-field cron expressions OR natural-language phrases like 'every Monday at 9am' or 'in 30 minutes'. Jobs are executed by the Prometheus cron scheduler.",
+    "parameters": {
+     "description": "Arguments for cron job creation.",
+     "properties": {
+      "name": {
+       "description": "Unique cron job name",
+       "title": "Name",
+       "type": "string"
+      },
+      "schedule": {
+       "description": "Schedule for the job. Either a standard 5-field cron expression (e.g. '*/5 * * * *', '0 9 * * 1-5') or a natural-language phrase (e.g. 'every Monday at 9am', 'in 30 minutes', 'tomorrow at 3pm', 'every weekday at noon').",
+       "title": "Schedule",
+       "type": "string"
+      },
+      "command": {
+       "description": "Shell command to run when triggered",
+       "title": "Command",
+       "type": "string"
+      },
+      "cwd": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Optional working directory override",
+       "title": "Cwd"
+      },
+      "enabled": {
+       "default": true,
+       "description": "Whether the job is active",
+       "title": "Enabled",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "name",
+      "schedule",
+      "command"
+     ],
+     "title": "CronCreateToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "cron_list",
+    "description": "List all registered cron jobs with schedule, status, and next run time.",
+    "parameters": {
+     "description": "Arguments for cron job listing (none required).",
+     "properties": {},
+     "title": "CronListToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "cron_delete",
+    "description": "Delete a local cron job by its unique name.",
+    "parameters": {
+     "description": "Arguments for cron job deletion.",
+     "properties": {
+      "name": {
+       "description": "Name of the cron job to delete",
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     "required": [
+      "name"
+     ],
+     "title": "CronDeleteToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "task_create",
+    "description": "Create a managed background task instead of running a long job with 'nohup … &'. Types: local_bash (shell command), local_agent (sub-agent prompt), file_watch (wait for a file matching a glob), poll (run a predicate command until it succeeds). The daemon detects completion and sends a Telegram notification; set on_complete='reengage'/'both' to also have the agent act on the result. Returns a task id immediately.",
+    "parameters": {
+     "description": "Arguments for task creation.",
+     "properties": {
+      "type": {
+       "default": "local_bash",
+       "description": "Task type: 'local_bash', 'local_agent', 'file_watch', or 'poll'.",
+       "title": "Type",
+       "type": "string"
+      },
+      "description": {
+       "description": "Short human-readable task description.",
+       "title": "Description",
+       "type": "string"
+      },
+      "command": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Shell command (local_bash only).",
+       "title": "Command"
+      },
+      "prompt": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Agent prompt (local_agent only).",
+       "title": "Prompt"
+      },
+      "model": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Model override for agent tasks.",
+       "title": "Model"
+      },
+      "watch_dir": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Directory to watch (file_watch only).",
+       "title": "Watch Dir",
+       "x-prometheus-path": "dir",
+       "x-prometheus-path-access": "read"
+      },
+      "watch_pattern": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Glob pattern for the file to wait for, e.g. '*.done' (file_watch only).",
+       "title": "Watch Pattern"
+      },
+      "poll_predicate": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Shell command polled until it exits 0 (poll only; fallback detector).",
+       "title": "Poll Predicate"
+      },
+      "on_complete": {
+       "default": "notify",
+       "description": "What to do on completion: 'notify' (Telegram only), 'reengage' (also inject the result back to the agent), or 'both'.",
+       "title": "On Complete",
+       "type": "string"
+      },
+      "reengage_prompt": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Optional template for the synthetic re-engagement turn.",
+       "title": "Reengage Prompt"
+      },
+      "timeout_seconds": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Hard ceiling; on expiry the task is marked failed (timeout).",
+       "title": "Timeout Seconds"
+      }
+     },
+     "required": [
+      "description"
+     ],
+     "title": "TaskCreateToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "task_get",
+    "description": "Get the status and details for a background task.",
+    "parameters": {
+     "description": "Arguments for task lookup.",
+     "properties": {
+      "task_id": {
+       "description": "Task identifier.",
+       "title": "Task Id",
+       "type": "string"
+      }
+     },
+     "required": [
+      "task_id"
+     ],
+     "title": "TaskGetToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "task_output",
+    "description": "Read the tail of a background task's output log.",
+    "parameters": {
+     "description": "Arguments for task output retrieval.",
+     "properties": {
+      "task_id": {
+       "description": "Task identifier.",
+       "title": "Task Id",
+       "type": "string"
+      },
+      "max_bytes": {
+       "default": 12000,
+       "description": "Max bytes to return.",
+       "maximum": 100000,
+       "minimum": 1,
+       "title": "Max Bytes",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "task_id"
+     ],
+     "title": "TaskOutputToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "task_stop",
+    "description": "Stop (terminate) a background task.",
+    "parameters": {
+     "description": "Arguments for stopping a task.",
+     "properties": {
+      "task_id": {
+       "description": "Task identifier.",
+       "title": "Task Id",
+       "type": "string"
+      }
+     },
+     "required": [
+      "task_id"
+     ],
+     "title": "TaskStopToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "download_file",
+    "description": "Download a file from a URL to local disk. Saves to ~/.prometheus/downloads/ by default. Streams with a size limit.",
+    "parameters": {
+     "description": "Arguments for downloading a file from a URL.",
+     "properties": {
+      "url": {
+       "description": "HTTP or HTTPS URL to download",
+       "title": "Url",
+       "type": "string"
+      },
+      "destination": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Local path to save the file (default: ~/.prometheus/downloads/<filename>)",
+       "title": "Destination",
+       "x-prometheus-path": "file",
+       "x-prometheus-path-access": "write"
+      },
+      "overwrite": {
+       "default": false,
+       "description": "Overwrite the destination if it already exists",
+       "title": "Overwrite",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "url"
+     ],
+     "title": "DownloadFileInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "sessions_spawn",
+    "description": "Create a new background agent session with the given prompt. Returns the session/task ID for tracking.",
+    "parameters": {
+     "description": "Arguments for spawning a new session.",
+     "properties": {
+      "prompt": {
+       "description": "Initial prompt for the new agent session",
+       "title": "Prompt",
+       "type": "string"
+      },
+      "description": {
+       "default": "agent session",
+       "description": "Short description of the session",
+       "title": "Description",
+       "type": "string"
+      },
+      "model": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Model override for this session",
+       "title": "Model"
+      }
+     },
+     "required": [
+      "prompt"
+     ],
+     "title": "SessionsSpawnInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "lcm_grep",
+    "description": "Search conversation history and summaries using FTS5 full-text search. Returns matching messages and/or summary nodes ranked by relevance.",
+    "parameters": {
+     "description": "Arguments for the LCM grep tool.",
+     "properties": {
+      "query": {
+       "description": "Full-text search query",
+       "title": "Query",
+       "type": "string"
+      },
+      "session_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "description": "Restrict search to a specific session (omit for all sessions)",
+       "title": "Session Id"
+      },
+      "search_target": {
+       "default": "both",
+       "description": "Search messages, summaries, or both",
+       "enum": [
+        "messages",
+        "summaries",
+        "both"
+       ],
+       "title": "Search Target",
+       "type": "string"
+      },
+      "limit": {
+       "default": 20,
+       "description": "Max results to return",
+       "maximum": 200,
+       "minimum": 1,
+       "title": "Limit",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "query"
+     ],
+     "title": "LCMGrepInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "vault_search",
+    "description": "Search the BRAIN VAULT — the owner's second brain, compiled from their notes and past conversations: projects, decisions, people, companies and standing engineering principles. Returns matching page paths with context; read a full page with vault_read. Searches the vault's compiled wiki/ tree. This is NOT the Prometheus wiki (wiki_query) — different knowledge, different root.",
+    "parameters": {
+     "description": "Arguments for vault_search.",
+     "properties": {
+      "query": {
+       "description": "What to look for in the brain vault's compiled knowledge.",
+       "title": "Query",
+       "type": "string"
+      }
+     },
+     "required": [
+      "query"
+     ],
+     "title": "VaultSearchInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "vault_read",
+    "description": "Read a file from the BRAIN VAULT by its vault-relative path — compiled pages under wiki/, original sources under raw/, human notes under notes/. Read-only. Large files come in windows: a partial read names the true size, the next offset, and an outline of '@offset heading' jump targets. Use vault_search first to find the path (its context lines carry @offset for jumping).",
+    "parameters": {
+     "description": "Arguments for vault_read.",
+     "properties": {
+      "path": {
+       "description": "Path relative to the brain vault root, e.g. 'wiki/sources/concepts/Standing-Principles.md' or 'raw/claude-chats/2026-04-24-prometheus3.md'.",
+       "title": "Path",
+       "type": "string",
+       "x-prometheus-path": "file",
+       "x-prometheus-path-access": "read"
+      },
+      "offset": {
+       "default": 0,
+       "description": "Character position to start reading from (0-based). A partial read names the next offset to continue with, and its outline lists '@offset heading' jump targets.",
+       "title": "Offset",
+       "type": "integer"
+      },
+      "max_chars": {
+       "default": 12000,
+       "description": "Window size in characters, clamped to 1000-48000. The default leaves room for the daemon's per-result budget; raise it only for a deliberate long pull.",
+       "title": "Max Chars",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "title": "VaultReadInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "ask_user",
+    "description": "Ask the user a question and wait for their response. Use when you need clarification before proceeding.",
+    "parameters": {
+     "description": "Arguments for asking the user a question.",
+     "properties": {
+      "question": {
+       "description": "The question to ask the user",
+       "title": "Question",
+       "type": "string"
+      }
+     },
+     "required": [
+      "question"
+     ],
+     "title": "AskUserInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "todo_write",
+    "description": "Append a TODO item to a project markdown checklist.",
+    "parameters": {
+     "description": "Arguments for TODO writes.",
+     "properties": {
+      "item": {
+       "description": "TODO item text.",
+       "title": "Item",
+       "type": "string"
+      },
+      "checked": {
+       "default": false,
+       "description": "Mark as already completed.",
+       "title": "Checked",
+       "type": "boolean"
+      },
+      "path": {
+       "default": ".prometheus/TODO.md",
+       "description": "Relative path to TODO file. Defaults to a runtime scratchpad inside the (gitignored) .prometheus/ directory so automated tools (evals, benchmarks, hooks) don't pollute the project TODO.md. Pass 'TODO.md' explicitly to write to the repo root.",
+       "title": "Path",
+       "type": "string",
+       "x-prometheus-path": "file",
+       "x-prometheus-path-access": "write"
+      }
+     },
+     "required": [
+      "item"
+     ],
+     "title": "TodoWriteToolInput",
+     "type": "object"
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "skill",
+    "description": "Load a skill: saved step-by-step instructions for one kind of task (a procedure, a house convention, a known fix). Call it with the skill's name before starting a task that a skill covers, then follow what it returns. The system prompt names the core skills; find others with tool_search.",
+    "parameters": {
+     "description": "Arguments for skill lookup.",
+     "properties": {
+      "name": {
+       "description": "Skill name to retrieve.",
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     "required": [
+      "name"
+     ],
+     "title": "SkillToolInput",
+     "type": "object"
+    }
+   }
+  }
+ ]
+}
