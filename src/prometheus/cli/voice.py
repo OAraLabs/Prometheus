@@ -268,11 +268,14 @@ async def transcribe_wav(
         logger.warning("Whisper STT module unavailable: %s", exc)
         return None
 
-    tool = WhisperSTTTool(config=config)
+    notices: list[str] = []
+    tool = WhisperSTTTool(config=config, notices=notices)
     result = await tool.execute(
         WhisperSTTInput(audio_path=str(wav_path)),
         ToolExecutionContext(cwd=Path.cwd()),
     )
+    for notice in notices:
+        print(f"\n[voice] {notice}")
     if result.is_error or not result.output:
         # Onboarding papercut fix: a missing Whisper engine used to
         # degrade to a silent None (looked like an empty recording).
@@ -302,7 +305,11 @@ async def synthesize_wav(
     remote = remote_settings("tts", config or {})
     if remote is not None:
         out_wav = tempfile.mktemp(suffix=".wav")
-        if await synthesize_remote(remote, text, out_wav):
+        notices: list[str] = []
+        spoke = await synthesize_remote(remote, text, out_wav, notices=notices)
+        for notice in notices:
+            print(f"\n[voice] {notice}")
+        if spoke:
             return Path(out_wav)
         Path(out_wav).unlink(missing_ok=True)
     return await _synthesize_piper(text, voice_config)

@@ -374,9 +374,9 @@ Pending pieces and health are in memory. Rows are written only by the daemon's o
 | PR | Builds |
 |---|---|
 | 1 | This contract. |
-| 2 | Voice fallback says so (section 9) for the YAML-configured remote voice servers, and the gateways resolve voice per call instead of at boot. |
+| 2 | Voice fallback says so (section 9) for the YAML-configured remote voice servers. |
 | 3 | The `pieces` store and `GET /api/pieces` (`{"v": 1, "pieces": [], ...}` until something writes a row). |
-| 4 | A typed address joins a voice box: probe, prompt, approve, pin, live use, health and fallback. |
+| 4 | A typed address joins a voice box: probe, prompt, approve, pin, live use, health and fallback. The gateways resolve voice per call (through the pieces registry) instead of at boot. |
 | 5 | `oara piece announce`. |
 | 6 | The mDNS browser. |
 | 7–8 | Model servers as pieces: named backends at runtime, then "make it the main model". |
