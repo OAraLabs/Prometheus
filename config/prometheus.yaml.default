@@ -772,6 +772,38 @@ whisper:
   model: "base"
   device: "auto"
   language: "en"
+  url: ""                  # another name for stt.url (below); stt.url wins when both are set
+
+# Remote voice servers — optional. Empty url (the default) keeps voice on
+# this machine: faster-whisper / whisper for speech-to-text, piper / espeak
+# for text-to-speech. Set a url to an OpenAI-compatible voice server on
+# another machine and Prometheus tries it first, everywhere it listens or
+# speaks (Telegram and Discord voice notes, `oara --voice`, the tts tool):
+#   - unreachable or failing -> the local engine, and one log line
+#   - 401 / 403 (key refused) or 400 (unknown voice or model) -> the local
+#     engine, and an ERROR in the log
+# `oara doctor` shows a row for each url that is set (it asks the server's
+# /health, then /v1/models if the server has one).
+#
+# A url is the server, e.g. http://127.0.0.1:8001 (or .../v1); the
+# /v1/audio/... route is added. A full route is used as written.
+# whisper.url is accepted for stt.url; stt.url wins when both are set.
+#
+# The key is NEVER read from this file. api_key_env names the variable that
+# holds it, in the environment or in ~/.config/prometheus/env. Empty means
+# PROMETHEUS_STT_API_KEY / PROMETHEUS_TTS_API_KEY; if that variable is unset
+# too, no key is sent. An api_key written here is ignored.
+stt:
+  url: ""                  # e.g. http://127.0.0.1:8001
+  api_key_env: ""          # empty = PROMETHEUS_STT_API_KEY
+  model: "whisper-1"       # the model name the server expects
+  timeout_seconds: 60
+tts:
+  url: ""                  # e.g. http://127.0.0.1:8003
+  api_key_env: ""          # empty = PROMETHEUS_TTS_API_KEY
+  model: "tts-1"           # the model name the server expects
+  voice: ""                # the server's voice name; empty = the server's default
+  timeout_seconds: 60
 
 # NOTE — this section was named `model_router:` before GRAFT-ROUTER-WIRE v3.
 # The old key is no longer shipped here because nothing reads it: a config
