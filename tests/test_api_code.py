@@ -9,6 +9,7 @@ read including the output tail.
 from __future__ import annotations
 
 import json as _json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -133,10 +134,29 @@ def test_create_forwards_daemon_config_before_subcommand(monkeypatch, tmp_path, 
     })
 
     assert r.status_code == 200
-    cmd = mgr.created_with["command"]
-    assert "--config" in cmd
-    assert str(tmp_path / "custom-prometheus.yaml") in cmd
-    assert cmd.index("--config") < cmd.index("code")
+    # Compare argument positions, not substrings: the interpreter's path may
+    # itself contain "code". --config is a top-level option, so argparse
+    # refuses it after the `code` subcommand.
+    argv = shlex.split(mgr.created_with["command"])
+    at = argv.index("--config")
+    assert argv[at + 1] == str(tmp_path / "custom-prometheus.yaml")
+    assert at < argv.index("code")
+
+
+def test_create_without_daemon_config_passes_none(monkeypatch, tmp_path, repo):
+    mgr = _StubManager(tmp_path)
+    mgr.child_config_path = None
+    c = _client_with(monkeypatch, mgr)
+
+    r = c.post("/api/code", json={
+        "repo": str(repo),
+        "description": "default config",
+        "acceptance_command": "python3 -m pytest -q",
+        "task_id": "no-config",
+    })
+
+    assert r.status_code == 200
+    assert "--config" not in shlex.split(mgr.created_with["command"])
 
 
 def test_validation_rejects_missing_fields_and_non_repo(monkeypatch, tmp_path, repo):
