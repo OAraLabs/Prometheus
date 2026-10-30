@@ -87,13 +87,18 @@ def _record_media_failure(
         logger.debug("media_services: record_silent_failure failed", exc_info=True)
 
 
-async def transcribe_audio(audio_path: str) -> str | None:
-    """Run audio through WhisperSTT for transcription. Returns None on failure."""
+async def transcribe_audio(
+    audio_path: str, config: dict[str, Any] | None = None,
+) -> str | None:
+    """Run audio through WhisperSTT for transcription. Returns None on failure.
+
+    *config* is the gateway's loaded prometheus.yaml (for ``stt.url``).
+    """
     try:
         from prometheus.tools.builtin.whisper_stt import WhisperSTTTool, WhisperSTTInput
         from prometheus.tools.base import ToolExecutionContext
 
-        tool = WhisperSTTTool()
+        tool = WhisperSTTTool(config=config)
         result = await tool.execute(
             WhisperSTTInput(audio_path=audio_path),
             ToolExecutionContext(cwd=Path.cwd()),

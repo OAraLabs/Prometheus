@@ -1,7 +1,8 @@
 # Provenance: NousResearch/hermes-agent (https://github.com/NousResearch/hermes-agent)
 # Original: tools/tts_tool.py
 # License: MIT
-# Modified: Rewritten as Prometheus BaseTool; uses local TTS engines only (espeak-ng, piper)
+# Modified: Rewritten as Prometheus BaseTool; local TTS engines (espeak-ng, piper),
+#           with an optional OpenAI-compatible remote (tts.url) tried first
 
 """Text-to-speech using local TTS engines (espeak-ng or piper)."""
 
@@ -51,6 +52,27 @@ class TTSTool(BaseTool):
         self, arguments: TTSInput, context: ToolExecutionContext
     ) -> ToolResult:
         text = arguments.text[:4000]  # cap at 4000 chars
+
+        # A relative output_path resolves against the tool context's cwd (the
+        # session workspace in a workspace session), like write_file. Handed
+        # on as given, the engine subprocess resolved it against the daemon
+        # PROCESS's directory instead.
+        if arguments.output_path:
+            out_path = str(_resolve_path(context.cwd, arguments.output_path))
+        else:
+            out_path = tempfile.mktemp(suffix=".wav")
+
+        # tts.url, when set, is tried first unless a local engine was asked
+        # for by name. Any failure falls through to the local engines below.
+        # The voice argument is engine-specific (an espeak or piper voice), so
+        # it stays with the local engines; the remote speaks with tts.voice.
+        if arguments.engine is None:
+            from prometheus.infra.voice_remote import remote_settings, synthesize_remote
+
+            remote = remote_settings("tts")
+            if remote is not None and await synthesize_remote(remote, text, out_path):
+                return ToolResult(output=f"Audio saved to {out_path}")
+
         engine = arguments.engine or _detect_engine()
         if engine is None:
             return ToolResult(
@@ -70,15 +92,6 @@ class TTSTool(BaseTool):
                 ),
                 is_error=True,
             )
-
-        # A relative output_path resolves against the tool context's cwd (the
-        # session workspace in a workspace session), like write_file. Handed
-        # on as given, the engine subprocess resolved it against the daemon
-        # PROCESS's directory instead.
-        if arguments.output_path:
-            out_path = str(_resolve_path(context.cwd, arguments.output_path))
-        else:
-            out_path = tempfile.mktemp(suffix=".wav")
 
         if engine == "espeak":
             return await _run_espeak(text, arguments.voice, out_path)
