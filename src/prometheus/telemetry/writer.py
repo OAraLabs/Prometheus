@@ -206,7 +206,9 @@ class TelemetryV2Writer:
         conditional UPDATEs ("only while ``outcome`` IS NULL") that must run
         AFTER the turn rows queued before them, which the one queue gives for
         free. ``fn`` gets the writer's connection and must touch only
-        ``V2_TABLES``; it is committed when it returns. One that raises is
+        ``V2_TABLES``, or the label columns of ``tool_calls``
+        (telemetry/trace_labels.py: a turn's end stamps its calls); it is
+        committed when it returns. One that raises is
         rolled back and becomes a WARNING plus a ``silent_failures`` row named
         ``label``, and the rows queued after it still land. Returns False if it
         was dropped (and counted), like a row.

@@ -945,7 +945,9 @@ async def test_adapter_bypass(runner: SmokeTestRunner):
     # Check telemetry recorded the call
     try:
         stats = runner.telemetry.report() if hasattr(runner.telemetry, 'report') else {}
-        has_records = bool(stats)
+        # A call counted, not a non-empty dict: report() always returns its
+        # keys, so `bool(stats)` passed with nothing recorded.
+        has_records = bool(stats.get("total_calls") or stats.get("total_denials"))
         result = TestResult(
             name="telemetry_recording",
             category="adapter",

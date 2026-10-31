@@ -161,6 +161,22 @@ def _looks_like_json_blob(value: Any) -> bool:
         return s.startswith('{"')  # truncated serialization still counts
 
 
+#: Predicates that check what the run PRODUCED (a file, the answer's text),
+#: not the shape of its tool calls. A task with none of them passes when its
+#: calls ran with the right shape: that is ``tool_ok``-plus-arguments, not task
+#: success, and its rows say so (``pass_basis``, telemetry/trace_labels.py).
+OUTCOME_PREDICATES = frozenset({
+    "expect_file", "expect_file_contains", "expect_text_contains", "expect_text_min_len",
+})
+PASS_BASIS_OUTCOME = "outcome"
+PASS_BASIS_TOOL_ONLY = "tool_only"
+
+
+def pass_basis(task_score: dict[str, Any]) -> str:
+    """``outcome`` if the task checks what the run produced, else ``tool_only``."""
+    return PASS_BASIS_OUTCOME if OUTCOME_PREDICATES & set(task_score) else PASS_BASIS_TOOL_ONLY
+
+
 def score(
     task_score: dict[str, Any],
     t: RunTranscript,

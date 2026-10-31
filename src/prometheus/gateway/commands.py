@@ -1487,17 +1487,28 @@ def cmd_health(verbose: bool = False, since_hours: float = 24.0) -> str:
     # With zero invocations, "0.0% success" is mathematically meaningless —
     # render "n/a" instead. Otherwise use a 1-decimal success rate so
     # "4 failures in 1247" doesn't render as "100% success" via rounding.
+    # "ran OK", not "success": this is whether the CALLS executed, which says
+    # nothing about whether the turns they sat in got anywhere. That is the
+    # Turns line below (telemetry/trace_labels.py).
     if tc_total == 0:
         rate_str = "n/a"
     else:
         rate_str = (
-            f"{tc_succ_rate * 100:.1f}% success"
-            if tc_succ_rate < 1.0 else "100% success"
+            f"{tc_succ_rate * 100:.1f}% ran OK"
+            if tc_succ_rate < 1.0 else "100% ran OK"
         )
     lines.append(
         f"{tc_icon} Tool calls:        {tc_total:>5,}  "
         f"({tc_fail} failures, {rate_str})"
     )
+    turns = summary.get("turns") or {}
+    t_linked = int(turns.get("linked") or 0)
+    if t_linked:
+        lines.append(
+            f"   Turns ended:       {t_linked:>5,}  "
+            f"({turns.get('completed', 0)} completed, {turns.get('stopped', 0)} stopped, "
+            f"{turns.get('errored', 0)} errored, {turns.get('abandoned', 0)} cut off)"
+        )
 
     subsystems = summary.get("subsystems", {}) or {}
     # Phase 2 (orphan-tools): tool_registration gets its own dedicated
@@ -4378,7 +4389,8 @@ def cmd_tools() -> str:
 
         lines = ["Tool Call Stats (24h)\n"]
         lines.append(f"Total calls: {stats['total_calls']}")
-        lines.append(f"Success rate: {stats['overall_success_rate']:.0%}")
+        # Calls that ran without error — a tool-call rate, not task success.
+        lines.append(f"Ran OK: {stats['overall_success_rate']:.0%}")
         if stats.get("total_denials"):
             lines.append(f"Denied by policy: {stats['total_denials']}")
 
@@ -4411,7 +4423,18 @@ def cmd_pairs() -> str:
         stats = store.stats()
 
         lines = ["Training Pairs\n"]
-        lines.append(f"Total: {stats['total']}")
+        # `total` is every row; cloud_golden rows are chosen-only copies of
+        # telemetry's golden calls, not pairs, and must never be added to a
+        # golden-trace count (PairStore.stats).
+        if "pairs" in stats:
+            lines.append(f"Pairs: {stats['pairs']}")
+            if stats.get("exemplars"):
+                lines.append(
+                    f"Cloud exemplars: {stats['exemplars']} "
+                    "(copies of golden calls; not a separate corpus)"
+                )
+        else:
+            lines.append(f"Total: {stats['total']}")
         lines.append(
             f"Last 7d: {stats['last_7d']} (~{stats['per_day_7d']}/day)"
         )

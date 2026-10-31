@@ -17,6 +17,7 @@ from prometheus.config.paths import get_config_dir
 from prometheus.context.environment import git_head_sha
 from prometheus.gateway.cron_service import load_cron_jobs, validate_cron_expression
 from prometheus.telemetry.outcomes import sweep_abandoned
+from prometheus.telemetry.trace_labels import queue_sweep_unended
 
 if TYPE_CHECKING:
     from prometheus.gateway.platform_base import BasePlatformAdapter
@@ -314,7 +315,9 @@ class Heartbeat:
         """Queue the telemetry v2 ``abandoned`` sweep, at most every
         ``OUTCOME_SWEEP_INTERVAL`` seconds. It runs on the telemetry writer's
         thread in a bounded batch, so this tick never waits on the database,
-        and ``sweep_abandoned`` never raises."""
+        and ``sweep_abandoned`` never raises. The trace-label sweep rides the
+        same tick: calls of a turn that never ended get ``turn_outcome``
+        ``abandoned`` (telemetry/trace_labels.py)."""
         if self._telemetry is None:
             return
         now = time.monotonic()
@@ -323,6 +326,7 @@ class Heartbeat:
             return
         self._outcome_sweep_last = now
         sweep_abandoned(self._telemetry)
+        queue_sweep_unended(self._telemetry)
 
     async def _check_idle(self) -> None:
         """Emit idle_start / idle_end signals on the bus."""

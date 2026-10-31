@@ -6020,7 +6020,8 @@ class TestGoldenTraceCapture:
         )
         assert path.exists()
         assert path.suffix == ".jsonl"
-        assert path.name.startswith("golden_traces_")
+        # A dump, never the incremental export's golden_traces_* name.
+        assert path.name.startswith("golden_dump_")
 
         lines = path.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) == 2

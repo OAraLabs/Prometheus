@@ -86,6 +86,10 @@ TELEMETRY_TARGETS = (
     ("subsystem_runs", "id", ("summary_json",)),
     ("signal_events", "id", ("payload",)),
     ("circuit_breaker_diagnostics", "id", ("raw_sample", "golden_reference")),
+    # Golden trace v2 (telemetry/golden_request.py): the requests golden calls
+    # answered, redacted at capture. A rewrite here leaves the row's content
+    # hash naming the pre-scrub body; nothing re-derives it, so that is harmless.
+    ("golden_blobs", "hash", ("body",)),
 )
 TRAINING_TARGETS = (
     ("training_pairs", "id", ("context", "rejected", "chosen", "meta")),
@@ -108,11 +112,11 @@ MEMORY_TARGETS = (
 MEMORY_FTS = {"memories": "memories_fts", "messages": "messages_fts"}
 
 
-def _backup(db: Path, stamp: str) -> Path:
-    dest = db.with_name(f"{db.name}.pre-scrub-{stamp}")
+def _backup(db: Path, stamp: str, label: str = "pre-scrub") -> Path:
+    dest = db.with_name(f"{db.name}.{label}-{stamp}")
     n = 1
     while dest.exists():  # a second run in the same second must not overwrite the first backup
-        dest = db.with_name(f"{db.name}.pre-scrub-{stamp}-{n}")
+        dest = db.with_name(f"{db.name}.{label}-{stamp}-{n}")
         n += 1
     src = sqlite3.connect(str(db))
     dst = sqlite3.connect(str(dest))

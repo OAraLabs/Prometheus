@@ -36,7 +36,7 @@ from prometheus.engine.messages import (
     ToolUseBlock,
 )
 from prometheus.gym.manifest import ExperimentManifest
-from prometheus.gym.scoring import RunTranscript, score
+from prometheus.gym.scoring import RunTranscript, pass_basis, score
 from prometheus.gym.store import GymStore
 from prometheus.gym.tasks import TaskSet, TaskSpec
 from prometheus.telemetry.tracker import (
@@ -542,6 +542,7 @@ async def run_experiment(
                 kv_cache_k=kv_cache["k"],
                 kv_cache_v=kv_cache["v"],
                 kv_cache_source=kv_cache["source"],
+                pass_basis=pass_basis(task.score),
             )
             if progress:
                 # E/X = emission/execution; only when they differ does the

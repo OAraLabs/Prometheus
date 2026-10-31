@@ -31,6 +31,8 @@ from prometheus.security.log_redaction import redact_capture as _redact
 from prometheus.security.log_redaction import redact_json_text, redact_secrets
 
 from prometheus.telemetry.db import connect_telemetry_db
+from prometheus.telemetry import golden_request, trace_labels
+from prometheus.telemetry.golden_request import GoldenRequestCapture
 from prometheus.telemetry.latency import LatencyAggregate
 from prometheus.telemetry.writer import TelemetryV2Writer
 
@@ -367,6 +369,8 @@ CREATE INDEX IF NOT EXISTS idx_signal_events_type_time
 -- Telemetry v2: a turn's responses, and a session's turns.
 CREATE INDEX IF NOT EXISTS idx_responses_turn ON responses (turn_id, round_index);
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns (session_id);
+-- Trace labels: turn end stamps every call of the turn by turn_id.
+CREATE INDEX IF NOT EXISTS idx_tool_calls_turn ON tool_calls (turn_id);
 """
 
 
@@ -420,6 +424,18 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("raw_before_repair", "TEXT"),  # the call as the model emitted it, redacted
         ("retry_index", "INTEGER"),   # 0 = first attempt, n = n-th retry of the same call
         ("result_summary", "TEXT"),   # the tool result's first RESULT_SUMMARY_CHARS, redacted
+        # TRACE LABELS (telemetry/trace_labels.py). `success` was read as "the
+        # task passed"; it only ever meant the call ran without error. Three
+        # labels, kept apart: `tool_ok` (= success, under an honest name),
+        # `turn_outcome` (how the call's turn ENDED, stamped at turn end), and
+        # `judged_ok` (a judge's verdict, filled later, with who and when).
+        # Additive and nullable; rows from before are labelled by
+        # `oara trace-labels --apply`, never rewritten.
+        *trace_labels.LABEL_COLUMNS,
+        # GOLDEN TRACE v2: the full request the call answered, as sent, in
+        # golden_requests (this file's GOLDEN REQUESTS section). NULL on v1
+        # rows and on every row that is not golden.
+        ("request_id", "TEXT"),
     ],
     "circuit_breaker_diagnostics": [
         ("golden_reference", "TEXT"),
@@ -493,10 +509,23 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
 # implementation (see sentinel/golden_trace_exporter.lcm_context_resolver).
 ContextResolver = "Callable[[dict[str, Any]], list[dict[str, str]]]"
 
-# Column order shared by both golden-trace queries.
+# Column order shared by both golden-trace queries. The trailing ones carry
+# golden trace v2 (request_id, tool_use_id, turn_id, served_model) and the
+# trace labels (telemetry/trace_labels.py); `turn_signal` is the turn's
+# user-signal outcome, from the turns row.
 _GOLDEN_COLUMNS = (
     "rowid", "model", "tool_name", "raw_model_output", "parsed_tool_call",
     "timestamp", "session_id", "tool_schema",
+    "request_id", "tool_use_id", "turn_id", "served_model",
+    "tool_ok", "turn_outcome", "judged_ok", "judged_by", "turn_signal",
+)
+_GOLDEN_SELECT = (
+    "SELECT c.rowid, c.model, c.tool_name, c.raw_model_output, c.parsed_tool_call,"
+    " c.timestamp, c.session_id, c.tool_schema,"
+    " c.request_id, c.tool_use_id, c.turn_id, c.served_model,"
+    " c.tool_ok, c.turn_outcome, c.judged_ok, c.judged_by, t.outcome"
+    " FROM tool_calls c LEFT JOIN turns t ON t.turn_id = c.turn_id"
+    " WHERE c.is_golden = 1"
 )
 
 
@@ -656,6 +685,8 @@ class ToolCallTelemetry:
         # 3. Create indexes (runs AFTER migration so indexes on newly-added
         #    columns don't fail against freshly-migrated pre-existing tables)
         self._conn.executescript(_SCHEMA_SQL_TABLES)
+        # Golden trace v2's request store (telemetry/golden_request.py).
+        self._conn.executescript(golden_request.TABLES_SQL)
         self._migrate_schema()
         self._migrate_latency_nullable()
         self._stamp_billing_boundary()
@@ -690,6 +721,7 @@ class ToolCallTelemetry:
         self._v2_writer: TelemetryV2Writer | None = None
         self._v2_writer_lock = threading.Lock()
         self._v2_capture_stamped = False
+        self._golden_requests: golden_request.GoldenRequestStore | None = None
 
     def _current_node_id(self) -> str | None:
         """The node ID to stamp on rows. Cached once found.
@@ -1097,6 +1129,8 @@ class ToolCallTelemetry:
         raw_before_repair: str | None = None,
         retry_index: int | None = None,
         result_summary: str | None = None,
+        golden_request: GoldenRequestCapture | None = None,
+        trainable: bool = True,
     ) -> None:
         """Record a single tool-call outcome. Never raises.
 
@@ -1120,8 +1154,16 @@ class ToolCallTelemetry:
 
         ``is_golden`` is computed internally, not passed in: True iff the
         provider is cloud AND ``success`` AND ``retries == 0`` AND
-        ``raw_model_output`` was supplied. Only cloud wins count as "teacher
-        model" examples worth keeping.
+        ``raw_model_output`` was supplied AND ``trainable``. Only cloud wins
+        count as "teacher model" examples worth keeping. ``trainable`` False
+        is a turn a group member wrote (gateway trust): it teaches nothing,
+        the export drops its context and ``cloud_golden`` refuses it, so it is
+        not counted golden either. ``is_golden`` says the CALL ran; it is not
+        a verdict on the turn (``turn_outcome``, telemetry/trace_labels.py).
+
+        ``golden_request`` (golden trace v2): the round's request as sent and
+        its route. Stored only when the call is golden
+        (telemetry/golden_request.py), and its failure never costs the row.
 
         Telemetry v2 (WP-X.54) fields, all optional and NULL when not given:
         ``turn_id`` and ``round_index`` place the call in its turn;
@@ -1146,7 +1188,8 @@ class ToolCallTelemetry:
                 session_id=session_id, tool_schema=tool_schema, turn_id=turn_id,
                 round_index=round_index, tool_use_id=tool_use_id, repair_kind=repair_kind,
                 raw_before_repair=raw_before_repair, retry_index=retry_index,
-                result_summary=result_summary,
+                result_summary=result_summary, golden_request=golden_request,
+                trainable=trainable,
             )
         except Exception as exc:
             # Undo the half: a commit that failed (the lock case) leaves the
@@ -1156,6 +1199,9 @@ class ToolCallTelemetry:
                 self._conn.rollback()
             except Exception:
                 pass
+            # The rollback also undid any golden request parts written in this
+            # transaction; the store must not go on believing they exist.
+            self._golden_requests = None
             log.warning(
                 "ToolCallTelemetry.record: write failed for model=%s tool=%s",
                 model, tool_name, exc_info=True,
@@ -1191,13 +1237,17 @@ class ToolCallTelemetry:
         raw_before_repair: str | None,
         retry_index: int | None,
         result_summary: str | None,
+        golden_request: GoldenRequestCapture | None = None,
+        trainable: bool = True,
     ) -> None:
         is_golden = (
             provider in _CLOUD_PROVIDERS
             and success
             and retries == 0
             and raw_model_output is not None
+            and trainable
         )
+        request_id = self._store_golden_request(golden_request) if is_golden else None
         # Capture-time redaction (security/log_redaction.redact_capture): the
         # model's raw output and the parsed call carry whatever the user typed
         # or a tool echoed — a Telegram bot token was found in this table.
@@ -1223,9 +1273,10 @@ class ToolCallTelemetry:
                raw_model_output, parsed_tool_call, is_golden, repairs,
                served_model, session_id, tool_schema, node_id,
                turn_id, round_index, tool_use_id, repair_kind,
-               raw_before_repair, retry_index, result_summary)
+               raw_before_repair, retry_index, result_summary, tool_ok,
+               request_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uuid4().hex,
@@ -1252,9 +1303,44 @@ class ToolCallTelemetry:
                 raw_before_repair,
                 retry_index,
                 result_summary,
+                # trace_labels: the call ran without error. `success`'s
+                # meaning under its honest name; never "the task passed".
+                1 if success else 0,
+                request_id,
             ),
         )
         self._conn.commit()
+
+    def _store_golden_request(
+        self, capture: GoldenRequestCapture | None,
+    ) -> str | None:
+        """Golden trace v2: store the round's request, in the row's transaction.
+
+        Returns its id, or None when there is none to store or storing failed.
+        A failure is a WARNING plus a ``silent_failures`` row and the call row
+        is still written (as a v1 trace): the capture must never cost the
+        denominator every success rate is built on.
+        """
+        if capture is None:
+            return None
+        try:
+            if self._golden_requests is None:
+                self._golden_requests = golden_request.GoldenRequestStore(self._conn)
+            return self._golden_requests.store(capture)
+        except Exception as exc:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            # Rolled back, so whatever it remembered writing may not exist.
+            self._golden_requests = None
+            log.warning("golden trace v2: request not stored; the call is kept as v1",
+                        exc_info=True)
+            self.record_silent_failure(
+                subsystem="telemetry", operation="golden_request", exc=exc,
+                context={"provider": getattr(capture, "provider", "")},
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Circuit Breaker diagnostic writes (Circuit Breaker Self-Diagnosis sprint)
@@ -2115,6 +2201,8 @@ class ToolCallTelemetry:
                                "success_rate": 0-1},
                     # denials = policy refusals (SecurityGate / hooks); they
                     # count in `total` but not in `failures` or the rate.
+                    # success_rate is the TOOL-CALL rate (ran without error).
+                "turns": turn_outcome_summary(since),   # how turns ended
                 "subsystems": {
                     "<name>": {
                         "runs": N, "success": N, "partial": N, "failed": N,
@@ -2133,6 +2221,8 @@ class ToolCallTelemetry:
             "tool_calls": {
                 "total": 0, "failures": 0, "denials": 0, "success_rate": 0.0,
             },
+            # How turns ended — the task-level number beside the tool-call one.
+            "turns": self.turn_outcome_summary(since=since),
             "subsystems": {},
             "recent_silent_failures": [],
         }
@@ -2230,16 +2320,12 @@ class ToolCallTelemetry:
         ``raw_model_output``, ``parsed_tool_call``, ``timestamp``.
         Filtered by ``tool_name`` if provided. Ordered newest-first.
         """
-        query = (
-            "SELECT rowid, model, tool_name, raw_model_output, parsed_tool_call,"
-            " timestamp, session_id, tool_schema"
-            " FROM tool_calls WHERE is_golden = 1"
-        )
+        query = _GOLDEN_SELECT
         params: list[Any] = []
         if tool_name is not None:
-            query += " AND tool_name = ?"
+            query += " AND c.tool_name = ?"
             params.append(tool_name)
-        query += " ORDER BY timestamp DESC LIMIT ?"
+        query += " ORDER BY c.timestamp DESC LIMIT ?"
         params.append(max(1, int(limit)))
 
         try:
@@ -2281,7 +2367,13 @@ class ToolCallTelemetry:
 
         Returns:
             Path to the written JSONL file, e.g.
-            ``~/.prometheus/golden_traces_1713885600.jsonl``
+            ``~/.prometheus/trajectories/golden_dump_1713885600.jsonl``
+
+        NOT ``golden_traces_*``. That name is the incremental export's, and the
+        readers of the corpus (the distillation harvester, GEPA, ``oara
+        doctor``) glob for it: a dump written under it, into the same folder
+        (the CLI's default), re-stated every row it held and counted each
+        trace twice.
         """
         if format != "jsonl":
             raise ValueError(f"Unsupported format: {format!r} (only 'jsonl' is supported)")
@@ -2290,7 +2382,7 @@ class ToolCallTelemetry:
         out_dir = Path(output_dir).expanduser().resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
         stamp = int(time.time())
-        path = out_dir / f"golden_traces_{stamp}.jsonl"
+        path = out_dir / f"golden_dump_{stamp}.jsonl"
 
         written = self._write_golden_jsonl(traces, path, context_resolver)
         skipped = len(traces) - written
@@ -2308,6 +2400,7 @@ class ToolCallTelemetry:
     def _build_example(
         trace: dict[str, Any],
         context_messages: list[dict[str, str]],
+        request: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Shape one golden trace as a tool-calling fine-tuning example.
 
@@ -2333,9 +2426,22 @@ class ToolCallTelemetry:
         no parsed call to learn. Skipping is deliberate: a corpus of
         unlearnable rows is worse than a smaller honest one, and the caller
         counts what it drops.
+
+        TWO FORMATS, ONE SHAPE (``_meta.trace_format``). With ``request`` (the
+        stored request the call answered, telemetry/golden_request.py) the
+        line is v2: ``messages`` is the system prompt and every message as
+        sent, tool calls and results included, uncapped; ``tools`` is the full
+        list offered; ``_meta`` adds the served model, provider, route and the
+        request's hashes. Without one (rows from before v2, or a capture that
+        failed) it is v1, from ``context_messages`` as before. The keys and
+        their meanings are the same in both, so a v1 reader reads a v2 line.
+        Both carry ``_meta.labels``: ``tool_ok``, ``turn_outcome``,
+        ``judged_ok`` / ``judged_by`` and ``turn_signal``
+        (telemetry/trace_labels.py). Every line here is a call that RAN;
+        whether its turn went anywhere is ``turn_outcome``.
         """
         raw_call = trace.get("parsed_tool_call")
-        if not raw_call or not context_messages:
+        if not raw_call or not (context_messages or request):
             return None
         try:
             call = json.loads(raw_call)
@@ -2349,7 +2455,10 @@ class ToolCallTelemetry:
             "content": trace.get("raw_model_output") or "",
             "tool_calls": [
                 {
-                    "id": f"call_{trace.get('rowid', 0)}",
+                    # v2: the call's own id, which the request's earlier tool
+                    # results refer to by the same scheme.
+                    "id": (trace.get("tool_use_id") if request is not None else None)
+                    or f"call_{trace.get('rowid', 0)}",
                     "type": "function",
                     "function": {
                         "name": call.get("name", trace["tool_name"]),
@@ -2359,14 +2468,52 @@ class ToolCallTelemetry:
             ],
         }
 
-        example: dict[str, Any] = {
+        labels = {
+            "tool_ok": trace.get("tool_ok") if trace.get("tool_ok") is not None else 1,
+            "turn_outcome": trace.get("turn_outcome"),
+            "judged_ok": trace.get("judged_ok"),
+            "judged_by": trace.get("judged_by"),
+            "turn_signal": trace.get("turn_signal"),
+        }
+        meta: dict[str, Any] = {
+            "model": trace["model"],
+            "tool_name": trace["tool_name"],
+            "timestamp": trace["timestamp"],
+            "session_id": trace.get("session_id"),
+            "trace_format": 1,
+            "turn_id": trace.get("turn_id"),
+            "labels": labels,
+        }
+
+        if request is not None:
+            system = request.get("system")
+            messages = ([{"role": "system", "content": system}] if system else [])
+            messages += list(request.get("messages") or [])
+            meta.update({
+                "trace_format": request.get("trace_format", 2),
+                "served_model": trace.get("served_model"),
+                "provider": request.get("provider"),
+                "route": request.get("route"),
+                "requested_model": request.get("requested_model"),
+                "request_id": request.get("request_id"),
+                "system_prompt_hash": request.get("system_hash"),
+                "tools_hash": request.get("tools_hash"),
+                "tool_set_hash": request.get("tool_set_hash"),
+                "build_version": request.get("build_version"),
+                "wire": request.get("wire"),
+            })
+            example: dict[str, Any] = {
+                "messages": [*messages, assistant],
+                "tools": list(request.get("tools") or []),
+                "_meta": meta,
+            }
+            if request.get("tool_choice") is not None:
+                example["tool_choice"] = request["tool_choice"]
+            return example
+
+        example = {
             "messages": [*context_messages, assistant],
-            "_meta": {
-                "model": trace["model"],
-                "tool_name": trace["tool_name"],
-                "timestamp": trace["timestamp"],
-                "session_id": trace.get("session_id"),
-            },
+            "_meta": meta,
         }
 
         schema = trace.get("tool_schema")
@@ -2393,6 +2540,18 @@ class ToolCallTelemetry:
         written = 0
         with path.open("w", encoding="utf-8") as fh:
             for trace in traces:
+                # v2: the request as sent, when one was stored. The LCM
+                # rebuild below is only for rows without one.
+                request = (
+                    golden_request.load_request(self._conn, trace["request_id"])
+                    if trace.get("request_id") else None
+                )
+                if request is not None and trace.get("parsed_tool_call"):
+                    example = self._build_example(trace, [], request)
+                    if example is not None:
+                        fh.write(json.dumps(_redact(example), ensure_ascii=False) + "\n")
+                        written += 1
+                        continue
                 context_messages: list[dict[str, str]] = []
                 if context_resolver is not None:
                     try:
@@ -2424,16 +2583,12 @@ class ToolCallTelemetry:
         Ascending order matters too, so the watermark advances through the
         backlog in order instead of skipping to the newest N.
         """
-        query = (
-            "SELECT rowid, model, tool_name, raw_model_output, parsed_tool_call,"
-            " timestamp, session_id, tool_schema"
-            " FROM tool_calls WHERE is_golden = 1 AND rowid > ?"
-        )
+        query = _GOLDEN_SELECT + " AND c.rowid > ?"
         params: list[Any] = [int(since_rowid)]
         if tool_name is not None:
-            query += " AND tool_name = ?"
+            query += " AND c.tool_name = ?"
             params.append(tool_name)
-        query += " ORDER BY rowid ASC LIMIT ?"
+        query += " ORDER BY c.rowid ASC LIMIT ?"
         params.append(max(1, int(limit)))
 
         try:
@@ -2519,8 +2674,19 @@ class ToolCallTelemetry:
     # Read
     # ------------------------------------------------------------------
 
-    def report(self, since: float | None = None) -> dict[str, Any]:
-        """Return aggregated success rates per model and per tool.
+    def report(self, since: float | None = None, until: float | None = None) -> dict[str, Any]:
+        """Return aggregated tool-call success rates per model and per tool.
+
+        EVERY RATE HERE IS A TOOL-CALL RATE: the share of calls that ran
+        without error (``tool_ok``). It is not task success and not model
+        quality — a call can run cleanly in a turn that went nowhere. Each
+        ``success_rate`` has a ``tool_ok_rate`` twin with the same value and
+        the honest name; ``success_rate`` stays for existing readers (Beacon's
+        telemetry card). How turns ENDED is the ``turns`` section
+        (``turn_outcome_summary``), the number to read for task-level success.
+
+        ``until`` (exclusive) bounds the window from above, so a baseline can
+        be read without the window it is compared against.
 
         Returns a dict structured as::
 
@@ -2554,6 +2720,8 @@ class ToolCallTelemetry:
                 "total_calls": int,          # excludes policy denials
                 "total_denials": int,
                 "overall_success_rate": float,
+                "overall_tool_ok_rate": float,   # the same number, honestly named
+                "turns": {...},              # turn_outcome_summary(since, until)
             }
         """
         # M1: drop synthetic ``_loop_transition`` rows so the per-tool breakdown
@@ -2569,7 +2737,11 @@ class ToolCallTelemetry:
         if since is not None:
             query += " AND timestamp >= ?"
             params = (*params, since)  # APPEND — do not drop the exclusion binds
+        if until is not None:
+            query += " AND timestamp < ?"
+            params = (*params, until)
         rows = self._conn.execute(query, params).fetchall()
+        turns = self.turn_outcome_summary(since=since, until=until)
 
         if not rows:
             return {
@@ -2578,6 +2750,8 @@ class ToolCallTelemetry:
                 "total_calls": 0,
                 "total_denials": 0,
                 "overall_success_rate": 0.0,
+                "overall_tool_ok_rate": 0.0,
+                "turns": turns,
             }
 
         # Aggregate
@@ -2646,6 +2820,7 @@ class ToolCallTelemetry:
             for mt in model_data.values():
                 c = mt["calls"]
                 mt["success_rate"] = mt["successes"] / c if c else 0.0
+                mt["tool_ok_rate"] = mt["success_rate"]
                 mt["avg_retries"] = mt["total_retries"] / c if c else 0.0
                 # (value, source) — see telemetry/latency.py. `avg_latency_ms`
                 # can now be None, which means "no number to report", NOT zero.
@@ -2656,6 +2831,7 @@ class ToolCallTelemetry:
         for td in tools.values():
             c = td["calls"]
             td["success_rate"] = td["successes"] / c if c else 0.0
+            td["tool_ok_rate"] = td["success_rate"]
             td["avg_retries"] = td["total_retries"] / c if c else 0.0
             td["avg_latency_ms"], td["avg_latency_source"] = td["latency"].resolve()
             del td["total_retries"], td["latency"], td["successes"]
@@ -2666,7 +2842,54 @@ class ToolCallTelemetry:
             "total_calls": total,
             "total_denials": total_denials,
             "overall_success_rate": total_success / total if total else 0.0,
+            "overall_tool_ok_rate": total_success / total if total else 0.0,
+            "turns": turns,
         }
+
+    def turn_outcome_summary(self, since: float | None = None,
+                             until: float | None = None) -> dict[str, Any]:
+        """How turns ENDED, by ``turn_outcome`` (telemetry/trace_labels.py).
+
+        The task-level number that tool-call rates are not: ``completed`` /
+        ``stopped`` / ``errored`` / ``abandoned`` counts over turns that
+        STARTED in the window, ``pending`` for ones still running, and
+        ``completed_rate`` over the turns with an end state. ``completed``
+        means the turn ended on its own, not that a judge passed it.
+        ``user_signal`` counts ``turns.outcome`` (the next message's verdict,
+        telemetry/outcomes.py) as recorded, ``abandoned`` there being neutral.
+        Turns exist from telemetry v2 on; before that this is all zeros.
+        """
+        case_sql, case_params = trace_labels._turn_outcome_sql("t")
+        where = ["1 = 1"]
+        params: list[Any] = []
+        if since is not None:
+            where.append("t.started_at >= ?")
+            params.append(since)
+        if until is not None:
+            where.append("t.started_at < ?")
+            params.append(until)
+        cutoff = time.time() - trace_labels.ABANDONED_AFTER_SECONDS
+        counts: dict[str | None, int] = {}
+        signals: dict[str, int] = {}
+        try:
+            for outcome, n in self._conn.execute(
+                "SELECT CASE WHEN t.ended_at IS NULL THEN"
+                f" (CASE WHEN t.started_at < ? THEN '{trace_labels.ABANDONED}' END)"
+                f" ELSE {case_sql} END, COUNT(*)"
+                f" FROM turns t WHERE {' AND '.join(where)} GROUP BY 1",
+                (cutoff, *case_params, *params),
+            ):
+                counts[outcome] = int(n)
+            for signal, n in self._conn.execute(
+                "SELECT COALESCE(t.outcome, 'none'), COUNT(*) FROM turns t"
+                f" WHERE {' AND '.join(where)} GROUP BY 1", tuple(params),
+            ):
+                signals[str(signal)] = int(n)
+        except sqlite3.DatabaseError:
+            pass
+        out = trace_labels.outcome_rates(counts)
+        out["user_signal"] = signals
+        return out
 
     @property
     def db_path(self) -> Path:

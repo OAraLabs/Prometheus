@@ -42,7 +42,8 @@ def _aggregate(rows: list[sqlite3.Row]) -> dict[str, Any]:
                  "category": "", "fail_reasons": []}
     )
     total = {"runs": 0, "emission": 0, "execution": 0, "repairs": 0, "dropped": 0,
-             "breaker_trips": 0, "feedback_retries": 0, "harness_errors": 0}
+             "breaker_trips": 0, "feedback_retries": 0, "harness_errors": 0,
+             "tool_only": 0, "basis_unknown": 0}
     for r in rows:
         em, ex = _emit(r), _exec(r)
         total["runs"] += 1
@@ -53,6 +54,11 @@ def _aggregate(rows: list[sqlite3.Row]) -> dict[str, Any]:
         total["breaker_trips"] += r["breaker_tripped"]
         total["feedback_retries"] += r["feedback_retries"]
         total["harness_errors"] += 1 if r["error"] else 0
+        basis = r["pass_basis"] if "pass_basis" in r.keys() else None
+        if basis == "tool_only":
+            total["tool_only"] += 1
+        elif basis is None:
+            total["basis_unknown"] += 1
         c = by_cat[r["category"]]
         c["runs"] += 1
         c["emission"] += em
@@ -150,11 +156,24 @@ def render_report(
         lines.append(f"- KV cache (baseline arm): {_kv_cache(baseline_rows)}")
     if t["harness_errors"]:
         lines.append(f"- ⚠️ harness-level errors (timeouts/crashes): {t['harness_errors']}")
+    # A pass on a task with no outcome predicate means its calls RAN with the
+    # right shape (tool_ok plus argument checks), not that the task got done.
+    # Said in the totals, so "the 'did it work' axis" below is never read past it.
+    if t["tool_only"]:
+        lines.append(
+            f"- Scored on tool-call checks only (no file/text predicate): "
+            f"{t['tool_only']}/{t['runs']} runs — their pass says the call ran, "
+            f"not that the task was done"
+        )
+    if t["basis_unknown"]:
+        lines.append(f"- Pass basis not recorded (runs before it existed): {t['basis_unknown']}")
     lines.append("")
 
     if base:
         b = base["total"]
-        lines += ["## Verdict (execution pass — the 'did it work' axis)", ""]
+        axis = ("tool-call checks only" if t["tool_only"] == t["runs"] and t["runs"]
+                else "the 'did it work' axis")
+        lines += [f"## Verdict (execution pass — {axis})", ""]
         if t["runs"] < MIN_RUNS_PER_ARM or b["runs"] < MIN_RUNS_PER_ARM:
             lines.append(
                 f"**INSUFFICIENT n** — arms have {b['runs']} vs {t['runs']} runs; "

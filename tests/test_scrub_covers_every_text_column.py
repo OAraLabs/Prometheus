@@ -70,6 +70,7 @@ ENUM = "a value from a fixed set the code defines, never free text"
 NAME = "a tool, model or subsystem NAME from code or config, not conversation"
 ID_LIST = "JSON list of row ids the store minted"
 TIME = "a timestamp the code writes"
+JUDGE = "the judge's model name or rubric id, set by the code that records a verdict"
 _n = {
     # telemetry.db
     ("telemetry.db", "tool_calls", "id"): ROW_ID,
@@ -86,6 +87,25 @@ _n = {
     ("telemetry.db", "tool_calls", "turn_id"): TURN,
     ("telemetry.db", "tool_calls", "tool_use_id"): "tool-call id the model server or daemon mints",
     ("telemetry.db", "tool_calls", "repair_kind"): ENUM,
+    ("telemetry.db", "tool_calls", "turn_outcome"): ENUM,
+    ("telemetry.db", "tool_calls", "judged_by"): JUDGE,
+    ("telemetry.db", "tool_calls", "request_id"): "content hash of a golden_requests row the store minted",
+    ("telemetry.db", "golden_blobs", "hash"): "content hash of the redacted body the store minted",
+    ("telemetry.db", "golden_blobs", "kind"): ENUM,
+    ("telemetry.db", "golden_requests", "id"): "content hash of the row the store minted",
+    ("telemetry.db", "golden_requests", "wire"): ENUM,
+    ("telemetry.db", "golden_requests", "system_hash"): "a golden_blobs content hash",
+    ("telemetry.db", "golden_requests", "tools_hash"): "a golden_blobs content hash",
+    ("telemetry.db", "golden_requests", "tool_set_hash"): "tool_sets key: a hash of tool names",
+    ("telemetry.db", "golden_requests", "message_hashes"): "JSON list of golden_blobs content hashes",
+    ("telemetry.db", "golden_requests", "requested_model"): NAME,
+    ("telemetry.db", "golden_requests", "provider"): NAME,
+    ("telemetry.db", "golden_requests", "route"): (
+        "JSON of the route's picker key, provider, backend and model names and a degraded flag, "
+        "all from config or code"),
+    ("telemetry.db", "golden_requests", "tool_choice"): (
+        "auto / none / required, or {tool: <a tool NAME>}, set by the loop"),
+    ("telemetry.db", "golden_requests", "build_version"): "the package version string",
     ("telemetry.db", "silent_failures", "id"): ROW_ID,
     ("telemetry.db", "silent_failures", "subsystem"): NAME,
     ("telemetry.db", "silent_failures", "operation"): NAME,
@@ -146,6 +166,8 @@ _n = {
     ("training.db", "training_pairs", "turn_id"): TURN,
     ("training.db", "training_pairs", "repair_kind"): ENUM,
     ("training.db", "training_pairs", "outcome"): ENUM,
+    ("training.db", "training_pairs", "turn_outcome"): ENUM,
+    ("training.db", "training_pairs", "judged_by"): JUDGE,
     # lcm.db
     ("lcm.db", "lcm_messages", "id"): ROW_ID,
     ("lcm.db", "lcm_messages", "session_id"): SESSION,

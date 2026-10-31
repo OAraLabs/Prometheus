@@ -1271,7 +1271,10 @@ def check_trajectory_export(config: dict[str, Any]) -> DiagnosticCheck:
     visible much later as an absent training corpus.
     """
     cfg = config.get("trajectory_export", {}) or {}
-    enabled = bool(cfg.get("enabled", True))
+    # The daemon's default (daemon.py starts the exporter only on an explicit
+    # true). This said True, so an install without the key was reported as
+    # exporting while nothing ran.
+    enabled = bool(cfg.get("enabled", False))
     out_dir = Path(
         str(cfg.get("output_dir", "~/.prometheus/trajectories/"))
     ).expanduser()
@@ -1289,7 +1292,10 @@ def check_trajectory_export(config: dict[str, Any]) -> DiagnosticCheck:
         if wm_path.exists():
             watermark = int(json.loads(wm_path.read_text())["last_rowid"])
 
-        db = Path("~/.prometheus/telemetry.db").expanduser()
+        from prometheus.config.paths import config_dir_path
+
+        # Where the tracker writes (PROMETHEUS_CONFIG_DIR, else ~/.prometheus).
+        db = config_dir_path() / "telemetry.db"
         if db.exists():
             conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
             try:
@@ -1327,7 +1333,10 @@ def check_trajectory_export(config: dict[str, Any]) -> DiagnosticCheck:
                 "fine-tune — the traces stay in telemetry.db either way.",
         )
 
-    files = len(list(out_dir.glob("*.jsonl"))) if out_dir.is_dir() else 0
+    # The incremental exporter's files only (golden_traces_<ts>_<rowid>.jsonl).
+    # `oara export-traces` dumps re-state rows already exported; counting them
+    # as export files counts the same traces twice.
+    files = len(list(out_dir.glob("golden_traces_*_*.jsonl"))) if out_dir.is_dir() else 0
     return DiagnosticCheck(
         name="Trajectory export", category="resources", status="ok",
         message=f"enabled — {files} export file(s) in {out_dir}, "
