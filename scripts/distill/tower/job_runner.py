@@ -15,6 +15,25 @@ those (process group of a recorded PID, after checking its command line).
 Queue, in order, one step at a time, each in its own resumable directory under
 ``$DJR_RESULTS/<model>/<kind>/``:
 
+00. ``train-smoke`` (only with ``DJR_SMOKE=1``; first in the queue): the Phase 5
+   QLoRA smoke of the 9B (``train_qlora.py --smoke``: 200 examples, 50 steps,
+   the loss must drop, a checkpoint round trip) with the training python, from
+   the HEAD-staged ``DJR_SMOKE_CODE``, on ``DJR_SMOKE_DATA`` (+ ``DJR_SMOKE_VAL``)
+   with the base in ``DJR_SMOKE_BASE`` (a local, pinned download; its revision
+   is ``DJR_SMOKE_BASE_REV`` or the ``revision`` in that directory's
+   ``MANIFEST.json``), offline (``HF_HUB_OFFLINE=1``), into ``DJR_SMOKE_OUT``.
+   ``DJR_SMOKE_MAX_DERIVED_OK=1`` passes the trainer's operator-approval flag
+   for Max-derived data (DISTILL-OPEN-QUESTIONS Q6b; the dataset must record
+   its own approval too, or the trainer refuses with exit 3); the trainer then
+   requires ``max-derived`` in the ``--out`` name and tags every output. It is
+   time-boxed like the A/B (``DJR_SMOKE_MAX_MIN`` from its start, never past
+   the step deadline; not started with less than ``DJR_SMOKE_MIN_MIN``) and runs
+   in a ``distill-train-smoke-*`` scope. The run manifest's ``status`` decides:
+   ``smoke-train-pass`` is done; ``stopped`` (time box, SIGTERM) is partial and
+   resumes with ``--resume``; ``smoke-train-fail``, a refusal or any other exit
+   fails the step. Its inputs missing: skipped, never a reason to refuse the
+   window. Only the training half of the smoke gate: the smoke adapter's eval
+   (merge, quantize, score) is a later step.
 0. ``teacher-ab`` (only with ``DJR_AB=1``; first in the queue): the teacher quant
    A/B (``scripts/distill/teacher_ab_run.sh --execute`` from the HEAD-staged
    ``DJR_AB_CODE``, never ``DJR_CODE``, so the scorer the baselines resume with
@@ -170,6 +189,19 @@ DEFAULTS: Dict[str, str] = {
     "DJR_MIN_BAKE_S": "1200",    # same, a bake-off baseline
     "DJR_FEAS_MARGIN_S": "60",   # load/teardown margin around one feasibility length
     "DJR_MIN_RUN_S": "300",      # refuse a stop-at closer than this
+    # the Phase 5 QLoRA smoke (step 00; off unless DJR_SMOKE=1)
+    "DJR_SMOKE": "0",
+    "DJR_SMOKE_CODE": "{home}/code-train/head",  # HEAD export: scripts/distill/{train_qlora,render,artifact_policy}.py
+    "DJR_SMOKE_DATA": "{home}/phase3/build-v3-max-derived/train.jsonl",
+    "DJR_SMOKE_VAL": "{home}/phase3/build-v3-max-derived/val.jsonl",  # empty: no val loss
+    "DJR_SMOKE_TOKENIZER": "{home}/models/qwen3.5-9b-tokenizer",
+    "DJR_SMOKE_BASE": "{home}/models/qwen3.5-9b-bnb4",
+    "DJR_SMOKE_BASE_REV": "",          # empty: "revision" from DJR_SMOKE_BASE/MANIFEST.json
+    "DJR_SMOKE_OUT": "{home}/phase5/runs/9b-smoke-max-derived",
+    "DJR_SMOKE_MAX_DERIVED_OK": "0",   # 1: pass --i-have-operator-approval-for-max-derived-data (Q6b)
+    "DJR_SMOKE_MAX_MIN": "90",         # time box from the step's start
+    "DJR_SMOKE_MIN_MIN": "20",         # least time worth starting it with
+    "DJR_SMOKE_GRACE_S": "300",        # SIGTERM -> the trainer checkpoints and exits -> SIGKILL
     # the teacher quant A/B (step 0; off unless DJR_AB=1)
     "DJR_AB": "0",
     "DJR_AB_CODE": "{home}/code-ab",   # HEAD-staged code for the A/B only (teacher_ab*.py, teacher_gen.py, src/)
@@ -293,6 +325,19 @@ class Cfg:
         self.ab_max_s = float(raw["DJR_AB_MAX_MIN"]) * 60
         self.ab_min_s = float(raw["DJR_AB_MIN_MIN"]) * 60
         self.ab_grace = float(raw["DJR_AB_GRACE_S"])
+        self.smoke = raw["DJR_SMOKE"].strip() == "1"
+        self.smoke_code, self.smoke_data = path("DJR_SMOKE_CODE"), path("DJR_SMOKE_DATA")
+        self.smoke_val, self.smoke_tok = path("DJR_SMOKE_VAL"), path("DJR_SMOKE_TOKENIZER")
+        self.smoke_base, self.smoke_out = path("DJR_SMOKE_BASE"), path("DJR_SMOKE_OUT")
+        self.smoke_base_rev = raw["DJR_SMOKE_BASE_REV"].strip()
+        self.smoke_md_ok = raw["DJR_SMOKE_MAX_DERIVED_OK"].strip() == "1"
+        self.smoke_max_s = float(raw["DJR_SMOKE_MAX_MIN"]) * 60
+        self.smoke_min_s = float(raw["DJR_SMOKE_MIN_MIN"]) * 60
+        self.smoke_grace = float(raw["DJR_SMOKE_GRACE_S"])
+
+    @property
+    def smoke_script(self) -> str:
+        return os.path.join(self.smoke_code, "scripts", "distill", "train_qlora.py")
 
     @property
     def ab_driver(self) -> str:
@@ -1093,7 +1138,11 @@ class Runner:
             {"name": "teacher-ab", "kind": "ab", "out": "teacher-ab", "min_s": self.cfg.ab_min_s,
              "must": False},
         ] if self.cfg.ab else []
-        return ab + [
+        smoke: List[Dict[str, Any]] = [
+            {"name": "train-smoke", "kind": "train", "out": "base-9b/train-smoke-max-derived",
+             "min_s": self.cfg.smoke_min_s, "must": False},
+        ] if self.cfg.smoke else []
+        return smoke + ab + [
             {"name": "base-9b-baseline", "kind": "baseline", "label": "base-9b", "out": "base-9b/baseline",
              "find": find_9b, "fixed_ctx": 262144, "ub": self.cfg.ub_9b, "min_s": self.cfg.min_9b_s,
              "must": True},
@@ -1170,6 +1219,8 @@ class Runner:
                     status, detail = self.run_baseline(step, st, deadline, p)
                 elif step["kind"] == "ab":
                     status, detail = self.run_ab(step, st, deadline, p)
+                elif step["kind"] == "train":
+                    status, detail = self.run_smoke(step, st, deadline, p)
                 else:
                     status, detail = self.run_feasibility(step, st, deadline, p)
             except Exception as exc:  # noqa: BLE001 - one step's bug must not end the window
@@ -1546,6 +1597,114 @@ class Runner:
         if rc == 1:
             return "partial", (summary or "not finished") + " (time box or work left; resumes next window)"
         return "failed", f"teacher_ab_run.sh exit {rc}: {log_tail(log_path, 3)}"
+
+    # -- QLoRA smoke step -------------------------------------------------------------
+
+    def smoke_base_rev(self) -> str:
+        c = self.cfg
+        if c.smoke_base_rev:
+            return c.smoke_base_rev
+        man = read_json(os.path.join(c.smoke_base, "MANIFEST.json"))
+        rev = man.get("revision") if isinstance(man, dict) else None
+        return rev if isinstance(rev, str) and re.fullmatch(r"[0-9a-f]{40}", rev) else ""
+
+    def smoke_inputs_ok(self) -> Tuple[bool, str]:
+        c = self.cfg
+        missing = [p for p in (c.train_py, c.smoke_script, c.smoke_data, c.smoke_tok) if not os.path.exists(p)]
+        for name in ("render.py", "artifact_policy.py"):
+            p = os.path.join(os.path.dirname(c.smoke_script), name)
+            if not os.path.exists(p):
+                missing.append(p)
+        if c.smoke_val and not os.path.exists(c.smoke_val):
+            missing.append(c.smoke_val)
+        base = Path(c.smoke_base)
+        if not (base / "config.json").is_file() or not list(base.glob("*.safetensors")):
+            missing.append(f"{c.smoke_base} (config.json + *.safetensors)")
+        elif download_unfinished(str(base)):
+            missing.append(str(download_unfinished(str(base))))
+        if not self.smoke_base_rev():
+            missing.append(f"base revision (DJR_SMOKE_BASE_REV or {c.smoke_base}/MANIFEST.json)")
+        return (not missing), ("missing: " + ", ".join(missing) if missing else "")
+
+    def smoke_cmd(self, until: Optional[float]) -> List[str]:
+        """The trainer's command line (``until`` None: the plan's placeholder)."""
+        c = self.cfg
+        cmd = [c.train_py, c.smoke_script, "--data", c.smoke_data]
+        if c.smoke_val:
+            cmd += ["--val", c.smoke_val]
+        cmd += ["--tokenizer-dir", c.smoke_tok, "--base-model", c.smoke_base,
+                "--base-revision", self.smoke_base_rev() or "<missing>", "--out", c.smoke_out,
+                "--log-dir", os.path.join(c.smoke_out, "logs"), "--smoke",
+                "--stop-at", str(iso(until)) if until is not None else "<time box end>"]
+        if os.path.isfile(os.path.join(c.smoke_out, "run_state.json")):
+            cmd.append("--resume")
+        if c.smoke_md_ok:
+            cmd.append("--i-have-operator-approval-for-max-derived-data")
+        return cmd
+
+    def smoke_env(self) -> Dict[str, str]:
+        env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH",)}
+        env.update(PYTHONUNBUFFERED="1", HF_HUB_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1", DO_NOT_TRACK="1",
+                   TRANSFORMERS_OFFLINE="1")
+        return env
+
+    def run_smoke(self, step: Dict[str, Any], st: Dict[str, Any], deadline: float,
+                  p: Dict[str, Any]) -> Tuple[str, str]:
+        """The 9B QLoRA smoke (train_qlora.py --smoke), time-boxed (see the module docstring)."""
+        cfg = self.cfg
+        ok, why = self.smoke_inputs_ok()
+        if not ok:
+            return "skipped", why
+        until = min(deadline, now() + cfg.smoke_max_s)
+        if until - now() < step["min_s"]:
+            return "skipped", (f"{max(0.0, until - now()) / 60:.0f} min left in its time box "
+                               f"(needs {step['min_s'] / 60:.0f})")
+        sdir = self.step_dir(step)
+        Path(sdir).mkdir(parents=True, exist_ok=True)
+        ok, info = self.wait_gpu_free(cfg.gpu_release_s)
+        if not ok:
+            return ("partial" if self.stop else "failed"), f"GPU not free: {info}"
+        reason = self.fresh_check(until)
+        if reason:
+            return "partial", f"not started ({reason})"
+        cmd = self.smoke_cmd(until)
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        full = self.scope_prefix(f"distill-train-smoke-{stamp}") + cmd
+        log_path = os.path.join(self.run_dir, "train-smoke.log")
+        self.progress["current"] = {"step": step["name"], "set": "train_qlora.py --smoke", "since": iso(now())}
+        p["until"] = iso(until)
+        self.save()
+        self.log(f"train smoke until {iso(until)}: {' '.join(cmd)}")
+        proc = self.spawn("child", full, log_path, cwd=sdir, env=self.smoke_env(),
+                          signature=["train_qlora.py", "--smoke"])
+        # the trainer checkpoints and exits before --stop-at; this deadline is only the backstop
+        rc, reason = self.supervise(proc, until + cfg.smoke_grace + 120, cfg.smoke_grace)
+        self.forget("child")
+        man = read_json(os.path.join(cfg.smoke_out, "manifest.json"))
+        status = str(man.get("status") or "") if isinstance(man, dict) else ""
+        sm = (man.get("smoke") or {}) if isinstance(man, dict) else {}
+        summary = ""
+        if sm.get("loss_first10") is not None:
+            summary = (f"{sm.get('steps')} steps, loss {sm.get('loss_first10'):.4f} -> {sm.get('loss_last10'):.4f}"
+                       f" ({'decreased' if sm.get('loss_decreased') else 'DID NOT DECREASE'}), round trip "
+                       f"{'ok' if sm.get('checkpoint_round_trip') else 'FAILED'}")
+        if summary:
+            p["smoke"] = {"status": status, "summary": summary, "adapter": man.get("adapter"),
+                          "max_derived": man.get("max_derived")}
+            st["smoke"] = p["smoke"]
+        if not reason and stopped_by_signal(rc):
+            reason = self.settle() or self.external_stop("the QLoRA smoke", rc)
+        if reason:
+            return "partial", f"stopped ({reason}); resumes next window"
+        if rc == 0 and status == "smoke-train-pass":
+            return "done", f"smoke-train-pass: {summary}; eval (merge, quantize, score) still to run"
+        if rc == 0 and status == "stopped":
+            return "partial", "stopped at its time box; resumes next window (--resume)"
+        if rc == 1 and status == "smoke-train-fail":
+            return "failed", f"smoke-train-fail: {summary}"
+        if rc == 3:
+            return "failed", f"refused: Max-derived data without both approvals: {log_tail(log_path, 2)}"
+        return "failed", f"train_qlora.py exit {rc} (manifest status {status or 'none'}): {log_tail(log_path, 3)}"
 
     # -- feasibility step ---------------------------------------------------------
 
@@ -1930,7 +2089,10 @@ def dry_run(cfg: Cfg, stop_at: float) -> int:
         if factsg else whyg, required=False)
     feas = "qwen38-27b-feasibility"
     feas_req, feas_note = needed(feas), why_not(feas)
-    chk(os.path.isfile(cfg.train_py), "training python", cfg.train_py + feas_note, required=feas_req)
+    # the smoke needs the training python too (its own inputs are checked below, never required)
+    py_req = feas_req or (cfg.smoke and needed("train-smoke"))
+    py_note = "" if py_req else feas_note
+    chk(os.path.isfile(cfg.train_py), "training python", cfg.train_py + py_note, required=py_req)
     if os.path.isfile(cfg.train_py):
         try:
             cp = subprocess.run([cfg.train_py, "-I", "-c", "import importlib.util as u; "
@@ -1939,10 +2101,10 @@ def dry_run(cfg: Cfg, stop_at: float) -> int:
                                 capture_output=True, text=True, timeout=60)
             missing = cp.stdout.strip()
             chk(cp.returncode == 0 and not missing, "training packages present (not imported: "
-                "importing unsloth touches the GPU)", (missing and "missing: " + missing) + feas_note,
-                required=feas_req)
+                "importing unsloth touches the GPU)", (missing and "missing: " + missing) + py_note,
+                required=py_req)
         except (OSError, subprocess.SubprocessError) as e:
-            chk(False, "training packages", str(e) + feas_note, required=feas_req)
+            chk(False, "training packages", str(e) + py_note, required=py_req)
     chk(os.path.isfile(cfg.feas_script), "feasibility_27b.py", cfg.feas_script + feas_note, required=feas_req)
     mb = Path(cfg.model_27b_bnb)
     st_files = list(mb.glob("*.safetensors")) if mb.is_dir() else []
@@ -1953,6 +2115,18 @@ def dry_run(cfg: Cfg, stop_at: float) -> int:
     chk(os.path.isfile(cfg.lengths), "train lengths file (feasibility --data)",
         (f"{cfg.lengths} ({count_lines(cfg.lengths)} rows)" if os.path.isfile(cfg.lengths) else cfg.lengths)
         + feas_note, required=feas_req)
+    if cfg.smoke:
+        sm_ok, sm_why = runner.smoke_inputs_ok()
+        chk(sm_ok or None, "QLoRA smoke inputs (DJR_SMOKE=1; never required: execute skips the step)",
+            (f"{cfg.smoke_script}; data {cfg.smoke_data} ({count_lines(cfg.smoke_data)} rows); base "
+             f"{cfg.smoke_base} @{runner.smoke_base_rev()[:12]}; tokenizer {cfg.smoke_tok}" if sm_ok else sm_why)
+            + why_not("train-smoke"), required=False)
+        commit_tr = Path(cfg.smoke_code) / "COMMIT"
+        chk(commit_tr.is_file() or None, "smoke code commit",
+            commit_tr.read_text().strip()[:12] if commit_tr.is_file() else f"no {commit_tr}", required=False)
+        chk(cfg.smoke_md_ok or None, "Max-derived approval flag passed (Q6b)",
+            "yes: the trainer also needs the dataset's own recorded approval" if cfg.smoke_md_ok
+            else "no (DJR_SMOKE_MAX_DERIVED_OK=0): Max-derived data would be refused", required=False)
     if cfg.ab:
         ab_ok, ab_why = runner.ab_inputs_ok()
         chk(ab_ok or None, "teacher A/B inputs (DJR_AB=1; never required: execute skips the step)",
@@ -1996,6 +2170,17 @@ def dry_run(cfg: Cfg, stop_at: float) -> int:
         status = st["status"]
         print(f" {i + 1}. {step['name']}  -> {sdir}  [state: {status}"
               + (f", failures {st['failures']}" if st["failures"] else "") + "]")
+        if step["kind"] == "train":
+            ok, why = runner.smoke_inputs_ok()
+            print("    " + ("inputs ok" if ok else f"skip: {why}"))
+            print(f"    time box: the earlier of {cfg.smoke_max_s / 60:.0f} min from its start and the step "
+                  f"deadline; not started with less than {cfg.smoke_min_s / 60:.0f} min")
+            print("    trainer (HF_HUB_OFFLINE=1): " + " ".join(runner.smoke_cmd(None)))
+            if st.get("smoke"):
+                print(f"    result so far: {st['smoke']}")
+            print("    then: the smoke adapter's eval (merge, quantize, score) is a later step, not this one")
+            est_total += 60 * 60
+            continue
         if step["kind"] == "ab":
             ok, why = runner.ab_inputs_ok()
             print("    " + ("inputs ok" if ok else f"skip: {why}"))
@@ -2092,9 +2277,12 @@ def summary_lines(progress: Any) -> List[str]:
         name = s.get("name", "?")
         short = {"base-9b-baseline": "9B base", "qwen38-27b-feasibility": "27B feas",
                  "qwen38-27b-baseline": "27B bake", "glimmer-30b-baseline": "Glimmer",
-                 "teacher-ab": "A/B"}.get(name, name)
+                 "teacher-ab": "A/B", "train-smoke": "smoke"}.get(name, name)
         status = s.get("status")
-        if name == "teacher-ab":
+        if name == "train-smoke":
+            sm = (s.get("smoke") or {}).get("summary")
+            out.append(f"{short} {status}: " + (sm or str(s.get("detail", "")))[:110])
+        elif name == "teacher-ab":
             dec = (s.get("decision") or {}).get("verdict")
             out.append(f"{short} {status}" + (f": {dec}" if dec else "")
                        + ("" if dec else f": {str(s.get('detail', ''))[:90]}"))

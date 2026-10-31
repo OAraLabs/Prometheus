@@ -879,3 +879,141 @@ def test_dry_run_shows_the_ab_driver_and_its_own_dry_run(box: Box) -> None:
     (call,) = _ab_calls(box)
     assert "--execute" not in call and "--notify-cmd" not in call
     assert not (box.d / "logs").exists() and not (box.d / "teacher-ab").exists()
+
+
+# ---------------------------------------------------------------------------
+# the QLoRA smoke step (train-smoke)
+# ---------------------------------------------------------------------------
+
+BASE_REV = "3c78dfb3e32c496a2438fb1790859eff805284cf"
+
+
+def _smoke_inputs(box: Box, **env: str) -> None:
+    """The smoke's inputs in the temp HOME: a fake trainer in code-train/head, data, tokenizer, base."""
+    dist = box.d / "code-train" / "head" / "scripts" / "distill"
+    dist.mkdir(parents=True)
+    (dist / "train_qlora.py").write_text((FIX / "fake_train_qlora.py").read_text())
+    (dist / "render.py").write_text("# fake\n")
+    (dist / "artifact_policy.py").write_text("# fake\n")
+    (box.d / "code-train" / "head" / "COMMIT").write_text("b" * 40 + "\n")
+    data = box.d / "phase3" / "build-v3-max-derived"
+    data.mkdir(parents=True)
+    (data / "train.jsonl").write_text('{"id": "r1"}\n{"id": "r2"}\n')
+    (data / "val.jsonl").write_text('{"id": "v1"}\n')
+    (box.d / "models" / "qwen3.5-9b-tokenizer").mkdir(parents=True)
+    (box.d / "models" / "qwen3.5-9b-tokenizer" / "tokenizer.json").write_text("{}")
+    base = box.d / "models" / "qwen3.5-9b-bnb4"
+    base.mkdir(parents=True)
+    (base / "config.json").write_text("{}")
+    (base / "model.safetensors").write_bytes(b"\0" * 16)
+    (base / "MANIFEST.json").write_text(json.dumps({"repo": "x/y", "revision": BASE_REV}))
+    box.env.update({"DJR_SMOKE": "1", "DJR_SMOKE_MAX_DERIVED_OK": "1", "DJR_SMOKE_MIN_MIN": "0.01",
+                    "DJR_SMOKE_GRACE_S": "5", **env})
+
+
+def _smoke_calls(box: Box) -> list[dict]:
+    return [json.loads(x) for x in box.log("smoke-calls.log")]
+
+
+def test_smoke_off_by_default_leaves_the_queue_as_it_was(box: Box) -> None:
+    _smoke_inputs(box)
+    box.env.pop("DJR_SMOKE")
+    assert box.run(stop_in=120).returncode == 0
+    assert [s["name"] for s in box.progress()["steps"]][0] == "base-9b-baseline"
+    assert box.log("smoke-calls.log") == []
+
+
+def test_smoke_runs_first_time_boxed_with_the_approval_then_the_queue_goes_on(box: Box) -> None:
+    _smoke_inputs(box, DJR_SMOKE_MAX_MIN="1")
+    t0 = time.time()
+    cp = box.run(stop_in=120)
+    assert cp.returncode == 0, cp.stdout[-3000:]
+    assert [s["name"] for s in box.progress()["steps"]] == [
+        "train-smoke", "base-9b-baseline", "qwen38-27b-feasibility", "qwen38-27b-baseline", "glimmer-30b-baseline"]
+    sm = box.step("train-smoke")
+    assert sm["status"] == "done" and sm["detail"].startswith("smoke-train-pass: 50 steps, loss 1.2500 -> 0.7500")
+    assert sm["smoke"]["max_derived"] is True
+    (call,) = _smoke_calls(box)
+    argv = call["argv"]
+    assert call["HF_HUB_OFFLINE"] == "1" and "--smoke" in argv and "--resume" not in argv
+    assert "--i-have-operator-approval-for-max-derived-data" in argv
+    assert _opt(argv, "--base-revision") == BASE_REV                    # from the base's MANIFEST.json
+    assert _opt(argv, "--out") == str(box.d / "phase5" / "runs" / "9b-smoke-max-derived")
+    assert _opt(argv, "--data").endswith("/phase3/build-v3-max-derived/train.jsonl")
+    assert _opt(argv, "--val").endswith("/phase3/build-v3-max-derived/val.jsonl")
+    until = datetime.fromisoformat(_opt(argv, "--stop-at")).timestamp()
+    assert t0 < until <= t0 + 60 + 2                     # the 1-min time box, not stop-at
+    assert any(u.startswith("distill-train-smoke-") for u in box.log("scopes.log"))
+    assert box.step("base-9b-baseline")["status"] == "done"
+    summary = subprocess.run([str(RUNNER_SH), "--summary"], env=box.env, capture_output=True, text=True)
+    assert "smoke done: 50 steps" in summary.stdout
+    assert box.run(stop_in=120).returncode == 0
+    assert len(_smoke_calls(box)) == 1 and box.step("train-smoke")["detail"] == "done in an earlier window"
+
+
+def test_smoke_without_the_approval_setting_omits_the_flag(box: Box) -> None:
+    _smoke_inputs(box, DJR_SMOKE_MAX_DERIVED_OK="0", FAKE_SMOKE_MODE="refuse")
+    assert box.run(stop_in=120).returncode == 1
+    (call,) = _smoke_calls(box)
+    assert "--i-have-operator-approval-for-max-derived-data" not in call["argv"]
+    sm = box.step("train-smoke")
+    assert sm["status"] == "failed" and sm["detail"].startswith("refused: Max-derived data")
+
+
+def test_smoke_cut_by_its_time_box_is_partial_and_resumes(box: Box) -> None:
+    _smoke_inputs(box, DJR_SMOKE_MAX_MIN="0.05", FAKE_SMOKE_MODE="until")    # 3 s
+    cp = box.run(stop_in=120)
+    assert cp.returncode == 0, cp.stdout[-3000:]
+    sm = box.step("train-smoke")
+    assert sm["status"] == "partial" and "resumes next window" in sm["detail"]
+    assert box.step("base-9b-baseline")["status"] == "done"
+    box.env["FAKE_SMOKE_MODE"] = "pass"
+    assert box.run(stop_in=120).returncode == 0
+    calls = _smoke_calls(box)
+    assert len(calls) == 2 and "--resume" in calls[1]["argv"] and box.step("train-smoke")["status"] == "done"
+
+
+def test_smoke_failure_fails_the_step_notifies_and_the_queue_goes_on(box: Box) -> None:
+    _smoke_inputs(box, FAKE_SMOKE_MODE="fail")
+    assert box.run(stop_in=120).returncode == 1
+    sm = box.step("train-smoke")
+    assert sm["status"] == "failed" and "DID NOT DECREASE" in sm["detail"]
+    assert box.step_state("base-9b/train-smoke-max-derived")["failures"] == 1
+    assert "train-smoke FAILED" in (box.state / "notify.log").read_text()
+    assert box.step("base-9b-baseline")["status"] == "done"
+
+
+def test_smoke_inputs_missing_skip_the_step_not_the_window(box: Box) -> None:
+    _smoke_inputs(box)
+    (box.d / "models" / "qwen3.5-9b-bnb4" / "model.safetensors").unlink()
+    dry = box.run(execute=False, stop_in=None)
+    assert dry.returncode == 0, dry.stdout[-3000:]
+    assert "[     --] QLoRA smoke inputs" in dry.stdout and "qwen3.5-9b-bnb4" in dry.stdout
+    assert box.run(stop_in=120).returncode == 0
+    assert box.step("train-smoke")["status"] == "skipped" and box.log("smoke-calls.log") == []
+
+
+def test_sigterm_during_the_smoke_stops_the_trainer(box: Box) -> None:
+    _smoke_inputs(box, FAKE_SMOKE_DELAY="60")
+    p = box.start(stop_in=120)
+    box.wait_for(lambda: (box.state / "smoke-pid").exists(), what="the trainer")
+    pid = int((box.state / "smoke-pid").read_text())
+    time.sleep(0.3)
+    p.send_signal(signal.SIGTERM)
+    assert p.wait(timeout=30) == 143
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    st = box.step_state("base-9b/train-smoke-max-derived")
+    assert st["status"] == "partial" and st["failures"] == 0
+
+
+def test_dry_run_shows_the_smoke_first_and_ab_off(box: Box) -> None:
+    _smoke_inputs(box)
+    cp = box.run(execute=False, stop_in=None)
+    assert cp.returncode == 0, cp.stdout[-3000:]
+    out = cp.stdout
+    assert " 1. train-smoke" in out and " 2. base-9b-baseline" in out and "teacher-ab" not in out
+    assert "[     ok] QLoRA smoke inputs" in out and f"@{BASE_REV[:12]}" in out
+    assert "[     ok] Max-derived approval flag passed" in out
+    assert "--stop-at <time box end>" in out and "--i-have-operator-approval-for-max-derived-data" in out
+    assert box.log("smoke-calls.log") == [] and not (box.d / "phase5").exists()
