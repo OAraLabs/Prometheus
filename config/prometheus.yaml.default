@@ -1772,8 +1772,11 @@ escalation:
 # key included). Stages: harvest -> verify -> build sets -> train (only with
 # enough new verified traces; resumes from checkpoints across weekends) ->
 # quantize -> score -> report. Each stage is stopped before the window ends.
-# The report the Monday reviewer reads, <data_dir>/reports/LATEST.md, is
-# written every window, with the reason for every stage that did not run.
+# The report the Monday reviewer reads, <data_dir>/reports/LATEST.md (with
+# LATEST.json, its machine-readable twin), is written every window, with the
+# reason for every stage that did not run and the next steps;
+# `python -m prometheus.jobs.flywheel_weekly --report-only` refreshes it from
+# the recorded state at any time without running a stage.
 flywheel:
   # The timer runs the job either way; off, the job only writes the report
   # saying so.

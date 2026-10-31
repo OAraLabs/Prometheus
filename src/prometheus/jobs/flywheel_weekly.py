@@ -3,9 +3,11 @@
 
 Run::
 
-    python3 -m prometheus.jobs.flywheel_weekly             # the timer, inside the window
-    python3 -m prometheus.jobs.flywheel_weekly --dry-run   # any time: the plan, nothing changed
-    python3 -m prometheus.jobs.flywheel_weekly --recover   # the OnFailure= unit
+    python3 -m prometheus.jobs.flywheel_weekly                # the timer, inside the window
+    python3 -m prometheus.jobs.flywheel_weekly --dry-run      # any time: the plan, nothing changed
+    python3 -m prometheus.jobs.flywheel_weekly --recover      # the OnFailure= unit
+    python3 -m prometheus.jobs.flywheel_weekly --report-only  # any time: refresh the reviewer's
+                                                              # input from the recorded state
 
 A fixed pipeline (no agent loop) driven by the ``flywheel:`` block of
 prometheus.yaml, which the job validates when it loads it: an unknown key, an
@@ -36,11 +38,38 @@ STAGES
    the scoring server serves it: the Phase 6 gate against the base model's
    summary, and wins and losses against the previous model.
 
-Then the report, always: ``<data_dir>/reports/LATEST.md`` plus a dated copy and
-JSON. It is the Monday reviewer's input. A skipped, refused or paused stage
-says why in it, and a disabled flywheel, a bad config, a crashed stage or a run
-the recovery unit had to finish still writes one. Paths under the home
-directory are written as ``~``; nothing here publishes the report.
+Then the report, always (below).
+
+THE MONDAY REVIEWER'S INPUT
+---------------------------
+The reviewer (a scheduled task outside this repo, run Monday mornings) reads
+one file and nothing else. This job writes it as
+``<data_dir>/reports/LATEST.md`` (data_dir defaults to
+``~/.prometheus/data/flywheel``) on the host it runs on. The cadence sprint's
+reviewer fetches ``flywheel/reports/LATEST.md`` from the public repo, and
+nothing here commits, copies or publishes the file there: whether and how it
+is published is the operator's decision (docs/sprints/DISTILL-OPEN-QUESTIONS.md
+#11). It is Markdown, with ``LATEST.json`` beside it as its machine-readable
+twin (schema :data:`REPORT_SCHEMA`, validated against :class:`WeeklyReport`
+before it is written). The Markdown is a title, a status
+line whose first words are ``FLYWHEEL weekly · OK|WARN|FAIL|OFF``, then exactly
+the sections of :data:`REVIEWER_SECTIONS`, in that order, each always present
+("None." when empty): at a glance; what ran (every stage, its result, its
+time); why stages did not run; traces; the model, with wins and losses vs the
+previous model; spend; guards; issues; operator notes; next steps (who acts:
+the job, the operator, or the runbook's plan; the last is always the next
+window). The JSON holds the same facts.
+
+It is written every window: a skipped, refused or paused stage says why, and a
+disabled flywheel, a bad config, an unreadable state, a crashed stage, a report
+that could not be built (a minimal one replaces it) or a run the recovery unit
+had to finish still writes one. ``--report-only`` rewrites it from the recorded
+state at any time (no stage runs, nothing else changes), so the input is
+current even in a week no window ran. Each file is replaced atomically (tmp +
+fsync + rename): the dated copy ``<run>-weekly.{json,md}`` first, then
+``LATEST.json``, then ``LATEST.md``; a reader sees a whole old file or a whole
+new one, and the pair carries the same ``run_id`` and ``generated``. Paths under
+the home directory are written as ``~``; nothing here publishes the report.
 
 Every stage is resumable. A stage that finished earlier in the same window is
 not repeated; harvest and verify commit by atomic rename, so a run cut short
@@ -53,8 +82,10 @@ WHAT IS NEVER TRAINED ON
 * **Unverified offspring output.** A trace from the student (a served model
   matching ``harvest.student_models``, or any trace that carries an adapter
   version) is trainable only with a ``pass`` verdict from a named verifier
-  that is not the student itself. Its tool calls having succeeded is not a
-  verification: that is how a model learns its own mistakes. A teacher's
+  that is not the student itself, under any of its names (its model, served
+  id or adapter, any adapter this job trained, any ``student_models``
+  match), and not Max (never a judge). Its tool calls having succeeded is
+  not a verification: that is how a model learns its own mistakes. A teacher's
   golden trace counts on its tool-success label (the runbook's rule); anything
   else is tagged and dropped, golden traces included: the builder reads a
   copy of them in which every trace verify did not pass is withheld. The train
@@ -86,12 +117,13 @@ candidate (the setup, or the operator, loads it there).
 Exit codes: 0 the run finished (stages may have been skipped or refused, with
 reasons); 1 a stage failed, the GPU restore failed or the report could not be
 written; 2 bad config, or a scheduled run outside the window; 3 another run
-holds the lock.
+holds the lock (a report-only refresh leaves that run's report alone).
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import errno
 import fcntl
@@ -114,12 +146,14 @@ from datetime import date, datetime, timedelta, timezone
 from datetime import time as dtime
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 logger = logging.getLogger("prometheus.jobs.flywheel_weekly")
 
-REPORT_SCHEMA = "flywheel-weekly-report/1"
+REPORT_SCHEMA = "flywheel-weekly-report/2"
 STATE_SCHEMA = "flywheel-weekly-state/1"
 
 STAGES = ("harvest", "verify", "build", "train", "quantize", "score")
@@ -130,6 +164,33 @@ REFUSED = "REFUSED"     # a guard or a gate said no
 PAUSED = "PAUSED"       # stopped for the window; picks up next window
 FAILED = "FAILED"
 DRY_RUN = "DRY-RUN"     # would run (the summary says what)
+NOT_RUN = "NOT RUN"     # no run reached it (the reason says what holds it)
+
+# The Monday reviewer's input: LATEST.md holds exactly these "## " sections, in
+# this order, every time (module docstring). LATEST.json is the twin.
+REVIEWER_SECTIONS = (
+    "At a glance",
+    "What ran",
+    "Why stages did not run",
+    "Traces",
+    "Model: wins and losses vs the previous model",
+    "Spend",
+    "Guards",
+    "Issues",
+    "Operator notes",
+    "Next steps",
+)
+REPORT_MODES = ("scheduled", "dry-run", "recovery", "config-error", "state-error",
+                "report-only")
+# Modes in which the job never read its state (and, for config-error, holds
+# only fallback defaults in place of the config): the report states neither
+# as fact.
+UNREAD_MODES = ("config-error", "state-error")
+# Who a next step waits on: the job itself (next window), the operator, or the
+# plan the runbook keeps outside the job (--next-step).
+STEP_OWNERS = ("job", "operator", "runbook")
+# Operator notes and next steps given on the command line are capped, one line each.
+NOTE_LIMIT = 600
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -150,6 +211,8 @@ KILL_BEFORE_END = timedelta(seconds=60)
 TERM_GRACE = timedelta(seconds=150)
 # Harvest and verify consult the clock every this many lines, not only at the top.
 CLOCK_EVERY_LINES = 200
+# How often a running child's stop and kill times are checked (seconds).
+POLL_SECONDS = 5.0
 # Every setups.py call is bounded. The restore is not window-bound (it runs
 # after the window if it must); the swap into gpu_setup is (Run.swap_command).
 SETUP_COMMAND_LIMIT = timedelta(minutes=30)
@@ -191,6 +254,8 @@ FROZEN_FILES = ("train.jsonl", "val.jsonl", "val-cases.jsonl", "eval-tools.jsonl
 # The only label an offspring row may train under. "tool-success" is a
 # teacher-only basis: the teacher is the reference, the offspring is not.
 OFFSPRING_TRAINABLE_LABELS = frozenset({"judge-pass"})
+# Verify's reasons for dropping an offspring trace (the report counts them).
+OFFSPRING_DROPS = ("unverified_offspring", "self_verified_offspring", "max_judged_offspring")
 # A golden trace verify did not pass keeps its line in the builder's copy under
 # this model id, which no --teacher-model is: the builder drops it first thing
 # (non_teacher_model), and every other trace keeps its id and index position.
@@ -533,20 +598,82 @@ def window_bounds(now: datetime, window: Window) -> tuple[datetime, datetime] | 
     return (start, end) if start <= local < end else None
 
 
+def window_on(day: date, window: Window) -> tuple[datetime, datetime]:
+    """The window's (start, end) on *day*, as aware local times.
+
+    The window takes its own date's UTC offset, so a window on the first
+    Saturday after a daylight-saving change starts at 02:00 local, not at the
+    previous week's 02:00 shifted by an hour.
+    """
+    tz = ZoneInfo(window.tz)
+    return (datetime.combine(day, window.start, tzinfo=tz),
+            datetime.combine(day, window.end, tzinfo=tz))
+
+
+def next_window(now: datetime, window: Window) -> tuple[datetime, datetime]:
+    """The window *now* is in, else the next one to start."""
+    local = now.astimezone(ZoneInfo(window.tz))
+    for ahead in range(8):
+        day = local.date() + timedelta(days=ahead)
+        if day.weekday() == window.day:
+            start, end = window_on(day, window)
+            if end > local:
+                return start, end
+    raise AssertionError("a weekly window always falls within eight days")
+
+
+def last_window_start(now: datetime, window: Window) -> datetime:
+    """The start of the newest window that has begun at or before *now*."""
+    local = now.astimezone(ZoneInfo(window.tz))
+    for back in range(8):
+        day = local.date() - timedelta(days=back)
+        if day.weekday() == window.day:
+            start, _ = window_on(day, window)
+            if start <= local:
+                return start
+    raise AssertionError("a weekly window always falls within eight days")
+
+
+def describe_window(start: datetime, end: datetime) -> str:
+    """``Sat 2026-11-07 02:00-06:00 EST (07:00-11:00 UTC)``."""
+    utc_s, utc_e = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+    return (f"{start:%a %Y-%m-%d %H:%M}-{end:%H:%M %Z} "
+            f"({utc_s:%H:%M}-{utc_e:%H:%M} UTC)")
+
+
 # ---------------------------------------------------------------------------
 # Files: atomic writes, JSON, the state
 # ---------------------------------------------------------------------------
 
 
 def _atomic_write(path: Path, data: str | bytes) -> None:
-    """tmp + fsync + rename: a reader sees the old file or the new one, never half."""
+    """tmp + fsync + rename: a reader sees the old file or the new one, never half.
+
+    The directory is synced after the rename (best effort), so a power cut
+    right after the job exits does not take the new name back.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    with open(tmp, "wb") as fh:
-        fh.write(data.encode("utf-8") if isinstance(data, str) else data)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data.encode("utf-8") if isinstance(data, str) else data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    try:
+        dfd = os.open(path.parent, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dfd)
+    except OSError:
+        pass
+    finally:
+        os.close(dfd)
 
 
 def _atomic_write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -602,6 +729,9 @@ class CommandSpec:
     kill_at: datetime | None = None     # SIGKILL here, whatever it is doing
     should_stop: Callable[[], bool] | None = None
     poll_s: float = 5.0
+    # The clock the stop and kill times are read against (the run's own clock;
+    # None = the wall clock).
+    clock: Callable[[], datetime] | None = None
 
 
 @dataclass
@@ -646,12 +776,13 @@ def run_command(spec: CommandSpec) -> CommandResult:
     caller treats it as paused, not failed.
     """
     spec.log_path.parent.mkdir(parents=True, exist_ok=True)
+    clock = spec.clock or _utcnow
     t0 = time.monotonic()
     stopped = False
     term_at: datetime | None = None
     kill_at = spec.kill_at
     with open(spec.log_path, "ab") as log:
-        log.write(f"\n=== {_utcnow().isoformat(timespec='seconds')} "
+        log.write(f"\n=== {clock().isoformat(timespec='seconds')} "
                   f"{shlex.join(spec.argv)}\n".encode())
         log.flush()
         proc = subprocess.Popen(spec.argv, cwd=spec.cwd, stdout=log, stderr=subprocess.STDOUT,
@@ -662,7 +793,7 @@ def run_command(spec: CommandSpec) -> CommandResult:
                 break
             except subprocess.TimeoutExpired:
                 pass
-            now = _utcnow()
+            now = clock()
             if term_at is None:
                 window = spec.stop_at is not None and now >= spec.stop_at
                 asked = spec.should_stop is not None and spec.should_stop()
@@ -722,6 +853,13 @@ class Run:
     gpu_note: str = ""
     restore_failed: bool = False
     crashed: bool = False
+    # For the report only: --note lines, --next-step lines, the run a
+    # report-only refresh re-renders ("" = none recorded), and the start of
+    # the spend week (default: a week before the window start).
+    notes: list[str] = field(default_factory=list)
+    extra_steps: list[str] = field(default_factory=list)
+    reported_run: str = ""
+    spend_since: datetime | None = None
 
     @property
     def data(self) -> Path:
@@ -761,8 +899,10 @@ class Run:
         log = self.data / "logs" / f"{self.run_id}-{log_name}.log"
         if windowed:
             return CommandSpec(argv, self.repo, log, stop_at=self.stop_at, kill_at=self.kill_at,
-                               should_stop=self.interrupted)
-        return CommandSpec(argv, self.repo, log, kill_at=self.clock() + SETUP_COMMAND_LIMIT)
+                               should_stop=self.interrupted, poll_s=POLL_SECONDS,
+                               clock=self.clock)
+        return CommandSpec(argv, self.repo, log, kill_at=self.clock() + SETUP_COMMAND_LIMIT,
+                           poll_s=POLL_SECONDS, clock=self.clock)
 
     def swap_command(self, argv: list[str]) -> CommandSpec:
         """A step of the swap into gpu_setup: bounded, and held to the window too.
@@ -773,7 +913,7 @@ class Run:
         log = self.data / "logs" / f"{self.run_id}-gpu-setup.log"
         return CommandSpec(argv, self.repo, log, stop_at=self.stop_at,
                            kill_at=min(self.clock() + SETUP_COMMAND_LIMIT, self.kill_at),
-                           should_stop=self.interrupted)
+                           should_stop=self.interrupted, poll_s=POLL_SECONDS, clock=self.clock)
 
     def fill(self, template: tuple[str, ...], values: dict[str, str]) -> list[str]:
         stop = self.stop_at.astimezone(timezone.utc)
@@ -868,14 +1008,50 @@ def tag_trace(meta: dict[str, Any], cfg: FlywheelConfig,
                    or (origin == "offspring"
                        and (not isinstance(record, dict) or record.get("max_derived", True) is not False)))
     verdict = str(meta.get("verdict") or "").strip().lower()
-    if str(meta.get("label") or "").strip().lower() == "fail":
+    rec_verdict, rec_judge = record_verdict(meta.get("verification"))
+    if rec_verdict == "fail" or str(meta.get("label") or "").strip().lower() == "fail":
         verdict = "fail"
+    elif not verdict and rec_verdict == "pass":
+        verdict = "pass"
+    judge = meta.get("judge")
+    # Every id the trace's own model goes by: a verifier naming any of them is
+    # the model judging itself (verification).
+    ids = sorted({str(meta.get(k)).strip() for k in ("source_model", "served_model", "model")
+                  if meta.get(k) and str(meta.get(k)).strip()})
     return {
         "source_model": model, "adapter_version": adapter, "origin": origin,
         "max_derived": bool(max_derived),
         "verdict": verdict if verdict in ("pass", "fail") else "",
-        "verified_by": str(meta.get("verified_by") or meta.get("judge") or "").strip(),
+        "verified_by": str(meta.get("verified_by") or (judge if isinstance(judge, str) else "")
+                           or rec_judge).strip(),
+        "model_ids": ids,
     }
+
+
+def record_verdict(rec: Any) -> tuple[str, str]:
+    """("pass" | "fail" | "", the judge's model) of a ``_meta.verification`` record.
+
+    The record teacher_gen.py writes (and build.py reads strictly): any
+    failing part makes it "fail" (``verified`` false, a fail status or
+    verdict, a judge verdict other than pass, tool calls that failed); a
+    pass needs ``verified`` true (or a pass status) and, when a judge is
+    named, its pass. The full strict check is the builder's; this only lets
+    a failed record veto, and a passed, judged one name its judge.
+    """
+    if not isinstance(rec, dict):
+        return "", ""
+    judge = rec.get("judge")
+    j_verdict = judge.get("verdict") if isinstance(judge, dict) else judge
+    j_model = judge.get("model") if isinstance(judge, dict) else rec.get("judge_model")
+    word = str(rec.get("status") or rec.get("verdict") or "").strip().lower()
+    decision = rec.get("verified")
+    failed = (decision is False or word == "fail" or rec.get("tool_success") is False
+              or (j_verdict is not None and str(j_verdict).strip().lower() != "pass")
+              or (isinstance(judge, dict) and "pass" in judge and judge["pass"] is not True))
+    if failed:
+        return "fail", ""
+    passed = decision is True or word == "pass"
+    return ("pass" if passed else ""), (str(j_model).strip() if passed and j_model else "")
 
 
 def _expand(patterns: tuple[str, ...]) -> list[Path]:
@@ -973,55 +1149,140 @@ def stage_harvest(run: Run) -> StageResult:
 # ---------------------------------------------------------------------------
 
 
-def verification(row: dict[str, Any]) -> tuple[str, str]:
+def _tokens(name: str) -> list[str]:
+    return [t for t in _TOKEN_SPLIT.split(name.lower()) if t]
+
+
+def _names_within(name: str, inside: str) -> bool:
+    """True when *name*'s tokens stand, in order and adjacent, in *inside*'s.
+
+    ``distill-9b-fw-x-Q4_K_M`` is within ``distill-9b-fw-x-Q4_K_M.gguf``, and
+    ``student-9b`` within ``models/student-9b@fw-x``; ``qwen3.5-9b`` is not
+    within ``qwen3.8-27b``.
+    """
+    want, have = _tokens(name), _tokens(inside)
+    return bool(want) and any(have[i:i + len(want)] == want
+                              for i in range(len(have) - len(want) + 1))
+
+
+# Placeholder names that never identify a model (tag_trace's fallbacks).
+_NO_NAME = frozenset({"", "unknown", "none"})
+
+
+def self_verifier(row: dict[str, Any], by: str, student_models: tuple[str, ...] = (),
+                  adapters: Any = ()) -> bool:
+    """True when the verifier *by* of an offspring trace is the student itself.
+
+    The student goes by many names: any id of the trace's own model (its
+    ``_meta.model``, served id or source model, with or without a path or a
+    ``.gguf`` suffix), its adapter version, any adapter this job trained, and
+    any ``harvest.student_models`` match. Over-matching only drops a trace,
+    the safe direction for this guard.
+    """
+    if _matches(by, student_models):
+        return True
+    # Any adapter of ours anywhere in the name (tag_trace's "unknown" rule).
+    if any(str(v).lower() in by.lower() for v in adapters or ()
+           if str(v).lower() not in _NO_NAME):
+        return True
+    own = {str(row.get("source_model") or ""), str(row.get("adapter_version") or ""),
+           *(str(x) for x in row.get("model_ids") or [])}
+    return any(_names_within(name, by) for name in own if name.lower() not in _NO_NAME)
+
+
+def verification(row: dict[str, Any], student_models: tuple[str, ...] = (),
+                 adapters: Any = ()) -> tuple[str, str]:
     """(basis, "") when the trace may be trained on, else ("", why not).
 
     * a ``fail`` verdict drops anything;
-    * offspring: only a ``pass`` from a named verifier that is not the
-      offspring itself. Tool success is never enough;
-    * teacher: a ``pass`` verdict, or for a golden trace its tool-success
-      label (the exporter writes only calls that ran without error). An
-      extra-source teacher trace needs a verdict, as the builder requires;
+    * offspring: only a ``pass`` from a named verifier that is neither the
+      student itself (:func:`self_verifier`; *student_models* and *adapters*
+      are the config's student patterns and the adapters this job trained)
+      nor the hosted teacher (the operator's ruling, and build.py's
+      ``judge_is_max``: Max never judges). Tool success is never enough;
+    * teacher: a ``pass`` verdict from a judge that is not Max, or for a
+      golden trace its tool-success label (the exporter writes only calls
+      that ran without error). An extra-source teacher trace needs such a
+      verdict, as the builder requires;
     * unknown origin: never.
     """
     if row.get("verdict") == "fail":
         return "", "verdict_fail"
     origin = row.get("origin")
+    by = str(row.get("verified_by") or "").strip()
+    passed = row.get("verdict") == "pass"
     if origin == "offspring":
-        by = str(row.get("verified_by") or "")
-        if row.get("verdict") != "pass" or not by:
+        if not passed or by.lower() in _NO_NAME:
             return "", "unverified_offspring"
-        if by.lower() in (str(row.get("source_model", "")).lower(),
-                          str(row.get("adapter_version", "")).lower()):
+        if self_verifier(row, by, student_models, adapters):
             return "", "self_verified_offspring"
+        if is_max_name(by):
+            return "", "max_judged_offspring"
         return "judge-pass", ""
     if origin == "teacher":
-        if row.get("verdict") == "pass":
+        max_judged = passed and is_max_name(by)
+        if passed and not max_judged:
             return "judge-pass", ""
         if row.get("kind") == "golden":
             return "tool-success", ""
-        return "", "unverified_extra"
+        return "", "max_judged" if max_judged else "unverified_extra"
     return "", "unknown_origin"
 
 
 def pool_source(row: dict[str, Any]) -> str:
-    """The provenance a pooled trace hands the builder as ``_meta.source``.
+    """The flywheel's provenance tag for a pooled trace.
 
-    The builder copies it onto every training row as ``source``, which is what
-    the train-time guards read: origin, model and adapter survive into the
-    dataset, and a Max-derived row says so in a token the Max guard matches.
+    The builder copies ``_meta.source`` onto every training row as
+    ``source``, which is what the train-time guards read: origin, model and
+    adapter survive into the dataset, and a Max-derived row says so in a
+    token the Max guard matches. :func:`pooled_meta` decides whether it
+    replaces the trace's own tag.
     """
     tail = "/max-derived" if row.get("max_derived") else ""
     return (f"flywheel/{row.get('origin')}/{row.get('source_model')}"
             f"@{row.get('adapter_version')}{tail}")
 
 
-def _verify_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def pooled_meta(meta: dict[str, Any], row: dict[str, Any], basis: str,
+                run_id: str) -> dict[str, Any]:
+    """The ``_meta`` a verified trace enters the pool with.
+
+    The builder's data policy keys training on the trace's own ``source`` tag
+    (``--train-sources``, e.g. ``qwen38-27b-gym``) and reads the generator's
+    ``verification`` record strictly, so a teacher trace that is not
+    Max-derived keeps both untouched. Offspring, Max-derived and untagged
+    traces are tagged :func:`pool_source` instead (their own tag kept as
+    ``source_original``): never a listed train source, and named offspring
+    or Max for the train-time guards. The job's own decision is recorded
+    under ``flywheel``, never in ``verification``: a record there without a
+    decision fails the builder's check.
+    """
+    out = dict(meta)
+    tag = out.get("source")
+    own = tag.strip() if isinstance(tag, str) and tag.strip() else ""
+    if row.get("origin") != "teacher" or row.get("max_derived") or not own:
+        if own and "source_original" not in out:
+            out["source_original"] = tag
+        out["source"] = pool_source(row)
+    out.update({
+        "source_model": row["source_model"], "adapter_version": row["adapter_version"],
+        "origin": row["origin"], "max_derived": row["max_derived"], "flywheel_run": run_id,
+        "flywheel": {"tag": pool_source(row), "run": run_id,
+                     "verification": {"basis": basis, "by": row.get("verified_by") or None}},
+    })
+    if basis == "judge-pass":
+        out["verdict"] = "pass"   # the builder's own verified-extra check reads it
+    return out
+
+
+def _verify_rows(run: Run, rows: list[dict[str, Any]]
+                 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     decided: list[dict[str, Any]] = []
     dropped: Counter[str] = Counter()
     verified_by_origin: Counter[str] = Counter()
+    adapters = _dict(run.state.get("adapters"))
     for row in rows:
-        basis, why = verification(row)
+        basis, why = verification(row, run.cfg.student_models, adapters)
         decided.append({"h": row["h"], "basis": basis, "reason": why})
         if basis:
             verified_by_origin[str(row.get("origin"))] += 1
@@ -1037,7 +1298,7 @@ def stage_verify(run: Run) -> StageResult:
         rows = run.facts.get("dry_harvest")
         if rows is None:
             return StageResult("verify", SKIPPED, reason="harvest did not run")
-        _, counts = _verify_rows(rows)
+        _, counts = _verify_rows(run, rows)
         run.facts["dry_verified"] = counts["verified"]
         return StageResult("verify", DRY_RUN, summary=(
             f"would verify {counts['verified']} of {counts['rows']} new trace(s); "
@@ -1059,7 +1320,7 @@ def stage_verify(run: Run) -> StageResult:
                 f"the window closed with {len(pending)} harvest(s) unverified; the next window "
                 "verifies them"), details={"verified": total["verified"]})
         rows = list(_read_jsonl(rdir / "harvest.jsonl"))
-        decided, counts = _verify_rows(rows)
+        decided, counts = _verify_rows(run, rows)
         trainable = {d["h"]: d["basis"] for d in decided if d["basis"]}
         tags = {r["h"]: r for r in rows}
         pooled: list[dict[str, Any]] = []
@@ -1075,18 +1336,8 @@ def stage_verify(run: Run) -> StageResult:
                 continue
             row = tags[h]
             trace = redact_capture(item["trace"])
-            meta = dict(trace.get("_meta") or {})
-            if meta.get("source") and "source_original" not in meta:
-                meta["source_original"] = meta["source"]
-            meta.update({
-                "source": pool_source(row), "source_model": row["source_model"],
-                "adapter_version": row["adapter_version"], "origin": row["origin"],
-                "max_derived": row["max_derived"], "flywheel_run": rdir.name,
-                "verification": {"basis": trainable[h], "by": row.get("verified_by") or None},
-            })
-            if trainable[h] == "judge-pass":
-                meta["verdict"] = "pass"   # the builder's own verified-extra check reads it
-            trace["_meta"] = meta
+            trace["_meta"] = pooled_meta(dict(trace.get("_meta") or {}), row, trainable[h],
+                                         rdir.name)
             pooled.append(trace)
         # The pool file first, verify.json last: verify.json is the commit point.
         _atomic_write_jsonl(run.data / "pool" / f"{rdir.name}.jsonl", pooled)
@@ -1100,9 +1351,9 @@ def stage_verify(run: Run) -> StageResult:
             this_run = counts
     details = {"runs": [p.name for p in pending], "verified": total["verified"],
                "pooled": total["pooled"], "dropped": dict(dropped), "this_run": this_run}
-    if dropped.get("unverified_offspring") or dropped.get("self_verified_offspring"):
-        details["offspring_dropped"] = (dropped["unverified_offspring"]
-                                        + dropped["self_verified_offspring"])
+    offspring_dropped = sum(dropped[k] for k in OFFSPRING_DROPS)
+    if offspring_dropped:
+        details["offspring_dropped"] = offspring_dropped
     drop_text = ", ".join(f"{k} {v}" for k, v in sorted(dropped.items())) or "none"
     return StageResult("verify", OK, summary=(
         f"{total['verified']} verified ({total['pooled']} into the pool) from "
@@ -1374,7 +1625,9 @@ def check_training_data(paths: list[Path], cfg: FlywheelConfig,
     A row's origin comes from its ``source`` (see :func:`pool_source`). The
     builder keeps only rows of its ``--teacher-model``, so when that model is
     the hosted teacher every row is Max-derived whatever its own source says;
-    an unknown teacher model counts as Max-derived (nothing shows otherwise).
+    an unknown teacher model counts as Max-derived (nothing shows otherwise),
+    and so does a row whose own ``model`` names Max or whose ``max_derived``
+    is true.
     A row sharing a :func:`row_keys` value with *held_out* (the score cases)
     is a task the candidate would be scored on.
     """
@@ -1407,7 +1660,11 @@ def check_training_data(paths: list[Path], cfg: FlywheelConfig,
                         g.offspring_unverified += 1
                 elif origin == "unknown":
                     g.unknown_rows += 1
-                if all_max or is_max_name(src):
+                # build.py also writes the row's model and max_derived: either
+                # naming Max makes the row Max-derived whatever its source says.
+                model = str(row.get("model") or meta.get("model") or "")
+                if all_max or is_max_name(src) or is_max_name(model) \
+                        or row.get("max_derived") is True or meta.get("max_derived") is True:
                     g.max_rows += 1
                 if held_out and row_keys(row) & held_out:
                     g.leaked_rows += 1
@@ -2040,8 +2297,19 @@ STAGE_FUNCS: dict[str, Callable[[Run], StageResult]] = {
 
 
 def _stage_from(raw: dict[str, Any], name: str) -> StageResult:
-    return StageResult(name, str(raw.get("status")), float(raw.get("seconds") or 0.0),
+    return StageResult(name, str(raw.get("status")), _num(raw.get("seconds")),
                        str(raw.get("summary") or ""), "done earlier in this window",
+                       _dict(raw.get("details")))
+
+
+def _stage_record(raw: dict[str, Any], name: str) -> StageResult:
+    """A recorded stage as it was recorded (its own reason), for a report rebuilt later."""
+    status = str(raw.get("status") or "")
+    known = (OK, SKIPPED, REFUSED, PAUSED, FAILED, DRY_RUN, NOT_RUN)
+    return StageResult(name, status if status in known else FAILED, _num(raw.get("seconds")),
+                       str(raw.get("summary") or ""),
+                       str(raw.get("reason") or "") if status in known
+                       else f"the record holds an unknown status {status!r}",
                        _dict(raw.get("details")))
 
 
@@ -2066,14 +2334,15 @@ def run_pipeline(run: Run) -> None:
                 f"({run.stop_at.astimezone(ZoneInfo(run.cfg.window.tz)):%H:%M}); {name} needs "
                 f"at least {MIN_STAGE_SECONDS[name] // 60} min"))
         else:
-            t0 = time.monotonic()
+            # Timed on the run's clock, the one the window is held to.
+            t0 = run.clock()
             try:
                 result = STAGE_FUNCS[name](run)
             except Exception as exc:  # noqa: BLE001 — one stage's crash must not cost the report
                 logger.exception("flywheel stage %s crashed", name)
                 result = StageResult(name, FAILED,
                                      reason=_redact(f"{type(exc).__name__}: {exc}")[:500])
-            result.seconds = round(time.monotonic() - t0, 1)
+            result.seconds = round(max(0.0, (run.clock() - t0).total_seconds()), 1)
         run.results[name] = result
         logger.info("flywheel %s: %s %s", name, result.status, result.reason or result.summary)
         if not run.dry_run:
@@ -2169,6 +2438,175 @@ def _this_weeks_model(run: Run) -> dict[str, Any] | None:
     return None
 
 
+def _all_stages(run: Run) -> list[StageResult]:
+    """Every stage, in order: one the run never reached is NOT RUN, saying so."""
+    return [run.results.get(name) or StageResult(
+        name, NOT_RUN, reason="the run stopped before this stage (see Issues)")
+        for name in STAGES]
+
+
+def _teachers_all_max(cfg: FlywheelConfig) -> bool:
+    return bool(cfg.teacher_models) and all(is_max_name(p) for p in cfg.teacher_models)
+
+
+def _one_line(text: Any, limit: int = NOTE_LIMIT) -> str:
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[:limit - 3].rstrip() + "..."
+
+
+def config_gaps(cfg: FlywheelConfig) -> list[str]:
+    """The settings a train-to-score week still needs (empty: none missing)."""
+    gaps = []
+    if not cfg.build_args:
+        gaps.append("build.args (this host's --pack, --tokenizer-dir, --index)")
+    if not cfg.train_command:
+        gaps.append("train.command")
+    if not cfg.gpu_setup:
+        gaps.append(f"gpu_setup (a setup name, or {NO_SWAP_SETUP!r})")
+    if not cfg.quantize_command:
+        gaps.append("quantize.command")
+    if not cfg.score_base_url or not cfg.score_cases:
+        gaps.append("score.base_url and score.cases")
+    if not cfg.baseline_summary:
+        gaps.append("score.baseline_summary")
+    return gaps
+
+
+def _report_after(run: Run) -> datetime:
+    """The time the report's next window follows: the end of the run's own
+    window once that window has begun (a run inside its window, or a refresh
+    of it, is not "next"); now when the report's window is still ahead, or a
+    refresh has no run to report."""
+    now = run.clock()
+    if run.window_start > now or (run.mode == "report-only" and not run.reported_run):
+        return now
+    return max(now, run.window_end)
+
+
+def plan_next_steps(run: Run, model: dict[str, Any]) -> list[dict[str, str]]:
+    """Who acts next, and on what: the operator's decisions first, then what
+    the job itself does next window, then the runbook's plan, then the next
+    window (always the last line)."""
+    cfg = run.cfg
+    steps: list[dict[str, str]] = []
+
+    def add(by: str, text: str) -> None:
+        line = _one_line(text)
+        if line and all(s["step"] != line for s in steps):
+            steps.append({"by": by, "step": line})
+
+    t = _dict(run.state.get("train"))
+    results = run.results
+    if run.mode == "config-error":
+        # cfg holds the defaults in place of the block (_fallback_config): none
+        # of them is the operator's setting, so no step is drawn from them.
+        add("operator", "Fix the flywheel: block in prometheus.yaml (every problem is listed under "
+                        "Issues). The job refuses to run until it parses, and changes nothing "
+                        "meanwhile.")
+        for text in run.extra_steps:
+            add("runbook", text)
+        start, end = next_window(_report_after(run), cfg.window)
+        add("job", (f"Next window: {describe_window(start, end)}; the job refuses to run then "
+                    "too unless the block parses." if not run.facts.get("window_unknown") else
+                    "Next window: unknown, flywheel.window is invalid (the default window would "
+                    f"be {describe_window(start, end)})."))
+        return steps
+    if run.mode == "state-error":
+        add("operator", f"Repair or move {run.state_path} by hand: it holds the train record, and "
+                        "the job will not reset it.")
+    if run.restore_failed:
+        deadman = _dict(run.state.get("gpu")).get("deadman_at")
+        add("operator", "Check the GPU hosts now: restoring the business setup failed (see Issues)"
+                        + (f"; the dead-man timer restores it at {deadman}." if deadman else "."))
+    for name in STAGES:
+        r = results.get(name)
+        if r is None or r.status != FAILED:
+            continue
+        if name == "train" and t.get("status") == "abandoned":
+            add("operator", f"Train {t.get('adapter_version')} was abandoned after "
+                            f"{t.get('failures')} failed window(s): fix the cause, then remove "
+                            "'train' from state.json to start over.")
+        elif run.mode == "recovery":
+            add("operator", f"Find out why the run died during {name} (the job's journal); the "
+                            "next window starts again.")
+        else:
+            add("operator", f"Look into the {name} failure (the reason is under What ran; a "
+                            "child's output is in the data dir's logs/); the next window retries "
+                            "it.")
+    train = results.get("train")
+    guard = _dict(train.details.get("guard")) if train else {}
+    approved = cfg.max_approval.approved
+    max_refusal = bool(guard.get("max_rows")) and not approved
+    if not approved and (max_refusal or _teachers_all_max(cfg)):
+        add("operator", "Decide DISTILL-OPEN-QUESTIONS #6 (training on Max-derived data). Until "
+                        "flywheel.max_data records approved, approved_by and approved_on, no "
+                        "train uses a Max-derived row.")
+    if not approved and _teachers_all_max(cfg):
+        add("operator", "flywheel.harvest.teacher_models names only Max models, so every verified "
+                        "trace is Max-derived: add the local teacher's model id (its gym traces) "
+                        "to train without Max data.")
+    for name in STAGES:
+        r = results.get(name)
+        if r is None or r.status != REFUSED:
+            continue
+        refusals = [str(x) for x in guard.get("refusals") or []] if name == "train" else []
+        if refusals and all("Max-derived" in x for x in refusals):
+            continue            # the OPEN-QUESTIONS #6 step above says it
+        add("operator", f"{name} was refused: {r.reason}")
+    gaps = config_gaps(cfg)
+    if gaps:
+        add("operator", "Before the flywheel can train, quantize and score, set flywheel."
+                        + ", flywheel.".join(gaps) + ".")
+    if not cfg.enabled:
+        add("operator", "The flywheel is off (flywheel.enabled: false), so a fired timer only "
+                        "writes this report. To turn it on, install the units in deploy/systemd/ "
+                        "(systemd --user) and set enabled: true.")
+
+    if t.get("status") in ("running", "incomplete"):
+        ckpt = latest_checkpoint(Path(str(t["run_dir"]))) if t.get("run_dir") else None
+        add("job", f"Resume train {t.get('adapter_version')} from "
+                   f"{ckpt.name if ckpt else 'its start (no checkpoint was saved)'} in the next "
+                   "window, on the same frozen data.")
+    elif t.get("status") != "abandoned":
+        pending = _safe_pending(run)
+        if pending is not None and pending < cfg.min_new_traces:
+            add("job", f"Train waits for {cfg.min_new_traces - pending} more verified trace(s) "
+                       f"({pending} of {cfg.min_new_traces} since the last train).")
+    adapters = _dict(run.state.get("adapters"))
+    quantized = _dict(run.state.get("quantized"))
+    waiting = sorted(v for v in adapters if _dict(quantized.get(v)).get("status") != "done")
+    if waiting and cfg.quantize_command:
+        add("job", f"Quantize {waiting[-1]} in the next window.")
+    scored = {m.get("adapter_version") for m in run.state.get("models") or []
+              if isinstance(m, dict)}
+    unscored = sorted(v for v, q in quantized.items()
+                      if _dict(q).get("status") == "done" and v not in scored)
+    if unscored:
+        add("operator", f"Load {unscored[-1]} on the scoring server (flywheel.score.base_url); "
+                        "the job scores it only while the server serves it.")
+    cand = model.get("candidate")
+    if cand:
+        verdict = str(model.get("verdict") or "")
+        if verdict == "PASS":
+            add("operator", f"Decide whether to promote {cand}: it passed the Phase 6 gate vs "
+                            f"{model.get('gate_against')}. Nothing was swapped; promotion is the "
+                            "operator's call.")
+        elif verdict in ("FAIL", "INCONCLUSIVE"):
+            add("operator", f"{cand} did not pass the Phase 6 gate ({verdict}): the runbook allows "
+                            "one adjusted run (e.g. 1 epoch or a lower learning rate), then stop "
+                            "and report.")
+        else:
+            add("operator", f"{cand} was scored without a gate verdict ({verdict or 'none'}): set "
+                            "flywheel.score.baseline_summary to the base model's summary.")
+    for text in run.extra_steps:
+        add("runbook", text)
+    start, end = next_window(_report_after(run), cfg.window)
+    add("job", f"Next window: {describe_window(start, end)}"
+               + ("; the flywheel is off, so it only writes this report." if not cfg.enabled
+                  else "."))
+    return steps
+
+
 def build_report(run: Run, status: str) -> dict[str, Any]:
     cfg = run.cfg
     tz = ZoneInfo(cfg.window.tz)
@@ -2199,41 +2637,111 @@ def build_report(run: Run, status: str) -> dict[str, Any]:
     t = run.state.get("train") if isinstance(run.state.get("train"), dict) else {}
     train_result = run.results.get("train")
     guard = train_result.details.get("guard") if train_result else None
-    approval = cfg.max_approval
     harvest = run.results.get("harvest")
     verify = run.results.get("verify")
+    now = run.clock()
+    nxt_start, nxt_end = next_window(_report_after(run), cfg.window)
+    since = run.spend_since or (run.window_start - timedelta(days=7))
     return {
         "schema": REPORT_SCHEMA, "kind": "weekly", "run_id": run.run_id, "mode": run.mode,
         "dry_run": run.dry_run, "status": status,
-        "window": {"describe": cfg.window.describe(),
-                   "start": run.window_start.isoformat(timespec="minutes"),
-                   "end": run.window_end.isoformat(timespec="minutes"),
+        "generated": now.astimezone(tz).isoformat(timespec="seconds"),
+        "reported_run": run.reported_run or None,
+        "window": {"describe": cfg.window.describe(), "timezone": cfg.window.tz,
+                   "start": run.window_start.astimezone(tz).isoformat(timespec="minutes"),
+                   "end": run.window_end.astimezone(tz).isoformat(timespec="minutes"),
                    "stop_at": run.stop_at.astimezone(tz).isoformat(timespec="minutes")},
+        "next_window": {"describe": describe_window(nxt_start, nxt_end),
+                        "start": nxt_start.isoformat(timespec="minutes"),
+                        "end": nxt_end.isoformat(timespec="minutes")},
         "started": run.started.astimezone(tz).isoformat(timespec="seconds"),
-        "finished": run.clock().astimezone(tz).isoformat(timespec="seconds"),
-        "stages": [asdict(run.results[name]) for name in STAGES if name in run.results],
+        "finished": now.astimezone(tz).isoformat(timespec="seconds"),
+        "stages": [asdict(s) for s in _all_stages(run)],
         "traces": {
             "harvest": harvest.details if harvest else {},
             "verify": verify.details if verify else {},
             "new_verified_since_last_train": _safe_pending(run),
-            "min_new_traces": cfg.min_new_traces,
+            "min_new_traces": None if run.mode == "config-error" else cfg.min_new_traces,
         },
         "train": {k: t.get(k) for k in ("adapter_version", "status", "attempts", "failures",
                                         "cutoff", "max_derived", "rows")} if t else None,
         "model": model_section,
-        "spend": spend_summary(cfg.spend_ledger, run.window_start - timedelta(days=7)),
+        "spend": spend_summary(cfg.spend_ledger, since),
         "guards": {
-            "max_data": {"approved": approval.approved, "approved_by": approval.approved_by,
-                         "approved_on": approval.approved_on, "reference": approval.reference},
+            "max_data": _max_data_guard(run),
             "train_data": guard if isinstance(guard, dict) else None,
-            "offspring_dropped_at_verify": (verify.details.get("offspring_dropped", 0)
-                                            if verify else 0),
+            "offspring_dropped_at_verify": int(_num(verify.details.get("offspring_dropped", 0)))
+            if verify else 0,
         },
         "issues": list(run.issues),
+        "notes": [n for n in (_one_line(_redact(x)) for x in run.notes) if n],
+        "next_steps": plan_next_steps(run, model_section),
+    }
+
+
+def _max_data_guard(run: Run) -> dict[str, Any]:
+    """The recorded Max-data approval; ``approved`` is None (unknown) when the
+    config is invalid and only the fallback defaults were read."""
+    a = run.cfg.max_approval
+    if run.mode == "config-error":
+        return {"approved": None, "approved_by": "", "approved_on": "", "reference": ""}
+    return {"approved": a.approved, "approved_by": a.approved_by, "approved_on": a.approved_on,
+            "reference": a.reference}
+
+
+def minimal_report(run: Run, exc: BaseException) -> dict[str, Any]:
+    """The report when :func:`build_report` (or rendering it) failed: built
+    only from what cannot fail, so the reviewer still learns the window broke."""
+    cfg = run.cfg
+    tz = ZoneInfo(cfg.window.tz)
+    now = run.clock()
+    known = (OK, SKIPPED, REFUSED, PAUSED, FAILED, DRY_RUN, NOT_RUN)
+    stages = []
+    for name in STAGES:
+        r = run.results.get(name)
+        stages.append({"name": name,
+                       "status": r.status if r is not None and r.status in known else NOT_RUN,
+                       "seconds": max(0.0, _num(r.seconds)) if r is not None else 0.0,
+                       "summary": _one_line(r.summary) if r is not None else "",
+                       "reason": _one_line(r.reason) if r is not None
+                       else "unknown: the report could not be built", "details": {}})
+    nxt_start, nxt_end = next_window(_report_after(run), cfg.window)
+    return {
+        "schema": REPORT_SCHEMA, "kind": "weekly", "run_id": run.run_id,
+        "mode": run.mode if run.mode in REPORT_MODES else "scheduled",
+        "dry_run": run.dry_run, "status": "FAIL",
+        "generated": now.astimezone(tz).isoformat(timespec="seconds"),
+        "reported_run": run.reported_run or None,
+        "window": {"describe": cfg.window.describe(), "timezone": cfg.window.tz,
+                   "start": run.window_start.astimezone(tz).isoformat(timespec="minutes"),
+                   "end": run.window_end.astimezone(tz).isoformat(timespec="minutes"),
+                   "stop_at": run.stop_at.astimezone(tz).isoformat(timespec="minutes")},
+        "next_window": {"describe": describe_window(nxt_start, nxt_end),
+                        "start": nxt_start.isoformat(timespec="minutes"),
+                        "end": nxt_end.isoformat(timespec="minutes")},
+        "started": run.started.astimezone(tz).isoformat(timespec="seconds"),
+        "finished": now.astimezone(tz).isoformat(timespec="seconds"),
+        "stages": stages, "traces": {}, "train": None,
+        "model": {"candidate": None, "why": [], "last_scored": None},
+        "spend": {"ledger": str(cfg.spend_ledger), "present": False, "since": "",
+                  "error": "not read: the report could not be built"},
+        "guards": {"max_data": _max_data_guard(run),
+                   "train_data": None, "offspring_dropped_at_verify": 0},
+        "issues": [*(str(i) for i in run.issues),
+                   _one_line(_redact(f"the full report could not be built "
+                                     f"({type(exc).__name__}: {exc}); this is a minimal one"))],
+        "notes": [n for n in (_one_line(_redact(x)) for x in run.notes) if n],
+        "next_steps": [
+            {"by": "operator", "step": "Find out why the report could not be built (the job's "
+                                       "journal holds the traceback)."},
+            {"by": "job", "step": f"Next window: {describe_window(nxt_start, nxt_end)}."},
+        ],
     }
 
 
 def _safe_pending(run: Run) -> int | None:
+    if run.mode in UNREAD_MODES:
+        return None              # the train record (its cutoff) was not read
     try:
         return new_verified_since_last_train(run)
     except (OSError, ValueError) as exc:
@@ -2241,31 +2749,248 @@ def _safe_pending(run: Run) -> int | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# The reviewer's input: schema, Markdown, files
+# ---------------------------------------------------------------------------
+
+
+class _Closed(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ReportStage(_Closed):
+    name: Literal["harvest", "verify", "build", "train", "quantize", "score"]
+    status: Literal["OK", "SKIPPED", "REFUSED", "PAUSED", "FAILED", "DRY-RUN", "NOT RUN"]
+    seconds: float = Field(ge=0)
+    summary: str
+    reason: str
+    details: dict[str, Any]
+
+
+class ReportWindow(_Closed):
+    describe: str
+    timezone: str
+    start: str
+    end: str
+    stop_at: str
+
+
+class ReportNextWindow(_Closed):
+    describe: str
+    start: str
+    end: str
+
+
+class ReportStep(_Closed):
+    by: Literal["job", "operator", "runbook"]
+    step: str = Field(min_length=1)
+
+
+class ReportWinLoss(_Closed):
+    metric: str
+    previous: float
+    candidate: float
+    delta: float
+
+
+class ReportModelSection(BaseModel):
+    """``candidate`` is null for a week without a new model (then ``why``
+    says what held it); with one, the wins and losses against the previous."""
+
+    model_config = ConfigDict(extra="allow")
+    candidate: str | None
+    wins: list[ReportWinLoss] = Field(default_factory=list)
+    losses: list[ReportWinLoss] = Field(default_factory=list)
+
+
+class ReportSpend(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    ledger: str
+    present: bool
+    since: str
+
+
+class ReportGuards(_Closed):
+    max_data: dict[str, Any]
+    train_data: dict[str, Any] | None
+    offspring_dropped_at_verify: int = Field(ge=0)
+
+
+class WeeklyReport(_Closed):
+    """``LATEST.json``: the machine-readable twin of the reviewer's ``LATEST.md``."""
+
+    report_schema: Literal["flywheel-weekly-report/2"] = Field(alias="schema")
+    kind: Literal["weekly"]
+    run_id: str = Field(min_length=1)
+    mode: Literal["scheduled", "dry-run", "recovery", "config-error", "state-error",
+                  "report-only"]
+    dry_run: bool
+    status: Literal["OK", "WARN", "FAIL", "OFF"]
+    generated: str
+    reported_run: str | None
+    window: ReportWindow
+    next_window: ReportNextWindow
+    started: str
+    finished: str
+    stages: list[ReportStage]
+    traces: dict[str, Any]
+    train: dict[str, Any] | None
+    model: ReportModelSection
+    spend: ReportSpend
+    guards: ReportGuards
+    issues: list[str]
+    notes: list[str]
+    next_steps: list[ReportStep] = Field(min_length=1)
+
+    @field_validator("stages")
+    @classmethod
+    def _every_stage_in_order(cls, stages: list[ReportStage]) -> list[ReportStage]:
+        names = [s.name for s in stages]
+        if names != list(STAGES):
+            raise ValueError(f"stages must be exactly {list(STAGES)} in order, not {names}")
+        return stages
+
+
+def report_problems(report: dict[str, Any]) -> list[str]:
+    """Where *report* departs from :class:`WeeklyReport` (empty: it does not)."""
+    try:
+        WeeklyReport.model_validate(report)
+    except ValidationError as exc:
+        return [f"{'.'.join(str(p) for p in e['loc']) or '(top)'}: {e['msg']}"
+                for e in exc.errors()][:20]
+    return []
+
+
 def _md_escape(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
+def _fmt_seconds(seconds: float) -> str:
+    s = int(round(seconds))
+    if s < 120:
+        return f"{s} s"
+    h, m = divmod(s // 60, 60)
+    return f"{h} h {m:02d} min" if h else f"{m} min"
+
+
+def _local(iso: str, tz: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(iso).astimezone(ZoneInfo(tz))
+    except (ValueError, ZoneInfoNotFoundError):
+        return None
+
+
+MODE_TEXT = {
+    "scheduled": "scheduled run",
+    "dry-run": "DRY RUN: nothing was changed",
+    "recovery": "written by the recovery unit after the run died",
+    "config-error": "config error: nothing ran",
+    "state-error": "state unreadable: nothing ran",
+    "report-only": "report only: no stage ran",
+}
+STATUS_TEXT = {
+    "OK": "nothing failed and nothing was refused",
+    "WARN": "something was refused or needs a look (see Issues)",
+    "FAIL": "a stage failed, the run died, or a restore or the report failed",
+    "OFF": "the flywheel is switched off",
+}
+
+
+def _unread(report: dict[str, Any]) -> str:
+    """``unknown (why)`` when the run never read its state, else empty."""
+    if report.get("mode") == "config-error":
+        return "unknown (the config is invalid, so the state was not read)"
+    if report.get("mode") == "state-error":
+        return "unknown (the state is unreadable)"
+    return ""
+
+
+def _threshold(traces: dict[str, Any]) -> str:
+    need = traces.get("min_new_traces")
+    return (f"a train needs {need}" if need is not None
+            else "the train threshold is unknown: the config is invalid")
+
+
+def _glance(report: dict[str, Any]) -> list[str]:
+    m = report["model"]
+    if m.get("candidate"):
+        missing = len(m.get("only_previous") or []) + len(m.get("only_candidate") or [])
+        model = (f"{m['candidate']} scored; Phase 6 gate vs {m.get('gate_against') or 'nothing'}: "
+                 f"{m.get('verdict')}; vs {m.get('previous') or 'nothing'}: "
+                 f"{len(m.get('wins') or [])} win(s), {len(m.get('losses') or [])} loss(es)"
+                 + (f", {missing} metric(s) not compared" if missing else ""))
+    else:
+        held = [f"{s['name']} {s['status']}" for s in report["stages"]
+                if s["name"] in ("train", "quantize", "score") and s["status"] != OK]
+        model = "no new model" + (f" ({', '.join(held)})" if held else "")
+    t = report.get("train")
+    train = (f"{t.get('adapter_version')} is {t.get('status')} (window(s) used "
+             f"{t.get('attempts')}, failures {t.get('failures')})" if t
+             else _unread(report) or "no train has started yet")
+    tr = report["traces"]
+    hv, vf = tr.get("harvest") or {}, tr.get("verify") or {}
+    pending = tr.get("new_verified_since_last_train")
+    traces = (f"{hv.get('new', 0)} new this window, {vf.get('verified', 0)} verified; "
+              if hv or vf else "none harvested in this run; ")
+    traces += (f"{'unknown' if pending is None else pending} verified since the last train "
+               f"({_threshold(tr)})")
+    sp = report["spend"]
+    if sp.get("error"):
+        spend = f"not read ({sp['error']})"
+    elif not sp.get("present"):
+        spend = "no ledger: no API spend recorded"
+    else:
+        spend = _fmt_spend(sp["week"])
+    return [
+        f"- Status: {report['status']} ({STATUS_TEXT.get(report['status'], '?')})",
+        f"- Model: {model}",
+        f"- Train: {train}",
+        f"- Traces: {traces}",
+        f"- Spend, last 7 days: {spend}",
+        f"- Issues: {len(report['issues'])}; operator steps: "
+        f"{sum(1 for s in report['next_steps'] if s['by'] == 'operator')}",
+        f"- Next window: {report['next_window']['describe']}",
+    ]
+
+
 def render_markdown(report: dict[str, Any]) -> str:
+    """LATEST.md: the title, the status line, then :data:`REVIEWER_SECTIONS` in order."""
     w = report["window"]
+    tz = w.get("timezone") or "UTC"
+    mode = MODE_TEXT.get(report["mode"], report["mode"])
+    if report["mode"] == "report-only":
+        mode += (f"; the {report['reported_run']} run's record" if report.get("reported_run")
+                 else "; no run recorded yet")
     lines = [
         f"# Flywheel weekly report: {report['run_id']}",
         "",
-        f"**Status: {report['status']}**"
-        + (" (DRY RUN: nothing was changed)" if report["dry_run"] else "")
-        + f" · window {w['describe']} · ran {report['started'][11:16]}-{report['finished'][11:16]}"
-        + f" · mode: {report['mode']}",
+        f"**FLYWHEEL weekly · {report['status']}** · {mode} · window {w['describe']}",
         "",
-        "| Stage | Result | Time | Summary |",
-        "|---|---|---|---|",
     ]
+    gen = _local(report["generated"], tz)
+    if report["mode"] == "report-only":
+        lines.append(f"Refreshed {gen:%a %Y-%m-%d %H:%M %Z}." if gen else "Refreshed.")
+    else:
+        s, f = _local(report["started"], tz), _local(report["finished"], tz)
+        if s and f:
+            lines.append(f"Ran {s:%a %Y-%m-%d %H:%M}-{f:%H:%M %Z}.")
+    lines += [f"Machine-readable twin: `LATEST.json` (`{report['schema']}`), generated "
+              f"{report['generated']}.", ""]
+
+    lines += ["## At a glance", "", *_glance(report)]
+
+    lines += ["", "## What ran", "", "| Stage | Result | Time | Summary |", "|---|---|---|---|"]
     for s in report["stages"]:
-        text = s["summary"] or s["reason"]
-        lines.append(f"| {s['name']} | {s['status']} | {s['seconds']:.0f} s | "
-                     f"{_md_escape(text)} |")
+        if s["status"] == NOT_RUN:
+            text, took = "not run (see below)", "-"
+        else:
+            text, took = s["summary"] or s["reason"], _fmt_seconds(s["seconds"])
+        lines.append(f"| {s['name']} | {s['status']} | {took} | {_md_escape(text)} |")
+
     not_run = [s for s in report["stages"] if s["status"] not in (OK, DRY_RUN)]
     lines += ["", "## Why stages did not run", ""]
     if not_run:
-        lines += [f"- **{s['name']}** {s['status']}: {s['reason'] or s['summary']}"
+        lines += [f"- **{s['name']}** {s['status']}: {_md_escape(s['reason'] or s['summary'])}"
                   for s in not_run]
     else:
         lines.append("Every stage ran.")
@@ -2281,10 +3006,11 @@ def render_markdown(report: dict[str, Any]) -> str:
     if vf:
         dropped = ", ".join(f"{k} {v}" for k, v in sorted((vf.get("dropped") or {}).items()))
         lines.append(f"- Verified: {vf.get('verified', 0)}; dropped: {dropped or 'none'}")
+    if not hv and not vf:
+        lines.append("- Nothing was harvested or verified in this run.")
     pending = tr.get("new_verified_since_last_train")
     lines.append(f"- New verified since the last train: "
-                 f"{'unknown' if pending is None else pending} "
-                 f"(a train needs {tr.get('min_new_traces')})")
+                 f"{'unknown' if pending is None else pending} ({_threshold(tr)})")
     by_source = hv.get("by_source") or []
     if by_source:
         lines += ["", "| Origin | Source model | Adapter | New |", "|---|---|---|---|"]
@@ -2305,15 +3031,31 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines += [f"- {r['metric']}: {r['previous']} -> {r['candidate']} "
                       f"({r['delta']:+.1f} pts)" for r in rows] or ["- none"]
         lines.append(f"\nUnchanged within {WIN_LOSS_PTS:g} pt: {m.get('unchanged', 0)} metric(s).")
+        # A metric only one side scored is neither a win nor a loss: say which.
+        for key, side in (("only_previous", f"{m.get('previous') or 'the previous model'} only, "
+                                            "the candidate has no score"),
+                          ("only_candidate", "the candidate only, "
+                                             f"{m.get('previous') or 'the previous model'} has "
+                                             "no score")):
+            if m.get(key):
+                lines.append(f"\nNot compared ({side}): "
+                             + ", ".join(_md_escape(str(x)) for x in m[key]) + ".")
         if m.get("error"):
             lines.append(f"\n{m['error']}")
     else:
-        lines.append("No new model this week.")
-        lines += [f"- {w}" for w in m.get("why") or []]
+        held = [f"{s['name']} {s['status']}" for s in report["stages"]
+                if s["name"] in ("train", "quantize", "score") and s["status"] != OK]
+        lines.append("No new model this week"
+                     + (f": {', '.join(held)} (reasons under Why stages did not run)."
+                        if held else "."))
         last = m.get("last_scored")
         if last:
             lines.append(f"- Last scored: {last['adapter_version']} ({last['verdict']}, "
                          f"{last['scored_in']})")
+        elif _unread(report):
+            lines.append(f"- Last scored: {_unread(report)}.")
+        else:
+            lines.append("- No model has been scored yet.")
     t = report.get("train")
     if t:
         lines.append(f"\nTrain record: {t.get('adapter_version')} is {t.get('status')} "
@@ -2321,12 +3063,12 @@ def render_markdown(report: dict[str, Any]) -> str:
 
     sp = report["spend"]
     lines += ["", "## Spend", ""]
-    if not sp.get("present"):
+    if sp.get("error"):
+        lines.append(f"Spend ledger not read ({sp['error']}).")
+    elif not sp.get("present"):
         lines.append(f"No spend ledger at {sp['ledger']}: no API spend recorded.")
-    elif sp.get("error"):
-        lines.append(f"Spend ledger unreadable ({sp['error']}).")
     else:
-        lines.append(f"- Last 7 days: {_fmt_spend(sp['week'])}")
+        lines.append(f"- Last 7 days (since {sp['since']}): {_fmt_spend(sp['week'])}")
         lines.append(f"- All time: {_fmt_spend(sp['total'])}")
         for phase, acc in sorted(sp["by_phase"].items()):
             lines.append(f"  - {phase}: {_fmt_spend(acc)}")
@@ -2337,7 +3079,10 @@ def render_markdown(report: dict[str, Any]) -> str:
     g = report["guards"]
     lines += ["", "## Guards", ""]
     md = g["max_data"]
-    if md["approved"]:
+    if md["approved"] is None:
+        lines.append("- Max-derived data: unknown (the config is invalid, so its max_data "
+                     "approval was not read)")
+    elif md["approved"]:
         lines.append(f"- Max-derived data: training ALLOWED, approved by {md['approved_by']} on "
                      f"{md['approved_on']}" + (f" ({md['reference']})" if md["reference"] else ""))
     else:
@@ -2348,12 +3093,25 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- Train data checked: {td['rows']} row(s), {td['max_rows']} Max-derived, "
                      f"{td['offspring_rows']} offspring ({td['offspring_unverified']} unverified), "
                      f"{td.get('leaked_rows', 0)} sharing a task with the score cases")
+    else:
+        lines.append("- Train data: not checked in this run (no train was started or refused)")
     lines.append(f"- Offspring traces dropped as unverified this window: "
                  f"{g.get('offspring_dropped_at_verify', 0)}")
 
     lines += ["", "## Issues", ""]
-    lines += [f"- {i}" for i in report["issues"]] or ["None."]
+    lines += [f"- {_md_escape(i)}" for i in report["issues"]] or ["None."]
+
+    lines += ["", "## Operator notes", ""]
+    lines += [f"- {_md_escape(n)}" for n in report.get("notes") or []] or ["None."]
+
+    lines += ["", "## Next steps", ""]
+    lines += [f"- [{s['by']}] {_md_escape(s['step'])}" for s in report["next_steps"]]
     return "\n".join(lines) + "\n"
+
+
+def markdown_sections(text: str) -> list[str]:
+    """The ``## `` headings of a rendered report, in order."""
+    return [line[3:].strip() for line in text.splitlines() if line.startswith("## ")]
 
 
 def _home_relative(value: Any, home: re.Pattern[str]) -> Any:
@@ -2380,18 +3138,245 @@ def public_paths(report: dict[str, Any]) -> dict[str, Any]:
     return out if isinstance(out, dict) else report
 
 
-def write_report(data: Path, report: dict[str, Any]) -> Path:
-    """The dated copy first, then LATEST, each by atomic rename."""
+def write_report(data: Path, report: dict[str, Any], *, stem: str | None = None) -> Path:
+    """The dated copy first, then LATEST.json, then LATEST.md, each by atomic rename.
+
+    A report that departs from :class:`WeeklyReport` is still written, marked
+    FAIL with the departures under Issues (a schema slip must not cost the
+    reviewer the week's report).
+    """
     report = public_paths(report)
-    rdir = data / "reports" / ("dry-run" if report["dry_run"] else "")
+    problems = report_problems(report)
+    if problems:
+        logger.error("the flywheel report departs from its schema: %s", problems)
+        report = {**report, "status": "FAIL",
+                  "issues": [*(report.get("issues") or []),
+                             *(f"report schema: {p}" for p in problems)]}
+    rdir = data / "reports" / ("dry-run" if report.get("dry_run") else "")
     text = render_markdown(report)
     blob = json.dumps(report, indent=1, default=str) + "\n"
-    stem = f"{report['run_id']}-weekly"
+    stem = stem or f"{report['run_id']}-weekly"
     _atomic_write(rdir / f"{stem}.json", blob)
     _atomic_write(rdir / f"{stem}.md", text)
     _atomic_write(rdir / "LATEST.json", blob)
     _atomic_write(rdir / "LATEST.md", text)
     return rdir / "LATEST.md"
+
+
+def emit_report(run: Run, status: str, *, stem: str | None = None) -> bool:
+    """Write the run's report, or a minimal one when it cannot be built.
+
+    True when the full report was written; False when only the minimal one
+    (or nothing) was, which the exit code carries.
+    """
+    try:
+        path = write_report(run.data, build_report(run, status), stem=stem)
+        logger.info("flywheel report (%s): %s", status, path)
+        return True
+    except Exception as exc:  # noqa: BLE001 — the reviewer still gets a report
+        logger.exception("could not build or write the flywheel report")
+        failure: BaseException = exc
+    try:
+        write_report(run.data, minimal_report(run, failure), stem=stem)
+        logger.info("a minimal flywheel report was written in its place")
+    except Exception:  # noqa: BLE001 — logged; the exit code carries it
+        logger.exception("could not write even the minimal flywheel report")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Report only: the reviewer's input from the recorded state
+# ---------------------------------------------------------------------------
+
+
+_DATED_REPORT = re.compile(r"^(\d{4}-\d{2}-\d{2})-weekly\.json$")
+
+
+def last_recorded_run(data: Path, state: dict[str, Any]) -> str:
+    """The newest run with a stage record, a dated report of its own, or the
+    state's current run ("" = none).
+
+    A run refused for a bad config or an unreadable state writes only its
+    dated report (``<run>-weekly.json``; a refresh's is ``-report-only``), so
+    the report counts as the record of that window.
+    """
+    ids = {p.parent.name for p in (data / "runs").glob("*/stages.json")}
+    ids |= {m.group(1) for p in (data / "reports").glob("*-weekly.json")
+            if (m := _DATED_REPORT.match(p.name))}
+    cur = _dict(state.get("current_run")).get("id")
+    if isinstance(cur, str) and cur:
+        ids.add(cur)
+    return max(ids, default="")
+
+
+def stage_blockers(run: Run) -> dict[str, str]:
+    """What holds each stage, read from the config and the state alone (no
+    stage runs): the report-only reasons when no run has been recorded."""
+    cfg = run.cfg
+    held: dict[str, list[str]] = {
+        name: ([] if cfg.enabled else ["flywheel.enabled is false"]) for name in STAGES}
+    if not _expand(cfg.golden) and not _expand(cfg.extra):
+        held["harvest"].append("no harvest source matches a file (flywheel.harvest.golden / extra)")
+        held["verify"].append("nothing is harvested to verify")
+    if not cfg.build_args:
+        held["build"].append("flywheel.build.args is empty (the builder needs this host's --pack "
+                             "and --tokenizer-dir)")
+    if resolve_build_script(cfg, run.repo) is None:
+        held["build"].append(f"no dataset builder at {cfg.build_script or ' or '.join(BUILD_SCRIPTS)}")
+    t = _dict(run.state.get("train"))
+    if t.get("status") in ("running", "incomplete"):
+        held["train"].append(f"train {t.get('adapter_version')} waits to resume")
+    elif t.get("status") == "abandoned":
+        held["train"].append(f"train {t.get('adapter_version')} was abandoned; the operator decides")
+    else:
+        pending = _safe_pending(run)
+        if pending is not None and pending < cfg.min_new_traces:
+            held["train"].append(f"{pending} new verified trace(s) since the last train; a train "
+                                 f"needs {cfg.min_new_traces} (flywheel.train.min_new_traces)")
+    if not cfg.train_command:
+        held["train"].append("flywheel.train.command is empty")
+    if not cfg.max_approval.approved and _teachers_all_max(cfg):
+        held["train"].append("every teacher model in flywheel.harvest.teacher_models names Max and "
+                             "no max_data approval is recorded (DISTILL-OPEN-QUESTIONS #6)")
+    adapters = _dict(run.state.get("adapters"))
+    quantized = _dict(run.state.get("quantized"))
+    if all(_dict(quantized.get(v)).get("status") == "done" for v in adapters):
+        held["quantize"].append("no finished adapter waits to be quantized")
+    if not cfg.quantize_command:
+        held["quantize"].append("flywheel.quantize.command is empty")
+    if not cfg.gpu_setup:
+        for name in ("train", "quantize"):
+            held[name].append("flywheel.gpu_setup is empty")
+    scored = {m.get("adapter_version") for m in run.state.get("models") or []
+              if isinstance(m, dict)}
+    if not any(_dict(q).get("status") == "done" and v not in scored
+               for v, q in quantized.items()):
+        held["score"].append("no quantized model waits to be scored")
+    if not cfg.score_base_url or not cfg.score_cases:
+        held["score"].append("flywheel.score.base_url and flywheel.score.cases are not both set")
+    return {name: "; ".join(why) or "nothing holds it: the next window runs it"
+            for name, why in held.items()}
+
+
+_SEVERITY = {"OK": 0, "OFF": 0, "WARN": 1, "FAIL": 2}
+
+
+def report_only(cfg: FlywheelConfig, *, clock: Clock, runner: Runner, repo: Path,
+                notes: list[str] | None = None, steps: list[str] | None = None) -> int:
+    """Rewrite the reviewer's input from the recorded state. Runs no stage.
+
+    It re-renders the newest recorded run (its stages, reasons and model) with
+    the current state, spend and next steps, or, when no run is recorded,
+    says what holds each stage. It never changes the state, never starts a
+    child process, and takes the run lock first: while a run holds it, that
+    run's own report is the current one and this writes nothing. LATEST.* are
+    replaced; the run's own dated copy is not (the refresh is dated
+    ``<today>-weekly-report-only``).
+    """
+    lock = _Lock(cfg.data_dir / "flywheel.lock")
+    if not lock.acquire():
+        logger.error("a flywheel run holds %s and writes its own report; nothing done", lock.path)
+        return EXIT_BUSY
+    try:
+        return _report_only(cfg, clock=clock, runner=runner, repo=repo,
+                            notes=list(notes or []), steps=list(steps or []))
+    finally:
+        lock.release()
+
+
+def _report_only(cfg: FlywheelConfig, *, clock: Clock, runner: Runner, repo: Path,
+                 notes: list[str], steps: list[str]) -> int:
+    now = clock()
+    tz = ZoneInfo(cfg.window.tz)
+    today = now.astimezone(tz).date().isoformat()
+    stem = f"{today}-weekly-report-only"
+    since = (now - timedelta(days=7)).astimezone(tz)
+    try:
+        state = load_state(cfg.data_dir / "state.json")
+    except FlywheelStateError as exc:
+        start, end = next_window(now, cfg.window)
+        run = Run(cfg=cfg, run_id=today, window_start=start, window_end=end, dry_run=False,
+                  clock=clock, runner=runner, repo=repo, state={}, mode="state-error",
+                  started=now, notes=notes, extra_steps=steps, spend_since=since)
+        run.issue(str(exc))
+        for name in STAGES:
+            run.results[name] = StageResult(name, NOT_RUN, reason="the state is unreadable "
+                                                                  "(see Issues)")
+        emit_report(run, "FAIL", stem=stem)
+        return EXIT_FAILED
+    reported = last_recorded_run(cfg.data_dir, state)
+    bounds: tuple[datetime, datetime] | None = None
+    if reported:
+        try:
+            bounds = window_on(date.fromisoformat(reported), cfg.window)
+        except ValueError:
+            bounds = None
+    start, end = bounds or next_window(now, cfg.window)
+    cur = _dict(state.get("current_run"))
+    # The run's own issues, status and (for a run that recorded no stages:
+    # flywheel off, config or state refused) stage reasons live in its own
+    # dated report.
+    own: Any = None
+    if reported:
+        try:
+            own = _read_json(cfg.data_dir / "reports" / f"{reported}-weekly.json")
+        except (OSError, ValueError):
+            own = None
+    own = own if isinstance(own, dict) else {}
+    began = (_parse_ts(cur.get("started")) if reported and cur.get("id") == reported
+             else _parse_ts(own.get("started")) if own.get("started") else None)
+    run = Run(cfg=cfg, run_id=reported or today, window_start=start, window_end=end,
+              dry_run=False, clock=clock, runner=runner, repo=repo, state=state,
+              mode="report-only", started=began or now, notes=notes, extra_steps=steps,
+              reported_run=reported, spend_since=since)
+    carried = "OK"
+    if reported:
+        try:
+            loaded = _read_json(run.run_dir / "stages.json")
+        except (OSError, ValueError) as exc:
+            run.issue(f"the {reported} run's stage record is unreadable ({type(exc).__name__})")
+            loaded = None
+        recorded = loaded if isinstance(loaded, dict) else {}
+        died = cur.get("id") == reported and cur.get("status") == "running"
+        own_stages = {s.get("name"): s for s in own.get("stages") or [] if isinstance(s, dict)}
+        blockers: dict[str, str] = {}
+        for name in STAGES:
+            raw, mine = recorded.get(name), own_stages.get(name)
+            if isinstance(raw, dict):
+                result = _stage_record(raw, name)
+            elif isinstance(mine, dict) and not died:
+                result = _stage_record(mine, name)
+            elif recorded or died:
+                result = StageResult(name, NOT_RUN, reason=f"the {reported} run did not reach it")
+            else:
+                blockers = blockers or stage_blockers(run)
+                result = StageResult(name, NOT_RUN, reason=(
+                    f"the {reported} run left no stage record; {blockers[name]}"))
+            run.results[name] = result
+        for item in own.get("issues") or []:
+            run.issue(f"({reported} run) {item}")
+        if own.get("status") in _SEVERITY:
+            carried = str(own["status"])
+        if died:
+            run.issue(f"The {reported} run is recorded as running but no process holds the run "
+                      "lock: it died. The recovery unit (--recover) restores any GPU swap and "
+                      "finishes its report.")
+            carried = "FAIL"
+    else:
+        for name, why in stage_blockers(run).items():
+            run.results[name] = StageResult(name, NOT_RUN,
+                                            reason=f"no run has been recorded yet; {why}")
+    last = last_window_start(now, cfg.window)
+    _, last_end = window_on(last.date(), cfg.window)
+    if cfg.enabled and now >= last_end and reported < last.date().isoformat():
+        run.issue(f"No run is recorded for the {last.date()} window"
+                  + (f" (the newest is {reported})" if reported else "")
+                  + ": the timer did not fire (units not installed, or the host was off), or "
+                    "the run never started.")
+    status, _ = overall_status(run)
+    if _SEVERITY[carried] > _SEVERITY.get(status, 0):
+        status = carried
+    return EXIT_OK if emit_report(run, status, stem=stem) else EXIT_FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -2459,11 +3444,7 @@ def _finish(run: Run) -> int:
             run.restore_failed = True
             run.issue(f"GPU RESTORE CRASHED: {type(exc).__name__}: {exc}")
     status, code = overall_status(run)
-    try:
-        path = write_report(run.data, build_report(run, status))
-        logger.info("flywheel report (%s): %s", status, path)
-    except Exception:  # noqa: BLE001 — logged; the exit code carries it
-        logger.exception("could not write the flywheel report")
+    if not emit_report(run, status):
         code = EXIT_FAILED
     if not run.dry_run:
         cur = run.state.get("current_run")
@@ -2504,11 +3485,17 @@ def _recover(cfg: FlywheelConfig, *, clock: Clock, runner: Runner, repo: Path) -
         logger.error("recovery cannot read the state: %s", exc)
         return EXIT_FAILED
     cur = _dict(state.get("current_run"))
-    run_id = str(cur.get("id") or clock().astimezone(ZoneInfo(cfg.window.tz)).date())
     now = clock()
-    run = Run(cfg=cfg, run_id=run_id, window_start=now, window_end=now, dry_run=False,
-              clock=clock, runner=runner, repo=repo, state=state, mode="recovery", started=now)
+    run_id = str(cur.get("id") or now.astimezone(ZoneInfo(cfg.window.tz)).date())
+    try:
+        start, end = window_on(date.fromisoformat(run_id), cfg.window)
+    except ValueError:
+        start, end = now, now
+    run = Run(cfg=cfg, run_id=run_id, window_start=start, window_end=end, dry_run=False,
+              clock=clock, runner=runner, repo=repo, state=state, mode="recovery",
+              started=_parse_ts(cur.get("started")) or now)
     release_gpu(run)
+    written = True
     if cur.get("status") == "running":
         try:
             loaded = _read_json(run.run_dir / "stages.json")
@@ -2520,28 +3507,30 @@ def _recover(cfg: FlywheelConfig, *, clock: Clock, runner: Runner, repo: Path) -
         for name in STAGES:
             raw = recorded.get(name)
             if isinstance(raw, dict):
-                run.results[name] = _stage_from(raw, name)
-                run.results[name].reason = str(raw.get("reason") or "")
+                run.results[name] = _stage_record(raw, name)
             elif not died_in:
                 died_in = name
                 run.results[name] = StageResult(name, FAILED, reason=(
                     "the job died during this stage, or before it started"))
             else:
-                run.results[name] = StageResult(name, SKIPPED, reason="not reached")
+                run.results[name] = StageResult(name, NOT_RUN, reason="not reached: the job died "
+                                                                     "first")
         run.issue("The weekly job ended without finishing (killed, crashed or timed out); the "
                   "recovery unit wrote this report from the stages it had recorded")
         cur.update(status="died")
-        write_report(run.data, build_report(run, "FAIL"))
+        written = emit_report(run, "FAIL")
     save_state(run.state_path, run.state)
-    return EXIT_FAILED if run.restore_failed else EXIT_OK
+    return EXIT_FAILED if run.restore_failed or not written else EXIT_OK
 
 
 def _fallback_config(block: Any) -> FlywheelConfig:
-    """The defaults, but at the block's own data_dir and window where those are usable.
+    """The defaults, but at the block's own data_dir, window and spend ledger
+    where those are usable.
 
     A typo elsewhere in the block must not move the report away from where the
     Monday reviewer reads it: the refusal lands in the configured place, under
-    the configured window's run id.
+    the configured window's run id. Every other value is a default, not the
+    operator's setting, and the config-error report states none of them.
     """
     defaults = parse_config(None)
     if not isinstance(block, dict):
@@ -2549,11 +3538,21 @@ def _fallback_config(block: Any) -> FlywheelConfig:
     raw = block.get("data_dir")
     if isinstance(raw, str) and raw.strip():
         defaults = replace(defaults, data_dir=_resolve_under(raw.strip(), _data_root()))
-    try:
-        defaults = replace(defaults, window=parse_config({"window": block.get("window")}).window)
-    except FlywheelConfigError:
-        pass
+    window = _block_window(block)
+    if window is not None:
+        defaults = replace(defaults, window=window)
+    ledger = block.get("spend_ledger")
+    if isinstance(ledger, str) and ledger.strip():
+        defaults = replace(defaults, spend_ledger=_resolve_under(ledger.strip(), _data_root()))
     return defaults
+
+
+def _block_window(block: Any) -> Window | None:
+    """The block's own window, or None when it does not parse."""
+    try:
+        return parse_config({"window": _dict(block).get("window")}).window
+    except FlywheelConfigError:
+        return None
 
 
 def main(argv: list[str] | None = None, *, clock: Clock | None = None,
@@ -2561,13 +3560,26 @@ def main(argv: list[str] | None = None, *, clock: Clock | None = None,
     parser = argparse.ArgumentParser(
         prog="python3 -m prometheus.jobs.flywheel_weekly",
         description="Weekly fine-tuning flywheel: harvest, verify, build, train, quantize, "
-                    "score, report. Runs inside its window; --dry-run any time.")
+                    "score, report. Runs inside its window; --dry-run and --report-only any "
+                    "time.")
     parser.add_argument("--config", default=None, help="prometheus.yaml (default: the search order)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="read sources and state, write reports/dry-run/, change nothing")
-    parser.add_argument("--recover", action="store_true",
-                        help="the OnFailure= unit: restore a GPU swap, finish a dead run's report")
+    how = parser.add_mutually_exclusive_group()
+    how.add_argument("--dry-run", action="store_true",
+                     help="read sources and state, write reports/dry-run/, change nothing")
+    how.add_argument("--recover", action="store_true",
+                     help="the OnFailure= unit: restore a GPU swap, finish a dead run's report")
+    how.add_argument("--report-only", action="store_true",
+                     help="rewrite the Monday reviewer's input (reports/LATEST.md and .json) from "
+                          "the recorded state: no stage runs, the state is not changed")
+    parser.add_argument("--note", action="append", default=[], metavar="TEXT",
+                        help="context the job cannot read from its state (an operator decision, "
+                             "a runbook gate); listed under Operator notes. Repeatable")
+    parser.add_argument("--next-step", action="append", default=[], metavar="TEXT",
+                        help="a step planned outside the job (the runbook's schedule); listed "
+                             "under Next steps. Repeatable")
     args = parser.parse_args(argv)
+    notes = [n for n in (_one_line(x) for x in args.note) if n]
+    steps = [n for n in (_one_line(x) for x in args.next_step) if n]
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -2579,6 +3591,7 @@ def main(argv: list[str] | None = None, *, clock: Clock | None = None,
     repo = repo or _repo_root()
 
     raw, problems = _read_config(args.config)
+    unreadable = bool(problems)          # the file itself, so no setting of it is known
     cfg: FlywheelConfig | None = None
     if not problems:
         try:
@@ -2590,12 +3603,14 @@ def main(argv: list[str] | None = None, *, clock: Clock | None = None,
         return recover(effective, clock=clock, runner=runner, repo=repo)
 
     now = clock()
+    if args.report_only and cfg is not None:
+        return report_only(cfg, clock=clock, runner=runner, repo=repo, notes=notes, steps=steps)
     bounds = window_bounds(now, effective.window)
     # A bad config is reported wherever the run falls: the window it would be
     # checked against may be the broken part, and a refusal changes nothing.
     if bounds is None and not args.dry_run and not problems:
-        logger.error("outside the flywheel window (%s); nothing done. --dry-run shows the plan.",
-                     effective.window.describe())
+        logger.error("outside the flywheel window (%s); nothing done. --dry-run shows the plan, "
+                     "--report-only refreshes the report.", effective.window.describe())
         return EXIT_CONFIG
     start, end = bounds or (now, now + effective.window.length)
     run_id = start.astimezone(ZoneInfo(effective.window.tz)).date().isoformat()
@@ -2605,13 +3620,16 @@ def main(argv: list[str] | None = None, *, clock: Clock | None = None,
             logger.error("flywheel config: %s", p)
         run = Run(cfg=effective, run_id=run_id, window_start=start, window_end=end,
                   dry_run=args.dry_run, clock=clock, runner=runner, repo=repo, started=now,
-                  state={}, mode="config-error")
+                  state={}, mode="config-error", notes=notes, extra_steps=steps)
+        if unreadable or _block_window(raw.get("flywheel")) is None:
+            run.facts["window_unknown"] = True
         for name in STAGES:
-            run.results[name] = StageResult(name, SKIPPED, reason="the flywheel config is "
+            run.results[name] = StageResult(name, NOT_RUN, reason="the flywheel config is "
                                                                   "invalid (see Issues)")
         for p in problems:
             run.issue(f"config: {p}")
-        write_report(run.data, build_report(run, "FAIL"))
+        stem = f"{run_id}-weekly-report-only" if args.report_only else None
+        emit_report(run, "FAIL", stem=stem)
         return EXIT_CONFIG
     assert cfg is not None
 
@@ -2631,16 +3649,20 @@ def main(argv: list[str] | None = None, *, clock: Clock | None = None,
             state = load_state(cfg.data_dir / "state.json")
         except FlywheelStateError as exc:
             run = Run(cfg=cfg, run_id=run_id, window_start=start, window_end=end,
-                      dry_run=args.dry_run, clock=clock, runner=runner, repo=repo, started=now, state={},
-                      mode="state-error")
+                      dry_run=args.dry_run, clock=clock, runner=runner, repo=repo, started=now,
+                      state={}, mode="state-error", notes=notes, extra_steps=steps)
             run.issue(str(exc))
             run.results["harvest"] = StageResult("harvest", FAILED, reason=str(exc))
-            write_report(run.data, build_report(run, "FAIL"))
+            for name in STAGES[1:]:
+                run.results[name] = StageResult(name, NOT_RUN, reason="the state is unreadable "
+                                                                      "(see Issues)")
+            emit_report(run, "FAIL")
             return EXIT_FAILED
         run = Run(cfg=cfg, run_id=run_id, window_start=start, window_end=end,
-                  dry_run=args.dry_run, clock=clock, runner=runner, repo=repo, started=now, state=state,
-                  interrupted=lambda: stop_requested["flag"],
-                  mode="dry-run" if args.dry_run else "scheduled")
+                  dry_run=args.dry_run, clock=clock, runner=runner, repo=repo, started=now,
+                  state=state, interrupted=lambda: stop_requested["flag"],
+                  mode="dry-run" if args.dry_run else "scheduled", notes=notes,
+                  extra_steps=steps)
         try:
             if not run.dry_run:
                 state["current_run"] = {"id": run_id, "status": "running", "pid": os.getpid(),

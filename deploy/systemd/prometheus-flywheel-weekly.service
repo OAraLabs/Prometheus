@@ -1,11 +1,15 @@
 # The weekly flywheel run (see prometheus-flywheel-weekly.timer for install).
 #
 # The job stops its own stages before the window ends (flywheel.window
-# stop_margin_minutes) and always writes <data_dir>/reports/LATEST.md, the
-# Monday reviewer's input. TimeoutStartSec is only the outer wall: at 4 h
-# systemd sends SIGTERM, which the job turns into "checkpoint, restore the
-# GPUs, write the report". If it exits non-zero or is killed, the recovery
-# unit restores any GPU swap it recorded and finishes the report.
+# stop_margin_minutes; SIGKILL to a stage one minute before the end), then
+# restores the business GPU setup, which may run past the window for up to
+# 30 min (the job's SETUP_COMMAND_LIMIT), then writes <data_dir>/reports/
+# LATEST.md. TimeoutStartSec is only the outer wall, and it must fall after
+# all of that: the window (4 h) + 30 min. A shorter wall SIGTERMs the job
+# during the restore, and TimeoutStopSec later SIGKILLs the restore and the
+# job before the report is written. Lengthen the window, lengthen this too.
+# If the job exits non-zero or is killed, the recovery unit restores any GPU
+# swap it recorded and finishes the report.
 #
 # The paths assume the deploy checkout and its venv; change them to match
 # the host. The daemon itself is never stopped by this job.
@@ -18,7 +22,7 @@ OnFailure=prometheus-flywheel-recover.service
 Type=oneshot
 WorkingDirectory=%h/prometheus-build/Prometheus
 ExecStart=%h/prometheus-build/Prometheus/.venv/bin/python -m prometheus.jobs.flywheel_weekly
-TimeoutStartSec=4h
+TimeoutStartSec=4h30min
 TimeoutStopSec=3min
 KillMode=mixed
 Nice=10

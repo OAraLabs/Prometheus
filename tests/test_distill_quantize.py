@@ -481,6 +481,10 @@ class FakeProc:
     def __init__(self, *, head=HEAD, build=None, supported=(ARCH,), ppl=None):
         self.calls = []
         self.head, self.build = head, build or HEAD[:9]
+        self.quantize_build = None  # llama-quantize's own, when it differs
+        # Builds before llama_print_build_info: "--version" prints "version: N (sha)"
+        # and a llama-quantize run starts with print_build_info's "main: build = N (sha)".
+        self.old_format = False
         self.supported = supported
         self.ppl = ppl or {"BF16": 4.0, "Q4_K_M": 4.2, "Q5_K_M": 4.08}
         self.hooks = {}  # tool name -> callable(argv), run before the tool "works"
@@ -513,7 +517,10 @@ class FakeProc:
         elif argv[0] == "git" and "status" in argv:
             out = ""
         elif argv[-1] == "--version":
-            out = f"version: 1 ({self.build})\nbuilt with cc for x86_64\n"
+            # The pin's format (common/build-info.cpp.in at 9d57ce456).
+            out = (f"version: 6789 ({self.build})\n" if self.old_format else
+                   f"version: 0.1.0-dev (build 1, commit {self.build})\n")
+            out += "built with cc for x86_64\n"
         elif "--print-supported-models" in argv:
             out = "TEXT models:\n" + "".join(f"  - {a}\n" for a in self.supported)
         elif len(argv) > 1 and argv[1].endswith("convert_hf_to_gguf.py"):
@@ -522,6 +529,11 @@ class FakeProc:
             Path(argv[argv.index("-o") + 1]).write_bytes(b"GGUF-imatrix")
         elif name == "llama-quantize":
             Path(argv[-2]).write_bytes(b"GGUF-" + argv[-1].encode())
+            # It has no --version; every run starts with the build (as at the pin).
+            qb = self.quantize_build or self.build
+            out = (f"main: build = 6789 ({qb})\nmain: built with cc for x86_64\n"
+                   if self.old_format else f"version: 0.1.0-dev (build 1, commit {qb})\n")
+            out += "llama_quantize: quantizing ...\n"
         elif name == "llama-perplexity":
             q = Path(argv[argv.index("-m") + 1]).stem.rsplit("-", 1)[-1]
             out = f"[1]4.1,[2]4.0\nFinal estimate: PPL = {self.ppl[q]:.4f} +/- 0.02\n"
@@ -650,6 +662,98 @@ def test_execute_refuses_another_llama_cpp_commit(host, capsys):
 
 def test_execute_refuses_binaries_from_another_build(host, capsys):
     host.proc.build = "1234567ab"
+    assert Q.main(host.argv + ["--execute"]) == 2
+    assert "rebuild at the pin" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("line", [
+    "version: 0.1.0-dev (build 1, commit 9d57ce4)",  # the pin's own format (a shallow clone)
+    "version: 6789 (9d57ce45)",  # older builds
+])
+def test_the_version_line_of_a_build_at_the_pin_is_recognised(line):
+    # The real run at 9d57ce456 printed the first line; the old pattern only
+    # knew the second, so preflight refused a correct build.
+    m = Q._BUILD.search(line + "\nbuilt with AppleClang 17.0.0 for Darwin arm64\n")
+    assert m is not None and HEAD.startswith(m.group(1))
+
+
+def test_a_llama_quantize_from_another_build_is_refused_by_its_own_log(host, capsys):
+    # Preflight cannot ask llama-quantize (--version prints its usage, exit 1
+    # at the pin), so a partial rebuild could leave an old one beside the rest.
+    host.proc.quantize_build = "1234567ab"
+    assert Q.main(host.argv + ["--execute"]) == 2
+    err = capsys.readouterr().err
+    assert "llama-quantize is not built from 9d57ce456" in err and "1234567ab" in err
+    assert not list((host.out / "gguf").glob("*Q4_K_M*"))  # the partial is gone too
+
+
+def test_the_manifest_records_llama_quantizes_build(host):
+    assert Q.main(host.argv + ["--execute"]) == 0
+    m = json.loads((host.out / "quantize-manifest.json").read_text())
+    assert m["llama_cpp"]["builds"]["llama-quantize"] == HEAD[:9]
+    # A rerun (or a resume after a pause in sanity) keeps both quants; the
+    # manifest still names the build that made them, read from their logs.
+    host.proc.calls.clear()
+    assert Q.main(host.argv + ["--execute"]) == 0
+    assert "llama-quantize" not in host.proc.tools()
+    m = json.loads((host.out / "quantize-manifest.json").read_text())
+    assert m["result"] == "PASS" and m["llama_cpp"]["builds"]["llama-quantize"] == HEAD[:9]
+
+
+@pytest.mark.parametrize("log", ["missing", "another build", "no build line"])
+def test_a_kept_quant_is_checked_by_the_log_of_the_run_that_made_it(host, capsys, log):
+    assert Q.main(host.argv + ["--execute"]) == 0
+    qlog = host.out / "logs" / "quantize-Q4_K_M.log"
+    if log == "missing":
+        qlog.unlink()
+    elif log == "another build":
+        qlog.write_text(qlog.read_text().replace(f"commit {HEAD[:9]}", "commit 1234567ab"))
+    else:
+        qlog.write_text("$ llama-quantize ...\nllama_quantize: quantizing ...\n")
+    capsys.readouterr()
+    assert Q.main(host.argv + ["--execute"]) == 2
+    err = capsys.readouterr().err
+    assert "run7-Q4_K_M.gguf" in err and "delete it" in err, err
+    if log == "another build":
+        assert "1234567ab" in err
+    # Refused, not removed: the operator decides.
+    assert (host.out / "gguf" / "run7-Q4_K_M.gguf").exists()
+    assert "llama-perplexity" not in host.proc.tools()[-3:]
+
+
+def test_a_build_at_the_pin_that_logs_the_older_way_passes(host):
+    # An allowed --llama-cpp-commit from before llama_print_build_info: preflight
+    # took its "version: N (sha)", and step 6 then refused its own log's
+    # "main: build = N (sha)" after the whole quantize.
+    host.proc.old_format = True
+    assert Q.main(host.argv + ["--execute"]) == 0
+    m = json.loads((host.out / "quantize-manifest.json").read_text())
+    assert m["llama_cpp"]["builds"]["llama-quantize"] == HEAD[:9]
+    assert m["llama_cpp"]["builds"]["llama-imatrix"] == HEAD[:9]
+
+
+def test_an_older_format_log_from_another_build_is_still_refused(host, capsys):
+    host.proc.old_format = True
+    host.proc.quantize_build = "1234567ab"
+    assert Q.main(host.argv + ["--execute"]) == 2
+    err = capsys.readouterr().err
+    assert "llama-quantize is not built from 9d57ce456" in err and "1234567ab" in err
+
+
+@pytest.mark.parametrize("text, want", [
+    ("version: 0.1.0-dev (build 1, commit 9d57ce4)\nbuilt with cc for x86_64\n", "9d57ce4"),
+    ("version: 6789 (9d57ce45)\n", "9d57ce45"),
+    ("main: build = 6789 (9d57ce45)\nmain: built with cc for x86_64\n", "9d57ce45"),
+    ("llama_model_loader: - kv 0: general.name str = x (9d57ce45)\n", None),
+    ("main: build = 6789 (unknown)\n", None),
+])
+def test_built_from_reads_both_build_line_formats(text, want):
+    assert Q.built_from("$ llama-quantize ...\n" + text) == want
+
+
+def test_a_build_with_an_unknown_commit_is_refused(host, capsys):
+    # build-info.cmake writes "unknown" outside a git checkout.
+    host.proc.build = "unknown"
     assert Q.main(host.argv + ["--execute"]) == 2
     assert "rebuild at the pin" in capsys.readouterr().err
 
@@ -972,6 +1076,11 @@ class GGUFReader:
 
 
 def test_gguf_metadata_is_read_under_the_convert_python_not_this_one(tmp_path, monkeypatch):
+    # A json.py in the working directory would shadow the stdlib under a bare -c.
+    work = tmp_path / "cwd"
+    work.mkdir()
+    (work / "json.py").write_text("raise SystemExit('planted json.py ran')\n")
+    monkeypatch.chdir(work)
     lc = tmp_path / "llama.cpp"
     (lc / "gguf-py" / "gguf").mkdir(parents=True)
     (lc / "gguf-py" / "gguf" / "__init__.py").write_text(GGUF_STUB)
@@ -984,12 +1093,12 @@ def test_gguf_metadata_is_read_under_the_convert_python_not_this_one(tmp_path, m
     real = subprocess.run
 
     def spy(cmd, **kw):
-        seen.append(cmd[:2])
+        seen.append(cmd[:3])
         return real([sys.executable, *cmd[1:]], **kw)
 
     monkeypatch.setattr(Q.subprocess, "run", spy)
     meta = Q.read_gguf_metadata(lc, good, convert_python)
-    assert seen == [[convert_python, "-c"]]
+    assert seen == [[convert_python, "-I", "-c"]]
     assert meta == {"architecture": "qwen35", "file_type": 15, "name": "m",
                     "context_length": 262144, "nextn_predict_layers": None,
                     "chat_template_sha256": sha(TEMPLATE)}

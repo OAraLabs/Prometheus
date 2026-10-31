@@ -41,7 +41,9 @@ Steps (``--execute``)
 ---------------------
 1. preflight: the llama.cpp checkout's HEAD is the pinned commit and its
    converter and gguf-py are unmodified; the binaries report that build
-   (``--version``); the converter registers the base's architecture
+   (``--version``; llama-quantize has none, so step 6 reads the build from
+   its log, a kept quant's from the log of the run that made it, and refuses
+   another); the converter registers the base's architecture
    (``--print-supported-models``); free disk covers the outputs.
 2. calibrate: the imatrix text and a held-back perplexity slice, both from the
    TRAIN split only (below). First, so a leak stops the run before any merge.
@@ -94,6 +96,12 @@ registers ``Qwen3_5ForConditionalGeneration`` and ``Qwen3_5ForCausalLM`` (arch
 ``-fa`` takes a value (``on|off|auto``): a bare ``-fa`` in front of ``-ctk``
 would swallow ``-ctk``, so the serve line says ``-fa on``. Another commit is
 allowed; preflight then decides support from that converter's own list.
+Run end to end at the pin on 2026-10-30, CPU only, on Qwen3.5-0.8B (the same
+architecture class) with adapters made on either loader class and with
+``--no-adapter``: ``scripts/distill/quantize_smoke.py`` repeats it. The
+converter's own requirements pin transformers 4.57.6, which does not know
+``qwen3_5`` (it logs "Failed to load model config" and reads ``config.json``);
+its GGUF metadata and vocab are byte-identical to a convert under 5.20.2.
 
 Calibration (train only)
 ------------------------
@@ -218,7 +226,13 @@ BASE_SIDE_FILES = ("tokenizer.json", "tokenizer_config.json", "special_tokens_ma
 TEMPLATE_FILE = "chat_template.jinja"
 
 _PPL = re.compile(r"Final estimate:\s*PPL\s*=\s*([0-9.]+(?:[eE][+-]?\d+)?|nan|inf)", re.I)
-_BUILD = re.compile(r"\((?:b\d+-)?([0-9a-f]{7,40})\)")
+# ``--version``'s commit. The pin prints "version: 0.1.0-dev (build 1, commit
+# 9d57ce4)" (common/build-info.cpp.in); older builds "version: 6789 (9d57ce45)".
+_BUILD = re.compile(r"\((?:build \d+, commit |b\d+-)?([0-9a-f]{7,40})\)")
+# The build line atop a tool's run log: the pin's llama_print_build_info prints
+# the "version:" line above; older builds print_build_info's "main: build = 6789
+# (9d57ce45)".
+_LOG_BUILD_LINE = re.compile(r"version:|\w+: build = \d+ \(")
 
 
 class QuantizeError(RuntimeError):
@@ -870,8 +884,9 @@ def merge_adapter(base: Path, adapter: Path, out: Path, *, template_dir: Path,
 # ---------------------------------------------------------------------------
 
 
-# Run as ``<convert-python> -c META_SCRIPT <gguf-py dir> <file>``: gguf-py needs
-# numpy, which the converter's interpreter has and this one may not.
+# Run as ``<convert-python> -I -c META_SCRIPT <gguf-py dir> <file>``: gguf-py
+# needs numpy, which the converter's interpreter has and this one may not. -I:
+# ``-c`` would put the working directory first on sys.path, ahead of the stdlib.
 META_SCRIPT = r"""
 import json, sys
 sys.path.insert(0, sys.argv[1])
@@ -905,7 +920,7 @@ print(json.dumps({
 
 
 def read_gguf_metadata(llama_dir: Path, path: Path, python: str = sys.executable) -> dict[str, Any]:
-    cp = subprocess.run([python, "-c", META_SCRIPT, str(llama_dir / "gguf-py"), str(path)],
+    cp = subprocess.run([python, "-I", "-c", META_SCRIPT, str(llama_dir / "gguf-py"), str(path)],
                         capture_output=True, text=True, check=False)
     lines = (cp.stdout or "").strip().splitlines()
     if cp.returncode != 0 or not lines:
@@ -1122,6 +1137,15 @@ def _run_logged(cmd: list[str], log: Path) -> tuple[int, str]:
         fh.flush()
         cp = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, text=True, check=False)
     return cp.returncode, log.read_text(encoding="utf-8", errors="replace")
+
+
+def built_from(text: str) -> str | None:
+    """The commit on a tool's build line (its own log or ``--version``), in the
+    pin's format or the older one."""
+    for line in text.splitlines():
+        if _LOG_BUILD_LINE.match(line) and (m := _BUILD.search(line)):
+            return m.group(1)
+    return None
 
 
 def _step(cmd: list[str], log: Path, what: str) -> str:
@@ -1382,13 +1406,31 @@ def _run_steps(s: Settings, arch: str | None, fp: dict[str, Any], old: dict[str,
     manifest["steps"]["quantize"] = {}
     for q in s.quants:
         dst = s.gguf(q)
+        log = logs / f"quantize-{q}.log"
         cmd = quantize_cmd(llama, ref, s.imatrix, _partial(dst), q)
         if dst.exists():
             print(f"  kept {dst.name}")
+            # Checked like a new one, by the log of the run that made it (a
+            # quant only gets its name after its own log passed this check).
+            text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+            built = built_from(text)
+            if built is None or not pre["head"].startswith(built):
+                said = f"{log} says {built or 'no build'}" if log.is_file() else f"no {log}"
+                raise QuantizeError(f"kept {dst.name}: its llama-quantize is not shown to be "
+                                    f"built from {pre['head'][:12]} ({said}); delete it to "
+                                    "remake it at the pin")
         else:
             _partial(dst).unlink(missing_ok=True)
-            _step(cmd, logs / f"quantize-{q}.log", f"llama-quantize {q}")
+            text = _step(cmd, log, f"llama-quantize {q}")
+            # llama-quantize has no --version (it prints its usage, exit 1), so
+            # preflight cannot ask it; it prints the build atop every run.
+            built = built_from(text)
+            if built is None or not pre["head"].startswith(built):
+                _partial(dst).unlink(missing_ok=True)
+                raise QuantizeError(f"llama-quantize is not built from {pre['head'][:12]} "
+                                    f"(its log says {built or 'no build'}); rebuild at the pin")
             _partial(dst).rename(dst)
+        manifest["llama_cpp"]["builds"]["llama-quantize"] = built
         manifest["steps"]["quantize"][q] = {"cmd": cmd}
     save()
 
