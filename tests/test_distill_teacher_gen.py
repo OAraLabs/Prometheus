@@ -322,10 +322,10 @@ def test_mocked_tools_never_run_the_real_tool(tmp_path, monkeypatch, no_outbound
 
 REFUSED = [
     "curl https://example.com/x", "ssh node-alpha uptime", "python3 -c 'print(1)'", "rm -rf /",
-    "cat /etc/passwd", "cat ~/.ssh/id_rsa", "ls ..", "cd / && ls", "echo $HOME", "echo `id`",
+    "cat /etc/passwd", "cat ~root/.ssh/id_rsa", "ls ..", "cd / && ls", "echo $HOME", "echo `id`",
     "echo $(id)", "sleep 100 &", "(ls)", "echo hi > /tmp/escape.txt", "sed -i s/a/b/ f.txt",
     "awk 'BEGIN{system(\"id\")}'", "find . -delete", "find . -exec rm {} ;", "git push",
-    "systemctl --user restart cobalt-intake", "systemctl --user status x && rm -rf .", "FOO=1 ls",
+    "systemctl --user restart cobalt-intake", "systemctl --user status x && ssh h", "FOO=1 ls",
     "./run.sh", "xargs rm", "pip install requests", "cat <<EOF", "wget http://127.0.0.1/x",
     "cp -s /etc/passwd p", "ls\nrm -rf .", "nc -l 9999", "sed -n '1w out' f.txt", "env",
     "ls | sh", "grep -r x ../..", "tee /tmp/x",
@@ -349,7 +349,7 @@ REFUSED = [
     "jq -f/etc/passwd f.json", "jq -L /x '.'", "jq 'import \"x\" as y; .' f.json",
     "jq --rawfile x /etc/passwd '.'", "cp -rs a b", "cp --sym a b", "find . -files0-from l",
     # shell expansion that hides a path: braces (bash), wildcards matching . or .., tildes
-    "cat {/etc/passwd,f.txt}", "cp f.txt {/tmp,}", "cat .*/x", "cat .?/x", "cat [.][.]/x", "cat ~/x",
+    "cat {/etc/passwd,f.txt}", "cp f.txt {/tmp,}", "cat .*/x", "cat .?/x", "cat [.][.]/x", "cat ~other/x",
     # bash-only operators dash would read as a background job
     "echo hi &> f.txt", "ls |& cat",
     # redirects in every form

@@ -162,16 +162,21 @@ def base_inputs(tmp_path: Path, teacher_id: str = "fake-teacher") -> list[str]:
             "--repo", str(tmp_path)]
 
 
-def tool_then_echo(fail: tuple[str, ...] = ()) -> Callable[[dict[str, Any]], dict[str, Any]]:
+def tool_then_echo(fail: tuple[str, ...] = (), prose: tuple[str, ...] = ()) -> Callable[[dict[str, Any]], dict[str, Any]]:
     """A teacher: with tools offered, two wiki_query calls then an answer quoting
-    the results; without tools, the answer. A prompt holding a *fail* text gets
-    "No." (too short for a chat task, no call for an agentic one)."""
+    the results; without tools, the answer. A prompt holding a *fail* text gets a
+    call the sandbox refuses (when tools are offered) and then "No." (too short for
+    a chat task); one holding a *prose* text gets the answer with no tool call."""
 
     def policy(body: dict[str, Any]) -> dict[str, Any]:
         msgs = body["messages"]
         k, prompt = _last_user(msgs)
         if any(f in prompt for f in fail):
+            if body.get("tools") and not any(m.get("role") == "tool" for m in msgs[k + 1:]):
+                return {"tool_calls": [("bash", {"command": "ls .."})]}
             return {"content": "No."}
+        if any(f in prompt for f in prose):
+            return echo_reply(body)
         step = sum(1 for m in msgs[k + 1:] if m.get("role") == "assistant")
         if body.get("tools") and step < 2:
             return {"tool_calls": [("wiki_query", {"query": f"service host {step}"})]}
@@ -407,12 +412,18 @@ def test_task_flags_are_honoured(tmp_path, no_outbound):
         out, ok, reasons, record = run_and_verify(chat, s)
         assert ok, reasons
         assert all(not b.get("tools") for b in fake.requests if b.get("stream"))
-    # inject_errors: the first tool call fails, the run recovers; no tool call at all fails the task
+    # inject_errors: the first tool call fails, the run recovers; giving up after it fails the task
     with FakeTeacher(tool_then_echo()) as fake:
         out, ok, reasons, record = run_and_verify(inject, settings_for(tmp_path, fake.url))
     assert ok and record["injected_failures"] == 1 and record["recovered"] is True
     with FakeTeacher(tool_then_echo(fail=("cobalt-intake",))) as fake:
-        assert "injection_not_fired" in run_and_verify(inject, settings_for(tmp_path, fake.url))[2]
+        assert "not_recovered" in run_and_verify(inject, settings_for(tmp_path, fake.url))[2]
+    # a real-pattern request answered in prose with no tool call had nothing to fail: the
+    # injection did not apply (it goes to the judge as a no-tool answer), never injection_not_fired
+    with FakeTeacher(tool_then_echo(prose=("cobalt-intake",))) as fake:
+        out, ok, reasons, record = run_and_verify(inject, settings_for(tmp_path, fake.url))
+    assert ok, reasons
+    assert record["injection"] == "not_applicable" and record["recovered"] is None
     # both flags: compacted AND the injection has to fire (a compacted-history task too)
     with FakeTeacher(tool_then_echo()) as fake:
         s = settings_for(tmp_path, fake.url, compaction_history_tokens=150)
@@ -421,9 +432,10 @@ def test_task_flags_are_honoured(tmp_path, no_outbound):
     assert ok, reasons
     assert record["compaction"]["events"] >= 1 and record["compaction"]["summary_in_request"]
     assert record["injected_failures"] == 1 and record["recovered"] is True
-    with FakeTeacher(tool_then_echo(fail=("amber-ledger",))) as fake:
-        reasons = run_and_verify(both, settings_for(tmp_path, fake.url, compaction_history_tokens=150))[2]
-    assert "injection_not_fired" in reasons
+    with FakeTeacher(tool_then_echo(prose=("amber-ledger",))) as fake:
+        _out, _ok, reasons, record = run_and_verify(both, settings_for(tmp_path, fake.url,
+                                                                       compaction_history_tokens=150))
+    assert "injection_not_fired" not in reasons and record["injection"] == "not_applicable"
 
 
 def test_judge_url_and_probe_guard_routing(tmp_path, no_outbound):
@@ -699,7 +711,7 @@ def test_ab_runs_both_arms_with_identical_settings_and_one_judge(tmp_path, no_ou
     srv_a, srv_b = rep["settings"]["servers"]["A"], rep["settings"]["servers"]["B"]
     assert (srv_a["model_file"], srv_b["model_file"]) == ("qwen3.8-27b-iq3_xxs.gguf", "qwen3.8-27b-q4_k_m.gguf")
     assert all(srv_a[k] == srv_b[k] for k in ab.SERVER_SAME_KEYS) and srv_a["n_ctx"] == 16384
-    assert A["fail_reasons"] and "injection_not_fired" in A["fail_reasons"]
+    assert A["fail_reasons"] and "not_recovered" in A["fail_reasons"]
     summary = (out / "ab_summary.txt").read_text().splitlines()
     assert len(summary) == 5 and summary[0] == "Teacher A/B decision: use Q4_K_M (less context)"
     assert "IQ3_XXS 5/8" in summary[1] and "Q4_K_M 7/8" in summary[1] and "-25.0 pts" in summary[2]

@@ -779,9 +779,12 @@ def test_variants_of_one_real_prompt_share_a_task_group(built: tuple) -> None:
 
 
 def test_flag_shares_exact(built: tuple) -> None:
-    rows, _, _ = built
+    rows, report, _ = built
     agentic = [r for r in rows if r["mode"] == "agentic"]
-    assert sum(r["flags"]["inject_errors"] for r in rows) == round(0.2 * len(agentic))
+    eligible = report["generation"]["inject_errors_eligible"]
+    assert 0 < eligible <= len(agentic)
+    assert sum(r["flags"]["inject_errors"] for r in rows) == min(round(0.2 * len(agentic)), eligible)
+    assert report["generation"]["inject_errors_shortfall"] == max(0, round(0.2 * len(agentic)) - eligible)
     assert sum(r["flags"]["force_compaction"] for r in rows) == round(0.2 * len(rows))
     assert not any(r["flags"]["inject_errors"] for r in rows if r["mode"] == "chat")
 
@@ -916,3 +919,86 @@ def test_settings_are_checked(host: dict[str, Path]) -> None:
     with pytest.raises(tg.TasksetError):
         tg.Settings(per_pattern=0).check()
     assert tg.main(_argv(host, "bad name!", host["root"] / "o")) == 2
+
+
+# ── fidelity filters (after the max-token-plan run: continuations, probes, injections) ──
+
+
+@pytest.mark.parametrize("text", [
+    "go", "ok keep going", "that order is good, ship it", "merge both please", "2 and 3",
+    "try again after I remounted the drive", "it still fails on the server", "fix it",
+    "Use what you suggested earlier for the config.", "That's not what I asked",
+])
+def test_continuations_of_an_earlier_exchange_are_context_dependent(text: str) -> None:
+    assert tg.context_dependent(text)
+    assert tg.prompt_problem(text + " " * 0, tg.Settings(min_words=1, min_chars=1)) == "context_dependent"
+    assert tg.prompt_problem(text, tg.Settings(min_words=1, min_chars=1, drop_context_dependent=False)) is None
+
+
+@pytest.mark.parametrize("text", [
+    "Which host runs the ingest service according to the wiki?", "Summarize the backup doc for me",
+    "Check disk space on the storage volume", "This is the plan for tomorrow, remember it",
+    "It's raining today, should I run the backup?", "Look at the logs and tell me why the service failed",
+])
+def test_self_contained_requests_are_not_context_dependent(text: str) -> None:
+    assert not tg.context_dependent(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Reply with exactly OK and nothing else.", "Do not use any tools, what is two plus two?",
+    "How many r's are in strawberry?", "Please run exactly `ls -la` in the workspace.",
+    "Answer without using tools: what day is it?",
+])
+def test_acceptance_harness_probes_are_not_user_patterns(text: str) -> None:
+    assert tg.prompt_problem(text, tg.Settings()) == "harness_probe"
+
+
+def test_tool_use_evidence_comes_from_the_real_turn(tmp_path: Path) -> None:
+    import collections
+    called = _golden_line("Show me the last lines of the daemon log please.", "beacon", 1)
+    prose = _golden_line("Tell me what a maintenance window is for a home server.", "beacon", 2)
+    prose["messages"][-1] = {"role": "assistant", "content": "It is a planned time for changes."}
+    path = tmp_path / "golden_traces_1_1.jsonl"
+    path.write_text(json.dumps(called) + "\n" + json.dumps(prose) + "\n", encoding="utf-8")
+    got = tg.load_golden([path], {}, tg.HUMAN_SURFACES, collections.Counter())
+    by_text = {rp.text: rp.tool_use for rp in got.values()}
+    assert by_text == {"Show me the last lines of the daemon log please.": True,
+                       "Tell me what a maintenance window is for a home server.": False}
+    tool_use = json.dumps([{"type": "tool_use", "id": "t", "name": "bash", "input": {"command": "df -h"}}])
+    _lcm_db(tmp_path / "lcm.db", [
+        ("beacon:s1", "user", "How full is the storage volume right now?", None, "user"),
+        ("beacon:s1", "assistant", "", tool_use, "user"),
+        ("beacon:s1", "user", "Thanks, what does the Use% column mean?", None, "user"),
+        ("beacon:s1", "assistant", "It is the share of the disk in use.", None, "user"),
+        ("beacon:s2", "assistant", "", tool_use, "user"),  # no prompt before it in its session
+    ])
+    lcm = tg.load_lcm(tmp_path / "lcm.db", tg.HUMAN_SURFACES, collections.Counter())
+    assert {rp.text: rp.tool_use for rp in lcm.values()} == {
+        "How full is the storage volume right now?": True, "Thanks, what does the Use% column mean?": False}
+
+
+def test_injected_failures_go_only_on_rows_that_will_call_a_tool(host: dict[str, Path]) -> None:
+    gen = _generator(host, per_pattern=6, max_uses=8, coding_cap=0.3)
+    rows = gen.generate("api")
+    flagged = [r for r in rows if r["flags"]["inject_errors"]]
+    assert flagged
+    for r in flagged:
+        parts = [gen.by_id[s["template_id"]] for s in r["sources"]]
+        assert all(t.tool_use for t in parts) and r["intent"] in tg.TOOL_INTENTS
+        assert len({t.chat_ok for t in parts}) == 1
+
+
+def test_recombination_stays_within_one_subcategory_and_can_be_capped(host: dict[str, Path]) -> None:
+    gen = _generator(host, per_pattern=6, max_uses=8, coding_cap=0.3)
+    rows = gen.generate("api")
+    rec = [r for r in rows if r["transform"] == "recombine"]
+    assert rec
+    for r in rec:
+        a, b = (gen.by_id[s["template_id"]] for s in r["sources"])
+        assert a.subcategory == b.subcategory and a.chat_ok == b.chat_ok
+    capped = _generator(host, per_pattern=6, max_uses=8, coding_cap=0.3, max_recombine_share=0.2)
+    out = capped.generate("api")
+    n_rec = sum(1 for r in out if r["transform"] == "recombine")
+    assert n_rec <= 0.2 * len(out) + 1e-9 and capped.stats["recombine_cap_dropped"] > 0
+    with pytest.raises(tg.TasksetError):
+        tg.Settings(max_recombine_share=1.0).check()

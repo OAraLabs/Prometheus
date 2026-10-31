@@ -68,12 +68,20 @@ Task source (the operator's rule: no model-written task text in training data)
   Candidates share no task group with the row or each other and are checked
   against the eval sets. The task's injections are held back during padding;
   a pad turn that does not end in a reply, or whose calls were refused,
-  repaired, dropped or cut off, rejects the task (``pad_*``). Pad turns are
+  repaired, dropped or cut off, is rolled back (its messages dropped, the
+  mocks restored; ``compaction_pad.skipped``) and the next candidate runs; a
+  task left with fewer than ``PAD_MIN_TURNS`` clean turns, or whose failed
+  turn changed the workspace, is rejected (``pad_*``). Pad turns are
   history: never rows, never judged on their own (the judge sees them as the
   earlier conversation). Rows carry the descriptor ``_meta.compaction_pad``
   (``version``, the pad rows' ``task_ids`` / ``task_groups`` /
   ``prompt_hashes`` / ``modes``, the teacher and tool calls, reads, the
   sandbox's ``repo_docs``, ``pool``: reserved | shared).
+  With ``--repo-fixture`` (auto: on when ``--repo`` is a checkout), every agent
+  task of a ``--tasks`` run also gets its own clone of ``--repo`` at
+  ``--repo-fixture-ref`` (a remote-tracking ref or tag: published history
+  only; committed files, the last ``REPO_FIXTURE_DEPTH`` commits, no remote)
+  at ``<workspace>/Prometheus``, built once per commit under the sandbox root.
 * ``--builtin-smoke``: the built-in families below (or ``--tasks-file`` rows
   from ``list-tasks``). Their text was written by hand in this file, so every
   row is tagged ``source = builtin-smoke`` (``--name`` defaults to it) and
@@ -158,9 +166,15 @@ its path arguments confined:
   ``todo_write`` run for real, but any path outside the sandbox is refused.
 * ``bash`` never runs ``bash -l``. A command is tokenized like a POSIX shell
   (quoting kept, so an unquoted brace, a wildcard that can match ``.``/``..``
-  or a leading tilde is refused) and refused unless every program is on
-  ``ALLOWED_PROGRAMS`` (text and file utilities: no interpreters, network
-  clients, package managers, ``ssh``, ``git``, ``xargs``), every path stays in
+  or ``~user`` is refused; ``~`` is $HOME, the sandbox root) and refused
+  unless every program is on ``ALLOWED_PROGRAMS`` (text and file utilities: no
+  interpreters, network clients, package managers, ``ssh``, ``xargs``) or is
+  read-only ``git`` (``_check_git``: log, show, status, diff, grep, blame,
+  listing branches and tags...; no config, hooks, pager, external diff, output
+  files or other repositories; only in a task with the repo fixture, and pinned
+  by ``GIT_DIR`` to the fixture's git directory, which lives outside the
+  workspace, so no repository config the agent could write is ever read), every
+  path stays in
   the sandbox, and there is no command substitution, variable, background job,
   subshell or heredoc. Options are read by each program's grammar
   (``_GRAMMARS``): a value attached to a short option (``-o/x``, ``-t/x``) or
@@ -176,11 +190,20 @@ its path arguments confined:
   ``bwrap`` on Linux (only the workspace writable, no network, no home or
   runtime dirs visible) or ``sandbox-exec`` on macOS. The report and every
   row's verification record name the jail used (``none`` means the command
-  checks alone). Host commands (``systemctl``, ``journalctl``,
-  ``nvidia-smi``, ``df``, ``free``, ``uptime``, ``ps``, ``curl`` to loopback)
-  are SIMULATED from the task's fixture and never executed; their output goes
-  through the command's own output redirects and the rest of its pipeline as
-  written; changing a service is refused.
+  checks alone). Host commands (``OPS_PROGRAMS``: ``systemctl``,
+  ``journalctl``, ``nvidia-smi``, ``df``, ``free``, ``uptime``, ``ps``,
+  ``curl`` to loopback, ``lsblk``, ``mount``/``findmnt`` (listing),
+  ``hostname``, ``uname``, ``ss``, ``pgrep``, ``which``/``command -v``/``type``,
+  ``sleep``...) are SIMULATED from the task's fixture and never executed, and
+  so are reads of a few host files (``VIRTUAL_FILES``: ``/proc/meminfo``,
+  ``/proc/mounts``, ``/etc/os-release``... for ``read_file`` and a text
+  utility heading a pipeline); their output goes through the command's own
+  output redirects and the rest of its pipeline as written, and a ``;`` /
+  ``&&`` / ``||`` list mixing them with sandbox commands runs part by part;
+  changing a service is refused. The permission gate answers the APPROVE tier
+  for ``bash`` only (``gym_permission_prompt``: the sandbox's grammar is the
+  guard), so a loopback ``curl`` reaches the simulation; its floor still
+  denies, and a denial counts as a refusal.
 * ``memory``, ``wiki_query``, ``wiki_compile``, ``cron_*``, ``task_*``,
   ``web_search``, ``web_fetch``, ``message``, ``sentinel_status``,
   ``lcm_grep`` are mocks over the task's fixtures (``lcm_grep`` searches the
@@ -198,11 +221,23 @@ Verification (all must hold; only then are rows written)
   and its answer checks (whole-word / whole-number regexes, with the negations
   of a state refused: "not running" is not "running");
 * per kind: chat-mode made no tool call; an injection (error-recovery, or any
-  task with ``inject_errors``) fired and (when the task expects it) a call
-  succeeded after it; compacted-history's compactor fired and a teacher
-  request carried the summary;
+  task with ``inject_errors``) fired and (when the task expects it) the agent
+  called again after it, in execution order (``ExecRecord.seq``); a real-pattern
+  task whose own turn made no tool call had nothing to fail
+  (``injection: not_applicable``: judged, and counted, as a plain agentic
+  task); compacted-history's compactor fired and a teacher request carried the
+  summary; a call that arrived with no arguments for a tool that requires some
+  is ``empty_tool_args``, not a tool error;
 * a judge with a strict rubric, at temperature 0 and its own ``--judge-seed``,
-  answering JSON: the teacher itself (``self-judge``) unless ``--judge-url``
+  answering JSON, shown what the agent was given (its system prompt, the
+  tools offered or "no tools", a fixed note on the sandbox) and an ``outcome``:
+  done, or reported_blocked (could not be done here and said so plainly: rubric
+  item 1 passes it), never not_done. Kept rows carry ``_meta.judge_outcome``;
+  reported_blocked rows and no-tool answers (``_meta.no_tool_answer``: a
+  real-pattern agent turn answered without a tool, a row even without
+  ``--emit-final-turns``, its tools kept) are held past ``CLASS_CAPS``, like
+  coding rows past the coding cap. The judge is
+  the teacher itself (``self-judge``) unless ``--judge-url``
   names another local endpoint (``local-judge``). The record names it the way
   build.py reads it: ``provider: local``, ``judge_key: none`` (the local
   judge's ``endpoint`` too under ``--teacher max-payg``), or for Max judging
@@ -426,7 +461,7 @@ ORIGIN_TASKSET = "taskset"
 ORIGIN_BUILTIN = "builtin"
 #: Request sampling fields ``--temperature`` / ``--top-k`` / ``--top-p`` / ``--min-p`` set.
 SAMPLING_KEYS = ("temperature", "top_k", "top_p", "min_p")
-GENERATOR_VERSION = "teacher-gen/4"
+GENERATOR_VERSION = "teacher-gen/5"
 #: ``--teacher``: the local llama-server (default) or Qwen Max on the pay-per-token key.
 TEACHER_LOCAL = "local"
 TEACHER_PAYG = "max-payg"
@@ -476,7 +511,7 @@ JUDGE_MAX_TOKENS = 600
 #: groups, chosen by a hash keyed by the taskset's name, so every run and every
 #: teacher over one taskset reserves the same pool) are never run as tasks: their
 #: prompts appear only as padding, so no padded row shares a task with another row.
-PAD_VERSION = "taskset-turns-v2"
+PAD_VERSION = "taskset-turns-v3"
 PAD_POOL_SHARE = 0.10
 PAD_MIN_TURNS = 3       # the real compactor summarises a span of at least 4 messages
 PAD_MAX_TURNS = 10      # candidates per task, in seeded order
@@ -494,6 +529,10 @@ DOMAINS = ("chat-mode", "memory/wiki", "sentinel/daemon", "other", "coding")
 DEFAULT_MIX = {"chat-mode": 0.30, "compacted-history": 0.20, "error-recovery": 0.20,
                "agentic": 0.22, "coding": 0.08}
 CODING_CAP = 0.35
+#: kept rows of a class that is right in moderation but must not dominate (Store.fits):
+#: a judged "could not be done here, said so" reply, and an agent turn that answered
+#: without a tool. Rows past the share are held, like coding rows past CODING_CAP.
+CLASS_CAPS = {"reported_blocked": 0.15, "no_tool_answer": 0.20}
 SUMMARY_MARKER = "[Compacted summary of turns"
 SEED_CALL_PREFIX = "call_seed_"
 ORCHESTRATOR = "orchestrator"
@@ -526,7 +565,15 @@ ALLOWED_PROGRAMS = frozenset({
 })
 #: Host commands answered from the task's fixture, never executed.
 OPS_PROGRAMS = frozenset({"systemctl", "journalctl", "nvidia-smi", "df", "free", "uptime", "ps",
-                          "curl"})
+                          "curl", "lsblk", "mount", "findmnt", "hostname", "uname", "whoami", "id",
+                          "nproc", "lscpu", "sensors", "ss", "pgrep", "which", "command", "type", "sleep"})
+#: Host files a command or read_file may read, answered from the task's ops fixture
+#: (``SandboxEnv.virtual_file``); the host's own file is never opened.
+VIRTUAL_FILES = ("/proc/meminfo", "/proc/mounts", "/proc/cpuinfo", "/proc/loadavg", "/proc/uptime",
+                 "/proc/version", "/etc/os-release", "/etc/hostname")
+#: Programs that may read a virtual host file (its text is fed to them on stdin).
+_VIRTUAL_READERS = frozenset({"cat", "head", "tail", "grep", "egrep", "fgrep", "wc", "awk", "sed", "sort",
+                              "uniq", "cut", "tr", "column", "nl"})
 _FORBIDDEN_HOST_PARTS = ("dashscope", "aliyuncs", "alibabacloud", "alicloud", "openai.com",
                          "anthropic.com", "openrouter", "googleapis", "together.xyz", "groq.com")
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
@@ -1879,6 +1926,9 @@ class ExecRecord:
     args: dict[str, Any]
     outcome: str  # ok | error | injected | refused | simulated
     detail: str = ""
+    #: when the call started, in this task's execution order (the loop runs a turn's
+    #: read-only calls together before its other calls: message order is not this)
+    seq: int = 0
 
 
 def _limits() -> None:  # pragma: no cover - runs in the child
@@ -2080,6 +2130,45 @@ _GRAMMARS: dict[str, _Grammar] = {
     "realpath": _Grammar(long={"--relative-to": "path", "--relative-base": "path"}),
 }
 _DEFAULT_GRAMMAR = _Grammar()
+#: git subcommands that only read the repository (``SandboxEnv._check_git``)
+_GIT_READ = frozenset({"log", "show", "status", "diff", "branch", "remote", "rev-parse", "ls-files", "grep",
+                       "blame", "describe", "tag", "shortlog", "rev-list", "ls-tree", "cat-file", "show-ref",
+                       "merge-base", "name-rev", "for-each-ref", "whatchanged", "count-objects"})
+_GIT_GLOBAL_OK = frozenset({"--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs",
+                            "--no-replace-objects"})
+#: options refused on any subcommand (prefix match): output files, external programs, other repositories
+_GIT_REFUSED_OPTS = ("--output", "--ext-diff", "--textconv", "--exec", "--upload-pack", "--receive-pack",
+                     "--open-files-in-pager", "--git-dir", "--work-tree", "--paginate", "--config")
+#: options whose value is a file git opens: confined
+_GIT_PATH_OPTS = frozenset({"--contents", "--file", "-f", "--exclude-from", "--ignore-revs-file",
+                            "--exclude-per-directory", "--pathspec-from-file"})
+#: options that take a separate value that is never a path
+_GIT_VALUE_OPTS = frozenset({"-n", "--max-count", "--skip", "--since", "--until", "--after", "--before",
+                             "--author", "--committer", "--grep", "-G", "--format", "--pretty", "--sort",
+                             "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+                             "-e", "-L", "-S", "--date", "--abbrev"})
+_GIT_LIST_FLAGS = {
+    "branch": frozenset({"-a", "-r", "-v", "-vv", "-l", "--list", "--all", "--remotes", "--verbose",
+                         "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+                         "--show-current", "--sort", "--format", "--color", "--no-color", "--column",
+                         "--no-column", "-i", "--ignore-case", "--abbrev", "--no-abbrev"}),
+    "tag": frozenset({"-l", "--list", "-n", "--contains", "--no-contains", "--merged", "--no-merged",
+                      "--points-at", "--sort", "--format", "--color", "--column", "--no-column", "-i",
+                      "--ignore-case"}),
+}
+#: git's environment inside the sandbox: no system or global config, never a prompt or
+#: a pager, no hooks, fsmonitor or signature program (GIT_CONFIG_COUNT: command-line-level
+#: config, above the repository's own)
+_GIT_SANDBOX_ENV = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_PAGER": "cat", "PAGER": "cat", "GIT_OPTIONAL_LOCKS": "0",
+                    "GIT_CONFIG_COUNT": "6", "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": "/dev/null",
+                    "GIT_CONFIG_KEY_1": "core.fsmonitor", "GIT_CONFIG_VALUE_1": "false",
+                    "GIT_CONFIG_KEY_2": "core.pager", "GIT_CONFIG_VALUE_2": "cat",
+                    # `log --show-signature` / `%G?` would start gpg (and its agents) on a
+                    # signed commit: the signature programs are `false` here
+                    "GIT_CONFIG_KEY_3": "gpg.program", "GIT_CONFIG_VALUE_3": "false",
+                    "GIT_CONFIG_KEY_4": "gpg.ssh.program", "GIT_CONFIG_VALUE_4": "false",
+                    "GIT_CONFIG_KEY_5": "gpg.x509.program", "GIT_CONFIG_VALUE_5": "false"}
 #: Programs whose operands are strings, never opened (``echo /etc/passwd`` reads nothing).
 _STRING_OPERANDS = frozenset({"echo", "printf", "tr", "basename", "dirname", "seq", "true", "false",
                               "pwd", "date"})
@@ -2113,7 +2202,8 @@ def _check_word(tok: _Tok, root: Path) -> None:
     if any(c in bare for c in "*?[") and any(
             part.startswith((".", "[")) and any(c in part for c in "*?[") for part in tok.text.split("/")):
         raise SandboxRefusal("a wildcard that can match `.` or `..` is not available in this session")
-    if bare.startswith("~"):
+    # ``~`` and ``~/...`` expand to $HOME, which is the sandbox root; ``~user`` is someone else's home
+    if bare.startswith("~") and not (bare == "~" or bare.startswith("~/")):
         raise SandboxRefusal(f"{tok.text!r} is outside this session's working directory ({root})")
 
 
@@ -2148,9 +2238,11 @@ def _sbpl(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def jail_prefix(kind: str, root: Path, cwd: Path) -> list[str]:
+def jail_prefix(kind: str, root: Path, cwd: Path, ro: tuple[Path, ...] = ()) -> list[str]:
     """argv that runs a command with only *root* writable, no network, and (Linux)
-    nothing of the host's home or runtime dirs visible; ``[]`` for ``none``."""
+    nothing of the host's home or runtime dirs visible; ``[]`` for ``none``. *ro*:
+    paths outside *root* the command may read but never write (the repo fixture's
+    git directory)."""
     if kind == "bwrap":
         argv = [shutil.which("bwrap") or "bwrap", "--unshare-all", "--die-with-parent", "--ro-bind", "/usr", "/usr"]
         for d in ("/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32"):
@@ -2161,8 +2253,10 @@ def jail_prefix(kind: str, root: Path, cwd: Path) -> list[str]:
         for f in ("/etc/alternatives", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
                   "/etc/localtime"):
             argv += ["--ro-bind-try", f, f]
-        return argv + ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-                       "--bind", str(root), str(root), "--chdir", str(cwd)]
+        argv += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+        for extra in ro:  # after the /tmp tmpfs, which would hide a path under /tmp (the default root)
+            argv += ["--ro-bind", str(extra), str(extra)]
+        return argv + ["--bind", str(root), str(root), "--chdir", str(cwd)]
     if kind == "sandbox-exec":
         home = os.path.realpath(os.path.expanduser("~"))
         r = str(root)
@@ -2170,7 +2264,8 @@ def jail_prefix(kind: str, root: Path, cwd: Path) -> list[str]:
                    f"(deny file-write* (require-all (require-not (subpath {_sbpl(r)}))"
                    ' (require-not (literal "/dev/null")) (require-not (literal "/dev/tty"))'
                    ' (require-not (literal "/dev/dtracehelper"))))'
-                   f"(deny file-read* (require-all (subpath {_sbpl(home)}) (require-not (subpath {_sbpl(r)}))))"
+                   f"(deny file-read* (require-all (subpath {_sbpl(home)}) (require-not (subpath {_sbpl(r)}))"
+                   + "".join(f" (require-not (subpath {_sbpl(str(x))}))" for x in ro) + "))"
                    "(deny signal (target others))")
         return [shutil.which("sandbox-exec") or "/usr/bin/sandbox-exec", "-p", profile]
     return []
@@ -2226,6 +2321,8 @@ class ShellPlan:
     simulated: tuple[str, int] | None = None
     rest: str | None = None      # the shell command the simulated output is fed to
     piped: bool = False          # rest ends in a pipeline (its status is the command's)
+    #: a `;` / `&&` / `||` list with a simulated part: (operator before it, its text, its plan, its cwd)
+    chain: list[tuple[str, str, "ShellPlan", Path]] | None = None
 
 
 @dataclass
@@ -2237,10 +2334,14 @@ class _Segment:
 class SandboxEnv:
     """One task's world: fixtures, injections, the call log and the confinement."""
 
-    def __init__(self, root: Path, task: GenTask, jail: str = "none") -> None:
+    def __init__(self, root: Path, task: GenTask, jail: str = "none", git_dir: Path | None = None) -> None:
         self.root = Path(root).resolve()
         self.task = task
         self.jail = jail
+        #: the repo fixture's git directory, OUTSIDE the writable workspace
+        #: (``clone_repo_fixture``); every git command is pinned to it. ``None``: no
+        #: repository in this task, and ``git`` is refused.
+        self.git_dir = Path(git_dir).resolve() if git_dir is not None else None
         self.fx: dict[str, Any] = copy.deepcopy(task.fixtures)
         self.injections = [dict(i, seen=0, fired=0) for i in task.inject]
         self.calls: collections.Counter = collections.Counter()
@@ -2250,6 +2351,10 @@ class SandboxEnv:
         self.outbox: list[dict[str, Any]] = []
         #: False while compaction pad turns run: the task's injections are for its own turn
         self.injections_armed = True
+        #: tool-use id -> reason, for calls the permission gate did not allow (never ran here)
+        self.gate_refused: dict[str, str] = {}
+        #: execution order: every ExecRecord gets the next number when its call starts
+        self.seq = 0
 
     # -- confinement -----------------------------------------------------------------
 
@@ -2258,7 +2363,9 @@ class SandboxEnv:
         if value is None or value == "":
             return base
         if value.startswith("~"):
-            raise SandboxRefusal(f"{value!r} is outside this session's working directory ({self.root})")
+            if not (value == "~" or value.startswith("~/")):
+                raise SandboxRefusal(f"{value!r} is outside this session's working directory ({self.root})")
+            value = str(self.root) + value[1:]  # HOME is the sandbox root (run_sh)
         p = Path(value)
         if not p.is_absolute():
             p = base / p
@@ -2322,9 +2429,11 @@ class SandboxEnv:
         args = arguments.model_dump(mode="json") if hasattr(arguments, "model_dump") else dict(arguments)
         self.calls[name] += 1
         tid = _CURRENT_CALL.get()
+        self.seq += 1
+        seq = self.seq
 
         def done(outcome: str, result: Any, detail: str = "") -> Any:
-            rec = ExecRecord(tid, name, args, outcome, detail)
+            rec = ExecRecord(tid, name, args, outcome, detail, seq)
             self.log.append(rec)
             if tid:
                 self.by_id[tid] = rec
@@ -2338,8 +2447,22 @@ class SandboxEnv:
             return done("injected", ToolResult(output=inj["output"], is_error=True,
                                                metadata={"injected": inj.get("kind", "error")}),
                         str(inj.get("kind", "")))
+        if name == "read_file" and self.virtual_file(str(args.get("path") or "")) is not None:
+            text = self.virtual_file(str(args["path"])) or ""
+            off, lim = int(args.get("offset") or 0), int(args.get("limit") or 200)
+            lines = text.splitlines()[off:off + lim]
+            out = "\n".join(f"{off + k + 1:>6}\t{ln}" for k, ln in enumerate(lines))
+            return done("simulated", ToolResult(output=out or f"(no content in selected range for {args['path']})",
+                                                metadata={"sandbox_outcome": "simulated"}))
         try:
             self._confine_args(name, args)
+            # ``~`` is the sandbox root here: hand the real tool the confined path, never
+            # a ``~`` it would expand to the host's home
+            tilde = {k: str(self.confine(str(args[k]))) for k in PATH_ARGS.get(name, ())
+                     if isinstance(args.get(k), str) and args[k].startswith("~")}
+            if tilde and hasattr(arguments, "model_copy"):
+                arguments = arguments.model_copy(update=tilde)
+                args.update(tilde)
             if tool.impl is not None:
                 result = await tool.impl(arguments, context)
             elif name == "read_file":
@@ -2363,6 +2486,50 @@ class SandboxEnv:
         toks = _lex(cmd)
         if not toks:
             raise SandboxRefusal("empty command")
+        chain = self._plan_chain(cmd, toks, cwd)
+        if chain is not None:
+            return ShellPlan(chain=chain)
+        return self._plan_pipeline(cmd, toks, cwd)
+
+    def _plan_chain(self, cmd: str, toks: list[_Tok], cwd: Path) -> list[tuple[str, str, ShellPlan, Path]] | None:
+        """A ``;`` / ``&&`` / ``||`` list in which some pipeline starts with a simulated
+        host command or reads a virtual host file, split into its pipelines (each
+        planned alone and run in order, honouring the operators). ``None`` for
+        anything else: an ordinary list runs as one command in the sandbox shell."""
+        groups: list[tuple[str, list[_Tok]]] = [("", [])]
+        for t in toks:
+            if t.op and t.text in (";", "&&", "||"):
+                groups.append((t.text, []))
+            else:
+                groups[-1][1].append(t)
+        if len(groups) == 1:
+            return None
+        if any(not g for _op, g in groups):
+            raise SandboxRefusal("command ends with an operator" if not groups[-1][1] else "empty command in a list")
+
+        def special(g: list[_Tok]) -> bool:
+            first: list[_Tok] = []
+            for t in g:
+                if t.op and t.text == "|":
+                    break
+                first.append(t)
+            return bool(first) and not first[0].op and (
+                first[0].text in OPS_PROGRAMS
+                or any(not t.op and self.virtual_file(t.text) is not None for t in first[1:]))
+
+        if not any(special(g) for _op, g in groups):
+            return None
+        out: list[tuple[str, str, ShellPlan, Path]] = []
+        for op, g in groups:
+            piece = cmd[g[0].start:g[-1].end]
+            ptoks = _lex(piece)
+            out.append((op, piece, self._plan_pipeline(piece, ptoks, cwd), cwd))
+            words = [t.text for t in ptoks]
+            if words and words[0] == "cd" and len(words) <= 2 and not any(t.op for t in ptoks):
+                cwd = self.confine(words[1], cwd) if len(words) == 2 else self.root
+        return out
+
+    def _plan_pipeline(self, cmd: str, toks: list[_Tok], cwd: Path) -> ShellPlan:
         segments: list[_Segment] = [_Segment()]
         ops: list[str] = []
         pipe_at: int | None = None
@@ -2406,6 +2573,21 @@ class SandboxEnv:
             raise SandboxRefusal("command ends with an operator")
         first = segments[0]
         argv = [w.text for w in first.words]
+        virt = [w for w in first.words[1:] if self.virtual_file(w.text) is not None]
+        if virt:
+            # a text utility reading a virtual host file: the fixture's text goes to its
+            # stdin and the path leaves the command (the host file is never opened)
+            if argv[0] not in _VIRTUAL_READERS or any(op != "|" for op in ops):
+                raise SandboxRefusal(f"{virt[0].text!r} can only be read by a text utility at the head of a "
+                                     "pipeline here")
+            self._check_segment([w.text for w in first.words if w not in virt], cwd)
+            for seg in segments[1:]:
+                self._check_segment([w.text for w in seg.words], cwd)
+            content = "".join(self.virtual_file(w.text) or "" for w in virt)
+            rest = cmd
+            for w in sorted(virt, key=lambda t: t.start, reverse=True):
+                rest = rest[:w.start] + rest[w.end:]
+            return ShellPlan(simulated=(content, 0), rest=rest, piped=True)
         if argv[0] in OPS_PROGRAMS:
             if any(op != "|" for op in ops):
                 raise SandboxRefusal("host commands can only be piped into text utilities here")
@@ -2432,6 +2614,11 @@ class SandboxEnv:
             raise SandboxRefusal(f"running `{prog}` is not available in this session")
         if prog in OPS_PROGRAMS:
             raise SandboxRefusal(f"`{prog}` can only be the first command of a pipeline here")
+        if prog == "git":
+            if self.git_dir is None:
+                raise SandboxRefusal("`git` is not available in this session (there is no repository here)")
+            self._check_git(seg[1:], cwd)
+            return
         if prog not in ALLOWED_PROGRAMS:
             raise SandboxRefusal(f"`{prog}` is not available in this session")
         args = seg[1:]
@@ -2521,6 +2708,69 @@ class SandboxEnv:
             if _pathy(a):
                 self.confine(a, cwd)
 
+    def _check_git(self, args: list[str], cwd: Path) -> None:
+        """Read-only git (``_GIT_READ``) on the task's own clone: no config, hooks,
+        pager, external diff, output files or other git dirs; every path operand
+        confined. The clone has no remote, so nothing can reach the network either."""
+        k = 0
+        while k < len(args) and args[k].startswith("-"):
+            a = args[k]
+            if a == "-C" and k + 1 < len(args):
+                cwd = self.confine(args[k + 1], cwd)
+                k += 2
+                continue
+            if a in _GIT_GLOBAL_OK:
+                k += 1
+                continue
+            raise SandboxRefusal(f"`git {a}` is not available in this session")
+        if k >= len(args):
+            raise SandboxRefusal("`git` needs a read-only subcommand here (log, show, status, diff, ...)")
+        sub, rest = args[k], args[k + 1:]
+        if sub not in _GIT_READ:
+            raise SandboxRefusal(f"`git {sub}` is not available in this session (read-only git: "
+                                 f"{', '.join(sorted(_GIT_READ))})")
+        positional: list[str] = []
+        flags: list[str] = []
+        k = 0
+        after_dashes = False
+        while k < len(rest):
+            a = rest[k]
+            if after_dashes or not a.startswith("-") or a == "-":
+                positional.append(a)
+                k += 1
+                continue
+            if a == "--":
+                after_dashes = True
+                k += 1
+                continue
+            name, eq, val = a.partition("=")
+            if name.startswith(_GIT_REFUSED_OPTS) or (sub == "grep" and a.startswith("-O")):
+                raise SandboxRefusal(f"`git {sub} {name}` is not available in this session")
+            if name in _GIT_PATH_OPTS:
+                value = val if eq else (rest[k + 1] if k + 1 < len(rest) else None)
+                if value is None:
+                    raise SandboxRefusal(f"`git {sub} {name}` needs a value")
+                self.confine(value, cwd)
+                k += 1 if eq else 2
+                continue
+            if len(name) > 2 and name[1] != "-" and name != "-vv" and name[1:].isalpha():
+                flags += ["-" + c for c in name[1:]]  # a cluster of short flags: -av
+            else:
+                flags.append(name)
+            if name in _GIT_VALUE_OPTS and not eq and not (sub == "tag" and name == "-n"):
+                k += 2  # its value is a revision or a pattern, never a path
+                continue
+            k += 1
+        if sub in ("branch", "tag"):
+            listing = {"-l", "--list"} & set(flags)
+            if set(flags) - _GIT_LIST_FLAGS[sub] or (positional and not listing):
+                raise SandboxRefusal(f"`git {sub}` only lists here")
+        if sub == "remote" and (positional or set(flags) - {"-v", "--verbose"}):
+            raise SandboxRefusal("`git remote` only lists here (the clone has no remote)")
+        for a in positional:
+            if _pathy(a) and not re.match(r"^[\w.^~@{}-]*:", a):  # rev:path names a path in the repo
+                self.confine(a, cwd)
+
     def _check_find(self, args: list[str], cwd: Path) -> None:
         if _FIND_REFUSED & set(args):
             raise SandboxRefusal("find actions that run commands, read file lists or write files are not available here")
@@ -2541,8 +2791,17 @@ class SandboxEnv:
         tmp = self.root / ".tmp"
         tmp.mkdir(exist_ok=True)
         env = {"PATH": "/usr/bin:/bin", "HOME": str(self.root), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
-               "TMPDIR": str(tmp), "TERM": "dumb"}
-        argv = jail_prefix(self.jail, self.root, cwd) + _shell_argv(cmd)
+               "TMPDIR": str(tmp), "TERM": "dumb", **_GIT_SANDBOX_ENV,
+               # git never looks for a repository above the sandbox (a checkout around --sandbox-root)
+               "GIT_CEILING_DIRECTORIES": str(self.root.parent)}
+        if self.git_dir is not None:
+            # git reads ONLY the fixture's own git directory, which lives outside the
+            # workspace (nothing here can write it): never a repository discovered in
+            # the workspace, whose config (diff.external, textconv, filters...) the agent
+            # could have written and git would run
+            env.update(GIT_DIR=str(self.git_dir), GIT_WORK_TREE=str(self.root / REPO_FIXTURE_DIR))
+        argv = jail_prefix(self.jail, self.root, cwd,
+                           (self.git_dir,) if self.git_dir is not None else ()) + _shell_argv(cmd)
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=str(cwd), env=env,
             stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
@@ -2604,6 +2863,33 @@ class SandboxEnv:
             raise SandboxRefusal("empty command")
         timeout = float(min(int(getattr(a, "timeout_seconds", 30) or 30), 30))
         plan = self.plan_shell(cmd, cwd)
+        steps = plan.chain if plan.chain is not None else [("", cmd, plan, cwd)]
+        texts: list[str] = []
+        rc: int | None = 0
+        simulated = False
+        for op, piece, sub, pcwd in steps:
+            if (op == "&&" and rc != 0) or (op == "||" and rc == 0):
+                continue
+            if not pcwd.is_dir():
+                # a `cd` the plan followed found no such directory: this part was checked
+                # against that directory, so it never runs anywhere else (a relative path
+                # checked there could leave the sandbox from another one)
+                texts.append(f"sh: cd: can't cd to {pcwd.relative_to(self.root)}: no such directory")
+                rc = 2
+                continue
+            text, rc, sim = await self._run_plan(sub, piece, pcwd, timeout)
+            simulated |= sim
+            if rc is None:
+                return ToolResult(output=f"Command timed out after {int(timeout)} seconds", is_error=True)
+            if text:
+                texts.append(text)
+        meta: dict[str, Any] = {"returncode": rc}
+        if simulated:
+            meta["sandbox_outcome"] = "simulated"
+        return ToolResult(output="\n".join(texts) or "(no output)", is_error=rc != 0, metadata=meta)
+
+    async def _run_plan(self, plan: ShellPlan, cmd: str, cwd: Path, timeout: float) -> tuple[str, int | None, bool]:
+        """(output, status (None: timed out), simulated) of one planned pipeline."""
         if plan.simulated is not None:
             text, rc = plan.simulated
             if plan.rest:
@@ -2614,12 +2900,9 @@ class SandboxEnv:
                     text, rc = shown, prc
                 else:  # only redirected: the host command's status, the shell's (empty) output
                     text = shown
-            return ToolResult(output=text or "(no output)", is_error=rc != 0,
-                              metadata={"returncode": rc, "sandbox_outcome": "simulated"})
+            return text, rc, True
         text, rc = await self.run_sh(cmd, cwd, None, timeout)
-        if rc is None:
-            return ToolResult(output=f"Command timed out after {int(timeout)} seconds", is_error=True)
-        return ToolResult(output=text or "(no output)", is_error=rc != 0, metadata={"returncode": rc})
+        return text, rc, False
 
     # -- simulated host --------------------------------------------------------------
 
@@ -2651,6 +2934,8 @@ class SandboxEnv:
                     f"{'Mem:':<7}{str(m['total']) + 'Gi':>10}{str(m['used']) + 'Gi':>10}"
                     f"{str(m['total'] - m['used'] - 2) + 'Gi':>10}{str(m['total'] - m['used']) + 'Gi':>12}\n"
                     f"{'Swap:':<7}{'8.0Gi':>10}{'0.2Gi':>10}{'7.8Gi':>10}"), 0
+        if prog == "uptime" and ("-p" in args or "--pretty" in args):
+            return f"up {w['uptime_days']} days, 3 hours, 12 minutes", 0
         if prog == "uptime":
             return f" 09:41:07 up {w['uptime_days']} days,  3:12,  1 user,  load average: 0.84, 0.91, 1.02", 0
         if prog == "ps":
@@ -2663,6 +2948,128 @@ class SandboxEnv:
             return "\n".join(rows), 0
         if prog == "curl":
             return self._curl(args, w)
+        return self._host_info(prog, args, w)
+
+    # -- host inspection (read-only, answered from the same fixture as df / free / ps) --
+
+    _KERNEL = "6.8.0-48-generic"
+    _NPROC = 16
+
+    def _pid(self, name: str) -> int:
+        return abs(hash(name)) % 90000 + 1000  # what ps and nvidia-smi show for a GPU process
+
+    def _processes(self, w: dict[str, Any]) -> list[tuple[int, str]]:
+        procs = [(s["pid"], name) for name, s in w["services"].items() if s["active"] == "active"]
+        return procs + [(self._pid(p["name"]), p["name"]) for p in w["gpu"]["procs"]]
+
+    def _mount_lines(self, w: dict[str, Any]) -> list[tuple[str, str, str, str]]:
+        rows = [(f"/dev/nvme0n1p{k + 1}", d["mount"], "ext4", "rw,relatime") for k, d in enumerate(w["disks"])]
+        return rows + [("proc", "/proc", "proc", "rw,nosuid,nodev,noexec,relatime"),
+                       ("sysfs", "/sys", "sysfs", "rw,nosuid,nodev,noexec,relatime"),
+                       ("tmpfs", "/run", "tmpfs", "rw,nosuid,nodev,size=6553600k,mode=755")]
+
+    def virtual_file(self, path: str) -> str | None:
+        """The fixture's text for a ``VIRTUAL_FILES`` path (``None`` for any other path)."""
+        if path not in VIRTUAL_FILES:
+            return None
+        w = self.ops()
+        m = w["mem"]
+        if path == "/proc/meminfo":
+            kb = 1024 * 1024
+            return (f"MemTotal:       {m['total'] * kb:>10} kB\nMemFree:        {(m['total'] - m['used'] - 2) * kb:>10} kB\n"
+                    f"MemAvailable:   {(m['total'] - m['used']) * kb:>10} kB\nBuffers:        {512 * 1024:>10} kB\n"
+                    f"Cached:         {2 * kb:>10} kB\nSwapTotal:      {8 * kb:>10} kB\n"
+                    f"SwapFree:       {int(7.8 * kb):>10} kB\n")
+        if path == "/proc/mounts":
+            return "".join(f"{dev} {mnt} {fs} {opts} 0 0\n" for dev, mnt, fs, opts in self._mount_lines(w))
+        if path == "/proc/cpuinfo":
+            return "".join(f"processor\t: {k}\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\n"
+                           f"cpu cores\t: {self._NPROC}\n\n" for k in range(self._NPROC))
+        if path == "/proc/loadavg":
+            return "0.84 0.91 1.02 2/1043 41877\n"
+        if path == "/proc/uptime":
+            return f"{w['uptime_days'] * 86400 + 11520}.42 {w['uptime_days'] * 86400 * 15}.10\n"
+        if path == "/proc/version":
+            return f"Linux version {self._KERNEL} (buildd@lcy02-amd64-001) (gcc 13.2.0) #48-Ubuntu SMP\n"
+        if path == "/etc/hostname":
+            return f"{w['host']}\n"
+        return ('PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\n'
+                'VERSION="24.04.1 LTS (Noble Numbat)"\nID=ubuntu\nID_LIKE=debian\n')
+
+    def _host_info(self, prog: str, args: list[str], w: dict[str, Any]) -> tuple[str, int]:
+        flags = {c for a in args if a.startswith("-") and not a.startswith("--") for c in a[1:]}
+        if prog == "sleep":
+            return "", 0  # nothing to wait for in the sandbox
+        if prog in ("which", "command", "type"):
+            names = [a for a in args if not a.startswith("-")]
+            if prog == "command" and not ({"v", "V"} & flags):
+                raise SandboxRefusal("`command` runs only as `command -v NAME` here")
+            known = ALLOWED_PROGRAMS | OPS_PROGRAMS | ({"git"} if self.git_dir is not None else frozenset())
+            found = [n for n in names if n in known]
+            if prog == "type":
+                lines = [f"{n} is /usr/bin/{n}" if n in known else f"sh: type: {n}: not found" for n in names]
+            else:
+                lines = [f"/usr/bin/{n}" for n in found]
+            return "\n".join(lines), 0 if names and len(found) == len(names) else 1
+        if prog == "hostname":
+            return w["host"], 0
+        if prog == "whoami":
+            return "svc", 0
+        if prog == "id":
+            return "uid=1000(svc) gid=1000(svc) groups=1000(svc),44(video),998(docker)", 0
+        if prog == "nproc":
+            return str(self._NPROC), 0
+        if prog == "uname":
+            parts = {"s": "Linux", "n": w["host"], "r": self._KERNEL, "v": "#48-Ubuntu SMP PREEMPT_DYNAMIC",
+                     "m": "x86_64", "o": "GNU/Linux"}
+            if "a" in flags or "--all" in args:
+                keys = "snrvmo"
+            else:
+                keys = "".join(k for k in "snrvmo" if k in flags) or "s"
+            return " ".join(parts[k] for k in keys), 0
+        if prog == "lscpu":
+            return (f"Architecture:            x86_64\nCPU(s):                  {self._NPROC}\n"
+                    "Model name:              AMD Ryzen 9 5950X 16-Core Processor\nThread(s) per core:      1\n"
+                    f"Core(s) per socket:      {self._NPROC}\nSocket(s):               1"), 0
+        if prog == "sensors":
+            return ("k10temp-pci-00c3\nAdapter: PCI adapter\nTctl:         +54.6\u00b0C\n\n"
+                    "nvme-pci-0100\nAdapter: PCI adapter\nComposite:    +41.9\u00b0C"), 0
+        if prog in ("mount", "findmnt"):
+            if any(not a.startswith("-") for a in args) or (flags - {"l", "t", "n", "D", "A"} and prog == "mount"):
+                raise SandboxRefusal(f"`{prog}` only lists mounts here")
+            rows = self._mount_lines(w)
+            if prog == "mount":
+                return "\n".join(f"{dev} on {mnt} type {fs} ({opts})" for dev, mnt, fs, opts in rows), 0
+            out = [f"{'TARGET':<20}{'SOURCE':<18}{'FSTYPE':<8}OPTIONS"]
+            out += [f"{mnt:<20}{dev:<18}{fs:<8}{opts}" for dev, mnt, fs, opts in rows]
+            return "\n".join(out), 0
+        if prog == "lsblk":
+            out = [f"{'NAME':<14}{'MAJ:MIN':<9}{'RM':>2}{'SIZE':>7}{'RO':>3} {'TYPE':<5}MOUNTPOINTS",
+                   f"{'nvme0n1':<14}{'259:0':<9}{'0':>2}{'1.5T':>7}{'0':>3} {'disk':<5}"]
+            for k, d in enumerate(w["disks"]):
+                branch = "\u2514\u2500" if k == len(w["disks"]) - 1 else "\u251c\u2500"
+                out.append(f"{branch + 'nvme0n1p' + str(k + 1):<14}{'259:' + str(k + 1):<9}{'0':>2}"
+                           f"{str(d['size']) + 'G':>7}{'0':>3} {'part':<5}{d['mount']}")
+            return "\n".join(out), 0
+        if prog == "ss":
+            out = ["State   Recv-Q  Send-Q   Local Address:Port    Peer Address:Port  Process"]
+            for name, sv in w["services"].items():
+                if sv["active"] == "active":
+                    out.append(f"LISTEN  0       4096         127.0.0.1:{sv['port']:<10}0.0.0.0:*"
+                               f"          users:((\"{name}\",pid={sv['pid']},fd=7))")
+            return "\n".join(out), 0
+        if prog == "pgrep":
+            pats = [a for a in args if not a.startswith("-")]
+            if len(pats) != 1:
+                raise SandboxRefusal("`pgrep` takes one pattern here")
+            try:
+                rx = re.compile(pats[0], re.I if "i" in flags else 0)
+            except re.error:
+                return f"pgrep: invalid pattern: {pats[0]}", 2
+            hits = [(pid, name) for pid, name in self._processes(w) if rx.search(name)]
+            if {"l", "a"} & flags:
+                return "\n".join(f"{pid} {name}" for pid, name in hits), 0 if hits else 1
+            return "\n".join(str(pid) for pid, _n in hits), 0 if hits else 1
         raise SandboxRefusal(f"`{prog}` is not available in this session")
 
     def _unit(self, raw: str, w: dict[str, Any]) -> str:
@@ -3258,6 +3665,14 @@ class Settings:
     tp_start_concurrency: int = TOKEN_PLAN_START_CONCURRENCY
     #: the pad pool's summary (``pad_pool_split``), for the report
     pad_pool: dict[str, Any] = field(default_factory=dict)
+    #: --repo-fixture (auto / on / off): every real-pattern agent task gets a clone of
+    #: --repo at --repo-fixture-ref (committed files only, no remote, its last
+    #: REPO_FIXTURE_DEPTH commits) at <workspace>/Prometheus. ``repo_store`` and
+    #: ``repo_fixture_info`` are set when the run prepares it (``prepare_repo_store``).
+    repo_fixture: str = "off"
+    repo_fixture_ref: str = "origin/main"
+    repo_store: Path | None = None
+    repo_fixture_info: dict[str, Any] = field(default_factory=dict)
 
     @property
     def payg(self) -> bool:
@@ -3339,6 +3754,9 @@ class Settings:
                 "thinking_budget": self.thinking_budget,
                 "pad": {"version": PAD_VERSION, "pool_share": PAD_POOL_SHARE, "min_turns": PAD_MIN_TURNS,
                         "max_turns": PAD_MAX_TURNS, "history_factor": PAD_HISTORY_FACTOR},
+                "judge_rubric": hashlib.sha256(JUDGE_SYSTEM.encode()).hexdigest()[:16],
+                "repo_fixture": self.repo_fixture_info.get("commit"),
+                "class_caps": dict(sorted(CLASS_CAPS.items())),
                 # the pack's template (date sentinel unfilled), so a resume on a later day is the same run
                 "system_prompt_sha": hashlib.sha256((self.base_system_prompt or "").encode()).hexdigest()[:16]}
 
@@ -3396,6 +3814,29 @@ class RecordedCall:
     #: --teacher max-payg: the ledger's call id and what the call cost
     call_id: str = ""
     cost_usd: float = 0.0
+    #: tool calls that arrived with no arguments for a tool whose schema requires some
+    #: (``empty_arg_call_ids``): a defect of the reply, never counted as a tool error
+    empty_args: tuple[str, ...] = ()
+
+
+def empty_arg_call_ids(message: Any, request: Any) -> tuple[str, ...]:
+    """Ids of the tool calls in *message* whose input is empty although the tool, as
+    *request* offered it, has required parameters. The parser turns missing, empty
+    or ``{}`` arguments into ``{}`` and the tool then fails validation ("Field
+    required"): that is the reply arriving without its arguments, not a tool error."""
+    from prometheus.engine.messages import ToolUseBlock
+
+    required: set[str] = set()
+    for t in getattr(request, "tools", None) or []:
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function") if isinstance(t.get("function"), dict) else t
+        params = fn.get("parameters") or fn.get("input_schema") or t.get("input_schema") or {}
+        name = fn.get("name") or t.get("name")
+        if name and isinstance(params, dict) and params.get("required"):
+            required.add(str(name))
+    return tuple(b.id for b in getattr(message, "content", None) or []
+                 if isinstance(b, ToolUseBlock) and not b.input and b.name in required)
 
 
 def _sampling_provider_cls() -> type:
@@ -3465,7 +3906,8 @@ def _recording_provider_cls() -> type:
                         self.calls.append(RecordedCall(
                             request, ev.message, ev.stop_reason, ev.served_model,
                             int(ev.usage.input_tokens or 0), int(ev.usage.output_tokens or 0),
-                            int(ev.dropped_malformed or 0), tuple(ev.unreadable_tool_calls or ())))
+                            int(ev.dropped_malformed or 0), tuple(ev.unreadable_tool_calls or ()),
+                            empty_args=empty_arg_call_ids(ev.message, request)))
                     yield ev
             except Exception as exc:
                 from prometheus.api.turn_errors import classify_turn_error
@@ -3647,9 +4089,16 @@ def _payg_provider_cls() -> type:
             if stop not in OUTPUT_LIMIT_STOPS and r.output_tokens - r.reasoning_tokens >= payload["max_tokens"]:
                 stop = "length"
             unreadable = tuple(_unreadable_call_ids(choice, stop))
+            empty = empty_arg_call_ids(message, request)
+            if empty:
+                # how much argument text the route delivered for each such call (diagnosis only)
+                lens = [len(str((tc.get("function") or {}).get("arguments") or ""))
+                        for tc in (r.message.get("tool_calls") or []) if isinstance(tc, dict)]
+                log.warning("teacher reply carried %d tool call(s) with no arguments (raw argument lengths %s)",
+                            len(empty), lens)
             self.calls.append(RecordedCall(
                 request, message, stop, r.served_model, int(r.input_tokens), int(r.output_tokens),
-                int(dropped or 0), unreadable, call_id=r.call_id, cost_usd=float(r.usd)))
+                int(dropped or 0), unreadable, call_id=r.call_id, cost_usd=float(r.usd), empty_args=empty))
             if r.text:
                 # the reply's text as one delta: the compactor's call envelope reads text from deltas
                 yield ApiTextDeltaEvent(text=r.text)
@@ -3738,6 +4187,12 @@ class TaskOutcome:
     summary_calls: list[RecordedCall] = field(default_factory=list)
     #: a paid call refused mid-task (--teacher max-payg): the run stops
     payg_stop: PaygStop | None = None
+    #: what the agent was given: the system prompt and the tool names its own turn
+    #: offered ([] in chat mode). The judge sees both (``judge_transcript``).
+    system_prompt: str = ""
+    tools_offered: list[str] = field(default_factory=list)
+    #: pad turns that failed and were rolled back (never history): {"id", "reason"}
+    pad_skipped: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def paid_usd(self) -> float:
@@ -3760,23 +4215,164 @@ def _telemetry(settings: Settings) -> Any:
     return _TELEMETRY[key]
 
 
+REPO_FIXTURE_DIR = "Prometheus"
+REPO_FIXTURE_DEPTH = 200
+REPO_FIXTURE_MODES = ("auto", "on", "off")
+
+
+class RepoFixtureError(RuntimeError):
+    pass
+
+
+def _git_host_env() -> dict[str, str]:
+    """The environment of the git commands that build the fixture (outside the jail):
+    no system or global config, never a prompt."""
+    return {"PATH": os.environ.get("PATH") or "/usr/bin:/bin", "HOME": tempfile.gettempdir(), "LANG": "C",
+            "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"}
+
+
+def _git(args: list[str], cwd: Path | None = None, timeout: float = 300.0) -> str:
+    try:
+        res = subprocess.run(["git", *args], cwd=str(cwd) if cwd else None, env=_git_host_env(),
+                             capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RepoFixtureError(f"git {args[0]}: {exc}") from exc
+    if res.returncode != 0:
+        raise RepoFixtureError(f"git {args[0]} failed: {(res.stderr or '').strip()[:300]}")
+    return res.stdout.strip()
+
+
+def prepare_repo_store(settings: "Settings") -> dict[str, Any] | None:
+    """Build (once per commit) the bare, shallow store every task's repo fixture is
+    cloned from: ``--repo``'s ``--repo-fixture-ref`` and its last REPO_FIXTURE_DEPTH
+    commits, committed files only (local edits and untracked files never reach it).
+    Sets ``settings.repo_store`` / ``repo_fixture_info``; ``None`` (and the fixture
+    off) for mode off, or for auto when --repo is not a git checkout or the ref does
+    not resolve. Mode on raises RepoFixtureError instead."""
+    mode = settings.repo_fixture
+    if mode == "off":
+        return None
+    repo = Path(settings.repo).expanduser()
+    try:
+        if not (repo / ".git").exists():
+            raise RepoFixtureError(f"--repo {repo} is not a git checkout")
+        sha = _git(["rev-parse", "--verify", "--quiet", f"{settings.repo_fixture_ref}^{{commit}}"], repo)
+        full = _git(["rev-parse", "--symbolic-full-name", settings.repo_fixture_ref], repo)
+        if not full.startswith(("refs/remotes/", "refs/tags/")):
+            # a local branch can hold commits nobody published (an unreleased fix, say)
+            raise RepoFixtureError(f"--repo-fixture-ref {settings.repo_fixture_ref!r} must name a remote-tracking "
+                                   "ref or a tag (published history only)")
+        store = Path(settings.sandbox_root) / "repo-store" / f"{sha[:16]}.git"
+        if not store.exists():
+            tmp = store.with_name(f"{store.name}.{os.getpid()}.tmp")
+            shutil.rmtree(tmp, ignore_errors=True)
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            _git(["init", "-q", "--bare", "--template=", str(tmp)])
+            _git(["fetch", "-q", "--no-tags", f"--depth={REPO_FIXTURE_DEPTH}", f"file://{repo.resolve()}",
+                  f"+{full}:refs/heads/main"], tmp)
+            _git(["symbolic-ref", "HEAD", "refs/heads/main"], tmp)
+            if _git(["rev-parse", "HEAD"], tmp) != sha:
+                raise RepoFixtureError(f"{full} moved while the fixture was built")
+            try:
+                os.replace(tmp, store)
+            except OSError:
+                shutil.rmtree(tmp, ignore_errors=True)
+                if not store.exists():
+                    raise
+    except RepoFixtureError as exc:
+        if mode == "on":
+            raise
+        log.warning("repo fixture off: %s", exc)
+        return None
+    settings.repo_store = store
+    settings.repo_fixture_info = {"commit": sha, "ref": full, "depth": REPO_FIXTURE_DEPTH, "dir": REPO_FIXTURE_DIR}
+    return settings.repo_fixture_info
+
+
+def wants_repo_fixture(task: GenTask, settings: "Settings") -> bool:
+    return settings.repo_store is not None and task.origin == ORIGIN_TASKSET and task.mode != "chat"
+
+
+def repo_git_dir(root: Path) -> Path:
+    """Where the repo fixture's git directory lives for the workspace *root*: beside
+    it, never inside it, so no tool or command of the task can write its config."""
+    root = Path(root)
+    return root.parent / f"{root.name}.repo-git"
+
+
+def clone_repo_fixture(store: Path, root: Path) -> Path:
+    """The task's own clone of the store at ``<root>/Prometheus``, with no remote. Its
+    git directory is ``repo_git_dir(root)``, outside the workspace: a repository's
+    config can make git run programs, so the agent must never be able to write it."""
+    dest = root / REPO_FIXTURE_DIR
+    gd = repo_git_dir(root)
+    shutil.rmtree(gd, ignore_errors=True)
+    _git(["clone", "-q", "--no-tags", "--template=", f"--separate-git-dir={gd}", str(store), str(dest)])
+    _git(["remote", "remove", "origin"], dest)
+    return dest
+
+
+async def gym_permission_prompt(tool_name: str, reason: str, arguments: Any = None) -> bool:
+    """The gym's answer to the gate's APPROVE tier (nobody is there to ask). A shell
+    command goes on to the sandbox, whose own grammar (``SandboxEnv.plan_shell``) is
+    the bash guard: it simulates host commands such as a loopback ``curl`` from the
+    task's fixture and refuses the rest (ssh, the network, interpreters). Without
+    this the gate's network patterns sent a loopback ``curl`` (or an ``echo`` that
+    names one) to APPROVE and it was denied before the sandbox could answer it.
+    Every other tool stays denied. The gate's floor (always-blocked commands, denied
+    paths, exfiltration) is a DENY, which never reaches this prompt."""
+    return tool_name == "bash"
+
+
+def _gym_gate_cls() -> type:
+    """``SecurityGate`` that remembers which calls it did not allow outright, so the
+    verification counts a gate denial as a refusal (``SandboxEnv.gate_refused``), not
+    as a natural tool error. Bash APPROVE decisions are approved by
+    ``gym_permission_prompt`` and are not recorded."""
+    cached = globals().get("_GYM_GATE")
+    if cached is not None:
+        return cached
+    from prometheus.permissions.checker import SecurityGate
+
+    class GymGate(SecurityGate):
+        def __init__(self, env: "SandboxEnv", **kw: Any) -> None:
+            super().__init__(**kw)
+            self._gym_env = env
+
+        def evaluate(self, tool_name: str, **kw: Any) -> Any:  # type: ignore[override]
+            decision = super().evaluate(tool_name, **kw)
+            if not decision.allowed and not (decision.requires_confirmation and tool_name == "bash"):
+                tid = _CURRENT_CALL.get()
+                if tid:
+                    self._gym_env.gate_refused[tid] = str(decision.reason or "")[:200]
+            return decision
+
+    globals()["_GYM_GATE"] = GymGate
+    return GymGate
+
+
 async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOutcome:
     from prometheus.__main__ import create_adapter
     from prometheus.engine.agent_loop import LoopContext, run_loop
     from prometheus.engine.messages import ConversationMessage
     from prometheus.engine.stream_events import AssistantTurnComplete
-    from prometheus.permissions.checker import SecurityGate
 
     root = Path(settings.sandbox_root) / f"w{worker}" / "workspace"
     if root.exists():
         shutil.rmtree(root)
     root.mkdir(parents=True)
     root = root.resolve()
+    # never a previous task's repository: the git dir lives beside the workspace
+    shutil.rmtree(repo_git_dir(root), ignore_errors=True)
+    git_dir: Path | None = None
+    if wants_repo_fixture(task, settings):
+        await asyncio.to_thread(clone_repo_fixture, Path(settings.repo_store), root)  # type: ignore[arg-type]
+        git_dir = repo_git_dir(root)
     for rel, content in task.setup_files.items():
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-    env = SandboxEnv(root, task, jail=resolve_jail(settings.jail))
+    env = SandboxEnv(root, task, jail=resolve_jail(settings.jail), git_dir=git_dir)
     registry = build_sandbox_registry(env)
     provider = teacher_provider(settings)
     # The local route's adapter for the model name, whichever provider serves it: a Max
@@ -3799,10 +4395,11 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
         observed[tool_use_id] = {"raw": raw, "executed": executed}
         _CURRENT_CALL.set(tool_use_id)
 
-    gate = SecurityGate(workspace_root=root, mode="default")
+    gate = _gym_gate_cls()(env, workspace_root=root, mode="default")
     context = LoopContext(
         provider=provider, model=settings.model_name, system_prompt=system_prompt,
         max_tokens=settings.max_tokens, tool_registry=registry, permission_checker=gate,
+        permission_prompt=gym_permission_prompt,
         adapter=adapter, telemetry=_telemetry(settings), cwd=root,
         max_tool_iterations=settings.max_tool_iterations, tool_timeout_seconds=settings.tool_timeout,
         session_id="system", tool_call_observer=_observe, compactor=compactor,
@@ -3810,7 +4407,9 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
         # cwd and the gate's write boundary are all the sandbox.
         workspace_resolver=lambda _session: root)
     out = TaskOutcome(task=task, run_id=f"{task.id}@{uuid.uuid4().hex[:10]}", messages=messages,
-                      n_seed=len(seeded), calls=provider.calls, observed=observed, env=env, provider=provider)
+                      n_seed=len(seeded), calls=provider.calls, observed=observed, env=env, provider=provider,
+                      system_prompt=system_prompt,
+                      tools_offered=[] if task.mode == "chat" else sorted(t.name for t in registry.list_tools()))
     if summarizer is not None:
         out.summary_calls = summarizer.calls
     t0 = time.monotonic()
@@ -3870,12 +4469,20 @@ def _turn_events(out: TaskOutcome, msgs: list[Any]) -> list[dict[str, Any]]:
             elif isinstance(b, ToolResultBlock) and b.tool_use_id in by_id:
                 by_id[b.tool_use_id]["is_error"] = bool(b.is_error)
                 by_id[b.tool_use_id]["result"] = b.content if isinstance(b.content, str) else str(b.content)
+    empty = {i for c in out.calls for i in c.empty_args}
     for ev in events:
         rec = out.env.by_id.get(ev["id"])
         obs = out.observed.get(ev["id"])
         ev["repaired"] = bool(obs) and (obs["raw"] != obs["executed"])
+        ev["seq"] = rec.seq if rec is not None else None
         if rec is not None and rec.outcome in ("injected", "refused", "simulated"):
             ev["outcome"] = rec.outcome
+        elif rec is None and ev["id"] in out.env.gate_refused:
+            ev["outcome"] = "refused"  # the permission gate: the call never reached the sandbox
+        elif rec is None and ev["id"] in empty:
+            # the teacher route delivered no arguments for a tool that requires some: a
+            # transport / format defect of the reply, not the tool failing
+            ev["outcome"] = "empty_args"
         elif ev["is_error"] is None:
             ev["outcome"] = "unanswered"
         elif ev["is_error"]:
@@ -3900,25 +4507,46 @@ def _last_text(msgs: list[Any]) -> str:
     return ""
 
 
+def _workspace_state(root: Path) -> dict[str, tuple[int, int]]:
+    """Every file under *root* with its size and mtime: what a pad turn may have changed."""
+    state: dict[str, tuple[int, int]] = {}
+    for dirpath, _dirs, files in os.walk(root):
+        for f in files:
+            p = Path(dirpath) / f
+            try:
+                st = p.lstat()
+            except OSError:
+                continue
+            state[str(p.relative_to(root))] = (st.st_size, st.st_mtime_ns)
+    return state
+
+
 async def _pad_turns(task: GenTask, settings: Settings, context: Any, out: TaskOutcome) -> None:
     """Run the task's pad turns (``GenTask.pad``) through the real loop, in order,
     until the history holds ``PAD_HISTORY_FACTOR`` x ``--compaction-history-tokens``
     (and at least ``PAD_MIN_TURNS`` turns) or the candidates run out. Each turn is
     a real-pattern prompt sent as the user's turn, answered by the same teacher in
     its own row's mode. A turn that did not end in a reply, or whose calls were
-    refused, repaired, dropped or cut off, stops the padding and rejects the task
-    (``out.pad_reasons``): that history would teach a sandbox or harness artifact.
-    Natural tool errors are kept (they are real tool results) and counted."""
+    refused, repaired, dropped or cut off, would teach a sandbox or harness
+    artifact: it is rolled back (its messages dropped, the mocks' state restored)
+    and the next candidate runs instead (``out.pad_skipped``). Pad turns are
+    history, never rows, so nothing of a rolled-back turn reaches a row. A turn
+    that changed the workspace cannot be rolled back cleanly and rejects the task
+    (``out.pad_reasons``), as does ending with fewer than ``PAD_MIN_TURNS`` clean
+    turns. Natural tool errors are kept (they are real tool results) and counted."""
     from prometheus.context.token_estimation import estimate_message_tokens
     from prometheus.engine.agent_loop import run_loop
     from prometheus.engine.messages import ConversationMessage
     from prometheus.engine.stream_events import AssistantTurnComplete
 
     messages = out.messages
+    env = out.env
     target = PAD_HISTORY_FACTOR * settings.compaction_history_tokens
     turns: list[dict[str, Any]] = []
     for cand in task.pad:
         first_msg, first_call = len(messages), len(out.calls)
+        fx_before, outbox_before = copy.deepcopy(env.fx), copy.deepcopy(env.outbox)
+        ws_before = _workspace_state(env.root)
         messages.append(ConversationMessage.from_user_text(cand["prompt"]))
         stops: list[str | None] = []
         async for item in run_loop(context, messages, mode="chat" if cand["mode"] == "chat" else "agent"):
@@ -3935,19 +4563,27 @@ async def _pad_turns(task: GenTask, settings: Settings, context: Any, out: TaskO
         elif outcomes["refused"]:
             problem = "pad_sandbox_refusal"
         elif (any(e["repaired"] for e in events) or any(c.dropped_malformed or c.unreadable for c in calls)
+              or outcomes["empty_args"]
               or any(c.stop_reason in ("length", "max_tokens") for c in calls)
               or any(getattr(m, "provenance", "") == ORCHESTRATOR for m in msgs)):
             problem = "pad_turn_unclean"
+        if problem:
+            if _workspace_state(env.root) != ws_before:
+                out.pad_reasons.append(problem)  # it wrote files: no clean rollback
+                break
+            del messages[first_msg:]
+            env.fx, env.outbox[:] = fx_before, outbox_before
+            out.pad_skipped.append({"id": cand["id"], "reason": problem})
+            continue
         turns.append({"id": cand["id"], "task_group": cand["task_group"], "mode": cand["mode"],
                       "prompt_hash": h(norm(cand["prompt"])), "teacher_calls": len(calls),
                       "tool_calls": len(events), "tool_errors": outcomes["error"] + outcomes["unanswered"],
                       "reads": sum(1 for e in events if e["name"] in ("read_file", "grep", "glob", "bash")
                                    and e["outcome"] == "ok")})
-        if problem:
-            out.pad_reasons.append(problem)
-            break
         if len(turns) >= PAD_MIN_TURNS and sum(estimate_message_tokens(m) for m in messages) >= target:
             break
+    if not out.pad_reasons and len(turns) < PAD_MIN_TURNS:
+        out.pad_reasons.append("pad_too_few_turns")
     out.pad = {
         "version": PAD_VERSION,
         # the user turns are these real-pattern prompts, verbatim; every reply is this
@@ -3960,6 +4596,8 @@ async def _pad_turns(task: GenTask, settings: Settings, context: Any, out: TaskO
         "reads": sum(t["reads"] for t in turns), "repo_docs": sorted(task.setup_files),
         "pool": "reserved" if settings.pad_pool.get("reserved") else "shared",
         "answered_by": "teacher", "history_tokens": sum(estimate_message_tokens(m) for m in messages),
+        # turns that failed and were rolled back (never history): ids and reason codes
+        "skipped": list(out.pad_skipped),
     }
 
 
@@ -4089,6 +4727,9 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
         reasons.append("adapter_repair")
     if dropped:
         reasons.append("dropped_malformed")
+    if counts["empty_args"]:
+        record["empty_arg_calls"] = counts["empty_args"]
+        reasons.append("empty_tool_args")
     if feedback:
         reasons.append("orchestrator_feedback")
     if any(c.stop_reason in ("length", "max_tokens") for c in calls):
@@ -4111,15 +4752,29 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
     recovered: bool | None = None
     # Any task carrying an injection (a taskset row with inject_errors and
     # force_compaction is a compacted-history task) must see it fire: a flag
-    # the run never exercised was not honoured.
+    # the run never exercised was not honoured. A real-pattern task whose own
+    # turn made no tool call at all had nothing to fail (a conversational
+    # request the teacher rightly answered in prose): the injection did not
+    # apply, and the trace goes to the judge as a no-tool answer.
     if task.kind == "error-recovery" or task.inject:
         if not out.env.injections_fired:
-            reasons.append("injection_not_fired")
+            if not events and task.origin == ORIGIN_TASKSET:
+                record["injection"] = "not_applicable"
+            else:
+                reasons.append("injection_not_fired")
         elif task.expect_recovery:
-            first = next((k for k, ev in enumerate(events) if ev["outcome"] == "injected"), len(events))
-            recovered = any(ev["outcome"] in ("ok", "simulated") for ev in events[first + 1:])
-            if not recovered:
+            # in execution order (``ExecRecord.seq``): the loop runs a turn's read-only
+            # calls together before the others, so the call the injection hit is not
+            # always the first one in the message
+            inj = min((ev["seq"] for ev in events if ev["outcome"] == "injected" and ev["seq"] is not None),
+                      default=None)
+            later = [ev for ev in events if ev["seq"] is not None and inj is not None and ev["seq"] > inj]
+            recovered = any(ev["outcome"] in ("ok", "simulated") for ev in later)
+            if not later:
+                # "Try again" and the agent made no further call: it gave up
                 reasons.append("not_recovered")
+            # it did try again and those calls failed too: their own reasons (tool_error,
+            # sandbox_refusal) decide; otherwise the judge rules on how it reported it
         else:
             recovered = bool(text)
     record["recovered"] = recovered
@@ -4156,8 +4811,10 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
 
 
 JUDGE_SYSTEM = (
-    "You are a strict grader of an AI agent's work. You see the task, the transcript (tool calls "
-    "with their results) and the agent's final reply. Judge only what the transcript shows.\n\n"
+    "You are a strict grader of an AI agent's work. You see the context the agent had (its system "
+    "prompt, the tools this turn offered, a note on the sandbox it ran in), the task, the transcript "
+    "(tool calls with their results) and the agent's final reply. Judge only what the transcript and "
+    "that context show.\n\n"
     "Fail it if ANY of these hold:\n"
     "1. The task was not actually done, or, when it could not be done, the agent did not say so plainly.\n"
     "2. A tool call used the wrong tool, invalid or invented arguments, or a pointless order of steps.\n"
@@ -4167,11 +4824,48 @@ JUDGE_SYSTEM = (
     "5. After a tool failure the agent ignored it instead of retrying, working around it or reporting it.\n"
     "6. The reply contradicts earlier parts of the conversation, including compacted summaries.\n"
     "7. The reply is padded, evasive, or does not answer what was asked.\n"
-    "8. The agent changed something it was told not to change, or did more than was asked.\n\n"
+    "8. The agent changed something it was told not to change, or did more than was asked.\n"
+    "9. The reply claims or promises a tool run, a check or earlier work that this transcript does "
+    "not show (\"I checked\", \"I'll run that now\", \"as we found earlier\").\n\n"
+    "Not failures by themselves: answering in prose without tools when the turn offered none or the "
+    "request needed none; facts the system prompt states (the agent's name, the date, its working "
+    "directory) used as given; and, when what the task needs is not in the workspace or the "
+    "conversation (a file, a service, a referent such as \"it\" or \"that\"), saying so plainly "
+    "and asking for it, after a sensible look where tools were offered.\n\n"
+    "outcome: \"done\" = the request was carried out or answered; \"reported_blocked\" = it could "
+    "not be done here and the reply says so plainly (what is missing, what it needs); \"not_done\" = "
+    "neither.\n\n"
     "Answer with one JSON object and nothing else:\n"
-    '{"verdict": "pass" or "fail", "completed": true/false, "tools_ok": true/false, '
-    '"grounded": true/false, "recovery_ok": true/false/null, "reason": "<one sentence>"}'
+    '{"verdict": "pass" or "fail", "outcome": "done" or "reported_blocked" or "not_done", '
+    '"tools_ok": true/false, "grounded": true/false, "recovery_ok": true/false/null, '
+    '"reason": "<one sentence>"}'
 )
+JUDGE_OUTCOMES = ("done", "reported_blocked", "not_done")
+#: the judge's outcomes that may pass (with verdict pass and every other check)
+PASS_OUTCOMES = frozenset({"done", "reported_blocked"})
+#: what the judge is told about the gym (fixed text: the same for every task)
+JUDGE_SANDBOX_NOTE = (
+    "The agent ran in a training sandbox. Its workspace holds only this task's own files (it may be "
+    "empty). Tool results may be simulated or mocked: treat them as the real world. Facts stated in "
+    "the system prompt count as provided material.")
+JUDGE_SYSTEM_PROMPT_CHARS = 1500
+
+
+def _judge_context(out: TaskOutcome) -> str:
+    """What the agent was given, for the judge: the head of its system prompt and
+    its workspace line, the tools this turn offered, and the sandbox note."""
+    sp = out.system_prompt or ""
+    head = sp[:JUDGE_SYSTEM_PROMPT_CHARS].rstrip()
+    if len(sp) > JUDGE_SYSTEM_PROMPT_CHARS:
+        ws = sp.rfind("# Workspace")
+        head += "\n...[system prompt cut]..." + ("\n" + sp[ws:].strip() if ws > JUDGE_SYSTEM_PROMPT_CHARS else "")
+    if out.task.mode == "chat":
+        tools = ("NO TOOLS AVAILABLE (chat mode): this turn offered no tools, so the agent could only "
+                 "answer in prose.")
+    else:
+        tools = ", ".join(out.tools_offered) if out.tools_offered else "(not recorded)"
+    return (f"CONTEXT (what the agent was given):\nSYSTEM PROMPT:\n{head or '(none recorded)'}\n\n"
+            f"TOOLS OFFERED THIS TURN: {tools}\n\nSANDBOX: {JUDGE_SANDBOX_NOTE}")
 
 
 def judge_transcript(out: TaskOutcome, max_chars: int = 30000, result_chars: int = 1500) -> str:
@@ -4201,8 +4895,11 @@ def judge_transcript(out: TaskOutcome, max_chars: int = 30000, result_chars: int
         earlier = earlier[: budget // 2] + "\n...[earlier conversation cut]...\n" + earlier[-budget // 2:]
     if len(current) > max_chars:
         current = current[: max_chars // 3] + "\n...[cut]...\n" + current[-2 * max_chars // 3:]
-    parts = [f"TASK KIND: {out.task.kind}" + (" (the context window was compacted mid-session)"
-                                               if out.task.compaction else ""),
+    # the task's kind and category are how the gym filed it, not what was asked: a hint only
+    hint = f"{out.task.kind}, {out.task.domain}" + (
+        "; the context window was compacted mid-session" if out.task.compaction else "")
+    parts = [_judge_context(out),
+             f"TASK LABEL (how the gym filed this task; a hint only, judge the request as written): {hint}",
              f"TASK (the user's last request):\n{out.task.prompt[:4000]}"]
     if earlier:
         parts.append(f"EARLIER CONVERSATION:\n{earlier}")
@@ -4250,18 +4947,35 @@ def payg_judge_payload(transcript: str, settings: Settings) -> dict[str, Any]:
 
 
 async def judge(out: TaskOutcome, settings: Settings) -> dict[str, Any]:
-    """The judge's record. ``pass`` needs verdict pass AND completed,
-    tools_ok and grounded true AND recovery_ok not false."""
+    """The judge's record (``_verdict_record``)."""
     return await judge_text(judge_transcript(out, settings.judge_max_chars), settings)
 
 
+def judge_outcome(obj: dict[str, Any]) -> str | None:
+    """The judge's ``outcome`` (``JUDGE_OUTCOMES``). A reply in the old shape (a
+    ``completed`` flag, no outcome) reads ``completed: true`` as done and anything
+    else as not done: an old "pass" with ``completed: false`` never passes."""
+    got = obj.get("outcome")
+    if isinstance(got, str) and got.strip().lower() in JUDGE_OUTCOMES:
+        return got.strip().lower()
+    if got is None and "completed" in obj:
+        return "done" if obj.get("completed") is True else "not_done"
+    return None
+
+
 def _verdict_record(record: dict[str, Any], obj: dict[str, Any] | None) -> dict[str, Any]:
+    """``pass`` needs verdict pass, an outcome of done or reported_blocked (rubric
+    item 1 accepts a task that could not be done when the reply says so plainly),
+    tools_ok and grounded true and recovery_ok not false."""
     if obj is None:
         record.update({"verdict": "fail", "pass": False, "reason": "unparseable judge reply"})
         return record
-    ok = (obj.get("verdict") == "pass" and obj.get("completed") is True and obj.get("tools_ok") is True
+    outcome = judge_outcome(obj)
+    ok = (obj.get("verdict") == "pass" and outcome in PASS_OUTCOMES and obj.get("tools_ok") is True
           and obj.get("grounded") is True and obj.get("recovery_ok") is not False)
-    record.update({k: obj.get(k) for k in ("verdict", "completed", "tools_ok", "grounded", "recovery_ok")})
+    record.update({k: obj.get(k) for k in ("verdict", "tools_ok", "grounded", "recovery_ok")})
+    record["outcome"] = outcome
+    record["completed"] = outcome == "done"
     record["reason"] = str(obj.get("reason") or "")[:300]
     record["pass"] = ok
     return record
@@ -4331,6 +5045,14 @@ def _blocks(message: Any) -> str:
                        for b in getattr(message, "content", None) or []], sort_keys=True, default=str)
 
 
+def effective_kind(task: GenTask, verification: dict[str, Any]) -> str:
+    """The kind a task's rows count as: an error-recovery task whose injection did not
+    apply (its own turn made no tool call) is a plain agentic (or coding) task."""
+    if task.kind == "error-recovery" and verification.get("injection") == "not_applicable":
+        return "coding" if task.domain == "coding" else "agentic"
+    return task.kind
+
+
 def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any]) -> list[dict[str, Any]]:
     """Golden-trace rows, one per teacher call that taught something sound."""
     from prometheus.engine.messages import ToolResultBlock, ToolUseBlock
@@ -4339,6 +5061,11 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
 
     task = out.task
     events = {ev["id"]: ev for ev in tool_events(out)}
+    # Tools offered, none needed: a real-pattern agent task whose own turn made no
+    # tool call is still a target (the student learns to answer without a tool when
+    # one is not needed), without --emit-final-turns; the row keeps its tools.
+    no_tool_answer = task.mode != "chat" and task.origin == ORIGIN_TASKSET and not events
+    judged = verification.get("judge") or {}
     provider = out.provider
     rows: list[dict[str, Any]] = []
     ts = time.time()
@@ -4372,7 +5099,7 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
             if any(ev is None or ev["repaired"] or ev["outcome"] not in ("ok", "simulated", "injected")
                    for ev in evs):
                 continue
-        elif task.mode != "chat" and not settings.emit_final_turns:
+        elif task.mode != "chat" and not settings.emit_final_turns and not no_tool_answer:
             continue
         payload = provider._build_request_payload(call.request)
         wire = [dict(m) for m in payload["messages"]]
@@ -4392,13 +5119,18 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
             # never a train row: build.py's strict policy would drop it anyway.
             "source": source,
             "tool_name": uses[0].name if uses else None, "timestamp": ts,
-            "session_id": f"gym:{task.id}", "category": task.domain, "task_category": task.kind,
+            "session_id": f"gym:{task.id}", "category": task.domain,
+            "task_category": effective_kind(task, verification),
             "task_family": task.family, "task_id": task.id, "gen_task_id": task.id, "task_hash": task.task_hash,
             "run_id": out.run_id, "step": step,
             "suppress_tools": task.mode == "chat",
             "compacted": any(SUMMARY_MARKER in content_text(m.get("content")) for m in wire),
             "error_recovery": any(m.get("is_error") for m in wire[last_user + 1:]),
             "target_injected_failure": injected_target, "final_answer": not uses,
+            "no_tool_answer": no_tool_answer and not uses,
+            # the judge's outcome: done, or reported_blocked (it could not be done here and
+            # the reply said so); a cap keeps the second from swamping the rows (Store)
+            "judge_outcome": judged.get("outcome"),
             "target_rewritten": _blocks(reply) != _blocks(call.reply),
             "verdict": "pass", "verification": verification,
             # a Max teacher's row is Max-derived: build.py trains it only under its
@@ -4512,12 +5244,24 @@ class SettingsMismatch(ValueError):
     pass
 
 
+def row_classes(row: dict[str, Any]) -> list[str]:
+    """The ``CLASS_CAPS`` classes a trace row belongs to."""
+    meta = row.get("_meta") or {}
+    out = []
+    if meta.get("judge_outcome") == "reported_blocked":
+        out.append("reported_blocked")
+    if meta.get("no_tool_answer"):
+        out.append("no_tool_answer")
+    return out
+
+
 class Store:
     def __init__(self, out: Path, name: str, fingerprint: dict[str, Any], coding_cap: float,
-                 guard: EvalGuard | None = None) -> None:
+                 guard: EvalGuard | None = None, class_caps: dict[str, float] | None = None) -> None:
         self.out = Path(out)
         self.out.mkdir(parents=True, exist_ok=True)
         self.coding_cap = coding_cap
+        self.class_caps = dict(CLASS_CAPS if class_caps is None else class_caps)
         self.guard = guard
         self.traces = self.out / f"{name}.traces.jsonl"
         self.held = self.out / f"{name}.held.jsonl"
@@ -4567,9 +5311,11 @@ class Store:
         self.keys = {prompt_call_key(r) for r in kept_t + kept_h}
         self.rows_kind: collections.Counter = collections.Counter()
         self.rows_domain: collections.Counter = collections.Counter()
+        self.rows_class: collections.Counter = collections.Counter()
         for r in kept_t:
             self.rows_kind[r["_meta"]["task_category"]] += 1
             self.rows_domain[r["_meta"]["category"]] += 1
+            self.rows_class.update(row_classes(r))
         self.held_queue: list[tuple[str, list[dict[str, Any]]]] = []
         by_run: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
         for r in kept_h:
@@ -4603,6 +5349,17 @@ class Store:
         total = self.total_rows + n_total
         return coding <= self.coding_cap * total + 1e-9
 
+    def fits(self, rows: list[dict[str, Any]]) -> bool:
+        """*rows* (one task's) keep the coding share and every ``class_caps`` share."""
+        n_coding = sum(1 for r in rows if r["_meta"].get("category") == "coding")
+        if n_coding and not self.coding_fits(n_coding, len(rows)):
+            return False
+        total = self.total_rows + len(rows)
+        add: collections.Counter = collections.Counter()
+        for r in rows:
+            add.update(row_classes(r))
+        return all(self.rows_class[c] + n <= self.class_caps.get(c, 1.0) * total + 1e-9 for c, n in add.items())
+
     # -- writes ----------------------------------------------------------------------
 
     def _event(self, ev: dict[str, Any]) -> None:
@@ -4617,6 +5374,7 @@ class Store:
         for r in rows:
             self.rows_kind[r["_meta"]["task_category"]] += 1
             self.rows_domain[r["_meta"]["category"]] += 1
+            self.rows_class.update(row_classes(r))
             self.keys.add(prompt_call_key(r))
 
     def record_skip(self, task: GenTask, reasons: list[str]) -> None:
@@ -4660,8 +5418,7 @@ class Store:
         ev = {"task_id": task.id, "task_hash": task.task_hash, "kind": task.kind, "domain": task.domain,
               "family": task.family, "run_id": run_id, "reasons": reasons, "rows": len(rows), **(extra or {})}
         if status == "kept":
-            n_coding = len(rows) if task.domain == "coding" else 0
-            if n_coding and not self.coding_fits(n_coding, len(rows)):
+            if not self.fits(rows):
                 _append(self.held, rows)
                 self.held_queue.append((run_id, rows))
                 self.keys.update(prompt_call_key(r) for r in rows)
@@ -4679,13 +5436,14 @@ class Store:
         released = 0
         while self.held_queue:
             run_id, rows = self.held_queue[0]
-            if not self.coding_fits(len(rows), len(rows)):
+            if not self.fits(rows):
                 break
             self.held_queue.pop(0)
             _append(self.traces, rows)
             for r in rows:
                 self.rows_kind[r["_meta"]["task_category"]] += 1
                 self.rows_domain[r["_meta"]["category"]] += 1
+                self.rows_class.update(row_classes(r))
             task_id = rows[0]["_meta"].get("gen_task_id") or rows[0]["_meta"]["task_id"]
             self._event({"task_id": task_id, "status": "released", "run_id": run_id})
             remaining = [r for _rid, rs in self.held_queue for r in rs]
@@ -4729,7 +5487,8 @@ class Store:
             "model": settings.model_name, "judge": settings.judge_kind, "judge_seed": settings.judge_seed,
             "teacher_served": settings.teacher_served, "jail": resolve_jail(settings.jail),
             "teacher": settings.teacher, "judge_provider": settings.judge_provider,
-            "pad_pool": settings.pad_pool or None, **payg_report(settings),
+            "pad_pool": settings.pad_pool or None, "repo_fixture": settings.repo_fixture_info or None,
+            **payg_report(settings),
             "rows_total": total, "rows_held": sum(len(rs) for _r, rs in self.held_queue),
             # verified only under a relaxation; source RELAXED_SOURCE, never train rows
             "rows_relaxed": self.rows_relaxed,
@@ -4739,6 +5498,9 @@ class Store:
                             for d in DOMAINS},
             "coding_share": round(self.rows_domain["coding"] / total, 3) if total else 0.0,
             "coding_cap": self.coding_cap,
+            "by_class": {c: {"rows": self.rows_class[c], "cap": cap,
+                             "share": round(self.rows_class[c] / total, 3) if total else 0.0}
+                         for c, cap in sorted(self.class_caps.items())},
             "judge_calls": judge_n, "judge_pass_rate": round(judge_pass / judge_n, 3) if judge_n else None,
             "rejection_reasons": dict(reasons.most_common()),
             "row_filters": dict(self.stats), "resume_repairs": dict(self.repairs),
@@ -5243,6 +6005,9 @@ async def process(task: GenTask, settings: Settings, worker: int) -> tuple[str, 
             return "rejected", [], list(out.pad_reasons), dict(extra, compaction_pad=out.pad)
         ok, reasons, record = deterministic_checks(out, settings)
         extra["verification"] = record
+        kind = effective_kind(task, record)
+        if kind != task.kind:
+            extra.update(kind=kind, planned_kind=task.kind)
         if not ok:
             return "rejected", [], reasons, extra
         import httpx
@@ -5540,7 +6305,8 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
         sandbox_root=Path(a.sandbox_root).expanduser(), base_system_prompt=pack_prompt,
         date_sentinel=date_sentinel,
         repo=Path(a.repo).expanduser(), max_consecutive_errors=a.max_consecutive_errors,
-        progress=not a.quiet, jail=a.jail, judge_id=a.judge_id, **teacher)
+        progress=not a.quiet, jail=a.jail, judge_id=a.judge_id,
+        repo_fixture=a.repo_fixture if a.tasks else "off", repo_fixture_ref=a.repo_fixture_ref, **teacher)
 
 
 #: Exit codes (module docstring).
@@ -5754,6 +6520,16 @@ def cmd_run(a: argparse.Namespace, *, payg_opener: Any = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_UNREACHABLE
     try:
+        info = prepare_repo_store(settings)
+    except (RepoFixtureError, OSError) as exc:
+        print(f"error: --repo-fixture: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    if info:
+        log.info("repo fixture: %s at %s (last %d commits)", info["ref"], info["commit"][:12], info["depth"])
+    if a.tasks and not settings.base_system_prompt:
+        log.warning("no --pack: the teacher gets the built-in system prompt, not the runtime one; "
+                    "real-pattern rows should be generated with --pack")
+    try:
         # the fingerprint holds the teacher's id: one output never mixes two teachers
         store = Store(settings.out, settings.name, settings.fingerprint(), settings.coding_cap, guard)
     except SettingsMismatch as exc:
@@ -5889,6 +6665,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     r.add_argument("--max-natural-errors", type=int, default=0, help="tolerate this many tool errors; " + relaxed)
     r.add_argument("--keep-refused", action="store_true", help="tolerate sandbox refusals; " + relaxed)
     r.add_argument("--sandbox-root", default=str(DEFAULT_SANDBOX_ROOT))
+    r.add_argument("--repo-fixture", choices=REPO_FIXTURE_MODES, default="auto",
+                   help="--tasks runs: give every agent task a clone of --repo at --repo-fixture-ref "
+                        f"(committed files, its last {REPO_FIXTURE_DEPTH} commits, no remote) at "
+                        f"<workspace>/{REPO_FIXTURE_DIR}; auto: when --repo is a checkout and the ref resolves")
+    r.add_argument("--repo-fixture-ref", default="origin/main",
+                   help="the ref the repo fixture is built from: a remote-tracking ref or a tag (only "
+                        "published history belongs in training rows)")
     r.add_argument("--max-consecutive-errors", type=int, default=5)
     r.add_argument("--jail", choices=JAIL_MODES, default="auto",
                    help="OS jail for shell commands (bwrap / sandbox-exec): auto uses one when it works, "

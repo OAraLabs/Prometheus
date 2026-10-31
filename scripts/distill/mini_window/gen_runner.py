@@ -1440,7 +1440,8 @@ def cmd_status(g: Gen) -> int:
 
 
 def cmd_stage_code(args: argparse.Namespace) -> int:
-    """(repo machine) ``git archive HEAD`` of src/, scripts/distill/, docs/, README.md and pyproject.toml into
+    """(repo machine) ``git archive HEAD`` of src/, scripts/distill/, docs/, config/model_registry.yaml (without it a
+    cloud model falls back to the local adapter tier), README.md and pyproject.toml into
     ``--dest`` on the host (via ``<dest>.incoming``; the previous copy kept as ``<dest>.prev``), plus COMMIT."""
     repo = HERE.parents[2]
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True,
@@ -1453,7 +1454,7 @@ def cmd_stage_code(args: argparse.Namespace) -> int:
               f"if [ -e ~/{dest} ]; then mv ~/{dest} ~/{dest}.prev; fi; mv ~/{dest}.incoming ~/{dest}; "
               f"echo staged $(cat ~/{dest}/COMMIT) in ~/{dest}")
     archive = ["git", "-C", str(repo), "archive", "--format=tar", "HEAD", "src", "scripts/distill", "docs",
-               "README.md", "pyproject.toml"]
+               "config/model_registry.yaml", "README.md", "pyproject.toml"]
     ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", args.ssh, remote]
     if dirty:
         print("note: uncommitted changes under src/ or scripts/distill/ are NOT staged (HEAD only)")

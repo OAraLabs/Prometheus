@@ -103,7 +103,12 @@ Mining
    names, and a home-directory path anywhere (quoted code, ``host:`` or
    ``file://`` forms included) that is not a refillable path slot
    (``home_path_literal``). A template with personal data is dropped, never
-   filled.
+   filled. Also dropped: acceptance-harness probes (``harness_probe``: "reply
+   with exactly", "do not use any tools", "run exactly", letter-counting
+   riddles) and, unless ``--keep-context-dependent``, prompts that only make
+   sense mid-conversation (``context_dependent``: "go", "merge both", "that
+   order is good", "try again after I remounted", bare item numbers): the gym
+   sends each prompt alone into an empty sandbox.
 2. Extract typed slots (non-overlapping, by priority): url, quoted span (typed
    by content: path/file/url/tool/job/topic; code-like quotes are protected
    literal text), path, file, ISO date, month-name date, cron expression,
@@ -138,8 +143,10 @@ Variants (seeded; ``--per-pattern`` per pattern, ``--max-uses`` per real prompt)
 * ``slot_fill``: every slot redrawn (inventory or generator).
 * ``slot_swap``: one content slot redrawn, the rest keep their real values.
 * ``recombine``: the template's leading sentences followed by another real
-  template's trailing sentences, both of the same intent (same subcategory
-  preferred); content slots redrawn with p=0.5, numbers always.
+  template's trailing sentences, both of the same intent and subcategory and
+  equally chat-eligible (``--recombine-any-subcategory``: same intent only,
+  same subcategory preferred); content slots redrawn with p=0.5, numbers
+  always. ``--max-recombine-share`` caps their share of the output.
 
 A candidate is kept only if it is new against every real prompt read
 (normalized text: a variant ``build.py`` would file under a real task is
@@ -158,9 +165,13 @@ Modes, categories, flags
   ``coding``, research/general -> ``other``. ``subcategory`` keeps the detail.
 * Agentic ``coding`` tasks are capped at ``--coding-cap`` of the output
   (round-robin over patterns, so the cap keeps coverage).
-* ``flags.inject_errors`` on exactly ``--error-share`` of agentic tasks and
-  ``flags.force_compaction`` on exactly ``--compaction-share`` of all tasks,
-  chosen by seeded hash rank.
+* ``flags.inject_errors`` on ``--error-share`` of agentic tasks, drawn only
+  from rows that will call a tool: every source prompt's real turn called one
+  (a golden trace's tool call, or a tool_use row after it in the snapshot),
+  the intent is an action (``TOOL_INTENTS``) and recombined parts agree on chat
+  eligibility (the report counts the eligible rows and any shortfall);
+  ``flags.force_compaction`` on exactly ``--compaction-share`` of all tasks;
+  both chosen by seeded hash rank.
 
 Output: ``<out>/<name>.jsonl`` (mode 0600; one task per line, round-robin
 over patterns so any prefix covers as many patterns as possible)::
@@ -257,7 +268,7 @@ BES = _load_sibling("distill_build_eval_sets", "build_eval_sets.py")
 TASKSET_SCHEMA = "distill-taskset/1"
 REPORT_SCHEMA = "distill-taskset-report/1"
 PROVENANCE = "real-pattern-v1"
-GENERATOR_VERSION = "1"
+GENERATOR_VERSION = "2"
 DEFAULT_SEED = 20261031
 DEFAULT_OUT = "~/distill/phase2b/tasksets"
 DEFAULT_TRACES = "~/.prometheus/trajectories/golden_traces_*.jsonl"
@@ -285,6 +296,8 @@ TRANSFORMS = ("slot_fill", "slot_swap", "recombine")
 INTENTS = ("summarize", "remember", "schedule", "plan", "explain", "research", "fix", "run",
            "create", "edit", "find", "check", "question", "request")
 CHAT_INTENTS = frozenset({"explain", "summarize", "plan", "question"})
+#: intents that ask for an action: the only rows an injected tool failure goes on
+TOOL_INTENTS = frozenset({"run", "fix", "edit", "find", "check", "create"})
 FROM_VALUES = ("repo", "repo-docs", "wiki", "registry", "jobs", "cron", "git", "generated",
                "original")
 
@@ -526,6 +539,44 @@ _MODEL_WRITTEN = re.compile(
     r" the (?:user|owner)\b")
 
 
+#: acceptance-harness probes, not something a person asks: an exact-reply instruction,
+#: a no-tools instruction, a "run exactly" command check, a letter-counting riddle
+_HARNESS_PROBE = re.compile(
+    r"(?i)\b(?:reply|respond|answer|output|say|print)\s+(?:with\s+)?exactly\b"
+    r"|\b(?:do not|don'?t|without)\s+(?:us(?:e|ing)|call(?:ing)?)\s+(?:any\s+)?tools?\b"
+    r"|\brun\s+exactly\b"
+    r"|\bhow many\s+(?:times\s+(?:does|do)\s+)?(?:the\s+)?(?:letters?\s+)?['\"]?[a-z]['\"]?(?:'?s)?\s+"
+    r"(?:are\s+(?:there\s+)?|appear\s+)?in\b")
+#: a continuation of an earlier exchange: its referents ("it", "that order", "both",
+#: item numbers, "try again") live in a conversation the gym does not have
+_CONTINUATION_ONLY = re.compile(
+    r"(?i)^\s*(?:(?:ok(?:ay)?|yes|yeah|yep|sure|great|perfect|cool|nice|good|alright|right|"
+    r"thanks|thank you|sounds good|looks good|lgtm)[\s,.!-]*)*"
+    r"(?:go(?: ahead| for it| on)?|keep going|continue|proceed|carry on|do it|do that|do both|ship it|"
+    r"try again|retry|again|same(?: thing)?|next|both|all of them|the (?:first|second|third|last) one|"
+    r"option \d+|\d+(?:\s*(?:,|and|&)\s*\d+)*)[\s.!]*$")
+_DEICTIC = re.compile(
+    r"(?i)\b(?:that order|the above|as (?:we )?discussed|as before|like before|like you said|"
+    r"you just (?:said|did|wrote|made|ran|suggested)|your (?:last|previous) (?:message|reply|answer|response)|"
+    r"(?:earlier|before) you (?:said|suggested|proposed|mentioned)|what you (?:said|suggested|proposed)|"
+    r"(?:merge|apply|do|run|use|take|keep|push) (?:both|them all|all of them|those|these)|"
+    r"(?:try|run it|do it) again|(?:items?|options?|points?|steps?) \d+(?:\s*(?:,|and|&)\s*\d+)*|"
+    r"after I (?:re)?(?:mounted|started|restarted|fixed|changed|pushed|installed|rebooted|merged))\b")
+_PRONOUN_OPENER = re.compile(
+    r"(?i)^\s*(?:(?:ok(?:ay)?|yes|yeah|so|and|but|now|then|great|perfect)[\s,]+)*"
+    r"(?:(?:it|that|this|they)(?:\s+(?:still|didn'?t|doesn'?t|won'?t|worked|failed|broke)"
+    r"|'s\s+(?:still|not|broken|wrong|working|fixed|done))\b"
+    r"|(?:fix|run|merge|check|try|use|apply|push|do|redo|undo|revert|send|ship|keep|drop)\s+"
+    r"(?:it|that|this|those|these|them|both)\b)")
+
+
+def context_dependent(text: str) -> bool:
+    """A real prompt that only makes sense after an earlier exchange (a bare "go",
+    "that order is good", "merge both", "try again after I remounted", item
+    numbers). Sent alone into an empty sandbox it asks for what is not there."""
+    return bool(_CONTINUATION_ONLY.match(text) or _DEICTIC.search(text) or _PRONOUN_OPENER.match(text))
+
+
 def prompt_problem(text: str, s: "Settings") -> str | None:
     """Why a real prompt cannot be a template (None: it can)."""
     if len(text) < s.min_chars or len(text.split()) < s.min_words:
@@ -546,6 +597,10 @@ def prompt_problem(text: str, s: "Settings") -> str | None:
         return "code_or_log_paste"
     if _OTHER_ASSISTANT.search(text):
         return "names_other_assistant"
+    if _HARNESS_PROBE.search(text):
+        return "harness_probe"
+    if s.drop_context_dependent and context_dependent(text):
+        return "context_dependent"
     return None
 
 
@@ -1359,6 +1414,9 @@ class RealPrompt:
     n_traces: int = 0
     categories: collections.Counter = field(default_factory=collections.Counter)
     in_lcm: bool = False
+    #: the agent made a tool call answering this prompt (a golden trace's turn, or the
+    #: snapshot's assistant rows after it): evidence the request needs tools
+    tool_use: bool = False
 
     @property
     def index_category(self) -> str | None:
@@ -1382,6 +1440,7 @@ class Template:
     n_traces: int
     token_set: frozenset[str]
     members: int = 1
+    tool_use: bool = False
 
     @property
     def varying(self) -> list[int]:
@@ -1438,6 +1497,10 @@ def load_golden(paths: list[Path], index: dict[tuple[str, int], dict[str, Any]],
                 if rp is None:
                     rp = out[ph] = RealPrompt(prompt.strip(), ph, "golden")
                 rp.n_traces += 1
+                last_user = max(k for k, m in enumerate(msgs[:-1]) if m.get("role") == "user")
+                if any((m.get("role") == "assistant" and m.get("tool_calls")) or m.get("role") == "tool"
+                       for m in msgs[last_user + 1:]):
+                    rp.tool_use = True
                 cat = (idx or {}).get("category")
                 if cat:
                     rp.categories[str(cat)] += 1
@@ -1457,9 +1520,12 @@ def load_lcm(path: Path, surfaces: tuple[str, ...], stats: collections.Counter,
         prov = "provenance" if "provenance" in cols else "'user'"
         trusted = "is_trusted" if "is_trusted" in cols else "1"
         rows = con.execute(
-            f"SELECT session_id, content, content_json, {prov}, {trusted} FROM lcm_messages"
-            " WHERE role = 'user' ORDER BY session_id, turn_index, rowid")
+            f"SELECT session_id, content, content_json, {prov}, {trusted}, role FROM lcm_messages"
+            " WHERE role IN ('user', 'assistant') ORDER BY session_id, turn_index, rowid")
         out: dict[str, RealPrompt] = {}
+        # the session and task proxy of the last user-typed prompt: an assistant row after
+        # it that calls a tool is evidence the prompt needed one
+        last: tuple[Any, str | None] = (None, None)
 
         def collect(content: str | None, blocks: Any) -> None:
             if injected is not None:
@@ -1468,15 +1534,21 @@ def load_lcm(path: Path, surfaces: tuple[str, ...], stats: collections.Counter,
                     texts.append(content_text(blocks))
                 injected.update(h(norm(t)) for t in texts if t.strip())
 
-        for sid, content, cj, provenance, is_trusted in rows:
-            stats["lcm_user_rows"] += 1
+        for sid, content, cj, provenance, is_trusted, role in rows:
             try:
                 blocks = json.loads(cj) if cj else None
             except ValueError:
                 blocks = None
+            if role == "assistant":
+                if last[0] == sid and last[1] in out and isinstance(blocks, list) and any(
+                        isinstance(b, dict) and b.get("type") == "tool_use" for b in blocks):
+                    out[last[1]].tool_use = True  # type: ignore[index]
+                continue
+            stats["lcm_user_rows"] += 1
             if provenance != "user":
                 stats["lcm_not_user_provenance"] += 1
                 collect(content, blocks)
+                last = (sid, None)
                 continue
             if cj:
                 types = {b.get("type") for b in blocks if isinstance(b, dict)} if isinstance(blocks, list) else set()
@@ -1486,9 +1558,11 @@ def load_lcm(path: Path, surfaces: tuple[str, ...], stats: collections.Counter,
             if not is_trusted:  # a text turn marked untrusted: not the owner typing
                 stats["lcm_untrusted_user_rows"] += 1
                 collect(content, blocks)
+                last = (sid, None)
                 continue
             if not str(sid or "").startswith(surfaces):
                 stats["lcm_not_human_surface"] += 1
+                last = (sid, None)
                 continue
             text = (content or "").strip()
             if not text:
@@ -1496,6 +1570,7 @@ def load_lcm(path: Path, surfaces: tuple[str, ...], stats: collections.Counter,
             ph = h(norm(text))
             if ph not in out:
                 out[ph] = RealPrompt(text, ph, "lcm", in_lcm=True)
+            last = (sid, ph)
         return out
     finally:
         con.close()
@@ -1740,8 +1815,16 @@ class Settings:
     attempts_per_variant: int = 6
     surfaces: tuple[str, ...] = HUMAN_SURFACES
     base_date: str = "2026-11-01"
+    #: drop real prompts that only make sense mid-conversation (``context_dependent``)
+    drop_context_dependent: bool = True
+    #: recombine only two prompts of the same subcategory whose chat eligibility agrees
+    recombine_same_subcategory: bool = True
+    #: at most this share of the output is ``recombine`` (None: no cap)
+    max_recombine_share: float | None = None
 
     def check(self) -> None:
+        if self.max_recombine_share is not None and not 0.0 <= self.max_recombine_share < 1.0:
+            raise TasksetError(f"max_recombine_share must be in [0, 1) (got {self.max_recombine_share})")
         for name in ("coding_cap", "chat_share", "error_share", "compaction_share", "source_merge",
                      "variant_dup", "holdout_containment"):
             v = getattr(self, name)
@@ -1869,7 +1952,7 @@ class Generator:
         return Template(id="tpl-" + h(rp.text), pattern_hash=rp.pattern_hash, origin=rp.origin,
                         text=rp.text, slots=tuple(slots), sentences=tuple(sents), intent=intent,
                         subcategory=sub, chat_ok=chat_ok, n_traces=rp.n_traces,
-                        token_set=frozenset(tokens(rp.text)))
+                        token_set=frozenset(tokens(rp.text)), tool_use=rp.tool_use)
 
     def merge_near_duplicates(self, tpls: list[Template]) -> list[Template]:
         """One template per group of near-identical real prompts (word-set
@@ -1893,6 +1976,7 @@ class Generator:
                     break
             if dup is not None:
                 reps[dup].members += 1
+                reps[dup].tool_use |= t.tool_use
                 self.stats["near_duplicate_prompts_merged"] += 1
                 continue
             for tok in t.token_set:
@@ -1939,7 +2023,13 @@ class Generator:
         same = self._by_intent.get(tpl.intent, [])
         others = [t for t in same if t.id != tpl.id and self._uses[t.id] < self.s.max_uses
                   and frozenset((tpl.id, t.id)) not in self._pairs]
-        return [t for t in others if t.subcategory == tpl.subcategory], others
+        near = [t for t in others if t.subcategory == tpl.subcategory]
+        if self.s.recombine_same_subcategory:
+            # one coherent request: the same intent and subcategory, and both halves
+            # equally answerable without tools (or not)
+            near = [t for t in near if t.chat_ok == tpl.chat_ok]
+            return near, near
+        return near, others
 
     def candidate(self, tpl: Template, rng: random.Random) -> Candidate | None:
         opts: list[tuple[str, float]] = []
@@ -2055,6 +2145,7 @@ class Generator:
         self._dup_sizes: list[int] = []
         self._uses: collections.Counter = collections.Counter()
         self._pairs: set[frozenset[str]] = set()
+        self._inject_ok: dict[str, bool] = {}
         order = sorted(self.templates, key=lambda t: rank(self.s.seed, "pattern", t.pattern_hash))
         by_pattern: dict[str, list[Candidate]] = {}
         for tpl in order:
@@ -2128,12 +2219,23 @@ class Generator:
                 picked.pop(last)
                 coding -= 1
                 self.stats["coding_cap_dropped"] += 1
+        share = self.s.max_recombine_share
+        if share is not None:
+            recomb = [i for i, r in enumerate(picked) if r["transform"] == "recombine"]
+            limit = math.floor(share * (len(picked) - len(recomb)) / (1 - share) + 1e-9)
+            drop = set(recomb[limit:]) if len(recomb) > limit else set()
+            self.stats["recombine_cap_dropped"] += len(drop)
+            picked = [r for i, r in enumerate(picked) if i not in drop]
         self.assign_flags(picked)
         return picked
 
     def row(self, c: Candidate, name: str) -> dict[str, Any]:
         primary = c.parts[0][0]
         rid = "ts-" + h(norm(c.prompt))
+        # an injected tool failure needs a task that calls a tool: evidence the real
+        # request did (its own turn called one), an action intent, every part agreeing
+        self._inject_ok[rid] = (all(t.tool_use for t, _, _ in c.parts) and primary.intent in TOOL_INTENTS
+                                and len({t.chat_ok for t, _, _ in c.parts}) == 1)
         # every part must be chat-eligible (a chat intent, no path/file/url, no live state)
         chat_ok = all(t.chat_ok for t, _, _ in c.parts)
         mode = "chat" if chat_ok and rank(self.s.seed, "chat", rid) < self.s.chat_share else "agentic"
@@ -2161,13 +2263,19 @@ class Generator:
         }
 
     def assign_flags(self, rows: list[dict[str, Any]]) -> None:
-        def take(eligible: list[dict[str, Any]], share: float, key: str) -> None:
+        def take(eligible: list[dict[str, Any]], n: int, key: str) -> None:
             ranked = sorted(eligible, key=lambda r: rank(self.s.seed, key, r["id"]))
-            for r in ranked[:round(share * len(eligible))]:
+            for r in ranked[:n]:
                 r["flags"][key] = True
 
-        take([r for r in rows if r["mode"] == "agentic"], self.s.error_share, "inject_errors")
-        take(rows, self.s.compaction_share, "force_compaction")
+        # --error-share of the agentic rows, drawn only from rows that will call a tool
+        agentic = [r for r in rows if r["mode"] == "agentic"]
+        want = round(self.s.error_share * len(agentic))
+        eligible = [r for r in agentic if self._inject_ok.get(r["id"])]
+        self.stats["inject_errors_eligible"] = len(eligible)
+        self.stats["inject_errors_shortfall"] = max(0, want - len(eligible))
+        take(eligible, min(want, len(eligible)), "inject_errors")
+        take(rows, round(self.s.compaction_share * len(rows)), "force_compaction")
 
 
 # ---------------------------------------------------------------------------
@@ -2399,6 +2507,7 @@ def build_report(gen: Generator, rows: list[dict[str, Any]], *, name: str, input
             "patterns_with_content_slots": sum(1 for t in gen.templates if t.varying),
             "patterns_multi_sentence": sum(1 for t in gen.templates if len(t.sentences) > 1),
             "patterns_chat_eligible": sum(1 for t in gen.templates if t.chat_ok),
+            "patterns_with_tool_use": sum(1 for t in gen.templates if t.tool_use),
             "slot_types": dict(sorted(slot_types.items())),
             "intents": dict(sorted(c(t.intent for t in gen.templates).items())),
             "subcategories": dict(sorted(c(t.subcategory for t in gen.templates).items())),
@@ -2409,6 +2518,9 @@ def build_report(gen: Generator, rows: list[dict[str, Any]], *, name: str, input
             "patterns_without_variants": gen.stats["patterns_without_variants"],
             "coding_cap_dropped": gen.stats["coding_cap_dropped"],
             "max_total_dropped": gen.stats["max_total_dropped"],
+            "recombine_cap_dropped": gen.stats["recombine_cap_dropped"],
+            "inject_errors_eligible": gen.stats["inject_errors_eligible"],
+            "inject_errors_shortfall": gen.stats["inject_errors_shortfall"],
         },
         "output": out_rows,
         "diversity": {
@@ -2603,7 +2715,9 @@ def run_build(a: argparse.Namespace) -> dict[str, Any]:
                  error_share=a.error_share, compaction_share=a.compaction_share, max_total=a.max_total,
                  max_prompt_chars=a.max_prompt_chars, holdout_containment=a.holdout_containment,
                  surfaces=tuple(x.strip() for x in a.surfaces.split(",") if x.strip()),
-                 base_date=a.base_date)
+                 base_date=a.base_date, drop_context_dependent=not a.keep_context_dependent,
+                 recombine_same_subcategory=not a.recombine_any_subcategory,
+                 max_recombine_share=a.max_recombine_share)
     s.check()
     out = _expand(a.out)
     assert out is not None
@@ -2658,6 +2772,7 @@ def run_build(a: argparse.Namespace) -> dict[str, Any]:
     for ph, rp in lcm.items():
         if ph in prompts:
             prompts[ph].in_lcm = True
+            prompts[ph].tool_use |= rp.tool_use
         else:
             prompts[ph] = rp
     if a.exclude_sessions:
@@ -2733,6 +2848,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     b.add_argument("--holdout-containment", type=float, default=Settings.holdout_containment)
     b.add_argument("--surfaces", default=",".join(HUMAN_SURFACES))
     b.add_argument("--base-date", default=Settings.base_date)
+    b.add_argument("--keep-context-dependent", action="store_true",
+                   help="keep real prompts that continue an earlier exchange (\"go\", \"merge both\", item numbers)")
+    b.add_argument("--recombine-any-subcategory", action="store_true",
+                   help="recombine prompts of the same intent across subcategories (the old behaviour)")
+    b.add_argument("--max-recombine-share", type=float, default=None,
+                   help="at most this share of the output is recombined (default: no cap)")
     b.add_argument("--dry-run", action="store_true", help="write the report only")
     b.add_argument("--exclude-sessions", metavar="FILE",
                    help="session ids, one per line: no prompt of a listed session sources a task")
