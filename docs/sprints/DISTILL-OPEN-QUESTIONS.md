@@ -92,3 +92,9 @@ none holds teacher data.
   - Calls are logged in `spend-ledger.csv` tagged `token-plan`. Max is the primary teacher; the local 27B fills gaps.
   - Kept as standing safety: the daemon's background jobs never use this key. If `QWEN_PAYG_KEY` appears, batch work moves to it. On "quota exhausted" the tools pause until the reset and notify once, instead of retrying blindly.
 11. **No sandbox jail on the 4090.** bwrap fails there because Ubuntu's AppArmor restricts unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns`). Enabling it needs sudo, for example an AppArmor profile for bwrap or that sysctl. Without it, gym/teacher tasks would run their tool commands unjailed on the business host, so the 4090 runs no gym tasks: GPU work there is baselines, training and quantization only. Teacher generation and the teacher A/B run on the 3090 Ti, where the jail works. Operator option: allow bwrap on the 4090, which would let it generate at full speed at night.
+12. **Teacher A/B arm B (Q4_K_M) can't run on the 3090 Ti while Ollama stays loaded.** With Ollama, speech and STT resident, Q4 fits only at `-ngl 43`, about 7.8 tok/s, under the 15 tok/s voice-probe floor. Q9 allows stopping Ollama only after Q4 has won the A/B. Tonight (Sun 01:00) runs arm A (IQ3) only and never swaps port 8092.
+    - Options:
+      - (a) Allow an Ollama stop in a nightly window for the A/B only.
+      - (b) Waive the probe floor for the A/B.
+      - (c) Run arm B on the 4090 in its nightly window: the 4090 serves the teacher on its tailnet address and the sandboxed gym stays on the 3090 Ti host, so no tool commands run on the 4090.
+    - **Default if unanswered: (c).** It needs no new approval: the 4090 night is approved, and its own Q4_K_M is the same model at full offload. It also reuses the planned cross-host generation path.
