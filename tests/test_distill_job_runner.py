@@ -1020,6 +1020,57 @@ def test_dry_run_shows_the_smoke_first_and_ab_off(box: Box) -> None:
 
 
 # ---------------------------------------------------------------------------
+# the full QLoRA run step (train-full)
+# ---------------------------------------------------------------------------
+
+
+def _train_inputs(box: Box, **env: str) -> None:
+    _smoke_inputs(box)
+    data = box.d / "phase3" / "build-v4-max-derived"
+    data.mkdir(parents=True)
+    (data / "train.jsonl").write_text('{"id": "r1"}\n{"id": "r2"}\n')
+    (data / "val.jsonl").write_text('{"id": "v1"}\n')
+    box.env.pop("DJR_SMOKE")
+    box.env.update({"DJR_TRAIN": "1", "DJR_TRAIN_MAX_DERIVED_OK": "1", "DJR_TRAIN_MIN_MIN": "0.01",
+                    "DJR_TRAIN_GRACE_S": "5", "DJR_TRAIN_MIN_FREE_GIB": "0", "DJR_ONLY": "train-full", **env})
+
+
+def test_train_full_runs_the_trainer_with_the_full_run_settings(box: Box) -> None:
+    stop_at = datetime.fromtimestamp(time.time() + 90).astimezone().isoformat(timespec="seconds")
+    _train_inputs(box, DJR_TRAIN_STOP_AT=stop_at)
+    cp = box.run(stop_in=120)
+    assert cp.returncode == 0, cp.stdout[-3000:]
+    st = box.step("train-full")
+    assert st["status"] == "done" and "val 1.6400 -> 1.2000" in st["detail"], st
+    (call,) = _smoke_calls(box)
+    argv = call["argv"]
+    assert "--smoke" not in argv and "--resume" not in argv and call["HF_HUB_OFFLINE"] == "1"
+    for flag, want in (("--epochs", "2"), ("--max-seq", "16384"), ("--grad-accum", "8"),
+                       ("--save-every", "200"), ("--save-every-minutes", "60"), ("--keep-checkpoints", "2"),
+                       ("--min-free-gib", "0"), ("--base-revision", BASE_REV)):
+        assert _opt(argv, flag) == want, flag
+    assert _opt(argv, "--stop-at") == stop_at                      # DJR_TRAIN_STOP_AT: before the deadline
+    assert _opt(argv, "--data").endswith("/phase3/build-v4-max-derived/train.jsonl")
+    assert _opt(argv, "--out") == str(box.d / "phase5" / "runs" / "9b-r32-v4-max-derived")
+    assert "--i-have-operator-approval-for-max-derived-data" in argv
+    assert any(u.startswith("distill-train-full-") for u in box.log("scopes.log"))
+    summary = subprocess.run([str(RUNNER_SH), "--summary"], env=box.env, capture_output=True, text=True)
+    assert "9B train done" in summary.stdout
+
+
+def test_train_full_stopped_is_partial_and_resumes(box: Box) -> None:
+    _train_inputs(box, FAKE_SMOKE_MODE="until", DJR_TRAIN_STOP_AT=datetime.fromtimestamp(
+        time.time() + 3).astimezone().isoformat(timespec="seconds"))
+    assert box.run(stop_in=120).returncode == 0
+    st = box.step("train-full")
+    assert st["status"] == "partial" and "resumes next window" in st["detail"], st
+    box.env.update(FAKE_SMOKE_MODE="pass", DJR_TRAIN_STOP_AT="")
+    assert box.run(stop_in=120).returncode == 0
+    calls = _smoke_calls(box)
+    assert len(calls) == 2 and "--resume" in calls[1]["argv"] and box.step("train-full")["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
 # continuous window (DJR_WINDOW_UNTIL) and DJR_ONLY
 # ---------------------------------------------------------------------------
 

@@ -34,6 +34,28 @@ Queue, in order, one step at a time, each in its own resumable directory under
    fails the step. Its inputs missing: skipped, never a reason to refuse the
    window. Only the training half of the smoke gate: the smoke adapter's eval
    (merge, quantize, score) is a later step.
+01. ``train-full`` (only with ``DJR_TRAIN=1``; after the smoke): the Phase 5 full
+   QLoRA run of the 9B (``train_qlora.py``, no ``--smoke``) from the HEAD-staged
+   ``DJR_TRAIN_CODE`` on ``DJR_TRAIN_DATA`` (+ ``DJR_TRAIN_VAL``), base
+   ``DJR_TRAIN_BASE`` (revision as for the smoke), into ``DJR_TRAIN_OUT`` (the
+   name must carry ``max-derived`` for Max-derived data; Q6b, with
+   ``DJR_TRAIN_MAX_DERIVED_OK=1`` for the operator flag). Settings:
+   ``DJR_TRAIN_EPOCHS``/``_MAX_SEQ``/``_GRAD_ACCUM``/``_SAVE_EVERY`` (steps) /
+   ``_SAVE_EVERY_MIN`` (minutes, whichever first) / ``_KEEP`` (checkpoints kept)
+   and ``DJR_TRAIN_MIN_FREE_GIB`` (the trainer checkpoints and stops below it;
+   the runner's own ``DJR_DISK_FLOOR_GIB`` still applies, so a window with
+   little disk needs that lowered too). In the 2026-10-31 continuous window the
+   run is started by ``train_full.py launch`` instead (business is down then,
+   and window_start needs it up); this step resumes it in later windows. Its ``--stop-at`` is the earlier of ``DJR_TRAIN_STOP_AT``
+   (ISO with offset) and the step deadline, so it checkpoints before the window
+   closes; a run directory with ``run_state.json`` resumes (``--resume``). It runs
+   in a ``distill-train-full-<stamp>`` scope with ``TimeoutStopSec`` =
+   ``DJR_TRAIN_STOP_TIMEOUT_S``, so a restore that stops ``distill-*`` units
+   gives the trainer time to checkpoint on SIGTERM. Manifest ``done`` is done;
+   ``stopped`` (stop-at, SIGTERM, disk floor) is partial and resumes; ``failed``
+   (diverged), a refusal or any other exit fails the step. Not started with
+   less than ``DJR_TRAIN_MIN_MIN`` before its stop-at, or with free disk under
+   ``DJR_TRAIN_MIN_FREE_GIB`` + 1 GiB.
 0. ``teacher-ab`` (only with ``DJR_AB=1``; first in the queue): the teacher quant
    A/B (``scripts/distill/teacher_ab_run.sh --execute`` from the HEAD-staged
    ``DJR_AB_CODE``, never ``DJR_CODE``, so the scorer the baselines resume with
@@ -211,6 +233,27 @@ DEFAULTS: Dict[str, str] = {
     "DJR_SMOKE_MAX_MIN": "90",         # time box from the step's start
     "DJR_SMOKE_MIN_MIN": "20",         # least time worth starting it with
     "DJR_SMOKE_GRACE_S": "300",        # SIGTERM -> the trainer checkpoints and exits -> SIGKILL
+    # the Phase 5 full QLoRA run (step 01; off unless DJR_TRAIN=1)
+    "DJR_TRAIN": "0",
+    "DJR_TRAIN_CODE": "{home}/code-train/head",
+    "DJR_TRAIN_DATA": "{home}/phase3/build-v4-max-derived/train.jsonl",
+    "DJR_TRAIN_VAL": "{home}/phase3/build-v4-max-derived/val.jsonl",
+    "DJR_TRAIN_TOKENIZER": "{home}/models/qwen3.5-9b-tokenizer",
+    "DJR_TRAIN_BASE": "{home}/models/qwen3.5-9b-bnb4",
+    "DJR_TRAIN_BASE_REV": "",          # empty: "revision" from DJR_TRAIN_BASE/MANIFEST.json
+    "DJR_TRAIN_OUT": "{home}/phase5/runs/9b-r32-v4-max-derived",
+    "DJR_TRAIN_MAX_DERIVED_OK": "0",   # 1: pass --i-have-operator-approval-for-max-derived-data (Q6b)
+    "DJR_TRAIN_EPOCHS": "2",
+    "DJR_TRAIN_MAX_SEQ": "16384",
+    "DJR_TRAIN_GRAD_ACCUM": "8",
+    "DJR_TRAIN_SAVE_EVERY": "200",     # optimizer steps (the runbook's ~200) ...
+    "DJR_TRAIN_SAVE_EVERY_MIN": "60",  # ... or this many minutes, whichever first (operator: hourly)
+    "DJR_TRAIN_KEEP": "2",             # checkpoints kept
+    "DJR_TRAIN_MIN_FREE_GIB": "6",     # the trainer checkpoints and stops below it
+    "DJR_TRAIN_STOP_AT": "",           # ISO with offset; empty: the step deadline only
+    "DJR_TRAIN_MIN_MIN": "30",         # least time worth starting it with
+    "DJR_TRAIN_GRACE_S": "600",        # SIGTERM -> the trainer checkpoints and exits -> SIGKILL
+    "DJR_TRAIN_STOP_TIMEOUT_S": "900",  # its scope's TimeoutStopSec (a restore stopping distill-*)
     # the teacher quant A/B (step 0; off unless DJR_AB=1)
     "DJR_AB": "0",
     "DJR_AB_CODE": "{home}/code-ab",   # HEAD-staged code for the A/B only (teacher_ab*.py, teacher_gen.py, src/)
@@ -243,7 +286,7 @@ STOP_REASONS = ("sigterm", "no-swaps", "production-unit-active", "disk-floor", "
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 SET_RETRIES = 3     # score.py passes per set that may end with errors before it is left as is
 STEP_FAILURES = 2   # a step that failed this often is skipped until someone looks
-KNOWN_STEPS = ("train-smoke", "teacher-ab", "base-9b-baseline", "qwen38-27b-feasibility",
+KNOWN_STEPS = ("train-smoke", "train-full", "teacher-ab", "base-9b-baseline", "qwen38-27b-feasibility",
                "qwen38-27b-baseline", "glimmer-30b-baseline")  # DJR_ONLY must name these
 
 # Rough speeds for the plan's time estimate only (RTX 4090; see DISTILL notes):
@@ -348,6 +391,30 @@ class Cfg:
         self.smoke_max_s = float(raw["DJR_SMOKE_MAX_MIN"]) * 60
         self.smoke_min_s = float(raw["DJR_SMOKE_MIN_MIN"]) * 60
         self.smoke_grace = float(raw["DJR_SMOKE_GRACE_S"])
+        self.train = raw["DJR_TRAIN"].strip() == "1"
+        self.train_code, self.train_data = path("DJR_TRAIN_CODE"), path("DJR_TRAIN_DATA")
+        self.train_val, self.train_tok = path("DJR_TRAIN_VAL"), path("DJR_TRAIN_TOKENIZER")
+        self.train_base, self.train_out = path("DJR_TRAIN_BASE"), path("DJR_TRAIN_OUT")
+        self.train_base_rev = raw["DJR_TRAIN_BASE_REV"].strip()
+        self.train_md_ok = raw["DJR_TRAIN_MAX_DERIVED_OK"].strip() == "1"
+        self.train_epochs = int(raw["DJR_TRAIN_EPOCHS"])
+        self.train_max_seq = int(raw["DJR_TRAIN_MAX_SEQ"])
+        self.train_grad_accum = int(raw["DJR_TRAIN_GRAD_ACCUM"])
+        self.train_save_every = int(raw["DJR_TRAIN_SAVE_EVERY"])
+        self.train_save_every_min = float(raw["DJR_TRAIN_SAVE_EVERY_MIN"])
+        self.train_keep = int(raw["DJR_TRAIN_KEEP"])
+        self.train_min_free = float(raw["DJR_TRAIN_MIN_FREE_GIB"])
+        sa = raw["DJR_TRAIN_STOP_AT"].strip()
+        self.train_stop_at = datetime.fromisoformat(sa).timestamp() if sa else None
+        if sa and datetime.fromisoformat(sa).tzinfo is None:
+            raise ValueError("DJR_TRAIN_STOP_AT needs a UTC offset")
+        self.train_min_s = float(raw["DJR_TRAIN_MIN_MIN"]) * 60
+        self.train_grace = float(raw["DJR_TRAIN_GRACE_S"])
+        self.train_stop_timeout = int(float(raw["DJR_TRAIN_STOP_TIMEOUT_S"]))
+
+    @property
+    def train_script(self) -> str:
+        return os.path.join(self.train_code, "scripts", "distill", "train_qlora.py")
 
     @property
     def smoke_script(self) -> str:
@@ -1156,7 +1223,11 @@ class Runner:
             {"name": "train-smoke", "kind": "train", "out": "base-9b/train-smoke-max-derived",
              "min_s": self.cfg.smoke_min_s, "must": False},
         ] if self.cfg.smoke else []
-        queue = smoke + ab + [
+        full: List[Dict[str, Any]] = [
+            {"name": "train-full", "kind": "train-full", "out": "base-9b/train-full-max-derived",
+             "min_s": self.cfg.train_min_s, "must": False},
+        ] if self.cfg.train else []
+        queue = smoke + full + ab + [
             {"name": "base-9b-baseline", "kind": "baseline", "label": "base-9b", "out": "base-9b/baseline",
              "find": find_9b, "fixed_ctx": 262144, "ub": self.cfg.ub_9b, "min_s": self.cfg.min_9b_s,
              "must": True},
@@ -1238,6 +1309,8 @@ class Runner:
                     status, detail = self.run_ab(step, st, deadline, p)
                 elif step["kind"] == "train":
                     status, detail = self.run_smoke(step, st, deadline, p)
+                elif step["kind"] == "train-full":
+                    status, detail = self.run_train_full(step, st, deadline, p)
                 else:
                     status, detail = self.run_feasibility(step, st, deadline, p)
             except Exception as exc:  # noqa: BLE001 - one step's bug must not end the window
@@ -1701,7 +1774,16 @@ class Runner:
         status = str(man.get("status") or "") if isinstance(man, dict) else ""
         sm = (man.get("smoke") or {}) if isinstance(man, dict) else {}
         summary = ""
-        if sm.get("loss_first10") is not None:
+        if sm.get("val_first") is not None and sm.get("val_last") is not None:
+            # the gate since 2026-10-31 (operator): val loss down from step 0 + the fixed probe
+            # batch's loss down from before training + finite + round trip
+            pf, pl = sm.get("probe_first"), sm.get("probe_last")
+            summary = (f"{sm.get('steps')} steps, val {sm['val_first']:.4f} -> {sm['val_last']:.4f}"
+                       + (f", probe {pf:.4f} -> {pl:.4f}" if isinstance(pf, (int, float))
+                          and isinstance(pl, (int, float)) else ", no probe")
+                       + f" ({'ok' if sm.get('loss_decreased') else 'GATE FAILED'}), round trip "
+                       f"{'ok' if sm.get('checkpoint_round_trip') else 'FAILED'}")
+        elif sm.get("loss_first10") is not None:
             summary = (f"{sm.get('steps')} steps, loss {sm.get('loss_first10'):.4f} -> {sm.get('loss_last10'):.4f}"
                        f" ({'decreased' if sm.get('loss_decreased') else 'DID NOT DECREASE'}), round trip "
                        f"{'ok' if sm.get('checkpoint_round_trip') else 'FAILED'}")
@@ -1722,6 +1804,125 @@ class Runner:
         if rc == 3:
             return "failed", f"refused: Max-derived data without both approvals: {log_tail(log_path, 2)}"
         return "failed", f"train_qlora.py exit {rc} (manifest status {status or 'none'}): {log_tail(log_path, 3)}"
+
+    # -- full QLoRA run ---------------------------------------------------------------
+
+    def train_base_rev(self) -> str:
+        c = self.cfg
+        if c.train_base_rev:
+            return c.train_base_rev
+        man = read_json(os.path.join(c.train_base, "MANIFEST.json"))
+        rev = man.get("revision") if isinstance(man, dict) else None
+        return rev if isinstance(rev, str) and re.fullmatch(r"[0-9a-f]{40}", rev) else ""
+
+    def train_inputs_ok(self) -> Tuple[bool, str]:
+        c = self.cfg
+        missing = [p for p in (c.train_py, c.train_script, c.train_data, c.train_tok) if not os.path.exists(p)]
+        for name in ("render.py", "artifact_policy.py"):
+            p = os.path.join(os.path.dirname(c.train_script), name)
+            if not os.path.exists(p):
+                missing.append(p)
+        if c.train_val and not os.path.exists(c.train_val):
+            missing.append(c.train_val)
+        base = Path(c.train_base)
+        if not (base / "config.json").is_file() or not list(base.glob("*.safetensors")):
+            missing.append(f"{c.train_base} (config.json + *.safetensors)")
+        elif download_unfinished(str(base)):
+            missing.append(str(download_unfinished(str(base))))
+        if not self.train_base_rev():
+            missing.append(f"base revision (DJR_TRAIN_BASE_REV or {c.train_base}/MANIFEST.json)")
+        return (not missing), ("missing: " + ", ".join(missing) if missing else "")
+
+    def train_cmd(self, until: Optional[float]) -> List[str]:
+        """The full run's command line (``until`` None: the plan's placeholder)."""
+        c = self.cfg
+        cmd = [c.train_py, c.train_script, "--data", c.train_data]
+        if c.train_val:
+            cmd += ["--val", c.train_val]
+        cmd += ["--tokenizer-dir", c.train_tok, "--base-model", c.train_base,
+                "--base-revision", self.train_base_rev() or "<missing>", "--out", c.train_out,
+                "--log-dir", os.path.join(c.train_out, "logs"),
+                "--epochs", str(c.train_epochs), "--max-seq", str(c.train_max_seq),
+                "--grad-accum", str(c.train_grad_accum), "--save-every", str(c.train_save_every),
+                "--save-every-minutes", f"{c.train_save_every_min:g}",
+                "--keep-checkpoints", str(c.train_keep), "--min-free-gib", f"{c.train_min_free:g}",
+                "--stop-at", str(iso(until)) if until is not None else "<stop-at>"]
+        if os.path.isfile(os.path.join(c.train_out, "run_state.json")):
+            cmd.append("--resume")
+        if c.train_md_ok:
+            cmd.append("--i-have-operator-approval-for-max-derived-data")
+        return cmd
+
+    def train_until(self, deadline: float) -> float:
+        c = self.cfg
+        return min(deadline, c.train_stop_at) if c.train_stop_at is not None else deadline
+
+    def run_train_full(self, step: Dict[str, Any], st: Dict[str, Any], deadline: float,
+                       p: Dict[str, Any]) -> Tuple[str, str]:
+        """The full 9B QLoRA run (see the module docstring), resumable across windows."""
+        cfg = self.cfg
+        ok, why = self.train_inputs_ok()
+        if not ok:
+            return "skipped", why
+        until = self.train_until(deadline)
+        if until - now() < step["min_s"]:
+            return "skipped", (f"{max(0.0, until - now()) / 60:.0f} min left before its stop-at "
+                               f"(needs {step['min_s'] / 60:.0f})")
+        free = disk_free(cfg.train_out if os.path.isdir(cfg.train_out) else cfg.home)
+        if free < (cfg.train_min_free + 1) * 2**30:
+            return "skipped", (f"free disk {free / 2**30:.1f} GiB is under the run's floor "
+                               f"{cfg.train_min_free:g} + 1 GiB")
+        sdir = self.step_dir(step)
+        Path(sdir).mkdir(parents=True, exist_ok=True)
+        ok, info = self.wait_gpu_free(cfg.gpu_release_s)
+        if not ok:
+            return ("partial" if self.stop else "failed"), f"GPU not free: {info}"
+        reason = self.fresh_check(until)
+        if reason:
+            return "partial", f"not started ({reason})"
+        cmd = self.train_cmd(until)
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        unit = f"distill-train-full-{stamp}"
+        scope = self.scope_prefix(unit)
+        if scope:  # a restore stopping distill-* gives the trainer time to checkpoint
+            scope = scope[:-1] + [f"--property=TimeoutStopSec={cfg.train_stop_timeout}", "--"]
+        log_path = os.path.join(self.run_dir, "train-full.log")
+        self.progress["current"] = {"step": step["name"], "set": "train_qlora.py", "since": iso(now()),
+                                    "unit": f"{unit}.scope" if scope else None}
+        p["until"] = iso(until)
+        p["unit"] = f"{unit}.scope" if scope else None
+        self.save()
+        self.log(f"train full until {iso(until)} in {unit}: {' '.join(cmd)}")
+        proc = self.spawn("child", scope + cmd, log_path, cwd=sdir, env=self.smoke_env(),
+                          signature=["train_qlora.py", cfg.train_out])
+        # the trainer checkpoints and exits before --stop-at; this deadline is only the backstop
+        rc, reason = self.supervise(proc, until + cfg.train_grace + 120, cfg.train_grace)
+        self.forget("child")
+        man = read_json(os.path.join(cfg.train_out, "manifest.json"))
+        status = str(man.get("status") or "") if isinstance(man, dict) else ""
+        summary = ""
+        if isinstance(man, dict):
+            vh = man.get("val_history") or []
+            vs = ""
+            if len(vh) >= 2:
+                vs = f", val {vh[0].get('val_loss', 0):.4f} -> {vh[-1].get('val_loss', 0):.4f}"
+            summary = (f"step {man.get('step')}, {man.get('tokens_seen', 0) / 1e6:.1f}M tokens{vs}"
+                       + (f", stop {man.get('reason')}" if man.get("reason") else ""))
+            p["train"] = {"status": status, "summary": summary, "adapter": man.get("adapter"),
+                          "max_derived": man.get("max_derived")}
+            st["train"] = p["train"]
+        if not reason and stopped_by_signal(rc):
+            reason = self.settle() or self.external_stop("the 9B training run", rc)
+        if rc == 0 and status == "done":
+            return "done", f"done: {summary}; adapter {man.get('adapter')}"
+        if reason:
+            return "partial", f"stopped ({reason}): {summary}; resumes next window (--resume)"
+        if rc == 0 and status == "stopped":
+            return "partial", f"stopped: {summary}; resumes next window (--resume)"
+        if rc == 3:
+            return "failed", f"refused: Max-derived data without both approvals: {log_tail(log_path, 2)}"
+        return "failed", (f"train_qlora.py exit {rc} (manifest status {status or 'none'}): "
+                          f"{summary or log_tail(log_path, 3)}")
 
     # -- feasibility step ---------------------------------------------------------
 
@@ -2113,7 +2314,7 @@ def dry_run(cfg: Cfg, stop_at: float) -> int:
     feas = "qwen38-27b-feasibility"
     feas_req, feas_note = needed(feas), why_not(feas)
     # the smoke needs the training python too (its own inputs are checked below, never required)
-    py_req = feas_req or (cfg.smoke and needed("train-smoke"))
+    py_req = feas_req or (cfg.smoke and needed("train-smoke")) or (cfg.train and needed("train-full"))
     py_note = "" if py_req else feas_note
     chk(os.path.isfile(cfg.train_py), "training python", cfg.train_py + py_note, required=py_req)
     if os.path.isfile(cfg.train_py):
@@ -2150,6 +2351,18 @@ def dry_run(cfg: Cfg, stop_at: float) -> int:
         chk(cfg.smoke_md_ok or None, "Max-derived approval flag passed (Q6b)",
             "yes: the trainer also needs the dataset's own recorded approval" if cfg.smoke_md_ok
             else "no (DJR_SMOKE_MAX_DERIVED_OK=0): Max-derived data would be refused", required=False)
+    if cfg.train:
+        tr_ok, tr_why = runner.train_inputs_ok()
+        chk(tr_ok or None, "QLoRA full-run inputs (DJR_TRAIN=1; never required: execute skips the step)",
+            (f"{cfg.train_script}; data {cfg.train_data} ({count_lines(cfg.train_data)} rows); base "
+             f"{cfg.train_base} @{runner.train_base_rev()[:12]}; tokenizer {cfg.train_tok}" if tr_ok else tr_why)
+            + why_not("train-full"), required=False)
+        commit_tf = Path(cfg.train_code) / "COMMIT"
+        chk(commit_tf.is_file() or None, "full-run code commit",
+            commit_tf.read_text().strip()[:12] if commit_tf.is_file() else f"no {commit_tf}", required=False)
+        chk(cfg.train_md_ok or None, "full run: Max-derived approval flag passed (Q6b)",
+            "yes: the trainer also needs the dataset's own recorded approval" if cfg.train_md_ok
+            else "no (DJR_TRAIN_MAX_DERIVED_OK=0): Max-derived data would be refused", required=False)
     if cfg.ab:
         ab_ok, ab_why = runner.ab_inputs_ok()
         chk(ab_ok or None, "teacher A/B inputs (DJR_AB=1; never required: execute skips the step)",
@@ -2203,6 +2416,17 @@ def dry_run(cfg: Cfg, stop_at: float) -> int:
                 print(f"    result so far: {st['smoke']}")
             print("    then: the smoke adapter's eval (merge, quantize, score) is a later step, not this one")
             est_total += 60 * 60
+            continue
+        if step["kind"] == "train-full":
+            ok, why = runner.train_inputs_ok()
+            print("    " + ("inputs ok" if ok else f"skip: {why}"))
+            print(f"    stop-at: the earlier of DJR_TRAIN_STOP_AT ({iso(cfg.train_stop_at) or 'unset'}) and the "
+                  f"step deadline; not started with less than {cfg.train_min_s / 60:.0f} min or under "
+                  f"{cfg.train_min_free:g} + 1 GiB free; scope TimeoutStopSec {cfg.train_stop_timeout}s")
+            print("    trainer (HF_HUB_OFFLINE=1): " + " ".join(runner.train_cmd(None)))
+            if st.get("train"):
+                print(f"    result so far: {st['train']}")
+            est_total += max(0.0, runner.train_until(stop_at) - t)
             continue
         if step["kind"] == "ab":
             ok, why = runner.ab_inputs_ok()
@@ -2300,11 +2524,14 @@ def summary_lines(progress: Any) -> List[str]:
         name = s.get("name", "?")
         short = {"base-9b-baseline": "9B base", "qwen38-27b-feasibility": "27B feas",
                  "qwen38-27b-baseline": "27B bake", "glimmer-30b-baseline": "Glimmer",
-                 "teacher-ab": "A/B", "train-smoke": "smoke"}.get(name, name)
+                 "teacher-ab": "A/B", "train-smoke": "smoke", "train-full": "9B train"}.get(name, name)
         status = s.get("status")
         if name == "train-smoke":
             sm = (s.get("smoke") or {}).get("summary")
             out.append(f"{short} {status}: " + (sm or str(s.get("detail", "")))[:110])
+        elif name == "train-full":
+            tr = (s.get("train") or {}).get("summary")
+            out.append(f"{short} {status}: " + (tr or str(s.get("detail", "")))[:110])
         elif name == "teacher-ab":
             dec = (s.get("decision") or {}).get("verdict")
             out.append(f"{short} {status}" + (f": {dec}" if dec else "")
