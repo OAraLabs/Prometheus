@@ -1,6 +1,6 @@
 # Distillation + flywheel — status
 
-_Updated 2026-10-30 19:48 ET. Refreshed on every check-in. Details: `DISTILL-LOG.md`; decisions: `DISTILL-OPEN-QUESTIONS.md`._
+_Updated 2026-10-30 20:09 ET. Refreshed on every check-in. Details: `DISTILL-LOG.md`; decisions: `DISTILL-OPEN-QUESTIONS.md`._
 
 ## In one paragraph
 
@@ -10,6 +10,9 @@ that, the 3090 Ti switches to "flywheel" mode: a local Qwen3.8-27B teacher gener
 existing Max traces can't be used for training. Then the 9B student trains on that. The 4090 is left alone.
 
 ## Done
+
+- **Phase 5–8 code committed:** trainer, quantize, shadow mode (off by default), weekly flywheel job (off by default), and
+  a rental cost packet (H100 about $140 per run; never launched). Full test suite green.
 
 - **Phase 0 – hardware check.** Both GPUs mapped. The 4090 is off-limits: it backs a customer tunnel and an overnight job.
 - **Phase 1 – data audit.** 11,152 harvested traces, but only ~300 distinct tasks, 86% coding, no chat-mode examples.
@@ -32,12 +35,12 @@ existing Max traces can't be used for training. Then the 9B student trains on th
 
 ## Running now
 
-- **Saluki baseline prep.** The probe-guard fix is in its final rehearsal; timers arm after review. Windows: 01:00–02:45, 03:45–05:45 and 06:15–06:59 ET.
+- **Saluki baseline: armed for tonight** (01:00–02:45, 03:45–05:45, 06:15–06:59 ET). One request at a time, only in the
+  quiet gap after each voice health check, and it stops and messages you if a check ever looks unhealthy.
 - **Prep for the 3090 Ti swap:** teacher model download, the daemon Saluki↔Max switch with exact restore, the gym teacher
   pipeline, and keeping Max traces out of training.
-- **New since your last message:** a confidence-interval long-context gate (your Q8 approval), and a task generator built
-  from the real task patterns. Quantize and flywheel follow-ups start once the current Phase 5–8 code lands.
-- **Phase 5–8 code:** trainer, quantize, shadow mode, flywheel cadence. Last fix pass running.
+- **Your extra items:** the confidence-interval long-context gate, the task generator built from real task patterns, a
+  real tiny-model quantize run, and flywheel end-to-end tests with this week's Monday reviewer file.
 
 ## Blocked / waiting on you
 
