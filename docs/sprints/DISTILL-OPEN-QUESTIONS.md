@@ -117,3 +117,4 @@ none holds teacher data.
      - Use it only if agreement with Max is ≥85%, and then drop the rows it fails. Report agreement and rows dropped.
      - If agreement is below 85%, train on v4 as-is and note it.
   3. **Full run:** then launch the first FULL 9B QLoRA run in this window: hourly checkpoints, done by Mon 05:20 EST. Telegram at start, at each epoch, and at the end with the val loss curve. After it, quantize and score against base 9B and Saluki.
+13. **A private business name is in this branch's history.** Commit dda7835 added it in a log line; 5803e20 removed it, so the branch tip is clean. Scrubbing the history needs a force-push of `feat/distill-flywheel`, which the standing rules don't allow without the operator. Default: no force-push; a squash merge keeps it out of `main`, but the PR's commit list still shows it.
