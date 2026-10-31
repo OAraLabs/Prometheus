@@ -7,6 +7,32 @@ Never blocking. Each item is skipped and work continues; the operator answers wh
 3. **4090 nights are booked.** _Update 2026-10-30 (research): out of date — the overnight benchmark has never run (0 of its 2–3 nights); its pre-run check refuses to start because a required sudoers drop-in isn't installed. Its proxy has been idle since 2026-10-25. It can pause at no cost._ Original: Another approved overnight job (proxy up since 2026-10-25) uses the 4090's `llama-server` 22:00–06:30. Which wins on the 4090 at night, and from when?
 4. **3090 Ti backs the live daemon.** Saluki is the daemon's primary until its test ends ~2026-11-02. `flywheel` would move the daemon to the Max API, which means editing its model config and config pins on the live host. Is that allowed during windows, or should 3090 Ti work wait until the Saluki test ends?
 5. **4090 disk.** 75 GB free (runbook asks ~100 GB). `~/models` is 186 GB, including several old GGUFs. Which can be removed (or moved to another disk)?
+
+   _GGUF inventory, 2026-10-30 (read-only). **Delete nothing: the operator decides.**_ Free space was 63 GB at
+   20:42 ET, with the training venv and model downloads for the window still landing in `~/distill`. "Last used" is
+   the best evidence available: the file's access time (the disk is mounted `relatime`, so it records the last read
+   to within a day, and any read counts, not just serving), the model server's journal (kept since 2026-03-05), the
+   user unit files, and the run/download logs in the home directory.
+
+   | GGUF (under `~/models`) | Size (GiB) | Last used | Evidence |
+   |---|---:|---|---|
+   | `Qwen3.8-27B-UD-Q4_K_XL.gguf` | 16.69 | **in use** | the business model server's `-m`; journal 2026-08-15 → 2026-10-21; atime 2026-10-21 (last restart) |
+   | `mmproj-Qwen3.8-27B-Q8_0.gguf` | 0.59 | **in use** | the same unit's `--mmproj`; atime 2026-10-21 |
+   | `Qwen3.8-27B-regular-Q4_K_M-bartowski.gguf` | 16.55 | 2026-09-25 | atime; downloaded 2026-08-18 (download log); never in the journal |
+   | `google_gemma-4-26B-A4B-it-Q4_K_M.gguf` | 15.87 | 2026-09-25 (read); served until 2026-07-10 | atime; journal 2026-04-06 → 2026-07-10; setup script and logs from 2026-04 |
+   | `mmproj-BF16.gguf` (Gemma 4 projector) | 1.11 | 2026-08-18 (read); served until 2026-07-10 | atime; journal 2026-04-06 → 2026-07-10 |
+   | `Qwen3.6-27B-UD-Q4_K_XL.gguf` | 16.40 | 2026-08-15 | journal 2026-07-10 → 2026-08-15; atime 2026-08-15 |
+   | `Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf` | 20.82 | 2026-06-22 | atime only (downloaded 2026-06-21); no journal, unit or log mention |
+   | `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf` | 20.71 | 2026-04-06 | atime; a run log from 2026-04-03; no journal mention |
+   | `glm-claude-distill/GLM-4.7-Flash-…-Distill-v2-heretic.Q4_K_M.gguf` | 16.89 | 2026-03-23 | atime only; no journal, unit or log mention |
+   | `gemma-4-26b-a4b-it-Q4_K_M.gguf`, `gemma-4-26B-A4B-it-Q4_K_M.gguf` | 0 | never | zero-byte files from failed downloads (2026-04-03) |
+   | **Total, 11 files** | **125.64** | | 134,902,733,536 bytes |
+
+   Notes: four files (the bartowski Qwen3.8, the Gemma 4 GGUF and two llama.cpp test vocabularies) were all read
+   between 09:47 and 10:19 on 2026-09-25, so that date is one session reading them, not necessarily serving. The
+   19 `ggml-vocab-*.gguf` files under `~/llama.cpp/models` (75 MB) are tokenizer test vocabularies that ship with the
+   llama.cpp source tree, not models. The rest of `~/models` is not GGUF: a 49 GiB safetensors copy of Gemma 4 26B
+   (`gemma-4-26b-a4b-it-hf/`), 11 GiB of OmniParser, and a renamed old projector (`mmproj-F16.gguf.old.qwen`, 0.84 GiB).
 6. **Qwen3.8 Max for judging, teacher traces and training — researched 2026-10-30, decision: NOT on the current key.**
    - The daemon reaches Max through an Alibaba Model Studio **Token Plan** subscription (Singapore). Both the Team and Personal plan pages restrict it to *interactive use in coding/agent tools* and forbid automation scripts, application backends and non-interactive batch calls; violations can suspend the subscription or revoke the key ([Team](https://www.alibabacloud.com/help/en/model-studio/token-plan-team-overview), [Personal](https://www.alibabacloud.com/help/en/model-studio/token-plan-personal-overview)).
    - So **Phase 2 (re-judging) and Phase 2b (teacher generation) are skipped** on this key: both are scripted batch jobs. Nothing has been sent to Max.
@@ -38,3 +64,4 @@ none holds teacher data.
 - **Teacher quant A/B (operator, 2026-10-30 20:15):** before mass generation, run the same 30 teacher tasks with the IQ3 quant and with a Q4_K_M (or Q5_K_M) of the same model; shorter context is fine for the test. If IQ3's pass rate is more than 5 points lower, use the bigger quant with less context. Plan: same tasks and settings for both arms; all 60 results judged by the bigger quant, so neither arm grades itself. The Q4 arm runs with a few layers on the CPU, because the other GPU residents stay (quality is unchanged, only speed drops).
 - **4090 nightly windows — APPROVED (operator, 2026-10-30 20:20):** 01:00–07:00 ET only, never by day or across the weekend. **Q7 approved:** a notify path is installed on the 4090 (bot token mode 600, never logged). At every window end the 4090 llama-server is restored and the tunnel verified: its connector reports ready connections and the origin's own health check passes. The public hostname is never contacted. The round trip is rehearsed first. Uses: the 27B feasibility test and baselines now; 9B QLoRA and quantize once the dataset passes its gate. Q5: the GGUF list goes under item 5; nothing is deleted.
 9. **If the bigger teacher quant wins the A/B, it doesn't fit fully on the 3090 Ti beside the other residents.** Q4_K_M of the 27B needs ~17.6 GiB at 16k context; ~13.3 GiB is free with Saluki down. Less context barely helps: this model's KV cache is tiny (~0.5 GiB at 16k). With partial CPU offload it runs at ~8.5 tok/s, against ~45 for IQ3. It fits fully only if the local Ollama model (5.4 GiB) is also unloaded during windows, which would pause what depends on it. **Default until you answer:** the A/B runs on the 4090 in its nightly window, where both quants fit on the GPU. If Q4 wins, generation uses Q4 on the 4090 at night and Q4 with partial offload on the 3090 Ti. Approving an Ollama unload during 3090 Ti windows would give Q4 full speed there.
+- **Q9 — APPROVED (operator, 2026-10-30 ~20:45):** Ollama on the 3090 Ti host may be unloaded during the NIGHTLY 01:00–07:00 windows only, and only if Q4_K_M wins the teacher A/B. It stays loaded in any daytime window, where Q4 runs with partial offload. Don't collide with the nightly evals: if they need the Ollama judge, schedule around them. Reload Ollama and verify it at every window end. Implementation note: a background cover-traffic service keeps Ollama's model warm, so a plain unload wouldn't stick. "Unload" therefore means stopping `ollama.service` for the slot and starting it again afterwards; restarting it is verified by its API listing the model.
