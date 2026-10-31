@@ -11,12 +11,14 @@
 #
 # VRAM per mini_ab.py's projection (from the GGUF's own tensor table), the card holding speech, STT, image and
 # the Ollama model (~13,265 MiB free once the IQ3 teacher stops):
-#   weights on the GPU    the last NGL of the 64 trunk layers (215-342 MiB each); the output matrix (995 MiB)
-#                         and the token embeddings stay on the CPU below -ngl 65, the MTP block is never loaded
+#   weights on the GPU    llama.cpp's placement for -ngl N: the output matrix (995 MiB) FIRST, then the skipped
+#                         MTP block, then the last N-2 of the 64 trunk layers (215-342 MiB each); the token
+#                         embeddings always stay on the CPU
 #   KV, q8_0              544 MiB (CTX 16,384 x 34,816 B; counted in full)
 #   recurrent state       300 MiB (2 slots; counted in full)
 #   context + buffers   1,192 MiB (as for distill-teacher.service) + 512 MiB for partial-offload copies
-#   -> about -ngl 45-46 with 600 MiB to spare. ~8-9 tok/s decode (the CPU reads ~5 GiB per token).
+#   -> about -ngl 43 with 600 MiB to spare. ~8 tok/s decode projected (the CPU reads ~5.6 GiB per token),
+#   under the voice probe's 15 tok/s floor: mini_ab.py does not swap this in while that holds (AB_Q4_MIN_EST_TPS).
 [Unit]
 Description=distill teacher A/B: Qwen3.8-27B Q4_K_M partly offloaded on the local model port (arm B + judge)
 After=network.target distill-teacher.service

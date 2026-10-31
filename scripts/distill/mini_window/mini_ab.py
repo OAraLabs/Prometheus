@@ -26,8 +26,10 @@ loaded, Q9). One ``run``:
    servers differ in per-slot context: 57,344 vs 16,384);
 4. arm A on the serving IQ3 teacher (through the guard);
 5. the swap: the guard stopped, ``distill-teacher.service`` stopped, the free VRAM read (nvidia-smi,
-   read-only), ``-ngl`` chosen from the Q4 GGUF's own tensor table (weights of the last N trunk layers + KV +
-   recurrent state + buffers + 600 MiB headroom must fit; fewer than ``AB_MIN_NGL`` refuses), NGL and
+   read-only), ``-ngl`` chosen from the Q4 GGUF's own tensor table (llama.cpp's placement: the output matrix,
+   then trunk layers from the end; + KV + recurrent state + buffers + 600 MiB headroom must fit; fewer than
+   ``AB_MIN_NGL`` refuses; a projected decode rate under the voice probe's floor refuses BEFORE any change,
+   already at the preflight, so arm A then runs alone and 8092 is never swapped: ``AB_Q4_MIN_EST_TPS``), NGL and
    MIN_FREE_MIB written to ``AB_Q4_ENV``, ``distill-teacher-q4-partial.service`` started (its ExecStartPre
    refuses with less free VRAM), then healthy and serving its alias, enough VRAM left beside it, and the NEXT
    voice probe OK (>= PROBE_MIN_TPS and its own floor). Anything else: back to IQ3 at once and no Q4 tonight;
@@ -109,6 +111,13 @@ AB_DEFAULTS: dict[str, str] = {
     "AB_PARTIAL_EXTRA_MIB": "512",
     "AB_HEADROOM_MIB": "600",
     "AB_MIN_NGL": "40",
+    # The voice probe's floor holds on the Q4 server too: no swap when its decode rate, projected from the bytes
+    # one token reads (GPU-resident weights at AB_GPU_GBPS, CPU-resident ones at AB_CPU_GBPS; calibrated to the
+    # Q4 manifest's fit math: 31.8 tok/s all on the GPU, 8.5 at -ngl 46), is under this. Empty: PROBE_MIN_TPS;
+    # 0: no projection, the first voice probe on Q4 decides (and a SLOW one alerts).
+    "AB_Q4_MIN_EST_TPS": "",
+    "AB_GPU_GBPS": "524",
+    "AB_CPU_GBPS": "55",
     "AB_POST_MIN_FREE_MIB": "256",
     "AB_IQ3_MIN_FREE_MIB": "12800",                    # distill-teacher.service's own MIN_FREE_MIB
     "AB_START_HHMM": "0100",
@@ -277,27 +286,52 @@ def gguf_layers(path: Path) -> dict[str, Any]:
             "blocks": blocks, "nextn": nextn}
 
 
-def plan_ngl(layers: dict[str, Any], free_mib: float, c: dict[str, str]) -> tuple[int, float]:
-    """(-ngl, projected MiB on the GPU): the most trunk layers (taken from the END, as llama.cpp offloads
-    them) whose weights + KV + recurrent state + buffers + headroom fit in ``free_mib``. Counted
-    conservatively: KV and recurrent state in full, the partial-offload extra, an -ngl of N as N trunk layers
-    (one more than llama.cpp loads when it counts the never-loaded MTP block). All trunk layers fitting means
-    -ngl 99 with the output matrix on the GPU too."""
+def gpu_weight_bytes(layers: dict[str, Any], ngl: int) -> int:
+    """The weight bytes llama.cpp (9d57ce456, llama-model.cpp load_tensors) puts on the GPU for ``-ngl N``:
+    the layer indices ``[blocks + 1 - N, blocks]``, where index ``blocks`` is the OUTPUT layer and the indices
+    from the trunk's end up are the MTP block(s) (TENSOR_SKIP without MTP decoding: never loaded). So any
+    N >= 1 puts the output matrix (995 MiB here) on the GPU first, and N - 1 - nextn trunk layers from the end
+    (44 at -ngl 46); the token embeddings always stay on the CPU."""
+    if ngl <= 0:
+        return 0
     trunk = layers["trunk"]
+    k = max(0, min(len(trunk), len(trunk) - (int(layers["blocks"]) + 1 - ngl)))
+    return int(layers["output"]) + sum(trunk[len(trunk) - k:])
+
+
+def plan_ngl(layers: dict[str, Any], free_mib: float, c: dict[str, str]) -> tuple[int, float]:
+    """(-ngl, projected MiB on the GPU): the largest -ngl whose weights (gpu_weight_bytes: the output matrix,
+    then trunk layers from the END) + KV + recurrent state + buffers + headroom fit in ``free_mib``. Counted
+    conservatively: KV and recurrent state in full, the partial-offload extra. Everything fitting means -ngl
+    99."""
     fixed = (int(c["AB_Q4_CTX"]) * int(c["AB_KV_BYTES_PER_TOKEN"]) / MIB + float(c["AB_RECURRENT_MIB"])
              + float(c["AB_BUFFERS_MIB"]))
     budget = free_mib - float(c["AB_HEADROOM_MIB"])
-    full = sum(trunk) / MIB + layers["output"] / MIB + fixed
+    full = (sum(layers["trunk"]) + layers["output"]) / MIB + fixed
     if full <= budget:
         return 99, full
     fixed += float(c["AB_PARTIAL_EXTRA_MIB"])
-    weights, n = 0.0, 0
-    for size in reversed(trunk):
-        if fixed + weights + size / MIB > budget:
+    best: tuple[int, float] = (0, fixed)
+    for n in range(1, int(layers["blocks"]) + 1):
+        proj = fixed + gpu_weight_bytes(layers, n) / MIB
+        if proj > budget:
             break
-        weights += size / MIB
-        n += 1
-    return n, fixed + weights
+        best = (n, proj)
+    return best
+
+
+def est_tps(layers: dict[str, Any], ngl: int, c: dict[str, str]) -> float:
+    """Projected decode tok/s at ``-ngl``: one token reads every GPU-resident weight at AB_GPU_GBPS and every
+    CPU-resident one (trunk + output; the embeddings are a row lookup) at AB_CPU_GBPS."""
+    total = sum(layers["trunk"]) + int(layers["output"])
+    gpu = total if ngl >= 99 else min(total, gpu_weight_bytes(layers, ngl))
+    s = gpu / (float(c["AB_GPU_GBPS"]) * 1e9) + (total - gpu) / (float(c["AB_CPU_GBPS"]) * 1e9)
+    return 1.0 / s if s > 0 else float("inf")
+
+
+def q4_min_tps(c: dict[str, str]) -> float:
+    v = c.get("AB_Q4_MIN_EST_TPS", "").strip()
+    return float(v) if v else float(c["PROBE_MIN_TPS"])
 
 
 # ── teacher_ab.py and the probe guard ────────────────────────────────────────
@@ -623,6 +657,17 @@ class Night:
             self.layers = gguf_layers(Path(self.c["AB_Q4_MODEL"]))
         return plan_ngl(self.layers, free, self.c)
 
+    def too_slow(self, ngl: int) -> str:
+        """Why a Q4 server at ``-ngl`` would fail the voice probe's floor (projected), or ""."""
+        floor = q4_min_tps(self.c)
+        if floor <= 0 or self.layers is None:
+            return ""
+        tps = est_tps(self.layers, ngl, self.c)
+        if tps >= floor:
+            return ""
+        return (f"Q4_K_M at -ngl {ngl} projects ~{tps:.1f} tok/s decode, under the voice probe's floor "
+                f"{floor:g}: no swap (AB_Q4_MIN_EST_TPS=0 lets the probe decide)")
+
     def serving(self, alias: str) -> bool:
         s = self.w.served()
         return s["health"] == 200 and alias in s["ids"]
@@ -683,9 +728,15 @@ class Night:
             else:
                 ngl, proj = self.ngl_for(free)
                 self.log(f"VRAM: ~{free} MiB free once {c['TEACHER_UNIT']} stops -> -ngl {ngl} "
-                         f"(projected {proj:.0f} MiB + {c['AB_HEADROOM_MIB']} headroom)")
+                         f"(projected {proj:.0f} MiB + {c['AB_HEADROOM_MIB']} headroom, "
+                         f"~{est_tps(self.layers or {}, ngl, c):.1f} tok/s projected)")
                 if ngl < int(c["AB_MIN_NGL"]):
                     why.append(f"only -ngl {ngl} would fit (< AB_MIN_NGL {c['AB_MIN_NGL']})")
+                slow = self.too_slow(ngl)
+                if slow and not self.q4_refused:
+                    # arm A still runs (its records keep for a night the Q4 can serve); 8092 is never swapped
+                    self.q4_refused = slow
+                    self.event(f"no Q4 tonight: {slow}")
         except (OSError, ValueError) as e:
             why.append(f"cannot read {c['AB_Q4_MODEL']}: {e}")
         pidf = w.state / PID_NAME
@@ -784,6 +835,9 @@ class Night:
         ngl, proj = self.ngl_for(pre)
         if ngl < int(c["AB_MIN_NGL"]):
             raise Q4Refused(f"only -ngl {ngl} would fit in ~{pre} MiB (AB_MIN_NGL {c['AB_MIN_NGL']}); no swap")
+        slow = self.too_slow(ngl)
+        if slow:
+            raise Q4Refused(slow)
         with w.lock(300) as got:
             if not got:
                 raise Q4Refused("another window script holds the lock; no swap")
@@ -807,6 +861,9 @@ class Night:
                          f"MIN_FREE_MIB {need}")
                 if ngl < int(c["AB_MIN_NGL"]):
                     raise MW.Fail(f"only -ngl {ngl} fits in {free} MiB free")
+                slow = self.too_slow(ngl)
+                if slow:
+                    raise MW.Fail(slow)
                 env = f"NGL={ngl}\nMIN_FREE_MIB={need}\n"
                 if w.execute:
                     Path(c["AB_Q4_ENV"]).write_text(env)
@@ -1093,7 +1150,7 @@ class Night:
                 w.write_flag("teacher A/B cleanup failed")
             ok = False
         self.guard.stop()
-        rc_rep, lines = 2, []
+        rc_rep, lines = 2, list[str]()
         try:
             rc_rep, lines = self.ab.report()
         except Exception as e:  # noqa: BLE001
@@ -1174,7 +1231,9 @@ def cmd_ngl(night: Night) -> int:
     layers = night.layers or {}
     print(json.dumps({"free_mib_after_iq3_stop": free, "ngl": ngl, "projected_mib": round(proj),
                       "min_free_mib": round(proj + float(night.c["AB_HEADROOM_MIB"])),
-                      "trunk_layers": len(layers.get("trunk", [])), "min_ngl": int(night.c["AB_MIN_NGL"])}))
+                      "trunk_layers": len(layers.get("trunk", [])), "min_ngl": int(night.c["AB_MIN_NGL"]),
+                      "est_tok_s": round(est_tps(layers, ngl, night.c), 1), "min_tok_s": q4_min_tps(night.c),
+                      "too_slow": night.too_slow(ngl) or None}))
     return 0
 
 

@@ -31,9 +31,9 @@ GEN = "distill-gen-20261031-070638.service"
 IQ3_ALIAS = "qwen3.8-27b-gsq-rco-iq3_xxs"
 Q4_ALIAS = "qwen3.8-27b-q4_k_m"
 MIB = 1 << 20
-# the real Q4_K_M's trunk layer sizes (MiB, from its tensor table), the output matrix 995 MiB
+# the real Q4_K_M's 64 trunk layer sizes (MiB, from its tensor table on the host), the output matrix 995 MiB
 Q4_TRUNK = [306.2, 264.9, 264.9, 241.6] + [264.9, 264.9, 264.9, 241.6] * 3 + [215.1, 215.1, 215.1, 219.7] * 8 \
-    + [215.1, 215.1, 215.1, 342.1]
+    + [222.9, 215.1, 215.1, 229.9] * 2 + [215.1, 215.1, 215.1, 219.7] + [215.1, 215.1, 215.1, 342.1]
 LAYERS = {"trunk": [int(x * MIB) for x in Q4_TRUNK], "output": int(994.6 * MIB), "blocks": 65, "nextn": 1}
 START = datetime(2026, 11, 1, 1, 0, tzinfo=ET, fold=0).timestamp()  # 01:00 EDT, the first one
 
@@ -50,7 +50,9 @@ def conf(tmp_path, **extra):
         "WIN_DIR": str(win), "LOG_DIR": str(home / "logs"), "NOTIFY": str(notify), "SETUPS_DIR": str(win / "setups"),
         "AB_Q4_ENV": str(win / "state" / "q4-partial.env"), "AB_OUT": str(home / "ab"),
         "AB_CODE": str(home / "code"), "GEN_PY": sys.executable, "EVAL_TIMES": "0300,0600",
-        "CONTINUOUS_UNTIL": "2026-11-01T18:00:00-05:00", **extra,
+        "CONTINUOUS_UNTIL": "2026-11-01T18:00:00-05:00",
+        # the swap tests drive the Q4 server; the projected-speed gate has its own test
+        "AB_Q4_MIN_EST_TPS": "0", **extra,
     }
     path = win / "window.conf"
     path.write_text("".join(f"{k}={v}\n" for k, v in lines.items()))
@@ -314,13 +316,42 @@ def test_tonight_falls_back_at_two_and_the_times_are_epochs(tmp_path):
 
 def test_ngl_plan_keeps_600_mib_headroom_and_counts_conservatively(tmp_path):
     c = conf(tmp_path)
+    assert len(LAYERS["trunk"]) == 64
     ngl, proj = AB.plan_ngl(LAYERS, 13265, c)  # the IQ3 teacher's 12,344 MiB + the 921 free today
-    assert 44 <= ngl <= 47  # the operator's estimate: -ngl 44-46
+    # 2 slots + the partial-offload extra + the output matrix on the GPU: -ngl 43 (41 trunk layers)
+    assert ngl == 43
     assert proj + 600 <= 13265
     bigger, _ = AB.plan_ngl(LAYERS, 13265 + 230, c)
     assert bigger == ngl + 1  # one more ~215 MiB layer
     assert AB.plan_ngl(LAYERS, 20000, c)[0] == 99  # everything fits: -ngl 99, the output on the GPU too
     assert AB.plan_ngl(LAYERS, 3000, c)[0] < int(c["AB_MIN_NGL"])
+
+
+def test_ngl_counts_llama_cpps_placement_the_output_matrix_first():
+    # llama.cpp 9d57ce456: -ngl N offloads layer indices [65 + 1 - N, 65]: the output layer (index 65), the
+    # skipped MTP block (64), then trunk layers 63, 62, ... -> N - 2 trunk layers beside the output matrix
+    out = LAYERS["output"]
+    assert AB.gpu_weight_bytes(LAYERS, 0) == 0
+    assert AB.gpu_weight_bytes(LAYERS, 1) == out == AB.gpu_weight_bytes(LAYERS, 2)
+    assert AB.gpu_weight_bytes(LAYERS, 46) == out + sum(LAYERS["trunk"][-44:])  # the Q4 manifest: 10,662 MiB
+    assert abs(AB.gpu_weight_bytes(LAYERS, 46) / MIB - 10662) < 10
+    assert AB.gpu_weight_bytes(LAYERS, 66) == out + sum(LAYERS["trunk"])
+
+
+def test_a_q4_projected_under_the_probe_floor_is_never_swapped_in(tmp_path):
+    c = conf(tmp_path, AB_Q4_MIN_EST_TPS="")
+    # calibrated to the Q4 manifest's fit math: 31.8 tok/s all on the GPU, 8.5 at -ngl 46
+    assert 31 <= AB.est_tps(LAYERS, 99, c) <= 33 and 8 <= AB.est_tps(LAYERS, 46, c) <= 9
+    nt, host, ab, g, out = night(tmp_path, AB_Q4_MIN_EST_TPS="")
+    rc = nt.run()
+    assert rc == 1
+    assert "under the voice probe's floor 15" in nt.q4_refused
+    assert {s["kind"] for s in ab.steps} == {"arm-A"}, "arm A alone"
+    assert not [u for _, u in _systemctl(host, "stop") if u == TEACHER], "8092 never swapped"
+    assert not [u for _, u in _systemctl(host, "start") if u == Q4P]
+    assert host.units[TEACHER] == "active" and host.started_gen
+    # the night ends as soon as arm A is done, not after waiting out the 03:00 eval for a swap
+    assert host.t < nt.t["evals"][0]
 
 
 def _gguf(path, tensors, meta):
@@ -378,7 +409,7 @@ def test_the_whole_night_in_order_around_the_evals(tmp_path):
     assert first_b["t0"] > max(s["t1"] for s in ab.steps if s["kind"] == "arm-A")
     # the Q4 unit got the -ngl chosen from the VRAM read right before its start, with 600 MiB headroom
     env = dict(line.split("=") for line in host.env_seen[0].split())
-    assert 44 <= int(env["NGL"]) <= 47 and int(env["MIN_FREE_MIB"]) <= 13265
+    assert int(env["NGL"]) == 43 and int(env["MIN_FREE_MIB"]) <= 13265
     # no Q4 step within 35 min of an eval or across it, nothing past the hard end
     for s in ab.steps:
         assert s["t1"] <= nt.t["hard"]
