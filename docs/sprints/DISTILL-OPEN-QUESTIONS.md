@@ -86,3 +86,8 @@ none holds teacher data.
   - **Ledger:** every call goes in `spend-ledger.csv`, tagged `token-plan`.
   - The daemon's background jobs still never use this key.
   - If `QWEN_PAYG_KEY` appears, all batch work moves to it, and Token Plan batch use stops.
+- **Token Plan override, revised (operator, 2026-10-31 ~01:10; replaces the guardrailed version above):** use the Token Plan key for all distillation Max work (Phase 2 judging, Phase 2b teacher generation; real-pattern taskset only, sandboxed gym tools).
+  - No quota reserve and no pacing limits: up to 100% of the subscription, as fast as the plan allows, with normal backoff on 429s.
+  - On a block or suspension (401/403 or a policy/suspension error): stop and Telegram the exact error.
+  - Calls are logged in `spend-ledger.csv` tagged `token-plan`. Max is the primary teacher; the local 27B fills gaps.
+  - Kept as standing safety: the daemon's background jobs never use this key. If `QWEN_PAYG_KEY` appears, batch work moves to it. On "quota exhausted" the tools pause until the reset and notify once, instead of retrying blindly.
