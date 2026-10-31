@@ -98,3 +98,9 @@ none holds teacher data.
       - (b) Waive the probe floor for the A/B.
       - (c) Run arm B on the 4090 in its nightly window: the 4090 serves the teacher on its tailnet address and the sandboxed gym stays on the 3090 Ti host, so no tool commands run on the 4090.
     - **Default if unanswered: (c).** It needs no new approval: the 4090 night is approved, and its own Q4_K_M is the same model at full offload. It also reuses the planned cross-host generation path.
+- **Operator answer, 2026-10-31 ~11:10 ET: 4090 continuous window.**
+  - The 4090 is approved for continuous flywheel use until Mon 2026-11-02 06:00 ET (EST, after the fall-back). After that it returns to nightly 01:00–07:00.
+  - **First choice:** teacher generation against the 4090's existing business llama-server, while it keeps serving the business tunnel, if business requests stay responsive (no queuing behind long generations). Tools stay sandboxed on the 3090 Ti host.
+  - **Training** (the 9B smoke test, then the first full 9B run once the dataset gate passes) gets the GPU exclusively in this window. Business downtime until Mon 06:00 is accepted when needed.
+  - A dead-man restore is armed for Mon 06:00 ET, the business server is restored, and the tunnel is verified. Telegram goes out when the business service goes down and when it is back.
+  - Finding: the business server runs a single slot (`--parallel 1`, 32K context), so sharing it as it stands would queue business requests. For the window it runs in a multi-slot shape that keeps 32K per slot, if VRAM allows. Generation uses at most slots − 1, and a latency probe pauses generation if business requests slow down. The original shape is restored at window end.
