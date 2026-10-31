@@ -124,3 +124,14 @@ Append-only, times in ET.
     - other 76.2% (n=21): not applied
   - **Process:** 193.7 min, 0 errors, 2 items still unparseable after one retry.
   - **Round 1:** judging the unjudged v4 rows in the applied categories: coding 1,211 + daemon 459. ETA ~70 min, then rebuild and further rounds.
+- 2026-10-31 16:59 — Judge round 1: 803/1,670 judged, ETA ~17:35 ET, then the rebuild and further rounds. An agent is rehearsing Phase 6 on the 3090 Ti host's CPU with the smoke adapter: merge into official bf16 → GGUF → quantize → CPU sanity → Phase 3 spot check; plus the scoring plan. Mini local generation: 141 rows.
+- 2026-10-31 17:56 — Judge round 1: 1,292 pass / 378 fail (22.6% dropped). The v4b rebuild at a 60% coding cap gives 3,362 train rows (< 3,500), so the chain raised the cap to 70% (scan: 4,483) and is building v4b-r1-c70. Next it judges the newly admitted, never-judged rows (round 2) until none remain. Expected train ~4.3–4.5K, so the full run is ~13–14 h; chain ETA ~19:30–20:00 ET.
+- 2026-10-31 18:16 — **Phase 6 rehearsal PASS** with the smoke adapter (44a1590), 22 min end to end:
+  - **Steps:** stream merge on the 3090 Ti host (1.3 GB peak RAM, bit-identical to PEFT) → BF16 GGUF on the 4090 CPU (--no-mtp: the 15 MTP tensors are dropped, the same layout as the base-9B GGUF) → train-only imatrix → Q4_K_M and Q5_K_M.
+  - **Perplexity:** BF16 10.60, Q4_K_M 10.68, Q5_K_M 10.72. CPU chat sanity is OK, including a clean tool call.
+  - **Phase 3 byte-for-byte spot check: PASS.** 24/24 rows match at both text and token level, including 4 chat-mode rows.
+  - **Why split hosts:** the 3090 Ti host lacks RAM for the converter and quantize, so the one-command script merges there and does the rest on the 4090, which needs ~60 GB free (73 now).
+  - **Caveats:**
+    - The base-9B baseline is Unsloth's mixed Q4_K_M while the student uses standard Q4_K_M + imatrix. Plan: also quantize and score the official base with the same recipe, for a like-for-like comparison.
+    - build.py spot-check crashes on Unicode line separators (17 v4 rows), a follow-up.
+    - The 4090's own llama.cpp tools other than llama-server are stale; working pinned builds are in ~/distill/phase6-rehearsal.
