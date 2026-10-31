@@ -18,6 +18,11 @@ nothing unless ``--execute``.
         --stop-at 2026-11-01T06:45-05:00 --i-have-operator-approval-for-max-derived-data
     # The base model through the same recipe (the Phase 4 base 9B GGUF):
     python3 scripts/distill/quantize.py run --no-adapter --base ... --out ~/distill/phase6/base-9b
+    # The merge alone, on one host (the one with the 16-bit base), for a run on
+    # another (the one with the GPU): ``run --no-adapter --base <that dir>`` then
+    # takes it as its base, and its provenance (merge-info.json) with it.
+    python3 scripts/distill/quantize.py merge --adapter ... --base ... --out \
+        ~/distill/phase6/<run>/merged --merge-mode stream [--execute]
     # The calibration text alone (stdlib only, no GPU), on the host with the splits:
     python3 scripts/distill/quantize.py calibrate --data ... --evalsets ... --out ... [--execute]
     # The llama-server line for Phase 6 scoring at 256k (prints, never runs):
@@ -72,7 +77,11 @@ Steps (``--execute``)
    fix a refusal suggests is not refused for changing an input.
 3. merge (skipped with ``--no-adapter``): PEFT ``merge_and_unload`` into the
    base at bf16 (or fp16), on the CPU by default (``--merge-device auto`` lets
-   accelerate split GPU / CPU / disk). Refused when the base loads with
+   accelerate split GPU / CPU / disk). ``--merge-mode stream`` does the same
+   arithmetic one weight at a time (``stream_merge.py``: under 1 GB resident
+   instead of the whole model, for a host that cannot hold the 9B in RAM;
+   bit-identical to PEFT's merge, checked module by module on the 9B).
+   Refused when the base loads with
    missing weights (they would be random), when not every LoRA module in the
    adapter attaches to the loaded base, or when any attached LoRA B matrix is
    zero: PEFT injects fresh layers (B = 0) for every targeted module and then
@@ -525,16 +534,43 @@ def calibration_counts(rec: dict[str, Any]) -> tuple[int, int, int]:
             _count(prov.get("ppl_max_derived"), int(rec["ppl_slice"]["rows"])))
 
 
-def output_provenance(adapter: Path | None, rec: dict[str, Any] | None) -> dict[str, Any]:
+def merged_base_info(base: Path | None) -> dict[str, Any] | None:
+    """``merge-info.json`` of a base that is a merged checkpoint (``merge``),
+    else None."""
+    p = base / "merge-info.json" if base is not None else None
+    if p is None or not p.is_file():
+        return None
+    try:
+        info = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"unreadable": str(p)}
+    return info if isinstance(info, dict) else {"unreadable": str(p)}
+
+
+def output_provenance(adapter: Path | None, rec: dict[str, Any] | None,
+                      base: Path | None = None) -> dict[str, Any]:
     """Whether this run's outputs are Max-derived (module docstring), and why.
 
     The adapter's verdict is ``artifact_policy.provenance`` of its directory
     (its name, train_qlora.py's run manifest beside it, and the data that
     names); unknown counts as Max-derived. A calibration record (*rec*; None
-    when none is built or recorded yet: unknown) counts by its rows."""
+    when none is built or recorded yet: unknown) counts by its rows. With no
+    adapter, a *base* that is a merged checkpoint (its ``merge-info.json``)
+    counts as Max-derived unless that file says ``max_derived: false``, and so
+    does a base whose path carries the tag."""
     pol = _policy()
     ev: list[str] = []
     md = False
+    if adapter is None and base is not None:
+        merged = merged_base_info(base)
+        if merged is not None and merged.get("max_derived") is not False:
+            md = True
+            ev.append("base: a merged checkpoint (merge-info.json"
+                      + (": max_derived" if merged.get("max_derived") else ": no max_derived: "
+                         "false") + ")")
+        if pol.path_has_tag(base):
+            md = True
+            ev.append(f"base: path carries {pol.TAG}")
     adapter_md: bool | None = False
     if adapter is not None:
         prov = pol.provenance(adapter)
@@ -971,6 +1007,33 @@ def merge_adapter(base: Path, adapter: Path, out: Path, *, template_dir: Path,
     return info
 
 
+def merge_adapter_stream(base: Path, adapter: Path, out: Path, *, template_dir: Path,
+                         dtype: str = "bf16") -> dict[str, Any]:
+    """``--merge-mode stream``: stream_merge.py writes the weights; the
+    checkpoint's other files are made the way :func:`merge_adapter` makes them
+    (config.json is the base's own: nothing re-serializes it)."""
+    sm = _sibling("distill_stream_merge", "stream_merge.py")
+    tmp = out.with_name(out.name + ".partial")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    try:
+        info = sm.stream_merge(base, adapter, tmp, dtype=dtype)
+    except sm.MergeError as exc:
+        raise QuantizeError(f"stream merge: {exc}") from exc
+    for name in ("config.json", *BASE_SIDE_FILES):
+        if (base / name).is_file():
+            shutil.copy2(base / name, tmp / name)
+    acfg = json.loads((adapter / "adapter_config.json").read_text(encoding="utf-8"))
+    info["adapter_config"] = {k: acfg.get(k) for k in (
+        "r", "lora_alpha", "lora_dropout", "use_rslora", "use_dora", "target_modules",
+        "base_model_name_or_path")}
+    info["template"] = install_template(tmp, base, template_dir)
+    _write_json(tmp / "merge-info.json", info)
+    tmp.rename(out)
+    return info
+
+
 # ---------------------------------------------------------------------------
 # GGUF metadata (read back through the pinned checkout's gguf-py)
 # ---------------------------------------------------------------------------
@@ -1076,6 +1139,7 @@ class Settings:
     python: str = sys.executable
     dtype: str = "bf16"
     merge_device: str = "cpu"
+    merge_mode: str = "peft"  # or "stream" (stream_merge.py)
     model_class: str = "auto"
     quants: tuple[str, ...] = DEFAULT_QUANTS
     ngl: str = "99"
@@ -1124,6 +1188,9 @@ class Settings:
             "adapter": adapter, "template_dir": str(self.template_dir),
             "template_sha256": sha256_text(read_template(self.template_dir)),
             "dtype": self.dtype, "model_class": self.model_class,
+            # only when not the default, so a run.json written before the
+            # option existed still matches its own run
+            **({"merge_mode": self.merge_mode} if self.merge_mode != "peft" else {}),
             "seed": self.seed, "calib_tokens": self.calib_tokens,
             "imatrix_ctx": self.imatrix_ctx, "ppl_ctx": self.ppl_ctx,
             "ppl_chunks": self.ppl_chunks,
@@ -1368,7 +1435,10 @@ def print_plan(s: Settings, arch: str | None, cal_note: str, name_problems: list
     show(supported_models_cmd(s.python, llama), f"lists {arch or '<arch>'}")
     print("  free disk under out >= the outputs not made yet + 5 GiB")
     print(f"[2/8] calibrate -> {calib}, {ppl_txt}, calibration.json (train split only)")
-    if s.adapter is not None:
+    if s.adapter is not None and s.merge_mode == "stream":
+        print(f"[3/8] merge -> {model_dir}  (in process: stream_merge.py, {s.dtype}, one "
+              "weight at a time on the CPU; mtp.* left out)")
+    elif s.adapter is not None:
         print(f"[3/8] merge -> {model_dir}  (in process: transformers + peft, {s.dtype}, "
               f"device {s.merge_device}, model class {s.model_class})")
     else:
@@ -1443,6 +1513,13 @@ def _run_steps(s: Settings, arch: str | None, fp: dict[str, Any], old: dict[str,
         "files": {f.name: {"bytes": f.stat().st_size,
                            **({"sha256": sha256_file(f)} if f.suffix == ".json" else {})}
                   for f in sorted(s.base.iterdir()) if f.is_file()}}
+    merged_from = merged_base_info(s.base) if s.adapter is None else None
+    if merged_from is not None:
+        # the base is a merge made elsewhere (``merge``): its adapter and base, by sha256
+        manifest["inputs"]["base"]["merged_from"] = {
+            k: merged_from.get(k) for k in ("adapter", "trainer_manifest", "base", "merge_mode",
+                                            "lora_modules", "attached", "b_nonzero", "dropped",
+                                            "host", "max_derived")}
     if s.adapter is not None:
         manifest["inputs"]["adapter"] = {"dir": str(s.adapter), **fp["adapter"]}
     save()
@@ -1458,7 +1535,7 @@ def _run_steps(s: Settings, arch: str | None, fp: dict[str, Any], old: dict[str,
         # The names were chosen before the run for what it was shown to be;
         # the calibration actually used must not say more (nothing is written
         # under an untagged name for Max-derived input).
-        if output_provenance(s.adapter, rec)["max_derived"] and not s.max_derived:
+        if output_provenance(s.adapter, rec, s.base)["max_derived"] and not s.max_derived:
             raise UsageError(untagged_error([
                 f"the calibration in use holds Max-derived rows, but this run was named as "
                 f"clean ({s.out}, label {s.label})"]))
@@ -1479,6 +1556,10 @@ def _run_steps(s: Settings, arch: str | None, fp: dict[str, Any], old: dict[str,
         print(f"[3/8] {model_dir.name}: kept (already made)")
         info_path = model_dir / "merge-info.json"
         info = json.loads(info_path.read_text(encoding="utf-8")) if info_path.is_file() else {}
+    elif s.adapter is not None and s.merge_mode == "stream":
+        print(f"[3/8] merge (stream) -> {model_dir}")
+        info = merge_adapter_stream(s.base, s.adapter, model_dir, template_dir=s.template_dir,
+                                    dtype=s.dtype)
     elif s.adapter is not None:
         print(f"[3/8] merge -> {model_dir}")
         info = merge_adapter(s.base, s.adapter, model_dir, template_dir=s.template_dir,
@@ -1842,7 +1923,7 @@ def _cmd_run(a: argparse.Namespace) -> int:
             cal = recorded_calibration(cand / "calib")
             if cal is not None:
                 break
-    prov = output_provenance(adapter, cal)
+    prov = output_provenance(adapter, cal, base)
     if prov["max_derived"] and not a.label:
         label = pol.tag_name(label)
     out = given_out or _path(DEFAULT_OUT_ROOT) / label
@@ -1855,6 +1936,7 @@ def _cmd_run(a: argparse.Namespace) -> int:
     s.llama = LlamaCpp(llama_dir, a.llama_cpp_commit.lower(),
                        _path(a.llama_bin_dir) if a.llama_bin_dir else llama_dir / "build" / "bin")
     s.python, s.dtype, s.merge_device = a.convert_python, a.dtype, a.merge_device
+    s.merge_mode = a.merge_mode
     s.model_class, s.quants, s.ngl, s.port = a.model_class, quants, a.ngl, a.port
     s.max_ppl_ratio = _ratio_map(a.max_ppl_ratio, quants)
     s.max_ppl = a.max_ppl
@@ -1900,6 +1982,80 @@ def _cmd_run(a: argparse.Namespace) -> int:
         return 0
     with window(s.stop_at):
         return run_pipeline(s, arch)
+
+
+def cmd_merge(a: argparse.Namespace) -> int:
+    return _guarded(lambda: _cmd_merge(a))
+
+
+def adapter_record(adapter: Path) -> dict[str, Any]:
+    """The adapter by sha256, and the trainer manifest beside it."""
+    rec: dict[str, Any] = {"dir": str(adapter), "files": {
+        n: {"bytes": (adapter / n).stat().st_size, "sha256": sha256_file(adapter / n)}
+        for n in ("adapter_config.json", "adapter_model.safetensors")}}
+    tm = adapter.parent / "manifest.json"
+    if tm.is_file():
+        try:
+            doc = json.loads(tm.read_text(encoding="utf-8"))
+        except ValueError:
+            doc = {}
+        doc = doc if isinstance(doc, dict) else {}
+        data = doc.get("data") if isinstance(doc.get("data"), dict) else {}
+        rec["trainer_manifest"] = {"path": str(tm), "sha256": sha256_file(tm),
+                                   "status": doc.get("status"),
+                                   "train_sha256": data.get("sha256"),
+                                   "train_path": data.get("path")}
+    return rec
+
+
+def _cmd_merge(a: argparse.Namespace) -> int:
+    base, adapter, out = _path(a.base), _path(a.adapter), _path(a.out)
+    tdir = _path(a.template_dir)
+    if not (adapter / "adapter_config.json").is_file():
+        raise QuantizeError(f"--adapter {adapter} has no adapter_config.json")
+    if not (base / "config.json").is_file():
+        raise QuantizeError(f"--base {base} has no config.json")
+    pol = _policy()
+    prov = pol.provenance(adapter)
+    md = prov.max_derived is not False  # unknown counts as Max-derived
+    if md and not pol.path_has_tag(out):
+        raise UsageError(untagged_error([f"--out {out} does not carry the {pol.TAG} tag (e.g. "
+                                         f"--out {pol.tag_path(out.parent) / out.name})"]))
+    rec = adapter_record(adapter)
+    info_path = out / "merge-info.json"
+    if out.exists():
+        info = merged_base_info(out) or {}
+        same = (info.get("adapter") or {}).get("files") == rec["files"]
+        if not same:
+            raise QuantizeError(f"{out} exists and is not a merge of this adapter; use a new --out")
+        print(f"kept {out} (a merge of this adapter: {info.get('merge_mode')}, "
+              f"{info.get('attached')} LoRA modules)")
+        return 0
+    mode = a.merge_mode
+    print(f"merge ({mode}, {a.dtype}) {adapter}\n   into {base}\n   -> {out}"
+          + (f"  [Max-derived: {'; '.join(prov.evidence[:2])}]" if md else ""))
+    if not a.execute:
+        print("DRY RUN: add --execute to merge")
+        return 0
+    out.parent.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    if mode == "stream":
+        info = merge_adapter_stream(base, adapter, out, template_dir=tdir, dtype=a.dtype)
+    else:
+        info = merge_adapter(base, adapter, out, template_dir=tdir, dtype=a.dtype,
+                             device=a.merge_device, model_class=a.model_class)
+    info.setdefault("merge_mode", mode)
+    info.update({
+        "adapter": rec, "trainer_manifest": rec.get("trainer_manifest"),
+        "base": {"dir": str(base), "files": {
+            f.name: {"bytes": f.stat().st_size,
+                     **({"sha256": sha256_file(f)} if f.suffix == ".json" else {})}
+            for f in sorted(base.iterdir()) if f.is_file()}},
+        "host": os.uname().nodename, "merged_at": _now(), "seconds": round(time.time() - t0, 1),
+        **pol.policy_fields(md), "provenance": prov.evidence[:6]})
+    _write_json(info_path, info)
+    print(f"merged {info.get('attached')} LoRA modules in {info['seconds']} s; {info_path}")
+    return 0
 
 
 def cmd_calibrate(a: argparse.Namespace) -> int:
@@ -1990,6 +2146,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--dtype", choices=("bf16", "fp16"), default="bf16")
     r.add_argument("--merge-device", choices=("cpu", "auto"), default="cpu",
                    help="cpu: all in system RAM; auto: GPU + CPU + disk offload")
+    r.add_argument("--merge-mode", choices=("peft", "stream"), default="peft",
+                   help="peft: merge_and_unload with the whole base in memory; stream: the "
+                        "same arithmetic one weight at a time (stream_merge.py, <1 GB RAM)")
     r.add_argument("--model-class", choices=("auto", "causal-lm", "image-text-to-text"),
                    default="auto", help="transformers class to load the base with")
     r.add_argument("--quants", default=",".join(DEFAULT_QUANTS))
@@ -2010,6 +2169,20 @@ def main(argv: list[str] | None = None) -> int:
     llama_args(r)
     _common(r)
 
+    m = sub.add_parser("merge", help="the merge alone into --out (plan unless --execute)")
+    m.add_argument("--adapter", required=True, help="PEFT LoRA dir (adapter_config.json + weights)")
+    m.add_argument("--base", default=DEFAULT_BASE, help="base model dir (HF safetensors, 16-bit)")
+    m.add_argument("--template-dir", default=DEFAULT_TEMPLATE_DIR,
+                   help="the tokenizer dir Phase 3 rendered the training text with")
+    m.add_argument("--out", required=True, help="the merged checkpoint dir (must not exist, or "
+                   "hold a merge of this adapter)")
+    m.add_argument("--merge-mode", choices=("peft", "stream"), default="stream")
+    m.add_argument("--merge-device", choices=("cpu", "auto"), default="cpu")
+    m.add_argument("--model-class", choices=("auto", "causal-lm", "image-text-to-text"),
+                   default="auto")
+    m.add_argument("--dtype", choices=("bf16", "fp16"), default="bf16")
+    m.add_argument("--execute", action="store_true", help="really merge (default: the plan)")
+
     c = sub.add_parser("calibrate", help="the train-only calibration text alone (no GPU)")
     c.add_argument("--out", required=True, help="run dir; writes <out>/calib/")
     _common(c)
@@ -2024,7 +2197,8 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     a = ap.parse_args(args)
     a.argv = args  # --detach re-runs this command line inside the unit
-    return {"run": cmd_run, "calibrate": cmd_calibrate, "serve": cmd_serve}[a.cmd](a)
+    return {"run": cmd_run, "merge": cmd_merge, "calibrate": cmd_calibrate,
+            "serve": cmd_serve}[a.cmd](a)
 
 
 if __name__ == "__main__":
