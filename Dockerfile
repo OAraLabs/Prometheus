@@ -33,7 +33,7 @@
 # FROM this one gets the same daemon however it is started. tini is only PID 1's job: reap the orphans of
 # model-written shells and pass SIGTERM on.
 
-FROM python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS build
+FROM python:3.12-slim-trixie@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159 AS build
 
 # The gateway and provider extras a server wants. Voice (onnxruntime), the browser (Playwright and its
 # browsers) and computer use (a desktop driver) are left out: build with --build-arg to add them. So is
@@ -66,7 +66,7 @@ RUN set -eu; \
     /opt/prometheus/bin/oara --version
 
 
-FROM python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+FROM python:3.12-slim-trixie@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 
 LABEL org.opencontainers.image.title="Prometheus" \
       org.opencontainers.image.description="An AI agent daemon that runs on hardware you own." \
