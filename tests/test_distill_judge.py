@@ -184,7 +184,8 @@ def test_cli_needs_a_provider_and_cannot_raise_the_cap_or_change_the_phase(tmp_p
         return FakeClient()
 
     base = ["--workdir", str(tmp_path), "run", "--no-live-probe"]
-    for extra in ([], ["--provider", "token-plan"], ["--provider", "max-payg", "--cap-usd", "500"],
+    # (--provider token-plan exists since the operator's 2026-10-31 override: tests/test_distill_token_plan.py)
+    for extra in ([], ["--provider", "max-token-plan"], ["--provider", "max-payg", "--cap-usd", "500"],
                   ["--provider", "max-payg", "--ledger", str(tmp_path / "other.csv")],
                   ["--provider", "max-payg", "--alert-usd", "500"], ["--provider", "local", "--phase", "x"],
                   ["--provider", "local", "--ignore-window"]):

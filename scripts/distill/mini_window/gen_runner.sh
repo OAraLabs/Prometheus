@@ -3,7 +3,8 @@
 #
 # Teacher generation in a flywheel window: probe guard -> local teacher_gen (concurrency 1), plus Max on the
 # pay-per-token key when QWEN_PAYG_KEY is present (judge_run.sh first, then teacher_gen --teacher max-payg),
-# and the harvest into the pool. Dry run unless --execute. Logic and safety rules: gen_runner.py (its
+# else on the Token Plan key (operator override 2026-10-31; judge_run.sh --provider token-plan, then
+# teacher_gen --teacher max-token-plan), and the harvest into the pool. Dry run unless --execute. Logic and safety rules: gen_runner.py (its
 # docstring). Settings: window.conf beside this file (GEN_* keys).
 # mini_window.py window-start / slot-exit start it as a transient unit NAMED distill-gen-<stamp>, so a
 # business restore (apply business stops every distill-* unit) and slot-enter stop it:

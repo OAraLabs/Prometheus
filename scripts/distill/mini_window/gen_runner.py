@@ -24,13 +24,25 @@ b. ``teacher_gen.py run --teacher local --tasks <the real-pattern taskset>`` thr
    row has no session id to drop it by later, so the preflight refuses such a taskset. Each teacher_gen
    run has its own ``--sandbox-root`` (``GEN_SANDBOX_ROOT``-local / -max-payg): teacher_gen wipes its
    workers' workspaces at every task start and end, and holds a lock on its root.
-c. only when ``QWEN_PAYG_KEY`` is present (environment or the 0600 env file; its value is never read here)
-   AND ``spend.py preflight`` passes: ``judge_run.sh --execute --budget-usd 25`` (Phase 2 sample on Max
-   through the pay-per-token key and the one spend ledger) FIRST, then ``teacher_gen.py run --teacher
-   max-payg --budget-usd 100`` into ``<runs>/max-payg-max-derived/``, concurrently with (b), niced (the API
-   is the bottleneck; the gym's sandbox commands run on this CPU). Its local judge goes through the same
-   guard. Key absent or preflight refused: logged, skipped, never a failure. The Token Plan key
-   (``QWEN_API_KEY``) is never used: spend.py refuses it and nothing here passes a key anywhere.
+c. the Max branch, on one of two routes (keys checked for presence only; no value is read here, and nothing
+   here passes a key anywhere):
+   * pay-per-token, whenever ``QWEN_PAYG_KEY`` is present (environment or the 0600 env file) AND ``spend.py
+     preflight`` passes: ``judge_run.sh --execute --provider payg --budget-usd 25`` (Phase 2 sample on Max,
+     the one spend ledger) FIRST, then ``teacher_gen.py run --teacher max-payg --budget-usd 100`` into
+     ``<runs>/max-payg-max-derived/``;
+   * else the Token Plan (``QWEN_API_KEY``; the operator's informed override of 2026-10-31; ``GEN_TOKEN_PLAN``
+     ``off`` disables it) when ``spend.py tokenplan-preflight`` passes: ``judge_run.sh --execute --provider
+     token-plan`` (8 workers; its first 50 calls are the trial ``spend.py tokenplan-status`` reports) FIRST,
+     then ``teacher_gen.py run --teacher max-token-plan --concurrency 8 --tp-start-concurrency 4`` into
+     ``<runs>/max-tokenplan-max-derived/``. $0 per call, no $ budget, no pacing: spend.py's guardrails
+     (adaptive concurrency, STOP on an account error or a key change, pause on an exhausted quota).
+     ``QWEN_PAYG_KEY`` appearing mid-run stops the Token Plan children at the next poll and the branch starts
+     over on the pay-per-token route (the judge resumes from its results). The quota pause
+     (``GEN_TP_PAUSE``, written by spend.py; a judge exit 4 or a teacher exit 7) parks the branch in state
+     ``quota`` until its reset time, then the branch starts over (the first call is spend.py's one probe).
+   Both run concurrently with (b), niced (the API is the bottleneck; the gym's sandbox commands run on this
+   CPU). The Max teacher's local judge goes through the same guard. No key, or a refused preflight: logged,
+   skipped, never a failure.
 d. ``harvest`` every ``GEN_HARVEST_EVERY_MIN`` and at the end: the rows of every finished task (ledger
    event kept or released) in ``<runs>/*/*.traces.jsonl`` not yet copied go to ``<pool>/<source>.<run>.
    traces.jsonl``; Max-derived rows (``artifact_policy.row_verdict``; unknown provenance counts as Max,
@@ -43,8 +55,8 @@ Stops (children by process group, SIGTERM then SIGKILL after ``GEN_CHILD_GRACE_S
 * the window's NO-SWAPS flag, or ``<runs>/STOP`` (the operator's stop for generation): everything stops;
 * the port no longer serving the teacher it served at the start (``GEN_PORT_GONE_CHECKS`` polls in a row):
   the window closed or failed;
-* the spend STOP file (``~/distill/spend-ledger.STOP``, the $140 alert): the paid branch stops at once and
-  is not restarted; the local branch goes on ($0). The Max teacher's own exit 4 (the ledger refused a
+* the spend STOP file (``~/distill/spend-ledger.STOP``: the $140 alert, or a Token Plan account error or key
+  change): the paid branch stops at once and is not restarted; the local branch goes on ($0). The Max teacher's own exit 4 (the ledger refused a
   reservation: its ``GEN_MAX_BUDGET_USD`` phase budget, a total across runs, or the cap) ends the branch as
   done, noted, never a failure; its exit 5 (the key, host, account or billing refused) stops it, noted;
 * the guard's abort switch or the guard gone: the local branch (and the Max run's local judge) stop for
@@ -132,6 +144,16 @@ GEN_DEFAULTS: dict[str, str] = {
     "GEN_MAX_JUDGE": "guard",                         # guard: the Max run's judge is the local teacher
     "GEN_PAYG_KEY_NAME": "QWEN_PAYG_KEY",
     "GEN_SPEND_STOP": "~/distill/spend-ledger.STOP",
+    # the Token Plan route (operator override 2026-10-31), used only while GEN_PAYG_KEY_NAME is absent
+    "GEN_TOKEN_PLAN": "on",                           # off: never the Token Plan
+    "GEN_TP_KEY_NAME": "QWEN_API_KEY",
+    "GEN_TP_CONCURRENCY": "8",                        # teacher tasks in flight (the adaptive limit's ceiling)
+    "GEN_TP_START_CONCURRENCY": "4",                  # the adaptive limit's start
+    "GEN_TP_JUDGE_CONCURRENCY": "8",
+    "GEN_TP_PAUSE": "~/distill/token-plan.PAUSE",     # spend.py's quota pause (read here, never written)
+    # a Token Plan child stopped by the quota with no pause standing (another process's probe in flight):
+    # the branch waits this long before it starts over, so it never spins
+    "GEN_TP_QUOTA_RECHECK_S": "300",
     "GEN_EVAL_PAUSE_BEFORE_MIN": "5",
     "GEN_EVAL_PAUSE_AFTER_MIN": "3",                  # ... and this long after its start time, until seen
     "GEN_LOCAL_RESTARTS": "3",
@@ -154,8 +176,14 @@ JUDGE_EXIT = {0: "ok", 3: "budget (cap, sub-budget or STOP)", 4: "paused (rate l
 TG_EXIT_SPEND_STOP, TG_EXIT_PAYG_REFUSED = 4, 5
 #: teacher_gen.py's exit for an unexpected exception (Python's own exit 1 would read as "kept nothing")
 TG_EXIT_CRASH = 6
+#: teacher_gen.py --teacher max-token-plan: the Token Plan's quota pause stopped it
+TG_EXIT_QUOTA_PAUSED = 7
 #: teacher_gen.py's default --name for each branch (the files a run writes are <out>/<name>.*)
 LOCAL_NAME, PAID_NAME = "qwen38-27b-gym", "max-payg-gym"
+#: the Max branch's two routes: teacher_gen --teacher, its --name, its output directory
+ROUTE_PAYG, ROUTE_TP = "payg", "token-plan"
+ROUTES = {ROUTE_PAYG: ("max-payg", PAID_NAME, "max-payg-max-derived"),
+          ROUTE_TP: ("max-token-plan", "max-tokenplan-gym", "max-tokenplan-max-derived")}
 
 
 class Skip(Exception):
@@ -272,6 +300,8 @@ class Child:
 @dataclass
 class Branch:
     state: str = "pending"
+    #: the Max branch's route (ROUTE_PAYG / ROUTE_TP) once chosen; "" before
+    mode: str = ""
     detail: str = ""
     child: Child | None = None
     restarts: int = 0
@@ -300,6 +330,7 @@ class Gen:
         self.flag = Path(conf["WIN_DIR"]) / MW.FLAG_NAME
         self.gen_stop = self.runs / "STOP"
         self.spend_stop = Path(conf["GEN_SPEND_STOP"])
+        self.tp_pause = Path(conf["GEN_TP_PAUSE"])
         self.abort_file = self.state_dir / "guard.abort"
         self.guard_url = "http://" + conf["GEN_GUARD_LISTEN"]
         self._out = out or (lambda s: print(s, flush=True))
@@ -358,7 +389,8 @@ class Gen:
                  local={"state": self.local.state, "detail": self.local.detail, "runs": self.local.runs,
                         "restarts": self.local.restarts, "exits": self.local.rcs,
                         "out": str(self.local_out()) if self.alias else None},
-                 paid={"state": self.paid.state, "detail": self.paid.detail, "exits": self.paid.rcs},
+                 paid={"state": self.paid.state, "detail": self.paid.detail, "exits": self.paid.rcs,
+                       "route": self.paid.mode or None},
                  guard={"listen": self.c["GEN_GUARD_LISTEN"], "running": bool(self.guard and self.guard.running),
                         "aborted": self.abort_file.exists()})
         tmp = self.state_dir / f".progress.{os.getpid()}"
@@ -454,8 +486,8 @@ class Gen:
     def local_out(self) -> Path:
         return self.runs / f"local-{slug(self.alias or 'teacher')}"
 
-    def paid_out(self) -> Path:
-        return self.runs / "max-payg-max-derived"
+    def paid_out(self, mode: str = ROUTE_PAYG) -> Path:
+        return self.runs / ROUTES[mode or ROUTE_PAYG][2]
 
     def sandbox_root(self, label: str) -> str:
         """One --sandbox-root per branch: teacher_gen wipes ``<root>/w<N>/workspace`` at every task start and
@@ -491,7 +523,10 @@ class Gen:
     def has_teacher_flag(self) -> bool:
         return bool(re.search(r"--teacher \{[^}]*\blocal\b", self.help_text))
 
-    def has_paid_mode(self) -> bool:
+    def has_paid_mode(self, mode: str = ROUTE_PAYG) -> bool:
+        if mode == ROUTE_TP:
+            return (bool(re.search(r"--teacher \{[^}]*max-token-plan", self.help_text))
+                    and "--tp-start-concurrency" in self.help_text)
         return bool(re.search(r"--teacher \{[^}]*max-payg", self.help_text)) and "--budget-usd" in self.help_text
 
     def guard_argv(self, until: float) -> list[str]:
@@ -512,38 +547,71 @@ class Gen:
                    self.guard_url, "--concurrency", c["GEN_LOCAL_CONCURRENCY"],
                    "--sandbox-root", self.sandbox_root("local")] + self.common_args(until))
 
-    def judge_argv(self) -> list[str]:
+    def judge_argv(self, mode: str = ROUTE_PAYG) -> list[str]:
         c = self.c
-        return (shlex.split(c["GEN_MAX_NICE_CMD"]) + ["/bin/bash", str(self.distill / "judge_run.sh"), "--execute",
-                                                      "--budget-usd", c["GEN_JUDGE_BUDGET_USD"],
-                                                      "--blind-budget-usd", c["GEN_JUDGE_BLIND_BUDGET_USD"]])
+        base = shlex.split(c["GEN_MAX_NICE_CMD"]) + ["/bin/bash", str(self.distill / "judge_run.sh"), "--execute"]
+        if mode == ROUTE_TP:
+            return base + ["--provider", "token-plan", "--concurrency", c["GEN_TP_JUDGE_CONCURRENCY"]]
+        return base + ["--provider", "payg", "--budget-usd", c["GEN_JUDGE_BUDGET_USD"],
+                       "--blind-budget-usd", c["GEN_JUDGE_BLIND_BUDGET_USD"]]
 
     def judge_env(self) -> dict[str, str]:
         return dict(self.py_env(), PY=self.c["GEN_PY"], NOTIFY=self.c["NOTIFY"], MODEL=self.c["GEN_MAX_MODEL"])
 
-    def paid_argv(self, until: float) -> list[str]:
+    def paid_argv(self, until: float, mode: str = ROUTE_PAYG) -> list[str]:
         c = self.c
         judge = (["--judge-url", c["MODEL_URL"], "--probe-guard-url", self.guard_url]
                  if c["GEN_MAX_JUDGE"] == "guard" else [])
-        return (shlex.split(c["GEN_MAX_NICE_CMD"]) + [c["GEN_PY"], str(self.distill / "teacher_gen.py"), "run",
-                                                      "--teacher", "max-payg", "--budget-usd",
-                                                      c["GEN_MAX_BUDGET_USD"], "--notify-cmd", c["NOTIFY"],
-                                                      "--out", str(self.paid_out()), "--concurrency",
-                                                      c["GEN_MAX_CONCURRENCY"], "--sandbox-root",
-                                                      self.sandbox_root("max-payg")]
+        teacher = ROUTES[mode][0]
+        if mode == ROUTE_TP:
+            route = ["--teacher", teacher, "--concurrency", c["GEN_TP_CONCURRENCY"],
+                     "--tp-start-concurrency", c["GEN_TP_START_CONCURRENCY"]]
+        else:
+            route = ["--teacher", teacher, "--budget-usd", c["GEN_MAX_BUDGET_USD"], "--concurrency",
+                     c["GEN_MAX_CONCURRENCY"]]
+        return (shlex.split(c["GEN_MAX_NICE_CMD"]) + [c["GEN_PY"], str(self.distill / "teacher_gen.py"), "run"]
+                + route + ["--notify-cmd", c["NOTIFY"], "--out", str(self.paid_out(mode)), "--sandbox-root",
+                           self.sandbox_root(teacher)]
                 + judge + self.common_args(until))
 
-    def spend_preflight(self) -> tuple[bool, str]:
-        argv = [self.c["GEN_PY"], str(self.distill / "spend.py"), "preflight", "--notify-cmd", self.c["NOTIFY"],
+    def spend_preflight(self, mode: str = ROUTE_PAYG) -> tuple[bool, str]:
+        cmd = "tokenplan-preflight" if mode == ROUTE_TP else "preflight"
+        argv = [self.c["GEN_PY"], str(self.distill / "spend.py"), cmd, "--notify-cmd", self.c["NOTIFY"],
                 "--model", self.c["GEN_MAX_MODEL"]]
         try:
             cp = subprocess.run(argv, capture_output=True, text=True, timeout=120, env=self.py_env())
         except (OSError, subprocess.SubprocessError) as e:
-            return False, f"spend.py preflight did not run: {type(e).__name__}"
+            return False, f"spend.py {cmd} did not run: {type(e).__name__}"
         if cp.returncode == 0:
-            return True, "spend preflight ok"
+            return True, f"spend {cmd} ok"
         last = (cp.stderr.strip().splitlines() or cp.stdout.strip().splitlines() or ["?"])[-1]
-        return False, f"spend preflight refused (exit {cp.returncode}): {last[:240]}"
+        return False, f"spend {cmd} refused (exit {cp.returncode}): {last[:240]}"
+
+    def paid_mode(self) -> str:
+        """The Max branch's route (guardrail 6: the pay-per-token key always wins), or "" for none."""
+        if key_present(self.c["GEN_PAYG_KEY_NAME"], self.env):
+            return ROUTE_PAYG
+        if self.c["GEN_TOKEN_PLAN"].strip().lower() == "on" and key_present(self.c["GEN_TP_KEY_NAME"], self.env):
+            return ROUTE_TP
+        return ""
+
+    def pause_until(self) -> float | None:
+        """When the Token Plan's quota pause (spend.py's PAUSE file) ends, while it stands; else None. An
+        unreadable file counts as one hour from its modification time (spend.py's own rule)."""
+        try:
+            raw = self.tp_pause.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raw = ""
+        try:
+            until = float(json.loads(raw)["until"])
+        except (ValueError, KeyError, TypeError):
+            try:
+                until = self.tp_pause.stat().st_mtime + 3600.0
+            except OSError:
+                return None
+        return until if self.now() < until else None
 
     # checks
 
@@ -633,27 +701,40 @@ class Gen:
                     f"run taskset_gen.py exclude and point GEN_TASKS at its output")
         return f"the excluded-session check failed (exit {cp.returncode}): {last}"
 
-    def paid_plan(self) -> tuple[bool, str]:
-        """Whether the paid branch may start (key present + spend preflight), and why not."""
-        name = self.c["GEN_PAYG_KEY_NAME"]
-        if not key_present(name, self.env):
-            return False, f"{name} is not present (environment or env file): Max judge and Max teacher skipped"
+    def paid_plan(self, mode: str | None = None) -> tuple[bool, str]:
+        """Whether the Max branch may start on *mode* (default: the route the keys pick now; key present +
+        the route's spend preflight), and why not."""
+        mode = self.paid_mode() if mode is None else mode
+        if not mode:
+            return False, (f"neither {self.c['GEN_PAYG_KEY_NAME']} nor (with GEN_TOKEN_PLAN=on) "
+                           f"{self.c['GEN_TP_KEY_NAME']} is present (environment or env file): Max judge and "
+                           "Max teacher skipped")
+        if mode == ROUTE_PAYG and not key_present(self.c["GEN_PAYG_KEY_NAME"], self.env):
+            return False, f"{self.c['GEN_PAYG_KEY_NAME']} is not present"
+        if mode == ROUTE_TP and key_present(self.c["GEN_PAYG_KEY_NAME"], self.env):
+            return False, f"{self.c['GEN_PAYG_KEY_NAME']} is present: Token Plan batch use stops"
         if self.spend_stop.exists():
-            return False, f"the spend STOP file {self.spend_stop} is present: no paid call"
+            return False, f"the spend STOP file {self.spend_stop} is present: no Max call"
+        if mode == ROUTE_TP:
+            until = self.pause_until()
+            if until is not None:
+                return False, f"the Token Plan quota pause stands until {self.iso(until)}"
         if not (self.distill / "spend.py").exists():
             return False, "spend.py not staged"
-        return self.spend_preflight()
+        return self.spend_preflight(mode)
 
     def print_plan(self, until: float) -> None:
         self.log(f"plan, until {self.iso(until)} (local concurrency {self.c['GEN_LOCAL_CONCURRENCY']}):")
         self.log("  a. probe guard: " + shlex.join(self.guard_argv(until)))
         self.log(f"  b. local teacher -> {self.local_out()}: " + shlex.join(self.local_argv(until)))
+        route = self.paid_mode() or ROUTE_PAYG
         ok, why = self.paid_plan()
-        self.log(f"  c. paid branch: {'GO' if ok else 'SKIP'} ({why})")
-        self.log("     1) " + shlex.join(self.judge_argv()) + "   [PY, PYTHONPATH, NOTIFY in its env]")
-        mode = ("" if self.has_paid_mode() or not self.help_text
-                else "   [this teacher_gen has no --teacher max-payg / --budget-usd: it would be skipped]")
-        self.log(f"     2) -> {self.paid_out()}: " + shlex.join(self.paid_argv(until)) + mode)
+        self.log(f"  c. paid branch ({'route ' + route if self.paid_mode() else 'no key'}): "
+                 f"{'GO' if ok else 'SKIP'} ({why})")
+        self.log("     1) " + shlex.join(self.judge_argv(route)) + "   [PY, PYTHONPATH, NOTIFY in its env]")
+        mode = ("" if self.has_paid_mode(route) or not self.help_text
+                else f"   [this teacher_gen has no --teacher {ROUTES[route][0]}: it would be skipped]")
+        self.log(f"     2) -> {self.paid_out(route)}: " + shlex.join(self.paid_argv(until, route)) + mode)
         self.log(f"  d. harvest every {self.c['GEN_HARVEST_EVERY_MIN']} min and at the end -> {self.pool}")
 
     def cmdline(self, pid: int) -> str:
@@ -670,7 +751,7 @@ class Gen:
         names the guard script with our port, teacher_gen.py or judge_run.sh). Under systemd a unit stop
         takes them all (KillMode=mixed); this covers a runner killed outside it."""
         want = {"guard": ("probe_guard.py", self.c["GEN_GUARD_LISTEN"]), "local": ("teacher_gen.py", "run"),
-                "max": ("teacher_gen.py", "max-payg"), "judge": ("judge_run.sh", "--execute")}
+                "max": ("teacher_gen.py", "--teacher max-"), "judge": ("judge_run.sh", "--execute")}
         for name, sig in want.items():
             f = self.state_dir / f"{name}.pid"
             try:
@@ -803,21 +884,47 @@ class Gen:
         b = self.paid
         if b.state in FINAL:
             return
+        if b.mode == ROUTE_TP and key_present(self.c["GEN_PAYG_KEY_NAME"], self.env):
+            # guardrail 6: the pay-per-token key appeared: Token Plan batch use stops, the branch starts over
+            self.stop_child(b.child, "QWEN_PAYG_KEY appeared")
+            b.child, b.state, b.mode = None, "pending", ""
+            b.detail = f"{self.c['GEN_PAYG_KEY_NAME']} appeared: Token Plan batch use stopped; switching routes"
+            self.note(b.detail)
+            self.save()
+            return
         if b.state == "pending":
-            ok, why = self.paid_plan()
-            self.log(f"paid branch: {'GO' if ok else 'SKIP'} ({why})")
+            mode = self.paid_mode()
+            if mode == ROUTE_TP and self.pause_until() is not None and not self.spend_stop.exists():
+                b.mode = mode
+                self.park_quota(f"the Token Plan quota pause stands until {self.iso(self.pause_until() or 0)}")
+                return
+            ok, why = self.paid_plan(mode)
+            self.log(f"paid branch ({mode or 'no key'}): {'GO' if ok else 'SKIP'} ({why})")
             if not ok:
                 b.state, b.detail = "off", why
                 self.save()
                 return
-            b.child = self.start_child("judge", self.judge_argv(), self.judge_env())
+            b.mode = mode
+            b.child = self.start_child("judge", self.judge_argv(mode), self.judge_env())
             b.state = "judge"
             self.save()
             return
         if self.spend_stop.exists():
             self.stop_child(b.child, "spend STOP")
-            b.state, b.detail = "stopped", f"the spend STOP file {self.spend_stop} appeared ($140 alert): no more paid calls"
+            b.state, b.detail = "stopped", (f"the spend STOP file {self.spend_stop} appeared ($140 alert, or a Token "
+                                            "Plan account error or key change): no more Max calls")
             self.note(b.detail)
+            self.save()
+            return
+        if b.state == "quota":
+            if self.pause_until() is not None or self.now() < b.resume_at:
+                return
+            if until - self.now() < float(self.c["GEN_MIN_START_S"]):
+                b.state, b.detail = "done", "the quota pause ended too close to --until"
+                self.save()
+                return
+            self.note("Token Plan quota pause over: the Max branch starts over (one probe call first)")
+            b.child, b.state, b.mode = None, "pending", ""
             self.save()
             return
         if b.state == "paused":
@@ -844,20 +951,25 @@ class Gen:
         if rc is None:
             return
         b.rcs.append(rc)
+        mode = b.mode or ROUTE_PAYG
         if b.state == "judge":
             self.log(f"judge_run.sh exit {rc} ({JUDGE_EXIT.get(rc, 'see its log')})")
+            if mode == ROUTE_TP and self.pause_until() is not None:
+                self.park_quota(f"judge exit {rc}; the Token Plan quota pause stands until "
+                                f"{self.iso(self.pause_until() or 0)}")
+                return
             if rc == 5:
-                b.state, b.detail = "done", "the Max judge stopped fatally (key, host, billing or auth): no Max teacher"
+                b.state, b.detail = "done", "the Max judge stopped fatally (key, host, account, billing or auth): no Max teacher"
                 self.note(b.detail)
                 return
-            ok, why = self.paid_plan()
+            ok, why = self.paid_plan(mode)
             if not ok:
                 b.state, b.detail = "done", f"judge exit {rc}; then {why}"
                 self.log(f"paid branch: {b.detail}")
                 return
-            if not self.has_paid_mode():
-                b.state, b.detail = "off", (f"judge exit {rc}; this teacher_gen has no --teacher max-payg / "
-                                            "--budget-usd yet: Max teacher skipped")
+            if not self.has_paid_mode(mode):
+                b.state, b.detail = "off", (f"judge exit {rc}; this teacher_gen has no --teacher {ROUTES[mode][0]} "
+                                            "yet: Max teacher skipped")
                 self.note(b.detail)
                 return
             if until - self.now() < float(self.c["GEN_MIN_START_S"]):
@@ -869,23 +981,29 @@ class Gen:
                 self.note(f"Max teacher waits (its local judge shares the evaluated server): {pause}")
                 self.save()
                 return
-            b.child = self.start_child("max", self.paid_argv(until), self.py_env())
+            b.child = self.start_child("max", self.paid_argv(until, mode), self.py_env())
             b.state, b.detail = "teacher", f"judge exit {rc}"
             self.save()
             return
         where = f": see {b.child.log_path if b.child else '?'}"
-        crashed = rc == TG_EXIT_CRASH or (rc == 1 and not self.wrote_report(b.child, self.paid_out(), PAID_NAME))
+        crashed = rc == TG_EXIT_CRASH or (rc == 1 and not self.wrote_report(b.child, self.paid_out(mode),
+                                                                            ROUTES[mode][1]))
         if rc in (0, 1) and not crashed:
             b.state, b.detail = "done", f"Max teacher exit {rc}"
         elif crashed:
             b.state, b.detail = "failed", f"Max teacher crashed (exit {rc}){where}"
             self.note(b.detail)
+        elif rc == TG_EXIT_QUOTA_PAUSED and mode == ROUTE_TP:
+            self.park_quota(f"Max teacher exit {rc}: the Token Plan quota pause stands"
+                            + (f" until {self.iso(self.pause_until() or 0)}" if self.pause_until() else ""))
+            return
         elif rc == TG_EXIT_SPEND_STOP:
             # its phase budget (--budget-usd, a total across runs) or the $150 cap is reached, or the
             # STOP file appeared between two polls: a planned end, not a failure; never restarted
             b.state = "done"
             b.detail = (f"Max teacher exit {rc}: the spend ledger refused a paid call (phase budget "
-                        f"${self.c['GEN_MAX_BUDGET_USD']}, the cap or STOP){where}")
+                        f"${self.c['GEN_MAX_BUDGET_USD']}, the cap or STOP){where}") if mode == ROUTE_PAYG else (
+                        f"Max teacher exit {rc}: the STOP file, or {self.c['GEN_PAYG_KEY_NAME']} appeared{where}")
             self.note(b.detail)
         elif rc == TG_EXIT_PAYG_REFUSED:
             b.state = "stopped"
@@ -895,6 +1013,16 @@ class Gen:
             b.state, b.detail = "failed", f"Max teacher exit {rc}{where}"
             self.note(b.detail)
         self.log(f"paid branch: {b.detail}")
+        self.save()
+
+    def park_quota(self, detail: str) -> None:
+        """The Token Plan's quota is exhausted: the Max branch waits (state ``quota``) for spend.py's pause to
+        end, then starts over. Not a failure, not a stop (spend.py told the operator once)."""
+        b = self.paid
+        b.child, b.state, b.detail = None, "quota", detail
+        # with a pause standing its end governs; without one (a probe in flight elsewhere) wait a while
+        b.resume_at = 0.0 if self.pause_until() is not None else self.now() + float(self.c["GEN_TP_QUOTA_RECHECK_S"])
+        self.note(f"Max branch waits: {detail}")
         self.save()
 
     def resume_paid(self, until: float) -> None:
@@ -914,14 +1042,18 @@ class Gen:
             b.state, b.detail = "done", "too close to --until to resume the Max teacher"
             self.save()
             return
-        ok, why = self.paid_plan()
+        mode = b.mode or ROUTE_PAYG
+        if mode == ROUTE_TP and self.pause_until() is not None:
+            self.park_quota(f"the Token Plan quota pause stands until {self.iso(self.pause_until() or 0)}")
+            return
+        ok, why = self.paid_plan(mode)
         if not ok:
             b.state, b.detail = "done", f"Max teacher not resumed: {why}"
             self.note(b.detail)
             self.save()
             return
         self.note("Max teacher resumes (the nightly eval is over)")
-        b.child = self.start_child("max", self.paid_argv(until), self.py_env())
+        b.child = self.start_child("max", self.paid_argv(until, mode), self.py_env())
         b.state, b.detail = "teacher", "resumed after a nightly eval"
         self.save()
 
@@ -1001,7 +1133,8 @@ class Gen:
             f"teacher {self.alias}",
             f"local: {self.local.state} ({self.local.detail or 'ran'}); runs {self.local.runs}, restarts "
             f"{self.local.restarts}"[:300],
-            f"Max: {self.paid.state} ({self.paid.detail or '-'})"[:300],
+            f"Max{' (' + self.paid.mode + ')' if self.paid.mode else ''}: {self.paid.state} "
+            f"({self.paid.detail or '-'})"[:300],
             f"harvested this run: {new}; pool: {totals}"[:300],
             ("notes: " + "; ".join(self.notes[-2:]))[:300] if self.notes else "",
         ])

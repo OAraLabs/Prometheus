@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
-# Phase 2 judging on Qwen Max through the PAY-PER-TOKEN key (QWEN_PAYG_KEY), never the Token Plan key.
+# Phase 2 judging on Qwen Max: the PAY-PER-TOKEN key (QWEN_PAYG_KEY) when it is present, else the Token
+# Plan key (QWEN_API_KEY; the operator's informed override of 2026-10-31).
 #
-#   judge_run.sh [--execute] [--rejudge] [--view outcome|blind] [--no-blind-fail]
+#   judge_run.sh [--execute] [--provider auto|payg|token-plan] [--trial] [--limit N]
+#                [--rejudge] [--view outcome|blind] [--no-blind-fail]
 #                [--budget-usd 20] [--blind-budget-usd 5] [--rejudge-budget-usd 40]
-#                [--allow-missing 0] [--concurrency 2]
+#                [--allow-missing 0] [--concurrency 2|8]
+#
+# --provider auto (default): `spend.py which-key` picks payg when QWEN_PAYG_KEY is present (it always
+#   wins), else token-plan when QWEN_API_KEY is. token-plan: $0 per call, no --budget-usd (the budget
+#   flags are ignored), concurrency 8 workers by default (the client's adaptive limit starts at 4); its
+#   preflight is `spend.py tokenplan-preflight` (exit 3: QWEN_PAYG_KEY is present; 4: the quota pause).
+# --trial (with --execute): the 50-call trial, the first Phase 2 judge calls: sample if needed, judge 50
+#   items (outcome view), no blind check, no re-judge, then `spend.py tokenplan-status` (trial clean?).
+#   It is a report, not a gate. Exit 0 when the 50 ran (items remaining is expected).
 #
 # DRY RUN by default: the preflight runs and the projected cost is printed. Nothing is sent.
 # --execute: sample (when there is no queue yet), run, the blind fail-side check, report.
@@ -52,10 +62,16 @@ budget=20
 blind_budget=5
 rejudge_budget=40
 allow_missing=0
-concurrency=2
+concurrency=""
+provider=auto
+trial=0
+limit=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --execute) execute=1 ;;
+    --provider) provider=${2:?--provider needs a value}; shift ;;
+    --trial) trial=1 ;;
+    --limit) limit=${2:?--limit needs a value}; shift ;;
     --rejudge) rejudge=1 ;;
     --no-blind-fail) blind_fail=0 ;;
     --view) view=${2:?--view needs a value}; shift ;;
@@ -64,7 +80,7 @@ while [ $# -gt 0 ]; do
     --rejudge-budget-usd) rejudge_budget=${2:?--rejudge-budget-usd needs a value}; shift ;;
     --allow-missing) allow_missing=${2:?--allow-missing needs a value}; shift ;;
     --concurrency) concurrency=${2:?--concurrency needs a value}; shift ;;
-    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
     *) echo "judge_run: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -72,11 +88,40 @@ done
 case "$allow_missing" in
   ''|*[!0-9]*) echo "judge_run: --allow-missing needs a whole number" >&2; exit 2 ;;
 esac
+case "$provider" in
+  auto|payg|token-plan) ;;
+  *) echo "judge_run: --provider must be auto, payg or token-plan" >&2; exit 2 ;;
+esac
+if [ "$trial" -eq 1 ]; then
+  limit=${limit:-50}
+  blind_fail=0
+  rejudge=0
+  view=outcome
+fi
+case "$limit" in
+  ''|*[!0-9]*) [ -z "$limit" ] || { echo "judge_run: --limit needs a whole number" >&2; exit 2; } ;;
+esac
 
 say() { printf 'judge_run: %s\n' "$*"; }
 run_spend() { "$PY" "$here/spend.py" "$@"; }
 run_judge() { "$PY" "$here/judge.py" "$@"; }
-paid=(--provider max-payg --notify-cmd "$NOTIFY" --judge-model "$MODEL" --concurrency "$concurrency")
+
+if [ "$provider" = auto ]; then
+  # presence only (QWEN_PAYG_KEY wins); no value is read into this script
+  provider=$(run_spend which-key) || { echo "judge_run: refused: no QWEN_PAYG_KEY or QWEN_API_KEY" >&2; exit 2; }
+fi
+lim=()
+if [ -n "$limit" ]; then lim=(--limit "$limit"); fi
+if [ "$provider" = token-plan ]; then
+  concurrency=${concurrency:-8}
+  paid=(--provider token-plan --notify-cmd "$NOTIFY" --judge-model "$MODEL" --concurrency "$concurrency")
+else
+  concurrency=${concurrency:-2}
+  paid=(--provider max-payg --notify-cmd "$NOTIFY" --judge-model "$MODEL" --concurrency "$concurrency")
+fi
+# The --budget-usd flag (pay-per-token only) in the array _b: empty on the Token Plan.
+_b=()
+budget_args() { _b=(); if [ "$provider" != token-plan ]; then _b=(--budget-usd "$1"); fi; }
 # A run that ended "incomplete" (exit 6) counts as finished when --allow-missing allows some items
 # to stay without a verdict; the report's gate then says whether few enough are missing.
 finished() { [ "$1" -eq 0 ] || { [ "$1" -eq 6 ] && [ "$allow_missing" -gt 0 ]; }; }
@@ -88,8 +133,23 @@ except (OSError, ValueError):
     print("")' "$1"
 }
 
-say "preflight (key, host, Token Plan, STOP file, price, ledger, notify)"
-run_spend preflight --notify-cmd "$NOTIFY" --model "$MODEL"
+if [ "$provider" = token-plan ]; then
+  say "route: Token Plan (QWEN_API_KEY; operator override 2026-10-31): \$0 per call, adaptive concurrency"
+  say "preflight (key, Token Plan host, QWEN_PAYG_KEY absent, STOP file, quota pause, key fingerprint, notify)"
+  pre=0
+  run_spend tokenplan-preflight --notify-cmd "$NOTIFY" --model "$MODEL" || pre=$?
+  case "$pre" in
+    0) ;;
+    3) echo "judge_run: refused: QWEN_PAYG_KEY is present: run with --provider auto (it uses that key)" >&2
+       exit 3 ;;
+    4) say "the Token Plan quota pause stands: nothing was sent"; exit 4 ;;
+    *) exit 2 ;;
+  esac
+else
+  say "route: pay-per-token (QWEN_PAYG_KEY)"
+  say "preflight (key, host, Token Plan, STOP file, price, ledger, notify)"
+  run_spend preflight --notify-cmd "$NOTIFY" --model "$MODEL"
+fi
 if ! "$PY" -c 'import prometheus.gym.ladder.record' >/dev/null 2>&1; then
   echo "judge_run: refused: Prometheus is not importable (PYTHONPATH=<deployed tree>/src)" >&2
   exit 2
@@ -111,7 +171,13 @@ say "projected cost of what is pending"
 run_judge --workdir "$WORKDIR" estimate "${paid[@]}" --view "$view"
 
 if [ "$execute" -eq 0 ]; then
-  say "dry run: would run judge.py run --provider max-payg --budget-usd $budget --view $view"
+  if [ "$trial" -eq 1 ]; then
+    say "dry run: the trial would judge $limit items (${paid[1]}), then print spend.py tokenplan-status"
+    say "dry run: nothing was sent; pass --execute to run"
+    exit 0
+  fi
+  say "dry run: would run judge.py run ${paid[1]} --view $view${limit:+ --limit $limit}" \
+    "$([ "$provider" = token-plan ] || printf -- '--budget-usd %s' "$budget")"
   if [ "$blind_fail" -eq 1 ] && [ "$view" = outcome ]; then
     say "dry run: then the blind fail-side check (--view blind --only fail, phase 2-judge-blind,"
     say "dry run: its own --budget-usd $blind_budget)"
@@ -125,11 +191,19 @@ if [ "$execute" -eq 0 ]; then
 fi
 
 rc=0
-run_judge --workdir "$WORKDIR" run "${paid[@]}" --budget-usd "$budget" --view "$view" || rc=$?
+budget_args "$budget"
+run_judge --workdir "$WORKDIR" run "${paid[@]}" ${_b[@]+"${_b[@]}"} --view "$view" ${lim[@]+"${lim[@]}"} || rc=$?
+if [ "$trial" -eq 1 ]; then
+  say "trial: judge.py exit $rc ($([ "$rc" -eq 6 ] && echo 'items remain, as expected' || echo 'see judge-status.json'))"
+  if [ "$provider" = token-plan ]; then run_spend tokenplan-status --notify-cmd "$NOTIFY" || true; fi
+  if [ "$rc" -eq 0 ] || [ "$rc" -eq 6 ]; then exit 0; fi
+  exit "$rc"
+fi
 if finished "$rc" && [ "$blind_fail" -eq 1 ] && [ "$view" = outcome ]; then
   say "blind fail-side check"
   blind_rc=0
-  run_judge --workdir "$WORKDIR" run "${paid[@]}" --budget-usd "$blind_budget" --view blind --only fail \
+  budget_args "$blind_budget"
+  run_judge --workdir "$WORKDIR" run "${paid[@]}" ${_b[@]+"${_b[@]}"} --view blind --only fail \
     || blind_rc=$?
   if ! finished "$blind_rc"; then rc=$blind_rc; fi
 fi
@@ -155,8 +229,9 @@ esac
 
 if [ "$rejudge" -eq 1 ]; then
   say "re-judge (run-all) if the gate asks for it"
+  budget_args "$rejudge_budget"
   run_judge --workdir "$REJUDGE_WORKDIR" run-all --rejudge-from "$WORKDIR" "${paid[@]}" \
-    --budget-usd "$rejudge_budget" || rc=$?
+    ${_b[@]+"${_b[@]}"} || rc=$?
   if [ -s "$REJUDGE_WORKDIR/judge-queue.jsonl" ]; then
     run_judge --workdir "$REJUDGE_WORKDIR" report --allow-missing "$allow_missing" \
       --markdown-out "$REJUDGE_WORKDIR/judge-report.md" || true

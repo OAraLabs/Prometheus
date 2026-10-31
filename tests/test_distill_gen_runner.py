@@ -246,8 +246,8 @@ def test_dry_run_prints_the_plan_and_starts_nothing(rig: Rig) -> None:
     assert "--probe-unit voice.service" in out and "--min-tps 15" in out
     assert "--teacher local" in out and "--concurrency 1" in out
     assert f"--probe-guard-url http://127.0.0.1:{rig.guard_port}" in out
-    assert "paid branch: SKIP (QWEN_PAYG_KEY is not present" in out
-    assert "judge_run.sh --execute --budget-usd 25 --blind-budget-usd 5" in out
+    assert "paid branch (no key): SKIP (neither QWEN_PAYG_KEY nor (with GEN_TOKEN_PLAN=on) QWEN_API_KEY" in out
+    assert "judge_run.sh --execute --provider payg --budget-usd 25 --blind-budget-usd 5" in out
     assert "--teacher max-payg --budget-usd 100" in out and "max-payg-max-derived" in out
     # each teacher_gen run its own sandbox root (they would wipe each other's workspaces)
     assert f"--sandbox-root {rig.sbx}-local" in out and f"--sandbox-root {rig.sbx}-max-payg" in out
@@ -445,7 +445,7 @@ def test_paid_branch_judges_first_then_the_max_teacher_and_stops_at_the_spend_st
     p = rig.start(until_s=60, env={"FAKE_JUDGE_S": "0.5"})
     rig.wait_for(lambda: (rig.state / "max-pid").exists(), what="the Max teacher")
     judge = rig.calls("judge-calls.log")
-    assert len(judge) == 1 and judge[0].startswith("--execute --budget-usd 25 --blind-budget-usd 5 |")
+    assert len(judge) == 1 and judge[0].startswith("--execute --provider payg --budget-usd 25 --blind-budget-usd 5 |")
     assert f"PY={sys.executable}" in judge[0] and f"PYTHONPATH={rig.root / 'code' / 'src'}" in judge[0]
     assert "MODEL=qwen3.8-max" in judge[0]
     tg = rig.calls("tg-calls.log")
@@ -519,7 +519,7 @@ def test_key_present_but_preflight_refused_skips_the_paid_branch(rig: Rig) -> No
     rig.with_key()
     cp = rig.run(until_s=3, env={"FAKE_SPEND_RC": "2"})
     assert cp.returncode == 0, cp.stdout[-3000:]
-    assert "paid branch: SKIP (spend preflight refused (exit 2): refused: STOP is active" in cp.stdout
+    assert "paid branch (payg): SKIP (spend preflight refused (exit 2): refused: STOP is active" in cp.stdout
     assert rig.calls("judge-calls.log") == [] and len(rig.calls("tg-calls.log")) == 1
     assert rig.progress()["paid"]["state"] == "off"
 

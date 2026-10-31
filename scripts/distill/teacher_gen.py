@@ -17,6 +17,12 @@
     uv run python scripts/distill/teacher_gen.py run --teacher max-payg --budget-usd 40 \\
         --tasks ~/distill/phase2b/tasksets/real-v1.jsonl --out ~/distill/phase2b-max-derived \\
         [--judge-url http://127.0.0.1:<local 27B judge>] [--thinking-budget 0] [--max-tokens 4096] ...
+    # Qwen Max on the Token Plan key (QWEN_API_KEY; operator override 2026-10-31), only while
+    # QWEN_PAYG_KEY is absent: $0 per call, every attempt a ledger row, spend.py's guardrails
+    # (adaptive concurrency 4 -> 8, STOP on an account error, pause on an exhausted quota):
+    uv run python scripts/distill/teacher_gen.py run --teacher max-token-plan --concurrency 8 \\
+        --tasks ~/distill/phase2b/tasksets/real-v1.jsonl --out ~/distill/phase2b-tokenplan-max-derived \\
+        [--judge-url http://127.0.0.1:<local 27B judge>] [--tp-start-concurrency 4] ...
     # A smoke run of the built-in task families (rows tagged builtin-smoke, never trained on):
     uv run python scripts/distill/teacher_gen.py run --builtin-smoke --max-tasks 5 --out /tmp/smoke ...
     # The built-in tasks a smoke run would start next (no model calls), as JSONL:
@@ -260,6 +266,30 @@ the strict record; they are never published (``publish_guard.py``), so
 carries ``max_derived: true`` and this phase's spend. The paid key is never
 used for daemon or background work: ``teacher_gen`` is one of spend.py's two
 allowed tools.
+The Max teacher on the Token Plan (``--teacher max-token-plan``)
+--------------------------------------------------------------
+The operator's informed override of 2026-10-31: the same Max teacher, on the
+Token Plan subscription key (``QWEN_API_KEY``, ``sk-sp-`` on a
+``token-plan.<region>`` host) through ``spend.TokenPlanClient``, only while
+``QWEN_PAYG_KEY`` is absent (that key wins: refused before any call, exit 5,
+or mid-run when it appears in the env file, stop ``superseded``, exit 4).
+Everything above holds (real-pattern taskset only, sandbox, verification,
+``--out`` with the max-derived tag, the signal handling), except money: $0 per
+call, no ``--budget-usd``, every attempt a ``token-plan`` row in the one
+ledger. ``--concurrency`` (1..8) is the tasks in flight; the client's adaptive
+limit (``--tp-start-concurrency``, default 4, never above ``--concurrency``)
+gates their calls, halves on a 429 burst and grows back slowly, and a
+rate-limit 429 is retried with exponential backoff inside the client. An
+account-level error or a key change writes the STOP file, notifies the
+operator with the exact error and stops the run (``payg_fatal``, exit 5); an
+exhausted quota starts the pause and stops the run (``quota_paused``, exit 7:
+gen_runner.py starts it again once the pause is over, and the first call is
+the single probe). Rows are tagged ``source = max-tokenplan-gym``
+(``max-tokenplan-gym-relaxed``), ``teacher: max-token-plan``,
+``max_derived: true``; a Max self-judge record says ``provider:
+max-token-plan``, ``judge_key: token-plan``. build.py admits them exactly as
+``max-payg-gym`` rows: only under ``--allow-max-derived``.
+
 The preflight refuses a teacher (or judge) whose ``/v1/models`` id does not
 match ``--teacher-id`` (``--judge-id``; default ``*qwen3*8*27b*``) or names a
 Max model, so a loopback proxy, the probe guard in front of another model or
@@ -335,7 +365,9 @@ in an error (teacher or judge transport, or a harness fault), 4 the spend
 ledger stopped a ``--teacher max-payg`` run (STOP, the cap, ``--budget-usd``),
 5 ``--teacher max-payg`` refused before any call (no ``QWEN_PAYG_KEY``, the
 Token Plan key or host, the STOP file, no notify command) or the paid API
-refused the key or account mid-run, 143 / 129 a ``--teacher max-payg`` run
+refused the key or account mid-run (``--teacher max-token-plan``: the same, and
+``QWEN_PAYG_KEY`` present at the start), 7 ``--teacher max-token-plan`` stopped
+by the quota pause (rerun after it), 143 / 129 a paid run
 stopped by SIGTERM / SIGHUP (its calls in flight settled first), 6 an
 unexpected exception (its traceback on stderr; never Python's own 1). Errored
 tasks are not in the ledger as done, so the next run retries them.
@@ -398,13 +430,25 @@ GENERATOR_VERSION = "teacher-gen/4"
 #: ``--teacher``: the local llama-server (default) or Qwen Max on the pay-per-token key.
 TEACHER_LOCAL = "local"
 TEACHER_PAYG = "max-payg"
-TEACHERS = (TEACHER_LOCAL, TEACHER_PAYG)
+#: The same Max teacher on the Token Plan key (operator override 2026-10-31; spend.TokenPlanClient).
+TEACHER_TOKEN_PLAN = "max-token-plan"
+TEACHERS = (TEACHER_LOCAL, TEACHER_PAYG, TEACHER_TOKEN_PLAN)
+#: The Max teachers: every call through one of spend.py's clients.
+MAX_TEACHERS = frozenset({TEACHER_PAYG, TEACHER_TOKEN_PLAN})
 #: --teacher max-payg: the one priced model (spend.PRICES), its row tags, and its ledger
 #: tool and phase (spend.ALLOWED_TOOLS; the phase is the --budget-usd sub-budget's key).
 PAYG_MODEL = "qwen3.8-max"
 PAYG_TEACHER_ID = "qwen3.8-max*"
 PAYG_SOURCE = "max-payg-gym"
 PAYG_RELAXED_SOURCE = "max-payg-gym-relaxed"
+#: --teacher max-token-plan rows (build.py admits them only under --allow-max-derived, as PAYG_SOURCE)
+TOKEN_PLAN_SOURCE = "max-tokenplan-gym"
+TOKEN_PLAN_RELAXED_SOURCE = "max-tokenplan-gym-relaxed"
+#: A Max self-judge's record names its route the way build.py reads it.
+JUDGE_ROUTE = {TEACHER_PAYG: ("max-payg", "payg"), TEACHER_TOKEN_PLAN: ("max-token-plan", "token-plan")}
+#: --teacher max-token-plan: tasks in flight at most (spend.TP_MAX_CONCURRENCY) and the adaptive start.
+TOKEN_PLAN_MAX_CONCURRENCY = 8
+TOKEN_PLAN_START_CONCURRENCY = 4
 PAYG_TOOL = "teacher_gen"
 PAYG_PHASE = "2b-teacher"
 PAYG_MAX_CONCURRENCY = 4
@@ -3210,12 +3254,19 @@ class Settings:
     budget_usd: float | None = None
     thinking_budget: int = 0
     payg_client: Any = field(default=None, repr=False, compare=False)
+    #: --teacher max-token-plan: the adaptive concurrency's start (its ceiling is --concurrency)
+    tp_start_concurrency: int = TOKEN_PLAN_START_CONCURRENCY
     #: the pad pool's summary (``pad_pool_split``), for the report
     pad_pool: dict[str, Any] = field(default_factory=dict)
 
     @property
     def payg(self) -> bool:
-        return self.teacher == TEACHER_PAYG
+        """A Max teacher (the pay-per-token key or the Token Plan): every call through spend.py."""
+        return self.teacher in MAX_TEACHERS
+
+    @property
+    def token_plan(self) -> bool:
+        return self.teacher == TEACHER_TOKEN_PLAN
 
     @property
     def teacher_endpoint(self) -> str:
@@ -3254,8 +3305,9 @@ class Settings:
 
     @property
     def judge_provider(self) -> str:
-        """``max-payg`` when Max judges (only ever on the paid key), else ``local``."""
-        return TEACHER_PAYG if self.payg and self.judge_is_teacher else "local"
+        """``max-payg`` / ``max-token-plan`` when Max judges itself (on the teacher's own key),
+        else ``local``."""
+        return JUDGE_ROUTE[self.teacher][0] if self.payg and self.judge_is_teacher else "local"
 
     @property
     def local_judge_model(self) -> str:
@@ -3267,13 +3319,13 @@ class Settings:
         """The ``_meta.source`` of a strictly verified row."""
         if self.task_source != ORIGIN_TASKSET:
             return BUILTIN_SOURCE
-        return PAYG_SOURCE if self.payg else SOURCE_TAG
+        return (TOKEN_PLAN_SOURCE if self.token_plan else PAYG_SOURCE) if self.payg else SOURCE_TAG
 
     @property
     def relaxed_source(self) -> str:
         if self.task_source != ORIGIN_TASKSET:
             return BUILTIN_SOURCE
-        return PAYG_RELAXED_SOURCE if self.payg else RELAXED_SOURCE
+        return (TOKEN_PLAN_RELAXED_SOURCE if self.token_plan else PAYG_RELAXED_SOURCE) if self.payg else RELAXED_SOURCE
 
     def fingerprint(self) -> dict[str, Any]:
         return {"generator": GENERATOR_VERSION, "seed": self.seed, "model_name": self.model_name,
@@ -3467,8 +3519,9 @@ class PaygCallFailed(RuntimeError):
 
 #: PaidCallError kinds that end the run instead of the task: the key or the account is refused.
 PAYG_FATAL_KINDS = frozenset({"auth", "billing"})
-#: PaygStop kinds: the ledger refused, the API refused the key or account, --until is too close.
-PAYG_STOP_KINDS = frozenset({"spend_stop", "payg_fatal", "until"})
+#: PaygStop kinds: the ledger refused, the API refused the key or account, --until is too close,
+#: the Token Plan's quota pause, QWEN_PAYG_KEY appeared during a Token Plan run.
+PAYG_STOP_KINDS = frozenset({"spend_stop", "payg_fatal", "until", "quota_paused", "superseded"})
 
 
 def payg_call(client: Any, payload: dict[str, Any], deadline: float | None = None) -> Any:
@@ -3491,6 +3544,12 @@ def payg_call(client: Any, payload: dict[str, Any], deadline: float | None = Non
         kwargs["timeout"] = left
     try:
         return client.chat(payload, **kwargs)
+    except spend.TokenPlanStop as exc:  # an account-level error or a key change: STOP written, operator told
+        raise PaygStop("payg_fatal", str(exc)) from None
+    except spend.QuotaPaused as exc:  # the Token Plan's quota: paused until it resets (not a STOP)
+        raise PaygStop("quota_paused", str(exc)) from None
+    except spend.TokenPlanSuperseded as exc:  # QWEN_PAYG_KEY appeared: batch work moves to it
+        raise PaygStop("superseded", str(exc)) from None
     except spend.SpendRefused as exc:  # STOP, the cap, the phase budget: nothing was sent
         raise PaygStop("spend_stop", str(exc)) from None
     except spend.PaidCallError as exc:  # settled already; messages hold neither key nor host
@@ -4091,7 +4150,7 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
                                 "writes": sum(1 for r in out.env.log[out.pad_log:] if r.outcome == "ok" and r.name in (
                                     "memory", "cron_create", "cron_delete", "task_create", "task_stop"))}
     if settings.payg:
-        record["teacher"] = TEACHER_PAYG
+        record["teacher"] = settings.teacher
         record["max_derived"] = True
     return not reasons, reasons, record
 
@@ -4239,12 +4298,13 @@ async def judge_text(transcript: str, settings: Settings) -> dict[str, Any]:
 
 
 async def _payg_judge_text(transcript: str, settings: Settings) -> dict[str, Any]:
-    """Max judging its own teacher rows on the pay-per-token key, through
-    spend.PaygClient (same ledger, phase and --budget-usd as the teacher calls),
-    recorded as such: build.py accepts it only as the pay-per-token Max judge."""
+    """Max judging its own teacher rows on the teacher's own key, through its spend.py
+    client (same ledger and phase; --budget-usd on the pay-per-token key), recorded
+    as such: build.py accepts it only as the pay-per-token or Token Plan Max judge."""
     payload = payg_judge_payload(transcript, settings)
+    provider, judge_key = JUDGE_ROUTE[settings.teacher]
     record: dict[str, Any] = {"kind": "self-judge", "model": PAYG_MODEL, "temperature": 0,
-                              "seed": settings.judge_seed, "provider": TEACHER_PAYG, "judge_key": "payg",
+                              "seed": settings.judge_seed, "provider": provider, "judge_key": judge_key,
                               "call_ids": [], "cost_usd": 0.0}
     obj = None
     for _attempt in range(2):
@@ -4426,16 +4486,23 @@ def payg_report(settings: Settings) -> dict[str, Any]:
     if not settings.payg:
         return {}
     spend: dict[str, Any] = {"tool": PAYG_TOOL, "phase": PAYG_PHASE, "model": PAYG_MODEL,
-                             "budget_usd": settings.budget_usd, "thinking_budget": settings.thinking_budget}
+                             "budget_usd": settings.budget_usd, "thinking_budget": settings.thinking_budget,
+                             "route": settings.teacher}
     client = settings.payg_client
     ledger = getattr(client, "ledger", None)
     if ledger is not None:
         try:
             mine = ledger.totals(tool=PAYG_TOOL, phase=PAYG_PHASE)
-            spend.update(phase_committed_usd=round(mine.committed_usd, 4), phase_paid_calls=mine.calls,
-                         ledger=ledger.describe(tool=PAYG_TOOL, phase=PAYG_PHASE,
-                                                phase_budget_usd=settings.budget_usd),
-                         stop=ledger.stop_reason())
+            if settings.token_plan:
+                spend.update(phase_token_plan_attempts=mine.plan_calls, phase_token_plan_ok=mine.plan_ok,
+                             phase_input_tokens=mine.plan_input_tokens,
+                             phase_output_tokens=mine.plan_output_tokens, stop=ledger.stop_reason(),
+                             concurrency=getattr(getattr(client, "limiter", None), "limit", None))
+            else:
+                spend.update(phase_committed_usd=round(mine.committed_usd, 4), phase_paid_calls=mine.calls,
+                             ledger=ledger.describe(tool=PAYG_TOOL, phase=PAYG_PHASE,
+                                                    phase_budget_usd=settings.budget_usd),
+                             stop=ledger.stop_reason())
         except Exception as exc:  # noqa: BLE001 - the report never fails over the ledger
             spend["ledger_error"] = type(exc).__name__
     return {**_artifact_policy().policy_fields(True), "spend": spend}
@@ -5200,7 +5267,7 @@ async def process(task: GenTask, settings: Settings, worker: int) -> tuple[str, 
         extra["judge"] = record["judge"]
         # a local judge never names Max (a proxy in front of Max, the Token Plan); only the
         # pay-per-token self-judge may, and only on the paid key
-        payg_judge = record["judge"].get("provider") == TEACHER_PAYG
+        payg_judge = record["judge"].get("provider") in {r[0] for r in JUDGE_ROUTE.values()}
         if has_max_token(record["judge"].get("served_model")) and not payg_judge:
             return "rejected", [], ["judge_model_refused"], extra
         if payg_judge and not has_max_token(record["judge"].get("served_model") or PAYG_MODEL):
@@ -5373,54 +5440,66 @@ def sampling_from_args(a: argparse.Namespace) -> dict[str, float]:
 
 
 def _payg_args(a: argparse.Namespace, out: Path) -> dict[str, Any]:
-    """The --teacher max-payg settings, or ValueError (a usage error, exit 2)."""
+    """The --teacher max-payg / max-token-plan settings, or ValueError (a usage error, exit 2)."""
+    tp = a.teacher == TEACHER_TOKEN_PLAN
+    mode = f"--teacher {a.teacher}"
+    key = "the Token Plan key" if tp else "the pay-per-token key"
     if a.builtin_smoke or a.tasks_file or not a.tasks:
-        # the operator approved the paid key for the real-pattern taskset only: a smoke run's
-        # hand-written tasks would spend the budget on rows build.py never trains on
-        raise ValueError("--teacher max-payg runs the real-pattern taskset only (--tasks <taskset.jsonl>); "
+        # the operator approved Max batch work for the real-pattern taskset only: a smoke run's
+        # hand-written tasks would spend the key on rows build.py never trains on
+        raise ValueError(f"{mode} runs the real-pattern taskset only (--tasks <taskset.jsonl>); "
                          "--builtin-smoke / --tasks-file are smoke runs for the local teacher")
     spend = _spend()
     AP = _artifact_policy()
     for flag, given in (("--teacher-url", a.teacher_url), ("--teacher-id", a.teacher_id)):
         if given:
-            raise ValueError(f"{flag} names a local teacher; --teacher max-payg calls {PAYG_MODEL} through "
-                             "spend.py on the pay-per-token key")
+            raise ValueError(f"{flag} names a local teacher; {mode} calls {PAYG_MODEL} through "
+                             f"spend.py on {key}")
     if a.model_name not in (None, PAYG_MODEL):
-        raise ValueError(f"--teacher max-payg runs {PAYG_MODEL} (the priced model); --model-name {a.model_name!r} "
-                         "is not it")
+        raise ValueError(f"{mode} runs {PAYG_MODEL} (the priced model); --model-name {a.model_name!r} is not it")
     if a.judge_model and not a.judge_url:
         raise ValueError("--judge-model names a LOCAL judge (--judge-url); without one Max judges itself")
     if a.probe_guard_url and not a.judge_url:
-        raise ValueError("with --teacher max-payg the probe guard fronts the local judge only: give --judge-url")
+        raise ValueError(f"with {mode} the probe guard fronts the local judge only: give --judge-url")
     if a.min_p is not None:
         raise ValueError("--min-p is not a field the paid API takes (spend.PAYLOAD_KEYS)")
+    if not 0 <= a.thinking_budget <= PAYG_MAX_THINKING_BUDGET:
+        raise ValueError(f"--thinking-budget must be 0 (thinking off) .. {PAYG_MAX_THINKING_BUDGET}")
+    if not 1 <= a.max_tokens <= PAYG_MAX_TOKENS:
+        raise ValueError(f"--max-tokens must be 1 .. {PAYG_MAX_TOKENS} with {mode} (it bounds "
+                         "every request's output)")
+    if not AP.path_has_tag(out):
+        raise ValueError(f"{mode} writes Max-derived data: --out must carry the {AP.TAG} tag "
+                         f"(e.g. --out {AP.tag_path(out)})")
+    common = {"model_name": PAYG_MODEL, "teacher_id": PAYG_TEACHER_ID, "teacher_served": PAYG_MODEL,
+              "thinking_budget": int(a.thinking_budget)}
+    if tp:
+        if a.budget_usd is not None:
+            raise ValueError("--budget-usd is for --teacher max-payg: the Token Plan has no $ budget")
+        if not 1 <= a.concurrency <= TOKEN_PLAN_MAX_CONCURRENCY:
+            raise ValueError(f"--concurrency must be 1 .. {TOKEN_PLAN_MAX_CONCURRENCY} on the Token Plan")
+        if not 1 <= a.tp_start_concurrency:
+            raise ValueError("--tp-start-concurrency must be at least 1")
+        return {"teacher": TEACHER_TOKEN_PLAN, "budget_usd": None,
+                "tp_start_concurrency": min(int(a.tp_start_concurrency), int(a.concurrency)), **common}
     budget = a.budget_usd
     if budget is None or not math.isfinite(budget) or budget <= 0:
         raise ValueError("--budget-usd (this run's phase share of the global cap, > 0) is required with "
                          "--teacher max-payg")
     if budget > spend.DEFAULT_CAP_USD:
         raise ValueError(f"--budget-usd {budget:g} is above the ${spend.DEFAULT_CAP_USD:.2f} cap")
-    if not 0 <= a.thinking_budget <= PAYG_MAX_THINKING_BUDGET:
-        raise ValueError(f"--thinking-budget must be 0 (thinking off) .. {PAYG_MAX_THINKING_BUDGET}")
-    if not 1 <= a.max_tokens <= PAYG_MAX_TOKENS:
-        raise ValueError(f"--max-tokens must be 1 .. {PAYG_MAX_TOKENS} with --teacher max-payg (it bounds "
-                         "every paid request's output)")
     if not 1 <= a.concurrency <= PAYG_MAX_CONCURRENCY:
         raise ValueError(f"--concurrency must be 1 .. {PAYG_MAX_CONCURRENCY} on the paid key")
-    if not AP.path_has_tag(out):
-        raise ValueError(f"--teacher max-payg writes Max-derived data: --out must carry the {AP.TAG} tag "
-                         f"(e.g. --out {AP.tag_path(out)})")
-    return {"teacher": TEACHER_PAYG, "model_name": PAYG_MODEL, "teacher_id": PAYG_TEACHER_ID,
-            "teacher_served": PAYG_MODEL, "budget_usd": float(budget), "thinking_budget": int(a.thinking_budget)}
+    return {"teacher": TEACHER_PAYG, "budget_usd": float(budget), **common}
 
 
 def settings_from_args(a: argparse.Namespace) -> Settings:
-    payg = a.teacher == TEACHER_PAYG
+    payg = a.teacher in MAX_TEACHERS
     for flag, value in (("--model-name", None if payg else a.model_name), ("--judge-model", a.judge_model),
                         ("--teacher-id", a.teacher_id), ("--judge-id", a.judge_id)):
         if has_max_token(value):
-            raise ValueError(f"{flag} {value!r} names a Max model; only --teacher max-payg uses one, "
-                             "and only on the pay-per-token key")
+            raise ValueError(f"{flag} {value!r} names a Max model; only --teacher max-payg / max-token-plan "
+                             "use one, and only through spend.py")
     if a.tasks_file and not a.builtin_smoke:
         raise ValueError("--tasks-file holds built-in (list-tasks) rows and needs --builtin-smoke; "
                          "a real-pattern taskset goes to --tasks")
@@ -5437,10 +5516,12 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
         teacher = _payg_args(a, out)
     else:
         if a.budget_usd is not None or a.thinking_budget:
-            raise ValueError("--budget-usd / --thinking-budget are for --teacher max-payg")
+            raise ValueError("--budget-usd / --thinking-budget are for --teacher max-payg / max-token-plan")
         teacher = {"teacher": TEACHER_LOCAL, "model_name": a.model_name or DEFAULT_MODEL_NAME,
                    "teacher_id": a.teacher_id or DEFAULT_TEACHER_ID}
-    default_name = (BUILTIN_SOURCE if task_source != ORIGIN_TASKSET else PAYG_SOURCE if payg else SOURCE_TAG)
+    default_name = (BUILTIN_SOURCE if task_source != ORIGIN_TASKSET
+                    else (TOKEN_PLAN_SOURCE if a.teacher == TEACHER_TOKEN_PLAN else PAYG_SOURCE) if payg
+                    else SOURCE_TAG)
     pack_prompt, date_sentinel = load_pack_template(a.pack)
     return Settings(
         task_source=task_source, sampling=sampling_from_args(a),
@@ -5464,6 +5545,8 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
 
 #: Exit codes (module docstring).
 EXIT_DONE, EXIT_NOTHING, EXIT_USAGE, EXIT_UNREACHABLE, EXIT_SPEND_STOP, EXIT_PAYG_REFUSED = 0, 1, 2, 3, 4, 5
+#: --teacher max-token-plan: the plan's quota pause stopped the run (gen_runner.py reruns it after the reset).
+EXIT_QUOTA_PAUSED = 7
 #: An unexpected exception (a traceback on stderr): never Python's own 1, which means "kept nothing".
 EXIT_CRASH = 6
 SANDBOX_LOCK = ".teacher_gen.lock"
@@ -5496,7 +5579,10 @@ def payg_client_for(settings: Settings, a: argparse.Namespace, opener: Any = Non
     that can reach the operator. Raises spend.SpendError (the run is refused, exit 5).
     Runs before the state directories are isolated (that repoints PROMETHEUS_ENV_FILE)."""
     spend = _spend()
-    creds = spend.resolve_payg(env_file=Path(a.env_file).expanduser() if a.env_file else None)
+    env_file = Path(a.env_file).expanduser() if a.env_file else None
+    if settings.token_plan:
+        return token_plan_client_for(settings, a, env_file, opener)
+    creds = spend.resolve_payg(env_file=env_file)
     ledger = spend.Ledger(notify_cmd=a.notify_cmd)
     ledger.check_open(tool=PAYG_TOOL, phase=PAYG_PHASE, model=PAYG_MODEL)
     notify = Path(a.notify_cmd).expanduser()
@@ -5508,6 +5594,33 @@ def payg_client_for(settings: Settings, a: argparse.Namespace, opener: Any = Non
                               opener=opener)
     log.warning("teacher: %s on the %s; %s", PAYG_MODEL, creds.describe(),
                 ledger.describe(tool=PAYG_TOOL, phase=PAYG_PHASE, phase_budget_usd=settings.budget_usd))
+    return client
+
+
+def token_plan_client_for(settings: Settings, a: argparse.Namespace, env_file: Path | None, opener: Any) -> Any:
+    """--teacher max-token-plan's client, after the checks before its first call: the key
+    (``QWEN_API_KEY``, ``sk-sp-`` on a Token Plan host; refused while ``QWEN_PAYG_KEY`` is
+    present), the one canonical ledger, no STOP file, no quota pause, the key's fingerprint
+    (recorded at first use; a different key is a STOP), a notify command. Raises
+    spend.SpendError (the run is refused, exit 5; a quota pause, exit 7)."""
+    spend = _spend()
+    creds = spend.resolve_token_plan(env_file=env_file)
+    ledger = spend.Ledger(notify_cmd=a.notify_cmd)
+    ledger.check_open(tool=PAYG_TOOL, phase=PAYG_PHASE, model=PAYG_MODEL)
+    notify = Path(a.notify_cmd).expanduser()
+    if not (notify.is_file() and os.access(notify, os.X_OK)):
+        raise spend.SpendError(f"the notify command {spend.display_path(notify)} is missing or not executable: "
+                               "a Token Plan STOP could not reach the operator")
+    pause = ledger.tp_pause_info()
+    if pause is not None and time.time() < float(pause["until"]):
+        raise spend.QuotaPaused(f"the Token Plan quota pause stands until {spend.utc_iso(float(pause['until']))}",
+                                until=float(pause["until"]))
+    client = spend.TokenPlanClient(creds, ledger, tool=PAYG_TOOL, phase=PAYG_PHASE, model=PAYG_MODEL,
+                                   timeout=settings.request_timeout, opener=opener,
+                                   start_concurrency=settings.tp_start_concurrency,
+                                   max_concurrency=settings.concurrency)
+    log.warning("teacher: %s on the %s; adaptive concurrency %d (max %d); $0 per call", PAYG_MODEL,
+                creds.describe(), settings.tp_start_concurrency, settings.concurrency)
     return client
 
 
@@ -5583,8 +5696,11 @@ def cmd_run(a: argparse.Namespace, *, payg_opener: Any = None) -> int:
         spend = _spend()
         try:
             settings.payg_client = payg_client_for(settings, a, payg_opener)
+        except spend.QuotaPaused as exc:
+            print(f"paused: --teacher {settings.teacher}: {exc}", file=sys.stderr)
+            return EXIT_QUOTA_PAUSED
         except spend.SpendError as exc:  # messages never hold the key or the host
-            print(f"error: --teacher max-payg refused before any call: {exc}", file=sys.stderr)
+            print(f"error: --teacher {settings.teacher} refused before any call: {exc}", file=sys.stderr)
             return EXIT_PAYG_REFUSED
     isolate_state_dirs(settings.out / "work")
     try:
@@ -5667,6 +5783,13 @@ def cmd_run(a: argparse.Namespace, *, payg_opener: Any = None) -> int:
         print(f"stopped: the paid API refused the key or the account: {report.get('stop_detail', '')}",
               file=sys.stderr)
         return EXIT_PAYG_REFUSED
+    if stop == "quota_paused":
+        print(f"paused: the Token Plan quota is exhausted: {report.get('stop_detail', '')}", file=sys.stderr)
+        return EXIT_QUOTA_PAUSED
+    if stop == "superseded":
+        print(f"stopped: QWEN_PAYG_KEY appeared, Token Plan batch use stops: {report.get('stop_detail', '')}",
+              file=sys.stderr)
+        return EXIT_SPEND_STOP
     if stop == "consecutive_errors":
         return EXIT_UNREACHABLE
     return EXIT_DONE if report["rows_total"] else EXIT_NOTHING
@@ -5711,7 +5834,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     r.add_argument("--teacher", choices=TEACHERS, default=TEACHER_LOCAL,
                    help=f"local: a loopback llama-server (default); {TEACHER_PAYG}: {PAYG_MODEL} on the "
                         "pay-per-token key (QWEN_PAYG_KEY) through spend.py, rows tagged "
-                        f"{PAYG_SOURCE} (Max-derived)")
+                        f"{PAYG_SOURCE} (Max-derived); {TEACHER_TOKEN_PLAN}: {PAYG_MODEL} on the Token Plan "
+                        f"key (QWEN_API_KEY, operator override 2026-10-31), rows tagged {TOKEN_PLAN_SOURCE}")
     r.add_argument("--teacher-url", help=f"local teacher (default {DEFAULT_TEACHER_URL})")
     r.add_argument("--probe-guard-url", help="local guard proxy carrying every local model request")
     r.add_argument("--judge-url", help="another LOCAL endpoint for the judge (default: the teacher; with "
@@ -5727,7 +5851,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                       help="reasoning tokens per paid request (0 = thinking off, as at runtime)")
     paid.add_argument("--env-file", help="the 0600 env file holding QWEN_PAYG_KEY (default: Prometheus's own)")
     paid.add_argument("--notify-cmd", default=_spend().DEFAULT_NOTIFY,
-                      help="gets the $140 STOP alert (message on stdin); must exist and be executable")
+                      help="gets the $140 STOP alert and every Token Plan STOP / pause (message on stdin); "
+                           "must exist and be executable")
+    paid.add_argument("--tp-start-concurrency", type=int, default=TOKEN_PLAN_START_CONCURRENCY,
+                      help=f"--teacher {TEACHER_TOKEN_PLAN}: calls in flight to start with (halved on a 429 "
+                           "burst, grown back slowly, never above --concurrency)")
     r.add_argument("--judge-seed", type=int, default=DEFAULT_JUDGE_SEED)
     r.add_argument("--allow-lan-endpoints", action="store_true")
     r.add_argument("--injection-manifest", required=True)

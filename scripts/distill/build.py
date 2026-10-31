@@ -151,7 +151,9 @@ every Max row in train/val is covered by the recorded approval.
 
 Max teacher gym rows (``_meta.source = "max-payg-gym"``: ``teacher_gen.py
 --teacher max-payg``, Qwen Max on the pay-per-token key over the real-pattern
-taskset) are Max-derived and are admitted ONLY under the allow. Without it every
+taskset; and ``"max-tokenplan-gym"``: ``--teacher max-token-plan``, the same
+on the Token Plan key under the operator's override of 2026-10-31, handled
+identically, refusal reasons included) are Max-derived and are admitted ONLY under the allow. Without it every
 such row is excluded (``max_payg_gym_needs_allow``): never train, val or eval
 material, so they pin no group and leave the local 27B rows' splits as they
 were. Under it a row is kept only as an ``--extra-traces`` row
@@ -177,14 +179,16 @@ from any user message such a session holds (in the input traces or the
 many sessions were listed and rows dropped (``data_policy.max_derived_allow``),
 never the ids or hashes. The list may be given without the allow too.
 
-Judges. The Token Plan key never judges: a verdict or record whose judge names
-Max is refused (``verdict_rows_max_judge`` fails the verdicts gate;
-``judge_is_max``). The one exception is the pay-per-token Max judge (the
-operator's PAYG ruling: Phase 2 judging): a ``judge.py`` row with ``provider:
-max-payg`` and ``judge_key: payg`` is applied like a local judge's verdict and
-counted in ``verdict_rows_payg_max_judge`` (``gates.verdicts.payg_max_judge``,
-never a failure), and a Max row's record whose ``judge`` has ``provider:
-max-payg`` verifies it. A train-source (local 27B) row still needs a
+Judges. A verdict or record whose judge names Max is refused unless it says
+which approved route judged (``verdict_rows_max_judge`` fails the verdicts
+gate; ``judge_is_max``). The exceptions are the pay-per-token Max judge (the
+operator's PAYG ruling: Phase 2 judging) and the Token Plan Max judge (the
+operator's override of 2026-10-31): a ``judge.py`` row with ``provider:
+max-payg`` and ``judge_key: payg`` (or ``max-token-plan`` / ``token-plan``) is
+applied like a local judge's verdict and counted in
+``verdict_rows_payg_max_judge`` (``verdict_rows_tokenplan_max_judge``;
+``gates.verdicts.payg_max_judge`` / ``tokenplan_max_judge``, never a failure),
+and a Max row's record whose ``judge`` has either provider verifies it. A train-source (local 27B) row still needs a
 ``--judge-models`` judge.
 
 The eval-tools hold-out stays Max-derived eval data: the Max groups a Max-only
@@ -372,12 +376,23 @@ NEVER_TRAIN_SOURCES = frozenset({"builtin-smoke"})
 #: Max may be the Token Plan key, which never judges.
 PAYG_PROVIDER = "max-payg"
 PAYG_JUDGE_KEY = "payg"
+#: The Token Plan Max judge (judge.py ``--provider token-plan``, teacher_gen.py's Max self-judge
+#: under ``--teacher max-token-plan``): the operator's informed override of 2026-10-31 lets
+#: the Token Plan key judge batch work. Accepted exactly where the pay-per-token judge is.
+TOKEN_PLAN_PROVIDER = "max-token-plan"
+TOKEN_PLAN_JUDGE_KEY = "token-plan"
+#: provider -> judge_key of the Max judges whose verdicts and records count.
+APPROVED_MAX_JUDGES = {PAYG_PROVIDER: PAYG_JUDGE_KEY, TOKEN_PLAN_PROVIDER: TOKEN_PLAN_JUDGE_KEY}
 #: teacher_gen.py --teacher max-payg rows: Qwen Max on the pay-per-token key, run
 #: through the gym on the real-pattern taskset. Max-derived: admitted ONLY under the
 #: Q6b allow (--allow-max-derived), and then only with the strict record a gym row
 #: needs; refused outright without it (never eval-only, so they pin no group).
 PAYG_GYM_SOURCE = "max-payg-gym"
-PAYG_GYM_SOURCES = frozenset({PAYG_GYM_SOURCE, PAYG_GYM_SOURCE + "-relaxed"})
+#: teacher_gen.py --teacher max-token-plan rows: the same Max teacher on the Token Plan key
+#: (operator override 2026-10-31), handled exactly as PAYG_GYM_SOURCE (only under the Q6b allow).
+TOKEN_PLAN_GYM_SOURCE = "max-tokenplan-gym"
+PAYG_GYM_SOURCES = frozenset({PAYG_GYM_SOURCE, PAYG_GYM_SOURCE + "-relaxed",
+                              TOKEN_PLAN_GYM_SOURCE, TOKEN_PLAN_GYM_SOURCE + "-relaxed"})
 #: The models a train-source row may come from: the local 27B teacher only.
 DEFAULT_TRAIN_MODELS = ("qwen3.8-27b*",)
 #: The local 27B teacher's tag: a share class of its own in the report.
@@ -700,11 +715,14 @@ def is_relaxed_source(tag: Any) -> bool:
 
 
 def is_payg_judge(judge: Any, model: Any) -> bool:
-    """*judge* (a record's ``judge`` object) is the pay-per-token Max judge:
-    ``provider`` is ``max-payg``, a ``judge_key`` (when given) is ``payg``, and
+    """*judge* (a record's ``judge`` object) is an approved Max judge: the
+    pay-per-token one (``provider`` ``max-payg``, a ``judge_key``, when given,
+    ``payg``) or the Token Plan one (``max-token-plan`` / ``token-plan``), and
     its model names Max. Anything else naming Max is not."""
-    return (isinstance(judge, dict) and judge.get("provider") == PAYG_PROVIDER
-            and judge.get("judge_key", PAYG_JUDGE_KEY) == PAYG_JUDGE_KEY and names_max(model))
+    if not isinstance(judge, dict):
+        return False
+    key = APPROVED_MAX_JUDGES.get(str(judge.get("provider")))
+    return key is not None and judge.get("judge_key", key) == key and names_max(model)
 
 
 EFFECT_KEYS = ("side_effects", "real_side_effects")
@@ -851,6 +869,9 @@ def load_verdicts(paths: list[str], stats: collections.Counter,
                 if row.get("provider") == PAYG_PROVIDER and row.get("judge_key") == PAYG_JUDGE_KEY \
                         and names_max(row.get("model")):
                     stats["verdict_rows_payg_max_judge"] += 1
+                elif row.get("provider") == TOKEN_PLAN_PROVIDER and row.get("judge_key") == TOKEN_PLAN_JUDGE_KEY \
+                        and names_max(row.get("model")):
+                    stats["verdict_rows_tokenplan_max_judge"] += 1
                 elif max_judged(row.get("model"), v):
                     continue
                 out[key] = v
@@ -2352,6 +2373,8 @@ class Builder:
         g["verdicts"] = {"loaded": len(self.verdicts), **vg,
                          # the pay-per-token Max judge's verdicts (applied; never a failure)
                          "payg_max_judge": self.stats["verdict_rows_payg_max_judge"],
+                         # the Token Plan Max judge's (operator override 2026-10-31; applied likewise)
+                         "tokenplan_max_judge": self.stats["verdict_rows_tokenplan_max_judge"],
                          "pass": not any(vg.values())}
         g["data_policy"] = self.policy_gate()
         g["train_size"] = {"value": len(tr), "range": list(s.train_range),

@@ -6,6 +6,7 @@
     python3 judge.py run      --provider max-payg --budget-usd 20 [--workdir ...] [--concurrency 2]
     python3 judge.py run      --provider local --local-url http://127.0.0.1:<port> [--workdir ...]
     python3 judge.py run      --provider max-payg --budget-usd 5 --view blind --only fail   # own budget
+    python3 judge.py run      --provider token-plan [--workdir ...] [--concurrency 8] [--limit 50]
     python3 judge.py report   [--workdir ...] [--markdown-out judge-report.md]
     python3 judge.py --workdir ~/distill/phase2-rejudge run-all --rejudge-from ~/distill/phase2 \\
         --provider max-payg --budget-usd 40
@@ -47,8 +48,21 @@ categories. ``run-all`` does this and then runs the queue.
 
 The providers
 -------------
-``--provider`` is required on every run. There is no third route: the Token
-Plan key (``QWEN_API_KEY``) is never used for judging.
+``--provider`` is required on every run.
+
+* ``token-plan``: Qwen Max on the Token Plan subscription key
+  (``QWEN_API_KEY``), under the operator's informed override of 2026-10-31,
+  through ``spend.TokenPlanClient``: $0 per call, every attempt a
+  ``token-plan`` row in the same ledger, no ``--budget-usd``. It refuses while
+  ``QWEN_PAYG_KEY`` is present (that key wins; exit 3, ``budget_stop``). Its
+  guardrails are spend.py's: adaptive concurrency (``--concurrency`` workers,
+  default and at most 8; the client starts at ``--tp-start-concurrency``,
+  default 4, halves on a 429 burst and grows back slowly); an account-level
+  error or a key change writes the STOP file, notifies the operator with the
+  exact error and ends the run (``fatal``, exit 5); an exhausted quota starts
+  the pause and ends the run (``paused``, exit 4) until it resets. The
+  client does not retry 429s itself here: this run's backoff does (below).
+  Rows say ``provider: max-token-plan``, ``judge_key: token-plan``.
 
 * ``max-payg``: Qwen Max (``--judge-model``, default qwen3.8-max) on the
   PAY-PER-TOKEN key, through ``spend.py``. Every attempt is reserved at its
@@ -110,7 +124,11 @@ One the API refused with a 4xx status, or that never connected, costs nothing.
 Exit codes: 0 every item judged; 3 budget (cap, sub-budget or STOP); 4 paused
 (rate limit or live throttling); 5 fatal (billing, auth, setup, a refused key
 or endpoint); 6 items remain (``--limit`` or item errors: run again); 7 busy
-(another run holds the workdir; nothing was done). ``judge-status.json`` says
+(another run holds the workdir; nothing was done); 128 + the signal for a
+paid run (``max-payg``, ``token-plan``) stopped by SIGTERM or SIGHUP
+(gen_runner.py's stops): it starts no new call, gives the calls in flight up
+to ``PAID_SIGNAL_WAIT_S`` to finish, and records the rest as interrupted (a
+``token-plan`` row each, or the reservation charged) before it exits. ``judge-status.json`` says
 which, and why (except for busy, which leaves the running run's status
 alone).
 
@@ -119,14 +137,16 @@ Verdict rows
 Each ``ok`` row has the shape build.py's ``load_verdicts`` reads: ``status``,
 ``verdict`` (the judge's, made strict, never the sampled ``label``),
 ``source.file`` / ``source.line`` / ``source.telemetry_rowid``, and ``model``
-(the judge's model id). It also records ``provider`` (``max-payg`` | ``local``),
-``judge_key`` (``payg`` | ``none``), ``served_model``, the tokens, ``cost_usd``
+(the judge's model id). It also records ``provider`` (``max-payg`` |
+``max-token-plan`` | ``local``), ``judge_key`` (``payg`` | ``token-plan`` | ``none``), ``served_model``, the tokens, ``cost_usd``
 and ``call_id`` (the ledger row), plus a ``verification`` record in
 ``_meta.verification`` shape (``{"verified": ..., "judge": {"verdict", "model",
 "served_model", "provider"}}``). build.py applies the verdicts of a local
 judge, and of this PAYG judge (``provider: max-payg`` with ``judge_key: payg``,
 counted under its ``verdict_rows_payg_max_judge``, which does not fail its
-verdicts gate). Any other judge whose model names Max is counted under its
+verdicts gate), and of the Token Plan judge (``provider: max-token-plan`` with
+``judge_key: token-plan``, the operator's 2026-10-31 override, counted under
+``verdict_rows_tokenplan_max_judge``). Any other judge whose model names Max is counted under its
 ``verdict_rows_max_judge`` and its passes are not applied (its "the Token Plan
 key never judges" rule).
 
@@ -177,6 +197,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import copy
 import fcntl
 import fnmatch
 import hashlib
@@ -188,8 +209,10 @@ import math
 import os
 import random
 import re
+import signal
 import sqlite3
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -224,7 +247,10 @@ TOOL = "judge"
 PHASE = "2-judge"
 PHASE_BLIND = "2-judge-blind"
 PHASE_ALL = "2-judge-all"
-PROVIDERS = ("max-payg", "local")
+PROVIDERS = ("max-payg", "token-plan", "local")
+#: --provider token-plan: what its verdict rows and records say (build.py reads these).
+TOKEN_PLAN_PROVIDER = "max-token-plan"
+TOKEN_PLAN_JUDGE_KEY = "token-plan"
 RUBRIC_VERSION = "2"
 RUBRIC_KEYS = ("right_tool", "valid_args", "sensible_order", "task_progress", "no_fabrication")
 VIEWS = ("outcome", "blind")
@@ -238,8 +264,11 @@ DEFAULT_TRAJECTORIES = Path("~/.prometheus/trajectories")
 DEFAULT_TELEMETRY_SNAPSHOT = Path("~/distill/snapshot/telemetry.db")
 DEFAULT_LOCAL_MODEL = "qwen3.8-27b*"
 DEFAULT_LIVE_PROVIDER = "llama_cpp"
-DEFAULT_CONCURRENCY = {"max-payg": 2, "local": 1}
+DEFAULT_CONCURRENCY = {"max-payg": 2, "token-plan": 8, "local": 1}
 MAX_PAYG_CONCURRENCY = 4
+#: --provider token-plan: workers (the client's adaptive limit gates them) and the limit's start.
+MAX_TOKEN_PLAN_CONCURRENCY = spend.TP_MAX_CONCURRENCY
+TOKEN_PLAN_START_CONCURRENCY = spend.TP_START_CONCURRENCY
 
 QUEUE_FILE = "judge-queue.jsonl"
 QUEUE_META_FILE = "judge-queue.meta.json"
@@ -278,6 +307,61 @@ CHARS_PER_TOKEN = 3.93
 ASSUMED_OUTPUT_TOKENS = 300
 
 log = logging.getLogger("distill.judge")
+
+#: A paid run's stop signals (gen_runner.py, systemd) and how long its calls in flight get to finish.
+PAID_EXIT_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+PAID_SIGNAL_WAIT_S = 12.0
+#: The process exit a stop signal ends in (tests replace it).
+_hard_exit = os._exit
+_SIGNAL_STOPPING: list[int] = []
+
+
+def paid_stop_on_signal(paid: Any, signum: int) -> None:
+    """A paid run's SIGTERM / SIGHUP: start no new call, give the calls in flight up to
+    ``PAID_SIGNAL_WAIT_S`` to finish (each writes its own ledger row), record the rest as
+    interrupted (``settle_open``: a ``token-plan`` row each, or the reservation charged), then exit
+    128 + *signum* while holding the ledger lock, so no worker thread is half way through a row.
+    Never returns. Without this the default action would leave sent calls with no ledger row."""
+    if _SIGNAL_STOPPING:  # a second signal while the first one is handled
+        return
+    _SIGNAL_STOPPING.append(signum)
+    ledger = None
+    try:
+        paid.close(f"signal {signum}")
+        end = time.monotonic() + PAID_SIGNAL_WAIT_S
+        while paid.open_calls() and time.monotonic() < end:
+            time.sleep(0.05)
+        settled = paid.settle_open()
+        print(f"stopped by signal {signum}: no new judge call; {len(settled)} call(s) still in flight "
+              "recorded as interrupted", file=sys.stderr, flush=True)
+        ledger = copy.copy(paid.ledger)
+        ledger.lock_timeout = min(float(ledger.lock_timeout), 5.0)
+    except Exception as exc:  # noqa: BLE001 - the exit below must happen
+        print(f"stopped by signal {signum}: {type(exc).__name__} while recording calls in flight",
+              file=sys.stderr, flush=True)
+    try:
+        if ledger is not None:
+            with ledger.locked():
+                _hard_exit(128 + signum)
+    except Exception:  # noqa: BLE001 - the lock stayed busy: exit anyway
+        pass
+    _hard_exit(128 + signum)
+
+
+def install_paid_signal_handlers(paid: Any) -> Callable[[], None]:
+    """``paid_stop_on_signal`` for ``PAID_EXIT_SIGNALS``; returns the function that puts the previous
+    handlers back. Only the main thread can install handlers (else: nothing)."""
+    if paid is None or threading.current_thread() is not threading.main_thread():
+        return lambda: None
+    _SIGNAL_STOPPING.clear()
+    previous = {sig: signal.signal(sig, lambda signum, _frame: paid_stop_on_signal(paid, signum))
+                for sig in PAID_EXIT_SIGNALS}
+
+    def restore() -> None:
+        for sig, old in previous.items():
+            signal.signal(sig, old if old is not None else signal.SIG_DFL)
+
+    return restore
 
 
 class JudgeSetupError(RuntimeError):
@@ -965,6 +1049,7 @@ class PaygJudgeClient:
                                           phase_budget_usd=budget_usd, timeout=timeout, opener=opener)
         except spend.SpendError as exc:  # messages never hold the key or the URL
             raise JudgeSetupError(str(exc)) from None
+        self.paid = self._paid  # spend.PaygClient: the signal handler settles its calls in flight
         self.ledger = ledger
         self.phase = phase
         self.budget_usd = budget_usd
@@ -1001,6 +1086,70 @@ class PaygJudgeClient:
         return CallResult(text=r.text, input_tokens=r.input_tokens, output_tokens=r.output_tokens,
                           served_model=r.served_model, cached_input_tokens=r.cached_input_tokens,
                           cost_usd=r.usd, usage_estimated=r.usage_estimated, call_id=r.call_id)
+
+
+class TokenPlanJudgeClient:
+    """Qwen Max on the Token Plan key (operator override 2026-10-31): $0, every attempt a
+    ``token-plan`` ledger row, spend.py's guardrails on every call."""
+
+    provider = TOKEN_PLAN_PROVIDER
+    judge_key = TOKEN_PLAN_JUDGE_KEY
+    price = None
+
+    def __init__(self, *, ledger: Any, phase: str, model: str = JUDGE_MODEL, thinking_budget: int = 0,
+                 env_file: Path | None = None, timeout: float = 300.0, creds: Any = None, opener: Any = None,
+                 start_concurrency: int = TOKEN_PLAN_START_CONCURRENCY,
+                 max_concurrency: int = MAX_TOKEN_PLAN_CONCURRENCY) -> None:
+        try:
+            creds = creds or spend.resolve_token_plan(env_file=env_file)
+            # retries_429=0: JudgeRun's own backoff retries a rate limit (it honours Retry-After)
+            self._tp = spend.TokenPlanClient(creds, ledger, tool=TOOL, phase=phase, model=model, timeout=timeout,
+                                             opener=opener, start_concurrency=min(start_concurrency, max_concurrency),
+                                             max_concurrency=max_concurrency, retries_429=0)
+        except spend.TokenPlanSuperseded as exc:
+            raise JudgeBudgetStop(str(exc)) from None
+        except spend.SpendError as exc:  # messages never hold the key
+            raise JudgeSetupError(str(exc)) from None
+        except ValueError as exc:
+            raise JudgeSetupError(str(exc)) from None
+        self.paid = self._tp  # spend.TokenPlanClient: the signal handler records its calls in flight
+        self.ledger = ledger
+        self.phase = phase
+        self.model = model
+        self.region = creds.region
+        self.thinking_budget = max(0, int(thinking_budget))
+        self.endpoint = creds.describe()
+
+    def payload(self, system: str, user: str, max_tokens: int) -> dict[str, Any]:
+        return judge_payload(system, user, model=self.model, max_tokens=max_tokens,
+                             thinking_budget=self.thinking_budget)
+
+    def budget_describe(self) -> str:
+        try:
+            mine = self.ledger.totals(tool=TOOL, phase=self.phase)
+        except spend.SpendError as exc:
+            return f"ledger unreadable: {exc}"
+        return (f"Token Plan ($0 per call; no $ budget): {mine.plan_calls} attempt(s) for {TOOL}/{self.phase}, "
+                f"concurrency limit {self._tp.limiter.limit}")
+
+    async def complete(self, system: str, user: str, *, max_tokens: int) -> CallResult:
+        payload = self.payload(system, user, max_tokens)
+        try:
+            r = await asyncio.to_thread(self._tp.chat, payload)
+        except spend.TokenPlanStop as exc:  # STOP written and the operator told: no retry around it
+            raise JudgeBudgetStop(str(exc), state="fatal") from None
+        except spend.QuotaPaused as exc:
+            raise JudgeBudgetStop(str(exc), state="paused") from None
+        except spend.SpendRefused as exc:  # STOP, QWEN_PAYG_KEY appeared, closed
+            raise JudgeBudgetStop(str(exc)) from None
+        except spend.PaidCallError as exc:
+            raise JudgeCallError(exc.kind, exc.message, status=exc.status, retry_after=exc.retry_after,
+                                 maybe_billed=exc.maybe_billed) from None
+        except spend.SpendError as exc:
+            raise JudgeBudgetStop(str(exc), state="fatal") from None
+        return CallResult(text=r.text, input_tokens=r.input_tokens, output_tokens=r.output_tokens,
+                          served_model=r.served_model, cached_input_tokens=r.cached_input_tokens,
+                          cost_usd=0.0, usage_estimated=r.usage_estimated, call_id=r.call_id)
 
 
 def names_max(name: Any) -> bool:
@@ -1770,6 +1919,9 @@ def _run_config(args: argparse.Namespace, phase: str) -> RunConfig:
     concurrency = args.concurrency or DEFAULT_CONCURRENCY[args.provider]
     if args.provider == "max-payg" and concurrency > MAX_PAYG_CONCURRENCY:
         raise JudgeSetupError(f"--concurrency {concurrency} is above {MAX_PAYG_CONCURRENCY} for the paid key")
+    if args.provider == "token-plan" and concurrency > MAX_TOKEN_PLAN_CONCURRENCY:
+        raise JudgeSetupError(f"--concurrency {concurrency} is above {MAX_TOKEN_PLAN_CONCURRENCY} for the "
+                              "Token Plan")
     if concurrency < 1:
         raise JudgeSetupError("--concurrency must be at least 1")
     return RunConfig(view=args.view, max_tokens=args.max_tokens, max_attempts=args.max_attempts,
@@ -1827,6 +1979,8 @@ def cmd_estimate(args: argparse.Namespace) -> int:
             out["ledger"] = {"error": str(exc)}
     else:
         out["projected"] = project_cost(pending, config, prior_rows=rows)
+        if args.provider == "token-plan":
+            out["price_basis"] = "Token Plan: $0 per call (it counts against the subscription's quota)"
     print(json.dumps(out, indent=1))
     return EXIT_DONE
 
@@ -1880,12 +2034,34 @@ def _run_locked(args: argparse.Namespace, p: dict[str, Path], items: list[dict[s
         if not (notify.is_file() and os.access(notify, os.X_OK)):
             raise JudgeSetupError(f"the notify command {spend.display_path(notify)} is missing or not "
                                   "executable: the $140 alert could not reach the operator")
+    elif args.provider == "token-plan":
+        if args.budget_usd is not None:
+            raise JudgeSetupError("--budget-usd is for max-payg: the Token Plan has no $ budget")
+        try:
+            ledger.check_open(tool=TOOL, phase=phase, model=args.judge_model)  # the ledger, STOP
+        except spend.StopActive as exc:
+            return _refuse(p, clock, "budget_stop", str(exc), len(pending))
+        except spend.SpendError as exc:
+            raise JudgeSetupError(str(exc)) from None
+        notify = Path(args.notify_cmd).expanduser()
+        if not (notify.is_file() and os.access(notify, os.X_OK)):
+            raise JudgeSetupError(f"the notify command {spend.display_path(notify)} is missing or not "
+                                  "executable: a Token Plan STOP could not reach the operator")
     if client_factory is not None:
         client = client_factory()
     elif args.provider == "max-payg":
         client = PaygJudgeClient(ledger=ledger, phase=phase, budget_usd=args.budget_usd, model=args.judge_model,
                                  thinking_budget=args.thinking_budget, env_file=args.env_file,
                                  timeout=args.timeout, opener=opener)
+    elif args.provider == "token-plan":
+        try:
+            client = TokenPlanJudgeClient(ledger=ledger, phase=phase, model=args.judge_model,
+                                          thinking_budget=args.thinking_budget, env_file=args.env_file,
+                                          timeout=args.timeout, opener=opener,
+                                          start_concurrency=args.tp_start_concurrency,
+                                          max_concurrency=config.concurrency)
+        except JudgeBudgetStop as exc:
+            return _refuse(p, clock, exc.state, exc.reason, len(pending))
     else:
         if not args.local_url:
             raise JudgeSetupError("--local-url (the local judge's loopback llama-server) is required")
@@ -1910,7 +2086,12 @@ def _run_locked(args: argparse.Namespace, p: dict[str, Path], items: list[dict[s
           flush=True)
     run = JudgeRun(items, client=client, results_path=p["results"], status_path=p["status"], config=config,
                    clock=clock, sleep=sleep, probe=probe)
-    outcome = asyncio.run(run.run())
+    # a paid run that is stopped records its calls in flight instead of leaving them unlogged
+    restore_signals = install_paid_signal_handlers(getattr(client, "paid", None))
+    try:
+        outcome = asyncio.run(run.run())
+    finally:
+        restore_signals()
     print(json.dumps({"state": outcome.state, "reason": outcome.reason, "judged": outcome.judged,
                       "unparseable": outcome.unparseable, "errors": outcome.errors,
                       "calls": outcome.calls, "remaining": outcome.remaining,
@@ -1964,7 +2145,8 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def _add_provider_args(r: argparse.ArgumentParser, *, view: bool = True) -> None:
     r.add_argument("--provider", choices=PROVIDERS, required=True,
-                   help="max-payg: Qwen Max on the pay-per-token key; local: the loopback 27B judge")
+                   help="max-payg: Qwen Max on the pay-per-token key; token-plan: Qwen Max on the Token Plan "
+                        "key (operator override 2026-10-31); local: the loopback 27B judge")
     if view:
         r.add_argument("--view", choices=VIEWS, default="outcome")
         r.add_argument("--only", choices=LABELS, default=None,
@@ -1986,7 +2168,12 @@ def _add_provider_args(r: argparse.ArgumentParser, *, view: bool = True) -> None
     r.add_argument("--backoff-base", type=float, default=BACKOFF_BASE_S)
     r.add_argument("--concurrency", type=int, default=None,
                    help=f"default {DEFAULT_CONCURRENCY['max-payg']} for max-payg (at most "
-                        f"{MAX_PAYG_CONCURRENCY}), {DEFAULT_CONCURRENCY['local']} for local")
+                        f"{MAX_PAYG_CONCURRENCY}), {DEFAULT_CONCURRENCY['token-plan']} for token-plan (at most "
+                        f"{MAX_TOKEN_PLAN_CONCURRENCY}: the adaptive limit's ceiling), "
+                        f"{DEFAULT_CONCURRENCY['local']} for local")
+    r.add_argument("--tp-start-concurrency", type=int, default=TOKEN_PLAN_START_CONCURRENCY,
+                   help="token-plan: calls in flight to start with (the limit halves on a 429 burst and "
+                        "grows back slowly, up to --concurrency)")
     r.add_argument("--limit", type=int, default=None, help="judge at most this many items this run")
     r.add_argument("--timeout", type=float, default=300.0, help="seconds per request")
     r.add_argument("--live-telemetry", type=Path, default=None,

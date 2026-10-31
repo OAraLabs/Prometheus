@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
-"""The one shared budget for every paid model call in the distillation project.
+"""The one shared budget and ledger for every batch Max call in the distillation project.
 
-Qwen Max is reached only through a PAY-PER-TOKEN Model Studio key,
-``QWEN_PAYG_KEY`` (with ``QWEN_PAYG_BASE_URL`` for a workspace key). It is never
-the Token Plan key (``QWEN_API_KEY``), which is for interactive use only. Every
-paid call goes through this module, so one ledger and one cap cover all of
-them: Phase 2 judging (``judge.py --provider max-payg``) and Phase 2b teacher
-generation (``teacher_gen.py``). Nothing else may use the key: ``PaygClient``
-refuses any tool not in ``ALLOWED_TOOLS``, and no daemon or background job is
-one of them.
+Two routes reach Qwen Max, and every call on either goes through this module,
+so one ledger, one STOP file and one notify path cover all of them: Phase 2
+judging (``judge.py``) and Phase 2b teacher generation (``teacher_gen.py``).
+Nothing else may use either key: both clients refuse any tool not in
+``ALLOWED_TOOLS``, and no daemon or background job is one of them.
 
-    python3 spend.py preflight [--model qwen3.8-max]
+* The PAY-PER-TOKEN key ``QWEN_PAYG_KEY`` (with ``QWEN_PAYG_BASE_URL`` for a
+  workspace key): ``PaygClient``, under the $150 cap below. ``PaygClient``
+  never takes the Token Plan key.
+* The Token Plan subscription key ``QWEN_API_KEY`` (operator override,
+  informed, 2026-10-31): ``TokenPlanClient``, $0 per call, no $ cap and no
+  pacing beyond the plan's own limits, only while ``QWEN_PAYG_KEY`` is absent.
+  Its guardrails are in "The Token Plan" below.
+
+    python3 spend.py preflight [--model qwen3.8-max]          # the pay-per-token route
+    python3 spend.py tokenplan-preflight [--model qwen3.8-max] # the Token Plan route
+    python3 spend.py tokenplan-status                         # trial, usage, errors, STOP, pause
+    python3 spend.py tokenplan-accept-key                     # after a deliberate key change only
+    python3 spend.py which-key                                # payg | token-plan (presence only)
     python3 spend.py status
     python3 spend.py prices
 
@@ -144,21 +153,107 @@ a command line. Nor is the base URL, which names the workspace. Requests go
 out with no proxy and no redirects, so the Authorization header reaches only
 the checked host.
 
-Exit codes (CLI): 0 ok; 2 refused (key, host, price, ledger, STOP).
+The Token Plan
+--------------
+``QWEN_API_KEY`` (prefix ``sk-sp-``) on
+``https://token-plan.<region>.maas.aliyuncs.com/compatible-mode/v1``
+(``QWEN_BASE_URL``, default the Singapore host), both read from the
+environment or the 0600 env file like the pay-per-token key. The operator
+accepted the risk that batch use may breach the plan's terms. Guardrails,
+all enforced in ``TokenPlanClient`` before and after every call:
+
+1. Concurrency adapts (``AdaptiveLimiter``): it starts at
+   ``TP_START_CONCURRENCY`` (4) calls in flight per process and never goes
+   above ``TP_MAX_CONCURRENCY`` (8). A burst of ``TP_BURST_429`` (3) rate-limit
+   429s within ``TP_BURST_WINDOW_S`` (60 s) halves it (down to 1); it grows
+   back by one after ``TP_GROW_AFTER_OK`` (50) clean calls in a row, at most
+   once per ``TP_GROW_MIN_INTERVAL_S`` (5 min). A rate-limit 429 is retried
+   with exponential backoff (``TP_BACKOFF_BASE_S`` 5 s doubling to
+   ``TP_BACKOFF_MAX_S`` 300 s, 10% jitter, or the server's Retry-After when
+   longer, capped at 15 min), up to ``retries_429`` times (default
+   ``TP_429_RETRIES``, 6; judge.py sets 0 and backs off itself). Model
+   Studio's per-minute token limit (429 ``Throttling.AllocationQuota``
+   "Allocated quota exceeded", 429 ``insufficient_quota`` "...check your plan
+   and billing details") is such a rate limit. The request ``timeout`` bounds
+   each attempt from its send; the wait for a slot, for another thread's probe
+   and the 429 backoff are bounded apart, by the client's ``wait_budget``
+   (default none: until ``close`` or a STOP). There is no other pacing, no
+   quota reserve and no ramp.
+2. STOP (``tp_classify`` says ``stop``): any 401 or 403, and any error whose
+   code or message names an account-level problem (AccessDenied,
+   Unpurchased, InvalidApiKey, suspended, Arrearage, risk control, policy,
+   banned, revoked, disabled, overdue, insufficient balance, an expired plan
+   or key; "billing" except on a 429; a DataInspectionFailed that is not a
+   401/403 only when its message names the account, the subscription, a
+   suspension or a ban). An error body that cannot be read is classified on
+   its status alone. The STOP line is written before anything else (its
+   ledger row, the notify), outside the ledger lock, and the client stays
+   stopped: no later call on it, nor any thread waiting for a slot or a probe,
+   sends again. The client appends to
+   the ledger's STOP file (``~/distill/spend-ledger.STOP``, the one every batch
+   tool already honours, so pay-per-token calls stop too), notifies the
+   operator with the exact error (HTTP status, error code, message and
+   request id, the key scrubbed) and raises ``TokenPlanStop``. The operator is
+   told once per STOP file: every call in flight gets the same 403, and each
+   adds its STOP line and row but no second notify. Nothing retries around it,
+   and nothing here ever removes the STOP file.
+3. Quota exhausted (``quota``: a reply saying the plan's quota, package or
+   allowance is used up, or a free tier exhausted, as opposed to a
+   per-minute rate limit): batch work
+   pauses until the reset time the reply gives (an ISO time, naive ones read
+   as UTC+8, the plan's region; "in N hours"; or a Retry-After of a minute or
+   more), else for ``TP_QUOTA_DEFAULT_PAUSE_S`` (1 h). The pause is the file
+   ``~/distill/token-plan.PAUSE``; every Token Plan call refuses with
+   ``QuotaPaused`` until it ends. Then exactly one call (across processes: a
+   claim in that file) goes out as the probe: success removes the file,
+   another quota error extends it. The operator is told once per exhausted
+   episode. Not a STOP.
+4. Every attempt (429 retries too) is a ledger row whose note starts
+   ``token-plan``: ``usd`` 0, the tokens from the usage block, the outcome
+   (``ok``, ``error:<kind>``, ``probe``). Those rows count toward no $ cap: the
+   pay-per-token $150 cap and $140 alert see only ``reserve`` / ``settle`` rows.
+5. Batch tooling only: ``ALLOWED_TOOLS``; nothing here reads or writes the
+   daemon's config, and the daemon's own jobs never import this module.
+6. ``QWEN_PAYG_KEY`` wins: ``resolve_token_plan`` refuses
+   (``TokenPlanSuperseded``) while it is present (environment or env file),
+   and the client re-reads the env file before every call (when it changed),
+   so a key that appears mid-run stops Token Plan use at the next call and
+   for good on that client (an env file others can read is refused at every
+   call until it is fixed, then read).
+   ``which-key`` tells the runners which route to start.
+7. The key's fingerprint (HMAC-SHA256 under a random salt, in
+   ``~/distill/token-plan-state.json``, mode 0600) is stored at first use. A
+   different key later (at a client's start, a preflight, or an env file
+   change mid-run) is a STOP with a notify: a new key may be another
+   account. ``tokenplan-accept-key`` records the new fingerprint after a
+   deliberate change; it does not remove the STOP file.
+
+The 50-call trial is not a gate (the operator dropped the ramp): it is the
+first ``TP_TRIAL_CALLS`` Token Plan attempts in the ledger, which with the
+runners' order are Phase 2 judge calls (``judge_run.sh --trial``), and
+``tokenplan-status`` reports whether they were clean.
+
+Exit codes (CLI): 0 ok; 2 refused (key, host, price, ledger, STOP); 3
+``tokenplan-preflight`` refused because ``QWEN_PAYG_KEY`` is present (use the
+pay-per-token route); 4 ``tokenplan-preflight`` while the quota pause stands.
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import copy
 import csv
 import fcntl
+import hashlib
+import hmac
 import http.client
 import json
 import logging
 import math
 import os
+import random
 import re
 import stat
 import subprocess
@@ -169,7 +264,7 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import urlsplit
@@ -187,19 +282,21 @@ NOTIFY_MAX_LINES = 5
 NOTIFY_ATTEMPTS = 5
 EPS = 1e-9
 #: The second word of an ``alert`` row.
-ALERT_KINDS = ("threshold", "over-reservation", "renotify")
+ALERT_KINDS = ("threshold", "over-reservation", "renotify", "token-plan-stop", "token-plan-pause")
 
 LEDGER_FIELDS = (
     "ts", "tool", "phase", "model", "call_id", "input_tokens", "cached_input_tokens",
     "output_tokens", "usd", "cumulative_usd", "note",
 )
-ROW_KINDS = ("reserve", "settle", "free", "alert")
+#: ``token-plan``: one Token Plan attempt ($0, tokens counted; never under the $ cap).
+ROW_KINDS = ("reserve", "settle", "free", "alert", "token-plan")
 
 KEY_ENV = "QWEN_PAYG_KEY"
 BASE_URL_ENV = "QWEN_PAYG_BASE_URL"
 TOKEN_PLAN_KEY_ENV = "QWEN_API_KEY"
+TOKEN_PLAN_BASE_URL_ENV = "QWEN_BASE_URL"
 #: Never handed to a child process (the notify command gets an environment without them).
-SECRET_ENV = (KEY_ENV, BASE_URL_ENV, TOKEN_PLAN_KEY_ENV)
+SECRET_ENV = (KEY_ENV, BASE_URL_ENV, TOKEN_PLAN_KEY_ENV, TOKEN_PLAN_BASE_URL_ENV)
 
 #: The only tools that may spend on the key: Phase 2 judging and Phase 2b teacher generation.
 #: No daemon or background job is (or may become) one of them.
@@ -657,6 +754,12 @@ class Totals:
     #: The latest stop's notify has not got through yet, after this many tries.
     notify_pending: bool = False
     notify_attempts: int = 0
+    #: Token Plan attempts ($0): all of them, the ``ok`` ones, and their tokens.
+    plan_calls: int = 0
+    plan_ok: int = 0
+    plan_input_tokens: int = 0
+    plan_cached_input_tokens: int = 0
+    plan_output_tokens: int = 0
 
     @property
     def committed_usd(self) -> float:
@@ -716,8 +819,10 @@ def totals_of(rows: list[dict[str, str]], *, tool: str | None = None, phase: str
         if kind not in ROW_KINDS:
             raise LedgerError(f"ledger row {row.get('call_id')!r} has an unknown kind {kind!r}")
         if kind == "alert":
-            # alert <threshold|over-reservation|renotify> <level|-> notify:<sent|...> <reason>
+            # alert <threshold|over-reservation|renotify|token-plan-*> <level|-> notify:<sent|...> <reason>
             parts = note.split(" ", 4) + ["", "", ""]
+            if parts[1] == "token-plan-pause":
+                continue  # a pause is not a stop: its notify is tracked in the PAUSE file
             if parts[1] == "threshold":
                 try:
                     level = float(parts[2])
@@ -732,6 +837,13 @@ def totals_of(rows: list[dict[str, str]], *, tool: str | None = None, phase: str
                 t.notify_pending, t.notify_attempts = True, tries
             continue
         if (tool is not None and row.get("tool") != tool) or (phase is not None and row.get("phase") != phase):
+            continue
+        if kind == "token-plan":
+            t.plan_calls += 1
+            t.plan_ok += note.split(" ", 2)[1:2] == ["ok"]
+            t.plan_input_tokens += int(_num(row, "input_tokens"))
+            t.plan_cached_input_tokens += int(_num(row, "cached_input_tokens"))
+            t.plan_output_tokens += int(_num(row, "output_tokens"))
             continue
         usd = _num(row, "usd")
         if kind == "reserve":
@@ -884,11 +996,14 @@ class Ledger:
 
     def _row(self, *, tool: str, phase: str, model: str, call_id: str, input_tokens: int = 0,
              cached_input_tokens: int = 0, output_tokens: int = 0, usd: float = 0.0,
-             cumulative: float, note: str) -> dict[str, Any]:
+             cumulative: float | None, note: str) -> dict[str, Any]:
+        """One ledger row. *cumulative* None (a Token Plan row, which changes no $ total) leaves
+        ``cumulative_usd`` empty, so the row is appended without reading the whole ledger."""
         return {"ts": utc_iso(self.clock()), "tool": tool, "phase": phase, "model": model,
                 "call_id": call_id, "input_tokens": int(input_tokens),
                 "cached_input_tokens": int(cached_input_tokens), "output_tokens": int(output_tokens),
-                "usd": f"{usd:.6f}", "cumulative_usd": f"{cumulative:.6f}", "note": note}
+                "usd": f"{usd:.6f}", "cumulative_usd": "" if cumulative is None else f"{cumulative:.6f}",
+                "note": note}
 
     # -- the stop --------------------------------------------------------------
 
@@ -906,14 +1021,23 @@ class Ledger:
                        tool: str, phase: str, model: str) -> str:
         """Send the five-line notify and record it as an ``alert <kind>`` row (lock held)."""
         settled, held = rows_totals.spent_usd, committed - rows_totals.spent_usd
-        message = "\n".join([
-            f"distill: paid Max calls STOPPED at ${committed:.2f} "
-            f"(alert ${self.alert_usd:.2f}, cap ${self.cap_usd:.2f})",
-            f"reason: {reason}",
-            f"last: {tool} / {phase} / {model}",
-            f"settled ${settled:.2f}, held for calls in flight ${max(0.0, held):.2f}",
-            f"remove {display_path(self.stop_path)} to resume (the cap still holds)",
-        ])
+        if kind == "token-plan-stop" or TP_STOP_MARK in reason:
+            message = "\n".join([
+                "distill: Token Plan batch use STOPPED (every batch Max call refuses)",
+                f"error: {reason}"[:900],
+                f"last: {tool} / {phase} / {model}",
+                "no retry; the daemon and its config are untouched",
+                f"remove {display_path(self.stop_path)} to resume (never removed automatically)",
+            ])
+        else:
+            message = "\n".join([
+                f"distill: paid Max calls STOPPED at ${committed:.2f} "
+                f"(alert ${self.alert_usd:.2f}, cap ${self.cap_usd:.2f})",
+                f"reason: {reason}",
+                f"last: {tool} / {phase} / {model}",
+                f"settled ${settled:.2f}, held for calls in flight ${max(0.0, held):.2f}",
+                f"remove {display_path(self.stop_path)} to resume (the cap still holds)",
+            ])
         sent = self.notifier(self.notify_cmd, message) if self.notify_cmd else "missing"
         level = f"{self.alert_usd:.2f}" if kind == "threshold" else "-"
         token = "notify:" + (sent.split(" ", 1)[0] or "failed")
@@ -1083,6 +1207,233 @@ class Ledger:
             text += f"; {tool}/{phase} ${mine:.4f}" + (
                 f" of ${phase_budget_usd:.2f}" if phase_budget_usd is not None else "")
         return text
+
+
+    # -- the Token Plan's STOP, pause, fingerprint and rows (module docstring) -------
+
+    @property
+    def tp_state_path(self) -> Path:
+        return self.path.with_name(TP_STATE_NAME)
+
+    @property
+    def tp_pause_path(self) -> Path:
+        return self.path.with_name(TP_PAUSE_NAME)
+
+    def _write_private(self, path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+
+    def _tp_state_locked(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.tp_state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            raise LedgerError(f"{display_path(self.tp_state_path)} is unreadable ({type(exc).__name__}): "
+                              "the key fingerprint cannot be checked (move it aside only on purpose)") from None
+        return data if isinstance(data, dict) else {}
+
+    def tp_state(self) -> dict[str, Any]:
+        with self.locked():
+            return self._tp_state_locked()
+
+    def _tp_update_state_locked(self, fn: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+        state = self._tp_state_locked()
+        fn(state)
+        self._write_private(self.tp_state_path, json.dumps(state, indent=1, sort_keys=True) + "\n")
+        return state
+
+    def tp_stop(self, *, reason: str, exact: str, tool: str, phase: str, model: str) -> str:
+        """Guardrail 2 / 7: append to the STOP file (never removed here), notify the operator with
+        the exact error and record an ``alert token-plan-stop`` row. Returns the notify outcome.
+
+        The STOP line is appended first, without the ledger lock (an O_APPEND write), so a busy lock
+        or an unreadable ledger never keeps the STOP from being written. The operator is told once
+        per STOP file: later hits while the same file stands (every call in flight gets the same
+        403) add their line but no second notify."""
+        wrote = self._tp_append_stop_line(reason, exact)
+        with self.locked():
+            return self._tp_stop_notify_locked(reason=reason, exact=exact, wrote=wrote, tool=tool, phase=phase,
+                                               model=model)
+
+    def _tp_stop_locked(self, *, reason: str, exact: str, tool: str, phase: str, model: str) -> str:
+        wrote = self._tp_append_stop_line(reason, exact)
+        return self._tp_stop_notify_locked(reason=reason, exact=exact, wrote=wrote, tool=tool, phase=phase,
+                                           model=model)
+
+    def _tp_append_stop_line(self, reason: str, exact: str) -> str:
+        """Append one STOP line (lock not needed). Returns "" or why the line could not be written."""
+        line = f"{utc_iso(self.clock())} distill spend STOP: {TP_STOP_MARK} {reason}: {exact}"[:1200]
+        try:
+            existed = self.stop_path.exists()
+            self.stop_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.stop_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+                if not existed:
+                    fh.write("Every batch Max call (judge.py, teacher_gen.py, gen_runner.py; the Token Plan and "
+                             "the pay-per-token key) refuses while this file exists.\n"
+                             "Nothing removes it automatically. Check the account first; remove it only to "
+                             "resume on purpose.\n")
+        except OSError as exc:
+            log.error("the Token Plan STOP file could not be written (%s): %s", type(exc).__name__, reason)
+            return f"the STOP file could not be written ({type(exc).__name__})"
+        log.warning("Token Plan STOP written: %s", reason)
+        return ""
+
+    def _stop_file_id(self) -> str:
+        """The STOP file standing now (inode and first line), or "" when there is none."""
+        try:
+            st = self.stop_path.stat()
+            first = (self.stop_path.read_text(encoding="utf-8").splitlines() or [""])[0]
+        except OSError:
+            return ""
+        return f"{st.st_ino}:{first}"
+
+    def _tp_stop_notify_locked(self, *, reason: str, exact: str, wrote: str, tool: str, phase: str,
+                               model: str) -> str:
+        state = self._tp_state_locked()
+        file_id = self._stop_file_id()
+        if file_id and state.get("stop_file_id") == file_id and state.get("stop_notify") == "sent":
+            log.warning("Token Plan STOP already notified for this STOP file: no second notify (%s)", reason)
+            return "sent"
+        t = totals_of(self.read_rows())
+        detail = f"{reason}: {exact}" + (f" [{wrote}]" if wrote else "")
+        sent = self._notify_locked(t, t.committed_usd, detail, kind="token-plan-stop",
+                                   tool=tool, phase=phase, model=model)
+        self._tp_update_state_locked(lambda st: st.update(
+            stopped_at=utc_iso(self.clock()), stop_reason=detail[:600], stop_notify=sent, stop_file_id=file_id))
+        return sent
+
+    def tp_pause_info(self) -> dict[str, Any] | None:
+        with self.locked():
+            return self._tp_pause_locked()
+
+    def _tp_pause_locked(self) -> dict[str, Any] | None:
+        """The PAUSE file's record, or None. An unreadable one counts as a pause of the default
+        length from its modification time (fail closed)."""
+        try:
+            raw = self.tp_pause_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raw = ""
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict) or not isinstance(data.get("until"), (int, float)):
+                raise ValueError
+            return data
+        except ValueError:
+            try:
+                since = self.tp_pause_path.stat().st_mtime
+            except OSError:
+                since = self.clock()
+            return {"until": since + TP_QUOTA_DEFAULT_PAUSE_S, "reason": "unreadable PAUSE file",
+                    "notify": "sent", "notify_attempts": 0, "probe": None}
+
+    def _tp_write_pause_locked(self, data: dict[str, Any]) -> None:
+        data = dict(data, until_utc=utc_iso(float(data["until"])))
+        self._write_private(self.tp_pause_path, json.dumps(data, indent=1, sort_keys=True) + "\n")
+
+    def _tp_pause_notify_locked(self, data: dict[str, Any], *, tool: str, phase: str, model: str) -> None:
+        """The pause's one notify (retried while it has not got through, up to ``NOTIFY_ATTEMPTS``)."""
+        if data.get("notify") == "sent" or int(data.get("notify_attempts") or 0) >= NOTIFY_ATTEMPTS:
+            return
+        until = float(data["until"])
+        message = "\n".join([
+            "distill: Token Plan quota exhausted: batch work PAUSED (not a STOP)",
+            f"error: {data.get('reason', '')}"[:900],
+            f"paused until {utc_iso(until)} ({data.get('basis', '')})",
+            f"last: {tool} / {phase} / {model}",
+            "resumes after one clean probe call; told once per exhaustion",
+        ])
+        sent = self.notifier(self.notify_cmd, message) if self.notify_cmd else "missing"
+        data["notify"] = sent
+        data["notify_attempts"] = int(data.get("notify_attempts") or 0) + 1
+        token = "notify:" + (sent.split(" ", 1)[0] or "failed")
+        self._append(self._row(tool=tool, phase=phase, model=model, call_id="", cumulative=None,
+                               note=f"alert token-plan-pause - {token} quota paused until {utc_iso(until)} "
+                                    f"(notify {sent})"))
+
+    def tp_quota(self, *, exact: str, reset_at: float | None, basis: str, tool: str, phase: str,
+                 model: str) -> float:
+        """Guardrail 3: start (or extend, after a failed probe) the pause; the operator is told once
+        per episode. Returns the time it ends."""
+        now = self.clock()
+        until = reset_at if reset_at is not None else now + TP_QUOTA_DEFAULT_PAUSE_S
+        until = min(max(until, now + TP_QUOTA_MIN_PAUSE_S), now + TP_QUOTA_MAX_PAUSE_S)
+        with self.locked():
+            data = self._tp_pause_locked() or {"since": now, "since_utc": utc_iso(now), "notify": "",
+                                               "notify_attempts": 0, "episode": uuid.uuid4().hex[:12]}
+            data.update(until=until, reason=exact[:900], basis=basis, probe=None,
+                        probes=int(data.get("probes") or 0))
+            self._tp_pause_notify_locked(data, tool=tool, phase=phase, model=model)
+            self._tp_write_pause_locked(data)
+        log.warning("Token Plan quota exhausted: batch work paused until %s", utc_iso(until))
+        return until
+
+    def tp_record(self, *, tool: str, phase: str, model: str, call_id: str, outcome: str,
+                  usage: Usage | None = None, error: dict[str, Any] | None = None) -> None:
+        """Guardrail 4: one ``token-plan`` row per attempt ($0, tokens counted); an error's
+        status, code and message also go to the state file's ``last_errors``."""
+        if tool not in ALLOWED_TOOLS:
+            raise SpendRefused(f"tool {tool!r} may not use the Token Plan key")
+        tokens = (usage.input_tokens, usage.cached_input_tokens, usage.output_tokens) if usage else (0, 0, 0)
+        with self.locked():
+            self._append(self._row(tool=tool, phase=phase, model=model, call_id=call_id,
+                                   input_tokens=tokens[0], cached_input_tokens=tokens[1],
+                                   output_tokens=tokens[2], usd=0.0, cumulative=None,
+                                   note=f"{TOKEN_PLAN_TAG} {outcome}"))
+            if error is not None:
+                entry = {"ts": utc_iso(self.clock()), "tool": tool, "phase": phase, "outcome": outcome, **error}
+
+                def push(st: dict[str, Any]) -> None:
+                    st["last_errors"] = (list(st.get("last_errors") or []) + [entry])[-TP_LAST_ERRORS:]
+                self._tp_update_state_locked(push)
+
+    def tp_record_limits(self, *, tool: str, phase: str, snapshot: dict[str, Any]) -> None:
+        with self.locked():
+            self._tp_update_state_locked(lambda st: st.setdefault("limits", {}).update(
+                {f"{tool}/{phase}": dict(snapshot, at=utc_iso(self.clock()))}))
+
+    def tp_check_key(self, creds: "TokenPlanCredentials", *, tool: str, phase: str = "",
+                     model: str = "") -> str:
+        """Guardrail 7: the key's salted fingerprint is stored at first use; a different key later
+        writes the STOP file, notifies, and raises ``TokenPlanStop``. Returns ``recorded`` or ``matches``."""
+        with self.locked():
+            state = self._tp_state_locked()
+            salt = state.get("salt")
+            if not (isinstance(salt, str) and state.get("fingerprint")):
+                salt = os.urandom(16).hex()
+                fp = creds.fingerprint(salt)
+                self._tp_update_state_locked(lambda st: st.update(
+                    salt=salt, fingerprint=fp, fingerprint_recorded=utc_iso(self.clock())))
+                return "recorded"
+            if hmac.compare_digest(creds.fingerprint(salt), str(state["fingerprint"])):
+                return "matches"
+            sent = self._tp_stop_locked(
+                reason="key changed",
+                exact=(f"{TOKEN_PLAN_KEY_ENV} is not the key first used on "
+                       f"{state.get('fingerprint_recorded', '?')} (salted fingerprint mismatch): a new key may "
+                       "be another account"),
+                tool=tool, phase=phase, model=model)
+        raise TokenPlanStop(f"{TOKEN_PLAN_KEY_ENV} changed since its first use: STOP written"
+                            + ("" if sent == "sent" else f"; the operator was NOT notified (notify {sent})"))
+
+    def tp_accept_key(self, creds: "TokenPlanCredentials") -> None:
+        """Record the current key as the Token Plan key (an operator action after a deliberate
+        change). The STOP file is left as it is."""
+        with self.locked():
+            salt = os.urandom(16).hex()
+            fp = creds.fingerprint(salt)
+            self._tp_update_state_locked(lambda st: st.update(
+                salt=salt, fingerprint=fp, fingerprint_recorded=utc_iso(self.clock()), key_accepted=True))
 
 
 # ---------------------------------------------------------------------------
@@ -1339,6 +1690,831 @@ class PaygClient:
 
 
 # ---------------------------------------------------------------------------
+# The Token Plan (operator override, informed, 2026-10-31; module docstring)
+# ---------------------------------------------------------------------------
+
+TOKEN_PLAN_TAG = "token-plan"
+#: The STOP file's line for a Token Plan stop starts with this (after the time).
+TP_STOP_MARK = "token-plan"
+TOKEN_PLAN_DEFAULT_HOST = "token-plan.ap-southeast-1.maas.aliyuncs.com"
+_TOKEN_PLAN_HOST = re.compile(r"^token-plan\.(?P<region>[a-z0-9-]+)\.maas\.aliyuncs\.com$")
+#: The models batch work may ask the Token Plan for.
+TOKEN_PLAN_MODELS = frozenset({"qwen3.8-max"})
+TP_STATE_NAME = "token-plan-state.json"
+TP_PAUSE_NAME = "token-plan.PAUSE"
+#: Guardrail 1 (adaptive concurrency, per process). The operator set 4 to start and 8 at most.
+TP_START_CONCURRENCY = 4
+TP_MAX_CONCURRENCY = 8
+#: A burst: this many rate-limit 429s within the window halves the concurrency. One stray 429
+#: is ordinary backoff; three in a minute at 4+ calls in flight means the plan's rate limit binds.
+TP_BURST_429 = 3
+TP_BURST_WINDOW_S = 60.0
+#: Grow back slowly: +1 after this many clean calls in a row, at most once per interval.
+TP_GROW_AFTER_OK = 50
+TP_GROW_MIN_INTERVAL_S = 300.0
+#: Exponential backoff on a rate-limit 429 (unbilled: refused before generation).
+TP_429_RETRIES = 6
+TP_BACKOFF_BASE_S = 5.0
+TP_BACKOFF_MAX_S = 300.0
+TP_RETRY_AFTER_MAX_S = 900.0
+#: Guardrail 3: the pause when the reply gives no reset time, and its bounds.
+TP_QUOTA_DEFAULT_PAUSE_S = 3600.0
+TP_QUOTA_MIN_PAUSE_S = 60.0
+TP_QUOTA_MAX_PAUSE_S = 31 * 86400.0
+#: A probe claim older than this is stale (its process died): another call may probe.
+TP_PROBE_STALE_S = 900.0
+#: A naive reset time in a reply is read in the plan's region's zone (Singapore, UTC+8).
+TP_NAIVE_RESET_TZ = timezone(timedelta(hours=8))
+TP_TRIAL_CALLS = 50
+TP_USAGE_WINDOW_S = 7 * 86400.0
+TP_LAST_ERRORS = 10
+TP_MESSAGE_MAX = 600
+
+
+class TokenPlanStop(StopActive):
+    """An account-level error or a key change: the STOP file is written and the operator told."""
+
+
+class TokenPlanSuperseded(SpendRefused):
+    """``QWEN_PAYG_KEY`` is present: batch work uses it, and Token Plan batch use stops."""
+
+
+class QuotaPaused(SpendRefused):
+    """The plan's quota is exhausted: batch work waits for ``until`` (a timestamp)."""
+
+    def __init__(self, message: str, *, until: float) -> None:
+        super().__init__(message)
+        self.until = until
+
+
+@dataclass(frozen=True)
+class TokenPlanCredentials:
+    """A checked Token Plan key and endpoint. ``repr`` shows neither the key nor the URL."""
+
+    region: str
+    key_source: str  # "environment" | "env file"
+    env_file: Path
+    base_url: str = field(repr=False)
+    _key: str = field(repr=False, compare=False)
+    host_kind = "token-plan"
+
+    def describe(self) -> str:
+        return (f"Token Plan endpoint in {self.region} ({REGION_NAMES.get(self.region, '?')}), "
+                f"key from the {self.key_source}")
+
+    def scrub(self, text: str) -> str:
+        text = str(text)
+        return text.replace(self._key, "<key>") if self._key else text
+
+    def fingerprint(self, salt: str) -> str:
+        return hmac.new(bytes.fromhex(salt), self._key.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def check_token_plan_endpoint(key: str, base_url: str | None) -> tuple[str, str]:
+    """(normalized base URL, region) for a Token Plan *key*, or ``KeyRefused``."""
+    if not key.startswith(PLAN_KEY_PREFIX):
+        raise KeyRefused(f"{TOKEN_PLAN_KEY_ENV} is not a Token Plan key (expected the {PLAN_KEY_PREFIX} prefix)")
+    if not _KEY_SHAPE.fullmatch(key):
+        raise KeyRefused(f"{TOKEN_PLAN_KEY_ENV} is not a Model Studio key (expected sk-sp-..., no spaces)")
+    parts = urlsplit((base_url or f"https://{TOKEN_PLAN_DEFAULT_HOST}{COMPAT_PATH}").strip())
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or not host:
+        raise KeyRefused(f"{TOKEN_PLAN_BASE_URL_ENV} must be an https:// URL")
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise KeyRefused(f"{TOKEN_PLAN_BASE_URL_ENV} must not carry credentials, a query or a fragment")
+    if parts.port not in (None, 443):
+        raise KeyRefused(f"{TOKEN_PLAN_BASE_URL_ENV} must use the default https port")
+    if parts.path.rstrip("/") != COMPAT_PATH:
+        raise KeyRefused(f"{TOKEN_PLAN_BASE_URL_ENV} must end in {COMPAT_PATH}")
+    m = _TOKEN_PLAN_HOST.match(host)
+    if not m or m.group("region") not in REGION_NAMES:
+        raise KeyRefused(f"{TOKEN_PLAN_BASE_URL_ENV}'s host is not a Token Plan host "
+                         "(token-plan.<region>.maas.aliyuncs.com)")
+    return f"https://{host}{COMPAT_PATH}", m.group("region")
+
+
+def _env_and_file(env: Mapping[str, str] | None, env_file: Path | None) -> tuple[Mapping[str, str], Path,
+                                                                                   dict[str, str]]:
+    env = os.environ if env is None else env
+    path = Path(env_file).expanduser() if env_file is not None else env_file_path(env)
+    return env, path, read_env_file(path)
+
+
+def payg_key_present(env: Mapping[str, str] | None = None, *, env_file: Path | None = None) -> bool:
+    """Guardrail 6: ``QWEN_PAYG_KEY`` is set (non-empty) in the environment or the env file.
+    Presence only: the value is not checked or kept."""
+    env, _path, from_file = _env_and_file(env, env_file)
+    return bool((env.get(KEY_ENV) or "").strip() or (from_file.get(KEY_ENV) or "").strip())
+
+
+def which_key(env: Mapping[str, str] | None = None, *, env_file: Path | None = None) -> str:
+    """``payg`` when ``QWEN_PAYG_KEY`` is present (it always wins), else ``token-plan`` when
+    ``QWEN_API_KEY`` is, else ``none``. Presence only."""
+    env, _path, from_file = _env_and_file(env, env_file)
+    if (env.get(KEY_ENV) or "").strip() or (from_file.get(KEY_ENV) or "").strip():
+        return "payg"
+    if (env.get(TOKEN_PLAN_KEY_ENV) or "").strip() or (from_file.get(TOKEN_PLAN_KEY_ENV) or "").strip():
+        return "token-plan"
+    return "none"
+
+
+def resolve_token_plan(env: Mapping[str, str] | None = None, *,
+                       env_file: Path | None = None) -> TokenPlanCredentials:
+    """The checked Token Plan credentials. ``TokenPlanSuperseded`` while ``QWEN_PAYG_KEY`` is
+    present; ``KeyRefused`` for a missing key, a key that is not ``sk-sp-``, or a host that is not
+    a Token Plan host."""
+    env, path, from_file = _env_and_file(env, env_file)
+    if (env.get(KEY_ENV) or "").strip() or (from_file.get(KEY_ENV) or "").strip():
+        raise TokenPlanSuperseded(f"{KEY_ENV} is present: batch work uses the pay-per-token key, and "
+                                  "Token Plan batch use stops")
+
+    def pick(name: str) -> tuple[str, str]:
+        value = (env.get(name) or "").strip()
+        if value:
+            return value, "environment"
+        value = (from_file.get(name) or "").strip()
+        return (value, "env file") if value else ("", "")
+
+    key, source = pick(TOKEN_PLAN_KEY_ENV)
+    if not key:
+        raise KeyRefused(f"{TOKEN_PLAN_KEY_ENV} is not set (environment or {display_path(path)})")
+    base_url, _src = pick(TOKEN_PLAN_BASE_URL_ENV)
+    url, region = check_token_plan_endpoint(key, base_url or None)
+    return TokenPlanCredentials(region=region, key_source=source, env_file=path, base_url=url, _key=key)
+
+
+# -- classifying an error ------------------------------------------------------------
+
+_W = r"[\s._-]*"
+#: Account-level words (guardrail 2). Any of them in an error's code or message is a STOP.
+TP_STOP_RE = re.compile(
+    r"access" + _W + r"denied|unpurchased|not" + _W + r"(?:purchased|activated|authori[sz]ed)"
+    r"|invalid" + _W + r"api" + _W + r"key|api" + _W + r"key[^.]{0,40}(?:invalid|revoked|disabled|expired)"
+    r"|suspend|arrearage|overdue|(?<![a-z])risk|policy|(?<![a-z])bann?ed(?![a-z])|revoked|disabled"
+    r"|forbidden|unauthori[sz]ed|insufficient" + _W + r"balance"
+    r"|(?:subscription|plan|account|key)[^.]{0,40}expired|expired[^.]{0,40}(?:subscription|plan|account|key)",
+    re.I)
+#: DataInspectionFailed is per request (content moderation) unless its message names the account.
+TP_ACCOUNT_RE = re.compile(r"account|subscription|suspend|(?<![a-z])bann?ed(?![a-z])|revoked|disabled|terms",
+                           re.I)
+#: "billing" alone is an account word except on a 429: Model Studio's TPM/TPS limit (429
+#: insufficient_quota) says "please check your plan and billing details".
+TP_BILLING_RE = re.compile(r"billing", re.I)
+#: Wording that says the plan itself is used up (not a per-minute limit).
+TP_EXHAUSTED_RE = re.compile(
+    r"exhaust|used" + _W + r"up|deplet|run" + _W + r"out|ran" + _W + r"out|no" + _W + r"remaining"
+    r"|free" + _W + r"(?:tier|allocated)|resets?" + _W + r"(?:at|on|in|after)", re.I)
+#: A per-minute rate limit, never an exhausted plan.
+TP_RATE_RE = re.compile(r"rate" + _W + r"limit|ratequota|per" + _W + r"(?:minute|second)|too many requests"
+                        r"|(?<![a-z])(?:rpm|tpm|qps)(?![a-z])", re.I)
+#: The plan's quota (package, allowance) is used up: pause until it resets (guardrail 3).
+TP_QUOTA_RE = re.compile(
+    r"(?:quota|token" + _W + r"plan|package|allowance|credit|usage" + _W + r"limit)[^.]{0,60}"
+    r"(?:exhaust|used" + _W + r"up|deplet|run" + _W + r"out|ran" + _W + r"out|exceed|reached|insufficient"
+    r"|no" + _W + r"remaining)"
+    r"|(?:exhaust|used" + _W + r"up|deplet|run" + _W + r"out|ran" + _W + r"out|no" + _W + r"remaining)"
+    r"[^.]{0,60}(?:quota|plan|package|allowance|credit)"
+    r"|free" + _W + r"tier" + _W + r"only",
+    re.I)
+
+
+def tp_classify(status: int, code: str, message: str) -> str:
+    """A Token Plan error: ``stop`` (account-level, guardrail 2), ``quota`` (exhausted, guardrail 3),
+    ``rate_limit`` (backoff, guardrail 1), else spend.py's kinds (provider_error, timeout,
+    context_overflow, bad_request)."""
+    code, message = str(code or ""), str(message or "")
+    text = f"{code} {message}"
+    if status in (401, 402, 403):
+        return "stop"  # any 401/403, DataInspectionFailed included (guardrail 2)
+    norm = re.sub(r"[\s_-]", "", code).lower()
+    if norm.replace(".", "").startswith("datainspectionfailed"):
+        return "stop" if TP_ACCOUNT_RE.search(message) else "bad_request"
+    if TP_STOP_RE.search(text) or (status != 429 and TP_BILLING_RE.search(text)):
+        return "stop"
+    if status == 429 and (norm == "insufficientquota" or norm.startswith("throttling.allocationquota")):
+        # Model Studio's TPM/TPS limit ("Allocated quota exceeded", "You exceeded your current quota,
+        # please check your plan and billing details"): a rate limit, unless it says the plan is used up
+        return "quota" if TP_EXHAUSTED_RE.search(message) else "rate_limit"
+    if not TP_RATE_RE.search(text) and TP_QUOTA_RE.search(text):
+        return "quota"
+    if status == 429:
+        return "rate_limit"
+    if 400 <= status < 500 and re.search(r"(?<![a-z])account(?![a-z])", text, re.I):
+        return "stop"
+    if status == 408:
+        return "timeout"
+    if status == 413:
+        return "context_overflow"
+    if status >= 500 or status == 200:
+        return "provider_error"
+    return "bad_request"
+
+
+_ISO_RESET = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)(?:\.\d+)?\s*(Z|UTC|GMT|[+-]\d{2}:?\d{2})?",
+                        re.I)
+_IN_RESET = re.compile(r"(?:in|after)\s+(\d+(?:\.\d+)?)\s*(second|sec|minute|min|hour|hr|day)s?", re.I)
+
+
+def tp_reset_time(message: str, retry_after: float | None, now: float) -> tuple[float | None, str]:
+    """(the reset time a quota reply gives, how it was read), or (None, why not)."""
+    m = _ISO_RESET.search(message or "")
+    if m:
+        zone = (m.group(3) or "").upper()
+        text = f"{m.group(1)}T{m.group(2)}"
+        try:
+            when = datetime.fromisoformat(text)
+            if zone in ("Z", "UTC", "GMT"):
+                when = when.replace(tzinfo=timezone.utc)
+            elif zone:
+                when = datetime.fromisoformat(text + (zone if ":" in zone else zone[:3] + ":" + zone[3:]))
+            else:
+                when = when.replace(tzinfo=TP_NAIVE_RESET_TZ)
+            ts = when.timestamp()
+            if ts > now:
+                return ts, "reset time from the reply" + ("" if zone else " (read as UTC+8)")
+        except ValueError:
+            pass
+    m = _IN_RESET.search(message or "")
+    if m:
+        unit = m.group(2).lower()
+        mult = 1 if unit.startswith("sec") else 60 if unit.startswith("min") else 86400 if unit == "day" else 3600
+        return now + float(m.group(1)) * mult, "reset delay from the reply"
+    if retry_after is not None and retry_after >= 60:
+        return now + min(float(retry_after), TP_QUOTA_MAX_PAUSE_S), "the reply's Retry-After"
+    return None, f"no reset time in the reply: {int(TP_QUOTA_DEFAULT_PAUSE_S // 60)} min, then one probe call"
+
+
+def _tp_error_detail(body: bytes) -> tuple[str, str, str]:
+    """(code, message, request id) from an error body; the message up to ``TP_MESSAGE_MAX``."""
+    try:
+        obj = json.loads(body.decode("utf-8", "replace"))
+    except ValueError:
+        text = body.decode("utf-8", "replace").strip()
+        return "", text[:TP_MESSAGE_MAX], ""
+    if not isinstance(obj, dict):
+        return "", str(obj)[:TP_MESSAGE_MAX], ""
+    inner = obj.get("error")
+    err: dict[str, Any] = inner if isinstance(inner, dict) else obj
+    code = str(err.get("code") or err.get("type") or obj.get("code") or "")
+    message = str(err.get("message") or obj.get("message") or "")
+    rid = str(obj.get("request_id") or obj.get("id") or err.get("request_id") or "")
+    return code, message[:TP_MESSAGE_MAX], rid
+
+
+# -- adaptive concurrency (guardrail 1) -----------------------------------------------
+
+
+class AdaptiveLimiter:
+    """At most ``limit`` calls in flight. A burst of rate-limit 429s halves the limit; clean calls
+    grow it back by one, slowly. Thread-safe; one per client (per process)."""
+
+    def __init__(self, start: int = TP_START_CONCURRENCY, maximum: int = TP_MAX_CONCURRENCY, *,
+                 minimum: int = 1, burst: int = TP_BURST_429, burst_window: float = TP_BURST_WINDOW_S,
+                 grow_after: int = TP_GROW_AFTER_OK, grow_interval: float = TP_GROW_MIN_INTERVAL_S,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        if not 1 <= minimum <= start <= maximum <= TP_MAX_CONCURRENCY:
+            raise ValueError(f"concurrency must satisfy 1 <= start ({start}) <= max ({maximum}) <= "
+                             f"{TP_MAX_CONCURRENCY}")
+        self.limit, self.minimum, self.maximum = int(start), int(minimum), int(maximum)
+        self.burst, self.burst_window = int(burst), float(burst_window)
+        self.grow_after, self.grow_interval = int(grow_after), float(grow_interval)
+        self.clock = clock
+        self.active = 0
+        self._cond = threading.Condition()
+        self._r429: collections.deque[float] = collections.deque()
+        self._ok_streak = 0
+        self._changed_at = clock()
+        self.changes: list[tuple[str, int]] = []
+
+    def acquire(self, timeout: float | None = None) -> bool:
+        with self._cond:
+            ok = self._cond.wait_for(lambda: self.active < self.limit, timeout=timeout)
+            if ok:
+                self.active += 1
+            return bool(ok)
+
+    def release(self) -> None:
+        with self._cond:
+            self.active = max(0, self.active - 1)
+            self._cond.notify_all()
+
+    def on_rate_limit(self) -> bool:
+        """One rate-limit 429. True when it completed a burst and the limit was halved."""
+        with self._cond:
+            now = self.clock()
+            self._ok_streak = 0
+            self._r429.append(now)
+            while self._r429 and self._r429[0] < now - self.burst_window:
+                self._r429.popleft()
+            if len(self._r429) < self.burst:
+                return False
+            self._r429.clear()
+            new = max(self.minimum, self.limit // 2)
+            changed = new != self.limit
+            self.limit, self._changed_at = new, now
+            self.changes.append(("halve", new))
+            return changed
+
+    def on_success(self) -> bool:
+        """One clean call. True when the limit grew."""
+        with self._cond:
+            now = self.clock()
+            self._ok_streak += 1
+            if (self._ok_streak >= self.grow_after and self.limit < self.maximum
+                    and now - self._changed_at >= self.grow_interval):
+                self.limit += 1
+                self._ok_streak, self._changed_at = 0, now
+                self.changes.append(("grow", self.limit))
+                self._cond.notify_all()
+                return True
+            return False
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._cond:
+            return {"limit": self.limit, "max": self.maximum, "min": self.minimum, "active": self.active}
+
+
+class _RateLimited(Exception):
+    def __init__(self, message: str, retry_after: float | None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class TokenPlanClient:
+    """Batch chat completions on the Token Plan key, every guardrail enforced per call (module
+    docstring). The same interface as ``PaygClient`` (``chat``, ``close``, ``open_calls``,
+    ``settle_open``, ``ledger``, ``model``, ``region``), so judge.py and teacher_gen.py use either.
+
+    ``chat`` returns a ``PaidResult`` (``usd`` 0) or raises: ``TokenPlanStop`` (account-level
+    error or key change: STOP written, operator told), ``QuotaPaused`` (the plan's quota),
+    ``TokenPlanSuperseded`` (``QWEN_PAYG_KEY`` appeared), ``StopActive`` (the STOP file),
+    ``SpendRefused`` (closed, a bad request body), or ``PaidCallError`` for a failed attempt
+    (``rate_limit`` once its backoff retries are used up)."""
+
+    price = None
+
+    def __init__(self, creds: TokenPlanCredentials, ledger: Ledger, *, tool: str, phase: str, model: str,
+                 timeout: float = 300.0, opener: Any = None, start_concurrency: int = TP_START_CONCURRENCY,
+                 max_concurrency: int = TP_MAX_CONCURRENCY, retries_429: int = TP_429_RETRIES,
+                 backoff_base: float = TP_BACKOFF_BASE_S, backoff_max: float = TP_BACKOFF_MAX_S,
+                 sleep: Callable[[float], None] = time.sleep, rng: random.Random | None = None,
+                 limiter: AdaptiveLimiter | None = None, wait_budget: float | None = None) -> None:
+        if tool not in ALLOWED_TOOLS:
+            raise SpendRefused(f"tool {tool!r} may not use the Token Plan key "
+                               f"(allowed: {', '.join(sorted(ALLOWED_TOOLS))})")
+        if model not in TOKEN_PLAN_MODELS:
+            raise SpendRefused(f"model {model!r} is not one batch work asks the Token Plan for "
+                               f"({', '.join(sorted(TOKEN_PLAN_MODELS))})")
+        ledger.check_paid_path()
+        self.creds = creds
+        self.ledger = ledger
+        self.tool = tool
+        self.phase = phase
+        self.model = model
+        self.region = creds.region
+        self.timeout = timeout
+        #: how long one ``chat`` may wait for a slot, the probe and 429 backoff, apart from the
+        #: request's own ``timeout`` (None: no bound; ``close`` and a STOP still end the wait)
+        self.wait_budget = wait_budget
+        self.retries_429 = max(0, int(retries_429))
+        self.backoff_base = float(backoff_base)
+        self.backoff_max = float(backoff_max)
+        self._sleep = sleep
+        self._rng = rng or random.Random()
+        self.limiter = limiter or AdaptiveLimiter(int(start_concurrency), int(max_concurrency))
+        self._opener = opener or default_opener()
+        self._owner = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        self._gate = threading.Lock()
+        self._closed = ""
+        self._open: dict[str, str] = {}
+        self._probe_cond = threading.Condition()
+        self._probing = False
+        #: a STOP or the pay-per-token key's arrival: terminal for this client (every later call raises it)
+        self._terminal: SpendRefused | None = None
+        self._env_sig = self._stat_env()
+        # guardrail 7 at the client's start (stores the fingerprint at first use)
+        ledger.tp_check_key(creds, tool=tool, phase=phase, model=model)
+        self._record_limits()
+
+    # -- guards -------------------------------------------------------------------------
+
+    def _stat_env(self) -> tuple[int, int, int] | None:
+        try:
+            st = self.creds.env_file.stat()
+        except OSError:
+            return None
+        return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+    def _recheck_env(self) -> None:
+        """Guardrails 6 and 7 mid-run: when the env file changed, a ``QWEN_PAYG_KEY`` there stops
+        Token Plan use; a different ``QWEN_API_KEY`` there (for a key read from it) is a STOP."""
+        sig = self._stat_env()
+        if sig == self._env_sig:
+            return
+        # KeyRefused for a file others can read; the signature is kept only once the file was read,
+        # so a refused read is tried again at every call until the file is fixed
+        values = read_env_file(self.creds.env_file)
+        self._env_sig = sig
+        if (values.get(KEY_ENV) or "").strip():
+            self._terminal = TokenPlanSuperseded(f"{KEY_ENV} appeared in the env file: batch work moves to the "
+                                                 "pay-per-token key; Token Plan batch use stops")
+            raise self._terminal
+        if self.creds.key_source == "env file":
+            current = (values.get(TOKEN_PLAN_KEY_ENV) or "").strip()
+            if current != self.creds._key:
+                self._terminal = TokenPlanStop(f"{TOKEN_PLAN_KEY_ENV} changed mid-run: STOP written")
+                sent = self.ledger.tp_stop(
+                    reason="key changed",
+                    exact=(f"{TOKEN_PLAN_KEY_ENV} in the env file changed or was removed mid-run: a new key "
+                           "may be another account"),
+                    tool=self.tool, phase=self.phase, model=self.model)
+                if sent != "sent":
+                    self._terminal = TokenPlanStop(f"{TOKEN_PLAN_KEY_ENV} changed mid-run: STOP written; the "
+                                                   f"operator was NOT notified ({sent})")
+                raise self._terminal
+
+    def _check_stopped(self) -> None:
+        """This client's terminal state, then the STOP file (``StopActive``)."""
+        if self._terminal is not None:
+            raise type(self._terminal)(str(self._terminal))
+        if self.ledger.stop_reason() is not None:
+            self.ledger.check_open(tool=self.tool, phase=self.phase, model=self.model)  # raises StopActive
+
+    def _guard(self, deadline: float | None) -> bool:
+        """Before every attempt: the env file, the STOP file, the quota pause. Returns True when this
+        attempt is the one probe call after a pause. The STOP is checked on every pass, so a thread
+        that waited on another thread's probe never sends after that probe wrote a STOP."""
+        self._check_closed()
+        self._check_stopped()
+        self._recheck_env()
+        while True:
+            self._check_stopped()
+            with self.ledger.locked():
+                pause = self.ledger._tp_pause_locked()
+                if pause is None:
+                    return False
+                now = self.ledger.clock()
+                until = float(pause["until"])
+                if now < until:
+                    if pause.get("notify") != "sent" and int(pause.get("notify_attempts") or 0) < NOTIFY_ATTEMPTS:
+                        self.ledger._tp_pause_notify_locked(pause, tool=self.tool, phase=self.phase,
+                                                            model=self.model)
+                        self.ledger._tp_write_pause_locked(pause)
+                    raise QuotaPaused(f"the Token Plan quota is exhausted: batch work is paused until "
+                                      f"{utc_iso(until)} ({pause.get('basis', '')})", until=until)
+                probe = pause.get("probe") if isinstance(pause.get("probe"), dict) else None
+                fresh = probe is not None and float(probe.get("claimed_at") or 0) > now - TP_PROBE_STALE_S
+                if probe is not None and fresh and probe.get("owner") != self._owner:
+                    raise QuotaPaused("the quota pause has ended and another process's probe call is in "
+                                      "flight", until=float(probe.get("claimed_at") or now) + TP_PROBE_STALE_S)
+                with self._probe_cond:
+                    if not self._probing:
+                        self._probing = True
+                        pause["probe"] = {"owner": self._owner, "claimed_at": now, "claimed_utc": utc_iso(now)}
+                        pause["probes"] = int(pause.get("probes") or 0) + 1
+                        self.ledger._tp_write_pause_locked(pause)
+                        return True
+            # another thread of this process is probing: wait for its outcome, then look again
+            with self._probe_cond:
+                left = None if deadline is None else deadline - time.monotonic()
+                if left is not None and left <= 0:
+                    raise PaidCallError("timeout", "waited for the probe call past the wait budget",
+                                        maybe_billed=False)
+                self._probe_cond.wait_for(lambda: not self._probing or bool(self._closed),
+                                          timeout=1.0 if left is None else min(1.0, left))
+            self._check_closed()
+
+    def _end_probe(self, is_probe: bool, *, ok: bool) -> None:
+        if not is_probe:
+            return
+        try:
+            with self.ledger.locked():
+                pause = self.ledger._tp_pause_locked()
+                if pause is not None:
+                    probe = pause.get("probe") if isinstance(pause.get("probe"), dict) else {}
+                    if ok:
+                        with contextlib.suppress(FileNotFoundError):
+                            self.ledger.tp_pause_path.unlink()
+                        log.warning("Token Plan quota pause over: the probe call succeeded")
+                    elif probe and probe.get("owner") == self._owner:
+                        pause["probe"] = None
+                        self.ledger._tp_write_pause_locked(pause)
+        finally:
+            with self._probe_cond:
+                self._probing = False
+                self._probe_cond.notify_all()
+
+    def _record_limits(self) -> None:
+        with contextlib.suppress(SpendError, OSError):
+            self.ledger.tp_record_limits(tool=self.tool, phase=self.phase, snapshot=self.limiter.snapshot())
+
+    # -- the call -----------------------------------------------------------------------
+
+    def chat(self, payload: dict[str, Any], *, call_id: str | None = None,
+             timeout: float | None = None) -> PaidResult:
+        payload = dict(payload)
+        if payload.setdefault("model", self.model) != self.model:
+            raise SpendRefused(f"the request names {payload['model']!r}; this client asks for {self.model!r}")
+        if timeout is not None and not (math.isfinite(timeout) and timeout > 0):
+            raise ValueError(f"timeout must be > 0 seconds, not {timeout!r}")
+        check_payload(payload)  # bounded output, text only, no search or plugins
+        self._check_closed()
+        self._check_stopped()
+        call_id = call_id or uuid.uuid4().hex
+        # The request timeout bounds each attempt from its send; the wait for a slot, the probe and
+        # the 429 backoff are bounded apart, by ``wait_budget`` (None: until close or a STOP).
+        per_attempt = self.timeout if timeout is None else min(self.timeout, timeout)
+        deadline = None if self.wait_budget is None else time.monotonic() + self.wait_budget
+        while not self.limiter.acquire(timeout=0.5 if deadline is None
+                                       else max(0.0, min(0.5, deadline - time.monotonic()))):
+            self._check_closed()
+            self._check_stopped()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise PaidCallError("timeout", "no concurrency slot within the wait budget", call_id=call_id,
+                                    maybe_billed=False)
+        self._open[call_id] = call_id
+        try:
+            attempt = 0
+            while True:
+                is_probe = self._guard(deadline)
+                attempt_id = call_id if attempt == 0 else f"{call_id}-r{attempt}"
+                try:
+                    result = self._send(payload, attempt_id, per_attempt, is_probe)
+                except _RateLimited as rl:
+                    self._end_probe(is_probe, ok=False)
+                    if self.limiter.on_rate_limit():
+                        log.warning("Token Plan 429 burst: concurrency halved to %d", self.limiter.limit)
+                        self._record_limits()
+                    delay = min(self.backoff_max, self.backoff_base * (2 ** attempt))
+                    delay += self._rng.uniform(0, delay * 0.1)
+                    if rl.retry_after:
+                        delay = max(delay, min(float(rl.retry_after), TP_RETRY_AFTER_MAX_S))
+                    if attempt >= self.retries_429 or (deadline is not None
+                                                        and time.monotonic() + delay >= deadline):
+                        raise PaidCallError("rate_limit", str(rl), status=429, retry_after=rl.retry_after,
+                                            call_id=call_id) from None
+                    log.warning("Token Plan rate limit (attempt %d); backing off %.0fs", attempt + 1, delay)
+                    self._sleep(delay)
+                    self._check_closed()
+                    attempt += 1
+                    continue
+                except BaseException:
+                    self._end_probe(is_probe, ok=False)
+                    raise
+                self._end_probe(is_probe, ok=True)
+                if self.limiter.on_success():
+                    self._record_limits()
+                return result
+        finally:
+            self._open.pop(call_id, None)
+            self.limiter.release()
+
+    def _exact(self, status: int | None, code: str, message: str, rid: str) -> str:
+        text = (f"HTTP {status} " if status is not None else "") + (f"{code}: " if code else "") + message
+        if rid:
+            text += f" (request_id {rid})"
+        return self.creds.scrub(text.strip())
+
+    def _fail(self, call_id: str, kind: str, message: str, *, status: int | None = None, code: str = "",
+              rid: str = "", retry_after: float | None = None, maybe_billed: bool = False,
+              is_probe: bool = False) -> BaseException:
+        """Record the attempt and return the exception to raise (after the STOP or the pause when the
+        error calls for one)."""
+        exact = self._exact(status, code, message, rid)
+        outcome = f"error:{kind}" + (f" http:{status}" if status is not None else "") + (" probe" if is_probe else "")
+        error = {"kind": kind, "status": status, "code": code,
+                 "message": self.creds.scrub(message)[:TP_MESSAGE_MAX], "request_id": rid}
+        if kind == "stop":
+            # the STOP comes first: neither a busy ledger lock nor an unreadable ledger gates it
+            self._terminal = TokenPlanStop(f"the Token Plan refused the key or the account: {exact}; STOP written")
+            try:
+                sent = self.ledger.tp_stop(reason=f"account-level error (HTTP {status})", exact=exact,
+                                           tool=self.tool, phase=self.phase, model=self.model)
+            except (SpendError, OSError) as exc:
+                sent = f"failed ({type(exc).__name__}: {exc})"
+            try:
+                self.ledger.tp_record(tool=self.tool, phase=self.phase, model=self.model, call_id=call_id,
+                                      outcome=outcome, error=error)
+            except (SpendError, OSError) as exc:
+                log.error("the Token Plan STOP's ledger row was not written (%s)", type(exc).__name__)
+            if sent != "sent":
+                self._terminal = TokenPlanStop(f"{self._terminal}; the operator was NOT notified (notify {sent})")
+            return self._terminal
+        self.ledger.tp_record(tool=self.tool, phase=self.phase, model=self.model, call_id=call_id, outcome=outcome,
+                              error=error)
+        if kind == "quota":
+            reset, basis = tp_reset_time(message, retry_after, self.ledger.clock())
+            until = self.ledger.tp_quota(exact=exact, reset_at=reset, basis=basis, tool=self.tool,
+                                         phase=self.phase, model=self.model)
+            return QuotaPaused(f"the Token Plan quota is exhausted ({exact}): batch work paused until "
+                               f"{utc_iso(until)}", until=until)
+        if kind == "rate_limit":
+            return _RateLimited(exact, retry_after)
+        return PaidCallError(kind, exact, status=status, retry_after=retry_after, maybe_billed=maybe_billed,
+                             call_id=call_id)
+
+    def _send(self, payload: dict[str, Any], call_id: str, timeout: float, is_probe: bool) -> PaidResult:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            self.creds.base_url.rstrip("/") + "/chat/completions", data=data, method="POST",
+            headers={"Content-Type": "application/json", "Accept": "application/json",
+                     "User-Agent": "distill-batch/1"})
+        request.add_unredirected_header("Authorization", "Bearer " + self.creds._key)
+        try:
+            resp = self._opener.open(request, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            try:
+                raw_err = exc.read(65536) if exc.fp is not None else b""
+            except (OSError, http.client.HTTPException, ValueError):
+                raw_err = b""  # a cut connection: classified on the status alone (a 401/403 still stops)
+            code, message, rid = _tp_error_detail(raw_err)
+            if not (code or message):
+                message = f"(no readable error body; HTTP {exc.code})"
+            kind = tp_classify(exc.code, code, message)
+            raise self._fail(call_id, kind, message, status=exc.code, code=code, rid=rid,
+                             retry_after=_retry_after(exc.headers), maybe_billed=status_maybe_billed(exc.code),
+                             is_probe=is_probe) from None
+        except urllib.error.URLError as exc:
+            reason = exc.reason
+            kind = "timeout" if isinstance(reason, TimeoutError) else "unreachable"
+            raise self._fail(call_id, kind, f"{type(reason).__name__} before the request was sent",
+                             is_probe=is_probe) from None
+        except (TimeoutError, http.client.HTTPException, ConnectionError, OSError) as exc:
+            kind = "timeout" if isinstance(exc, TimeoutError) else "unreachable"
+            raise self._fail(call_id, kind, f"{type(exc).__name__} after the request was sent", maybe_billed=True,
+                             is_probe=is_probe) from None
+        try:
+            with resp:
+                raw = resp.read()
+        except (TimeoutError, http.client.HTTPException, OSError) as exc:
+            kind = "timeout" if isinstance(exc, TimeoutError) else "unreachable"
+            raise self._fail(call_id, kind, f"{type(exc).__name__} while reading the reply", maybe_billed=True,
+                             is_probe=is_probe) from None
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise self._fail(call_id, "provider_error", "the reply is not JSON", maybe_billed=True,
+                             is_probe=is_probe) from None
+        choices = body.get("choices") if isinstance(body, dict) else None
+        if isinstance(body, dict) and body.get("error") and not choices:
+            # an error inside a 200 reply: classified like any other (a STOP word still stops)
+            code, message, rid = _tp_error_detail(raw)
+            kind = tp_classify(200, code, message)
+            raise self._fail(call_id, kind, message, status=200, code=code, rid=rid, maybe_billed=True,
+                             is_probe=is_probe)
+        usage = parse_usage(body.get("usage")) if isinstance(body, dict) else None
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise self._fail(call_id, "provider_error", "the reply has no choices", maybe_billed=True,
+                             is_probe=is_probe)
+        found = choices[0].get("message")
+        reply: dict[str, Any] = found if isinstance(found, dict) else {}
+        self.ledger.tp_record(tool=self.tool, phase=self.phase, model=self.model, call_id=call_id,
+                              outcome="ok probe" if is_probe else "ok", usage=usage)
+        text = reply.get("content")
+        return PaidResult(
+            call_id=call_id, text=text if isinstance(text, str) else "",
+            reasoning_text=str(reply.get("reasoning_content") or ""),
+            served_model=body.get("model") if isinstance(body.get("model"), str) else None,
+            input_tokens=usage.input_tokens if usage else 0,
+            cached_input_tokens=usage.cached_input_tokens if usage else 0,
+            output_tokens=usage.output_tokens if usage else 0,
+            reasoning_tokens=usage.reasoning_tokens if usage else 0,
+            usd=0.0, usage_estimated=usage is None, message=reply,
+            finish_reason=choices[0].get("finish_reason"),
+        )
+
+    # -- stopping -----------------------------------------------------------------------
+
+    def close(self, reason: str = "closed", *, wait: float = 5.0) -> None:
+        got = self._gate.acquire(timeout=max(0.0, wait))
+        try:
+            self._closed = reason or "closed"
+        finally:
+            if got:
+                self._gate.release()
+        with self._probe_cond:
+            self._probe_cond.notify_all()
+
+    def _check_closed(self) -> None:
+        if self._closed:
+            raise SpendRefused(f"this Token Plan client is closed ({self._closed}): no new call")
+
+    def open_calls(self) -> int:
+        return len(self._open)
+
+    def settle_open(self, *, error_kind: str = "interrupted", lock_timeout: float = 5.0) -> list[str]:
+        """Record every call still in flight as interrupted (one ``token-plan`` row each), so a stopped
+        process leaves the ledger's count of attempts complete. Never raises."""
+        ledger = copy.copy(self.ledger)
+        ledger.lock_timeout = min(self.ledger.lock_timeout, max(0.0, lock_timeout))
+        done: list[str] = []
+        for call_id in list(self._open):
+            try:
+                ledger.tp_record(tool=self.tool, phase=self.phase, model=self.model, call_id=call_id,
+                                 outcome=f"error:{error_kind}")
+            except (SpendError, OSError):
+                continue
+            done.append(call_id)
+            self._open.pop(call_id, None)
+        return done
+
+
+def tokenplan_preflight(*, ledger: Ledger, model: str, env: Mapping[str, str] | None = None,
+                        env_file: Path | None = None) -> dict[str, Any]:
+    """Everything a Token Plan run needs, checked locally (no call is made). Raises
+    ``TokenPlanSuperseded`` (``QWEN_PAYG_KEY`` present), ``QuotaPaused``, ``StopActive``
+    (``TokenPlanStop`` for a key change) or another ``SpendError``."""
+    creds = resolve_token_plan(env, env_file=env_file)
+    if model not in TOKEN_PLAN_MODELS:
+        raise SpendRefused(f"model {model!r} is not one batch work asks the Token Plan for")
+    ledger.check_open(tool="preflight", model=model)  # the canonical ledger; STOP (and its renotify)
+    pause = ledger.tp_pause_info()
+    if pause is not None and ledger.clock() < float(pause["until"]):
+        raise QuotaPaused(f"the Token Plan quota pause stands until {utc_iso(float(pause['until']))}",
+                          until=float(pause["until"]))
+    fingerprint = ledger.tp_check_key(creds, tool="preflight", model=model)
+    notify = Path(ledger.notify_cmd or "").expanduser()
+    if not ledger.notify_cmd or not (notify.is_file() and os.access(notify, os.X_OK)):
+        raise SpendError(f"the notify command {display_path(notify)} is missing or not executable: a STOP "
+                         "could not reach the operator")
+    return {"endpoint": creds.describe(), "model": model, "key_fingerprint": fingerprint,
+            "ledger": display_path(ledger.path), "stop": None,
+            "pause": None if pause is None else {"until": utc_iso(float(pause["until"])), "over": True},
+            "concurrency": {"start": TP_START_CONCURRENCY, "max": TP_MAX_CONCURRENCY},
+            "notify": display_path(notify)}
+
+
+def tokenplan_status(ledger: Ledger, *, env: Mapping[str, str] | None = None,
+                     env_file: Path | None = None) -> dict[str, Any]:
+    """Read-only: the route in use, the key's fingerprint state, STOP and pause, the 50-call trial,
+    7-day usage (no budget: the operator allows up to 100% of the plan), the last errors and the
+    adaptive concurrency each tool last recorded. Never prints the key."""
+    with ledger.locked():
+        rows = ledger.read_rows()
+        state = ledger._tp_state_locked()
+        pause = ledger._tp_pause_locked()
+    now = ledger.clock()
+    out: dict[str, Any] = {"ledger": display_path(ledger.path)}
+    try:
+        route = which_key(env, env_file=env_file)
+    except KeyRefused as exc:
+        route = f"unknown ({exc})"
+    out["route"] = {"payg": "pay-per-token (QWEN_PAYG_KEY present: Token Plan batch use stops)",
+                    "token-plan": "token-plan", "none": "none (no key)"}.get(route, route)
+    try:
+        creds = resolve_token_plan(env, env_file=env_file)
+        fp = state.get("fingerprint")
+        if not fp or not isinstance(state.get("salt"), str):
+            out["key"] = "present; fingerprint not recorded yet (the first batch use records it)"
+        elif hmac.compare_digest(creds.fingerprint(state["salt"]), str(fp)):
+            out["key"] = f"present; matches the fingerprint recorded {state.get('fingerprint_recorded', '?')}"
+        else:
+            out["key"] = "present; DIFFERENT from the recorded fingerprint: the next batch use writes STOP"
+        out["endpoint"] = creds.describe()
+    except SpendError as exc:
+        out["key"] = f"not usable for Token Plan batch work: {exc}"
+    out["stop"] = ledger.stop_reason()
+    if pause is not None:
+        until = float(pause["until"])
+        out["pause"] = {"until": utc_iso(until), "active": now < until, "basis": pause.get("basis"),
+                        "error": pause.get("reason"), "notify": pause.get("notify"),
+                        "probe_in_flight": bool(pause.get("probe")), "probes": pause.get("probes", 0)}
+    else:
+        out["pause"] = None
+    plan = [r for r in rows if (r.get("note") or "").split(" ", 1)[0] == TOKEN_PLAN_TAG]
+    first = plan[:TP_TRIAL_CALLS]
+    outcomes = [(r.get("note") or "").split(" ")[1] if len((r.get("note") or "").split(" ")) > 1 else ""
+                for r in first]
+    issues = collections.Counter(o for o in outcomes if o.startswith("error:"))
+    serious = {k: v for k, v in issues.items() if k in ("error:stop", "error:quota")}
+    rate = issues.get("error:rate_limit", 0)
+    out["trial"] = {
+        "calls": len(first), "of": TP_TRIAL_CALLS, "done": len(first) >= TP_TRIAL_CALLS,
+        "clean": not serious and rate < TP_BURST_429 and not (out["stop"] and TP_STOP_MARK in out["stop"]),
+        "errors": dict(issues), "gate": "none (the operator dropped the ramp; this is a report)",
+        "how": "judge_run.sh --execute --trial (the first 50 Phase 2 judge calls), then tokenplan-status",
+    }
+    out["ramp"] = (f"none (operator 2026-10-31: no ramp, no pacing). Adaptive concurrency per process: start "
+                   f"{TP_START_CONCURRENCY}, max {TP_MAX_CONCURRENCY}, halve on {TP_BURST_429} rate-limit 429s "
+                   f"in {int(TP_BURST_WINDOW_S)} s, +1 after {TP_GROW_AFTER_OK} clean calls")
+    out["concurrency_last_recorded"] = state.get("limits") or {}
+    cutoff = utc_iso(now - TP_USAGE_WINDOW_S)
+    week = [r for r in plan if (r.get("ts") or "") >= cutoff]
+    t = totals_of(week)
+    by: dict[str, int] = collections.Counter(f"{r.get('tool')}/{r.get('phase')}" for r in week)
+    out["usage_7d"] = {"attempts": t.plan_calls, "ok": t.plan_ok, "input_tokens": t.plan_input_tokens,
+                       "cached_input_tokens": t.plan_cached_input_tokens, "output_tokens": t.plan_output_tokens,
+                       "errors": dict(collections.Counter(
+                           (r.get("note") or "").split(" ")[1] for r in week
+                           if (r.get("note") or "").split(" ")[1:2] != ["ok"])),
+                       "by_tool_phase": dict(by)}
+    out["budget"] = ("none: up to 100% of the subscription (operator override 2026-10-31); $0 per call, "
+                     "separate from the pay-per-token $150 cap")
+    out["last_errors"] = state.get("last_errors") or []
+    return out
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1393,15 +2569,27 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("preflight", "status"):
+    for name in ("preflight", "status", "tokenplan-preflight", "tokenplan-status", "tokenplan-accept-key",
+                 "which-key"):
         s = sub.add_parser(name, help=f"the one ledger, {DEFAULT_LEDGER} (not configurable)")
         s.add_argument("--notify-cmd", default=DEFAULT_NOTIFY)
-        if name == "preflight":
+        if name in ("preflight", "tokenplan-preflight"):
             s.add_argument("--model", default="qwen3.8-max")
+        if name != "status":
             s.add_argument("--env-file", type=Path, default=None,
                            help="the 0600 env file (default: Prometheus's own)")
     sub.add_parser("prices")
     args = ap.parse_args(argv)
+    if args.cmd == "which-key":
+        try:
+            route = which_key(env_file=args.env_file)
+        except SpendError as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+        print(route)
+        return 0 if route != "none" else 2
+    if args.cmd.startswith("tokenplan-"):
+        return _tokenplan_cli(args)
     try:
         if args.cmd == "prices":
             print(json.dumps({f"{m}@{r}": {"input": p.input_per_m, "cached_input": p.cached_input_per_m,
@@ -1416,6 +2604,30 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print(json.dumps(preflight(ledger=ledger, model=args.model, env_file=args.env_file), indent=1))
         return 0
+    except SpendError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+
+
+def _tokenplan_cli(args: argparse.Namespace) -> int:
+    ledger = Ledger(notify_cmd=args.notify_cmd)
+    try:
+        if args.cmd == "tokenplan-status":
+            print(json.dumps(tokenplan_status(ledger, env_file=args.env_file), indent=1))
+            return 0
+        if args.cmd == "tokenplan-accept-key":
+            creds = resolve_token_plan(env_file=args.env_file)
+            ledger.tp_accept_key(creds)
+            print("recorded the current QWEN_API_KEY as the Token Plan key; the STOP file (if any) is unchanged")
+            return 0
+        print(json.dumps(tokenplan_preflight(ledger=ledger, model=args.model, env_file=args.env_file), indent=1))
+        return 0
+    except TokenPlanSuperseded as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 3
+    except QuotaPaused as exc:
+        print(f"paused: {exc}", file=sys.stderr)
+        return 4
     except SpendError as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
