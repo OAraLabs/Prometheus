@@ -1437,9 +1437,16 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     else:
         logger.info("File checkpoints: OFF (checkpoints.enabled: false)")
 
+    # Distillation shadow mode: each primary round is also sent to a local student and both
+    # replies are logged; only the primary's acts. None unless shadow.enabled is true AND the
+    # block validates (a bad block is logged and leaves it off). ONE mirror for both loops below.
+    from prometheus.engine.shadow import build_shadow_mirror
+    shadow_mirror = build_shadow_mirror(config, telemetry=telemetry)
+
     agent_loop = AgentLoop(
         provider=provider,
         model=model_name,
+        shadow=shadow_mirror,
         # Each request asks for its model's output cap, not one flat 4096 (max_tokens is the default for a
         # model the caps do not know). Built the same way for the web LoopContext below.
         output_caps=OutputCaps.from_config(config),
@@ -2111,6 +2118,16 @@ async def run_daemon(args: argparse.Namespace) -> bool:
 
     set_cron_security_gate(security_gate)
 
+    # Shadow auto-disable is one of the daemon's own notices: the owner's private chat, or nowhere
+    # (the log line and the shadow_auto_disabled event are written either way).
+    if shadow_mirror is not None and telegram is not None and _notify_chat:
+        _shadow_gateway, _shadow_chat = telegram, _notify_chat
+
+        async def _shadow_notify(text: str) -> None:
+            await _shadow_gateway.send(_shadow_chat, text)
+
+        shadow_mirror.notify = _shadow_notify
+
     # Cron scheduler (skip if --telegram-only). Wire a failure-notification
     # path so cron job failures push a Telegram message — the heartbeat
     # task-watcher only sees BackgroundTaskManager tasks, not cron
@@ -2419,6 +2436,10 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             # telemetry row before this point).
             if compactor is not None:
                 compactor.signal_bus = signal_bus
+            # Shadow auto-disable records its event through the bus once it exists (a direct
+            # telemetry row before this point).
+            if shadow_mirror is not None:
+                shadow_mirror.signal_bus = signal_bus
             # MemoryTool (hermes_memory_tool) emits memory_updated on
             # MEMORY.md / USER.md writes. Module-level setter matches the
             # tools/builtin/sentinel_status.py pattern.
@@ -2825,6 +2846,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 provider=provider,
                 model=model_name,
                 fallback=build_fallback_target(model_config, detected_model=model_name, registry=backend_registry),
+                shadow=shadow_mirror,
                 system_prompt=system_prompt,
                 max_tokens=4096,
                 output_caps=OutputCaps.from_config(config),

@@ -33,6 +33,8 @@ Coverage map — the writes enumerated in the retention survey:
     C. the boundary        18-20  what ephemeral deliberately does NOT stop:
                                   the tool_calls row itself (a denominator),
                                   subsystem_runs, the permission audit log
+    D. shadow mode          21    the distillation comparison row: the round's
+                                  text and tool arguments (engine/shadow.py)
 """
 
 from __future__ import annotations
@@ -657,6 +659,55 @@ def test_the_audit_log_is_deliberately_untouched():
 
     assert "ephemeral" not in inspect.signature(AuditLogger.log).parameters
     assert "ephemeral" not in inspect.signature(SecurityGate._audit_log).parameters
+
+
+# ===========================================================================
+# D. Shadow mode — write 21
+# ===========================================================================
+
+@pytest.mark.parametrize("ephemeral", [True, False])
+def test_shadow_mode_comparison_rows(tmp_path, flag, ephemeral):
+    """WRITE 21 — a shadow-mode row is the round's final text and every tool
+    call's arguments (up to 20k chars of them), on disk beside the session id.
+    An ephemeral turn is not mirrored at all: the shadow model is sent nothing
+    and no row is written. A normal turn is mirrored round by round."""
+    from prometheus.engine.shadow import ShadowMirror, resolve_shadow_config
+
+    flag(SESSION, ephemeral)
+    shadow_dir = tmp_path / "shadow"
+    config = resolve_shadow_config({"shadow": {
+        "enabled": True, "base_url": "http://127.0.0.1:8099", "model": "student",
+        # Two slots: a scripted primary never yields to the event loop, so with
+        # one the first round's shadow would still hold it when the second starts.
+        "max_concurrency": 2, "log_dir": str(shadow_dir),
+    }})
+    student = _ScriptedProvider([_text_round("the student's answer")])
+    mirror = ShadowMirror(config, student)
+    context = LoopContext(
+        provider=_ScriptedProvider([_tool_round("t1"), _text_round()]), model="test",
+        system_prompt="S", max_tokens=256, tool_registry=_registry(), shadow=mirror,
+    )
+
+    async def _run():
+        messages = [ConversationMessage.from_user_text("go")]
+        async for _event, _usage in run_loop(context, messages, session_id=SESSION):
+            pass
+        await mirror.drain()
+
+    asyncio.run(_run())
+
+    rows = [json.loads(line) for path in sorted(shadow_dir.glob("shadow-*.jsonl"))
+            for line in path.read_text(encoding="utf-8").splitlines()]
+    if ephemeral:
+        assert student.requests == [], "an ephemeral turn reached the shadow model"
+        assert rows == [], "an ephemeral turn's content was written to a shadow row"
+    else:
+        assert len(student.requests) == 2 and len(rows) == 2, (
+            "NON-ephemeral mirroring broke — shadow mode measures nothing"
+        )
+        assert {r["session_id"] for r in rows} == {SESSION}
+        assert "secret-payload" in json.dumps(rows[0]["primary"]["args"])
+        assert "confidential summary" in rows[1]["primary"]["text"]
 
 
 # ===========================================================================

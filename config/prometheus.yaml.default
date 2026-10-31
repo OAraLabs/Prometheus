@@ -127,6 +127,47 @@ model:
   max_tool_iterations_cloud: 500        # Cloud (tier=off) cap. EQUAL to local since 2026-09-07: one ceiling per session, so a turn that routes to cloud mid-run does not change its iteration budget. Cost is governed by the budget/quota layer + the provider plan, not by this backstop.
   max_turns: 200                        # Max MODEL ROUNDS in one turn (a round can carry several tool calls). Reaching it is a budget stop, not a failure: the turn's work is kept and saved, and the next message continues from it (#774).
 
+# Shadow mirroring (distillation): every request the primary model above serves
+# is ALSO sent to a second, LOCAL model, and both replies are written side by
+# side as one JSONL row (tool chosen, arguments equivalent, final text scrubbed
+# of credentials, latencies, errors). Only the primary's reply is used: the
+# shadow's tool calls are never executed, and its errors and timeouts are
+# logged, never raised. Off, nothing is built and every turn is unchanged.
+# An ephemeral chat (/ephemeral on) is never mirrored.
+# scripts/distill/shadow_report.py summarizes the rows per request category.
+#
+# Checked at boot whether on or off: an unknown key or a bad value is an
+# ERROR line and leaves mirroring off; it never stops the daemon.
+shadow:
+  enabled: false
+  # Local only, by provider (llama_cpp, ollama, lm_studio, vllm,
+  # openai_compatible) AND by address: base_url must be loopback, a private or
+  # tailnet IP, or a host name that only resolves locally (gpu-box,
+  # gpu-box.lan, gpu-box.<tailnet>.ts.net); name a LAN box with a public DNS
+  # name by its IP. Mirroring to a hosted API would double the spend and send
+  # every conversation to a second provider. base_url and model are required
+  # when enabled, and base_url must not be a server turns are already served
+  # from: the primary's, the fallback's, or a backends: entry.
+  provider: "llama_cpp"
+  base_url: ""
+  model: ""                     # labels every row; a round already served by this model is not mirrored
+  sample_rate: 1.0              # share of primary rounds mirrored (0.0-1.0)
+  max_concurrency: 1            # shadow requests in flight at once; a round that finds every slot busy is skipped, never queued
+  timeout_seconds: 300          # a shadow reply slower than this is abandoned and logged as a timeout
+  log_dir: ""                   # empty = <data dir>/shadow (~/.prometheus/data/shadow); one shadow-<UTC date>.jsonl per day
+  # While mirroring is on, the primary is watched: when its last `window`
+  # rounds show an error rate or a p95 latency ABOVE these, mirroring turns
+  # itself off until the next restart, logs a warning, records a
+  # shadow_auto_disabled event and messages the owner's chat (if one is set).
+  # Latency here is the time to the primary's FIRST streamed event, so a long
+  # reply is not a slow primary. A "prompt over the context window" refusal
+  # is not counted as an error: the turn answers it, and it is not the
+  # primary failing.
+  auto_disable:
+    primary_error_rate: 0.2
+    primary_latency_p95_ms: 120000
+    window: 20
+
 # Assembly-time context compaction (the relief valve). Sprint 2 (OAra):
 # this was config-dark since birth — the compactor only exists when
 # compaction.enabled is true. Default ON; the config-dark audit alarms if
@@ -1721,3 +1762,104 @@ escalation:
   max_tokens: 4096
   teacher_model:            # required — no code default
   teacher_provider: anthropic
+
+
+# ── Fine-tuning flywheel (weekly window) ──────────────────────────────────
+# python -m prometheus.jobs.flywheel_weekly, fired by the systemd user timer
+# in deploy/systemd/ (Saturday 02:00 ET). Nothing installs that timer: the
+# operator does, by hand. The daemon never reads this block. The job
+# validates it when it loads it and refuses to run on a bad one (an unknown
+# key included). Stages: harvest -> verify -> build sets -> train (only with
+# enough new verified traces; resumes from checkpoints across weekends) ->
+# quantize -> score -> report. Each stage is stopped before the window ends.
+# The report the Monday reviewer reads, <data_dir>/reports/LATEST.md, is
+# written every window, with the reason for every stage that did not run.
+flywheel:
+  # The timer runs the job either way; off, the job only writes the report
+  # saying so.
+  enabled: false
+  # State, run records, the verified pool, checkpoints, models, reports.
+  # Relative = under the Prometheus data dir (~/.prometheus/data).
+  data_dir: flywheel
+  window:
+    day: sat
+    start: "02:00"          # quote times: YAML reads an unquoted 02:00 as 120
+    end: "06:00"
+    timezone: America/New_York
+    # No stage starts, and a running one is sent SIGTERM to checkpoint and
+    # stop, this many minutes before the end (SIGKILL one minute before it).
+    stop_margin_minutes: 15
+  harvest:
+    # Read only, never modified. Golden traces are also what the dataset
+    # builder reads itself (the job passes them as its --traces); extra
+    # sources (judged gym or offspring traces) reach the builder only
+    # through the verified pool.
+    golden:
+      - ~/.prometheus/trajectories/golden_traces_*.jsonl
+    extra: []
+    # Served-model ids (shell patterns, case-insensitive). A teacher's golden
+    # trace is verified by its tool-success label. An offspring trace (a
+    # student model, or any trace carrying an adapter_version) only by a
+    # pass verdict from a named verifier other than itself. Anything else is
+    # tagged and never trained on.
+    teacher_models: [qwen3.8-max]
+    student_models: []
+  build:
+    # "" = scripts/distill/build_datasets.py, else scripts/distill/build.py.
+    script: ""
+    # This host's builder arguments (--pack, --tokenizer-dir, --index ...).
+    # The job adds --traces, --extra-traces and --out. Empty = the build
+    # stage is skipped, saying so.
+    args: []
+  train:
+    # Verified traces needed since the last train's data was frozen.
+    min_new_traces: 500
+    # The trainer's argv. The job fills {python} {repo} {train} {val}
+    # {data_dir} (the frozen split files) {run_dir} (checkpoint-<step>/,
+    # adapter/, optional manifest.json) {adapter_version} {stop_at}
+    # {stop_at_epoch} {max_seconds}. Empty = no training, saying so. E.g.
+    #   ["{python}", "scripts/distill/train_qlora.py", "--data", "{train}",
+    #    "--val", "{val}", "--tokenizer-dir", "<dir>", "--out", "{run_dir}",
+    #    "--stop-at", "{stop_at}"]
+    command: []
+    # Appended on every attempt after the first ({checkpoint} = the newest
+    # checkpoint-<step>; args naming it wait for one), e.g. ["--resume"].
+    resume_args: []
+    # The trainer's exit code for "checkpointed and stopped for the window"
+    # (75 = EX_TEMPFAIL). Exit 0 is finished, unless {run_dir}/manifest.json
+    # says "stopped"; a finished train leaves {run_dir}/adapter.
+    incomplete_exit_code: 75
+    # Failed windows before a train is abandoned for the operator.
+    max_failed_attempts: 2
+  # DISTILL-OPEN-QUESTIONS #6: no training on data derived from the hosted
+  # teacher (Qwen3.8 Max) until the operator decides. The train stage refuses
+  # any dataset holding Max-derived rows unless all three are set here.
+  max_data:
+    approved: false
+    approved_by: ""
+    approved_on: ""         # YYYY-MM-DD
+    reference: ""           # where the decision is written down
+  quantize:
+    # argv; {python} {repo} {adapter_dir} {data_dir} (the adapter's frozen
+    # splits, for a train-only calibration) {out_dir} {adapter_version}
+    # {stop_at} {stop_at_epoch} {max_seconds}. Empty = not quantized.
+    command: []
+  score:
+    # llama-server serving the newest quantized candidate. The job does not
+    # load it there: a server reporting another model (GET /v1/models) is
+    # not scored, saying so. "" = not scored.
+    base_url: ""
+    # Fixed eval case files (score.py's schema). Keep them the same every
+    # week, or the comparison is not like for like. Relative = the checkout.
+    # A train whose rows share an id, task or group with them is refused.
+    cases: []
+    # The base model's score.py summary: every candidate's Phase 6 gate is
+    # measured against it (wins and losses are against the previous model).
+    baseline_summary: ""
+  # A setup (scripts/distill/setups.py) applied before the GPU stages: its
+  # dead-man restore is armed first, and `business` is restored after the
+  # run. "none" = train and quantize run on the GPUs as they are (no swap, no
+  # dead-man restore). "" = train and quantize do not run, saying so.
+  gpu_setup: ""
+  # The API spend ledger the weekly report sums up (read only).
+  spend_ledger: ~/distill/spend-ledger.csv

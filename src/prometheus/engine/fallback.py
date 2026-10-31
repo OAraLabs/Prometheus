@@ -266,6 +266,7 @@ async def stream_round_with_fallback(
     operation: str,
     round_index: int | None,
     session_id: str | None,
+    shadow=None,
 ):
     """Stream one round; on a TERMINAL failure, serve it from the fallback instead.
 
@@ -280,18 +281,26 @@ async def stream_round_with_fallback(
     `build_request(model)` rebuilds the request for whichever model serves, because the model
     name is part of the payload and reusing the failed request would ask the local backend to
     serve `qwen3.8-max`.
+
+    `shadow` (engine/shadow.ShadowMirror, None when shadow mode is off) mirrors the PRIMARY
+    attempt only: the fallback is not the model the shadow is measured against. With None the
+    round streams exactly as it did before the parameter existed.
     """
     decision: FallbackDecision | None = None
     emitted = False
 
     try:
-        async for event in envelope.stream(
+        request = build_request(model)
+        stream = envelope.stream(
             provider=provider,
-            request=build_request(model),
+            request=request,
             operation=operation,
             round_index=round_index,
             session_id=session_id,
-        ):
+        )
+        if shadow is not None:
+            stream = shadow.mirror(stream, request, session_id=session_id, round_index=round_index)
+        async for event in stream:
             emitted = True
             yield event
         return

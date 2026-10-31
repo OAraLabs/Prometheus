@@ -1,0 +1,29 @@
+# Weekly fine-tuning flywheel window: Saturday 02:00-06:00 America/New_York.
+#
+# A TEMPLATE. Nothing in Prometheus installs or enables it; the operator does,
+# once, on the orchestrating host (systemd --user):
+#
+#   cp deploy/systemd/prometheus-flywheel-*.{timer,service} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now prometheus-flywheel-weekly.timer
+#
+# Then set flywheel.enabled: true in prometheus.yaml. Until then the job only
+# writes the report saying the flywheel is off. Rehearse first, any time:
+#   python -m prometheus.jobs.flywheel_weekly --dry-run
+#
+# The job holds itself to the window it reads from flywheel.window; keep this
+# calendar line and that block in step.
+
+[Unit]
+Description=Prometheus fine-tuning flywheel, weekly window (Sat 02:00 ET)
+
+[Timer]
+OnCalendar=Sat *-*-* 02:00:00 America/New_York
+# A host that was off at 02:00 Saturday skips the week. Persistent=true would
+# run a four-hour GPU job at whatever weekday hour it next booted.
+Persistent=false
+AccuracySec=1min
+Unit=prometheus-flywheel-weekly.service
+
+[Install]
+WantedBy=timers.target

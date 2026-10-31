@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **456** of
+Every key in `config/prometheus.yaml.default` — **505** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -36,6 +36,19 @@ none either — the key is documented so its absence is visible.
 | `model.max_tool_iterations` | `500` |
 | `model.max_tool_iterations_cloud` | `500` |
 | `model.max_turns` | `200` |
+| `shadow` | *(section)* |
+| `shadow.enabled` | `False` |
+| `shadow.provider` | `llama_cpp` |
+| `shadow.base_url` | `` |
+| `shadow.model` | `` |
+| `shadow.sample_rate` | `1.0` |
+| `shadow.max_concurrency` | `1` |
+| `shadow.timeout_seconds` | `300` |
+| `shadow.log_dir` | `` |
+| `shadow.auto_disable` | *(section)* |
+| `shadow.auto_disable.primary_error_rate` | `0.2` |
+| `shadow.auto_disable.primary_latency_p95_ms` | `120000` |
+| `shadow.auto_disable.window` | `20` |
 | `compaction` | *(section)* |
 | `compaction.enabled` | `True` |
 | `compaction.max_summary_tokens` | `512` |
@@ -472,3 +485,39 @@ none either — the key is documented so its absence is visible.
 | `escalation.max_tokens` | `4096` |
 | `escalation.teacher_model` | *(empty — no code default)* |
 | `escalation.teacher_provider` | `anthropic` |
+| `flywheel` | *(section)* |
+| `flywheel.enabled` | `False` |
+| `flywheel.data_dir` | `flywheel` |
+| `flywheel.window` | *(section)* |
+| `flywheel.window.day` | `sat` |
+| `flywheel.window.start` | `02:00` |
+| `flywheel.window.end` | `06:00` |
+| `flywheel.window.timezone` | `America/New_York` |
+| `flywheel.window.stop_margin_minutes` | `15` |
+| `flywheel.harvest` | *(section)* |
+| `flywheel.harvest.golden` | `['~/.prometheus/trajectories/golden_traces_*.jsonl']` |
+| `flywheel.harvest.extra` | `[]` |
+| `flywheel.harvest.teacher_models` | `['qwen3.8-max']` |
+| `flywheel.harvest.student_models` | `[]` |
+| `flywheel.build` | *(section)* |
+| `flywheel.build.script` | `` |
+| `flywheel.build.args` | `[]` |
+| `flywheel.train` | *(section)* |
+| `flywheel.train.min_new_traces` | `500` |
+| `flywheel.train.command` | `[]` |
+| `flywheel.train.resume_args` | `[]` |
+| `flywheel.train.incomplete_exit_code` | `75` |
+| `flywheel.train.max_failed_attempts` | `2` |
+| `flywheel.max_data` | *(section)* |
+| `flywheel.max_data.approved` | `False` |
+| `flywheel.max_data.approved_by` | `` |
+| `flywheel.max_data.approved_on` | `` |
+| `flywheel.max_data.reference` | `` |
+| `flywheel.quantize` | *(section)* |
+| `flywheel.quantize.command` | `[]` |
+| `flywheel.score` | *(section)* |
+| `flywheel.score.base_url` | `` |
+| `flywheel.score.cases` | `[]` |
+| `flywheel.score.baseline_summary` | `` |
+| `flywheel.gpu_setup` | `` |
+| `flywheel.spend_ledger` | `~/distill/spend-ledger.csv` |

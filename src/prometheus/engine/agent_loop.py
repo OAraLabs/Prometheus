@@ -706,6 +706,13 @@ class LoopContext:
     # billing — never a 429, which is already retried a layer down). None disables it, which is
     # also the Phase 4 opt-out coding mode relies on to keep its pinned-provider guarantee.
     fallback: object | None = None        # FallbackTarget
+    # Distillation shadow mode (engine/shadow.ShadowMirror): each primary round's request also
+    # goes to a second, local model, and both replies are logged side by side. Only the primary's
+    # reply reaches the turn; the shadow's tool calls are never executed. None (the default, and
+    # whenever shadow.enabled is false) leaves every round byte-identical. A process-wide service
+    # like telemetry, not per-run state: what it holds (the primary's recent health, the shadow
+    # request in flight) describes the provider, so sharing it across sessions is the point.
+    shadow: object | None = None
     # Per-model output caps (providers/output_caps.OutputCaps). Each request
     # asks for the cap of the model serving it, the fallback's included; None
     # sends ``max_tokens`` for every model, as before (tests, harnesses).
@@ -2683,6 +2690,9 @@ async def _run_loop(
             operation="loop_round",
             round_index=turn,
             session_id=rec_sid,
+            # No mirror on an ephemeral turn: a shadow row is the round's text and tool arguments
+            # written to disk beside the session id, the content ephemeral mode keeps out.
+            shadow=None if ephemeral else context.shadow,
         )), _v2_provider_error):
             if isinstance(event, _ContextOverflowEvent):
                 # The last event of the round: the guard yields it and ends.
@@ -6341,10 +6351,13 @@ class AgentLoop:
         checkpoint_store: object | None = None,
         fallback: object | None = None,
         output_caps: object | None = None,
+        shadow: object | None = None,
     ) -> None:
         self._provider = provider
         # SPRINT-provider-fallback: where a terminal provider failure degrades to.
         self._fallback = fallback
+        # Distillation shadow mode (LoopContext.shadow). None = off.
+        self._shadow = shadow
         # Per-model output caps (LoopContext.output_caps).
         self._output_caps = output_caps
         self._model = model
@@ -6492,6 +6505,7 @@ class AgentLoop:
             provider=self._provider,
             model=self._model,
             fallback=self._fallback,
+            shadow=self._shadow,
             output_caps=self._output_caps,
             system_prompt=system_prompt,
             max_tokens=self._max_tokens,
