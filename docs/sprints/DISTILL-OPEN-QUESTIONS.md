@@ -78,3 +78,11 @@ none holds teacher data.
   - Hard cap **$150 total**, logged in `spend-ledger.csv`; at $140 everything stops and the operator is told.
   - It is never used for daemon or background jobs. Max becomes the primary teacher, and the local 27B fills the remaining gaps.
   - **Status:** the key isn't on the 3090 Ti host yet. Checked `~/.config/prometheus/env`, shell profiles, `environment.d` and the login environment; the operator has been told where to add it. The code (a shared spend ledger and cap, a Max judge mode, then a Max mode for teacher generation) is being built so it starts once the key is present. Every paid call checks that the key's prefix matches its host and refuses the Token Plan key or host.
+- **Token Plan override (operator, informed, 2026-10-31 ~01:05):** the operator accepts the risk of using the Token Plan key (`QWEN_API_KEY`) for distillation batch work, overriding the 10-25 "nothing automated on it" rule. They understand it may breach the plan terms and could get the key suspended. Scope: Phase 2 judging and Phase 2b teacher generation only (real-pattern taskset, sandboxed gym tools). Guardrails:
+  - **Ramp:** a 50-call trial first, then ramp up gradually if it's clean.
+  - **Pace:** concurrency 1, a few seconds between calls, mainly overnight. Pause whenever the operator is using Prometheus interactively.
+  - **Quota:** keep at least 40% of the plan's quota for the operator. The remaining quota can't be read from here, so this is enforced as a conservative rolling 7-day batch cap plus an immediate stop on any quota signal.
+  - **Stop:** halt ALL batch use at once on any 401/403, quota or policy error, unusual 429 pattern, warning notice, or key change, and Telegram the exact error. No retrying around it.
+  - **Ledger:** every call goes in `spend-ledger.csv`, tagged `token-plan`.
+  - The daemon's background jobs still never use this key.
+  - If `QWEN_PAYG_KEY` appears, all batch work moves to it, and Token Plan batch use stops.
