@@ -35,3 +35,4 @@ stored call = 10,628 exported (+500 Flash, +24 Grok = 11,152). Distinct teacher 
 from ~300 distinct tasks in 25 conversations. The quarantine folder (5,519 lines) is an older export of the same calls;
 the gym stores (gym.db 1,199 runs, gym-training 44, verify 33, dictwrap 336 pairs) are all from a local student model, so
 none holds teacher data.
+- **Teacher quant A/B (operator, 2026-10-30 20:15):** before mass generation, run the same 30 teacher tasks with the IQ3 quant and with a Q4_K_M (or Q5_K_M) of the same model; shorter context is fine for the test. If IQ3's pass rate is more than 5 points lower, use the bigger quant with less context. Plan: same tasks and settings for both arms; all 60 results judged by the bigger quant, so neither arm grades itself. The Q4 arm runs with a few layers on the CPU, because the other GPU residents stay (quality is unchanged, only speed drops).
