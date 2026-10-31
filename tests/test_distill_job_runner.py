@@ -1060,4 +1060,8 @@ def test_only_limits_the_queue_and_refuses_unknown_names(box: Box) -> None:
     cp = box.run(stop_in=120, env={"DJR_ONLY": "train-smoke,full-train"})
     assert cp.returncode == 2 and "unknown steps: full-train" in box.progress()["stop_reason"]
     dry = box.run(execute=False, stop_in=None, env={"DJR_ONLY": "train-smoke"})
+    assert dry.returncode == 0, dry.stdout + dry.stderr
     assert "queue limited to DJR_ONLY: train-smoke" in dry.stdout
+    assert "base-9b-baseline is not in the queue" in dry.stdout
+    dry = box.run(execute=False, stop_in=None, env={"DJR_ONLY": "base-9b-baseline"})
+    assert dry.returncode == 0, dry.stdout + dry.stderr

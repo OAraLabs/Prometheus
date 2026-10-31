@@ -1988,11 +1988,13 @@ def dry_run(cfg: Cfg, stop_at: float) -> int:
     states = {s["name"]: runner.load_state(s) for s in runner.steps()}
 
     def needed(step_name: str) -> bool:
-        st = states[step_name]
-        return st["status"] != "done" and st.get("failures", 0) < STEP_FAILURES
+        st = states.get(step_name)  # absent: not in the queue (DJR_ONLY, or a step that is off)
+        return st is not None and st["status"] != "done" and st.get("failures", 0) < STEP_FAILURES
 
     def why_not(step_name: str) -> str:
-        st = states[step_name]
+        st = states.get(step_name)
+        if st is None:
+            return f" (not needed: {step_name} is not in the queue)"
         return "" if needed(step_name) else (
             f" (not needed: {step_name} is {st['status']}"
             + (f", failed {st['failures']} times" if st.get("failures", 0) >= STEP_FAILURES else "") + ")")
