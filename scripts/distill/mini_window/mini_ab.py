@@ -40,6 +40,11 @@ loaded, Q9). One ``run``:
    two attempts, then mini_window's business restore with the NO-SWAPS flag), the guard stopped, the report,
    and generation restarted (only if this run paused it, and only with the IQ3 teacher serving).
 
+``AB_ARM_B=remote`` (OQ #12 option c): arm B and the judge run on the 4090's teacher over the tailnet instead
+(``teacher_ab.py arm --arm B`` / ``judge`` with the remote flags, started apart from this script; the tools stay
+on this host). The night then runs steps 1-4 and 7-8 only: no Q4 swap, no Q4 file read, arm B labelled
+``AB_REMOTE_LABEL_B``.
+
 Nightly evals (cron EVAL_TIMES, 03:00 and 06:00 ET) are left alone and score the IQ3 teacher, as every eval
 in the window does: no Q4 phase runs within ``AB_Q4_EVAL_GAP_MIN`` of one (the swap back starts then) or while
 one runs, arm A pauses ``AB_IQ3_EVAL_GAP_MIN`` before one (as gen_runner does), and after the eval the
@@ -88,6 +93,12 @@ AB_DEFAULTS: dict[str, str] = {
     "AB_PY": "",                                       # empty: GEN_PY
     "AB_TASKS": "~/distill/phase2b/tasksets/real-v3-excl.jsonl",
     "AB_N": "30",
+    # Where arm B (and the judge of both arms) runs: "local" (the Q4_K_M swap on this host, steps 5-6) or "remote"
+    # (DISTILL-OPEN-QUESTIONS #12 option c: the 4090's teacher on the tailnet, run with teacher_ab.py arm --arm B /
+    # judge and the remote flags; never by this script). With "remote" the night runs arm A only, never swaps the
+    # local model port and never reads the Q4 file; the selection labels arm B AB_REMOTE_LABEL_B.
+    "AB_ARM_B": "local",
+    "AB_REMOTE_LABEL_B": "UD-Q4_K_XL",
     "AB_SEED": "teacher-ab-mini-v3",
     "AB_TEMPERATURE": "0.7",
     "AB_TOP_K": "20",
@@ -144,12 +155,24 @@ PID_NAME = "ab-run.pid"
 MIB = 1 << 20
 
 
+class _NoLocalArmB(Exception):
+    """AB_ARM_B=remote: the preflight skips the Q4 VRAM plan (no local arm B)."""
+
+
 class Q4Refused(Exception):
     """The Q4 teacher cannot serve tonight (refused, failed, or the probe was not OK): IQ3 is back."""
 
 
 class Abort(Exception):
     """Stop the night (the cleanup still runs)."""
+
+
+def arm_b_remote(c: dict[str, str]) -> bool:
+    """AB_ARM_B: "remote" runs arm B on the remote teacher (not here); anything but local/remote is refused."""
+    mode = c.get("AB_ARM_B", "local").strip().lower()
+    if mode not in ("local", "remote"):
+        raise ValueError(f"AB_ARM_B={c.get('AB_ARM_B')!r}: local or remote")
+    return mode == "remote"
 
 
 def load(conf_path: Path) -> dict[str, str]:
@@ -380,7 +403,8 @@ class Ab:
              "--top-p", c["AB_TOP_P"], "--min-p", c["AB_MIN_P"], "--max-tokens", c["AB_MAX_TOKENS"],
              "--concurrency", c["AB_CONCURRENCY"], "--request-timeout", c["AB_REQUEST_TIMEOUT"],
              "--task-timeout", c["AB_TASK_TIMEOUT"], "--min-task-seconds", c["AB_MIN_TASK_S"],
-             "--label-a", LABELS["A"], "--label-b", LABELS["B"], "--allow-ctx-difference"]
+             "--label-a", LABELS["A"], "--label-b", c["AB_REMOTE_LABEL_B"] if arm_b_remote(c) else LABELS["B"],
+             "--allow-ctx-difference"]
         return a + (["--pack", c["GEN_PACK"]] if c.get("GEN_PACK") else [])
 
     def select(self) -> dict[str, Any]:
@@ -697,11 +721,18 @@ class Night:
             why.append(f"{w.flag} is present")
         if not w.active(c["TEACHER_UNIT"]) or not self.serving(c["TEACHER_ALIAS"]):
             why.append(f"{c['TEACHER_UNIT']} is not serving {c['TEACHER_ALIAS']} on {c['MODEL_URL']}")
-        if w.unit_prop(c["AB_Q4_UNIT"], "LoadState") != "loaded":
+        remote_b = arm_b_remote(c)
+        if remote_b:
+            # arm B and the judge run on the remote teacher (teacher_ab.py with the remote flags): this night runs
+            # arm A only and never swaps the local model port
+            if not self.q4_refused:
+                self.q4_refused = "arm B runs on the remote teacher (AB_ARM_B=remote), not on this host"
+                self.event(f"no Q4 tonight: {self.q4_refused}")
+        elif w.unit_prop(c["AB_Q4_UNIT"], "LoadState") != "loaded":
             why.append(f"{c['AB_Q4_UNIT']} is not installed (install_teacher_units.sh --only ab)")
         elif w.active(c["AB_Q4_UNIT"]):
             why.append(f"{c['AB_Q4_UNIT']} is already running")
-        for key in ("AB_Q4_MODEL", "AB_TASKS", "GEN_GUARD_PY"):
+        for key in (("AB_TASKS", "GEN_GUARD_PY") if remote_b else ("AB_Q4_MODEL", "AB_TASKS", "GEN_GUARD_PY")):
             if not Path(c[key]).is_file():
                 why.append(f"missing {c[key]} ({key})")
         if not self.ab.script.is_file() or not (Path(c["AB_CODE"]) / "src").is_dir():
@@ -722,6 +753,8 @@ class Night:
         if w.eval_running():
             why.append("a nightly eval is running")
         try:
+            if remote_b:
+                raise _NoLocalArmB
             free = self.predicted_free()
             if free is None:
                 why.append("nvidia-smi did not answer")
@@ -737,6 +770,8 @@ class Night:
                     # arm A still runs (its records keep for a night the Q4 can serve); 8092 is never swapped
                     self.q4_refused = slow
                     self.event(f"no Q4 tonight: {slow}")
+        except _NoLocalArmB:
+            pass
         except (OSError, ValueError) as e:
             why.append(f"cannot read {c['AB_Q4_MODEL']}: {e}")
         pidf = w.state / PID_NAME

@@ -1,0 +1,34 @@
+# Teacher generation against the 4090's teacher on the tailnet ("option 3", operator 2026-10-31 ~11:20 ET):
+# gen_runner.py remote (its module docstring). The teacher runs on the 4090 (tower/serve_teacher.sh); every
+# tool command runs on THIS host (the 3090 Ti host) inside bwrap.
+#
+# Installed as ~/.config/systemd/user/teacher-remote-gen.service on the 3090 Ti host. The name is NOT distill-*
+# on purpose: this host's business restores and its window end (Sun 18:00) stop every distill-* unit, and this
+# run is independent of that window (it uses no GPU here); it ends at its own --until (GEN_REMOTE_UNTIL,
+# Mon 2026-11-02 10:30 UTC) or on <runs>/STOP-remote. No [Install] section: never at boot.
+#
+#   gen_runner.py stage-code --ssh <3090 Ti host> --dest distill/phase2b/code-remote --execute   # (repo machine)
+#   ~/distill/phase2b/code-remote/scripts/distill/mini_window/gen_runner.sh remote-setup --execute
+#   install -m 644 gen_runner.remote.service ~/.config/systemd/user/teacher-remote-gen.service
+#   systemctl --user daemon-reload
+#   ~/distill/phase2b/code-remote/scripts/distill/mini_window/gen_runner.sh remote          # dry run, read-only
+#   systemctl --user start teacher-remote-gen.service
+# Stop: systemctl --user stop teacher-remote-gen.service (or touch ~/distill/phase2b/runs/STOP-remote).
+[Unit]
+Description=distill generation: the 4090's teacher over the tailnet, tools jailed here (gen_runner remote)
+After=network-online.target
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=%h/distill
+# the window's settings (GEN_* keys; defaults in gen_runner.py), read from the window directory
+Environment=DISTILL_WINDOW_CONF=%h/distill/window/window.conf
+ExecStart=%h/distill/phase2b/code-remote/scripts/distill/mini_window/gen_runner.sh remote --execute
+# 2 = refused by a check (nothing started), 3 = STOP: not failures to retry
+Restart=on-failure
+RestartPreventExitStatus=2 3
+RestartSec=120
+KillMode=mixed
+TimeoutStopSec=90

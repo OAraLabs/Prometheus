@@ -253,7 +253,61 @@ Verification (all must hold; only then are rows written)
 
 Endpoints must be loopback (``--allow-lan-endpoints`` also admits private and
 CGNAT addresses). Known hosted-API hosts are refused outright, and no local
-request ever carries an Authorization header.
+request ever carries an Authorization header, except to a remote teacher's
+own endpoint (below).
+
+A remote local teacher (``--teacher-key-file``)
+----------------------------------------------
+The same 27B (``--teacher local``, rows ``source = qwen38-27b-gym``) served by
+ANOTHER machine on the tailnet: the 4090 serves it (``tower/serve_teacher.sh``,
+several slots, an API key), while the gym, the sandbox and every tool command
+stay on this host, inside its OS jail (DISTILL-OPEN-QUESTIONS #11: the 4090 has
+none, so nothing ever executes there).
+
+    teacher_gen.py run --teacher local --teacher-url http://<teacher-host>:18094 \
+        --teacher-key-file ~/distill/secrets/teacher-4090.key --teacher-host <teacher-host> \
+        --teacher-quant UD-Q4_K_XL --teacher-sha256 <64 hex> --tool-host <this host> \
+        [--until ISO] [--concurrency N] [--skip-done-in '<runs>/local-*/*.tasks.jsonl'] --tasks ...
+
+* The URL must resolve to tailnet addresses only (``TAILNET_NETS``: Tailscale's
+  100.64.0.0/10 and fd7a:115c:a1e0::/48), never loopback, a LAN, a public name
+  or one of this host's own addresses; scheme://host:port, nothing else. It is
+  checked once per run (``Settings.teacher_endpoint`` keeps the checked URL).
+* The key file must be a regular 0600 file owned by this user; its key goes
+  only into the ``Authorization: Bearer`` header of requests to that endpoint
+  (the teacher, its summarizer and its self-judge), never into argv, a log, a
+  row, the report or settings.json. The preflight checks that the server
+  REFUSES ``/props`` without the key (an open server is refused) and accepts it
+  with the key.
+* ``--tool-host`` must name this host and ``--teacher-host`` another one; the
+  jail is ``require`` (``--jail off`` is refused); no probe guard, no
+  ``--judge-url`` (the teacher judges itself, with the same gates).
+* Concurrency is at most the server's slots (``/props`` total_slots, read at the
+  start and again after every pause): ``--concurrency`` defaults to them and a
+  larger one is cut to them (at most ``REMOTE_MAX_CONCURRENCY``).
+* ``--until`` defaults to ``REMOTE_DEFAULT_UNTIL`` (Mon 2026-11-02 10:30 UTC, i.e.
+  05:30 EST, 30 min before the 4090's dead-man restore); a default that has
+  passed is a usage error. An HH:MM ``--until`` is resolved in the local zone's
+  own rules on the day it falls on (a run started before a DST change ends at
+  the wall-clock time meant, not an hour off).
+* Rows and the report carry ``teacher_route: tailnet``, ``teacher_host``,
+  ``teacher_quant``, ``teacher_sha256`` and ``tool_host``; the fingerprint
+  holds the host, quant and sha, so one output never mixes servers.
+* The server going away (refused, reset, no route, a timeout, or 503 while it
+  loads; for hours while the 4090 trains) PAUSES the run: after a task ends in
+  a transport error the server's ``/health`` is read; unless it answers 200 no
+  new task starts, the tasks in flight finish as errors (not done: they rerun
+  in this run), and those errors do not count towards
+  ``--max-consecutive-errors``. ``/health`` is polled with a doubling backoff
+  (``REMOTE_BACKOFF_S``) until it is ready again; then the served model id and
+  ``/props`` (key enforced, slots) are read again and the run resumes. A server
+  that comes back serving another model, open without a key, or refusing our
+  key stops the run (stop ``teacher_changed``, exit 8). Rows written stay; the
+  report counts ``remote_pauses`` and ``remote_paused_s``.
+* ``--skip-done-in <ledger glob>`` skips tasks another run over the same prompts
+  already finished (kept, held, released, relaxed or rejected; matched by task id
+  or by ``task_hash``, the normalized prompt, so another taskset's copy of a
+  prompt is skipped too): the 3090 Ti's own teacher, say.
 
 The Max teacher (``--teacher max-payg``)
 --------------------------------------
@@ -411,7 +465,8 @@ ledger stopped a ``--teacher max-payg`` run (STOP, the cap, ``--budget-usd``),
 Token Plan key or host, the STOP file, no notify command) or the paid API
 refused the key or account mid-run (``--teacher max-token-plan``: the same, and
 ``QWEN_PAYG_KEY`` present at the start), 7 ``--teacher max-token-plan`` stopped
-by the quota pause (rerun after it), 143 / 129 a paid run
+by the quota pause (rerun after it), 8 a remote teacher came back as another
+server (another model, no key, or our key refused; rows kept), 143 / 129 a paid run
 stopped by SIGTERM / SIGHUP (its calls in flight settled first), 6 an
 unexpected exception (its traceback on stderr; never Python's own 1). Errored
 tasks are not in the ledger as done, so the next run retries them.
@@ -422,6 +477,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import collections
+import contextlib
 import contextvars
 import copy
 import dataclasses
@@ -441,6 +497,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -531,6 +588,14 @@ DEFAULT_TEACHER_URL = "http://127.0.0.1:8093"
 DEFAULT_MODEL_NAME = "qwen3.8-27b"
 DEFAULT_TEACHER_ID = "*qwen3*8*27b*"
 DEFAULT_JUDGE_SEED = 7
+DEFAULT_CONCURRENCY = 2
+#: a remote teacher's concurrency default: its server's slots, at most this many
+REMOTE_MAX_CONCURRENCY = 8
+#: a remote teacher's default --until: Mon 2026-11-02 10:30 UTC = 05:30 EST (the clocks fall back on
+#: Sun 2026-11-01), 30 min before the 4090's dead-man restore at 06:00 EST (operator, 2026-10-31)
+REMOTE_DEFAULT_UNTIL = "2026-11-02T10:30:00+00:00"
+#: the OS jail a remote teacher's tool commands must run in (the tool host is Linux)
+REMOTE_JAILS = frozenset({"bwrap"})
 DEFAULT_SEED = "teacher-gen-v1"
 DEFAULT_SANDBOX_ROOT = Path(tempfile.gettempdir()) / "prometheus-teacher-gen"
 KINDS = ("chat-mode", "compacted-history", "error-recovery", "agentic", "coding")
@@ -595,6 +660,11 @@ _VIRTUAL_READERS = frozenset({"cat", "head", "tail", "grep", "egrep", "fgrep", "
 _FORBIDDEN_HOST_PARTS = ("dashscope", "aliyuncs", "alibabacloud", "alicloud", "openai.com",
                          "anthropic.com", "openrouter", "googleapis", "together.xyz", "groq.com")
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
+#: Tailscale's address ranges: IPv4 from the CGNAT block, IPv6 from its own ULA prefix. A remote
+#: teacher (``--teacher-key-file``) must resolve to these only: never loopback, a LAN or the internet.
+TAILNET_NETS = (_CGNAT, ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+#: The shortest API key a remote teacher's key file may hold (the arm script writes 64 hex chars).
+TEACHER_KEY_MIN_LEN = 32
 OUTPUT_LIMIT = 1 << 20  # bytes read per stream of a sandboxed command
 _CURRENT_CALL: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "teacher_gen_current_call", default=None)
@@ -645,6 +715,95 @@ def check_endpoint(url: str, *, allow_lan: bool = False) -> str:
             f"{host} ({addr}) is not a local endpoint"
             + ("" if allow_lan else " (loopback only; --allow-lan-endpoints admits private addresses)"))
     return url.rstrip("/")
+
+
+def is_local_address(addr: str) -> bool:
+    """Whether *addr* is assigned to this host (a socket can bind it): a teacher there would be
+    the tool host itself."""
+    ip = ipaddress.ip_address(addr)
+    fam = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+    try:
+        with socket.socket(fam, socket.SOCK_DGRAM) as s:
+            s.bind((str(ip), 0))
+        return True
+    except OSError:
+        return False
+
+
+def check_tailnet_endpoint(url: str) -> str:
+    """The URL of a REMOTE teacher (``--teacher-key-file``) without a trailing slash, or
+    EndpointError: every address its host resolves to is a tailnet address (``TAILNET_NETS``),
+    none is loopback or one of this host's own (the teacher host is never the tool host).
+    A LAN or public address (the business tunnel's public name, say) is refused, and so are
+    hosted-API hosts, credentials in the URL and a path."""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise EndpointError(f"not an http(s) URL: {url!r}")
+    if parts.username or parts.password:
+        raise EndpointError("credentials in an endpoint URL are refused (the key comes from --teacher-key-file)")
+    if parts.path.strip("/") or parts.query or parts.fragment:
+        raise EndpointError("a remote teacher URL is scheme://host:port only")
+    host = parts.hostname.lower()
+    if any(p in host for p in _FORBIDDEN_HOST_PARTS):
+        raise EndpointError(f"{host} is a hosted API; this script only calls local model servers")
+    addrs = _host_addresses(host)
+    if not addrs:
+        raise EndpointError(f"{host} resolves to no address")
+    for addr in addrs:
+        ip = ipaddress.ip_address(addr)
+        if ip.is_loopback or not any(ip in net for net in TAILNET_NETS):
+            raise EndpointError(f"{host} ({addr}) is not a tailnet address: a remote teacher is reached over "
+                                "the tailnet only")
+        if is_local_address(addr):
+            raise EndpointError(f"{host} ({addr}) is this host: a remote teacher runs on another machine "
+                                "(the tools run here)")
+    return url.rstrip("/")
+
+
+class TeacherKeyError(ValueError):
+    """A remote teacher's key file that must not be used (its text is never in the message)."""
+
+
+def load_teacher_key(path: str | Path) -> str:
+    """The API key in a remote teacher's key file: a regular file (not a symlink) owned by this
+    user, mode 0600 or tighter, holding one key (the first line that is not blank or a ``#``
+    comment) of at least ``TEACHER_KEY_MIN_LEN`` printable characters without spaces. The key
+    goes into an Authorization header and nowhere else: never argv, a log, a row or a report."""
+    p = Path(path).expanduser()
+    try:
+        fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise TeacherKeyError(f"{p}: cannot open the key file ({exc.strerror or type(exc).__name__}; "
+                              "a symlink is refused)") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise TeacherKeyError(f"{p}: not a regular file")
+        if st.st_uid != os.geteuid():
+            raise TeacherKeyError(f"{p}: owned by uid {st.st_uid}, not this user")
+        if st.st_mode & 0o077:
+            raise TeacherKeyError(f"{p}: mode {st.st_mode & 0o777:o}; a key file must be 0600 (no group or "
+                                  "other access)")
+        if st.st_size > 4096:
+            raise TeacherKeyError(f"{p}: {st.st_size} bytes is not a key file")
+        raw = os.read(fd, 4097)
+    finally:
+        os.close(fd)
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError:
+        raise TeacherKeyError(f"{p}: the key file is not ASCII") from None
+    key = next((ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")), "")
+    if len(key) < TEACHER_KEY_MIN_LEN:
+        raise TeacherKeyError(f"{p}: no key of at least {TEACHER_KEY_MIN_LEN} characters")
+    if not all(33 <= ord(ch) < 127 for ch in key) or "," in key:
+        raise TeacherKeyError(f"{p}: the key holds spaces, commas or control characters")
+    return key
+
+
+def local_hostname() -> str:
+    """This host's short name, lower case (``Gpu-Box.tail.ts.net`` -> ``gpu-box``)."""
+    return socket.gethostname().split(".")[0].lower()
 
 
 def same_server(a: str | None, b: str | None) -> bool:
@@ -3691,6 +3850,42 @@ class Settings:
     repo_fixture_ref: str = "origin/main"
     repo_store: Path | None = None
     repo_fixture_info: dict[str, Any] = field(default_factory=dict)
+    #: a REMOTE local teacher (``--teacher-key-file``): the same 27B served by another machine on the
+    #: tailnet with an API key (the 4090 in its night window), while the tools and their jail stay on
+    #: this host. ``teacher_key`` is read from the 0600 file at the start and only ever goes into the
+    #: Authorization header of requests to the teacher's endpoint (never saved, logged or repr'd).
+    teacher_key_file: Path | None = None
+    teacher_key: str | None = field(default=None, repr=False, compare=False)
+    teacher_host: str | None = None
+    teacher_quant: str | None = None
+    teacher_sha256: str | None = None
+    #: the host the tools must run on (``--tool-host``): checked against this host's name
+    tool_host: str | None = None
+    _remote_checked: str | None = field(default=None, repr=False, compare=False)
+    _remote_url: str = field(default="", repr=False, compare=False)
+
+    @property
+    def remote(self) -> bool:
+        """A remote teacher over the tailnet (``--teacher-key-file``)."""
+        return self.teacher_key_file is not None
+
+    @property
+    def teacher_headers(self) -> dict[str, str]:
+        """Headers for every request to the teacher's endpoint: the remote teacher's key, else none
+        (a loopback teacher never gets an Authorization header)."""
+        if not self.remote:
+            return {}
+        if not self.teacher_key:
+            raise EndpointError("the remote teacher's key was not loaded (--teacher-key-file)")
+        return {"Authorization": f"Bearer {self.teacher_key}"}
+
+    def remote_meta(self) -> dict[str, Any]:
+        """What a remote teacher's rows and report record about where it ran (empty for a local one)."""
+        if not self.remote:
+            return {}
+        return {"teacher_route": "tailnet", "teacher_host": self.teacher_host,
+                "teacher_quant": self.teacher_quant, "teacher_sha256": self.teacher_sha256,
+                "tool_host": self.tool_host}
 
     @property
     def payg(self) -> bool:
@@ -3705,6 +3900,15 @@ class Settings:
     def teacher_endpoint(self) -> str:
         if self.payg:
             raise EndpointError("--teacher max-payg has no local teacher endpoint (it calls spend.PaygClient)")
+        if self.remote:
+            if self.probe_guard_url:
+                raise EndpointError("a remote teacher has no probe guard (the guard fronts this host's GPU)")
+            # checked once per URL (it resolves the name and probes this host's own addresses), then
+            # kept: every task and judge call reads this property
+            if self._remote_checked != self.teacher_url:
+                self._remote_url = check_tailnet_endpoint(self.teacher_url)
+                self._remote_checked = self.teacher_url
+            return self._remote_url
         return check_endpoint(self.probe_guard_url or self.teacher_url, allow_lan=self.allow_lan)
 
     @property
@@ -3730,6 +3934,9 @@ class Settings:
             return check_endpoint(self.probe_guard_url or str(self.judge_url), allow_lan=self.allow_lan)
         if self.judge_is_teacher:
             return self.teacher_endpoint
+        if self.remote:
+            raise EndpointError("with a remote teacher the judge is the teacher itself (no --judge-url): the "
+                                "key is sent to the teacher's endpoint only")
         return check_endpoint(str(self.judge_url), allow_lan=self.allow_lan)
 
     @property
@@ -3761,6 +3968,14 @@ class Settings:
         return (TOKEN_PLAN_RELAXED_SOURCE if self.token_plan else PAYG_RELAXED_SOURCE) if self.payg else RELAXED_SOURCE
 
     def fingerprint(self) -> dict[str, Any]:
+        fp = self._fingerprint()
+        if self.remote:
+            # only for a remote teacher, so every existing output's settings.json still matches: one
+            # output never mixes two serving hosts or quant files
+            fp["remote_teacher"] = {k: v for k, v in self.remote_meta().items() if k != "tool_host"}
+        return fp
+
+    def _fingerprint(self) -> dict[str, Any]:
         return {"generator": GENERATOR_VERSION, "seed": self.seed, "model_name": self.model_name,
                 "mix": {k: self.mix.get(k, 0.0) for k in KINDS}, "coding_cap": self.coding_cap,
                 "judge_kind": self.judge_kind, "judge_seed": self.judge_seed,
@@ -4139,7 +4354,7 @@ def teacher_provider(settings: "Settings") -> Any:
                                     thinking_budget=settings.thinking_budget, sampling=settings.sampling,
                                     deadline=settings.until)
     return _recording_provider_cls()(base_url=settings.teacher_endpoint, timeout=settings.request_timeout,
-                                     sampling=settings.sampling)
+                                     sampling=settings.sampling, headers=settings.teacher_headers or None)
 
 
 def chat_system_prompt(system_prompt: str) -> str:
@@ -5122,8 +5337,11 @@ async def judge_text(transcript: str, settings: Settings) -> dict[str, Any]:
                               "seed": settings.judge_seed, "provider": "local", "judge_key": "none"}
     if settings.payg:
         record["endpoint"] = settings.judge_endpoint  # a loopback URL: the local 27B judge
+    # a remote teacher judges itself (Settings.judge_endpoint refuses another judge): its key
+    headers = settings.teacher_headers if settings.judge_is_teacher else {}
     obj = None
-    async with httpx.AsyncClient(timeout=settings.request_timeout, trust_env=False) as client:
+    async with httpx.AsyncClient(timeout=settings.request_timeout, trust_env=False,
+                                 headers=headers or None) as client:
         for _attempt in range(2):
             resp = await client.post(f"{settings.judge_endpoint}/v1/chat/completions", json=payload)
             resp.raise_for_status()
@@ -5264,6 +5482,7 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
             "generator": GENERATOR_VERSION,
             "gen_seed": settings.seed, "task_origin": task.origin,
         }
+        meta.update(settings.remote_meta())
         if settings.payg:
             meta.update(tags=[_artifact_policy().TAG], paid_call_id=call.call_id,
                         cost_usd=round(call.cost_usd, 6), thinking_budget=settings.thinking_budget)
@@ -5611,6 +5830,7 @@ class Store:
             "model": settings.model_name, "judge": settings.judge_kind, "judge_seed": settings.judge_seed,
             "teacher_served": settings.teacher_served, "jail": resolve_jail(settings.jail),
             "teacher": settings.teacher, "judge_provider": settings.judge_provider,
+            **settings.remote_meta(),
             "pad_pool": settings.pad_pool or None, "repo_fixture": settings.repo_fixture_info or None,
             **payg_report(settings),
             "rows_total": total, "rows_held": sum(len(rs) for _r, rs in self.held_queue),
@@ -6070,11 +6290,11 @@ class Scheduler:
 # ---------------------------------------------------------------------------
 
 
-async def preflight(url: str, timeout: float) -> str | None:
+async def preflight(url: str, timeout: float, headers: dict[str, str] | None = None) -> str | None:
     import httpx
 
     try:
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False, headers=headers or None) as client:
             resp = await client.get(f"{url}/v1/models")
     except Exception as exc:  # noqa: BLE001
         raise EndpointError(f"{url}/v1/models is unreachable ({type(exc).__name__})") from exc
@@ -6180,10 +6400,147 @@ class TeacherUnreachable(RuntimeError):
     pass
 
 
+#: How long a remote teacher's /health may take to answer before it counts as not ready.
+REMOTE_HEALTH_TIMEOUT_S = 10.0
+#: A paused remote run polls /health first after this many seconds, doubling up to the second.
+REMOTE_BACKOFF_S = (15.0, 300.0)
+#: How often a worker waiting out a pause looks at the run's stop conditions (--until, a signal).
+REMOTE_WAIT_POLL_S = 5.0
+
+
+class TeacherChanged(RuntimeError):
+    """A paused remote teacher came back as another server (its text names what differs)."""
+
+
+async def teacher_health(settings: Settings) -> str:
+    """A remote teacher's state from its ``/health`` (public on llama-server: no key is sent):
+    ``ready`` (200), ``loading`` (503 while it loads a model), ``gone`` (refused, reset, no
+    route, its name no longer resolves, no answer in ``REMOTE_HEALTH_TIMEOUT_S``) or
+    ``http-<code>`` (anything else). Only ``ready`` lets tasks start."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=REMOTE_HEALTH_TIMEOUT_S, trust_env=False) as client:
+            resp = await client.get(f"{settings.teacher_endpoint}/health")
+    except (httpx.HTTPError, OSError, EndpointError):
+        return "gone"
+    if resp.status_code == 200:
+        return "ready"
+    return "loading" if resp.status_code == 503 else f"http-{resp.status_code}"
+
+
+async def remote_identity(settings: Settings, timeout: float) -> int:
+    """After a pause: the remote teacher is still the server this run started on (the served
+    id it had, the key enforced and ours accepted). Returns its slots (``/props`` total_slots);
+    TeacherChanged otherwise. A transport failure here is EndpointError (still not back)."""
+    served = await preflight(settings.teacher_endpoint, timeout, settings.teacher_headers)
+    if settings.teacher_served and served != settings.teacher_served:
+        raise TeacherChanged(f"it now serves {served!r}, not {settings.teacher_served!r}")
+    try:
+        props = await remote_props(settings, timeout)
+    except EndpointError as exc:
+        if "unreachable" in str(exc):
+            raise
+        raise TeacherChanged(str(exc)) from None
+    return int(props.get("total_slots") or 1)
+
+
+class RemoteGate:
+    """The pause of a remote run (``--teacher-key-file``): ``ready`` is set while tasks may start.
+    ``check`` (after a task's transport error) reads ``/health`` and pauses unless it is ready;
+    one monitor then polls with a doubling backoff, re-reads the server's identity and slots once
+    it answers, and resumes the workers (``limit``: those numbered below it run)."""
+
+    def __init__(self, settings: Settings, stopped: Callable[[], str], on_change: Callable[[str, str], None],
+                 on_state: Callable[[str], None] | None = None) -> None:
+        self.settings = settings
+        self.stopped = stopped
+        self.on_change = on_change
+        self.on_state = on_state or (lambda _s: None)
+        self.ready = asyncio.Event()
+        self.ready.set()
+        self.limit = max(1, settings.concurrency)
+        self.pauses = 0
+        self.paused_s = 0.0
+        self._since = 0.0
+        self._monitor: asyncio.Task[None] | None = None
+
+    @property
+    def paused(self) -> bool:
+        return not self.ready.is_set()
+
+    async def check(self) -> bool:
+        """Whether the run is (now) paused: the server is not ready after a transport error."""
+        if self.paused:
+            return True
+        state = await teacher_health(self.settings)
+        if state == "ready":
+            return False
+        if self.paused:  # another worker paused it while this one waited for /health
+            return True
+        self.ready.clear()
+        self.pauses += 1
+        self._since = time.monotonic()
+        log.warning("remote teacher %s is not ready (%s): paused, no new task starts; the tasks in flight "
+                    "rerun", self.settings.teacher_host, state)
+        self.on_state(f"paused: teacher {state}")
+        self._monitor = asyncio.create_task(self._watch())
+        return True
+
+    async def _watch(self) -> None:
+        delay, cap = REMOTE_BACKOFF_S
+        while not self.stopped():
+            await self._sleep(delay)
+            if self.stopped():
+                break
+            state = await teacher_health(self.settings)
+            if state == "ready":
+                try:
+                    slots = await remote_identity(self.settings, min(30.0, self.settings.request_timeout))
+                except TeacherChanged as exc:
+                    self.on_change("teacher_changed", f"{self.settings.teacher_host}: {exc}"[:300])
+                    break
+                except EndpointError:
+                    state = "gone"
+                else:
+                    self.limit = remote_concurrency(self.settings.concurrency, slots)
+                    self.paused_s += time.monotonic() - self._since
+                    log.warning("remote teacher %s is back (%d slots): %d tasks in flight again",
+                                self.settings.teacher_host, slots, self.limit)
+                    self.on_state("running")
+                    self.ready.set()
+                    return
+            log.warning("remote teacher %s still not ready (%s); next look in %.0f s",
+                        self.settings.teacher_host, state, min(cap, delay * 2))
+            delay = min(cap, delay * 2)
+        self.paused_s += time.monotonic() - self._since
+        self.ready.set()  # stopped: wake the waiting workers so they see it
+
+    async def _sleep(self, seconds: float) -> None:
+        end = time.monotonic() + seconds
+        while not self.stopped() and time.monotonic() < end:
+            await asyncio.sleep(min(REMOTE_WAIT_POLL_S, max(0.0, end - time.monotonic())))
+
+    async def wait(self, wid: int) -> None:
+        """Until tasks may start for worker *wid* (ready, and *wid* under ``limit``) or the run stops."""
+        while not self.stopped() and (self.paused or wid >= self.limit):
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self.ready.wait(), REMOTE_WAIT_POLL_S)
+            if not self.paused and wid >= self.limit:
+                await asyncio.sleep(REMOTE_WAIT_POLL_S)
+
+    async def close(self) -> None:
+        if self._monitor is not None and not self._monitor.done():
+            self._monitor.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._monitor
+
+
 async def run(settings: Settings, gen: Generator, store: Store, guard: EvalGuard | None) -> dict[str, Any]:
     started = time.time()
     sched = Scheduler(gen, store, settings.mix, guard)
     state: dict[str, Any] = {"started": 0, "consecutive_errors": 0, "stop": "", "stop_detail": ""}
+    gate: RemoteGate | None = None
 
     def stop_reason() -> str:
         if state["stop"]:
@@ -6196,8 +6553,23 @@ async def run(settings: Settings, gen: Generator, store: Store, guard: EvalGuard
             return "until"
         return ""
 
+    def changed(kind: str, detail: str) -> None:
+        state["stop"] = state["stop"] or kind
+        state["stop_detail"] = state["stop_detail"] or detail
+        log.warning("stopping: %s", detail)
+
+    def remote_state(what: str) -> None:
+        store.write_report(store.report(settings, started, {"stop": stop_reason() or what}))
+
+    if settings.remote:
+        gate = RemoteGate(settings, stop_reason, changed, remote_state)
+
     async def worker(wid: int) -> None:
         while not stop_reason():
+            if gate is not None:
+                await gate.wait(wid)
+                if stop_reason():
+                    return
             task = sched.next_task()
             if task is None:
                 state["stop"] = state["stop"] or "no_tasks"
@@ -6227,22 +6599,34 @@ async def run(settings: Settings, gen: Generator, store: Store, guard: EvalGuard
             sched.release(task)
             final = store.commit(task, extra.pop("run_id", None) or f"{task.id}@{uuid.uuid4().hex[:10]}",
                                  status, rows, reasons, extra)
-            if status == "error":
+            if status == "error" and gate is not None and await gate.check():
+                # the remote teacher is gone or loading (the 4090 trains, say): a pause, not a
+                # failing run; this task is not done and reruns once the server is back
+                state["consecutive_errors"] = 0
+            elif status == "error":
                 state["consecutive_errors"] += 1
                 if state["consecutive_errors"] >= settings.max_consecutive_errors:
                     state["stop"] = "consecutive_errors"
             else:
                 state["consecutive_errors"] = 0
-            store.write_report(store.report(settings, started, {"stop": stop_reason() or "running"}))
+            paused = gate is not None and gate.paused
+            store.write_report(store.report(settings, started,
+                                            {"stop": stop_reason() or ("paused" if paused else "running")}))
             if settings.progress:
                 print(f"[{final}] {task.id} rows={len(rows) if final in ('kept', 'held') else 0}"
                       f"{' ' + ','.join(reasons) if reasons else ''} ({extra.get('duration_s', '-')}s)",
                       file=sys.stderr, flush=True)
 
-    await asyncio.gather(*(worker(i) for i in range(max(1, settings.concurrency))))
+    try:
+        await asyncio.gather(*(worker(i) for i in range(max(1, settings.concurrency))))
+    finally:
+        if gate is not None:
+            await gate.close()
     final: dict[str, Any] = {"stop": stop_reason() or "done", "tasks_started": state["started"]}
     if state["stop_detail"]:
         final["stop_detail"] = state["stop_detail"]
+    if gate is not None:
+        final.update(remote_pauses=gate.pauses, remote_paused_s=round(gate.paused_s, 1))
     report = store.report(settings, started, final)
     store.write_report(report)
     return report
@@ -6257,16 +6641,29 @@ def parse_until(text: str | None, now: dt.datetime | None = None,
                 max_ahead_hours: float | None = None) -> float | None:
     """--until as a timestamp: HH:MM (local, next occurrence) or an ISO time.
     With *max_ahead_hours*, an HH:MM whose next occurrence is further ahead is a
-    ValueError (it has passed today: give an ISO time to mean tomorrow)."""
+    ValueError (it has passed today: give an ISO time to mean tomorrow).
+
+    An HH:MM is placed on its day in the zone's own rules: the system zone, or
+    *now*'s tzinfo when *now* is given (a ``ZoneInfo`` keeps its DST rules; a
+    fixed offset stays fixed). So 05:30 asked for on the evening before the
+    fall-back is 05:30 EST (10:30 UTC), not *now*'s EDT offset an hour off."""
     if not text:
         return None
-    now = now or dt.datetime.now().astimezone()
+    local_now = now if now is not None else dt.datetime.now().astimezone()
     m = re.fullmatch(r"(\d{1,2}):(\d{2})", text.strip())
     if m:
-        target = now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
-        if target <= now:
-            target += dt.timedelta(days=1)
-        ahead_h = (target - now).total_seconds() / 3600
+        hhmm = dt.time(int(m.group(1)), int(m.group(2)))
+        zone = now.tzinfo if now is not None else None
+        system_zone = now is None
+
+        def on(day: dt.date) -> dt.datetime:
+            naive = dt.datetime.combine(day, hhmm)
+            return naive.astimezone() if system_zone else naive.replace(tzinfo=zone)
+
+        target = on(local_now.date())
+        if target <= local_now:
+            target = on(local_now.date() + dt.timedelta(days=1))
+        ahead_h = (target - local_now).total_seconds() / 3600
         if max_ahead_hours is not None and ahead_h > max_ahead_hours:
             raise ValueError(f"--until {text.strip()} is next at {target.isoformat(timespec='minutes')}, "
                              f"{ahead_h:.1f} h away (more than {max_ahead_hours:g} h): it has most likely "
@@ -6383,8 +6780,66 @@ def _payg_args(a: argparse.Namespace, out: Path) -> dict[str, Any]:
     return {"teacher": TEACHER_PAYG, "budget_usd": float(budget), **common}
 
 
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_HOSTNAME = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
+
+
+def _remote_args(a: argparse.Namespace) -> dict[str, Any]:
+    """The remote-teacher settings (``--teacher-key-file``), or ValueError (a usage error, exit 2).
+    The key itself is read later (``load_remote_key``), never here."""
+    given = [f for f, v in (("--teacher-host", a.teacher_host), ("--teacher-quant", a.teacher_quant),
+                            ("--teacher-sha256", a.teacher_sha256), ("--tool-host", a.tool_host))
+             if v]
+    if not a.teacher_key_file:
+        if given:
+            raise ValueError(f"{', '.join(given)} describe a remote teacher: give --teacher-key-file too")
+        return {}
+    if a.teacher in MAX_TEACHERS:
+        raise ValueError("--teacher-key-file is for --teacher local served by another machine")
+    if not a.teacher_url:
+        raise ValueError("--teacher-key-file needs --teacher-url (the remote teacher's tailnet address)")
+    if a.probe_guard_url:
+        raise ValueError("--probe-guard-url fronts this host's own GPU; a remote teacher has none")
+    if a.judge_url:
+        raise ValueError("with --teacher-key-file the teacher judges itself: no --judge-url (the key is sent "
+                         "to the teacher's endpoint only)")
+    if a.allow_lan_endpoints:
+        raise ValueError("--allow-lan-endpoints is not for a remote teacher: it is reached over the tailnet only")
+    for flag, v in (("--teacher-host", a.teacher_host), ("--tool-host", a.tool_host)):
+        if not v or not _HOSTNAME.fullmatch(v.lower()):
+            raise ValueError(f"{flag} (a host name) is required with --teacher-key-file")
+    if not a.teacher_quant:
+        raise ValueError("--teacher-quant (the served quant, e.g. UD-Q4_K_XL) is required with "
+                         "--teacher-key-file")
+    sha = (a.teacher_sha256 or "").lower()
+    if not _SHA256.fullmatch(sha):
+        raise ValueError("--teacher-sha256 (64 hex chars: the served GGUF) is required with --teacher-key-file")
+    here = local_hostname()
+    if a.tool_host.lower() != here:
+        raise ValueError(f"--tool-host {a.tool_host} is not this host ({here}): the tools run only on the "
+                         "tool host, never anywhere else")
+    if a.teacher_host.lower() == here:
+        raise ValueError(f"--teacher-host {a.teacher_host} is this host: a remote teacher runs on another machine")
+    if a.jail not in ("auto", "require"):
+        raise ValueError("--jail off is refused with a remote teacher: its tools run only inside the OS jail")
+    if a.concurrency is not None and not 1 <= a.concurrency <= REMOTE_MAX_CONCURRENCY:
+        raise ValueError(f"--concurrency must be 1 .. {REMOTE_MAX_CONCURRENCY} with a remote teacher")
+    if not a.until:
+        # the 4090's continuous window: generation ends before its dead-man restore (06:00 EST)
+        if parse_until(REMOTE_DEFAULT_UNTIL) <= time.time():  # type: ignore[operator]
+            raise ValueError(f"the default --until ({REMOTE_DEFAULT_UNTIL}) has passed: give --until")
+        a.until = REMOTE_DEFAULT_UNTIL
+    return {"teacher_key_file": Path(a.teacher_key_file).expanduser(), "teacher_host": a.teacher_host.lower(),
+            "teacher_quant": a.teacher_quant, "teacher_sha256": sha, "tool_host": a.tool_host.lower(),
+            # the jail is required, never optional: no tool command runs unjailed for a remote teacher
+            "jail": "require"}
+
+
 def settings_from_args(a: argparse.Namespace) -> Settings:
     payg = a.teacher in MAX_TEACHERS
+    remote = _remote_args(a)
+    concurrency = a.concurrency if a.concurrency is not None else (0 if remote else DEFAULT_CONCURRENCY)
+    a.concurrency = concurrency if concurrency else DEFAULT_CONCURRENCY  # the paid modes' checks read it
     for flag, value in (("--model-name", None if payg else a.model_name), ("--judge-model", a.judge_model),
                         ("--teacher-id", a.teacher_id), ("--judge-id", a.judge_id)):
         if has_max_token(value):
@@ -6413,12 +6868,13 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
                     else (TOKEN_PLAN_SOURCE if a.teacher == TEACHER_TOKEN_PLAN else PAYG_SOURCE) if payg
                     else SOURCE_TAG)
     pack_prompt, date_sentinel = load_pack_template(a.pack)
+    jail = remote.pop("jail", a.jail)
     return Settings(
         task_source=task_source, sampling=sampling_from_args(a),
         out=out, name=a.name or default_name, teacher_url=a.teacher_url or DEFAULT_TEACHER_URL,
         probe_guard_url=a.probe_guard_url,
         judge_url=a.judge_url, judge_model=a.judge_model,
-        judge_seed=a.judge_seed, allow_lan=a.allow_lan_endpoints, concurrency=a.concurrency,
+        judge_seed=a.judge_seed, allow_lan=a.allow_lan_endpoints, concurrency=concurrency,
         until=parse_until(a.until, max_ahead_hours=UNTIL_HHMM_MAX_AHEAD_H), min_task_seconds=a.min_task_seconds,
         max_tasks=a.max_tasks,
         target_rows=a.target_rows, seed=a.seed, mix=parse_mix(a.mix), coding_cap=a.coding_cap,
@@ -6430,8 +6886,9 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
         sandbox_root=Path(a.sandbox_root).expanduser(), base_system_prompt=pack_prompt,
         date_sentinel=date_sentinel,
         repo=Path(a.repo).expanduser(), max_consecutive_errors=a.max_consecutive_errors,
-        progress=not a.quiet, jail=a.jail, judge_id=a.judge_id,
-        repo_fixture=a.repo_fixture if a.tasks else "off", repo_fixture_ref=a.repo_fixture_ref, **teacher)
+        progress=not a.quiet, jail=jail, judge_id=a.judge_id,
+        repo_fixture=a.repo_fixture if a.tasks else "off", repo_fixture_ref=a.repo_fixture_ref, **teacher,
+        **remote)
 
 
 #: Exit codes (module docstring).
@@ -6440,6 +6897,8 @@ EXIT_DONE, EXIT_NOTHING, EXIT_USAGE, EXIT_UNREACHABLE, EXIT_SPEND_STOP, EXIT_PAY
 EXIT_QUOTA_PAUSED = 7
 #: An unexpected exception (a traceback on stderr): never Python's own 1, which means "kept nothing".
 EXIT_CRASH = 6
+#: A paused remote teacher came back as another server (another model, open, or our key refused).
+EXIT_TEACHER_CHANGED = 8
 SANDBOX_LOCK = ".teacher_gen.lock"
 
 
@@ -6569,9 +7028,71 @@ def install_payg_signal_handlers(client: Any) -> Callable[[], None]:
     return restore
 
 
+async def remote_props(settings: Settings, timeout: float) -> dict[str, Any]:
+    """A remote teacher's ``/props`` (with its key), after checking that the server ENFORCES the
+    key: the same request without it must be refused (401/403). An open server on the tailnet is
+    refused (EndpointError), and so is one that refuses the key we hold."""
+    import httpx
+
+    url = f"{settings.teacher_endpoint}/props"
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            bare = await client.get(url)
+            keyed = await client.get(url, headers=settings.teacher_headers)
+    except Exception as exc:  # noqa: BLE001
+        raise EndpointError(f"{settings.teacher_endpoint}/props is unreachable ({type(exc).__name__})") from exc
+    if bare.status_code not in (401, 403):
+        raise EndpointError(f"the remote teacher answers /props without a key (HTTP {bare.status_code}): it "
+                            "must be started with --api-key-file; refusing an open server")
+    if keyed.status_code != 200:
+        raise EndpointError(f"the remote teacher refused our key on /props (HTTP {keyed.status_code}): the key "
+                            "files on the two hosts differ")
+    try:
+        body = keyed.json()
+    except ValueError as exc:
+        raise EndpointError("the remote teacher's /props is not JSON") from exc
+    return body if isinstance(body, dict) else {}
+
+
+def remote_concurrency(want: int | None, slots: int) -> int:
+    """Tasks in flight against a remote teacher: *want* (``--concurrency``; 0/None: as many as it has
+    slots), never more than its slots or ``REMOTE_MAX_CONCURRENCY``, at least 1."""
+    return max(1, min(want or REMOTE_MAX_CONCURRENCY, max(1, int(slots)), REMOTE_MAX_CONCURRENCY))
+
+
+#: ledger statuses that mean another run finished a task (``--skip-done-in``); an error or a skip
+#: did not, so such a task still runs here
+SKIP_DONE_STATUSES = frozenset({"kept", "held", "released", "relaxed", "rejected"})
+
+
+def skip_keys_from(patterns: list[str]) -> tuple[set[str], set[str]]:
+    """(task ids, task hashes) another run finished, from its ledgers (``--skip-done-in``): a task
+    whose id or normalized prompt (``task_hash``) is among them is skipped here."""
+    ids: set[str] = set()
+    hashes: set[str] = set()
+    for path in expand(patterns):
+        for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue  # a torn last line
+            if isinstance(ev, dict) and ev.get("status") in SKIP_DONE_STATUSES:
+                if ev.get("task_id"):
+                    ids.add(str(ev["task_id"]))
+                if ev.get("task_hash"):
+                    hashes.add(str(ev["task_hash"]))
+    return ids, hashes
+
+
 def cmd_run(a: argparse.Namespace, *, payg_opener: Any = None) -> int:
     try:
         settings = settings_from_args(a)
+        if settings.remote:
+            settings.teacher_key = load_teacher_key(settings.teacher_key_file or "")
+            jail = resolve_jail(settings.jail)
+            if jail not in REMOTE_JAILS:
+                raise EndpointError(f"a remote teacher's tools run only under {'/'.join(sorted(REMOTE_JAILS))} "
+                                    f"on the tool host; this host's jail is {jail or 'none'}")
         if not settings.payg:
             settings.teacher_endpoint  # noqa: B018 - validates the URLs before anything runs
         settings.judge_endpoint  # noqa: B018
@@ -6618,6 +7139,16 @@ def cmd_run(a: argparse.Namespace, *, payg_opener: Any = None) -> int:
         if settings.pad_pool.get("reserved"):
             log.warning("pad pool: %d rows in %d task groups are padding only (never run as tasks)",
                         settings.pad_pool["pool_rows"], settings.pad_pool["pool_groups"])
+        if a.skip_done_in:
+            try:
+                skip_ids, skip_hashes = skip_keys_from(a.skip_done_in)
+            except OSError as exc:
+                print(f"error: --skip-done-in: {exc}", file=sys.stderr)
+                return EXIT_USAGE
+            kept_tasks = [t for t in tasks if t.id not in skip_ids and t.task_hash not in skip_hashes]
+            log.warning("--skip-done-in: %d tasks were already finished by another run; %d left",
+                        len(tasks) - len(kept_tasks), len(kept_tasks))
+            gen = FixedGenerator(kept_tasks)
     elif a.tasks_file:
         try:
             gen = FixedGenerator(load_builtin_tasks(a.tasks_file))
@@ -6631,9 +7162,20 @@ def cmd_run(a: argparse.Namespace, *, payg_opener: Any = None) -> int:
 
     async def check_servers() -> None:
         if not settings.payg:
-            served = await preflight(settings.teacher_endpoint, min(30.0, settings.request_timeout))
+            served = await preflight(settings.teacher_endpoint, min(30.0, settings.request_timeout),
+                                     settings.teacher_headers or None)
             settings.teacher_served = check_model_id(served, settings.teacher_id, "teacher")
             log.info("teacher serves %s", served)
+        if settings.remote:
+            props = await remote_props(settings, min(30.0, settings.request_timeout))
+            slots = max(1, int(props.get("total_slots") or 1))
+            want = settings.concurrency
+            settings.concurrency = remote_concurrency(want, slots)
+            if want and want > settings.concurrency:
+                log.warning("concurrency cut to the remote server's %d slots (asked for %d)", slots, want)
+            log.warning("remote teacher %s (%s) on the tailnet, %d slots; %d tasks in flight; tools run here (%s)",
+                        settings.teacher_host, settings.teacher_quant, slots, settings.concurrency,
+                        settings.tool_host)
         if settings.judge_endpoint and (settings.payg or settings.judge_endpoint != settings.teacher_endpoint):
             judged = await preflight(settings.judge_endpoint, min(30.0, settings.request_timeout))
             check_model_id(judged, settings.judge_id or (DEFAULT_TEACHER_ID if settings.payg
@@ -6693,6 +7235,10 @@ def cmd_run(a: argparse.Namespace, *, payg_opener: Any = None) -> int:
         return EXIT_SPEND_STOP
     if stop == "consecutive_errors":
         return EXIT_UNREACHABLE
+    if stop == "teacher_changed":
+        print(f"stopped: the remote teacher changed ({report.get('stop_detail', '?')}); the rows so far "
+              "are kept", file=sys.stderr)
+        return EXIT_TEACHER_CHANGED
     return EXIT_DONE if report["rows_total"] else EXIT_NOTHING
 
 
@@ -6769,7 +7315,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     smp.add_argument("--top-k", dest="top_k", type=int)
     smp.add_argument("--top-p", dest="top_p", type=float)
     smp.add_argument("--min-p", dest="min_p", type=float)
-    r.add_argument("--concurrency", type=int, default=2)
+    r.add_argument("--concurrency", type=int,
+                   help=f"tasks in flight (default {DEFAULT_CONCURRENCY}; with --teacher-key-file: the remote "
+                        "server's slots, from its /props)")
+    rem = r.add_argument_group(
+        "a REMOTE local teacher (the same 27B served by another machine on the tailnet, with an API key; "
+        "every tool still runs on THIS host, in its jail)")
+    rem.add_argument("--teacher-key-file", help="0600 file holding the server's API key (sent only as the "
+                                                "Authorization header of teacher requests; never logged)")
+    rem.add_argument("--teacher-host", help="the serving host's name, recorded in every row (teacher_host); "
+                                            "must not be this host")
+    rem.add_argument("--teacher-quant", help="the served quant (e.g. UD-Q4_K_XL), recorded as teacher_quant")
+    rem.add_argument("--teacher-sha256", help="sha256 of the served GGUF, recorded as teacher_sha256")
+    rem.add_argument("--tool-host", help="the host the tools must run on: refused unless it is this host")
+    r.add_argument("--skip-done-in", action="append", default=[], metavar="LEDGER_GLOB",
+                   help="skip tasks that already produced rows in another run's <name>.tasks.jsonl "
+                        "(another teacher over the same taskset); repeatable")
     r.add_argument("--until", help="HH:MM (local, next occurrence; refused when that is more than 12 h "
                                    "ahead) or ISO time; a hard end")
     r.add_argument("--min-task-seconds", type=float, default=120.0)

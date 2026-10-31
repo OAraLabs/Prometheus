@@ -1,0 +1,36 @@
+# The distillation teacher on the 4090, served over the tailnet to the 3090 Ti host's sandboxed gym
+# (serve_teacher.sh beside this file: the flags, the VRAM plan, the pinned model and template, the checks).
+#
+# Install (the 4090, as its user; the window machinery starts and stops it, nothing else):
+#   install -d -m 700 ~/distill/teacher-serve
+#   install -m 700 serve_teacher.sh ~/distill/teacher-serve/serve_teacher.sh
+#   install -m 644 distill-teacher-serve.service ~/.config/systemd/user/distill-teacher-serve.service
+#   systemctl --user daemon-reload
+#   ~/distill/teacher-serve/serve_teacher.sh keygen     # once: ~/distill/secrets/teacher-serve.key, 0600
+#   (the 3090 Ti host then pulls the key and pushes the base chat template: gen_runner.py remote-setup)
+#   ~/distill/teacher-serve/serve_teacher.sh plan       # read-only
+#
+# Start (business server stopped first, its "down" Telegram sent, the dead-man armed):
+#   systemctl --user stop llama-server.service && systemctl --user start distill-teacher-serve.service
+# Stop (for training, say; the 3090 Ti host's generation pauses and resumes by itself):
+#   systemctl --user stop distill-teacher-serve.service
+# A business restore (`setups.py apply business`, the window end, the dead-man) stops every distill-* unit,
+# this one included, before the business server starts. No [Install] section: it never starts at boot.
+[Unit]
+Description=distill teacher: Qwen3.8-27B UD-Q4_K_XL on the tailnet for the 3090 Ti host's gym (text only)
+After=network-online.target
+# The business server and this one never run together: serve_teacher.sh refuses while it is active (so this
+# unit never takes it down by itself), and a restore stops this unit before starting the business server.
+After=llama-server.service
+# A server that keeps failing (out of memory, say) stays down instead of retrying every 20 s.
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=simple
+Environment=TEACHER_SLOTS=4
+Environment=TEACHER_CTX_PER_SLOT=32768
+ExecStart=%h/distill/teacher-serve/serve_teacher.sh exec
+Restart=on-failure
+RestartSec=20
+TimeoutStopSec=60

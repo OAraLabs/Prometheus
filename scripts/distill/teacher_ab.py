@@ -92,6 +92,24 @@ judge that is not a Max model). A provider refusal (context overflow) or a
 task timeout is a fail; a server that is down (transport errors) is retried by
 the next run, never recorded.
 
+Remote arm B (the 4090; DISTILL-OPEN-QUESTIONS #12, option c)
+------------------------------------------------------------
+Arm B and the judge may run against the teacher another machine serves on the
+tailnet (``tower/serve_teacher.sh``): ``arm --arm B`` and ``judge`` take
+teacher_gen's remote flags (``--teacher-key-file`` and ``--teacher-host``,
+``--teacher-quant``, ``--teacher-sha256``, ``--tool-host``). The URL must be a
+tailnet address of another host, the key goes only into the Authorization header,
+the server must refuse ``/props`` without it, and every tool command still runs
+HERE under bwrap. Arm A's sampling and request settings are used unchanged
+(``ab_settings.json``). The remote server can differ from arm A's in more than the
+per-slot context: ``--record-server-diff`` lets the arm run when only the chat
+template and/or the server's sampler defaults differ, records the list in every
+arm-B record (``server_diff``) with the remote route (``teacher_route``,
+``teacher_host``, ``teacher_quant``, ``teacher_sha256``), and the report then
+decides with the differences listed beside the verdict (``server_differences``)
+instead of refusing. The same model file, another served model mid-arm, or any
+other difference is still refused.
+
 Report
 ------
 ``ab_report.json``: per-arm pass rate (with tool success, predicates and judge
@@ -140,6 +158,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import sys
 import time
@@ -183,6 +202,8 @@ PROPS_SAMPLER_KEYS = (
 SERVER_SAME_KEYS = ("chat_template_sha", "sampler_sha", "n_ctx")
 #: of those, the one ``--allow-ctx-difference`` lets differ
 CTX_KEY = "n_ctx"
+#: the differences ``--record-server-diff`` lets a remote arm B run with (recorded, then reported)
+RECORDABLE_DIFFS = frozenset({"chat_template_sha", "sampler_sha"})
 
 
 def _load_sibling(name: str, file: str) -> Any:
@@ -300,17 +321,25 @@ def props_record(props: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def server_props(url: str, timeout: float) -> dict[str, Any]:
+async def server_props(url: str, timeout: float, settings: Any = None) -> dict[str, Any]:
     """``props_record`` of the server at *url*; ServerError when it has no usable
-    /props (every llama-server has one; a server without is not what this compares)."""
+    /props (every llama-server has one; a server without is not what this compares).
+    With a remote teacher's *settings*: teacher_gen's ``remote_props`` (the key is
+    enforced and ours accepted, else ServerError)."""
     import httpx
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            resp = await client.get(f"{url}/props")
-        body = resp.json() if resp.status_code == 200 else None
-    except (httpx.HTTPError, OSError, ValueError) as exc:
-        raise ServerError(f"{url}/props is unreachable ({type(exc).__name__})") from exc
+    if settings is not None and settings.remote:
+        try:
+            body = await tg.remote_props(settings, timeout)
+        except tg.EndpointError as exc:
+            raise ServerError(str(exc)) from exc
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                resp = await client.get(f"{url}/props")
+            body = resp.json() if resp.status_code == 200 else None
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            raise ServerError(f"{url}/props is unreachable ({type(exc).__name__})") from exc
     if not isinstance(body, dict) or not body.get("chat_template") or not body.get("model_path"):
         raise ServerError(f"{url}/props names no chat template or model file: the arms' servers "
                           "cannot be compared (is it llama-server?)")
@@ -550,9 +579,60 @@ def load_tasks(paths: Paths) -> list[Any]:
     return tasks
 
 
-def gen_settings(conf: dict[str, Any], paths: Paths, url: str) -> Any:
-    """teacher_gen Settings for one arm: everything from ab_settings.json, only the URL differs."""
-    return tg.Settings(
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_HOSTNAME = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
+
+
+def remote_kwargs(a: argparse.Namespace) -> dict[str, Any]:
+    """teacher_gen Settings fields for a remote teacher (``--teacher-key-file``), or {}: the same
+    rules as teacher_gen's run (another host on the tailnet, this host runs the tools, jail required)."""
+    flags = (("--teacher-host", getattr(a, "teacher_host", None)), ("--teacher-quant", getattr(a, "teacher_quant", None)),
+             ("--teacher-sha256", getattr(a, "teacher_sha256", None)), ("--tool-host", getattr(a, "tool_host", None)))
+    if not getattr(a, "teacher_key_file", None):
+        given = [f for f, v in flags if v]
+        if given or getattr(a, "record_server_diff", False):
+            raise InputError(f"{', '.join(given) or '--record-server-diff'} is for a remote teacher: give "
+                             "--teacher-key-file too")
+        return {}
+    for flag, v in flags:
+        if not v:
+            raise InputError(f"{flag} is required with --teacher-key-file")
+    host, tool = a.teacher_host.lower(), a.tool_host.lower()
+    for flag, v in (("--teacher-host", host), ("--tool-host", tool)):
+        if not _HOSTNAME.fullmatch(v):
+            raise InputError(f"{flag} {v!r} is not a host name")
+    if not _SHA256.fullmatch(a.teacher_sha256.lower()):
+        raise InputError("--teacher-sha256 must be 64 hex characters (the served GGUF)")
+    here = tg.local_hostname()
+    if tool != here:
+        raise InputError(f"--tool-host {tool} is not this host ({here}): the tools run only here")
+    if host == here:
+        raise InputError(f"--teacher-host {host} is this host: a remote teacher runs on another machine")
+    return {"teacher_key_file": Path(a.teacher_key_file).expanduser(), "teacher_host": host,
+            "teacher_quant": a.teacher_quant, "teacher_sha256": a.teacher_sha256.lower(), "tool_host": tool,
+            "jail": "require"}
+
+
+def remote_settings(conf: dict[str, Any], paths: Paths, url: str, remote: dict[str, Any]) -> Any:
+    """``gen_settings`` for a remote teacher: its key loaded, the tailnet URL checked, bwrap here."""
+    settings = gen_settings(conf, paths, url, remote)
+    try:
+        settings.teacher_key = tg.load_teacher_key(remote["teacher_key_file"])
+        jail = tg.resolve_jail(settings.jail)
+    except ValueError as exc:  # a refused key file (TeacherKeyError), no working jail (EndpointError)
+        raise InputError(str(exc)) from exc
+    if jail not in tg.REMOTE_JAILS:
+        raise InputError(f"a remote teacher's tools run only under {'/'.join(sorted(tg.REMOTE_JAILS))} here; "
+                         f"this host's jail is {jail}")
+    return settings
+
+
+def gen_settings(conf: dict[str, Any], paths: Paths, url: str, remote: dict[str, Any] | None = None) -> Any:
+    """teacher_gen Settings for one arm: everything from ab_settings.json, only the URL (and, for a
+    remote teacher, its route) differs."""
+    remote = dict(remote or {})
+    jail = remote.pop("jail", conf["jail"])
+    return tg.Settings(**remote,
         out=paths.out, name="teacher-ab", teacher_url=url, model_name=conf["model_name"],
         judge_model=conf["judge_model"], judge_seed=conf["judge_seed"], judge_max_chars=conf["judge_max_chars"],
         allow_lan=conf["allow_lan"], concurrency=conf["concurrency"], min_task_seconds=conf["min_task_seconds"],
@@ -560,7 +640,7 @@ def gen_settings(conf: dict[str, Any], paths: Paths, url: str) -> Any:
         tool_timeout=conf["tool_timeout"], task_timeout=conf["task_timeout"],
         request_timeout=conf["request_timeout"], compaction_history_tokens=conf["compaction_history_tokens"],
         sandbox_root=paths.sandbox, base_system_prompt=conf["system_prompt"], progress=False,
-        jail=conf["jail"], teacher_id=conf["teacher_id"], judge_id=conf["judge_id"],
+        jail=jail, teacher_id=conf["teacher_id"], judge_id=conf["judge_id"],
         task_source=tg.ORIGIN_TASKSET, sampling=dict(conf["sampling"]))
 
 
@@ -616,9 +696,9 @@ def cmd_select(a: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-async def _preflight(url: str, pattern: str, role: str, timeout: float) -> str:
+async def _preflight(url: str, pattern: str, role: str, timeout: float, headers: dict[str, str] | None = None) -> str:
     try:
-        served = await tg.preflight(url, timeout)
+        served = await tg.preflight(url, timeout, headers or None)
         return tg.check_model_id(served, pattern, role)
     except tg.EndpointError as exc:
         raise ServerError(str(exc)) from exc
@@ -662,15 +742,19 @@ async def _one_task(task: Any, settings: Any, conf: dict[str, Any], arm: str, wo
         shutil.rmtree(out.env.root, ignore_errors=True)
 
 
-async def run_arm(paths: Paths, conf: dict[str, Any], arm: str, url: str, until: float | None) -> dict[str, Any]:
-    settings = gen_settings(conf, paths, url)
+async def run_arm(paths: Paths, conf: dict[str, Any], arm: str, url: str, until: float | None,
+                  remote: dict[str, Any] | None = None, record_diff: bool = False) -> dict[str, Any]:
+    if record_diff and not remote:
+        raise InputError("--record-server-diff is for a remote arm (--teacher-key-file)")
+    settings = remote_settings(conf, paths, url, remote) if remote else gen_settings(conf, paths, url)
     try:
         endpoint = settings.teacher_endpoint
     except tg.EndpointError as exc:
         raise InputError(str(exc)) from exc
-    served = await _preflight(endpoint, conf["teacher_id"], "teacher", min(30.0, conf["request_timeout"]))
+    served = await _preflight(endpoint, conf["teacher_id"], "teacher", min(30.0, conf["request_timeout"]),
+                              settings.teacher_headers)
     settings.teacher_served = served
-    server = await server_props(endpoint, min(30.0, conf["request_timeout"]))
+    server = await server_props(endpoint, min(30.0, conf["request_timeout"]), settings)
     path = paths.arm(arm)
     done = {}
     for r in read_records(path):
@@ -688,11 +772,21 @@ async def run_arm(paths: Paths, conf: dict[str, Any], arm: str, url: str, until:
             raise InputError(f"arm {arm} was started on another server ({(r.get('server') or {}).get('model_file')}); "
                              f"this one serves {server['model_file']}")
     other = next((r.get("server") for r in read_records(paths.arm("B" if arm == "A" else "A"))), None)
+    diff: list[str] = []
     if other is not None:
         diff = server_differences(server, other, bool(conf.get("ctx_may_differ")))
-        if diff:
+        if diff and not (record_diff and set(diff) <= RECORDABLE_DIFFS):
             raise InputError(f"arm {arm}'s server is not like for like with the other arm's: {', '.join(diff)} "
-                             f"({server['model_file']} vs {other.get('model_file')})")
+                             f"({server['model_file']} vs {other.get('model_file')})"
+                             + ("" if record_diff else
+                                f"; a remote arm may record {', '.join(sorted(RECORDABLE_DIFFS))} differences "
+                                "(--record-server-diff)"))
+        if diff:
+            log.warning("arm %s runs on a server that differs from arm %s's in %s: recorded in every record",
+                        arm, "B" if arm == "A" else "A", ", ".join(diff))
+    elif record_diff:
+        raise InputError("--record-server-diff needs the other arm's records first (its server is the baseline)")
+    route = dict(settings.remote_meta()) if remote else {}
     tasks = [t for t in load_tasks(paths) if t.id not in done]
     queue = collections.deque(tasks)
     state = {"stop": "", "errors": 0, "ran": 0}
@@ -730,7 +824,8 @@ async def run_arm(paths: Paths, conf: dict[str, Any], arm: str, url: str, until:
             row = {"schema": RECORD_SCHEMA, "arm": arm, "label": conf["labels"][arm], "task_id": task.id,
                    "task_group": task.meta.get("task_id"), "category": task.domain, "mode": task.mode,
                    "kind": task.kind, "url": url, "served": served, "settings_sha": sha, "server": server,
-                   "sampling": dict(sorted(conf["sampling"].items())),
+                   "sampling": dict(sorted(conf["sampling"].items())), **route,
+                   **({"server_diff": diff} if record_diff else {}),
                    "finished_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"), **rec}
             _append(path, row)
             print(f"[arm {arm}] {task.id} {'ok' if rec['det_ok'] else ','.join(rec['reasons'])} "
@@ -745,8 +840,10 @@ async def run_arm(paths: Paths, conf: dict[str, Any], arm: str, url: str, until:
 def cmd_arm(a: argparse.Namespace) -> int:
     paths = Paths(a.out)
     conf = load_conf(paths)
+    remote = remote_kwargs(a)
     tg.isolate_state_dirs(paths.work)
-    res = asyncio.run(run_arm(paths, conf, a.arm, a.url, resolve_until(a.until)))
+    res = asyncio.run(run_arm(paths, conf, a.arm, a.url, resolve_until(a.until), remote,
+                              bool(getattr(a, "record_server_diff", False))))
     print(json.dumps(res))
     if res["stop"] == "consecutive_errors":
         return 3
@@ -758,19 +855,22 @@ def cmd_arm(a: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-async def run_judge(paths: Paths, conf: dict[str, Any], judge_url: str, until: float | None) -> dict[str, Any]:
+async def run_judge(paths: Paths, conf: dict[str, Any], judge_url: str, until: float | None,
+                    remote: dict[str, Any] | None = None) -> dict[str, Any]:
     import httpx
 
     from prometheus.api.turn_errors import classify_turn_error
 
-    settings = gen_settings(conf, paths, judge_url)
+    # a remote judge is the remote teacher judging itself: its key goes to its own endpoint only
+    settings = remote_settings(conf, paths, judge_url, remote) if remote else gen_settings(conf, paths, judge_url)
     settings.judge_url = judge_url
     try:
         endpoint = settings.judge_endpoint
     except tg.EndpointError as exc:
         raise InputError(str(exc)) from exc
-    served = await _preflight(endpoint, conf["judge_id"], "judge", min(30.0, conf["request_timeout"]))
-    server = await server_props(endpoint, min(30.0, conf["request_timeout"]))
+    served = await _preflight(endpoint, conf["judge_id"], "judge", min(30.0, conf["request_timeout"]),
+                              settings.teacher_headers if remote else None)
+    server = await server_props(endpoint, min(30.0, conf["request_timeout"]), settings if remote else None)
     # the plan: every trace of both arms is judged by arm B's model (the bigger quant),
     # so neither arm grades itself in its own run; IQ3 grading both is refused
     b_recs = read_records(paths.arm("B"))
@@ -843,8 +943,9 @@ async def run_judge(paths: Paths, conf: dict[str, Any], judge_url: str, until: f
 def cmd_judge(a: argparse.Namespace) -> int:
     paths = Paths(a.out)
     conf = load_conf(paths)
+    remote = remote_kwargs(a)
     tg.isolate_state_dirs(paths.work)
-    res = asyncio.run(run_judge(paths, conf, a.judge_url, resolve_until(a.until)))
+    res = asyncio.run(run_judge(paths, conf, a.judge_url, resolve_until(a.until), remote))
     print(json.dumps(res))
     if res["stop"] == "consecutive_errors":
         return 3
@@ -900,9 +1001,17 @@ def build_report(paths: Paths, conf: dict[str, Any], min_pairs: int | None = Non
         elif len(servers[arm]) > 1:
             problems.append(f"arm {arm} ran on more than one server")
     ctx_may_differ = bool(conf.get("ctx_may_differ"))
+    recorded_diff: list[str] = []
     if all(len(servers[arm]) == 1 and servers[arm][0] for arm in ARMS):
         diff = server_differences(servers["A"][0], servers["B"][0], ctx_may_differ)
-        if diff:
+        # a remote arm B that ran with --record-server-diff: every one of its records lists exactly
+        # these differences, and only recordable ones (the chat template, the sampler defaults)
+        b_lists = {json.dumps(sorted(r.get("server_diff") or []))
+                   for r in recs["B"].values() if "server_diff" in r}
+        if diff and set(diff) <= RECORDABLE_DIFFS and recs["B"] \
+                and all("server_diff" in r for r in recs["B"].values()) and b_lists == {json.dumps(sorted(diff))}:
+            recorded_diff = sorted(diff)
+        elif diff:
             problems.append(f"the arms' servers differ: {', '.join(diff)}")
     judge_ids = sorted({str(r.get("judge_served")) for r in judges.values()})
     if len(judge_ids) > 1:
@@ -975,9 +1084,13 @@ def build_report(paths: Paths, conf: dict[str, Any], min_pairs: int | None = Non
         "settings": {"sha": settings_sha(conf), "sampling": conf["sampling"], "max_tokens": conf["max_tokens"],
                      "model_name": conf["model_name"], "concurrency": conf["concurrency"],
                      "compaction_history_tokens": conf["compaction_history_tokens"],
-                     "identical_across_arms": not any(p.startswith(("the arms' request settings",
-                                                                    "the arms' servers differ")) for p in problems),
-                     "servers": {arm: servers[arm][0] if len(servers[arm]) == 1 else servers[arm] for arm in ARMS}},
+                     "identical_across_arms": not recorded_diff and not any(
+                         p.startswith(("the arms' request settings", "the arms' servers differ")) for p in problems),
+                     "servers": {arm: servers[arm][0] if len(servers[arm]) == 1 else servers[arm] for arm in ARMS},
+                     # a remote arm B's recorded differences (--record-server-diff): decided with, listed here
+                     "server_differences": recorded_diff,
+                     "arm_b_route": {k: next((r.get(k) for r in recs["B"].values() if r.get(k)), None)
+                                     for k in ("teacher_route", "teacher_host", "teacher_quant", "teacher_sha256")}},
         "judge": {"served": judge_ids[0] if len(judge_ids) == 1 else judge_ids, "records": len(judges),
                   "judged": judged_n, "temperature": 0, "seed": conf["judge_seed"],
                   "model_file": [Path(f).name for f in judge_files],
@@ -1048,6 +1161,9 @@ def summary_lines(rep: dict[str, Any]) -> list[str]:
         ctx_note = (f"; ctx {ctx['n_ctx']['A']}/{ctx['n_ctx']['B']}: {len(ctx['bound_pairs'])} pairs needed more than "
                     f"{ctx['limit']}" + (f" (without them: {ctx['verdict_without_bound']})"
                                           if ctx.get("verdict_without_bound") else ""))
+    recorded = (rep.get("settings") or {}).get("server_differences") or []
+    if recorded:
+        head += f" (servers differ: {', '.join(recorded)}; recorded)"
     return [
         head,
         f"Pass: {rate(A)} vs {rate(B)}",
@@ -1187,6 +1303,15 @@ def _select_args(p: argparse.ArgumentParser) -> None:
                         "partly offloaded with less); the report lists the pairs that needed more than the smaller")
 
 
+def _remote_args(p: argparse.ArgumentParser) -> None:
+    g = p.add_argument_group("a remote teacher on the tailnet (teacher_gen.py's flags; tools still run here)")
+    g.add_argument("--teacher-key-file", help="0600 file with the server's API key (Authorization header only)")
+    g.add_argument("--teacher-host", help="the serving host (not this one)")
+    g.add_argument("--teacher-quant", help="the served quant, e.g. UD-Q4_K_XL")
+    g.add_argument("--teacher-sha256", help="sha256 of the served GGUF")
+    g.add_argument("--tool-host", help="this host's name: the tools run here only")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1200,10 +1325,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ar.add_argument("--url", required=True)
     ar.add_argument("--until", help="HH:MM (local, next occurrence; refused when more than 12 h ahead) or ISO "
                                     "time: a hard end")
+    _remote_args(ar)
+    ar.add_argument("--record-server-diff", action="store_true",
+                    help="a remote arm whose server differs from the other arm's only in the chat template and/or "
+                         "sampler defaults runs, recording the differences (the report lists them)")
     j = sub.add_parser("judge", help="judge every recorded trace of both arms on one endpoint")
     j.add_argument("--out", required=True)
     j.add_argument("--judge-url", required=True)
     j.add_argument("--until")
+    _remote_args(j)
     r = sub.add_parser("report", help="pass rates, the paired interval and the decision")
     r.add_argument("--out", required=True)
     r.add_argument("--min-pairs", type=int, help="pairs needed for a decision (default: every selected task)")

@@ -5,6 +5,8 @@
     gen_runner.py harvest  [--execute]                       # new verified teacher rows -> the pool
     gen_runner.py status                                     # read-only
     gen_runner.py stage-code --ssh TARGET [--execute]        # (repo machine) HEAD export -> GEN_CODE
+    gen_runner.py remote   [--execute] [--until ISO]          # the 4090-served teacher: unit teacher-remote-gen
+    gen_runner.py remote-setup [--execute]                   # pull the 4090's key, push the base chat template
 
 ``run`` is a dry run unless ``--execute``: the read-only checks run and the plan (every command) is printed.
 Runs ON the 3090 Ti host from ``~/distill/window/`` (``gen_runner.sh`` beside ``mini_window.py``), stdlib
@@ -82,6 +84,34 @@ guard's, one log per child), the run directories, ``<pool>``. A notify (<= 5 lin
 
 Exit: 0 finished (until, or nothing left to do), 1 a branch failed, 2 refused by a check (nothing started)
 or another runner holds the lock, 3 stopped by NO-SWAPS / STOP / the window closing, 143 a signal.
+
+``remote``: generation against the teacher the 4090 serves on the tailnet (operator 2026-10-31 ~11:20 ET,
+"option 3"; ``tower/serve_teacher.sh``), run as the user unit ``teacher-remote-gen.service``
+(``gen_runner.remote.service`` beside this file). It is NOT a ``distill-*`` unit and touches neither this
+host's GPU nor its window: the 3090 Ti's own window (Saluki's port, the probe guard, the nightly evals, the
+window end at Sun 18:00 and every business restore) leaves it running, and it stops at its own ``--until``
+(``GEN_REMOTE_UNTIL``, Mon 2026-11-02 10:30 UTC = 05:30 EST, before the 4090's dead-man at 06:00 EST).
+One ``teacher_gen.py run --teacher local`` with the remote flags (``--teacher-url GEN_REMOTE_URL
+--teacher-key-file GEN_REMOTE_KEY_FILE --teacher-host --teacher-quant --teacher-sha256 --tool-host <this
+host> --jail require``): every tool command runs HERE under bwrap; the key file's path is the only part of
+it in any argv or log. Its own run directory (``<runs>/GEN_REMOTE_NAME``), sandbox root (``-remote``),
+code export (``GEN_REMOTE_CODE``, so a restage for the local run never swaps code under it), lock
+(``state/remote.lock``) and taskset (``GEN_REMOTE_TASKS``, real-v3-excl, with the same excluded-session
+check), skipping every task the local run already finished (``--skip-done-in <runs>/local-*/*.tasks.jsonl``,
+by id or prompt hash). Concurrency is the server's slots (teacher_gen reads ``/props``). While the 4090
+trains (its teacher stopped) teacher_gen PAUSES by itself and resumes when the server is back; a
+teacher_gen that exits because the server was not up at its start (exit 3), or came back changed (exit 8),
+is started again after ``GEN_REMOTE_WAIT_S`` (doubling to ``GEN_REMOTE_WAIT_MAX_S``); a crash (exit 6, or 1
+without a report) at most ``GEN_REMOTE_CRASH_RESTARTS`` times. Done when teacher_gen reports ``no_tasks``
+or ``until``. Stops: SIGTERM, ``<runs>/STOP`` or ``<runs>/STOP-remote``, ``--until``. Harvest as above
+(the remote rows are ``qwen38-27b-gym`` rows with ``teacher_host``/``teacher_quant``/``teacher_sha256``).
+Notify at the start and the end.
+
+``remote-setup`` (this host; dry run unless ``--execute``): the key the 4090 generated
+(``serve_teacher.sh keygen``) is PULLED over ssh (``GEN_REMOTE_SSH``: this host may log in there, not the
+other way round) into ``GEN_REMOTE_KEY_FILE`` (0600, its directory 0700): the key travels on ssh's stdout,
+never in an argv or a log (a sha256 prefix is printed as its fingerprint). Then the base chat template
+(``GEN_REMOTE_TEMPLATE_SRC``, sha256-pinned) is pushed on ssh's stdin to the path serve_teacher.sh reads.
 """
 
 from __future__ import annotations
@@ -89,13 +119,16 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -165,7 +198,36 @@ GEN_DEFAULTS: dict[str, str] = {
     "GEN_MAX_HOURS": "40",                            # refuse an --until further out than this
     "GEN_MIN_RUN_S": "600",                           # refuse an --until closer than this
     "GEN_MIN_START_S": "180",                         # no child (re)started closer to --until than this
+    # ``remote``: the 4090's teacher on the tailnet (module docstring)
+    "GEN_REMOTE_CODE": "~/distill/phase2b/code-remote",
+    # host-specific, set in window.conf (never committed): the 4090's tailnet name, its URL and the ssh target
+    # this host reaches it with (user@host); empty refuses the run
+    "GEN_REMOTE_URL": "",                             # http://<4090 tailnet name>:18094
+    "GEN_REMOTE_HOST": "",                            # <4090 host name>, recorded as teacher_host
+    "GEN_REMOTE_SSH": "",                             # <user>@<4090 host> (remote-setup only)
+    "GEN_REMOTE_KEY_FILE": "~/distill/secrets/teacher-4090.key",
+    "GEN_REMOTE_KEY_SRC": "distill/secrets/teacher-serve.key",           # on the 4090, relative to its home
+    "GEN_REMOTE_TEMPLATE_SRC": "~/distill/models/teacher/provenance/base-chat_template.jinja",
+    "GEN_REMOTE_TEMPLATE_DEST": "distill/teacher-serve/chat_template.jinja",  # on the 4090, relative to its home
+    "GEN_REMOTE_QUANT": "UD-Q4_K_XL",
+    "GEN_REMOTE_SHA256": "bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372",
+    "GEN_REMOTE_TASKS": "~/distill/phase2b/tasksets/real-v3-excl.jsonl",
+    "GEN_REMOTE_NAME": "",                            # empty: remote-<GEN_REMOTE_HOST>-<quant>
+    "GEN_REMOTE_SKIP_DONE_IN": "",                    # empty: <runs>/local-*/*.tasks.jsonl; "off": none
+    "GEN_REMOTE_UNTIL": "2026-11-02T10:30:00+00:00",
+    "GEN_REMOTE_CONCURRENCY": "",                     # empty: the server's slots
+    "GEN_REMOTE_MAX_HOURS": "72",
+    "GEN_REMOTE_WAIT_S": "60",
+    "GEN_REMOTE_WAIT_MAX_S": "600",
+    "GEN_REMOTE_CRASH_RESTARTS": "5",
 }
+#: the base model's chat_template.jinja (Qwen/Qwen3.8-27B), the one the local IQ3 teacher embeds byte for byte
+#: and serve_teacher.sh passes the 4090's teacher (its UD-Q4_K_XL file embeds another)
+REMOTE_TEMPLATE_SHA256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+#: teacher_gen.py exits the remote runner reads (teacher_gen's module docstring)
+TG_EXIT_DONE, TG_EXIT_NOTHING, TG_EXIT_USAGE, TG_EXIT_UNREACHABLE = 0, 1, 2, 3
+TG_EXIT_TEACHER_CHANGED = 8
+REMOTE_KEY_MIN_LEN = 32
 SCHEMA = "distill-gen-runner/1"
 POOL_SCHEMA = "distill-gen-pool/1"
 FINAL = ("done", "failed", "stopped", "off")
@@ -1154,6 +1216,373 @@ class Gen:
         return res
 
 
+# ── remote: the 4090's teacher on the tailnet ────────────────────────────────
+
+
+def this_host() -> str:
+    """This host's short name, lower case (teacher_gen.local_hostname)."""
+    return socket.gethostname().split(".")[0].lower()
+
+
+def key_file_problem(path: Path) -> str | None:
+    """Why *path* is no usable key file (never reading the key): missing, a symlink, not a regular file,
+    not ours, or readable by group/other."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return f"no key file {path} (gen_runner.py remote-setup --execute)"
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        return f"{path} is not a regular file"
+    if st.st_uid != os.geteuid():
+        return f"{path} is not owned by this user"
+    if st.st_mode & 0o077:
+        return f"{path} has mode {st.st_mode & 0o777:o}; a key file must be 0600"
+    return None
+
+
+class RemoteGen(Gen):
+    """``remote``: one teacher_gen against the 4090's teacher, supervised (module docstring)."""
+
+    def __init__(self, conf: dict[str, str], execute: bool, **kw: Any) -> None:
+        conf = dict(conf)
+        home = os.path.expanduser("~")
+        for k in ("GEN_REMOTE_CODE", "GEN_REMOTE_KEY_FILE", "GEN_REMOTE_TEMPLATE_SRC", "GEN_REMOTE_TASKS"):
+            if conf[k].startswith("~/"):
+                conf[k] = home + conf[k][1:]
+        conf["GEN_CODE"] = conf["GEN_REMOTE_CODE"]
+        conf["GEN_TASKS"] = conf["GEN_REMOTE_TASKS"]
+        super().__init__(conf, execute, **kw)
+        self.child: Child | None = None
+        self.state = "pending"
+        self.detail = ""
+        self.runs_started = 0
+        self.crashes = 0
+        self.waits = 0
+        self.resume_at = 0.0
+        self.rcs: list[int | None] = []
+        self.remote_stop = self.runs / "STOP-remote"
+        self.lock_name = "remote.lock"
+
+    def out_dir(self) -> Path:
+        name = self.c["GEN_REMOTE_NAME"].strip() or f"remote-{self.c['GEN_REMOTE_HOST']}-{self.c['GEN_REMOTE_QUANT']}"
+        return self.runs / slug(name.lower())
+
+    def skip_glob(self) -> str | None:
+        v = self.c["GEN_REMOTE_SKIP_DONE_IN"].strip()
+        if v.lower() == "off":
+            return None
+        return v or str(self.runs / "local-*" / "*.tasks.jsonl")
+
+    def resolve_until(self, text: str | None) -> float:
+        now = self.now()
+        raw = (text or self.c["GEN_REMOTE_UNTIL"]).strip()
+        if re.fullmatch(r"\d{1,2}:\d{2}", raw):
+            h, m = (int(x) for x in raw.split(":"))
+            at = datetime.fromtimestamp(now, self.tz).replace(hour=h, minute=m, second=0, microsecond=0)
+            if at.timestamp() <= now:
+                at += timedelta(days=1)  # ZoneInfo arithmetic: wall time, the offset of that day (DST)
+            t = at.timestamp()
+        else:
+            dt = datetime.fromisoformat(raw)
+            t = (dt if dt.tzinfo else dt.replace(tzinfo=self.tz)).timestamp()
+        if t <= now + float(self.c["GEN_MIN_RUN_S"]):
+            raise Skip(f"--until {self.iso(t)} is less than {float(self.c['GEN_MIN_RUN_S']):.0f} s away")
+        if t > now + 3600 * float(self.c["GEN_REMOTE_MAX_HOURS"]):
+            raise Skip(f"--until {self.iso(t)} is more than {self.c['GEN_REMOTE_MAX_HOURS']} h away")
+        return t
+
+    def remote_argv(self, until: float) -> list[str]:
+        c = self.c
+        a = (shlex.split(c["GEN_NICE_CMD"]) + [c["GEN_PY"], str(self.distill / "teacher_gen.py"), "run",
+                                               "--teacher", "local", "--out", str(self.out_dir()),
+                                               "--teacher-url", c["GEN_REMOTE_URL"],
+                                               "--teacher-key-file", c["GEN_REMOTE_KEY_FILE"],
+                                               "--teacher-host", c["GEN_REMOTE_HOST"],
+                                               "--teacher-quant", c["GEN_REMOTE_QUANT"],
+                                               "--teacher-sha256", c["GEN_REMOTE_SHA256"],
+                                               "--tool-host", this_host(), "--jail", "require",
+                                               "--sandbox-root", self.sandbox_root("remote")])
+        if c["GEN_REMOTE_CONCURRENCY"].strip():
+            a += ["--concurrency", c["GEN_REMOTE_CONCURRENCY"].strip()]
+        glob_ = self.skip_glob()
+        if glob_:
+            a += ["--skip-done-in", glob_]
+        return a + self.common_args(until)
+
+    def preflight(self, until: float) -> list[str]:
+        c = self.c
+        problems: list[str] = []
+        for key in ("GEN_REMOTE_URL", "GEN_REMOTE_HOST"):
+            if not c[key].strip():
+                problems.append(f"{key} is not set (window.conf): the remote teacher's tailnet name")
+        for f in (self.gen_stop, self.remote_stop):
+            if f.exists():
+                problems.append(f"{f} is present (remove it to allow generation)")
+        need = [self.code / "COMMIT"] + [self.distill / n for n in ("teacher_gen.py", "taskset_gen.py",
+                                                                    "artifact_policy.py")]
+        missing = [str(p) for p in need if not p.exists()]
+        if missing:
+            problems.append(f"code not staged (gen_runner.py stage-code --dest {c['GEN_REMOTE_CODE']}): missing "
+                            + ", ".join(missing))
+        else:
+            text = (self.distill / "teacher_gen.py").read_text(encoding="utf-8", errors="replace")
+            if "--teacher-key-file" not in text or "--teacher-sha256" not in text or "RemoteGate" not in text:
+                problems.append(f"the staged teacher_gen.py in {self.code} has no remote mode with pauses: restage")
+            self.log(f"code {(self.code / 'COMMIT').read_text().strip()[:12]} in {self.code}")
+        if not os.access(c["GEN_PY"], os.X_OK):
+            problems.append(f"GEN_PY {c['GEN_PY']} is not executable")
+        why = key_file_problem(Path(c["GEN_REMOTE_KEY_FILE"]))
+        if why:
+            problems.append(why)
+        if not re.fullmatch(r"[0-9a-f]{64}", c["GEN_REMOTE_SHA256"]):
+            problems.append("GEN_REMOTE_SHA256 is not 64 hex characters")
+        if this_host() == c["GEN_REMOTE_HOST"].lower():
+            problems.append(f"GEN_REMOTE_HOST {c['GEN_REMOTE_HOST']} is this host: the teacher runs elsewhere")
+        if not shutil.which("bwrap"):
+            problems.append("no bwrap on this host: a remote teacher's tools run only inside it")
+        for key in ("GEN_TASKS", "GEN_INJECTION_MANIFEST", "GEN_PACK"):
+            if c[key] and not Path(c[key]).is_file():
+                problems.append(f"{key} {c[key]} missing")
+        if not missing and Path(c["GEN_TASKS"]).is_file():
+            problem = self.exclusion_problem()
+            if problem:
+                problems.append(problem)
+        for p in c["GEN_EVAL_TOOLS"].split():
+            if not Path(p).is_file():
+                problems.append(f"GEN_EVAL_TOOLS {p} missing")
+        if not os.access(c["NOTIFY"], os.X_OK):
+            problems.append(f"notify command {c['NOTIFY']} is not executable")
+        return problems
+
+    def print_plan(self, until: float) -> None:
+        self.log(f"plan: remote teacher {self.c['GEN_REMOTE_HOST']} ({self.c['GEN_REMOTE_QUANT']}) at "
+                 f"{self.c['GEN_REMOTE_URL']} until {self.iso(until)}; tools here ({this_host()}, bwrap)")
+        self.log("plan: " + shlex.join(self.remote_argv(until)))
+
+    def save(self) -> None:
+        if not self.execute:
+            return
+        p = self.progress
+        p.update(updated_at=self.iso(self.now()), notes=self.notes[-30:], harvested_this_run=self.harvested,
+                 remote={"state": self.state, "detail": self.detail, "runs": self.runs_started,
+                         "crashes": self.crashes, "waits": self.waits, "exits": self.rcs[-20:],
+                         "out": str(self.out_dir()), "teacher_host": self.c["GEN_REMOTE_HOST"]})
+        tmp = self.state_dir / f".remote-progress.{os.getpid()}"
+        tmp.write_text(json.dumps(p, indent=1) + "\n")
+        os.replace(tmp, self.state_dir / "remote-progress.json")
+
+    def report_stop(self) -> str:
+        """The stop teacher_gen's last report names (\"\" when it wrote none during this child's run)."""
+        name = LOCAL_NAME
+        if not self.wrote_report(self.child, self.out_dir(), name):
+            return ""
+        try:
+            rep = json.loads((self.out_dir() / f"{name}.report.json").read_text())
+        except (OSError, ValueError):
+            return ""
+        return str(rep.get("stop") or "")
+
+    def wait_after(self, why: str) -> None:
+        self.waits += 1
+        delay = min(float(self.c["GEN_REMOTE_WAIT_MAX_S"]),
+                    float(self.c["GEN_REMOTE_WAIT_S"]) * 2 ** min(self.waits - 1, 10))
+        self.resume_at = self.now() + delay
+        self.state, self.detail = "waiting", f"{why}; next try in {delay:.0f} s"
+        self.log(f"remote: {self.detail}")
+
+    def tick(self, until: float) -> None:
+        if self.state in FINAL:
+            return
+        ch = self.child
+        if ch is not None and ch.running:
+            return
+        if ch is not None and ch.proc is not None:
+            rc = ch.poll()
+            self.rcs.append(rc)
+            stop = self.report_stop()
+            self.child = None
+            self.log(f"teacher_gen exited {rc} (report stop: {stop or 'none'})")
+            if stop in ("no_tasks", "until", "max_tasks", "target_rows") and rc in (TG_EXIT_DONE, TG_EXIT_NOTHING):
+                self.state, self.detail = "done", f"teacher_gen: {stop}"
+                return
+            if rc == TG_EXIT_USAGE:
+                self.state, self.detail = "failed", "teacher_gen refused its arguments (exit 2; see its log)"
+                return
+            if rc in (TG_EXIT_UNREACHABLE, TG_EXIT_TEACHER_CHANGED):
+                self.wait_after("the remote teacher is not up" if rc == TG_EXIT_UNREACHABLE
+                                else "the remote teacher came back changed")
+                self.save()
+                return
+            if rc == TG_EXIT_CRASH or (rc == TG_EXIT_NOTHING and not stop) or rc is None or rc < 0:
+                self.crashes += 1
+                if self.crashes > int(self.c["GEN_REMOTE_CRASH_RESTARTS"]):
+                    self.state, self.detail = "failed", f"teacher_gen crashed {self.crashes} times (last exit {rc})"
+                    return
+                self.wait_after(f"teacher_gen crashed (exit {rc})")
+                self.save()
+                return
+            # any other end (rows kept, the run ended for another reason): start again, it resumes
+            self.wait_after(f"teacher_gen ended (exit {rc}, {stop or 'no report'})")
+            self.save()
+            return
+        if self.now() < self.resume_at:
+            return
+        if until - self.now() < float(self.c["GEN_MIN_START_S"]):
+            self.state, self.detail = "done", "too close to --until to start again"
+            return
+        self.runs_started += 1
+        self.state, self.detail = "running", ""
+        self.child = self.start_child("remote", self.remote_argv(until), self.py_env())
+        self.save()
+
+    def stop_reason(self, until: float) -> str | None:
+        if self.stop:
+            return self.stop
+        if self.gen_stop.exists() or self.remote_stop.exists():
+            return "gen-stop"
+        if self.now() >= until:
+            return "until"
+        return None
+
+    def run(self, until: float) -> int:
+        self.progress.update(state="running", until=self.iso(until), teacher=self.c["GEN_REMOTE_HOST"],
+                             code=(self.code / "COMMIT").read_text().strip()[:12])
+        self.save()
+        self.notify([f"remote gen started: teacher {self.c['GEN_REMOTE_HOST']} {self.c['GEN_REMOTE_QUANT']} over the "
+                     f"tailnet, tools on {this_host()} (bwrap), until {self.iso(until)[:16]}"])
+        harvest_every = 60 * float(self.c["GEN_HARVEST_EVERY_MIN"])
+        next_harvest = time.monotonic() + harvest_every
+        reason: str | None = None
+        try:
+            while True:
+                reason = self.stop_reason(until)
+                if reason:
+                    break
+                self.tick(until)
+                if self.state in FINAL:
+                    reason = "nothing left to do" if self.state == "done" else "failed"
+                    break
+                if time.monotonic() >= next_harvest:
+                    self.harvest_now()
+                    next_harvest = time.monotonic() + harvest_every
+                self.sleep(float(self.c["GEN_POLL_S"]))
+        finally:
+            reason = reason or self.stop or "error"
+            self.shutdown(reason)
+        if reason == "sigterm" or reason.startswith("signal"):
+            return 143
+        if reason == "gen-stop":
+            return 3
+        return 1 if reason == "failed" else 0
+
+    def shutdown(self, reason: str) -> None:
+        self.log(f"stopping ({reason})")
+        if self.child is not None and self.child.running:
+            self.stop_child(self.child, reason)
+        if self.state not in FINAL:
+            self.state = "stopped"
+        added = self.harvest_now()
+        self.progress.update(state="failed" if reason == "failed" else "finished", stop_reason=reason,
+                             ended_at=self.iso(self.now()))
+        self.save()
+        totals = ", ".join(f"{k} {v}" for k, v in sorted((added or {}).get("pool_rows", {}).items())) or "empty"
+        new = ", ".join(f"{k} +{v}" for k, v in sorted(self.harvested.items())) or "+0"
+        self.notify([
+            f"remote gen {self.state} ({reason}); teacher {self.c['GEN_REMOTE_HOST']} {self.c['GEN_REMOTE_QUANT']}",
+            f"teacher_gen runs {self.runs_started}, waits {self.waits}, crashes {self.crashes}; {self.detail or '-'}"[:300],
+            f"harvested this run: {new}; pool: {totals}"[:300],
+        ])
+
+
+def cmd_remote(g: RemoteGen, until_arg: str | None) -> int:
+    until = g.resolve_until(until_arg)
+    if not g.execute:
+        problems = g.preflight(until)
+        g.print_plan(until)
+        if problems:
+            raise Skip("; ".join(problems))
+        g.log("dry run: nothing started; a real run (--execute) starts the plan above")
+        return 0
+    lock = os.open(g.state_dir / g.lock_name, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise Skip("another remote runner holds the lock") from None
+        (g.state_dir / "remote-runner.pid").write_text(f"{os.getpid()}\n")
+        problems = g.preflight(until)
+        g.print_plan(until)
+        if problems:
+            raise Skip("; ".join(problems))
+        return g.run(until)
+    finally:
+        os.close(lock)
+
+
+def _ssh(target: str, remote_cmd: str) -> list[str]:
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target, remote_cmd]
+
+
+def cmd_remote_setup(c: dict[str, str], execute: bool, out: Callable[[str], None] = print,
+                     run: Callable[..., Any] = subprocess.run) -> int:
+    """Pull the 4090's key into GEN_REMOTE_KEY_FILE (0600) and push the pinned base chat template there."""
+    home = os.path.expanduser("~")
+    key_dest = Path(c["GEN_REMOTE_KEY_FILE"].replace("~", home, 1))
+    tmpl = Path(c["GEN_REMOTE_TEMPLATE_SRC"].replace("~", home, 1))
+    src, dest = c["GEN_REMOTE_KEY_SRC"], c["GEN_REMOTE_TEMPLATE_DEST"]
+    if not c.get("GEN_REMOTE_SSH", "").strip():
+        out("remote-setup: GEN_REMOTE_SSH (user@host of the 4090) is not set in window.conf")
+        return 2
+    for rel in (src, dest):
+        if not re.fullmatch(r"[A-Za-z0-9_./-]+", rel) or rel.startswith("/") or ".." in rel.split("/"):
+            out(f"remote-setup: {rel!r}: a plain path relative to the remote home is required")
+            return 2
+    pull = _ssh(c["GEN_REMOTE_SSH"], f"cat -- {shlex.quote(src)}")
+    push_dir = os.path.dirname(dest) or "."
+    push = _ssh(c["GEN_REMOTE_SSH"], f"umask 077; mkdir -p {shlex.quote(push_dir)} && "
+                                     f"cat > {shlex.quote(dest)}.incoming && mv -f {shlex.quote(dest)}.incoming "
+                                     f"{shlex.quote(dest)}")
+    out(("" if execute else "[dry run] ") + f"{shlex.join(pull)} > {key_dest} (0600; the key is never shown)")
+    out(("" if execute else "[dry run] ") + f"{shlex.join(push)} < {tmpl}")
+    if not execute:
+        return 0
+    try:
+        data = tmpl.read_bytes()
+    except OSError as e:
+        out(f"remote-setup: cannot read {tmpl}: {e.strerror}")
+        return 1
+    if hashlib.sha256(data).hexdigest() != REMOTE_TEMPLATE_SHA256:
+        out(f"remote-setup: {tmpl} is not the pinned base template (sha256 {REMOTE_TEMPLATE_SHA256[:12]}...)")
+        return 1
+    cp = run(pull, capture_output=True, timeout=60)
+    raw = cp.stdout if isinstance(cp.stdout, bytes) else (cp.stdout or "").encode()
+    key = next((ln.strip() for ln in raw.decode("ascii", "replace").splitlines()
+                if ln.strip() and not ln.strip().startswith("#")), "")
+    raw = b""
+    if cp.returncode != 0 or len(key) < REMOTE_KEY_MIN_LEN or not all(33 <= ord(ch) < 127 for ch in key):
+        out(f"remote-setup: no usable key from {c['GEN_REMOTE_SSH']}:{src} (ssh exit {cp.returncode}); run "
+            "serve_teacher.sh keygen there first")
+        return 1
+    key_dest.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(key_dest.parent, 0o700)
+    fd, tmp = tempfile.mkstemp(dir=key_dest.parent, prefix=".teacher-key.")
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, (key + "\n").encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, key_dest)
+    out(f"remote-setup: key in {key_dest} (0600; fingerprint {hashlib.sha256((key + chr(10)).encode()).hexdigest()[:12]})")
+    key = ""
+    cp = run(push, input=data, capture_output=True, timeout=60)
+    if cp.returncode != 0:
+        out(f"remote-setup: pushing the chat template failed (ssh exit {cp.returncode})")
+        return 1
+    out(f"remote-setup: base chat template pushed to {c['GEN_REMOTE_SSH']}:~/{dest}")
+    return 0
+
+
 # ── harvest ──────────────────────────────────────────────────────────────────
 
 
@@ -1482,6 +1911,11 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] | None = N
     h = sub.add_parser("harvest")
     h.add_argument("--execute", action="store_true")
     sub.add_parser("status")
+    rr = sub.add_parser("remote", help="generation against the 4090's teacher on the tailnet (tools here)")
+    rr.add_argument("--execute", action="store_true")
+    rr.add_argument("--until", help="ISO (default GEN_REMOTE_UNTIL) or HH:MM ET (next occurrence)")
+    rs = sub.add_parser("remote-setup", help="pull the 4090's key (0600), push the base chat template")
+    rs.add_argument("--execute", action="store_true")
     st = sub.add_parser("stage-code", help="(repo machine) HEAD export to the host's GEN_CODE")
     st.add_argument("--ssh", required=True)
     st.add_argument("--dest", default="distill/phase2b/code-head", help="on the host, relative to its home")
@@ -1494,14 +1928,17 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] | None = N
         return cmd_stage_code(args)
     conf = load(Path(args.conf))
     execute = bool(getattr(args, "execute", False))
-    g = Gen(conf, execute, out=out, clock=clock, env=env)
+    if args.cmd == "remote-setup":
+        return cmd_remote_setup(conf, execute, out=out or print)
+    g = (RemoteGen if args.cmd == "remote" else Gen)(conf, execute, out=out, clock=clock, env=env)
     if args.cmd == "status":
         return cmd_status(g)
     if execute:
         for d in (g.runs, g.state_dir, g.log_dir):
             d.mkdir(parents=True, exist_ok=True)
             os.chmod(d, 0o700)
-        g.log_file = g.log_dir / f"gen-{datetime.fromtimestamp(g.now(), g.tz).strftime('%F')}.log"
+        g.log_file = g.log_dir / (f"{'remote' if args.cmd == 'remote' else 'gen'}-"
+                                  f"{datetime.fromtimestamp(g.now(), g.tz).strftime('%F')}.log")
         g.log(f"start pid {os.getpid()} ({args.cmd})")
     else:
         g.log("dry run: read-only checks run, every action is printed instead (pass --execute)")
@@ -1521,11 +1958,13 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] | None = N
         for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(s, on_signal)
     try:
+        if isinstance(g, RemoteGen):
+            return cmd_remote(g, args.until)
         return cmd_run(g, args.until)
     except Skip as e:
         g.log(f"SKIP: {e}")
         if execute:
-            g.notify([f"mini gen refused (nothing started): {e}"[:600]])
+            g.notify([f"{'remote' if isinstance(g, RemoteGen) else 'mini'} gen refused (nothing started): {e}"[:600]])
         return 2
     finally:
         g.log("end")

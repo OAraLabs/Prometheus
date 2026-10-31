@@ -166,8 +166,12 @@ class LlamaCppProvider(ModelProvider):
         timeout: float = 120.0,
         grammar: str | None = None,
         suppress_thinking: bool = True,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        # Extra request headers for every call to this server (an Authorization
+        # header for a llama-server started with --api-key-file). Never logged.
+        self._headers: dict[str, str] | None = dict(headers) if headers else None
         self._timeout = timeout
         self._grammar = grammar
         # When True (the default), every completion sends BOTH
@@ -257,7 +261,7 @@ class LlamaCppProvider(ModelProvider):
             payload["stream"] = False
             payload.pop("stream_options", None)
             payload.pop("grammar", None)
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, headers=self._headers) as client:
                 resp = await client.post(
                     f"{self._base_url}/v1/chat/completions", json=payload
                 )
@@ -297,7 +301,7 @@ class LlamaCppProvider(ModelProvider):
         """
         url = f"{self._base_url}/props"
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=self._headers) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 props = resp.json()
@@ -356,7 +360,7 @@ class LlamaCppProvider(ModelProvider):
         """
         url = f"{self._base_url}/props"
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=self._headers) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 props = resp.json()
@@ -428,7 +432,7 @@ class LlamaCppProvider(ModelProvider):
         """
         url = f"{self._base_url}/props"
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=self._headers) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 props = resp.json()
@@ -476,7 +480,7 @@ class LlamaCppProvider(ModelProvider):
 
         url = f"{self._base_url}/props"
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=self._headers) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 props = resp.json()
@@ -510,7 +514,7 @@ class LlamaCppProvider(ModelProvider):
         """
         url = f"{self._base_url}/v1/models"
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=self._headers) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 body = resp.json()
@@ -853,7 +857,7 @@ class LlamaCppProvider(ModelProvider):
         cache_write: int | None = None
         served_model: str | None = None
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with httpx.AsyncClient(timeout=self._timeout, headers=self._headers) as client:
             async with client.stream("POST", url, json=payload) as response:
                 if response.status_code >= 400:
                     await response.aread()
