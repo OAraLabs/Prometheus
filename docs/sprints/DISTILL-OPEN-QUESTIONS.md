@@ -104,3 +104,9 @@ none holds teacher data.
   - **Training** (the 9B smoke test, then the first full 9B run once the dataset gate passes) gets the GPU exclusively in this window. Business downtime until Mon 06:00 is accepted when needed.
   - A dead-man restore is armed for Mon 06:00 ET, the business server is restored, and the tunnel is verified. Telegram goes out when the business service goes down and when it is back.
   - Finding: the business server runs a single slot (`--parallel 1`, 32K context), so sharing it as it stands would queue business requests. For the window it runs in a multi-slot shape that keeps 32K per slot, if VRAM allows. Generation uses at most slots − 1, and a latency probe pauses generation if business requests slow down. The original shape is restored at window end.
+- **Operator answer, 2026-10-31 ~11:20 ET (replaces the ~11:10 answer):**
+  - **4090:** continuous until Mon 06:00 ET. Business downtime is fully acceptable until then: "Don't hold back for it." Use the 4090 for whatever moves us fastest: a dedicated teacher (option 3: the 4090 serves the 27B, tools sandboxed on the 3090 Ti host) and exclusive-GPU training (9B smoke test, then the first full 9B run once the dataset gate passes). The dead-man restore is at Mon 06:00 ET (EST); restore the business server, verify the tunnel, and Telegram on down/up. The shared-shape plan is dropped.
+  - **Coding cap:** the operator's real use is mostly coding, so a coding-heavy model is fine.
+    1. Log and Telegram the train-set size at coding caps of 35/50/60/70%, plus the unjudged Max count and how it's handled until the Nov 16 reset.
+    2. Raise the coding cap to the lowest level that reaches train ≥ 3,500 (max 70%), keeping the leakage, quality and chat-mode gates.
+  - **Size gate:** 3,500 for this FIRST full 9B run only; keep growing toward 5,000+ for later runs. A more general daily-use model will be trained separately later.
