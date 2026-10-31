@@ -135,3 +135,5 @@ Append-only, times in ET.
     - The base-9B baseline is Unsloth's mixed Q4_K_M while the student uses standard Q4_K_M + imatrix. Plan: also quantize and score the official base with the same recipe, for a like-for-like comparison.
     - build.py spot-check crashes on Unicode line separators (17 v4 rows), a follow-up.
     - The 4090's own llama.cpp tools other than llama-server are stale; working pinned builds are in ~/distill/phase6-rehearsal.
+- 2026-10-31 18:28 — JSONL readers now split only on newlines (049e047): build.py spot-check and verdicts, teacher_gen resume and skip-keys, gen_runner ledger, teacher_ab, quantize_smoke. Distill suite 1,515 passed.
+- 2026-10-31 18:28 — v4b-r1-c70: 4,483 train / 138 val; all gates except the spot check PASS (the spot check passed separately in the Phase 6 rehearsal); check-build ok. 990 tool-success train rows remain, 721 of them in calibrated categories, so round 2 is judging coding 715 + daemon 6 (424 done).
