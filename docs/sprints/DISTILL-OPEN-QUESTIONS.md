@@ -110,3 +110,10 @@ none holds teacher data.
     1. Log and Telegram the train-set size at coding caps of 35/50/60/70%, plus the unjudged Max count and how it's handled until the Nov 16 reset.
     2. Raise the coding cap to the lowest level that reaches train ≥ 3,500 (max 70%), keeping the leakage, quality and chat-mode gates.
   - **Size gate:** 3,500 for this FIRST full 9B run only; keep growing toward 5,000+ for later runs. A more general daily-use model will be trained separately later.
+- **Operator answer, Sat 2026-10-31 ~12:10 ET: smoke gate, local judge, full run.**
+  1. **Smoke gate:** the per-step first-10/last-10 comparison is too noisy at 50 steps. Gate instead on (a) held-out val loss decreasing and (b) loss on a FIXED probe batch, measured before vs after. Also verify the train data is shuffled (not ordered by category or length), then rerun the smoke on the 4090 with the fixed gate.
+  2. **Local judge, before the full run:** the 4090 serves the local 27B as a judge for the ~1,895 unjudged Max rows in the v4 train set.
+     - First calibrate it against the 4,353 Max-judged rows.
+     - Use it only if agreement with Max is ≥85%, and then drop the rows it fails. Report agreement and rows dropped.
+     - If agreement is below 85%, train on v4 as-is and note it.
+  3. **Full run:** then launch the first FULL 9B QLoRA run in this window: hourly checkpoints, done by Mon 05:20 EST. Telegram at start, at each epoch, and at the end with the val loss curve. After it, quantize and score against base 9B and Saluki.
