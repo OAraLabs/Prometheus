@@ -6,8 +6,9 @@
     python3 scripts/distill/train_qlora.py --data ~/distill/phase3/train.jsonl \\
         --tokenizer-dir ~/distill/models/qwen3.5-9b-tokenizer \\
         --out data/distill/runs/9b-r32 --dry-run
-    # 2. Smoke: 200 examples, 50 steps, loss must drop, checkpoint round trip
-    #    (the training half of the smoke gate; the eval pipeline runs separately).
+    # 2. Smoke: 200 examples, 50 steps, the smoke gate (below), checkpoint round
+    #    trip (the training half of the runbook's gate; the eval pipeline runs
+    #    separately). Needs --val (the held-out rows the gate reads).
     #    The base comes from a staged, pinned download (see "Base model" below).
     HF_HUB_OFFLINE=1 python3 scripts/distill/train_qlora.py ... \\
         --base-model ~/distill/models/qwen3.5-9b-base \\
@@ -15,7 +16,7 @@
         --out data/distill/runs/smoke --smoke
     # 3. Full run (detached: scripts/distill/launch_detached.sh), resumable.
     python3 scripts/distill/train_qlora.py ... --out data/distill/runs/9b-r32 [--resume] \\
-        [--stop-at 2026-11-01T06:45-05:00]
+        [--stop-at 2026-11-01T06:45-05:00] [--save-every-minutes 60] [--min-free-gib 6]
 
 Base model
 ----------
@@ -76,8 +77,10 @@ MLP projections (``TARGET_MODULES``), lr 1e-4 with linear warmup then
 cosine to zero, 2 epochs, micro-batch 1 (no padding) with gradient
 accumulation, "unsloth" gradient checkpointing, 8-bit AdamW, loss normalised
 over the accumulation group's loss tokens. The sample order is a seeded
-permutation of the row ids per epoch (the *plan*); the position in the plan is
-part of every checkpoint.
+permutation of the row ids per epoch (the *plan*; never the file's order, which
+build.py groups by category, and no length grouping); the position in the plan
+is part of every checkpoint. ``run_state.json`` ``order`` records the evidence
+(:func:`order_stats` of the file order and of each epoch of the plan).
 
 * **Sequence step-down.** Before training, one forward+backward on the
   longest example probes memory. A CUDA OOM there or during training records
@@ -87,17 +90,39 @@ part of every checkpoint.
   re-fitted with ``render.fit_to_budget`` (oldest context dropped, system
   prompt, tools, last query and the learned turn kept) when ``--tokenizer-dir``
   holds the chat template, else dropped; every step-down is recorded.
-* **Checkpoints** every ``--save-every`` steps (and on SIGTERM, at
-  ``--stop-at``, and at the end): adapter, optimizer, RNG states and
+* **Checkpoints** every ``--save-every`` steps or ``--save-every-minutes``,
+  whichever comes first (and at each epoch end, on SIGTERM, at ``--stop-at``,
+  and at the end; ``--keep-checkpoints`` newest kept): adapter, optimizer, RNG states and
   ``state.json`` (step, plan position, tokens seen, a fingerprint of the
   weights), written to a ``.partial`` directory and renamed once complete.
   ``--resume`` takes the newest complete one; the plan, data hash and config
   hash must match the run's, and the restored weights must match the
   fingerprint (exit 1 otherwise: a restore that drops weights would train on
   from fresh LoRA weights).
-* **Stop.** SIGTERM (a ``setup apply business`` stops ``distill-*`` units) or
-  ``--stop-at`` abandons the accumulation group in progress and checkpoints
-  at the last completed step, so a window close loses at most one group.
+* **Stop.** SIGTERM (a ``setup apply business`` stops ``distill-*`` units),
+  ``--stop-at`` or free disk under ``--min-free-gib`` abandons the
+  accumulation group in progress and checkpoints at the last completed step,
+  so a window close loses at most one group.
+* **Held-out loss** before the first update (step 0) and at every
+  interval, epoch and end checkpoint, on two fixed, disjoint sets of ``--val``
+  rows (none of whose ids, tasks or groups train): the val subset
+  (``--val-rows``, 64) and the probe batch (``--probe-size`` 32 rows chosen by
+  ``--probe-seed``). Kept in ``run_state.json`` (``val_history``; the sets in
+  ``held_out``; epoch ends in ``epochs_done``; ``progress`` has the token rate
+  and the ETA). A resume must find the same sets.
+* **Non-finite steps.** A NaN/inf loss or pre-clip grad norm skips that
+  step's update; ``MAX_NONFINITE_RUN`` in a row stop the run as diverged
+  (exit 1, manifest ``failed``); the last checkpoint is untouched.
+
+Smoke gate (operator, 2026-10-31)
+---------------------------------
+Each step trains on different rows, so per-step train loss is mostly which
+rows a step drew; comparing two 10-step means failed a clean run (the first 9B
+smoke: 1.013 -> 1.160 while its val loss fell). It is not gated. The gate
+(``smoke_verdict``) is: (a) the val loss on the val subset is lower at the end
+than at step 0; (b) the loss on the fixed probe batch is lower after training
+than before; every train loss and recorded pre-clip grad norm is finite and the
+median grad norm does not grow tenfold; and the checkpoint round trip passes.
 
 Exit: 0 done (or stopped cleanly), 1 training failed or the smoke check
 failed, 2 usage or data error, 3 refused (Max-derived data without both approvals).
@@ -119,6 +144,7 @@ import random
 import re
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import time
@@ -210,6 +236,7 @@ class TrainConfig:
     optim: str = "adamw_8bit"
     gradient_checkpointing: str = "unsloth"
     save_every: int = 200
+    save_every_minutes: float = 0.0  # also checkpoint when this long since the last one (0: off)
     keep_checkpoints: int = 3
     seed: int = 3407
     log_every: int = 10
@@ -247,6 +274,8 @@ class TrainConfig:
             errs.append("grad_accum must be >= 1")
         if self.save_every < 1 or self.keep_checkpoints < 1:
             errs.append("save_every and keep_checkpoints must be >= 1")
+        if self.save_every_minutes < 0:
+            errs.append("save_every_minutes must be >= 0")
         if self.optim not in ("adamw_8bit", "adamw_torch"):
             errs.append(f"optim must be adamw_8bit or adamw_torch, not {self.optim!r}")
         if self.max_steps is not None and self.max_steps < 1:
@@ -948,15 +977,173 @@ def select_smoke(ids: Iterable[str], seed: int, n: int = SMOKE_EXAMPLES) -> list
     return sorted(order[:n])
 
 
-def loss_decreased(losses: list[float], window: int = 10, min_drop: float = 0.02
-                   ) -> tuple[bool, float, float]:
-    """Mean of the last *window* step losses is below the first window's by at
-    least *min_drop* (a fraction). Needs two non-overlapping windows."""
-    if len(losses) < 2 * window:
-        return False, float("nan"), float("nan")
-    first = sum(losses[:window]) / window
-    last = sum(losses[-window:]) / window
-    return last < first * (1.0 - min_drop), first, last
+# ---------------------------------------------------------------------------
+# Held-out loss and the smoke gate (operator, 2026-10-31 ~12:10 ET)
+# ---------------------------------------------------------------------------
+# Per-step train loss is mostly which rows the step drew (the first 9B smoke's
+# 50 steps ranged 0.52-2.26 on a flat trend; its first-10 vs last-10 means went
+# 1.013 -> 1.160 while the val loss fell), so it is never gated. The gate reads
+# held-out rows, never trained on (the val split; build.py splits by task),
+# measured before the first update (step 0) and after the last:
+#   (a) the val loss on the val subset (the first VAL_SUBSET val ids not in the
+#       probe) falls from step 0 to the end;
+#   (b) the loss on the FIXED probe batch (PROBE_SIZE val rows chosen by a
+#       recorded seed, disjoint from the val subset) falls from before to after;
+# every train loss and recorded grad norm is finite, the median pre-clip grad
+# norm does not grow more than GRAD_NORM_GROWTH_MAX-fold (first vs last
+# quarter of the steps), and the checkpoint round trip passes.
+PROBE_SIZE = 32
+VAL_SUBSET = 64
+GRAD_NORM_GROWTH_MAX = 10.0
+# Consecutive optimizer steps with a non-finite loss or grad norm (each one
+# skipped, no update) before the run stops as diverged.
+MAX_NONFINITE_RUN = 3
+
+
+def finite(x: Any) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def select_probe(ids: Iterable[str], seed: int, n: int = PROBE_SIZE) -> list[str]:
+    """The fixed probe batch: *n* of the held-out *ids*, by a seeded shuffle of
+    the sorted ids (the same val file and seed give the same batch anywhere)."""
+    order = sorted(ids)
+    random.Random(f"distill-probe:{seed}").shuffle(order)
+    return sorted(order[:n])
+
+
+def held_out_sets(val_ids: Iterable[str], seed: int, probe_n: int = PROBE_SIZE,
+                  val_n: int = VAL_SUBSET) -> tuple[list[str], list[str]]:
+    """(val subset, probe batch), disjoint and fixed for the run: the probe
+    takes its rows first (at most half of them, so a small val split still
+    leaves a val subset), the val subset is the first *val_n* of the rest."""
+    ids = sorted(val_ids)
+    probe_n = min(probe_n, len(ids) // 2)
+    probe = select_probe(ids, seed, probe_n) if probe_n > 0 else []
+    taken = set(probe)
+    return [x for x in ids if x not in taken][:val_n], probe
+
+
+def held_out_check(history: list[dict[str, Any]], key: str, *, min_drop: float = 0.0
+                   ) -> dict[str, Any]:
+    """*key* (``val_loss`` or ``probe_loss``) fell from step 0 to its last
+    point by more than *min_drop* (a fraction; 0: any decrease), every point
+    finite. Without a step-0 point it fails: the start is measured on the same
+    rows before any update, never taken from a later checkpoint."""
+    pts = sorted((h for h in history if h.get(key) is not None), key=lambda h: h["step"])
+    out: dict[str, Any] = {"points": [[h["step"], h[key]] for h in pts], "min_drop": min_drop,
+                           "ok": False}
+    if not pts or pts[0]["step"] != 0:
+        out["why"] = f"no {key} at step 0 (before training)"
+        return out
+    if len(pts) < 2:
+        out["why"] = f"no {key} after training"
+        return out
+    if not all(finite(h[key]) for h in pts):
+        out["why"] = f"a non-finite {key}"
+        return out
+    first, last = float(pts[0][key]), float(pts[-1][key])
+    out.update(first_step=0, first=first, last_step=pts[-1]["step"], last=last,
+               drop_rel=(first - last) / first if first else None)
+    out["ok"] = last < first * (1.0 - min_drop)
+    if not out["ok"]:
+        out["why"] = f"{key} {first:.4f} -> {last:.4f} did not fall"
+    return out
+
+
+def rows_improved(history: list[dict[str, Any]]) -> list[int] | None:
+    """[rows of the probe batch whose own loss fell from step 0 to the last
+    point, rows]; reported with the gate, not gated (the mean is)."""
+    pts = sorted((h for h in history if h.get("probe_per_row")), key=lambda h: h["step"])
+    if len(pts) < 2 or pts[0]["step"] != 0 or len(pts[0]["probe_per_row"]) != len(
+            pts[-1]["probe_per_row"]):
+        return None
+    a, b = pts[0]["probe_per_row"], pts[-1]["probe_per_row"]
+    return [sum(1 for x, y in zip(a, b) if finite(x) and finite(y) and y < x), len(a)]
+
+
+def grad_norm_check(grad_norms: list[float | None]) -> dict[str, Any]:
+    """Every recorded pre-clip grad norm finite, and the median of the last
+    quarter of the steps at most GRAD_NORM_GROWTH_MAX times the first
+    quarter's (a run blowing up grows its gradient long before a NaN).
+    ``None``: the backend reported no norm (or the step's loss was NaN)."""
+    known = [g for g in grad_norms if g is not None]
+    fin = [float(g) for g in known if finite(g)]
+    out: dict[str, Any] = {"recorded": len(known), "of_steps": len(grad_norms),
+                           "all_finite": len(fin) == len(known), "max": max(fin) if fin else None,
+                           "growth_max": GRAD_NORM_GROWTH_MAX, "stable": True}
+    q = len(fin) // 4
+    if out["all_finite"] and q >= 2:
+        first, last = statistics.median(fin[:q]), statistics.median(fin[-q:])
+        out.update(median_first_quarter=first, median_last_quarter=last)
+        if first > 0 and last > GRAD_NORM_GROWTH_MAX * first:
+            out["stable"] = False
+            out["why"] = (f"median grad norm grew {last / first:.1f}x (first quarter {first:.3g}, "
+                          f"last {last:.3g})")
+    return out
+
+
+def smoke_verdict(losses: list[float], history: list[dict[str, Any]],
+                  grad_norms: list[float | None], round_trip: bool, *,
+                  min_val_drop: float = 0.0) -> dict[str, Any]:
+    """The training half of the smoke gate (see above). *history* is the
+    run's ``val_history``: one entry per held-out evaluation, step 0 first,
+    with ``val_loss`` and ``probe_loss``."""
+    val = held_out_check(history, "val_loss", min_drop=min_val_drop)
+    probe = held_out_check(history, "probe_loss")
+    probe["rows_improved"] = rows_improved(history)
+    grads = grad_norm_check(grad_norms)
+    fin = [x for x in losses if finite(x)]
+    checks = {"val_loss_decreased": val["ok"], "probe_loss_decreased": probe["ok"],
+              "losses_finite": bool(losses) and len(fin) == len(losses),
+              "grad_norms_finite": grads["all_finite"], "grad_norm_stable": grads["stable"],
+              "checkpoint_round_trip": bool(round_trip)}
+    return {"passed": all(checks.values()), "checks": checks, "val": val, "probe": probe,
+            "grad_norm": grads,
+            "train_loss": {"steps": len(losses), "mean": sum(fin) / len(fin) if fin else None,
+                           "gated": False,
+                           "note": "per-step train loss is which rows a step drew: not gated"}}
+
+
+def order_stats(order: list[str], length: Callable[[str], int],
+                category: Callable[[str], str | None] | None = None) -> dict[str, Any]:
+    """How ordered a sample order is: the lag-1 autocorrelation of lengths,
+    the rank correlation of length with position, and (with categories) the
+    number of same-category runs against what a random permutation gives on
+    average. A shuffled order sits near 0 / the expected runs; a file grouped
+    by category or sorted by length is far off."""
+    n = len(order)
+    out: dict[str, Any] = {"n": n}
+    if n < 3:
+        return out
+    lens = [float(length(x)) for x in order]
+    m = sum(lens) / n
+    den = sum((x - m) ** 2 for x in lens)
+    out["len_ac1"] = (sum((a - m) * (b - m) for a, b in zip(lens, lens[1:])) / den) if den else 0.0
+    rank = [0.0] * n
+    for r, i in enumerate(sorted(range(n), key=lambda i: lens[i])):
+        rank[i] = float(r)
+    mid = (n - 1) / 2.0
+    out["len_rank_corr_with_position"] = (sum((i - mid) * (rank[i] - mid) for i in range(n))
+                                          / sum((i - mid) ** 2 for i in range(n)))
+    if category is not None:
+        cats = [category(x) or "?" for x in order]
+        counts: dict[str, int] = {}
+        for c in cats:
+            counts[c] = counts.get(c, 0) + 1
+        runs = 1 + sum(1 for a, b in zip(cats, cats[1:]) if a != b)
+        longest = cur = 1
+        for a, b in zip(cats, cats[1:]):
+            cur = cur + 1 if a == b else 1
+            longest = max(longest, cur)
+        same = sum(k * (k - 1) for k in counts.values()) / (n * (n - 1))
+        out.update(categories=len(counts), category_runs=runs, category_longest_run=longest,
+                   category_runs_if_shuffled=round(1 + (n - 1) * (1 - same), 1))
+    return out
+
+
+def _fmt(x: Any) -> str:
+    return f"{x:.4f}" if finite(x) else str(x)
 
 
 def ckpt_step(path: Path) -> int | None:
@@ -1023,7 +1210,7 @@ def now_iso() -> str:
 class Backend(Protocol):
     def load(self, max_seq: int, revision: str | None) -> None: ...
     def forward_backward(self, ids: Any, spans: list[tuple[int, int]], scale: float) -> float: ...
-    def step(self, lr: float) -> None: ...
+    def step(self, lr: float) -> float | None: ...
     def zero_grad(self) -> None: ...
     def eval_loss(self, ids: Any, spans: list[tuple[int, int]]) -> float: ...
     def save(self, d: Path) -> None: ...
@@ -1106,13 +1293,17 @@ class UnslothBackend:
         (loss * scale).backward()
         return float(loss.detach())
 
-    def step(self, lr: float) -> None:
+    def step(self, lr: float) -> float | None:
+        """Clip and apply the accumulated gradient; the pre-clip total grad
+        norm. A non-finite norm skips the update (the gradient is dropped)."""
         for g in self.opt.param_groups:
             g["lr"] = lr
-        if self.cfg.max_grad_norm:
-            self.torch.nn.utils.clip_grad_norm_(self.params, self.cfg.max_grad_norm)
-        self.opt.step()
+        norm = float(self.torch.nn.utils.clip_grad_norm_(
+            self.params, self.cfg.max_grad_norm or float("inf")))
+        if math.isfinite(norm):
+            self.opt.step()
         self.opt.zero_grad(set_to_none=True)
+        return norm
 
     def zero_grad(self) -> None:
         self.opt.zero_grad(set_to_none=True)
@@ -1205,6 +1396,12 @@ class StepRecord:
     lr: float
     tokens: int
     seconds: float
+    grad_norm: float | None = None  # pre-clip; None: the backend reports none
+    skipped: bool = False  # non-finite loss or grad norm: no update this step
+
+
+class Diverged(RuntimeError):
+    """MAX_NONFINITE_RUN steps in a row had a non-finite loss or grad norm."""
 
 
 @dataclass
@@ -1224,13 +1421,19 @@ class Trainer:
 
     def __init__(self, cfg: TrainConfig, source: Source, out_dir: Path, backend: Backend, *,
                  stop: StopFlag | None = None, only_ids: list[str] | None = None,
-                 val: Source | None = None, val_max: int = 64,
+                 val: Source | None = None, val_max: int = VAL_SUBSET,
+                 probe_n: int = PROBE_SIZE, probe_seed: int | None = None,
                  metrics_path: Path | None = None,
                  on_save: Callable[[Path], None] | None = None,
                  revision: str | None = None,
                  checkpoint_manifest: dict[str, Any] | None = None,
+                 min_free_bytes: float | None = None,
+                 disk_free: Callable[[Path], float] | None = None,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self.cfg = cfg
+        # --min-free-gib: below it the run checkpoints and stops ("disk-floor")
+        self.min_free_bytes = min_free_bytes
+        self.disk_free = disk_free or (lambda p: float(shutil.disk_usage(p).free))
         # Q6b: written into every checkpoint (CKPT_MANIFEST), so a copied
         # checkpoint carries its own provenance; None writes none
         self.checkpoint_manifest = checkpoint_manifest
@@ -1242,6 +1445,10 @@ class Trainer:
         self.only_ids = only_ids
         self.val = val
         self.val_max = val_max
+        self.probe_n = probe_n
+        self.probe_seed = cfg.seed if probe_seed is None else probe_seed
+        self.val_ids: list[str] = []  # the val subset (fixed for the run)
+        self.probe_ids: list[str] = []  # the fixed probe batch (val rows, disjoint from the subset)
         self.metrics_path = metrics_path
         self.on_save = on_save
         self.clock = clock
@@ -1250,6 +1457,15 @@ class Trainer:
         self.tokens_seen = 0
         self.losses: list[float] = []
         self.records: list[StepRecord] = []
+        # one entry per held-out evaluation ({"step", "val_loss", "probe_loss",
+        # "probe_per_row", "why", "at"}; step 0: before any update), persisted in
+        # run_state.json for the smoke gate, the epoch reports and the watcher
+        self.val_history: list[dict[str, Any]] = []
+        self.epoch_len = 0  # plan entries per epoch
+        self._last_save_t = 0.0  # clock() at the last checkpoint (time-based saves)
+        self._rate: tuple[float, int] | None = None  # (clock, tokens_seen) at this process's first step
+        self.nonfinite = 0  # steps skipped for a non-finite loss / grad norm
+        self.nonfinite_run = 0
         self.run_state: dict[str, Any] = {}
         self.fit_report: FitReport | None = None
         self.resumed_from: str | None = None
@@ -1271,6 +1487,7 @@ class Trainer:
         self.out.mkdir(parents=True, exist_ok=True)
         ids = self.only_ids if self.only_ids is not None else self.source.ids()
         self.plan = epoch_plan(ids, self.cfg.epochs, self.cfg.seed)
+        self.epoch_len = len(set(ids))
         plan_sha = sha256_text("\n".join(self.plan))
         rs_path = self.out / RUN_STATE
         latest = find_latest_checkpoint(self.out)
@@ -1291,12 +1508,16 @@ class Trainer:
                   "max_seq": self.cfg.max_seq, "seq_history": [], "schedule": None,
                   "base_revision_resolved": self.revision or self.cfg.base_revision}
         self.run_state = rs
+        self.val_history = [dict(h) for h in rs.get("val_history") or []]
+        self.held_out_setup()
         # a resume loads the weights the run started on, even if the branch moved
         self.revision = rs.get("base_revision_resolved") or self.revision
         self.fit_report = self.source.fit(self.max_seq)
         self.kept = self.source.kept() & set(self.plan)
         if not self.kept:
             raise DataError(f"no example fits max_seq {self.max_seq}")
+        if "order" not in rs:
+            rs["order"] = self.order_report()
         self.backend.load(self.max_seq, self.revision)
         if resume and latest is not None:
             self.restore_check = self.restore_from(latest)
@@ -1317,6 +1538,85 @@ class Trainer:
         rs["updated_at"] = now_iso()
         write_json(rs_path, rs)
         self.preflight()
+        if self.val is not None and self.step == 0 and not any(
+                h.get("step") == 0 for h in self.val_history):
+            self.record_held_out(self.measure_held_out(), "baseline")
+        self._last_save_t = self.clock()
+
+    def held_out_setup(self) -> None:
+        """The val subset and the fixed probe batch, from the val rows that fit
+        (``--val``): disjoint from each other, and from every train row by id and,
+        where rows carry them, by task and group (build.py splits by task, so a
+        held-out row's task never trains). Recorded in run_state.json; a resume
+        must find the same sets."""
+        if self.val is None:
+            return
+        self.val_ids, self.probe_ids = held_out_sets(self.val.kept(), self.probe_seed,
+                                                     self.probe_n, self.val_max)
+        held = self.val_ids + self.probe_ids
+        if not held:
+            raise DataError("--val holds no row that fits")
+        train_ids = set(self.plan)
+        overlap = sorted(set(held) & train_ids)
+        tasks = None
+        vrows = getattr(self.val, "by_id", None)
+        trows = getattr(self.source, "by_id", None)
+        if isinstance(vrows, dict) and isinstance(trows, dict):
+            def keys(rows: dict[str, Any], ids: Iterable[str]) -> set[str]:
+                return {f"{k}:{rows[x][k]}" for x in ids if x in rows
+                        for k in ("task_id", "group_id") if rows[x].get(k)}
+            tasks = sorted(keys(vrows, held) & keys(trows, train_ids))
+        if overlap or tasks:
+            raise DataError(f"held-out rows that also train: ids {overlap[:3]}, tasks "
+                            f"{(tasks or [])[:3]} ({len(overlap)} ids, {len(tasks or [])} tasks)")
+        rec = {"val_subset": {"n": len(self.val_ids), "max": self.val_max,
+                              "ids_sha256": sha256_text("\n".join(self.val_ids)),
+                              "rule": "the first val ids (sorted) not in the probe batch"},
+               "probe": {"n": len(self.probe_ids), "size": self.probe_n, "seed": self.probe_seed,
+                         "ids": self.probe_ids,
+                         "ids_sha256": sha256_text("\n".join(self.probe_ids)),
+                         "rule": "select_probe: seeded shuffle of the sorted val ids"},
+               "val_rows_fitting": len(self.val.kept()),
+               "train_overlap": {"ids": 0, "tasks": 0 if tasks is not None else None}}
+        old = self.run_state.get("held_out")
+        if old and (old["val_subset"]["ids_sha256"], old["probe"]["ids_sha256"]) != (
+                rec["val_subset"]["ids_sha256"], rec["probe"]["ids_sha256"]):
+            raise UsageError("cannot resume: the val subset or probe batch differs from the run's "
+                             "(same --val, --probe-size and --probe-seed needed)")
+        self.run_state["held_out"] = rec
+        log.info("held out: val subset %d rows, probe batch %d rows (seed %d), none in train",
+                 len(self.val_ids), len(self.probe_ids), self.probe_seed)
+
+    def order_report(self) -> dict[str, Any]:
+        """The evidence that training sees a shuffled order: the plan's sampler
+        and seed, and :func:`order_stats` for the data file's own order and for
+        each epoch of the plan (logged, kept in run_state.json and the manifest)."""
+        by_id = getattr(self.source, "by_id", None)
+        cat = (lambda x: by_id[x].get("category")) if isinstance(by_id, dict) else None
+        kept = self.kept
+
+        def length(x: str) -> int:
+            return self.source.n_tokens(x) if x in kept else 0
+
+        rep: dict[str, Any] = {
+            "sampler": "epoch_plan: every id once per epoch, a seeded permutation of the sorted ids "
+                       "per epoch; micro-batch 1; no length grouping, no sequential order",
+            "seed": self.cfg.seed, "epochs": self.cfg.epochs,
+            "epochs_differ": self.cfg.epochs < 2 or self.plan[:self.epoch_len] != self.plan[
+                self.epoch_len:2 * self.epoch_len]}
+        rows = getattr(self.source, "rows", None)
+        if isinstance(rows, list):
+            want = set(self.plan) & kept
+            rep["file"] = order_stats([r["id"] for r in rows if r.get("id") in want], length, cat)
+        rep["plan"] = [order_stats([x for x in self.plan[e * self.epoch_len:(e + 1) * self.epoch_len]
+                                    if x in kept], length, cat)
+                       for e in range(self.cfg.epochs)]
+        p0 = rep["plan"][0]
+        log.info("sample order: plan epoch 1 length ac1 %.3f, category runs %s (shuffled ~%s); "
+                 "file order ac1 %s, runs %s", p0.get("len_ac1", 0.0), p0.get("category_runs"),
+                 p0.get("category_runs_if_shuffled"), (rep.get("file") or {}).get("len_ac1"),
+                 (rep.get("file") or {}).get("category_runs"))
+        return rep
 
     def preflight(self) -> None:
         """One forward+backward on the longest example at this length, so an
@@ -1335,6 +1635,31 @@ class Trainer:
             self.backend.set_rng_state(rng)
         log.info("preflight ok: %d tokens at max_seq %d, peak %s GiB", len(ids), self.max_seq,
                  self.backend.peak_memory_gb())
+
+    def record_held_out(self, held: dict[str, Any] | None, why: str) -> None:
+        """Add a held-out evaluation at the current step to the history
+        (run_state.json)."""
+        if not held:
+            return
+        self.val_history = [h for h in self.val_history if h.get("step") != self.step]
+        self.val_history.append({"step": self.step, **held, "why": why, "at": now_iso()})
+        self.val_history.sort(key=lambda h: h["step"])
+        self.run_state["val_history"] = self.val_history
+        self.run_state["updated_at"] = now_iso()
+        write_json(self.out / RUN_STATE, self.run_state)
+        log.info("held out at step %d (%s): val_loss %s, probe_loss %s", self.step, why,
+                 _fmt(held.get("val_loss")), _fmt(held.get("probe_loss")))
+
+    def held_out_at(self, step: int) -> dict[str, Any]:
+        return next((h for h in self.val_history if h.get("step") == step), {})
+
+    def disk_low(self) -> bool:
+        if not self.min_free_bytes:
+            return False
+        try:
+            return self.disk_free(self.out) < self.min_free_bytes
+        except OSError:
+            return False
 
     def step_down(self, where: str) -> None:
         """Persist the next ladder length and raise :class:`StepDown`."""
@@ -1371,6 +1696,10 @@ class Trainer:
             if until_step is not None and self.step >= until_step:
                 return RunResult("until_step", self.step, records=self.records[start:])
             reason = self.stop.check()
+            if not reason and self.disk_low():
+                self.stop.reason = reason = "disk-floor"
+                log.warning("free disk under %.1f GiB: checkpointing and stopping",
+                            (self.min_free_bytes or 0) / 2**30)
             if reason:
                 return self._stopped(reason, start)
             group, new_pos = next_group(self.plan, self.pos, self.kept, self.cfg.grad_accum)
@@ -1396,16 +1725,37 @@ class Trainer:
                 self.backend.set_rng_state(rng)
                 return self._stopped(self.stop.reason, start)
             lr = lr_at(self.step, sched["total_steps"], sched["warmup_steps"], self.cfg.lr)
-            self.backend.step(lr)
+            epochs_before = self.epochs_completed()
+            if math.isfinite(loss):
+                gn = self.backend.step(lr)
+            else:  # a NaN/inf loss: its gradient is not applied
+                self.backend.zero_grad()
+                gn = None
+            skipped = not math.isfinite(loss) or (gn is not None and not math.isfinite(gn))
             self.step += 1
             self.pos = new_pos
             self.tokens_seen += tokens
             self.losses.append(loss)
-            rec = StepRecord(self.step, loss, lr, tokens, self.clock() - t0)
+            rec = StepRecord(self.step, loss, lr, tokens, self.clock() - t0, gn, skipped)
             self.records.append(rec)
             self._metrics(rec)
-            if self.step % self.cfg.save_every == 0:
+            if skipped:
+                self.nonfinite += 1
+                self.nonfinite_run += 1
+                log.warning("step %d: non-finite loss %r / grad norm %r: update skipped "
+                            "(%d in a row)", self.step, loss, gn, self.nonfinite_run)
+                if self.nonfinite_run >= MAX_NONFINITE_RUN:
+                    raise Diverged(f"{self.nonfinite_run} steps in a row with a non-finite loss or "
+                                   f"grad norm (last at step {self.step}); the last checkpoint "
+                                   "holds the weights from before")
+            else:
+                self.nonfinite_run = 0
+            if self.step % self.cfg.save_every == 0 or self.save_due():
                 self.save("interval")
+            done = self.epochs_completed()
+            if done > epochs_before:
+                self.save("epoch")  # a no-op when this step just checkpointed (it measured then)
+                self.record_epoch(done)
             if hook is not None:
                 hook_reason = hook(self, rec)
                 if hook_reason:
@@ -1414,6 +1764,55 @@ class Trainer:
         path = self.save("end")
         return RunResult("done", self.step, checkpoint=path.name, records=self.records[start:])
 
+    def save_due(self) -> bool:
+        """``save_every_minutes`` have passed since the last checkpoint."""
+        m = self.cfg.save_every_minutes
+        return bool(m and m > 0 and self.clock() - self._last_save_t >= m * 60)
+
+    def epochs_completed(self) -> int:
+        """Epochs of the plan the position has passed (a group can straddle
+        the boundary: the epoch counts as done at the step that passes it)."""
+        if not self.epoch_len:
+            return 0
+        return min(self.pos // self.epoch_len, self.cfg.epochs)
+
+    def record_epoch(self, epoch: int) -> None:
+        """An epoch end with the held-out losses measured at this step
+        (run_state.json ``epochs_done``: what the watcher reports)."""
+        h = self.held_out_at(self.step)
+        rs = self.run_state
+        done = [e for e in rs.get("epochs_done") or [] if e.get("epoch") != epoch]
+        done.append({"epoch": epoch, "of": self.cfg.epochs, "step": self.step, "pos": self.pos,
+                     "tokens_seen": self.tokens_seen, "val_loss": h.get("val_loss"),
+                     "probe_loss": h.get("probe_loss"), "at": now_iso()})
+        rs["epochs_done"] = sorted(done, key=lambda e: e["epoch"])
+        rs["updated_at"] = now_iso()
+        write_json(self.out / RUN_STATE, rs)
+        log.info("epoch %d/%d done at step %d: val_loss %s", epoch, self.cfg.epochs, self.step,
+                 _fmt(h.get("val_loss")))
+
+    def progress(self) -> dict[str, Any]:
+        """Where the run is and when it should end, from this process's own
+        token rate (wall time since its first step, held-out evaluations and
+        checkpoints included)."""
+        left = self.remaining_tokens()
+        total = self.total_steps
+        out: dict[str, Any] = {"step": self.step, "total_steps": total, "pos": self.pos,
+                               "plan_len": len(self.plan), "epoch": min(self.epochs_completed() + 1,
+                                                                        self.cfg.epochs),
+                               "epochs": self.cfg.epochs, "tokens_seen": self.tokens_seen,
+                               "tokens_left": left, "max_seq": self.max_seq,
+                               "updated_at": now_iso()}
+        if self._rate is not None:
+            dt = self.clock() - self._rate[0]
+            dn = self.tokens_seen - self._rate[1]
+            if dt > 0 and dn > 0:
+                tps = dn / dt
+                out.update(tok_s=round(tps, 1), eta_s=round(left / tps),
+                           eta_at=datetime.fromtimestamp(time.time() + left / tps, timezone.utc)
+                           .isoformat(timespec="seconds"))
+        return out
+
     def _stopped(self, reason: str, start: int) -> RunResult:
         path = self.save(f"stop:{reason}")
         log.info("stopped (%s) at step %d; resume with --resume", reason, self.step)
@@ -1421,10 +1820,15 @@ class Trainer:
                          records=self.records[start:])
 
     def _metrics(self, rec: StepRecord) -> None:
+        if self._rate is None:  # this process's first step: the rate counts from its start
+            self._rate = (self.clock() - rec.seconds, self.tokens_seen - rec.tokens)
         if self.step % self.cfg.log_every == 0 or self.step == 1:
+            self.run_state["progress"] = self.progress()
+            write_json(self.out / RUN_STATE, self.run_state)
             tps = rec.tokens / rec.seconds if rec.seconds > 0 else 0.0
-            log.info("step %d/%d loss %.4f lr %.2e %d tok %.0f tok/s", rec.step, self.total_steps,
-                     rec.loss, rec.lr, rec.tokens, tps)
+            gn = f" gnorm {rec.grad_norm:.3f}" if rec.grad_norm is not None else ""
+            log.info("step %d/%d loss %.4f lr %.2e %d tok %.0f tok/s%s", rec.step, self.total_steps,
+                     rec.loss, rec.lr, rec.tokens, tps, gn)
         if self.metrics_path is not None:
             with self.metrics_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps({**asdict(rec), "max_seq": self.max_seq, "at": now_iso(),
@@ -1432,17 +1836,31 @@ class Trainer:
 
     # ------------------------------------------------------- checkpoints
 
-    def val_loss(self) -> float | None:
-        if self.val is None:
-            return None
-        ids = sorted(self.val.kept())[: self.val_max]
+    def _loss_over(self, ids: list[str]) -> tuple[float | None, list[float]]:
+        """Token-weighted mean loss over held-out *ids*, and each row's own."""
+        assert self.val is not None
         num = den = 0.0
+        per: list[float] = []
         for x in ids:
             t, s = self.val.example(x)
             n = loss_tokens(s)
-            num += self.backend.eval_loss(t, s) * n
+            lo = self.backend.eval_loss(t, s)
+            per.append(lo)
+            num += lo * n
             den += n
-        return num / den if den else None
+        return (num / den if den else None), per
+
+    def measure_held_out(self) -> dict[str, Any] | None:
+        """The val loss on the val subset and the loss on the fixed probe batch."""
+        if self.val is None:
+            return None
+        vl, _ = self._loss_over(self.val_ids)
+        pl, per = self._loss_over(self.probe_ids)
+        return {"val_loss": vl, "probe_loss": pl, "probe_per_row": per}
+
+    def val_loss(self) -> float | None:
+        held = self.measure_held_out()
+        return held["val_loss"] if held else None
 
     def save(self, why: str) -> Path:
         """Checkpoint at the current step (no-op when the newest one is it)."""
@@ -1454,12 +1872,15 @@ class Trainer:
         tmp.mkdir(parents=True)
         self.backend.save(tmp)
         self.backend.save_rng(tmp / "rng.pt", self.backend.rng_state())
-        vl = self.val_loss() if why == "interval" or why == "end" else None
+        held = self.measure_held_out() if why in ("interval", "end", "epoch") else None
+        self.record_held_out(held, why)
+        vl = held["val_loss"] if held else None
         write_json(tmp / "state.json", {
             "step": self.step, "pos": self.pos, "tokens_seen": self.tokens_seen,
             "max_seq": self.max_seq, "total_steps": self.total_steps, "why": why,
-            "losses": self.losses[-200:], "val_loss": vl, "saved_at": now_iso(),
-            "plan_sha": self.run_state["plan_sha"],
+            "losses": self.losses[-200:], "val_loss": vl,
+            "probe_loss": held["probe_loss"] if held else None, "saved_at": now_iso(),
+            "plan_sha": self.run_state["plan_sha"], "nonfinite_steps": self.nonfinite,
             # what a restore of this checkpoint must bring back (checked on resume)
             "fingerprint": self.backend.fingerprint()})
         if self.checkpoint_manifest is not None:
@@ -1468,6 +1889,7 @@ class Trainer:
         (tmp / COMPLETE).write_text(now_iso() + "\n", encoding="utf-8")
         tmp.replace(final)
         prune_checkpoints(self.out, self.cfg.keep_checkpoints)
+        self._last_save_t = self.clock()
         log.info("checkpoint %s (%s)%s", final.name, why,
                  f" val_loss {vl:.4f}" if vl is not None else "")
         if self.on_save is not None:
@@ -1488,6 +1910,13 @@ class Trainer:
         self.step, self.pos = int(st["step"]), int(st["pos"])
         self.tokens_seen = int(st.get("tokens_seen", 0))
         self.losses = [float(x) for x in st.get("losses", [])]
+        self.nonfinite = int(st.get("nonfinite_steps", 0))
+        self.nonfinite_run = 0
+        # val points and epoch ends past the restored step belong to weights that are gone
+        self.val_history = [h for h in self.val_history if h.get("step", 0) <= self.step]
+        self.run_state["val_history"] = self.val_history
+        self.run_state["epochs_done"] = [e for e in self.run_state.get("epochs_done") or []
+                                         if e.get("step", 0) <= self.step]
         self.resumed_from = ckpt.name
         saved = st.get("fingerprint")
 
@@ -1656,18 +2085,32 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--max-seq", type=int, default=SEQ_LADDER[0], choices=SEQ_LADDER)
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--warmup-ratio", type=float, default=0.03)
-    ap.add_argument("--save-every", type=int, default=200)
+    ap.add_argument("--save-every", type=int, default=200, help="checkpoint every N optimizer steps")
+    ap.add_argument("--save-every-minutes", type=float, default=0.0,
+                    help="also checkpoint when this many minutes passed since the last one (0: off); "
+                         "every checkpoint but a stop's measures the held-out losses")
     ap.add_argument("--keep-checkpoints", type=int, default=3)
     ap.add_argument("--optim", choices=("adamw_8bit", "adamw_torch"), default="adamw_8bit")
     ap.add_argument("--seed", type=int, default=3407)
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true",
                       help="validate data, masks and config; no torch")
-    mode.add_argument("--smoke", action="store_true", help="200 examples, 50 steps, loss must drop")
+    mode.add_argument("--smoke", action="store_true",
+                      help="200 examples, 50 steps; the gate: val and probe loss down (see above)")
     ap.add_argument("--resume", action="store_true", help="continue from the newest checkpoint")
     ap.add_argument("--stop-at", help="ISO time: checkpoint and exit cleanly before it")
     ap.add_argument("--preview", type=int, default=2, help="examples to print in --dry-run")
-    ap.add_argument("--smoke-min-drop", type=float, default=0.02)
+    ap.add_argument("--smoke-min-drop", type=float, default=0.0,
+                    help="smoke gate: the smallest relative val-loss drop (default 0: any decrease)")
+    ap.add_argument("--probe-size", type=int, default=PROBE_SIZE,
+                    help="val rows in the fixed probe batch (disjoint from the val subset)")
+    ap.add_argument("--probe-seed", type=int, default=None,
+                    help="the probe batch's seed (default: --seed); recorded in run_state.json")
+    ap.add_argument("--val-rows", type=int, default=VAL_SUBSET,
+                    help="val rows in the val-loss subset (the first sorted val ids not in the probe)")
+    ap.add_argument("--min-free-gib", type=float, default=0.0,
+                    help="checkpoint and stop (reason disk-floor) when the --out disk has less free "
+                         "(0: off)")
     ap.add_argument(APPROVAL_FLAG, dest="approved", action="store_true",
                     help="the operator approved training on Max-derived data (OPEN-QUESTIONS #6, "
                          "Q6b); the dataset must also record its build-time approval")
@@ -1678,8 +2121,8 @@ def config_from_args(a: argparse.Namespace) -> TrainConfig:
     return TrainConfig(base_model=a.base_model, base_revision=a.base_revision, load=a.load,
                        r=a.r, alpha=a.alpha, lr=a.lr, epochs=a.epochs, max_seq=a.max_seq,
                        grad_accum=a.grad_accum, warmup_ratio=a.warmup_ratio,
-                       save_every=a.save_every, keep_checkpoints=a.keep_checkpoints,
-                       optim=a.optim, seed=a.seed)
+                       save_every=a.save_every, save_every_minutes=a.save_every_minutes,
+                       keep_checkpoints=a.keep_checkpoints, optim=a.optim, seed=a.seed)
 
 
 def parse_stop_at(value: str | None) -> float | None:
@@ -1835,7 +2278,9 @@ def main(argv: list[str] | None = None, *, backend_factory: Callable[[TrainConfi
         if resolved is None and not (a.resume and (a.out / RUN_STATE).is_file()):
             resolved = resolve_revision(cfg.base_model, cfg.base_revision)
         trainer = Trainer(cfg, source, a.out, backend, stop=stop, only_ids=only, val=val,
+                          val_max=a.val_rows, probe_n=a.probe_size, probe_seed=a.probe_seed,
                           metrics_path=log_dir / "metrics.jsonl", revision=resolved,
+                          min_free_bytes=a.min_free_gib * 2**30 if a.min_free_gib > 0 else None,
                           checkpoint_manifest=checkpoint_manifest(
                               run_id, a.data or a.pretokenized, source, g))
         mode = "smoke" if a.smoke else "train"
@@ -1849,7 +2294,11 @@ def main(argv: list[str] | None = None, *, backend_factory: Callable[[TrainConfi
                          versions=backend.versions(),
                          extra={"status": status, "seq_history": trainer.run_state.get(
                              "seq_history", []), "resumed_from": trainer.resumed_from,
-                             "step": trainer.step, "tokens_seen": trainer.tokens_seen, **extra},
+                             "step": trainer.step, "tokens_seen": trainer.tokens_seen,
+                             "held_out": trainer.run_state.get("held_out"),
+                             "sample_order": trainer.run_state.get("order"),
+                             "epochs_done": trainer.run_state.get("epochs_done", []),
+                             "progress": trainer.run_state.get("progress"), **extra},
                          dataset=ds)
             write_json(log_dir / "manifest.json", m)
             write_json(a.out / "manifest.json", m)
@@ -1864,14 +2313,22 @@ def main(argv: list[str] | None = None, *, backend_factory: Callable[[TrainConfi
             log.warning("%s; re-executing with --resume", sd)
             reexec_resume(argv)
             return 1  # only reached when execv is mocked
+        except Diverged as dv:
+            log.error("diverged: %s", dv)
+            write_manifest("failed", {"reason": f"diverged: {dv}", "nonfinite_steps": trainer.nonfinite,
+                                      "val_history": trainer.val_history})
+            print(f"error: training diverged: {dv}", file=sys.stderr)
+            return 1
         finally:
             signal.signal(signal.SIGTERM, prev_handler)
+        hist = {"val_history": trainer.val_history, "nonfinite_steps": trainer.nonfinite}
         if res.status == "done":
             adapter = trainer.save_adapter(dest)
-            write_manifest("done", {"adapter": str(adapter), "peak_gb": backend.peak_memory_gb()})
+            write_manifest("done", {"adapter": str(adapter), "peak_gb": backend.peak_memory_gb(),
+                                    **hist})
             log.info("done: %d steps, adapter %s", trainer.step, adapter)
         else:
-            write_manifest("stopped", {"reason": res.reason})
+            write_manifest("stopped", {"reason": res.reason, **hist})
         return 0
     except (UsageError, DataError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1882,12 +2339,31 @@ def main(argv: list[str] | None = None, *, backend_factory: Callable[[TrainConfi
         return 1
 
 
+def smoke_line(v: dict[str, Any]) -> str:
+    """One line for a smoke verdict."""
+    c = v["checks"]
+
+    def held(d: dict[str, Any], name: str) -> str:
+        return (f"{name} {d['first']:.4f} -> {d['last']:.4f}" if "first" in d
+                else f"{name}: {d.get('why', 'n/a')}")
+
+    ri = v["probe"].get("rows_improved")
+    bad = [k for k, ok in c.items() if not ok]
+    return (f"{held(v['val'], 'val')}; {held(v['probe'], 'probe')}"
+            + (f" ({ri[0]}/{ri[1]} rows lower)" if ri else "")
+            + f"; finite {c['losses_finite'] and c['grad_norms_finite']}; round trip "
+            f"{'ok' if c['checkpoint_round_trip'] else 'FAILED'}: "
+            + ("PASS" if v["passed"] else "FAIL (" + ", ".join(bad) + ")"))
+
+
 def smoke(trainer: Trainer, a: argparse.Namespace,
           write_manifest: Callable[[str, dict[str, Any]], None], *,
           adapter: Path | None = None) -> int:
-    """50 steps. At the halfway checkpoint the weights train a few steps on,
-    then the checkpoint is restored and must bring back exactly the weights it
-    saved; the loss must drop. A stop (SIGTERM, ``--stop-at``) is no verdict:
+    """50 steps. The held-out losses (val subset + fixed probe batch) are
+    measured before the first update and at each checkpoint. At the halfway
+    checkpoint the weights train a few steps on, then the checkpoint is
+    restored and must bring back exactly the weights it saved; then the smoke
+    gate (:func:`smoke_verdict`). A stop (SIGTERM, ``--stop-at``) is no verdict:
     the manifest says "stopped" and ``--smoke --resume`` finishes the smoke.
 
     This is the training half of the runbook's smoke gate only, so the status
@@ -1913,17 +2389,26 @@ def smoke(trainer: Trainer, a: argparse.Namespace,
         check = {**trainer.restore_check,
                  "passed": bool(trainer.restore_check["ok"] and trainer.restore_check["moved"])}
     round_trip = bool(check and check["passed"])
-    ok, first, last = loss_decreased(trainer.losses, min_drop=a.smoke_min_drop)
+    verdict = smoke_verdict(trainer.losses, trainer.val_history,
+                            [r.grad_norm for r in trainer.records], round_trip,
+                            min_val_drop=a.smoke_min_drop)
     adapter = trainer.save_adapter(adapter if adapter is not None else a.out / ADAPTER_DIR)
-    passed = ok and round_trip
+    passed = verdict["passed"]
+    val, probe = verdict["val"], verdict["probe"]
+    kept = {r.step: r for r in trainer.records}  # a step the round trip replayed counts once
+    secs = sum(r.seconds for r in kept.values())
     write_manifest("smoke-train-pass" if passed else "smoke-train-fail", {
-        "smoke": {"steps": trainer.step, "loss_first10": first, "loss_last10": last,
-                  "loss_decreased": ok, "checkpoint_round_trip": round_trip,
-                  "round_trip": check, "eval_pipeline": "not run"},
+        "smoke": {"steps": trainer.step, "gate": verdict,
+                  "loss_decreased": bool(val["ok"] and probe["ok"]),
+                  "val_first": val.get("first"), "val_last": val.get("last"),
+                  "probe_first": probe.get("first"), "probe_last": probe.get("last"),
+                  "probe_rows_improved": probe.get("rows_improved"),
+                  "tok_s": round(sum(r.tokens for r in kept.values()) / secs, 1) if secs else None,
+                  "peak_gb": trainer.backend.peak_memory_gb(),
+                  "checkpoint_round_trip": round_trip, "round_trip": check,
+                  "eval_pipeline": "not run"},
         "adapter": str(adapter)})
-    print(f"smoke (training): {trainer.step} steps, loss {first:.4f} -> {last:.4f} "
-          f"({'decreased' if ok else 'DID NOT DECREASE'}); checkpoint round trip "
-          f"{'ok' if round_trip else 'FAILED'}")
+    print(f"smoke (training): {trainer.step} steps; {smoke_line(verdict)}")
     if passed:
         print(f"the smoke gate also needs the eval pipeline (merge, quantize, score) on {adapter}")
     return 0 if passed else 1

@@ -454,12 +454,6 @@ def test_prune_keeps_the_newest_and_clears_partials(tmp_path: Path) -> None:
     assert sorted(p.name for p in out.iterdir()) == ["checkpoint-000300", "checkpoint-000400"]
 
 
-def test_loss_decrease_check() -> None:
-    assert T.loss_decreased([2.0] * 10 + [1.0] * 10)[0]
-    assert not T.loss_decreased([1.0] * 20)[0]
-    assert not T.loss_decreased([1.0] * 15)[0]  # too short to judge
-
-
 # ── the training loop (fake backend) ──────────────────────────────────────
 
 
@@ -714,29 +708,314 @@ def test_non_max_data_trains_without_the_flag(tmp_path: Path, cli: dict[str, Any
     assert len((cli["logs"] / "metrics.jsonl").read_text().splitlines()) == 8
 
 
+def with_val(tmp_path: Path, n: int = 6) -> list[str]:
+    """A val split (ids disjoint from rows_n's) and the flag that passes it."""
+    val = write_rows(tmp_path / "val.jsonl", [make_row(5000 + i) for i in range(n)])
+    return ["--val", str(val)]
+
+
 def test_smoke_runs_50_steps_round_trips_a_checkpoint_and_checks_the_loss(
         tmp_path: Path, cli: dict[str, Any], capsys: pytest.CaptureFixture[str]) -> None:
     data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(230)))
     flag = T.APPROVAL_FLAG
-    assert T.main(base_args(data, cli, "--smoke", flag), backend_factory=lambda c: FakeBackend()) == 0
+    val = with_val(tmp_path, 40)
+    assert T.main(base_args(data, cli, "--smoke", flag, *val),
+                  backend_factory=lambda c: FakeBackend()) == 0
     m = json.loads((cli["logs"] / "manifest.json").read_text())
     # the training half of the smoke gate only; the eval pipeline is still owed
     assert m["status"] == "smoke-train-pass" and m["smoke"]["steps"] == 50
     assert m["smoke"]["eval_pipeline"] == "not run"
     assert m["smoke"]["checkpoint_round_trip"] and m["smoke"]["loss_decreased"]
+    gate = m["smoke"]["gate"]
+    assert gate["passed"] and all(gate["checks"].values())
+    assert set(gate["checks"]) == {"val_loss_decreased", "probe_loss_decreased", "losses_finite",
+                                   "grad_norms_finite", "grad_norm_stable", "checkpoint_round_trip"}
+    # step 0 (before any update) and both checkpoints; the round trip's replay kept no stale point
+    for key in ("val", "probe"):
+        assert [p[0] for p in gate[key]["points"]] == [0, 25, 50], key
+        assert gate[key]["first_step"] == 0 and gate[key]["last"] < gate[key]["first"], key
+    assert gate["probe"]["rows_improved"] == [20, 20]
+    assert m["smoke"]["probe_last"] < m["smoke"]["probe_first"]
+    assert m["smoke"]["tok_s"] is None or m["smoke"]["tok_s"] > 0
+    rs = json.loads((cli["out"] / "run_state.json").read_text())
+    assert [h["step"] for h in rs["val_history"]] == [0, 25, 50]
+    assert all(h["probe_loss"] is not None for h in rs["val_history"])
+    held = rs["held_out"]  # 40 val rows: the probe takes at most half, the val subset the rest
+    assert held["probe"]["n"] == 20 and held["probe"]["seed"] == 3407 and held["val_subset"]["n"] == 20
+    assert held["train_overlap"] == {"ids": 0, "tasks": 0}
+    assert m["held_out"] == held and m["sample_order"]["plan"][0]["n"] == 200
     rt = m["smoke"]["round_trip"]
     assert rt["checkpoint"] == "checkpoint-000025" and rt["ok"] and rt["moved"]
     assert rt["after"] == rt["saved"] != rt["before"]  # trained past it, then brought back
     assert m["operator_approval_max_derived"] is True
-    assert "loss" in capsys.readouterr().out
+    assert "PASS" in capsys.readouterr().out
 
     class Flat(FakeBackend):
+        """No learning: the weights move, nothing held out gets better."""
+
         def forward_backward(self, ids: Any, spans: Any, scale: float) -> float:
             super().forward_backward(ids, spans, scale)
             return 1.0
 
+        def eval_loss(self, ids: Any, spans: Any) -> float:
+            return 1.0
+
     shutil.rmtree(cli["out"])
-    assert T.main(base_args(data, cli, "--smoke", flag), backend_factory=lambda c: Flat()) == 1
+    assert T.main(base_args(data, cli, "--smoke", flag, *val), backend_factory=lambda c: Flat()) == 1
+    m = json.loads((cli["logs"] / "manifest.json").read_text())
+    checks = m["smoke"]["gate"]["checks"]
+    assert m["status"] == "smoke-train-fail" and not m["smoke"]["loss_decreased"]
+    assert not checks["val_loss_decreased"] and not checks["probe_loss_decreased"]
+    assert checks["losses_finite"] and checks["checkpoint_round_trip"]
+
+    # no --val: nothing held out shows the loss fell, so the gate cannot pass
+    shutil.rmtree(cli["out"])
+    assert T.main(base_args(data, cli, "--smoke", flag), backend_factory=lambda c: FakeBackend()) == 1
+    m = json.loads((cli["logs"] / "manifest.json").read_text())
+    assert m["status"] == "smoke-train-fail"
+    assert "step 0" in m["smoke"]["gate"]["val"]["why"] and "step 0" in m["smoke"]["gate"]["probe"]["why"]
+
+
+class Diverging(FakeBackend):
+    """Each update makes things worse: the held-out loss climbs and the
+    gradient grows, though every number stays finite."""
+
+    def forward_backward(self, ids: Any, spans: Any, scale: float) -> float:
+        super().forward_backward(ids, spans, scale)
+        return 1.0 + 0.05 * self.opt_steps + self.rng.random() * 0.05
+
+    def step(self, lr: float) -> float | None:
+        super().step(lr)
+        return 0.5 * 1.2 ** self.opt_steps
+
+    def eval_loss(self, ids: Any, spans: Any) -> float:
+        return 1.0 + 0.01 * self.opt_steps
+
+
+class NaNLoss(FakeBackend):
+    """One step's loss is NaN (its update is skipped; one alone is not divergence)."""
+
+    def forward_backward(self, ids: Any, spans: Any, scale: float) -> float:
+        loss = super().forward_backward(ids, spans, scale)
+        if self.opt_steps == 30 and not getattr(self, "fired", False):
+            self.fired = True
+            return float("nan")
+        return loss
+
+
+class InfGrad(FakeBackend):
+    """One step's gradient overflows: the backend reports the norm and skips the update."""
+
+    def step(self, lr: float) -> float | None:
+        if self.opt_steps == 12 and not getattr(self, "fired", False):
+            self.fired = True
+            self.zero_grad()
+            return float("inf")
+        super().step(lr)
+        return 0.5
+
+
+def test_smoke_fails_a_diverging_run_a_nan_loss_or_a_non_finite_grad_norm(
+        tmp_path: Path, cli: dict[str, Any]) -> None:
+    data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(230)))
+    args = base_args(data, cli, "--smoke", T.APPROVAL_FLAG, *with_val(tmp_path, 40))
+    for backend, failing in ((Diverging, {"val_loss_decreased", "probe_loss_decreased",
+                                          "grad_norm_stable"}),
+                             (NaNLoss, {"losses_finite"}), (InfGrad, {"grad_norms_finite"})):
+        shutil.rmtree(cli["out"], ignore_errors=True)
+        assert T.main(args, backend_factory=lambda c, b=backend: b()) == 1, backend.__name__
+        m = json.loads((cli["logs"] / "manifest.json").read_text())
+        gate = m["smoke"]["gate"]
+        assert m["status"] == "smoke-train-fail", backend.__name__
+        assert {k for k, ok in gate["checks"].items() if not ok} == failing, (backend.__name__, gate)
+    # the diverging run's numbers: held-out up, the median grad norm far past tenfold
+    shutil.rmtree(cli["out"])
+    T.main(args, backend_factory=lambda c: Diverging())
+    gate = json.loads((cli["logs"] / "manifest.json").read_text())["smoke"]["gate"]
+    assert gate["val"]["last"] > gate["val"]["first"] and gate["probe"]["rows_improved"][0] == 0
+    assert "grew" in gate["grad_norm"]["why"]
+
+
+# The first real 9B smoke (2026-10-31, 4090, build v3, 50 steps at 16,384): per-step
+# train loss as its metrics.jsonl kept it, and the val loss at its two checkpoints.
+SMOKE_9B_LOSSES = [
+    1.1381, 1.0914, 1.2229, 1.1248, 1.0271, 1.0065, 0.7388, 0.6389, 1.2738, 0.8693,
+    1.2397, 1.5734, 1.5185, 0.7081, 1.0084, 1.066, 1.6551, 1.0265, 0.8531, 0.788,
+    0.7102, 1.2772, 0.7712, 0.5564, 1.2153, 1.1394, 0.8769, 0.8436, 0.9461, 0.608,
+    0.8495, 1.0431, 1.2751, 0.8043, 0.7957, 1.0258, 0.7709, 0.5248, 1.2927, 1.1655,
+    1.4288, 1.2251, 2.2623, 0.9897, 1.3095, 0.8493, 0.783, 1.24, 0.5884, 0.9264]
+SMOKE_9B_VAL = [{"step": 25, "val_loss": 1.4576861033851052},
+                {"step": 50, "val_loss": 1.443403955733422}]
+
+
+def test_per_step_train_loss_is_not_gated_and_the_start_must_be_step_0() -> None:
+    # the old rule failed this curve: first-10 mean 1.013 vs last-10 mean 1.160
+    first, last = sum(SMOKE_9B_LOSSES[:10]) / 10, sum(SMOKE_9B_LOSSES[-10:]) / 10
+    assert round(first, 3) == 1.013 and round(last, 3) == 1.160
+    history = [{"step": 0, "val_loss": 1.47, "probe_loss": 1.52, "probe_per_row": [1.5, 1.6]},
+               *({**h, "probe_loss": 1.50} for h in SMOKE_9B_VAL[:1]),
+               {**SMOKE_9B_VAL[1], "probe_loss": 1.49, "probe_per_row": [1.4, 1.7]}]
+    v = T.smoke_verdict(SMOKE_9B_LOSSES, history, [0.4] * 50, True)
+    assert v["passed"], v
+    assert not v["train_loss"]["gated"] and v["probe"]["rows_improved"] == [1, 2]
+    assert "lower" in T.smoke_line(v) and T.smoke_line(v).endswith("PASS")
+    # that smoke itself measured nothing before training: no start to compare with
+    v = T.smoke_verdict(SMOKE_9B_LOSSES, SMOKE_9B_VAL, [None] * 50, True)
+    assert not v["passed"] and v["val"]["why"] == "no val_loss at step 0 (before training)"
+    # a held-out loss that rises, or a NaN train loss, fails the same curve
+    worse = [dict(h) for h in history]
+    worse[-1]["probe_loss"] = 1.53
+    assert not T.smoke_verdict(SMOKE_9B_LOSSES, worse, [0.4] * 50, True)["checks"][
+        "probe_loss_decreased"]
+    nan = SMOKE_9B_LOSSES[:-1] + [float("nan")]
+    assert not T.smoke_verdict(nan, history, [0.4] * 50, True)["checks"]["losses_finite"]
+    assert not T.smoke_verdict(SMOKE_9B_LOSSES, history, [0.4] * 50, False)["passed"]
+
+
+def test_held_out_and_grad_norm_check_edges() -> None:
+    hc = T.held_out_check
+    assert not hc([{"step": 0, "val_loss": 1.0}], "val_loss")["ok"]  # nothing after training
+    assert not hc([{"step": 0, "val_loss": 1.0}, {"step": 9, "val_loss": 1.0}], "val_loss")["ok"]
+    assert hc([{"step": 9, "val_loss": 0.9}, {"step": 0, "val_loss": 1.0}], "val_loss")["ok"]
+    assert not hc([{"step": 3, "val_loss": 1.0}, {"step": 9, "val_loss": 0.5}], "val_loss")["ok"]
+    assert not hc([{"step": 0, "val_loss": 1.0}, {"step": 9, "val_loss": float("nan")}],
+                  "val_loss")["ok"]
+    assert not hc([{"step": 0, "val_loss": 1.0}, {"step": 9, "val_loss": 0.99}], "val_loss",
+                  min_drop=0.02)["ok"]
+    # the last point decides, not the best one
+    assert not hc([{"step": 0, "probe_loss": 1.0}, {"step": 5, "probe_loss": 0.5},
+                   {"step": 9, "probe_loss": 1.01}], "probe_loss")["ok"]
+    g = T.grad_norm_check
+    assert g([0.5] * 40)["stable"] and g([None] * 40)["all_finite"]  # no norms reported: nothing to fail
+    assert g([3.0] * 10 + [0.3] * 30)["stable"]  # falling is fine
+    assert not g([0.3] * 10 + [0.3 * 20] * 30)["stable"]
+    assert not g([0.5] * 39 + [float("inf")])["all_finite"]
+    assert T.finite(1) and not T.finite(True) and not T.finite(None) and not T.finite(float("inf"))
+
+
+def test_the_probe_batch_is_seeded_fixed_disjoint_and_never_trained(tmp_path: Path) -> None:
+    ids = [f"v{i:03d}" for i in range(114)]
+    probe = T.select_probe(ids, 3407)
+    assert len(probe) == 32 and probe == T.select_probe(list(reversed(ids)), 3407)
+    assert probe != T.select_probe(ids, 1)
+    sub, pr = T.held_out_sets(ids, 3407)
+    assert pr == probe and len(sub) == 64 and not set(sub) & set(pr)
+    sub, pr = T.held_out_sets(ids[:20], 3407)  # a small val split: the probe takes half
+    assert len(pr) == 10 and sorted(sub + pr) == ids[:20]
+    rows = rows_n(12)
+    val = T.JsonlSource(tmp_path / "val.jsonl", ENC, rows=[make_row(5000 + i) for i in range(40)])
+    val.fit(80)
+    t = trainer(tmp_path, rows, FakeBackend(), val=val)
+    t.setup(resume=False)
+    assert t.probe_ids == T.select_probe(val.kept(), 3407, 20) and not set(t.probe_ids) & set(t.plan)
+    assert t.val_history[0]["step"] == 0 and len(t.val_history[0]["probe_per_row"]) == 20
+    t.run(hook=lambda tr, rec: "stop" if tr.step == 3 else None)
+    # a resume with another probe seed would compare different rows: refused
+    with pytest.raises(T.UsageError, match="probe batch"):
+        trainer(tmp_path, rows, FakeBackend(), val=val, probe_seed=1).setup(resume=True)
+    t2 = trainer(tmp_path, rows, FakeBackend(), val=val)
+    t2.setup(resume=True)
+    assert [h["step"] for h in t2.val_history] == [0, 3]  # the step-0 point survives a resume
+    # a held-out row from a task that also trains is refused, by id or by task
+    same_task = [dict(make_row(5000 + i), task_id=f"t{i}") for i in range(10)]
+    train_rows = [dict(r, task_id="t3" if i == 0 else f"x{i}") for i, r in enumerate(rows_n(12))]
+    vs = T.JsonlSource(tmp_path / "v2.jsonl", ENC, rows=same_task)
+    vs.fit(80)
+    with pytest.raises(T.DataError, match="also train"):
+        trainer(tmp_path, train_rows, FakeBackend(), val=vs, out="leak").setup(resume=False)
+    dup = T.JsonlSource(tmp_path / "v3.jsonl", ENC, rows=rows_n(3))
+    dup.fit(80)
+    with pytest.raises(T.DataError, match="also train"):
+        trainer(tmp_path, rows, FakeBackend(), val=dup, out="leak2").setup(resume=False)
+
+
+def test_the_plan_is_shuffled_whatever_the_file_order(tmp_path: Path) -> None:
+    """build.py writes train.jsonl grouped by category; the trainer never trains
+    in file order: each epoch is a seeded permutation, recorded with the stats."""
+    cats = ["coding"] * 60 + ["chat-mode"] * 20 + ["other"] * 20
+    rows = [dict(make_row(i, 3 + i // 10), category=c) for i, c in enumerate(cats)]  # grouped + long
+    t = trainer(tmp_path, rows, FakeBackend(), cfg=small_cfg(save_every=1000))
+    t.setup(resume=False)
+    order = json.loads((tmp_path / "run" / T.RUN_STATE).read_text())["order"]
+    f, p0, p1 = order["file"], *order["plan"]
+    assert order["seed"] == 3407 and order["epochs_differ"] and "seeded permutation" in order["sampler"]
+    assert f["category_runs"] == 3 and f["category_longest_run"] == 60
+    assert f["len_ac1"] > 0.8 and f["len_rank_corr_with_position"] > 0.8
+    for p in (p0, p1):
+        assert p["n"] == 100 and p["categories"] == 3
+        assert abs(p["category_runs"] - p["category_runs_if_shuffled"]) < 15
+        assert p["category_longest_run"] < 15
+        assert abs(p["len_ac1"]) < 0.3 and abs(p["len_rank_corr_with_position"]) < 0.3
+    # a sorted order is caught by the same stats
+    by_len = sorted(t.kept, key=t.source.n_tokens)
+    assert T.order_stats(by_len, t.source.n_tokens)["len_rank_corr_with_position"] > 0.95
+
+
+def test_time_based_checkpoints_epoch_ends_and_progress(tmp_path: Path) -> None:
+    clock = Clock()
+    rows = rows_n(12)
+    val = T.JsonlSource(tmp_path / "val.jsonl", ENC, rows=[make_row(5000 + i) for i in range(6)])
+    val.fit(80)
+    be = FakeBackend(clock=clock, sec_per_token=1.0)  # ~30 s per step
+    cfg = small_cfg(save_every=1000, save_every_minutes=2.0, keep_checkpoints=10)
+    t = trainer(tmp_path, rows, be, cfg=cfg, val=val, clock=clock.now)
+    t.setup(resume=False)
+    assert t.run().status == "done" and t.step == 12
+    steps = sorted(int(p.name.split("-")[1]) for p in (tmp_path / "run").iterdir()
+                   if p.name.startswith("checkpoint-"))
+    gaps = [b - a for a, b in zip([0] + steps, steps)]
+    assert 6 in steps and 12 in steps and len(steps) >= 4 and max(gaps) <= 6
+    rs = json.loads((tmp_path / "run" / T.RUN_STATE).read_text())
+    ep = rs["epochs_done"]
+    assert [(e["epoch"], e["step"], e["of"]) for e in ep] == [(1, 6, 2), (2, 12, 2)]
+    assert all(e["val_loss"] is not None and e["probe_loss"] is not None for e in ep)
+    assert ep[1]["val_loss"] < ep[0]["val_loss"] < rs["val_history"][0]["val_loss"]
+    assert {h["step"] for h in rs["val_history"]} >= {0, 6, 12}
+    pr = rs["progress"]
+    assert pr["step"] == 12 and pr["tokens_left"] == 0 and pr["tok_s"] > 0 and pr["eta_s"] == 0
+    assert pr["epochs"] == 2 and pr["total_steps"] == 12
+    # mid-run: the ETA is the tokens left at this process's own rate
+    t2 = trainer(tmp_path, rows, FakeBackend(clock=clock, sec_per_token=1.0), cfg=cfg, out="r2",
+                 clock=clock.now)
+    t2.setup(resume=False)
+    t2.run(hook=lambda tr, rec: "stop" if tr.step == 4 else None)
+    pr = json.loads((tmp_path / "r2" / T.RUN_STATE).read_text())["progress"]
+    assert pr["step"] == 4 and pr["eta_s"] == pytest.approx(pr["tokens_left"] / pr["tok_s"], rel=0.01)
+
+
+def test_a_run_checkpoints_and_stops_under_the_disk_floor(tmp_path: Path) -> None:
+    free = {"bytes": 50.0 * 2**30}
+    t = trainer(tmp_path, rows_n(12), FakeBackend(), min_free_bytes=6 * 2**30,
+                disk_free=lambda p: free["bytes"])
+    t.setup(resume=False)
+
+    def shrink(tr: Any, rec: Any) -> None:
+        if tr.step == 2:
+            free["bytes"] = 5.0 * 2**30
+
+    res = t.run(hook=shrink)
+    assert res.status == "stopped" and res.reason == "disk-floor" and res.step == 2
+    assert T.find_latest_checkpoint(tmp_path / "run").name == "checkpoint-000002"
+
+
+def test_three_non_finite_steps_in_a_row_stop_the_run_as_diverged(tmp_path: Path,
+                                                                 cli: dict[str, Any]) -> None:
+    class AllNaN(FakeBackend):
+        def forward_backward(self, ids: Any, spans: Any, scale: float) -> float:
+            loss = super().forward_backward(ids, spans, scale)
+            return float("nan") if self.calls > 8 else loss
+
+    t = trainer(tmp_path, rows_n(20), AllNaN())
+    t.setup(resume=False)
+    with pytest.raises(T.Diverged):
+        t.run()
+    assert t.nonfinite == 3 and t.backend.opt_steps < t.step  # skipped steps never updated
+    # through the CLI: exit 1 and a "failed" manifest naming it
+    data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(20)))
+    assert T.main(base_args(data, cli, T.APPROVAL_FLAG, "--grad-accum", "2"),
+                  backend_factory=lambda c: AllNaN()) == 1
+    m = json.loads((cli["out"] / "manifest.json").read_text())
+    assert m["status"] == "failed" and "diverged" in m["reason"]
 
 
 class NoOpRestore(FakeBackend):
@@ -751,7 +1030,7 @@ class NoOpRestore(FakeBackend):
 def test_smoke_round_trip_fails_when_the_restore_does_nothing(tmp_path: Path,
                                                               cli: dict[str, Any]) -> None:
     data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(230)))
-    rc = T.main(base_args(data, cli, "--smoke", T.APPROVAL_FLAG),
+    rc = T.main(base_args(data, cli, "--smoke", T.APPROVAL_FLAG, *with_val(tmp_path)),
                 backend_factory=lambda c: NoOpRestore())
     m = json.loads((cli["logs"] / "manifest.json").read_text())
     assert rc == 1 and m["status"] == "smoke-train-fail"
@@ -776,7 +1055,7 @@ def test_a_resume_refuses_a_restore_that_does_not_bring_the_weights_back(tmp_pat
 def test_a_stopped_smoke_is_no_verdict_and_resumes(tmp_path: Path, cli: dict[str, Any],
                                                    monkeypatch: pytest.MonkeyPatch) -> None:
     data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(230)))
-    args = base_args(data, cli, "--smoke", T.APPROVAL_FLAG)
+    args = base_args(data, cli, "--smoke", T.APPROVAL_FLAG, *with_val(tmp_path))
     for stop_step in (10, 30):  # in the first half, then in the second
         shutil.rmtree(cli["out"], ignore_errors=True)
 
