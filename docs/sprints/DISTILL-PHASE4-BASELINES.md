@@ -1,7 +1,8 @@
 # Phase 4: baselines and the long-context gate
 
-**Status (2026-10-30):** the gate math is done and in the scorer (`scripts/distill/score.py`, scorer v4).
-The baselines are **pending**: see [Baselines](#baselines-pending) at the end.
+**Status (2026-10-31):** the gate math is done and in the scorer (`scripts/distill/score.py`, scorer v4).
+Baselines are in for base Qwen3.5-9B, Saluki and Qwen3.8-27B; Muse Glimmer 30B is partial. See
+[Baselines](#baselines) at the end.
 
 The operator approved OPEN-QUESTIONS #8 on 2026-10-30. The fixed long-context bar ("no worse than base by
 more than 3 pts at any depth bucket") is replaced by a paired gate built on confidence intervals. The other
@@ -352,24 +353,104 @@ never the verdict's code.
 
 ---
 
-## Baselines (pending)
+## Baselines
 
-| Model | Where | Status |
-|---|---|---|
-| Base Qwen3.5-9B (Q4_K_M, llama.cpp `-c 262144 -np 1 -fa -ctk q8_0 -ctv q8_0`) | 4090 | **Pending.** GPU work on the 4090 is blocked (OPEN-QUESTIONS #2, #3). |
-| Saluki (its existing endpoint, concurrency 1, read-only) | 3090 Ti | **Pending; runs overnight.** It must finish before the first 3090 Ti swap (operator answer to #4). |
-| Bake-off: Qwen3.8-27B and Meta Muse Glimmer 30B (Q4, each at its native max context) | 4090 | **Pending** on the 4090. They are ranked on eval-tools first, then on eval-longctx at 128K or less. |
+Scored in night 1 (2026-10-31). All four summaries were rewritten with HEAD's scorer (`score.py summarize`,
+scorer v4, summary schema `distill-score-summary/3`, schema validator jsonschema) from the stored result rows.
+No request was re-sent. The new summaries sit beside the originals as `<label>.head-4ef1dfe.summary.json` and
+`.md`. Saluki's originals were scorer v3 (schema /2, no per-case outcomes); the 4090 originals were already v4,
+and the rewrite changed no number. Every model got the same case files (sha256 checked on both hosts) and the
+same request settings: `max_tokens` 4096, thinking suppressed, server-default temperature, no seed,
+concurrency 1. No set has errors or invalid rows.
 
-The eval sets are those from Phase 3:
-- eval-tools: 329 cases
-- eval-longctx: 180 cases (45 per bucket)
-- eval-injection: 192 cases
-- sanity: 211 cases
-- ungated: 60 long-context tool cases, scored on their own
+### Models and servers
 
-Each baseline's scores table goes here, from `score.py summarize`. Result rows written by an earlier scorer
-version need only `summarize` re-run (no requests, no GPU) to get the per-case outcomes the paired gate
-reads. Rows are never re-sent for a scorer change.
+| Model | Host | Quant (served file) | Context | Sets covered |
+|---|---|---|---|---|
+| base-9b: Qwen3.5-9B | 4090 | Q4_K_M (`Qwen3.5-9B-Q4_K_M.gguf`) | 262,144, 1 slot | all four; long-ctx all 4 buckets |
+| saluki | 3090 Ti | IQ2 mix (`Underdog-Saluki-27B-1.0-IQ2-mix.gguf`) | 65,536 (live server, 2 slots) | all four; long-ctx **32K only** |
+| qwen38-27b: Qwen3.8-27B | 4090 | Q4_K_XL (`Qwen3.8-27B-UD-Q4_K_XL.gguf`) | 131,072, 1 slot | all four; long-ctx 256K over context |
+| glimmer-30b: Muse Glimmer 30B | 4090 | Q4_K_M (`Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf`) | 131,072 (native), 1 slot | **partial**: sanity; eval-tools 259/329 |
+
+- The 4090 servers ran llama.cpp `-np 1 -fa on -ctk q8_0 -ctv q8_0 --jinja -ngl 99`, each at the largest
+  context that loaded (the runner tries the native context first).
+- **Saluki at 32K only.** It was scored on its live endpoint, read-only, at concurrency 1, behind the probe
+  guard. That server's 65,536-token KV is shared with the daemon's slot, so a 64K+ case would have crowded the
+  daemon. It ran the 45 cases of the 32K bucket (`eval-longctx-32k.jsonl`, the same case ids as the full
+  set's 32K bucket).
+- **Qwen3.8-27B at 131,072.** Its native 262,144 context failed to create on the 24 GB card, so the runner
+  stepped down to 131,072. The 45 cases of the 256K bucket are `context_exceeded` and count as misses (0/45).
+  Its 256K number therefore measures the context limit, not recall.
+- **Glimmer is partial.** Night 1 ended at the 06:35 stop with sanity done and eval-tools at 259/329.
+  eval-injection (0/192) and eval-longctx (0/180) have not run. Its eval-tools rate is over those 259 cases,
+  not the full set. The runner resumes it in a later 4090 window.
+- `task_success` has the same count as `tool_name_accuracy` on every model in this run, so the tables below
+  show only task success.
+
+### sanity (211 cases)
+
+| Model | sanity_score | 95% CI | n |
+|---|---|---|---|
+| base-9b | 96.7% | [93.3, 98.4] | 211 |
+| saluki | 94.8% | [90.9, 97.1] | 211 |
+| qwen38-27b | 97.2% | [93.9, 98.7] | 211 |
+| glimmer-30b | 99.5% | [97.4, 99.9] | 211 |
+
+### eval-tools (329 cases)
+
+| Model | task_success [95% CI] | n | arg_validity | arg_exactness [95% CI] | p50 latency |
+|---|---|---|---|---|---|
+| base-9b | 72.3% [67.3, 76.9] | 329 | 100% (238/238) | 10.1% [6.9, 14.6] | 2.2 s |
+| saluki | 70.5% [65.4, 75.2] | 329 | 100% (232/232) | 9.5% [6.3, 13.9] | 8.9 s |
+| qwen38-27b | 72.9% [67.9, 77.5] | 329 | 100% (240/240) | 11.2% [7.8, 15.9] | 7.7 s |
+| glimmer-30b (partial) | 75.7% [70.1, 80.5] | 259 | 100% (196/196) | **0.5%** [0.1, 2.8] | 4.6 s |
+
+On the same 259 cases Glimmer has answered, task success is: Glimmer 196, Qwen3.8-27B 196, base-9b 195,
+Saluki 184 (75.7 / 75.7 / 75.3 / 71.0%). On the other 70 cases Qwen3.8-27B scores 44 (62.9%), so the 70 left
+are harder than average, and Glimmer's full-set rate will likely fall. Glimmer's argument exactness is
+far below every other model (1 exact call in 196). Its calls are valid but almost never match the
+reference arguments.
+
+### eval-injection (192 cases)
+
+| Model | injection_resistance | 95% CI | n | tool_output / memory / wiki |
+|---|---|---|---|---|
+| base-9b | 99.0% | [96.3, 99.7] | 192 | 63/64, 63/64, 64/64 |
+| saluki | 98.4% | [95.5, 99.5] | 192 | 63/64, 62/64, 64/64 |
+| qwen38-27b | 99.0% | [96.3, 99.7] | 192 | 64/64, 64/64, 62/64 |
+| glimmer-30b | not run | | 0 | |
+
+### eval-longctx by bucket (45 cases per bucket)
+
+| Model | 32K | 64K | 128K | 256K | ≤128K pooled | All buckets |
+|---|---|---|---|---|---|---|
+| base-9b | 82.2% [68.7, 90.7] | 80.0% [66.2, 89.1] | 71.1% [56.6, 82.3] | 77.8% [63.7, 87.5] | 77.8% [70.1, 84.0], n 135 | 77.8% [71.2, 83.2], n 180 |
+| saluki | 82.2% [68.7, 90.7] | not run | not run | not run | 32K only | 82.2%, n 45 |
+| qwen38-27b | 86.7% [73.8, 93.7] | 84.4% [71.2, 92.3] | 82.2% [68.7, 90.7] | 0.0% [0.0, 7.9]* | 84.4% [77.4, 89.6], n 135 | 63.3% [56.1, 70.0], n 180 |
+| glimmer-30b | not run | not run | not run | not run | | |
+
+\* All 45 are `context_exceeded` at 131,072; this is the context limit, not recall.
+
+The intervals are 95% Wilson intervals, each bucket on its own. The ≤128K pooled column is computed from the
+per-case outcomes in the summaries. No paired comparison against base-9b is made here: the gate is for tuned
+against base, and these are different models.
+
+### Large-student bake-off (runbook: eval-tools first, then eval-longctx at ≤128K)
+
+**No winner yet.** Glimmer has 70 eval-tools cases and all of eval-longctx left.
+
+1. **eval-tools.** On the 259 cases both models answered, the two are **tied**: 196 each. The paired table
+   (Qwen3.8-27B right only 28, Glimmer right only 28, both right 168, both wrong 35) gives a difference of
+   0.0 pts, Newcombe 95% CI [−5.7, +5.7], exact McNemar p = 1.0. On the full set Qwen3.8-27B scores 72.9%
+   [67.9, 77.5].
+2. **eval-longctx ≤128K.** Qwen3.8-27B: 84.4% [77.4, 89.6] (114/135). Glimmer: not run.
+
+**Provisional order: Qwen3.8-27B first, Glimmer second.** Qwen3.8-27B is ahead only on completeness, since
+the first criterion is tied so far. The ranking becomes final when Glimmer finishes eval-tools (329) and
+eval-longctx. If eval-tools stays within its interval, ≤128K long-context recall decides. Glimmer's 0.5%
+argument exactness is a separate warning for a training student. It is not a ranking criterion.
+
+The ungated long-context tool set (60 cases) was not part of these runs.
 
 ## References
 
