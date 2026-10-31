@@ -1,0 +1,22 @@
+# OnFailure= handler of distill-teacher.service and distill-teacher-q4.service (GPU-window host).
+#
+# A teacher that crashes mid-window (out of memory beside an image job, a CUDA error) and fails its
+# restarts leaves the local model port dark until the window ends: up to ~35 h in the continuous window,
+# and nothing else watches it. This runs `mini_window.py teacher-failed --execute`, which (under the window
+# lock) restores business when no teacher serves the port and the local model server is down, sets the
+# NO-SWAPS flag and notifies. It does nothing when the other teacher runs (slot-exit's fallback) or a window
+# script already restored business (a forward swap that failed restores on its own).
+#
+# NOT named distill-*: `apply business` stops every running distill-* unit, which would stop this restore.
+# No [Install] section: only OnFailure= starts it. Install: install_teacher_units.sh (with the teachers).
+[Unit]
+Description=distill window: restore the local model server after a teacher failed (OnFailure)
+
+[Service]
+Type=oneshot
+# The lock wait (FAILED_LOCK_WAIT_S, 20 min) plus up to three restore rounds: not the 90 s default.
+TimeoutStartSec=75min
+# A stop's SIGTERM reaches only the script, which then finishes its restore before exiting.
+KillMode=mixed
+TimeoutStopSec=20min
+ExecStart=/usr/bin/python3 -I %h/distill/window/mini_window.py --conf %h/distill/window/window.conf teacher-failed --execute

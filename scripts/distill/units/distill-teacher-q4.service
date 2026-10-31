@@ -1,0 +1,45 @@
+# Local teacher, bigger quant: Qwen3.8-27B Q4_K_M (~5.0 bpw, Apache 2.0), text only, all layers on
+# the GPU. For NIGHTLY windows only, and only if Q4_K_M wins the teacher quant A/B: it needs the
+# Ollama model's VRAM too, so `apply flywheel-night-q4` stops ollama.service as well as the daemon's
+# local model server (DISTILL-OPEN-QUESTIONS #9 / Q9). Same port and shape as distill-teacher.service
+# (2 slots, unified q8_0 KV, ubatch 512, same reasoning budget and sampling), shorter context.
+#
+# Started and stopped only by scripts/distill/setups.py; no [Install] section (never at boot); every
+# `apply business` restore stops it and starts Ollama again. In the nightly-eval slots (02:50-03:15,
+# 05:50-06:15) the window tooling swaps it for distill-teacher.service so the eval judge (Ollama) fits:
+# scripts/distill/mini_window/eval_slot_enter.sh and eval_slot_exit.sh.
+#
+# VRAM on the 24 GiB card with the daemon's model server AND Ollama stopped (18,651 MiB free):
+#   weights on the GPU 15,713.9 MiB  (16,477,259,776 B: 64 trunk layers + output; token embeddings on
+#                                     the CPU; the MTP block is skipped without --spec-type draft-mtp)
+#   KV, q8_0              816.0 MiB  (CTX 24,576 x 34,816 B)
+#   recurrent state       299.2 MiB  (2 slots)
+#   context + buffers   1,191.9 MiB  (as for distill-teacher.service)
+#   total              18,021.1 MiB  -> ~630 MiB spare. 28,672 would leave ~494 MiB.
+# The daemon still budgets at the window it read at boot (the replaced server's): prompts between
+# 24,576 tokens and its compaction point are refused by this server on a Q4 night.
+[Unit]
+Description=distill teacher: Qwen3.8-27B Q4_K_M on the local model port (text only, nightly)
+After=network.target
+Conflicts=distill-teacher.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
+# As in distill-teacher.service: a teacher systemd gave up on restores the local model server at once.
+OnFailure=window-mini-teacher-failed.service
+
+[Service]
+Type=simple
+Environment=CTX=24576
+# Projected size plus slack: with Ollama's model still loaded only ~13.3 GiB is free, so this refuses.
+Environment=MIN_FREE_MIB=18200
+ExecStartPre=/bin/sh -c 'free=$$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -n 1 | tr -d " "); if [ "$${free:-0}" -ge "$${MIN_FREE_MIB}" ]; then exit 0; fi; echo "distill-teacher-q4: only $${free:-?} MiB VRAM free, needs $${MIN_FREE_MIB}: not starting" >&2; exit 1'
+ExecStart=%h/ladder/src/llama.cpp-9d57ce456/build/bin/llama-server \
+  -m %h/distill/models/teacher-q4/Qwen3.8-27B-Q4_K_M.gguf --no-mmproj \
+  --alias qwen3.8-27b-q4_k_m \
+  --host 127.0.0.1 --port 8092 --no-slots -ngl 99 --fit off -c ${CTX} --parallel 2 --kv-unified \
+  --flash-attn on -ctk q8_0 -ctv q8_0 --jinja --batch-size 2048 --ubatch-size 512 \
+  --temp 1.0 --top-k 20 --top-p 0.95 --min-p 0.0 \
+  --reasoning-budget 2048 --reasoning-budget-message "[REASONING_BUDGET_EXHAUSTED]"
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=90

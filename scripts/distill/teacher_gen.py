@@ -3,21 +3,49 @@
 
     # On the GPU host. The teacher is a llama.cpp server on loopback; no paid API, no API key.
     uv run python scripts/distill/teacher_gen.py run \\
+        --tasks ~/distill/phase2b/tasksets/real-v1.jsonl \\
         --out ~/distill/phase2b-local --teacher-url http://127.0.0.1:8093 \\
         --injection-manifest ~/distill/phase3/evalsets/eval-injection.manifest.json \\
         --eval-tools ~/distill/phase3/eval-tools.jsonl \\
         --eval-tools ~/distill/phase3/evalsets/ungated/eval-longctx-tools.jsonl \\
         --pack ~/distill/phase3/request_pack.json --repo ~/Prometheus \\
-        --until 06:45 [--concurrency 2] [--probe-guard-url http://127.0.0.1:<port>]
-    # The tasks a run would start next (no model calls), as JSONL:
+        --until 06:45 [--concurrency 2] [--probe-guard-url http://127.0.0.1:<port>] \\
+        [--judge-url http://127.0.0.1:<other port>] [--temperature 0.7 --top-k 20 --top-p 0.8 --min-p 0]
+    # A smoke run of the built-in task families (rows tagged builtin-smoke, never trained on):
+    uv run python scripts/distill/teacher_gen.py run --builtin-smoke --max-tasks 5 --out /tmp/smoke ...
+    # The built-in tasks a smoke run would start next (no model calls), as JSONL:
     uv run python scripts/distill/teacher_gen.py list-tasks --n 3 --injection-manifest ... --eval-tools ...
     # Into the Phase 3 builder. Its data policy (--train-sources, default qwen38-27b-gym;
     # --train-models, default qwen3.8-27b*) admits these rows to train/val on their own
     # _meta.verification record. Never pass this model as --teacher-model: that names Max rows.
-    python3 build.py build ... --extra-traces '~/distill/phase2b-local/*.traces.jsonl'
+    python3 build.py build ... --extra-traces '~/distill/phase2b-local/qwen38-27b-gym.traces.jsonl'
 
-What it generates
------------------
+Task source (the operator's rule: no model-written task text in training data)
+-------------------------------------------------------------------------------
+``run`` needs exactly one of:
+
+* ``--tasks <taskset.jsonl>``: a ``taskset_gen.py`` real-pattern taskset (every
+  row checked by that file's own ``validate_task``; anything else is refused).
+  It is the ONLY way to rows tagged ``source = qwen38-27b-gym``: a row gets that
+  tag only when the run is a ``--tasks`` run AND its task was built from a
+  validated taskset row (``GenTask.origin == "taskset"``, provenance
+  ``real-pattern-v1``). The task flags are execution conditions:
+  ``suppress_tools`` -> a chat-mode request with no tools; ``inject_errors`` ->
+  the sandbox fails the first tool call and the run must recover (also on a
+  task that is compacted too); ``force_compaction`` -> a long reading session
+  of repo docs before the prompt, then the real compactor with a small window
+  (rows name the padding: ``_meta.compaction_pad``). The padding is always the
+  ``--repo``'s own git-tracked docs: a repo without any is refused (exit 2),
+  never padded with the synthetic runbooks a smoke run falls back to. ``_meta.task_id`` is the
+  row's ``task_group``, ``_meta.partner_task_id`` a recombined row's second
+  group, and the row's provenance fields are carried.
+* ``--builtin-smoke``: the built-in families below (or ``--tasks-file`` rows
+  from ``list-tasks``). Their text was written by hand in this file, so every
+  row is tagged ``source = builtin-smoke`` (``--name`` defaults to it) and
+  ``build.py`` never trains on it. A list-tasks row cannot claim another origin.
+
+What the built-in families generate (``--builtin-smoke``)
+--------------------------------------------------------
 Five task kinds, scheduled by deficit against ``--mix`` (rows kept per kind vs
 the target share; ties go to the earlier kind, and a kind whose pass rate is
 very low after 10 attempts is scheduled less), in this priority order:
@@ -56,8 +84,19 @@ Each task runs through the real ``run_loop`` with the real ``ModelAdapter``
 (tier from the model registry), a ``SecurityGate`` scoped to the task's
 sandbox, and a ``LlamaCppProvider`` pointed at ``--teacher-url`` (or
 ``--probe-guard-url``, which then carries every teacher, summarizer and
-self-judge request). Thinking stays off, as at runtime; sampling is the
-server's own (set it at launch: the live provider sends none). ``--concurrency``
+self-judge request; a ``--judge-url`` naming another server is called
+directly, the guard fronts the teacher only; the teacher's or the guard's
+port under any spelling of its host, ``localhost`` or ``[::1]`` for
+``127.0.0.1`` say, is the teacher, never a way around the guard). No
+model request goes through a proxy: HTTP(S)_PROXY / ALL_PROXY are dropped
+from the process and NO_PROXY is ``*``. A reply llama-server cut off
+mid-stream (an error event, no finish_reason) is a server error, never a
+turn. Thinking stays off, as at
+runtime. Sampling is the server's own unless ``--temperature`` / ``--top-k`` /
+``--top-p`` / ``--min-p`` are given: those go on every teacher and summarizer
+request (a GGUF's own metadata can change a server's defaults, so two servers
+compared on the same tasks need them; the judge always runs at temperature 0
+with ``--judge-seed``). ``--concurrency``
 tasks run at once (default 2). Each worker has one sandbox directory under
 ``--sandbox-root``, wiped before and after every task. ``--until`` is a hard
 end: no task starts within ``--min-task-seconds`` of it, and a task still
@@ -120,9 +159,10 @@ Verification (all must hold; only then are rows written)
 * the task's deterministic gym predicates (``prometheus.gym.scoring.score``)
   and its answer checks (whole-word / whole-number regexes, with the negations
   of a state refused: "not running" is not "running");
-* per kind: chat-mode made no tool call; error-recovery's injection fired and
-  (when the task expects it) a call succeeded after it; compacted-history's
-  compactor fired and a teacher request carried the summary;
+* per kind: chat-mode made no tool call; an injection (error-recovery, or any
+  task with ``inject_errors``) fired and (when the task expects it) a call
+  succeeded after it; compacted-history's compactor fired and a teacher
+  request carried the summary;
 * a LOCAL judge: the teacher itself (``self-judge``) unless ``--judge-url``
   names another local endpoint (``local-judge``), with a strict rubric, at
   temperature 0 and its own ``--judge-seed``, answering JSON.
@@ -138,8 +178,9 @@ the Ollama port cannot pass as the local 27B; rows carry that id
 
 ``--max-natural-errors`` / ``--keep-refused`` relax tool success. A task kept
 only because of them is ``relaxed``: its rows go to ``<name>.relaxed.jsonl``
-with source ``qwen38-27b-gym-relaxed`` (build.py's strict policy would drop
-them as train rows) and count toward no target, mix or cap.
+with source ``qwen38-27b-gym-relaxed`` (``builtin-smoke`` in a smoke run;
+build.py's strict policy would drop them as train rows) and count toward no
+target, mix or cap.
 
 Provider errors: a teacher or judge that is down, slow or failing (connection,
 timeout, 5xx) is an ``error`` (retried by the next run; enough in a row stop
@@ -148,10 +189,8 @@ it). A request it refuses (context overflow, another 4xx) is a rejection
 recorded as done, never retried. An overflow the loop recovered from by
 compacting is ignored.
 
-``--tasks-file`` takes list-tasks rows or a ``taskset_gen.py`` taskset (its
-contract: chat rows send no tools, ``inject_errors`` fails the first tool
-call, ``force_compaction`` puts a long reading session before the prompt,
-``_meta.task_id`` is the row's ``task_group`` and its provenance is carried).
+``--tasks`` takes only a ``taskset_gen.py`` taskset (Task source, above);
+``--builtin-smoke --tasks-file`` takes list-tasks rows.
 
 Outputs (``--out``, file prefix ``--name``)
 -----------------------------------------
@@ -159,8 +198,9 @@ Outputs (``--out``, file prefix ``--name``)
   ``build.py --extra-traces`` reads: ``messages`` (the exact wire messages the
   teacher saw, system prompt first; tool results carry ``is_error``) ending in
   the teacher's assistant turn, ``tools`` (the offered tools, OpenAI shape;
-  ``[]`` for chat-mode), and ``_meta``: ``source`` = ``qwen38-27b-gym``,
-  ``model`` (``--model-name``), ``served_model``, ``category`` (build.py's
+  ``[]`` for chat-mode), and ``_meta``: ``source`` = ``qwen38-27b-gym``
+  (``--tasks``; ``builtin-smoke`` with ``--builtin-smoke``), ``task_origin``,
+  ``sampling`` (when given), ``model`` (``--model-name``), ``served_model``, ``category`` (build.py's
   categories: chat-mode, memory/wiki, sentinel/daemon, other, coding),
   ``task_category`` (the kind), ``task_id``, ``task_family``, ``run_id``,
   ``verdict: pass``, ``max_derived: false``, ``suppress_tools``, ``compacted``,
@@ -236,7 +276,18 @@ SOURCE_TAG = "qwen38-27b-gym"
 #: Rows verified only under --max-natural-errors / --keep-refused: written to their own
 #: file under this tag, never counted toward targets, the mix or the coding cap.
 RELAXED_SOURCE = "qwen38-27b-gym-relaxed"
-GENERATOR_VERSION = "teacher-gen/2"
+#: Rows of the built-in task families (``--builtin-smoke``): their task text was written
+#: by hand in this file, not taken from real prompts, so they are never a train source
+#: (build.py excludes them: never listed, and not the Max model's rows either).
+BUILTIN_SOURCE = "builtin-smoke"
+#: The provenance ``taskset_gen.py`` stamps on every row (its ``PROVENANCE``).
+TASKSET_PROVENANCE = "real-pattern-v1"
+#: Where a task came from: a real-pattern taskset (``--tasks``) or the built-in families.
+ORIGIN_TASKSET = "taskset"
+ORIGIN_BUILTIN = "builtin"
+#: Request sampling fields ``--temperature`` / ``--top-k`` / ``--top-p`` / ``--min-p`` set.
+SAMPLING_KEYS = ("temperature", "top_k", "top_p", "min_p")
+GENERATOR_VERSION = "teacher-gen/3"
 DEFAULT_TEACHER_URL = "http://127.0.0.1:8093"
 DEFAULT_MODEL_NAME = "qwen3.8-27b"
 DEFAULT_TEACHER_ID = "*qwen3*8*27b*"
@@ -336,6 +387,34 @@ def check_endpoint(url: str, *, allow_lan: bool = False) -> str:
     return url.rstrip("/")
 
 
+def same_server(a: str | None, b: str | None) -> bool:
+    """Whether two endpoint URLs reach the same server: the same port (scheme
+    default when none) on hosts that share an address, every loopback spelling
+    (127.0.0.1, localhost, [::1], 127.0.0.2) counting as one. Paths are ignored.
+    An unresolvable host falls back to comparing the names. Errs towards True:
+    a judge URL that might be the teacher is treated as the teacher."""
+    if not a or not b:
+        return False
+    pa, pb = urlsplit(a), urlsplit(b)
+    try:
+        port_a = pa.port or (443 if pa.scheme == "https" else 80)
+        port_b = pb.port or (443 if pb.scheme == "https" else 80)
+    except ValueError:
+        return a.rstrip("/") == b.rstrip("/")
+    if port_a != port_b:
+        return False
+    ha, hb = (pa.hostname or "").lower(), (pb.hostname or "").lower()
+    try:
+        addrs_a, addrs_b = _host_addresses(ha), _host_addresses(hb)
+    except EndpointError:
+        return ha == hb
+
+    def norm(addrs: list[str]) -> set[str]:
+        return {"loopback" if ipaddress.ip_address(x).is_loopback else x for x in addrs}
+
+    return ha == hb or bool(norm(addrs_a) & norm(addrs_b))
+
+
 # ---------------------------------------------------------------------------
 # Hashes (build.py's Phase 1 functions, ported unchanged; a test holds them equal)
 # ---------------------------------------------------------------------------
@@ -418,16 +497,24 @@ class GenTask:
     answer: dict[str, list[str]] = field(default_factory=dict)
     #: copied into every row's _meta (a taskset's provenance)
     meta: dict[str, Any] = field(default_factory=dict)
+    #: ORIGIN_TASKSET only when ``task_from_taskset`` built it from a validated
+    #: taskset row; a task read back from a file is always built-in (``from_dict``)
+    origin: str = ORIGIN_BUILTIN
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "GenTask":
+        """A list-tasks row: always a built-in task. A row claiming another
+        origin is refused (only ``--tasks`` makes taskset tasks)."""
         names = {f.name for f in dataclasses.fields(cls)}
         unknown = set(d) - names
         if unknown:
             raise ValueError(f"task {d.get('id')!r}: unknown keys {sorted(unknown)}")
+        if d.get("origin", ORIGIN_BUILTIN) != ORIGIN_BUILTIN:
+            raise ValueError(f"task {d.get('id')!r}: a list-tasks row is a built-in task; "
+                             "real-pattern tasks come only from a taskset_gen.py file (--tasks)")
         task = cls(**d)
         task.validate()
         return task
@@ -441,6 +528,8 @@ class GenTask:
             raise ValueError(f"task {self.id!r}: domain {self.domain!r} not in {DOMAINS}")
         if self.mode not in ("agent", "chat"):
             raise ValueError(f"task {self.id!r}: mode must be agent or chat")
+        if self.origin not in (ORIGIN_TASKSET, ORIGIN_BUILTIN):
+            raise ValueError(f"task {self.id!r}: origin {self.origin!r} is not taskset or builtin")
         bad = set(self.score) - ALLOWED_SCORE_KEYS
         if bad:
             raise ValueError(f"task {self.id!r}: unknown score predicates {sorted(bad)}")
@@ -630,12 +719,23 @@ def _split_sections(path: str, text: str, lo: int = 500, hi: int = 2400) -> list
     return out
 
 
+class NoRepoDocs(ValueError):
+    """``--repo`` holds no docs to read from (a real-pattern run never pads with synthetic text)."""
+
+
 class Sources:
-    def __init__(self, sections: list[Section]) -> None:
+    def __init__(self, sections: list[Section], *, synthetic: bool = False) -> None:
         self.sections = sections
+        #: True when the sections are this file's own synthetic runbooks (hand-written
+        #: template text), not a repo's docs: only a --builtin-smoke run may use them
+        self.synthetic = synthetic
 
     @classmethod
-    def from_repo(cls, repo: Path) -> "Sources":
+    def from_repo(cls, repo: Path, *, allow_synthetic: bool = True) -> "Sources":
+        """The repo's git-tracked ``docs/``, ``wiki/`` and ``README.md`` sections.
+        With none, this file's synthetic runbooks when *allow_synthetic*, else
+        NoRepoDocs (a real-pattern task's padding must be real docs, never text
+        written in this file)."""
         repo = Path(repo).expanduser()
         files: list[str] = []
         try:
@@ -658,7 +758,12 @@ class Sources:
             except OSError:
                 continue
         if not sections:
-            sections = _synthetic_sections()
+            if not allow_synthetic:
+                raise NoRepoDocs(
+                    f"--repo {repo} has no git-tracked docs/, wiki/ or README.md sections to read: a "
+                    "force_compaction task's padding must be real repo docs (point --repo at a checkout "
+                    "that has them; the built-in synthetic runbooks are for --builtin-smoke only)")
+            return cls(_synthetic_sections(), synthetic=True)
         return cls(sections)
 
 
@@ -2909,19 +3014,45 @@ class Settings:
     judge_id: str | None = None
     #: what /v1/models said at preflight (set by the run; every call must match it)
     teacher_served: str | None = None
+    #: ORIGIN_TASKSET: tasks come only from a taskset_gen.py file (--tasks) and rows are
+    #: SOURCE_TAG; anything else is a smoke run of the built-in families, rows BUILTIN_SOURCE
+    task_source: str = ORIGIN_BUILTIN
+    #: explicit sampling on every teacher (and summarizer) request: SAMPLING_KEYS -> value.
+    #: Empty: the server's launch defaults (which a GGUF's own metadata can change).
+    sampling: dict[str, float] = field(default_factory=dict)
 
     @property
     def teacher_endpoint(self) -> str:
         return check_endpoint(self.probe_guard_url or self.teacher_url, allow_lan=self.allow_lan)
 
     @property
+    def judge_is_teacher(self) -> bool:
+        """No --judge-url, or one that reaches the teacher's server (or the probe
+        guard) under any spelling (``same_server``): judged through the teacher's
+        endpoint, so the probe guard is never bypassed."""
+        return (not self.judge_url or same_server(self.judge_url, self.teacher_url)
+                or same_server(self.judge_url, self.probe_guard_url))
+
+    @property
     def judge_endpoint(self) -> str:
-        return check_endpoint(self.judge_url, allow_lan=self.allow_lan) if self.judge_url else self.teacher_endpoint
+        """The teacher's own endpoint (through the probe guard, when one is set)
+        when the judge is the teacher; another local server is called directly."""
+        if self.judge_is_teacher:
+            return self.teacher_endpoint
+        return check_endpoint(str(self.judge_url), allow_lan=self.allow_lan)
 
     @property
     def judge_kind(self) -> str:
-        return "self-judge" if not self.judge_url or self.judge_url.rstrip("/") == self.teacher_url.rstrip("/") \
-            else "local-judge"
+        return "self-judge" if self.judge_is_teacher else "local-judge"
+
+    @property
+    def row_source(self) -> str:
+        """The ``_meta.source`` of a strictly verified row."""
+        return SOURCE_TAG if self.task_source == ORIGIN_TASKSET else BUILTIN_SOURCE
+
+    @property
+    def relaxed_source(self) -> str:
+        return RELAXED_SOURCE if self.task_source == ORIGIN_TASKSET else BUILTIN_SOURCE
 
     def fingerprint(self) -> dict[str, Any]:
         return {"generator": GENERATOR_VERSION, "seed": self.seed, "model_name": self.model_name,
@@ -2929,7 +3060,8 @@ class Settings:
                 "judge_kind": self.judge_kind, "judge_seed": self.judge_seed,
                 "emit_final_turns": self.emit_final_turns, "max_natural_errors": self.max_natural_errors,
                 "keep_refused": self.keep_refused, "teacher_id": self.teacher_id,
-                "teacher_served": self.teacher_served,
+                "teacher_served": self.teacher_served, "task_source": self.task_source,
+                "sampling": dict(sorted(self.sampling.items())),
                 "system_prompt_sha": hashlib.sha256((self.base_system_prompt or "").encode()).hexdigest()[:16]}
 
     def system_prompt(self, root: Path) -> str:
@@ -2937,8 +3069,24 @@ class Settings:
         return f"{base.rstrip()}\n\n# Workspace\n\nThis conversation's working directory is `{root}`."
 
 
+#: Proxy settings httpx (trust_env, the provider's default) would send requests through.
+PROXY_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+
+
+def drop_proxy_env() -> None:
+    """No model request may leave through a proxy: every endpoint is a local
+    server (``check_endpoint``), but the provider's httpx client honours
+    HTTP(S)_PROXY / ALL_PROXY, which would carry the task prompts to the proxy
+    host. Removed from this process, and NO_PROXY set to ``*``."""
+    for var in PROXY_ENV:
+        os.environ.pop(var, None)
+    os.environ["NO_PROXY"] = os.environ["no_proxy"] = "*"
+
+
 def isolate_state_dirs(work: Path) -> None:
-    """Point every Prometheus state root at *work* before anything writes."""
+    """Point every Prometheus state root at *work* before anything writes, and
+    drop any proxy from the environment (``drop_proxy_env``) before any request."""
+    drop_proxy_env()
     work.mkdir(parents=True, exist_ok=True)
     for var, sub in (("PROMETHEUS_CONFIG_DIR", "config"), ("PROMETHEUS_DATA_DIR", "data"),
                      ("PROMETHEUS_LOGS_DIR", "logs")):
@@ -2964,15 +3112,58 @@ class RecordedCall:
     unreadable: tuple[str, ...]
 
 
+def _sampling_provider_cls() -> type:
+    """LlamaCppProvider that adds explicit sampling fields (``sampling=``) to
+    every request body. The live provider sends none; a run that compares two
+    servers (teacher_ab.py) must not inherit each server's own defaults."""
+    cached = globals().get("_SAMPLING")
+    if cached is not None:
+        return cached
+    from prometheus.providers.llama_cpp import LlamaCppProvider
+
+    class SamplingProvider(LlamaCppProvider):
+        def __init__(self, *args: Any, sampling: dict[str, float] | None = None, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            bad = set(sampling or {}) - set(SAMPLING_KEYS)
+            if bad:
+                raise ValueError(f"unknown sampling fields {sorted(bad)}")
+            self.sampling = dict(sampling or {})
+
+        def _build_request_payload(self, request: Any) -> dict[str, Any]:
+            payload = super()._build_request_payload(request)
+            payload.update(self.sampling)
+            return payload
+
+        async def _call_once(self, request: Any) -> Any:  # type: ignore[override]
+            """The live provider's single attempt, refusing a cut-off stream: llama-server
+            ends a failed generation mid-stream with a ``data: {"error": ...}`` event
+            (a full KV cache, a compute error) that has no choices, and the live
+            parser then returns the partial reply as if it were complete. A real
+            completion always carries a finish_reason; one without is a server
+            failure (retried by the next run), never a turn to verify or train on."""
+            import httpx
+
+            from prometheus.providers.base import ApiMessageCompleteEvent
+
+            async for ev in super()._call_once(request):
+                if isinstance(ev, ApiMessageCompleteEvent) and not ev.stop_reason:
+                    raise httpx.RemoteProtocolError(
+                        "llama-server ended the stream without a finish_reason (a server error "
+                        "mid-stream); the partial reply is discarded")
+                yield ev
+
+    globals()["_SAMPLING"] = SamplingProvider
+    return SamplingProvider
+
+
 def _recording_provider_cls() -> type:
     cached = globals().get("_RECORDING")
     if cached is not None:
         return cached
     from prometheus.providers.base import ApiMessageCompleteEvent
-    from prometheus.providers.llama_cpp import LlamaCppProvider
 
-    class RecordingProvider(LlamaCppProvider):
-        """LlamaCppProvider that keeps every completed call (request + reply)."""
+    class RecordingProvider(_sampling_provider_cls()):  # type: ignore[misc]
+        """The sampling provider, keeping every completed call (request + reply)."""
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
@@ -3090,7 +3281,7 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
     env = SandboxEnv(root, task, jail=resolve_jail(settings.jail))
     registry = build_sandbox_registry(env)
     provider = _recording_provider_cls()(base_url=settings.teacher_endpoint,
-                                         timeout=settings.request_timeout)
+                                         timeout=settings.request_timeout, sampling=settings.sampling)
     adapter = create_adapter({"provider": "llama_cpp", "model": settings.model_name}, {})
     system_prompt = settings.system_prompt(root)
     counter = {"n": 0}
@@ -3170,12 +3361,12 @@ def _make_compactor(settings: Settings, system_prompt: str, registry: Any, count
     output cap, so a long seeded history has to be compacted."""
     from prometheus.context.compactor import ContextCompactor
     from prometheus.context.token_estimation import estimate_tokens
-    from prometheus.providers.llama_cpp import LlamaCppProvider
 
     tools_chars = 0 if chat else len(str(registry.to_api_schema()))
     fixed = estimate_tokens(system_prompt) + tools_chars // 4
     comp = ContextCompactor(
-        provider=LlamaCppProvider(base_url=settings.teacher_endpoint, timeout=settings.request_timeout),
+        provider=_sampling_provider_cls()(base_url=settings.teacher_endpoint, timeout=settings.request_timeout,
+                                          sampling=settings.sampling),
         model=settings.model_name,
         effective_limit=fixed + settings.compaction_history_tokens + settings.max_tokens,
         threshold_pct=0.85, reserve_tokens=settings.max_tokens, protect_recent_turns=2,
@@ -3290,7 +3481,10 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
     if task.mode == "chat" and events:
         reasons.append("chat_mode_tool_call")
     recovered: bool | None = None
-    if task.kind == "error-recovery":
+    # Any task carrying an injection (a taskset row with inject_errors and
+    # force_compaction is a compacted-history task) must see it fire: a flag
+    # the run never exercised was not honoured.
+    if task.kind == "error-recovery" or task.inject:
         if not out.env.injections_fired:
             reasons.append("injection_not_fired")
         elif task.expect_recovery:
@@ -3399,19 +3593,30 @@ def parse_verdict(text: str) -> dict[str, Any] | None:
     return obj
 
 
-async def judge(out: TaskOutcome, settings: Settings) -> dict[str, Any]:
-    """The local judge's record. ``pass`` needs verdict pass AND completed,
-    tools_ok and grounded true AND recovery_ok not false."""
-    import httpx
-
-    payload = {
+def judge_payload(transcript: str, settings: Settings) -> dict[str, Any]:
+    """The judge request for one rendered transcript (``judge_transcript``)."""
+    return {
         "model": settings.judge_model or settings.model_name,
         "messages": [{"role": "system", "content": JUDGE_SYSTEM},
-                     {"role": "user", "content": judge_transcript(out, settings.judge_max_chars)}],
+                     {"role": "user", "content": transcript}],
         "temperature": 0, "seed": settings.judge_seed, "max_tokens": 600, "stream": False,
         "response_format": {"type": "json_object"},
         "chat_template_kwargs": {"enable_thinking": False, "thinking": False},
     }
+
+
+async def judge(out: TaskOutcome, settings: Settings) -> dict[str, Any]:
+    """The local judge's record. ``pass`` needs verdict pass AND completed,
+    tools_ok and grounded true AND recovery_ok not false."""
+    return await judge_text(judge_transcript(out, settings.judge_max_chars), settings)
+
+
+async def judge_text(transcript: str, settings: Settings) -> dict[str, Any]:
+    """``judge`` on an already rendered transcript (teacher_ab.py judges stored
+    traces this way, all on one judge endpoint). Raises httpx errors."""
+    import httpx
+
+    payload = judge_payload(transcript, settings)
     record: dict[str, Any] = {"kind": settings.judge_kind, "model": payload["model"], "temperature": 0,
                               "seed": settings.judge_seed}
     obj = None
@@ -3460,6 +3665,14 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
     provider = out.provider
     rows: list[dict[str, Any]] = []
     ts = time.time()
+    # The train source only for a task built from a validated real-pattern taskset row
+    # in a --tasks run; a built-in (hand-written) task is a smoke row whatever the run.
+    real = (settings.task_source == ORIGIN_TASKSET and task.origin == ORIGIN_TASKSET
+            and task.meta.get("provenance") == TASKSET_PROVENANCE)
+    if not real:
+        source = BUILTIN_SOURCE
+    else:
+        source = settings.row_source if verification.get("tool_success") else settings.relaxed_source
     for step, call in enumerate(out.calls):
         # The target is the message the loop acted on and committed, not the raw
         # reply: the loop pulls text-markup calls out of the reply (new ids) and strips
@@ -3498,7 +3711,7 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
             "teacher_id": settings.teacher_served,
             # A row verified only under a relaxation (natural tool errors, refusals) is
             # never a train row: build.py's strict policy would drop it anyway.
-            "source": SOURCE_TAG if verification.get("tool_success") else RELAXED_SOURCE,
+            "source": source,
             "tool_name": uses[0].name if uses else None, "timestamp": ts,
             "session_id": f"gym:{task.id}", "category": task.domain, "task_category": task.kind,
             "task_family": task.family, "task_id": task.id, "gen_task_id": task.id, "task_hash": task.task_hash,
@@ -3510,8 +3723,10 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
             "target_rewritten": _blocks(reply) != _blocks(call.reply),
             "verdict": "pass", "verification": verification, "max_derived": False,
             "generator": GENERATOR_VERSION,
-            "gen_seed": settings.seed,
+            "gen_seed": settings.seed, "task_origin": task.origin,
         }
+        if settings.sampling:
+            meta["sampling"] = dict(sorted(settings.sampling.items()))
         # a taskset's provenance (taskset, provenance, template ids, ...) and its task group
         for k, v in task.meta.items():
             if k == "task_id" or k not in meta:
@@ -3793,7 +4008,9 @@ class Store:
                         "target_share": settings.mix.get(k, 0.0)}
         total = self.total_rows
         return {
-            "schema": "distill-teacher-gen-report/1", "generator": GENERATOR_VERSION, "source": SOURCE_TAG,
+            "schema": "distill-teacher-gen-report/1", "generator": GENERATOR_VERSION,
+            "source": settings.row_source, "task_source": settings.task_source,
+            "sampling": dict(sorted(settings.sampling.items())),
             "model": settings.model_name, "judge": settings.judge_kind, "judge_seed": settings.judge_seed,
             "teacher_served": settings.teacher_served, "jail": resolve_jail(settings.jail),
             "rows_total": total, "rows_held": sum(len(rs) for _r, rs in self.held_queue),
@@ -3856,11 +4073,14 @@ def _chat_pad_seed(g: Generator, rng: random.Random, k: int) -> list[dict[str, A
 
 
 def task_from_taskset(row: dict[str, Any], sources: Sources) -> GenTask:
-    """A ``taskset_gen.py`` row (its teacher_gen contract) as a GenTask: id, prompt
-    and category as given; mode chat sends no tools; ``inject_errors`` fails the
-    first tool call (a timeout); ``force_compaction`` puts a long reading session
-    (repo docs) before the prompt and runs the compactor; the row's provenance goes
-    into every trace row's _meta."""
+    """A validated ``taskset_gen.py`` row (its teacher_gen contract) as a GenTask
+    of origin ORIGIN_TASKSET: id, prompt and category as given; mode chat
+    (``flags.suppress_tools``) runs ``run_loop(mode="chat")``, which sends no
+    tools; ``inject_errors`` fails the first tool call (a timeout) and the run
+    must recover from it; ``force_compaction`` puts a long reading session (repo
+    docs) before the prompt and runs the real compactor with a small window. The
+    row's provenance goes into every trace row's _meta, ``_meta.task_id`` is its
+    ``task_group`` and a recombined row's partner group is ``partner_task_id``."""
     flags = row["flags"]
     chat = row["mode"] == "chat"
     kind = ("compacted-history" if flags["force_compaction"] else "error-recovery" if flags["inject_errors"]
@@ -3870,15 +4090,21 @@ def task_from_taskset(row: dict[str, Any], sources: Sources) -> GenTask:
     # its task_group, so the variants land in one split (the ledger keeps the row id)
     meta["task_id"] = row["task_group"]
     if row["transform"] == "recombine" and len(row["sources"]) == 2:
-        meta["partner_task_id"] = "tg-" + row["sources"][1]["pattern_hash"]
+        partner = "tg-" + row["sources"][1]["pattern_hash"]
+        if partner != row["task_group"]:
+            meta["partner_task_id"] = partner
     fields: dict[str, Any] = dict(
         id=row["id"], kind=kind, domain=row["category"], family=f"taskset:{row['subcategory']}",
-        prompt=row["prompt"], mode="chat" if chat else "agent", meta=meta)
+        prompt=row["prompt"], mode="chat" if chat else "agent", meta=meta, origin=ORIGIN_TASKSET)
     if chat:
         fields["score"] = {"expect_text_min_len": 40}
     if flags["inject_errors"]:
         fields.update(inject=[dict(TASKSET_INJECTION)], expect_recovery=True)
     if flags["force_compaction"]:
+        if sources.synthetic or not sources.sections:
+            # never pad a real-pattern task with text written in this file
+            raise NoRepoDocs(f"taskset row {row['id']}: force_compaction needs real repo docs to read "
+                             "(the sources are synthetic or empty)")
         rng = random.Random(f"teacher-gen|taskset-compaction|{row['id']}")
         g = Generator(sources)
         if chat:
@@ -3887,14 +4113,15 @@ def task_from_taskset(row: dict[str, Any], sources: Sources) -> GenTask:
             fields["seed"], fields["setup_files"] = _reading_seed(
                 g, rng, rng.randint(5, 7), "Some reading first, then my real question. ")
         fields["compaction"] = True
+        # the padding is fixed harness text around real repo docs, never task text:
+        # named on every row so it can be told apart (or filtered) downstream
+        meta["compaction_pad"] = "repo-docs-reading-v1"
     task = GenTask(**fields)
     task.validate()
     return task
 
 
-def load_tasks_file(path: str, repo: Path) -> list[GenTask]:
-    """A ``--tasks-file``: list-tasks rows (GenTask) or a ``taskset_gen.py`` taskset
-    (validated with its own ``validate_task``). ValueError / OSError on bad input."""
+def _read_jsonl_rows(path: str) -> list[Any]:
     rows = []
     for n, line in enumerate(Path(path).expanduser().read_text(encoding="utf-8").splitlines(), 1):
         if line.strip():
@@ -3904,27 +4131,76 @@ def load_tasks_file(path: str, repo: Path) -> list[GenTask]:
                 raise ValueError(f"{path}: line {n}: not JSON ({exc})") from exc
     if not rows:
         raise ValueError(f"{path}: no tasks")
-    if all(isinstance(r, dict) and "taskset" in r and "provenance" in r for r in rows):
-        ts = _load_sibling("distill_taskset_gen", "taskset_gen.py")
-        for n, r in enumerate(rows, 1):
-            problems = ts.validate_task(r)
-            if problems:
-                raise ValueError(f"{path}: taskset row {n}: {problems[0]}")
-        sources = Sources.from_repo(repo) if any(r["flags"]["force_compaction"] for r in rows) else Sources([])
-        tasks = [task_from_taskset(r, sources) for r in rows]
-    else:
-        tasks = []
-        for n, r in enumerate(rows, 1):
-            if not isinstance(r, dict):
-                raise ValueError(f"{path}: line {n}: not a task object")
-            try:
-                tasks.append(GenTask.from_dict(r))
-            except TypeError as exc:
-                raise ValueError(f"{path}: line {n}: {exc}") from exc
+    return rows
+
+
+def _is_taskset_row(row: Any) -> bool:
+    return isinstance(row, dict) and "taskset" in row and "provenance" in row
+
+
+def read_taskset_rows(path: str) -> list[dict[str, Any]]:
+    """The rows of a ``taskset_gen.py`` file, each checked by that file's own
+    ``validate_task`` (schema, id = hash of the prompt, provenance). Anything
+    else (a list-tasks row, a row that fails validation) is a ValueError: only
+    a real-pattern taskset may feed a train-source run."""
+    ts = _load_sibling("distill_taskset_gen", "taskset_gen.py")
+    if ts.PROVENANCE != TASKSET_PROVENANCE:
+        raise ValueError(f"taskset_gen.py stamps {ts.PROVENANCE!r}, this script expects {TASKSET_PROVENANCE!r}")
+    rows = _read_jsonl_rows(path)
+    for n, r in enumerate(rows, 1):
+        if not _is_taskset_row(r):
+            raise ValueError(f"{path}: line {n}: not a taskset_gen.py row (--tasks takes only a real-pattern "
+                             "taskset; built-in tasks run with --builtin-smoke)")
+        problems = ts.validate_task(r)
+        if problems:
+            raise ValueError(f"{path}: taskset row {n}: {problems[0]}")
+    ids = [r["id"] for r in rows]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"{path}: task ids repeat")
+    return rows
+
+
+def tasks_from_taskset_rows(rows: list[dict[str, Any]], repo: Path) -> list[GenTask]:
+    """GenTasks of validated taskset rows. A ``force_compaction`` row pads with
+    *repo*'s own docs; a repo without any is refused (NoRepoDocs, a ValueError),
+    never replaced by the synthetic runbooks."""
+    pad = any(r["flags"]["force_compaction"] for r in rows)
+    sources = Sources.from_repo(repo, allow_synthetic=False) if pad else Sources([])
+    return [task_from_taskset(r, sources) for r in rows]
+
+
+def load_taskset(path: str, repo: Path) -> list[GenTask]:
+    """``--tasks``: a real-pattern taskset as GenTasks (origin taskset)."""
+    return tasks_from_taskset_rows(read_taskset_rows(path), repo)
+
+
+def load_builtin_tasks(path: str) -> list[GenTask]:
+    """``--builtin-smoke --tasks-file``: list-tasks rows (built-in tasks only;
+    a taskset row here is refused, it belongs to ``--tasks``)."""
+    tasks = []
+    for n, r in enumerate(_read_jsonl_rows(path), 1):
+        if not isinstance(r, dict):
+            raise ValueError(f"{path}: line {n}: not a task object")
+        if _is_taskset_row(r):
+            raise ValueError(f"{path}: line {n}: a taskset_gen.py row; run real-pattern tasks with --tasks")
+        try:
+            tasks.append(GenTask.from_dict(r))
+        except TypeError as exc:
+            raise ValueError(f"{path}: line {n}: {exc}") from exc
     ids = [t.id for t in tasks]
     if len(set(ids)) != len(ids):
         raise ValueError(f"{path}: task ids repeat")
     return tasks
+
+
+def load_tasks_file(path: str, repo: Path) -> list[GenTask]:
+    """A tasks file of either kind: a ``taskset_gen.py`` taskset (``load_taskset``)
+    or list-tasks rows (``load_builtin_tasks``). ValueError / OSError on bad
+    input. The CLI never guesses: ``--tasks`` reads only a taskset."""
+    rows = _read_jsonl_rows(path)
+    if all(_is_taskset_row(r) for r in rows):
+        return load_taskset(path, repo)
+    return load_builtin_tasks(path)
 
 
 
@@ -4192,7 +4468,16 @@ async def run(settings: Settings, gen: Generator, store: Store, guard: EvalGuard
     return report
 
 
-def parse_until(text: str | None, now: dt.datetime | None = None) -> float | None:
+#: An HH:MM --until is its next occurrence; one that lands further ahead than this
+#: has most likely passed today already (a late start would otherwise run all day).
+UNTIL_HHMM_MAX_AHEAD_H = 12.0
+
+
+def parse_until(text: str | None, now: dt.datetime | None = None,
+                max_ahead_hours: float | None = None) -> float | None:
+    """--until as a timestamp: HH:MM (local, next occurrence) or an ISO time.
+    With *max_ahead_hours*, an HH:MM whose next occurrence is further ahead is a
+    ValueError (it has passed today: give an ISO time to mean tomorrow)."""
     if not text:
         return None
     now = now or dt.datetime.now().astimezone()
@@ -4201,6 +4486,11 @@ def parse_until(text: str | None, now: dt.datetime | None = None) -> float | Non
         target = now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
         if target <= now:
             target += dt.timedelta(days=1)
+        ahead_h = (target - now).total_seconds() / 3600
+        if max_ahead_hours is not None and ahead_h > max_ahead_hours:
+            raise ValueError(f"--until {text.strip()} is next at {target.isoformat(timespec='minutes')}, "
+                             f"{ahead_h:.1f} h away (more than {max_ahead_hours:g} h): it has most likely "
+                             "passed today; give an ISO time to mean tomorrow")
         return target.timestamp()
     when = dt.datetime.fromisoformat(text.strip())
     if when.tzinfo is None:
@@ -4233,20 +4523,49 @@ def load_pack_prompt(path: str | None) -> str | None:
     return prompt.replace(sentinel, dt.date.today().isoformat()) if sentinel else prompt
 
 
+def sampling_from_args(a: argparse.Namespace) -> dict[str, float]:
+    """The explicit sampling flags given (none: the server's own defaults)."""
+    out: dict[str, float] = {}
+    for key in SAMPLING_KEYS:
+        value = getattr(a, key, None)
+        if value is None:
+            continue
+        if key == "top_k":
+            if int(value) != value or value < 0:
+                raise ValueError("--top-k must be a whole number >= 0")
+            out[key] = int(value)
+        else:
+            if not 0 <= value <= (5.0 if key == "temperature" else 1.0):
+                raise ValueError(f"--{key.replace('_', '-')} {value} is out of range")
+            out[key] = float(value)
+    return out
+
+
 def settings_from_args(a: argparse.Namespace) -> Settings:
     for flag, value in (("--model-name", a.model_name), ("--judge-model", a.judge_model),
                         ("--teacher-id", a.teacher_id), ("--judge-id", a.judge_id)):
         if has_max_token(value):
             raise ValueError(f"{flag} {value!r} names a Max model; this script never uses one")
+    if a.tasks_file and not a.builtin_smoke:
+        raise ValueError("--tasks-file holds built-in (list-tasks) rows and needs --builtin-smoke; "
+                         "a real-pattern taskset goes to --tasks")
+    if bool(a.tasks) == bool(a.builtin_smoke):
+        raise ValueError("give exactly one of --tasks <taskset.jsonl> (real-pattern tasks: the only "
+                         f"source of {SOURCE_TAG} rows) or --builtin-smoke (built-in tasks, rows tagged "
+                         f"{BUILTIN_SOURCE}, never trained on)")
+    task_source = ORIGIN_TASKSET if a.tasks else ORIGIN_BUILTIN
+    name = a.name or (SOURCE_TAG if task_source == ORIGIN_TASKSET else BUILTIN_SOURCE)
     out = Path(a.out).expanduser().resolve()
     live = (Path.home() / ".prometheus").resolve()
     if out == live or live in out.parents:
         raise ValueError(f"--out must not be inside {live}")
     return Settings(
-        out=out, name=a.name, teacher_url=a.teacher_url, probe_guard_url=a.probe_guard_url,
+        task_source=task_source, sampling=sampling_from_args(a),
+        out=out, name=name, teacher_url=a.teacher_url, probe_guard_url=a.probe_guard_url,
         judge_url=a.judge_url, model_name=a.model_name, judge_model=a.judge_model,
         judge_seed=a.judge_seed, allow_lan=a.allow_lan_endpoints, concurrency=a.concurrency,
-        until=parse_until(a.until), min_task_seconds=a.min_task_seconds, max_tasks=a.max_tasks,
+        until=parse_until(a.until, max_ahead_hours=UNTIL_HHMM_MAX_AHEAD_H), min_task_seconds=a.min_task_seconds,
+        max_tasks=a.max_tasks,
         target_rows=a.target_rows, seed=a.seed, mix=parse_mix(a.mix), coding_cap=a.coding_cap,
         max_tokens=a.max_tokens, max_tool_iterations=a.max_tool_iterations, tool_timeout=a.tool_timeout,
         task_timeout=a.task_timeout,
@@ -4284,14 +4603,24 @@ def cmd_run(a: argparse.Namespace) -> int:
         return 2
     if jail == "none":
         log.warning("no OS jail: sandboxed shell commands are confined by the command checks alone")
-    if a.tasks_file:
+    gen: Generator
+    if a.tasks:
+        # the only path to train-source rows: real-pattern tasks, validated by taskset_gen.py
         try:
-            gen: Generator = FixedGenerator(load_tasks_file(a.tasks_file, settings.repo))
+            gen = FixedGenerator(load_taskset(a.tasks, settings.repo))
+        except (ValueError, OSError, KeyError) as exc:
+            print(f"error: --tasks: {exc}", file=sys.stderr)
+            return 2
+    elif a.tasks_file:
+        try:
+            gen = FixedGenerator(load_builtin_tasks(a.tasks_file))
         except (ValueError, OSError, KeyError) as exc:
             print(f"error: --tasks-file: {exc}", file=sys.stderr)
             return 2
     else:
         gen = Generator(Sources.from_repo(settings.repo), settings.seed)
+    if settings.task_source != ORIGIN_TASKSET:
+        log.warning("--builtin-smoke: built-in tasks; rows are tagged %s and never train", BUILTIN_SOURCE)
     async def check_servers() -> None:
         served = await preflight(settings.teacher_endpoint, min(30.0, settings.request_timeout))
         settings.teacher_served = check_model_id(served, settings.teacher_id, "teacher")
@@ -4353,7 +4682,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="generate verified teacher traces")
     r.add_argument("--out", required=True)
-    r.add_argument("--name", default=SOURCE_TAG, help="output file prefix (unique across build inputs)")
+    r.add_argument("--name", help=f"output file prefix, unique across build inputs (default {SOURCE_TAG} "
+                                  f"with --tasks, {BUILTIN_SOURCE} with --builtin-smoke)")
+    src = r.add_argument_group("task source (exactly one)")
+    src.add_argument("--tasks", metavar="TASKSET.jsonl",
+                     help=f"a taskset_gen.py real-pattern taskset: the ONLY source of {SOURCE_TAG} rows")
+    src.add_argument("--builtin-smoke", action="store_true",
+                     help=f"run the built-in task families (or --tasks-file); rows are tagged {BUILTIN_SOURCE} "
+                          "and never train")
     r.add_argument("--teacher-url", default=DEFAULT_TEACHER_URL)
     r.add_argument("--probe-guard-url", help="local guard proxy carrying every model request")
     r.add_argument("--judge-url", help="another LOCAL endpoint for the judge (default: the teacher)")
@@ -4365,9 +4701,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     r.add_argument("--eval-tools", action="append", required=True, help="eval-tools JSONL (glob; repeat)")
     r.add_argument("--pack", help="build.py request pack: its system prompt is the teacher's")
     r.add_argument("--repo", default=str(_REPO_DEFAULT), help="docs source (git-tracked docs/, wiki/, README.md)")
-    r.add_argument("--tasks-file", help="run exactly these tasks (JSONL, list-tasks schema)")
+    r.add_argument("--tasks-file", help="with --builtin-smoke: run exactly these built-in tasks (list-tasks JSONL)")
+    smp = r.add_argument_group("explicit sampling (sent on every teacher request; default: the server's own)")
+    smp.add_argument("--temperature", type=float)
+    smp.add_argument("--top-k", dest="top_k", type=int)
+    smp.add_argument("--top-p", dest="top_p", type=float)
+    smp.add_argument("--min-p", dest="min_p", type=float)
     r.add_argument("--concurrency", type=int, default=2)
-    r.add_argument("--until", help="HH:MM (local, next occurrence) or ISO time; a hard end")
+    r.add_argument("--until", help="HH:MM (local, next occurrence; refused when that is more than 12 h "
+                                   "ahead) or ISO time; a hard end")
     r.add_argument("--min-task-seconds", type=float, default=120.0)
     r.add_argument("--max-tasks", type=int)
     r.add_argument("--target-rows", type=int)

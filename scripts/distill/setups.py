@@ -12,7 +12,9 @@ A setup is ``data/distill/setups/<name>.yaml`` (gitignored: it holds host
 details). Per host it lists the systemd *user* units that own the GPU, with
 their ExecStart, unit files, listening ports, VRAM and a health check, plus
 ``allow_extra`` (patterns of units that may run beside them) and ``stop``
-(units this setup may stop although ``business`` does not list them). The
+(units this setup may stop although ``business`` does not list them, and
+stops whenever they run, even one an ``allow_extra`` pattern matches: two
+model servers that take turns on one port, say). The
 hosts themselves come from ``data/distill/setups/hosts.yaml``::
 
     hosts:
@@ -66,7 +68,13 @@ failing ``pre_apply`` hook ends the attempt before any unit changes.
 restore hook checks its own preconditions). ``enabled: false`` hooks are
 listed and never run. A setup that switches a host to Max is applied (and a
 dead-man armed) only when ``business`` switches that host back, and executes
-only while that host's dead-man timer is armed.
+only while that host's dead-man timer is armed. The same holds for any apply
+other than ``business`` that stops a unit ``business`` lists (only a restore
+starts it again). A target unit the user manager has not loaded (not installed,
+masked) blocks the plan before anything stops. ``apply --execute`` makes up to
+1 + RESTORE_RETRIES attempts; ``--attempts 1`` makes one (a forward swap whose
+caller restores on failure), and an attempt stops waiting for health once a
+target unit has failed outright.
 """
 
 from __future__ import annotations
@@ -846,6 +854,9 @@ def validate_setup(data: Any) -> dict[str, Any]:
             s.setdefault("gpu_on_demand", False)
         for u in hs["stop"]:
             check_unit_name(str(u))
+        both = sorted(seen & set(hs["stop"]))
+        if both:
+            raise ValueError(f"{host}: {', '.join(both)} listed under both services and stop")
     return data
 
 
@@ -912,8 +923,9 @@ def gpu_units(live: dict[str, Any]) -> set[str]:
     return {p["unit"] for p in live.get("procs", []) if p.get("scope") == "user" and p.get("unit")}
 
 
-def _allowed_extra(unit: str | None, patterns: list[str]) -> bool:
-    return bool(unit) and any(fnmatch.fnmatch(unit, p) for p in patterns)
+def _allowed_extra(unit: str | None, patterns: list[str], stop: list[str] | None = None) -> bool:
+    """Whether ``unit`` may run beside the target: it matches ``patterns`` and the target does not ``stop`` it."""
+    return bool(unit) and unit not in (stop or ()) and any(fnmatch.fnmatch(unit, p) for p in patterns)
 
 
 def match_setup(setup: dict[str, Any], live_by_host: dict[str, dict[str, Any]]) -> list[str]:
@@ -933,7 +945,7 @@ def match_setup(setup: dict[str, Any], live_by_host: dict[str, dict[str, Any]]) 
             elif unit not in on_gpu and not svc.get("gpu_on_demand"):
                 reasons.append(f"{host}: {unit} is not on the GPU")
         for unit in sorted(on_gpu - set(wanted)):
-            if not _allowed_extra(unit, hs["allow_extra"]):
+            if not _allowed_extra(unit, hs["allow_extra"], hs.get("stop")):
                 reasons.append(f"{host}: extra GPU unit {unit}")
         for p in live.get("procs", []):
             if not (p.get("scope") == "user" and p.get("unit")) and not _allowed_extra(
@@ -974,9 +986,10 @@ def compute_plan(setup: dict[str, Any], live_by_host: dict[str, dict[str, Any]],
     Everything is decided here, before anything runs. Candidates to stop are
     the units the probe reported on (GPU owners, running distill-* jobs, and
     every unit any saved setup names for that host) that are running and not
-    in the target. A unit matching the target's ``allow_extra`` is left alone.
-    A candidate matching the never-stop guard lands in ``refused``; with
-    ``captured`` (an apply other than the restore setup), a candidate the
+    in the target. A unit matching the target's ``allow_extra`` is left alone,
+    unless the target's ``stop`` names it. A candidate matching the never-stop
+    guard lands in ``refused``; with ``captured`` (an apply other than the
+    restore setup), a candidate the
     restore setup does not list lands in ``uncaptured`` unless the target's
     ``stop`` names it. Either refuses the whole apply. A GPU process the tool
     cannot stop is a blocker. ``restart_unhealthy`` (a retry) restarts target
@@ -1003,7 +1016,7 @@ def compute_plan(setup: dict[str, Any], live_by_host: dict[str, dict[str, Any]],
                 continue
             plan.blockers.append(describe_unmanaged(p))
         for unit in sorted(running - set(svcs)):
-            if _allowed_extra(unit, hs["allow_extra"]) or not stoppable(unit):
+            if _allowed_extra(unit, hs["allow_extra"], hs.get("stop")) or not stoppable(unit):
                 continue  # not stoppable: its GPU processes are blockers above
             if is_never_stop(unit, guard):
                 plan.refused.append(unit)
@@ -1014,6 +1027,13 @@ def compute_plan(setup: dict[str, Any], live_by_host: dict[str, dict[str, Any]],
                 plan.stop.append(unit)
         for unit, svc in svcs.items():
             if unit not in running:
+                # A unit the user manager has not loaded (not installed, masked) can never start: block
+                # before anything is stopped, so a swap does not take the port down for nothing. A swap
+                # also blocks on "unknown" (the probe could not read it); a restore still tries.
+                load = units.get(unit, {}).get("load")
+                if load and load != "loaded" and (load != "unknown" or captured is not None):
+                    plan.blockers.append(f"{unit} cannot start: the user manager reports LoadState {load} "
+                                         "(not installed?)")
                 plan.start.append(unit)
                 continue
             sick = (not units.get(unit, {}).get("health", {}).get("ok")
@@ -1072,7 +1092,7 @@ def verify_host(hs: dict[str, Any], live: dict[str, Any]) -> list[str]:
             problems.append(f"{svc['unit']} has no GPU process yet")
     wanted = {s["unit"] for s in hs["services"]}
     for unit in sorted(on_gpu - wanted):
-        if not _allowed_extra(unit, hs["allow_extra"]):
+        if not _allowed_extra(unit, hs["allow_extra"], hs.get("stop")):
             problems.append(f"{unit} still holds the GPU")
     if hs.get("min_free_mib"):
         free = sum(g["vram_total_mib"] - g["vram_used_mib"] for g in live.get("gpus", []))
@@ -1281,11 +1301,19 @@ def apply_once(setup: dict[str, Any], keys: list[str], runner: Runner, hosts: Ho
         return 2, refusals
     if any(p.blockers for p in plans.values()):
         return 1, [f"{p.host}: {b}" for p in plans.values() for b in p.blockers]
-    # The daemon goes to Max only with a restore already scheduled that nobody has to remember.
+    # The daemon goes to Max, or a unit only the restore brings back stops, only with a restore already
+    # scheduled that nobody has to remember.
     movers = [h for h in keys if "to-max" in switch_hooks(scoped, h, "pre_apply")]
-    unarmed = [h for h in movers if not deadman_armed(live[h], h)]
+    captured = captured_units(setup, setups, keys)
+    takes_down = {h: sorted(set(plans[h].stop) & captured.get(h, set())) for h in keys} if captured else {}
+    why = {h: f"{setup['name']} switches the daemon to Max there" for h in movers}
+    for h, units in takes_down.items():
+        if units:
+            why.setdefault(h, f"{setup['name']} stops {', '.join(units)} there, which only {RESTORE_SETUP} "
+                              "starts again")
+    unarmed = [h for h in keys if h in why and not deadman_armed(live[h], h)]
     if unarmed:
-        gaps = [f"{h}: {setup['name']} switches the daemon to Max there, but no dead-man restore is armed "
+        gaps = [f"{h}: {why[h]}, but no dead-man restore is armed "
                 f"({DEADMAN_PREFIX}{h}.timer is not active): run `setups.py deadman {RESTORE_SETUP} --at "
                 "<window end> --execute` first" for h in unarmed]
         if execute:
@@ -1339,14 +1367,24 @@ def apply_once(setup: dict[str, Any], keys: list[str], runner: Runner, hosts: Ho
     timeout = max([s.get("health_timeout_s", DEFAULT_HEALTH_TIMEOUT_S)
                    for h in keys for s in setup["hosts"][h]["services"]] or [60])
     deadline = _now() + timeout
+    failed_polls = 0
     while True:
         problems = []
+        failed = []
         for h in keys:
             hs = setup["hosts"][h]
             lv = probe(runner, h, [s["unit"] for s in hs["services"]],
                        {s["unit"]: s["health"] for s in hs["services"]})
             problems += [f"{h}: {x}" for x in verify_host(hs, lv)]
+            failed += [f"{h}: {s['unit']}" for s in hs["services"]
+                       if lv.get("units", {}).get(s["unit"], {}).get("active") == "failed"]
+        # A target unit that systemd gave up on (failed start, start limit hit) does not come back by
+        # itself: stop waiting once two polls in a row see it, so the caller's retry or restore starts now.
+        failed_polls = failed_polls + 1 if failed else 0
         if not problems or _now() > deadline:
+            break
+        if failed_polls >= 2:
+            log(f"target unit(s) failed: {', '.join(failed)}; not waiting out the health timeout")
             break
         _sleep(POLL_S)
     # After the units, even when the wait reported problems: a restore hook checks
@@ -1411,7 +1449,10 @@ def cmd_apply(args: argparse.Namespace, hosts: Hosts, runner: Runner) -> int:
             if args.execute:
                 report_apply(args.name, keys, runner, hosts, 2, gaps, 0)
             return 2
-    attempts = 1 + (RESTORE_RETRIES if args.execute else 0)
+    # --attempts 1: a forward swap whose target does not come up should fail now, so its caller restores
+    # at once instead of after two more health waits with the port dark. A restore keeps its retries.
+    asked = getattr(args, "attempts", None)
+    attempts = (asked or 1 + RESTORE_RETRIES) if args.execute else 1
     rc, problems, attempt = 1, [], 0
     for attempt in range(1, attempts + 1):
         if attempt > 1:
@@ -1611,6 +1652,13 @@ def cmd_deadman(args: argparse.Namespace, hosts: Hosts, runner: Runner) -> int:
     return rc
 
 
+def _attempts(text: str) -> int:
+    n = int(text)
+    if not 1 <= n <= 1 + RESTORE_RETRIES:
+        raise argparse.ArgumentTypeError(f"--attempts must be 1..{1 + RESTORE_RETRIES}")
+    return n
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="setups", description=__doc__.split("\n\n")[0])
     ap.add_argument("--setups-dir", type=Path, default=DEFAULT_SETUPS_DIR)
@@ -1629,6 +1677,9 @@ def main(argv: list[str] | None = None) -> int:
     g = a.add_mutually_exclusive_group()
     g.add_argument("--dry-run", action="store_true", default=True, help="print the plan (default)")
     g.add_argument("--execute", action="store_true", help="really stop/start units")
+    a.add_argument("--attempts", type=_attempts, default=None,
+                   help=f"--execute attempts (default {1 + RESTORE_RETRIES}; 1 = no retry, for a forward swap "
+                        "whose caller restores on failure)")
     d = sub.add_parser("deadman", help="schedule an independent restore timer on each host")
     d.add_argument("name", nargs="?")
     d.add_argument("--at", help="ISO time; naive times are " + NAIVE_TZ)

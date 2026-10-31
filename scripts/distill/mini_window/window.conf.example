@@ -1,0 +1,32 @@
+# window.conf for scripts/distill/mini_window/ (copy to the GPU host's ~/distill/window/window.conf).
+# KEY=VALUE, shell syntax (bash can source it). ~ and $HOME expand. The real file names this site's
+# units, so it lives in the gitignored data/distill/ tree, never in the repo.
+
+HOST_KEY=mini                    # this host's key in hosts.yaml (dead-man unit distill-deadman-<key>)
+ET_TZ=America/New_York
+
+# Required: the daemon's local model server (business), the unit whose journal carries the voice
+# probe's result lines, and the Ollama model the nightly evals judge with.
+LOCAL_MODEL_UNIT=local-model.service
+PROBE_UNIT=voice-middleware.service
+OLLAMA_MODEL=judge-model:tag
+
+# Optional (defaults shown).
+# PY=/usr/bin/python3
+# SETUPS_DIR=$HOME/distill/window/setups   # setups.py, daemon_switch.py, this host's setups + hosts.yaml
+# NOTIFY=$HOME/distill/notify.sh           # message on stdin, max lines as $1
+# MODEL_URL=http://127.0.0.1:8092           # the port the local model server and the teachers share
+# TEACHER_ALIAS=qwen3.8-27b-gsq-rco-iq3_xxs
+# TEACHER_Q4_ALIAS=qwen3.8-27b-q4_k_m
+# DAEMON_HEALTH_URL=http://127.0.0.1:8005/health
+# PROBE_NAME=inference_gpu
+# PROBE_MIN_TPS=15
+# GEN_UNIT_GLOB=distill-gen-*              # generation units the eval slots stop first (by name)
+# BASELINE_UNIT_GLOB=distill-baseline-*    # no swap while these are armed or running
+# EVAL_TIMES=0300,0600                      # the nightly evals (cron); no swap within EVAL_GAP_MIN
+# WINDOW_OPEN_HHMM=0100
+# LATEST_SWAP_HHMM=0600
+# CONTINUOUS_UNTIL=                         # ET timestamp: swaps at any hour before it
+# DEADMAN_HHMM=0715
+# SLOT_RETURN_LATEST_HHMM=0620              # slot-exit after this stays on the IQ3 teacher
+# EVAL_WAIT_MAX_S=1500

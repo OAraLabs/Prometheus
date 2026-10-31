@@ -1,0 +1,57 @@
+# Local teacher for the distillation flywheel: Qwen3.8-27B GSQ-RCO IQ3_XXS (~3.0 bpw, Apache 2.0),
+# text only. During a GPU window it REPLACES the daemon's local model server on the same loopback
+# port and in the same shape (one unified q8_0 KV pool shared by 2 slots, ubatch 512, the same
+# reasoning budget and sampling), so the daemon, the voice probe and the nightly evals keep a local
+# model with no config change and no paid API (docs/sprints/DISTILL-OPEN-QUESTIONS.md #10).
+#
+# Started and stopped only by scripts/distill/setups.py (`apply flywheel` starts it, `apply business`
+# stops it: every distill-* unit is stopped by a restore). No [Install] section: it never starts at
+# boot, so a reboot in the middle of a window comes back to the business layout.
+# Install: scripts/distill/units/install_teacher_units.sh (prints its commands unless --execute).
+#
+# VRAM on the 24 GiB card, beside the residents that stay (speech, STT, image, the Ollama model):
+#   weights on the GPU  9,227.8 MiB  (9,676,118,016 B; the token embeddings stay on the CPU)
+#   KV, q8_0            1,904.0 MiB  (CTX 57,344 x 34,816 B: 16 attention layers x 4 KV heads x 256 x 2)
+#   recurrent state       299.2 MiB  (2 slots x 156,893,184 B, 48 gated-delta-net layers)
+#   context + buffers   1,191.9 MiB  (measured on the server this replaces at -ub 512, its vision
+#                                     encoder included, so it errs high for text only)
+#   total              12,623.0 MiB  of the 13,265 MiB the replaced server frees -> ~642 MiB spare.
+# CTX is the largest multiple of 4,096 (<= 65,536) that leaves >= 600 MiB: 61,440 would leave ~506.
+# The daemon budgets its prompts at the window it read at its own boot and compacts at ~80% of it,
+# which stays under 57,344 for all but an unusually large single turn.
+# Ollama RELOADING its judge beside this server (after slot-enter starts it empty, or a reload at another
+# context size) has only ~13 MiB to spare: ~6,028 MiB free with its model unloaded, less Ollama's
+# 457 MiB minimum, against ~5,558 MiB for the judge at 16K. It may then keep a layer or two on the CPU
+# (slower evals, nothing fails). Fully on the GPU needs CTX 49,152 (-272 MiB), which would refuse daemon
+# prompts between 49,152 and its ~52K compaction point: the operator's trade-off, not changed here.
+# mini_window.py reports the judge's placement (rehearsal, window start, after each Q4-night eval slot).
+[Unit]
+Description=distill teacher: Qwen3.8-27B IQ3_XXS on the local model port (text only)
+After=network.target
+# One of the two teacher quants at a time: starting one stops the other, and the stop finishes first.
+Conflicts=distill-teacher-q4.service
+After=distill-teacher-q4.service
+# A server that keeps failing (out of memory, say) stays down instead of retrying every 10 s.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+# Once systemd gives up on it (a unit with Restart= enters "failed" only after its start limit), the port
+# would stay dark until the window ends: restore the local model server now (mini_window.py teacher-failed).
+OnFailure=window-mini-teacher-failed.service
+
+[Service]
+Type=simple
+Environment=CTX=57344
+# The projected process size plus slack: less free than this means the server it replaces (or an
+# image job) still holds the card. Refused with one journal line instead of failing mid-load.
+Environment=MIN_FREE_MIB=12800
+ExecStartPre=/bin/sh -c 'free=$$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -n 1 | tr -d " "); if [ "$${free:-0}" -ge "$${MIN_FREE_MIB}" ]; then exit 0; fi; echo "distill-teacher: only $${free:-?} MiB VRAM free, needs $${MIN_FREE_MIB}: not starting" >&2; exit 1'
+ExecStart=%h/ladder/src/llama.cpp-9d57ce456/build/bin/llama-server \
+  -m %h/distill/models/teacher/Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf --no-mmproj \
+  --alias qwen3.8-27b-gsq-rco-iq3_xxs \
+  --host 127.0.0.1 --port 8092 --no-slots -ngl 99 --fit off -c ${CTX} --parallel 2 --kv-unified \
+  --flash-attn on -ctk q8_0 -ctv q8_0 --jinja --batch-size 2048 --ubatch-size 512 \
+  --temp 1.0 --top-k 20 --top-p 0.95 --min-p 0.0 \
+  --reasoning-budget 2048 --reasoning-budget-message "[REASONING_BUDGET_EXHAUSTED]"
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=90

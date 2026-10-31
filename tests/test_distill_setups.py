@@ -553,6 +553,50 @@ def test_plan_non_restore_refuses_units_business_did_not_capture():
     assert plans["beta"].uncaptured == [] and plans["beta"].stop == ["chat.service", "ollama.service"]
 
 
+def _turns_setup(target, other):
+    """Two model servers that take turns on one port: run ``target``, stop ``other``, keep distill jobs."""
+    return S.validate_setup({"name": "turns", "version": 1, "hosts": {"beta": {
+        "services": [{"unit": target, "health": {"type": "http", "url": "http://127.0.0.1:8092/health"}},
+                     {"unit": "tts.service"}],
+        "allow_extra": ["distill-*"], "stop": [other]}}})
+
+
+def test_plan_stop_wins_over_allow_extra():
+    live = {"beta": live_host(
+        [proc(21, "tts.service", 3000), proc(50, "distill-teacher-q4.service", 18000),
+         proc(51, "distill-gen-1.service", 0)],
+        {"tts.service": unit_info(), "distill-teacher-q4.service": unit_info(),
+         "distill-gen-1.service": unit_info(), "distill-teacher.service": unit_info(active="inactive")})}
+    setup = _turns_setup("distill-teacher.service", "distill-teacher-q4.service")
+    plans = S.compute_plan(setup, live, captured={"beta": {"tts.service"}})
+    assert plans["beta"].stop == ["distill-teacher-q4.service"]   # named under stop: stopped
+    assert plans["beta"].start == ["distill-teacher.service"]
+    assert plans["beta"].keep == ["tts.service"]                  # the gen job matches allow_extra: kept
+    assert not (plans["beta"].uncaptured or plans["beta"].refused or plans["beta"].blockers)
+    # Not running: nothing to stop, and the other server is not started.
+    live["beta"]["units"]["distill-teacher-q4.service"]["active"] = "inactive"
+    live["beta"]["procs"] = [p for p in live["beta"]["procs"] if p["unit"] != "distill-teacher-q4.service"]
+    assert S.compute_plan(setup, live)["beta"].stop == []
+
+
+def test_verify_and_status_flag_a_stop_unit_still_on_the_gpu():
+    setup = _turns_setup("distill-teacher.service", "distill-teacher-q4.service")
+    live = live_host([proc(21, "tts.service", 3000), proc(50, "distill-teacher-q4.service", 18000),
+                      proc(52, "distill-teacher.service", 12000)],
+                     {"tts.service": unit_info(), "distill-teacher-q4.service": unit_info(),
+                      "distill-teacher.service": unit_info()})
+    assert S.verify_host(setup["hosts"]["beta"], live) == ["distill-teacher-q4.service still holds the GPU"]
+    assert S.match_setup(setup, {"beta": live}) == ["beta: extra GPU unit distill-teacher-q4.service"]
+    live["procs"] = [p for p in live["procs"] if p["unit"] != "distill-teacher-q4.service"]
+    assert S.verify_host(setup["hosts"]["beta"], live) == []
+
+
+def test_validate_rejects_a_unit_under_services_and_stop():
+    with pytest.raises(ValueError, match="both services and stop"):
+        S.validate_setup({"name": "x", "hosts": {"beta": {"services": [{"unit": "a.service"}],
+                                                           "stop": ["a.service"]}}})
+
+
 def test_plan_retry_restarts_unhealthy_or_off_gpu_targets():
     live = business_live()
     live["alpha"]["units"]["llm.service"]["health"] = {"ok": False, "detail": "HTTP 503"}
@@ -910,6 +954,109 @@ def test_apply_refused_plan_executes_nothing(tmp_path):
     assert S.cmd_apply(args_for(tmp_path, "flywheel", True), HOSTS, runner) == 2
     assert runner.calls == []
     assert json.loads(S.last_apply_path().read_text())["result"] == "refused"
+
+
+def test_a_swap_that_stops_a_business_unit_needs_an_armed_dead_man(tmp_path, capsys):
+    # A Mac-side `apply flywheel --execute` (or flywheel_weekly) at any hour: nothing would bring the
+    # stopped business units back if the swap then failed, so it is refused until a dead-man is armed.
+    write_setups(tmp_path)
+    state = business_state()
+    runner = FakeRunner(state, armed=())
+    assert S.cmd_apply(args_for(tmp_path, "flywheel", True), HOSTS, runner) == 2
+    assert runner.calls == [] and state["alpha"]["units"]["llm.service"][0] == "active"
+    record = json.loads(S.last_apply_path().read_text())
+    assert record["result"] == "refused"
+    assert any("stops llm.service" in p and "no dead-man restore is armed" in p for p in record["problems"])
+    capsys.readouterr()
+    assert S.cmd_apply(args_for(tmp_path, "flywheel", False), HOSTS, runner) == 0     # a dry run notes it
+    out = capsys.readouterr().out
+    assert "  note: alpha: flywheel stops llm.service" in out and "--execute refuses until then" in out
+    # the restore itself needs no dead-man
+    state["alpha"]["units"]["llm.service"] = ("inactive", 20000)
+    assert S.cmd_apply(args_for(tmp_path, "business", True), HOSTS, runner) == 0
+    # a swap that stops no business unit needs none either
+    for u in ("chat.service", "ollama.service"):
+        state["beta"]["units"][u] = ("inactive", 0)
+    state["alpha"]["units"]["llm.service"] = ("inactive", 20000)
+    runner.calls.clear()
+    assert S.cmd_apply(args_for(tmp_path, "flywheel", True), HOSTS, runner) == 0
+    assert not [c for c in runner.calls if c[1][2] == "stop"]
+
+
+def test_a_start_target_the_user_manager_has_not_loaded_blocks_before_anything_stops(tmp_path):
+    fw = flywheel_setup()
+    tts = next(s for s in fw["hosts"]["beta"]["services"] if s["unit"] == "tts.service")
+    fw["hosts"]["beta"]["services"].append({**tts, "unit": "teacher.service", "vram_mib": 12000})
+    fw = S.validate_setup(fw)
+    S.write_private(tmp_path / "business.yaml", S.dump_setup(business_setup()))
+    S.write_private(tmp_path / "flywheel.yaml", S.dump_setup(fw))
+
+    class NotInstalled(FakeRunner):
+        load = "not-found"
+
+        def run(self, host, argv, input=None, timeout=90):
+            cp = super().run(host, argv, input, timeout)
+            if argv[1:2] == ["-"] and argv[2].startswith("{") and host == "beta":
+                lv = json.loads(cp.stdout)
+                if "teacher.service" in lv["units"]:
+                    lv["units"]["teacher.service"]["load"] = self.load
+                cp = subprocess.CompletedProcess(argv, 0, json.dumps(lv) + "\n", "")
+            return cp
+
+    state = business_state()
+    runner = NotInstalled(state)
+    args = args_for(tmp_path, "flywheel", True)
+    args.attempts = 1
+    assert S.cmd_apply(args, HOSTS, runner) == 1
+    assert runner.calls == []                                   # chat (the model server) never stopped
+    assert state["beta"]["units"]["chat.service"][0] == "active"
+    record = json.loads(S.last_apply_path().read_text())
+    assert any("teacher.service cannot start" in p and "not-found" in p for p in record["problems"])
+    # "unknown" (the probe could not read it) blocks a swap, but not a restore
+    live = business_live()
+    live["beta"]["units"]["teacher.service"] = unit_info(active="inactive", ok=False, load="unknown")
+    plans = S.compute_plan(fw, live, captured={"alpha": {"llm.service"}, "beta": {"chat.service"}})
+    assert any("LoadState unknown" in b for b in plans["beta"].blockers)
+    b = business_setup()
+    live["beta"]["units"]["chat.service"] = unit_info(active="inactive", ok=False, load="unknown")
+    assert S.compute_plan(b, live)["beta"].blockers == []
+    live["beta"]["units"]["chat.service"] = unit_info(active="inactive", ok=False, load="masked")
+    assert any("chat.service cannot start" in x for x in S.compute_plan(b, live)["beta"].blockers)
+
+
+def test_a_failed_target_ends_the_health_wait_and_attempts_one_does_not_retry(tmp_path, clock):
+    write_setups(tmp_path)
+
+    class Broken(FakeRunner):  # the start fails outright (start limit hit, refused ExecStartPre)
+        def run(self, host, argv, input=None, timeout=90):
+            cp = super().run(host, argv, input, timeout)
+            if argv[:3] == ["systemctl", "--user", "start"] and argv[3] == "llm.service":
+                self.state[host]["units"]["llm.service"] = ("failed", 0)
+            return cp
+
+    state = business_state()
+    state["alpha"]["units"]["llm.service"] = ("inactive", 20000)
+    runner = Broken(state)
+    assert S.cmd_apply(args_for(tmp_path, "business", True), HOSTS, runner) == 1
+    starts = [c for c in runner.calls if c[1][2:] == ["start", "llm.service"]]
+    assert len(starts) == 1 + S.RESTORE_RETRIES                 # a restore keeps its retries...
+    # ...but no attempt waits out the 300 s health timeout once the unit has failed
+    assert clock["t"] < S.RESTORE_RETRIES * S.RETRY_DELAY_S + (1 + S.RESTORE_RETRIES) * 30
+    clock["t"], clock["sleeps"] = 0.0, []
+    state["alpha"]["units"]["llm.service"] = ("inactive", 20000)
+    runner.calls.clear()
+    args = args_for(tmp_path, "business", True)
+    args.attempts = 1
+    assert S.cmd_apply(args, HOSTS, runner) == 1
+    assert len([c for c in runner.calls if c[1][2:] == ["start", "llm.service"]]) == 1
+    assert S.RETRY_DELAY_S not in clock["sleeps"] and clock["t"] < 30
+    assert json.loads(S.last_apply_path().read_text())["attempts"] == 1
+
+
+def test_apply_attempts_option_is_bounded(tmp_path):
+    for bad in ("0", str(2 + S.RESTORE_RETRIES), "x"):
+        with pytest.raises(SystemExit):
+            S.main(["--setups-dir", str(tmp_path), "apply", "flywheel", "--attempts", bad])
 
 
 # ── save + status commands ──────────────────────────────────────────────────
@@ -1315,8 +1462,11 @@ def test_a_switch_to_max_without_an_armed_dead_man_is_refused(tmp_path, capsys):
     capsys.readouterr()
     assert S.cmd_apply(args_for(tmp_path, "flywheel", False), HOSTS, runner) == 0
     assert "--execute refuses until then" in capsys.readouterr().out
-    # once it is armed, the apply runs
+    # beta's alone is not enough: flywheel also stops alpha's llm.service, which only business restarts
     runner.armed = {"beta"}
+    assert S.cmd_apply(args_for(tmp_path, "flywheel", True), HOSTS, runner) == 2 and runner.calls == []
+    # once both are armed, the apply runs
+    runner.armed = {"alpha", "beta"}
     assert S.cmd_apply(args_for(tmp_path, "flywheel", True), HOSTS, runner) == 0
     assert [a for _, a, _ in runner.hooks][-2:] == [["capture", "--execute"], ["to-max", "--execute"]]
 

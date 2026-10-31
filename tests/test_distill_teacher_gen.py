@@ -177,9 +177,15 @@ class FakeTeacher:
 
 @pytest.fixture(autouse=True)
 def _restore_state_env(monkeypatch):
-    """``cmd_run`` points the Prometheus state roots at its own work dir; undo it after each test."""
-    for var in ("PROMETHEUS_LOGS_DIR", "PROMETHEUS_CONFIG_DIR", "PROMETHEUS_DATA_DIR", "PROMETHEUS_ENV_FILE"):
-        monkeypatch.setenv(var, os.environ.get(var, "")) if os.environ.get(var) else monkeypatch.delenv(var, raising=False)
+    """``cmd_run`` points the Prometheus state roots at its own work dir and drops
+    the proxy settings; undo both after each test (a variable that was unset is
+    unset again: setenv first, so monkeypatch records it)."""
+    for var in ("PROMETHEUS_LOGS_DIR", "PROMETHEUS_CONFIG_DIR", "PROMETHEUS_DATA_DIR", "PROMETHEUS_ENV_FILE",
+                *tg.PROXY_ENV, "NO_PROXY", "no_proxy"):
+        old = os.environ.get(var)
+        monkeypatch.setenv(var, old if old is not None else "")
+        if old is None:
+            monkeypatch.delenv(var)
 
 
 @pytest.fixture
@@ -235,7 +241,9 @@ def test_end_to_end_agentic_task_writes_a_verified_tagged_row(tmp_path, no_outbo
     assert len(rows) == 1
     row = rows[0]
     meta = row["_meta"]
-    assert meta["source"] == "qwen38-27b-gym" and meta["model"] == tg.DEFAULT_MODEL_NAME
+    # a built-in (hand-written) task is a smoke row: never the train source
+    assert meta["source"] == tg.BUILTIN_SOURCE and meta["model"] == tg.DEFAULT_MODEL_NAME
+    assert meta["task_origin"] == "builtin" and "sampling" not in meta
     assert meta["category"] == "memory/wiki" and meta["task_category"] == "agentic"
     assert meta["task_id"] == "t-00001" and meta["verdict"] == "pass"
     assert meta["verification"]["tool_success"] is True and meta["tool_name"] == "wiki_query"
@@ -680,12 +688,13 @@ def test_rows_are_what_build_py_reads(tmp_path):
     build = _load("distill_build", "build.py")
     for text in ("Read notes/a1b2c3d4e5.md at 10:45", "  Which HOST runs X?  "):
         assert tg.norm(text) == build.norm(text) and tg.h(text) == build.h(text)
-    t = task(kind="error-recovery", prompt="Check the wiki: which host runs cobalt-intake?", fixtures={"wiki": WIKI},
-             expect_recovery=True,
-             inject=[{"tool": "wiki_query", "nth": 1, "output": "Error: the wiki index is busy."}])
+    # a real-pattern taskset row with inject_errors, in a --tasks run: the train source
+    (t,) = tg.tasks_from_taskset_rows(
+        [_taskset_row("Check the wiki: which host runs cobalt-intake?", inject_errors=True)], tmp_path)
+    assert t.kind == "error-recovery" and t.origin == tg.ORIGIN_TASKSET
     call = ("call", "wiki_query", {"query": "cobalt-intake"})
     with FakeTeacher(scripted({"cobalt-intake": [call, ("call", "wiki_query", {"query": "host"}), "echo"]})) as fake:
-        s = settings_for(tmp_path, fake.url)
+        s = settings_for(tmp_path, fake.url, task_source=tg.ORIGIN_TASKSET)
         out, ok, _reasons, record = run_and_verify(t, s)
         record["judge"] = asyncio.run(tg.judge(out, s))  # what process() does before writing rows
     assert ok and record["judge"]["pass"]
@@ -854,6 +863,13 @@ def test_parse_until_and_mix():
     now = dt.datetime(2026, 10, 30, 23, 0).astimezone()
     assert dt.datetime.fromtimestamp(tg.parse_until("06:45", now)).hour == 6
     assert tg.parse_until("06:45", now) > now.timestamp()
+    # an HH:MM that passed a moment ago would be ~24 h away: refused with a limit, so a run
+    # started late (a Persistent timer, a manual resume) never runs on into the day
+    late = dt.datetime(2026, 10, 31, 6, 46).astimezone()
+    with pytest.raises(ValueError, match="passed today"):
+        tg.parse_until("06:45", late, max_ahead_hours=tg.UNTIL_HHMM_MAX_AHEAD_H)
+    assert tg.parse_until("06:45", now, max_ahead_hours=tg.UNTIL_HHMM_MAX_AHEAD_H) - now.timestamp() == 7.75 * 3600
+    assert tg.parse_until("2026-11-02T06:45:00", late, max_ahead_hours=1) > late.timestamp()  # ISO: as given
     mix = tg.parse_mix("chat-mode=3,coding=1")
     assert mix["chat-mode"] == 0.75 and mix["agentic"] == 0.0
     with pytest.raises(ValueError):
@@ -867,7 +883,7 @@ def _cli_inputs(tmp_path: Path, tasks: list[Any]) -> list[str]:
     evt.write_text("")
     tf = tmp_path / "tasks.jsonl"
     tf.write_text("".join(json.dumps(t.to_dict()) + "\n" for t in tasks))
-    return ["--injection-manifest", str(manifest), "--eval-tools", str(evt), "--tasks-file", str(tf),
+    return ["--builtin-smoke", "--injection-manifest", str(manifest), "--eval-tools", str(evt), "--tasks-file", str(tf),
             "--sandbox-root", str(tmp_path / "sbx"), "--quiet", "--request-timeout", "20",
             "--teacher-id", "fake-teacher"]
 
@@ -888,7 +904,7 @@ def test_cli_run_resumes_without_repeating_or_duplicating(tmp_path, monkeypatch,
                 *_cli_inputs(tmp_path, tasks)]
         assert tg.main(base + ["--max-tasks", "2"]) == 0
         first = fake.kinds["agent"]
-        traces = out / f"{tg.SOURCE_TAG}.traces.jsonl"
+        traces = out / f"{tg.BUILTIN_SOURCE}.traces.jsonl"
         rows = [json.loads(x) for x in traces.read_text().splitlines()]
         assert len(rows) == 2 and first == 2
         # a crash: rows of a run the ledger never heard of, then a torn line
@@ -900,10 +916,12 @@ def test_cli_run_resumes_without_repeating_or_duplicating(tmp_path, monkeypatch,
     rows = [json.loads(x) for x in traces.read_text().splitlines()]
     assert sorted(r["_meta"]["task_id"] for r in rows) == ["c-00000", "c-00001", "c-00002"]
     assert len({r["_meta"]["run_id"] for r in rows}) == 3
-    report = json.loads((out / f"{tg.SOURCE_TAG}.report.json").read_text())
+    report = json.loads((out / f"{tg.BUILTIN_SOURCE}.report.json").read_text())
+    assert report["source"] == tg.BUILTIN_SOURCE and report["task_source"] == "builtin"
+    assert {r["_meta"]["source"] for r in rows} == {tg.BUILTIN_SOURCE}
     assert report["rows_total"] == 3 and report["resume_repairs"] == {"orphan_trace_rows": 1}
     # the teacher's preflight id is part of the settings: one output never mixes two teachers
-    assert json.loads((out / f"{tg.SOURCE_TAG}.settings.json").read_text())["teacher_served"] == "fake-teacher"
+    assert json.loads((out / f"{tg.BUILTIN_SOURCE}.settings.json").read_text())["teacher_served"] == "fake-teacher"
     assert {r["_meta"]["teacher_id"] for r in rows} == {"fake-teacher"} and report["teacher_served"] == "fake-teacher"
     assert report["by_kind"]["chat-mode"]["pass_rate"] == 1.0
     # state stayed under --out: the live roots were never created
@@ -928,7 +946,7 @@ def test_cli_refuses_remote_endpoints_and_stops_at_until(tmp_path, no_outbound):
                       "2020-01-01T00:00:00", *_cli_inputs(tmp_path, tasks)])
         assert fake.kinds["agent"] == 0
     assert rc == 1
-    report = json.loads((tmp_path / "o2" / f"{tg.SOURCE_TAG}.report.json").read_text())
+    report = json.loads((tmp_path / "o2" / f"{tg.BUILTIN_SOURCE}.report.json").read_text())
     assert report["stop"] == "until"
     # an unreachable teacher is exit 3 before any task runs
     port = socket.socket()
@@ -1058,6 +1076,11 @@ def test_tasks_file_reads_a_taskset_and_bad_files_are_input_errors(tmp_path, no_
         assert ts.validate_task(r) == [], ts.validate_task(r)
     path = tmp_path / "real-v1.jsonl"
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    # --repo needs real docs for the force_compaction padding (never the synthetic runbooks)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "backups.md").write_text(
+        "# Backups\n\n" + "Backups run every night and are kept for two weeks; test a restore every month "
+        "into a scratch directory and compare the file counts with the source before trusting it. " * 6)
     tasks = tg.load_tasks_file(str(path), tmp_path)
     assert [t.kind for t in tasks] == ["agentic", "error-recovery", "chat-mode", "compacted-history"]
     assert [t.id for t in tasks] == [r["id"] for r in rows] and tasks[0].task_hash == rows[0]["id"][3:]
@@ -1097,7 +1120,7 @@ def test_relaxed_rows_go_to_their_own_file_and_count_for_nothing(tmp_path):
         s = settings_for(tmp_path, fake.url, max_natural_errors=1)
         status, rows, reasons, extra = _process(t, s)
     assert status == "relaxed" and rows and extra["verification"]["tool_success"] is False
-    assert {r["_meta"]["source"] for r in rows} == {tg.RELAXED_SOURCE}
+    assert {r["_meta"]["source"] for r in rows} == {tg.BUILTIN_SOURCE}  # a built-in task: smoke, relaxed or not
     build = _load("distill_build", "build.py")
     if hasattr(build, "DEFAULT_TRAIN_SOURCES"):
         assert tg.RELAXED_SOURCE not in build.DEFAULT_TRAIN_SOURCES
