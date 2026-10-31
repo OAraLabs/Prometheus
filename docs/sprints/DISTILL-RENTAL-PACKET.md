@@ -1,11 +1,24 @@
 # Phase 5 rental packet: the large student on Modal (2026-10-30)
 
-> **Status: not launched. Requires the operator. Blocked on DISTILL-OPEN-QUESTIONS #6.**
-> Nothing in this packet has run. No Modal account was used and no money was spent. The data
-> is Max-derived, and training on it is on hold until the operator answers #6, so
-> `modal_train.py` refuses to launch without `--i-have-operator-approval-for-max-derived-data`.
-> Launching also uploads the training data to Modal. Ground rule 2 lets data leave the
-> machines only for judge calls, so the launch decision covers that too.
+> **Status: not launched. Requires the operator. Max-derived data never rents
+> (DISTILL-OPEN-QUESTIONS #6, Q6b ruling).** Nothing in this packet has run. No Modal account
+> was used and no money was spent.
+>
+> - **Q6b (operator, 2026-10-30):** Max-derived traces may train a private, internal-only
+>   model, on our own machines (`train_qlora.py` under build.py's recorded allow). Renting
+>   uploads the training data to Modal, off our machines, so `modal_train.py` refuses
+>   Max-derived data at every step: `pretokenize`, `plan`, `rent`, the upload and the GPU
+>   call. **There is no override:** no flag, and no approval, lets it rent a Max-derived row.
+>   `--i-have-operator-approval-for-max-derived-data` is the local trainer's flag;
+>   `modal_train.py` has none. Renting Max-derived data would need a new operator decision
+>   and a code change.
+> - **A rented run is possible only on clean, gym-only data:** train/val rows from the local
+>   27B teacher's real-pattern gym runs (`source = qwen38-27b-gym`, `max_derived: false`),
+>   built without `--allow-max-derived`, pre-tokenized into a directory of its own that
+>   holds nothing `publish_guard.py` would refuse (not the dataset's Max-derived eval-tools
+>   set). Anything that does not show it is clean is refused (fail closed).
+> - Launching uploads that data to Modal. Ground rule 2 lets data leave the machines only for
+>   judge calls, so the launch decision covers that too.
 
 ## Recommendation
 
@@ -52,10 +65,11 @@ that measurement before going on.
 | RTX PRO 6000 | 22.2 / 60.6 / 166.4 | 3 | 1.30 |
 | A100 80 GB | 29.8 / 80.8 / 222.5 | 4 | 1.48 |
 
-**The corpus we have today would cost much less.** Without Phase 2b it supports ~1,900 train
-examples (Phase 1). At the likely speed that is about 42M tokens: H100 ~8 h / ~$36,
-B200 ~5 h / ~$34, L40S ~18 h / ~$45. Phase 3's 5K-example gate fails at that size, so no
-run would happen on it.
+**The corpus we have today can never be rented.** The ~1,900 train examples Phase 1 found
+are the hosted Max teacher's traces: Max-derived, so they stay on our machines whatever the
+cost (Q6b). (Had it been clean: about 42M tokens at the likely speed, H100 ~8 h / ~$36,
+B200 ~5 h / ~$34, L40S ~18 h / ~$45.) A rented run's size is whatever clean, gym-only data
+the local 27B teacher generates, and Phase 3's 5K-example gate applies to that data alone.
 
 The tables come from the code. `python3 scripts/distill/modal_train.py estimate` prints
 them, and a test keeps this file in step with it. After pre-tokenizing,
@@ -64,7 +78,9 @@ them, and a test keeps this file in step with it. After pre-tokenizing,
 ### Assumptions (stated so the calibration can prove them wrong)
 
 - **Run size** comes from the Phase 1 audit and the Phase 3 gate. A run happens only after
-  Phase 3 passes its 5–10K train-size gate.
+  Phase 3 passes its 5–10K train-size gate on clean, gym-only data (the status note above);
+  the token sizes below were measured on the Max traces and stand in for gym rows of the
+  same shape.
 
   | Case | Examples | Mean tokens per example | Epochs | Run tokens |
   |---|---:|---:|---:|---:|
@@ -143,11 +159,16 @@ them, and a test keeps this file in step with it. After pre-tokenizing,
      variants, so a step-down needs no template or tokenizer on paid time.
    - `plan` prints the cost for one GPU and cap.
 2. **Guards before any spend.** The script refuses when:
-   - Max-derived rows are present without the approval flag. `pretokenize` counts a row
-     as Max-derived unless something shows otherwise: build.py's `report.json` naming a
+   - Any row is Max-derived, with no override (Q6b). `pretokenize` counts a row as
+     Max-derived unless something shows otherwise: build.py's `report.json` naming a
      non-Max teacher, or a builder-written `max_derived: false`. A row's `source` alone
      does not clear it, since build.py labels teacher rows `extra` as readily as
-     `max-golden`.
+     `max-golden`. A path carrying the `max-derived` tag is refused too.
+   - The pre-tokenized directory's count of Max-derived rows is missing or not 0, its
+     name or manifest says Max-derived, its provenance chain does not show it is clean,
+     or it holds anything `publish_guard.py` would refuse (a dataset's Max-derived
+     eval-tools rows beside the pre-tokenized files, a stray JSONL, a symbolic link).
+     `plan`, `rent`, the upload and the GPU call each check again.
    - `--max-usd` is missing.
    - The optimistic estimate is already over the cap.
    - Without `--launch` it only prints.
@@ -236,10 +257,17 @@ so local and rented runs share one environment.
 
 ## Before anyone launches
 
-1. The operator answers DISTILL-OPEN-QUESTIONS #6: whether training on Max-derived data is
-   allowed at all.
-2. Phase 3 passes its gates with ≥5K train examples. Today's corpus supports ~1.9K without
-   Phase 2b.
+1. The training data is clean and gym-only (DISTILL-OPEN-QUESTIONS #6, Q6b ruling: Max-derived
+   data trains only on our own machines). That means a build.py run without
+   `--allow-max-derived`, whose train/val hold only the local 27B teacher's `qwen38-27b-gym`
+   rows (report: `data_policy` gate PASS, 0 Max-derived rows in train/val,
+   `settings.teacher_model` the local 27B, `max_derived: false` in `dataset-manifest.json`),
+   pre-tokenized into a directory of its own (never beside the dataset's eval-tools set,
+   which is built from Max traces). Check it first with
+   `python3 scripts/distill/publish_guard.py check <pretok dir>`: what it refuses, the
+   rental refuses.
+2. Phase 3 passes its gates with ≥5K train examples on that gym-only data alone. Today's
+   Max corpus (~1.9K examples) does not count toward it: it can never be rented.
 3. Phase 4 picks the bake-off winner. The dataset is re-rendered with the winner's own
    tokenizer and template: `build.py build --tokenizer-dir <winner tokenizer>`. The 9B's
    counts are close but not exact.
@@ -274,12 +302,14 @@ modal run --detach scripts/distill/modal_train.py::rent --data data/distill/pret
 
 - **`<cap>` is the dollar figure from "RENT YES $<cap>"** (the recommendation above is
   200). Never a larger one.
-- **As published, this line refuses before anything is uploaded (exit 3)**, because the
-  data is Max-derived. "RENT YES" answers the spend question only. It is not an answer to
-  DISTILL-OPEN-QUESTIONS #6 (training on Max-derived data) or to the ground-rule-2
-  question of sending the training data to Modal.
-- Append `--i-have-operator-approval-for-max-derived-data` only after the operator has
-  answered both separately and that answer is recorded in DISTILL-OPEN-QUESTIONS.md.
+- **This line refuses before anything is uploaded (exit 3) whenever the data holds a
+  Max-derived row, or nothing shows that it does not.** Nothing on the line overrides that
+  (Q6b): `modal_train.py` takes no approval flag (the trainer's
+  `--i-have-operator-approval-for-max-derived-data` is not one of its options). Only clean,
+  gym-only data (Before anyone launches, step 1) gets past it.
+- "RENT YES" answers the spend question only. It is not an answer to the ground-rule-2
+  question of sending the (clean) training data to Modal, and it never makes Max-derived
+  data rentable.
 - For a different GPU, change `--gpu` and `--max-usd` (the table above).
 - Without `--launch`, the same line prints the plan and spends nothing.
 - **If the client went away**, the call in flight keeps running (`--detach`) up to its

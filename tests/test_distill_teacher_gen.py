@@ -1054,7 +1054,8 @@ def test_provider_refusals_are_rejections_and_recovered_errors_are_ignored(tmp_p
 
 
 def _taskset_row(prompt: str, **flags: bool) -> dict[str, Any]:
-    tpl, ph = "tpl-" + "a" * 16, "b" * 16
+    # one real prompt per row: its own template and task group
+    tpl, ph = "tpl-" + tg.h("tpl|" + prompt), tg.h("pattern|" + prompt)
     chat = flags.get("suppress_tools", False)
     return {"id": "ts-" + tg.h(tg.norm(prompt)), "taskset": "real-v1",
             "category": "chat-mode" if chat else "memory/wiki", "subcategory": "wiki",
@@ -1086,7 +1087,11 @@ def test_tasks_file_reads_a_taskset_and_bad_files_are_input_errors(tmp_path, no_
     assert [t.id for t in tasks] == [r["id"] for r in rows] and tasks[0].task_hash == rows[0]["id"][3:]
     assert tasks[1].inject[0]["tool"] == tg.ANY_TOOL and tasks[1].expect_recovery
     assert tasks[2].mode == "chat" and tasks[2].domain == "chat-mode"
-    assert tasks[3].compaction and len(tasks[3].seed) >= 20 and tasks[3].setup_files
+    # padded with the OTHER rows' real prompts (answered live by the teacher), never a canned seed;
+    # an agent task's sandbox holds the repo's own docs whole
+    assert tasks[3].compaction and not tasks[3].seed and len(tasks[3].pad) == 3
+    assert {p["id"] for p in tasks[3].pad} == {r["id"] for r in rows[:3]}
+    assert tasks[3].setup_files == {"docs/backups.md": (tmp_path / "docs" / "backups.md").read_text()}
     assert tasks[0].meta["provenance"] == "real-pattern-v1" and tasks[0].meta["taskset"] == "real-v1"
     # the injection fires on whichever tool comes first, and provenance reaches the rows
     with FakeTeacher(scripted({"tell me its host": [("call", "wiki_query", {"query": "cobalt-intake"}),

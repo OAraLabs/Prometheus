@@ -31,7 +31,27 @@ operator: the imatrix is computed from the calibration text, so ``run
 closed: a row naming Max counts, and so does any row unless build.py's
 ``report.json`` beside ``train.jsonl`` names a non-Max teacher or the row says
 ``max_derived: false``. Writing the calibration text (``calibrate``) is data
-preparation and is not held.
+preparation and is not held. The refusal comes before anything is written.
+
+Max-derived outputs are tagged (DISTILL-OPEN-QUESTIONS Q6b, ``artifact_policy.py``)
+----------------------------------------------------------------------------------
+The run's outputs are Max-derived when the adapter is (its provenance chain:
+a ``max-derived`` name, train_qlora.py's run manifest beside it, the training
+data and build.py's report that manifest names; nothing showing either way
+counts) or when any calibration or perplexity row is (the rule above; those
+rows are stored in ``<out>/calib``). This is decided before anything runs, and
+then every output name carries the tag: the default ``--label`` gets it
+(``<run>-max-derived``, so the GGUFs are ``<run>-max-derived-Q4_K_M.gguf``,
+their ``general.name`` and the serve lines' aliases follow), so does the
+default ``--out``, and an explicit ``--label`` or ``--out`` without it is
+refused (exit 2; the plan says so). ``quantize-manifest.json`` carries
+``max_derived``, ``tags: ["max-derived"]``, ``private`` and ``publish``
+(``artifact_policy.policy_fields``), the evidence under ``provenance``, and the
+calibration counts under ``calibration_provenance``; ``calib/calibration.json``
+carries the same fields for its own rows, and ``calibrate --execute`` refuses
+an untagged ``--out`` for Max-derived rows. ``serve`` refuses an untagged
+``--alias`` for a GGUF whose name or manifest says Max-derived.
+``publish_guard.py`` refuses all of it.
 
 The window: ``--stop-at`` (and SIGTERM, which a ``setups.py`` restore or the
 weekly flywheel sends) stops the run, killing a running step, whose
@@ -484,6 +504,77 @@ def _trainer() -> ModuleType:
     return _sibling("distill_train_qlora", "train_qlora.py")
 
 
+def _policy() -> ModuleType:
+    """artifact_policy.py: the Max-derived rule for names, manifests and the
+    provenance chain (DISTILL-OPEN-QUESTIONS Q6b)."""
+    return _sibling("distill_artifact_policy", "artifact_policy.py")
+
+
+def _count(value: Any, default: int) -> int:
+    """A recorded row count, or *default* (every row) when it is not one."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 \
+        else default
+
+
+def calibration_counts(rec: dict[str, Any]) -> tuple[int, int, int]:
+    """(calibration rows, of them Max-derived, ppl rows Max-derived) of a
+    calibration record. A record without the counts counts every row."""
+    prov = rec.get("provenance") if isinstance(rec.get("provenance"), dict) else {}
+    rows = int(rec["calibration"]["rows"])
+    return (rows, _count(prov.get("calibration_max_derived"), rows),
+            _count(prov.get("ppl_max_derived"), int(rec["ppl_slice"]["rows"])))
+
+
+def output_provenance(adapter: Path | None, rec: dict[str, Any] | None) -> dict[str, Any]:
+    """Whether this run's outputs are Max-derived (module docstring), and why.
+
+    The adapter's verdict is ``artifact_policy.provenance`` of its directory
+    (its name, train_qlora.py's run manifest beside it, and the data that
+    names); unknown counts as Max-derived. A calibration record (*rec*; None
+    when none is built or recorded yet: unknown) counts by its rows."""
+    pol = _policy()
+    ev: list[str] = []
+    md = False
+    adapter_md: bool | None = False
+    if adapter is not None:
+        prov = pol.provenance(adapter)
+        adapter_md = prov.max_derived
+        md = md or adapter_md is not False
+        ev += [f"adapter: {e}" for e in prov.evidence[:4]] or ["adapter: no provenance found"]
+        if adapter_md is None:
+            ev.append("adapter: nothing shows it is not Max-derived (counted as Max-derived)")
+    calib_md = ppl_md = None
+    if rec is None:
+        md = True
+        ev.append("calibration: none built or recorded yet (counted as Max-derived)")
+    else:
+        rows, calib_md, ppl_md = calibration_counts(rec)
+        if calib_md or ppl_md:
+            md = True
+            ev.append(f"calibration: {calib_md}/{rows} rows Max-derived or unknown, and "
+                      f"{ppl_md} of the perplexity slice")
+    return {"max_derived": md, "adapter": adapter_md, "calibration_max_derived": calib_md,
+            "ppl_max_derived": ppl_md, "evidence": ev, "rule": pol.RULING}
+
+
+def tag_problems(pol: Any, label: str, out: Path, *, label_given: bool) -> list[str]:
+    """Why these output names may not hold Max-derived outputs (Q6b): each
+    must carry the ``max-derived`` tag."""
+    problems = []
+    if not pol.has_tag(label):
+        problems.append(f"{'--label ' if label_given else 'the label '}{label} does not carry "
+                        f"the {pol.TAG} tag (e.g. --label {pol.tag_name(label)})")
+    if not pol.has_tag(out.name):
+        problems.append(f"--out {out} does not carry the {pol.TAG} tag in its name "
+                        f"(e.g. --out {pol.tag_path(out)})")
+    return problems
+
+
+def untagged_error(problems: list[str]) -> str:
+    return ("the outputs are Max-derived (DISTILL-OPEN-QUESTIONS Q6b): every name carries the "
+            "max-derived tag, so " + "; ".join(problems))
+
+
 @dataclass
 class _Cand:
     id: str
@@ -654,8 +745,9 @@ def calibration_from_settings(s: "Settings") -> Calibration:
 def write_calibration(cal: Calibration, calib_dir: Path) -> dict[str, Any]:
     _write_atomic(calib_dir / "calibration.txt", cal.text)
     _write_atomic(calib_dir / "ppl.txt", cal.ppl_text)
-    record = {**cal.info, "written_at": _now(), "calibration_ids": cal.calib_ids,
-              "ppl_ids": cal.ppl_ids}
+    _, calib_md, ppl_md = calibration_counts(cal.info)
+    record = {**cal.info, **_policy().policy_fields(bool(calib_md or ppl_md)),
+              "written_at": _now(), "calibration_ids": cal.calib_ids, "ppl_ids": cal.ppl_ids}
     _write_json(calib_dir / "calibration.json", record)
     return record
 
@@ -993,6 +1085,10 @@ class Settings:
     approved: bool = False  # APPROVAL_FLAG: Max-derived calibration text allowed
     stop_at: float | None = None  # epoch seconds (STOP_MARGIN_S already taken off)
     train_sha256: str | None = None  # the train.jsonl this model goes with
+    # Decided before anything runs (output_provenance): the outputs are
+    # Max-derived, so every name carries the tag (Q6b).
+    max_derived: bool = False
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     @property
     def outtype(self) -> str:
@@ -1117,10 +1213,14 @@ def provenance_note(info: dict[str, Any], approved: bool) -> str:
 
 
 def default_label(adapter: Path | None, base: Path) -> str:
+    """The run's name: the base's, or the adapter's (its run directory's, for
+    a generic adapter directory name: train_qlora.py writes ``<run>/adapter``,
+    or ``<run>/adapter-max-derived`` for Max-derived data)."""
     if adapter is None:
         return _label("base-" + base.name)
     name = adapter.name
-    if name in ("adapter", "final", "lora", "checkpoint-final") and adapter.parent.name:
+    generic = re.sub(r"(?i)[-_]max[-_]derived$", "", name)
+    if generic in ("adapter", "final", "lora", "checkpoint-final") and adapter.parent.name:
         name = adapter.parent.name
     return _label(name)
 
@@ -1230,7 +1330,7 @@ def _file_entry(path: Path, kind: str, **extra: Any) -> dict[str, Any]:
             "sha256": sha256_file(path), **extra}
 
 
-def print_plan(s: Settings, arch: str | None, cal_note: str) -> None:
+def print_plan(s: Settings, arch: str | None, cal_note: str, name_problems: list[str]) -> None:
     llama = s.llama
     assert llama is not None and s.base is not None
 
@@ -1247,7 +1347,15 @@ def print_plan(s: Settings, arch: str | None, cal_note: str) -> None:
     print(f"adapter      {adapter}")
     print(f"template     {s.template_dir}")
     print(f"out          {s.out}  (label {s.label})")
-    stop = (datetime.fromtimestamp(s.stop_at, timezone.utc).isoformat(timespec="seconds")
+    if s.max_derived:
+        print("provenance   Max-derived: every output name carries the max-derived tag, and "
+              "the outputs are private (never published; Q6b) -- "
+              + "; ".join(s.provenance.get("evidence") or []))
+    else:
+        print("provenance   not Max-derived (adapter and calibration rows shown clean)")
+    if name_problems:
+        print(f"names        run --execute REFUSED (exit 2): {untagged_error(name_problems)}")
+    stop =(datetime.fromtimestamp(s.stop_at, timezone.utc).isoformat(timespec="seconds")
             if s.stop_at is not None else "no --stop-at")
     print(f"window       stops at {stop}; SIGTERM stops it too (exit {EXIT_PAUSED}, a re-run "
           f"resumes); --detach runs it as {UNIT_PREFIX}<UTC stamp>")
@@ -1307,6 +1415,8 @@ def run_pipeline(s: Settings, arch: str | None) -> int:
         print(f"  run.json: earlier inputs ({', '.join(diff)}) made nothing yet; replaced")
 
     manifest: dict[str, Any] = {"schema": MANIFEST_SCHEMA, "started_at": _now(), "label": s.label,
+                                **_policy().policy_fields(s.max_derived),
+                                "provenance": s.provenance,
                                 "inputs": {}, "steps": {}, "artifacts": [], "serve": {}}
 
     def save() -> None:
@@ -1344,13 +1454,20 @@ def _run_steps(s: Settings, arch: str | None, fp: dict[str, Any], old: dict[str,
 
     def check(rec: dict[str, Any]) -> None:
         checked["train_split"] = check_train_split(s, rec, built=built)
-        checked["max_derived"] = provenance_gate(s, rec)
+        checked["calibration"] = provenance_gate(s, rec)
+        # The names were chosen before the run for what it was shown to be;
+        # the calibration actually used must not say more (nothing is written
+        # under an untagged name for Max-derived input).
+        if output_provenance(s.adapter, rec)["max_derived"] and not s.max_derived:
+            raise UsageError(untagged_error([
+                f"the calibration in use holds Max-derived rows, but this run was named as "
+                f"clean ({s.out}, label {s.label})"]))
 
     rec = ensure_calibration(s, calib_dir, write=True, check=check)
     manifest["steps"]["calibrate"] = {k: v for k, v in rec.items()
                                       if k not in ("calibration_ids", "ppl_ids")}
     manifest["steps"]["calibrate"]["train_split"] = checked["train_split"]
-    manifest["max_derived"] = checked["max_derived"]
+    manifest["calibration_provenance"] = checked["calibration"]
     print(f"  {provenance_note(rec, s.approved)}")
     save()
     # The first step that makes an output from the inputs comes next.
@@ -1704,7 +1821,6 @@ def _cmd_run(a: argparse.Namespace) -> int:
     base = _path(a.base)
     adapter = _path(a.adapter) if a.adapter else None
     label = _label(a.label) if a.label else default_label(adapter, base)
-    out = _path(a.out) if a.out else _path(DEFAULT_OUT_ROOT) / label
     quants = tuple(q.strip().upper() for q in a.quants.split(",") if q.strip())
     unknown = [q for q in quants if q not in SIZE_RATIO]
     if not quants or unknown:
@@ -1712,8 +1828,29 @@ def _cmd_run(a: argparse.Namespace) -> int:
     if a.train_sha256 and not re.fullmatch(r"[0-9a-f]{64}", a.train_sha256.lower()):
         raise UsageError("--train-sha256 takes a sha256 (64 hex digits)")
     llama_dir = _path(a.llama_cpp_dir)
-    s = _settings(a, out)
+    pol = _policy()
+    given_out = _path(a.out) if a.out else None
+    s = _settings(a, given_out or _path(DEFAULT_OUT_ROOT) / label)
+    # Max-derived or not, from the provenance chain and the calibration this
+    # run will use, before anything runs: it names every output (Q6b).
+    cal: dict[str, Any] | None = None
+    if (s.data / "train.jsonl").is_file():
+        cal = calibration_from_settings(s).info
+    else:
+        for cand in ([given_out] if given_out else
+                     [_path(DEFAULT_OUT_ROOT) / pol.tag_name(label), _path(DEFAULT_OUT_ROOT) / label]):
+            cal = recorded_calibration(cand / "calib")
+            if cal is not None:
+                break
+    prov = output_provenance(adapter, cal)
+    if prov["max_derived"] and not a.label:
+        label = pol.tag_name(label)
+    out = given_out or _path(DEFAULT_OUT_ROOT) / label
+    s.out = out
+    name_problems = (tag_problems(pol, label, out, label_given=bool(a.label))
+                     if prov["max_derived"] else [])
     s.base, s.adapter, s.label = base, adapter, label
+    s.max_derived, s.provenance = bool(prov["max_derived"]), prov
     s.template_dir = _path(a.template_dir)
     s.llama = LlamaCpp(llama_dir, a.llama_cpp_commit.lower(),
                        _path(a.llama_bin_dir) if a.llama_bin_dir else llama_dir / "build" / "bin")
@@ -1732,10 +1869,19 @@ def _cmd_run(a: argparse.Namespace) -> int:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         detached = detach_cmd(list(a.argv), out, ts=ts, cwd=Path.cwd())
     if not s.execute:
-        print_plan(s, arch, _cal_note(s))
+        print_plan(s, arch, _cal_note(s), name_problems)
         if detached is not None:
             print(f"\ndetached (with --execute): {shlex.join(detached)}")
         return 0
+    # Refusals before anything is written (or a detached unit started): no
+    # calibration to use, Max-derived calibration rows without the operator's
+    # approval (exit 3), a Max-derived run under an untagged name (exit 2).
+    if cal is None:
+        raise CalibrationError(f"{s.data / 'train.jsonl'} not found and no calibration in "
+                               f"{s.out / 'calib'}")
+    provenance_gate(s, cal)
+    if name_problems:
+        raise UsageError(untagged_error(name_problems))
     if not base.is_dir():
         raise QuantizeError(f"--base {base} not found")
     if adapter is not None and not (adapter / "adapter_config.json").is_file():
@@ -1760,25 +1906,60 @@ def cmd_calibrate(a: argparse.Namespace) -> int:
     return _guarded(lambda: _cmd_calibrate(a))
 
 
+def _calib_out_problem(s: Settings, rec: dict[str, Any]) -> str:
+    """Why ``<out>/calib`` may not hold this calibration ("" when it may): its
+    rows are Max-derived (or unknown) and --out does not carry the tag (Q6b)."""
+    _, calib_md, ppl_md = calibration_counts(rec)
+    pol = _policy()
+    if (calib_md or ppl_md) and not pol.has_tag(s.out.name):
+        return untagged_error([f"its calibration rows ({calib_md} Max-derived or unknown, "
+                               f"{ppl_md} in the perplexity slice) go to --out {s.out}, which "
+                               f"does not carry the {pol.TAG} tag (e.g. --out "
+                               f"{pol.tag_path(s.out)})"])
+    return ""
+
+
 def _cmd_calibrate(a: argparse.Namespace) -> int:
     s = _settings(a, _path(a.out))
     if not s.execute:
         print("DRY RUN: nothing is written. Add --execute to write the calibration.\n")
         print(f"calibration  {_cal_note(s)}")
         print(f"would write  {s.out / 'calib'}/calibration.txt, ppl.txt, calibration.json")
+        if (s.data / "train.jsonl").is_file():
+            problem = _calib_out_problem(s, calibration_from_settings(s).info)
+            if problem:
+                print(f"names        --execute REFUSED (exit 2): {problem}")
         return 0
-    rec = ensure_calibration(s, s.out / "calib", write=True)
+
+    def check(rec: dict[str, Any]) -> None:
+        problem = _calib_out_problem(s, rec)
+        if problem:
+            raise UsageError(problem)
+
+    rec = ensure_calibration(s, s.out / "calib", write=True, check=check)
     print(json.dumps({k: v for k, v in rec.items() if k not in ("calibration_ids", "ppl_ids")},
                      indent=2))
     return 0
 
 
 def cmd_serve(a: argparse.Namespace) -> int:
+    return _guarded(lambda: _cmd_serve(a))
+
+
+def _cmd_serve(a: argparse.Namespace) -> int:
     gguf = _path(a.gguf)
     llama_dir = _path(a.llama_cpp_dir)
     server = (_path(a.llama_bin_dir) if a.llama_bin_dir else llama_dir / "build" / "bin") \
         / "llama-server"
     alias = a.alias or gguf.stem
+    # A GGUF whose name or manifest says Max-derived is served under a tagged
+    # id too (Q6b): the id is what score.py stamps on every row it writes.
+    pol = _policy()
+    if pol.path_has_tag(gguf) or pol.provenance(gguf).max_derived is True:
+        if a.alias and not pol.has_tag(alias):
+            raise UsageError(untagged_error([f"--alias {alias} does not carry the {pol.TAG} "
+                                             f"tag (e.g. --alias {pol.tag_name(alias)})"]))
+        alias = pol.tag_name(alias)
     print(shlex.join(serve_command(gguf, server=server, alias=alias, host=a.host, port=a.port,
                                    ngl=a.ngl)))
     return 0

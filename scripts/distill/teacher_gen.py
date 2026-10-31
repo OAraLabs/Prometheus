@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 2b-style teacher generation: gym tasks, a LOCAL teacher, sandboxed tools, verified traces.
+"""Phase 2b-style teacher generation: gym tasks, a teacher, sandboxed tools, verified traces.
 
     # On the GPU host. The teacher is a llama.cpp server on loopback; no paid API, no API key.
     uv run python scripts/distill/teacher_gen.py run \\
@@ -11,6 +11,12 @@
         --pack ~/distill/phase3/request_pack.json --repo ~/Prometheus \\
         --until 06:45 [--concurrency 2] [--probe-guard-url http://127.0.0.1:<port>] \\
         [--judge-url http://127.0.0.1:<other port>] [--temperature 0.7 --top-k 20 --top-p 0.8 --min-p 0]
+    # Qwen Max as the teacher, on the PAY-PER-TOKEN key only (QWEN_PAYG_KEY), every call through
+    # spend.py's one ledger ($150 cap, STOP + notify at $140); rows are Max-derived (--out must
+    # carry the max-derived tag). The local 27B judges when --judge-url is given (preferred):
+    uv run python scripts/distill/teacher_gen.py run --teacher max-payg --budget-usd 40 \\
+        --tasks ~/distill/phase2b/tasksets/real-v1.jsonl --out ~/distill/phase2b-max-derived \\
+        [--judge-url http://127.0.0.1:<local 27B judge>] [--thinking-budget 0] [--max-tokens 4096] ...
     # A smoke run of the built-in task families (rows tagged builtin-smoke, never trained on):
     uv run python scripts/distill/teacher_gen.py run --builtin-smoke --max-tasks 5 --out /tmp/smoke ...
     # The built-in tasks a smoke run would start next (no model calls), as JSONL:
@@ -31,18 +37,42 @@ Task source (the operator's rule: no model-written task text in training data)
   validated taskset row (``GenTask.origin == "taskset"``, provenance
   ``real-pattern-v1``). The task flags are execution conditions:
   ``suppress_tools`` -> a chat-mode request with no tools; ``inject_errors`` ->
-  the sandbox fails the first tool call and the run must recover (also on a
-  task that is compacted too); ``force_compaction`` -> a long reading session
-  of repo docs before the prompt, then the real compactor with a small window
-  (rows name the padding: ``_meta.compaction_pad``). The padding is always the
-  ``--repo``'s own git-tracked docs: a repo without any is refused (exit 2),
-  never padded with the synthetic runbooks a smoke run falls back to. ``_meta.task_id`` is the
-  row's ``task_group``, ``_meta.partner_task_id`` a recombined row's second
-  group, and the row's provenance fields are carried.
+  the sandbox fails the first tool call of the task's own turn and the run must
+  recover (also on a task that is compacted too); ``force_compaction`` ->
+  earlier turns before the prompt, then the real compactor with a small window
+  (below). ``_meta.task_id`` is the row's ``task_group``,
+  ``_meta.partner_task_id`` a recombined row's second group, and the row's
+  provenance fields are carried.
+
+  Compaction padding holds no text written here or by an agent: every user
+  turn before the prompt is ANOTHER real-pattern prompt of the same taskset,
+  sent verbatim and answered live by the same teacher in the same run (its own
+  row's mode: chat turns only before a chat-mode prompt), until the history
+  holds ``PAD_HISTORY_FACTOR`` x ``--compaction-history-tokens`` (at least
+  ``PAD_MIN_TURNS`` turns, at most ``PAD_MAX_TURNS``). An agent task's sandbox
+  holds whole git-tracked docs of ``--repo`` (those a pad prompt names, plus a
+  few more), so a read during padding returns the repo's own text; a repo
+  without docs is refused for an agent task (exit 2), never padded with the
+  synthetic runbooks a smoke run falls back to. The pad prompts come from a
+  reserved pool (``PAD_POOL_SHARE`` of the taskset's task groups, never
+  flagged ones, chosen by a hash of the taskset's name, so every run and every
+  teacher reserves the same ones; ``pad_pool_split``): pool rows are never run
+  as tasks, so no padded row shares a task with a row in another build split.
+  A taskset too small to spare a group pads from every other row instead.
+  Candidates share no task group with the row or each other and are checked
+  against the eval sets. The task's injections are held back during padding;
+  a pad turn that does not end in a reply, or whose calls were refused,
+  repaired, dropped or cut off, rejects the task (``pad_*``). Pad turns are
+  history: never rows, never judged on their own (the judge sees them as the
+  earlier conversation). Rows carry the descriptor ``_meta.compaction_pad``
+  (``version``, the pad rows' ``task_ids`` / ``task_groups`` /
+  ``prompt_hashes`` / ``modes``, the teacher and tool calls, reads, the
+  sandbox's ``repo_docs``, ``pool``: reserved | shared).
 * ``--builtin-smoke``: the built-in families below (or ``--tasks-file`` rows
   from ``list-tasks``). Their text was written by hand in this file, so every
   row is tagged ``source = builtin-smoke`` (``--name`` defaults to it) and
   ``build.py`` never trains on it. A list-tasks row cannot claim another origin.
+  The local teacher only: ``--teacher max-payg`` refuses it (exit 2).
 
 What the built-in families generate (``--builtin-smoke``)
 --------------------------------------------------------
@@ -98,7 +128,9 @@ request (a GGUF's own metadata can change a server's defaults, so two servers
 compared on the same tasks need them; the judge always runs at temperature 0
 with ``--judge-seed``). ``--concurrency``
 tasks run at once (default 2). Each worker has one sandbox directory under
-``--sandbox-root``, wiped before and after every task. ``--until`` is a hard
+``--sandbox-root``, wiped before and after every task; the run holds an
+exclusive lock on that root, so a second run on the same root is refused
+(exit 2) instead of wiping the first one's workspaces. ``--until`` is a hard
 end: no task starts within ``--min-task-seconds`` of it, and a task still
 running at it is cancelled and not recorded (it reruns next time).
 Re-running the same command resumes (see Outputs).
@@ -163,13 +195,71 @@ Verification (all must hold; only then are rows written)
   task with ``inject_errors``) fired and (when the task expects it) a call
   succeeded after it; compacted-history's compactor fired and a teacher
   request carried the summary;
-* a LOCAL judge: the teacher itself (``self-judge``) unless ``--judge-url``
-  names another local endpoint (``local-judge``), with a strict rubric, at
-  temperature 0 and its own ``--judge-seed``, answering JSON.
+* a judge with a strict rubric, at temperature 0 and its own ``--judge-seed``,
+  answering JSON: the teacher itself (``self-judge``) unless ``--judge-url``
+  names another local endpoint (``local-judge``). The record names it the way
+  build.py reads it: ``provider: local``, ``judge_key: none`` (the local
+  judge's ``endpoint`` too under ``--teacher max-payg``), or for Max judging
+  itself ``provider: max-payg``, ``judge_key: payg`` and the ledger's
+  ``call_ids``.
 
 Endpoints must be loopback (``--allow-lan-endpoints`` also admits private and
-CGNAT addresses). Known hosted-API hosts are refused outright, and no request
-ever carries an Authorization header: this script cannot reach the Max key.
+CGNAT addresses). Known hosted-API hosts are refused outright, and no local
+request ever carries an Authorization header.
+
+The Max teacher (``--teacher max-payg``)
+--------------------------------------
+Qwen Max (``PAYG_MODEL``) on the PAY-PER-TOKEN key and nothing else: every
+teacher, summarizer and self-judge request is ``spend.PaygClient.chat`` (tool
+``teacher_gen``, phase ``2b-teacher``), reserved at its worst case in the one
+ledger (``~/distill/spend-ledger.csv``) and settled from the API's usage. The
+key is ``QWEN_PAYG_KEY`` only (``spend.resolve_payg``: never ``QWEN_API_KEY``,
+a ``sk-sp-`` key or a Token Plan / Coding Plan host; its prefix must match its
+host), read before the state directories are isolated. Before the first call
+the run checks the key, the canonical ledger, the STOP file and the notify
+command, and refuses (exit 5) when any is missing: until the key is on the
+host the mode refuses cleanly and sends nothing. ``--budget-usd`` is required:
+this phase's share of the global cap, checked by spend.py against the ledger's
+total for teacher_gen / 2b-teacher (so a resumed run cannot spend it twice).
+Each request carries only ``spend.PAYLOAD_KEYS``: the loop's messages and
+tools, an explicit ``max_tokens`` (at most ``--max-tokens``, itself at most
+``PAYG_MAX_TOKENS``), ``enable_thinking`` (false unless ``--thinking-budget N``,
+which also sends ``thinking_budget``), no stream; ``--min-p`` is refused. A
+reply's reasoning is never a target. One attempt per call (no retry inside
+a task); a failed attempt is charged as spend.py says. The run stops cleanly
+when the ledger refuses (the STOP file, the $150 cap, the $140 alert, the
+phase budget; exit 4) or the API refuses the key or account (auth, billing;
+exit 5): the task in flight is not recorded and reruns next time, and the rows
+written so far stay. Concurrency is at most ``PAYG_MAX_CONCURRENCY``. Under
+``--until`` every paid call is over ``PAYG_UNTIL_MARGIN_S`` before it (its
+timeout is cut to fit) and none starts with less than ``PAYG_MIN_CALL_S``
+left: the run stops (stop ``until``) and the task reruns, so no call is still
+in flight when gen_runner.py stops its children. A SIGTERM or SIGHUP (a stop
+by gen_runner.py or systemd) starts no new paid call, gives the calls in
+flight up to ``PAYG_SIGNAL_WAIT_S`` to settle from their usage, settles the
+rest as interrupted (charged their reservation) and exits 128 + the signal:
+a stop never leaves a reservation open in the ledger. The task in flight is
+not recorded (it reruns next time).
+
+Everything else is the local path's: the real-pattern taskset only
+(``--builtin-smoke`` and ``--tasks-file`` are refused, exit 2: the paid key
+is for real-pattern tasks, never for hand-written smoke tasks), the
+sandbox, injections, compaction padding (answered by Max: teacher output),
+the verification, the dedupe and the eval guard. The loop runs with the local
+route's adapter for the model name (tier light), exactly as for the 27B. Every
+served model must match ``PAYG_TEACHER_ID``. The judge: the local 27B when
+``--judge-url`` is given (preferred; through ``--probe-guard-url`` when one
+fronts it; its id must match ``--judge-id``, default ``*qwen3*8*27b*``, never
+Max), else Max judging itself on the paid key. Rows are tagged
+``source = max-payg-gym`` (``max-payg-gym-relaxed`` under a relaxation),
+``model = qwen3.8-max``, ``max_derived: true``, ``tags: ["max-derived"]``,
+``teacher: max-payg`` and their ledger ``paid_call_id`` / ``cost_usd``.
+build.py admits them only under ``--allow-max-derived`` (its Q6b allow), with
+the strict record; they are never published (``publish_guard.py``), so
+``--out`` must carry the ``max-derived`` tag (exit 2 otherwise) and the report
+carries ``max_derived: true`` and this phase's spend. The paid key is never
+used for daemon or background work: ``teacher_gen`` is one of spend.py's two
+allowed tools.
 The preflight refuses a teacher (or judge) whose ``/v1/models`` id does not
 match ``--teacher-id`` (``--judge-id``; default ``*qwen3*8*27b*``) or names a
 Max model, so a loopback proxy, the probe guard in front of another model or
@@ -187,7 +277,10 @@ timeout, 5xx) is an ``error`` (retried by the next run; enough in a row stop
 it). A request it refuses (context overflow, another 4xx) is a rejection
 (``context_overflow``, ``provider_bad_request``, ``judge_bad_request``):
 recorded as done, never retried. An overflow the loop recovered from by
-compacting is ignored.
+compacting is ignored. The compactor swallows its summarizer's errors, so a
+compaction task that never compacted because its summary request failed for
+a passing reason (one of ``RETRY_KINDS``: a 429, a timeout, a 5xx) is an
+``error`` too, never ``compaction_not_exercised``.
 
 ``--tasks`` takes only a ``taskset_gen.py`` taskset (Task source, above);
 ``--builtin-smoke --tasks-file`` takes list-tasks rows.
@@ -203,7 +296,8 @@ Outputs (``--out``, file prefix ``--name``)
   ``sampling`` (when given), ``model`` (``--model-name``), ``served_model``, ``category`` (build.py's
   categories: chat-mode, memory/wiki, sentinel/daemon, other, coding),
   ``task_category`` (the kind), ``task_id``, ``task_family``, ``run_id``,
-  ``verdict: pass``, ``max_derived: false``, ``suppress_tools``, ``compacted``,
+  ``verdict: pass``, ``max_derived`` (false; true for a Max teacher's row),
+  ``teacher``, ``compaction_pad`` (a padded row), ``suppress_tools``, ``compacted``,
   ``error_recovery``, and ``verification``: the full record in the shape
   build.py's data policy reads strictly (``verified``, ``tool_success``,
   ``judge`` with ``verdict``/``model``/``pass``, ``sandboxed: true``,
@@ -226,7 +320,9 @@ Outputs (``--out``, file prefix ``--name``)
 * ``<name>.report.json``: counts and pass rates by kind and category, row
   shares, judge stats, rejection reasons. Rewritten after every task.
 * ``<name>.settings.json``: the generation settings; a resume with different
-  ones is refused.
+  ones is refused. The ``--pack`` system prompt counts as its template: the
+  pack's date sentinel becomes the date each task starts on, so a resume on a
+  later day is the same run.
 
 Resume: a torn last line is cut; rows whose run is not in the ledger (a crash
 between the two writes) are removed; tasks in the ledger are not run again;
@@ -235,8 +331,14 @@ a held task released before a crash ends up in exactly one file.
 Exit: 0 done (target, ``--max-tasks``, ``--until`` or no tasks left), 1 a
 run that kept nothing, 2 usage or input error, 3 the teacher or judge is
 unreachable (preflight), or ``--max-consecutive-errors`` tasks in a row ended
-in an error (teacher or judge transport, or a harness fault). Errored tasks are
-not in the ledger as done, so the next run retries them.
+in an error (teacher or judge transport, or a harness fault), 4 the spend
+ledger stopped a ``--teacher max-payg`` run (STOP, the cap, ``--budget-usd``),
+5 ``--teacher max-payg`` refused before any call (no ``QWEN_PAYG_KEY``, the
+Token Plan key or host, the STOP file, no notify command) or the paid API
+refused the key or account mid-run, 143 / 129 a ``--teacher max-payg`` run
+stopped by SIGTERM / SIGHUP (its calls in flight settled first), 6 an
+unexpected exception (its traceback on stderr; never Python's own 1). Errored
+tasks are not in the ledger as done, so the next run retries them.
 """
 
 from __future__ import annotations
@@ -248,6 +350,7 @@ import contextvars
 import copy
 import dataclasses
 import datetime as dt
+import fcntl
 import fnmatch
 import glob
 import hashlib
@@ -255,15 +358,19 @@ import importlib.util
 import ipaddress
 import json
 import logging
+import math
 import os
 import random
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -287,7 +394,51 @@ ORIGIN_TASKSET = "taskset"
 ORIGIN_BUILTIN = "builtin"
 #: Request sampling fields ``--temperature`` / ``--top-k`` / ``--top-p`` / ``--min-p`` set.
 SAMPLING_KEYS = ("temperature", "top_k", "top_p", "min_p")
-GENERATOR_VERSION = "teacher-gen/3"
+GENERATOR_VERSION = "teacher-gen/4"
+#: ``--teacher``: the local llama-server (default) or Qwen Max on the pay-per-token key.
+TEACHER_LOCAL = "local"
+TEACHER_PAYG = "max-payg"
+TEACHERS = (TEACHER_LOCAL, TEACHER_PAYG)
+#: --teacher max-payg: the one priced model (spend.PRICES), its row tags, and its ledger
+#: tool and phase (spend.ALLOWED_TOOLS; the phase is the --budget-usd sub-budget's key).
+PAYG_MODEL = "qwen3.8-max"
+PAYG_TEACHER_ID = "qwen3.8-max*"
+PAYG_SOURCE = "max-payg-gym"
+PAYG_RELAXED_SOURCE = "max-payg-gym-relaxed"
+PAYG_TOOL = "teacher_gen"
+PAYG_PHASE = "2b-teacher"
+PAYG_MAX_CONCURRENCY = 4
+#: The most output one paid request may ask for (``--max-tokens`` above it is refused);
+#: every request carries an explicit max_tokens at or under ``--max-tokens``.
+PAYG_MAX_TOKENS = 8192
+#: The most reasoning one paid request may ask for (``--thinking-budget``; 0 = thinking off).
+PAYG_MAX_THINKING_BUDGET = 16384
+#: Under ``--until``, every paid call must be over this long before it (its timeout is cut to fit):
+#: gen_runner.py stops its children at --until, and a call still in flight then would be cut off.
+PAYG_UNTIL_MARGIN_S = 15.0
+#: ... and a paid call with less time than this left before that point is not started: the run
+#: stops (stop ``until``) and the task reruns next time, instead of paying for a call cut short.
+PAYG_MIN_CALL_S = 120.0
+#: A paid run stopped by one of these signals (gen_runner.py, systemd) starts no new paid call,
+#: waits up to ``PAYG_SIGNAL_WAIT_S`` (under gen_runner's 20 s grace before SIGKILL) for its calls
+#: in flight to settle from their usage, settles the rest as interrupted, and exits 128 + signal.
+PAYG_EXIT_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+PAYG_SIGNAL_WAIT_S = 12.0
+#: The judge's output bound (local and paid).
+JUDGE_MAX_TOKENS = 600
+#: Compaction padding (force_compaction taskset rows): earlier turns made of OTHER
+#: real-pattern prompts from the taskset's reserved pad pool, answered by the same
+#: teacher in the same run. ``PAD_POOL_SHARE`` of a taskset's rows (whole task
+#: groups, chosen by a hash keyed by the taskset's name, so every run and every
+#: teacher over one taskset reserves the same pool) are never run as tasks: their
+#: prompts appear only as padding, so no padded row shares a task with another row.
+PAD_VERSION = "taskset-turns-v2"
+PAD_POOL_SHARE = 0.10
+PAD_MIN_TURNS = 3       # the real compactor summarises a span of at least 4 messages
+PAD_MAX_TURNS = 10      # candidates per task, in seeded order
+PAD_HISTORY_FACTOR = 1.5  # pad until the history holds this x --compaction-history-tokens
+PAD_DOCS = 4            # whole repo docs (besides those a pad prompt names) in an agent task's sandbox
+PAD_DOC_MAX_BYTES = 16_000
 DEFAULT_TEACHER_URL = "http://127.0.0.1:8093"
 DEFAULT_MODEL_NAME = "qwen3.8-27b"
 DEFAULT_TEACHER_ID = "*qwen3*8*27b*"
@@ -500,6 +651,11 @@ class GenTask:
     #: ORIGIN_TASKSET only when ``task_from_taskset`` built it from a validated
     #: taskset row; a task read back from a file is always built-in (``from_dict``)
     origin: str = ORIGIN_BUILTIN
+    #: compaction padding (a force_compaction taskset row): other real-pattern prompts,
+    #: in order, each ``{"id", "task_group", "mode": chat|agent, "prompt", "docs"}``.
+    #: ``run_task`` sends them as earlier user turns, each answered by the same teacher,
+    #: until the history is long enough to compact (``pad_candidates``)
+    pad: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -545,6 +701,12 @@ class GenTask:
                 raise ValueError(f"task {self.id!r}: bad injection {inj!r}")
         if set(self.answer) - {"match", "forbid"}:
             raise ValueError(f"task {self.id!r}: answer checks are match / forbid")
+        for p in self.pad:
+            if not isinstance(p, dict) or p.get("mode") not in ("chat", "agent") \
+                    or not isinstance(p.get("prompt"), str) or not p["prompt"].strip():
+                raise ValueError(f"task {self.id!r}: bad pad turn {p!r}")
+            if self.mode == "chat" and p["mode"] != "chat":
+                raise ValueError(f"task {self.id!r}: a chat-mode task pads with chat turns only")
         for pats in self.answer.values():
             for pat in pats:
                 try:
@@ -557,7 +719,8 @@ class GenTask:
         return h(norm(self.prompt))
 
     def user_texts(self) -> list[str]:
-        return [str(next(iter(s.values()))) for s in self.seed if "user" in s] + [self.prompt]
+        return ([str(next(iter(s.values()))) for s in self.seed if "user" in s]
+                + [str(p["prompt"]) for p in self.pad] + [self.prompt])
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +805,14 @@ class EvalGuard:
             return False
         return bool(self.manifest.record_overlaps({"messages": row["messages"]}))
 
+    def prompt_overlaps(self, text: str) -> bool:
+        """One prompt (a pad candidate's) shares text with an eval set (``task_overlaps``'s tests)."""
+        if h(norm(text)) in self.eval_task_ids:
+            return True
+        if self._shingle is not None and self.eval_shingles and self._shingle(text) & self.eval_shingles:
+            return True
+        return self.manifest is not None and bool(self.manifest.record_overlaps({"prompt": text}))
+
 
 def expand(patterns: list[str]) -> list[Path]:
     out: list[Path] = []
@@ -724,11 +895,15 @@ class NoRepoDocs(ValueError):
 
 
 class Sources:
-    def __init__(self, sections: list[Section], *, synthetic: bool = False) -> None:
+    def __init__(self, sections: list[Section], *, synthetic: bool = False, root: Path | None = None) -> None:
         self.sections = sections
         #: True when the sections are this file's own synthetic runbooks (hand-written
         #: template text), not a repo's docs: only a --builtin-smoke run may use them
         self.synthetic = synthetic
+        #: the repo the sections were read from (None: synthetic or built by hand)
+        self.root = root
+        #: the repo-relative doc files the sections come from (whole files for padding)
+        self.doc_paths = sorted({s.path for s in sections}) if not synthetic else []
 
     @classmethod
     def from_repo(cls, repo: Path, *, allow_synthetic: bool = True) -> "Sources":
@@ -764,7 +939,7 @@ class Sources:
                     "force_compaction task's padding must be real repo docs (point --repo at a checkout "
                     "that has them; the built-in synthetic runbooks are for --builtin-smoke only)")
             return cls(_synthetic_sections(), synthetic=True)
-        return cls(sections)
+        return cls(sections, root=repo)
 
 
 def _synthetic_sections() -> list[Section]:
@@ -2029,6 +2204,8 @@ class SandboxEnv:
         self.by_id: dict[str, ExecRecord] = {}
         self.messages: list[Any] = []
         self.outbox: list[dict[str, Any]] = []
+        #: False while compaction pad turns run: the task's injections are for its own turn
+        self.injections_armed = True
 
     # -- confinement -----------------------------------------------------------------
 
@@ -2070,6 +2247,8 @@ class SandboxEnv:
                 raise SandboxRefusal(f"{fg!r} is outside this session's working directory ({self.root})")
 
     def _injection(self, name: str, args: dict[str, Any]) -> dict[str, Any] | None:
+        if not self.injections_armed:
+            return None
         blob = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
         for inj in self.injections:
             if inj["tool"] not in (name, ANY_TOOL):
@@ -3002,7 +3181,10 @@ class Settings:
     max_natural_errors: int = 0
     keep_refused: bool = False
     sandbox_root: Path = DEFAULT_SANDBOX_ROOT
+    #: the system prompt (``--pack``): with ``date_sentinel``, a template whose sentinel becomes today's
+    #: date in each task's prompt (``system_prompt``); the fingerprint hashes the template, never a date
     base_system_prompt: str | None = None
+    date_sentinel: str | None = None
     repo: Path = _REPO_DEFAULT
     max_consecutive_errors: int = 5
     progress: bool = True
@@ -3020,23 +3202,48 @@ class Settings:
     #: explicit sampling on every teacher (and summarizer) request: SAMPLING_KEYS -> value.
     #: Empty: the server's launch defaults (which a GGUF's own metadata can change).
     sampling: dict[str, float] = field(default_factory=dict)
+    #: TEACHER_LOCAL (a loopback llama-server) or TEACHER_PAYG (Qwen Max through spend.py)
+    teacher: str = TEACHER_LOCAL
+    #: --teacher max-payg: this phase's sub-budget under the global cap (spend.py checks it
+    #: against the ledger's total for teacher_gen / 2b-teacher), the reasoning budget
+    #: (0: thinking off, as at runtime) and the paid client (set by the run, never saved)
+    budget_usd: float | None = None
+    thinking_budget: int = 0
+    payg_client: Any = field(default=None, repr=False, compare=False)
+    #: the pad pool's summary (``pad_pool_split``), for the report
+    pad_pool: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def payg(self) -> bool:
+        return self.teacher == TEACHER_PAYG
 
     @property
     def teacher_endpoint(self) -> str:
+        if self.payg:
+            raise EndpointError("--teacher max-payg has no local teacher endpoint (it calls spend.PaygClient)")
         return check_endpoint(self.probe_guard_url or self.teacher_url, allow_lan=self.allow_lan)
 
     @property
     def judge_is_teacher(self) -> bool:
         """No --judge-url, or one that reaches the teacher's server (or the probe
         guard) under any spelling (``same_server``): judged through the teacher's
-        endpoint, so the probe guard is never bypassed."""
+        endpoint, so the probe guard is never bypassed. With --teacher max-payg:
+        no --judge-url (Max judges itself on the paid key)."""
+        if self.payg:
+            return not self.judge_url
         return (not self.judge_url or same_server(self.judge_url, self.teacher_url)
                 or same_server(self.judge_url, self.probe_guard_url))
 
     @property
     def judge_endpoint(self) -> str:
         """The teacher's own endpoint (through the probe guard, when one is set)
-        when the judge is the teacher; another local server is called directly."""
+        when the judge is the teacher; another local server is called directly.
+        With --teacher max-payg: the local judge (through the probe guard, when one
+        is set), or "" when Max judges itself through the paid client."""
+        if self.payg:
+            if not self.judge_url:
+                return ""
+            return check_endpoint(self.probe_guard_url or str(self.judge_url), allow_lan=self.allow_lan)
         if self.judge_is_teacher:
             return self.teacher_endpoint
         return check_endpoint(str(self.judge_url), allow_lan=self.allow_lan)
@@ -3046,13 +3253,27 @@ class Settings:
         return "self-judge" if self.judge_is_teacher else "local-judge"
 
     @property
+    def judge_provider(self) -> str:
+        """``max-payg`` when Max judges (only ever on the paid key), else ``local``."""
+        return TEACHER_PAYG if self.payg and self.judge_is_teacher else "local"
+
+    @property
+    def local_judge_model(self) -> str:
+        """The model name a local judge request carries (and its record names)."""
+        return self.judge_model or (DEFAULT_MODEL_NAME if self.payg else self.model_name)
+
+    @property
     def row_source(self) -> str:
         """The ``_meta.source`` of a strictly verified row."""
-        return SOURCE_TAG if self.task_source == ORIGIN_TASKSET else BUILTIN_SOURCE
+        if self.task_source != ORIGIN_TASKSET:
+            return BUILTIN_SOURCE
+        return PAYG_SOURCE if self.payg else SOURCE_TAG
 
     @property
     def relaxed_source(self) -> str:
-        return RELAXED_SOURCE if self.task_source == ORIGIN_TASKSET else BUILTIN_SOURCE
+        if self.task_source != ORIGIN_TASKSET:
+            return BUILTIN_SOURCE
+        return PAYG_RELAXED_SOURCE if self.payg else RELAXED_SOURCE
 
     def fingerprint(self) -> dict[str, Any]:
         return {"generator": GENERATOR_VERSION, "seed": self.seed, "model_name": self.model_name,
@@ -3062,10 +3283,20 @@ class Settings:
                 "keep_refused": self.keep_refused, "teacher_id": self.teacher_id,
                 "teacher_served": self.teacher_served, "task_source": self.task_source,
                 "sampling": dict(sorted(self.sampling.items())),
+                "teacher": self.teacher, "judge_provider": self.judge_provider,
+                "thinking_budget": self.thinking_budget,
+                "pad": {"version": PAD_VERSION, "pool_share": PAD_POOL_SHARE, "min_turns": PAD_MIN_TURNS,
+                        "max_turns": PAD_MAX_TURNS, "history_factor": PAD_HISTORY_FACTOR},
+                # the pack's template (date sentinel unfilled), so a resume on a later day is the same run
                 "system_prompt_sha": hashlib.sha256((self.base_system_prompt or "").encode()).hexdigest()[:16]}
 
     def system_prompt(self, root: Path) -> str:
-        base = self.base_system_prompt or DEFAULT_SYSTEM_PROMPT.format(date=dt.date.today().isoformat())
+        today = dt.date.today().isoformat()
+        if self.base_system_prompt:
+            base = (self.base_system_prompt.replace(self.date_sentinel, today) if self.date_sentinel
+                    else self.base_system_prompt)
+        else:
+            base = DEFAULT_SYSTEM_PROMPT.format(date=today)
         return f"{base.rstrip()}\n\n# Workspace\n\nThis conversation's working directory is `{root}`."
 
 
@@ -3110,6 +3341,9 @@ class RecordedCall:
     output_tokens: int
     dropped_malformed: int
     unreadable: tuple[str, ...]
+    #: --teacher max-payg: the ledger's call id and what the call cost
+    call_id: str = ""
+    cost_usd: float = 0.0
 
 
 def _sampling_provider_cls() -> type:
@@ -3192,6 +3426,196 @@ def _recording_provider_cls() -> type:
     return RecordingProvider
 
 
+# ---------------------------------------------------------------------------
+# --teacher max-payg: Qwen Max on the pay-per-token key, every call through spend.py
+# ---------------------------------------------------------------------------
+
+
+def _spend() -> Any:
+    """``spend.py`` beside this file (the one ledger, cap, STOP and key checks; the
+    module name judge.py loads it under, so both share one copy)."""
+    return _load_sibling("distill_spend", "spend.py")
+
+
+def _artifact_policy() -> Any:
+    return _load_sibling("distill_artifact_policy", "artifact_policy.py")
+
+
+class PaygStop(RuntimeError):
+    """A paid call was refused or cannot go on: the run stops cleanly (nothing is
+    recorded for the task in flight; it reruns next time). ``kind`` is
+    ``spend_stop`` (the STOP file, the $150 cap, this phase's --budget-usd, the
+    ledger) or ``payg_fatal`` (the API refused the key or the account: auth, billing)."""
+
+    def __init__(self, kind: str, message: str) -> None:
+        super().__init__(f"{kind}: {message}")
+        self.kind = kind
+        self.message = message
+
+
+class PaygCallFailed(RuntimeError):
+    """One paid attempt that failed (already settled in the ledger). ``kind`` is
+    spend.py's (timeout, unreachable, provider_error, rate_limit, bad_request,
+    context_overflow): the first four are retried by the next run, the rest are
+    a rejection of the task."""
+
+    def __init__(self, kind: str, message: str, status: int | None = None) -> None:
+        super().__init__(f"{kind}: {message}")
+        self.kind = kind
+        self.status = status
+
+
+#: PaidCallError kinds that end the run instead of the task: the key or the account is refused.
+PAYG_FATAL_KINDS = frozenset({"auth", "billing"})
+#: PaygStop kinds: the ledger refused, the API refused the key or account, --until is too close.
+PAYG_STOP_KINDS = frozenset({"spend_stop", "payg_fatal", "until"})
+
+
+def payg_call(client: Any, payload: dict[str, Any], deadline: float | None = None) -> Any:
+    """``client.chat(payload)`` (spend.PaygClient: reserve, POST, settle), its errors as
+    PaygStop / PaygCallFailed. Every payload holds only ``spend.PAYLOAD_KEYS``.
+
+    *deadline* (``--until``, a timestamp): the call must be over ``PAYG_UNTIL_MARGIN_S``
+    before it, so its timeout is cut to fit, and a call with less than ``PAYG_MIN_CALL_S``
+    left is never started (``PaygStop("until")``: nothing is reserved; the run stops)."""
+    spend = _spend()
+    bad = sorted(set(payload) - set(spend.PAYLOAD_KEYS))
+    if bad:  # a bug here, never something to send
+        raise ValueError(f"paid request fields {bad} are not in spend.PAYLOAD_KEYS")
+    kwargs: dict[str, Any] = {}
+    if deadline is not None:
+        left = deadline - PAYG_UNTIL_MARGIN_S - time.time()
+        if left < max(PAYG_MIN_CALL_S, 1.0):
+            raise PaygStop("until", f"--until is {max(0.0, left + PAYG_UNTIL_MARGIN_S):.0f} s away: no paid "
+                                    "call starts that could still be running then")
+        kwargs["timeout"] = left
+    try:
+        return client.chat(payload, **kwargs)
+    except spend.SpendRefused as exc:  # STOP, the cap, the phase budget: nothing was sent
+        raise PaygStop("spend_stop", str(exc)) from None
+    except spend.PaidCallError as exc:  # settled already; messages hold neither key nor host
+        if exc.kind in PAYG_FATAL_KINDS:
+            raise PaygStop("payg_fatal", str(exc)) from None
+        raise PaygCallFailed(exc.kind, exc.message, exc.status) from None
+    except spend.SpendError as exc:  # the ledger, the price tier: nothing more can be spent safely
+        raise PaygStop("spend_stop", str(exc)) from None
+
+
+def _payg_provider_cls() -> type:
+    """A ModelProvider for the agent loop and the compactor that sends each request
+    through ``spend.PaygClient`` (one attempt, no stream, no retry) and records it
+    like the recording provider does."""
+    cached = globals().get("_PAYG")
+    if cached is not None:
+        return cached
+    from prometheus.engine.usage import UsageSnapshot
+    from prometheus.providers.base import (
+        OUTPUT_LIMIT_STOPS,
+        ApiMessageCompleteEvent,
+        ApiTextDeltaEvent,
+        ModelProvider,
+    )
+    from prometheus.providers.openai_compat import _native_tool_choice
+    from prometheus.providers.stub import _build_openai_messages, _parse_assistant_message, _unreadable_call_ids
+
+    class PaygProvider(ModelProvider):
+        provider_name = TEACHER_PAYG
+
+        def __init__(self, client: Any, *, model: str, max_tokens: int, thinking_budget: int = 0,
+                     sampling: dict[str, float] | None = None, deadline: float | None = None) -> None:
+            self.client = client
+            #: --until: every call is over before it (payg_call)
+            self.deadline = deadline
+            self.model = model
+            self.max_tokens = int(max_tokens)
+            self.thinking_budget = int(thinking_budget)
+            bad = set(sampling or {}) - (set(SAMPLING_KEYS) - {"min_p"})
+            if bad:
+                raise ValueError(f"sampling fields {sorted(bad)} are not sent to the paid API")
+            self.sampling = dict(sampling or {})
+            self.calls: list[RecordedCall] = []
+            self.errors: list[str] = []
+            self.error_kinds: list[str] = []
+
+        def _build_request_payload(self, request: Any) -> dict[str, Any]:
+            """The chat-completions body: the loop's messages and tools as the local
+            provider builds them, an explicit max_tokens (at most ``--max-tokens``),
+            explicit thinking (off unless ``--thinking-budget``), no stream."""
+            payload: dict[str, Any] = {
+                "model": self.model,
+                "messages": _build_openai_messages(request, allow_images=False),
+                "max_tokens": max(1, min(int(request.max_tokens or self.max_tokens), self.max_tokens)),
+                "stream": False,
+                "enable_thinking": self.thinking_budget > 0,
+            }
+            if self.thinking_budget > 0:
+                payload["thinking_budget"] = self.thinking_budget
+            if request.tools and not request.suppress_tools:
+                payload["tools"] = [
+                    {"type": "function", "function": {
+                        "name": t.get("function", {}).get("name", t.get("name", "")),
+                        "description": t.get("function", {}).get("description", t.get("description", "")),
+                        "parameters": t.get("function", {}).get(
+                            "parameters", t.get("input_schema", t.get("parameters", {})))}}
+                    for t in request.tools]
+                payload["tool_choice"] = _native_tool_choice(getattr(request, "tool_choice", "auto"))
+            payload.update(self.sampling)
+            return payload
+
+        async def stream_message(self, request: Any) -> Any:  # type: ignore[override]
+            payload = self._build_request_payload(request)
+            try:
+                r = await asyncio.to_thread(payg_call, self.client, payload, self.deadline)
+            except PaygStop as exc:
+                self.errors.append(str(exc)[:200])
+                self.error_kinds.append(exc.kind)
+                raise
+            except PaygCallFailed as exc:
+                self.errors.append(str(exc)[:200])
+                self.error_kinds.append(exc.kind)
+                raise
+            if not r.finish_reason:
+                self.errors.append("provider_error: the reply has no finish_reason")
+                self.error_kinds.append("provider_error")
+                raise PaygCallFailed("provider_error", "the reply has no finish_reason")
+            # the reply without its reasoning channel: thinking is never a training target
+            choice = {"message": {"content": r.message.get("content"),
+                                  "tool_calls": r.message.get("tool_calls")}}
+            message, dropped = _parse_assistant_message(choice, model=self.model)
+            stop = r.finish_reason
+            # DashScope has said "tool_calls" for a reply cut at the output limit: count
+            # output at the cap as a stop at the limit (the loop's own rule)
+            if stop not in OUTPUT_LIMIT_STOPS and r.output_tokens - r.reasoning_tokens >= payload["max_tokens"]:
+                stop = "length"
+            unreadable = tuple(_unreadable_call_ids(choice, stop))
+            self.calls.append(RecordedCall(
+                request, message, stop, r.served_model, int(r.input_tokens), int(r.output_tokens),
+                int(dropped or 0), unreadable, call_id=r.call_id, cost_usd=float(r.usd)))
+            if r.text:
+                # the reply's text as one delta: the compactor's call envelope reads text from deltas
+                yield ApiTextDeltaEvent(text=r.text)
+            yield ApiMessageCompleteEvent(
+                message=message,
+                usage=UsageSnapshot(input_tokens=r.input_tokens, output_tokens=r.output_tokens,
+                                    cached_input_tokens=r.cached_input_tokens),
+                stop_reason=stop, dropped_malformed=dropped, served_model=r.served_model,
+                unreadable_tool_calls=unreadable)
+
+    globals()["_PAYG"] = PaygProvider
+    return PaygProvider
+
+
+def teacher_provider(settings: "Settings") -> Any:
+    """The provider every teacher (and summarizer) request goes through: the paid
+    client for --teacher max-payg, else the local llama-server (or its probe guard)."""
+    if settings.payg:
+        return _payg_provider_cls()(settings.payg_client, model=PAYG_MODEL, max_tokens=settings.max_tokens,
+                                    thinking_budget=settings.thinking_budget, sampling=settings.sampling,
+                                    deadline=settings.until)
+    return _recording_provider_cls()(base_url=settings.teacher_endpoint, timeout=settings.request_timeout,
+                                     sampling=settings.sampling)
+
+
 def seed_messages(seed: list[dict[str, Any]]) -> list[Any]:
     """The gym's seed format, with deterministic tool-call ids."""
     from prometheus.engine.messages import ConversationMessage, TextBlock, ToolResultBlock, ToolUseBlock
@@ -3244,6 +3668,21 @@ class TaskOutcome:
     committed: dict[int, Any] = field(default_factory=dict)
     #: stop_reason of every AssistantTurnComplete, in order (None: the model chose to stop)
     turn_stops: list[str | None] = field(default_factory=list)
+    #: compaction padding: the teacher calls (``calls[:pad_calls]``) and sandbox log
+    #: entries (``env.log[:pad_log]``) of the pad turns, which are history, never rows;
+    #: the descriptor rows carry as ``_meta.compaction_pad``; why padding failed
+    pad_calls: int = 0
+    pad_log: int = 0
+    pad: dict[str, Any] | None = None
+    pad_reasons: list[str] = field(default_factory=list)
+    #: the summarizer's calls (the compactor's own provider): never rows
+    summary_calls: list[RecordedCall] = field(default_factory=list)
+    #: a paid call refused mid-task (--teacher max-payg): the run stops
+    payg_stop: PaygStop | None = None
+
+    @property
+    def paid_usd(self) -> float:
+        return sum(c.cost_usd for c in self.calls) + sum(c.cost_usd for c in self.summary_calls)
 
 
 _TELEMETRY: dict[str, Any] = {}
@@ -3280,16 +3719,20 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
         target.write_text(content, encoding="utf-8")
     env = SandboxEnv(root, task, jail=resolve_jail(settings.jail))
     registry = build_sandbox_registry(env)
-    provider = _recording_provider_cls()(base_url=settings.teacher_endpoint,
-                                         timeout=settings.request_timeout, sampling=settings.sampling)
+    provider = teacher_provider(settings)
+    # The local route's adapter for the model name, whichever provider serves it: a Max
+    # teacher (tier light, like the 27B) runs the loop exactly as the local teacher does.
     adapter = create_adapter({"provider": "llama_cpp", "model": settings.model_name}, {})
     system_prompt = settings.system_prompt(root)
     counter = {"n": 0}
     compactor = None
+    summarizer = None
     if task.compaction:
-        compactor = _make_compactor(settings, system_prompt, registry, counter, chat=task.mode == "chat")
+        summarizer = teacher_provider(settings)
+        compactor = _make_compactor(settings, system_prompt, registry, counter, chat=task.mode == "chat",
+                                    provider=summarizer)
     seeded = seed_messages(task.seed)
-    messages = seeded + [ConversationMessage.from_user_text(task.prompt)]
+    messages = list(seeded)
     env.messages = messages
     observed: dict[str, dict[str, Any]] = {}
 
@@ -3309,25 +3752,156 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
         workspace_resolver=lambda _session: root)
     out = TaskOutcome(task=task, run_id=f"{task.id}@{uuid.uuid4().hex[:10]}", messages=messages,
                       n_seed=len(seeded), calls=provider.calls, observed=observed, env=env, provider=provider)
+    if summarizer is not None:
+        out.summary_calls = summarizer.calls
     t0 = time.monotonic()
     try:
-        async for item in run_loop(context, messages, mode="chat" if task.mode == "chat" else "agent"):
-            ev = item[0] if isinstance(item, tuple) else item
-            if isinstance(ev, AssistantTurnComplete):
-                out.turn_stops.append(ev.stop_reason)
-                # The loop commits a model reply right after the call that produced it
-                # (no other teacher call in between); an error turn carries a stop reason.
-                if ev.stop_reason is None and provider.calls:
-                    out.committed[len(provider.calls) - 1] = ev.message
+        if task.pad:
+            # earlier turns: other real-pattern prompts, each answered by this teacher, with
+            # the compactor off and the task's injections held back for its own turn
+            env.injections_armed = False
+            await _pad_turns(task, settings, dataclasses.replace(context, compactor=None), out)
+            env.injections_armed = True
+            out.n_seed = len(messages)
+            out.pad_calls = len(provider.calls)
+            out.pad_log = len(env.log)
+        if not out.pad_reasons:
+            messages.append(ConversationMessage.from_user_text(task.prompt))
+            async for item in run_loop(context, messages, mode="chat" if task.mode == "chat" else "agent"):
+                ev = item[0] if isinstance(item, tuple) else item
+                if isinstance(ev, AssistantTurnComplete):
+                    out.turn_stops.append(ev.stop_reason)
+                    # The loop commits a model reply right after the call that produced it
+                    # (no other teacher call in between); an error turn carries a stop reason.
+                    if ev.stop_reason is None and provider.calls:
+                        out.committed[len(provider.calls) - 1] = ev.message
     except asyncio.CancelledError:
         raise
+    except PaygStop as exc:  # the spend ledger refused: the run stops, this task reruns later
+        out.payg_stop = exc
+        out.error = f"PaygStop: {str(exc)[:300]}"
     except Exception as exc:  # harness-level: recorded, not raised
         out.error = f"{type(exc).__name__}: {str(exc)[:300]}"
     finally:
         out.duration_s = time.monotonic() - t0
         out.compactions = counter["n"]
+    if out.payg_stop is None:
+        # a refused paid call the loop or the compactor caught and did not re-raise
+        for p in (provider, summarizer):
+            for kind, err in zip(getattr(p, "error_kinds", []), getattr(p, "errors", [])):
+                if kind in PAYG_STOP_KINDS and out.payg_stop is None:
+                    out.payg_stop = PaygStop(kind, err)
     classify_provider_errors(out, provider)
+    classify_summarizer_errors(out, summarizer)
     return out
+
+
+def _turn_events(out: TaskOutcome, msgs: list[Any]) -> list[dict[str, Any]]:
+    """The tool calls in *msgs* with what the sandbox did with each (``tool_events``'s fields)."""
+    from prometheus.engine.messages import ToolResultBlock, ToolUseBlock
+
+    events: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    for m in msgs:
+        for b in m.content:
+            if isinstance(b, ToolUseBlock) and not b.id.startswith(SEED_CALL_PREFIX):
+                ev = {"id": b.id, "name": b.name, "input": dict(b.input), "is_error": None, "result": ""}
+                events.append(ev)
+                by_id[b.id] = ev
+            elif isinstance(b, ToolResultBlock) and b.tool_use_id in by_id:
+                by_id[b.tool_use_id]["is_error"] = bool(b.is_error)
+                by_id[b.tool_use_id]["result"] = b.content if isinstance(b.content, str) else str(b.content)
+    for ev in events:
+        rec = out.env.by_id.get(ev["id"])
+        obs = out.observed.get(ev["id"])
+        ev["repaired"] = bool(obs) and (obs["raw"] != obs["executed"])
+        if rec is not None and rec.outcome in ("injected", "refused", "simulated"):
+            ev["outcome"] = rec.outcome
+        elif ev["is_error"] is None:
+            ev["outcome"] = "unanswered"
+        elif ev["is_error"]:
+            ev["outcome"] = "error"
+        else:
+            ev["outcome"] = "ok"
+    return events
+
+
+def _last_text(msgs: list[Any]) -> str:
+    """The final prose reply in *msgs* ("" when the last assistant turn called a tool)."""
+    from prometheus.engine.messages import TextBlock, ToolUseBlock
+
+    for m in reversed(msgs):
+        if m.role != "assistant":
+            continue
+        if any(isinstance(b, ToolUseBlock) for b in m.content):
+            return ""
+        text = "".join(b.text for b in m.content if isinstance(b, TextBlock)).strip()
+        if text:
+            return text
+    return ""
+
+
+async def _pad_turns(task: GenTask, settings: Settings, context: Any, out: TaskOutcome) -> None:
+    """Run the task's pad turns (``GenTask.pad``) through the real loop, in order,
+    until the history holds ``PAD_HISTORY_FACTOR`` x ``--compaction-history-tokens``
+    (and at least ``PAD_MIN_TURNS`` turns) or the candidates run out. Each turn is
+    a real-pattern prompt sent as the user's turn, answered by the same teacher in
+    its own row's mode. A turn that did not end in a reply, or whose calls were
+    refused, repaired, dropped or cut off, stops the padding and rejects the task
+    (``out.pad_reasons``): that history would teach a sandbox or harness artifact.
+    Natural tool errors are kept (they are real tool results) and counted."""
+    from prometheus.context.token_estimation import estimate_message_tokens
+    from prometheus.engine.agent_loop import run_loop
+    from prometheus.engine.messages import ConversationMessage
+    from prometheus.engine.stream_events import AssistantTurnComplete
+
+    messages = out.messages
+    target = PAD_HISTORY_FACTOR * settings.compaction_history_tokens
+    turns: list[dict[str, Any]] = []
+    for cand in task.pad:
+        first_msg, first_call = len(messages), len(out.calls)
+        messages.append(ConversationMessage.from_user_text(cand["prompt"]))
+        stops: list[str | None] = []
+        async for item in run_loop(context, messages, mode="chat" if cand["mode"] == "chat" else "agent"):
+            ev = item[0] if isinstance(item, tuple) else item
+            if isinstance(ev, AssistantTurnComplete):
+                stops.append(ev.stop_reason)
+        msgs = messages[first_msg:]
+        calls = out.calls[first_call:]
+        events = _turn_events(out, msgs)
+        outcomes = collections.Counter(e["outcome"] for e in events)
+        problem = ""
+        if not calls or not stops or stops[-1] is not None or not _last_text(msgs):
+            problem = "pad_turn_incomplete"
+        elif outcomes["refused"]:
+            problem = "pad_sandbox_refusal"
+        elif (any(e["repaired"] for e in events) or any(c.dropped_malformed or c.unreadable for c in calls)
+              or any(c.stop_reason in ("length", "max_tokens") for c in calls)
+              or any(getattr(m, "provenance", "") == ORCHESTRATOR for m in msgs)):
+            problem = "pad_turn_unclean"
+        turns.append({"id": cand["id"], "task_group": cand["task_group"], "mode": cand["mode"],
+                      "prompt_hash": h(norm(cand["prompt"])), "teacher_calls": len(calls),
+                      "tool_calls": len(events), "tool_errors": outcomes["error"] + outcomes["unanswered"],
+                      "reads": sum(1 for e in events if e["name"] in ("read_file", "grep", "glob", "bash")
+                                   and e["outcome"] == "ok")})
+        if problem:
+            out.pad_reasons.append(problem)
+            break
+        if len(turns) >= PAD_MIN_TURNS and sum(estimate_message_tokens(m) for m in messages) >= target:
+            break
+    out.pad = {
+        "version": PAD_VERSION,
+        # the user turns are these real-pattern prompts, verbatim; every reply is this
+        # teacher's, in this run; a read returns the repo's own docs (the sandbox's files)
+        "turns": len(turns), "task_ids": [t["id"] for t in turns],
+        "task_groups": [t["task_group"] for t in turns], "prompt_hashes": [t["prompt_hash"] for t in turns],
+        "modes": [t["mode"] for t in turns],
+        "teacher_calls": sum(t["teacher_calls"] for t in turns),
+        "tool_calls": sum(t["tool_calls"] for t in turns), "tool_errors": sum(t["tool_errors"] for t in turns),
+        "reads": sum(t["reads"] for t in turns), "repo_docs": sorted(task.setup_files),
+        "pool": "reserved" if settings.pad_pool.get("reserved") else "shared",
+        "answered_by": "teacher", "history_tokens": sum(estimate_message_tokens(m) for m in messages),
+    }
 
 
 #: Provider failures worth retrying later: the server was down, slow or failing.
@@ -3354,19 +3928,37 @@ def classify_provider_errors(out: TaskOutcome, provider: Any) -> None:
     out.rejection = "context_overflow" if last == "context_overflow" else f"provider_{last}"
 
 
+def classify_summarizer_errors(out: TaskOutcome, summarizer: Any) -> None:
+    """The compactor swallows its summarizer's errors and sends the history uncompacted, so a
+    compaction task whose summary request failed for a passing reason (a 429, a timeout, a 5xx,
+    the server down: ``RETRY_KINDS``) and that never compacted would be rejected for good as
+    ``compaction_not_exercised``. It is a transport error instead (retried by the next run). A
+    summary request refused for a lasting reason (too long, a bad request) still rejects."""
+    if summarizer is None or out.compactions or out.transport_error or out.payg_stop is not None:
+        return
+    errors = list(getattr(summarizer, "errors", []) or [])
+    if not errors:
+        return
+    kinds = list(getattr(summarizer, "error_kinds", []) or [])
+    if (kinds[-1] if kinds else "unknown") in RETRY_KINDS:
+        out.transport_error = True
+        out.error = out.error or f"summarizer: {errors[-1]}"
+
+
 def _make_compactor(settings: Settings, system_prompt: str, registry: Any, counter: dict[str, int],
-                    *, chat: bool = False) -> Any:
+                    *, chat: bool = False, provider: Any = None) -> Any:
     """The real compactor with a window of the fixed cost (system prompt and,
     unless chat-mode, the tool schemas) + ``compaction_history_tokens`` + the
-    output cap, so a long seeded history has to be compacted."""
+    output cap, so a long history has to be compacted. Its summarizer is the
+    teacher (*provider*, default ``teacher_provider``): the summaries are the
+    teacher's own output, and its calls are recorded but never rows."""
     from prometheus.context.compactor import ContextCompactor
     from prometheus.context.token_estimation import estimate_tokens
 
     tools_chars = 0 if chat else len(str(registry.to_api_schema()))
     fixed = estimate_tokens(system_prompt) + tools_chars // 4
     comp = ContextCompactor(
-        provider=_sampling_provider_cls()(base_url=settings.teacher_endpoint, timeout=settings.request_timeout,
-                                          sampling=settings.sampling),
+        provider=provider if provider is not None else teacher_provider(settings),
         model=settings.model_name,
         effective_limit=fixed + settings.compaction_history_tokens + settings.max_tokens,
         threshold_pct=0.85, reserve_tokens=settings.max_tokens, protect_recent_turns=2,
@@ -3389,48 +3981,13 @@ def _make_compactor(settings: Settings, system_prompt: str, registry: Any, count
 
 
 def tool_events(out: TaskOutcome) -> list[dict[str, Any]]:
-    """Every tool call the loop made in this run (seeded calls excluded), with
-    what the sandbox did with it."""
-    from prometheus.engine.messages import ToolResultBlock, ToolUseBlock
-
-    events: list[dict[str, Any]] = []
-    by_id: dict[str, dict[str, Any]] = {}
-    for m in out.messages[out.n_seed:]:
-        for b in m.content:
-            if isinstance(b, ToolUseBlock) and not b.id.startswith(SEED_CALL_PREFIX):
-                ev = {"id": b.id, "name": b.name, "input": dict(b.input), "is_error": None, "result": ""}
-                events.append(ev)
-                by_id[b.id] = ev
-            elif isinstance(b, ToolResultBlock) and b.tool_use_id in by_id:
-                by_id[b.tool_use_id]["is_error"] = bool(b.is_error)
-                by_id[b.tool_use_id]["result"] = b.content if isinstance(b.content, str) else str(b.content)
-    for ev in events:
-        rec = out.env.by_id.get(ev["id"])
-        obs = out.observed.get(ev["id"])
-        ev["repaired"] = bool(obs) and (obs["raw"] != obs["executed"])
-        if rec is not None and rec.outcome in ("injected", "refused", "simulated"):
-            ev["outcome"] = rec.outcome
-        elif ev["is_error"] is None:
-            ev["outcome"] = "unanswered"
-        elif ev["is_error"]:
-            ev["outcome"] = "error"
-        else:
-            ev["outcome"] = "ok"
-    return events
+    """Every tool call the loop made in the task's own turn (seeded calls and pad
+    turns excluded), with what the sandbox did with it."""
+    return _turn_events(out, out.messages[out.n_seed:])
 
 
 def final_text(out: TaskOutcome) -> str:
-    from prometheus.engine.messages import TextBlock, ToolUseBlock
-
-    for m in reversed(out.messages[out.n_seed:]):
-        if m.role != "assistant":
-            continue
-        if any(isinstance(b, ToolUseBlock) for b in m.content):
-            return ""
-        text = "".join(b.text for b in m.content if isinstance(b, TextBlock)).strip()
-        if text:
-            return text
-    return ""
+    return _last_text(out.messages[out.n_seed:])
 
 
 def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, list[str], dict[str, Any]]:
@@ -3442,18 +3999,24 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
     counts = collections.Counter(ev["outcome"] for ev in events)
     natural = counts["error"] + counts["unanswered"]
     repaired = sum(ev["repaired"] for ev in events)
-    dropped = sum(c.dropped_malformed for c in out.calls)
+    # the task's own turn: pad turns are history (checked when they ran, in _pad_turns)
+    calls = out.calls[out.pad_calls:]
+    dropped = sum(c.dropped_malformed for c in calls)
     feedback = sum(1 for m in out.messages[out.n_seed:] if getattr(m, "provenance", "") == ORCHESTRATOR)
     text = final_text(out)
     record: dict[str, Any] = {
         "tool_calls": len(events), "tool_errors": natural, "injected_failures": counts["injected"],
         "sandbox_refusals": counts["refused"], "simulated_calls": counts["simulated"],
         "repaired_calls": repaired, "dropped_malformed": dropped, "orchestrator_feedback": feedback,
-        "teacher_calls": len(out.calls), "compactions": out.compactions,
+        "teacher_calls": len(calls), "compactions": out.compactions,
     }
+    if out.pad is not None:
+        record["compaction_pad"] = out.pad
+    if out.pad_reasons:
+        reasons += out.pad_reasons
     if out.error:
         reasons.append("harness_error")
-    if not out.calls:
+    if not calls:
         reasons.append("no_teacher_calls")
     if not text:
         reasons.append("no_final_text")
@@ -3469,15 +4032,21 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
         reasons.append("dropped_malformed")
     if feedback:
         reasons.append("orchestrator_feedback")
-    if any(c.stop_reason in ("length", "max_tokens") for c in out.calls):
+    if any(c.stop_reason in ("length", "max_tokens") for c in calls):
         reasons.append("output_limit")
-    # Every reply must come from the teacher the preflight checked: llama-server reports
-    # either its own id or the requested model name; never a Max model.
+    # Every reply (pad turns too) must come from the teacher the preflight checked:
+    # llama-server reports either its own id or the requested model name, never a Max
+    # model; the paid API names the Max model it served (PAYG_TEACHER_ID), nothing else.
     served = sorted({c.served_model for c in out.calls if c.served_model})
     record["served_models"] = served
-    allowed = {settings.model_name} | ({settings.teacher_served} if settings.teacher_served else set())
-    if any(has_max_token(m) or (settings.teacher_served and m not in allowed) for m in served):
-        reasons.append("served_model_mismatch")
+    if settings.payg:
+        if any(not fnmatch.fnmatchcase(m.lower(), settings.teacher_id.lower()) or not has_max_token(m)
+               for m in served):
+            reasons.append("served_model_mismatch")
+    else:
+        allowed = {settings.model_name} | ({settings.teacher_served} if settings.teacher_served else set())
+        if any(has_max_token(m) or (settings.teacher_served and m not in allowed) for m in served):
+            reasons.append("served_model_mismatch")
     if task.mode == "chat" and events:
         reasons.append("chat_mode_tool_call")
     recovered: bool | None = None
@@ -3497,7 +4066,7 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
     record["recovered"] = recovered
     if task.compaction:
         in_request = any(SUMMARY_MARKER in (getattr(m, "text", "") or "")
-                         for c in out.calls for m in c.request.messages)
+                         for c in calls for m in c.request.messages)
         record["compaction"] = {"events": out.compactions, "summary_in_request": in_request}
         if not out.compactions or not in_request:
             reasons.append("compaction_not_exercised")
@@ -3519,8 +4088,11 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
     record["side_effects"] = False
     record["jail"] = out.env.jail
     record["mocked_effects"] = {"messages": len(out.env.outbox),
-                                "writes": sum(1 for r in out.env.log if r.outcome == "ok" and r.name in (
+                                "writes": sum(1 for r in out.env.log[out.pad_log:] if r.outcome == "ok" and r.name in (
                                     "memory", "cron_create", "cron_delete", "task_create", "task_stop"))}
+    if settings.payg:
+        record["teacher"] = TEACHER_PAYG
+        record["max_derived"] = True
     return not reasons, reasons, record
 
 
@@ -3594,31 +4166,64 @@ def parse_verdict(text: str) -> dict[str, Any] | None:
 
 
 def judge_payload(transcript: str, settings: Settings) -> dict[str, Any]:
-    """The judge request for one rendered transcript (``judge_transcript``)."""
+    """The local judge request for one rendered transcript (``judge_transcript``)."""
     return {
-        "model": settings.judge_model or settings.model_name,
+        "model": settings.local_judge_model,
         "messages": [{"role": "system", "content": JUDGE_SYSTEM},
                      {"role": "user", "content": transcript}],
-        "temperature": 0, "seed": settings.judge_seed, "max_tokens": 600, "stream": False,
+        "temperature": 0, "seed": settings.judge_seed, "max_tokens": JUDGE_MAX_TOKENS, "stream": False,
         "response_format": {"type": "json_object"},
         "chat_template_kwargs": {"enable_thinking": False, "thinking": False},
     }
 
 
+def payg_judge_payload(transcript: str, settings: Settings) -> dict[str, Any]:
+    """The Max self-judge request (--teacher max-payg without --judge-url): the same
+    rubric at temperature 0 and its own seed, thinking off, output bounded; only
+    ``spend.PAYLOAD_KEYS``."""
+    return {
+        "model": PAYG_MODEL,
+        "messages": [{"role": "system", "content": JUDGE_SYSTEM},
+                     {"role": "user", "content": transcript}],
+        "temperature": 0, "seed": settings.judge_seed, "max_tokens": JUDGE_MAX_TOKENS, "stream": False,
+        "response_format": {"type": "json_object"}, "enable_thinking": False,
+    }
+
+
 async def judge(out: TaskOutcome, settings: Settings) -> dict[str, Any]:
-    """The local judge's record. ``pass`` needs verdict pass AND completed,
+    """The judge's record. ``pass`` needs verdict pass AND completed,
     tools_ok and grounded true AND recovery_ok not false."""
     return await judge_text(judge_transcript(out, settings.judge_max_chars), settings)
 
 
+def _verdict_record(record: dict[str, Any], obj: dict[str, Any] | None) -> dict[str, Any]:
+    if obj is None:
+        record.update({"verdict": "fail", "pass": False, "reason": "unparseable judge reply"})
+        return record
+    ok = (obj.get("verdict") == "pass" and obj.get("completed") is True and obj.get("tools_ok") is True
+          and obj.get("grounded") is True and obj.get("recovery_ok") is not False)
+    record.update({k: obj.get(k) for k in ("verdict", "completed", "tools_ok", "grounded", "recovery_ok")})
+    record["reason"] = str(obj.get("reason") or "")[:300]
+    record["pass"] = ok
+    return record
+
+
 async def judge_text(transcript: str, settings: Settings) -> dict[str, Any]:
     """``judge`` on an already rendered transcript (teacher_ab.py judges stored
-    traces this way, all on one judge endpoint). Raises httpx errors."""
+    traces this way, all on one judge endpoint). A local judge raises httpx
+    errors; the Max self-judge (--teacher max-payg, no --judge-url) raises
+    PaygStop / PaygCallFailed. The record names the judge the way build.py
+    reads it: ``provider`` ``local`` (``judge_key`` ``none``, its ``endpoint``)
+    or ``max-payg`` (``judge_key`` ``payg``, the ledger's ``call_ids``)."""
+    if settings.payg and settings.judge_is_teacher:
+        return await _payg_judge_text(transcript, settings)
     import httpx
 
     payload = judge_payload(transcript, settings)
     record: dict[str, Any] = {"kind": settings.judge_kind, "model": payload["model"], "temperature": 0,
-                              "seed": settings.judge_seed}
+                              "seed": settings.judge_seed, "provider": "local", "judge_key": "none"}
+    if settings.payg:
+        record["endpoint"] = settings.judge_endpoint  # a loopback URL: the local 27B judge
     obj = None
     async with httpx.AsyncClient(timeout=settings.request_timeout, trust_env=False) as client:
         for _attempt in range(2):
@@ -3630,15 +4235,27 @@ async def judge_text(transcript: str, settings: Settings) -> dict[str, Any]:
             obj = parse_verdict(content)
             if obj is not None:
                 break
-    if obj is None:
-        record.update({"verdict": "fail", "pass": False, "reason": "unparseable judge reply"})
-        return record
-    ok = (obj.get("verdict") == "pass" and obj.get("completed") is True and obj.get("tools_ok") is True
-          and obj.get("grounded") is True and obj.get("recovery_ok") is not False)
-    record.update({k: obj.get(k) for k in ("verdict", "completed", "tools_ok", "grounded", "recovery_ok")})
-    record["reason"] = str(obj.get("reason") or "")[:300]
-    record["pass"] = ok
-    return record
+    return _verdict_record(record, obj)
+
+
+async def _payg_judge_text(transcript: str, settings: Settings) -> dict[str, Any]:
+    """Max judging its own teacher rows on the pay-per-token key, through
+    spend.PaygClient (same ledger, phase and --budget-usd as the teacher calls),
+    recorded as such: build.py accepts it only as the pay-per-token Max judge."""
+    payload = payg_judge_payload(transcript, settings)
+    record: dict[str, Any] = {"kind": "self-judge", "model": PAYG_MODEL, "temperature": 0,
+                              "seed": settings.judge_seed, "provider": TEACHER_PAYG, "judge_key": "payg",
+                              "call_ids": [], "cost_usd": 0.0}
+    obj = None
+    for _attempt in range(2):
+        r = await asyncio.to_thread(payg_call, settings.payg_client, payload, settings.until)
+        record["call_ids"].append(r.call_id)
+        record["cost_usd"] = round(record["cost_usd"] + float(r.usd), 6)
+        record["served_model"] = r.served_model
+        obj = parse_verdict(r.text)
+        if obj is not None:
+            break
+    return _verdict_record(record, obj)
 
 
 # ---------------------------------------------------------------------------
@@ -3674,6 +4291,8 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
     else:
         source = settings.row_source if verification.get("tool_success") else settings.relaxed_source
     for step, call in enumerate(out.calls):
+        if step < out.pad_calls:
+            continue  # a pad turn: history this row's context holds, never a target
         # The target is the message the loop acted on and committed, not the raw
         # reply: the loop pulls text-markup calls out of the reply (new ids) and strips
         # leftover <tool_call> text from dual-emit replies before committing. A reply
@@ -3721,10 +4340,18 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
             "error_recovery": any(m.get("is_error") for m in wire[last_user + 1:]),
             "target_injected_failure": injected_target, "final_answer": not uses,
             "target_rewritten": _blocks(reply) != _blocks(call.reply),
-            "verdict": "pass", "verification": verification, "max_derived": False,
+            "verdict": "pass", "verification": verification,
+            # a Max teacher's row is Max-derived: build.py trains it only under its
+            # explicit allow, and nothing made from it is ever published
+            "max_derived": settings.payg, "teacher": settings.teacher,
             "generator": GENERATOR_VERSION,
             "gen_seed": settings.seed, "task_origin": task.origin,
         }
+        if settings.payg:
+            meta.update(tags=[_artifact_policy().TAG], paid_call_id=call.call_id,
+                        cost_usd=round(call.cost_usd, 6), thinking_budget=settings.thinking_budget)
+        if out.pad is not None:
+            meta["compaction_pad"] = out.pad
         if settings.sampling:
             meta["sampling"] = dict(sorted(settings.sampling.items()))
         # a taskset's provenance (taskset, provenance, template ids, ...) and its task group
@@ -3791,6 +4418,27 @@ def _rewrite(path: Path, rows: list[dict[str, Any]]) -> None:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
+
+
+def payg_report(settings: Settings) -> dict[str, Any]:
+    """The report's Max fields: the artifact policy (Max-derived, private) and this
+    phase's spend from the one ledger. Nothing for a local teacher."""
+    if not settings.payg:
+        return {}
+    spend: dict[str, Any] = {"tool": PAYG_TOOL, "phase": PAYG_PHASE, "model": PAYG_MODEL,
+                             "budget_usd": settings.budget_usd, "thinking_budget": settings.thinking_budget}
+    client = settings.payg_client
+    ledger = getattr(client, "ledger", None)
+    if ledger is not None:
+        try:
+            mine = ledger.totals(tool=PAYG_TOOL, phase=PAYG_PHASE)
+            spend.update(phase_committed_usd=round(mine.committed_usd, 4), phase_paid_calls=mine.calls,
+                         ledger=ledger.describe(tool=PAYG_TOOL, phase=PAYG_PHASE,
+                                                phase_budget_usd=settings.budget_usd),
+                         stop=ledger.stop_reason())
+        except Exception as exc:  # noqa: BLE001 - the report never fails over the ledger
+            spend["ledger_error"] = type(exc).__name__
+    return {**_artifact_policy().policy_fields(True), "spend": spend}
 
 
 class SettingsMismatch(ValueError):
@@ -4013,6 +4661,8 @@ class Store:
             "sampling": dict(sorted(settings.sampling.items())),
             "model": settings.model_name, "judge": settings.judge_kind, "judge_seed": settings.judge_seed,
             "teacher_served": settings.teacher_served, "jail": resolve_jail(settings.jail),
+            "teacher": settings.teacher, "judge_provider": settings.judge_provider,
+            "pad_pool": settings.pad_pool or None, **payg_report(settings),
             "rows_total": total, "rows_held": sum(len(rs) for _r, rs in self.held_queue),
             # verified only under a relaxation; source RELAXED_SOURCE, never train rows
             "rows_relaxed": self.rows_relaxed,
@@ -4064,21 +4714,147 @@ _TASKSET_META = {"taskset": "taskset", "provenance": "provenance", "subcategory"
                  "source_pattern_hash": "source_pattern_hash", "transform": "transform"}
 
 
-def _chat_pad_seed(g: Generator, rng: random.Random, k: int) -> list[dict[str, Any]]:
-    seed: list[dict[str, Any]] = []
-    for sec in g.sections(rng, k):
-        seed += [{"user": f"Here's a reference section first:\n\n{excerpt_block(sec)}\n\nWhat does it cover?"},
-                 {"assistant_text": f"This section ({sec.heading}) covers: " + " ".join(sec.text.split()[:60]) + " ..."}]
-    return seed
+class NoPadPrompts(ValueError):
+    """A force_compaction row has too few other real-pattern prompts to pad with."""
 
 
-def task_from_taskset(row: dict[str, Any], sources: Sources) -> GenTask:
+def _row_groups(row: dict[str, Any]) -> set[str]:
+    """Every task group a taskset row's text comes from: its own and, for a
+    recombined row, its partner's (``"tg-" + sources[i].pattern_hash``)."""
+    groups = {str(row["task_group"])}
+    for src in row.get("sources") or []:
+        if isinstance(src, dict) and src.get("pattern_hash"):
+            groups.add("tg-" + str(src["pattern_hash"]))
+    return groups
+
+
+def _rank(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _flagged(row: dict[str, Any]) -> bool:
+    return bool(row["flags"]["inject_errors"] or row["flags"]["force_compaction"])
+
+
+def pad_pool_split(rows: list[dict[str, Any]], *, share: float = PAD_POOL_SHARE,
+                   guard: "EvalGuard | None" = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """(rows to run as tasks, the reserved pad pool, a summary) for a taskset.
+
+    Only a taskset with force_compaction rows reserves a pool. It is whole task
+    groups with no flagged row (inject_errors / force_compaction rows are the
+    scarce execution conditions and always run), ranked by a hash keyed by the
+    taskset's name, so every run and every teacher over one taskset reserves the
+    same groups: ``floor(share x groups)``, extended in rank order until it holds
+    ``PAD_MIN_TURNS`` groups (of chat rows too, when a chat-mode row is padded).
+    Pool rows never run as tasks: their prompts appear only as padding, so a
+    padded row never shares a task with a row in another build split. A taskset
+    too small for that (no group to spare) reserves nothing and pads from every
+    other row (``reserved: false``). With *guard*, pool rows that overlap the eval
+    sets are dropped from the pool (and not run either: the scheduler would skip them)."""
+    comp = [r for r in rows if r["flags"]["force_compaction"]]
+    summary: dict[str, Any] = {"version": PAD_VERSION, "share": share, "reserved": False,
+                               "pool_rows": 0, "pool_groups": 0, "eval_overlap_dropped": 0}
+    if not comp or share <= 0:
+        return list(rows), [], summary
+    by_group: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
+    for r in rows:
+        by_group[str(r["task_group"])].append(r)
+    name = "|".join(sorted({str(r.get("taskset")) for r in rows}))
+    eligible = sorted((g for g, rs in by_group.items() if not any(_flagged(r) for r in rs)),
+                      key=lambda g: _rank(f"teacher-gen|pad-pool|{name}|{g}"))
+    want = math.floor(share * len(by_group))
+    if want <= 0 or len(eligible) <= want:
+        return list(rows), [], summary
+    need_chat = PAD_MIN_TURNS if any(r["mode"] == "chat" for r in comp) else 0
+    chosen: list[str] = []
+    for g in eligible:
+        chat_groups = sum(1 for c in chosen if any(r["mode"] == "chat" for r in by_group[c]))
+        if len(chosen) >= max(want, PAD_MIN_TURNS) and chat_groups >= need_chat:
+            break
+        chosen.append(g)
+    pool_groups = set(chosen)
+    pool = [r for r in rows if str(r["task_group"]) in pool_groups]
+    main = [r for r in rows if str(r["task_group"]) not in pool_groups]
+    if guard is not None:
+        kept = [r for r in pool if not guard.prompt_overlaps(r["prompt"])]
+        summary["eval_overlap_dropped"] = len(pool) - len(kept)
+        pool = kept
+    summary.update(reserved=True, pool_rows=len(pool), pool_groups=len({r["task_group"] for r in pool}))
+    return main, pool, summary
+
+
+def pad_candidates(row: dict[str, Any], pool: list[dict[str, Any]], *,
+                   guard: "EvalGuard | None" = None) -> list[dict[str, Any]]:
+    """Up to ``PAD_MAX_TURNS`` pad turns for one force_compaction row: other
+    real-pattern prompts from *pool*, in an order seeded by the row's id, none
+    sharing a task group with the row or with each other (a recombined row's
+    partner group counts), chat prompts only for a chat-mode row, none overlapping
+    the eval sets (*guard*). Each turn runs in its own row's mode."""
+    mine = _row_groups(row)
+    chat = row["mode"] == "chat"
+    out: list[dict[str, Any]] = []
+    used: set[str] = set()
+    for cand in sorted(pool, key=lambda r: _rank(f"teacher-gen|pad|{row['id']}|{r['id']}")):
+        groups = _row_groups(cand)
+        if cand["id"] == row["id"] or groups & mine or groups & used:
+            continue
+        if chat and cand["mode"] != "chat":
+            continue
+        if guard is not None and guard.prompt_overlaps(cand["prompt"]):
+            continue
+        docs = sorted({str(sl["value"]) for sl in cand.get("slots") or []
+                       if isinstance(sl, dict) and sl.get("type") in ("path", "file")
+                       and isinstance(sl.get("value"), str)})
+        out.append({"id": cand["id"], "task_group": cand["task_group"],
+                    "mode": "chat" if cand["mode"] == "chat" else "agent", "prompt": cand["prompt"],
+                    "docs": docs})
+        used |= groups
+        if len(out) >= PAD_MAX_TURNS:
+            break
+    return out
+
+
+def pad_docs(pads: list[dict[str, Any]], sources: Sources, key: str) -> dict[str, str]:
+    """Whole repo docs for an agent task's sandbox, so a read during padding returns
+    real repo text: every doc a pad prompt names (by its path slots) that the repo
+    has, then ``PAD_DOCS`` more in an order seeded by *key*; each at most
+    ``PAD_DOC_MAX_BYTES``, written at its repo path."""
+    if sources.synthetic or sources.root is None or not sources.doc_paths:
+        raise NoRepoDocs("compaction padding needs the repo's own docs (the sources are synthetic or empty)")
+    have = set(sources.doc_paths)
+    named = [d for p in pads for d in p.get("docs") or [] if d in have]
+    rest = sorted(sources.doc_paths, key=lambda d: _rank(f"teacher-gen|pad-docs|{key}|{d}"))
+    files: dict[str, str] = {}
+    extra = 0
+    for rel in list(dict.fromkeys(named)) + rest:
+        if rel in files:
+            continue
+        is_named = rel in named
+        if not is_named and extra >= PAD_DOCS:
+            break
+        try:
+            raw = (sources.root / rel).read_bytes()
+        except OSError:
+            continue
+        if len(raw) > PAD_DOC_MAX_BYTES:
+            continue
+        files[rel] = raw.decode("utf-8", "replace")
+        extra += not is_named
+    if not files:
+        raise NoRepoDocs(f"no repo doc under {PAD_DOC_MAX_BYTES} bytes to put in a padded task's sandbox")
+    return files
+
+
+def task_from_taskset(row: dict[str, Any], sources: Sources, *, pool: list[dict[str, Any]] | None = None,
+                      guard: "EvalGuard | None" = None) -> GenTask:
     """A validated ``taskset_gen.py`` row (its teacher_gen contract) as a GenTask
     of origin ORIGIN_TASKSET: id, prompt and category as given; mode chat
     (``flags.suppress_tools``) runs ``run_loop(mode="chat")``, which sends no
     tools; ``inject_errors`` fails the first tool call (a timeout) and the run
-    must recover from it; ``force_compaction`` puts a long reading session (repo
-    docs) before the prompt and runs the real compactor with a small window. The
+    must recover from it; ``force_compaction`` puts earlier turns before the
+    prompt (``pad``: other real-pattern prompts from *pool*, answered live by the
+    same teacher; an agent task's sandbox also holds whole repo docs, so a read
+    returns real repo text) and runs the real compactor with a small window. The
     row's provenance goes into every trace row's _meta, ``_meta.task_id`` is its
     ``task_group`` and a recombined row's partner group is ``partner_task_id``."""
     flags = row["flags"]
@@ -4101,21 +4877,21 @@ def task_from_taskset(row: dict[str, Any], sources: Sources) -> GenTask:
     if flags["inject_errors"]:
         fields.update(inject=[dict(TASKSET_INJECTION)], expect_recovery=True)
     if flags["force_compaction"]:
-        if sources.synthetic or not sources.sections:
+        if not chat and (sources.synthetic or not sources.doc_paths):
             # never pad a real-pattern task with text written in this file
             raise NoRepoDocs(f"taskset row {row['id']}: force_compaction needs real repo docs to read "
                              "(the sources are synthetic or empty)")
-        rng = random.Random(f"teacher-gen|taskset-compaction|{row['id']}")
-        g = Generator(sources)
-        if chat:
-            fields["seed"] = _chat_pad_seed(g, rng, rng.randint(5, 7))
-        else:
-            fields["seed"], fields["setup_files"] = _reading_seed(
-                g, rng, rng.randint(5, 7), "Some reading first, then my real question. ")
+        # the earlier turns are other real-pattern prompts and the teacher's own answers to them
+        pads = pad_candidates(row, pool or [], guard=guard)
+        if len(pads) < PAD_MIN_TURNS:
+            raise NoPadPrompts(
+                f"taskset row {row['id']}: force_compaction needs at least {PAD_MIN_TURNS} other real-pattern "
+                f"prompts to pad with ({'chat-mode ones, ' if chat else ''}from other task groups, clear of the "
+                f"eval sets); found {len(pads)}")
+        fields["pad"] = pads
+        if not chat:
+            fields["setup_files"] = pad_docs(pads, sources, row["id"])
         fields["compaction"] = True
-        # the padding is fixed harness text around real repo docs, never task text:
-        # named on every row so it can be told apart (or filtered) downstream
-        meta["compaction_pad"] = "repo-docs-reading-v1"
     task = GenTask(**fields)
     task.validate()
     return task
@@ -4160,18 +4936,34 @@ def read_taskset_rows(path: str) -> list[dict[str, Any]]:
     return rows
 
 
-def tasks_from_taskset_rows(rows: list[dict[str, Any]], repo: Path) -> list[GenTask]:
+def tasks_from_taskset_rows(rows: list[dict[str, Any]], repo: Path, *,
+                            pool: list[dict[str, Any]] | None = None,
+                            guard: "EvalGuard | None" = None) -> list[GenTask]:
     """GenTasks of validated taskset rows. A ``force_compaction`` row pads with
-    *repo*'s own docs; a repo without any is refused (NoRepoDocs, a ValueError),
-    never replaced by the synthetic runbooks."""
-    pad = any(r["flags"]["force_compaction"] for r in rows)
-    sources = Sources.from_repo(repo, allow_synthetic=False) if pad else Sources([])
-    return [task_from_taskset(r, sources) for r in rows]
+    prompts from *pool* (default: *rows* themselves, every other row; ``load_taskset``
+    passes the reserved pad pool) and, when it is an agent task, with *repo*'s own
+    docs; a repo without any is refused (NoRepoDocs, a ValueError), never replaced
+    by the synthetic runbooks. Too few prompts to pad with is NoPadPrompts."""
+    need_docs = any(r["flags"]["force_compaction"] and r["mode"] != "chat" for r in rows)
+    sources = Sources.from_repo(repo, allow_synthetic=False) if need_docs else Sources([])
+    pool = rows if pool is None else pool
+    return [task_from_taskset(r, sources, pool=pool, guard=guard) for r in rows]
 
 
-def load_taskset(path: str, repo: Path) -> list[GenTask]:
-    """``--tasks``: a real-pattern taskset as GenTasks (origin taskset)."""
-    return tasks_from_taskset_rows(read_taskset_rows(path), repo)
+def load_taskset_with_pool(path: str, repo: Path, *, guard: "EvalGuard | None" = None) -> tuple[list[GenTask], dict[str, Any]]:
+    """``--tasks``: the GenTasks to run (origin taskset) and the pad-pool summary
+    (``pad_pool_split``): the reserved pool's rows pad force_compaction tasks and
+    are never run themselves."""
+    rows = read_taskset_rows(path)
+    main, pool, summary = pad_pool_split(rows, guard=guard)
+    tasks = tasks_from_taskset_rows(main, repo, pool=pool if summary["reserved"] else rows, guard=guard)
+    summary["tasks"] = len(tasks)
+    return tasks, summary
+
+
+def load_taskset(path: str, repo: Path, *, guard: "EvalGuard | None" = None) -> list[GenTask]:
+    """``--tasks``: a real-pattern taskset as GenTasks (origin taskset), its pad pool held back."""
+    return load_taskset_with_pool(path, repo, guard=guard)[0]
 
 
 def load_builtin_tasks(path: str) -> list[GenTask]:
@@ -4359,7 +5151,9 @@ async def process(task: GenTask, settings: Settings, worker: int) -> tuple[str, 
     """Run + verify one task: (status, rows, reasons, ledger extras). Status is
     kept, relaxed (verified only under --max-natural-errors / --keep-refused:
     rows build.py's strict policy drops), rejected (done; never retried) or
-    error (the teacher or judge was unreachable: retried by the next run)."""
+    error (the teacher or judge was unreachable: retried by the next run).
+    Raises PaygStop when the spend ledger refused a paid call (the run stops;
+    the task reruns next time)."""
     from prometheus.api.turn_errors import classify_turn_error
 
     out = await run_task(task, settings, worker)
@@ -4367,13 +5161,19 @@ async def process(task: GenTask, settings: Settings, worker: int) -> tuple[str, 
                              "teacher_calls": len(out.calls),
                              "tokens_in": sum(c.input_tokens for c in out.calls),
                              "tokens_out": sum(c.output_tokens for c in out.calls)}
+    if out.pad is not None:
+        extra["pad_turns"] = out.pad["turns"]
     if out.recovered_errors:
         extra["recovered_provider_errors"] = [e[:200] for e in out.recovered_errors]
     try:
+        if out.payg_stop is not None:
+            raise out.payg_stop
         if out.transport_error:
             return "error", [], ["transport_error"], dict(extra, error=out.error[:200])
         if out.rejection:
             return "rejected", [], [out.rejection], dict(extra, error=(out.error or out.provider.errors[-1])[:200])
+        if out.pad_reasons:
+            return "rejected", [], list(out.pad_reasons), dict(extra, compaction_pad=out.pad)
         ok, reasons, record = deterministic_checks(out, settings)
         extra["verification"] = record
         if not ok:
@@ -4382,6 +5182,10 @@ async def process(task: GenTask, settings: Settings, worker: int) -> tuple[str, 
 
         try:
             record["judge"] = await judge(out, settings)
+        except PaygCallFailed as exc:
+            if exc.kind in RETRY_KINDS:
+                return "error", [], ["judge_unreachable"], dict(extra, error=str(exc)[:200])
+            return "rejected", [], [f"judge_{exc.kind}"], dict(extra, error=str(exc)[:200])
         except httpx.HTTPStatusError as exc:
             kind = str(classify_turn_error(exc).get("kind") or "unknown")
             if kind not in RETRY_KINDS:  # the judge refused this transcript (too long, say): it always will
@@ -4389,8 +5193,17 @@ async def process(task: GenTask, settings: Settings, worker: int) -> tuple[str, 
             return "error", [], ["judge_unreachable"], dict(extra, error=f"{type(exc).__name__}: {str(exc)[:200]}")
         except (httpx.HTTPError, OSError, ValueError) as exc:  # transport, a non-JSON body
             return "error", [], ["judge_unreachable"], dict(extra, error=f"{type(exc).__name__}: {str(exc)[:200]}")
+        finally:
+            if settings.payg:
+                judged = record.get("judge") or {}
+                extra["cost_usd"] = round(out.paid_usd + float(judged.get("cost_usd") or 0), 6)
         extra["judge"] = record["judge"]
-        if has_max_token(record["judge"].get("served_model")):
+        # a local judge never names Max (a proxy in front of Max, the Token Plan); only the
+        # pay-per-token self-judge may, and only on the paid key
+        payg_judge = record["judge"].get("provider") == TEACHER_PAYG
+        if has_max_token(record["judge"].get("served_model")) and not payg_judge:
+            return "rejected", [], ["judge_model_refused"], extra
+        if payg_judge and not has_max_token(record["judge"].get("served_model") or PAYG_MODEL):
             return "rejected", [], ["judge_model_refused"], extra
         if not record["judge"]["pass"]:
             return "rejected", [], ["judge_fail"], extra
@@ -4412,7 +5225,7 @@ class TeacherUnreachable(RuntimeError):
 async def run(settings: Settings, gen: Generator, store: Store, guard: EvalGuard | None) -> dict[str, Any]:
     started = time.time()
     sched = Scheduler(gen, store, settings.mix, guard)
-    state = {"started": 0, "consecutive_errors": 0, "stop": ""}
+    state: dict[str, Any] = {"started": 0, "consecutive_errors": 0, "stop": "", "stop_detail": ""}
 
     def stop_reason() -> str:
         if state["stop"]:
@@ -4437,6 +5250,14 @@ async def run(settings: Settings, gen: Generator, store: Store, guard: EvalGuard
                 budget = min(budget, settings.until - time.time())
             try:
                 status, rows, reasons, extra = await asyncio.wait_for(process(task, settings, wid), budget)
+            except PaygStop as exc:
+                # the spend ledger refused a paid call (STOP, the cap, --budget-usd) or the API
+                # refused the key: stop cleanly; this task is not recorded and reruns next time
+                sched.release(task)
+                state["stop"] = state["stop"] or exc.kind
+                state["stop_detail"] = state["stop_detail"] or exc.message[:300]
+                log.warning("paid calls stopped (%s): %s", exc.kind, exc.message[:300])
+                return
             except asyncio.TimeoutError:
                 if settings.until is not None and time.time() >= settings.until - 1:
                     sched.release(task)
@@ -4462,8 +5283,10 @@ async def run(settings: Settings, gen: Generator, store: Store, guard: EvalGuard
 
     await asyncio.gather(*(worker(i) for i in range(max(1, settings.concurrency))))
     store.release_held()
-    report = store.report(settings, started, {"stop": stop_reason() or "done",
-                                              "tasks_started": state["started"]})
+    final: dict[str, Any] = {"stop": stop_reason() or "done", "tasks_started": state["started"]}
+    if state["stop_detail"]:
+        final["stop_detail"] = state["stop_detail"]
+    report = store.report(settings, started, final)
     store.write_report(report)
     return report
 
@@ -4514,12 +5337,20 @@ def parse_mix(text: str | None) -> dict[str, float]:
     return {k: v / total for k, v in mix.items()}
 
 
-def load_pack_prompt(path: str | None) -> str | None:
+def load_pack_template(path: str | None) -> tuple[str | None, str | None]:
+    """The pack's system prompt as stored (its date sentinel unfilled) and the sentinel (None: none)."""
     if not path:
-        return None
+        return None, None
     pack = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
-    prompt = pack["system_prompt"]
     sentinel = pack.get("date_sentinel")
+    return pack["system_prompt"], (str(sentinel) if sentinel else None)
+
+
+def load_pack_prompt(path: str | None) -> str | None:
+    """The pack's system prompt with today's date filled in (teacher_ab fixes the date this way)."""
+    prompt, sentinel = load_pack_template(path)
+    if prompt is None:
+        return None
     return prompt.replace(sentinel, dt.date.today().isoformat()) if sentinel else prompt
 
 
@@ -4541,28 +5372,81 @@ def sampling_from_args(a: argparse.Namespace) -> dict[str, float]:
     return out
 
 
+def _payg_args(a: argparse.Namespace, out: Path) -> dict[str, Any]:
+    """The --teacher max-payg settings, or ValueError (a usage error, exit 2)."""
+    if a.builtin_smoke or a.tasks_file or not a.tasks:
+        # the operator approved the paid key for the real-pattern taskset only: a smoke run's
+        # hand-written tasks would spend the budget on rows build.py never trains on
+        raise ValueError("--teacher max-payg runs the real-pattern taskset only (--tasks <taskset.jsonl>); "
+                         "--builtin-smoke / --tasks-file are smoke runs for the local teacher")
+    spend = _spend()
+    AP = _artifact_policy()
+    for flag, given in (("--teacher-url", a.teacher_url), ("--teacher-id", a.teacher_id)):
+        if given:
+            raise ValueError(f"{flag} names a local teacher; --teacher max-payg calls {PAYG_MODEL} through "
+                             "spend.py on the pay-per-token key")
+    if a.model_name not in (None, PAYG_MODEL):
+        raise ValueError(f"--teacher max-payg runs {PAYG_MODEL} (the priced model); --model-name {a.model_name!r} "
+                         "is not it")
+    if a.judge_model and not a.judge_url:
+        raise ValueError("--judge-model names a LOCAL judge (--judge-url); without one Max judges itself")
+    if a.probe_guard_url and not a.judge_url:
+        raise ValueError("with --teacher max-payg the probe guard fronts the local judge only: give --judge-url")
+    if a.min_p is not None:
+        raise ValueError("--min-p is not a field the paid API takes (spend.PAYLOAD_KEYS)")
+    budget = a.budget_usd
+    if budget is None or not math.isfinite(budget) or budget <= 0:
+        raise ValueError("--budget-usd (this run's phase share of the global cap, > 0) is required with "
+                         "--teacher max-payg")
+    if budget > spend.DEFAULT_CAP_USD:
+        raise ValueError(f"--budget-usd {budget:g} is above the ${spend.DEFAULT_CAP_USD:.2f} cap")
+    if not 0 <= a.thinking_budget <= PAYG_MAX_THINKING_BUDGET:
+        raise ValueError(f"--thinking-budget must be 0 (thinking off) .. {PAYG_MAX_THINKING_BUDGET}")
+    if not 1 <= a.max_tokens <= PAYG_MAX_TOKENS:
+        raise ValueError(f"--max-tokens must be 1 .. {PAYG_MAX_TOKENS} with --teacher max-payg (it bounds "
+                         "every paid request's output)")
+    if not 1 <= a.concurrency <= PAYG_MAX_CONCURRENCY:
+        raise ValueError(f"--concurrency must be 1 .. {PAYG_MAX_CONCURRENCY} on the paid key")
+    if not AP.path_has_tag(out):
+        raise ValueError(f"--teacher max-payg writes Max-derived data: --out must carry the {AP.TAG} tag "
+                         f"(e.g. --out {AP.tag_path(out)})")
+    return {"teacher": TEACHER_PAYG, "model_name": PAYG_MODEL, "teacher_id": PAYG_TEACHER_ID,
+            "teacher_served": PAYG_MODEL, "budget_usd": float(budget), "thinking_budget": int(a.thinking_budget)}
+
+
 def settings_from_args(a: argparse.Namespace) -> Settings:
-    for flag, value in (("--model-name", a.model_name), ("--judge-model", a.judge_model),
+    payg = a.teacher == TEACHER_PAYG
+    for flag, value in (("--model-name", None if payg else a.model_name), ("--judge-model", a.judge_model),
                         ("--teacher-id", a.teacher_id), ("--judge-id", a.judge_id)):
         if has_max_token(value):
-            raise ValueError(f"{flag} {value!r} names a Max model; this script never uses one")
+            raise ValueError(f"{flag} {value!r} names a Max model; only --teacher max-payg uses one, "
+                             "and only on the pay-per-token key")
     if a.tasks_file and not a.builtin_smoke:
         raise ValueError("--tasks-file holds built-in (list-tasks) rows and needs --builtin-smoke; "
                          "a real-pattern taskset goes to --tasks")
     if bool(a.tasks) == bool(a.builtin_smoke):
         raise ValueError("give exactly one of --tasks <taskset.jsonl> (real-pattern tasks: the only "
-                         f"source of {SOURCE_TAG} rows) or --builtin-smoke (built-in tasks, rows tagged "
-                         f"{BUILTIN_SOURCE}, never trained on)")
+                         f"source of {SOURCE_TAG} / {PAYG_SOURCE} rows) or --builtin-smoke (built-in tasks, "
+                         f"rows tagged {BUILTIN_SOURCE}, never trained on)")
     task_source = ORIGIN_TASKSET if a.tasks else ORIGIN_BUILTIN
-    name = a.name or (SOURCE_TAG if task_source == ORIGIN_TASKSET else BUILTIN_SOURCE)
     out = Path(a.out).expanduser().resolve()
     live = (Path.home() / ".prometheus").resolve()
     if out == live or live in out.parents:
         raise ValueError(f"--out must not be inside {live}")
+    if payg:
+        teacher = _payg_args(a, out)
+    else:
+        if a.budget_usd is not None or a.thinking_budget:
+            raise ValueError("--budget-usd / --thinking-budget are for --teacher max-payg")
+        teacher = {"teacher": TEACHER_LOCAL, "model_name": a.model_name or DEFAULT_MODEL_NAME,
+                   "teacher_id": a.teacher_id or DEFAULT_TEACHER_ID}
+    default_name = (BUILTIN_SOURCE if task_source != ORIGIN_TASKSET else PAYG_SOURCE if payg else SOURCE_TAG)
+    pack_prompt, date_sentinel = load_pack_template(a.pack)
     return Settings(
         task_source=task_source, sampling=sampling_from_args(a),
-        out=out, name=name, teacher_url=a.teacher_url, probe_guard_url=a.probe_guard_url,
-        judge_url=a.judge_url, model_name=a.model_name, judge_model=a.judge_model,
+        out=out, name=a.name or default_name, teacher_url=a.teacher_url or DEFAULT_TEACHER_URL,
+        probe_guard_url=a.probe_guard_url,
+        judge_url=a.judge_url, judge_model=a.judge_model,
         judge_seed=a.judge_seed, allow_lan=a.allow_lan_endpoints, concurrency=a.concurrency,
         until=parse_until(a.until, max_ahead_hours=UNTIL_HHMM_MAX_AHEAD_H), min_task_seconds=a.min_task_seconds,
         max_tasks=a.max_tasks,
@@ -4572,86 +5456,220 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
         request_timeout=a.request_timeout or (600.0 if a.probe_guard_url else 300.0),
         compaction_history_tokens=a.compaction_history_tokens, emit_final_turns=a.emit_final_turns,
         max_natural_errors=a.max_natural_errors, keep_refused=a.keep_refused,
-        sandbox_root=Path(a.sandbox_root).expanduser(), base_system_prompt=load_pack_prompt(a.pack),
+        sandbox_root=Path(a.sandbox_root).expanduser(), base_system_prompt=pack_prompt,
+        date_sentinel=date_sentinel,
         repo=Path(a.repo).expanduser(), max_consecutive_errors=a.max_consecutive_errors,
-        progress=not a.quiet, jail=a.jail, teacher_id=a.teacher_id, judge_id=a.judge_id)
+        progress=not a.quiet, jail=a.jail, judge_id=a.judge_id, **teacher)
 
 
-def cmd_run(a: argparse.Namespace) -> int:
+#: Exit codes (module docstring).
+EXIT_DONE, EXIT_NOTHING, EXIT_USAGE, EXIT_UNREACHABLE, EXIT_SPEND_STOP, EXIT_PAYG_REFUSED = 0, 1, 2, 3, 4, 5
+#: An unexpected exception (a traceback on stderr): never Python's own 1, which means "kept nothing".
+EXIT_CRASH = 6
+SANDBOX_LOCK = ".teacher_gen.lock"
+
+
+class SandboxBusy(Exception):
+    """Another teacher_gen run holds this ``--sandbox-root``."""
+
+
+def lock_sandbox_root(root: Path) -> int:
+    """An exclusive lock on ``root`` for this process's life (an fd the caller closes): two runs sharing a
+    sandbox root would wipe each other's ``w<N>/workspace`` at every task start and end, and a row could
+    carry the other run's files. A second run on the same root is refused (SandboxBusy)."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    fd = os.open(root / SANDBOX_LOCK, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise SandboxBusy(f"--sandbox-root {root} is in use by another teacher_gen run "
+                          "(give each concurrent run its own)") from None
+    return fd
+
+
+def payg_client_for(settings: Settings, a: argparse.Namespace, opener: Any = None) -> Any:
+    """The paid client, after every check a paid run makes before its first call:
+    the key (QWEN_PAYG_KEY only: never the Token Plan key or host, its prefix
+    matching its host), the one canonical ledger, no STOP file, a notify command
+    that can reach the operator. Raises spend.SpendError (the run is refused, exit 5).
+    Runs before the state directories are isolated (that repoints PROMETHEUS_ENV_FILE)."""
+    spend = _spend()
+    creds = spend.resolve_payg(env_file=Path(a.env_file).expanduser() if a.env_file else None)
+    ledger = spend.Ledger(notify_cmd=a.notify_cmd)
+    ledger.check_open(tool=PAYG_TOOL, phase=PAYG_PHASE, model=PAYG_MODEL)
+    notify = Path(a.notify_cmd).expanduser()
+    if not (notify.is_file() and os.access(notify, os.X_OK)):
+        raise spend.SpendError(f"the notify command {spend.display_path(notify)} is missing or not executable: "
+                               "the $140 alert could not reach the operator")
+    client = spend.PaygClient(creds, ledger, tool=PAYG_TOOL, phase=PAYG_PHASE, model=PAYG_MODEL,
+                              phase_budget_usd=settings.budget_usd, timeout=settings.request_timeout,
+                              opener=opener)
+    log.warning("teacher: %s on the %s; %s", PAYG_MODEL, creds.describe(),
+                ledger.describe(tool=PAYG_TOOL, phase=PAYG_PHASE, phase_budget_usd=settings.budget_usd))
+    return client
+
+
+#: The process exit a stop signal ends in (tests replace it).
+_hard_exit = os._exit
+_SIGNAL_STOPPING: list[int] = []
+
+
+def payg_stop_on_signal(client: Any, signum: int) -> None:
+    """A paid run's SIGTERM / SIGHUP (gen_runner.py at --until or a stop, a systemd stop): start no
+    new paid call, give the calls in flight up to ``PAYG_SIGNAL_WAIT_S`` to settle from their usage,
+    settle the rest as interrupted (charged their reservation), then exit 128 + *signum* while
+    holding the ledger lock, so no worker thread is half way through a ledger row. Never returns.
+    Without this the default action would kill the process mid-call and leave its reservations
+    open in the ledger for good. The task in flight is not recorded (it reruns next time)."""
+    if _SIGNAL_STOPPING:  # a second signal while the first one is handled
+        return
+    _SIGNAL_STOPPING.append(signum)
+    ledger = None
+    try:
+        client.close(f"signal {signum}")
+        end = time.monotonic() + PAYG_SIGNAL_WAIT_S
+        while client.open_calls() and time.monotonic() < end:
+            time.sleep(0.05)
+        settled = client.settle_open()
+        print(f"stopped by signal {signum}: no new paid call; {len(settled)} paid call(s) still in flight "
+              "settled as interrupted (charged their reservation)", file=sys.stderr, flush=True)
+        ledger = copy.copy(client.ledger)
+        ledger.lock_timeout = min(float(ledger.lock_timeout), 5.0)
+    except Exception as exc:  # noqa: BLE001 - the exit below must happen
+        print(f"stopped by signal {signum}: {type(exc).__name__} while settling paid calls in flight",
+              file=sys.stderr, flush=True)
+    try:
+        if ledger is not None:
+            with ledger.locked():
+                _hard_exit(128 + signum)
+    except Exception:  # noqa: BLE001 - the lock stayed busy: exit anyway
+        pass
+    _hard_exit(128 + signum)
+
+
+def install_payg_signal_handlers(client: Any) -> Callable[[], None]:
+    """``payg_stop_on_signal`` for ``PAYG_EXIT_SIGNALS``; returns the function that puts the
+    previous handlers back. Only the main thread can install handlers (else: nothing)."""
+    if threading.current_thread() is not threading.main_thread():
+        return lambda: None
+    _SIGNAL_STOPPING.clear()
+    previous = {sig: signal.signal(sig, lambda signum, _frame: payg_stop_on_signal(client, signum))
+                for sig in PAYG_EXIT_SIGNALS}
+
+    def restore() -> None:
+        for sig, old in previous.items():
+            signal.signal(sig, old if old is not None else signal.SIG_DFL)
+
+    return restore
+
+
+def cmd_run(a: argparse.Namespace, *, payg_opener: Any = None) -> int:
     try:
         settings = settings_from_args(a)
-        settings.teacher_endpoint  # noqa: B018 - validates the URLs before anything runs
+        if not settings.payg:
+            settings.teacher_endpoint  # noqa: B018 - validates the URLs before anything runs
         settings.judge_endpoint  # noqa: B018
     except (ValueError, OSError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        return EXIT_USAGE
     missing = [pat for pat in a.eval_tools if not expand([pat])]
     if missing:
         print(f"error: --eval-tools matched no file: {', '.join(missing)} (disjointness cannot be checked)",
               file=sys.stderr)
-        return 2
+        return EXIT_USAGE
+    if settings.payg:
+        spend = _spend()
+        try:
+            settings.payg_client = payg_client_for(settings, a, payg_opener)
+        except spend.SpendError as exc:  # messages never hold the key or the host
+            print(f"error: --teacher max-payg refused before any call: {exc}", file=sys.stderr)
+            return EXIT_PAYG_REFUSED
     isolate_state_dirs(settings.out / "work")
     try:
         guard = EvalGuard.load(a.injection_manifest, a.eval_tools)
     except (OSError, ValueError, KeyError) as exc:
         print(f"error: eval sets: {exc}", file=sys.stderr)
-        return 2
+        return EXIT_USAGE
     try:
         jail = resolve_jail(settings.jail)
     except EndpointError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        return EXIT_USAGE
     if jail == "none":
         log.warning("no OS jail: sandboxed shell commands are confined by the command checks alone")
     gen: Generator
     if a.tasks:
         # the only path to train-source rows: real-pattern tasks, validated by taskset_gen.py
         try:
-            gen = FixedGenerator(load_taskset(a.tasks, settings.repo))
+            tasks, settings.pad_pool = load_taskset_with_pool(a.tasks, settings.repo, guard=guard)
+            gen = FixedGenerator(tasks)
         except (ValueError, OSError, KeyError) as exc:
             print(f"error: --tasks: {exc}", file=sys.stderr)
-            return 2
+            return EXIT_USAGE
+        if settings.pad_pool.get("reserved"):
+            log.warning("pad pool: %d rows in %d task groups are padding only (never run as tasks)",
+                        settings.pad_pool["pool_rows"], settings.pad_pool["pool_groups"])
     elif a.tasks_file:
         try:
             gen = FixedGenerator(load_builtin_tasks(a.tasks_file))
         except (ValueError, OSError, KeyError) as exc:
             print(f"error: --tasks-file: {exc}", file=sys.stderr)
-            return 2
+            return EXIT_USAGE
     else:
         gen = Generator(Sources.from_repo(settings.repo), settings.seed)
     if settings.task_source != ORIGIN_TASKSET:
         log.warning("--builtin-smoke: built-in tasks; rows are tagged %s and never train", BUILTIN_SOURCE)
+
     async def check_servers() -> None:
-        served = await preflight(settings.teacher_endpoint, min(30.0, settings.request_timeout))
-        settings.teacher_served = check_model_id(served, settings.teacher_id, "teacher")
-        if settings.judge_endpoint != settings.teacher_endpoint:
+        if not settings.payg:
+            served = await preflight(settings.teacher_endpoint, min(30.0, settings.request_timeout))
+            settings.teacher_served = check_model_id(served, settings.teacher_id, "teacher")
+            log.info("teacher serves %s", served)
+        if settings.judge_endpoint and (settings.payg or settings.judge_endpoint != settings.teacher_endpoint):
             judged = await preflight(settings.judge_endpoint, min(30.0, settings.request_timeout))
-            check_model_id(judged, settings.judge_id or settings.teacher_id, "judge")
-        log.info("teacher serves %s", served)
+            check_model_id(judged, settings.judge_id or (DEFAULT_TEACHER_ID if settings.payg
+                                                         else settings.teacher_id), "judge")
 
     try:
         asyncio.run(check_servers())
     except EndpointError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_UNREACHABLE
     try:
         # the fingerprint holds the teacher's id: one output never mixes two teachers
         store = Store(settings.out, settings.name, settings.fingerprint(), settings.coding_cap, guard)
     except SettingsMismatch as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        return EXIT_USAGE
+    # a paid run that is stopped settles its calls in flight instead of leaving them open
+    restore_signals = install_payg_signal_handlers(settings.payg_client) if settings.payg else (lambda: None)
     try:
         report = asyncio.run(run(settings, gen, store, guard))
     except EndpointError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 3
-    print(json.dumps({"report": str(store.report_path), "rows_total": report["rows_total"],
-                      "stop": report.get("stop"), "coding_share": report["coding_share"],
-                      "by_kind": {k: {"rows": v["rows"], "pass_rate": v["pass_rate"]}
-                                  for k, v in report["by_kind"].items()}}, indent=1))
-    if report.get("stop") == "consecutive_errors":
-        return 3
-    return 0 if report["rows_total"] else 1
+        return EXIT_UNREACHABLE
+    finally:
+        restore_signals()
+    summary = {"report": str(store.report_path), "rows_total": report["rows_total"],
+               "stop": report.get("stop"), "coding_share": report["coding_share"],
+               "by_kind": {k: {"rows": v["rows"], "pass_rate": v["pass_rate"]}
+                           for k, v in report["by_kind"].items()}}
+    if settings.payg:
+        summary["spend"] = report.get("spend")
+    print(json.dumps(summary, indent=1))
+    stop = report.get("stop")
+    if stop == "spend_stop":
+        print(f"stopped: the spend ledger refused a paid call: {report.get('stop_detail', '')}", file=sys.stderr)
+        return EXIT_SPEND_STOP
+    if stop == "payg_fatal":
+        print(f"stopped: the paid API refused the key or the account: {report.get('stop_detail', '')}",
+              file=sys.stderr)
+        return EXIT_PAYG_REFUSED
+    if stop == "consecutive_errors":
+        return EXIT_UNREACHABLE
+    return EXIT_DONE if report["rows_total"] else EXIT_NOTHING
 
 
 def cmd_list_tasks(a: argparse.Namespace) -> int:
@@ -4690,11 +5708,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     src.add_argument("--builtin-smoke", action="store_true",
                      help=f"run the built-in task families (or --tasks-file); rows are tagged {BUILTIN_SOURCE} "
                           "and never train")
-    r.add_argument("--teacher-url", default=DEFAULT_TEACHER_URL)
-    r.add_argument("--probe-guard-url", help="local guard proxy carrying every model request")
-    r.add_argument("--judge-url", help="another LOCAL endpoint for the judge (default: the teacher)")
-    r.add_argument("--model-name", default=DEFAULT_MODEL_NAME, help="request model + _meta.model")
+    r.add_argument("--teacher", choices=TEACHERS, default=TEACHER_LOCAL,
+                   help=f"local: a loopback llama-server (default); {TEACHER_PAYG}: {PAYG_MODEL} on the "
+                        "pay-per-token key (QWEN_PAYG_KEY) through spend.py, rows tagged "
+                        f"{PAYG_SOURCE} (Max-derived)")
+    r.add_argument("--teacher-url", help=f"local teacher (default {DEFAULT_TEACHER_URL})")
+    r.add_argument("--probe-guard-url", help="local guard proxy carrying every local model request")
+    r.add_argument("--judge-url", help="another LOCAL endpoint for the judge (default: the teacher; with "
+                                       f"--teacher {TEACHER_PAYG}, the local 27B judge, preferred)")
+    r.add_argument("--model-name", help=f"request model + _meta.model (default {DEFAULT_MODEL_NAME}; "
+                                        f"{PAYG_MODEL} with --teacher {TEACHER_PAYG})")
     r.add_argument("--judge-model")
+    paid = r.add_argument_group(f"--teacher {TEACHER_PAYG} (every call reserved and settled in the one "
+                                "spend ledger: $150 cap, STOP at $140)")
+    paid.add_argument("--budget-usd", type=float,
+                      help=f"required: this phase's ({PAYG_TOOL}/{PAYG_PHASE}) share of the global cap")
+    paid.add_argument("--thinking-budget", type=int, default=0,
+                      help="reasoning tokens per paid request (0 = thinking off, as at runtime)")
+    paid.add_argument("--env-file", help="the 0600 env file holding QWEN_PAYG_KEY (default: Prometheus's own)")
+    paid.add_argument("--notify-cmd", default=_spend().DEFAULT_NOTIFY,
+                      help="gets the $140 STOP alert (message on stdin); must exist and be executable")
     r.add_argument("--judge-seed", type=int, default=DEFAULT_JUDGE_SEED)
     r.add_argument("--allow-lan-endpoints", action="store_true")
     r.add_argument("--injection-manifest", required=True)
@@ -4732,8 +5765,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     r.add_argument("--jail", choices=JAIL_MODES, default="auto",
                    help="OS jail for shell commands (bwrap / sandbox-exec): auto uses one when it works, "
                         "require refuses to run without one")
-    r.add_argument("--teacher-id", default=DEFAULT_TEACHER_ID,
-                   help="glob the teacher's /v1/models id must match (case-insensitive; never a Max model)")
+    r.add_argument("--teacher-id",
+                   help=f"glob the local teacher's /v1/models id must match (default {DEFAULT_TEACHER_ID}; "
+                        "case-insensitive; never a Max model)")
     r.add_argument("--judge-id", help="glob for a --judge-url server's id (default: --teacher-id)")
     r.add_argument("--quiet", action="store_true")
     ls = sub.add_parser("list-tasks", help="print the tasks a run would start, no model calls")
@@ -4746,13 +5780,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, payg_opener: Any = None) -> int:
+    """*payg_opener* (tests): the paid client's opener (spend.PaygClient's ``opener``)."""
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     a = parse_args(argv)
     if a.cmd == "run":
-        return cmd_run(a)
+        try:
+            lock = lock_sandbox_root(Path(a.sandbox_root).expanduser())
+        except (SandboxBusy, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            return cmd_run(a, payg_opener=payg_opener)
+        finally:
+            os.close(lock)
     return cmd_list_tasks(a)
 
 
+def cli(argv: list[str] | None = None) -> int:
+    """The command line: ``main``, with an unexpected exception reported as ``EXIT_CRASH`` (its
+    traceback on stderr), so a supervisor never mistakes a crash for exit 1 ("kept nothing")."""
+    try:
+        return main(argv)
+    except Exception:  # noqa: BLE001 - any crash: the exit code must say so
+        traceback.print_exc()
+        print(f"error: teacher_gen crashed (exit {EXIT_CRASH}); a rerun resumes from the ledger", file=sys.stderr)
+        return EXIT_CRASH
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli())

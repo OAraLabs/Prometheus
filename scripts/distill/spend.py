@@ -75,7 +75,10 @@ first word of ``note``:
 ``cumulative_usd`` on each row is the committed total after it: every settled
 cost plus every open reservation at its worst case. A process that dies
 mid-call leaves its reservation open, so the ledger keeps charging that call
-at its worst case. That errs high, never low.
+at its worst case. That errs high, never low. A process that is stopped on
+purpose (teacher_gen.py on SIGTERM) instead closes its client, waits briefly
+for its calls in flight to settle from their usage, and settles the rest as
+``error:interrupted charged-reservation`` (``PaygClient.settle_open``).
 
 The cap and the stop
 --------------------
@@ -148,6 +151,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import csv
 import fcntl
 import http.client
@@ -159,6 +163,7 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -1167,6 +1172,12 @@ class PaygClient:
 
     One attempt per ``chat``: reserve the worst case, POST, settle from the
     usage block. ``opener`` (an ``OpenerDirector``-like object) is for tests.
+    ``chat(..., timeout=)`` bounds one call more tightly than the client's
+    ``timeout`` (a caller that must be done by a deadline). ``close`` refuses
+    every later call (``SpendRefused``); ``open_calls`` / ``settle_open`` let a
+    process that is being stopped wait for its calls in flight and then settle
+    the rest as ``interrupted`` (charged their reservation: the request may have
+    reached the model), so a stop never leaves a reservation open.
     """
 
     def __init__(self, creds: PaygCredentials, ledger: Ledger, *, tool: str, phase: str, model: str,
@@ -1183,6 +1194,12 @@ class PaygClient:
         self.phase_budget_usd = phase_budget_usd
         self.timeout = timeout
         self._opener = opener or default_opener()
+        #: held from the closed check to the reservation's registration, so ``close`` never
+        #: misses a reservation that is being written
+        self._gate = threading.Lock()
+        self._closed = ""
+        #: this client's reservations whose call has not settled yet
+        self._open: dict[str, Reservation] = {}
 
     @property
     def region(self) -> str:
@@ -1192,17 +1209,24 @@ class PaygClient:
         est_in, est_out = worst_case_tokens(payload)
         return est_in, est_out, self.price.usd(est_in, 0, est_out)
 
-    def chat(self, payload: dict[str, Any], *, call_id: str | None = None) -> PaidResult:
+    def chat(self, payload: dict[str, Any], *, call_id: str | None = None,
+             timeout: float | None = None) -> PaidResult:
         payload = dict(payload)
         if payload.setdefault("model", self.model) != self.model:
             raise SpendRefused(f"the request names {payload['model']!r}; this client is priced for "
                                f"{self.model!r}")
+        if timeout is not None and not (math.isfinite(timeout) and timeout > 0):
+            raise ValueError(f"timeout must be > 0 seconds, not {timeout!r}")
         est_in, est_out = worst_case_tokens(payload)
-        res = self.ledger.reserve(tool=self.tool, phase=self.phase, model=self.model, region=self.region,
-                                  input_tokens=est_in, output_tokens=est_out,
-                                  phase_budget_usd=self.phase_budget_usd, call_id=call_id)
+        with self._gate:
+            if self._closed:
+                raise SpendRefused(f"this paid client is closed ({self._closed}): no new paid call")
+            res = self.ledger.reserve(tool=self.tool, phase=self.phase, model=self.model, region=self.region,
+                                      input_tokens=est_in, output_tokens=est_out,
+                                      phase_budget_usd=self.phase_budget_usd, call_id=call_id)
+            self._open[res.call_id] = res
         try:
-            return self._send(payload, res)
+            return self._send(payload, res, self.timeout if timeout is None else min(self.timeout, timeout))
         except PaidCallError:
             raise
         except BaseException:
@@ -1211,6 +1235,39 @@ class PaygClient:
             with contextlib.suppress(SpendError):
                 self.ledger.settle(res, ok=False, maybe_billed=True, error_kind="interrupted")
             raise
+        finally:
+            self._open.pop(res.call_id, None)
+
+    def close(self, reason: str = "closed", *, wait: float = 5.0) -> None:
+        """Refuse every later ``chat`` (``SpendRefused``). Calls already reserved go on. Waits up to
+        *wait* seconds for a reservation being written (never forever: a signal handler calls this)."""
+        got = self._gate.acquire(timeout=max(0.0, wait))
+        try:
+            self._closed = reason or "closed"
+        finally:
+            if got:
+                self._gate.release()
+
+    def open_calls(self) -> int:
+        """How many of this client's calls are reserved and not settled yet."""
+        return len(self._open)
+
+    def settle_open(self, *, error_kind: str = "interrupted", lock_timeout: float = 5.0) -> list[str]:
+        """Settle every call of this client still in flight as failed and maybe billed (charged its
+        reservation: the request may have reached the model), so a process that is being stopped leaves
+        no open reservation behind. Never raises (a signal handler calls this); returns the call ids it
+        settled. A call that settles itself meanwhile is left as it settled. Use after ``close``."""
+        ledger = copy.copy(self.ledger)  # the same file, a shorter wait for its lock
+        ledger.lock_timeout = min(self.ledger.lock_timeout, max(0.0, lock_timeout))
+        done: list[str] = []
+        for res in list(self._open.values()):
+            try:
+                ledger.settle(res, ok=False, maybe_billed=True, error_kind=error_kind)
+            except SpendError:  # settled by its own call just now, or the lock stayed busy
+                continue
+            done.append(res.call_id)
+            self._open.pop(res.call_id, None)
+        return done
 
     def _fail(self, res: Reservation, kind: str, message: str, *, status: int | None = None,
               retry_after: float | None = None, maybe_billed: bool,
@@ -1221,7 +1278,7 @@ class PaygClient:
         return PaidCallError(kind, self.creds.scrub(message), status=status, retry_after=retry_after,
                              maybe_billed=maybe_billed, call_id=res.call_id, usd=settled.usd)
 
-    def _send(self, payload: dict[str, Any], res: Reservation) -> PaidResult:
+    def _send(self, payload: dict[str, Any], res: Reservation, timeout: float) -> PaidResult:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             self.creds.base_url.rstrip("/") + "/chat/completions", data=data, method="POST",
@@ -1229,7 +1286,7 @@ class PaygClient:
                      "User-Agent": "distill-spend/1"})
         request.add_unredirected_header("Authorization", "Bearer " + self.creds._key)
         try:
-            resp = self._opener.open(request, timeout=self.timeout)
+            resp = self._opener.open(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
             # A 4xx (but 408) is a refusal before anything was generated: $0. A 5xx or a 408 can come
             # after the model ran (a gateway timeout on a long generation): charged its reservation.

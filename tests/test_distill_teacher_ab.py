@@ -90,6 +90,13 @@ def ts_row(prompt: str, category: str = "memory/wiki", *, group: str | None = No
     return row
 
 
+def pad_rows() -> list[dict[str, Any]]:
+    """Plain real-pattern rows a force_compaction row pads with (other task groups)."""
+    return [ts_row("Which team owns harbor-sync according to the wiki?"),
+            ts_row("What is a good way to keep notes for an on-call handoff?", "chat-mode"),
+            ts_row("Find the port quill-indexer listens on in the wiki.")]
+
+
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> Path:
     path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
     return path
@@ -259,9 +266,14 @@ def test_tasks_run_writes_train_source_rows_that_build_py_admits(tmp_path, no_ou
     assert chat[0]["tools"] == [] and chat[0]["_meta"]["suppress_tools"] is True
     assert any(r["_meta"]["error_recovery"] for r in inject)
     assert inject[0]["_meta"]["verification"]["injected_failures"] == 1
-    assert all(r["_meta"]["compacted"] and r["_meta"]["compaction_pad"] == "repo-docs-reading-v1" for r in comp)
-    # the padding is the repo's own docs, never the synthetic runbooks written in teacher_gen.py
-    (comp_task,) = tg.tasks_from_taskset_rows([rows[3]], tmp_path)
+    # the padding is other real-pattern prompts of this taskset, answered by the same teacher
+    others = {r["id"] for i, r in enumerate(rows) if i != 3}
+    for r in comp:
+        pad = r["_meta"]["compaction_pad"]
+        assert r["_meta"]["compacted"] and pad["version"] == tg.PAD_VERSION and pad["answered_by"] == "teacher"
+        assert pad["turns"] >= tg.PAD_MIN_TURNS and set(pad["task_ids"]) <= others
+    # the sandbox's docs are the repo's own, never the synthetic runbooks written in teacher_gen.py
+    comp_task = tg.tasks_from_taskset_rows(rows, tmp_path)[3]
     assert comp_task.setup_files and all("guide-" in f and "runbooks" not in f for f in comp_task.setup_files)
     assert all(any(p[:60] in text for p in DOC_PARAS) for text in comp_task.setup_files.values())
     assert {r["_meta"]["partner_task_id"] for r in recomb} == {"tg-" + rows[4]["sources"][1]["pattern_hash"]}
@@ -318,7 +330,8 @@ def test_model_requests_never_go_through_a_proxy(tmp_path, no_outbound, monkeypa
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     write_docs(tmp_path)
     rows = [ts_row("Which host runs cobalt-intake according to the wiki?"),
-            ts_row("Check the status page for lumen-cache in the wiki.", "sentinel/daemon", force_compaction=True)]
+            ts_row("Check the status page for lumen-cache in the wiki.", "sentinel/daemon", force_compaction=True),
+            *pad_rows()]
     taskset = write_jsonl(tmp_path / "real.jsonl", rows)
     with FakeTeacher(tool_then_echo()) as teacher, FakeTeacher() as proxy:
         for var in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
@@ -343,7 +356,7 @@ def test_force_compaction_never_pads_with_synthetic_text(tmp_path, no_outbound, 
     comp = ts_row("Find the owner of amber-ledger in the wiki notes.", "other", force_compaction=True)
     plain = ts_row("Which host runs cobalt-intake according to the wiki?")
     with pytest.raises(tg.NoRepoDocs, match="real repo docs"):
-        tg.tasks_from_taskset_rows([plain, comp], bare)
+        tg.tasks_from_taskset_rows([plain, comp, *pad_rows()], bare)
     assert tg.tasks_from_taskset_rows([plain], bare)[0].origin == "taskset"  # nothing to pad: no docs needed
     with pytest.raises(tg.NoRepoDocs):  # sources that fell back to the synthetic runbooks
         tg.task_from_taskset(comp, tg.Sources.from_repo(bare))
@@ -385,9 +398,9 @@ def test_task_flags_are_honoured(tmp_path, no_outbound):
         ts_row("What is a sensible backup rotation for a home server?", "chat-mode"),
         ts_row("Look up cobalt-intake in the wiki and tell me its host.", inject_errors=True),
         ts_row("Read the wiki page on amber-ledger and give me its owner.", inject_errors=True,
-               force_compaction=True)], tmp_path)
+               force_compaction=True), *pad_rows()], tmp_path)[:3]
     assert (chat.kind, inject.kind, both.kind) == ("chat-mode", "error-recovery", "compacted-history")
-    assert both.inject and both.compaction and both.seed
+    assert both.inject and both.compaction and both.pad and not both.seed
     # suppress_tools: a chat-mode request, no tools on the wire
     with FakeTeacher(tool_then_echo()) as fake:
         s = settings_for(tmp_path, fake.url, task_source=tg.ORIGIN_TASKSET)
@@ -441,8 +454,8 @@ def test_judge_url_and_probe_guard_routing(tmp_path, no_outbound):
     # the probe guard carries every teacher, summarizer and (self-)judge request; the
     # teacher's own port (dead here) is never called
     dead = f"http://127.0.0.1:{free_port()}"
-    (comp,) = tg.tasks_from_taskset_rows([ts_row("Read the wiki page on amber-ledger and give me its owner.",
-                                                 force_compaction=True)], tmp_path)
+    comp = tg.tasks_from_taskset_rows([ts_row("Read the wiki page on amber-ledger and give me its owner.",
+                                              force_compaction=True), *pad_rows()], tmp_path)[0]
     for judge_url in (None, dead):
         with FakeTeacher(tool_then_echo()) as guard:
             s = settings_for(tmp_path, dead, probe_guard_url=guard.url, judge_url=judge_url,

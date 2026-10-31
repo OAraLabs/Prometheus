@@ -68,6 +68,8 @@ class Host:
         self.fail_apply = set()     # setups whose --execute fails
         self.ollama_ps = (5828081664, 5828081664)  # the judge's /api/ps (size, size_vram) while Ollama runs
         self.never_ready = set()    # units whose server never answers
+        self.gen_runs = []          # transient services started (the generation runner)
+        self.fail_gen = False       # its systemd-run fails
         self.calls = []
         self.applied = []
         self.applied_at = []
@@ -158,6 +160,12 @@ class Host:
             return "", 0
         if a[:2] == ["systemd-run", "--user"]:
             unit = [x for x in a if x.startswith("--unit=")][0].split("=", 1)[1]
+            if not any(x.startswith("--on-calendar=") for x in a):  # a transient service: generation
+                if self.fail_gen:
+                    return "Failed to start transient service unit\n", 1
+                self.gen_runs.append(a)
+                self.extra[unit + ".service"] = "active"
+                return "", 0
             cal = [x for x in a if x.startswith("--on-calendar=")][0].split("=", 1)[1]
             when = datetime.strptime(cal, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=ZoneInfo("UTC")).timestamp()
             self.timers[unit + ".timer"] = {"sub": "waiting", "next": when, "argv": a}
@@ -507,7 +515,7 @@ def deadman_arms(host):
     """The --on-calendar times (epoch) of every dead-man systemd-run, in order."""
     out = []
     for a in host.calls:
-        if a[0] == "systemd-run":
+        if a[0] == "systemd-run" and any(x.startswith("--on-calendar=") for x in a):
             cal = [x for x in a if x.startswith("--on-calendar=")][0].split("=", 1)[1]
             out.append(datetime.strptime(cal, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=ZoneInfo("UTC")).timestamp())
     return out
@@ -921,3 +929,104 @@ def test_stage_drops_the_swap_units_from_never_stop_in_the_window_copy_only(tmp_
     with pytest.raises(SystemExit, match="must stay never-stop"):
         M.window_hosts_copy(S, shared, "mini", swap)
 
+
+
+# ── generation (Track C): window-start and slot-exit start distill-gen-<stamp> ──────────────────
+
+
+def stage_gen(host):
+    runner = host.win / "gen_runner.sh"
+    runner.write_text("#!/bin/sh\nexit 0\n")
+    runner.chmod(0o755)
+    return runner
+
+
+def rehearsed(host):
+    (host.win / "state").mkdir(exist_ok=True)
+    (host.win / "state" / "rehearsal.last").write_text("PASS 2026-11-02 01:10 EST ok\n")
+
+
+def test_window_start_starts_generation_after_the_verified_swap(rig):
+    host = rig()
+    runner = stage_gen(host)
+    rehearsed(host)
+    assert host.main("window-start", "--execute") == 0, "\n".join(host.lines)
+    (run,) = host.gen_runs
+    unit = [x for x in run if x.startswith("--unit=")][0].split("=", 1)[1]
+    assert re.fullmatch(r"distill-gen-\d{8}-\d{6}", unit)              # a restore stops distill-* units
+    assert run[-3:] == [str(runner), "run", "--execute"] and "--collect" in run
+    assert "KillMode=mixed" in run and "TimeoutStopSec=90" in run
+    # only after the swap was verified (the teacher up, the probe OK)
+    i_gen = host.calls.index(run)
+    i_swap = max(i for i, a in enumerate(host.calls) if len(a) > 1 and a[1].endswith("/setups.py") and "--execute" in a)
+    assert i_gen > i_swap and host.units[TEACHER] == "active"
+    assert f"generation: {unit} started" in host.notified[0]
+
+
+def test_window_start_dry_run_only_prints_the_generation_start(rig):
+    host = rig()
+    stage_gen(host)
+    assert host.main("window-start") == 0
+    assert host.gen_runs == [] and changes(host) == []
+    assert "[dry run] would run: systemd-run --user --unit=distill-gen-" in "\n".join(host.lines)
+
+
+def test_generation_not_staged_off_or_running_is_not_started(rig):
+    host = rig()
+    rehearsed(host)
+    assert host.main("window-start", "--execute") == 0                  # no runner staged
+    assert host.gen_runs == [] and "generation: not staged" in host.notified[0]
+    host = rig()
+    stage_gen(host)
+    rehearsed(host)
+    host.conf.write_text(host.conf.read_text() + "GEN_ENABLE=0\n")
+    assert host.main("window-start", "--execute") == 0
+    assert host.gen_runs == [] and "generation: off (GEN_ENABLE)" in host.notified[0]
+    host = rig()
+    stage_gen(host)
+    rehearsed(host)
+    host.extra["distill-gen-20261102-0120.service"] = "active"
+    assert host.main("window-start", "--execute") == 0
+    assert host.gen_runs == [] and "already running (distill-gen-20261102-0120.service)" in host.notified[0]
+
+
+def test_a_failed_generation_start_never_fails_the_window(rig):
+    host = rig()
+    stage_gen(host)
+    rehearsed(host)
+    host.fail_gen = True
+    assert host.main("window-start", "--execute") == 0
+    assert host.units[TEACHER] == "active" and host.applied == ["flywheel"]   # the window stays open
+    assert "generation: FAILED to start distill-gen-" in host.notified[0]
+
+
+def test_q4_night_eval_slot_stops_generation_and_slot_exit_restarts_it(rig):
+    host = rig(start="2026-11-02T02:50:00", layout="flywheel-night-q4")
+    stage_gen(host)
+    host.extra["distill-gen-20261102-0120.service"] = "active"
+    assert host.main("slot-enter", "--execute") == 0, "\n".join(host.lines)
+    assert host.extra["distill-gen-20261102-0120.service"] == "inactive" and host.gen_runs == []
+    host.sleep(epoch("2026-11-02T03:15:00") - host.t)
+    assert host.main("slot-exit", "--execute") == 0, "\n".join(host.lines)
+    assert host.units[Q4] == "active" and len(host.gen_runs) == 1
+    assert "generation: distill-gen-" in "\n".join(host.lines)
+
+
+def test_stage_ships_the_generation_runner(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(M, "load_conf", lambda path, home=None: {**M.DEFAULTS, "LOCAL_MODEL_UNIT": LOCAL,
+                                                                 "PROBE_UNIT": "p.service", "OLLAMA_MODEL": JUDGE})
+    monkeypatch.syspath_prepend(str(REPO / "scripts" / "distill"))
+    import setups as S  # noqa: PLC0415
+    monkeypatch.setattr(S, "load_setup", lambda d, n: {"name": n, "hosts": {"mini": {"services": []}}})
+    monkeypatch.setattr(S, "dump_setup", lambda s: "x: 1\n")
+    monkeypatch.setattr(M, "window_hosts_copy", lambda *a: "hosts: {}\n")
+    monkeypatch.setattr(sys, "argv", ["mini_window"])
+    conf = tmp_path / "w.conf"
+    conf.write_text("x")
+    monkeypatch.setattr(M.subprocess, "run", lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0))
+    out = []
+    monkeypatch.setattr("builtins.print", lambda *a, **k: out.append(" ".join(map(str, a))))
+    assert M.main(["--conf", str(conf), "stage", "--ssh", "host"]) == 0
+    text = "\n".join(out)
+    assert "gen_runner.py" in text and "gen_runner.sh" in text and calls == []

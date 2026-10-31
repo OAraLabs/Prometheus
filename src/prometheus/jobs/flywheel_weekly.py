@@ -20,20 +20,50 @@ SIGKILL one minute before the end.
 STAGES
 ------
 1. **harvest**  New traces from the configured sources, read only, deduped by
-   content against every earlier harvest. Each is tagged with its source
-   model, adapter version, origin (teacher / offspring / unknown) and whether
-   it is Max-derived.
+   content against every earlier harvest. Each source file has a watermark in
+   the state (the byte offset read to, at a whole line, and a hash of the bytes
+   before it): a file that only grew is read from there, so a new golden export
+   (a new interactive /qwen turn, say) or a teacher run that appended rows is
+   picked up without re-reading the rest; a file rewritten under its name (a
+   teacher_gen.py resume trims its tail) is read whole again, and the content
+   dedupe keeps what was harvested before. A last line without its newline is
+   still being written and waits for the next harvest. Each trace is tagged
+   with its source model, adapter version, origin (teacher / offspring /
+   unknown) and whether it is Max-derived; the counts are kept per source tag
+   (``_meta.source``: the local 27B's ``qwen38-27b-gym``, a Max teacher run's
+   own tag, ``golden-export`` for the daemon's exports) and per share class
+   (``max`` / ``qwen38-27b-gym`` / ``other``, build.py's classes).
 2. **verify**   Decides which harvested traces may be trained on (rules below)
    and puts the trainable extra-source ones in the verified pool.
 3. **build**    The dataset builder (scripts/distill/build_datasets.py, or
    build.py) over a copy of the golden sources holding only the traces verify
    passed, plus the verified pool. Sets whose byte-for-byte spot check has not
-   passed are never trained on.
+   passed are never trained on. ``max_derived.exclude_sessions_file``, when
+   set, goes to the builder as ``--exclude-sessions``; the Q6b allow (below)
+   adds ``--allow-max-derived --max-derived-approval <approval_ref>`` and puts
+   the sets in ``sets-max-derived/`` (build.py wants the tag in the name). The
+   job owns these flags: ``build.args`` may not set them. Any edit to the
+   ids the list names rebuilds the sets, new traces or not.
 4. **train**    Only with >= ``train.min_new_traces`` verified traces since the
    last train's data was frozen, and as many train rows the last train did not
-   have. A train the window cuts short resumes from its newest checkpoint next
-   window, on the same frozen data.
-5. **quantize** The finished adapter.
+   have, on sets built under the session exclusion list as it is now. A train
+   the window cuts short resumes from its newest checkpoint next window, on
+   the same frozen data and under the approval that data records, unless the
+   list changed since it was frozen: it is then superseded (kept under
+   ``superseded_trains`` in the state, its data and checkpoints on disk) and a
+   new train starts on sets rebuilt under the current list. A train on
+   Max-derived rows is named for it (``fw-<run>-max-derived``: its run
+   directory, frozen data and models), the trainer gets
+   ``--i-have-operator-approval-for-max-derived-data``, and its adapter is
+   found under the tagged name the trainer gives it (``adapter-max-derived``,
+   scripts/distill/artifact_policy.py); an untagged adapter from Max-derived
+   data fails the train.
+5. **quantize** The finished adapter, into ``models/<version>`` (tagged, with
+   the quantizer's approval flag, when the adapter is Max-derived: its record
+   says so, says nothing, or its provenance chain shows it). quantize.py
+   decides the same from the adapter's own chain, failing closed, so the
+   trainer must leave its run manifest beside the adapter (train_qlora.py
+   does); without one it refuses the untagged ``models/<version>``.
 6. **score**    The quantized candidate (scripts/distill/score.py), only while
    the scoring server serves it: the Phase 6 gate against the base model's
    summary, and wins and losses against the previous model.
@@ -55,10 +85,12 @@ before it is written). The Markdown is a title, a status
 line whose first words are ``FLYWHEEL weekly · OK|WARN|FAIL|OFF``, then exactly
 the sections of :data:`REVIEWER_SECTIONS`, in that order, each always present
 ("None." when empty): at a glance; what ran (every stage, its result, its
-time); why stages did not run; traces; the model, with wins and losses vs the
-previous model; spend; guards; issues; operator notes; next steps (who acts:
-the job, the operator, or the runbook's plan; the last is always the next
-window). The JSON holds the same facts.
+time); why stages did not run; traces (per source, and the newest dataset's
+Max vs local-27B share per split); the model, with wins and losses vs the
+previous model; spend; guards (the Q6b allow, and every Max-derived artifact
+the state holds, each private: never published); issues; operator notes;
+next steps (who acts: the job, the operator, or the runbook's plan; the last
+is always the next window). The JSON holds the same facts.
 
 It is written every window: a skipped, refused or paused stage says why, and a
 disabled flywheel, a bad config, an unreadable state, a crashed stage, a report
@@ -84,23 +116,36 @@ WHAT IS NEVER TRAINED ON
   version) is trainable only with a ``pass`` verdict from a named verifier
   that is not the student itself, under any of its names (its model, served
   id or adapter, any adapter this job trained, any ``student_models``
-  match), and not Max (never a judge). Its tool calls having succeeded is
-  not a verification: that is how a model learns its own mistakes. A teacher's
-  golden trace counts on its tool-success label (the runbook's rule); anything
-  else is tagged and dropped, golden traces included: the builder reads a
-  copy of them in which every trace verify did not pass is withheld. The train
-  stage checks the frozen data again before every start and every resume.
+  match), and not Max (never a judge of a student). Its tool calls having
+  succeeded is not a verification: that is how a model learns its own
+  mistakes. A teacher's golden trace counts on its tool-success label (the
+  runbook's rule); an extra-source teacher trace needs a pass from a judge that
+  is not Max, or, on a Max-derived teacher trace only, from the pay-per-token
+  Max judge (the operator's PAYG ruling: ``provider: max-payg``, ``judge_key``
+  ``payg`` when given; build.py's rule, which also never lets it verify a local
+  27B row). Any other judge naming Max may be the Token Plan key and verifies
+  nothing. Anything else is tagged and dropped, golden traces included: the
+  builder reads a copy of them in which every trace verify did not pass is
+  withheld. The train stage checks the frozen data again before every start
+  and every resume.
 * **The score cases.** A training row that shares an id, task or group with
   a configured ``score.cases`` file refuses the train (and the scoring of an
   adapter trained on it): the builder re-splits every week, so a task held out
   once can land in a later train split.
-* **Max-derived data, without the operator's recorded approval.** Open
-  question #6 (docs/sprints/DISTILL-OPEN-QUESTIONS.md) holds training on data
-  derived from the hosted teacher. The train stage refuses a dataset holding
-  any such row unless ``max_data`` records ``approved``, ``approved_by`` and
-  ``approved_on``. The offspring of an adapter trained on Max-derived data is
+* **Max-derived data, without the Q6b allow.** The operator's Q6b ruling
+  (docs/sprints/DISTILL-OPEN-QUESTIONS.md #6) lets Max-derived rows train a
+  PRIVATE model under an explicit, recorded allow: ``max_derived`` records
+  ``approved: true``, an ``approval_ref`` and an ``exclude_sessions_file`` (the
+  Token-Plan incident session, never trained on). The train stage refuses a
+  dataset holding any such row unless all three are set, the file lists a
+  session, and the dataset itself recorded the same approval when build.py
+  made it. The offspring of an adapter trained on Max-derived data is
   Max-derived too, and so is the offspring of an adapter this job did not
   train (nothing shows otherwise).
+* Everything Max-derived stays private: it is tagged ``max-derived`` in its
+  name and manifest, ``publish_guard.py`` refuses it, the rental tool never
+  uploads it, and nothing here publishes anything. The report lists what the
+  state holds of it.
 
 WIRING (the operator half: nothing here installs it)
 ----------------------------------------------------
@@ -129,6 +174,7 @@ import errno
 import fcntl
 import glob
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -153,7 +199,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 logger = logging.getLogger("prometheus.jobs.flywheel_weekly")
 
-REPORT_SCHEMA = "flywheel-weekly-report/2"
+REPORT_SCHEMA = "flywheel-weekly-report/3"
 STATE_SCHEMA = "flywheel-weekly-state/1"
 
 STAGES = ("harvest", "verify", "build", "train", "quantize", "score")
@@ -228,8 +274,41 @@ NO_SWAP_SETUP = "none"
 BUILD_SCRIPTS = ("scripts/distill/build_datasets.py", "scripts/distill/build.py")
 SCORE_SCRIPT = "scripts/distill/score.py"
 SETUPS_SCRIPT = "scripts/distill/setups.py"
+# The Max-derived rule (DISTILL-OPEN-QUESTIONS Q6b): names, manifests,
+# provenance. One module for every distill script, loaded under the name they
+# all use (:func:`load_policy`).
+POLICY_SCRIPT = "scripts/distill/artifact_policy.py"
+POLICY_MODULE = "distill_artifact_policy"
+# build.py's Q6b allow and its session exclusion list: the job sets them from
+# flywheel.max_derived (stage_build).
+BUILD_ALLOW_FLAG = "--allow-max-derived"
+BUILD_APPROVAL_FLAG = "--max-derived-approval"
+BUILD_EXCLUDE_FLAG = "--exclude-sessions"
+# The trainer's and the quantizer's operator flag for Max-derived data
+# (train_qlora.APPROVAL_FLAG, quantize.APPROVAL_FLAG): the job appends it to a
+# train on Max-derived rows, and to the quantize of its adapter, only under a
+# complete Q6b allow.
+MAX_DERIVED_APPROVAL_FLAG = "--i-have-operator-approval-for-max-derived-data"
 # The job owns these builder flags; build.args may not set them.
-BUILD_OWNED_FLAGS = ("--traces", "--extra-traces", "--out", "--report", "--dry-run")
+BUILD_OWNED_FLAGS = ("--traces", "--extra-traces", "--out", "--report", "--dry-run",
+                     BUILD_ALLOW_FLAG, BUILD_APPROVAL_FLAG, BUILD_EXCLUDE_FLAG)
+# The builder's output directory: sets/, or sets-max-derived/ under the allow.
+SETS_DIR = "sets"
+# The pay-per-token Max judge (build.py's PAYG_PROVIDER / PAYG_JUDGE_KEY; the
+# operator's PAYG ruling for Phase 2 judging).
+PAYG_PROVIDER = "max-payg"
+PAYG_JUDGE_KEY = "payg"
+# The teachers whose traces count as teacher traces by default: the hosted Max
+# (its golden exports and pay-per-token teacher runs) and the local 27B teacher
+# (teacher_gen.py's gym runs).
+DEFAULT_TEACHER_MODELS = ("qwen3.8-max", "qwen3.8-27b*")
+# build.py's share classes: Max-derived rows, the local 27B teacher's, the rest.
+GYM_SOURCE = "qwen38-27b-gym"
+SHARE_CLASSES = ("max", GYM_SOURCE, "other")
+# A golden export with no source tag of its own is counted under this label.
+GOLDEN_EXPORT_SOURCE = "golden-export"
+# The daemon's incremental exporter names its files golden_traces_<time>_<rowid>.jsonl.
+_EXPORT_RE = re.compile(r"^golden_traces_\d+_(\d+)\.jsonl$")
 
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 TRAIN_FIELDS = frozenset({
@@ -301,6 +380,92 @@ def _redact(text: str) -> str:
     return redact_secrets(text)
 
 
+def load_policy(repo: Path | None = None) -> Any:
+    """scripts/distill/artifact_policy.py, the Max-derived rule (Q6b): from the
+    run's checkout, else this package's own. Loaded once, under the module name
+    every distill script loads it by.
+
+    Raises FileNotFoundError when neither checkout holds it: nothing is then
+    named, trained or quantized as if it were clean (the callers refuse).
+    """
+    loaded = sys.modules.get(POLICY_MODULE)
+    if loaded is not None:
+        return loaded
+    roots = [r for r in (repo, _repo_root()) if r is not None]
+    for root in roots:
+        path = root / POLICY_SCRIPT
+        if not path.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location(POLICY_MODULE, path)
+        if spec is None or spec.loader is None:
+            continue
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[POLICY_MODULE] = mod
+        try:
+            spec.loader.exec_module(mod)
+        except BaseException:
+            sys.modules.pop(POLICY_MODULE, None)
+            raise
+        return mod
+    raise FileNotFoundError(
+        f"{POLICY_SCRIPT} is in neither {' nor '.join(str(r) for r in roots)}: the Max-derived "
+        "rule (DISTILL-OPEN-QUESTIONS Q6b) cannot be read")
+
+
+def _policy_or_none(repo: Path | None) -> Any:
+    try:
+        return load_policy(repo)
+    except (OSError, ImportError, SyntaxError) as exc:
+        logger.warning("artifact_policy.py unavailable: %s", exc)
+        return None
+
+
+def _session_ids(path: Path) -> set[str]:
+    """The session ids *path* lists, as build.py's ``read_session_list`` reads
+    them (one per line, ``#`` comments and blank lines skipped). Raises
+    OSError / ValueError / UnicodeDecodeError when the file cannot be read or
+    lists none."""
+    ids = {line.split("#", 1)[0].strip() for line in path.read_text(encoding="utf-8").splitlines()}
+    ids.discard("")
+    if not ids:
+        raise ValueError("lists no session id")
+    return ids
+
+
+def read_session_list(path: Path) -> int:
+    """How many session ids *path* lists. The ids themselves are never read
+    into the report. Raises as :func:`_session_ids` does."""
+    return len(_session_ids(path))
+
+
+def session_list_digest(path: Path | None) -> str | None:
+    """The session exclusion list as the builder applies it: a sha256 of the
+    sorted ids *path* lists; "" when no list is set, None when it is unusable
+    (:func:`session_list_problem` says why). The sets and a frozen train
+    record it, so an edit to the list is seen: the build runs again, and data
+    built under the old list neither starts a train nor resumes one."""
+    if path is None:
+        return ""
+    try:
+        ids = _session_ids(path)
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    return hashlib.sha256("\n".join(sorted(ids)).encode("utf-8")).hexdigest()
+
+
+def session_list_problem(path: Path | None) -> str:
+    """Why the session exclusion list is unusable ("" when it is usable)."""
+    if path is None:
+        return "flywheel.max_derived.exclude_sessions_file is not set"
+    try:
+        read_session_list(path)
+    except FileNotFoundError:
+        return f"the session exclusion list {path} does not exist"
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return f"the session exclusion list {path} is unusable ({type(exc).__name__}: {exc})"
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Config: the flywheel: block, validated at load
 # ---------------------------------------------------------------------------
@@ -336,11 +501,22 @@ class Window:
 
 
 @dataclass(frozen=True)
-class MaxApproval:
+class MaxDerivedAllow:
+    """``flywheel.max_derived``: the operator's Q6b allow, passed to build.py.
+
+    ``complete`` (approved, with a reference and a session exclusion list) is
+    the only state in which a Max-derived row trains. The list may be set
+    without the allow: the builder then drops those sessions from every split.
+    """
+
     approved: bool = False
-    approved_by: str = ""
-    approved_on: str = ""
-    reference: str = ""
+    approval_ref: str = ""
+    exclude_sessions_file: Path | None = None
+
+    @property
+    def complete(self) -> bool:
+        return (self.approved and bool(self.approval_ref.strip())
+                and self.exclude_sessions_file is not None)
 
 
 @dataclass(frozen=True)
@@ -359,7 +535,7 @@ class FlywheelConfig:
     resume_args: tuple[str, ...]
     incomplete_exit_code: int
     max_failed_attempts: int
-    max_approval: MaxApproval
+    max_derived: MaxDerivedAllow
     quantize_command: tuple[str, ...]
     score_base_url: str
     score_cases: tuple[str, ...]
@@ -504,7 +680,7 @@ def parse_config(raw: Any) -> FlywheelConfig:
     h = top.section("harvest")
     golden = h.texts("golden", ("~/.prometheus/trajectories/golden_traces_*.jsonl",))
     extra = h.texts("extra", ())
-    teacher_models = h.texts("teacher_models", ("qwen3.8-max",))
+    teacher_models = h.texts("teacher_models", DEFAULT_TEACHER_MODELS)
     student_models = h.texts("student_models", ())
     h.done()
 
@@ -530,25 +706,27 @@ def parse_config(raw: Any) -> FlywheelConfig:
     if resume_args and not train_command:
         problems.append("flywheel.train.resume_args is set but train.command is empty")
 
-    m = top.section("max_data")
-    approval = MaxApproval(
-        approved=m.flag("approved", False),
-        approved_by=m.text("approved_by", ""),
-        approved_on=str(m._get("approved_on", "")).strip(),
-        reference=m.text("reference", ""),
-    )
+    if isinstance(top.raw, dict) and "max_data" in top.raw:
+        top.read.add("max_data")
+        problems.append("flywheel.max_data was replaced by flywheel.max_derived (approved, "
+                        "approval_ref, exclude_sessions_file: the operator's Q6b allow, "
+                        "DISTILL-OPEN-QUESTIONS #6)")
+    m = top.section("max_derived")
+    approved = m.flag("approved", False)
+    approval_ref = m.text("approval_ref", "")
+    exclude_raw = m.text("exclude_sessions_file", "")
     m.done()
-    if approval.approved:
-        if not approval.approved_by:
-            problems.append("flywheel.max_data.approved is true but approved_by is empty: "
-                            "an approval records who gave it")
-        try:
-            on = date.fromisoformat(approval.approved_on)
-            if on > _utcnow().date():
-                problems.append("flywheel.max_data.approved_on is in the future")
-        except ValueError:
-            problems.append("flywheel.max_data.approved is true but approved_on is not a "
-                            f"YYYY-MM-DD date ({approval.approved_on!r})")
+    approval = MaxDerivedAllow(
+        approved=approved, approval_ref=approval_ref,
+        exclude_sessions_file=_resolve_under(exclude_raw, _data_root()) if exclude_raw else None)
+    if approved and not approval_ref:
+        problems.append("flywheel.max_derived.approved is true but approval_ref is empty: the "
+                        "allow records the operator's approval verbatim (e.g. \"operator Q6b "
+                        "2026-10-30\"), and build.py records it in the dataset")
+    if approved and not exclude_raw:
+        problems.append("flywheel.max_derived.approved is true but exclude_sessions_file is "
+                        "empty: build.py's allow needs the session exclusion list (the "
+                        "2026-10-13 Token-Plan incident session is never trained on)")
 
     q = top.section("quantize")
     quantize_command = q.texts("command", ())
@@ -580,7 +758,7 @@ def parse_config(raw: Any) -> FlywheelConfig:
         build_script=build_script, build_args=build_args, min_new_traces=min_new,
         train_command=train_command, resume_args=resume_args,
         incomplete_exit_code=incomplete_code, max_failed_attempts=max_failed,
-        max_approval=approval, quantize_command=quantize_command,
+        max_derived=approval, quantize_command=quantize_command,
         score_base_url=base_url, score_cases=cases, baseline_summary=baseline,
         gpu_setup=gpu_setup, spend_ledger=ledger,
     )
@@ -1018,14 +1196,31 @@ def tag_trace(meta: dict[str, Any], cfg: FlywheelConfig,
     # the model judging itself (verification).
     ids = sorted({str(meta.get(k)).strip() for k in ("source_model", "served_model", "model")
                   if meta.get(k) and str(meta.get(k)).strip()})
+    by = str(meta.get("verified_by") or (judge if isinstance(judge, str) else "")
+             or rec_judge).strip()
+    rec = meta.get("verification")
+    # The pay-per-token Max judge, when it is the very judge named above.
+    payg = bool(by) and any(
+        is_payg_judge(j, _dict(j).get("model")) and str(_dict(j).get("model")).strip() == by
+        for j in (_dict(rec).get("judge"), judge))
     return {
         "source_model": model, "adapter_version": adapter, "origin": origin,
         "max_derived": bool(max_derived),
         "verdict": verdict if verdict in ("pass", "fail") else "",
-        "verified_by": str(meta.get("verified_by") or (judge if isinstance(judge, str) else "")
-                           or rec_judge).strip(),
+        "verified_by": by,
+        "payg_judge": payg,
         "model_ids": ids,
     }
+
+
+def is_payg_judge(judge: Any, model: Any) -> bool:
+    """*judge* (a record's ``judge`` object) is the pay-per-token Max judge:
+    ``provider`` is ``max-payg``, a ``judge_key`` (when given) is ``payg``, and
+    its model names Max. build.py's ``is_payg_judge``; anything else naming
+    Max is not (it may be the Token Plan key, which never judges)."""
+    return (isinstance(judge, dict) and judge.get("provider") == PAYG_PROVIDER
+            and judge.get("judge_key", PAYG_JUDGE_KEY) == PAYG_JUDGE_KEY
+            and isinstance(model, str) and is_max_name(model))
 
 
 def record_verdict(rec: Any) -> tuple[str, str]:
@@ -1074,56 +1269,156 @@ def harvested_hashes(data: Path) -> set[str]:
     return out
 
 
+def _prefix_hash(path: Path, size: int) -> Any:
+    """A sha256 object over the first *size* bytes of *path* (more can be fed
+    to it), or None when the file is shorter or unreadable."""
+    digest = hashlib.sha256()
+    left = size
+    try:
+        with open(path, "rb") as fh:
+            while left > 0:
+                block = fh.read(min(left, 1 << 20))
+                if not block:
+                    return None
+                digest.update(block)
+                left -= len(block)
+    except OSError:
+        return None
+    return digest
+
+
+def harvest_marks(state: dict[str, Any]) -> dict[str, Any]:
+    """The harvest's own watermarks: per source file (by real path), the byte
+    offset read to (a whole line), the lines before it and the sha256 of the
+    bytes before it."""
+    return _dict(_dict(state.get("harvest")).get("files"))
+
+
+def share_class(max_derived: bool, source: str) -> str:
+    """build.py's share class of a trace: Max-derived, the local 27B teacher's, or other."""
+    return "max" if max_derived else GYM_SOURCE if source == GYM_SOURCE else "other"
+
+
+def source_label(kind: str, meta: dict[str, Any]) -> str:
+    """The source a harvested trace is counted under: its own ``_meta.source``
+    tag, else what it is (a golden export, an untagged extra-source trace)."""
+    tag = meta.get("source")
+    if isinstance(tag, str) and tag.strip():
+        return tag.strip()
+    return GOLDEN_EXPORT_SOURCE if kind == "golden" else "untagged"
+
+
 def stage_harvest(run: Run) -> StageResult:
     cfg = run.cfg
     seen = harvested_hashes(run.data)
     raw_adapters = run.state.get("adapters")
     adapters: dict[str, Any] = raw_adapters if isinstance(raw_adapters, dict) else {}
+    marks = harvest_marks(run.state)
+    new_marks: dict[str, Any] = {}
     rows: list[dict[str, Any]] = []
     contents: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
-    files = 0
+    file_counts: Counter[str] = Counter()
+    files = looked = 0
+    export_rowid = 0
+    paused = StageResult("harvest", PAUSED, reason=(
+        "the window closed mid-harvest; nothing was recorded, and the next window harvests "
+        "these traces again"))
     for kind, patterns in (("golden", cfg.golden), ("extra", cfg.extra)):
         for path in _expand(patterns):
             files += 1
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                for lineno, line in enumerate(fh, 1):
-                    if lineno % CLOCK_EVERY_LINES == 0 and run.out_of_time():
-                        return StageResult("harvest", PAUSED, reason=(
-                            "the window closed mid-harvest; nothing was recorded, and the next "
-                            "window harvests these traces again"))
+            key = os.path.realpath(path)
+            m = _EXPORT_RE.match(path.name) if kind == "golden" else None
+            if m:
+                export_rowid = max(export_rowid, int(m.group(1)))
+            mark = _dict(marks.get(key))
+            offset, lineno = 0, 0
+            digest: Any = None
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = -1
+            at = mark.get("offset")
+            if isinstance(at, int) and not isinstance(at, bool) and at > 0 \
+                    and mark.get("kind") == kind:
+                digest = _prefix_hash(path, at) if size >= at else None
+                if digest is not None and digest.hexdigest() == mark.get("sha256"):
+                    offset, lineno = at, int(_num(mark.get("lines")))
+                    file_counts["unchanged" if size == at else "grown"] += 1
+                else:
+                    digest = None
+                    file_counts["rewritten"] += 1     # read whole again; the dedupe holds
+            else:
+                file_counts["new"] += 1
+            if digest is None:
+                digest = hashlib.sha256()
+            with open(path, "rb") as fh:
+                fh.seek(offset)
+                for raw in fh:
+                    looked += 1
+                    if looked % CLOCK_EVERY_LINES == 0 and run.out_of_time():
+                        return paused
+                    whole = raw.endswith(b"\n")
+                    if whole:
+                        # Only whole lines move the watermark: a last line still
+                        # being written is read again next time.
+                        lineno += 1
+                        offset += len(raw)
+                        digest.update(raw)
+                    line = raw.decode("utf-8", errors="replace")
                     if not line.strip():
                         continue
                     try:
                         trace = json.loads(line)
                     except ValueError:
-                        counts["unreadable"] += 1
+                        counts["unreadable" if whole else "partial_last_line"] += 1
                         continue
                     if shape_problem(trace):
-                        counts["unreadable"] += 1
+                        counts["unreadable" if whole else "partial_last_line"] += 1
                         continue
                     h = trace_hash(trace)
                     if h in seen:
                         counts["already_harvested"] += 1
                         continue
                     seen.add(h)
-                    meta = trace.get("_meta") or {}
+                    meta = trace.get("_meta") if isinstance(trace.get("_meta"), dict) else {}
                     tag = tag_trace(meta, cfg, adapters)
-                    rows.append({"h": h, "kind": kind, "file": path.name, "line": lineno, **tag})
+                    source = source_label(kind, meta)
+                    rows.append({"h": h, "kind": kind, "file": path.name,
+                                 "line": lineno + (0 if whole else 1), **tag, "source": source,
+                                 "class": share_class(tag["max_derived"], source)})
                     if kind == "extra":
                         contents.append({"h": h, "trace": trace})
+            new_marks[key] = {"kind": kind, "offset": offset, "lines": lineno,
+                              "sha256": digest.hexdigest()}
     by_origin = Counter(r["origin"] for r in rows)
     table = Counter((r["origin"], r["source_model"], r["adapter_version"]) for r in rows)
+    sources = Counter((r["kind"], r["source"], r["class"]) for r in rows)
+    by_class = Counter(r["class"] for r in rows)
+    before = int(_num(_dict(run.state.get("harvest")).get("golden_export_rowid")))
     details = {
         "new": len(rows), "files": files, "by_origin": dict(by_origin),
         "already_harvested": counts["already_harvested"], "unreadable": counts["unreadable"],
         "by_source": [{"origin": o, "source_model": m, "adapter_version": a, "new": n}
                       for (o, m, a), n in sorted(table.items())],
+        # Per source tag and share class: the Max teacher's and the local 27B
+        # teacher's runs, the golden exports (new interactive /qwen turns).
+        "by_source_tag": [{"kind": k, "source": s, "class": c, "new": n}
+                          for (k, s, c), n in sorted(sources.items())],
+        "by_class": {c: by_class.get(c, 0) for c in SHARE_CLASSES},
+        "watermarks": {k: file_counts.get(k, 0) for k in ("new", "grown", "unchanged",
+                                                          "rewritten")},
+        "golden_export_rowid": max(export_rowid, before) or None,
+        "golden_export_rowid_before": before or None,
         "offspring_adapter_unknown": sum(1 for r in rows if r["origin"] == "offspring"
                                          and r["adapter_version"] == "unknown"),
     }
+    if counts["partial_last_line"]:
+        details["partial_last_lines"] = counts["partial_last_line"]
     origin_text = ", ".join(f"{k} {v}" for k, v in sorted(by_origin.items())) or "none"
-    summary = (f"{len(rows)} new trace(s) from {files} file(s) ({origin_text}); "
+    class_text = ", ".join(f"{c} {by_class[c]}" for c in SHARE_CLASSES if by_class.get(c))
+    summary = (f"{len(rows)} new trace(s) from {files} file(s) ({origin_text}"
+               + (f"; {class_text}" if class_text else "") + "); "
                f"{counts['already_harvested']} already harvested; "
                f"{counts['unreadable']} unreadable")
     if details["offspring_adapter_unknown"]:
@@ -1137,10 +1432,14 @@ def stage_harvest(run: Run) -> StageResult:
         run.facts["dry_harvest"] = rows
         return StageResult("harvest", DRY_RUN, summary="would record " + summary, details=details)
     # Content first, then the row file: harvest.jsonl is the commit point, and
-    # every later run's dedupe reads it.
+    # every later run's dedupe reads it. The watermarks move only after it: a
+    # crash in between re-reads those lines next time, and the dedupe drops them.
     run.run_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write_jsonl(run.run_dir / "harvest-traces.jsonl", contents)
     _atomic_write_jsonl(run.run_dir / "harvest.jsonl", rows)
+    run.state["harvest"] = {"files": new_marks, "updated": run.run_id,
+                            "golden_export_rowid": max(export_rowid, before) or None}
+    run.save()
     return StageResult("harvest", OK, summary=summary, details=details)
 
 
@@ -1198,12 +1497,17 @@ def verification(row: dict[str, Any], student_models: tuple[str, ...] = (),
     * offspring: only a ``pass`` from a named verifier that is neither the
       student itself (:func:`self_verifier`; *student_models* and *adapters*
       are the config's student patterns and the adapters this job trained)
-      nor the hosted teacher (the operator's ruling, and build.py's
-      ``judge_is_max``: Max never judges). Tool success is never enough;
+      nor the hosted teacher (build.py's ``judge_is_max``: no Max judge, the
+      pay-per-token one included, verifies a student). Tool success is never
+      enough;
     * teacher: a ``pass`` verdict from a judge that is not Max, or for a
       golden trace its tool-success label (the exporter writes only calls
       that ran without error). An extra-source teacher trace needs such a
-      verdict, as the builder requires;
+      verdict, as the builder requires. The pay-per-token Max judge
+      (:func:`is_payg_judge`, ``payg_judge`` on the row) counts on a
+      Max-derived teacher trace, as build.py applies it to a Max row; on a
+      local 27B row it does not (build.py wants a ``--judge-models`` judge
+      there), and any other Max judge never counts (``max_judged``);
     * unknown origin: never.
     """
     if row.get("verdict") == "fail":
@@ -1221,7 +1525,8 @@ def verification(row: dict[str, Any], student_models: tuple[str, ...] = (),
         return "judge-pass", ""
     if origin == "teacher":
         max_judged = passed and is_max_name(by)
-        if passed and not max_judged:
+        payg = max_judged and row.get("payg_judge") is True and row.get("max_derived") is True
+        if passed and (not max_judged or payg):
             return "judge-pass", ""
         if row.get("kind") == "golden":
             return "tool-success", ""
@@ -1236,7 +1541,7 @@ def pool_source(row: dict[str, Any]) -> str:
     ``source``, which is what the train-time guards read: origin, model and
     adapter survive into the dataset, and a Max-derived row says so in a
     token the Max guard matches. :func:`pooled_meta` decides whether it
-    replaces the trace's own tag.
+    replaces the trace's own tag (only an offspring or untagged trace's).
     """
     tail = "/max-derived" if row.get("max_derived") else ""
     return (f"flywheel/{row.get('origin')}/{row.get('source_model')}"
@@ -1247,20 +1552,28 @@ def pooled_meta(meta: dict[str, Any], row: dict[str, Any], basis: str,
                 run_id: str) -> dict[str, Any]:
     """The ``_meta`` a verified trace enters the pool with.
 
-    The builder's data policy keys training on the trace's own ``source`` tag
-    (``--train-sources``, e.g. ``qwen38-27b-gym``) and reads the generator's
-    ``verification`` record strictly, so a teacher trace that is not
-    Max-derived keeps both untouched. Offspring, Max-derived and untagged
-    traces are tagged :func:`pool_source` instead (their own tag kept as
-    ``source_original``): never a listed train source, and named offspring
-    or Max for the train-time guards. The job's own decision is recorded
-    under ``flywheel``, never in ``verification``: a record there without a
-    decision fails the builder's check.
+    The builder's data policy keys on the trace's own ``source`` tag, so a
+    tagged teacher trace keeps it, Max-derived or not: ``--train-sources``
+    (e.g. ``qwen38-27b-gym``) lets it train, ``builtin-smoke`` (hand-written
+    task text) never trains, and ``max-payg-gym`` gets build.py's PAYG rules
+    (refused without the Q6b allow, no early dedupe claim, out of the
+    Max-only hold-out plan). Renamed, any of those rows would pass as a plain
+    Max row. A Max-derived one still says so to the builder and the train
+    guards: ``max_derived`` is set here, which build.py refuses on a
+    train-source row, and its model or tag names Max. The generator's
+    ``verification`` record is read strictly and stays untouched.
+
+    Offspring and untagged traces are tagged :func:`pool_source` instead
+    (their own tag kept as ``source_original``): never a listed train
+    source, and named offspring or Max for the train-time guards. The job's
+    own decision and tag are recorded under ``flywheel``, never in
+    ``verification``: a record there without a decision fails the builder's
+    check.
     """
     out = dict(meta)
     tag = out.get("source")
     own = tag.strip() if isinstance(tag, str) and tag.strip() else ""
-    if row.get("origin") != "teacher" or row.get("max_derived") or not own:
+    if row.get("origin") != "teacher" or not own:
         if own and "source_original" not in out:
             out["source_original"] = tag
         out["source"] = pool_source(row)
@@ -1280,17 +1593,29 @@ def _verify_rows(run: Run, rows: list[dict[str, Any]]
     decided: list[dict[str, Any]] = []
     dropped: Counter[str] = Counter()
     verified_by_origin: Counter[str] = Counter()
+    verified_by_class: Counter[str] = Counter()
+    payg = 0
     adapters = _dict(run.state.get("adapters"))
     for row in rows:
         basis, why = verification(row, run.cfg.student_models, adapters)
         decided.append({"h": row["h"], "basis": basis, "reason": why})
         if basis:
             verified_by_origin[str(row.get("origin"))] += 1
+            cls = row.get("class")
+            verified_by_class[cls if cls in SHARE_CLASSES
+                              else "max" if row.get("max_derived") else "other"] += 1
+            payg += basis == "judge-pass" and row.get("payg_judge") is True
         else:
             dropped[why] += 1
     verified = sum(verified_by_origin.values())
-    return decided, {"verified": verified, "dropped": dict(dropped),
-                     "verified_by_origin": dict(verified_by_origin), "rows": len(rows)}
+    counts: dict[str, Any] = {"verified": verified, "dropped": dict(dropped),
+                              "verified_by_origin": dict(verified_by_origin),
+                              "verified_by_class": {c: verified_by_class.get(c, 0)
+                                                    for c in SHARE_CLASSES},
+                              "rows": len(rows)}
+    if payg:
+        counts["payg_max_judge"] = payg
+    return decided, counts
 
 
 def stage_verify(run: Run) -> StageResult:
@@ -1346,11 +1671,17 @@ def stage_verify(run: Run) -> StageResult:
         _atomic_write(rdir / "verify.json", json.dumps(record, indent=1) + "\n")
         total["verified"] += counts["verified"]
         total["pooled"] += len(pooled)
+        total["payg_max_judge"] += int(counts.get("payg_max_judge") or 0)
+        for cls, n in _dict(counts.get("verified_by_class")).items():
+            total[f"class:{cls}"] += int(n)
         dropped.update(counts["dropped"])
         if rdir.name == run.run_id:
             this_run = counts
     details = {"runs": [p.name for p in pending], "verified": total["verified"],
-               "pooled": total["pooled"], "dropped": dict(dropped), "this_run": this_run}
+               "pooled": total["pooled"], "dropped": dict(dropped), "this_run": this_run,
+               "verified_by_class": {c: total[f"class:{c}"] for c in SHARE_CLASSES}}
+    if total["payg_max_judge"]:
+        details["payg_max_judge"] = total["payg_max_judge"]
     offspring_dropped = sum(dropped[k] for k in OFFSPRING_DROPS)
     if offspring_dropped:
         details["offspring_dropped"] = offspring_dropped
@@ -1444,6 +1775,47 @@ def resolve_build_script(cfg: FlywheelConfig, repo: Path) -> Path | None:
     return None
 
 
+def dataset_facts(pol: Any, out: Path, report: dict[str, Any]) -> dict[str, Any]:
+    """What the state keeps about a dataset's Max-derived side (aggregates only):
+
+    * ``max_derived``: train/val hold Max-derived rows (artifact_policy's
+      provenance of the directory: build.py's per-split counts or its
+      ``max_derived`` flag; ``None`` when nothing shows either way);
+    * ``holds_max_rows``: any set holds them (eval-tools is built from Max
+      traces), so the directory is private either way;
+    * ``approval``: the Q6b approval the dataset recorded (build.py's
+      ``data_policy.max_derived_allow``), or None;
+    * ``share``: build.py's ``data_policy.share`` (rows and percent per class
+      per split: Max-derived, the local 27B teacher's, other).
+    """
+    md: bool | None = None
+    holds = False
+    if pol is not None:
+        try:
+            prov = pol.provenance(out)
+            md, holds = prov.max_derived, bool(prov.holds_max_rows)
+        except (OSError, ValueError) as exc:
+            logger.warning("provenance of %s unreadable: %s", out, exc)
+    if md is None and isinstance(report.get("max_derived"), bool):
+        md = report["max_derived"]
+    approval = None
+    if pol is not None:
+        approval = pol.dataset_approval(report) \
+            or pol.dataset_approval(_read_json_quiet(out / "dataset-manifest.json"))
+    share = _dict(_dict(report.get("data_policy")).get("share"))
+    by_split = _dict(share.get("by_split"))
+    return {"max_derived": md, "holds_max_rows": holds or md is True, "approval": approval,
+            "share": ({"by_split": by_split, "approval": share.get("approval")}
+                      if by_split else None)}
+
+
+def _read_json_quiet(path: Path) -> Any:
+    try:
+        return _read_json(path)
+    except (OSError, ValueError):
+        return None
+
+
 def stage_build(run: Run) -> StageResult:
     cfg = run.cfg
     script = resolve_build_script(cfg, run.repo)
@@ -1460,15 +1832,33 @@ def stage_build(run: Run) -> StageResult:
     newest = max((rid for rid, n in verified.items() if n > 0), default="")
     if run.dry_run and run.facts.get("dry_verified"):
         newest = run.run_id
+    allow = cfg.max_derived
+    listed = session_list_digest(allow.exclude_sessions_file)
     # Same inputs, same builder, same arguments: the same sets. A changed
-    # argument (the operator fixing --pack, say) rebuilds without new traces.
+    # argument (the operator fixing --pack, say), a changed Q6b allow or an
+    # edit to the session exclusion list (its ids, not only its path)
+    # rebuilds without new traces.
     inputs = hashlib.sha256(json.dumps(
-        [str(script), list(cfg.build_args), list(cfg.golden)]).encode()).hexdigest()[:16]
+        [str(script), list(cfg.build_args), list(cfg.golden), allow.complete,
+         allow.approval_ref if allow.complete else "",
+         str(allow.exclude_sessions_file or ""), listed]).encode()).hexdigest()[:16]
     if sets and newest <= str(sets.get("run") or "") and sets.get("inputs") == inputs:
         return StageResult("build", SKIPPED, reason=(
             f"no verified traces since the {sets.get('run')} build; its sets stand"),
             details={"sets": sets})
-    out = run.run_dir / "sets"
+    if allow.exclude_sessions_file is not None:
+        problem = session_list_problem(allow.exclude_sessions_file)
+        if problem:
+            return StageResult("build", REFUSED, reason=(
+                f"{problem} (flywheel.max_derived.exclude_sessions_file): the builder drops "
+                "those sessions from every split, so it was not started without them"))
+    pol = _policy_or_none(run.repo)
+    if allow.complete and pol is None:
+        return StageResult("build", FAILED, reason=(
+            f"the Q6b allow is set but {POLICY_SCRIPT} cannot be loaded, so the Max-derived "
+            "sets cannot be named for it; the builder was not started"))
+    # build.py's allow wants the tag in the output's name (artifact_policy).
+    out = run.run_dir / (pol.tag_name(SETS_DIR) if allow.complete else SETS_DIR)
     golden_dir = run.data / "build-input" / "golden"
     golden_files = _expand(cfg.golden)
     pool = sorted((run.data / "pool").glob("*.jsonl"))
@@ -1480,8 +1870,20 @@ def stage_build(run: Run) -> StageResult:
     for path in pool:
         argv += ["--extra-traces", str(path)]
     argv += ["--out", str(out)]
+    if allow.exclude_sessions_file is not None:
+        argv += [BUILD_EXCLUDE_FLAG, str(allow.exclude_sessions_file)]
+    if allow.complete:
+        # The explicit, recorded allow: build.py writes the reference into
+        # report.json and dataset-manifest.json, which the train stage reads back.
+        argv += [BUILD_ALLOW_FLAG, BUILD_APPROVAL_FLAG, allow.approval_ref]
     if run.dry_run:
-        return StageResult("build", DRY_RUN, summary=f"would run: {_quote(argv)}")
+        said = []
+        if allow.complete:
+            said.append(f"under the Q6b allow {allow.approval_ref!r}, into {out.name}/")
+        if allow.exclude_sessions_file is not None:
+            said.append("with the session exclusion list")
+        return StageResult("build", DRY_RUN, summary=(
+            "would run" + (f" ({', '.join(said)})" if said else "") + f": {_quote(argv)}"))
     names = Counter(p.name for p in golden_files)
     repeated = sorted(n for n, k in names.items() if k > 1)
     if repeated:
@@ -1524,11 +1926,16 @@ def stage_build(run: Run) -> StageResult:
     run.state["sets"] = {
         "run": run.run_id, "dir": str(out), "gates": verdict, "spot_check": spot,
         "failed_gates": failed, "teacher_model": settings.get("teacher_model"),
-        "rows": written, "inputs": inputs,
+        "rows": written, "inputs": inputs, "sessions_sha256": listed or "",
+        **dataset_facts(pol, out, report),
     }
     run.save()
     details = {"failed_gates": failed, "spot_check": spot, "rows": written,
-               "pool_files": len(pool), "golden": golden}
+               "pool_files": len(pool), "golden": golden,
+               "max_derived": run.state["sets"]["max_derived"],
+               "approval": run.state["sets"]["approval"]}
+    if run.state["sets"].get("share"):
+        details["share"] = run.state["sets"]["share"]
     if verdict.startswith("exit "):
         return StageResult("build", REFUSED, reason=(
             f"the builder exited {res.returncode} with a passing report; nothing trains on "
@@ -1566,6 +1973,8 @@ class GuardResult:
     leaked_rows: int = 0
     teacher_model: str = ""
     refusals: list[str] = field(default_factory=list)
+    # Rows per share class (Max-derived / the local 27B teacher's / other).
+    share: dict[str, int] = field(default_factory=lambda: dict.fromkeys(SHARE_CLASSES, 0))
 
 
 def row_keys(row: dict[str, Any]) -> set[str]:
@@ -1663,9 +2072,17 @@ def check_training_data(paths: list[Path], cfg: FlywheelConfig,
                 # build.py also writes the row's model and max_derived: either
                 # naming Max makes the row Max-derived whatever its source says.
                 model = str(row.get("model") or meta.get("model") or "")
-                if all_max or is_max_name(src) or is_max_name(model) \
-                        or row.get("max_derived") is True or meta.get("max_derived") is True:
-                    g.max_rows += 1
+                flag = row["max_derived"] if "max_derived" in row else meta.get("max_derived")
+                own_max = (is_max_name(src) or is_max_name(model) or flag is True
+                           or meta.get("max_derived") is True)
+                is_max = all_max or own_max
+                g.max_rows += is_max
+                # The share is the row's own: build.py names the Max model as
+                # its teacher for any set that mixes in a Max row, which says
+                # nothing of a local 27B row beside it (max_derived false). A
+                # row that does not say is counted as the guard counts it.
+                cls = share_class(own_max or (all_max and flag is not False), src)
+                g.share[cls] = g.share.get(cls, 0) + 1
                 if held_out and row_keys(row) & held_out:
                     g.leaked_rows += 1
     if g.unreadable:
@@ -1680,11 +2097,12 @@ def check_training_data(paths: list[Path], cfg: FlywheelConfig,
         g.refusals.append(f"{g.leaked_rows} training row(s) share an id, task or group with the "
                           "score cases (flywheel.score.cases): the candidate would be scored on "
                           "what it trained on")
-    if g.max_rows and not cfg.max_approval.approved:
+    if g.max_rows and not cfg.max_derived.complete:
         g.refusals.append(
             f"{g.max_rows} of {g.rows} row(s) are Max-derived and no operator approval is "
-            "recorded (flywheel.max_data: approved, approved_by, approved_on). "
-            "DISTILL-OPEN-QUESTIONS #6 holds training on Max-derived data")
+            "recorded (flywheel.max_derived: approved, approval_ref, exclude_sessions_file; "
+            "DISTILL-OPEN-QUESTIONS #6, Q6b ruling). Max-derived rows train only under that "
+            "explicit allow")
     return g
 
 
@@ -1728,35 +2146,131 @@ def _frozen_problem(t: dict[str, Any]) -> str:
     return ""
 
 
-def _freeze(run: Run, sets: dict[str, Any], guard: GuardResult) -> dict[str, Any]:
+def _freeze(run: Run, sets: dict[str, Any], guard: GuardResult, pol: Any) -> dict[str, Any]:
     """Pin the train's data: hard links (or copies) of the split files, with hashes.
 
     A resume weeks later trains on these exact bytes, whatever later builds
     write. The run directory is named after the adapter version, so a trainer
-    that names its logs after its output directory names them usefully.
+    that names its logs after its output directory names them usefully. A
+    train on Max-derived rows is named for it (``fw-<run>-max-derived``, by
+    artifact_policy's ``tag_name``): its run directory (the trainer refuses an
+    untagged ``--out`` for such data), its frozen data and, later, its models.
     """
-    base = f"fw-{run.run_id}"
-    version, n = base, 1
-    while (run.data / "train" / version).exists() or (run.data / "train" / f"{version}.data").exists():
+    max_derived = guard.max_rows > 0
+    base, n = f"fw-{run.run_id}", 1
+    while True:
+        version = pol.name_for(base if n == 1 else f"{base}-{n}", max_derived)
+        if not ((run.data / "train" / version).exists()
+                or (run.data / "train" / f"{version}.data").exists()):
+            break
         n += 1
-        version = f"{base}-{n}"
     run_dir = run.data / "train" / version
     data_dir = run.data / "train" / f"{version}.data"
     data_dir.mkdir(parents=True)
     shas: dict[str, str] = {}
-    for name in (*FROZEN_FILES, "report.json"):
+    for name in (*FROZEN_FILES, "report.json", "dataset-manifest.json"):
         src = Path(str(sets["dir"])) / name
         if src.is_file():
             _link_or_copy(src, data_dir / name)
             shas[name] = _sha256(data_dir / name)
     return {
         "adapter_version": version, "status": "running", "data_dir": str(data_dir),
-        "run_dir": str(run_dir), "adapter_dir": str(run_dir / ADAPTER_SUBDIR),
+        "run_dir": str(run_dir),
+        "adapter_dir": str(run_dir / pol.name_for(ADAPTER_SUBDIR, max_derived)),
         "cutoff": str(sets.get("run") or run.run_id), "sets": str(sets["dir"]),
-        "teacher_model": guard.teacher_model, "max_derived": guard.max_rows > 0,
+        "teacher_model": guard.teacher_model, "max_derived": max_derived,
+        "share": dict(guard.share),
+        "approval": run.cfg.max_derived.approval_ref if max_derived else None,
+        # the session exclusion list the data was built under (a resume needs it unchanged)
+        "sessions_sha256": str(sets.get("sessions_sha256") or ""),
         "sha256": shas, "rows": guard.rows, "attempts": 0, "failures": 0,
         "frozen_in": run.run_id,
     }
+
+
+def find_adapter(pol: Any, run_dir: Path, max_derived: bool) -> tuple[Path | None, bool, str]:
+    """The adapter a finished train left in *run_dir*: (path, Max-derived, problem).
+
+    The trainer names it by artifact_policy's rule: ``adapter-max-derived``
+    for Max-derived data (train_qlora.py), ``adapter`` otherwise. A tagged
+    adapter is Max-derived whatever the data check said (the trainer's own
+    check fails closed). An untagged one is refused when the data is
+    Max-derived, or when its own provenance chain (the trainer's run
+    manifest) shows it is: its name would not say what it is.
+    """
+    tagged = run_dir / pol.tag_name(ADAPTER_SUBDIR)
+    plain = run_dir / ADAPTER_SUBDIR
+    if tagged.is_dir():
+        return tagged, True, ""
+    if plain.is_dir():
+        if max_derived:
+            return None, True, (f"the data is Max-derived but the trainer left an untagged "
+                                f"{plain} (expected {tagged.name}/, DISTILL-OPEN-QUESTIONS Q6b)")
+        prov = pol.provenance(plain)
+        if prov.max_derived is True:
+            return None, True, (f"{plain} is Max-derived ({'; '.join(prov.evidence[:2])}) but "
+                                f"its name is not tagged (expected {tagged.name}/)")
+        return plain, False, ""
+    want = tagged if max_derived else plain
+    return None, max_derived, f"left no adapter at {want}"
+
+
+def max_derived_train_problem(run: Run, data_dir: Path, *, resuming: bool = False
+                              ) -> tuple[str, str | None]:
+    """(why a train on Max-derived rows may not start or resume, "" when it
+    may; the approval its data records).
+
+    The allow is complete (:func:`check_training_data` refuses Max rows
+    without it), the session exclusion list is usable, and the dataset itself
+    recorded an approval when build.py made it (``--allow-max-derived
+    --max-derived-approval``), as the trainer will check too. A new train
+    needs the very approval the config names: a build under the current
+    allow comes first. A resume trains on its frozen data, which keeps the
+    approval it was built and frozen under; a re-worded approval_ref applies
+    from the next build on and never strands it.
+    """
+    allow = run.cfg.max_derived
+    if not allow.complete:
+        return ("no complete Q6b allow is recorded for these Max-derived rows "
+                "(flywheel.max_derived: approved, approval_ref, exclude_sessions_file; "
+                "DISTILL-OPEN-QUESTIONS Q6b)"), None
+    problem = session_list_problem(allow.exclude_sessions_file)
+    if problem:
+        return f"{problem}: a Max-derived train needs it (DISTILL-OPEN-QUESTIONS Q6b)", None
+    pol = load_policy(run.repo)
+    recorded = pol.dataset_approval(_read_json_quiet(data_dir / "report.json")) \
+        or pol.dataset_approval(_read_json_quiet(data_dir / "dataset-manifest.json"))
+    if resuming:
+        if recorded:
+            return "", recorded
+        return (f"the frozen data in {data_dir} records no Max-derived approval, so no allow "
+                f"can resume it: remove 'train' from {run.state_path} to start a new train on "
+                "sets built under the allow"), None
+    if recorded != allow.approval_ref:
+        said = f"the approval {recorded!r}" if recorded else "no Max-derived approval"
+        return (f"the dataset records {said}, not flywheel.max_derived.approval_ref "
+                f"{allow.approval_ref!r}: it was not built under this allow (build.py "
+                f"{BUILD_ALLOW_FLAG} {BUILD_APPROVAL_FLAG}). A build under the allow comes "
+                "first"), recorded
+    return "", recorded
+
+
+def _supersede(run: Run, t: dict[str, Any], why: str) -> dict[str, Any]:
+    """Retire a running or paused train that may not resume (*why*), so a new
+    one can start on sets built under the current settings. Its record moves
+    to ``state["superseded_trains"]``; its frozen data and checkpoints stay on
+    disk (private when Max-derived). A dry run only says so."""
+    rec = {k: t.get(k) for k in ("adapter_version", "data_dir", "run_dir", "max_derived",
+                                 "frozen_in", "attempts")}
+    rec.update(why=why, superseded_in=run.run_id)
+    run.issue(f"train {t.get('adapter_version')} is not resumed: {why}. Its frozen data and "
+              "checkpoints stay on disk (private when Max-derived); a new train starts on sets "
+              "built under the current list")
+    if not run.dry_run:
+        run.state.setdefault("superseded_trains", []).append(rec)
+        run.state.pop("train", None)
+        run.save()
+    return rec
 
 
 def _placeholders(args: tuple[str, ...]) -> set[str]:
@@ -1785,6 +2299,20 @@ def stage_train(run: Run) -> StageResult:
             f"train {t.get('adapter_version')} failed {t.get('failures')} time(s) and was "
             f"abandoned; the operator decides (fix the cause, then remove 'train' from "
             f"{run.state_path})"), details=details)
+    # The builder drops the listed sessions from every split, Max-derived or not:
+    # no train starts or resumes on data built under another list.
+    listed = session_list_digest(cfg.max_derived.exclude_sessions_file)
+    if listed is None:
+        return StageResult("train", REFUSED, reason=(
+            f"{session_list_problem(cfg.max_derived.exclude_sessions_file)} "
+            "(flywheel.max_derived.exclude_sessions_file): the builder drops those sessions from "
+            "every split, so no train starts or resumes until it is readable"), details=details)
+    if t and t.get("status") in ("running", "incomplete") \
+            and str(t.get("sessions_sha256") or "") != listed:
+        details["superseded"] = _supersede(run, t, (
+            "the session exclusion list (flywheel.max_derived.exclude_sessions_file) changed "
+            "since its data was frozen, so that data may hold rows of a session listed now"))
+        t = None
     resuming = bool(t and t.get("status") in ("running", "incomplete"))
     if resuming and not cfg.train_command:
         return StageResult("train", SKIPPED, reason=(
@@ -1810,8 +2338,10 @@ def stage_train(run: Run) -> StageResult:
                 "flywheel.train.command is empty: no trainer is configured"), details=details)
         built = run.results.get("build")
         if run.dry_run and built is not None and built.status == DRY_RUN:
-            max_note = ("approved" if cfg.max_approval.approved
-                        else "refused: no max_data approval is recorded")
+            max_note = (f"approved under the Q6b allow ({cfg.max_derived.approval_ref!r}); "
+                        "the train is tagged max-derived and stays private"
+                        if cfg.max_derived.complete
+                        else "refused: no operator approval is recorded (flywheel.max_derived)")
             return StageResult("train", DRY_RUN, summary=(
                 f"would train on this window's sets if they pass the builder's gates and the "
                 f"guards (Max-derived rows: {max_note})"), details=details)
@@ -1828,6 +2358,11 @@ def stage_train(run: Run) -> StageResult:
             return StageResult("train", REFUSED, reason=(
                 f"the newest sets ({sets.get('run')}) are not trainable: the builder's verdict "
                 f"is {sets.get('gates')} ({why})"), details=details)
+        if str(sets.get("sessions_sha256") or "") != listed:
+            return StageResult("train", REFUSED, reason=(
+                f"the newest sets ({sets.get('run')}) were built under another session exclusion "
+                "list than flywheel.max_derived.exclude_sessions_file holds now; the build runs "
+                "again first (any edit to the list rebuilds)"), details=details)
         newest = max((rid for rid, n in verified_by_run(run.data).items() if n > 0), default="")
         if newest > str(sets.get("run") or ""):
             return StageResult("train", SKIPPED, reason=(
@@ -1860,17 +2395,35 @@ def stage_train(run: Run) -> StageResult:
     details["guard"] = asdict(guard)
     if guard.refusals:
         return StageResult("train", REFUSED, reason="; ".join(guard.refusals), details=details)
+    pol = _policy_or_none(run.repo)
+    if pol is None:
+        return StageResult("train", FAILED, reason=(
+            f"{POLICY_SCRIPT} cannot be loaded: no train starts without the Max-derived rule "
+            "that names its outputs (DISTILL-OPEN-QUESTIONS Q6b)"), details=details)
+    max_derived = guard.max_rows > 0 or bool(resuming and t and t.get("max_derived", True))
+    if max_derived:
+        problem, recorded = max_derived_train_problem(
+            run, Path(str(t["data_dir"])) if resuming and t else Path(str(sets["dir"])),
+            resuming=resuming)
+        if problem:
+            return StageResult("train", REFUSED, reason=problem, details=details)
+        if resuming and t and recorded != cfg.max_derived.approval_ref:
+            details["approval"] = recorded
+            run.issue(f"train {t.get('adapter_version')} resumes under the approval its frozen "
+                      f"data records ({recorded!r}); flywheel.max_derived.approval_ref now reads "
+                      f"{cfg.max_derived.approval_ref!r}, which the next build records")
     verb = f"resume {t.get('adapter_version')}" if resuming and t else "start a train"
     if run.dry_run:
         return StageResult("train", DRY_RUN, summary=(
-            f"would {verb} on {guard.rows} row(s) with: {' '.join(cfg.train_command)}"),
+            f"would {verb} on {guard.rows} row(s) with: {' '.join(cfg.train_command)}"
+            + (" (Max-derived: tagged max-derived, private)" if max_derived else "")),
             details=details)
     note = ensure_gpu(run, "train")
     if note:
         return StageResult("train", SKIPPED, reason=note, details=details)
 
     if not resuming:
-        t = _freeze(run, sets, guard)
+        t = _freeze(run, sets, guard, pol)
     assert t is not None
     version = str(t["adapter_version"])
     run_dir = Path(str(t["run_dir"]))
@@ -1887,6 +2440,11 @@ def stage_train(run: Run) -> StageResult:
     if int(t.get("attempts") or 0) > 0 and cfg.resume_args \
             and (ckpt is not None or "checkpoint" not in _placeholders(cfg.resume_args)):
         argv += run.fill(cfg.resume_args, {**values, "checkpoint": str(ckpt or "")})
+    if max_derived and MAX_DERIVED_APPROVAL_FLAG not in argv:
+        # The operator's say-so on the trainer's own command line (the Q6b
+        # allow is complete: checked above); the dataset's recorded approval is
+        # the trainer's second key.
+        argv.append(MAX_DERIVED_APPROVAL_FLAG)
     t.update(status="running", attempts=int(t.get("attempts") or 0) + 1, last_run=run.run_id)
     run.state["train"] = t
     run.save()
@@ -1895,22 +2453,24 @@ def stage_train(run: Run) -> StageResult:
     res = run.runner(run.command(argv, "train"))
     now = run.clock().isoformat(timespec="seconds")
     said = _trainer_status(run_dir) if res.returncode == 0 and not res.stopped else ""
-    adapter_dir = Path(str(t["adapter_dir"]))
-    if res.returncode == 0 and not res.stopped and said in ("", "done") and adapter_dir.is_dir():
-        t.update(status="complete", finished=now)
+    finished = res.returncode == 0 and not res.stopped and said in ("", "done")
+    found, found_md, missing = (find_adapter(pol, run_dir, bool(t.get("max_derived", True)))
+                                if finished else (None, False, ""))
+    if finished and found is not None:
+        md = found_md or bool(t.get("max_derived", True))
+        t.update(status="complete", finished=now, adapter_dir=str(found), max_derived=md)
         run.state["last_train"] = {"adapter_version": version, "cutoff": t["cutoff"],
                                    "finished": now}
         adapters = run.state.setdefault("adapters", {})
-        adapters[version] = {"max_derived": bool(t.get("max_derived", True)),
-                             "adapter_dir": str(adapter_dir), "data_dir": t["data_dir"],
-                             "trained": now}
+        adapters[version] = {"max_derived": md, "adapter_dir": str(found),
+                             "data_dir": t["data_dir"], "trained": now}
         run.save()
         return StageResult("train", OK, summary=(
-            f"{version} finished ({t['attempts']} window(s), {guard.rows} rows)"),
-            details=details)
+            f"{version} finished ({t['attempts']} window(s), {guard.rows} rows"
+            + ("; Max-derived, private" if md else "") + ")"), details=details)
     if res.returncode == 0 and not res.stopped and said != "stopped":
         res = CommandResult(1, False, res.seconds, (
-            f"exited 0 but left no adapter at {adapter_dir}" if said in ("", "done")
+            f"exited 0 but {missing}" if said in ("", "done")
             else f"exited 0 with its {TRAINER_MANIFEST} saying {said!r}"))
     after = latest_checkpoint(run_dir)
     details["checkpoint"] = after.name if after else None
@@ -1960,12 +2520,31 @@ def stage_quantize(run: Run) -> StageResult:
     if not cfg.quantize_command:
         return StageResult("quantize", SKIPPED, reason=(
             f"flywheel.quantize.command is empty: {version} waits for a quantizer"))
-    out_dir = run.data / "models" / version
     record = _dict(adapters.get(version))
+    adapter_dir = str(record.get("adapter_dir") or "")
+    pol = _policy_or_none(run.repo)
+    if pol is None:
+        return StageResult("quantize", FAILED, reason=(
+            f"{POLICY_SCRIPT} cannot be loaded: {version} is not quantized without the "
+            "Max-derived rule that names its models (DISTILL-OPEN-QUESTIONS Q6b)"))
+    # The adapter's own record, else its provenance chain (artifact_policy):
+    # a model merged from a Max-derived adapter, and calibrated on its rows,
+    # is Max-derived; a record that does not say counts as Max-derived.
+    max_derived = record.get("max_derived", True) is not False
+    if not max_derived and adapter_dir and pol.provenance(adapter_dir).max_derived is True:
+        max_derived = True
+    if max_derived and not cfg.max_derived.complete:
+        return StageResult("quantize", REFUSED, reason=(
+            f"{version}'s adapter is Max-derived and flywheel.max_derived records no complete "
+            "Q6b allow (approved, approval_ref, exclude_sessions_file): its quantize develops "
+            "a model from Max-derived data, so it waits for the allow"))
+    out_dir = run.data / "models" / pol.name_for(version, max_derived)
     argv = run.fill(cfg.quantize_command, {
-        "adapter_dir": str(record.get("adapter_dir") or ""),
+        "adapter_dir": adapter_dir,
         "data_dir": str(record.get("data_dir") or ""),
         "out_dir": str(out_dir), "adapter_version": version})
+    if max_derived and MAX_DERIVED_APPROVAL_FLAG not in argv:
+        argv.append(MAX_DERIVED_APPROVAL_FLAG)
     if run.dry_run:
         return StageResult("quantize", DRY_RUN, summary=f"would run: {_quote(argv)}")
     note = ensure_gpu(run, "quantize")
@@ -1975,9 +2554,12 @@ def stage_quantize(run: Run) -> StageResult:
     res = run.runner(run.command(argv, "quantize"))
     if res.returncode == 0 and not res.stopped:
         quantized[version] = {"status": "done", "out_dir": str(out_dir),
+                              "max_derived": max_derived,
                               "finished": run.clock().isoformat(timespec="seconds")}
         run.save()
-        return StageResult("quantize", OK, summary=f"{version} quantized into {out_dir}")
+        return StageResult("quantize", OK, summary=(
+            f"{version} quantized into {out_dir}"
+            + (" (Max-derived: private, never published)" if max_derived else "")))
     if res.stopped or res.returncode == cfg.incomplete_exit_code:
         return StageResult("quantize", PAUSED, reason=(
             f"stopped for the window; {version} is quantized again next window"))
@@ -2535,12 +3117,13 @@ def plan_next_steps(run: Run, model: dict[str, Any]) -> list[dict[str, str]]:
                             "it.")
     train = results.get("train")
     guard = _dict(train.details.get("guard")) if train else {}
-    approved = cfg.max_approval.approved
+    approved = cfg.max_derived.complete
     max_refusal = bool(guard.get("max_rows")) and not approved
     if not approved and (max_refusal or _teachers_all_max(cfg)):
-        add("operator", "Decide DISTILL-OPEN-QUESTIONS #6 (training on Max-derived data). Until "
-                        "flywheel.max_data records approved, approved_by and approved_on, no "
-                        "train uses a Max-derived row.")
+        add("operator", "Record the Q6b allow to train on Max-derived rows (DISTILL-OPEN-QUESTIONS "
+                        "#6: a private model only): flywheel.max_derived approved: true, "
+                        "approval_ref and exclude_sessions_file. Until then no train uses a "
+                        "Max-derived row.")
     if not approved and _teachers_all_max(cfg):
         add("operator", "flywheel.harvest.teacher_models names only Max models, so every verified "
                         "trace is Max-derived: add the local teacher's model id (its gym traces) "
@@ -2662,13 +3245,15 @@ def build_report(run: Run, status: str) -> dict[str, Any]:
             "verify": verify.details if verify else {},
             "new_verified_since_last_train": _safe_pending(run),
             "min_new_traces": None if run.mode == "config-error" else cfg.min_new_traces,
+            "dataset": dataset_share(run),
         },
         "train": {k: t.get(k) for k in ("adapter_version", "status", "attempts", "failures",
                                         "cutoff", "max_derived", "rows")} if t else None,
         "model": model_section,
         "spend": spend_summary(cfg.spend_ledger, since),
         "guards": {
-            "max_data": _max_data_guard(run),
+            "max_derived": _max_derived_guard(run),
+            "private_artifacts": private_artifacts(run),
             "train_data": guard if isinstance(guard, dict) else None,
             "offspring_dropped_at_verify": int(_num(verify.details.get("offspring_dropped", 0)))
             if verify else 0,
@@ -2679,14 +3264,109 @@ def build_report(run: Run, status: str) -> dict[str, Any]:
     }
 
 
-def _max_data_guard(run: Run) -> dict[str, Any]:
-    """The recorded Max-data approval; ``approved`` is None (unknown) when the
-    config is invalid and only the fallback defaults were read."""
-    a = run.cfg.max_approval
+def _max_derived_guard(run: Run) -> dict[str, Any]:
+    """The recorded Q6b allow; ``approved`` and ``complete`` are None
+    (unknown) when the config is invalid and only the fallback defaults were
+    read. The exclusion list is counted, never quoted."""
+    a = run.cfg.max_derived
     if run.mode == "config-error":
-        return {"approved": None, "approved_by": "", "approved_on": "", "reference": ""}
-    return {"approved": a.approved, "approved_by": a.approved_by, "approved_on": a.approved_on,
-            "reference": a.reference}
+        return {"approved": None, "approval_ref": "", "exclude_sessions_file": "",
+                "sessions_listed": None, "complete": None}
+    listed: int | None = None
+    if a.exclude_sessions_file is not None:
+        try:
+            listed = read_session_list(a.exclude_sessions_file)
+        except (OSError, ValueError, UnicodeDecodeError):
+            listed = None
+    return {"approved": a.approved, "approval_ref": a.approval_ref,
+            "exclude_sessions_file": str(a.exclude_sessions_file or ""),
+            "sessions_listed": listed, "complete": a.complete}
+
+
+PRIVATE_RULE = ("Max-derived artifacts are private: never pushed to Hugging Face or anywhere "
+                "public. publish_guard.py refuses them and the rental tool never uploads them "
+                "(DISTILL-OPEN-QUESTIONS Q6b); nothing in this job publishes anything.")
+
+
+def private_artifacts(run: Run) -> dict[str, Any]:
+    """Every Max-derived artifact the state records, each private (never
+    published): the newest sets (when they hold Max-derived rows, or nothing
+    shows they do not), the current and any superseded train's frozen data
+    and run directory, every Max-derived adapter and the models quantized
+    from them. ``tagged``
+    says whether the name carries ``max-derived`` (artifact_policy)."""
+    out: dict[str, Any] = {"rule": PRIVATE_RULE, "known": run.mode not in UNREAD_MODES,
+                           "items": []}
+    if run.mode in UNREAD_MODES:
+        return out
+    pol = _policy_or_none(run.repo)
+    items: list[dict[str, Any]] = []
+
+    def add(kind: str, name: str, path: Any, why: str, *, named: bool = True) -> None:
+        """*named*: the name must carry the tag (it is trained on, or holds in
+        train/val, Max-derived rows); a set holding Max rows only in eval does
+        not, and is private all the same."""
+        p = str(path or "")
+        if not p or any(i["path"] == p for i in items):
+            return
+        items.append({"kind": kind, "name": name, "path": p, "why": why,
+                      "tagged": (bool(pol.path_has_tag(p)) if pol is not None and named
+                                 else None)})
+
+    sets = _dict(run.state.get("sets"))
+    if sets.get("dir"):
+        md = sets.get("max_derived")
+        if md is True:
+            add("dataset", f"sets of {sets.get('run')}", sets["dir"],
+                "train/val hold Max-derived rows")
+        elif sets.get("holds_max_rows") or md is None:
+            add("dataset", f"sets of {sets.get('run')}", sets["dir"],
+                "holds Max-derived rows (eval)" if sets.get("holds_max_rows")
+                else "provenance unknown: private until shown clean", named=False)
+    t = _dict(run.state.get("train"))
+    if t and t.get("max_derived", True) is not False:
+        add("train data", str(t.get("adapter_version")), t.get("data_dir"),
+            "frozen Max-derived training rows")
+        add("train run", str(t.get("adapter_version")), t.get("run_dir"),
+            "checkpoints of a train on Max-derived rows")
+    # A superseded train's frozen data and checkpoints stay on disk.
+    for old in run.state.get("superseded_trains") or []:
+        old = _dict(old)
+        if old and old.get("max_derived", True) is not False:
+            name = f"{old.get('adapter_version')} (superseded)"
+            add("train data", name, old.get("data_dir"),
+                "frozen Max-derived training rows of a superseded train")
+            add("train run", name, old.get("run_dir"),
+                "checkpoints of a superseded train on Max-derived rows")
+    adapters = _dict(run.state.get("adapters"))
+    for version, rec in sorted(adapters.items()):
+        if _dict(rec).get("max_derived", True) is not False:
+            add("adapter", version, _dict(rec).get("adapter_dir"), "trained on Max-derived rows")
+    for version, q in sorted(_dict(run.state.get("quantized")).items()):
+        rec = _dict(adapters.get(version))
+        if _dict(q).get("max_derived", rec.get("max_derived", True)) is not False:
+            add("model", version, _dict(q).get("out_dir"), "merged from a Max-derived adapter")
+    out["items"] = items
+    return out
+
+
+def dataset_share(run: Run) -> dict[str, Any] | None:
+    """The Max vs local-27B share: the newest sets' (build.py's
+    ``data_policy.share``, per split) and the current train's rows per class
+    (as the train guard counted them). None when the state was not read."""
+    if run.mode in UNREAD_MODES:
+        return None
+    sets = _dict(run.state.get("sets"))
+    t = _dict(run.state.get("train"))
+    out: dict[str, Any] = {}
+    if sets.get("dir"):
+        out["sets"] = {"run": sets.get("run"), "max_derived": sets.get("max_derived"),
+                       "approval": sets.get("approval"), "share": sets.get("share")}
+    if t and isinstance(t.get("share"), dict):
+        out["train"] = {"adapter_version": t.get("adapter_version"),
+                        "max_derived": t.get("max_derived"), "rows": t.get("rows"),
+                        "share": t.get("share")}
+    return out or None
 
 
 def minimal_report(run: Run, exc: BaseException) -> dict[str, Any]:
@@ -2725,7 +3405,8 @@ def minimal_report(run: Run, exc: BaseException) -> dict[str, Any]:
         "model": {"candidate": None, "why": [], "last_scored": None},
         "spend": {"ledger": str(cfg.spend_ledger), "present": False, "since": "",
                   "error": "not read: the report could not be built"},
-        "guards": {"max_data": _max_data_guard(run),
+        "guards": {"max_derived": _max_derived_guard(run),
+                   "private_artifacts": {"rule": PRIVATE_RULE, "known": False, "items": []},
                    "train_data": None, "offspring_dropped_at_verify": 0},
         "issues": [*(str(i) for i in run.issues),
                    _one_line(_redact(f"the full report could not be built "
@@ -2810,8 +3491,26 @@ class ReportSpend(BaseModel):
     since: str
 
 
+class ReportPrivateItem(_Closed):
+    kind: Literal["dataset", "train data", "train run", "adapter", "model"]
+    name: str
+    path: str
+    why: str
+    tagged: bool | None
+
+
+class ReportPrivate(_Closed):
+    """The Max-derived artifacts the state records: private, never published.
+    ``known`` is false when the state was not read (the list is then empty)."""
+
+    rule: str = Field(min_length=1)
+    known: bool
+    items: list[ReportPrivateItem]
+
+
 class ReportGuards(_Closed):
-    max_data: dict[str, Any]
+    max_derived: dict[str, Any]
+    private_artifacts: ReportPrivate
     train_data: dict[str, Any] | None
     offspring_dropped_at_verify: int = Field(ge=0)
 
@@ -2819,7 +3518,7 @@ class ReportGuards(_Closed):
 class WeeklyReport(_Closed):
     """``LATEST.json``: the machine-readable twin of the reviewer's ``LATEST.md``."""
 
-    report_schema: Literal["flywheel-weekly-report/2"] = Field(alias="schema")
+    report_schema: Literal["flywheel-weekly-report/3"] = Field(alias="schema")
     kind: Literal["weekly"]
     run_id: str = Field(min_length=1)
     mode: Literal["scheduled", "dry-run", "recovery", "config-error", "state-error",
@@ -2941,16 +3640,55 @@ def _glance(report: dict[str, Any]) -> list[str]:
         spend = "no ledger: no API spend recorded"
     else:
         spend = _fmt_spend(sp["week"])
-    return [
+    lines = [
         f"- Status: {report['status']} ({STATUS_TEXT.get(report['status'], '?')})",
         f"- Model: {model}",
         f"- Train: {train}",
         f"- Traces: {traces}",
+    ]
+    share = _glance_share(tr.get("dataset"))
+    if share:
+        lines.append(f"- Max vs local 27B: {share}")
+    private = _dict(report["guards"].get("private_artifacts"))
+    if private.get("known"):
+        n = len(private.get("items") or [])
+        lines.append(f"- Max-derived artifacts: {n}, all private (never published)" if n
+                     else "- Max-derived artifacts: none recorded")
+    lines += [
         f"- Spend, last 7 days: {spend}",
         f"- Issues: {len(report['issues'])}; operator steps: "
         f"{sum(1 for s in report['next_steps'] if s['by'] == 'operator')}",
         f"- Next window: {report['next_window']['describe']}",
     ]
+    return lines
+
+
+SHARE_NAMES = {"max": "Max", GYM_SOURCE: "local 27B", "other": "other"}
+
+
+def _share_text(entry: Any) -> str:
+    """One split of build.py's share table (``{"rows": n, "<class>": {"rows",
+    "pct"}}``) or a plain ``{"<class>": rows}`` count, as one line."""
+    e = _dict(entry)
+    counts = {c: (int(_num(_dict(e[c]).get("rows"))) if isinstance(e.get(c), dict)
+                  else int(_num(e.get(c)))) for c in SHARE_CLASSES}
+    total = int(_num(e.get("rows"))) if "rows" in e else sum(counts.values())
+    if not total:
+        return ""
+    return ", ".join(f"{SHARE_NAMES[c]} {counts[c]} ({100.0 * counts[c] / total:.1f}%)"
+                     for c in SHARE_CLASSES) + f" of {total}"
+
+
+def _glance_share(dataset: Any) -> str:
+    d = _dict(dataset)
+    sets = _dict(d.get("sets"))
+    train_split = _dict(_dict(_dict(sets.get("share")).get("by_split")).get("train"))
+    text = _share_text(train_split)
+    if text:
+        return f"train split of the {sets.get('run')} sets: {text}"
+    t = _dict(d.get("train"))
+    text = _share_text(t.get("share"))
+    return f"{t.get('adapter_version')} trains on {text}" if text else ""
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -3003,19 +3741,59 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- New this window: {hv.get('new', 0)} ({origins or 'none'}); "
                      f"already harvested {hv.get('already_harvested', 0)}; "
                      f"unreadable {hv.get('unreadable', 0)}")
+        by_class = _dict(hv.get("by_class"))
+        if by_class:
+            lines.append("- New by class: " + ", ".join(
+                f"{SHARE_NAMES[c]} {int(_num(by_class.get(c)))}" for c in SHARE_CLASSES))
+        marks = _dict(hv.get("watermarks"))
+        if marks:
+            rowid = hv.get("golden_export_rowid")
+            was = hv.get("golden_export_rowid_before")
+            lines.append(
+                f"- Source files: {marks.get('new', 0)} new, {marks.get('grown', 0)} grown "
+                f"(read from the watermark), {marks.get('unchanged', 0)} unchanged, "
+                f"{marks.get('rewritten', 0)} rewritten (read whole again)"
+                + (f"; golden exports through rowid {rowid}"
+                   + (f" (was {was})" if was and was != rowid else "") if rowid else ""))
     if vf:
         dropped = ", ".join(f"{k} {v}" for k, v in sorted((vf.get("dropped") or {}).items()))
         lines.append(f"- Verified: {vf.get('verified', 0)}; dropped: {dropped or 'none'}")
+        vclass = _dict(vf.get("verified_by_class"))
+        if any(int(_num(v)) for v in vclass.values()):
+            lines.append("- Verified by class: " + ", ".join(
+                f"{SHARE_NAMES[c]} {int(_num(vclass.get(c)))}" for c in SHARE_CLASSES)
+                + (f"; {vf['payg_max_judge']} passed by the pay-per-token Max judge"
+                   if vf.get("payg_max_judge") else ""))
     if not hv and not vf:
         lines.append("- Nothing was harvested or verified in this run.")
     pending = tr.get("new_verified_since_last_train")
     lines.append(f"- New verified since the last train: "
                  f"{'unknown' if pending is None else pending} ({_threshold(tr)})")
+    ds = _dict(tr.get("dataset"))
+    sets = _dict(ds.get("sets"))
+    by_split = _dict(_dict(sets.get("share")).get("by_split"))
+    if by_split:
+        lines.append(f"- Max vs local 27B in the {sets.get('run')} sets"
+                     + (f" (Q6b approval {sets['approval']!r})" if sets.get("approval") else "")
+                     + ":")
+        lines += [f"  - {split}: {_share_text(entry) or 'no rows'}"
+                  for split, entry in by_split.items()]
+    elif sets:
+        lines.append(f"- Max vs local 27B in the {sets.get('run')} sets: the builder's report "
+                     "has no share table")
+    tshare = _share_text(_dict(ds.get("train")).get("share"))
+    if tshare:
+        lines.append(f"- Train {_dict(ds.get('train')).get('adapter_version')} rows: {tshare}")
     by_source = hv.get("by_source") or []
     if by_source:
         lines += ["", "| Origin | Source model | Adapter | New |", "|---|---|---|---|"]
         lines += [f"| {r['origin']} | {_md_escape(r['source_model'])} | "
                   f"{_md_escape(r['adapter_version'])} | {r['new']} |" for r in by_source]
+    by_tag = hv.get("by_source_tag") or []
+    if by_tag:
+        lines += ["", "| Kind | Source | Class | New |", "|---|---|---|---|"]
+        lines += [f"| {r['kind']} | {_md_escape(str(r['source']))} | "
+                  f"{SHARE_NAMES.get(r['class'], r['class'])} | {r['new']} |" for r in by_tag]
 
     lines += ["", "## Model: wins and losses vs the previous model", ""]
     m = report["model"]
@@ -3078,16 +3856,23 @@ def render_markdown(report: dict[str, Any]) -> str:
 
     g = report["guards"]
     lines += ["", "## Guards", ""]
-    md = g["max_data"]
-    if md["approved"] is None:
-        lines.append("- Max-derived data: unknown (the config is invalid, so its max_data "
-                     "approval was not read)")
-    elif md["approved"]:
-        lines.append(f"- Max-derived data: training ALLOWED, approved by {md['approved_by']} on "
-                     f"{md['approved_on']}" + (f" ({md['reference']})" if md["reference"] else ""))
+    md = g["max_derived"]
+    if md.get("complete") is None:
+        lines.append("- Max-derived data: unknown (the config is invalid, so its max_derived "
+                     "allow was not read)")
+    elif md.get("complete"):
+        listed = md.get("sessions_listed")
+        lines.append(
+            f"- Max-derived data: training ALLOWED under the Q6b allow (approval "
+            f"{md.get('approval_ref')!r}; "
+            + (f"{listed} session(s) excluded via {md.get('exclude_sessions_file')}"
+               if listed else f"the session exclusion list {md.get('exclude_sessions_file')} is "
+                              "unusable, so every Max-derived train is refused")
+            + "). Everything trained on it is tagged max-derived and private")
     else:
         lines.append("- Max-derived data: training refused (no operator approval recorded; "
-                     "DISTILL-OPEN-QUESTIONS #6)")
+                     "DISTILL-OPEN-QUESTIONS #6): the Q6b ruling allows it for a private model "
+                     "under flywheel.max_derived (approved, approval_ref, exclude_sessions_file)")
     td = g.get("train_data")
     if td:
         lines.append(f"- Train data checked: {td['rows']} row(s), {td['max_rows']} Max-derived, "
@@ -3097,6 +3882,17 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append("- Train data: not checked in this run (no train was started or refused)")
     lines.append(f"- Offspring traces dropped as unverified this window: "
                  f"{g.get('offspring_dropped_at_verify', 0)}")
+    priv = _dict(g.get("private_artifacts"))
+    lines.append(f"- Private: {priv.get('rule') or PRIVATE_RULE}")
+    if not priv.get("known"):
+        lines.append("  - What the state holds of them: unknown (the state was not read)")
+    elif not priv.get("items"):
+        lines.append("  - None recorded.")
+    for item in priv.get("items") or []:
+        untagged = " (its name does NOT carry the max-derived tag)" \
+            if item.get("tagged") is False else ""
+        lines.append(f"  - {item['kind']} {_md_escape(str(item['name']))}: "
+                     f"{_md_escape(str(item['path']))} ({item['why']}){untagged}")
 
     lines += ["", "## Issues", ""]
     lines += [f"- {_md_escape(i)}" for i in report["issues"]] or ["None."]
@@ -3235,9 +4031,10 @@ def stage_blockers(run: Run) -> dict[str, str]:
                                  f"needs {cfg.min_new_traces} (flywheel.train.min_new_traces)")
     if not cfg.train_command:
         held["train"].append("flywheel.train.command is empty")
-    if not cfg.max_approval.approved and _teachers_all_max(cfg):
+    if not cfg.max_derived.complete and _teachers_all_max(cfg):
         held["train"].append("every teacher model in flywheel.harvest.teacher_models names Max and "
-                             "no max_data approval is recorded (DISTILL-OPEN-QUESTIONS #6)")
+                             "no Q6b allow is recorded in flywheel.max_derived "
+                             "(DISTILL-OPEN-QUESTIONS #6)")
     adapters = _dict(run.state.get("adapters"))
     quantized = _dict(run.state.get("quantized"))
     if all(_dict(quantized.get(v)).get("status") == "done" for v in adapters):

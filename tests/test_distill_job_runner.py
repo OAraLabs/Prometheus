@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -729,3 +730,152 @@ def test_every_child_runs_with_core_dumps_off(box: Box) -> None:
     assert box.run(stop_in=120).returncode == 0
     lines = box.log("limits.log")
     assert lines and set(lines) == {"core 0 0"}
+
+
+# ---------------------------------------------------------------------------
+# step 0: the teacher quant A/B (DJR_AB=1)
+# ---------------------------------------------------------------------------
+
+IQ3_SHA = "f" * 64
+Q4_SHA = "e" * 64
+
+
+def _ab_inputs(box: Box, **env: str) -> None:
+    """The A/B's inputs in the temp HOME: a fake driver in code-ab, the taskset, both GGUFs."""
+    dist = box.d / "code-ab" / "scripts" / "distill"
+    dist.mkdir(parents=True)
+    (dist / "teacher_ab_run.sh").write_text(
+        f'#!/bin/bash\nexec "{sys.executable}" "{FIX / "fake_teacher_ab_run.py"}" "$@"\n')
+    (dist / "teacher_ab.py").write_text("# fake\n")
+    (box.d / "code-ab" / "COMMIT").write_text("a" * 40 + "\n")
+    (box.d / "phase2b" / "tasksets").mkdir(parents=True)
+    (box.d / "phase2b" / "tasksets" / "real-v1-excl.jsonl").write_text('{"id": "ts-1"}\n')
+    (box.d / "models" / "teacher").mkdir(parents=True)
+    (box.d / "models" / "teacher" / "Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf").write_bytes(_gguf("qwen35", 262144, 65))
+    (box.home / "models" / "Qwen3.8-27B-regular-Q4_K_M-bartowski.gguf").write_bytes(_gguf("qwen35", 262144, 64))
+    box.env.update({"DJR_AB": "1", "DJR_AB_IQ3_SHA256": IQ3_SHA, "DJR_AB_Q4_SHA256": Q4_SHA,
+                    "DJR_AB_MIN_MIN": "0.01", **env})
+
+
+def _ab_calls(box: Box) -> list[list[str]]:
+    return [json.loads(x) for x in box.log("ab-calls.log")]
+
+
+def _opt(argv: list[str], name: str) -> str:
+    return argv[argv.index(name) + 1]
+
+
+def test_ab_off_by_default_leaves_the_queue_as_it_was(box: Box) -> None:
+    _ab_inputs(box)
+    box.env.pop("DJR_AB")
+    cp = box.run(stop_in=120)
+    assert cp.returncode == 0, cp.stdout[-3000:]
+    assert [s["name"] for s in box.progress()["steps"]][0] == "base-9b-baseline"
+    assert box.log("ab-calls.log") == []
+
+
+def test_ab_runs_first_time_boxed_then_the_queue_goes_on(box: Box) -> None:
+    _ab_inputs(box, DJR_AB_MAX_MIN="1")
+    t0 = time.time()
+    cp = box.run(stop_in=120)
+    assert cp.returncode == 0, cp.stdout[-3000:]
+    prog = box.progress()
+    assert [s["name"] for s in prog["steps"]] == ["teacher-ab", "base-9b-baseline", "qwen38-27b-feasibility",
+                                                  "qwen38-27b-baseline", "glimmer-30b-baseline"]
+    ab = box.step("teacher-ab")
+    assert ab["status"] == "done" and ab["decision"]["verdict"] == "keep IQ3"
+    assert ab["detail"] == "Teacher A/B decision: keep IQ3"
+    (call,) = _ab_calls(box)
+    assert call[0] == "--execute"
+    until = datetime.fromisoformat(_opt(call, "--until")).timestamp()
+    assert t0 < until <= t0 + 60 + 2                     # the 1-min time box, not stop-at
+    assert _opt(call, "--tasks") == str(box.d / "phase2b" / "tasksets" / "real-v1-excl.jsonl")
+    assert _opt(call, "--iq3").endswith("/distill/models/teacher/Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf")
+    assert _opt(call, "--q4").endswith("/models/Qwen3.8-27B-regular-Q4_K_M-bartowski.gguf")
+    assert _opt(call, "--iq3-sha256") == IQ3_SHA and _opt(call, "--q4-sha256") == Q4_SHA
+    assert _opt(call, "--port") == str(box.port) and _opt(call, "--code") == str(box.d / "code-ab")
+    assert _opt(call, "--py") == sys.executable                          # DJR_SCORE_PY by default
+    assert _opt(call, "--notify-cmd") == str(box.d / "notify.sh")
+    assert any(u.startswith("distill-teacher-ab-") for u in box.log("scopes.log"))
+    # the rest of the queue ran after it, on the runner's own server
+    assert box.step("base-9b-baseline")["status"] == "done"
+    assert box.step_state("teacher-ab")["decision"]["verdict"] == "keep IQ3"
+    summary = subprocess.run([str(RUNNER_SH), "--summary"], env=box.env, capture_output=True, text=True)
+    assert "A/B done: keep IQ3" in summary.stdout
+    # a later window does not run it again
+    assert box.run(stop_in=120).returncode == 0
+    assert len(_ab_calls(box)) == 1
+    assert box.step("teacher-ab")["detail"] == "done in an earlier window"
+
+
+def test_ab_cut_by_its_time_box_is_partial_and_resumes(box: Box) -> None:
+    _ab_inputs(box, DJR_AB_MAX_MIN="0.05", FAKE_AB_UNTIL_EXIT="1")    # 3 s
+    t0 = time.time()
+    cp = box.run(stop_in=120)
+    assert cp.returncode == 0, cp.stdout[-3000:]
+    ab = box.step("teacher-ab")
+    assert ab["status"] == "partial" and "resumes next window" in ab["detail"]
+    until = datetime.fromisoformat(_opt(_ab_calls(box)[0], "--until")).timestamp()
+    assert until <= t0 + 3 + 1
+    assert box.step("base-9b-baseline")["status"] == "done"
+    box.env["FAKE_AB_UNTIL_EXIT"] = "0"
+    assert box.run(stop_in=120).returncode == 0
+    assert len(_ab_calls(box)) == 2 and box.step("teacher-ab")["status"] == "done"
+
+
+def test_ab_inputs_missing_skip_the_step_not_the_window(box: Box) -> None:
+    _ab_inputs(box)
+    (box.d / "phase2b" / "tasksets" / "real-v1-excl.jsonl").unlink()
+    dry = box.run(execute=False, stop_in=None)
+    assert dry.returncode == 0, dry.stdout[-3000:]
+    assert "[     --] teacher A/B inputs" in dry.stdout and "real-v1-excl.jsonl" in dry.stdout
+    cp = box.run(stop_in=120)
+    assert cp.returncode == 0, cp.stdout[-3000:]
+    assert box.step("teacher-ab")["status"] == "skipped" and "missing" in box.step("teacher-ab")["detail"]
+    assert box.log("ab-calls.log") == [] and box.step("base-9b-baseline")["status"] == "done"
+
+
+def test_ab_driver_failure_fails_the_step_and_notifies(box: Box) -> None:
+    _ab_inputs(box, FAKE_AB_RC="3")
+    cp = box.run(stop_in=120)
+    assert cp.returncode == 1
+    ab = box.step("teacher-ab")
+    assert ab["status"] == "failed" and "exit 3" in ab["detail"] and "would not start" in ab["detail"]
+    assert box.step_state("teacher-ab")["failures"] == 1
+    assert "teacher-ab FAILED" in (box.state / "notify.log").read_text()
+    assert box.step("base-9b-baseline")["status"] == "done"
+
+
+def test_ab_invalid_report_is_a_failure(box: Box) -> None:
+    _ab_inputs(box, FAKE_AB_RC="1", FAKE_AB_VERDICT="invalid")
+    assert box.run(stop_in=120).returncode == 1
+    assert box.step("teacher-ab")["status"] == "failed"
+    assert box.step("teacher-ab")["decision"]["verdict"] == "invalid"
+
+
+def test_sigterm_during_the_ab_stops_the_driver(box: Box) -> None:
+    _ab_inputs(box, FAKE_AB_DELAY="60")
+    p = box.start(stop_in=120)
+    box.wait_for(lambda: (box.state / "ab-pid").exists(), what="the A/B driver")
+    pid = int((box.state / "ab-pid").read_text())
+    p.send_signal(signal.SIGTERM)
+    assert p.wait(timeout=30) == 143
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    st = box.step_state("teacher-ab")
+    assert st["status"] == "partial" and st["failures"] == 0
+    assert [s["status"] for s in box.progress()["steps"][1:]] == ["not-started"] * 4
+
+
+def test_dry_run_shows_the_ab_driver_and_its_own_dry_run(box: Box) -> None:
+    _ab_inputs(box)
+    cp = box.run(execute=False, stop_in=None)
+    assert cp.returncode == 0, cp.stdout[-3000:]
+    out = cp.stdout
+    assert " 1. teacher-ab" in out and " 2. base-9b-baseline" in out
+    assert "--until <time box end>" in out and f"--iq3-sha256 {IQ3_SHA}" in out
+    assert "driver dry run (exit 0):" in out and "DRY RUN (nothing is started" in out
+    assert "[     ok] teacher A/B inputs" in out
+    (call,) = _ab_calls(box)
+    assert "--execute" not in call and "--notify-cmd" not in call
+    assert not (box.d / "logs").exists() and not (box.d / "teacher-ab").exists()

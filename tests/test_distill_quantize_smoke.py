@@ -141,7 +141,8 @@ def check_manifest(m, label, ref):
     assert cal["eval_check"]["train_rows_sharing_a_key"] == 0
     # The planted eval-injection row is left out, and nothing else.
     assert cal["eval_check"]["dropped_injection_overlap"] == 1
-    assert m["max_derived"]["calibration_max_derived"] == 0
+    assert m["calibration_provenance"]["calibration_max_derived"] == 0
+    assert m["max_derived"] is False and m["tags"] == []      # clean data: untagged names
     names = {a["name"]: a for a in m["artifacts"]}
     sizes = {q: names[f"{label}-{q}.gguf"]["bytes"] for q in (ref, "Q4_K_M", "Q5_K_M")}
     assert sizes["Q4_K_M"] < sizes["Q5_K_M"] < sizes[ref]

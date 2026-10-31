@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import csv
+import importlib.util
 import json
 import os
 import signal
@@ -32,8 +33,10 @@ REPO = Path(__file__).resolve().parents[1]
 SAT = datetime(2026, 10, 31, 2, 0, 30, tzinfo=ET)        # inside the window (EDT)
 NEXT_SAT = datetime(2026, 11, 7, 2, 0, 30, tzinfo=ET)    # a week on, after the DST change
 FRIDAY = datetime(2026, 10, 30, 14, 0, tzinfo=ET)
-APPROVED = {"max_data": {"approved": True, "approved_by": "operator",
-                         "approved_on": "2020-01-01", "reference": "test decision"}}
+# The Q6b allow; the block fixture sets the session exclusion list it needs.
+REF = "operator Q6b test"
+APPROVED = {"max_derived": {"approved": True, "approval_ref": REF}}
+TAG = "max-derived"
 
 
 # --------------------------------------------------------------------------- #
@@ -125,8 +128,11 @@ def block(tmp_path: Path) -> dict[str, Any]:
     cases = write_jsonl(tmp_path / "cases" / "eval-tools.jsonl", [{"id": "c1"}])
     baseline = tmp_path / "baseline.summary.json"
     baseline.write_text(json.dumps(summary("base-9b", 0.40, 0.90)))
+    sessions = tmp_path / "exclude-sessions.txt"
+    sessions.write_text("# the incident session\nsess-incident\n")
     return {
         "enabled": True, "data_dir": str(tmp_path / "fw"),
+        "max_derived": {"exclude_sessions_file": str(sessions)},
         "harvest": {"golden": [str(tmp_path / "golden" / "*.jsonl")],
                     "extra": [str(tmp_path / "extra" / "*.jsonl")],
                     "student_models": ["student-*"]},
@@ -177,7 +183,8 @@ def build_ok(*, source: str = "max-golden", teacher: str = "qwen3.8-max",
              tag: str | None = None) -> Callable[[fw.CommandSpec], fw.CommandResult]:
     """A builder that writes the split files and report.json build.py writes
     (a PASS includes the spot check). Row ids carry the run id unless *tag*
-    fixes them, so each week's build holds rows no earlier train had."""
+    fixes them, so each week's build holds rows no earlier train had. Given
+    build.py's Q6b allow it records the approval as build.py does."""
     def handler(spec: fw.CommandSpec) -> fw.CommandResult:
         out = Path(arg(spec.argv, "--out"))
         prefix = tag or out.parent.name
@@ -187,20 +194,29 @@ def build_ok(*, source: str = "max-golden", teacher: str = "qwen3.8-max",
         write_jsonl(out / "val.jsonl", train[:1])
         write_jsonl(out / "val-cases.jsonl", [{"id": "v"}])
         write_jsonl(out / "eval-tools.jsonl", [{"id": "e"}])
-        (out / "report.json").write_text(json.dumps({
+        report: dict[str, Any] = {
             "settings": {"teacher_model": teacher},
             "gates": {"train_size": {"pass": gates == "PASS"},
                       "spot_check": {"status": "PASS" if gates == "PASS" else "NOT RUN"},
                       "overall": gates},
             "inputs": {"written": {"train.jsonl": rows, "val.jsonl": 1,
-                                   "eval-tools.jsonl": 1}}}))
+                                   "eval-tools.jsonl": 1}}}
+        if fw.BUILD_ALLOW_FLAG in spec.argv:
+            assert TAG in out.name                      # build.py's rule
+            report["data_policy"] = {"max_derived_allow": {
+                "allowed": True, "approval": arg(spec.argv, fw.BUILD_APPROVAL_FLAG)}}
+        (out / "report.json").write_text(json.dumps(report))
         return fw.CommandResult(0 if gates == "PASS" else 1)
     return handler
 
 
 def train_finishes(spec: fw.CommandSpec) -> int:
+    """train_qlora.py's layout: the adapter is tagged when the run is."""
     run_dir = Path(arg(spec.argv, "--out"))
-    (run_dir / "adapter").mkdir(parents=True, exist_ok=True)
+    tagged = TAG in run_dir.name
+    assert tagged == (fw.MAX_DERIVED_APPROVAL_FLAG in spec.argv)
+    (run_dir / ("adapter-max-derived" if tagged else "adapter")).mkdir(parents=True,
+                                                                        exist_ok=True)
     (run_dir / "manifest.json").write_text(json.dumps({"status": "done"}))
     return 0
 
@@ -253,7 +269,8 @@ def test_the_template_block_is_valid_off_and_states_the_code_defaults():
     data = yaml.safe_load((REPO / "config" / "prometheus.yaml.default").read_text())
     cfg = fw.parse_config(data["flywheel"])
     assert cfg.enabled is False
-    assert cfg.max_approval.approved is False
+    assert cfg.max_derived == fw.MaxDerivedAllow() and not cfg.max_derived.complete
+    assert cfg.teacher_models == fw.DEFAULT_TEACHER_MODELS == ("qwen3.8-max", "qwen3.8-27b*")
     assert cfg.window.describe() == "Sat 02:00-06:00 America/New_York"
     # The template documents the defaults: writing it changes nothing.
     assert cfg == fw.parse_config(None)
@@ -269,12 +286,17 @@ def test_the_template_block_is_valid_off_and_states_the_code_defaults():
     ({"train": {"resume_args": ["--resume"]}}, "train.command is empty"),
     ({"train": {"min_new_traces": 0}}, "min_new_traces"),
     ({"quantize": {"command": ["q.py", "{train}"]}}, "unknown placeholder"),
-    ({"max_data": {"approved": True, "approved_on": "2020-01-01"}}, "approved_by is empty"),
-    ({"max_data": {"approved": True, "approved_by": "op"}}, "YYYY-MM-DD"),
-    ({"max_data": {"approved": True, "approved_by": "op", "approved_on": "2999-01-01"}},
-     "in the future"),
-    ({"max_data": {"approved": "yes"}}, "true or false"),
+    ({"max_derived": {"approved": True, "exclude_sessions_file": "/x"}},
+     "approval_ref is empty"),
+    ({"max_derived": {"approved": True, "approval_ref": "op"}}, "exclude_sessions_file is empty"),
+    ({"max_derived": {"approved": "yes"}}, "true or false"),
+    ({"max_derived": {"approved_by": "op"}}, "max_derived.approved_by is not a flywheel setting"),
+    # the old block is named, not silently ignored
+    ({"max_data": {"approved": True}}, "flywheel.max_data was replaced by flywheel.max_derived"),
     ({"build": {"args": ["--out", "x"]}}, "may not set --out"),
+    ({"build": {"args": ["--allow-max-derived"]}}, "may not set --allow-max-derived"),
+    ({"build": {"args": ["--max-derived-approval=x"]}}, "may not set --max-derived-approval"),
+    ({"build": {"args": ["--exclude-sessions", "f"]}}, "may not set --exclude-sessions"),
     ({"gpu_setup": "business"}, "gpu_setup"),
     ({"score": {"base_url": "127.0.0.1:8080"}}, "base_url"),
     ({"harvest": {"golden": "not-a-list"}}, "list of non-empty strings"),
@@ -291,9 +313,12 @@ def test_every_problem_is_reported_at_once():
     assert len(exc.value.problems) == 2
 
 
-def test_a_recorded_approval_parses(block):
+def test_a_recorded_approval_parses(block, tmp_path):
     cfg = fw.parse_config(merge(block, APPROVED))
-    assert cfg.max_approval.approved and cfg.max_approval.approved_by == "operator"
+    assert cfg.max_derived.complete and cfg.max_derived.approval_ref == REF
+    assert cfg.max_derived.exclude_sessions_file == tmp_path / "exclude-sessions.txt"
+    # The list alone is no allow; the allow alone is no config.
+    assert not fw.parse_config(block).max_derived.complete
 
 
 # --------------------------------------------------------------------------- #
@@ -311,8 +336,26 @@ def test_stages_run_in_order_and_the_report_is_written(tmp_path, block, repo):
     rep = report(tmp_path)
     assert [s["name"] for s in rep["stages"]] == list(fw.STAGES)
     assert {s["name"]: s["status"] for s in rep["stages"]} == dict.fromkeys(fw.STAGES, fw.OK)
+    # Max-derived rows trained under the Q6b allow: every name carries the tag
+    # (artifact_policy), the trainer and quantizer get the operator's flag.
+    version = "fw-2026-10-31-max-derived"
+    build = runner.argv("build")
+    assert Path(arg(build, "--out")).name == "sets-max-derived"
+    assert arg(build, fw.BUILD_APPROVAL_FLAG) == REF and fw.BUILD_ALLOW_FLAG in build
+    assert arg(build, fw.BUILD_EXCLUDE_FLAG) == str(tmp_path / "exclude-sessions.txt")
+    assert Path(arg(runner.argv("train"), "--out")).name == version
+    assert fw.MAX_DERIVED_APPROVAL_FLAG in runner.argv("train")
+    q = runner.argv("quantize")
+    assert Path(arg(q, "--adapter")).name == "adapter-max-derived"
+    assert Path(arg(q, "--out")).name == version and fw.MAX_DERIVED_APPROVAL_FLAG in q
+    state = json.loads((tmp_path / "fw" / "state.json").read_text())
+    assert state["adapters"][version]["max_derived"] is True
+    assert state["quantized"][version]["max_derived"] is True
+    private = {i["kind"]: i for i in rep["guards"]["private_artifacts"]["items"]}
+    assert {"train data", "train run", "adapter", "model"} <= set(private)
+    assert all(private[k]["tagged"] for k in ("train data", "train run", "adapter", "model"))
     # wins and losses vs the previous model (the baseline summary here)
-    assert rep["model"]["candidate"] == "fw-2026-10-31"
+    assert rep["model"]["candidate"] == version
     assert [w["metric"] for w in rep["model"]["wins"]] == ["eval-tools / task_success"]
     assert [x["metric"] for x in rep["model"]["losses"]] == ["eval-longctx / recall_by_depth @32k"]
     reports = tmp_path / "fw" / "reports"
@@ -459,7 +502,7 @@ def test_a_train_needs_new_rows_not_only_new_verified_traces(tmp_path, block, re
     assert "build" in runner.names() and "train" not in runner.names()
     train = stage(report(tmp_path), "train")
     assert train["status"] == fw.SKIPPED
-    assert "0 train row(s) that fw-2026-10-31 was not trained on" in train["reason"]
+    assert "0 train row(s) that fw-2026-10-31-max-derived was not trained on" in train["reason"]
     assert train["details"]["new_verified_since_last_train"] == 2
 
 
@@ -483,13 +526,13 @@ def test_a_paused_train_resumes_next_window_on_the_same_frozen_data(tmp_path, bl
     assert stage(rep, "train")["status"] == fw.PAUSED
     assert "checkpoint-200" in stage(rep, "train")["reason"]
     frozen = arg(spec.argv, "--data")
-    assert frozen.endswith("train/fw-2026-10-31.data/train.jsonl")
+    assert frozen.endswith("train/fw-2026-10-31-max-derived.data/train.jsonl")
 
     # Next Saturday: no new traces (below the bar), yet the train resumes.
     second = Runner(build=build_ok(), train=train_finishes, score=score_ok)
     run_main(tmp_path, merge(block, APPROVED), second, repo, NEXT_SAT)
     resumed = second.argv("train")
-    assert "--resume" in resumed
+    assert "--resume" in resumed and fw.MAX_DERIVED_APPROVAL_FLAG in resumed
     assert arg(resumed, "--data") == frozen
     assert "build" not in second.names()          # nothing new to build
     rep = report(tmp_path)
@@ -518,6 +561,45 @@ def test_a_finished_exit_without_an_adapter_is_a_failure(tmp_path, block, repo):
     run_main(tmp_path, merge(block, APPROVED), Runner(build=build_ok(), train=lambda s: 0), repo)
     train = stage(report(tmp_path), "train")
     assert train["status"] == fw.FAILED and "no adapter" in train["reason"]
+    assert "adapter-max-derived" in train["reason"]          # the name it looked for
+
+
+def test_an_untagged_adapter_from_max_derived_data_fails_the_train(tmp_path, block, repo):
+    """A trainer that ignores the tag leaves an adapter whose name does not
+    say what it is: never recorded, never quantized (Q6b)."""
+    golden(tmp_path, 3)
+
+    def untagged(spec: fw.CommandSpec) -> int:
+        run_dir = Path(arg(spec.argv, "--out"))
+        (run_dir / "adapter").mkdir(parents=True)
+        (run_dir / "manifest.json").write_text(json.dumps({"status": "done"}))
+        return 0
+
+    runner = Runner(build=build_ok(), train=untagged)
+    run_main(tmp_path, merge(block, APPROVED), runner, repo)
+    rep = report(tmp_path)
+    train = stage(rep, "train")
+    assert train["status"] == fw.FAILED
+    assert "the data is Max-derived but the trainer left an untagged" in train["reason"]
+    assert "quantize" not in runner.names()
+    state = json.loads((tmp_path / "fw" / "state.json").read_text())
+    assert "adapters" not in state
+
+
+def test_find_adapter_reads_the_tag_and_the_trainers_manifest(tmp_path):
+    pol = fw.load_policy()
+    run_dir = tmp_path / "fw-x"
+    (run_dir / "adapter-max-derived").mkdir(parents=True)
+    # A tagged adapter is Max-derived even when the data check said it was not.
+    assert fw.find_adapter(pol, run_dir, False) == (run_dir / "adapter-max-derived", True, "")
+    clean = tmp_path / "fw-y"
+    (clean / "adapter").mkdir(parents=True)
+    assert fw.find_adapter(pol, clean, False) == (clean / "adapter", False, "")
+    # The trainer's run manifest says Max-derived: the untagged name is refused.
+    (clean / "manifest.json").write_text(json.dumps(
+        {"schema": "distill-train-manifest/1", "max_derived": True, "tags": [TAG]}))
+    found, md, problem = fw.find_adapter(pol, clean, False)
+    assert found is None and md is True and "its name is not tagged" in problem
 
 
 def test_no_stage_starts_too_close_to_the_window_end(tmp_path, block, repo):
@@ -640,6 +722,211 @@ def test_a_teacher_gen_trace_keeps_its_source_tag_and_verification_record(tmp_pa
     assert off["flywheel"]["verification"] == {"basis": "judge-pass", "by": "judge-27b"}
 
 
+PAYG = {"verdict": "pass", "model": "qwen3.8-max", "pass": True, "provider": "max-payg",
+        "judge_key": "payg"}
+RECORD = {"verified": True, "tool_success": True, "sandboxed": True, "side_effects": False}
+
+
+def test_verify_accepts_the_payg_max_judge_as_build_py_does_and_no_other_max_judge(
+        tmp_path, block, repo):
+    """The operator's PAYG ruling: the pay-per-token Max judge verifies a
+    Max-derived teacher trace (build.py applies it to a Max row). The Token
+    Plan key (any other Max judge) never does, nor does the PAYG judge verify
+    a local 27B row (build.py wants a --judge-models judge there) or a student."""
+    def judged(i: int, judge: dict[str, Any], **meta: Any) -> dict[str, Any]:
+        return trace(i, verification={**RECORD, "judge": judge}, **meta)
+
+    write_jsonl(tmp_path / "extra" / "teacher-runs.jsonl", [
+        judged(60, PAYG, source="max-payg-gym"),                                # verified
+        judged(61, {**PAYG, "judge_key": "payg"}, model="qwen3.8-max"),         # verified
+        judged(62, {k: v for k, v in PAYG.items() if k != "provider"}),        # Token Plan?
+        judged(63, {**PAYG, "judge_key": "token-plan"}),                        # not PAYG
+        judged(64, {**PAYG, "provider": "max-payg", "model": "judge-27b"}),     # not Max: ok
+        judged(65, PAYG, model="qwen3.8-27b", source="qwen38-27b-gym", max_derived=False),
+        judged(66, PAYG, model="student-9b", adapter_version="fw-x"),           # a student
+    ])
+    run = make_run(block, repo)
+    assert fw.stage_harvest(run).status == fw.OK
+    result = fw.stage_verify(run)
+    verify = json.loads((run.run_dir / "verify.json").read_text())
+    assert verify["dropped"] == {"max_judged": 3, "max_judged_offspring": 1}
+    assert verify["verified"] == 3 and verify["payg_max_judge"] == 2
+    assert result.details["payg_max_judge"] == 2
+    pool = {p["messages"][0]["content"] for p in
+            (json.loads(x) for x in (tmp_path / "fw" / "pool" / "2026-10-31.jsonl")
+             .read_text().splitlines())}
+    assert pool == {"task 60", "task 61", "task 64"}
+    # The rule on its own: a PAYG pass on a row that is not Max-derived is no pass.
+    row = {"origin": "teacher", "kind": "extra", "verdict": "pass",
+           "verified_by": "qwen3.8-max", "payg_judge": True, "max_derived": False}
+    assert fw.verification(row) == ("", "max_judged")
+    assert fw.verification({**row, "max_derived": True}) == ("judge-pass", "")
+    assert fw.verification({**row, "max_derived": True, "payg_judge": False}) == (
+        "", "max_judged")
+    assert fw.is_payg_judge(PAYG, "qwen3.8-max")
+    assert not fw.is_payg_judge({**PAYG, "judge_key": "plan"}, "qwen3.8-max")
+    assert not fw.is_payg_judge(PAYG, "qwen3.8-27b")
+
+
+def test_the_flywheels_payg_rule_is_build_pys(tmp_path):
+    """One rule: build.py's is_payg_judge and the flywheel's agree."""
+    spec = importlib.util.spec_from_file_location(
+        "distill_build_for_fw", REPO / "scripts" / "distill" / "build.py")
+    assert spec and spec.loader
+    build = importlib.util.module_from_spec(spec)
+    sys.modules["distill_build_for_fw"] = build
+    try:
+        spec.loader.exec_module(build)
+    finally:
+        sys.modules.pop("distill_build_for_fw", None)
+    assert (fw.PAYG_PROVIDER, fw.PAYG_JUDGE_KEY) == (build.PAYG_PROVIDER, build.PAYG_JUDGE_KEY)
+    assert fw.GYM_SOURCE == build.GYM_SOURCE and fw.SHARE_CLASSES == build.SHARE_CLASSES
+    for judge, model in ((PAYG, "qwen3.8-max"), ({**PAYG, "judge_key": "x"}, "qwen3.8-max"),
+                         ({"model": "qwen3.8-max"}, "qwen3.8-max"), (PAYG, "judge-27b"),
+                         ({k: v for k, v in PAYG.items() if k != "judge_key"}, "qwen3.8-max")):
+        assert fw.is_payg_judge(judge, model) == build.is_payg_judge(judge, model)
+    for flag in ("BUILD_ALLOW_FLAG", "BUILD_APPROVAL_FLAG"):
+        assert getattr(fw, flag) == getattr(fw.load_policy(), flag)
+    qspec = importlib.util.spec_from_file_location(
+        "distill_quantize_for_fw", REPO / "scripts" / "distill" / "quantize.py")
+    assert qspec and qspec.loader
+    q = importlib.util.module_from_spec(qspec)
+    sys.modules["distill_quantize_for_fw"] = q
+    try:
+        qspec.loader.exec_module(q)
+    finally:
+        sys.modules.pop("distill_quantize_for_fw", None)
+    # the trainer's flag too (quantize.py's test keeps the two equal)
+    assert fw.MAX_DERIVED_APPROVAL_FLAG == q.APPROVAL_FLAG
+
+
+# --------------------------------------------------------------------------- #
+# Harvest: watermarks and counts per source
+# --------------------------------------------------------------------------- #
+
+
+def gym_trace(i: int, model: str = "qwen3.8-27b", source: str = "qwen38-27b-gym",
+              judge: dict[str, Any] | None = None, **meta: Any) -> dict[str, Any]:
+    """A teacher_gen.py row: the local 27B's, or a Max teacher run's."""
+    rec = {**RECORD, "judge": judge or {"verdict": "pass", "model": "qwen3.8-27b",
+                                        "pass": True}}
+    return trace(i, model=model, source=source, verdict="pass", verification=rec,
+                 max_derived=not model.endswith("27b"), **meta)
+
+
+def test_harvest_reads_past_its_watermark_and_counts_each_source(tmp_path, block, repo):
+    exports = tmp_path / "golden"
+    write_jsonl(exports / "golden_traces_1790000000_100.jsonl", [trace(0), trace(1)])
+    local = write_jsonl(tmp_path / "extra" / "qwen38-27b-gym.traces.jsonl",
+                        [gym_trace(10), gym_trace(11)])
+    maxrun = write_jsonl(tmp_path / "extra" / "max-gym.traces.jsonl",
+                         [gym_trace(20, model="qwen3.8-max", source="max-payg-gym", judge=PAYG)])
+    state: dict[str, Any] = {"schema": fw.STATE_SCHEMA}
+    first = fw.stage_harvest(make_run(block, repo, state=state))
+    assert first.status == fw.OK and first.details["new"] == 5
+    d = first.details
+    assert d["by_class"] == {"max": 3, "qwen38-27b-gym": 2, "other": 0}
+    assert {(r["kind"], r["source"], r["class"], r["new"]) for r in d["by_source_tag"]} == {
+        ("golden", "golden-export", "max", 2), ("extra", "qwen38-27b-gym", "qwen38-27b-gym", 2),
+        ("extra", "max-payg-gym", "max", 1)}
+    assert d["watermarks"] == {"new": 3, "grown": 0, "unchanged": 0, "rewritten": 0}
+    assert d["golden_export_rowid"] == 100 and d["golden_export_rowid_before"] is None
+    marks = fw.harvest_marks(state)
+    assert marks[os.path.realpath(local)]["offset"] == local.stat().st_size
+    assert json.loads((tmp_path / "fw" / "state.json").read_text())["harvest"]["files"] == marks
+
+    # A week on: a new export (a new interactive /qwen turn), more rows from the
+    # local teacher, a line the Max run is still writing; nothing else changed.
+    write_jsonl(exports / "golden_traces_1790600000_140.jsonl", [trace(2)])
+    with open(local, "a") as fh:
+        fh.write(json.dumps(gym_trace(12)) + "\n")
+    with open(maxrun, "a") as fh:
+        fh.write(json.dumps(gym_trace(21, model="qwen3.8-max", source="max-payg-gym"))[:40])
+    second = fw.stage_harvest(make_run(block, repo, now=NEXT_SAT, state=state))
+    d = second.details
+    assert second.status == fw.OK and d["new"] == 2 and d["already_harvested"] == 0
+    assert d["unreadable"] == 0 and d["partial_last_lines"] == 1
+    assert d["watermarks"] == {"new": 1, "grown": 2, "unchanged": 1, "rewritten": 0}
+    assert d["golden_export_rowid"] == 140 and d["golden_export_rowid_before"] == 100
+    assert d["by_class"] == {"max": 1, "qwen38-27b-gym": 1, "other": 0}
+
+    # The Max run finishes its line; teacher_gen.py's resume rewrites the local
+    # file (drops a row): read whole again, nothing harvested twice.
+    with open(maxrun, "a") as fh:
+        fh.write(json.dumps(gym_trace(21, model="qwen3.8-max",
+                                      source="max-payg-gym"))[40:] + "\n")
+    write_jsonl(local, [gym_trace(11), gym_trace(12), gym_trace(13)])
+    third = fw.stage_harvest(make_run(block, repo, now=NEXT_SAT + timedelta(days=7),
+                                      state=state))
+    d = third.details
+    assert d["new"] == 2 and d["already_harvested"] == 2 and d["unreadable"] == 0
+    assert d["watermarks"] == {"new": 0, "grown": 1, "unchanged": 2, "rewritten": 1}
+    rows = [json.loads(x) for x in (tmp_path / "fw" / "runs" / "2026-11-14" / "harvest.jsonl")
+            .read_text().splitlines()]
+    assert sorted((r["file"], r["line"]) for r in rows) == [
+        ("max-gym.traces.jsonl", 2), ("qwen38-27b-gym.traces.jsonl", 3)]
+
+
+def test_a_harvest_the_window_cuts_short_moves_no_watermark(tmp_path, block, repo, monkeypatch):
+    monkeypatch.setattr(fw, "CLOCK_EVERY_LINES", 1)
+    golden(tmp_path, 5)
+    ticks = iter(range(10_000))
+
+    def ticking() -> datetime:
+        return datetime(2026, 10, 31, 5, 43, tzinfo=ET) + timedelta(minutes=next(ticks))
+
+    state: dict[str, Any] = {"schema": fw.STATE_SCHEMA}
+    assert fw.stage_harvest(make_run(block, repo, clock=ticking, state=state)).status == fw.PAUSED
+    assert "harvest" not in state
+
+
+def test_the_report_shows_the_share_and_that_max_derived_artifacts_are_private(
+        tmp_path, block, repo):
+    golden(tmp_path, 3)
+
+    def with_share(spec: fw.CommandSpec) -> fw.CommandResult:
+        res = build_ok()(spec)
+        out = Path(arg(spec.argv, "--out"))
+        report_ = json.loads((out / "report.json").read_text())
+        report_["data_policy"]["share"] = {
+            "classes": list(fw.SHARE_CLASSES), "approval": REF, "max_derived_allowed": True,
+            "by_split": {"train": {"rows": 5, "max": {"rows": 2, "pct": 40.0},
+                                   "qwen38-27b-gym": {"rows": 3, "pct": 60.0},
+                                   "other": {"rows": 0, "pct": 0.0}},
+                         "val": {"rows": 1, "max": {"rows": 0, "pct": 0.0},
+                                 "qwen38-27b-gym": {"rows": 1, "pct": 100.0},
+                                 "other": {"rows": 0, "pct": 0.0}}}}
+        (out / "report.json").write_text(json.dumps(report_))
+        return res
+
+    run_main(tmp_path, merge(block, APPROVED),
+             Runner(build=with_share, train=train_finishes, score=score_ok), repo)
+    rep, md = reviewer_file(tmp_path / "fw" / "reports")
+    sets = rep["traces"]["dataset"]["sets"]
+    assert sets["approval"] == REF and sets["share"]["by_split"]["train"]["rows"] == 5
+    assert rep["traces"]["dataset"]["train"]["share"] == {"max": 4, "qwen38-27b-gym": 0,
+                                                          "other": 0}
+    assert ("- Max vs local 27B: train split of the 2026-10-31 sets: Max 2 (40.0%), local 27B "
+            "3 (60.0%), other 0 (0.0%) of 5") in md
+    assert f"- Max vs local 27B in the 2026-10-31 sets (Q6b approval {REF!r}):" in md
+    assert "  - val: Max 0 (0.0%), local 27B 1 (100.0%), other 0 (0.0%) of 1" in md
+    assert "- New by class: Max 3, local 27B 0, other 0" in md
+    g = rep["guards"]
+    assert g["max_derived"] == {"approved": True, "approval_ref": REF,
+                                "exclude_sessions_file": str(tmp_path / "exclude-sessions.txt"),
+                                "sessions_listed": 1, "complete": True}
+    kinds = {i["kind"]: i for i in g["private_artifacts"]["items"]}
+    assert set(kinds) == {"dataset", "train data", "train run", "adapter", "model"}
+    assert kinds["adapter"]["name"] == "fw-2026-10-31-max-derived"
+    assert "- Max-derived artifacts: 5, all private (never published)" in md
+    assert "training ALLOWED under the Q6b allow (approval 'operator Q6b test'; 1 session(s) " \
+           "excluded via" in md
+    assert "- Private: Max-derived artifacts are private: never pushed to Hugging Face or " \
+           "anywhere public." in md
+    assert "  - adapter fw-2026-10-31-max-derived: " in md and "NOT carry" not in md
+    assert "sess-incident" not in md and "sess-incident" not in json.dumps(rep)
+
+
 def test_offspring_judged_by_the_student_under_any_of_its_names_or_by_max_is_dropped(
         tmp_path, block, repo):
     """The student judging itself is no verification, whichever name the judge
@@ -728,14 +1015,21 @@ def test_tagging_reads_the_exact_adapter_version_a_served_id_names(block):
         "offspring", "unknown", True)
 
 
-def _seed_sets(run: fw.Run, rows: list[dict[str, Any]], teacher: str) -> None:
+def _seed_sets(run: fw.Run, rows: list[dict[str, Any]], teacher: str,
+               approval: str | None = REF) -> None:
+    """Sets as build.py leaves them; with an *approval*, built under the Q6b allow."""
     sets = run.run_dir / "sets"
     write_jsonl(sets / "train.jsonl", rows)
     write_jsonl(sets / "val.jsonl", rows[-1:])
-    (sets / "report.json").write_text(json.dumps({"settings": {"teacher_model": teacher}}))
+    report: dict[str, Any] = {"settings": {"teacher_model": teacher}}
+    if approval is not None:
+        report["data_policy"] = {"max_derived_allow": {"allowed": True, "approval": approval}}
+    (sets / "report.json").write_text(json.dumps(report))
     (run.run_dir / "verify.json").write_text(json.dumps({"verified": 10}))
     run.state["sets"] = {"run": run.run_id, "dir": str(sets), "gates": "PASS",
-                         "teacher_model": teacher}
+                         "teacher_model": teacher,
+                         "sessions_sha256": fw.session_list_digest(
+                             run.cfg.max_derived.exclude_sessions_file) or ""}
 
 
 def test_the_train_refuses_offspring_rows_without_a_judge_verdict(tmp_path, block, repo):
@@ -791,6 +1085,217 @@ def test_the_train_refuses_max_derived_data_without_recorded_approval(tmp_path, 
     run = make_run(merge(block, APPROVED), repo, runner=runner)
     _seed_sets(run, rows, teacher="qwen3.8-max")
     assert fw.stage_train(run).status == fw.OK
+    argv = runner.argv("train")
+    assert Path(arg(argv, "--out")).name == "fw-2026-10-31-max-derived"
+    assert fw.MAX_DERIVED_APPROVAL_FLAG in argv
+    t = run.state["train"]
+    assert t["max_derived"] is True and t["approval"] == REF
+    assert t["share"] == {"max": 4, "qwen38-27b-gym": 0, "other": 0}     # train + val rows
+    assert Path(t["data_dir"]).name == "fw-2026-10-31-max-derived.data"
+    assert run.state["adapters"]["fw-2026-10-31-max-derived"]["adapter_dir"].endswith(
+        "/adapter-max-derived")
+
+
+@pytest.mark.parametrize("approval, over, why", [
+    # sets built without the allow (or under another approval) record none of it
+    (None, {}, "the dataset records no Max-derived approval"),
+    ("another ref", {}, "the dataset records the approval 'another ref'"),
+    # the allow needs a usable exclusion list, at train time too
+    (REF, {"max_derived": {"exclude_sessions_file": "/nonexistent/sessions.txt"}},
+     "does not exist"),
+])
+def test_a_max_derived_train_needs_the_datasets_own_approval_and_the_session_list(
+        tmp_path, block, repo, approval, over, why):
+    rows = [{"source": "max-golden", "label": "tool-success"}] * 3
+    runner = Runner(train=train_finishes)
+    run = make_run(merge(merge(block, APPROVED), over), repo, runner=runner)
+    _seed_sets(run, rows, teacher="qwen3.8-max", approval=approval)
+    result = fw.stage_train(run)
+    assert result.status == fw.REFUSED and why in result.reason, result.reason
+    assert runner.calls == [] and "train" not in run.state
+
+
+def test_an_empty_session_list_refuses_the_build(tmp_path, block, repo):
+    golden(tmp_path, 3)
+    (tmp_path / "exclude-sessions.txt").write_text("# nothing listed\n\n")
+    runner = Runner(build=build_ok())
+    run_main(tmp_path, merge(block, APPROVED), runner, repo)
+    build = stage(report(tmp_path), "build")
+    assert build["status"] == fw.REFUSED and "lists no session id" in build["reason"]
+    assert "build" not in runner.names()
+
+
+def test_without_the_allow_the_build_gets_only_the_session_list(tmp_path, block, repo):
+    golden(tmp_path, 1)
+    runner = Runner(build=build_ok())
+    run_main(tmp_path, block, runner, repo)
+    argv = runner.argv("build")
+    assert Path(arg(argv, "--out")).name == "sets"
+    assert arg(argv, fw.BUILD_EXCLUDE_FLAG) == str(tmp_path / "exclude-sessions.txt")
+    assert fw.BUILD_ALLOW_FLAG not in argv and fw.BUILD_APPROVAL_FLAG not in argv
+
+
+def test_a_changed_allow_rebuilds_the_sets(tmp_path, block, repo):
+    golden(tmp_path, 3)
+    run_main(tmp_path, block, Runner(build=build_ok()), repo)
+    # A week on, no new traces, but the operator recorded the Q6b allow.
+    runner = Runner(build=build_ok(), train=train_finishes, score=score_ok)
+    run_main(tmp_path, merge(block, APPROVED), runner, repo, NEXT_SAT)
+    assert runner.names()[:2] == ["build", "train"]
+    assert Path(arg(runner.argv("build"), "--out")).name == "sets-max-derived"
+
+
+def test_an_edit_to_the_session_list_rebuilds_and_older_sets_never_train(tmp_path, block, repo):
+    """The build's inputs hold the ids the list names, not only its path; and
+    sets built under another list never start a train, even when the rebuild
+    fails."""
+    golden(tmp_path, 3)
+    held = merge(merge(block, APPROVED), {"train": {"min_new_traces": 100}})   # no train yet
+    first = Runner(build=build_ok())
+    run_main(tmp_path, held, first, repo)
+    assert first.names() == ["build"]
+    state_path = tmp_path / "fw" / "state.json"
+    before = json.loads(state_path.read_text())["sets"]
+    assert before["sessions_sha256"] == fw.session_list_digest(
+        tmp_path / "exclude-sessions.txt") != ""
+    # A comment or reordering is no edit to the list: its sets stand.
+    sessions = tmp_path / "exclude-sessions.txt"
+    sessions.write_text("sess-incident   # 2026-10-13\n\n# the incident session\n")
+    second = Runner(build=build_ok())
+    run_main(tmp_path, held, second, repo, NEXT_SAT)
+    assert "build" not in second.names()
+    assert stage(report(tmp_path), "build")["status"] == fw.SKIPPED
+    # A second incident session listed, and no new traces: the build runs again.
+    # It fails here, and the sets of 2026-10-31 (built without that session
+    # excluded) do not train.
+    sessions.write_text("sess-incident\nsess-second\n")
+    third = Runner(build=lambda spec: fw.CommandResult(2, tail="boom"), train=train_finishes)
+    run_main(tmp_path, merge(held, {"train": {"min_new_traces": 2}}), third, repo,
+             NEXT_SAT + timedelta(days=7))
+    assert third.names() == ["build"]
+    rep = report(tmp_path)
+    assert stage(rep, "build")["status"] == fw.FAILED
+    train = stage(rep, "train")
+    assert train["status"] == fw.REFUSED
+    assert "were built under another session exclusion list" in train["reason"]
+    assert "train" not in json.loads(state_path.read_text())
+    assert "sess-second" not in json.dumps(rep)
+
+
+def test_a_paused_train_is_superseded_when_the_session_list_changes(tmp_path, block, repo):
+    """Its frozen data may hold a session listed since: it is not resumed, and
+    a new train starts on sets rebuilt under the current list."""
+    golden(tmp_path, 3)
+    first = Runner(build=build_ok(), train=train_paused)
+    run_main(tmp_path, merge(block, APPROVED), first, repo)
+    frozen = arg(first.argv("train"), "--data")
+    assert frozen.endswith("train/fw-2026-10-31-max-derived.data/train.jsonl")
+    (tmp_path / "exclude-sessions.txt").write_text("sess-incident\nsess-second\n")
+
+    second = Runner(build=build_ok(), train=train_finishes, score=score_ok)
+    run_main(tmp_path, merge(block, APPROVED), second, repo, NEXT_SAT)
+    assert second.names()[:2] == ["build", "train"]
+    argv = second.argv("train")
+    assert "--resume" not in argv and arg(argv, "--data") != frozen
+    assert arg(argv, "--data").endswith("train/fw-2026-11-07-max-derived.data/train.jsonl")
+    rep, md = reviewer_file(tmp_path / "fw" / "reports")
+    train = stage(rep, "train")
+    assert train["status"] == fw.OK
+    assert train["details"]["superseded"]["adapter_version"] == "fw-2026-10-31-max-derived"
+    assert any(i.startswith("train fw-2026-10-31-max-derived is not resumed: the session "
+                            "exclusion list") for i in rep["issues"])
+    state = json.loads((tmp_path / "fw" / "state.json").read_text())
+    old = state["superseded_trains"]
+    assert [o["adapter_version"] for o in old] == ["fw-2026-10-31-max-derived"]
+    assert old[0]["superseded_in"] == "2026-11-07" and old[0]["max_derived"] is True
+    assert state["train"]["adapter_version"] == "fw-2026-11-07-max-derived"
+    assert state["train"]["sessions_sha256"] == state["sets"]["sessions_sha256"] \
+        == fw.session_list_digest(tmp_path / "exclude-sessions.txt")
+    # its frozen data and checkpoints stay on disk, and private
+    items = {(i["kind"], i["name"]) for i in rep["guards"]["private_artifacts"]["items"]}
+    assert ("train data", "fw-2026-10-31-max-derived (superseded)") in items
+    assert ("train run", "fw-2026-10-31-max-derived (superseded)") in items
+    assert Path(frozen).is_file()
+    assert "sess-second" not in md and "sess-second" not in json.dumps(rep)
+
+
+def test_a_dry_run_says_a_train_would_be_superseded_and_changes_nothing(tmp_path, block, repo):
+    golden(tmp_path, 3)
+    run_main(tmp_path, merge(block, APPROVED), Runner(build=build_ok(), train=train_paused), repo)
+    state_path = tmp_path / "fw" / "state.json"
+    (tmp_path / "exclude-sessions.txt").write_text("sess-incident\nsess-second\n")
+    before = state_path.read_text()
+    run = make_run(merge(block, APPROVED), repo, now=NEXT_SAT,
+                   state=json.loads(before))
+    run.dry_run = True
+    result = fw.stage_train(run)
+    assert result.details["superseded"]["adapter_version"] == "fw-2026-10-31-max-derived"
+    assert "superseded_trains" not in run.state and run.state["train"]["status"] == "incomplete"
+    assert state_path.read_text() == before
+
+
+def test_a_reworded_approval_ref_does_not_strand_a_paused_train(tmp_path, block, repo):
+    """The frozen data keeps the approval it was built under; the trainer reads
+    it there. A new approval_ref applies from the next build on."""
+    golden(tmp_path, 3)
+    first = Runner(build=build_ok(), train=train_paused)
+    run_main(tmp_path, merge(block, APPROVED), first, repo)
+    frozen = arg(first.argv("train"), "--data")
+    reworded = merge(block, {"max_derived": {"approved": True,
+                                             "approval_ref": REF + " (reworded)"}})
+    second = Runner(build=build_ok(), train=train_finishes, score=score_ok)
+    run_main(tmp_path, reworded, second, repo, NEXT_SAT)
+    resumed = second.argv("train")
+    assert "--resume" in resumed and arg(resumed, "--data") == frozen
+    assert fw.MAX_DERIVED_APPROVAL_FLAG in resumed
+    rep = report(tmp_path)
+    train = stage(rep, "train")
+    assert train["status"] == fw.OK and train["details"]["approval"] == REF
+    assert any(f"resumes under the approval its frozen data records ({REF!r})" in i
+               for i in rep["issues"])
+    assert not any("A build under the allow comes first" in s for s in steps_by(rep, "operator"))
+    # The allow itself still counts: without it the resume is refused, not superseded.
+    third_state = json.loads((tmp_path / "fw" / "state.json").read_text())
+    third_state["train"]["status"] = "incomplete"
+    run = make_run(block, repo, now=NEXT_SAT + timedelta(days=7), state=third_state)
+    result = fw.stage_train(run)
+    assert result.status == fw.REFUSED and "Max-derived" in result.reason
+    assert run.state["train"]["status"] == "incomplete"
+
+
+def test_quantize_refuses_a_max_derived_adapter_without_the_allow(tmp_path, block, repo):
+    state = {"schema": fw.STATE_SCHEMA, "adapters": {
+        "fw-x-max-derived": {"adapter_dir": "a", "data_dir": "d", "max_derived": True}}}
+    runner = Runner()
+    result = fw.stage_quantize(make_run(block, repo, runner=runner, state=state))
+    assert result.status == fw.REFUSED and "no complete Q6b allow" in result.reason
+    assert runner.calls == []
+    # A record that does not say counts as Max-derived; its models dir is tagged.
+    state = {"schema": fw.STATE_SCHEMA, "adapters": {"fw-y": {"adapter_dir": "a",
+                                                              "data_dir": "d"}}}
+    runner = Runner()
+    run = make_run(merge(block, APPROVED), repo, runner=runner, state=state)
+    assert fw.stage_quantize(run).status == fw.OK
+    argv = runner.argv("quantize")
+    assert Path(arg(argv, "--out")).name == "fw-y-max-derived"
+    assert fw.MAX_DERIVED_APPROVAL_FLAG in argv
+    assert run.state["quantized"]["fw-y"]["max_derived"] is True
+
+
+def test_the_train_share_counts_each_row_by_its_own_provenance(tmp_path, block):
+    """build.py names the Max model as the teacher of any set that mixes in a
+    Max row; the guard still counts every row as Max-derived, but the share
+    reports the local 27B's rows as theirs."""
+    rows = write_jsonl(tmp_path / "mixed.jsonl", [
+        *[{"source": "max-golden", "model": "qwen3.8-max", "max_derived": True}] * 6,
+        *[{"source": "qwen38-27b-gym", "model": "qwen3.8-27b", "max_derived": False}] * 4,
+        {"source": "qwen38-27b-gym"},                    # says nothing: counted as Max
+    ])
+    g = fw.check_training_data([rows], fw.parse_config(merge(block, APPROVED)), "qwen3.8-max")
+    assert g.rows == 11 and g.max_rows == 11 and g.refusals == []
+    assert g.share == {"max": 7, "qwen38-27b-gym": 4, "other": 0}
+    local = fw.check_training_data([rows], fw.parse_config(block), "qwen3.8-27b")
+    assert local.share == {"max": 6, "qwen38-27b-gym": 5, "other": 0}
 
 
 def test_an_unknown_builder_teacher_counts_as_max_derived(tmp_path, block):
@@ -883,7 +1388,9 @@ def test_a_config_error_report_states_nothing_from_the_fallback_defaults(tmp_pat
                               "job refuses to run then too unless the block parses."}]
     assert rep["traces"]["min_new_traces"] is None
     assert rep["traces"]["new_verified_since_last_train"] is None
-    assert rep["guards"]["max_data"]["approved"] is None
+    assert rep["guards"]["max_derived"]["approved"] is None
+    assert rep["guards"]["max_derived"]["complete"] is None
+    assert rep["guards"]["private_artifacts"]["known"] is False
     assert rep["spend"]["ledger"] == block["spend_ledger"]       # the block's own ledger
     for wrong in ("needs 500", "500 more", "OPEN-QUESTIONS #6", "names only Max", "flywheel is off",
                   "training refused", "no train has started", "No model has been scored",
@@ -912,7 +1419,8 @@ def test_the_report_writes_the_home_directory_as_tilde(tmp_path, block, repo, mo
         assert str(tmp_path) not in (reports / name).read_text(), name
     rep = report(tmp_path)
     assert rep["spend"]["ledger"] == "~/ledger.csv"
-    assert stage(rep, "score")["details"]["summary"] == "~/fw/scores/fw-2026-10-31.summary.json"
+    assert stage(rep, "score")["details"]["summary"] == (
+        "~/fw/scores/fw-2026-10-31-max-derived.summary.json")
 
 
 def test_outside_the_window_a_scheduled_run_does_nothing(tmp_path, block, repo):
@@ -1046,7 +1554,8 @@ def test_train_and_quantize_need_a_gpu_setup_or_the_no_swap_opt_in(tmp_path, blo
     assert train["status"] == fw.SKIPPED and "flywheel.gpu_setup is empty" in train["reason"]
     assert runner.names() == ["build"]
     waiting = {"schema": fw.STATE_SCHEMA, "adapters": {"fw-x": {"adapter_dir": "a",
-                                                                "data_dir": "d"}}}
+                                                                "data_dir": "d",
+                                                                "max_derived": False}}}
     run = make_run(merge(block, {"gpu_setup": ""}), repo, runner=runner, state=waiting)
     quantize = fw.stage_quantize(run)
     assert quantize.status == fw.SKIPPED and "'none'" in quantize.reason
@@ -1059,7 +1568,8 @@ def test_a_gpu_swap_starts_only_with_time_for_it_and_is_held_to_the_stop_time(
 
     def waiting() -> dict[str, Any]:
         return {"schema": fw.STATE_SCHEMA, "adapters": {"fw-x": {"adapter_dir": "a",
-                                                                 "data_dir": "d"}}}
+                                                                 "data_dir": "d",
+                                                                 "max_derived": False}}}
 
     # 20 min before the 05:45 stop: enough for quantize alone, not for a swap too.
     runner = Runner()
@@ -1171,13 +1681,13 @@ def test_the_gate_is_against_the_base_model_and_wins_against_the_previous(
 
     assert arg(second.argv("score-compare"), "--base") == str(tmp_path / "baseline.summary.json")
     m = report(tmp_path)["model"]
-    assert m["candidate"] == "fw-2026-11-07"
+    assert m["candidate"] == "fw-2026-11-07-max-derived"
     assert m["gate_against"] == "baseline (baseline.summary.json)"
-    assert m["previous"] == "fw-2026-10-31"
+    assert m["previous"] == "fw-2026-10-31-max-derived"
     assert m["wins"] == [] and m["losses"] == []      # score_ok scores every week alike
     md = (tmp_path / "fw" / "reports" / "LATEST.md").read_text()
     assert "Phase 6 gate vs baseline (baseline.summary.json)" in md
-    assert "Compared with fw-2026-10-31 (a comparison, not the gate)" in md
+    assert "Compared with fw-2026-10-31-max-derived (a comparison, not the gate)" in md
 
 
 # --------------------------------------------------------------------------- #
@@ -1410,11 +1920,12 @@ def test_a_report_only_refresh_after_a_config_error_keeps_the_runs_dated_copy(
 
 
 def test_report_only_with_no_run_says_what_holds_each_stage(tmp_path, repo):
-    """This week's real situation: the template config (flywheel off, nothing
-    configured, the only teacher Max), no run ever, operator context given."""
+    """The template config (flywheel off, nothing configured) with Max as the
+    only teacher, no run ever, operator context given."""
     data = yaml.safe_load((REPO / "config" / "prometheus.yaml.default").read_text())["flywheel"]
     data["data_dir"] = str(tmp_path / "fw")
     data["spend_ledger"] = str(tmp_path / "no-ledger.csv")
+    data["harvest"]["teacher_models"] = ["qwen3.8-max"]
     runner = Runner()
     code = run_main(tmp_path, data, runner, repo, FRIDAY, "--report-only",
                     "--note", "Training on the hosted teacher's traces is on hold (#6).",
@@ -1430,9 +1941,10 @@ def test_report_only_with_no_run_says_what_holds_each_stage(tmp_path, repo):
     train = stage(rep, "train")["reason"]
     assert "0 new verified trace(s) since the last train; a train needs 500" in train
     assert "flywheel.train.command is empty" in train and "flywheel.gpu_setup is empty" in train
-    assert "names Max and no max_data approval is recorded (DISTILL-OPEN-QUESTIONS #6)" in train
+    assert ("names Max and no Q6b allow is recorded in flywheel.max_derived "
+            "(DISTILL-OPEN-QUESTIONS #6)") in train
     operator = steps_by(rep, "operator")
-    assert operator[0].startswith("Decide DISTILL-OPEN-QUESTIONS #6")
+    assert operator[0].startswith("Record the Q6b allow to train on Max-derived rows")
     assert operator[1].startswith("flywheel.harvest.teacher_models names only Max models")
     assert operator[2].startswith("Before the flywheel can train, quantize and score, set "
                                   "flywheel.build.args")

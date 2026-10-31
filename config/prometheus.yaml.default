@@ -1795,24 +1795,29 @@ flywheel:
   harvest:
     # Read only, never modified. Golden traces are also what the dataset
     # builder reads itself (the job passes them as its --traces); extra
-    # sources (judged gym or offspring traces) reach the builder only
-    # through the verified pool.
+    # sources (judged gym or offspring traces, teacher_gen.py runs of either
+    # teacher) reach the builder only through the verified pool. Each file
+    # keeps a watermark: a file that grew is read from where the last
+    # harvest stopped, a rewritten one whole again (the dedupe holds).
     golden:
       - ~/.prometheus/trajectories/golden_traces_*.jsonl
     extra: []
-    # Served-model ids (shell patterns, case-insensitive). A teacher's golden
-    # trace is verified by its tool-success label. An offspring trace (a
-    # student model, or any trace carrying an adapter_version) only by a
-    # pass verdict from a named verifier other than itself. Anything else is
-    # tagged and never trained on.
-    teacher_models: [qwen3.8-max]
+    # Served-model ids (shell patterns, case-insensitive): the hosted Max and
+    # the local 27B teacher. A teacher's golden trace is verified by its
+    # tool-success label; an extra one by a pass from a judge that is not
+    # Max (or, on a Max-derived trace only, the pay-per-token Max judge). An
+    # offspring trace (a student model, or any trace carrying an
+    # adapter_version) only by a pass verdict from a named verifier other
+    # than itself and never Max. Anything else is tagged and never trained on.
+    teacher_models: [qwen3.8-max, "qwen3.8-27b*"]
     student_models: []
   build:
     # "" = scripts/distill/build_datasets.py, else scripts/distill/build.py.
     script: ""
     # This host's builder arguments (--pack, --tokenizer-dir, --index ...).
-    # The job adds --traces, --extra-traces and --out. Empty = the build
-    # stage is skipped, saying so.
+    # The job adds --traces, --extra-traces and --out, and from max_derived
+    # (below) --exclude-sessions, --allow-max-derived and
+    # --max-derived-approval. Empty = the build stage is skipped, saying so.
     args: []
   train:
     # Verified traces needed since the last train's data was frozen.
@@ -1830,22 +1835,37 @@ flywheel:
     resume_args: []
     # The trainer's exit code for "checkpointed and stopped for the window"
     # (75 = EX_TEMPFAIL). Exit 0 is finished, unless {run_dir}/manifest.json
-    # says "stopped"; a finished train leaves {run_dir}/adapter.
+    # says "stopped"; a finished train leaves {run_dir}/adapter (on
+    # Max-derived data {run_dir}/adapter-max-derived).
     incomplete_exit_code: 75
     # Failed windows before a train is abandoned for the operator.
     max_failed_attempts: 2
-  # DISTILL-OPEN-QUESTIONS #6: no training on data derived from the hosted
-  # teacher (Qwen3.8 Max) until the operator decides. The train stage refuses
-  # any dataset holding Max-derived rows unless all three are set here.
-  max_data:
+  # DISTILL-OPEN-QUESTIONS #6, Q6b ruling: Max-derived rows (the hosted
+  # teacher's traces) may train a PRIVATE model only, under this explicit,
+  # recorded allow. With all three set, the build gets build.py's
+  # --allow-max-derived --max-derived-approval <approval_ref> (its sets go in
+  # sets-max-derived/), a train on Max-derived rows is named
+  # fw-<run>-max-derived and gets --i-have-operator-approval-for-max-derived-data
+  # (so does the quantize of its adapter), and everything it makes is tagged
+  # max-derived and never published. Otherwise the train stage refuses any
+  # dataset holding a Max-derived row.
+  max_derived:
     approved: false
-    approved_by: ""
-    approved_on: ""         # YYYY-MM-DD
-    reference: ""           # where the decision is written down
+    # The operator's approval, recorded verbatim in the dataset
+    # (e.g. "operator Q6b 2026-10-30").
+    approval_ref: ""
+    # Session ids, one per line (# comments allowed): build.py's
+    # --exclude-sessions, required by the allow (the 2026-10-13 Token-Plan
+    # incident session). Host-only: keep it out of the repo. Relative = under
+    # the Prometheus data dir. Set alone, the builder still drops them. Any
+    # edit to the ids rebuilds the sets; a train frozen under an older list
+    # is not resumed, and a new one starts on the rebuilt sets.
+    exclude_sessions_file: ""
   quantize:
     # argv; {python} {repo} {adapter_dir} {data_dir} (the adapter's frozen
-    # splits, for a train-only calibration) {out_dir} {adapter_version}
-    # {stop_at} {stop_at_epoch} {max_seconds}. Empty = not quantized.
+    # splits, for a train-only calibration) {out_dir} (models/<version>,
+    # tagged for a Max-derived adapter) {adapter_version} {stop_at}
+    # {stop_at_epoch} {max_seconds}. Empty = not quantized.
     command: []
   score:
     # llama-server serving the newest quantized candidate. The job does not

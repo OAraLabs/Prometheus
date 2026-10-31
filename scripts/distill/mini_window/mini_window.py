@@ -52,6 +52,13 @@ Safety:
   -p KillMode=mixed`` (see the wrappers): the restore that a stop's SIGTERM starts takes minutes, and the
   default 90 s would SIGKILL it half done. A second signal is ignored while that restore runs.
 
+Generation (Track C): once a window-start swap is verified, and again when slot-exit is back on the Q4
+teacher, ``gen_runner.sh run --execute`` (GEN_RUNNER; GEN_ENABLE=0 turns it off) starts as the transient
+unit ``distill-gen-<stamp>`` (``--collect``, KillMode=mixed, TimeoutStopSec=GEN_STOP_TIMEOUT_S), so every
+``apply business`` restore and slot-enter stop it by name. Not when one is already running or the runner is
+not staged; a start that fails is reported and never fails the window (gen_runner.py's own checks refuse a
+port that does not serve the teacher).
+
 Nightly evals (cron 03:00 and 06:00) are not changed: during a window they score whichever teacher is on
 the port (recorded under its alias). On a Q4 night they also need Ollama (the judge) while the Q4 teacher
 holds Ollama's VRAM, so the night scheduler runs ``slot-enter`` at 02:50 / 05:50 (Q4 teacher -> IQ3
@@ -112,6 +119,9 @@ DEFAULTS: dict[str, str] = {
     "SETUP_Q4": "flywheel-night-q4",
     "SETUP_RESTORE": "business",
     "GEN_UNIT_GLOB": "distill-gen-*",
+    "GEN_ENABLE": "1",
+    "GEN_RUNNER": "",              # empty: WIN_DIR/gen_runner.sh (staged beside this file)
+    "GEN_STOP_TIMEOUT_S": "90",
     "BASELINE_UNIT_GLOB": "distill-baseline-*",
     "EVAL_CMD_MATCH": "scripts/run_nightly_evals.py",
     "EVAL_TIMES": "0300,0600",
@@ -981,7 +991,9 @@ def cmd_window_start(w: Window, q4: bool) -> int:
             w.swap_pending = False
         judge = "" if q4 else f"; judge {w.ollama_fit()[1]}"
         w.record("window.started", f"{w.et().strftime('%F %T %Z')} {setup} {alias}")
-        w.notify(f"mini window open: {alias} on the local model port ({setup}); voice probe {p.describe()}{judge}")
+        gen = start_gen(w, "window-start")
+        w.notify(f"mini window open: {alias} on the local model port ({setup}); voice probe {p.describe()}{judge}"
+                 f"\ngeneration: {gen}")
         return 0
 
 
@@ -1017,6 +1029,35 @@ def cmd_window_end(w: Window) -> int:
         w.notify(f"mini window end: RESTORE FAILED, the daemon's local model may be DOWN.\n{line}\n"
                  "NO-SWAPS flag set; the dead-man retries.")
         return 1
+
+
+def start_gen(w: Window, why: str) -> str:
+    """Start the generation runner as ``distill-gen-<stamp>`` (see the module doc). Returns what happened,
+    for the log and the notify; never raises: generation is not what the window's swap is judged by."""
+    c = w.c
+    try:
+        if c.get("GEN_ENABLE", "1") != "1":
+            return "off (GEN_ENABLE)"
+        runner = c.get("GEN_RUNNER") or f"{c['WIN_DIR']}/gen_runner.sh"
+        if not os.access(runner, os.X_OK):
+            w.log(f"no generation runner at {runner}: the window runs without generation")
+            return "not staged"
+        running = sorted(u for u, s in w.units_matching(c["GEN_UNIT_GLOB"], "service").items() if s in ACTIVE)
+        if running:
+            return f"already running ({', '.join(running)})"
+        unit = f"distill-gen-{w.et().strftime('%Y%m%d-%H%M%S')}"
+        cp = w.act(["systemd-run", "--user", f"--unit={unit}", "--collect", "-p", "KillMode=mixed",
+                    "-p", f"TimeoutStopSec={c['GEN_STOP_TIMEOUT_S']}", "-p", f"WorkingDirectory={Path(c['WIN_DIR']).parent}",
+                    f"--description=distill generation ({why})", runner, "run", "--execute"], timeout=60)
+        if not w.execute:
+            return f"would start {unit}"
+        if cp.returncode != 0:
+            w.log(f"systemd-run {unit} exited {cp.returncode}: {(cp.stderr or cp.stdout).strip()[:200]}")
+            return f"FAILED to start {unit} (systemd-run exit {cp.returncode})"
+        return f"{unit} started"
+    except Exception as e:  # noqa: BLE001 - never fail a verified window over generation
+        w.log(f"generation start failed: {type(e).__name__}: {e}")
+        return f"FAILED to start ({type(e).__name__})"
 
 
 def stop_gen_units(w: Window) -> list[str]:
@@ -1138,7 +1179,8 @@ def cmd_slot_exit(w: Window) -> int:
                 raise Fail(f"{c['OLLAMA_UNIT']} still runs after {c['SETUP_Q4']}")
             w.swap_pending = False
         w.clear_slot()
-        w.log(f"back on {c['TEACHER_Q4_ALIAS']} (Ollama stopped); the scheduler resumes generation")
+        w.log(f"back on {c['TEACHER_Q4_ALIAS']} (Ollama stopped)")
+        w.log(f"generation: {start_gen(w, 'slot-exit')}")
         return 0
 
 
@@ -1248,6 +1290,8 @@ def cmd_stage(args: argparse.Namespace) -> int:
             "mini_window_end.sh": HERE / "mini_window_end.sh",
             "eval_slot_enter.sh": HERE / "eval_slot_enter.sh",
             "eval_slot_exit.sh": HERE / "eval_slot_exit.sh",
+            "gen_runner.py": HERE / "gen_runner.py",
+            "gen_runner.sh": HERE / "gen_runner.sh",
             "window.conf": conf_path,
             "setups/setups.py": repo / "scripts" / "distill" / "setups.py",
             "setups/daemon_switch.py": repo / "scripts" / "distill" / "daemon_switch.py",
@@ -1260,7 +1304,7 @@ def cmd_stage(args: argparse.Namespace) -> int:
             ("ssh", f"mkdir -p {dest}/setups {dest}/state && chmod 700 {dest} {dest}/setups {dest}/state"),
         ]
         for rel, src in files.items():
-            mode = "0700" if rel.endswith((".sh", "mini_window.py")) else "0600"
+            mode = "0700" if rel.endswith((".sh", "mini_window.py", "gen_runner.py")) else "0600"
             steps.append(("put", (rel, src, mode)))
         steps.append(("ssh", f"ls -la {dest} {dest}/setups"))
         for kind, step in steps:

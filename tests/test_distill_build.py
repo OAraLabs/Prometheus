@@ -2469,3 +2469,169 @@ def test_q6b_listed_sessions_never_enter_the_dataset(tmp_path: Path) -> None:
     lst = tmp_path / "sessions.txt"
     lst.write_text("# incident\nbeacon:incident  # 2026-10-13\n\n")
     assert build.read_session_list(lst) == {"beacon:incident"}
+
+
+def test_q6b_gym_rows_built_from_a_listed_sessions_prompts_never_enter(tmp_path: Path) -> None:
+    # a gym row carries no session id: it is tied to the listed session through its task group
+    # ("tg-" + the task proxy of the real prompt it was built from), a recombined partner's group or
+    # a padding turn's group
+    golden = write_jsonl(tmp_path / "golden_traces_1_1.jsonl", [
+        trace("alpha", "bash", {"command": "make alpha"}, session="beacon:incident"),
+        trace("charlie", "bash", {"command": "make charlie"}, session="beacon:ok"),
+    ])
+    lcm_db = tmp_path / "lcm.db"
+    con = sqlite3.connect(lcm_db)
+    con.execute("CREATE TABLE lcm_messages (session_id TEXT, role TEXT, content TEXT, content_json TEXT, "
+                "turn_index INTEGER)")
+    con.execute("INSERT INTO lcm_messages VALUES ('beacon:incident', 'user', 'resume the old job', NULL, 9)")
+    con.commit()
+    con.close()
+    task = build.h(build.norm("please handle the alpha job"))
+    pad = build.h(build.norm("opening note alpha"))
+    lcm_only = build.h(build.norm("resume the old job"))
+    other = build.h(build.norm("please handle the charlie job"))
+    gym_file = write_jsonl(tmp_path / "gym.jsonl", [
+        gym("delta", "bash", {"command": "make delta"}, task_id="tg-" + task),
+        gym("echo", "bash", {"command": "make echo"}, task_id="tg-" + other, partner_task_id="tg-" + lcm_only),
+        gym("foxtrot", "bash", {"command": "make foxtrot"}, task_id="tg-" + other,
+            compaction_pad={"task_groups": ["tg-" + other, "tg-" + pad]}),
+        gym("golf", "bash", {"command": "make golf"}, task_id="tg-" + other),
+    ])
+    lcm = build.LcmSnapshot(str(lcm_db))
+    prompts = build.excluded_session_prompts({"beacon:incident"}, [golden, gym_file], lcm)
+    assert {task, pad, lcm_only} <= prompts and other not in prompts
+    assert build.excluded_session_prompts({"beacon:incident"}, [golden], None) == {task, pad}
+    s = build.Settings(train_range=(1, 100000), eval_min=1, min_presence=0, train_sources=(GYM,),
+                       eval_task_frac=0.0, val_frac=0.0, category_cap=1.0,
+                       exclude_sessions=("beacon:incident",))
+    b = build.Builder(student=make_student(), pack=make_pack(), catalog="stubs", settings=s, index={},
+                      verdicts={}, lcm=None, spool=tmp_path / "spool.jsonl", excluded_prompts=prompts)
+    feed(b, golden)
+    feed(b, gym_file, "extra")
+    assert b.stats["excluded:excluded_session"] == 1
+    assert b.stats["excluded:excluded_session_task"] == 3
+    assert [e.trace_id for e in b.examples if e.source == GYM] == ["gym.jsonl:4"]
+    info = b.split()
+    report = b.report(info, b.gates(), catalog="stubs", head_tokens={}, inputs={}, elapsed=0.0)
+    allow = report["data_policy"]["max_derived_allow"]
+    assert allow["excluded_session_task_rows"] == 3 and allow["excluded_session_prompts"] == len(prompts)
+    assert task not in json.dumps(report) and "beacon:incident" not in json.dumps(report)
+
+
+# ── the flywheel's pool hands build.py the producer's own tag ──
+
+
+def _flywheel() -> Any:
+    if not (_DIR.parent.parent / "src" / "prometheus" / "jobs" / "flywheel_weekly.py").is_file():
+        pytest.skip("flywheel_weekly.py not in this checkout")
+    return pytest.importorskip("prometheus.jobs.flywheel_weekly")
+
+
+def pooled(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """*rows* as the weekly flywheel pools them: harvested as extra traces
+    (tag_trace), passed by its verify, re-written by pooled_meta."""
+    fw = _flywheel()
+    cfg = fw.parse_config(None)
+    out = []
+    for row in rows:
+        meta = dict(row["_meta"])
+        tag = fw.tag_trace(meta, cfg, {})
+        harvested = {**tag, "kind": "extra", "source": fw.source_label("extra", meta)}
+        basis, why = fw.verification(harvested, cfg.student_models)
+        assert basis, why
+        out.append({**row, "_meta": fw.pooled_meta(meta, harvested, basis, "2026-10-31")})
+    return out
+
+
+def test_a_pooled_max_smoke_row_is_still_never_trained(tmp_path: Path) -> None:
+    """A Max-mode teacher_gen --builtin-smoke row (hand-written task text) the
+    flywheel verified and pooled keeps the tag build.py refuses it by, under
+    the Q6b allow or without it."""
+    for judge in (VERIFIED["judge"], _payg_judge()):
+        rows = pooled([trace("alpha", "bash", {"command": "make alpha"}, source="builtin-smoke",
+                             session="gym:alpha", max_derived=True,
+                             verification={**VERIFIED, "judge": judge})])
+        assert rows[0]["_meta"]["source"] == "builtin-smoke"
+        assert rows[0]["_meta"]["flywheel"]["tag"] == (
+            "flywheel/teacher/qwen3.8-max@none/max-derived")
+        for allow in (True, False):
+            root = tmp_path / f"{judge['model']}-{allow}"
+            b = allow_builder(root, eval_task_frac=0.0, val_frac=0.0, category_cap=1.0,
+                              allow_max_derived=allow, max_derived_approval=REF if allow else None)
+            feed(b, write_jsonl(root / "pool.jsonl", rows), "extra")
+            assert b.excluded == [("pool.jsonl:1", "never_train_source")]
+            assert not b.examples
+
+
+def test_pooled_payg_gym_rows_keep_build_pys_payg_rules(tmp_path: Path) -> None:
+    """teacher_gen --teacher max-payg rows the flywheel pooled are still
+    max-payg-gym rows to build.py: refused outright without the Q6b allow (no
+    eval-tools rows that pin the local 27B's groups, no early dedupe claim),
+    and under it admitted as PAYG gym rows. Fed pooled or fed directly, the
+    builder decides the same."""
+    payg = _payg_judge()
+    tasks = [word(i) for i in range(12)]
+    local = [gym(t, "bash", {"command": f"make {t}"}) for t in tasks]
+    paid = [trace(t, "bash", {"command": f"make {t}"}, source="max-payg-gym",
+                  session=f"gym:{t}", max_derived=True,
+                  verification={**VERIFIED, "judge": payg if i % 2 else VERIFIED["judge"]})
+            for i, t in enumerate(tasks[:6])]
+    pool = pooled(paid)
+    assert {r["_meta"]["source"] for r in pool} == {"max-payg-gym"}
+
+    def built(root: Path, rows: list[dict[str, Any]], allow: bool) -> Any:
+        b = allow_builder(root, category_cap=1.0, allow_max_derived=allow,
+                          max_derived_approval=REF if allow else None)
+        # max-payg-gym* sorts before qwen38-27b-gym*: the PAYG file comes first
+        feed(b, write_jsonl(root / "max-payg-gym.jsonl", rows), "extra")
+        feed(b, write_jsonl(root / "qwen38-27b-gym.jsonl", local), "extra")
+        b.split()
+        return b
+
+    def splits(b: Any) -> dict[str, list[str]]:
+        return {k: sorted(e.trace_id for e in b.final.get(k, []))
+                for k in ("train", "val", "eval-tools")}
+
+    alone = splits(built(tmp_path / "alone", [], False))     # the local rows by themselves
+    assert alone["train"]
+    for allow in (False, True):
+        direct = built(tmp_path / f"direct-{allow}", paid, allow)
+        via_pool = built(tmp_path / f"pool-{allow}", pool, allow)
+        assert sorted(via_pool.excluded) == sorted(direct.excluded)
+        assert splits(via_pool) == splits(direct)
+        if not allow:
+            assert via_pool.stats["excluded:max_payg_gym_needs_allow"] == len(paid)
+            assert {e.source for e in via_pool.examples} == {GYM}
+            # refused rows pin no group and claim no key: the local rows split as alone
+            assert splits(via_pool) == alone
+        else:
+            assert via_pool.stats["excluded:max_payg_gym_needs_allow"] == 0
+            assert {e.source for e in via_pool.examples if e.max_derived} == {"max-payg-gym"}
+
+
+def test_the_flywheels_train_share_is_build_pys(tmp_path: Path) -> None:
+    """A Q6b set mixes Max and local 27B rows: build.py names the Max model as
+    its teacher, the flywheel's guard counts every row as Max-derived, and its
+    share of the rows still matches build.py's data_policy.share."""
+    fw = _flywheel()
+    golden, gym_file = policy_inputs(tmp_path)
+    b = allow_builder(tmp_path / "b")
+    feed(b, golden)
+    feed(b, gym_file, "extra")
+    info = b.split()
+    report = b.report(info, b.gates(), catalog="stubs", head_tokens={}, inputs={}, elapsed=0.0)
+    out = tmp_path / "phase3-max-derived"
+    out.mkdir()
+    b.write(out)
+    teacher = report["settings"]["teacher_model"]
+    assert teacher == build.TEACHER_MODEL
+    sessions = write_jsonl(tmp_path / "sessions.txt", [])
+    sessions.write_text("beacon:incident\n")
+    cfg = fw.parse_config({"max_derived": {"approved": True, "approval_ref": REF,
+                                           "exclude_sessions_file": str(sessions)}})
+    g = fw.check_training_data([out / "train.jsonl", out / "val.jsonl"], cfg, teacher)
+    by = report["data_policy"]["share"]["by_split"]
+    assert g.share == {c: by["train"][c]["rows"] + by["val"][c]["rows"]
+                       for c in build.SHARE_CLASSES}
+    assert g.share["max"] > 0 and g.share[GYM] > 0
+    assert g.max_rows == g.rows and g.refusals == []

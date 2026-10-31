@@ -566,7 +566,9 @@ def host(tmp_path, phase3, model_dirs, monkeypatch):
     monkeypatch.setattr(Q, "_import_merge_deps", fake_deps(calls))
     proc = FakeProc()
     monkeypatch.setattr(Q.subprocess, "run", proc)
-    out = tmp_path / "phase6" / "run7"
+    # The fixture data is Max-derived (no provenance: fail closed), so the run
+    # is too: its --out and every output name carry the tag (Q6b).
+    out = tmp_path / "phase6" / "run7-max-derived"
     argv = ["run", "--adapter", str(model_dirs.adapter), "--base", str(model_dirs.base),
             "--template-dir", str(model_dirs.tdir), "--data", str(phase3.data),
             "--evalsets", str(phase3.evalsets), "--out", str(out), "--llama-cpp-dir", str(lc),
@@ -621,8 +623,9 @@ def test_execute_runs_every_step_and_writes_the_manifest(host, capsys):
     assert m["schema"] == "distill-quantize-manifest/1" and m["result"] == "PASS"
     assert m["llama_cpp"]["head"] == HEAD and m["llama_cpp"]["converter_registers"] == ARCH
     by_name = {a["name"]: a for a in m["artifacts"]}
-    assert set(by_name) == {"run7-BF16.gguf", "run7.imatrix.gguf", "run7-Q4_K_M.gguf",
-                            "run7-Q5_K_M.gguf", "calibration.txt", "ppl.txt"}
+    assert set(by_name) == {"run7-max-derived-BF16.gguf", "run7-max-derived.imatrix.gguf",
+                            "run7-max-derived-Q4_K_M.gguf", "run7-max-derived-Q5_K_M.gguf",
+                            "calibration.txt", "ppl.txt"}
     for a in m["artifacts"]:
         p = Path(a["path"])
         assert a["bytes"] == p.stat().st_size
@@ -713,11 +716,11 @@ def test_a_kept_quant_is_checked_by_the_log_of_the_run_that_made_it(host, capsys
     capsys.readouterr()
     assert Q.main(host.argv + ["--execute"]) == 2
     err = capsys.readouterr().err
-    assert "run7-Q4_K_M.gguf" in err and "delete it" in err, err
+    assert "run7-max-derived-Q4_K_M.gguf" in err and "delete it" in err, err
     if log == "another build":
         assert "1234567ab" in err
     # Refused, not removed: the operator decides.
-    assert (host.out / "gguf" / "run7-Q4_K_M.gguf").exists()
+    assert (host.out / "gguf" / "run7-max-derived-Q4_K_M.gguf").exists()
     assert "llama-perplexity" not in host.proc.tools()[-3:]
 
 
@@ -800,21 +803,21 @@ def test_no_adapter_runs_the_base_through_the_same_recipe(host, model_dirs):
     argv = [a for a in host.argv]
     i = argv.index("--adapter")
     del argv[i:i + 2]
-    argv[argv.index("--out") + 1] = str(host.out.parent / "base-9b")
+    argv[argv.index("--out") + 1] = str(host.out.parent / "base-9b-max-derived")
     assert Q.main(argv + ["--no-adapter", "--execute"]) == 0
-    out = host.out.parent / "base-9b"
+    out = host.out.parent / "base-9b-max-derived"
     assert (out / "base-view" / "model.safetensors").is_symlink()
     assert "load" not in host.merge_calls
     conv = next(c for c in host.proc.calls if "--outfile" in c)
     assert conv[2] == str(out / "base-view") and "--no-mtp" in conv
     m = json.loads((out / "quantize-manifest.json").read_text())
     assert m["result"] == "PASS" and m["inputs"]["template_sha256"] == sha(TEMPLATE)
-    assert {a["name"] for a in m["artifacts"]} >= {"base-base-Q4_K_M.gguf"}
+    assert {a["name"] for a in m["artifacts"]} >= {"base-base-max-derived-Q4_K_M.gguf"}
 
 
 def test_calibrate_subcommand_writes_only_with_execute(phase3, tmp_path, monkeypatch):
     monkeypatch.setattr(Q.subprocess, "run", lambda *a, **k: pytest.fail("calibrate ran a command"))
-    out = tmp_path / "calrun"
+    out = tmp_path / "calrun-max-derived"
     args = ["calibrate", "--data", str(phase3.data), "--evalsets", str(phase3.evalsets),
             "--out", str(out), "--calib-tokens", "20000", "--imatrix-ctx", "2048",
             "--ppl-ctx", "2048", "--ppl-chunks", "2"]
@@ -895,7 +898,7 @@ def test_the_trainer_manifest_ties_the_calibration_to_the_adapters_split(host, p
     m = json.loads((host.out / "quantize-manifest.json").read_text())
     assert m["steps"]["calibrate"]["train_split"]["matched"] == "the adapter's trainer manifest"
     # Without the splits, the manifest is what ties a calibrate-made calibration.
-    out2 = tmp_path / "phase6" / "run7b"
+    out2 = tmp_path / "phase6" / "run7b-max-derived"
     assert Q.main(calibrate_args(phase3, out2)) == 0
     argv = list(host.argv)
     argv[argv.index("--data") + 1] = str(tmp_path / "not-here")
@@ -945,7 +948,7 @@ def test_the_real_injection_manifest_drops_a_planted_case_and_nothing_else(phase
     rows = [train_row(i) for i in range(N_TRAIN)]
     rows[3]["text"] += "tool result: " + case["injection"]["instruction"]
     jsonl(phase3.data / "train.jsonl", rows)
-    out = tmp_path / "calrun"
+    out = tmp_path / "calrun-max-derived"
     # The manifest in --evalsets is picked up without being named. The budgets
     # ask for more than the rows hold, so every row is checked.
     assert Q.main(["calibrate", "--data", str(phase3.data), "--evalsets", str(phase3.evalsets),
@@ -988,7 +991,7 @@ def _base_argv(host):
     argv = list(host.argv)
     i = argv.index("--adapter")
     del argv[i:i + 2]
-    argv[argv.index("--out") + 1] = str(host.out.parent / "base-9b")
+    argv[argv.index("--out") + 1] = str(host.out.parent / "base-9b-max-derived")
     return argv + ["--no-adapter"]
 
 
@@ -1025,8 +1028,11 @@ def test_rows_with_another_source_need_no_approval_and_the_counts_are_recorded(h
         json.dumps({"settings": {"teacher_model": "local-teacher-30b"}}))
     assert Q.main(argv + ["--execute"]) == 0
     m = json.loads((host.out / "quantize-manifest.json").read_text())
-    assert m["max_derived"]["calibration_max_derived"] == 0
-    assert m["max_derived"]["approved"] is False
+    assert m["calibration_provenance"]["calibration_max_derived"] == 0
+    assert m["calibration_provenance"]["approved"] is False
+    # Clean calibration, but nothing shows the fixture's adapter is: still tagged.
+    assert m["max_derived"] is True and m["provenance"]["adapter"] is None
+    assert m["provenance"]["calibration_max_derived"] == 0
     cal = m["steps"]["calibrate"]
     assert cal["provenance"]["sources"] == {
         "local-gym": cal["calibration"]["rows"] + cal["ppl_slice"]["rows"]}
@@ -1036,14 +1042,150 @@ def test_an_approved_run_records_the_approval(host):
     assert Q.main(host.argv + ["--execute"]) == 0
     m = json.loads((host.out / "quantize-manifest.json").read_text())
     rows = m["steps"]["calibrate"]["calibration"]["rows"]
-    assert m["max_derived"] == {"calibration_rows": rows, "calibration_max_derived": rows,
-                                "ppl_max_derived": m["steps"]["calibrate"]["ppl_slice"]["rows"],
-                                "approved": True}
+    assert m["calibration_provenance"] == {
+        "calibration_rows": rows, "calibration_max_derived": rows,
+        "ppl_max_derived": m["steps"]["calibrate"]["ppl_slice"]["rows"], "approved": True}
+    # artifact_policy's fields: the manifest, and the run, are Max-derived and private.
+    assert (m["max_derived"], m["tags"], m["private"]) == (True, ["max-derived"], True)
+    assert m["publish"].startswith("refused")
 
 
 def test_the_approval_flag_is_the_trainers():
     T = Q._trainer()
     assert Q.APPROVAL_FLAG == T.APPROVAL_FLAG
+
+
+# ── Q6b: Max-derived outputs are tagged everywhere, from the provenance chain ──
+
+
+def _with(argv, flag, value):
+    argv = list(argv)
+    if flag in argv:
+        argv[argv.index(flag) + 1] = value
+    else:
+        argv += [flag, value]
+    return argv
+
+
+def _clean(phase3, model_dirs):
+    """Rows build.py marked clean, and the trainer's run manifest saying so."""
+    train = phase3.data / "train.jsonl"
+    jsonl(train, [train_row(i, max_derived=False, source="qwen38-27b-gym")
+                  for i in range(N_TRAIN)])
+    (model_dirs.adapter.parent / "manifest.json").write_text(json.dumps({
+        "schema": "distill-train-manifest/1", "max_derived": False, "tags": [],
+        "data": {"path": str(train), "sha256": file_sha(train), "max_derived_rows": 0}}))
+
+
+def test_a_clean_run_keeps_its_names_and_says_it_is_not_max_derived(host, phase3, model_dirs,
+                                                                     tmp_path):
+    _clean(phase3, model_dirs)
+    out = tmp_path / "phase6" / "run7"
+    argv = [a for a in _with(host.argv, "--out", str(out)) if a != Q.APPROVAL_FLAG]
+    assert Q.main(argv + ["--execute"]) == 0
+    m = json.loads((out / "quantize-manifest.json").read_text())
+    assert (m["max_derived"], m["tags"], m["private"]) == (False, [], False)
+    assert m["provenance"]["adapter"] is False and m["label"] == "run7"
+    assert {a["name"] for a in m["artifacts"]} >= {"run7-Q4_K_M.gguf", "run7-BF16.gguf"}
+    rec = json.loads((out / "calib" / "calibration.json").read_text())
+    assert rec["max_derived"] is False and rec["tags"] == []
+
+
+@pytest.mark.parametrize("flag, value, said", [
+    ("--out", "phase6/run7", "--out"),
+    ("--label", "run7", "--label run7 does not carry the max-derived tag"),
+])
+def test_an_untagged_name_for_max_derived_input_is_refused_before_anything_is_written(
+        host, tmp_path, capsys, flag, value, said):
+    target = str(tmp_path / value) if flag == "--out" else value
+    argv = _with(host.argv, flag, target)
+    out = Path(target) if flag == "--out" else host.out
+    assert Q.main(argv + ["--execute"]) == 2
+    err = capsys.readouterr().err
+    assert said in err and "Max-derived" in err and "max-derived" in err
+    assert not out.exists() and host.proc.calls == [] and "load" not in host.merge_calls
+    # The plan says so and runs nothing.
+    assert Q.main(argv) == 0
+    plan = capsys.readouterr().out
+    assert "names        run --execute REFUSED (exit 2)" in plan and said in plan
+    assert not out.exists()
+
+
+def test_without_approval_the_refusal_comes_first_and_writes_nothing(host, tmp_path, capsys):
+    argv = [a for a in _with(host.argv, "--out", str(tmp_path / "untagged"))
+            if a != Q.APPROVAL_FLAG]
+    assert Q.main(argv + ["--execute"]) == 3
+    assert "DISTILL-OPEN-QUESTIONS #6" in capsys.readouterr().err
+    assert not (tmp_path / "untagged").exists()
+
+
+def test_a_max_derived_adapter_tags_the_outputs_even_with_clean_calibration(
+        host, phase3, model_dirs, tmp_path):
+    """The adapter decides through its provenance chain: a trainer manifest
+    saying Max-derived, or the tag in its directory's name."""
+    _clean(phase3, model_dirs)
+    tm = json.loads((model_dirs.adapter.parent / "manifest.json").read_text())
+    tm.update(max_derived=True, tags=["max-derived"])
+    (model_dirs.adapter.parent / "manifest.json").write_text(json.dumps(tm))
+    argv = [a for a in host.argv if a != Q.APPROVAL_FLAG]      # clean rows: no approval needed
+    assert Q.main(argv + ["--execute"]) == 0
+    m = json.loads((host.out / "quantize-manifest.json").read_text())
+    assert m["max_derived"] is True and m["provenance"]["adapter"] is True
+    assert m["calibration_provenance"]["calibration_max_derived"] == 0
+    assert {a["name"] for a in m["artifacts"]} >= {"run7-max-derived-Q4_K_M.gguf"}
+    assert "--alias run7-max-derived-Q4_K_M" in m["serve"]["Q4_K_M"]
+    conv = next(c for c in host.proc.calls if "--outfile" in c)
+    assert conv[conv.index("--model-name") + 1] == "run7-max-derived"
+    # The adapter train_qlora.py writes for Max-derived data: <run>/adapter-max-derived.
+    run_dir = tmp_path / "9b-r32-max-derived"
+    shutil.copytree(model_dirs.adapter, run_dir / "adapter-max-derived")
+    assert Q.default_label(run_dir / "adapter-max-derived", model_dirs.base) == \
+        "9b-r32-max-derived"
+    p = Q.output_provenance(run_dir / "adapter-max-derived", None)
+    assert p["max_derived"] is True and p["adapter"] is True
+
+
+def test_publish_guard_refuses_what_a_max_derived_run_made(host):
+    assert Q.main(host.argv + ["--execute"]) == 0
+    pol = Q._policy()
+    prov, reasons = pol.check_publishable(host.out)
+    assert prov.max_derived is True and reasons
+    with pytest.raises(pol.NotPublishable):
+        pol.assert_publishable(host.out / "gguf" / "run7-max-derived-Q4_K_M.gguf")
+
+
+def test_calibrate_refuses_an_untagged_out_for_max_derived_rows(phase3, tmp_path, capsys):
+    out = tmp_path / "calrun"
+    args = ["calibrate", "--data", str(phase3.data), "--evalsets", str(phase3.evalsets),
+            "--out", str(out), "--calib-tokens", "20000", "--imatrix-ctx", "2048",
+            "--ppl-ctx", "2048", "--ppl-chunks", "2"]
+    assert Q.main(args) == 0
+    assert "--execute REFUSED (exit 2)" in capsys.readouterr().out
+    assert Q.main(args + ["--execute"]) == 2
+    assert "does not carry the max-derived tag" in capsys.readouterr().err
+    assert not out.exists()
+    tagged = tmp_path / "calrun-max-derived"
+    assert Q.main(_with(args, "--out", str(tagged)) + ["--execute"]) == 0
+    rec = json.loads((tagged / "calib" / "calibration.json").read_text())
+    assert (rec["max_derived"], rec["tags"], rec["private"]) == (True, ["max-derived"], True)
+
+
+def test_serve_gives_a_max_derived_gguf_a_tagged_id(tmp_path, capsys):
+    gguf = tmp_path / "run7-max-derived-Q4_K_M.gguf"
+    base = ["serve", "--gguf", str(gguf), "--llama-cpp-dir", str(tmp_path / "lc")]
+    assert Q.main(base) == 0
+    assert capsys.readouterr().out.strip().endswith("--alias run7-max-derived-Q4_K_M")
+    assert Q.main(base + ["--alias", "student"]) == 2
+    assert "--alias student does not carry the max-derived tag" in capsys.readouterr().err
+    assert Q.main(base + ["--alias", "student-max-derived"]) == 0
+    # A GGUF whose manifest says so, under an untagged file name (made before the rule).
+    old = tmp_path / "old" / "gguf" / "m-Q4_K_M.gguf"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"GGUF")
+    (old.parent.parent / "quantize-manifest.json").write_text(json.dumps(
+        {"schema": "distill-quantize-manifest/1", "max_derived": True}))
+    assert Q.main(["serve", "--gguf", str(old), "--llama-cpp-dir", str(tmp_path / "lc")]) == 0
+    assert capsys.readouterr().out.strip().endswith("--alias m-Q4_K_M-max-derived")
 
 
 # ── GGUF metadata: read under --convert-python ─────────────────────────────
@@ -1184,7 +1326,8 @@ def test_sigterm_mid_step_pauses_and_the_same_command_resumes(host):
     m = json.loads((host.out / "quantize-manifest.json").read_text())
     assert m["result"] == "PAUSED"
     gguf = host.out / "gguf"
-    assert (gguf / "run7-BF16.gguf").exists() and not (gguf / "run7.imatrix.gguf").exists()
+    assert (gguf / "run7-max-derived-BF16.gguf").exists()
+    assert not (gguf / "run7-max-derived.imatrix.gguf").exists()
     host.proc.hooks.clear()
     host.proc.calls.clear()
     assert Q.main(host.argv + ["--execute"]) == 0
@@ -1206,7 +1349,7 @@ def test_stop_at_arms_a_timer_that_stops_the_running_step(host):
     # An hour ahead, less the margin for the kill and the exit.
     assert 3600 - Q.STOP_MARGIN_S - 30 < armed[0] <= 3600 - Q.STOP_MARGIN_S
     assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
-    assert not (host.out / "gguf" / "run7-Q4_K_M.gguf").exists()
+    assert not (host.out / "gguf" / "run7-max-derived-Q4_K_M.gguf").exists()
 
 
 def test_detach_runs_the_same_command_as_a_distill_unit(host, monkeypatch, capsys):

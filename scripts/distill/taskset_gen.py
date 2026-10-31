@@ -12,8 +12,21 @@ teacher (``teacher_gen.py``) runs through the gym.
         [--injection-manifest ~/distill/phase3/evalsets/eval-injection.manifest.json] \\
         [--repo ~/Prometheus] [--wiki ~/.prometheus/wiki] [--wiki-sections topics] \\
         [--pack ~/distill/phase3/request_pack.json] [--cron-jobs ~/.prometheus/data/cron_jobs.json] \\
-        [--out ~/distill/phase2b/tasksets]
+        [--out ~/distill/phase2b/tasksets] [--exclude-sessions ~/distill/policy/exclude-sessions.txt]
     python3 taskset_gen.py validate ~/distill/phase2b/tasksets/real-v1.jsonl
+    # Drop every row built from a prompt of a listed session (DISTILL-OPEN-QUESTIONS #6: the
+    # 2026-10-13 incident session is in no training data) -> real-v1-excl.jsonl + .exclusion.json;
+    # --check writes nothing and exits 1 while the taskset still holds such a row:
+    python3 taskset_gen.py exclude --tasks ~/distill/phase2b/tasksets/real-v1.jsonl \\
+        --exclude-sessions ~/distill/policy/exclude-sessions.txt [--check] \\
+        [--traces '~/.prometheus/trajectories/golden_traces_*.jsonl'] [--lcm-snapshot ~/distill/snapshot/lcm.db]
+
+Excluded sessions: a row's prompts are its ``source_pattern_hash`` and every
+``sources[].pattern_hash`` (a recombined row's partner too). ``exclude`` drops a
+row when any of them is the task proxy of a user message the listed sessions
+hold, in their golden traces (every user message, any surface) or their
+snapshot rows (however labelled). ``build --exclude-sessions`` drops those
+prompts before mining. Only counts and input hashes are written, never the ids.
 
 The rule this file exists to keep
 ---------------------------------
@@ -2451,6 +2464,136 @@ def _write_atomic(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
+# ---------------------------------------------------------------------------
+# Excluded sessions (DISTILL-OPEN-QUESTIONS #6: the 2026-10-13 Token-Plan incident session)
+# ---------------------------------------------------------------------------
+
+EXCLUSION_SCHEMA = "distill-taskset-exclusion/1"
+
+
+def read_session_list(path: Path) -> set[str]:
+    """Session ids, one per line (blank lines and ``#`` comments skipped: build.py's format). A file that
+    lists none is an error, so an empty list cannot stand in for the exclusion."""
+    ids = {line.split("#", 1)[0].strip() for line in path.read_text(encoding="utf-8").splitlines()}
+    ids.discard("")
+    if not ids:
+        raise TasksetError(f"{path} lists no session id")
+    return ids
+
+
+def excluded_pattern_hashes(sessions: set[str], trace_paths: list[Path], lcm_path: Path | None,
+                            stats: collections.Counter) -> set[str]:
+    """The task proxies (``h(norm(text))``, the taskset's ``pattern_hash``) of every user message a listed
+    session holds: each user message of its golden traces (any surface) and each of its user rows in the
+    snapshot (the text and the joined text blocks), however labelled. Wider than what ``build`` mines on
+    purpose: no prompt of a listed session can source a task."""
+    out: set[str] = set()
+    for p in trace_paths:
+        with p.open(encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    trace = json.loads(line)
+                    meta = trace.get("_meta") or {}
+                    msgs = trace["messages"]
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    stats["golden_unparseable"] += 1
+                    continue
+                if str(meta.get("session_id") or "").strip() not in sessions:
+                    continue
+                stats["golden_rows_in_listed_sessions"] += 1
+                for m in msgs:
+                    if isinstance(m, dict) and m.get("role") == "user":
+                        text = content_text(m.get("content"))
+                        if text.strip():
+                            out.add(h(norm(text)))
+    if lcm_path is not None:
+        con = sqlite3.connect(f"file:{lcm_path}?mode=ro", uri=True)
+        try:
+            marks = ",".join("?" * len(sessions))
+            for content, cj in con.execute(f"SELECT content, content_json FROM lcm_messages WHERE role = 'user' "
+                                           f"AND session_id IN ({marks})", sorted(sessions)):
+                stats["lcm_rows_in_listed_sessions"] += 1
+                texts = [content or ""]
+                try:
+                    blocks = json.loads(cj) if cj else None
+                except ValueError:
+                    blocks = None
+                if isinstance(blocks, list):
+                    texts.append(content_text(blocks))
+                out.update(h(norm(t)) for t in texts if t.strip())
+        finally:
+            con.close()
+    return out
+
+
+def row_patterns(row: dict[str, Any]) -> set[str]:
+    """Every real prompt a taskset row was built from (its own and a recombined partner's)."""
+    return {str(row.get("source_pattern_hash"))} | {str(s.get("pattern_hash")) for s in row.get("sources") or []
+                                                     if isinstance(s, dict)}
+
+
+def _sha256(path: Path) -> str:
+    d = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            d.update(chunk)
+    return d.hexdigest()
+
+
+def run_exclude(a: argparse.Namespace) -> int:
+    """``exclude``: drop every taskset row built from a prompt of a listed session (any source); writes
+    ``<out>`` (default ``<stem>-excl.jsonl`` beside the input) and ``<out stem>.exclusion.json`` (counts and
+    hashes of the inputs, never the ids or any text). ``--check`` writes nothing: exit 0 when no row would
+    be dropped, 1 when some would (gen_runner.py's preflight)."""
+    tasks = _expand(a.tasks)
+    sessions_path = _expand(a.exclude_sessions)
+    assert tasks is not None and sessions_path is not None
+    sessions = read_session_list(sessions_path)
+    rows = load_taskset(tasks)
+    paths = sorted({Path(p) for pat in (a.traces or [DEFAULT_TRACES])
+                    for p in glob.glob(os.path.expanduser(pat))}, key=lambda p: p.name)
+    if not paths:
+        raise TasksetError("no golden trace file matched (--traces): the listed sessions' prompts cannot be found")
+    lcm = None
+    if a.lcm_snapshot:
+        lcm = _expand(a.lcm_snapshot)
+        assert lcm is not None
+        _refuse_live(lcm)
+        if not lcm.exists():
+            raise TasksetError(f"lcm snapshot {lcm} not found ('' to skip)")
+    stats: collections.Counter = collections.Counter()
+    excluded = excluded_pattern_hashes(sessions, paths, lcm, stats)
+    keep = [r for r in rows if not row_patterns(r) & excluded]
+    dropped = [r for r in rows if row_patterns(r) & excluded]
+    summary: dict[str, Any] = {
+        "schema": EXCLUSION_SCHEMA, "taskset": sorted({str(r.get("taskset")) for r in rows}),
+        "input": tasks.name, "input_sha256": _sha256(tasks), "sessions_listed": len(sessions),
+        "session_list_sha256": _sha256(sessions_path), "golden_files": len(paths), "lcm_snapshot": bool(lcm),
+        "golden_rows_in_listed_sessions": stats["golden_rows_in_listed_sessions"],
+        "lcm_rows_in_listed_sessions": stats["lcm_rows_in_listed_sessions"],
+        "patterns_excluded": len(excluded), "rows_in": len(rows), "rows_out": len(keep),
+        "rows_dropped": len(dropped), "task_groups_dropped": len({r["task_group"] for r in dropped}),
+        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    if a.check:
+        summary["check"] = "clean" if not dropped else "holds rows of listed sessions"
+        print(json.dumps(summary, sort_keys=True))
+        return 0 if not dropped else 1
+    out = _expand(a.out) if a.out else tasks.with_name(f"{tasks.stem}-excl.jsonl")
+    assert out is not None
+    if out == tasks:
+        raise TasksetError("--out must not be the input taskset")
+    if _inside_git_tree(out.parent):
+        raise TasksetError(f"{out} is inside a git work tree; task text never goes near a repo")
+    os.makedirs(out.parent, mode=0o700, exist_ok=True)
+    _write_atomic(out, "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in keep))
+    summary.update(output=out.name, output_sha256=_sha256(out))
+    _write_atomic(out.with_name(f"{out.stem}.exclusion.json"), json.dumps(summary, indent=1, sort_keys=True) + "\n")
+    print(json.dumps(summary, sort_keys=True))
+    return 0
+
+
 def run_build(a: argparse.Namespace) -> dict[str, Any]:
     t0 = time.monotonic()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", a.name):
@@ -2517,6 +2660,16 @@ def run_build(a: argparse.Namespace) -> dict[str, Any]:
             prompts[ph].in_lcm = True
         else:
             prompts[ph] = rp
+    if a.exclude_sessions:
+        sp = _expand(a.exclude_sessions)
+        assert sp is not None
+        sessions = read_session_list(sp)
+        excluded = excluded_pattern_hashes(sessions, paths, _expand(a.lcm_snapshot) if a.lcm_snapshot else None,
+                                           stats)
+        gone = [ph for ph in prompts if ph in excluded]
+        for ph in gone:
+            del prompts[ph]
+        inputs["excluded_sessions"] = {"listed": len(sessions), "prompts_dropped": len(gone)}
     inputs.update({"golden_files": len(paths), "index_rows": len(index),
                    "golden_prompts": len(golden), "lcm_prompts": len(lcm),
                    "golden_and_lcm": sum(1 for rp in golden.values() if rp.in_lcm),
@@ -2581,8 +2734,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     b.add_argument("--surfaces", default=",".join(HUMAN_SURFACES))
     b.add_argument("--base-date", default=Settings.base_date)
     b.add_argument("--dry-run", action="store_true", help="write the report only")
+    b.add_argument("--exclude-sessions", metavar="FILE",
+                   help="session ids, one per line: no prompt of a listed session sources a task")
     v = sub.add_parser("validate", help="schema-check a taskset file")
     v.add_argument("path")
+    x = sub.add_parser("exclude", help="drop the rows built from a listed session's prompts (or --check for any)")
+    x.add_argument("--tasks", required=True, help="the taskset to filter")
+    x.add_argument("--exclude-sessions", required=True, metavar="FILE", help="session ids, one per line")
+    x.add_argument("--traces", action="append", help=f"glob, repeatable (default {DEFAULT_TRACES})")
+    x.add_argument("--lcm-snapshot", default=DEFAULT_LCM, help="'' to skip")
+    x.add_argument("--out", help="default: <stem>-excl.jsonl beside --tasks")
+    x.add_argument("--check", action="store_true",
+                   help="write nothing; exit 0 when no row comes from a listed session, 1 when some do")
     return ap.parse_args(argv)
 
 
@@ -2593,8 +2756,10 @@ def main(argv: list[str] | None = None) -> int:
             rows = load_taskset(a.path)
             print(json.dumps({"rows": len(rows), "valid": True}))
             return 0
+        if a.cmd == "exclude":
+            return run_exclude(a)
         report = run_build(a)
-    except (TasksetError, BES.BuildError) as exc:
+    except (TasksetError, BES.BuildError, OSError, sqlite3.Error, ValueError) as exc:
         print(f"taskset_gen: {exc}", file=sys.stderr)
         return 2
     summary = {k: report[k] for k in ("taskset", "dry_run")}

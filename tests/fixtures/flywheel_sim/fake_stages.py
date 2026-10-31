@@ -8,10 +8,15 @@ on a shared clock file instead of real time:
   traces    the week's producers: golden exports (the daemon's exporter),
             gym teacher traces (teacher_gen.py's shape), offspring traces
   build     scripts/distill/build.py build: the data policy (train sources,
-            strict verification), splits, report.json with gates
+            strict verification), the Q6b allow (--allow-max-derived with its
+            approval, a tagged --out and --exclude-sessions), splits,
+            report.json with gates, the recorded allow and the share table
   train     the trainer: checkpoint-<step>/ every --save-every steps, adapter/
-            and manifest.json when done; SIGTERM saves a checkpoint and exits 75
-  quantize  GGUFs into --out; FLYWHEEL_SIM_CRASH=quantize raises (exit 1)
+            (adapter-max-derived/ for a tagged run, which needs the approval
+            flag) and manifest.json when done; SIGTERM saves a checkpoint and
+            exits 75
+  quantize  GGUFs into --out (a Max-derived adapter needs the approval flag
+            and a tagged --out); FLYWHEEL_SIM_CRASH=quantize raises (exit 1)
   run       scripts/distill/score.py run (scores from FLYWHEEL_SIM_SCORES)
   compare   scripts/distill/score.py compare (the Phase 6 gate)
   deadman / apply   scripts/distill/setups.py
@@ -40,6 +45,8 @@ from pathlib import Path
 from typing import Any
 
 EX_TEMPFAIL = 75
+# train_qlora.py's and quantize.py's operator flag for Max-derived data.
+APPROVAL_FLAG = "--i-have-operator-approval-for-max-derived-data"
 
 
 # --------------------------------------------------------------------------- #
@@ -175,6 +182,23 @@ def strict_pass(meta: dict[str, Any], judge_models: list[str]) -> bool:
 
 
 def cmd_build(a: argparse.Namespace) -> int:
+    # build.py's Q6b allow: both flags or neither, a tagged --out, and the
+    # session exclusion list beside it.
+    allow = bool(a.allow_max_derived)
+    if allow != (a.max_derived_approval is not None) or (allow and not a.exclude_sessions):
+        print("error: --allow-max-derived needs --max-derived-approval and --exclude-sessions",
+              flush=True)
+        return 2
+    if allow and "max-derived" not in Path(a.out).name:
+        print("error: with --allow-max-derived the --out name must carry max-derived", flush=True)
+        return 2
+    excluded: set[str] = set()
+    if a.exclude_sessions:
+        excluded = {x.split("#", 1)[0].strip()
+                    for x in Path(a.exclude_sessions).read_text().splitlines()} - {""}
+        if not excluded:
+            print("error: --exclude-sessions lists no session id", flush=True)
+            return 2
     spend(a.sim_minutes)
     policy = a.train_sources != ["none"]
     rows: list[dict[str, Any]] = []
@@ -186,6 +210,8 @@ def cmd_build(a: argparse.Namespace) -> int:
                 if meta.get("model") == "flywheel-withheld":
                     withheld += 1
                     continue
+                if str(meta.get("session_id")) in excluded:
+                    continue
                 trace_id = f"{Path(name).name}:{lineno}"
                 tag = meta.get("source") if isinstance(meta.get("source"), str) else None
                 source = tag or ("max-golden" if kind == "golden" else "extra")
@@ -196,6 +222,8 @@ def cmd_build(a: argparse.Namespace) -> int:
                     label = "tool-success"
                 elif offspring and a.offspring_label:
                     train_ok, label = True, a.offspring_label      # a faulty builder
+                elif allow and kind == "golden" and model == a.teacher_model:
+                    train_ok, label = True, "tool-success"         # a Max row, under the allow
                 else:
                     listed = any(fnmatch.fnmatchcase(source, p) for p in a.train_sources)
                     train_ok = (listed and not names_max(source) and not names_max(model)
@@ -236,11 +264,22 @@ def cmd_build(a: argparse.Namespace) -> int:
         teacher = a.teacher_model
     gates: dict[str, Any] = {
         "train_size": {"rows": len(train), "min": a.min_train, "pass": len(train) >= a.min_train},
-        "data_policy": {"pass": not policy or not any(r["max_derived"] for r in train + val)},
+        "data_policy": {"pass": not policy or allow
+                        or not any(r["max_derived"] for r in train + val)},
         "spot_check": ({"status": "PASS"} if a.spot_check_server else {"status": "NOT RUN"}),
     }
     failed = [k for k, v in gates.items() if v.get("pass") is False]
     gates["overall"] = ("FAIL" if failed else "PASS" if a.spot_check_server else "INCOMPLETE")
+
+    def share(part: list[dict[str, Any]]) -> dict[str, Any]:
+        n = len(part)
+        cls = {"max": sum(1 for r in part if r["max_derived"]),
+               "qwen38-27b-gym": sum(1 for r in part if not r["max_derived"]
+                                     and r["source"] == "qwen38-27b-gym")}
+        cls["other"] = n - cls["max"] - cls["qwen38-27b-gym"]
+        return {"rows": n, **{k: {"rows": v, "pct": round(100.0 * v / n, 2) if n else 0.0}
+                              for k, v in cls.items()}}
+
     (out / "report.json").write_text(json.dumps({
         "schema": "distill-build-report/sim",
         "settings": {"teacher_model": teacher, "train_sources": a.train_sources,
@@ -248,6 +287,13 @@ def cmd_build(a: argparse.Namespace) -> int:
         "inputs": {"written": {"train.jsonl": len(train), "val.jsonl": len(val),
                                "eval-tools.jsonl": len(held)}, "withheld_stubs": withheld},
         "gates": gates,
+        "data_policy": {
+            "max_derived_allow": {"allowed": allow,
+                                  "approval": a.max_derived_approval if allow else None,
+                                  "excluded_sessions_listed": len(excluded)},
+            "share": {"classes": ["max", "qwen38-27b-gym", "other"],
+                      "by_split": {"train": share(train), "val": share(val)},
+                      "approval": a.max_derived_approval if allow else None}},
     }, indent=1))
     record("build", train=len(train), val=len(val), eval_tools=len(held), teacher=teacher,
            withheld=withheld, overall=gates["overall"])
@@ -320,7 +366,13 @@ def cmd_train(a: argparse.Namespace) -> int:
             print(f"SIGTERM: saved {ck.name}, exiting {EX_TEMPFAIL}", flush=True)
             record("train-stopped", step=step, checkpoint=ck.name)
             return EX_TEMPFAIL
-    adapter = run_dir / "adapter"
+    # train_qlora.py: Max-derived data trains only with the operator's flag,
+    # under a tagged --out, into a tagged adapter directory.
+    tagged = "max-derived" in run_dir.name
+    if tagged != bool(a.approved):
+        print("refusing: a tagged run needs the approval flag, and only it", flush=True)
+        return 2
+    adapter = run_dir / ("adapter-max-derived" if tagged else "adapter")
     adapter.mkdir(parents=True, exist_ok=True)
     (adapter / "adapter_config.json").write_text(json.dumps({"r": 32, "lora_alpha": 32,
                                                              "rows": rows}))
@@ -337,6 +389,11 @@ def cmd_train(a: argparse.Namespace) -> int:
 
 def cmd_quantize(a: argparse.Namespace) -> int:
     record("quantize", version=a.version)
+    if ("max-derived" in Path(a.adapter).name) != bool(a.approved) \
+            or ("max-derived" in Path(a.adapter).name) != ("max-derived" in Path(a.out).name):
+        print("refusing: a Max-derived adapter needs the approval flag and a tagged --out",
+              flush=True)
+        return 2
     if "quantize" in os.environ.get("FLYWHEEL_SIM_CRASH", ""):
         spend(4)
         raise RuntimeError("simulated llama-quantize crash: imatrix calibration ran out of memory")
@@ -369,7 +426,9 @@ def _metrics(scores: dict[str, float], cases: int) -> dict[str, Any]:
 
 def cmd_score_run(a: argparse.Namespace) -> int:
     served = Path(os.environ["FLYWHEEL_SIM_SERVED"]).read_text().strip()
-    scores = json.loads(Path(os.environ["FLYWHEEL_SIM_SCORES"]).read_text())[a.label]
+    table = json.loads(Path(os.environ["FLYWHEEL_SIM_SCORES"]).read_text())
+    # A Max-derived candidate scores as the week's model does (the table is per week).
+    scores = table.get(a.label) or table[re.sub(r"-max-derived$", "", a.label)]
     cases = sum(len(read_jsonl(Path(c))) for c in a.cases)
     record("score", label=a.label, served=served, cases=cases)
     spend(2 * cases)
@@ -447,6 +506,9 @@ def main(argv: list[str]) -> int:
     b.add_argument("--spot-check-server", default="")
     b.add_argument("--offspring-label", default="")
     b.add_argument("--sim-minutes", type=float, default=20)
+    b.add_argument("--allow-max-derived", action="store_true")
+    b.add_argument("--max-derived-approval", default=None)
+    b.add_argument("--exclude-sessions", default=None)
     b.set_defaults(fn=cmd_build)
 
     tr = sub.add_parser("train")
@@ -457,11 +519,13 @@ def main(argv: list[str]) -> int:
     tr.add_argument("--resume", action="store_true")
     tr.add_argument("--minutes-per-row", type=float, default=5)
     tr.add_argument("--save-every", type=int, default=10)
+    tr.add_argument(APPROVAL_FLAG, dest="approved", action="store_true")
     tr.set_defaults(fn=cmd_train)
 
     q = sub.add_parser("quantize")
     for flag in ("--adapter", "--data", "--out", "--version"):
         q.add_argument(flag, required=True)
+    q.add_argument(APPROVAL_FLAG, dest="approved", action="store_true")
     q.set_defaults(fn=cmd_quantize)
 
     r = sub.add_parser("run")

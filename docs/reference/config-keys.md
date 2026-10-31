@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **505** of
+Every key in `config/prometheus.yaml.default` — **504** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -497,7 +497,7 @@ none either — the key is documented so its absence is visible.
 | `flywheel.harvest` | *(section)* |
 | `flywheel.harvest.golden` | `['~/.prometheus/trajectories/golden_traces_*.jsonl']` |
 | `flywheel.harvest.extra` | `[]` |
-| `flywheel.harvest.teacher_models` | `['qwen3.8-max']` |
+| `flywheel.harvest.teacher_models` | `['qwen3.8-max', 'qwen3.8-27b*']` |
 | `flywheel.harvest.student_models` | `[]` |
 | `flywheel.build` | *(section)* |
 | `flywheel.build.script` | `` |
@@ -508,11 +508,10 @@ none either — the key is documented so its absence is visible.
 | `flywheel.train.resume_args` | `[]` |
 | `flywheel.train.incomplete_exit_code` | `75` |
 | `flywheel.train.max_failed_attempts` | `2` |
-| `flywheel.max_data` | *(section)* |
-| `flywheel.max_data.approved` | `False` |
-| `flywheel.max_data.approved_by` | `` |
-| `flywheel.max_data.approved_on` | `` |
-| `flywheel.max_data.reference` | `` |
+| `flywheel.max_derived` | *(section)* |
+| `flywheel.max_derived.approved` | `False` |
+| `flywheel.max_derived.approval_ref` | `` |
+| `flywheel.max_derived.exclude_sessions_file` | `` |
 | `flywheel.quantize` | *(section)* |
 | `flywheel.quantize.command` | `[]` |
 | `flywheel.score` | *(section)* |

@@ -149,12 +149,33 @@ calls stay hard cases only. Each such row carries ``max_derived: true`` and the
 approval (``max_derived_approval``), and the ``data_policy`` gate passes only if
 every Max row in train/val is covered by the recorded approval.
 
+Max teacher gym rows (``_meta.source = "max-payg-gym"``: ``teacher_gen.py
+--teacher max-payg``, Qwen Max on the pay-per-token key over the real-pattern
+taskset) are Max-derived and are admitted ONLY under the allow. Without it every
+such row is excluded (``max_payg_gym_needs_allow``): never train, val or eval
+material, so they pin no group and leave the local 27B rows' splits as they
+were. Under it a row is kept only as an ``--extra-traces`` row
+(``max_payg_gym_not_extra``), not relaxed (``max_payg_gym_relaxed``), saying
+``max_derived: true`` (``max_payg_gym_not_max_derived``), with a record that
+passes strictly: tool success, a passing judge that is a ``--judge-models``
+judge (the local 27B, preferred) or the pay-per-token Max judge (``provider:
+max-payg``, ``judge_key: payg``), sandboxed, no side effects
+(``max_payg_gym_unverified:<why>`` otherwise). It claims its dedupe key once
+verified (as a gym row), trains under the approval like any Max row, and counts
+as ``max`` in ``data_policy.share`` (its own entry in ``data_policy.sources``).
+It is left out of the Max-only hold-out plan (which stays the plan over the
+harvested Max rows) and its groups may give eval quota, as gym groups.
+
 The allow also needs ``--exclude-sessions FILE`` (session ids, one per line):
 the 2026-10-13 Token-Plan incident session (DISTILL-OPEN-QUESTIONS #6) is
 excluded from any training data. Every row of a listed session (``_meta.session_id``)
-is dropped before anything else (``excluded_session``); the report records how
+is dropped before anything else (``excluded_session``), and so is a gym row built
+from any user message such a session holds (in the input traces or the
+``--lcm-snapshot``): its ``_meta.task_id``, ``partner_task_id`` or a
+``compaction_pad.task_groups`` entry is ``tg-`` + that message's task proxy
+(``excluded_session_task``; gym rows carry no session id). The report records how
 many sessions were listed and rows dropped (``data_policy.max_derived_allow``),
-never the ids. The list may be given without the allow too.
+never the ids or hashes. The list may be given without the allow too.
 
 Judges. The Token Plan key never judges: a verdict or record whose judge names
 Max is refused (``verdict_rows_max_judge`` fails the verdicts gate;
@@ -351,6 +372,12 @@ NEVER_TRAIN_SOURCES = frozenset({"builtin-smoke"})
 #: Max may be the Token Plan key, which never judges.
 PAYG_PROVIDER = "max-payg"
 PAYG_JUDGE_KEY = "payg"
+#: teacher_gen.py --teacher max-payg rows: Qwen Max on the pay-per-token key, run
+#: through the gym on the real-pattern taskset. Max-derived: admitted ONLY under the
+#: Q6b allow (--allow-max-derived), and then only with the strict record a gym row
+#: needs; refused outright without it (never eval-only, so they pin no group).
+PAYG_GYM_SOURCE = "max-payg-gym"
+PAYG_GYM_SOURCES = frozenset({PAYG_GYM_SOURCE, PAYG_GYM_SOURCE + "-relaxed"})
 #: The models a train-source row may come from: the local 27B teacher only.
 DEFAULT_TRAIN_MODELS = ("qwen3.8-27b*",)
 #: The local 27B teacher's tag: a share class of its own in the report.
@@ -1764,10 +1791,16 @@ class Builder:
                  index: dict[tuple[str, int], dict[str, Any]], verdicts: dict[str, str],
                  lcm: LcmSnapshot | None = None, spool: Path | None = None,
                  verdict_checks: dict[str, Any] | None = None,
-                 eval_holdout_tasks: set[str] | frozenset[str] = frozenset()) -> None:
+                 eval_holdout_tasks: set[str] | frozenset[str] = frozenset(),
+                 excluded_prompts: set[str] | frozenset[str] = frozenset()) -> None:
         self.student = student
         # tasks (Phase 1 prompt hashes) an earlier eval set holds: they stay eval-tools
         self.eval_holdout_tasks = frozenset(eval_holdout_tasks)
+        # task proxies of every user message a --exclude-sessions session holds
+        # (excluded_session_prompts): a gym row whose task group, recombined partner
+        # or compaction padding came from one of them is dropped too (never the hashes
+        # in any output)
+        self.excluded_prompts = frozenset(excluded_prompts)
         self.student.encoder = HeadCachedEncoder(student.encoder)
         self.s = settings
         self.rebuilder = Rebuilder(pack, catalog, lcm, settings.lcm_max_messages,
@@ -1856,6 +1889,28 @@ class Builder:
             return s.max_model
         return model
 
+    def payg_gym_refusal(self, trace: Trace) -> str:
+        """Why a ``max-payg-gym`` row (teacher_gen.py --teacher max-payg) may not be
+        kept, or "". It is Max-derived, so only the Q6b allow admits it, and only
+        as a verified gym row: an extra trace, not a relaxed tag, saying it is
+        Max-derived, whose own record passes strictly (tool success, a passing
+        judge that is a --judge-models judge or the pay-per-token Max judge,
+        sandboxed, no side effects). Refused rows go to no split at all: an
+        unverified or unallowed PAYG gym row is not eval material either."""
+        meta = trace.meta
+        if not self.max_allowed:
+            return "max_payg_gym_needs_allow"
+        if trace.kind != "extra":
+            return "max_payg_gym_not_extra"
+        if is_relaxed_source(source_tag(meta)):
+            return "max_payg_gym_relaxed"
+        if meta.get("max_derived") is not True:
+            return "max_payg_gym_not_max_derived"
+        strict = verification_of(meta, strict=True, judge_models=self.judge_models, payg_judge=True)
+        if strict.decision is not True:
+            return "max_payg_gym_unverified:" + ("no_record" if strict.decision is None else strict.basis)
+        return ""
+
     def is_train_source(self, trace: Trace) -> bool:
         """A row the data policy lets train: a listed tag that does not name Max
         and is not a never-train tag (``NEVER_TRAIN_SOURCES``), whatever the
@@ -1901,6 +1956,12 @@ class Builder:
                     self.stats["verdicts_on_excluded_sessions"] += 1
             self.exclude(trace, "excluded_session")
             return
+        if self.excluded_prompts and row_task_prompts(meta) & self.excluded_prompts:
+            # a gym row built from a listed session's prompt (its task group, a
+            # recombined partner, or a padding turn): it has no session id of its
+            # own, so the session check above cannot see it
+            self.exclude(trace, "excluded_session_task")
+            return
         model = meta.get("model")
         model_s = model.strip() if isinstance(model, str) else ""
         train_source = self.is_train_source(trace)
@@ -1929,6 +1990,12 @@ class Builder:
             # --builtin-smoke): not real-pattern data, so neither train nor eval
             self.exclude(trace, "never_train_source")
             return
+        payg_gym = source_tag(meta) in PAYG_GYM_SOURCES and trace.kind != "fail"
+        if payg_gym:
+            why = self.payg_gym_refusal(trace)
+            if why:
+                self.exclude(trace, why)
+                return
         # Data policy: under one, everything kept that is not a train source is
         # the Max teacher's; with none (library default) every row may train.
         max_derived = not train_source
@@ -1955,7 +2022,8 @@ class Builder:
         # call. A Max row claims its key now (a verdict on it is a verdict on
         # the call); a train-source row once verified (its record verifies the
         # whole trajectory, and a failed attempt's first call may be a retry's).
-        if not train_source and not self.claim(trace, keys):
+        # A PAYG gym row claims its key once verified, like a train-source gym row.
+        if not train_source and not payg_gym and not self.claim(trace, keys):
             return
         # label
         vkey = next((k for k in (trace.trace_id, keys.h_exact) if k in self.verdicts), None)
@@ -1971,7 +2039,7 @@ class Builder:
             verdict = str(meta["verdict"]).lower()
         # A Max row's record may name the pay-per-token Max judge; a train-source
         # (local 27B) row's needs a --judge-models judge (OPEN-QUESTIONS #6)
-        record = (verification_of(meta, strict=train_source, judge_models=self.judge_models,
+        record = (verification_of(meta, strict=train_source or payg_gym, judge_models=self.judge_models,
                                   payg_judge=not train_source)
                   if trace.kind != "fail" else Verification(None, "absent"))
         if record.decision is not None:
@@ -2006,7 +2074,7 @@ class Builder:
             return
         else:
             label = "tool-success"
-        if train_source and not self.claim(trace, keys):
+        if (train_source or payg_gym) and not self.claim(trace, keys):
             return
         outcome = (idx or {}).get("turn_outcome")
         if self.s.exclude_bad_turns and label == "tool-success" and outcome in BAD_TURN_OUTCOMES:
@@ -2180,12 +2248,15 @@ class Builder:
             # train are pinned; the eval quota for the rest comes from the
             # train-source groups. A failed call pins nothing: as in a Max-only
             # build, a hard case whose task trains is dropped.
-            max_only = plan_splits([e for e in pool if e.max_derived], seed=s.seed,
-                                   eval_task_frac=s.eval_task_frac, val_frac=s.val_frac,
+            # PAYG gym rows (gym data on the real-pattern taskset, like the train
+            # source's) are left out of that plan, so it holds out the same Max
+            # groups with or without them, and their groups may give eval quota.
+            max_only = plan_splits([e for e in pool if e.max_derived and e.source not in PAYG_GYM_SOURCES],
+                                   seed=s.seed, eval_task_frac=s.eval_task_frac, val_frac=s.val_frac,
                                    max_group_share=s.holdout_max_group_share)
             hold = {g for g, sp in max_only.groups.items() if sp == "eval-tools"}
             pinned = hold | listed | {e.group for e in pool if not e.train_ok}
-            no_quota = {e.group for e in pool if e.max_derived}
+            no_quota = {e.group for e in pool if e.max_derived and e.source not in PAYG_GYM_SOURCES}
         else:
             # Under a data policy a group holding a row that may not train (a
             # Max-derived row or a failed call) is eval-tools material whole.
@@ -2570,6 +2641,9 @@ class Builder:
             # --exclude-sessions (the Token-Plan incident session): listed, rows dropped
             "excluded_sessions_listed": len(s.exclude_sessions),
             "excluded_session_rows": self.stats["excluded:excluded_session"],
+            # gym rows built from one of those sessions' prompts (task group, partner, padding)
+            "excluded_session_prompts": len(self.excluded_prompts),
+            "excluded_session_task_rows": self.stats["excluded:excluded_session_task"],
             "max_holdout_groups": plan.max_holdout_groups,
             "max_holdout_tasks": plan.max_holdout_tasks,
         })
@@ -2720,9 +2794,14 @@ def cmd_build(a: argparse.Namespace) -> int:
     verdicts = load_verdicts(a.verdicts or [], stats, checks)
     lcm = LcmSnapshot(a.lcm_snapshot) if a.lcm_snapshot else None
     spool = None if a.dry_run else out / "spool.jsonl"
+    # a pre-pass: the listed sessions' prompts, so a gym row built from one (no
+    # session id of its own) is dropped wherever it comes in the input order
+    excluded_prompts = (excluded_session_prompts(excluded_sessions, golden + extra + fail, lcm)
+                        if excluded_sessions else set())
     b = Builder(student=student, pack=pack, catalog=catalog, settings=s,
                 index=load_index(a.index), verdicts=verdicts, lcm=lcm, spool=spool,
-                verdict_checks=checks, eval_holdout_tasks=holdout_tasks)
+                verdict_checks=checks, eval_holdout_tasks=holdout_tasks,
+                excluded_prompts=excluded_prompts)
     b.stats.update(stats)
     n = 0
     for paths, kind in ((golden, "golden"), (extra, "extra"), (fail, "fail")):
@@ -2808,6 +2887,54 @@ def read_session_list(path: Path) -> set[str]:
     if not ids:
         raise ValueError("lists no session id")
     return ids
+
+
+def excluded_session_prompts(sessions: set[str], paths: list[Path], lcm: LcmSnapshot | None) -> set[str]:
+    """Task proxies (``h(norm(text))``, taskset_gen's ``pattern_hash``) of every user
+    message the listed sessions hold: in the input traces (golden / fail files) and,
+    with a snapshot, in their user rows there. A gym row carries no session id, so
+    this is how a row built from one of these prompts is found (``row_task_prompts``)."""
+    out: set[str] = set()
+    for path in paths:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    raw = json.loads(line)
+                    if str((raw.get("_meta") or {}).get("session_id") or "").strip() not in sessions:
+                        continue
+                    msgs = raw.get("messages") or []
+                except (ValueError, AttributeError):
+                    continue
+                for m in msgs:
+                    if isinstance(m, dict) and m.get("role") == "user":
+                        text = content_text(m.get("content"))
+                        if text.strip():
+                            out.add(h(norm(text)))
+    if lcm is not None:
+        for sid in sorted(sessions):
+            for row in lcm.con.execute("SELECT content, content_json FROM lcm_messages "
+                                       "WHERE session_id = ? AND role = 'user'", (sid,)):
+                texts = [row["content"] or ""]
+                try:
+                    blocks = json.loads(row["content_json"]) if row["content_json"] else None
+                except ValueError:
+                    blocks = None
+                if isinstance(blocks, list):
+                    texts.append(content_text(blocks))
+                out.update(h(norm(t)) for t in texts if t.strip())
+    return out
+
+
+def row_task_prompts(meta: dict[str, Any]) -> set[str]:
+    """The real prompts a gym row was built from: its task group (``tg-<hash>``),
+    a recombined partner's group and the groups of its compaction padding."""
+    ids = [meta.get("task_id"), meta.get("partner_task_id")]
+    pad = meta.get("compaction_pad")
+    if isinstance(pad, dict) and isinstance(pad.get("task_groups"), list):
+        ids += pad["task_groups"]
+    return {str(x)[3:] for x in ids if isinstance(x, str) and x.startswith("tg-")}
 
 
 def read_holdout_tasks(path: Path) -> set[str]:

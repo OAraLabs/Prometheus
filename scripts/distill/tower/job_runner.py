@@ -15,6 +15,24 @@ those (process group of a recorded PID, after checking its command line).
 Queue, in order, one step at a time, each in its own resumable directory under
 ``$DJR_RESULTS/<model>/<kind>/``:
 
+0. ``teacher-ab`` (only with ``DJR_AB=1``; first in the queue): the teacher quant
+   A/B (``scripts/distill/teacher_ab_run.sh --execute`` from the HEAD-staged
+   ``DJR_AB_CODE``, never ``DJR_CODE``, so the scorer the baselines resume with
+   does not change). The driver starts one llama-server at a time on
+   ``DJR_HOST:DJR_PORT`` (the IQ3 copy, then the Q4_K_M, which also judges both
+   arms), records and stops it by PID, and resumes where it stopped. The tasks
+   are ``DJR_AB_TASKS`` (a taskset_gen.py real-pattern taskset, default the one
+   ``taskset_gen.py exclude`` wrote without the excluded sessions' rows); the models are
+   checked against ``DJR_AB_IQ3_SHA256`` / ``DJR_AB_Q4_SHA256`` when set. It is
+   time-boxed: its ``--until`` is the earlier of ``DJR_AB_MAX_MIN`` after its
+   start and the step deadline (stop-at minus what the later must-run steps
+   reserve), so the rest of the queue keeps its time; it is not started with
+   less than ``DJR_AB_MIN_MIN`` left. The driver runs in a ``distill-teacher-ab-*``
+   scope, so a restore stops it and its server. Exit 0 (a decision) is done;
+   1 (time box, work left) is partial and resumes next window; an ``invalid``
+   report, 2 or 3 fail the step (two failures park it). Its inputs missing:
+   skipped, never a reason to refuse the window. ``ab_report.json`` /
+   ``ab_summary.txt`` stay in ``DJR_AB_OUT``.
 1. ``base-9b-baseline``: its own llama-server on loopback (``DJR_HOST:DJR_PORT``)
    with the base 9B Q4_K_M at ``-c 262144 -np 1 -fa on -ctk q8_0 -ctv q8_0
    --jinja``, then ``score.py run`` (concurrency 1) over sanity, eval-tools,
@@ -152,6 +170,20 @@ DEFAULTS: Dict[str, str] = {
     "DJR_MIN_BAKE_S": "1200",    # same, a bake-off baseline
     "DJR_FEAS_MARGIN_S": "60",   # load/teardown margin around one feasibility length
     "DJR_MIN_RUN_S": "300",      # refuse a stop-at closer than this
+    # the teacher quant A/B (step 0; off unless DJR_AB=1)
+    "DJR_AB": "0",
+    "DJR_AB_CODE": "{home}/code-ab",   # HEAD-staged code for the A/B only (teacher_ab*.py, teacher_gen.py, src/)
+    "DJR_AB_PY": "",                   # empty: DJR_SCORE_PY (it holds Prometheus's base dependencies)
+    "DJR_AB_TASKS": "{home}/phase2b/tasksets/real-v1-excl.jsonl",
+    "DJR_AB_OUT": "{home}/teacher-ab",
+    "DJR_AB_IQ3": "{home}/models/teacher/Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf",
+    "DJR_AB_Q4": "~/models/Qwen3.8-27B-regular-Q4_K_M-bartowski.gguf",
+    "DJR_AB_IQ3_SHA256": "",
+    "DJR_AB_Q4_SHA256": "",
+    "DJR_AB_PACK": "",                 # optional build.py request pack (the teacher's system prompt)
+    "DJR_AB_MAX_MIN": "120",           # time box from the step's start
+    "DJR_AB_MIN_MIN": "40",            # least time worth starting it with
+    "DJR_AB_GRACE_S": "120",           # SIGTERM -> the driver stops its step and server (60 s) -> SIGKILL
 }
 
 # Score sets in run order: (set name, case file, per-request timeout s).
@@ -253,6 +285,18 @@ class Cfg:
         self.min_9b_s, self.min_bake_s = float(raw["DJR_MIN_9B_S"]), float(raw["DJR_MIN_BAKE_S"])
         self.feas_margin = float(raw["DJR_FEAS_MARGIN_S"])
         self.min_run_s = float(raw["DJR_MIN_RUN_S"])
+        self.ab = raw["DJR_AB"].strip() == "1"
+        self.ab_code, self.ab_tasks, self.ab_out = path("DJR_AB_CODE"), path("DJR_AB_TASKS"), path("DJR_AB_OUT")
+        self.ab_py = path("DJR_AB_PY") or self.score_py
+        self.ab_iq3, self.ab_q4, self.ab_pack = path("DJR_AB_IQ3"), path("DJR_AB_Q4"), path("DJR_AB_PACK")
+        self.ab_iq3_sha, self.ab_q4_sha = raw["DJR_AB_IQ3_SHA256"].strip(), raw["DJR_AB_Q4_SHA256"].strip()
+        self.ab_max_s = float(raw["DJR_AB_MAX_MIN"]) * 60
+        self.ab_min_s = float(raw["DJR_AB_MIN_MIN"]) * 60
+        self.ab_grace = float(raw["DJR_AB_GRACE_S"])
+
+    @property
+    def ab_driver(self) -> str:
+        return os.path.join(self.ab_code, "scripts", "distill", "teacher_ab_run.sh")
 
     @property
     def score_script(self) -> str:
@@ -1045,7 +1089,11 @@ class Runner:
     # -- the queue ----------------------------------------------------------------
 
     def steps(self) -> List[Dict[str, Any]]:
-        return [
+        ab: List[Dict[str, Any]] = [
+            {"name": "teacher-ab", "kind": "ab", "out": "teacher-ab", "min_s": self.cfg.ab_min_s,
+             "must": False},
+        ] if self.cfg.ab else []
+        return ab + [
             {"name": "base-9b-baseline", "kind": "baseline", "label": "base-9b", "out": "base-9b/baseline",
              "find": find_9b, "fixed_ctx": 262144, "ub": self.cfg.ub_9b, "min_s": self.cfg.min_9b_s,
              "must": True},
@@ -1120,6 +1168,8 @@ class Runner:
             try:
                 if step["kind"] == "baseline":
                     status, detail = self.run_baseline(step, st, deadline, p)
+                elif step["kind"] == "ab":
+                    status, detail = self.run_ab(step, st, deadline, p)
                 else:
                     status, detail = self.run_feasibility(step, st, deadline, p)
             except Exception as exc:  # noqa: BLE001 - one step's bug must not end the window
@@ -1406,6 +1456,96 @@ class Runner:
         return "done", (f"summary {summary} (n_ctx {st.get('ctx_scored')}, {tag})"
                         + (f"; errors left in {', '.join(errs)}" if errs else "")
                         + (f"; NOTE {'; '.join(mixed)}" if mixed else ""))
+
+    # -- teacher A/B step -------------------------------------------------------------
+
+    def ab_inputs_ok(self) -> Tuple[bool, str]:
+        c = self.cfg
+        missing = [p for p in (c.ab_driver, os.path.join(c.ab_code, "scripts", "distill", "teacher_ab.py"),
+                               c.ab_tasks, c.ab_iq3, c.ab_q4, c.ab_py, c.llama_server) if not os.path.exists(p)]
+        if c.ab_pack and not os.path.exists(c.ab_pack):
+            missing.append(c.ab_pack)
+        return (not missing), ("missing: " + ", ".join(missing) if missing else "")
+
+    def ab_cmd(self, until: Optional[float]) -> List[str]:
+        """The driver's command line (``until`` None: its dry run)."""
+        c = self.cfg
+        cmd = ["/bin/bash", c.ab_driver] + (["--execute", "--until", str(iso(until))] if until is not None else [])
+        cmd += ["--tasks", c.ab_tasks, "--out", c.ab_out, "--iq3", c.ab_iq3, "--q4", c.ab_q4,
+                "--server", c.llama_server, "--port", str(c.port), "--py", c.ab_py, "--code", c.ab_code]
+        if c.ab_iq3_sha:
+            cmd += ["--iq3-sha256", c.ab_iq3_sha]
+        if c.ab_q4_sha:
+            cmd += ["--q4-sha256", c.ab_q4_sha]
+        if c.ab_pack:
+            cmd += ["--pack", c.ab_pack]
+        if until is not None and c.notify and os.access(c.notify, os.X_OK):
+            cmd += ["--notify-cmd", c.notify]
+        return cmd
+
+    def ab_env(self) -> Dict[str, str]:
+        env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "TEACHER_AB_CODE", "TEACHER_AB_PY")}
+        env.update(PYTHONUNBUFFERED="1", HF_HUB_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1", DO_NOT_TRACK="1")
+        return env
+
+    def run_ab(self, step: Dict[str, Any], st: Dict[str, Any], deadline: float,
+               p: Dict[str, Any]) -> Tuple[str, str]:
+        """The teacher quant A/B through its own driver, time-boxed (see the module docstring)."""
+        cfg = self.cfg
+        ok, why = self.ab_inputs_ok()
+        if not ok:
+            return "skipped", why
+        until = min(deadline, now() + cfg.ab_max_s)
+        if until - now() < step["min_s"]:
+            return "skipped", (f"{max(0.0, until - now()) / 60:.0f} min left in its time box "
+                               f"(needs {step['min_s'] / 60:.0f})")
+        sdir = self.step_dir(step)
+        Path(sdir).mkdir(parents=True, exist_ok=True)
+        if port_in_use(cfg.host, cfg.port):
+            return "failed", f"{cfg.host}:{cfg.port} is already taken"
+        ok, info = self.wait_gpu_free(cfg.gpu_release_s)
+        if not ok:
+            return ("partial" if self.stop else "failed"), f"GPU not free: {info}"
+        reason = self.fresh_check(until)
+        if reason:
+            return "partial", f"not started ({reason})"
+        cmd = self.ab_cmd(until)
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        full = self.scope_prefix(f"distill-teacher-ab-{stamp}") + cmd
+        log_path = os.path.join(self.run_dir, "teacher-ab.log")
+        self.progress["current"] = {"step": step["name"], "set": "teacher_ab_run.sh", "since": iso(now())}
+        p["until"] = iso(until)
+        self.save()
+        self.log(f"teacher A/B until {iso(until)}: {' '.join(cmd)}")
+        proc = self.spawn("child", full, log_path, cwd=sdir, env=self.ab_env(),
+                          signature=["teacher_ab_run.sh", "--execute"])
+        # the driver ends itself at --until; this deadline is only the backstop
+        rc, reason = self.supervise(proc, until + cfg.ab_grace + 120, cfg.ab_grace)
+        self.forget("child")
+        rep = read_json(os.path.join(cfg.ab_out, "ab_report.json"))
+        dec = (rep.get("decision") or {}) if isinstance(rep, dict) else {}
+        verdict = str(dec.get("verdict") or "")
+        summary = ""
+        try:
+            summary = Path(cfg.ab_out, "ab_summary.txt").read_text(errors="replace").strip().splitlines()[0]
+        except (OSError, IndexError):
+            pass
+        if verdict:
+            p["decision"] = {"verdict": verdict, "a_minus_b_pts": dec.get("a_minus_b_pts"),
+                             "pairs": dec.get("pairs"), "report": os.path.join(cfg.ab_out, "ab_report.json")}
+            st["decision"] = p["decision"]
+        if not reason and stopped_by_signal(rc):
+            # a restore stopped its distill-teacher-ab-* scope: our own SIGTERM may be a moment behind
+            reason = self.settle() or self.external_stop("the teacher A/B driver", rc)
+        if reason:
+            return "partial", f"stopped ({reason}); resumes next window" + (f"; {summary}" if summary else "")
+        if rc == 0:
+            return "done", summary or f"decision: {verdict}"
+        if rc == 1 and verdict == "invalid":
+            return "failed", summary or "the A/B report is invalid"
+        if rc == 1:
+            return "partial", (summary or "not finished") + " (time box or work left; resumes next window)"
+        return "failed", f"teacher_ab_run.sh exit {rc}: {log_tail(log_path, 3)}"
 
     # -- feasibility step ---------------------------------------------------------
 
@@ -1813,6 +1953,14 @@ def dry_run(cfg: Cfg, stop_at: float) -> int:
     chk(os.path.isfile(cfg.lengths), "train lengths file (feasibility --data)",
         (f"{cfg.lengths} ({count_lines(cfg.lengths)} rows)" if os.path.isfile(cfg.lengths) else cfg.lengths)
         + feas_note, required=feas_req)
+    if cfg.ab:
+        ab_ok, ab_why = runner.ab_inputs_ok()
+        chk(ab_ok or None, "teacher A/B inputs (DJR_AB=1; never required: execute skips the step)",
+            (f"{cfg.ab_driver}; tasks {cfg.ab_tasks}; IQ3 {cfg.ab_iq3}; Q4 {cfg.ab_q4}; python {cfg.ab_py}"
+             if ab_ok else ab_why) + why_not("teacher-ab"), required=False)
+        commit_ab = Path(cfg.ab_code) / "COMMIT"
+        chk(commit_ab.is_file() or None, "A/B code commit",
+            commit_ab.read_text().strip()[:12] if commit_ab.is_file() else f"no {commit_ab}", required=False)
     free = disk_free(cfg.home)
     chk(free >= cfg.disk_floor + cfg.disk_margin, "free disk", f"{free / 2**30:.1f} GiB (floor "
         f"{cfg.disk_floor / 2**30:.0f} + margin {cfg.disk_margin / 2**30:.0f})")
@@ -1848,6 +1996,26 @@ def dry_run(cfg: Cfg, stop_at: float) -> int:
         status = st["status"]
         print(f" {i + 1}. {step['name']}  -> {sdir}  [state: {status}"
               + (f", failures {st['failures']}" if st["failures"] else "") + "]")
+        if step["kind"] == "ab":
+            ok, why = runner.ab_inputs_ok()
+            print("    " + ("inputs ok" if ok else f"skip: {why}"))
+            print(f"    time box: the earlier of {cfg.ab_max_s / 60:.0f} min from its start and stop-at minus "
+                  f"the later must-run steps' reserve; not started with less than {cfg.ab_min_s / 60:.0f} min")
+            print("    driver: " + " ".join(runner.ab_cmd(stop_at)).replace(f"--until {iso(stop_at)}",
+                                                                          "--until <time box end>"))
+            if st.get("decision"):
+                print(f"    decision so far: {st['decision']}")
+            if ok and needed(step["name"]):
+                try:
+                    env = dict(runner.ab_env(), PYTHONDONTWRITEBYTECODE="1")
+                    cp = subprocess.run(runner.ab_cmd(None), capture_output=True, text=True, timeout=180, env=env)
+                    print(f"    driver dry run (exit {cp.returncode}):")
+                    for ln in (cp.stdout + cp.stderr).strip().splitlines()[:40]:
+                        print("      " + ln)
+                except (OSError, subprocess.SubprocessError) as e:
+                    print(f"    driver dry run failed: {e}")
+            est_total += 90 * 60
+            continue
         if step["kind"] == "baseline":
             model, why = step["find"](cfg)
             if not model:
@@ -1923,9 +2091,14 @@ def summary_lines(progress: Any) -> List[str]:
     for s in progress.get("steps", []):
         name = s.get("name", "?")
         short = {"base-9b-baseline": "9B base", "qwen38-27b-feasibility": "27B feas",
-                 "qwen38-27b-baseline": "27B bake", "glimmer-30b-baseline": "Glimmer"}.get(name, name)
+                 "qwen38-27b-baseline": "27B bake", "glimmer-30b-baseline": "Glimmer",
+                 "teacher-ab": "A/B"}.get(name, name)
         status = s.get("status")
-        if s.get("sets"):
+        if name == "teacher-ab":
+            dec = (s.get("decision") or {}).get("verdict")
+            out.append(f"{short} {status}" + (f": {dec}" if dec else "")
+                       + ("" if dec else f": {str(s.get('detail', ''))[:90]}"))
+        elif s.get("sets"):
             parts = []
             for n, v in s["sets"].items():
                 ab = {"sanity": "san", "eval-tools": "tools", "eval-injection": "inj",

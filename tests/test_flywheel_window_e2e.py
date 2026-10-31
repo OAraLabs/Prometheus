@@ -51,9 +51,8 @@ W2 = datetime(2026, 11, 7, 2, 0, 30, tzinfo=ET)     # EST, UTC-5: first Saturday
 W3 = datetime(2026, 11, 14, 2, 0, 30, tzinfo=ET)
 W4 = datetime(2026, 11, 21, 2, 0, 30, tzinfo=ET)
 
-APPROVED = {"max_data": {"approved": True, "approved_by": "operator",
-                         "approved_on": "2020-01-01", "reference": "test decision"}}
-BASE = {"task_success": 0.40, "recall_32k": 0.90, "recall_64k": 0.85, "injection": 0.70,
+REF = "operator Q6b test"     # the Q6b allow's reference (Sim.approved)
+BASE ={"task_success": 0.40, "recall_32k": 0.90, "recall_64k": 0.85, "injection": 0.70,
         "sanity": 0.80}
 SCORES = {
     "fw-2026-10-31": {"task_success": 0.55, "recall_32k": 0.895, "recall_64k": 0.86,
@@ -136,6 +135,13 @@ class Sim:
         monkeypatch.delenv("FLYWHEEL_SIM_CRASH", raising=False)
         monkeypatch.setattr(fw, "POLL_SECONDS", 0.002)
         monkeypatch.setattr(fw, "served_model_id", self._served_model_id)
+        self.sessions = root / "exclude-sessions.txt"
+        self.sessions.write_text("sess-incident\n")
+
+    def approved(self) -> dict[str, Any]:
+        """The Q6b allow, as the operator records it in the flywheel: block."""
+        return {"max_derived": {"approved": True, "approval_ref": REF,
+                                "exclude_sessions_file": str(self.sessions)}}
 
     def spend(self, ts: str, phase: str, calls: int, usd: float) -> None:
         """A spend-ledger row, as the runbook's judge would append one."""
@@ -500,23 +506,49 @@ def test_max_derived_data_is_refused_and_no_trainer_or_swap_starts(sim: Sim):
     assert "- Train data checked: 12 row(s), 12 Max-derived" in sec["Guards"]
     assert "- **train** REFUSED: 12 of 12 row(s) are Max-derived" in sec["Why stages did not run"]
     operator = steps(rep, "operator")
-    assert operator[0].startswith("Decide DISTILL-OPEN-QUESTIONS #6")
+    assert operator[0].startswith("Record the Q6b allow to train on Max-derived rows")
     assert operator[1].startswith("flywheel.harvest.teacher_models names only Max models")
     assert not any(s.startswith("train was refused") for s in operator)   # said once, above
 
-    # The guard alone held it: with the approval recorded, the same window trains.
-    approved = {**legacy, **APPROVED}
+    # The allow recorded mid-window: this window's sets were built without it
+    # (and without its session exclusion list), so the train still refuses.
+    approved = {**legacy, **sim.approved()}
+    n = len(sim.calls())
     assert sim.run(W1 + timedelta(minutes=30), approved) == fw.EXIT_OK
-    assert sim.cmds() == ["build", "deadman", "apply:flywheel", "train", "train-done",
-                          "quantize", "score", "compare", "apply:business"]
+    assert sim.cmds(n) == []
     rep = sim.report()
     assert stage(rep, "build")["reason"] == "done earlier in this window"
+    train = stage(rep, "train")
+    assert train["status"] == fw.REFUSED
+    assert "were built under another session exclusion list" in train["reason"]
+
+    # Next window the build reruns under the allow (a changed allow rebuilds)
+    # and the same rows train a private model, tagged everywhere.
+    n = len(sim.calls())
+    assert sim.run(W2, approved) == fw.EXIT_OK
+    assert sim.cmds(n) == ["build", "deadman", "apply:flywheel", "train", "train-done",
+                           "quantize", "score", "compare", "apply:business"]
+    rep = sim.report()
     assert stage(rep, "train")["status"] == fw.OK
-    assert "training ALLOWED, approved by operator on 2020-01-01" in sections(sim.md())["Guards"]
+    version = "fw-2026-11-07-max-derived"
+    state = sim.state()
+    assert state["sets"]["dir"].endswith("/2026-11-07/sets-max-derived")
+    assert state["sets"]["approval"] == REF and state["sets"]["max_derived"] is True
+    assert state["adapters"][version]["adapter_dir"].endswith(f"/{version}/adapter-max-derived")
+    assert (sim.data / "models" / version / f"{version}-Q4_K_M.gguf").is_file()
+    assert rep["model"]["candidate"] == version
+    sec = sections(sim.md())
+    assert (f"training ALLOWED under the Q6b allow (approval {REF!r}; 1 session(s) excluded"
+            in sec["Guards"])
+    assert f"  - adapter {version}: " in sec["Guards"]
+    assert f"  - model {version}: " in sec["Guards"]
+    assert "NOT carry" not in sec["Guards"]
+    assert ("- Max vs local 27B: train split of the 2026-11-07 sets: Max 11 (100.0%), local 27B "
+            "0 (0.0%), other 0 (0.0%) of 11") in sec["At a glance"]
 
 
 def test_offspring_output_is_never_trained_on(sim: Sim):
-    assert week_one(sim, sim.block(**APPROVED)) == fw.EXIT_OK      # fw-2026-10-31 trained
+    assert week_one(sim) == fw.EXIT_OK      # fw-2026-10-31 trained (gym rows: no allow needed)
     # The week: the student's own traces reach the golden exports (no verdict),
     # judged ones arrive as extra traces, and a faulty builder lets pooled
     # offspring rows into train/val labelled tool-success.
@@ -526,7 +558,7 @@ def test_offspring_output_is_never_trained_on(sim: Sim):
     sim.produce("gym", sim.gym / "gym-2026-11-06.jsonl", 100, 12)
     sim.produce("offspring", sim.gym / "offspring-2026-11-06.jsonl", 600, 3, served=OFFSPRING_ID,
                 judged_by="qwen3.8-27b")
-    faulty = sim.block(**APPROVED)
+    faulty = sim.block(**sim.approved())
     faulty["build"] = {"args": [*faulty["build"]["args"], "--offspring-label", "tool-success"]}
     n = len(sim.calls())
     assert sim.run(W2, faulty) == fw.EXIT_OK

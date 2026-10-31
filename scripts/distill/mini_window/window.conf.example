@@ -30,3 +30,21 @@ OLLAMA_MODEL=judge-model:tag
 # DEADMAN_HHMM=0715
 # SLOT_RETURN_LATEST_HHMM=0620              # slot-exit after this stays on the IQ3 teacher
 # EVAL_WAIT_MAX_S=1500
+
+# Generation (gen_runner.py; started by window-start and slot-exit as distill-gen-<stamp>). Defaults shown.
+# GEN_ENABLE=1
+# GEN_RUNNER=                               # empty: WIN_DIR/gen_runner.sh
+# GEN_STOP_TIMEOUT_S=90
+# GEN_CODE=$HOME/distill/phase2b/code-head  # gen_runner.py stage-code: a HEAD export + COMMIT
+# GEN_PY=$HOME/prometheus-deploy/.venv/bin/python
+# GEN_RUNS=$HOME/distill/phase2b/runs       # resumable outputs, state/, logs/, STOP
+# GEN_POOL=$HOME/distill/phase2b/pool       # harvested rows; max-derived/ for Max-derived ones
+# GEN_TASKS=$HOME/distill/phase2b/tasksets/real-v1-excl.jsonl   # taskset_gen.py exclude output
+# GEN_EXCLUDE_SESSIONS=$HOME/distill/policy/exclude-sessions.txt  # the preflight refuses a taskset holding their rows
+# GEN_SANDBOX_ROOT=                         # empty: <tmp>/prometheus-teacher-gen; -local / -max-payg per run
+# GEN_GUARD_PY=$HOME/distill/phase4/probe_guard.py
+# GEN_GUARD_LISTEN=127.0.0.1:18593
+# GEN_STOP_HHMM=0635                        # a nightly window's generation ends here
+# GEN_JUDGE_BUDGET_USD=25                   # judge_run.sh --budget-usd (Max, pay-per-token key only)
+# GEN_JUDGE_BLIND_BUDGET_USD=5
+# GEN_MAX_BUDGET_USD=100                    # teacher_gen --teacher max-payg --budget-usd
