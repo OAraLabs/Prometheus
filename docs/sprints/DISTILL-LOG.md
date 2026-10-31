@@ -137,3 +137,9 @@ Append-only, times in ET.
     - The 4090's own llama.cpp tools other than llama-server are stale; working pinned builds are in ~/distill/phase6-rehearsal.
 - 2026-10-31 18:28 — JSONL readers now split only on newlines (049e047): build.py spot-check and verdicts, teacher_gen resume and skip-keys, gen_runner ledger, teacher_ab, quantize_smoke. Distill suite 1,515 passed.
 - 2026-10-31 18:28 — v4b-r1-c70: 4,483 train / 138 val; all gates except the spot check PASS (the spot check passed separately in the Phase 6 rehearsal); check-build ok. 990 tool-success train rows remain, 721 of them in calibrated categories, so round 2 is judging coding 715 + daemon 6 (424 done).
+- 2026-10-31 18:59 — Judge round 2: 721 judged, giving v4b-r2-c70 with 4,480 train / 140 val and 400 tool-success rows left (110 in calibrated categories). Round 3 judged those 110 (72 pass / 38 fail); building r3. Total local judge fails applied so far: 1,465 + round 3.
+- 2026-10-31 19:54 — **Judge chain finished (19:53): use v4b**, 4,480 train / 140 val; 6 rounds, 2,539 local verdicts (610 fail); v4b staged to the 4090 and sha-verified; the judge server is stopped.
+- 2026-10-31 19:54 — **First FULL 9B QLoRA run started 19:54 ET on the 4090:** distill-train-full-20261031T195413, run 9b-r32-v4b-max-derived (private, max-derived).
+  - **Run:** 124.1M tokens over 2 epochs, ~13.6 h, ETA ~Sun 09:15 EST. Stop-at Mon 05:20 EST, hourly checkpoints, keep 2.
+  - **Watcher:** flywheel-train-watch-20261031T195413 Telegrams at start, each epoch and the end (val curve), then restores business.
+  - **Base:** provenance-verified bnb4 of official Qwen3.5-9B.

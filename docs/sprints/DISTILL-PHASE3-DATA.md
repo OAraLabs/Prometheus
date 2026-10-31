@@ -143,3 +143,36 @@ neither fix is applied without the operator.
 On the 3090 Ti host: `~/distill/phase3/code/` holds the builder; `build.py pack` then `build --dry-run`. Outputs and
 `build_report.json` are under `~/distill/phase3/`. Code: `scripts/distill/build.py`, `render.py`,
 `build_eval_sets.py`, `build_fail_set.py`.
+
+## v4b (first full run, after the local 27B judge), 2026-10-31
+
+**Gate: PASS** on every gate.
+- The byte-for-byte spot check is the one not run inside the build. It passed separately in the Phase 6 rehearsal: 24/24 rows at text and token level, including chat-mode.
+- Coding cap 70%: the operator's rule takes the lowest of 60/70% that keeps train ≥ 3,500, and the judge drops left 3,360 at 60%.
+
+**Local 27B judge (operator Sat ruling).**
+- Calibrated against Max's verdicts on 4,651 pass-side items: 85.40% agreement [84.4, 86.4], kappa 0.54 [0.50, 0.57]. Used, because ≥ 85%.
+- It passes 40% of what Max fails, and fails 8.1% of what Max passes.
+- Applied only in categories with ≥ 20 pairs at ≥ 85%:
+  - coding: 85.5% (n = 4,489)
+  - sentinel/daemon: 85.7% (n = 28, CI 68.5–94.3)
+- Not applied:
+  - memory/wiki: 83.2% (n = 113)
+  - other: 76.2% (n = 21)
+- Six judge rounds (the cap rebuild admits rows that haven't been judged): 2,539 local verdicts, 1,929 pass / 610 fail.
+- Of v4's 1,895 unjudged train rows: 1,605 judged, 358 dropped. Rows entering in rebuilds: 869 judged, 232 dropped. No local fail is left in the dataset.
+
+| Split | Rows | Max golden | Max gym | Local 27B gym | Max total |
+|---|---:|---:|---:|---:|---:|
+| train | 4,480 | 3,751 (83.7%) | 696 (15.5%) | 33 (0.7%) | 99.3% |
+| val | 140 | 128 | 12 | 0 | 100% |
+| eval-tools | 402 | 295 + 26 failed-call hard cases | 79 | 2 | 99.5% |
+
+- **Labels in train:** 4,188 judge-pass (Max or local) and 292 tool-success only. The tool-success rows are mostly in memory/wiki and other, which aren't calibrated; Max judges them after the Nov 16 reset.
+- **Categories:** coding 70.0%, other 13.5%, daemon 8.8%, chat-mode 6.3%, memory/wiki 1.4%.
+- **Presence:** chat-mode 284, error-recovery 654, compacted 166.
+- **Class caps:** reported_blocked 10.1%, no-tool 2.5%.
+- **Leakage:** 0 overlaps.
+- **Data policy:** all 4,587 Max-derived train/val rows are covered by the Q6b approval. Private, tagged max-derived.
+- **Hashes:** manifest sha256 `f05b6d5c4037bf18c1ee6394d9c7195e5568a44949455149f3521e5d5fffe45c`, train sha256 `ba2cc33652d4b3aea86d93e4fa5a33a01ecc4a8eef6c86a8e38bb2874a33b46b`. Staged to the 4090 and verified there.
+- **Known gap (also in v4):** a parallel sibling call can bring a failed turn back into train. To be fixed before the next dataset.
