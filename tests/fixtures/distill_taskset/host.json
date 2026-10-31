@@ -1,0 +1,37 @@
+{
+ "_comment": "A synthetic host for tests/test_distill_taskset.py: repo files (committed to a temp git repo), wiki pages, cron job names, registry tool names and a word list. All invented.",
+ "repo_files": {
+  "README.md": "# Demo Repo\n\n## Getting Started\n\nSee https://docs.example.org/start for details.\n",
+  "docs/guide/release.md": "# Release Guide\n\n## Release Process\n\nBump, tag, publish.\n\n## Retry Policy\n\nRead https://docs.example.org/release/retries first.\n",
+  "docs/guide/setup.md": "# Setup\n\n## Deployment Guide\n\n## Install Steps\n",
+  "docs/notes/caching.md": "# Caching\n\n## Cache Layers\n",
+  "src/prometheus/__init__.py": "",
+  "src/prometheus/symbiote/__init__.py": "",
+  "src/prometheus/symbiote/core.py": "",
+  "src/prometheus/gym/runner.py": "",
+  "src/prometheus/telemetry/export.py": "",
+  "src/prometheus/jobs/__init__.py": "",
+  "src/prometheus/jobs/nightly_digest.py": "",
+  "src/app/__init__.py": "",
+  "src/app/parser.py": "",
+  "src/app/util.py": "",
+  "src/app/cli.py": "",
+  "scripts/tools/report.py": "",
+  "config/app.yaml": "",
+  "config/limits.toml": ""
+ },
+ "wiki": {
+  "topics/release-process.md": "# Release Process\n\n## Version Bumps\n\n## Changelog Rules\n",
+  "topics/deployment-guide.md": "# Deployment Guide\n\n## Rollback Steps\n",
+  "topics/lora-training-notes.md": "# LoRA Training Notes\n\n## Batch Sizes\n",
+  "topics/192.0.2.10.md": "# Host notes\n",
+  "people/jordan-blake.md": "# Jordan Blake\n",
+  "clients/northwind-traders.md": "# Northwind Traders\n"
+ },
+ "cron_jobs": [{"name": "nightly digest"}, {"name": "weekly cleanup"}],
+ "tools": ["bash", "read_file", "web_fetch", "cron_create", "wiki_query", "memory", "web_search"],
+ "dictionary": ["a", "the", "gym", "memory", "release", "process", "guide", "deployment", "telemetry",
+                "version", "bumps", "changelog", "rules", "rollback", "steps", "setup", "getting", "started",
+                "demo", "repo", "retry", "policy", "install", "caching", "cache", "layers", "training",
+                "notes", "batch", "sizes", "host", "jobs", "app", "scripts", "tools", "config"]
+}

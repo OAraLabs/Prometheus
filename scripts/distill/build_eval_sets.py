@@ -71,11 +71,14 @@ the share of haystack tokens before the needle. Kinds:
   eval-tools gate run; score it on its own and report it beside the recall
   numbers.
 
-The Phase 6 gate fails recall on a drop of more than 3 pts in ANY length
-bucket. ``build_report.json`` states, per bucket, what one case is worth, how
-many net extra misses fail the bar, and how often an unchanged model would
-fail it by chance (at an assumed 10% discordance each way), so a gate result
-is read with its noise in view.
+``build_report.json`` states, per bucket, what one case is worth, how many
+net extra misses would fail the RETIRED fixed bar (a drop of more than 3 pts
+in ANY length bucket), and how often an unchanged model would fail it by
+chance (at an assumed 10% discordance each way): the noise that retired it
+(OPEN-QUESTIONS #8). The Phase 6 gate now pairs the two models' outcomes case
+by case (score.py ``compare``; the math and power tables are in
+docs/sprints/DISTILL-PHASE4-BASELINES.md, and ``score.py gate-power`` prints
+them for any set size).
 
 Recall and multi-hop cases are chat-mode (``suppress_tools``): a model that
 re-reads a file instead of answering would measure tool habits, not recall.
@@ -187,8 +190,9 @@ MIN_DOC_LINES = 20
 READ_LIMIT = 200  # read_file's default window
 MAX_LINE_CHARS = 1000
 MAX_FIT_ITERS = 30
-# score.py's LONGCTX_MAX_DROP_PTS (a test holds them equal): the Phase 6 bar on
-# a recall drop in any one length bucket. Used only to report its resolution.
+# score.py's LONGCTX_MAX_DROP_PTS (a test holds them equal): the retired fixed
+# bar on a recall drop in any one length bucket, now the paired gate's margin.
+# Used only to report the fixed bar's noise.
 LONGCTX_GATE_DROP_PTS = 3.0
 GATE_NOISE_DISCORDANCE = 0.10  # assumed share of cases each model alone gets right
 # No per-case max_tokens: score.py then sends the live local output cap, as the

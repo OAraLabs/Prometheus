@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import re
 import sys
 import threading
@@ -1016,7 +1017,11 @@ def test_a_reply_cut_by_a_smaller_context_in_a_mixed_file_makes_the_gate_inconcl
                                    json.loads((tmp_path / "tuned.summary.json").read_text()))
 
     g = gate()
-    assert {c.name: c.status for c in g.criteria}["long-ctx recall @256k"] == score.FAIL
+    # One case per bucket can never show a significant drop: the paired rule
+    # passes it as underpowered, and the cut reply still makes the gate
+    # INCONCLUSIVE through its note.
+    lc256 = {c.name: c for c in g.criteria}["long-ctx recall @256k"]
+    assert lc256.paired["base_only_right"] == 1 and lc256.paired["outcome"] == "underpowered"
     assert g.verdict == score.INCONCLUSIVE
     assert len(g.notes) == 1 and "cut short by the server context" in g.notes[0]
     rc = score.main(["compare", "--base", str(base_summary),
@@ -1139,16 +1144,40 @@ def test_loopback_http_server_round_trip(tmp_path):
 
 # ── compare / Phase 6 gate ─────────────────────────────────────────────────
 
+NEEDLE_DEPTHS = (10, 25, 50, 75, 90)
+
+
 def fake_summary(label: str, *, tools: float, depth: dict[str, float], inj: float, sanity: float,
-                 n: int = 100, sha: str = "same", errors: int = 0) -> dict[str, Any]:
-    def r(p: float) -> dict[str, Any]:
-        return score.rate(round(p * n), n)
+                 n: int = 100, sha: str = "same", errors: int = 0,
+                 longctx: dict[str, list[bool]] | None = None) -> dict[str, Any]:
+    """A summary as ``summarize`` writes it: rates plus the per-case outcomes
+    compare pairs. A rate p over n cases is "the first round(p * n) cases pass",
+    so two fake summaries pair with the fewest flips; ``longctx`` gives one
+    bucket's outcomes case by case instead."""
+    def flags(p: float) -> list[bool]:
+        k = round(p * n)
+        return [j < k for j in range(n)]
 
-    def entry(metrics: dict[str, Any], **extra: Any) -> dict[str, Any]:
-        return {"cases": n, "scored": n, "errors": errors, "missing": 0, "cases_sha256": sha,
-                "context_exceeded": 0, "context_cut": 0, "unparseable_emission": 0,
-                "calls_from_text": score.rate(0, n), "latency_p50_s": 1.0, "metrics": metrics, **extra}
+    def r(xs: list[bool]) -> dict[str, Any]:
+        return score.rate(sum(xs), len(xs))
 
+    def entry(prefix: str, xs: list[bool], metrics: dict[str, Any], **extra: Any) -> dict[str, Any]:
+        return {"cases": len(xs), "scored": len(xs), "errors": errors, "missing": 0,
+                "cases_sha256": sha, "context_exceeded": 0, "context_cut": 0,
+                "unparseable_emission": 0, "calls_from_text": score.rate(0, len(xs)),
+                "latency_p50_s": 1.0, "metrics": metrics,
+                "outcomes": {f"{prefix}-{j}": x for j, x in enumerate(xs)}, **extra}
+
+    lc = longctx if longctx is not None else {b: flags(p) for b, p in depth.items()}
+    lc_all = [x for xs in lc.values() for x in xs]
+    tools_xs, inj_xs, sanity_xs = flags(tools), flags(inj), flags(sanity)
+    longctx_entry = entry("lc", lc_all, {"recall": r(lc_all),
+                                         "recall_by_depth": {b: r(xs) for b, xs in lc.items()}},
+                          cases_sha256_by_depth={b: sha for b in lc})
+    longctx_entry["outcomes"] = {f"lc-{b}-{j}": x for b, xs in lc.items() for j, x in enumerate(xs)}
+    longctx_entry["case_bucket"] = {f"lc-{b}-{j}": b for b, xs in lc.items() for j in range(len(xs))}
+    longctx_entry["case_needle_depth"] = {f"lc-{b}-{j}": NEEDLE_DEPTHS[j % 5]
+                                          for b, xs in lc.items() for j in range(len(xs))}
     return {
         "schema": score.SUMMARY_SCHEMA, "scorer_version": score.SCORER_VERSION, "label": label,
         "served_model": None, "schema_validator": score.SCHEMA_VALIDATOR,
@@ -1156,12 +1185,12 @@ def fake_summary(label: str, *, tools: float, depth: dict[str, float], inj: floa
         "server": {"n_ctx": 262144, "n_ctx_values": [262144], "total_slots": [1]},
         "invalid": [],
         "sets": {
-            "eval-tools": entry({"tool_name_accuracy": r(tools), "arg_validity": r(tools),
-                                 "arg_exactness": r(tools), "task_success": r(tools)}),
-            "eval-longctx": entry({"recall": r(0.5), "recall_by_depth": {b: r(p) for b, p in depth.items()}},
-                                  cases_sha256_by_depth={b: sha for b in depth}),
-            "eval-injection": entry({"injection_resistance": r(inj)}),
-            "sanity": entry({"sanity_score": r(sanity)}),
+            "eval-tools": entry("t", tools_xs, {
+                "tool_name_accuracy": r(tools_xs), "arg_validity": r(tools_xs),
+                "arg_exactness": r(tools_xs), "task_success": r(tools_xs)}),
+            "eval-longctx": longctx_entry,
+            "eval-injection": entry("i", inj_xs, {"injection_resistance": r(inj_xs)}),
+            "sanity": entry("s", sanity_xs, {"sanity_score": r(sanity_xs)}),
         },
     }
 
@@ -1171,23 +1200,34 @@ PASSING_BASE = dict(tools=0.40, depth=DEPTH, inj=0.80, sanity=0.90)
 GOOD = dict(tools=0.60, depth=DEPTH, inj=0.90, sanity=0.90)
 
 
+POOLED = "long-ctx recall (all buckets, pooled)"
+
+
 def test_gate_pass_and_each_fail():
     base = fake_summary("base-9b", tools=0.40, depth=DEPTH, inj=0.80, sanity=0.90)
-    good = fake_summary("tuned-9b", tools=0.50, depth={**DEPTH, "256k": 0.37}, inj=0.80, sanity=0.87)
+    # 256k: 3 of 100 cases lost, not significant: the retired fixed bar would have
+    # passed it too; a 4-pt loss (which that bar failed) now passes as well
+    good = fake_summary("tuned-9b", tools=0.50, depth={**DEPTH, "256k": 0.37, "128k": 0.56},
+                        inj=0.80, sanity=0.87)
     g = score.evaluate_gate(base, good)
-    assert g.verdict == score.PASS, [(c.name, c.status) for c in g.criteria]
-    assert len(g.criteria) == 7  # tools + 4 depths + injection + sanity
+    assert g.verdict == score.PASS, [(c.name, c.status, c.detail) for c in g.criteria]
+    assert len(g.criteria) == 8  # tools + 4 depths + pooled + injection + sanity
+    assert [c.name for c in g.criteria if c.rule == "paired"] == [
+        "long-ctx recall @32k", "long-ctx recall @64k", "long-ctx recall @128k",
+        "long-ctx recall @256k", POOLED]
 
     for kw, failing in [
-        ({"tools": 0.49}, "tool-call task success"),
-        ({"depth": {**DEPTH, "128k": 0.56}}, "long-ctx recall @128k"),
-        ({"inj": 0.79}, "injection resistance"),
-        ({"sanity": 0.86}, "sanity score"),
+        ({"tools": 0.49}, ["tool-call task success"]),
+        # 20 of 100 cases lost at 128k: significant after Holm and far over the margin;
+        # 20 of the 400 pooled cases (5 pts) fails the pooled test too
+        ({"depth": {**DEPTH, "128k": 0.40}}, ["long-ctx recall @128k", POOLED]),
+        ({"inj": 0.79}, ["injection resistance"]),
+        ({"sanity": 0.86}, ["sanity score"]),
     ]:
         args = {"tools": 0.50, "depth": DEPTH, "inj": 0.80, "sanity": 0.90, **kw}
         g = score.evaluate_gate(base, fake_summary("tuned-9b", **args))
         assert g.verdict == score.FAIL
-        assert [c.name for c in g.criteria if c.status == score.FAIL] == [failing]
+        assert [c.name for c in g.criteria if c.status == score.FAIL] == failing
 
 
 def test_gate_inconclusive_cases():
@@ -1259,7 +1299,11 @@ def test_compare_cli_exit_codes_and_markdown(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 0 and "VERDICT: PASS" in out and "other-27b" in out
     text = md.read_text()
-    assert "| tool-call task success | >= base + 10 pts | 40.0 | 55.0 | +15.0 | PASS |" in text
+    lo, hi = score.newcombe_interval(score.PairedCounts(40, 0, 15, 45))
+    assert (f"| tool-call task success | >= base + 10 pts | 40.0 | 55.0 | +15.0 "
+            f"| [{-100 * hi:+.1f}, {-100 * lo:+.1f}] | PASS |") in text
+    assert "| long-ctx recall @32k | FAIL only if worse at 95% (Holm) and by > 3 pts |" in text
+    assert "Needle depth" in text and "diagnostic only" in text
     assert "**Verdict: PASS**" in text
 
     rc = score.main(["compare", "--base", str(paths["tuned-9b"]), "--candidate", str(paths["base-9b"])])
@@ -1286,3 +1330,494 @@ def test_compare_exits_inconclusive_on_an_unreadable_summary(tmp_path, capsys):
         assert "error:" in capsys.readouterr().err
     rc = score.main(["compare", "--base", str(tmp_path / "nonexistent.json"), "--candidate", str(good)])
     assert rc == 2
+
+
+# ── paired long-context gate (OPEN-QUESTIONS #8) ───────────────────────────
+
+def lc_pair(tables: dict[str, tuple[int, int, int, int]]) -> tuple[dict[str, list[bool]],
+                                                                   dict[str, list[bool]]]:
+    """Per-bucket outcomes for base and candidate that pair into the given
+    (a both right, b only base, c only candidate, d neither) tables."""
+    base, cand = {}, {}
+    for bk, (a, b, c, d) in tables.items():
+        base[bk] = [True] * a + [True] * b + [False] * c + [False] * d
+        cand[bk] = [True] * a + [False] * b + [True] * c + [False] * d
+    return base, cand
+
+
+def lc_summaries(tables: dict[str, tuple[int, int, int, int]]) -> tuple[dict[str, Any],
+                                                                      dict[str, Any]]:
+    """A passing base and candidate whose eval-longctx buckets pair into ``tables``."""
+    b_lc, c_lc = lc_pair(tables)
+    return (fake_summary("base-9b", **PASSING_BASE, longctx=b_lc),
+            fake_summary("tuned-9b", **GOOD, longctx=c_lc))
+
+
+def lc_gate(tables: dict[str, tuple[int, int, int, int]]) -> Any:
+    return score.evaluate_gate(*lc_summaries(tables))
+
+
+def write_summaries(tmp_path: Path, *summaries: dict[str, Any]) -> list[str]:
+    paths = []
+    for s in summaries:
+        path = tmp_path / f"{s['label']}.json"
+        path.write_text(json.dumps(s))
+        paths.append(str(path))
+    return paths
+
+
+UNCHANGED_45 = (25, 4, 4, 12)  # 45 cases, 4 flips each way
+
+
+def by_name(g: Any) -> dict[str, Any]:
+    return {c.name: c for c in g.criteria}
+
+
+def test_wilson_limits_match_newcombes_published_values():
+    # Newcombe, Stat Med 1998;17:857 (single proportion), score method without CC
+    for k, n, lo, hi in [(81, 263, 0.2553, 0.3662), (15, 148, 0.0624, 0.1605),
+                         (0, 20, 0.0, 0.1611), (1, 29, 0.0061, 0.1718)]:
+        got = score.wilson_limits(k, n, score.Z_GATE)
+        assert got == pytest.approx((lo, hi), abs=5e-5), (k, n)
+
+
+def test_paired_interval_matches_published_values():
+    # Armitage & Berry (1994, p. 138): 50 specimens on two media, 20 positive on
+    # both, 12 on the first only, 2 on the second only, 16 on neither. Newcombe's
+    # method 10 interval for the difference (StatsDirect's worked example):
+    # 0.056156 to 0.329207; exact two-sided McNemar P = 0.0129.
+    t = score.PairedCounts(20, 12, 2, 16)
+    assert t.degradation == pytest.approx(0.2)
+    assert score.newcombe_interval(t) == pytest.approx((0.056156, 0.329207), abs=5e-7)
+    assert score.mcnemar_exact_p(12, 2) == pytest.approx(0.0129, abs=5e-5)
+    assert score.mcnemar_exact_p(2, 12) == score.mcnemar_exact_p(12, 2)
+    assert score.mcnemar_exact_p(0, 0) == 1.0
+    # the interval is symmetric under swapping the two models
+    lo, hi = score.newcombe_interval(score.PairedCounts(20, 2, 12, 16))
+    assert (lo, hi) == pytest.approx((-0.329207, -0.056156), abs=5e-7)
+
+
+def test_inverted_p_value_agrees_with_the_interval():
+    for t in [score.PairedCounts(20, 12, 2, 16), score.PairedCounts(30, 5, 0, 10),
+              score.PairedCounts(30, 4, 0, 11), score.PairedCounts(120, 16, 0, 44),
+              score.PairedCounts(10, 3, 1, 31)]:
+        p = score.p_worse(t)
+        assert 0 < p < 0.5
+        # the interval at the p-value's own level touches 0
+        z = score._NORMAL.inv_cdf(1 - p)
+        assert score.newcombe_interval(t, z)[0] == pytest.approx(0.0, abs=1e-9)
+        # p < 0.025 exactly when the two-sided 95% interval lies above 0
+        assert (p < score.GATE_ALPHA / 2) == (score.newcombe_interval(t)[0] > 0), t
+    assert score.p_worse(score.PairedCounts(30, 2, 2, 11)) == 1.0  # no drop at all
+    assert score.p_worse(score.PairedCounts(30, 0, 5, 10)) == 1.0  # better
+
+
+def test_holm_adjusted_p_values():
+    # R: p.adjust(c(0.01, 0.04, 0.03, 0.005), "holm")
+    assert score.holm_adjust([0.01, 0.04, 0.03, 0.005]) == pytest.approx([0.03, 0.06, 0.06, 0.02])
+    assert score.holm_adjust([0.2]) == [0.2]
+    assert score.holm_adjust([0.5, 0.6, 0.9]) == pytest.approx([1.0, 1.0, 1.0])
+    assert score.holm_ranks([0.3, 0.1, 0.2]) == [2, 0, 1]
+
+
+def test_identical_models_never_fail_long_context():
+    rng = __import__("random").Random(7)
+    for _ in range(25):
+        lc = {b: [rng.random() < rng.uniform(0.2, 0.95) for _ in range(45)] for b in DEPTH}
+        base = fake_summary("base-9b", **PASSING_BASE, longctx=lc)
+        g = score.evaluate_gate(base, fake_summary("tuned-9b", **GOOD, longctx=lc))
+        for c in g.criteria:
+            if c.rule == "paired":
+                assert c.status == score.PASS, (c.name, c.detail)
+                assert c.paired["base_only_right"] == c.paired["candidate_only_right"] == 0
+                assert c.paired["diff_pts"] == 0.0 and c.paired["p_worse"] == 1.0
+        assert g.verdict == score.PASS
+
+
+def test_a_large_real_degradation_fails(tmp_path, capsys):
+    tables = {"32k": UNCHANGED_45, "64k": UNCHANGED_45, "128k": UNCHANGED_45,
+              "256k": (20, 12, 0, 13)}  # 12 of 45 lost at 256k: 26.7 pts
+    g = lc_gate(tables)
+    c = by_name(g)["long-ctx recall @256k"]
+    assert c.status == score.FAIL and c.paired["outcome"] == "fail"
+    assert c.paired["degradation_pts"] == pytest.approx(26.67, abs=0.01)
+    assert c.paired["degradation_ci_pts"][0] > 0 and c.paired["significant"]
+    assert c.paired["holm"]["rank"] == 1 and c.paired["holm"]["degradation_lower_at_level_pts"] > 0
+    assert c.paired["ci_pts"][1] < 0  # candidate minus base: wholly below zero
+    assert all(by_name(g)[f"long-ctx recall @{b}"].status == score.PASS
+               for b in ("32k", "64k", "128k"))
+    assert g.verdict == score.FAIL
+
+    b_lc, c_lc = lc_pair(tables)
+    paths = {}
+    for label, lc, kw in (("base-9b", b_lc, PASSING_BASE), ("tuned-9b", c_lc, GOOD)):
+        paths[label] = tmp_path / f"{label}.json"
+        paths[label].write_text(json.dumps(fake_summary(label, **kw, longctx=lc)))
+    out = tmp_path / "gate.json"
+    rc = score.main(["compare", "--base", str(paths["base-9b"]), "--candidate",
+                     str(paths["tuned-9b"]), "--json-out", str(out)])
+    assert rc == 1 and "VERDICT: FAIL" in capsys.readouterr().out
+    js = json.loads(out.read_text())
+    assert js["schema"] == score.GATE_SCHEMA and js["verdict"] == "FAIL" and js["exit_code"] == 1
+    assert js["scorer_version"] == score.SCORER_VERSION
+    crit = {c["name"]: c for c in js["criteria"]}
+    assert crit["long-ctx recall @256k"]["status"] == "FAIL"
+    assert crit["long-ctx recall @256k"]["paired"]["base_only_right"] == 12
+    assert crit["tool-call task success"]["rule"] == "point"
+    assert js["method"]["longctx"]["multiplicity"].startswith("Holm")
+    depths = js["diagnostics"]["longctx_by_needle_depth"]
+    assert [r["needle_depth_pct"] for r in depths] == [10, 25, 50, 75, 90]
+    assert sum(r["n"] for r in depths) == 180
+
+
+def test_holm_controls_the_four_buckets():
+    one = score.PairedCounts(30, 5, 0, 10)  # 11.1 pts lost, one-sided p ~0.017
+    assert 0.025 / 4 < score.p_worse(one) < 0.025
+    # alone (one bucket, no family) it FAILs ...
+    assert score.longctx_rule([one]) == ([True], True)
+    # ... beside three unchanged buckets Holm needs p < 0.025 / 4: underpowered PASS
+    u = score.PairedCounts(*UNCHANGED_45)
+    assert score.longctx_rule([u, u, one, u]) == ([False] * 4, False)
+    g = lc_gate({"32k": UNCHANGED_45, "64k": UNCHANGED_45, "128k": (30, 5, 0, 10),
+                 "256k": UNCHANGED_45})
+    c = by_name(g)["long-ctx recall @128k"]
+    assert c.status == score.PASS and c.paired["outcome"] == "underpowered"
+    assert c.paired["p_worse_adjusted"] == pytest.approx(4 * c.paired["p_worse"])
+    assert c.paired["mdd_pts"] > score.LONGCTX_MAX_DROP_PTS  # the drop it could detect
+    assert "underpowered" in c.detail and "detects drops of" in c.detail
+
+    # step-down: the second-smallest p is held to 0.025 / 3, not 0.025 / 4
+    first, second = score.PairedCounts(30, 8, 0, 7), score.PairedCounts(20, 6, 0, 19)
+    assert score.p_worse(first) < 0.025 / 4
+    assert 0.025 / 4 < score.p_worse(second) < 0.025 / 3
+    buckets, _ = score.longctx_rule([first, second, u, u])
+    assert buckets == [True, True, False, False]  # Bonferroni (x4) would pass the second
+
+
+def _exact_size(n: int, base_rate: float, q: float, level: float) -> float:
+    """The exact chance the rule FAILs one bucket of n cases of an unchanged
+    model (each case flips with probability q each way), at one-sided ``level``."""
+    probs = (base_rate - q, q, q, 1 - base_rate - q)
+    total = 0.0
+    for b in range(n + 1):
+        for c in range(n + 1 - b):
+            for a in range(n + 1 - b - c):
+                cells = (a, b, c, n - a - b - c)
+                if score.longctx_rule([score.PairedCounts(*cells)], alpha=2 * level)[0][0]:
+                    total += math.exp(math.lgamma(n + 1)
+                                      + sum(k * math.log(p) - math.lgamma(k + 1)
+                                            for k, p in zip(cells, probs)))
+    return total
+
+
+def test_few_disagreements_never_fail_long_context():
+    # The interval's own p runs far below the exact one at tiny counts: three
+    # disagreeing cases gave p 0.0036 (exact one-sided McNemar 0.125) and FAILed.
+    P = score.PairedCounts
+    for t, mid in [(P(0, 2, 0, 0), 0.125), (P(2, 3, 0, 0), 0.0625), (P(0, 3, 0, 0), 0.0625)]:
+        assert score.p_worse(t) < 0.025  # the interval alone calls it significant
+        assert score.mcnemar_midp_worse(t.b, t.c) == mid
+        assert score.p_worse_gate(t) == mid
+    trivial = P(2, 0, 0, 1)
+    assert score.longctx_rule([P(0, 3, 0, 0), trivial, trivial, trivial]) == ([False] * 4, False)
+    assert score.longctx_rule([P(2, 3, 0, 0)]) == ([False], False)
+    # the fewest disagreements that can FAIL: 5, all one way, alone; 7 at Holm's first step of 4
+    assert score.longctx_rule([P(0, 5, 0, 0)]) == ([True], True)
+    assert score.longctx_rule([P(0, 4, 0, 0)]) == ([False], False)
+    assert score.longctx_rule([P(0, 7, 0, 0), trivial, trivial, trivial])[0][0]
+    assert not score.longctx_rule([P(0, 6, 0, 0), trivial, trivial, trivial])[0][0]
+    # mid-p against the binomial by hand: b = 12, c = 2 -> (C(14,13) + C(14,14) + C(14,12)/2) / 2^14
+    assert score.mcnemar_midp_worse(12, 2) == pytest.approx(60.5 / 16384, rel=1e-12)
+    assert score.mcnemar_midp_worse(2, 12) == score.mcnemar_midp_worse(3, 3) == 1.0
+    # the exact chance an unchanged bucket FAILs stays at or under its level at every small n
+    for n in range(1, 13):
+        for base_rate, q in [(0.5, 0.25), (0.6, 0.3), (0.5, 0.4)]:
+            for level in (0.025, 0.025 / 4):
+                assert _exact_size(n, base_rate, q, level) <= level, (n, base_rate, q, level)
+    # a whole gate of tiny unchanged buckets: 12.2% / 9.2% / 6.7% false FAILs before the check
+    for n in (3, 5, 8):
+        sim = score.simulate_longctx_gate(n=n, q=0.3, base_rate=0.6, drops=[0.0] * 4, reps=4000,
+                                          seed=f"small|{n}")
+        assert sim["fail"] <= 0.05, (n, sim)
+
+
+def test_report_says_why_an_interval_that_excludes_zero_did_not_fail(tmp_path, capsys):
+    # 128k: 5 of 45 lost, raw p 0.017, so the printed (unadjusted) 95% interval lies
+    # below 0; beside three unchanged buckets Holm holds it to 0.025 / 4, so no FAIL.
+    # The text and Markdown reports must say so, with the Holm numbers.
+    tables = {"32k": UNCHANGED_45, "64k": UNCHANGED_45, "128k": (30, 5, 0, 10),
+              "256k": UNCHANGED_45}
+    paths = write_summaries(tmp_path, *lc_summaries(tables))
+    md = tmp_path / "gate.md"
+    rc = score.main(["compare", "--base", paths[0], "--candidate", paths[1], "--markdown-out",
+                     str(md)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    for text in (out, md.read_text()):
+        assert "[-21.6, -0.8]" in text
+        assert ("the unadjusted 95% interval excludes 0, but the drop is not significant after "
+                "Holm's correction for 4 buckets") in text
+        assert ("p 0.017; Holm-adjusted p 0.069, rank 1 of 4, held to one-sided 0.00625, where "
+                "the drop's lower bound is -2.1 pts") in text
+        assert "rank 2 of 4, held to one-sided 0.00833" in text  # every bucket shows its step
+
+    # an interval that excludes 0 on three disagreeing cases: the exact check says why
+    c = by_name(lc_gate({"32k": (2, 3, 0, 0)}))["long-ctx recall @32k"]
+    assert c.status == score.PASS and c.paired["degradation_ci_pts"][0] > 0
+    assert "with 3 disagreeing cases the exact mid-p check does not confirm the drop" in c.detail
+    assert "p 0.062 by the exact mid-p check, 0.019 by the interval" in c.detail
+    assert c.paired["p_worse"] == c.paired["p_worse_midp"] == 0.0625
+    assert c.paired["p_worse_interval"] == pytest.approx(0.0191, abs=1e-4)
+
+
+def test_report_prints_each_bound_once_from_the_table():
+    # (25, 4, 4, 12): the upper bound on the drop is 12.746 pts. The JSON keeps two
+    # decimals (12.75); the report must not round that again to 12.8 beside a
+    # detail line that says 12.7.
+    base, cand = lc_summaries({b: UNCHANGED_45 for b in DEPTH})
+    g = score.evaluate_gate(base, cand)
+    c = by_name(g)["long-ctx recall @128k"]
+    assert c.paired["ci_pts"] == [-12.75, 12.75]
+    assert score._ci(c) == "[-12.7, +12.7]"
+    assert "95% upper bound 12.7 pts" in c.detail
+    assert "a drop of up to 12.7 pts" in g.underpowered_line()
+    md = score.render_compare([base, cand], g, markdown=True)
+    assert "| +0.0 | [-12.7, +12.7] | PASS (underpowered" in md
+    assert "12.8" not in md
+    for row in g.diagnostics["longctx_by_needle_depth"]:
+        lo, hi = score.newcombe_interval(score._paired_table(row))
+        assert score._ci_text(row) == f"[{-100 * hi:+.1f}, {-100 * lo:+.1f}]"
+    assert score._signed(-0.04) == score._signed(-0.0) == "+0.0"
+
+
+def test_compare_exits_2_when_an_output_cannot_be_written(tmp_path, capsys, monkeypatch):
+    # The flywheel reads only the exit code: a passing model whose report could
+    # not be written must never exit 1 (FAIL).
+    paths = write_summaries(tmp_path, fake_summary("base-9b", **PASSING_BASE),
+                            fake_summary("tuned-9b", **GOOD))
+    missing = tmp_path / "no-such-dir"
+    for flag in ("--json-out", "--markdown-out"):
+        rc = score.main(["compare", "--base", paths[0], "--candidate", paths[1], flag,
+                         str(missing / "gate.out")])
+        cap = capsys.readouterr()
+        assert rc == 2, flag
+        assert "VERDICT" not in cap.out and "cannot write" in cap.err
+    # --markdown-out expands ~ as --json-out does
+    monkeypatch.setenv("HOME", str(tmp_path))
+    rc = score.main(["compare", "--base", paths[0], "--candidate", paths[1],
+                     "--markdown-out", "~/gate.md", "--json-out", "~/gate.json"])
+    assert rc == 0 and "VERDICT: PASS" in capsys.readouterr().out
+    assert "**Verdict: PASS**" in (tmp_path / "gate.md").read_text()
+    assert json.loads((tmp_path / "gate.json").read_text())["exit_code"] == 0
+    rc = score.main(["gate-power", "--reps", "20", "--q", "0.1", "--drop", "10",
+                     "--json-out", str(missing / "power.json")])
+    cap = capsys.readouterr()
+    assert rc == 2 and "MDD80" not in cap.out and "cannot write" in cap.err
+
+
+def test_phase4_doc_numbers_are_what_the_code_prints():
+    # docs/sprints/DISTILL-PHASE4-BASELINES.md quotes these; keep the two in step.
+    t = score.PairedCounts(30, 5, 0, 10)
+    assert round(score.p_worse(t), 4) == 0.0172
+    assert score.mcnemar_midp_worse(5, 0) == 0.015625            # one-sided mid-p
+    assert score.mcnemar_exact_p(5, 0) == 0.0625                 # two-sided, as the report prints
+    assert score.paired_report(t, "x")["mcnemar_exact_p"] == 0.0625
+    example = {"32k": (38, 2, 1, 4), "64k": (33, 3, 2, 7), "128k": (24, 4, 2, 15),
+               "256k": (14, 4, 1, 26)}
+    crit = by_name(lc_gate(example))
+    rows = [(f"long-ctx recall @{b}", ci, rank, adj) for b, ci, rank, adj in [
+        ("32k", "[-12.7, +7.8]", 3, 0.68), ("64k", "[-13.5, +8.9]", 4, 0.68),
+        ("128k", "[-15.4, +6.8]", 2, 0.68), ("256k", "[-16.8, +3.7]", 1, 0.44)]]
+    for name, ci, rank, adj in rows:
+        c = crit[name]
+        assert c.status == score.PASS and c.paired["outcome"] == "underpowered", name
+        assert score._ci(c) == ci and c.paired["holm"]["rank"] == rank, name
+        assert round(c.paired["p_worse_adjusted"], 2) == adj, name
+    c256 = crit["long-ctx recall @256k"].paired
+    assert round(c256["p_worse"], 3) == 0.109 and round(c256["mdd_pts"], 1) == 29.2
+    pooled = crit[POOLED]
+    assert score._ci(pooled) == "[-8.7, +0.9]" and round(pooled.paired["p_worse"], 3) == 0.058
+    assert round(pooled.paired["mdd_pts"], 1) == 9.1
+    worse = by_name(lc_gate({**example, "256k": (8, 10, 1, 26)}))
+    c = worse["long-ctx recall @256k"]
+    assert c.status == score.FAIL and c.paired["degradation_ci_pts"] == [5.83, 33.32]
+    assert round(c.paired["p_worse"], 4) == 0.0032 and round(c.paired["p_worse_adjusted"], 3) == 0.013
+    assert "held to one-sided 0.00625, where the drop's lower bound is +2.0 pts" in c.detail
+    assert worse[POOLED].status == score.FAIL
+    assert worse[POOLED].paired["degradation_ci_pts"] == [1.77, 12.62]
+    assert round(worse[POOLED].paired["p_worse"], 4) == 0.0047
+    # the base-recall reruns the doc quotes are valid commands (90% only with flips <= 10%)
+    assert score.main(["gate-power", "--reps", "20", "--base-rate", "0.9", "--q", "0.05",
+                       "--q", "0.10", "--drop", "10"]) == 0
+    assert score.main(["gate-power", "--reps", "20", "--base-rate", "0.9", "--drop", "10"]) == 2
+
+
+def test_pooled_test_fails_a_spread_out_drop():
+    spread = (30, 4, 0, 11)  # 4 of 45 lost in EVERY bucket: 8.9 pts each
+    assert score.p_worse(score.PairedCounts(*spread)) > 0.025  # no bucket alone is significant
+    g = lc_gate({b: spread for b in DEPTH})
+    crits = by_name(g)
+    assert all(crits[f"long-ctx recall @{b}"].status == score.PASS for b in DEPTH)
+    pooled = crits[POOLED]
+    assert pooled.status == score.FAIL and pooled.paired["n"] == 180
+    assert pooled.paired["base_only_right"] == 16 and pooled.paired["degradation_ci_pts"][0] > 0
+    assert g.verdict == score.FAIL
+    # a significant drop of exactly the margin passes ("by > 3 pts")
+    edge = score.PairedCounts(300, 12, 0, 88)  # 12 of 400: 3.0 pts
+    assert score.p_worse(edge) < 0.025 / 4 and not score.materially_worse(edge)
+    assert score.longctx_rule([edge]) == ([False], False)
+    assert score.materially_worse(score.PairedCounts(300, 13, 0, 87))
+
+
+def test_non_inferiority_is_reported_when_shown():
+    # 400 cases a bucket with almost no churn: the drop is ruled out beyond 3 pts
+    big = {b: (300, 1, 1, 98) for b in DEPTH}
+    b_lc, c_lc = lc_pair(big)
+    base = fake_summary("base-9b", **PASSING_BASE, longctx=b_lc)
+    g = score.evaluate_gate(base, fake_summary("tuned-9b", **GOOD, longctx=c_lc))
+    for b in DEPTH:
+        c = by_name(g)[f"long-ctx recall @{b}"]
+        assert c.status == score.PASS and c.paired["outcome"] == "non_inferior", c.detail
+        assert c.paired["degradation_ci_pts"][1] < score.LONGCTX_MAX_DROP_PTS
+
+
+def test_mismatched_case_sets_are_inconclusive(tmp_path, capsys):
+    base = fake_summary("base-9b", **PASSING_BASE)
+
+    renamed = fake_summary("t", **GOOD)  # same content hashes, but one case id differs
+    lc = renamed["sets"]["eval-longctx"]
+    lc["outcomes"]["lc-32k-xx"] = lc["outcomes"].pop("lc-32k-0")
+    lc["case_bucket"]["lc-32k-xx"] = lc["case_bucket"].pop("lc-32k-0")
+    g = score.evaluate_gate(base, renamed)
+    crits = by_name(g)
+    assert crits["long-ctx recall @32k"].status == score.INCONCLUSIVE
+    assert "case ids differ" in crits["long-ctx recall @32k"].note
+    assert crits[POOLED].status == score.INCONCLUSIVE
+    assert crits["long-ctx recall @64k"].status == score.PASS
+    assert g.verdict == score.INCONCLUSIVE
+
+    moved = fake_summary("t", **GOOD)  # a case filed under another bucket
+    moved["sets"]["eval-longctx"]["case_bucket"]["lc-32k-0"] = "64k"
+    g = score.evaluate_gate(base, moved)
+    assert by_name(g)["long-ctx recall @32k"].status == score.INCONCLUSIVE
+    assert g.verdict == score.INCONCLUSIVE
+
+    no_outcomes = fake_summary("t", **GOOD)
+    for e in no_outcomes["sets"].values():
+        e.pop("outcomes")
+    g = score.evaluate_gate(base, no_outcomes)
+    assert all(c.status == score.INCONCLUSIVE for c in g.criteria)
+    assert all("per-case outcomes" in c.note for c in g.criteria)
+
+    other_tools = fake_summary("t", **GOOD)  # an informational pairing that fails refuses too
+    other_tools["sets"]["eval-tools"]["outcomes"].pop("t-0")
+    assert by_name(score.evaluate_gate(base, other_tools))["tool-call task success"].status \
+        == score.INCONCLUSIVE
+
+    # a FAIL elsewhere still outranks it
+    worse = fake_summary("t", **{**GOOD, "tools": 0.1})
+    worse["sets"]["eval-longctx"]["outcomes"].pop("lc-32k-0")
+    assert score.evaluate_gate(base, worse).verdict == score.FAIL
+
+    # a summary from before the paired gate is refused with the fix in the message
+    old = fake_summary("t", **GOOD)
+    old["schema"] = "distill-score-summary/2"
+    paths = [tmp_path / "base.json", tmp_path / "old.json"]
+    paths[0].write_text(json.dumps(base))
+    paths[1].write_text(json.dumps(old))
+    assert score.main(["compare", "--base", str(paths[0]), "--candidate", str(paths[1])]) == 2
+    assert "re-run summarize" in capsys.readouterr().err
+
+
+def test_other_criteria_keep_point_estimates_and_show_paired_intervals():
+    base = fake_summary("base-9b", **PASSING_BASE)
+    g = score.evaluate_gate(base, fake_summary("t", **{**GOOD, "tools": 0.50}))  # exactly +10
+    tools = by_name(g)["tool-call task success"]
+    assert tools.status == score.PASS and tools.rule == "point"
+    assert tools.paired["candidate_only_right"] == 10 and tools.paired["diff_pts"] == 10.0
+    lo, hi = tools.paired["ci_pts"]
+    assert lo < 10.0 < hi  # the interval says +10 is not established; the bar decides anyway
+    assert tools.paired["bootstrap_ci_pts"][0] <= 10.0 <= tools.paired["bootstrap_ci_pts"][1]
+    for name in ("injection resistance", "sanity score"):
+        assert by_name(g)[name].paired is not None and by_name(g)[name].rule == "point"
+
+
+def test_bootstrap_is_seeded_and_brackets_the_estimate():
+    t = score.PairedCounts(120, 16, 4, 40)
+    a = score.bootstrap_interval(t, "k")
+    assert a == score.bootstrap_interval(t, "k")
+    assert a[0] < t.degradation < a[1]
+    lo, hi = score.newcombe_interval(t)
+    assert abs(a[0] - lo) < 0.03 and abs(a[1] - hi) < 0.03  # the cross-check agrees
+    assert score.bootstrap_interval(score.PairedCounts(5, 0, 0, 5), "k") == (0.0, 0.0)
+
+
+def test_sampler_draws_binomial_counts():
+    rng = __import__("random").Random(3)
+    draws = [score._binomial(rng, 45, 0.1) for _ in range(4000)]
+    assert sum(draws) / len(draws) == pytest.approx(4.5, abs=0.15)
+    assert score._binomial(rng, 10, 0.0) == 0 and score._binomial(rng, 10, 1.0) == 10
+    assert score._binomial_at(0.3, 20, 0.7) >= score._binomial_at(0.2, 20, 0.7)  # increasing in u
+    t = score.sample_table(rng, 45, (0.5, 0.1, 0.1, 0.3))
+    assert t.n == 45
+    assert score.sample_table(rng, 45, (0.0, 0.0, 0.0, 1.0)) == score.PairedCounts(0, 0, 0, 45)
+    assert score.sample_table(rng, 45, (1.0, 0.0, 0.0, 0.0)) == score.PairedCounts(45, 0, 0, 0)
+
+
+@pytest.mark.parametrize("q", [0.05, 0.10, 0.20])
+def test_unchanged_model_false_fail_rate_is_at_most_five_percent(q):
+    sim = score.simulate_longctx_gate(n=45, q=q, base_rate=0.6, drops=[0.0] * 4, reps=3000,
+                                      seed=f"test|{q}")
+    assert sim["fail"] <= 0.05, sim
+    assert sim["bucket_fail"] <= 0.035 and sim["pooled_fail"] <= 0.035, sim  # each ~2.5% at most
+    # the retired fixed bar failed an unchanged model most of the time
+    fixed = 1 - (1 - score.fixed_bar_fail_prob(45, q)) ** 4
+    assert fixed > 0.6
+    if q == 0.10:
+        assert fixed == pytest.approx(0.77, abs=0.01)  # OPEN-QUESTIONS #8
+
+
+def test_power_and_minimum_detectable_degradation():
+    mdd = score.min_detectable_degradation(180, 0.10, z=score.Z_GATE)
+    assert mdd is not None and 0.05 < mdd < 0.12
+    sim = score.simulate_longctx_gate(n=45, q=0.10, base_rate=0.6, drops=[mdd] * 4, reps=1500,
+                                      seed="mdd")
+    assert 0.7 <= sim["fail"] <= 0.95, sim  # the approximation is close to the simulated rule
+    assert score.min_detectable_degradation(45, 0.05, z=score.Z_GATE) \
+        < score.min_detectable_degradation(45, 0.20, z=score.Z_GATE)  # churn costs power
+    assert score.min_detectable_degradation(0, 0.1, z=score.Z_GATE) is None
+    with pytest.raises(ValueError, match="do not make a table"):
+        score.simulate_longctx_gate(n=45, q=0.3, base_rate=0.9, drops=[0.0], reps=1, seed="x")
+
+
+def test_gate_power_cli(tmp_path, capsys):
+    out = tmp_path / "power.json"
+    rc = score.main(["gate-power", "--reps", "200", "--q", "0.1", "--drop", "10",
+                     "--json-out", str(out)])
+    text = capsys.readouterr().out
+    assert rc == 0 and "Fixed 3-pt bar" in text and "MDD80" in text
+    rep = json.loads(out.read_text())
+    row = rep["rows"][0]
+    assert row["q"] == 0.1 and row["fixed_bar_fail"] == pytest.approx(0.769, abs=0.001)
+    assert set(row) >= {"unchanged", "one_bucket", "all_buckets"}
+    assert score.main(["gate-power", "--reps", "0"]) == 2
+    assert score.main(["gate-power", "--reps", "5", "--q", "0.5"]) == 2
+    assert score.main(["gate-power", "--reps", "5", "--q", "0"]) == 2
+    assert score.main(["gate-power", "--reps", "5", "--q", "0.4", "--base-rate", "0.9"]) == 2
+
+
+def test_summary_carries_per_case_outcomes(tmp_path, monkeypatch):
+    monkeypatch.setattr(score.asyncio, "sleep", _no_sleep)
+    cases = all_cases()
+    cases[2]["meta"] = {"depth_pct": 25}
+    assert run_cli(tmp_path, FakeServer(), cases=cases) == 0
+    s = json.loads((tmp_path / "base.summary.json").read_text())
+    assert s["schema"] == "distill-score-summary/3" and s["scorer_version"] == score.SCORER_VERSION
+    assert s["sets"]["eval-tools"]["outcomes"] == {"t1": True, "t2": False}
+    lc = s["sets"]["eval-longctx"]
+    assert lc["outcomes"] == {"l1": True, "l2": False, "l3": False}
+    assert lc["case_bucket"] == {"l1": "32k", "l2": "64k", "l3": "256k"}
+    assert lc["case_needle_depth"] == {"l1": 25}
+    assert s["sets"]["sanity"]["outcomes"] == {"s1": True}
+    # outcomes never land among the metrics (they are not rates)
+    assert all("outcomes" not in e["metrics"] for e in s["sets"].values())
