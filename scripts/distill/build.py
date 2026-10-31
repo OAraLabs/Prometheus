@@ -860,7 +860,7 @@ def load_verdicts(paths: list[str], stats: collections.Counter,
         if not p.is_file():
             stats["verdict_files_missing"] += 1
             continue
-        for line in p.read_text(encoding="utf-8").splitlines():
+        for line in p.read_text(encoding="utf-8").split("\n"):
             if not line.strip():
                 continue
             row = json.loads(line)
@@ -3292,7 +3292,7 @@ def spot_check_rows(server: str, rows_path: str | Path, student: Any, *, n: int 
                     ) -> list[dict[str, Any]]:
     """Render N rows ourselves and with llama-server; compare byte for byte."""
     rows = [json.loads(line) for line in Path(rows_path).expanduser().read_text(
-        encoding="utf-8").splitlines() if line.strip()]
+        encoding="utf-8").split("\n") if line.strip()]
     rows = spot_sample(rows, n, seed)
     results = []
 

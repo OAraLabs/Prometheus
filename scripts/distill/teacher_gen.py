@@ -5548,7 +5548,7 @@ def _repair_jsonl(path: Path) -> list[dict[str, Any]]:
             fh.truncate(cut)
         data = data[:cut]
     rows = []
-    for line in data.decode("utf-8").splitlines():
+    for line in data.decode("utf-8").split("\n"):
         if line.strip():
             try:
                 rows.append(json.loads(line))
@@ -6093,7 +6093,7 @@ def task_from_taskset(row: dict[str, Any], sources: Sources, *, pool: list[dict[
 
 def _read_jsonl_rows(path: str) -> list[Any]:
     rows = []
-    for n, line in enumerate(Path(path).expanduser().read_text(encoding="utf-8").splitlines(), 1):
+    for n, line in enumerate(Path(path).expanduser().read_text(encoding="utf-8").split("\n"), 1):
         if line.strip():
             try:
                 rows.append(json.loads(line))
@@ -7110,7 +7110,7 @@ def skip_keys_from(patterns: list[str]) -> tuple[set[str], set[str]]:
     ids: set[str] = set()
     hashes: set[str] = set()
     for path in expand(patterns):
-        for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        for line in Path(path).read_text(encoding="utf-8", errors="replace").split("\n"):
             try:
                 ev = json.loads(line)
             except ValueError:

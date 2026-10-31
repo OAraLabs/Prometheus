@@ -1604,7 +1604,7 @@ def finished_runs(ledger: Path) -> set[str]:
         text = ledger.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ok
-    for line in text.splitlines():
+    for line in text.split("\n"):
         try:
             ev = json.loads(line)
         except ValueError:

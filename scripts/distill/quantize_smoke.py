@@ -513,7 +513,7 @@ def make_data(a: argparse.Namespace) -> int:
     # even the smallest budget reaches it: its tool result carries
     # eval-injection's first instruction, which the calibration must drop.
     inj = json.loads((FIXTURES / "eval-injection.sample.jsonl").read_text(
-        encoding="utf-8").splitlines()[0])["injection"]["instruction"]
+        encoding="utf-8").split("\n")[0])["injection"]["instruction"]
     msgs = [{"role": "system", "content": SYSTEM},
             {"role": "user", "content": "What does the stored record about the spare ladder say?"},
             {"role": "assistant", "content": "", "tool_calls": [{"type": "function", "function": {

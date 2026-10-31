@@ -568,7 +568,7 @@ def load_conf(paths: Paths) -> dict[str, Any]:
 
 def load_tasks(paths: Paths) -> list[Any]:
     tasks = []
-    for line in paths.tasks.read_text(encoding="utf-8").splitlines():
+    for line in paths.tasks.read_text(encoding="utf-8").split("\n"):
         if line.strip():
             d = json.loads(line)["task"]
             task = tg.GenTask(**d)

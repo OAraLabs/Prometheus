@@ -1301,6 +1301,48 @@ def test_spot_check_compares_byte_for_byte(tmp_path: Path, monkeypatch: pytest.M
     assert rc == 1 and all(r["prompt_match"] and not r["stored_match"] for r in res["rows"])
 
 
+# U+2028 and U+0085 are line breaks to str.splitlines but stay raw inside a JSON
+# string written with ensure_ascii=False, as build.py writes its rows.
+ODD_BREAKS = " then\x85done"
+
+
+def test_spot_check_reads_rows_holding_unicode_line_separators(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    b = make_builder(tmp_path, eval_task_frac=0.0, val_frac=0.0, category_cap=1.0)
+    feed(b, write_jsonl(tmp_path / "golden_traces_1_1.jsonl", [
+        trace(word(i), "bash", {"command": f"make {word(i)}{ODD_BREAKS}"}) for i in range(3)]))
+    b.split()
+    out = tmp_path / "out"
+    out.mkdir()
+    b.write(out)
+    text = (out / "train.jsonl").read_text(encoding="utf-8")
+    assert " " in text and "\x85" in text  # raw in the file, not escaped
+    assert len(text.splitlines()) > 3  # what the old reader split the rows into
+    st = make_student()
+    monkeypatch.setattr(R.Student, "load", classmethod(lambda cls, d: st))
+
+    def honest(url: str, body: dict[str, Any]) -> dict[str, Any]:
+        return {"prompt": R.render(st.template, body["messages"], body.get("tools"),
+                                   add_generation_prompt=body["add_generation_prompt"],
+                                   template_kwargs=body.get("chat_template_kwargs"))}
+
+    args = build.parse_args(["spot-check", "--server", "http://127.0.0.1:1", "--rows",
+                             str(out / "train.jsonl"), "--tokenizer-dir", "unused", "--n", "5"])
+    rc = build.cmd_spot_check(args, post=honest)
+    res = json.loads(capsys.readouterr().out)
+    assert rc == 0 and res["spot_check"] == "PASS" and len(res["rows"]) == 3
+
+    # the verdict reader too: a judge's reason may hold the same characters
+    vfile = tmp_path / "v.jsonl"
+    vfile.write_text(json.dumps({"trace_id": "golden_traces_1_1.jsonl:1", "verdict": "pass",
+                                 "reason": f"ok{ODD_BREAKS}"}, ensure_ascii=False) + "\n",
+                     encoding="utf-8")
+    stats: collections.Counter = collections.Counter()
+    assert build.load_verdicts([str(vfile)], stats) == {"golden_traces_1_1.jsonl:1": "pass"}
+    assert stats["verdict_rows_unusable"] == 0
+
+
 def test_a_build_without_the_spot_check_is_incomplete_not_pass(tmp_path: Path) -> None:
     b = make_builder(tmp_path, eval_task_frac=0.15, val_frac=0.05, holdout_max_group_share=0.5,
                      val_share_range=(0.0, 1.0))
