@@ -1,6 +1,6 @@
 # Distillation + flywheel — status
 
-_Updated 2026-10-30 20:51 ET. Refreshed on every check-in. Details: `DISTILL-LOG.md`; decisions: `DISTILL-OPEN-QUESTIONS.md`._
+_Updated 2026-10-30 21:49 ET. Refreshed on every check-in. Details: `DISTILL-LOG.md`; decisions: `DISTILL-OPEN-QUESTIONS.md`._
 
 ## In one paragraph
 
@@ -36,12 +36,17 @@ tasks built from your real task patterns. That starts after an IQ3-vs-Q4 teacher
 
 ## Running now
 
-- **Saluki baseline: armed for tonight** (01:00–02:45, 03:45–05:45, 06:15–06:59 ET). One request at a time, only in the
-  quiet gap after each voice health check, and it stops and messages you if a check ever looks unhealthy.
-- **Prep for the 3090 Ti swap:** teacher model download, the daemon Saluki↔Max switch with exact restore, the gym teacher
-  pipeline, and keeping Max traces out of training.
-- **Your extra items:** the confidence-interval long-context gate, the task generator built from real task patterns, a
-  real tiny-model quantize run, and flywheel end-to-end tests with this week's Monday reviewer file.
+- **Tonight, armed (both GPUs, 01:00–07:00):**
+  - 3090 Ti: read-only Saluki baseline in three windows.
+  - 4090: rehearsal at 01:00. Then, from 01:20, the base-9B baseline, the 27B feasibility test and the bake-off. The
+    business server is restored and checked at 06:40, with a backup restore at 07:15.
+- **Code being built (no GPU, no Max):**
+  - Teacher pipeline fed only by your real task patterns, plus the IQ3-vs-Q4 teacher test.
+  - 3090 Ti window setup: the teacher takes Saluki's port.
+  - Max-derived training policy and tags (your Q6b ruling).
+  - The $150 spend ledger for the pay-per-token key.
+  - Quantize and flywheel hardening.
+- **Investigating:** why your /qwen turns since Oct 15 aren't saved as training examples.
 
 ## Your approvals in effect
 
@@ -52,7 +57,9 @@ tasks built from your real task patterns. That starts after an IQ3-vs-Q4 teacher
 
 ## Blocked / waiting on you
 
-- **Training on the existing Max traces:** on hold until you decide (open question 6).
+- **Pay-per-token Max key:** `QWEN_PAYG_KEY` isn't on the 3090 Ti host yet. Max judging and generation start once it's
+  in `~/.config/prometheus/env`.
+
 - **4060 Ti box:** still no SSH.
 
 ## Next
