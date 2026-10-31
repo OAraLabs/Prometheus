@@ -40,8 +40,11 @@ COPIES_ENV = "PROMETHEUS_TELEMETRY_V2_COPIES"
 
 # What T-1 adds. Spelled out here, not derived from the code, so an extra
 # column or table nobody asked for is a failure rather than a silent addition.
+# The trace labels (telemetry/trace_labels.py) and golden trace v2's request
+# store (telemetry/golden_request.py) ride the same additive migration.
+_TRACE_LABELS = ["tool_ok", "turn_outcome", "judged_ok", "judged_by", "judged_at"]
 EXPECTED_NEW_TABLES = {
-    "telemetry.db": {"turns", "responses", "tool_sets"},
+    "telemetry.db": {"turns", "responses", "tool_sets", "golden_blobs", "golden_requests"},
     "training.db": set(),
 }
 EXPECTED_NEW_COLUMNS = {
@@ -49,10 +52,11 @@ EXPECTED_NEW_COLUMNS = {
         "tool_calls": [
             "turn_id", "round_index", "tool_use_id", "repair_kind",
             "raw_before_repair", "retry_index", "result_summary",
+            *_TRACE_LABELS, "request_id",
         ],
     },
     "training.db": {
-        "training_pairs": ["turn_id", "round_index", "repair_kind", "outcome"],
+        "training_pairs": ["turn_id", "round_index", "repair_kind", "outcome", *_TRACE_LABELS],
     },
 }
 EXPECTED_NEW_META_KEYS = {"telemetry.db": {"telemetry_v2_since"}, "training.db": set()}

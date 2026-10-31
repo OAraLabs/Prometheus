@@ -112,6 +112,15 @@ class WebAuditRunner(SmokeTestRunner):
             return True
         return (time.monotonic() - self.started_at) < self.time_limit_seconds
 
+    def _tool_call_counts(self) -> dict[str, int]:
+        """{tool: calls} from telemetry, or {} when there is none to read."""
+        try:
+            report = self.telemetry.report() if hasattr(self.telemetry, "report") else {}
+            tools = report.get("tools", {}) if isinstance(report, dict) else {}
+            return {t: int((v or {}).get("calls", 0)) for t, v in tools.items()}
+        except Exception:
+            return {}
+
     @staticmethod
     def detect_circuit_breaker(text: str, error: str) -> bool:
         haystack = (text + " " + error).lower()
@@ -150,6 +159,7 @@ class WebAuditRunner(SmokeTestRunner):
             print(f"\n  ▶ {name}")
             print(f"    Message: {message[:80]}{'...' if len(message) > 80 else ''}")
 
+        calls_before = self._tool_call_counts()
         start = time.monotonic()
         try:
             out = await self.run_agent(message, max_iterations=max_iterations)
@@ -191,13 +201,13 @@ class WebAuditRunner(SmokeTestRunner):
             if not p.exists():
                 errors.append(f"Expected file {expect_file_exists} to exist")
 
-        tools_called: list[str] = []
-        try:
-            report = self.telemetry.report() if hasattr(self.telemetry, "report") else {}
-            by_tool = report.get("by_tool", {}) if isinstance(report, dict) else {}
-            tools_called = list(by_tool.keys()) if isinstance(by_tool, dict) else []
-        except Exception:
-            tools_called = []
+        # The tools THIS test called: the per-tool call counts that grew while
+        # it ran. This read report()["by_tool"], a key report() never had, so
+        # every test with expect_tools failed; and the all-time totals would
+        # have credited a test with any tool ever called before it.
+        calls_after = self._tool_call_counts()
+        tools_called = sorted(
+            t for t, n in calls_after.items() if n > calls_before.get(t, 0))
 
         if expect_tools:
             if not any(t in tools_called for t in expect_tools):

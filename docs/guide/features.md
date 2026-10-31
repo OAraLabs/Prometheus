@@ -29,9 +29,10 @@ This page is the complete map of what Prometheus can do: every entry point, tool
 | `oara code --repo --task --acceptance [...]` | Launch a sandboxed iterate-to-green coding run; `--control-dir` enables pause / inject / resume |
 | `oara ingest-video <source> [--model --fps --no-audio --work-dir --force]` | Turn a screen recording or YouTube URL into a skill **draft** for review in Beacon (see [Record a Skill](record-a-skill.md)) |
 | `oara bakeoff-vlm --corpus --model [--provider --base-url --limit --threshold --output]` | Score a vision model against the annotated skill corpus — golden-SKILL.md diff, hallucination-penalized |
-| `oara export-traces [--limit --output --tool]` | Export golden tool-call traces to JSONL for fine-tuning |
+| `oara export-traces [--limit --output --tool]` | Dump the newest golden tool-call traces to `golden_dump_<time>.jsonl` (the daemon's incremental export writes `golden_traces_*.jsonl`; a dump re-states rows it already exported, so it never takes that name). Each line says its format (`_meta.trace_format`: 2 carries the request as sent) and its labels (`_meta.labels`: `tool_ok`, `turn_outcome`, `judged_ok`) |
 | `oara gepa proposals \| show <id> \| promote <id> \| reject <id>` | Review GEPA's skill proposals. `promote` is the only way a proposal changes a skill: it checks the live skill is the version that was scored, runs the code scanner, and archives the old version |
 | `oara gepa dry-run [--json]` | What a GEPA cycle would do now, as counts: no model calls, no writes |
+| `oara trace-labels [--apply --json]` | Label stored tool calls and training pairs written before the trace labels: `tool_ok` (the call ran without error) and `turn_outcome` (how its turn ended: completed, stopped, errored, abandoned, or unknown when it can't be linked). Dry run by default; `--apply` backs up each database, then fills only empty labels, so it is safe to run twice or with the daemon up |
 | `oara scrub [--apply]` | Redact secrets kept before capture-time redaction existed (telemetry, training pairs, trajectory exports, LCM, memory facts). Dry run by default: counts only, every database opened read-only. `--apply` rewrites in place after a backup of each database; stop the daemon first |
 
 ---

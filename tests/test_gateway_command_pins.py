@@ -463,7 +463,7 @@ class TestToolsPairsPins:
         assert _sent_text(adapter) == (
             "Tool Call Stats (24h)\n\n"
             "Total calls: 10\n"
-            "Success rate: 90%\n"
+            "Ran OK: 90%\n"
             "\nMost called:\n"
             "  bash: 6 calls (100% ok)\n"
             "Adapter repairs: 2"
@@ -493,7 +493,7 @@ class TestToolsPairsPins:
         assert _sent_text(adapter) == (
             "Tool Call Stats (24h)\n\n"
             "Total calls: 10\n"
-            "Success rate: 90%\n"
+            "Ran OK: 90%\n"
             "\nMost called:\n"
             "  bash: 6 calls (100% ok)\n"
             "Validation failures: 3"

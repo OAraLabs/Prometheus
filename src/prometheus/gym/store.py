@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS gym_runs (
     kv_cache_k      TEXT,
     kv_cache_v      TEXT,
     kv_cache_source TEXT,
+    -- scoring.pass_basis: 'outcome' (a predicate checked what the run made) or
+    -- 'tool_only' (only the calls' shape was checked: the pass says the call
+    -- ran, not that the task got done). NULL on rows from before it existed.
+    pass_basis      TEXT,
     PRIMARY KEY (series, experiment, task_id, run_idx)
 );
 """
@@ -74,7 +78,7 @@ class GymStore:
         # KV-cache provenance. Rows written before this column existed keep
         # NULL in all three, which reads as "never recorded" — correct, and
         # distinct from a run that recorded 'unreported'.
-        for col in ("kv_cache_k", "kv_cache_v", "kv_cache_source"):
+        for col in ("kv_cache_k", "kv_cache_v", "kv_cache_source", "pass_basis"):
             if col not in have:
                 self._conn.execute(f"ALTER TABLE gym_runs ADD COLUMN {col} TEXT")
 
@@ -85,7 +89,7 @@ class GymStore:
             "fail_reasons", "tools_called", "latency_ms",
             "retries", "repairs", "dropped_malformed", "feedback_retries",
             "breaker_tripped", "error", "manifest_sha", "taskset_sha",
-            "kv_cache_k", "kv_cache_v", "kv_cache_source",
+            "kv_cache_k", "kv_cache_v", "kv_cache_source", "pass_basis",
         )
         row.setdefault("timestamp", time.time())
         values = [row.get(c) for c in cols]

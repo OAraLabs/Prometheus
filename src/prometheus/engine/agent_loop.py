@@ -943,6 +943,12 @@ def _run_paths(context: "LoopContext") -> tuple[Path, tuple[Path, ...] | None]:
 # read-only tool calls run under gather, in tasks that copy the context.
 _ROUND_SERVING: contextvars.ContextVar = contextvars.ContextVar("prometheus_round_serving", default=None)
 
+# Golden trace v2: the ApiMessageRequest that SERVED the round in progress (the
+# fallback's, when the round degraded), so a golden call's row can store the
+# request it answered as it was sent (telemetry/golden_request.py). Telemetry
+# reads it and nothing else does. A ContextVar for _ROUND_SERVING's reason.
+_ROUND_REQUEST: contextvars.ContextVar = contextvars.ContextVar("prometheus_round_request", default=None)
+
 # The session the run's rows are recorded under (WP-X.21 T3): the recorded id
 # (the turn's conversation, or a record-only run's own id), None on an
 # ephemeral turn. For _log_iteration, whose 14 call sites have no session in
@@ -1345,12 +1351,64 @@ class _TurnRecord:
         except Exception:
             log.warning("telemetry v2: turn-end outcome for %s failed", self.turn_id,
                         exc_info=True)
+        self._stamp_trace_labels(ended_at)
+
+    def _stamp_trace_labels(self, ended_at: float) -> None:
+        """Trace labels: how this turn ended, on every call and pair it wrote.
+
+        ``turn_outcome`` (telemetry/trace_labels.py), so a stored call says
+        whether its turn completed, was stopped or errored, not only whether
+        the call itself ran. The tool_calls rows are labelled on the writer
+        thread, after the end upsert; the turn's training pairs on the pair
+        store. Never raises.
+        """
+        try:
+            from prometheus.learning import pair_capture
+            from prometheus.telemetry import trace_labels
+
+            label = trace_labels.turn_outcome(
+                started_at=self.started_at, ended_at=ended_at,
+                forced_stop_reason=self.forced_stop_reason, terminal_kind=self.terminal_kind)
+            if label is None:
+                return
+            turn_id = self.turn_id
+            self._writer.call(
+                "trace_labels_turn_end",
+                lambda conn: trace_labels.label_turn_calls(conn, turn_id, label))
+            pair_capture.label_turn(turn_id, label)
+        except Exception:
+            log.warning("trace labels for turn %s failed", self.turn_id, exc_info=True)
 
 
 def _serving_model(context: "LoopContext") -> str:
     """The model to RECORD for the round in progress: the fallback's, if it served."""
     serving = _ROUND_SERVING.get()
     return serving[0] if serving is not None else context.model
+
+
+def _golden_request_capture(context: "LoopContext", provider_name: str):  # noqa: ANN202
+    """Golden trace v2: the round's request and route, for ``telemetry.record``.
+
+    None outside a round. Built for every executed call; serialized by
+    telemetry only if the call is golden, so a local call costs one object.
+    """
+    request = _ROUND_REQUEST.get()
+    if request is None:
+        return None
+    from prometheus.telemetry.golden_request import GoldenRequestCapture
+
+    return GoldenRequestCapture(
+        request=request,
+        provider=provider_name,
+        route={
+            "key": context.route_key,
+            "provider": context.route_provider,
+            "backend": context.backend,
+            # A fallback served this round, not the route the session chose.
+            "degraded": _ROUND_SERVING.get() is not None,
+            "session_model": context.model,
+        },
+    )
 
 
 def _serving_provider_name(context: "LoopContext") -> str:
@@ -1565,6 +1623,7 @@ async def run_loop(
     # cross-talk this must never allow).
     _paths_token = _RUN_PATHS.set(None)
     _serving_token = _ROUND_SERVING.set(None)
+    _request_token = _ROUND_REQUEST.set(None)
     _offered_token = _ROUND_OFFERED.set(None)
     _catalog_token = _RUN_CATALOG.set(None)
     # The profile this run is held to; _run_loop sets it once the profile is resolved (None until then,
@@ -1628,6 +1687,7 @@ async def run_loop(
         _RUN_TURN.reset(_turn_token)
         _RUN_PATHS.reset(_paths_token)
         _ROUND_SERVING.reset(_serving_token)
+        _ROUND_REQUEST.reset(_request_token)
         _ROUND_OFFERED.reset(_offered_token)
         _RUN_CATALOG.reset(_catalog_token)
         _RUN_PROFILE.reset(_profile_token)
@@ -2302,6 +2362,9 @@ async def _run_loop(
         unreadable_calls: frozenset[str] = frozenset()
         round_stop_reason: str | None = None
         round_max_tokens: list[int] = [context.max_tokens]
+        # The request _build_request last built: the one that served (a
+        # fallback builds after the primary). Golden trace v2 stores it.
+        round_request: list[ApiMessageRequest | None] = [None]
         served_model_this_turn: str | None = None
         # Per-TURN, like served_model above. A list rather than a plain name because the
         # on_degrade callback below is a closure, and rebinding through it would need nonlocal.
@@ -2474,7 +2537,7 @@ async def _run_loop(
             # request would ask the local backend to serve the cloud model's name. The output
             # cap follows the model the same way, and the one sent is kept for the round.
             round_max_tokens[0] = _output_cap(context, _model)
-            return ApiMessageRequest(
+            round_request[0] = ApiMessageRequest(
                 model=_model,
                 # Context-assembly: fence any untrusted injected turns (task
                 # output, watched-file contents, cron data) with the derived
@@ -2490,6 +2553,7 @@ async def _run_loop(
                 # The window this round was budgeted for: Ollama loads exactly it.
                 context_window=_budgeted_window(context, _model),
             )
+            return round_request[0]
 
         def _window_for(_model: str) -> tuple[int, bool]:
             return _serving_window(context, _model)
@@ -2856,6 +2920,7 @@ async def _run_loop(
              degrade_notice_this_turn[0].provider_name or "")
             if degrade_notice_this_turn else None
         )
+        _ROUND_REQUEST.set(round_request[0])
 
         # DEGENERATE-OUTPUT GUARD (#772). Before ANYTHING keeps or acts on this
         # round: tool-call extraction below rebuilds final_message without its
@@ -4345,6 +4410,7 @@ def _capture_success_pairs(
                 chosen=chosen,
                 meta={"error_feedback": entry["error"]},
                 telemetry=context.telemetry,
+                tool_ok=True,
                 **_v2_pair_fields(),
             )
         if cloud_golden_enabled():
@@ -4359,6 +4425,7 @@ def _capture_success_pairs(
                     rejected=None,
                     chosen=chosen,
                     telemetry=context.telemetry,
+                    tool_ok=True,
                     **_v2_pair_fields(),
                 )
     except Exception:
@@ -6212,6 +6279,12 @@ async def _execute_tool_call(
                 else context.session_id
             ),
             tool_schema=None if ephemeral else _tool_schema_json(context, tool_name),
+            # Golden trace v2: the request this call answered, as sent, kept
+            # only if the row is golden. Never on an ephemeral turn.
+            golden_request=None if ephemeral else _golden_request_capture(context, provider_name),
+            # Gateway trust: a turn a group member wrote teaches nothing, so
+            # its calls are not golden (cloud_golden pairs already refuse it).
+            trainable=_turn_trust()[0],
             # Telemetry v2. The summary only on success: a failure's output is
             # already error_detail (spec 4.2, "NULL if the existing row
             # already stores it"). What the model was given, before the

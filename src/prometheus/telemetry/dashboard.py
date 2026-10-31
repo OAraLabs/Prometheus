@@ -15,6 +15,7 @@ from prometheus.telemetry.db import connect_telemetry_db
 from prometheus.telemetry.tracker import (
     LUCKY_GUESS_ERROR_TYPE,
     LUCKY_GUESS_OPERATION,
+    NON_CALL_FAILURE_TYPES,
     POLICY_ERROR_TYPES,
 )
 
@@ -22,6 +23,12 @@ from prometheus.telemetry.tracker import (
 # honesty — see tracker.POLICY_ERROR_TYPES).
 _POLICY_PH = ",".join("?" * len(POLICY_ERROR_TYPES))
 _POLICY_PARAMS = tuple(POLICY_ERROR_TYPES)
+# Kept out of every RATE here, as report() and health_summary() keep them out:
+# policy refusals, and a command that ran and exited non-zero (the call
+# worked; the world said no). /tools kept nonzero_exit in its denominator and
+# showed a lower rate than /health for the same calls (audit 2026-10-31).
+_NON_CALL_PH = ",".join("?" * len(NON_CALL_FAILURE_TYPES))
+_NON_CALL_PARAMS = tuple(sorted(NON_CALL_FAILURE_TYPES))
 
 # The old lucky-guess markers are tool_calls rows but not calls (see
 # tracker.LUCKY_GUESS_ERROR_TYPE): every per-call query here skips them.
@@ -42,7 +49,13 @@ class ToolDashboard:
         print(stats["success_rate_by_tool"])
     """
 
-    def __init__(self, db_path: str | Path = "~/.prometheus/telemetry.db") -> None:
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        if db_path is None:
+            # The tracker's own resolution (PROMETHEUS_CONFIG_DIR), not a
+            # hard-coded ~/.prometheus: /tools read a different file from the
+            # one /health and /api/telemetry read whenever the two differ.
+            from prometheus.config.paths import get_config_dir
+            db_path = get_config_dir() / "telemetry.db"
         self._db_path = Path(db_path).expanduser().resolve()
         # Shared WAL + busy_timeout setup (see telemetry.db) — the reader side
         # of the same concurrency-safe substrate the writer uses.
@@ -58,7 +71,8 @@ class ToolDashboard:
 
         Keys returned:
 
-        * ``success_rate_by_tool``  – ``{tool_name: float}``
+        * ``success_rate_by_tool``  – ``{tool_name: float}``: share of calls
+          that RAN without error (``tool_ok``), not task success
         * ``most_called``           – top-10 tools by call count (list of dicts)
         * ``avg_latency_by_tool``   – ``{tool_name: float}``
         * ``circuit_breaker_trips`` – count of ``_loop_transition`` records
@@ -74,7 +88,9 @@ class ToolDashboard:
           ``_loop_transition`` loop echoes excluded)
         * ``total_denials``         – policy refusals (SecurityGate / hooks);
           included in ``total_calls``, excluded from success rates
-        * ``overall_success_rate``  – float 0.0 – 1.0 over non-denied calls
+        * ``overall_success_rate``  – float 0.0 – 1.0: calls that ran without
+          error, over calls that are not policy denials or non-zero exits.
+          A tool-call rate, never task success (telemetry/trace_labels.py)
         """
         cutoff = time.time() - hours * 3600
 
@@ -116,7 +132,7 @@ class ToolDashboard:
 
     def _success_rate_by_tool(self, cutoff: float) -> dict[str, float]:
         # M1: synthetic _loop_transition rows are loop echoes, not tools.
-        # D3: policy denials are excluded from the rate denominator.
+        # D3: policy denials and non-zero exits are excluded from the rate.
         rows = self._conn.execute(
             f"""
             SELECT tool_name,
@@ -124,11 +140,11 @@ class ToolDashboard:
               FROM tool_calls
              WHERE timestamp >= ?
                AND tool_name != '_loop_transition'
-               AND (error_type IS NULL OR error_type NOT IN ({_POLICY_PH}))
+               AND (error_type IS NULL OR error_type NOT IN ({_NON_CALL_PH}))
                AND {_NOT_A_MARKER}
              GROUP BY tool_name
             """,
-            (cutoff, *_POLICY_PARAMS, LUCKY_GUESS_ERROR_TYPE),
+            (cutoff, *_NON_CALL_PARAMS, LUCKY_GUESS_ERROR_TYPE),
         ).fetchall()
         return {r["tool_name"]: r["rate"] for r in rows}
 
@@ -274,14 +290,15 @@ class ToolDashboard:
 
     def _totals(self, cutoff: float) -> tuple[int, int, float]:
         # total counts every real tool call (denials included — the model
-        # made the call); the success rate is judged over non-denied calls.
+        # made the call); the rate is judged over calls that are neither
+        # denials nor non-zero exits, as report() and /health judge it.
         row = self._conn.execute(
             f"""
             SELECT COUNT(*) AS total,
                    COALESCE(SUM(error_type IN ({_POLICY_PH})), 0) AS denials,
                    COALESCE(
                        CAST(SUM(success) AS REAL)
-                       / NULLIF(COUNT(*) - COALESCE(SUM(error_type IN ({_POLICY_PH})), 0), 0),
+                       / NULLIF(COUNT(*) - COALESCE(SUM(error_type IN ({_NON_CALL_PH})), 0), 0),
                        0.0
                    ) AS rate
               FROM tool_calls
@@ -289,6 +306,6 @@ class ToolDashboard:
                AND tool_name != '_loop_transition'
                AND {_NOT_A_MARKER}
             """,
-            (*_POLICY_PARAMS, *_POLICY_PARAMS, cutoff, LUCKY_GUESS_ERROR_TYPE),
+            (*_POLICY_PARAMS, *_NON_CALL_PARAMS, cutoff, LUCKY_GUESS_ERROR_TYPE),
         ).fetchone()
         return row["total"], row["denials"], row["rate"]

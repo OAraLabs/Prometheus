@@ -1579,6 +1579,7 @@ def main() -> None:
     from prometheus.cli.service import add_install_service_subparser
     from prometheus.cli.setup import add_setup_subparser
     from prometheus.cli.token import add_token_subparser
+    from prometheus.cli.trace_labels import add_trace_labels_subparser
     add_setup_subparser(subparsers)
     add_token_subparser(subparsers)
     add_pair_subparser(subparsers)
@@ -1587,6 +1588,7 @@ def main() -> None:
     add_install_service_subparser(subparsers)
     add_gepa_subparser(subparsers)
     add_scrub_subparser(subparsers)
+    add_trace_labels_subparser(subparsers)
 
     daemon_parser = subparsers.add_parser("daemon", help="Start always-on daemon")
     daemon_parser.add_argument(
@@ -2007,6 +2009,12 @@ def main() -> None:
     if args.command == "scrub":
         from prometheus.cli.scrub import run_scrub
         sys.exit(run_scrub(args))
+
+    # `oara trace-labels` — fill tool_ok / turn_outcome on rows from before the
+    # trace labels. Dry run unless --apply. No model, no config.
+    if args.command == "trace-labels":
+        from prometheus.cli.trace_labels import run_trace_labels
+        sys.exit(run_trace_labels(args))
 
     # Migration subcommand — runs pre-agent, no model needed
     if args.command == "retention":

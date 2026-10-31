@@ -397,6 +397,8 @@ class TestTrajectoryExportCheck:
         home = tmp_path / "home"
         (home / ".prometheus").mkdir(parents=True, exist_ok=True)
         os.environ["HOME"] = str(home)
+        # The doctor reads the telemetry DB where the tracker writes it.
+        os.environ["PROMETHEUS_CONFIG_DIR"] = str(home / ".prometheus")
         tel = ToolCallTelemetry(db_path=home / ".prometheus" / "telemetry.db")
         for i in range(n_golden):
             tel.record(
@@ -412,9 +414,14 @@ class TestTrajectoryExportCheck:
         import os
 
         original = os.environ.get("HOME")
+        original_cfg = os.environ.get("PROMETHEUS_CONFIG_DIR")
         yield
         if original is not None:
             os.environ["HOME"] = original
+        if original_cfg is not None:
+            os.environ["PROMETHEUS_CONFIG_DIR"] = original_cfg
+        else:
+            os.environ.pop("PROMETHEUS_CONFIG_DIR", None)
 
     def test_disabled_with_stranded_traces_warns(self, tmp_path):
         """The forgotten-flag case: traces piling up, nothing exporting."""

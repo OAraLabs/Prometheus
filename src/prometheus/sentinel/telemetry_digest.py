@@ -69,7 +69,10 @@ class TelemetryDigest:
         baseline_since = now - (self._baseline_hours * 3600)
 
         current = self._telemetry.report(since=current_since)
-        baseline = self._telemetry.report(since=baseline_since)
+        # The baseline ENDS where the current window starts. It used to span
+        # the whole baseline period, current window included, so a drop was
+        # compared against a baseline already pulled toward it.
+        baseline = self._telemetry.report(since=baseline_since, until=current_since)
 
         anomalies = self._compare(current, baseline)
 
@@ -86,7 +89,11 @@ class TelemetryDigest:
         current: dict[str, Any],
         baseline: dict[str, Any],
     ) -> list[DigestAnomaly]:
-        """Flag anomalies: success drop >5%, retry increase >10%, latency >50%."""
+        """Flag anomalies: tool-call success drop >5%, retry increase >10%, latency >50%.
+
+        Every rate compared is a TOOL-CALL rate (``tool_ok``: the call ran),
+        a tool's reliability. It is not task success and is never named so.
+        """
         anomalies: list[DigestAnomaly] = []
 
         current_tools = current.get("tools", {})
@@ -156,8 +163,18 @@ class TelemetryDigest:
         total = report.get("total_calls", 0)
         rate = report.get("overall_success_rate", 0.0)
         lines = [
-            f"Telemetry digest: {total} calls, {rate:.1%} overall success rate",
+            f"Telemetry digest: {total} tool calls, {rate:.1%} ran without error",
         ]
+        # How turns ENDED: the task-level number the tool-call rate is not.
+        turns = report.get("turns") or {}
+        if turns.get("linked"):
+            completed = turns.get("completed_rate")
+            lines.append(
+                f"  Turns: {turns['linked']} ended — "
+                + (f"{completed:.1%} completed, " if completed is not None else "")
+                + f"{turns.get('stopped', 0)} stopped, {turns.get('errored', 0)} errored, "
+                f"{turns.get('abandoned', 0)} cut off"
+            )
 
         # PER-TOOL LATENCY, RENDERED WITH ITS PROVENANCE.
         #

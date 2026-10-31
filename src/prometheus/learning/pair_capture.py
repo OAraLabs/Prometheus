@@ -92,6 +92,12 @@ CREATE INDEX IF NOT EXISTS idx_pairs_tool ON training_pairs (tool_name);
 CREATE INDEX IF NOT EXISTS idx_pairs_ts ON training_pairs (timestamp);
 """
 
+def _trace_label_columns() -> list[tuple[str, str]]:
+    from prometheus.telemetry.trace_labels import LABEL_COLUMNS
+
+    return list(LABEL_COLUMNS)
+
+
 # Columns added after the table first shipped, added on open when missing
 # (PRAGMA-guarded ADD COLUMN, as telemetry.db's _EXPECTED_COLUMNS). Nullable,
 # never backfilled.
@@ -104,7 +110,16 @@ _EXPECTED_COLUMNS: list[tuple[str, str]] = [
     ("turn_id", "TEXT"),          # telemetry.db turns.turn_id
     ("round_index", "INTEGER"),   # the round the rejected/chosen call came from
     ("repair_kind", "TEXT"),      # the adapter repair, as tool_calls.repair_kind
-    ("outcome", "TEXT"),          # the turn's outcome, copied at mine time
+    # Declared as "the turn's outcome, copied at mine time", but nothing has
+    # ever written it: NULL on every row. The turn's end state is now
+    # `turn_outcome` below; the user signal stays on telemetry's turns row.
+    ("outcome", "TEXT"),
+    # TRACE LABELS (telemetry/trace_labels.py), as on tool_calls: `tool_ok`
+    # (the chosen call ran without error; NULL where the source banks it
+    # before it runs), `turn_outcome` (how its turn ended, stamped at turn
+    # end by `label_turn`), `judged_ok` / `judged_by` / `judged_at`. Not in
+    # `context_hash`, for the reason above.
+    *_trace_label_columns(),
 ]
 
 
@@ -157,13 +172,16 @@ class PairStore:
         round_index: int | None = None,
         repair_kind: str | None = None,
         outcome: str | None = None,
+        tool_ok: bool | None = None,
     ) -> bool:
         """Insert a pair; returns False on dedupe-hit.
 
-        ``turn_id``, ``round_index``, ``repair_kind`` and ``outcome`` are
-        stored beside the pair and are NOT part of the dedupe hash (see
-        ``_EXPECTED_COLUMNS``): the same (context, rejected) with different
-        telemetry fields is still the same pair.
+        ``turn_id``, ``round_index``, ``repair_kind``, ``outcome`` and
+        ``tool_ok`` are stored beside the pair and are NOT part of the dedupe
+        hash (see ``_EXPECTED_COLUMNS``): the same (context, rejected) with
+        different telemetry fields is still the same pair. ``tool_ok`` None
+        means the chosen call has not run yet (a repair banked before it
+        executes), not that it failed.
 
         Raises on a bad source, and on a ``chosen`` side carrying leaked
         chat-template markup (``CorruptPairRejected``). ``capture_pair`` turns
@@ -208,8 +226,8 @@ class PairStore:
                 "INSERT INTO training_pairs "
                 "(id, timestamp, pair_source, model_id, tool_name, context, "
                 " rejected, chosen, meta, context_hash, "
-                " turn_id, round_index, repair_kind, outcome) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " turn_id, round_index, repair_kind, outcome, tool_ok) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     hashlib.sha256(f"{h}{time.time()}".encode()).hexdigest()[:32],
                     time.time(),
@@ -225,6 +243,7 @@ class PairStore:
                     round_index,
                     repair_kind,
                     outcome,
+                    None if tool_ok is None else (1 if tool_ok else 0),
                 ),
             )
             self._conn.commit()
@@ -233,9 +252,32 @@ class PairStore:
             return False  # duplicate (context, rejected) — by design
 
     def stats(self) -> dict[str, Any]:
+        """Counts for ``/pairs`` and ``/api/pairs``.
+
+        ``total`` is every row, as before. It is NOT a count of pairs:
+        ``cloud_golden`` rows are chosen-only copies of cloud tool calls that
+        telemetry.db also holds (``tool_calls.is_golden``) and the golden
+        export writes out again, so adding ``total`` to either counts the same
+        calls twice (2026-10-30: 11,207 here + 11,152 exported read as ~22K).
+        ``pairs`` is rows with a rejected side; ``exemplars`` the chosen-only
+        rows, with ``exemplars_note`` saying where their canonical count is.
+        ``turn_outcome`` counts rows by how their turn ended
+        (telemetry/trace_labels.py); none of these is a success rate.
+        """
         by_source = dict(self._conn.execute(
             "SELECT pair_source, COUNT(*) FROM training_pairs GROUP BY pair_source"
         ).fetchall())
+        pairs = self._conn.execute(
+            "SELECT COUNT(*) FROM training_pairs WHERE rejected IS NOT NULL"
+        ).fetchone()[0]
+        try:
+            by_outcome = {
+                (k if k is not None else "unlabelled"): n
+                for k, n in self._conn.execute(
+                    "SELECT turn_outcome, COUNT(*) FROM training_pairs GROUP BY turn_outcome")
+            }
+        except sqlite3.DatabaseError:
+            by_outcome = {}
         by_tool = dict(self._conn.execute(
             "SELECT tool_name, COUNT(*) FROM training_pairs "
             "GROUP BY tool_name ORDER BY COUNT(*) DESC LIMIT 15"
@@ -250,6 +292,12 @@ class PairStore:
         ).fetchone()[0]
         return {
             "total": total,
+            "pairs": pairs,
+            "exemplars": total - pairs,
+            "exemplars_note": (
+                "chosen-only cloud_golden copies of telemetry golden calls; "
+                "count teacher traces in telemetry.db, not here"),
+            "by_turn_outcome": by_outcome,
             "by_source": by_source,
             "by_tool": by_tool,
             "last_7d": last_7d,
@@ -265,6 +313,14 @@ class PairStore:
             "SELECT * FROM training_pairs WHERE timestamp >= ? ORDER BY timestamp",
             (since,),
         ).fetchall()
+
+    def label_turn(self, turn_id: str, outcome: str) -> int:
+        """Stamp ``turn_outcome`` on this turn's pairs that have none. Returns rows changed."""
+        cur = self._conn.execute(
+            "UPDATE training_pairs SET turn_outcome = ? WHERE turn_id = ? AND turn_outcome IS NULL",
+            (outcome, turn_id))
+        self._conn.commit()
+        return cur.rowcount or 0
 
     def close(self) -> None:
         self._conn.close()
@@ -318,6 +374,16 @@ def cloud_golden_enabled() -> bool:
     return _cloud_golden_enabled
 
 
+def label_turn(turn_id: str, outcome: str) -> None:
+    """Turn end: label the turn's pairs with how it ended. Never raises into the turn."""
+    if _store is None or not turn_id:
+        return
+    try:
+        _store.label_turn(turn_id, outcome)
+    except Exception:
+        log.warning("pair capture: could not label turn %s", turn_id, exc_info=True)
+
+
 def capture_pair(
     *,
     pair_source: str,
@@ -331,6 +397,7 @@ def capture_pair(
     repair_kind: str | None = None,
     turn_id: str | None = None,
     round_index: int | None = None,
+    tool_ok: bool | None = None,
 ) -> None:
     """Fail-loud-but-non-blocking capture. Never raises into the turn.
 
@@ -339,7 +406,8 @@ def capture_pair(
     ``round_index`` are the telemetry v2 turn and round the pair was captured
     in, joining it to its ``tool_calls`` and ``responses`` rows. All three
     are stored in their own columns, outside the dedupe hash, as ``add_pair``
-    stores them.
+    stores them. ``tool_ok`` True when the chosen call has already run without
+    error; None when it is banked before it runs.
     """
     if _store is None:
         return
@@ -364,6 +432,7 @@ def capture_pair(
             repair_kind=repair_kind,
             turn_id=turn_id,
             round_index=round_index,
+            tool_ok=tool_ok,
         )
     except Exception as exc:
         log.error("pair capture failed (%s/%s): %s", pair_source, tool_name, exc,
