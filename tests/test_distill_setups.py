@@ -283,7 +283,8 @@ def test_probe_main_lists_jobs_classifies_by_uid_and_reads_the_last_apply(tmp_pa
                                 "GPU-0, 12, /opt/y, 500\n",
         "list-units": "distill-pipeline.service loaded activating auto-restart pipeline\n"
                       "distill-old.service loaded inactive dead old\n"
-                      "distill-deadman-alpha.service loaded failed failed dead-man\n",
+                      "distill-deadman-alpha.service loaded failed failed dead-man\n"
+                      "distill-deadman-alpha.timer loaded active waiting dead-man\n",
         "cat": f"# {UNIT_DIR}/u.service\nExecStart=/opt/srv --hf-token hf_SECRET --port 9\n",
     }
 
@@ -320,6 +321,8 @@ def test_probe_main_lists_jobs_classifies_by_uid_and_reads_the_last_apply(tmp_pa
                       12: ("user", "tmux-spawn-1.scope")}
     assert set(out["units"]) == {"llm.service", "tmux-spawn-1.scope", "distill-pipeline.service"}
     assert out["deadman_units"] == {"distill-deadman-alpha.service": "failed"}
+    assert out["deadman_timer_states"] == {"distill-deadman-alpha.timer": "active"}
+    assert S.deadman_armed(out, "alpha") and not S.deadman_armed(out, "beta")
     assert out["units"]["llm.service"]["load"] == "loaded"
     assert out["last_apply"]["result"] == "failed"
     assert "hf_SECRET" not in json.dumps(out)
@@ -608,14 +611,19 @@ class FakeRunner:
     state: host -> {"units": {unit: (active, vram) or (active, vram, healthy)}}.
     """
 
-    def __init__(self, state, extra_procs=None):
+    def __init__(self, state, extra_procs=None, hook_rc=None, python="python3", armed=None):
         self.state = state
+        self.armed = set(state) if armed is None else set(armed)  # hosts with a dead-man timer waiting
         self.extra_procs = extra_procs or {}
         self.calls = []
         self.shell = []
+        self.hooks = []  # (host, daemon_switch args, timeout)
+        self.order = []  # hooks and systemctl calls, in the order they ran
+        self.hook_rc = hook_rc or {}
+        self._python = python
 
     def python(self, host):
-        return "python3"
+        return self._python
 
     def command(self, host, argv):
         return argv
@@ -625,7 +633,13 @@ class FakeRunner:
         return (st + (True,))[:3]
 
     def run(self, host, argv, input=None, timeout=90):
-        if argv[:2] == ["python3", "-"]:
+        if argv[1:2] == ["-"] and not argv[2].startswith("{"):  # a daemon_switch.py hook
+            assert argv[0] == self._python and "def cmd_restore" in input
+            self.hooks.append((host, argv[2:], timeout))
+            self.order.append(("hook", host, " ".join(argv[2:])))
+            rc = self.hook_rc.get(argv[2], 0)
+            return subprocess.CompletedProcess(argv, rc, f"daemon_switch {argv[2]} rc={rc}\n", "")
+        if argv[1:2] == ["-"]:
             req = json.loads(argv[2])
             units = self.state[host]["units"]
             procs = [proc(i, u, v) for i, (u, st) in enumerate(units.items())
@@ -637,12 +651,16 @@ class FakeRunner:
             for u in names:
                 a, _, healthy = self._unit(host, u)
                 info[u] = unit_info(active=a, ok=a == "active" and healthy)
-            out = json.dumps(live_host(procs, info, used=sum(p["vram_mib"] for p in procs)))
+            lv = live_host(procs, info, used=sum(p["vram_mib"] for p in procs))
+            lv["deadman_timer_states"] = {f"distill-deadman-{host}.timer": "active"} if host in self.armed else {}
+            out = json.dumps(lv)
             return subprocess.CompletedProcess(argv, 0, out + "\n", "")
         if argv[0] == "sh":
             self.shell.append((host, argv, input))
+            self.order.append(("sh", host, argv[-1]))
             return subprocess.CompletedProcess(argv, 0, "", "")
         self.calls.append((host, argv))
+        self.order.append(("systemctl", host, f"{argv[2]} {argv[3]}"))
         verb, unit = argv[2], argv[3]
         _, vram, healthy = self._unit(host, unit)
         self.state[host]["units"][unit] = ("inactive" if verb == "stop" else "active", vram, healthy)
@@ -1004,7 +1022,9 @@ def test_deadman_commands():
     # old failed units are reset before scheduling; the host is test-run before arming
     assert "reset-failed" in steps[0][1] and kinds.index("check") < kinds.index("ssh", 2)
     assert [s for k, s in steps if k == "scp"] == [("script", "setups.py"), ("setup", "business.yaml"),
-                                                   ("hosts", "hosts.yaml")]
+                                                   ("hosts", "hosts.yaml"), ("switch", "daemon_switch.py")]
+    checks = [s for k, s in steps if k == "check"]
+    assert checks[1].endswith("/daemon_switch.py selftest") and S.DEADMAN_PYTHON in checks[1]
     assert "is-active --quiet distill-deadman-alpha.timer" in steps[-1][1]
 
 
@@ -1205,3 +1225,205 @@ def test_parse_at_naive_is_eastern():
     dt = S.parse_at("2026-10-31T07:15")
     assert S.on_calendar(dt) == "2026-10-31 11:15:00 UTC"
     assert S.on_calendar(S.parse_at("2026-10-31T11:15:00Z")) == "2026-10-31 11:15:00 UTC"
+
+
+# ── hooks: the daemon model switch around an apply ──────────────────────────
+
+SWITCH_PRE = ["daemon_switch.py capture", "daemon_switch.py to-max"]
+
+
+def write_hooked_setups(tmp_path, restore_hook=True, flywheel_extra=None, business_extra=None):
+    b = business_setup()
+    if restore_hook:
+        b["hosts"]["beta"]["post_apply"] = ["daemon_switch.py restore"] + (business_extra or [])
+    f = flywheel_setup()
+    f["hosts"]["beta"]["pre_apply"] = SWITCH_PRE + (flywheel_extra or [])
+    for s in (b, f):
+        S.write_private(tmp_path / f"{s['name']}.yaml", S.dump_setup(S.validate_setup(s)))
+
+
+def test_hooks_normalize_and_refuse_what_could_stop_a_never_stop_unit():
+    h = S.normalize_hook("daemon_switch.py to-max", "pre_apply")
+    assert h == {"run": "daemon_switch.py to-max", "enabled": True, "timeout_s": S.SWITCH_TIMEOUT_S}
+    off = S.normalize_hook({"run": "echo hi", "enabled": False, "why": "not decided"}, "post_apply")
+    assert off["enabled"] is False and off["timeout_s"] == S.HOOK_TIMEOUT_S
+    for bad, phase in [
+        ("daemon_switch.py to-max --execute", "pre_apply"),   # setups adds --execute itself
+        ("daemon_switch.py to-max --exec", "pre_apply"),      # an abbreviation argparse would expand
+        ("daemon_switch.py to-max --ex", "pre_apply"),
+        ("daemon_switch.py restore --execut", "post_apply"),
+        ("daemon_switch.py capture --force", "pre_apply"),    # would record Max as the before-state
+        ("daemon_switch.py capture --offline", "pre_apply"),
+        ("daemon_switch.py restore --notify-cmd=x", "post_apply"),
+        ("daemon_switch.py to-max --set", "pre_apply"),       # an option without its value
+        ("daemon_switch.py to-max --set --execute", "pre_apply"),
+        ("daemon_switch.py to-max extra", "pre_apply"),
+        ("systemctl --user isolate basic.target", "pre_apply"),  # stops every unit, none named
+        ("systemctl --user exit", "post_apply"),
+        ("systemctl --user default", "post_apply"),
+        ("systemctl --user rescue", "post_apply"),
+        ("sh -c 'systemctl --user stop prometheus.service'", "pre_apply"),
+        ("bash -lc 'echo hi'", "pre_apply"),
+        ("xargs systemctl --user stop < units.txt", "post_apply"),
+        ("eval \"$STOP\"", "post_apply"),
+        ("daemon_switch.py to-max", "post_apply"),            # to-max must run before units stop
+        ("daemon_switch.py restore", "pre_apply"),            # restore must run after they start
+        ("daemon_switch.py rm-rf", "pre_apply"),
+        ("python3 ~/daemon_switch.py to-max --execute", "pre_apply"),
+        ("systemctl --user restart prometheus", "pre_apply"),
+        ("systemctl --user stop prometheus.service", "post_apply"),
+        ("true && systemctl --user stop 'cloudflared-x.service'", "pre_apply"),
+        ("systemctl --user stop $UNIT", "pre_apply"),
+        ("systemctl --user stop 'llama*'", "pre_apply"),
+        ("pkill -f llama-server", "pre_apply"),
+        ("kill 1234", "pre_apply"),
+        ("sudo systemctl start x.service", "pre_apply"),
+        ({"run": "echo", "enabled": "no"}, "pre_apply"),
+        ({"run": "echo", "when": "now"}, "pre_apply"),
+        ({"run": "echo", "timeout_s": 0}, "pre_apply"),
+    ]:
+        with pytest.raises(ValueError):
+            S.normalize_hook(bad, phase)
+    # a stop of a unit that is not never-stop is a plain command
+    assert S.normalize_hook("systemctl --user stop teacher.service", "post_apply")["enabled"]
+    # the switch's own options, spelled out, with their values
+    for ok in ("daemon_switch.py to-max --set sentinel.synthesis_enabled=false --idle-wait 600",
+               "daemon_switch.py restore --backend-wait=900 --state-dir /srv/state"):
+        assert S.normalize_hook(ok, "post_apply" if "restore" in ok else "pre_apply")["run"] == ok
+    # the site guard from hosts.yaml applies at run time
+    assert S.hook_guard_problem("systemctl --user stop site.service", S.NEVER_STOP + ("site.service",))
+
+
+def test_flywheel_switches_the_daemon_before_anything_stops(tmp_path):
+    write_hooked_setups(tmp_path)
+    runner = FakeRunner(business_state())
+    assert S.cmd_apply(args_for(tmp_path, "flywheel", True), HOSTS, runner) == 0
+    assert [a for _, a, _ in runner.hooks] == [["capture", "--execute"], ["to-max", "--execute"]]
+    assert all(t == S.SWITCH_TIMEOUT_S for _, _, t in runner.hooks)
+    first_stop = next(i for i, o in enumerate(runner.order) if o[0] == "systemctl" and o[2].startswith("stop"))
+    assert max(i for i, o in enumerate(runner.order) if o[0] == "hook") < first_stop
+
+
+def test_a_switch_to_max_without_an_armed_dead_man_is_refused(tmp_path, capsys):
+    write_hooked_setups(tmp_path)
+    runner = FakeRunner(business_state(), armed=())
+    assert S.cmd_apply(args_for(tmp_path, "flywheel", True), HOSTS, runner) == 2
+    assert runner.calls == [] and runner.hooks == []  # nothing switched, stopped or started
+    record = json.loads(S.last_apply_path().read_text())
+    assert record["result"] == "refused" and "no dead-man restore is armed" in record["problems"][0]
+    # a dry run says so and still shows the switch's own dry run
+    capsys.readouterr()
+    assert S.cmd_apply(args_for(tmp_path, "flywheel", False), HOSTS, runner) == 0
+    assert "--execute refuses until then" in capsys.readouterr().out
+    # once it is armed, the apply runs
+    runner.armed = {"beta"}
+    assert S.cmd_apply(args_for(tmp_path, "flywheel", True), HOSTS, runner) == 0
+    assert [a for _, a, _ in runner.hooks][-2:] == [["capture", "--execute"], ["to-max", "--execute"]]
+
+
+def test_a_failing_pre_hook_stops_and_starts_nothing(tmp_path, clock, capsys):
+    write_hooked_setups(tmp_path)
+    state = business_state()
+    runner = FakeRunner(state, hook_rc={"to-max": 1})
+    assert S.cmd_apply(args_for(tmp_path, "flywheel", True), HOSTS, runner) == 1
+    assert runner.calls == []  # the model server the daemon still uses is never stopped
+    assert state["beta"]["units"]["chat.service"][0] == "active"
+    record = json.loads(S.last_apply_path().read_text())
+    assert record["result"] == "failed" and "to-max" in record["problems"][0]
+    assert "may already be on Max" in capsys.readouterr().out
+
+
+def test_business_points_the_daemon_back_after_its_model_server_is_up(tmp_path):
+    write_hooked_setups(tmp_path)
+    state = business_state()
+    runner = FakeRunner(state)
+    assert S.cmd_apply(args_for(tmp_path, "flywheel", True), HOSTS, runner) == 0
+    runner.order.clear()
+    runner.hooks.clear()
+    assert S.cmd_apply(args_for(tmp_path, "business", True), HOSTS, runner) == 0
+    assert [a for _, a, _ in runner.hooks] == [["restore", "--execute"]]
+    start = runner.order.index(("systemctl", "beta", "start chat.service"))
+    assert runner.order.index(("hook", "beta", "restore --execute")) > start
+
+
+def test_a_failed_restore_hook_fails_the_restore_and_notifies(tmp_path, clock):
+    write_hooked_setups(tmp_path)
+    hosts = S.Hosts({"alpha": S.Host("alpha", "user@alpha-host"),
+                     "beta": S.Host("beta", "beta-host", notify_cmd="/opt/notify")})
+    runner = FakeRunner(business_state(), hook_rc={"restore": 1})
+    assert S.cmd_apply(args_for(tmp_path, "business", True), hosts, runner) == 1
+    assert len(runner.hooks) == 1 + S.RESTORE_RETRIES  # retried like any failed restore
+    assert runner.shell and "restore" in runner.shell[-1][2]
+
+
+def test_dry_run_shows_the_switch_plan_and_runs_no_command(tmp_path, capsys):
+    write_hooked_setups(tmp_path, flywheel_extra=["echo would-pause-something"])
+    runner = FakeRunner(business_state())
+    assert S.cmd_apply(args_for(tmp_path, "flywheel", False), HOSTS, runner) == 0
+    assert [a for _, a, _ in runner.hooks] == [["capture"], ["to-max"]]  # daemon_switch's own dry run
+    assert runner.calls == [] and runner.shell == []
+    out = capsys.readouterr().out
+    assert "pre_apply: daemon_switch.py to-max" in out and "would run" in out
+
+
+def test_disabled_hooks_are_listed_and_never_run(tmp_path, capsys):
+    off = {"run": "echo pause-evals", "enabled": False, "why": "handling not decided"}
+    write_hooked_setups(tmp_path, business_extra=[off])
+    runner = FakeRunner(business_state())
+    assert S.cmd_apply(args_for(tmp_path, "business", True), HOSTS, runner) == 0
+    assert runner.shell == []
+    assert "skipped (disabled): handling not decided" in capsys.readouterr().out
+
+
+def test_a_switch_business_cannot_undo_is_refused(tmp_path, monkeypatch):
+    write_hooked_setups(tmp_path, restore_hook=False)
+    runner = FakeRunner(business_state())
+    assert S.cmd_apply(args_for(tmp_path, "flywheel", True), HOSTS, runner) == 2
+    assert runner.calls == [] and runner.hooks == []
+    hosts_file, hosts = _deadman_fixture(tmp_path)
+    write_hooked_setups(tmp_path, restore_hook=False)
+    monkeypatch.setattr(S, "_call", lambda argv, timeout=120: pytest.fail("touched a host"))
+    with pytest.raises(SystemExit, match="restore"):
+        S.cmd_deadman(_deadman_args(tmp_path, hosts_file), hosts, S.Runner(hosts))
+
+
+def test_deadman_copies_the_switch_script_and_its_restore_runs_on_the_host(tmp_path, monkeypatch):
+    hosts_file, hosts = _deadman_fixture(tmp_path)
+    write_hooked_setups(tmp_path)
+    copied = {}
+
+    def fake_call(argv, timeout=120):
+        if argv[0] == "scp":
+            copied[(argv[-1].split(":")[0], argv[-1].rsplit("/", 1)[1])] = Path(argv[-2]).read_text()
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(S, "_call", fake_call)
+    assert S.cmd_deadman(_deadman_args(tmp_path, hosts_file), hosts, S.Runner(hosts)) == 0
+    assert "def cmd_restore" in copied[("beta-host", "daemon_switch.py")]
+    assert yaml.safe_load(copied[("beta-host", "business.yaml")])["hosts"]["beta"]["post_apply"][0]["run"] \
+        == "daemon_switch.py restore"
+    # On the host, the timer runs the copies with --local: the restore hook runs from the copy.
+    rdir = tmp_path / "home" / S.REMOTE_DIR
+    rdir.mkdir(parents=True)
+    for (target, name), text in copied.items():
+        if target == "beta-host":
+            (rdir / name).write_text(text)
+    steps = S.deadman_commands("business", "beta", WHEN)
+    run = [c for k, c in steps if k == "ssh" and "systemd-run" in c][0]
+    _, argv = _main_argv(run, tmp_path / "home")
+    runner = FakeRunner(business_state(), python=sys.executable)
+    monkeypatch.setattr(S, "Runner", lambda hosts, local=False: runner)
+    monkeypatch.setattr(S, "switch_source", lambda: (rdir / "daemon_switch.py").read_text())
+    assert S.main(argv) == 0
+    assert [(h, a) for h, a, _ in runner.hooks] == [("beta", ["restore", "--execute"])]
+
+
+def test_save_business_again_keeps_its_hooks(tmp_path, capsys):
+    write_hooked_setups(tmp_path)
+    runner = StaticRunner(business_live())
+    args = save_args(tmp_path, "business")
+    args.force = True
+    assert S.cmd_save(args, HOSTS, runner) == 0
+    saved = S.load_setup(tmp_path, "business")
+    assert saved["hosts"]["beta"]["post_apply"][0]["run"] == "daemon_switch.py restore"
+    assert "kept hooks: beta post_apply (1)" in capsys.readouterr().out

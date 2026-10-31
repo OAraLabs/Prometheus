@@ -15,7 +15,9 @@ percentiles, gate results: no text, no ids, no hashes).
         --index ~/distill/phase1/trace_index.jsonl --pack ~/distill/phase3/request_pack.json \\
         --tokenizer-dir ~/distill/models/qwen3.5-9b-tokenizer --out ~/distill/phase3 \\
         [--verdicts judge-sample.jsonl ...] [--fail-traces ~/distill/phase2/fail_traces.jsonl] \\
-        [--extra-traces '~/distill/phase2b/*.jsonl'] [--lcm-snapshot ~/distill/snapshot/lcm.db] \\
+        [--extra-traces '~/distill/gym/*.jsonl'] [--train-sources qwen38-27b-gym] \\
+        [--train-models 'qwen3.8-27b*'] [--judge-models 'qwen3.8-27b*'] \\
+        [--lcm-snapshot ~/distill/snapshot/lcm.db] \\
         [--spot-check-server http://127.0.0.1:8080] [--dry-run]
     # 3. Spot check (needs llama-server serving the student GGUF with --jinja):
     python3 build.py spot-check --server http://127.0.0.1:8080 \\
@@ -40,17 +42,50 @@ Inputs
   ``h_exact``, verdict in ``verdict`` / ``label`` (``pass``|``fail``) or a
   boolean ``pass``. Later files override earlier ones (a full re-judge after
   the sample). A verdict row that is unusable, matches no trace or disagrees
-  with the index fails the ``verdicts`` gate. Unjudged golden traces fall back
+  with the index fails the ``verdicts`` gate. So does a verdict whose judge
+  model names Max (judge.py's ``model``; ``judge_model`` / ``model`` on other
+  rows): the Max key never judges. Such a pass is not applied; such a fail
+  still is (dropping a row is always safe). Unjudged golden traces fall back
   to the tool-success label (the runbook's rule): every golden trace's call ran
   without error, by construction.
 * Input file names must be unique across ``--traces``, ``--extra-traces`` and
   ``--fail-traces`` (a trace is ``<file name>:<line>``); a repeat is an input
   error.
-* ``--extra-traces``: Phase 2b teacher traces in the same shape, tagged
-  ``_meta.source = "max-gym-<date>"``. They must carry a pass verdict (in
-  ``--verdicts`` or ``_meta.verdict``); unverified rows are excluded. They are
-  deduped against everything before them and may carry ``_meta.category``,
-  ``_meta.suppress_tools`` (chat-mode), ``_meta.compacted``.
+* ``--extra-traces``: teacher traces in the same shape, e.g. ``teacher_gen.py``
+  output (tagged ``_meta.source = "qwen38-27b-gym"``) or older Max gym rows
+  (``max-gym-<date>``). Each must be verified: a pass verdict (in
+  ``--verdicts`` or ``_meta.verdict``) or a passing ``_meta.verification``
+  record (below); unverified rows are excluded. A train-source row (data
+  policy, below) is verified only by its own record, read strictly: a pass
+  verdict alone never verifies it. They are deduped against
+  everything before them and may carry ``_meta.category``, ``_meta.task_id``
+  (the generator's task: every row of one task lands in one split),
+  ``_meta.suppress_tools`` (chat-mode), ``_meta.compacted``,
+  ``_meta.error_recovery``. A missing ``_meta.tool_name`` is read from the
+  target's first call.
+* ``_meta.verification`` (``teacher_gen.py``'s record), honoured on any row::
+
+      {"verified": true,                 # the generator's decision (or
+                                         #  "status"/"verdict": "pass"|"fail")
+       "tool_success": true,
+       "judge": {"verdict": "pass", "model": "<local judge>"},
+       "sandboxed": true,
+       "side_effects": false}            # (or "real_side_effects")
+
+  Every part is read fail-closed: ``tool_success`` and ``sandboxed`` pass
+  only as exactly ``true``, the side-effect fields only as ``false`` or empty
+  (``[]``, ``{}``, ``""``); any other value (``"false"``, ``0``, a list of
+  effects) fails the row. A judge must give a pass verdict (a judge record
+  with no verdict, or with ``pass`` not ``true``, fails), and a judge whose
+  model names Max fails the row (the Max key never judges). On a Max row
+  (eval-only) a part may be absent. On a train-source row every part is
+  required: tool success, a passing judge whose model matches
+  ``--judge-models`` (default: the ``--train-models``), sandboxed, and no side
+  effects; a missing part fails it with its own reason. A failing record
+  excludes the row even beside a pass verdict, and a fail verdict excludes it
+  even beside a passing record. A train-source row claims its dedupe key only
+  once verified (one task's retries share their first call), a Max row as
+  soon as it is read (its verdicts are per call).
 * ``--fail-traces``: rebuilt failed teacher calls (same shape), used only as
   hard eval-tools cases, never for training. A row may carry its own
   ``expect``; otherwise the case expects the tool the teacher picked, called
@@ -60,6 +95,35 @@ Inputs
   ``content_json`` blocks (earlier tool calls and tool results included) up to
   the teacher's own assistant message; otherwise the stored ≤12-message
   window is used. ``context_source`` on each row says which.
+
+Data policy (``--train-sources``)
+---------------------------------
+Only rows whose own ``_meta.source`` tag matches a ``--train-sources`` pattern
+(fnmatch; default ``qwen38-27b-gym``) may enter train or val. Such a row needs
+a ``_meta.model`` that matches a ``--train-models`` pattern (the local teacher;
+case-insensitive fnmatch, default ``qwen3.8-27b*``; otherwise
+``train_source_wrong_model``) and does not name Max (nor may its
+``served_model``: ``train_source_names_max``), no ``_meta.max_derived`` (or
+record ``max_derived``) other than ``false`` (``train_source_max_derived``),
+and a passing strict verification record (above; a train-source row is never
+trained on a verdict alone or on the tool-success fallback). Every other row the build
+keeps is Max-derived: the ``--max-model``'s rows (default ``qwen3.8-max``, also
+``--teacher-model``), a tag naming Max, or no tag at all. Max-derived rows,
+the failed calls included, are eval-tools material only: a group holding one
+goes to eval-tools whole (so a train-source row sharing its task or context is
+held out with it, and the Max part of eval-tools stays put as train data
+grows), and the eval-tools quota (``--eval-task-frac``) is taken from the
+remaining train-source groups. Train/val rows carry ``source``, ``model`` and
+``max_derived``; the report's ``data_policy`` states the rule with per-source
+counts (input, exclusions by reason, verification outcomes, models, rows per
+split), and the ``data_policy`` gate fails on any Max-derived, unlisted or
+wrong-model row in train/val. A source, train model or judge model naming Max
+cannot be listed (exit 2). The size, val-share, category and presence gates
+count the listed sources' rows only; leakage is checked across every source in
+every split. The report's ``settings.teacher_model`` is what the trainer's and
+the flywheel's Max guards read: the one model whose rows train/val hold when
+that is a single model that does not name Max, else the ``--max-model`` (the
+guards then treat every row as Max-derived, which fails closed).
 
 Rebuilding the request
 ----------------------
@@ -155,13 +219,23 @@ Splits and gates
   tool result after the last user query, still in the request, that is an
   error. ``error_signal`` (telemetry or ``_meta`` says a call failed nearby)
   is reported but not gated.
+* Chat mode is a request that offered no tools: ``_meta.suppress_tools`` /
+  ``chat_mode`` / ``tool_choice: "none"`` / ``mode: "chat"``, or a trace with
+  no ``tools`` and no call. It is rebuilt the way the runtime sends it (no
+  tools, no ``tool_choice``), so the student template renders no tools block,
+  and the row counts toward the chat-mode presence gate. A turn that answers
+  in prose while tools were offered is not chat mode: it keeps the catalog
+  (``final_answer`` flag). A tool call in a chat-mode turn is excluded
+  (``call_in_chat_mode``): no tool was offered to call.
 * Category cap: no category above ``--category-cap`` (35%) of train; the
   largest fixed point is kept, round-robin over tasks so task diversity
   survives; val keeps the same per-category share train kept, so it mirrors
   train's mix. What was dropped is reported.
 * Gates (in code; FAIL is reported, never worked around): no task / group /
-  prefix / exact / prompt+call hash, and no session user message of a final
-  request, in two splits; every verdict row applied; train size in
+  prefix / exact / prompt+call / generator-task hash, and no session user
+  message of a final request, in two splits (whatever the rows' sources);
+  every verdict row applied; nothing but the listed train sources in
+  train/val (``data_policy``); train size (listed sources) in
   ``--train-range``; val share in ``--val-share-range``; eval-tools at least
   ``--eval-min``; max train category share ≤ cap; chat-mode, error/recovery and
   compacted-history examples present in train. The byte-for-byte spot check
@@ -184,6 +258,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import fnmatch
 import glob
 import hashlib
 import importlib.util
@@ -204,7 +279,11 @@ from typing import Any, Iterator
 PACK_SCHEMA = "distill-request-pack/1"
 REPORT_SCHEMA = "distill-phase3-report/1"
 DATE_SENTINEL = "@@DISTILL_TRACE_DATE@@"
-TEACHER_MODEL = "qwen3.8-max"
+TEACHER_MODEL = "qwen3.8-max"  # the hosted Max teacher: its rows are eval-only
+#: The sources that may train (OPEN-QUESTIONS #6: the local 27B gym teacher).
+DEFAULT_TRAIN_SOURCES = ("qwen38-27b-gym",)
+#: The models a train-source row may come from: the local 27B teacher only.
+DEFAULT_TRAIN_MODELS = ("qwen3.8-27b*",)
 DEFAULT_TRACES = "~/.prometheus/trajectories/golden_traces_*.jsonl"
 LIMIT_TOKENS = 16384
 SPLITS = ("train", "val", "eval-tools")
@@ -419,6 +498,149 @@ def iter_traces(paths: list[Path], kind: str, stats: collections.Counter) -> Ite
                 yield Trace(f"{path.name}:{lineno}", kind, path.name, lineno, raw)
 
 
+# ---------------------------------------------------------------------------
+# Data policy: which rows may train, and what verifies a row
+# ---------------------------------------------------------------------------
+
+_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+PASS_WORDS = frozenset({"pass", "passed", "verified", "ok"})
+FAIL_WORDS = frozenset({"fail", "failed", "unverified", "rejected", "error"})
+POLICY_RULE = (
+    "train/val hold only rows whose _meta.source matches --train-sources, whose model matches "
+    "--train-models, whose model and source do not name Max, and whose own verification record "
+    "shows tool success, a passing judge matching --judge-models, sandboxed tools and no side "
+    "effects; Max-derived rows (the --max-model's, a source naming Max, or no source tag, "
+    "failed calls included) are eval-tools only, and a group holding one goes to eval-tools "
+    "whole")
+
+
+def names_max(name: Any) -> bool:
+    """True when *name* holds the token ``max``: ``qwen3.8-max``, ``max-golden``,
+    ``max-gym-2026-11-01`` do, ``maximal`` does not. The rule the trainer's and
+    the flywheel's guards use; over-matching only keeps a row out of training."""
+    return isinstance(name, str) and "max" in _TOKEN_SPLIT.split(name.lower())
+
+
+def source_tag(meta: dict[str, Any]) -> str | None:
+    """The row's own ``_meta.source`` tag, or None (the builder's fallback
+    labels ``max-golden`` / ``extra`` / ``fail`` are not tags)."""
+    tag = meta.get("source")
+    return tag.strip() if isinstance(tag, str) and tag.strip() else None
+
+
+def source_label(trace: Trace) -> str:
+    """The source a row is counted and written under."""
+    return source_tag(trace.meta) or ("max-golden" if trace.kind == "golden" else trace.kind)
+
+
+def matches_source(tag: str | None, patterns: tuple[str, ...] | None) -> bool:
+    return tag is not None and any(fnmatch.fnmatchcase(tag, p) for p in patterns or ())
+
+
+def matches_model(model: Any, patterns: tuple[str, ...] | None) -> bool:
+    """*model* (a non-empty string) matches one of *patterns*, ignoring case
+    (served model ids differ in case only: ``Qwen3.8-27B`` / ``qwen3.8-27b``)."""
+    return (isinstance(model, str) and bool(model.strip())
+            and any(fnmatch.fnmatchcase(model.strip().lower(), p.lower()) for p in patterns or ()))
+
+
+def says_max_derived(holder: Any) -> bool:
+    """*holder* carries a ``max_derived`` other than an explicit ``false``
+    (absent is silent; null, true, "false" or 0 all count: fail closed)."""
+    return isinstance(holder, dict) and "max_derived" in holder \
+        and holder["max_derived"] is not False
+
+
+def no_effects(value: Any) -> bool:
+    """A side-effect field that says "none": exactly ``false`` or empty."""
+    return value is False or (isinstance(value, (str, list, tuple, dict)) and not value)
+
+
+def chat_mode_of(raw: dict[str, Any]) -> bool:
+    """Whether the trace's request offered no tools (module docstring)."""
+    found = raw.get("_meta")
+    meta: dict[str, Any] = found if isinstance(found, dict) else {}
+    if meta.get("suppress_tools") or meta.get("chat_mode") \
+            or str(meta.get("tool_choice") or "").strip().lower() == "none" \
+            or str(meta.get("mode") or "").strip().lower() == "chat":
+        return True
+    target = (raw.get("messages") or [{}])[-1]
+    return not target.get("tool_calls") and not raw.get("tools")
+
+
+@dataclass
+class Verification:
+    decision: bool | None  # None: the row carries no record
+    basis: str  # on a pass, the label it earns; otherwise why it failed
+
+
+EFFECT_KEYS = ("side_effects", "real_side_effects")
+
+
+def verification_of(meta: dict[str, Any], *, strict: bool = False,
+                    judge_models: tuple[str, ...] | None = None) -> Verification:
+    """The row's ``_meta.verification`` record, read fail-closed (module docstring).
+
+    Each part is either absent or exactly its safe value; any other value
+    fails. *strict* (a train-source row) also fails a record that leaves a
+    part out: tool success, a passing judge whose model matches
+    *judge_models*, sandboxed, no side effects."""
+    rec = meta.get("verification")
+    if rec is None:
+        return Verification(None, "absent")
+    if not isinstance(rec, dict):
+        return Verification(False, "unreadable")
+    decision = rec.get("verified")
+    if not isinstance(decision, bool):
+        word = str(rec.get("status") or rec.get("verdict") or "").strip().lower()
+        decision = True if word in PASS_WORDS else False if word in FAIL_WORDS else None
+    if decision is None:
+        return Verification(False, "no_decision")
+    if not decision:
+        return Verification(False, "not_verified")
+    if "tool_success" in rec and rec["tool_success"] is not True:
+        return Verification(False, "tool_failed")
+    judge = rec.get("judge")
+    j_verdict: Any = None
+    j_model: Any = None
+    if isinstance(judge, dict):
+        j_verdict, j_model = judge.get("verdict"), judge.get("model")
+    elif isinstance(judge, str):
+        j_verdict = judge
+    j_verdict = j_verdict if j_verdict is not None else rec.get("judge_verdict")
+    j_model = j_model if j_model is not None else rec.get("judge_model")
+    judged = judge is not None or j_verdict is not None or j_model is not None
+    if names_max(j_model) or (isinstance(judge, dict) and names_max(judge.get("served_model"))):
+        return Verification(False, "judge_is_max")
+    if judged and (j_verdict is None or (isinstance(judge, dict) and judge.get("error"))):
+        return Verification(False, "judge_no_verdict")  # a judge that never answered
+    if judged and (str(j_verdict).strip().lower() not in PASS_WORDS
+                   or (isinstance(judge, dict) and "pass" in judge and judge["pass"] is not True)):
+        return Verification(False, "judge_not_pass")
+    if "sandboxed" in rec and rec["sandboxed"] is not True:
+        return Verification(False, "not_sandboxed")
+    effects = [k for k in EFFECT_KEYS if k in rec]
+    if any(not no_effects(rec[k]) for k in effects):
+        return Verification(False, "side_effects")
+    if strict:
+        if "tool_success" not in rec:
+            return Verification(False, "no_tool_success")
+        if not judged:
+            return Verification(False, "no_judge")
+        if not isinstance(j_model, str) or not j_model.strip():
+            return Verification(False, "judge_no_model")
+        if judge_models is not None and not matches_model(j_model, judge_models):
+            return Verification(False, "judge_not_allowed")
+        if "sandboxed" not in rec:
+            return Verification(False, "no_sandbox_record")
+        if not effects:
+            return Verification(False, "no_side_effects_record")
+        return Verification(True, "judge-pass")
+    if judged:
+        return Verification(True, "judge-pass")
+    return Verification(True, "tool-success" if "tool_success" in rec else "verified")
+
+
 def load_index(path: str | None) -> dict[tuple[str, int], dict[str, Any]]:
     """Phase 1 index rows keyed by (file, ordinal within the file, 1-based).
     The index has one row per non-empty trace line, in file order."""
@@ -447,8 +669,19 @@ def load_verdicts(paths: list[str], stats: collections.Counter,
     ``source.telemetry_rowid`` goes to *checks* (key -> rowid) for the build
     to compare with the Phase 1 index. A fail-side row (no file: a failed call
     judged from telemetry) is skipped, since fail traces are never trained.
+
+    A verdict whose judge model names Max (judge.py's ``model``; on other rows
+    ``judge_model``, else ``model``) is counted in ``verdict_rows_max_judge``,
+    which fails the verdicts gate: the Max key never judges. Its pass is not
+    loaded; its fail is (dropping a row is always safe).
     """
     out: dict[str, str] = {}
+
+    def max_judged(model: Any, v: str) -> bool:
+        if not names_max(model):
+            return False
+        stats["verdict_rows_max_judge"] += 1
+        return v == "pass"
     for path in paths:
         p = Path(path).expanduser()
         if not p.is_file():
@@ -472,6 +705,8 @@ def load_verdicts(paths: list[str], stats: collections.Counter,
                     stats["verdict_rows_unusable"] += 1
                     continue
                 key = f"{file}:{lineno + 1}"
+                if max_judged(row.get("model"), v):
+                    continue
                 out[key] = v
                 if checks is not None:
                     checks[key] = src.get("telemetry_rowid")
@@ -485,6 +720,10 @@ def load_verdicts(paths: list[str], stats: collections.Counter,
             v = str(v).strip().lower() if v is not None else ""
             if not key or v not in ("pass", "fail"):
                 stats["verdict_rows_unusable"] += 1
+                continue
+            judge = row.get("judge_model") if row.get("judge_model") is not None \
+                else row.get("model")
+            if max_judged(judge, v):
                 continue
             out[str(key)] = v
             if checks is not None:
@@ -866,7 +1105,9 @@ class Rebuilder:
         target = msgs[-1]
         if target.get("role") != "assistant":
             return "no_assistant_target"
-        chat_mode = bool(meta.get("suppress_tools")) or not target.get("tool_calls")
+        chat_mode = chat_mode_of(trace.raw)
+        if chat_mode and target.get("tool_calls"):
+            return "call_in_chat_mode"  # no tool was offered to call
         conv: list[Any] | None = None
         source, lcm_target, lcm_match = "stored", None, None
         error_in_turn = False
@@ -934,8 +1175,9 @@ class Rebuilder:
                       and str(m.get("content", "")).lstrip().lower().startswith("error")]
             error_in_turn = bool(failed)
             error_ids |= {str(m.get("tool_call_id")) for m in failed}
+        # tool_choice as sent: a chat-mode payload (no tools) carries none at all
         return Request(messages=wire, tools=payload.get("tools") or [],
-                       tool_choice=payload.get("tool_choice", "none" if chat_mode else "auto"),
+                       tool_choice=payload.get("tool_choice"),
                        template_kwargs=dict(payload.get("chat_template_kwargs") or {}),
                        context_source=source, chat_mode=chat_mode, error_in_turn=error_in_turn,
                        lcm_target=lcm_target, lcm_match=lcm_match,
@@ -1044,6 +1286,11 @@ class Example:
     # session-scoped hashes of the user messages in the final request (its own
     # query included): examples that share one share context
     ctx_keys: list[str] = field(default_factory=list)
+    model: str = ""
+    # data policy: a Max-derived row is eval-only; train_ok = may enter train/val
+    max_derived: bool = True
+    train_ok: bool = True
+    gen_task: str = ""  # "<source>\x1f<generator task id>", "" when none
 
 
 def approx_codes(context_source: str) -> list[str]:
@@ -1106,13 +1353,17 @@ def seeded(seed: str, key: str) -> str:
 
 
 def assign_groups(examples: list[Example]) -> None:
-    """Join tasks that share a context prefix or a session user message of
-    their final requests; group = smallest task id in it."""
+    """Join tasks that share a context prefix, a session user message of their
+    final requests or a generator task id; group = smallest task id in it.
+    Rows of every source take part, so a train-source task sharing context with
+    a Max-derived one lands in its group."""
     uf = UnionFind()
     for ex in examples:
         uf.union("t:" + ex.task_id, "p:" + ex.prefix)
         for key in ex.ctx_keys:
             uf.union("t:" + ex.task_id, "c:" + key)
+        if ex.gen_task:  # every row of one generator task, whatever its prompt
+            uf.union("t:" + ex.task_id, "g:" + ex.gen_task)
     members: dict[str, list[str]] = collections.defaultdict(list)
     for node in list(uf.parent):
         if node.startswith("t:"):
@@ -1128,16 +1379,25 @@ class SplitPlan:
     ineligible_groups: int
     eval_tasks: int
     total_tasks: int
+    # data policy: groups holding a row that may not train go to eval-tools whole
+    pinned_groups: int = 0
+    pinned_tasks: int = 0
+    pinned_train_rows: int = 0  # train-source rows held out with them
 
 
 def plan_splits(pool: list[Example], *, seed: str, eval_task_frac: float, val_frac: float,
-                max_group_share: float) -> SplitPlan:
-    rows = collections.Counter(ex.group for ex in pool)
+                max_group_share: float, pinned: set[str] | frozenset[str] = frozenset()
+                ) -> SplitPlan:
+    """Assign groups to splits, seeded. *pinned* groups go to eval-tools whole
+    and take no part in the quotas or the hold-out size limit, which are
+    computed over the other groups."""
+    free = [ex for ex in pool if ex.group not in pinned]
+    rows = collections.Counter(ex.group for ex in free)
     tasks: dict[str, set[str]] = collections.defaultdict(set)
-    for ex in pool:
+    for ex in free:
         tasks[ex.group].add(ex.task_id)
-    total_rows = len(pool)
-    total_tasks = len({ex.task_id for ex in pool})
+    total_rows = len(free)
+    total_tasks = len({ex.task_id for ex in free})
     order = sorted(rows, key=lambda g: seeded(seed, g))
     limit = max_group_share * total_rows
     eligible = {g for g in order if rows[g] <= limit}
@@ -1159,7 +1419,13 @@ def plan_splits(pool: list[Example], *, seed: str, eval_task_frac: float, val_fr
             val_rows += rows[g]
     for g in order:
         plan.setdefault(g, "train")
-    return SplitPlan(plan, len(order) - len(eligible), eval_tasks, total_tasks)
+    for g in pinned:
+        plan[g] = "eval-tools"
+    held = [ex for ex in pool if ex.group in pinned]
+    return SplitPlan(plan, len(order) - len(eligible), eval_tasks, total_tasks,
+                     pinned_groups=len({ex.group for ex in held}),
+                     pinned_tasks=len({ex.task_id for ex in held}),
+                     pinned_train_rows=sum(1 for ex in held if ex.train_ok))
 
 
 def round_robin(examples: list[Example], seed: str) -> list[Example]:
@@ -1240,9 +1506,13 @@ def sample_per_task(examples: list[Example], k: int, seed: str) -> list[Example]
 
 
 def leakage(splits: dict[str, list[Example]]) -> dict[str, Any]:
+    """Overlaps between every two splits, over the rows of every source (a
+    Max-derived eval case and a train-source train row are compared like any
+    two rows). ``sources`` names what each split held when checked."""
     keys = {"task": lambda e: [e.task_id], "group": lambda e: [e.group],
             "prefix": lambda e: [e.prefix], "exact": lambda e: [e.h_exact],
-            "prompt_call": lambda e: [e.h_prompt_call], "context": lambda e: e.ctx_keys}
+            "prompt_call": lambda e: [e.h_prompt_call], "context": lambda e: e.ctx_keys,
+            "source_task": lambda e: [e.gen_task] if e.gen_task else []}
     out: dict[str, Any] = {}
     names = list(splits)
     ok = True
@@ -1255,7 +1525,8 @@ def leakage(splits: dict[str, list[Example]]) -> dict[str, Any]:
                 row[kname] = n
                 ok = ok and n == 0
             out[f"{a}|{b}"] = row
-    return {"pass": ok, "overlaps": out}
+    return {"pass": ok, "overlaps": out,
+            "sources": {k: sorted({e.source for e in v}) for k, v in splits.items()}}
 
 
 # ---------------------------------------------------------------------------
@@ -1291,7 +1562,10 @@ def split_summary(rows: list[Example], limit: int) -> dict[str, Any]:
         "label": dict(C(e.label for e in rows).most_common()),
         "kind": dict(C(e.kind for e in rows).most_common()),
         "context_source": dict(C(e.context_source for e in rows).most_common()),
+        "source": dict(C(e.source for e in rows).most_common()),
+        "max_derived": sum(1 for e in rows if e.max_derived),
         "chat_mode": sum(e.flags["chat_mode"] for e in rows),
+        "final_answer": sum(e.flags.get("final_answer", False) for e in rows),
         "error_recovery": sum(e.flags["error_recovery"] for e in rows),
         "error_signal": sum(e.flags.get("error_signal", False) for e in rows),
         "compacted": sum(e.flags["compacted"] for e in rows),
@@ -1318,7 +1592,23 @@ class Settings:
     prefix_n: int = 4
     seed: str = "phase3-v1"
     eval_success: str = "presence"
-    teacher_model: str = TEACHER_MODEL
+    # The hosted Max teacher whose harvested rows are kept (as eval-only rows
+    # under a train-source policy). The report's settings.teacher_model is not
+    # this setting: it is derived from what train/val hold (Builder.
+    # teacher_model), because the trainer's and the flywheel's Max guards read
+    # it as "every train/val row is this model's". The trainer falls back to
+    # the rows' own provenance without it; the flywheel counts every row as
+    # Max-derived without it.
+    max_model: str = TEACHER_MODEL
+    # Sources that may train (fnmatch patterns on _meta.source). None = no
+    # policy, every accepted row may train: library default for the split and
+    # gate machinery; the CLI always sets one (default DEFAULT_TRAIN_SOURCES).
+    train_sources: tuple[str, ...] | None = None
+    # Under a policy, the models a train-source row may come from (the local
+    # teacher; case-insensitive fnmatch) and the judges its record may name
+    # (None = the train models: the teacher judges itself).
+    train_models: tuple[str, ...] = DEFAULT_TRAIN_MODELS
+    judge_models: tuple[str, ...] | None = None
     exclude_bad_turns: bool = False
     train_range: tuple[int, int] = (5000, 10000)
     val_share_range: tuple[float, float] = (0.02, 0.05)
@@ -1360,19 +1650,100 @@ class Builder:
         self._spool = spool.open("wb") if spool else None
         self._reader: Any = None
         self._file_ordinal: collections.Counter = collections.Counter()
+        # per-source aggregates for the report's data_policy section
+        self.by_source: dict[str, collections.Counter] = collections.defaultdict(
+            collections.Counter)
+        self.models_by_source: dict[str, collections.Counter] = collections.defaultdict(
+            collections.Counter)
 
     def exclude(self, trace: Trace, reason: str) -> None:
         self.stats[f"excluded:{reason}"] += 1
+        self.by_source[source_label(trace)][f"excluded:{reason}"] += 1
         self.excluded.append((trace.trace_id, reason))
+
+    @property
+    def judge_models(self) -> tuple[str, ...]:
+        """The judge models a train-source row's record may name."""
+        return self.s.judge_models if self.s.judge_models is not None else self.s.train_models
+
+    def teacher_model(self) -> str:
+        """``settings.teacher_model`` for the report: the one model whose rows
+        train/val hold, read by the trainer's and the flywheel's Max guards as
+        "every train/val row is this model's". The ``--max-model`` (every row
+        Max-derived, which fails closed) unless train/val hold only
+        train-source rows of a single model that does not name Max."""
+        s = self.s
+        if s.train_sources is None:
+            return s.max_model  # no policy: only the Max model's rows are kept
+        rows = self.final["train"] + self.final["val"]
+        models = {e.model for e in rows}
+        if len(models) != 1 or not all(e.train_ok and not e.max_derived for e in rows):
+            return s.max_model
+        (model,) = models
+        if not model or names_max(model) or model == s.max_model \
+                or not matches_model(model, s.train_models):
+            return s.max_model
+        return model
+
+    def is_train_source(self, trace: Trace) -> bool:
+        """A row the data policy lets train: a listed tag that does not name Max."""
+        tag = source_tag(trace.meta)
+        return (self.s.train_sources is not None and trace.kind != "fail"
+                and matches_source(tag, self.s.train_sources) and not names_max(tag))
+
+    def claim(self, trace: Trace, keys: TraceKeys) -> bool:
+        """Take the row's dedupe key; False (and excluded) when an earlier row
+        holds it. Phase 1's rule: first row per normalized prompt + call."""
+        seen = self.seen_fail if trace.kind == "fail" else self.seen_prompt_call
+        key = keys.h_exact if trace.kind == "fail" else keys.h_prompt_call
+        if key in seen:
+            self.exclude(trace, "duplicate")
+            return False
+        seen.add(key)
+        return True
 
     def add(self, trace: Trace) -> None:
         self.stats[f"input_{trace.kind}"] += 1
         if trace.kind == "golden":
             self._file_ordinal[trace.file] += 1
-        meta = trace.meta
-        if (trace.kind != "fail" or meta.get("model")) and meta.get("model") != self.s.teacher_model:
+        if not isinstance(trace.raw.get("_meta"), dict):
+            trace.raw["_meta"] = {}
+        meta = trace.raw["_meta"]  # (trace.meta would hand back a copy of an empty one)
+        src = source_label(trace)
+        self.by_source[src]["input"] += 1
+        model = meta.get("model")
+        model_s = model.strip() if isinstance(model, str) else ""
+        train_source = self.is_train_source(trace)
+        if train_source:
+            if not model_s:
+                self.exclude(trace, "train_source_no_model")
+                return
+            if names_max(model_s) or model_s == self.s.max_model \
+                    or names_max(meta.get("served_model")):
+                # a Max row under a train-source tag: its provenance is wrong
+                self.exclude(trace, "train_source_names_max")
+                return
+            if not matches_model(model_s, self.s.train_models):
+                # not the local teacher (a hosted route the same key serves, say)
+                self.exclude(trace, "train_source_wrong_model")
+                return
+            if says_max_derived(meta) or says_max_derived(meta.get("verification")):
+                # its producer says it came from Max (a task seeded from a Max chat)
+                self.exclude(trace, "train_source_max_derived")
+                return
+        elif (trace.kind != "fail" or meta.get("model")) and meta.get("model") != self.s.max_model:
             self.exclude(trace, "non_teacher_model")
             return
+        # Data policy: under one, everything kept that is not a train source is
+        # the Max teacher's; with none (library default) every row may train.
+        max_derived = not train_source
+        train_ok = trace.kind != "fail" and (train_source or self.s.train_sources is None)
+        if trace.kind == "extra" and not meta.get("tool_name"):
+            calls = trace.raw["messages"][-1].get("tool_calls") or []
+            name = ((calls[0] if calls and isinstance(calls[0], dict) else {})
+                    .get("function") or {}).get("name")
+            if name:
+                meta["tool_name"] = name
         keys = trace_keys(trace.raw)
         idx = self.index.get((trace.file, self._file_ordinal[trace.file])) \
             if trace.kind == "golden" else None
@@ -1385,17 +1756,12 @@ class Builder:
             for k in ("h_exact", "h_prompt", "h_prompt_call"):
                 if idx.get(k) != getattr(keys, k):
                     self.index_disagree[k] += 1
-        # dedupe exactly as Phase 1: first teacher row per normalized prompt + call
-        if trace.kind == "fail":
-            if keys.h_exact in self.seen_fail:
-                self.exclude(trace, "duplicate")
-                return
-            self.seen_fail.add(keys.h_exact)
-        else:
-            if keys.h_prompt_call in self.seen_prompt_call:
-                self.exclude(trace, "duplicate")
-                return
-            self.seen_prompt_call.add(keys.h_prompt_call)
+        # Dedupe exactly as Phase 1: first teacher row per normalized prompt +
+        # call. A Max row claims its key now (a verdict on it is a verdict on
+        # the call); a train-source row once verified (its record verifies the
+        # whole trajectory, and a failed attempt's first call may be a retry's).
+        if not train_source and not self.claim(trace, keys):
+            return
         # label
         vkey = next((k for k in (trace.trace_id, keys.h_exact) if k in self.verdicts), None)
         verdict = self.verdicts[vkey] if vkey is not None else None
@@ -1408,27 +1774,52 @@ class Builder:
                 verdict = None
         if verdict is None and meta.get("verdict"):
             verdict = str(meta["verdict"]).lower()
+        record = (verification_of(meta, strict=train_source, judge_models=self.judge_models)
+                  if trace.kind != "fail" else Verification(None, "absent"))
+        if record.decision is not None:
+            outcome_key = "verification:" + ("pass" if record.decision else record.basis)
+            self.stats[outcome_key] += 1
+            self.by_source[src][outcome_key] += 1
         if trace.kind == "fail":
             label = "hard-case"
         elif verdict == "fail":
             self.exclude(trace, "judge_fail")
             return
+        elif record.decision is False:
+            self.exclude(trace, "verification_failed")
+            return
+        elif train_source:
+            # Only the row's own strict record verifies it: a verdict (from
+            # --verdicts or _meta.verdict) shows no tool success, sandbox or
+            # local judge, and may come from any judge.
+            if not record.decision:
+                self.exclude(trace, "unverified")
+                return
+            label = record.basis
         elif verdict == "pass":
             label = "judge-pass"
+        elif record.decision:
+            label = record.basis
         elif trace.kind == "extra":
+            # the tool-success fallback is for harvested teacher rows only
             self.exclude(trace, "unverified")
             return
         else:
             label = "tool-success"
+        if train_source and not self.claim(trace, keys):
+            return
         outcome = (idx or {}).get("turn_outcome")
         if self.s.exclude_bad_turns and label == "tool-success" and outcome in BAD_TURN_OUTCOMES:
             self.exclude(trace, "bad_turn_outcome")
             return
+        chat_mode = chat_mode_of(trace.raw)
         if trace.kind == "extra" and meta.get("category"):
             category = str(meta["category"])
         else:
             category, _ = classify(trace.raw, keys.prompt, keys.args,
                                    human_surface=True if trace.kind == "extra" else None)
+            if category == "chat-mode" and not chat_mode and trace.kind != "golden":
+                category = "other"  # a prose answer to a request that offered tools
         if idx is not None and idx.get("category") != category:
             self.index_disagree["category"] += 1
         try:
@@ -1479,6 +1870,8 @@ class Builder:
         context_text = "\n".join(content_text(m.get("content")) for m in final_msgs[1:-1])
         flags = {
             "chat_mode": req.chat_mode,
+            # a prose answer while tools were offered (not chat mode: tools rendered)
+            "final_answer": not req.chat_mode and not final_msgs[-1].get("tool_calls"),
             "error_recovery": error_after_last_query(final_msgs, req.error_ids),
             "compacted": bool(COMPACTION.search(context_text)) or bool(meta.get("compacted")),
             # diagnostic only: telemetry / _meta say a call failed nearby, which
@@ -1490,10 +1883,12 @@ class Builder:
         session = str(meta.get("session_id") or "") if fit is not None else ""
         ctx_keys = sorted({session + "\x1f" + h(norm(content_text(m.get("content"))))
                            for m in final_msgs[:-1] if m.get("role") == "user"}) if session else []
+        gen_task = meta.get("task_id")
+        gen_task = (src + "\x1f" + str(gen_task).strip()
+                    if isinstance(gen_task, (str, int)) and str(gen_task).strip() else "")
         ex = Example(
             id=("p3f-" if trace.kind == "fail" else "p3-") + h(trace.trace_id),
-            trace_id=trace.trace_id, kind=trace.kind,
-            source=str(meta.get("source") or ("max-golden" if trace.kind == "golden" else trace.kind)),
+            trace_id=trace.trace_id, kind=trace.kind, source=src,
             category=category, task_id=keys.h_prompt, h_exact=keys.h_exact,
             h_prompt_call=keys.h_prompt_call, label=label, flags=flags,
             context_source=req.context_source,
@@ -1507,7 +1902,8 @@ class Builder:
             expect_tool=None if req.chat_mode else own_call[0] if trace.kind == "fail" else
             ((req.messages[-1].get("tool_calls") or [{}])[0].get("function") or {}).get("name"),
             turn_outcome=outcome, omitted_messages=req.omitted_messages,
-            lcm_target=req.lcm_target, ctx_keys=ctx_keys,
+            lcm_target=req.lcm_target, ctx_keys=ctx_keys, model=model_s,
+            max_derived=max_derived, train_ok=train_ok, gen_task=gen_task,
         )
         if self._spool is not None:
             heavy = {
@@ -1527,6 +1923,12 @@ class Builder:
             self.unfittable.append(ex)
         else:
             self.examples.append(ex)
+        counts = self.by_source[src]
+        counts["accepted"] += 1
+        counts["train_eligible"] += ex.train_ok
+        counts["max_derived"] += ex.max_derived
+        counts["chat_mode"] += flags["chat_mode"]
+        self.models_by_source[src][model_s or "unknown"] += 1
 
     def close_spool(self) -> None:
         if self._spool is not None:
@@ -1553,12 +1955,18 @@ class Builder:
         s = self.s
         pool = self.examples
         assign_groups(pool + self.fails + self.unfittable)
+        # Under a data policy a group holding a row that may not train (a
+        # Max-derived row or a failed call) is eval-tools material whole.
+        pinned = ({e.group for e in pool + self.fails if not e.train_ok}
+                  if s.train_sources is not None else set())
         plan = plan_splits(pool, seed=s.seed, eval_task_frac=s.eval_task_frac,
-                           val_frac=s.val_frac, max_group_share=s.holdout_max_group_share)
+                           val_frac=s.val_frac, max_group_share=s.holdout_max_group_share,
+                           pinned=pinned)
         for ex in pool:
             ex.split = plan.groups[ex.group]
-        train_all = [e for e in pool if e.split == "train"]
-        val_all = [e for e in pool if e.split == "val"]
+        # (train_ok is already true of every row here; kept as the last word)
+        train_all = [e for e in pool if e.split == "train" and e.train_ok]
+        val_all = [e for e in pool if e.split == "val" and e.train_ok]
         held = [e for e in pool if e.split == "eval-tools"]
         train, train_caps = cap_categories(train_all, s.category_cap, s.seed)
         ratios = {c: r["kept"] / r["before"] for c, r in train_caps.items() if r["before"]}
@@ -1578,19 +1986,46 @@ class Builder:
             "plan": plan, "train_caps": train_caps, "val_caps": val_caps,
             "held_rows": len(held), "eval_sampled": len(eval_rows),
             "fail_used": len(fail_used), "fail_dropped_task_in_train_or_val": fail_dropped,
+            "not_train_ok_in_train_val_groups": sum(
+                1 for e in pool if e.split in ("train", "val") and not e.train_ok),
         }
+
+    def policy_gate(self) -> dict[str, Any]:
+        """Nothing but the listed train sources' rows in train/val."""
+        s = self.s
+        if s.train_sources is None:
+            return {"status": "NO POLICY",
+                    "note": "library default: every accepted row may train; the CLI always "
+                            "sets --train-sources"}
+        rows = self.final["train"] + self.final["val"]
+        max_rows = sum(1 for e in rows if e.max_derived or not e.train_ok)
+        other = sum(1 for e in rows if not matches_source(e.source, s.train_sources)
+                    or names_max(e.source) or names_max(e.model) or e.model == s.max_model)
+        wrong_model = sum(1 for e in rows if not matches_model(e.model, s.train_models))
+        return {"train_sources": list(s.train_sources), "train_models": list(s.train_models),
+                "max_model": s.max_model,
+                "max_derived_in_train_val": max_rows,
+                "outside_train_sources_in_train_val": other,
+                "unlisted_model_in_train_val": wrong_model,
+                "pass": max_rows == 0 and other == 0 and wrong_model == 0}
 
     def gates(self) -> dict[str, Any]:
         s = self.s
-        tr, va, ev = (self.final[k] for k in SPLITS)
+        # size, share, category and presence count the rows that may train only
+        tr, va = ([e for e in self.final[k] if e.train_ok] for k in ("train", "val"))
+        ev = self.final["eval-tools"]
         g: dict[str, Any] = {"leakage": leakage(self.final)}
         vg = {"files_missing": self.stats["verdict_files_missing"],
               "rows_unusable": self.stats["verdict_rows_unusable"],
+              "max_judge": self.stats["verdict_rows_max_judge"],
               "unmatched": len(set(self.verdicts) - self.verdicts_used),
               "index_mismatch": self.stats["verdict_index_mismatch"]}
         g["verdicts"] = {"loaded": len(self.verdicts), **vg,
                          "pass": not any(vg.values())}
+        g["data_policy"] = self.policy_gate()
         g["train_size"] = {"value": len(tr), "range": list(s.train_range),
+                           "by_source": dict(collections.Counter(e.source for e in tr)
+                                             .most_common()),
                            "pass": s.train_range[0] <= len(tr) <= s.train_range[1]}
         share = len(va) / (len(tr) + len(va)) if (tr or va) else 0.0
         g["val_share"] = {"value": round(share, 4), "range": list(s.val_share_range),
@@ -1615,6 +2050,8 @@ class Builder:
         return {
             "id": ex.id, "split": ex.split, "task_id": ex.task_id, "group_id": ex.group,
             "category": ex.category, "source": ex.source, "label": ex.label,
+            # provenance the trainer's Max guard reads (it fails closed without it)
+            "model": ex.model or None, "max_derived": ex.max_derived,
             "context_source": ex.context_source, "approximate": True,
             "approx": approx_codes(ex.context_source), "flags": ex.flags,
             "truncated": ({"dropped_messages": ex.dropped_messages,
@@ -1640,7 +2077,8 @@ class Builder:
             "id": ex.id, "set": set_name, "messages": msgs[:-1],
             "tools": heavy["tools"], "tool_choice": "none" if ex.flags["chat_mode"] else "auto",
             "expect": expect,
-            "meta": {"source": ex.source, "task_id": ex.task_id, "group_id": ex.group,
+            "meta": {"source": ex.source, "model": ex.model or None,
+                     "max_derived": ex.max_derived, "task_id": ex.task_id, "group_id": ex.group,
                      "category": ex.category, "label": ex.label,
                      "context_source": ex.context_source, "approximate": True,
                      "approx": approx_codes(ex.context_source), "trace_id": ex.trace_id,
@@ -1705,17 +2143,24 @@ class Builder:
             "schema": REPORT_SCHEMA,
             "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "elapsed_s": round(elapsed, 1),
-            "settings": {k: (list(v) if isinstance(v, tuple) else v)
-                         for k, v in vars(s).items()},
+            "settings": {**{k: (list(v) if isinstance(v, tuple) else v)
+                            for k, v in vars(s).items()},
+                         # what the trainer's and the flywheel's Max guards read
+                         "teacher_model": self.teacher_model()},
             "catalog": catalog,
             "inputs": inputs,
+            "data_policy": self.policy_report(split_info),
             "counts": dict(sorted(self.stats.items())),
             "index_disagreements": dict(self.index_disagree),
             "lcm_match": dict(self.lcm_match),
             "pool": {
-                "rows": len(self.examples), "tasks": plan.total_tasks,
+                "rows": len(self.examples),
+                "tasks": len({e.task_id for e in self.examples}),
+                "train_eligible_rows": sum(1 for e in self.examples if e.train_ok),
                 "groups": len(groups), "largest_group_rows": max(groups.values(), default=0),
                 "groups_too_big_to_hold_out": plan.ineligible_groups,
+                "source": dict(collections.Counter(e.source for e in self.examples)
+                               .most_common()),
                 "category": dict(collections.Counter(e.category for e in self.examples)
                                  .most_common()),
                 "label": dict(collections.Counter(e.label for e in self.examples).most_common()),
@@ -1747,8 +2192,50 @@ class Builder:
                            "fail_cases": split_info["fail_used"],
                            "fail_dropped_task_in_train_or_val":
                                split_info["fail_dropped_task_in_train_or_val"],
-                           "held_out_tasks": plan.eval_tasks},
+                           "held_out_tasks": plan.eval_tasks,
+                           # tasks the quotas were taken from (not pinned)
+                           "splittable_tasks": plan.total_tasks,
+                           "pinned_groups": plan.pinned_groups,
+                           "pinned_tasks": plan.pinned_tasks},
             "gates": gates,
+        }
+
+    def policy_report(self, split_info: dict[str, Any]) -> dict[str, Any]:
+        """The data policy and what it did, per source (aggregates only)."""
+        s = self.s
+        plan: SplitPlan = split_info["plan"]
+        per_split: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+        for k, rows in self.final.items():
+            for e in rows:
+                per_split[e.source][k] += 1
+        sources: dict[str, Any] = {}
+        for src in sorted(self.by_source):
+            c = self.by_source[src]
+
+            def part(prefix: str, c: collections.Counter = c) -> dict[str, int]:
+                return {k[len(prefix):]: v for k, v in sorted(c.items()) if k.startswith(prefix)}
+
+            excluded = part("excluded:")
+            sources[src] = {
+                "listed": matches_source(src, s.train_sources) and not names_max(src),
+                "input": c["input"], "accepted": c["accepted"],
+                "excluded": sum(excluded.values()), "excluded_by_reason": excluded,
+                "verification": part("verification:"),
+                "train_eligible": c["train_eligible"], "max_derived": c["max_derived"],
+                "chat_mode": c["chat_mode"],
+                "models": dict(self.models_by_source[src].most_common()),
+                **{k: per_split[src][k] for k in SPLITS},
+            }
+        return {
+            "train_sources": list(s.train_sources) if s.train_sources is not None else None,
+            "train_models": list(s.train_models), "judge_models": list(self.judge_models),
+            "max_model": s.max_model, "teacher_model": self.teacher_model(),
+            "rule": POLICY_RULE if s.train_sources is not None else
+            "none (library default): every accepted row may train",
+            "sources": sources,
+            "train_source_rows_held_out_with_max_rows": plan.pinned_train_rows,
+            "not_train_ok_in_train_val_groups": split_info.get(
+                "not_train_ok_in_train_val_groups", 0),
         }
 
 
@@ -1808,6 +2295,23 @@ def cmd_build(a: argparse.Namespace) -> int:
         print(f"error: input file names must be unique (trace ids are <file name>:<line>);"
               f" given more than once: {', '.join(dupes)}", file=sys.stderr)
         return 2
+    policy: dict[str, tuple[str, ...]] = {}
+    for flag, given, default in (("--train-sources", a.train_sources, DEFAULT_TRAIN_SOURCES),
+                                 ("--train-models", a.train_models, DEFAULT_TRAIN_MODELS),
+                                 ("--judge-models", a.judge_models, None)):
+        if given is None and default is None:
+            continue
+        patterns = tuple(p.strip() for p in (given or default or ()) if p.strip())
+        if not patterns:
+            print(f"error: {flag} needs at least one pattern", file=sys.stderr)
+            return 2
+        refused = [p for p in patterns if names_max(p) or p.lower() == a.max_model.lower()]
+        if refused:
+            print(f"error: {flag} may not name Max: Max-derived rows never train and the Max "
+                  f"key never judges (DISTILL-OPEN-QUESTIONS #6); refused: {', '.join(refused)}",
+                  file=sys.stderr)
+            return 2
+        policy[flag] = patterns
     handler = _CountingHandler()
     root = logging.getLogger()
     for old in list(root.handlers):
@@ -1818,7 +2322,9 @@ def cmd_build(a: argparse.Namespace) -> int:
         max_tokens=a.max_tokens, category_cap=a.category_cap, val_frac=a.val_frac,
         eval_task_frac=a.eval_task_frac, eval_max_per_task=a.eval_max_per_task,
         holdout_max_group_share=a.holdout_max_group_share, prefix_n=a.prefix_n, seed=a.seed,
-        eval_success=a.eval_success, teacher_model=a.teacher_model,
+        eval_success=a.eval_success, max_model=a.max_model,
+        train_sources=policy["--train-sources"], train_models=policy["--train-models"],
+        judge_models=policy.get("--judge-models"),
         exclude_bad_turns=a.exclude_bad_turns, train_range=(a.train_range[0], a.train_range[1]),
         val_share_range=(a.val_share_range[0], a.val_share_range[1]), eval_min=a.eval_min,
         min_presence=a.min_presence, lcm_max_messages=a.lcm_max_messages,
@@ -1887,13 +2393,33 @@ def cmd_pack(a: argparse.Namespace) -> int:
     return 0
 
 
+def is_chat_row(row: dict[str, Any]) -> bool:
+    """A written row of a chat-mode request (no tools offered)."""
+    return bool((row.get("flags") or {}).get("chat_mode") or row.get("suppress_tools"))
+
+
+def spot_sample(rows: list[dict[str, Any]], n: int, seed: str) -> list[dict[str, Any]]:
+    """*n* rows in seeded order, with at least one chat-mode row and one row
+    that offers tools when the file holds both (the two render differently:
+    with and without the tools block)."""
+    def key(r: dict[str, Any]) -> str:
+        return seeded(seed, str(r.get("id")))
+
+    order = sorted(rows, key=key)
+    must = [r for r in (next((r for r in order if is_chat_row(r)), None),
+                        next((r for r in order if not is_chat_row(r)), None)) if r is not None]
+    must = must[:max(0, n)]
+    rest = [r for r in order if not any(r is m for m in must)]
+    return sorted(must + rest[:max(0, n - len(must))], key=key)
+
+
 def spot_check_rows(server: str, rows_path: str | Path, student: Any, *, n: int = 5,
                     seed: str = "spot-v1", show_diff: bool = False, post: Any = None
                     ) -> list[dict[str, Any]]:
     """Render N rows ourselves and with llama-server; compare byte for byte."""
     rows = [json.loads(line) for line in Path(rows_path).expanduser().read_text(
         encoding="utf-8").splitlines() if line.strip()]
-    rows = sorted(rows, key=lambda r: seeded(seed, str(r.get("id"))))[:n]
+    rows = spot_sample(rows, n, seed)
     results = []
 
     def diff(res: dict[str, Any], name: str, ours: str, theirs: str) -> bool:
@@ -1999,7 +2525,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bd.add_argument("--prefix-n", type=int, default=4)
     bd.add_argument("--seed", default="phase3-v1")
     bd.add_argument("--eval-success", choices=("presence", "exact"), default="presence")
-    bd.add_argument("--teacher-model", default=TEACHER_MODEL)
+    bd.add_argument("--max-model", "--teacher-model", dest="max_model", default=TEACHER_MODEL,
+                    help="the hosted Max teacher of the harvested traces: its rows are kept "
+                         f"as eval-only rows (default {TEACHER_MODEL})")
+    bd.add_argument("--train-sources", nargs="+", metavar="SOURCE",
+                    help="_meta.source tags (fnmatch patterns) whose verified rows may train; "
+                         "every other row is eval-only (default: "
+                         f"{' '.join(DEFAULT_TRAIN_SOURCES)}). A source naming Max is refused.")
+    bd.add_argument("--train-models", nargs="+", metavar="MODEL",
+                    help="_meta.model patterns (fnmatch, any case) a train-source row may come "
+                         "from: the local teacher (default: "
+                         f"{' '.join(DEFAULT_TRAIN_MODELS)}). A model naming Max is refused.")
+    bd.add_argument("--judge-models", nargs="+", metavar="MODEL",
+                    help="judge model patterns a train-source row's verification record may "
+                         "name (default: the --train-models). A model naming Max is refused.")
     bd.add_argument("--exclude-bad-turns", action="store_true")
     bd.add_argument("--train-range", type=int, nargs=2, default=[5000, 10000])
     bd.add_argument("--val-share-range", type=float, nargs=2, default=[0.02, 0.05])

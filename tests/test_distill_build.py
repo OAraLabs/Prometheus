@@ -1194,3 +1194,657 @@ def test_runtime_catalog_follows_deferred_loading() -> None:
     assert build.runtime_catalog({"tools": {"deferred_loading": {"enabled": False}}}) == "full"
     assert build.runtime_catalog(
         {"tools": {"deferred_loading": {"enabled": "auto", "local_catalog": "names"}}}) == "full"
+
+
+# ── data policy: only listed train sources train; Max rows are eval-only ──
+
+GYM = "qwen38-27b-gym"
+GYM_MODEL = "qwen3.8-27b"
+VERIFIED = {"verified": True, "tool_success": True, "sandboxed": True, "side_effects": False,
+            "judge": {"verdict": "pass", "model": GYM_MODEL}}
+
+
+def gym(task: str, tool: str, args: dict[str, Any], *, model: str = GYM_MODEL,
+        session: str | None = None, verification: Any = VERIFIED, **meta: Any
+        ) -> dict[str, Any]:
+    """A teacher_gen.py row: golden-trace shape, source tag, verification record."""
+    if verification is not None:
+        meta["verification"] = verification
+    meta.setdefault("source", GYM)
+    return trace(task, tool, args, model=model, session=session or f"gym:{task}", **meta)
+
+
+def gym_chat(task: str, answer: str = "Here is the plain answer.", **kw: Any) -> dict[str, Any]:
+    """A chat-mode gym row: no tools offered, a prose answer, no tool name."""
+    row = gym(task, "bash", {}, suppress_tools=True, category="chat-mode", **kw)
+    row["messages"][-1] = {"role": "assistant", "content": answer}
+    row["tools"] = []
+    row["_meta"].pop("tool_name")
+    return row
+
+
+def policy_inputs(tmp_path: Path) -> tuple[Path, Path]:
+    cats = ["coding", "other", "memory/wiki", "sentinel/daemon"]
+    rows = []
+    for t in range(40):
+        task = "gym" + word(t)
+        rows.append(gym(task, "bash", {"command": f"make {task}"}, category=cats[t % 4]))
+        rows.append(gym(task, "read_file", {"path": f"{task}.txt"}, category=cats[t % 4]))
+    rows += [gym_chat("chat" + word(t)) for t in range(8)]
+    return corpus(tmp_path), write_jsonl(tmp_path / "gym.jsonl", rows)
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+
+
+def test_only_listed_train_sources_train_and_max_rows_are_eval_only(tmp_path: Path) -> None:
+    golden, gym_file = policy_inputs(tmp_path)
+    b = make_builder(tmp_path, train_sources=(GYM,), eval_task_frac=0.15, val_frac=0.05,
+                     holdout_max_group_share=0.5, val_share_range=(0.0, 1.0))
+    feed(b, golden)
+    feed(b, gym_file, "extra")
+    max_rows = [e for e in b.examples if e.source == "max-golden"]
+    assert max_rows and all(e.max_derived and not e.train_ok for e in max_rows)
+    info = b.split()
+    gates = b.gates()
+    for split in ("train", "val"):
+        assert all(e.source == GYM and e.train_ok and not e.max_derived and e.model == GYM_MODEL
+                   for e in b.final[split])
+    assert b.final["train"] and b.final["val"]
+    # every Max pool row is held-out scoring material, and some gym tasks are held out too
+    ev = b.final["eval-tools"]
+    assert sum(e.source == "max-golden" for e in ev) == len(max_rows)
+    assert any(e.source == GYM for e in ev)
+    assert info["plan"].pinned_groups > 0 and info["plan"].pinned_train_rows == 0
+    assert gates["data_policy"]["pass"] and gates["data_policy"]["train_sources"] == [GYM]
+    assert gates["data_policy"]["max_derived_in_train_val"] == 0
+    # leakage is checked across sources, and passes
+    assert gates["leakage"]["pass"]
+    assert set(gates["leakage"]["sources"]["eval-tools"]) >= {"max-golden", GYM}
+    assert gates["leakage"]["sources"]["train"] == [GYM]
+    assert gates["train_size"]["value"] == len(b.final["train"])
+    assert gates["train_size"]["by_source"] == {GYM: len(b.final["train"])}
+    assert gates["category_cap"]["pass"] and gates["presence"]["chat_mode"] >= 1
+
+    out = tmp_path / "out"
+    out.mkdir()
+    b.write(out)
+    for row in read_jsonl(out / "train.jsonl") + read_jsonl(out / "val.jsonl"):
+        assert (row["source"], row["model"], row["max_derived"]) == (GYM, GYM_MODEL, False)
+    cases = score.load_cases([out / "eval-tools.jsonl", out / "val-cases.jsonl"])
+    max_cases = [c for c in cases if c.raw["meta"]["source"] == "max-golden"]
+    assert max_cases and {c.set for c in max_cases} == {"eval-tools"}
+    assert all(c.raw["meta"]["max_derived"] and c.raw["meta"]["model"] == "qwen3.8-max"
+               for c in max_cases)
+
+    report = b.report(info, gates, catalog="stubs", head_tokens={}, inputs={}, elapsed=0.0)
+    # pool.tasks counts the pool's own tasks, beside its rows (Max ones included);
+    # the tasks the hold-out quotas came from (pinned groups left out) are apart
+    pool_tasks = {e.task_id for e in b.examples}
+    assert report["pool"]["rows"] == len(b.examples)
+    assert report["pool"]["tasks"] == len(pool_tasks)
+    assert pool_tasks >= {e.task_id for e in max_rows}
+    pinned = {e.group for e in b.examples if not e.train_ok}
+    free = {e.task_id for e in b.examples if e.group not in pinned}
+    assert report["eval_tools"]["splittable_tasks"] == info["plan"].total_tasks == len(free)
+    assert info["plan"].total_tasks < report["pool"]["tasks"]
+    dp = report["data_policy"]
+    assert dp["train_sources"] == [GYM] and dp["rule"] == build.POLICY_RULE
+    mg, gs = dp["sources"]["max-golden"], dp["sources"][GYM]
+    assert not mg["listed"] and mg["train"] == mg["val"] == 0 and mg["eval-tools"] == len(max_rows)
+    assert mg["excluded_by_reason"] == {"duplicate": 1, "non_teacher_model": 1}
+    assert gs["listed"] and gs["input"] == gs["accepted"] == gs["train_eligible"] == 88
+    assert gs["models"] == {GYM_MODEL: 88} and gs["verification"] == {"pass": 88}
+    assert gs["chat_mode"] == 8 and gs["max_derived"] == 0
+    assert gs["train"] + gs["val"] + gs["eval-tools"] <= 88
+    # the guards' key: train/val hold only the local teacher's rows
+    assert report["settings"]["teacher_model"] == GYM_MODEL == dp["teacher_model"]
+    assert report["settings"]["train_sources"] == [GYM]
+    blob = json.dumps(report)
+    assert "please handle" not in blob and "gym.jsonl" not in blob and "gym:" not in blob
+
+
+def test_the_trainers_guard_clears_policy_rows_and_still_refuses_max(tmp_path: Path) -> None:
+    if not (_DIR / "train_qlora.py").is_file():
+        pytest.skip("train_qlora.py not in this checkout")
+    T = _load("distill_train_qlora", "train_qlora.py")
+    golden, gym_file = policy_inputs(tmp_path)
+    b = make_builder(tmp_path, train_sources=(GYM,), eval_task_frac=0.15, val_frac=0.05,
+                     holdout_max_group_share=0.5)
+    feed(b, golden)
+    feed(b, gym_file, "extra")
+    info = b.split()
+    gates = b.gates()
+    out = tmp_path / "out"
+    out.mkdir()
+    b.write(out)
+    report = b.report(info, gates, catalog="stubs", head_tokens={}, inputs={}, elapsed=0.0)
+    (out / T.BUILD_REPORT).write_text(json.dumps(report))
+    teacher = T.builder_teacher_is_max(out / "train.jsonl")
+    assert teacher is False  # train/val hold only the local teacher's rows
+    rows = read_jsonl(out / "train.jsonl")
+    assert rows and not any(T.is_max_derived(r, teacher) for r in rows)
+    cases = read_jsonl(out / "eval-tools.jsonl")
+    assert any(T.is_max_derived(c, teacher) for c in cases)
+
+
+def test_a_group_holding_a_max_row_goes_to_eval_tools_whole(tmp_path: Path) -> None:
+    b = make_builder(tmp_path, train_sources=(GYM,), eval_task_frac=0.0, val_frac=0.0,
+                     category_cap=1.0)
+    feed(b, write_jsonl(tmp_path / "golden_traces_1_1.jsonl", [
+        trace("alpha", "bash", {"command": "make alpha"})]))
+    feed(b, write_jsonl(tmp_path / "gym.jsonl", [
+        gym("alpha", "read_file", {"path": "alpha.txt"}),   # Max's task: held out with it
+        *[gym("gym" + word(i), "bash", {"command": f"make {i}"}) for i in range(4)]]), "extra")
+    info = b.split()
+    by_id = {e.trace_id: e.split for e in b.examples}
+    assert by_id["golden_traces_1_1.jsonl:1"] == by_id["gym.jsonl:1"] == "eval-tools"
+    assert {by_id[f"gym.jsonl:{i}"] for i in range(2, 6)} == {"train"}
+    assert info["plan"].pinned_groups == 1 and info["plan"].pinned_train_rows == 1
+    assert build.leakage(b.final)["pass"]
+    # without a policy the same rows all train (the library default)
+    (tmp_path / "legacy").mkdir()
+    b2 = make_builder(tmp_path / "legacy", eval_task_frac=0.0, val_frac=0.0, category_cap=1.0)
+    feed(b2, tmp_path / "golden_traces_1_1.jsonl")
+    b2.split()
+    assert [e.source for e in b2.final["train"]] == ["max-golden"]
+
+
+def test_a_failed_max_call_pins_its_group_under_a_policy(tmp_path: Path) -> None:
+    b = make_builder(tmp_path, train_sources=(GYM,), eval_task_frac=0.0, val_frac=0.0,
+                     category_cap=1.0)
+    feed(b, write_jsonl(tmp_path / "gym.jsonl", [
+        gym("hotel", "bash", {"command": "make hotel"}),
+        gym("india", "bash", {"command": "make india"})]), "extra")
+    feed(b, write_jsonl(tmp_path / "fail.jsonl", [
+        trace("hotel", "read_file", {"path": "missing.txt"})]), "fail")
+    info = b.split()
+    assert info["fail_used"] == 1 and info["fail_dropped_task_in_train_or_val"] == 0
+    assert [e.trace_id for e in b.final["train"]] == ["gym.jsonl:2"]
+    assert {e.trace_id for e in b.final["eval-tools"]} == {"gym.jsonl:1", "fail.jsonl:1"}
+
+
+def test_train_source_rows_need_a_non_max_model_and_a_verification(tmp_path: Path) -> None:
+    b = make_builder(tmp_path, train_sources=(GYM, "*-gym-*"))
+    feed(b, write_jsonl(tmp_path / "golden_traces_1_1.jsonl", [
+        # a gym tag on a golden row still needs its verification: no tool-success fallback
+        trace("kilo", "bash", {"command": "make kilo"}, model=GYM_MODEL, source=GYM)]))
+    feed(b, write_jsonl(tmp_path / "gym.jsonl", [
+        gym("alpha", "bash", {"command": "a"}, model="qwen3.8-max"),       # Max under a gym tag
+        gym("bravo", "bash", {"command": "b"}, model=""),                  # no model
+        gym("charlie", "bash", {"command": "c"}, verification=None),       # unverified
+        # a bare verdict is not a verification record: unverified
+        gym("delta", "bash", {"command": "d"}, verification=None, verdict="pass"),
+        # a tag naming Max that a broad pattern matches is still Max-derived: eval-only
+        trace("echo", "bash", {"command": "e"}, source="max-gym-2026-11-01", verdict="pass"),
+        # an untagged row of another model is nobody's teacher row
+        trace("foxtrot", "bash", {"command": "f"}, model=GYM_MODEL, session="gym:f",
+              verification=VERIFIED),
+    ]), "extra")
+    st = b.stats
+    assert st["excluded:train_source_names_max"] == 1 and st["excluded:train_source_no_model"] == 1
+    assert st["excluded:unverified"] == 3 and st["excluded:non_teacher_model"] == 1
+    (e,) = b.examples
+    assert e.trace_id == "gym.jsonl:5"
+    assert not e.train_ok and e.max_derived and e.source == "max-gym-2026-11-01"
+
+
+@pytest.mark.parametrize("record,decision,basis", [
+    (None, None, "absent"),
+    ("yes", False, "unreadable"),
+    ({}, False, "no_decision"),
+    ({"verified": False}, False, "not_verified"),
+    ({"status": "failed"}, False, "not_verified"),
+    ({"verified": "true"}, False, "no_decision"),          # not a bool, no status word
+    # (read as a Max row's record: parts may be absent; a train-source row
+    # needs every part, test_a_train_source_record_needs_every_part)
+    ({"verified": True}, True, "verified"),
+    ({"status": "pass"}, True, "verified"),
+    ({"verdict": "PASS", "tool_success": True}, True, "tool-success"),
+    ({"verified": True, "tool_success": False}, False, "tool_failed"),
+    ({"verified": True, "judge": {"verdict": "fail"}}, False, "judge_not_pass"),
+    ({"verified": True, "judge_verdict": "pass"}, True, "judge-pass"),
+    ({"verified": True, "judge": "pass"}, True, "judge-pass"),
+    ({"verified": True, "judge": {"verdict": "pass", "model": "qwen3.8-max"}}, False,
+     "judge_is_max"),
+    ({"verified": True, "judge_model": "Qwen3.8-MAX", "judge_verdict": "pass"}, False,
+     "judge_is_max"),
+    ({"verified": True, "judge": {"verdict": "pass", "model": "maximal-judge"}}, True,
+     "judge-pass"),
+    ({"verified": True, "sandboxed": False}, False, "not_sandboxed"),
+    ({"verified": True, "side_effects": True}, False, "side_effects"),
+    ({"verified": True, "real_side_effects": True}, False, "side_effects"),
+    # a veto is any value but the safe one, not just the opposite bool
+    ({"verified": True, "side_effects": ["wrote ~/.ssh/config"]}, False, "side_effects"),
+    ({"verified": True, "side_effects": "true"}, False, "side_effects"),
+    ({"verified": True, "side_effects": "false"}, False, "side_effects"),
+    ({"verified": True, "side_effects": 1}, False, "side_effects"),
+    ({"verified": True, "side_effects": 0}, False, "side_effects"),
+    ({"verified": True, "side_effects": None}, False, "side_effects"),
+    ({"verified": True, "real_side_effects": {"http": "POST"}}, False, "side_effects"),
+    ({"verified": True, "side_effects": False, "real_side_effects": ["sent mail"]}, False,
+     "side_effects"),
+    ({"verified": True, "side_effects": []}, True, "verified"),
+    ({"verified": True, "side_effects": {}, "real_side_effects": ""}, True, "verified"),
+    ({"verified": True, "sandboxed": "false"}, False, "not_sandboxed"),
+    ({"verified": True, "sandboxed": "true"}, False, "not_sandboxed"),
+    ({"verified": True, "sandboxed": 0}, False, "not_sandboxed"),
+    ({"verified": True, "sandboxed": 1}, False, "not_sandboxed"),
+    ({"verified": True, "tool_success": "false"}, False, "tool_failed"),
+    ({"verified": True, "tool_success": "true"}, False, "tool_failed"),
+    ({"verified": True, "tool_success": 0}, False, "tool_failed"),
+    ({"verified": True, "tool_success": None}, False, "tool_failed"),
+    # a judge that never gave a verdict
+    ({"verified": True, "judge": {"model": "qwen3.8-27b", "error": "timeout"}}, False,
+     "judge_no_verdict"),
+    ({"verified": True, "judge": {"verdict": "pass", "error": "timeout"}}, False,
+     "judge_no_verdict"),
+    ({"verified": True, "judge_model": "qwen3.8-27b"}, False, "judge_no_verdict"),
+    ({"verified": True, "judge": True}, False, "judge_no_verdict"),
+    ({"verified": True, "judge": {"verdict": "pass", "pass": False}}, False, "judge_not_pass"),
+    ({"verified": True, "judge": {"verdict": "pass", "pass": "true"}}, False, "judge_not_pass"),
+    ({"verified": True, "judge": {"verdict": "pass", "pass": True}}, True, "judge-pass"),
+])
+def test_the_verification_record_is_read_fail_closed(record: Any, decision: bool | None,
+                                                     basis: str) -> None:
+    meta = {} if record is None else {"verification": record}
+    v = build.verification_of(meta)
+    assert (v.decision, v.basis) == (decision, basis)
+
+
+
+# The operator's rule for a train-source row (OPEN-QUESTIONS #6): tool success +
+# a local judge, sandboxed tools only, no real-world side effects.
+@pytest.mark.parametrize("record,basis", [
+    ({k: v for k, v in VERIFIED.items() if k != "tool_success"}, "no_tool_success"),
+    ({k: v for k, v in VERIFIED.items() if k != "judge"}, "no_judge"),
+    ({**VERIFIED, "judge": "pass"}, "judge_no_model"),
+    ({**VERIFIED, "judge": {"verdict": "pass", "model": " "}}, "judge_no_model"),
+    ({**VERIFIED, "judge": {"verdict": "pass", "model": "qwen2.5:7b"}}, "judge_not_allowed"),
+    ({**VERIFIED, "judge": {"verdict": "pass", "model": "qwen3.8-plus"}}, "judge_not_allowed"),
+    ({**VERIFIED, "judge": {"verdict": "pass", "model": "qwen3.8-max"}}, "judge_is_max"),
+    ({**VERIFIED, "judge": {"verdict": "pass", "model": GYM_MODEL,
+                            "served_model": "qwen3.8-max"}}, "judge_is_max"),
+    ({k: v for k, v in VERIFIED.items() if k != "sandboxed"}, "no_sandbox_record"),
+    ({k: v for k, v in VERIFIED.items() if k != "side_effects"}, "no_side_effects_record"),
+    # the reviewer's three: each would have trained
+    ({"verified": True}, "no_tool_success"),
+    ({"verified": True, "tool_success": True}, "no_judge"),
+    ({"verified": True, "judge": "pass"}, "no_tool_success"),
+])
+def test_a_train_source_record_needs_every_part(record: dict[str, Any], basis: str) -> None:
+    v = build.verification_of({"verification": record}, strict=True,
+                              judge_models=build.DEFAULT_TRAIN_MODELS)
+    assert (v.decision, v.basis) == (False, basis)
+
+
+def test_a_complete_train_source_record_passes_strictly() -> None:
+    models = build.DEFAULT_TRAIN_MODELS
+    for rec in (VERIFIED,
+                {**VERIFIED, "side_effects": [], "judge": {"verdict": "PASS", "pass": True,
+                                                           "model": "Qwen3.8-27B"}},
+                {k: v for k, v in VERIFIED.items() if k != "side_effects"}
+                | {"real_side_effects": False}):
+        v = build.verification_of({"verification": rec}, strict=True, judge_models=models)
+        assert (v.decision, v.basis) == (True, "judge-pass")
+    other = {**VERIFIED, "judge": {"verdict": "pass", "model": "qwen2.5:7b"}}
+    assert build.verification_of({"verification": other}, strict=True,
+                                 judge_models=("qwen2.5:*",)).decision is True
+
+
+def test_partial_records_on_train_source_rows_never_train(tmp_path: Path) -> None:
+    b = make_builder(tmp_path, train_sources=(GYM,), eval_task_frac=0.0, val_frac=0.0,
+                     category_cap=1.0)
+    feed(b, write_jsonl(tmp_path / "gym.jsonl", [
+        gym("alpha", "bash", {"command": "a"}, verification={"verified": True}),
+        gym("bravo", "bash", {"command": "b"},
+            verification={"verified": True, "tool_success": True}),
+        gym("charlie", "bash", {"command": "c"}, verification={"verified": True, "judge": "pass"}),
+        gym("delta", "bash", {"command": "d"},
+            verification={**VERIFIED, "side_effects": ["wrote ~/.ssh/config"]}),
+        gym("echo", "bash", {"command": "e"}),
+    ]), "extra")
+    st = b.stats
+    assert st["excluded:verification_failed"] == 4
+    assert st["verification:no_tool_success"] == 2 and st["verification:no_judge"] == 1
+    assert st["verification:side_effects"] == 1 and st["verification:pass"] == 1
+    assert [e.trace_id for e in b.examples] == ["gym.jsonl:5"]
+    b.split()
+    assert [e.trace_id for e in b.final["train"]] == ["gym.jsonl:5"]
+    assert b.gates()["data_policy"]["pass"]
+
+
+def test_a_verdict_never_verifies_a_train_source_row_and_max_never_judges(
+        tmp_path: Path) -> None:
+    rows = [gym("alpha", "bash", {"command": "a"}, verification=None),
+            gym("bravo", "bash", {"command": "b"}, verification=None, verdict="pass"),
+            gym("charlie", "bash", {"command": "c"}, verification=None),
+            gym("delta", "bash", {"command": "d"})]
+    gym_file = write_jsonl(tmp_path / "gym.jsonl", rows)
+    vfile = write_jsonl(tmp_path / "v.jsonl", [
+        # judge.py rows (0-based line): alpha judged by the hosted Max route
+        {"source": {"file": "gym.jsonl", "line": 0}, "status": "ok", "verdict": "pass",
+         "label": "pass", "model": "qwen3.8-max"},
+        # charlie judged locally, but a verdict is no verification record
+        {"source": {"file": "gym.jsonl", "line": 2}, "status": "ok", "verdict": "pass",
+         "label": "pass", "model": GYM_MODEL},
+        # a Max fail still drops its row (dropping is always safe)
+        {"trace_id": "gym.jsonl:4", "verdict": "fail", "judge_model": "Qwen3.8-MAX"},
+    ])
+    stats: collections.Counter = collections.Counter()
+    verdicts = build.load_verdicts([str(vfile)], stats)
+    assert verdicts == {"gym.jsonl:3": "pass", "gym.jsonl:4": "fail"}
+    assert stats["verdict_rows_max_judge"] == 2
+    b = make_builder(tmp_path, train_sources=(GYM,), verdicts=verdicts)
+    b.stats.update(stats)
+    feed(b, gym_file, "extra")
+    assert b.examples == []
+    assert b.stats["excluded:unverified"] == 3 and b.stats["excluded:judge_fail"] == 1
+    b.split()
+    gate = b.gates()["verdicts"]
+    assert not gate["pass"] and gate["max_judge"] == 2 and gate["unmatched"] == 0
+    # a local judge's verdict on a Max row still labels it (eval-only material)
+    (tmp_path / "m").mkdir()
+    golden = write_jsonl(tmp_path / "m" / "golden_traces_1_1.jsonl",
+                         [trace("kilo", "bash", {"command": "make kilo"})])
+    m = make_builder(tmp_path / "m", train_sources=(GYM,),
+                     verdicts={"golden_traces_1_1.jsonl:1": "pass"})
+    feed(m, golden)
+    (k,) = m.examples
+    assert k.label == "judge-pass" and k.max_derived and not k.train_ok
+
+
+def test_train_source_rows_must_come_from_the_local_teacher(tmp_path: Path) -> None:
+    rows = [gym("alpha", "bash", {"command": "a"}, model="qwen3.8-plus"),  # hosted, same key
+            gym("bravo", "bash", {"command": "b"}, model="Qwen3.8-27B"),   # the teacher, any case
+            gym("charlie", "bash", {"command": "c"}, served_model="qwen3.8-max"),
+            gym("delta", "bash", {"command": "d"}, model="qwen3.8-27b-q4_k_m")]
+    gym_file = write_jsonl(tmp_path / "gym.jsonl", rows)
+    b = make_builder(tmp_path, train_sources=(GYM,))
+    feed(b, gym_file, "extra")
+    assert b.stats["excluded:train_source_wrong_model"] == 1
+    assert b.stats["excluded:train_source_names_max"] == 1
+    assert [e.trace_id for e in b.examples] == ["gym.jsonl:2", "gym.jsonl:4"]
+    # the operator can widen the list, never to Max (the CLI refuses that)
+    (tmp_path / "w").mkdir()
+    w = make_builder(tmp_path / "w", train_sources=(GYM,),
+                     train_models=("qwen3.8-27b*", "qwen3.8-plus"))
+    feed(w, gym_file, "extra")
+    assert [e.trace_id for e in w.examples] == ["gym.jsonl:1", "gym.jsonl:2", "gym.jsonl:4"]
+    # and a wrong-model row that reached train/val fails the data_policy gate
+    b.split()
+    stray = ex(90, "other", "s0", max_derived=False, model="qwen3.8-plus")
+    stray.source = GYM
+    b.final["train"].append(stray)
+    dp = b.gates()["data_policy"]
+    assert not dp["pass"] and dp["unlisted_model_in_train_val"] == 1
+    assert dp["max_derived_in_train_val"] == 0
+
+
+def test_a_row_its_producer_marked_max_derived_never_trains(tmp_path: Path) -> None:
+    b = make_builder(tmp_path, train_sources=(GYM,), eval_task_frac=0.0, val_frac=0.0,
+                     category_cap=1.0)
+    feed(b, write_jsonl(tmp_path / "gym.jsonl", [
+        gym("alpha", "bash", {"command": "a"}, max_derived=True),   # seeded from a Max chat
+        gym("bravo", "bash", {"command": "b"}, max_derived="false"),
+        gym("charlie", "bash", {"command": "c"}, max_derived=None),
+        gym("delta", "bash", {"command": "d"}, verification={**VERIFIED, "max_derived": 1}),
+        gym("echo", "bash", {"command": "e"}, max_derived=False),
+        gym("foxtrot", "bash", {"command": "f"}),
+    ]), "extra")
+    assert b.stats["excluded:train_source_max_derived"] == 4
+    assert [e.trace_id for e in b.examples] == ["gym.jsonl:5", "gym.jsonl:6"]
+    b.split()
+    out = tmp_path / "out"
+    out.mkdir()
+    b.write(out)
+    assert {r["max_derived"] for r in read_jsonl(out / "train.jsonl")} == {False}
+
+
+def test_the_flywheels_guard_clears_a_clean_policy_build_and_refuses_max(
+        tmp_path: Path) -> None:
+    if not (_DIR.parent.parent / "src" / "prometheus" / "jobs" / "flywheel_weekly.py").is_file():
+        pytest.skip("flywheel_weekly.py not in this checkout")
+    fw = pytest.importorskip("prometheus.jobs.flywheel_weekly")
+    cfg = fw.parse_config(None)  # no max_data approval recorded
+
+    def built(root: Path, *, policy: bool, models: tuple[str, ...] = (GYM_MODEL,)
+              ) -> tuple[str, list[Path]]:
+        root.mkdir()
+        golden, gym_file = policy_inputs(root)
+        rows = read_jsonl(gym_file)
+        for i, r in enumerate(rows):
+            r["_meta"]["model"] = models[i % len(models)]
+        write_jsonl(gym_file, rows)
+        b = make_builder(root, train_sources=(GYM,) if policy else None, eval_task_frac=0.15,
+                         val_frac=0.05, holdout_max_group_share=0.5)
+        feed(b, golden)
+        feed(b, gym_file, "extra")
+        info = b.split()
+        out = root / "out"
+        out.mkdir()
+        b.write(out)
+        report = b.report(info, b.gates(), catalog="stubs", head_tokens={}, inputs={},
+                          elapsed=0.0)
+        return report["settings"]["teacher_model"], [out / "train.jsonl", out / "val.jsonl"]
+
+    teacher, paths = built(tmp_path / "gym", policy=True)
+    assert teacher == GYM_MODEL
+    g = fw.check_training_data(paths, cfg, teacher)
+    assert g.rows > 0 and g.max_rows == 0 and g.refusals == []
+    # without the key every row counted as Max-derived: clean data could never train
+    assert fw.check_training_data(paths, cfg, None).max_rows == g.rows
+    # a build that trains on Max rows (no policy) names the Max model: refused
+    teacher, paths = built(tmp_path / "legacy", policy=False)
+    assert teacher == build.TEACHER_MODEL
+    g = fw.check_training_data(paths, cfg, teacher)
+    assert g.rows > 0 and g.max_rows == g.rows and g.refusals
+    # two teacher models cannot be named as one: the build fails closed
+    teacher, paths = built(tmp_path / "mixed", policy=True, models=(GYM_MODEL, "qwen3.8-27b-q8"))
+    assert teacher == build.TEACHER_MODEL
+
+
+def test_a_failing_record_or_verdict_excludes_whatever_the_other_says(tmp_path: Path) -> None:
+    b = make_builder(tmp_path, train_sources=(GYM,),
+                     verdicts={"gym.jsonl:2": "fail", "gym.jsonl:3": "pass"})
+    feed(b, write_jsonl(tmp_path / "gym.jsonl", [
+        gym("alpha", "bash", {"command": "a"}, verdict="pass",
+            verification={"verified": True, "tool_success": False}),
+        gym("bravo", "bash", {"command": "b"}),                          # judged fail
+        gym("charlie", "bash", {"command": "c"},
+            verification={"verified": True, "judge": {"verdict": "fail"}}),  # verdict pass
+        gym("delta", "bash", {"command": "d"}),
+    ]), "extra")
+    assert b.stats["excluded:verification_failed"] == 2 and b.stats["excluded:judge_fail"] == 1
+    assert b.stats["verification:tool_failed"] == 1 and b.stats["verification:judge_not_pass"] == 1
+    (d,) = b.examples
+    assert d.trace_id == "gym.jsonl:4" and d.label == "judge-pass"
+
+
+def test_a_failed_attempt_does_not_take_a_verified_retrys_dedupe_key(tmp_path: Path) -> None:
+    b = make_builder(tmp_path, train_sources=(GYM,))
+    feed(b, write_jsonl(tmp_path / "gym.jsonl", [
+        gym("alpha", "bash", {"command": "ls"}, verification={"verified": False}),
+        gym("alpha", "bash", {"command": "ls"}),           # the retry, same first call
+        gym("alpha", "bash", {"command": "ls"}),           # a true duplicate of the retry
+    ]), "extra")
+    assert [e.trace_id for e in b.examples] == ["gym.jsonl:2"]
+    assert b.stats["excluded:verification_failed"] == 1 and b.stats["excluded:duplicate"] == 1
+    # a Max row still claims its key when read: a verdict on it is a verdict on the call
+    m = make_builder(tmp_path, verdicts={"golden_traces_1_1.jsonl:1": "fail"})
+    feed(m, write_jsonl(tmp_path / "golden_traces_1_1.jsonl", [
+        trace("alpha", "bash", {"command": "ls"}), trace("alpha", "bash", {"command": "ls"})]))
+    assert m.examples == [] and m.stats["excluded:judge_fail"] == 1
+    assert m.stats["excluded:duplicate"] == 1
+
+
+def test_generator_task_ids_join_rows_into_one_group(tmp_path: Path) -> None:
+    b = make_builder(tmp_path, train_sources=(GYM, "other-gym"))
+    feed(b, write_jsonl(tmp_path / "gym.jsonl", [
+        gym("alpha", "bash", {"command": "a"}, task_id="t-7"),
+        gym("bravo", "bash", {"command": "b"}, task_id="t-7"),      # another prompt, same task
+        gym("charlie", "bash", {"command": "c"}, task_id="t-8"),
+        gym("delta", "bash", {"command": "d"}, task_id="t-7", source="other-gym"),  # other source
+    ]), "extra")
+    build.assign_groups(b.examples)
+    a, bb, c, d = b.examples
+    assert a.task_id != bb.task_id and a.group == bb.group
+    assert c.group != a.group and d.group != a.group
+    res = build.leakage({"train": [a], "val": [], "eval-tools": [bb]})
+    assert not res["pass"] and res["overlaps"]["train|eval-tools"]["source_task"] == 1
+
+
+def test_chat_mode_gym_rows_render_without_tools_and_count_for_presence(tmp_path: Path) -> None:
+    prose = gym("bravo", "bash", {}, category="other")   # tools offered, answered in prose
+    prose["messages"][-1] = {"role": "assistant", "content": "Nothing to run; it is done."}
+    prose["_meta"].pop("tool_name")
+    called = gym_chat("charlie")
+    called["messages"][-1]["tool_calls"] = [call("bash", {"command": "ls"})]
+    uncategorized = gym_chat("delta")
+    uncategorized["_meta"].pop("category")
+    plain = gym("echo", "bash", {}, category="other")     # tools offered, no category, prose
+    plain["messages"][-1] = {"role": "assistant", "content": "Done already."}
+    plain["_meta"].pop("category")
+    b = make_builder(tmp_path, train_sources=(GYM,), eval_task_frac=0.0, val_frac=0.0,
+                     category_cap=1.0)
+    feed(b, write_jsonl(tmp_path / "gym.jsonl",
+                        [gym_chat("alpha"), prose, called, uncategorized, plain]), "extra")
+    assert b.stats["excluded:call_in_chat_mode"] == 1
+    by_id = {e.trace_id: e for e in b.examples}
+    chat, fa, unc, pl = (by_id[f"gym.jsonl:{i}"] for i in (1, 2, 4, 5))
+    assert chat.flags["chat_mode"] and not chat.flags["final_answer"] and chat.expect_tool is None
+    assert unc.flags["chat_mode"] and unc.category == "chat-mode"
+    assert not fa.flags["chat_mode"] and fa.flags["final_answer"]
+    assert not pl.flags["chat_mode"] and pl.category == "other"  # not chat mode: tools offered
+    heavy = b.read_heavy(chat)
+    text = heavy["render"]["text"]
+    # the runtime's chat-mode request: no tools, no tool_choice; the plain system turn
+    assert heavy["tools"] == [] and heavy["tool_choice"] is None
+    assert text.startswith("<|im_start|>system\nYou are a test agent.") and "<tools>" not in text
+    a, z = heavy["render"]["loss_spans_char"][0]
+    assert text[a:z] == "Here is the plain answer.<|im_end|>"
+    assert text[:a].endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    assert text == R.render(b.student.template, heavy["messages"], None,
+                            add_generation_prompt=False)
+    fa_heavy = b.read_heavy(fa)
+    assert "<tools>" in fa_heavy["render"]["text"] and fa_heavy["tool_choice"] == "auto"
+    assert fa_heavy["expect"] == {"tool": None}
+    b.split()
+    gates = b.gates()
+    assert gates["presence"]["chat_mode"] == 2 and gates["data_policy"]["pass"]
+
+
+def test_size_and_presence_gates_count_the_train_sources_only(tmp_path: Path) -> None:
+    b = make_builder(tmp_path, train_sources=(GYM,))
+    b.s.train_range, b.s.min_presence = (3, 3), 1
+    gym_rows = [ex(i, "other", f"g{i}", max_derived=False, model=GYM_MODEL) for i in range(3)]
+    for e in gym_rows:
+        e.source = GYM
+    gym_rows[0].flags["compacted"] = True
+    leaked = [ex(10 + i, "coding", f"m{i}") for i in range(2)]  # Max rows, never train_ok
+    for e in leaked:
+        e.train_ok = False
+        e.flags.update(chat_mode=True, error_recovery=True)
+    b.final = {"train": gym_rows + leaked, "val": [], "eval-tools": []}
+    gates = b.gates()
+    assert gates["train_size"]["value"] == 3 and gates["train_size"]["pass"]
+    assert gates["train_size"]["by_source"] == {GYM: 3}
+    assert gates["presence"]["chat_mode"] == 0 and gates["presence"]["compacted"] == 1
+    assert not gates["presence"]["pass"]
+    # and Max rows in train/val fail the data_policy gate (and so the build)
+    assert not gates["data_policy"]["pass"]
+    assert gates["data_policy"]["max_derived_in_train_val"] == 2
+    assert gates["data_policy"]["outside_train_sources_in_train_val"] == 2
+    assert gates["overall"] == "FAIL"
+    b.final["train"] = gym_rows
+    assert b.gates()["data_policy"]["pass"]
+
+
+def test_spot_sample_holds_a_chat_row_and_a_tool_row() -> None:
+    rows = [{"id": f"r{i}", "flags": {"chat_mode": False}} for i in range(20)]
+    rows.append({"id": "chat", "flags": {"chat_mode": True}})
+    picked = build.spot_sample(rows, 3, "spot-v1")
+    assert len(picked) == 3 and sum(build.is_chat_row(r) for r in picked) == 1
+    assert build.spot_sample(rows[:2], 5, "s") == sorted(
+        rows[:2], key=lambda r: build.seeded("s", r["id"]))
+    only_chat = [{"id": "c", "suppress_tools": True}]
+    assert build.spot_sample(only_chat, 5, "s") == only_chat
+    assert build.spot_sample(rows, 0, "s") == []
+
+
+def test_spot_check_sends_a_chat_row_the_way_the_runtime_does(tmp_path: Path) -> None:
+    b = make_builder(tmp_path, train_sources=(GYM,), eval_task_frac=0.0, val_frac=0.0,
+                     category_cap=1.0)
+    feed(b, write_jsonl(tmp_path / "gym.jsonl", [
+        gym_chat("alpha"), gym("bravo", "bash", {"command": "make bravo"})]), "extra")
+    b.split()
+    out = tmp_path / "out"
+    out.mkdir()
+    b.write(out)
+    bodies: list[dict[str, Any]] = []
+
+    def honest(url: str, body: dict[str, Any]) -> dict[str, Any]:
+        bodies.append(body)
+        return {"prompt": R.render(b.student.template, body["messages"], body.get("tools"),
+                                   add_generation_prompt=body["add_generation_prompt"],
+                                   template_kwargs=body.get("chat_template_kwargs"))}
+
+    res = build.spot_check_rows("http://x", out / "train.jsonl", b.student, n=2, post=honest)
+    assert len(res) == 2 and all(r["match"] for r in res)
+    assert {r["completion_match"] is True for r in res} == {True, False}  # a chat row has no call
+    chat_bodies = [x for x in bodies if "tools" not in x]
+    assert chat_bodies and all("tool_choice" not in x for x in chat_bodies)
+
+
+def test_cli_build_applies_the_default_train_source_policy(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    golden, gym_file = policy_inputs(tmp_path)
+    pack = tmp_path / "pack.json"
+    pack.write_text(json.dumps(make_pack()))
+    monkeypatch.setattr(R.Student, "load", classmethod(lambda cls, d: make_student()))
+
+    def run(*extra: str) -> int:
+        return build.main(["build", "--traces", str(golden), "--extra-traces", str(gym_file),
+                           "--pack", str(pack), "--tokenizer-dir", "unused",
+                           "--out", str(tmp_path / "out"), "--dry-run", "--eval-min", "1",
+                           "--train-range", "1", "1000", "--val-share-range", "0", "1",
+                           "--eval-task-frac", "0.15", "--holdout-max-group-share", "0.5",
+                           "--min-presence", "0", *extra])
+
+    assert run() == 1  # INCOMPLETE: no spot check server
+    report = json.loads((tmp_path / "out" / "report.json").read_text())
+    assert report["settings"]["train_sources"] == list(build.DEFAULT_TRAIN_SOURCES)
+    assert report["settings"]["max_model"] == build.TEACHER_MODEL
+    assert report["settings"]["train_models"] == list(build.DEFAULT_TRAIN_MODELS)
+    assert report["settings"]["teacher_model"] == GYM_MODEL
+    g = report["gates"]
+    assert g["data_policy"]["pass"] and g["train_size"]["by_source"] == {
+        GYM: report["splits"]["train"]["rows"]}
+    assert report["splits"]["train"]["source"] == {GYM: report["splits"]["train"]["rows"]}
+    assert report["data_policy"]["sources"]["max-golden"]["train"] == 0
+    assert g["overall"] == "INCOMPLETE"
+    capsys.readouterr()
+    # the old flag name still sets the Max model; a source naming Max is refused
+    assert run("--teacher-model", "some-other-max") == 1
+    report = json.loads((tmp_path / "out" / "report.json").read_text())
+    assert report["settings"]["max_model"] == "some-other-max"
+    assert report["data_policy"]["sources"]["max-golden"]["excluded_by_reason"][
+        "non_teacher_model"] > 0
+    capsys.readouterr()
+    for flag, bad in (("--train-sources", ["max-golden"]), ("--train-sources", ["max-gym-*"]),
+                      ("--train-sources", [GYM, "Qwen3.8-MAX"]),
+                      ("--train-models", ["qwen3.8-max"]), ("--train-models", ["qwen3.8-*", "MAX"]),
+                      ("--judge-models", ["qwen3.8-max"])):
+        assert run(flag, *bad) == 2
+        assert f"{flag} may not name Max" in capsys.readouterr().err
+    for flag in ("--train-sources", "--train-models", "--judge-models"):
+        assert run(flag, " ") == 2
+    # a train model the gym rows do not match: nothing trains
+    assert run("--train-models", "other-27b*") == 1
+    report = json.loads((tmp_path / "out" / "report.json").read_text())
+    assert report["splits"]["train"]["rows"] == 0
+    assert report["data_policy"]["sources"][GYM]["excluded_by_reason"] == {
+        "train_source_wrong_model": 88}
+    assert report["settings"]["teacher_model"] == build.TEACHER_MODEL  # fails closed

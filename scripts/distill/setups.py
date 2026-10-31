@@ -42,6 +42,31 @@ again before every ``systemctl stop``. A GPU process the tool cannot manage
 ``distill-*.scope`` jobs) blocks the plan before anything runs. Every apply
 other than ``business`` also refuses to stop a unit that ``business`` does not
 list, so a restore can bring back whatever a swap took down.
+
+Hooks: a host section may list ``pre_apply`` and ``post_apply`` commands, run
+on that host before any unit is stopped and after the health wait::
+
+    mini:
+      pre_apply:  [daemon_switch.py capture, daemon_switch.py to-max]    # flywheel
+      post_apply: [daemon_switch.py restore]                             # business
+      # {run: <command>, enabled: false, why: <text>, timeout_s: 300} is the long form
+
+``daemon_switch.py <command>`` runs the sibling script on the host (shipped on
+stdin, or the dead-man's copy) as a dry run, with ``--execute`` added only when
+the apply executes (a hook passes only the switch's own SWITCH_HOOK_OPTIONS,
+spelled out); it moves the Prometheus daemon's primary model to the Max API
+and back, restarting the daemon only through the daemon's own
+``POST /api/restart`` (no systemd stop). Any other command runs under ``sh -c``
+on an executing apply only, after the never-stop guard: a command that could
+stop a never-stop unit, stops a whole manager (``isolate``, ``exit``, ...),
+runs a command line the guard cannot see (``sh -c``, ``xargs``, ``eval``), or
+kills/reboots/escalates, is refused at load and again before it runs. A
+failing ``pre_apply`` hook ends the attempt before any unit changes.
+``post_apply`` hooks run even when the health wait reported problems (a
+restore hook checks its own preconditions). ``enabled: false`` hooks are
+listed and never run. A setup that switches a host to Max is applied (and a
+dead-man armed) only when ``business`` switches that host back, and executes
+only while that host's dead-man timer is armed.
 """
 
 from __future__ import annotations
@@ -166,12 +191,12 @@ def parse_ss_listen(text: str) -> list[tuple[int, str]]:
     return out
 
 
-def parse_list_units(text: str) -> dict[str, str]:
-    """unit -> ACTIVE state, from ``systemctl list-units --plain --no-legend``."""
+def parse_list_units(text: str, suffixes: tuple[str, ...] = (".service", ".scope")) -> dict[str, str]:
+    """unit -> ACTIVE state, from ``systemctl list-units --plain --no-legend`` (units with ``suffixes``)."""
     out: dict[str, str] = {}
     for line in text.splitlines():
         parts = line.replace("●", " ").split()
-        if len(parts) >= 3 and (parts[0].endswith(".service") or parts[0].endswith(".scope")):
+        if len(parts) >= 3 and parts[0].endswith(suffixes):
             out[parts[0]] = parts[2]
     return out
 
@@ -343,6 +368,10 @@ def probe_main(req: dict[str, Any]) -> dict[str, Any]:
                     "health_spec": spec, "health": health}
     timers = _run(["systemctl", "--user", "list-timers", "--all", "--no-legend",
                    "--no-pager", "distill-deadman-*"])["out"]
+    # A dead-man restore is armed while its timer is active (waiting); an apply that moves the daemon
+    # to Max needs one first.
+    timer_states = parse_list_units(_run(["systemctl", "--user", "list-units", "--type=timer", "--all", "--plain",
+                                          "--no-legend", "--no-pager", "distill-deadman-*"])["out"], (".timer",))
     last = None
     if req.get("last_apply"):
         try:
@@ -352,7 +381,7 @@ def probe_main(req: dict[str, Any]) -> dict[str, Any]:
             last = None
     return {"reachable": True, "ok": True, "gpus": gpus, "procs": procs, "units": units,
             "deadman_timers": [ln.strip() for ln in timers.splitlines() if ln.strip()],
-            "deadman_units": deadman, "last_apply": last}
+            "deadman_units": deadman, "deadman_timer_states": timer_states, "last_apply": last}
 
 
 _PROBE_FUNCS = (_run, unit_from_cgroup, parse_ss_listen, parse_list_units, parse_unit_cat,
@@ -582,6 +611,208 @@ def build_setup(name: str, live_by_host: dict[str, dict[str, Any]], hosts: Hosts
     }
 
 
+# ── hooks: commands a setup runs on a host around its unit changes ──────────
+
+SWITCH_SCRIPT = "daemon_switch.py"  # a sibling of this file, run on the host
+SWITCH_COMMANDS = {"pre_apply": ("capture", "to-max", "status"), "post_apply": ("restore", "status")}
+SWITCH_TIMEOUT_S = 1800  # idle wait + daemon restart + model-server wait, with room
+# The options a daemon_switch hook may pass, each taking a value, matched exactly (no abbreviation, so
+# nothing like --exec reaches the script as --execute). --execute is setups' to add; --offline,
+# --notify-cmd and --force are not for hooks.
+SWITCH_HOOK_OPTIONS = ("--config", "--pins", "--env-file", "--state-dir", "--api", "--idle-wait", "--boot-wait",
+                       "--backend-wait", "--set")
+HOOK_TIMEOUT_S = 300
+HOOK_PHASES = ("pre_apply", "post_apply")
+HOOK_KEYS = frozenset({"run", "enabled", "why", "timeout_s"})
+# Commands a hook never runs: killing by pattern or pid, power state, privilege.
+_HOOK_FORBIDDEN = frozenset({"kill", "pkill", "killall", "reboot", "shutdown", "poweroff", "halt",
+                             "telinit", "init", "sudo", "su", "doas", "pkexec"})
+# systemctl/service verbs that stop (or may stop) a unit.
+_STOP_VERBS = frozenset({"stop", "restart", "try-restart", "reload-or-restart", "try-reload-or-restart",
+                         "condrestart", "force-reload", "kill", "isolate", "mask", "disable", "reboot",
+                         "poweroff", "halt", "suspend", "hibernate", "hybrid-sleep", "rescue", "emergency",
+                         "exit", "soft-reboot", "default", "clean", "freeze", "switch-root"})
+
+
+# systemctl verbs that change the whole manager's (or the machine's) state, stopping every unit with no
+# unit named: refused outright.
+_STATE_VERBS = frozenset({"isolate", "exit", "default", "rescue", "emergency", "soft-reboot", "switch-root",
+                          "reboot", "poweroff", "halt", "kexec", "suspend", "hibernate", "hybrid-sleep",
+                          "suspend-then-hibernate"})
+# Commands that run a command line the guard cannot see (a shell's -c is checked separately).
+_INDIRECT = frozenset({"xargs", "eval"})
+
+
+def hook_guard_problem(run: str, guard: tuple[str, ...] = NEVER_STOP) -> str | None:
+    """Why a generic hook command must not run, or None. Catches mistakes; hooks are trusted config."""
+    try:
+        lex = shlex.shlex(run, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError as e:
+        return f"cannot parse it: {e}"
+    if "daemon_switch" in run:
+        return f"run {SWITCH_SCRIPT} as its own hook form ('{SWITCH_SCRIPT} <command>'), not inside a command"
+    words = [os.path.basename(t) for t in toks]
+    for w in words:
+        if w in _HOOK_FORBIDDEN:
+            return f"it runs {w!r}: hooks never kill processes, change power state or escalate"
+        if w in _INDIRECT:
+            return f"it runs {w!r}, whose command line the never-stop guard cannot check"
+    for i, w in enumerate(words):
+        if w in _SHELLS and any(t.startswith("-") and not t.startswith("--") and "c" in t[1:] for t in toks[i + 1:]):
+            return f"it runs {w} -c, whose command line the never-stop guard cannot check (write it as the hook)"
+    if "systemctl" in words:
+        state = sorted({t for t in toks if t in _STATE_VERBS})
+        if state:
+            return f"it runs systemctl {state[0]}, which stops every unit of the manager (never-stop ones too)"
+    if ("systemctl" in words or "service" in words) and any(t in _STOP_VERBS for t in toks):
+        for t in toks:
+            if (t.startswith("-") or t in _STOP_VERBS or os.path.basename(t) in ("systemctl", "service")
+                    or not re.search(r"[A-Za-z0-9*?\[$`]", t)):  # options, verbs, ; && | ( ...
+                continue
+            if any(ch in t for ch in "*?[$`"):
+                return f"it stops a unit named by a pattern or variable ({t!r})"
+            unit = t if re.search(r"\.[a-z]+$", t) else t + ".service"
+            if is_never_stop(unit, guard) or is_never_stop(t, guard):
+                return f"it would stop never-stop unit {t}"
+    return None
+
+
+def normalize_hook(entry: Any, phase: str, guard: tuple[str, ...] = NEVER_STOP) -> dict[str, Any]:
+    """A hook entry (a command string, or a mapping) as ``{run, enabled, timeout_s[, why]}``."""
+    hook = {"run": entry} if isinstance(entry, str) else dict(entry) if isinstance(entry, dict) else None
+    if hook is None:
+        raise ValueError(f"{phase}: a hook is a command string or a mapping with 'run'")
+    unknown = sorted(set(hook) - HOOK_KEYS)
+    if unknown:
+        raise ValueError(f"{phase}: unknown hook key(s) {', '.join(unknown)}")
+    run = hook.get("run")
+    if not isinstance(run, str) or not run.strip():
+        raise ValueError(f"{phase}: a hook needs a non-empty 'run' command")
+    enabled = hook.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"{phase}: hook {run!r}: enabled must be true or false")
+    try:
+        argv = shlex.split(run)
+    except ValueError as e:
+        raise ValueError(f"{phase}: hook {run!r}: {e}") from None
+    if argv[0] == SWITCH_SCRIPT:
+        allowed = SWITCH_COMMANDS[phase]
+        if len(argv) < 2 or argv[1] not in allowed:
+            raise ValueError(f"{phase}: {SWITCH_SCRIPT} hooks here run one of {', '.join(allowed)} "
+                             "(to-max before units stop, restore after they start)")
+        args, i = argv[2:], 0
+        while i < len(args):
+            name, eq, _ = args[i].partition("=")
+            if name not in SWITCH_HOOK_OPTIONS:
+                raise ValueError(f"{phase}: hook {run!r}: {args[i]!r} is not an option a {SWITCH_SCRIPT} hook "
+                                 f"passes (only {', '.join(SWITCH_HOOK_OPTIONS)}, spelled out; setups adds "
+                                 "--execute itself on an executing apply)")
+            if not eq:
+                if i + 1 >= len(args) or args[i + 1].startswith("-"):
+                    raise ValueError(f"{phase}: hook {run!r}: {name} needs a value")
+                i += 1
+            i += 1
+        default_timeout = SWITCH_TIMEOUT_S
+    else:
+        problem = hook_guard_problem(run, guard)
+        if problem:
+            raise ValueError(f"{phase}: hook {run!r} refused: {problem}")
+        default_timeout = HOOK_TIMEOUT_S
+    timeout = hook.get("timeout_s", default_timeout)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        raise ValueError(f"{phase}: hook {run!r}: timeout_s must be a positive integer")
+    out: dict[str, Any] = {"run": run, "enabled": enabled, "timeout_s": timeout}
+    if hook.get("why"):
+        out["why"] = str(hook["why"])
+    return out
+
+
+def switch_hooks(setup: dict[str, Any], host: str, phase: str) -> list[str]:
+    """The daemon_switch commands this setup's ENABLED hooks run on ``host`` in ``phase``."""
+    out = []
+    for hook in setup["hosts"].get(host, {}).get(phase, []) or []:
+        argv = shlex.split(hook["run"]) if hook.get("enabled", True) else []
+        if argv and argv[0] == SWITCH_SCRIPT:
+            out.append(argv[1])
+    return out
+
+
+def deadman_armed(live: dict[str, Any], host: str) -> bool:
+    """Whether the probe saw this host's dead-man timer active (armed, waiting to restore)."""
+    return (live.get("deadman_timer_states") or {}).get(f"{DEADMAN_PREFIX}{host}.timer") == "active"
+
+
+def restore_gaps(switching: list[dict[str, Any]], restore: dict[str, Any] | None,
+                 keys: list[str]) -> list[str]:
+    """Hosts a setup in ``switching`` moves to Max that the restore setup would not move back."""
+    gaps = []
+    for h in keys:
+        movers = [s["name"] for s in switching if "to-max" in switch_hooks(s, h, "pre_apply")]
+        if movers and (restore is None or "restore" not in switch_hooks(restore, h, "post_apply")):
+            gaps.append(f"{h}: {', '.join(sorted(movers))} switches the daemon to Max there, but "
+                        f"{RESTORE_SETUP} has no post_apply '{SWITCH_SCRIPT} restore' for {h}")
+    return gaps
+
+
+def switch_source() -> str:
+    path = Path(__file__).resolve().with_name(SWITCH_SCRIPT)
+    try:
+        return path.read_text()
+    except OSError as e:
+        raise RuntimeError(f"{SWITCH_SCRIPT} not found next to setups.py ({path}): {e}") from None
+
+
+def run_hooks(phase: str, setup: dict[str, Any], keys: list[str], runner: Runner, hosts: Hosts,
+              execute: bool) -> list[str]:
+    """Run one phase's hooks host by host; returns the problems. A failing pre_apply hook stops the phase."""
+    problems: list[str] = []
+    for h in keys:
+        for hook in setup["hosts"][h].get(phase, []) or []:
+            label = f"{h}: {phase} `{hook['run']}`"
+            if not hook.get("enabled", True):
+                print(f"  {label}: skipped (disabled){': ' + hook['why'] if hook.get('why') else ''}")
+                continue
+            argv = shlex.split(hook["run"])
+            stdin = None
+            if argv[0] == SWITCH_SCRIPT:
+                cmd = [runner.python(h), "-", *argv[1:]] + (["--execute"] if execute else [])
+            else:
+                if not execute:
+                    print(f"  [dry run] {label}: would run")
+                    continue
+                problem = hook_guard_problem(hook["run"], hosts.guard(h))
+                if problem:
+                    problems.append(f"{label} REFUSED: {problem}")
+                    log(problems[-1])
+                    if phase == "pre_apply":
+                        return problems
+                    continue
+                cmd = ["sh", "-c", hook["run"]]
+            log(f"{label}{'' if execute else ' (dry run)'}")
+            try:
+                if argv[0] == SWITCH_SCRIPT:
+                    stdin = switch_source()
+                cp = runner.run(h, cmd, input=stdin, timeout=int(hook.get("timeout_s") or HOOK_TIMEOUT_S))
+            except Exception as e:  # noqa: BLE001 - a hook that cannot run is a failed hook
+                problems.append(f"{label} failed: {type(e).__name__}: {e}")
+                log(problems[-1])
+                if phase == "pre_apply":
+                    return problems
+                continue
+            out = ((cp.stdout or "") + (cp.stderr or "")).strip()
+            for line in out.splitlines():
+                print(f"    {line}")
+            if cp.returncode != 0:
+                tail = " | ".join(out.splitlines()[-2:])[-300:] or "(no output)"
+                problems.append(f"{label} failed (exit {cp.returncode}): {tail}")
+                log(problems[-1])
+                if phase == "pre_apply":
+                    return problems
+    return problems
+
+
 def validate_setup(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict) or not isinstance(data.get("hosts"), dict):
         raise ValueError("setup must be a mapping with a 'hosts' mapping")
@@ -596,6 +827,14 @@ def validate_setup(data: Any) -> dict[str, Any]:
         hs.setdefault("allow_extra", [])
         hs.setdefault("stop", [])
         hs.setdefault("min_free_mib", None)
+        for phase in HOOK_PHASES:
+            hooks = hs.get(phase) or []
+            if not isinstance(hooks, list):
+                raise ValueError(f"{host}: {phase} must be a list of hooks")
+            try:
+                hs[phase] = [normalize_hook(x, phase) for x in hooks]
+            except ValueError as e:
+                raise ValueError(f"{host}: {e}") from None
         seen = set()
         for s in hs["services"]:
             check_unit_name(s["unit"])
@@ -893,8 +1132,22 @@ def cmd_save(args: argparse.Namespace, hosts: Hosts, runner: Runner) -> int:
         print("fix business_units in hosts.yaml; nothing was saved", file=sys.stderr)
         return 1
     setup = validate_setup(build_setup(args.name, live, hosts, extra=capture))
+    # Hooks are hand-written, not captured: an overwrite keeps the old file's
+    # (business without its restore hook would leave the daemon on Max).
+    kept = []
+    if path.exists():
+        try:
+            old = validate_setup(yaml.safe_load(path.read_text()))
+        except (ValueError, KeyError, TypeError, yaml.YAMLError) as e:
+            raise SystemExit(f"{path} does not load ({e}); its hooks would be lost. Fix or move it first")
+        for h, ohs in old["hosts"].items():
+            if h in setup["hosts"]:
+                for phase in HOOK_PHASES:
+                    if ohs.get(phase):
+                        setup["hosts"][h][phase] = ohs[phase]
+                        kept.append(f"{h} {phase} ({len(ohs[phase])})")
     write_private(path, dump_setup(setup))
-    print(f"saved {path}")
+    print(f"saved {path}" + (f"; kept hooks: {', '.join(kept)}" if kept else ""))
     for x in skipped:
         print(f"WARNING: {x}", file=sys.stderr)
     for h, hs in setup["hosts"].items():
@@ -975,11 +1228,17 @@ def cmd_status(args: argparse.Namespace, hosts: Hosts, runner: Runner) -> int:
     return 0
 
 
-def print_plan(name: str, plans: dict[str, HostPlan], execute: bool) -> None:
+def print_plan(name: str, plans: dict[str, HostPlan], execute: bool,
+               setup: dict[str, Any] | None = None) -> None:
     print(f"apply {name} ({'EXECUTE' if execute else 'dry run'}):")
     for p in plans.values():
         line = f"  {p.host}: stop {p.stop or '-'}; start {p.start or '-'}; keep {p.keep or '-'}"
         print(line + (f"; restart {p.restart}" if p.restart else ""))
+        hs = (setup or {}).get("hosts", {}).get(p.host, {})
+        for phase in HOOK_PHASES:
+            for hook in hs.get(phase, []) or []:
+                off = "" if hook.get("enabled", True) else " (disabled)"
+                print(f"  {p.host}: {phase}: {hook['run']}{off}")
         for r in p.refused:
             print(f"  {p.host}: REFUSED: would stop never-stop unit {r}")
         for u in p.uncaptured:
@@ -1014,7 +1273,7 @@ def apply_once(setup: dict[str, Any], keys: list[str], runner: Runner, hosts: Ho
     scoped = {**setup, "hosts": {h: setup["hosts"][h] for h in keys}}
     plans = compute_plan(scoped, live, {h: hosts.guard(h) for h in keys},
                          captured=captured_units(setup, setups, keys), restart_unhealthy=retry)
-    print_plan(setup["name"], plans, execute)
+    print_plan(setup["name"], plans, execute, scoped)
     refusals = [f"{p.host}: would stop never-stop unit {u}" for p in plans.values() for u in p.refused]
     refusals += [f"{p.host}: would stop {u}, which {RESTORE_SETUP} does not list"
                  for p in plans.values() for u in p.uncaptured]
@@ -1022,8 +1281,27 @@ def apply_once(setup: dict[str, Any], keys: list[str], runner: Runner, hosts: Ho
         return 2, refusals
     if any(p.blockers for p in plans.values()):
         return 1, [f"{p.host}: {b}" for p in plans.values() for b in p.blockers]
+    # The daemon goes to Max only with a restore already scheduled that nobody has to remember.
+    movers = [h for h in keys if "to-max" in switch_hooks(scoped, h, "pre_apply")]
+    unarmed = [h for h in movers if not deadman_armed(live[h], h)]
+    if unarmed:
+        gaps = [f"{h}: {setup['name']} switches the daemon to Max there, but no dead-man restore is armed "
+                f"({DEADMAN_PREFIX}{h}.timer is not active): run `setups.py deadman {RESTORE_SETUP} --at "
+                "<window end> --execute` first" for h in unarmed]
+        if execute:
+            return 2, gaps
+        for g in gaps:
+            print(f"  note: {g} (--execute refuses until then)")
+    # Hooks: daemon_switch runs as a dry run here unless executing; other commands only on execute.
+    pre = run_hooks("pre_apply", scoped, keys, runner, hosts, execute)
     if not execute:
-        return 0, []
+        problems = pre + run_hooks("post_apply", scoped, keys, runner, hosts, execute)
+        return (1 if problems else 0), problems
+    if pre:
+        log("a pre_apply hook failed: no unit is stopped or started"
+            + (f"; the daemon on {', '.join(movers)} may already be on Max (an earlier hook switched it): the "
+               f"armed dead-man, or `setups.py apply {RESTORE_SETUP} --execute`, moves it back" if movers else ""))
+        return 1, pre
     errors: list[str] = []
 
     def act(h: str, verb: str, unit: str) -> None:
@@ -1069,9 +1347,12 @@ def apply_once(setup: dict[str, Any], keys: list[str], runner: Runner, hosts: Ho
                        {s["unit"]: s["health"] for s in hs["services"]})
             problems += [f"{h}: {x}" for x in verify_host(hs, lv)]
         if not problems or _now() > deadline:
-            problems += errors
-            return (0 if not problems else 1), problems
+            break
         _sleep(POLL_S)
+    # After the units, even when the wait reported problems: a restore hook checks
+    # its own preconditions (the model server healthy) before it points anything back.
+    problems += errors + run_hooks("post_apply", scoped, keys, runner, hosts, execute)
+    return (0 if not problems else 1), problems
 
 
 def failure_message(name: str, host: str, problems: list[str], attempts: int, result: str) -> str:
@@ -1121,6 +1402,15 @@ def cmd_apply(args: argparse.Namespace, hosts: Hosts, runner: Runner) -> int:
     setups = list_setups(args.setups_dir)
     setups[setup["name"]] = setup
     keys = selected_hosts(hosts, setup, args.only_host)
+    if setup["name"] != RESTORE_SETUP:
+        gaps = restore_gaps([setup], setups.get(RESTORE_SETUP), keys)
+        if gaps:
+            for g in gaps:
+                print(f"REFUSED: {g}")
+            print("a restore could not move the daemon back; nothing was changed")
+            if args.execute:
+                report_apply(args.name, keys, runner, hosts, 2, gaps, 0)
+            return 2
     attempts = 1 + (RESTORE_RETRIES if args.execute else 0)
     rc, problems, attempt = 1, [], 0
     for attempt in range(1, attempts + 1):
@@ -1150,6 +1440,10 @@ def cmd_apply(args: argparse.Namespace, hosts: Hosts, runner: Runner) -> int:
         log(f"attempt {attempt}/{attempts} failed: {'; '.join(problems)}")
     else:
         log(f"setup {args.name} FAILED after {attempts} attempts: {'; '.join(problems)}")
+        movers = [h for h in keys if "to-max" in switch_hooks(setup, h, "pre_apply")]
+        if movers and setup["name"] != RESTORE_SETUP:
+            log(f"the daemon on {', '.join(movers)} may be on Max: the armed dead-man restores it at the window's "
+                f"end, or run `setups.py apply {RESTORE_SETUP} --execute` now")
     report_apply(args.name, keys, runner, hosts, rc, problems, attempt)
     return rc
 
@@ -1172,11 +1466,13 @@ def deadman_commands(name: str, host: str, when: datetime, python: str = DEADMAN
 
     kind "ssh" is a remote shell string. kind "scp" is (role, remote file
     name): the caller copies its local file for that role ("script", "setup",
-    "hosts") to that name in the remote directory. The timer runs from those
-    copies with --local, so it needs nothing from this machine. kind "check"
-    is a remote shell string too: it runs ``status`` with the same interpreter
-    and copies first, so a host that cannot run them (no PyYAML, say) fails
-    while arming instead of at restore time.
+    "hosts", "switch") to that name in the remote directory. The timer runs
+    from those copies with --local, so it needs nothing from this machine (the
+    restore setup's ``daemon_switch.py`` hooks run from the "switch" copy).
+    kind "check" is a remote shell string too: it runs ``status`` and the
+    switch script's ``selftest`` with the same interpreter and copies first,
+    so a host that cannot run them (no PyYAML, say) fails while arming instead
+    of at restore time.
     """
     unit = DEADMAN_PREFIX + host
     rdir = '"$HOME/' + REMOTE_DIR + '"'
@@ -1192,7 +1488,9 @@ def deadman_commands(name: str, host: str, when: datetime, python: str = DEADMAN
         ("scp", ("script", "setups.py")),
         ("scp", ("setup", f"{name}.yaml")),
         ("scp", ("hosts", "hosts.yaml")),
+        ("scp", ("switch", SWITCH_SCRIPT)),
         ("check", f"{script} status"),
+        ("check", f"{shlex.quote(python)} {rdir}/{SWITCH_SCRIPT} selftest"),
         ("ssh", run),
         ("ssh", f"systemctl --user list-timers --all --no-pager {unit}.timer && "
                 f"systemctl --user is-active --quiet {unit}.timer"),
@@ -1257,6 +1555,12 @@ def cmd_deadman(args: argparse.Namespace, hosts: Hosts, runner: Runner) -> int:
     if when <= datetime.now(timezone.utc):
         raise SystemExit(f"--at {when.isoformat()} is in the past")
     keys = selected_hosts(hosts, setup, args.only_host)
+    # The dead-man is the restore nobody watches: on a host any saved setup moves to
+    # Max, the setup it applies must move the daemon back.
+    others = [s for n, s in list_setups(args.setups_dir).items() if n != setup["name"]]
+    gaps = restore_gaps(others, setup, keys)
+    if gaps:
+        raise SystemExit("REFUSED: " + "; ".join(gaps))
     # The dead-man runs when nobody may be watching: a failed restore on a host
     # without notify_cmd would be recorded only on that host.
     silent = [h for h in keys if not (hosts.hosts.get(h) and hosts.hosts[h].notify_cmd)]
@@ -1280,7 +1584,8 @@ def cmd_deadman(args: argparse.Namespace, hosts: Hosts, runner: Runner) -> int:
                           dump_setup({**setup, "hosts": {h: setup["hosts"][h]}}))
             write_private(own / "hosts.yaml", hosts_file_for(args.hosts_file, h))
             files = {"script": str(Path(__file__).resolve()),
-                     "setup": str(own / f"{args.name}.yaml"), "hosts": str(own / "hosts.yaml")}
+                     "setup": str(own / f"{args.name}.yaml"), "hosts": str(own / "hosts.yaml"),
+                     "switch": str(Path(__file__).resolve().with_name(SWITCH_SCRIPT))}
             print(f"{h}: dead-man 'apply {args.name}' at {on_calendar(when)} with {python}")
             for kind, step in deadman_commands(args.name, h, when, python):
                 if kind == "scp":
@@ -1299,7 +1604,7 @@ def cmd_deadman(args: argparse.Namespace, hosts: Hosts, runner: Runner) -> int:
                 if out:
                     print("  " + out.replace("\n", "\n  "))
                 if cp.returncode != 0:
-                    why = f" ({python} cannot run setups.py on {h}; not arming)" if kind == "check" else ""
+                    why = f" ({python} cannot run the copied scripts on {h}; not arming)" if kind == "check" else ""
                     print(f"  FAILED ({kind}, exit {cp.returncode}){why}")
                     rc = 1
                     break
