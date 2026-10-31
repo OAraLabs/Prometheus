@@ -1452,11 +1452,26 @@ def test_remote_verdicts_are_read_by_build_a_fail_drops_the_row_and_a_pass_is_a_
     assert st["verdict_rows_unusable"] == 3
 
 
-def _src_workdir(tmp_path: Path, items: list[dict[str, Any]], max_rows: list[dict[str, Any]]) -> Path:
-    src = tmp_path / "phase2-rejudge"
-    write_queue(src, items, {"mode": "rejudge", "view": "outcome"})
+def _src_workdir(tmp_path: Path, items: list[dict[str, Any]], max_rows: list[dict[str, Any]],
+                 name: str = "phase2-rejudge", meta: dict[str, Any] | None = None) -> Path:
+    src = tmp_path / name
+    write_queue(src, items, {"mode": "rejudge", "view": "outcome"} if meta is None else meta)
     (src / judge.RESULTS_FILE).write_text("".join(json.dumps(r) + "\n" for r in max_rows))
     return src
+
+
+def write_calibration(work: Path, apply: list[str], *, decision: str = "use-local-judge",
+                      schema: str | None = None) -> Path:
+    """A calibrate report as ``subset --which unjudged --calibration`` reads it."""
+    work.mkdir(parents=True, exist_ok=True)
+    rep = {"schema": schema or judge.CALIBRATION_SCHEMA, "rubric_version": judge.RUBRIC_VERSION,
+           "created": "2026-10-31T17:00:00Z", "apply_categories": apply,
+           "decision": {"decision": decision, "reason": "test"},
+           "by_category": [{"category": c, "n": 30, "agreement": 0.9} for c in apply]}
+    if schema == "distill-judge-calibration/1":
+        del rep["apply_categories"]
+    (work / judge.CALIBRATION_FILE).write_text(json.dumps(rep))
+    return work
 
 
 def test_subset_cuts_the_calibration_set_and_the_unjudged_train_rows(tmp_path: Path,
@@ -1488,8 +1503,13 @@ def test_subset_cuts_the_calibration_set_and_the_unjudged_train_rows(tmp_path: P
     assert judge.main(["--workdir", str(cal), "subset", "--from", str(src), "--which", "max-judged"]) == 1  # exists
 
     unj = tmp_path / "unj"
+    # never without a calibration that decided use-local-judge
     assert judge.main(["--workdir", str(unj), "subset", "--from", str(src), "--which", "unjudged",
-                       "--train-file", str(tf)]) == 0
+                       "--train-file", str(tf)]) == judge.EXIT_ERROR
+    assert "--calibration" in capsys.readouterr().err and not (unj / judge.QUEUE_FILE).exists()
+    cal_ok = write_calibration(tmp_path / "cal-ok", ["coding"])
+    assert judge.main(["--workdir", str(unj), "subset", "--from", str(src), "--which", "unjudged",
+                       "--train-file", str(tf), "--calibration", str(cal_ok)]) == 0
     q = judge.read_jsonl(unj / judge.QUEUE_FILE)
     assert [it["id"] for it in q] == [items[i]["id"] for i in (5, 6, 7, 8)]   # source order, sources kept
     assert all("file" in it["source"] for it in q)
@@ -1500,7 +1520,7 @@ def test_subset_cuts_the_calibration_set_and_the_unjudged_train_rows(tmp_path: P
     with pytest.raises(SystemExit):
         judge.main(["--workdir", str(unj), "subset", "--from", str(src), "--which", "everything"])
     assert judge.main(["--workdir", str(src), "subset", "--from", str(src), "--which", "unjudged",
-                       "--train-file", str(tf), "--force"]) == judge.EXIT_ERROR
+                       "--train-file", str(tf), "--calibration", str(cal_ok), "--force"]) == judge.EXIT_ERROR
     assert "its own --workdir" in capsys.readouterr().err
 
 
@@ -1554,6 +1574,9 @@ def test_calibration_reports_agreement_kappa_confusion_and_decides_at_85_percent
     cats = {c["category"]: c for c in rep["by_category"]}
     assert cats["coding"]["n"] == 60 and cats["coding"]["agreement"] == pytest.approx(50 / 60, abs=1e-4)
     assert cats["other"]["agreement"] == pytest.approx(35 / 40, abs=1e-4)
+    # 85% overall, but coding alone is 83%: only "other" (87.5% on 40 pairs) may be applied
+    assert rep["apply_categories"] == ["other"] and not cats["coding"]["apply"] and cats["other"]["apply"]
+    assert "Applied only in: other" in text
     assert rep["judge"]["hosts"] == {"gpu-tower": 100} and rep["judge"]["quants"] == {"UD-Q4_K_XL": 100}
 
     # one more disagreement: 84% < 85%: train on the dataset as it is
@@ -1561,7 +1584,8 @@ def test_calibration_reports_agreement_kappa_confusion_and_decides_at_85_percent
     (cal / judge.RESULTS_FILE).write_text("".join(json.dumps(r) + "\n" for r in local_rows(all_ids)))
     assert judge.main(["--workdir", str(cal), "calibrate"]) == judge.EXIT_DONE
     assert "DECISION: do not use the local judge" in capsys.readouterr().out
-    assert json.loads((cal / judge.CALIBRATION_FILE).read_text())["decision"]["decision"] == "do-not-use"
+    rep = json.loads((cal / judge.CALIBRATION_FILE).read_text())
+    assert rep["decision"]["decision"] == "do-not-use" and rep["apply_categories"] == []
 
     # three items without a local verdict: more than the 2 (2%) allowed -> incomplete (exit 6)
     some = {it["id"] for it in queue[3:]}
@@ -1570,6 +1594,245 @@ def test_calibration_reports_agreement_kappa_confusion_and_decides_at_85_percent
     assert "incomplete" in capsys.readouterr().out
     assert judge.main(["--workdir", str(cal), "calibrate", "--allow-missing", "3"]) == judge.EXIT_DONE
     capsys.readouterr()
+
+
+def test_calibration_set_spans_every_max_judged_source_on_the_pass_side_interleaved_by_category(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The re-judge reached only coding and memory/wiki; the Phase 2 sample holds Max's verdicts in
+    sentinel/daemon and other. Calibration takes both, pass side only, small categories first."""
+    rejudge = [golden_item(i) for i in range(40)] + [golden_item(i, category="memory/wiki") for i in range(40, 44)]
+    rj = _src_workdir(tmp_path, rejudge, [max_row(it, "pass") for it in rejudge])
+    sample = [golden_item(i, category="sentinel/daemon") for i in range(100, 106)]
+    sample += [golden_item(i, category="other") for i in range(106, 110)]
+    fails = [make_item(i, label="fail", category="other") for i in range(110, 113)]  # fail side: error shown
+    sample_rows = [max_row(it, "fail" if n % 2 else "pass") for n, it in enumerate(sample + fails)]
+    sample_rows.append({**max_row(sample[0], "fail"), "view": "blind"})  # another view: not a verdict here
+    p2 = _src_workdir(tmp_path, sample + fails, sample_rows, name="phase2", meta={})  # the sample's meta: no view
+    cal = tmp_path / "cal"
+    assert judge.main(["--workdir", str(cal), "subset", "--which", "max-judged",
+                       "--from", str(rj), "--from", str(p2)]) == 0
+    q = judge.read_jsonl(cal / judge.QUEUE_FILE)
+    assert {it["id"] for it in q} == {it["id"] for it in rejudge + sample}   # no fail-side item
+    assert collections.Counter(it["category"] for it in q[:16]) == {
+        "coding": 4, "memory/wiki": 4, "other": 4, "sentinel/daemon": 4}     # every category early
+    meta = json.loads((cal / judge.QUEUE_META_FILE).read_text())
+    assert meta["subset_sources"] == [str(rj.resolve()), str(p2.resolve())] and meta["side"] == "pass"
+    assert meta["max_verdict_files"] == [str(rj.resolve() / judge.RESULTS_FILE),
+                                         str(p2.resolve() / judge.RESULTS_FILE)]
+    assert meta["max_verdicts_by_category"]["sentinel/daemon"] == {"pass": 3, "fail": 3}
+    assert meta["queued_by_source"][str(p2.resolve())] == {"other": 4, "sentinel/daemon": 6}
+    # calibrate reads the Max verdicts of every source by default
+    local = [{"id": it["id"], "status": "ok", "verdict": "pass", "view": "outcome",
+              "rubric_version": judge.RUBRIC_VERSION, "provider": "local", "model": REMOTE_ALIAS} for it in q]
+    (cal / judge.RESULTS_FILE).write_text("".join(json.dumps(r) + "\n" for r in local))
+    assert judge.main(["--workdir", str(cal), "calibrate", "--min-category-pairs", "4"]) == judge.EXIT_DONE
+    rep = json.loads((cal / judge.CALIBRATION_FILE).read_text())
+    assert rep["set"] == 54 and {c["category"]: c["n"] for c in rep["by_category"]} == {
+        "coding": 40, "memory/wiki": 4, "other": 4, "sentinel/daemon": 6}
+    # --side both takes the fail side too; sources judged in different views are refused
+    capsys.readouterr()
+    both = tmp_path / "both"
+    assert judge.main(["--workdir", str(both), "subset", "--which", "max-judged", "--side", "both",
+                       "--from", str(rj), "--from", str(p2)]) == 0
+    assert len(judge.read_jsonl(both / judge.QUEUE_FILE)) == 57
+    (p2 / judge.QUEUE_META_FILE).write_text(json.dumps({"view": "blind"}))
+    assert judge.main(["--workdir", str(tmp_path / "mixed"), "subset", "--which", "max-judged",
+                       "--from", str(rj), "--from", str(p2)]) == judge.EXIT_ERROR
+    assert "different views" in capsys.readouterr().err
+
+
+def test_local_verdicts_are_used_only_in_categories_calibrated_with_enough_pairs(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The review's case: coding agrees 88% and carries the overall gate; sentinel/daemon agrees 60%
+    and other has too few pairs. Only coding's rows get the local judge; the rest stay as they are."""
+    cal_items = ([golden_item(i) for i in range(200)]
+                 + [golden_item(i, category="sentinel/daemon") for i in range(200, 225)]
+                 + [golden_item(i, category="other") for i in range(225, 235)])
+    mx = {it["id"]: "pass" for it in cal_items}
+    flip = ({cal_items[i]["id"] for i in range(24)}            # coding: 176/200 = 88%
+            | {cal_items[i]["id"] for i in range(200, 210)}    # sentinel/daemon: 15/25 = 60%
+            | {cal_items[225]["id"]})                          # other: 9/10, but 10 pairs < 20
+    local = [{"id": it["id"], "status": "ok", "verdict": "fail" if it["id"] in flip else "pass",
+              "view": "outcome", "rubric_version": judge.RUBRIC_VERSION, "provider": "local",
+              "model": REMOTE_ALIAS} for it in cal_items]
+    rep = judge.calibration_report(cal_items, local, [max_row(it, mx[it["id"]]) for it in cal_items])
+    assert rep["agreement"]["k"] == 200 and rep["agreement"]["n"] == 235   # 85.1% overall
+    assert rep["decision"]["decision"] == "use-local-judge" and rep["apply_categories"] == ["coding"]
+    cats = {c["category"]: c for c in rep["by_category"]}
+    assert not cats["sentinel/daemon"]["apply"] and "60.00% < 85%" in cats["sentinel/daemon"]["apply_reason"]
+    assert not cats["other"]["apply"] and "10 pair(s) < 20" in cats["other"]["apply_reason"]
+    text = judge.render_calibration(rep)
+    assert "Applied only in: coding" in text and "| sentinel/daemon | 25/25 | 60.0% |" in text
+    calw = tmp_path / "cal"
+    calw.mkdir()
+    (calw / judge.CALIBRATION_FILE).write_text(json.dumps(rep))
+
+    # the unjudged train rows: coding, sentinel/daemon and other, none Max-judged
+    target = ([golden_item(i) for i in range(300, 306)] + [golden_item(i, category="sentinel/daemon")
+                                                           for i in range(306, 310)]
+              + [golden_item(i, category="other") for i in range(310, 313)])
+    src = _src_workdir(tmp_path, target, [])
+    tf = tmp_path / "train.jsonl"
+    tf.write_text("".join(json.dumps({"id": judge.train_row_id(it["source"]["file"], it["source"]["line"]),
+                                      "label": "tool-success", "category": it["category"]}) + "\n"
+                          for it in target))
+    unj = tmp_path / "unj"
+    assert judge.main(["--workdir", str(unj), "subset", "--which", "unjudged", "--from", str(src),
+                       "--train-file", str(tf), "--calibration", str(calw)]) == 0
+    assert [it["id"] for it in judge.read_jsonl(unj / judge.QUEUE_FILE)] == [it["id"] for it in target[:6]]
+    meta = json.loads((unj / judge.QUEUE_META_FILE).read_text())
+    assert meta["uncalibrated_by_category"] == {"other": 3, "sentinel/daemon": 4}
+    assert meta["target_by_category"]["sentinel/daemon"] == {
+        "rows": 4, "applied": False, "calibration_pairs": 25, "calibration_agreement": 0.6}
+    assert meta["target_by_category"]["coding"]["applied"] and meta["calibration"]["apply_categories"] == ["coding"]
+
+    # no category calibrated -> do-not-use, and a do-not-use or schema-1 report queues nothing
+    rep2 = judge.calibration_report(cal_items, local, [max_row(it, mx[it["id"]]) for it in cal_items],
+                                    min_category_pairs=500)
+    assert rep2["decision"]["decision"] == "do-not-use" and rep2["apply_categories"] == []
+    capsys.readouterr()
+    for name, cal_dir in (("no", write_calibration(tmp_path / "no", ["coding"], decision="do-not-use")),
+                          ("v1", write_calibration(tmp_path / "v1", ["coding"],
+                                                   schema="distill-judge-calibration/1"))):
+        assert judge.main(["--workdir", str(tmp_path / f"unj-{name}"), "subset", "--which", "unjudged",
+                           "--from", str(src), "--train-file", str(tf), "--calibration", str(cal_dir)]) == 1
+        assert not (tmp_path / f"unj-{name}" / judge.QUEUE_FILE).exists()
+    err = capsys.readouterr().err
+    assert "decided 'do-not-use'" in err and "no per-category decision" in err
+
+
+def _report_of(b: Any, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """What check-build reads of a build.py report.json, from a split Builder."""
+    return {"gates": b.gates(), "counts": dict(sorted(b.stats.items())),
+            "inputs": {"written": {"train.jsonl": len(b.final["train"])}}, "settings": {"seed": "phase3-v1"},
+            **(extra or {})}
+
+
+def test_rebuild_loop_keeps_every_max_file_and_judges_the_rows_a_rebuild_lets_in(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """End to end against build.py: base build (two Max verdict files) -> local judge on its
+    tool-success rows -> rebuild. Leaving out a Max file the base used is caught (check-build exit 5).
+    The capped coding category refills from past its old cut, so the rebuild holds tool-success rows
+    the judge never saw; the loop judges them until `subset` exits 8 and none is left."""
+    bt = _build_helpers()
+    build = bt.build
+    golden = bt.corpus(tmp_path)          # 120 coding rows over 40 tasks, 12 each daemon/other/memory
+    feed_rows = judge.read_jsonl(golden)
+    settings = {"eval_task_frac": 0.15, "val_frac": 0.05, "holdout_max_group_share": 0.5}
+
+    def builder(name: str, files: list[Path]) -> Any:
+        stats: collections.Counter = collections.Counter()
+        verdicts = build.load_verdicts([str(f) for f in files], stats)
+        (tmp_path / name).mkdir()
+        b = bt.make_builder(tmp_path / name, verdicts=verdicts, **settings)
+        b.stats.update(stats)
+        bt.feed(b, golden)
+        b.split()
+        return b
+
+    # the re-judge queue: every teacher row, in its build.py category
+    probe = builder("probe", [])
+    cat_of = {e.trace_id: e.category for e in probe.examples}
+    items = []
+    for line, row in enumerate(feed_rows):
+        tid = f"{golden.name}:{line + 1}"
+        if tid in cat_of:
+            items.append({**golden_item(line, category=cat_of[tid]),
+                          "source": {"file": golden.name, "line": line, "telemetry_rowid": 1000 + line}})
+    by_id = {it["id"]: it for it in items}
+    coding = [it for it in items if it["category"] == "coding"]
+    # Max: the Phase 2 sample judged a few rows (two fails) plus a fail-side item; the re-judge 30 coding rows
+    sample_rows = [max_row(coding[i], "fail" if i < 2 else "pass") for i in range(6)]
+    sample_rows.append({**max_row(make_item(900, label="fail"), "fail")})
+    p2 = _src_workdir(tmp_path, coding[:6], sample_rows, name="phase2", meta={})
+    rj_rows = [max_row(it, "pass" if n % 5 else "fail") for n, it in enumerate(coding[6:36])]
+    rj = _src_workdir(tmp_path, [it for it in items if it["id"] not in {c["id"] for c in coding[:6]}],
+                      rj_rows)
+    max_files = [p2 / judge.RESULTS_FILE, rj / judge.RESULTS_FILE]
+
+    base = builder("base", max_files)
+    assert base.gates()["verdicts"]["pass"] and base.stats["excluded:judge_fail"] == 2 + 6
+    base_dir = tmp_path / "build-base"
+    base_dir.mkdir()
+    (base_dir / "report.json").write_text(json.dumps(_report_of(base)))
+
+    def write_train(b: Any, d: Path) -> Path:
+        d.mkdir(exist_ok=True)
+        (d / "train.jsonl").write_text("".join(json.dumps({"id": e.id, "label": e.label, "category": e.category})
+                                               + "\n" for e in b.final["train"]))
+        return d / "train.jsonl"
+
+    base_train = {e.id for e in base.final["train"]}
+    assert any(e.label == "tool-success" for e in base.final["train"])
+    cal = write_calibration(tmp_path / "cal", ["coding", "memory/wiki", "other", "sentinel/daemon"])
+
+    def judge_round(n: int, train_file: Path) -> tuple[int, Path]:
+        work = tmp_path / f"local-{n}"
+        rc = judge.main(["--workdir", str(work), "subset", "--which", "unjudged", "--from", str(rj),
+                         "--from", str(p2), "--train-file", str(train_file), "--calibration", str(cal)])
+        if rc != 0:
+            return rc, work
+        rows = []
+        for k, it in enumerate(judge.read_jsonl(work / judge.QUEUE_FILE)):
+            verdict = "fail" if (it["category"] == "coding" and k % 3 == 0) else "pass"
+            rows.append({"id": it["id"], "label": "pass", "category": it["category"], "source": it["source"],
+                         "status": "ok", "verdict": verdict, "view": "outcome",
+                         "rubric_version": judge.RUBRIC_VERSION, "provider": "local", "model": REMOTE_ALIAS})
+        (work / judge.RESULTS_FILE).write_text("".join(json.dumps(r) + "\n" for r in rows))
+        return rc, work
+
+    rc, l1 = judge_round(1, write_train(base, base_dir))
+    assert rc == 0
+    l1_rows = judge.read_jsonl(l1 / judge.RESULTS_FILE)
+    max_judged = {r["id"] for r in rj_rows + sample_rows}
+    assert {r["id"] for r in l1_rows} == {
+        i for i, it in by_id.items()
+        if judge.train_row_id(golden.name, it["source"]["line"]) in base_train and i not in max_judged}
+    l1_fails = sum(1 for r in l1_rows if r["verdict"] == "fail")
+    assert l1_fails > 0
+    capsys.readouterr()
+
+    # the reviewed command: the re-judge file and the local file, WITHOUT the Phase 2 sample file
+    bad = builder("bad", [rj / judge.RESULTS_FILE, l1 / judge.RESULTS_FILE])
+    bad_dir = tmp_path / "build-bad"
+    write_train(bad, bad_dir)
+    (bad_dir / "report.json").write_text(json.dumps(_report_of(bad)))
+    assert judge.main(["check-build", "--base", str(base_dir), "--build", str(bad_dir),
+                       "--local", str(l1)]) == judge.EXIT_FATAL
+    out = json.loads(capsys.readouterr().out)
+    assert not out["ok"] and any("pass every --verdicts file the base used" in p for p in out["problems"])
+    assert out["expected"]["judge_fail"] == 8 + l1_fails and out["build"]["judge_fail"] == 6 + l1_fails
+
+    # the right rebuild: every Max file the base used, in its order, the local file last; then loop
+    files = [*max_files, l1 / judge.RESULTS_FILE]
+    locals_ = [l1]
+    newcomers_seen = False
+    for n in range(2, 12):
+        b = builder(f"re-{n}", files)
+        d = tmp_path / f"build-{n}"
+        train_file = write_train(b, d)
+        (d / "report.json").write_text(json.dumps(_report_of(b)))
+        capsys.readouterr()
+        assert judge.main(["check-build", "--base", str(base_dir), "--build", str(d),
+                           *[a for w in locals_ for a in ("--local", str(w))]]) == judge.EXIT_DONE
+        out = json.loads(capsys.readouterr().out)
+        assert out["ok"] and out["build"]["tokenplan_max_judge"] == out["base"]["tokenplan_max_judge"]
+        left = {e.id for e in b.final["train"] if e.label == "tool-success"}
+        assert out["tool_success_left"] == len(left)
+        newcomers_seen |= bool(left - base_train)
+        rc, work = judge_round(n, train_file)
+        if rc == judge.EXIT_NOTHING_LEFT:
+            assert not left and not (work / judge.QUEUE_FILE).exists()
+            break
+        assert rc == 0 and {it["id"] for it in judge.read_jsonl(work / judge.QUEUE_FILE)} <= {
+            it["id"] for it in items if judge.train_row_id(golden.name, it["source"]["line"]) in left}
+        files.append(work / judge.RESULTS_FILE)
+        locals_.append(work)
+    else:
+        pytest.fail("the rebuild loop did not converge")
+    assert newcomers_seen        # the coding cap let unjudged rows in on the first rebuild
+    assert len(locals_) >= 2     # so one loop round was needed
+    assert all(e.label != "tool-success" for e in b.final["train"])
 
 
 def test_the_local_judge_uses_the_max_judges_rubric_and_prompt(judge_server: Any, tmp_path: Path) -> None:

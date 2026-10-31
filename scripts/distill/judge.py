@@ -11,15 +11,32 @@
     python3 judge.py --workdir ~/distill/phase2-rejudge run-all --rejudge-from ~/distill/phase2 \\
         --provider max-payg --budget-usd 40
 
-The local 27B served by the 4090 on the tailnet (tower/serve_teacher.sh), calibrated against Max first:
+The local 27B served by the 4090 on the tailnet (tower/serve_teacher.sh), calibrated against Max first,
+on the pass side of BOTH Max-judged workdirs (the re-judge only reached coding and memory/wiki; the Phase 2
+sample holds the Max verdicts in sentinel/daemon and other):
 
-    python3 judge.py --workdir ~/distill/phase2-local-cal subset --from ~/distill/phase2-rejudge --which max-judged
+    python3 judge.py --workdir ~/distill/phase2-local-cal subset --which max-judged \\
+        --from ~/distill/phase2-rejudge --from ~/distill/phase2
     python3 judge.py --workdir ~/distill/phase2-local-cal run --provider local \\
         --judge-url http://<tailnet host>:<port> --judge-key-file ~/distill/secrets/teacher-4090.key [--limit 24]
-    python3 judge.py --workdir ~/distill/phase2-local-cal calibrate          # agreement, kappa, the >= 85% decision
-    python3 judge.py --workdir ~/distill/phase2-local-v4 subset --from ~/distill/phase2-rejudge --which unjudged \\
-        --train-file ~/distill/phase3/<build>/train.jsonl
+    python3 judge.py --workdir ~/distill/phase2-local-cal calibrate   # overall >= 85% AND per category (20+ pairs)
+    python3 judge.py --workdir ~/distill/phase2-local-v4 subset --which unjudged --from ~/distill/phase2-rejudge \\
+        --train-file ~/distill/phase3/<build>/train.jsonl --calibration ~/distill/phase2-local-cal
     python3 judge.py --workdir ~/distill/phase2-local-v4 run --provider local --judge-url ... --judge-key-file ...
+
+Then rebuild (build.py) with every ``--verdicts`` file the base build used, in ITS order, and the local
+judge's files last (v4: ``~/distill/phase2/judge-sample.jsonl``, then the re-judge snapshot, then
+``~/distill/phase2-local-v4/judge-sample.jsonl``), and check it:
+
+    python3 judge.py check-build --base ~/distill/phase3/<build> --build ~/distill/phase3/<rebuild> \\
+        --local ~/distill/phase2-local-v4
+
+A rebuild lets rows in that were not in the base's train: the coding cap keeps the same share of a
+smaller total, so each dropped coding row is replaced from past the cap's old cut, and a dropped row's
+parallel sibling may now take its turn. Some have no verdict (``tool-success``). So loop: ``subset
+--which unjudged`` on the rebuild's train.jsonl in a NEW workdir (``phase2-local-v4-2``, ...), run the
+judge there, rebuild with every local file so far (in order), ``check-build`` with every ``--local``;
+until ``subset`` exits 8 (nothing left in a calibrated category).
 
 ``judge_run.sh`` wraps the Max path: preflight, sample, estimate, run, report
 and the optional re-judge, as a dry run unless ``--execute`` is given.
@@ -236,21 +253,32 @@ categories first, and running it again resumes.
 
 subset
 ------
-A queue for the local judge cut from a judged workdir (``--from``, the Phase 2
-Max re-judge), in its own ``--workdir``:
+A queue for the local judge cut from judged workdirs (``--from``, repeatable:
+the Phase 2 Max re-judge and the Phase 2 sample; an id in both is taken from
+the first), in its own ``--workdir``:
 
 * ``--which max-judged``: every item Max judged (an ``ok`` row of a Max
-  provider), shuffled (seeded) so a partial run is a fair sample. Ledger phase
-  ``2-judge-local-cal``. Its ``source`` becomes ``{"calibration_of": ...}``: no
-  file, so build.py never applies these verdicts (they would override Max's on
-  the same traces); fed to it by mistake, they fail its verdicts gate.
-* ``--which unjudged --train-file <build>/train.jsonl``: every item WITHOUT a
-  Max verdict whose train row (build.py's id: ``p3-`` + sha1 of
-  ``<file>:<line + 1>``) is in the train file with ``--train-label`` (default
-  ``tool-success``: the rows that train on the harvested label alone). Ledger
-  phase ``2-judge-local``. These verdicts go to build.py (``--verdicts``, after
-  the Max file): a fail drops the row, a pass labels it ``judge-pass``.
-  ``report`` in that workdir counts them (false-pass = rows dropped).
+  provider) on the ``--side`` the judge is applied to (default ``pass``: in
+  the outcome view a fail-side item shows its recorded error, so agreeing on it
+  is easy), shuffled (seeded) within each category and interleaved category by
+  category, so a partial run has judged the small categories first. Ledger
+  phase ``2-judge-local-cal``. Its ``source`` becomes ``{"calibration_of": ...}``:
+  no file, so build.py never applies these verdicts (they would override Max's
+  on the same traces); fed to it by mistake, they fail its verdicts gate.
+* ``--which unjudged --train-file <build>/train.jsonl --calibration
+  <calibration workdir>``: every item WITHOUT a Max verdict whose train row
+  (build.py's id: ``p3-`` + sha1 of ``<file>:<line + 1>``) is in the train
+  file with ``--train-label`` (default ``tool-success``: the rows that train
+  on the harvested label alone), in one of the calibration report's
+  ``apply_categories``. A matched row in another category is uncalibrated: it
+  is counted (``uncalibrated_by_category``, and ``target_by_category`` with
+  each category's calibration pairs) and left as it is. The report must have
+  decided ``use-local-judge``, or nothing is queued. Ledger phase
+  ``2-judge-local``. These verdicts go to build.py (``--verdicts``, after
+  EVERY Max file the base build used, in its order): a fail drops the row, a
+  pass labels it ``judge-pass``. ``report`` in that workdir counts them
+  (false-pass = rows dropped). Nothing left to queue: exit 8 (``subset`` is
+  the rebuild loop's stop test), no queue written.
 
 calibrate
 ---------
@@ -261,8 +289,22 @@ false pass (the local judge passes what Max fails; also as a share of its
 passes) and false fail, pass rates, per-category agreement, and the decision:
 ``use-local-judge`` at ``--threshold`` (0.85) or above, else ``do-not-use``
 (train on the dataset as it is); ``incomplete`` (exit 6) while more than
-``--allow-missing`` (default 2% of the set) items lack a local verdict.
-Writes ``calibration-report.json`` (aggregates only).
+``--allow-missing`` (default 2% of the set) items lack a local verdict. The
+overall figure is mostly coding, so it says nothing about the other categories:
+``apply_categories`` lists the categories with ``--min-category-pairs`` (20)
+pairs or more AND their own agreement at the threshold, and ``subset --which
+unjudged`` queues only those. ``use-local-judge`` needs the overall agreement
+and one such category. Writes ``calibration-report.json`` (aggregates only).
+
+check-build
+-----------
+``--base <build> --build <rebuild> --local <workdir> [--local ...]``: is the
+rebuild the base plus the local verdicts, nothing lost? Its Max verdict rows
+(token-plan, payg, fail-side) must equal the base's (else a ``--verdicts`` file
+the base used is missing), its loaded verdicts must be the base's plus the
+local ones, its ``judge_fail`` exclusions the base's plus the local fails, and
+its verdicts gate must pass. Exit 5 on any problem. It also counts the rebuild's
+train labels per category: ``tool_success_left`` rows are the next loop's.
 
 estimate
 --------
@@ -381,6 +423,10 @@ MODE_LOCAL_JUDGE = "local-judge"
 PHASE_LOCAL_CAL = "2-judge-local-cal"
 PHASE_LOCAL = "2-judge-local"
 CALIBRATION_FILE = "calibration-report.json"
+CALIBRATION_SCHEMA = "distill-judge-calibration/2"
+#: calibrate: a category's local verdicts are applied only with at least this many calibration pairs
+#: in it AND its own agreement at the threshold: the judge's agreement is measured where it is used.
+CALIBRATION_MIN_CATEGORY_PAIRS = 20
 #: The Max judges whose verdicts calibrate the local one (judge.py's own Max routes).
 MAX_PROVIDERS = frozenset({"max-payg", "max-token-plan"})
 MAX_PAYG_CONCURRENCY = 4
@@ -403,6 +449,8 @@ EXIT_PAUSED = 4
 EXIT_FATAL = 5
 EXIT_INCOMPLETE = 6
 EXIT_BUSY = 7
+#: ``subset --which unjudged``: no train row left for the local judge (the rebuild loop is done).
+EXIT_NOTHING_LEFT = 8
 STATE_EXIT = {
     "done": EXIT_DONE, "budget_stop": EXIT_BUDGET, "paused": EXIT_PAUSED, "fatal": EXIT_FATAL,
     "incomplete": EXIT_INCOMPLETE, "busy": EXIT_BUSY,
@@ -2404,44 +2452,121 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build_subset(src: Path, which: str, *, verdict_files: list[Path] | None = None,
-                 train_files: Iterable[Path] = (), train_labels: Iterable[str] = ("tool-success",),
-                 seed: int = DEFAULT_SEED) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """A queue for the local judge, cut from a judged workdir *src* (the Phase 2 Max re-judge).
+def _interleave_by_category(items: list[dict[str, Any]], seed: str) -> list[dict[str, Any]]:
+    """*items* shuffled (seeded) within each category, then taken one category at a time: a run cut
+    short has judged every category about equally (the small ones completely, early), and each
+    category's prefix is still a fair sample of it."""
+    by_cat: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for it in sorted(items, key=lambda x: x["id"]):
+        by_cat[str(it.get("category", "?"))].append(it)
+    queues = []
+    for cat in sorted(by_cat):
+        q = by_cat[cat]
+        random.Random(f"{seed}:{cat}").shuffle(q)
+        queues.append(q)
+    out: list[dict[str, Any]] = []
+    while queues:
+        for q in queues:
+            out.append(q.pop(0))
+        queues = [q for q in queues if q]
+    return out
 
-    ``max-judged`` (calibration): every item with a Max verdict, shuffled (seeded) so a partial run
-    is a fair sample. Its ``source`` becomes ``{"calibration_of": <source>}``: no file, so build.py
-    can never apply these verdicts (they would override Max's); fed to it by mistake they fail its
-    verdicts gate. ``unjudged``: every item WITHOUT a Max verdict whose build.py train row
+
+def read_calibration(path: Path) -> dict[str, Any]:
+    """A ``calibrate`` report (*path*: the calibration workdir or its ``calibration-report.json``) that
+    lets the local judge's verdicts be applied: decision ``use-local-judge`` and the categories it
+    was calibrated in (``apply_categories``, schema 2). Anything else is refused."""
+    path = Path(path).expanduser()
+    if path.is_dir():
+        path = path / CALIBRATION_FILE
+    if not path.is_file():
+        raise JudgeSetupError(f"no calibration report at {path} (run `calibrate` in the calibration workdir)")
+    rep = json.loads(path.read_text(encoding="utf-8"))
+    if rep.get("schema") != CALIBRATION_SCHEMA or not isinstance(rep.get("apply_categories"), list):
+        raise JudgeSetupError(f"{path} is not a {CALIBRATION_SCHEMA} report (no per-category decision): "
+                              "run `calibrate` again")
+    dec = (rep.get("decision") or {}).get("decision")
+    if dec != "use-local-judge" or not rep["apply_categories"]:
+        raise JudgeSetupError(f"{path} decided {dec!r}: the local judge's verdicts are not used "
+                              "(train on the dataset as it is)")
+    if rep.get("rubric_version") != RUBRIC_VERSION:
+        raise JudgeSetupError(f"{path} is rubric v{rep.get('rubric_version')}; this is v{RUBRIC_VERSION}")
+    rep["_path"], rep["_sha256"] = str(path), _sha256_file(path)
+    return rep
+
+
+def build_subset(src: Path | Iterable[Path], which: str, *, verdict_files: list[Path] | None = None,
+                 train_files: Iterable[Path] = (), train_labels: Iterable[str] = ("tool-success",),
+                 seed: int = DEFAULT_SEED, side: str = "pass",
+                 calibration: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """A queue for the local judge, cut from judged workdirs *src* (one or more: the Phase 2 Max
+    re-judge, and the Phase 2 sample, which holds Max verdicts in the categories the re-judge never
+    reached). An id queued in more than one source is taken from the first.
+
+    ``max-judged`` (calibration): every item with a Max verdict on the *side* the local judge will be
+    applied to (``pass``, the default: harvested tool successes; a fail-side item shows its recorded
+    error in the outcome view, so agreement on it says little), interleaved by category
+    (``_interleave_by_category``). Its ``source`` becomes ``{"calibration_of": <source>}``: no file,
+    so build.py can never apply these verdicts (they would override Max's); fed to it by mistake they
+    fail its verdicts gate. ``unjudged``: every item WITHOUT a Max verdict whose build.py train row
     (``train_row_id``) is in *train_files* with a label in *train_labels* (``tool-success``: the rows
-    trained on the harvested label only), in the source queue's order, sources kept: these verdicts
-    are build.py's to apply (a fail excludes the row, a pass makes it ``judge-pass``)."""
-    src = Path(src).expanduser()
-    queue_path, meta_path = src / QUEUE_FILE, src / QUEUE_META_FILE
-    if not queue_path.is_file():
-        raise JudgeSetupError(f"no queue at {queue_path}")
-    src_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
-    view = src_meta.get("view") or "outcome"
-    files = [Path(f).expanduser() for f in (verdict_files or [src / RESULTS_FILE])]
+    trained on the harvested label only), in a category *calibration* (``read_calibration``) lets
+    the local judge decide, in the source queues' order, sources kept: these verdicts are build.py's
+    to apply (a fail excludes the row, a pass makes it ``judge-pass``). A matched row in any other
+    category is counted (``uncalibrated_by_category``) and left as it is."""
+    srcs = [Path(src).expanduser()] if isinstance(src, (str, Path)) else [Path(s).expanduser() for s in src]
+    if not srcs:
+        raise JudgeSetupError("subset needs --from (a judged workdir)")
+    views: dict[str, str] = {}
+    for s in srcs:
+        if not (s / QUEUE_FILE).is_file():
+            raise JudgeSetupError(f"no queue at {s / QUEUE_FILE}")
+        m = json.loads((s / QUEUE_META_FILE).read_text(encoding="utf-8")) if (s / QUEUE_META_FILE).is_file() else {}
+        views[str(s)] = m.get("view") or "outcome"
+    if len(set(views.values())) != 1:
+        raise JudgeSetupError(f"the sources were judged in different views ({views}); calibrate one view")
+    view = next(iter(views.values()))
+    files = [Path(f).expanduser() for f in (verdict_files or [s / RESULTS_FILE for s in srcs])]
     verdicts: dict[str, str] = {}
     for f in files:
         if not f.is_file():
             raise JudgeSetupError(f"no Max verdicts at {f}")
         verdicts.update(max_verdicts(iter_jsonl(f), view))
     meta: dict[str, Any] = {"schema": "distill-judge-queue/1", "created": iso(utc_now()),
-                            "subset_from": str(src), "view": view, "seed": seed,
-                            "max_verdict_files": [str(f) for f in files]}
+                            "subset_from": str(srcs[0]), "subset_sources": [str(s) for s in srcs],
+                            "view": view, "seed": seed, "max_verdict_files": [str(f) for f in files]}
+
+    def items() -> Iterable[tuple[Path, dict[str, Any]]]:
+        seen: set[str] = set()
+        for s in srcs:
+            for item in iter_jsonl(s / QUEUE_FILE):
+                if item["id"] not in seen:
+                    seen.add(item["id"])
+                    yield s, item
+
     chosen: list[dict[str, Any]] = []
     if which == "max-judged":
-        for item in iter_jsonl(queue_path):
-            if item["id"] in verdicts:
+        if side not in ("pass", "fail", "both"):
+            raise JudgeSetupError(f"--side must be pass, fail or both, not {side!r}")
+        per_source: dict[str, Counter] = {str(s): Counter() for s in srcs}
+        for s, item in items():
+            if item["id"] in verdicts and (side == "both" or item.get("label") == side):
                 item["source"] = {"calibration_of": item.get("source")}
                 chosen.append(item)
-        chosen.sort(key=lambda it: it["id"])
-        random.Random(f"{seed}:calibration").shuffle(chosen)
-        meta.update({"mode": MODE_CALIBRATION,
-                     "max_verdicts": dict(Counter(verdicts[it["id"]] for it in chosen))})
+                per_source[str(s)][str(item.get("category", "?"))] += 1
+        chosen = _interleave_by_category(chosen, f"{seed}:calibration")
+        by_cat: dict[str, Counter] = defaultdict(Counter)
+        for it in chosen:
+            by_cat[str(it.get("category", "?"))][verdicts[it["id"]]] += 1
+        meta.update({"mode": MODE_CALIBRATION, "side": side,
+                     "max_verdicts": dict(Counter(verdicts[it["id"]] for it in chosen)),
+                     "max_verdicts_by_category": {c: dict(v) for c, v in sorted(by_cat.items())},
+                     "queued_by_source": {k: dict(sorted(v.items())) for k, v in per_source.items()}})
     elif which == "unjudged":
+        if calibration is None:
+            raise JudgeSetupError("--which unjudged needs --calibration (the calibration workdir whose report "
+                                  "decided use-local-judge): the local judge decides only where it was calibrated")
+        apply = {str(c) for c in calibration["apply_categories"]}
         labels = {str(x) for x in train_labels}
         wanted: dict[str, str] = {}
         info = []
@@ -2457,17 +2582,34 @@ def build_subset(src: Path, which: str, *, verdict_files: list[Path] | None = No
         if not info:
             raise JudgeSetupError("--which unjudged needs --train-file (the dataset build's train.jsonl)")
         matched: set[str] = set()
-        for item in iter_jsonl(queue_path):
+        uncalibrated: Counter = Counter()
+        target: Counter = Counter()
+        for _s, item in items():
             src_ = item.get("source") or {}
             if item["id"] in verdicts or not src_.get("file") or not isinstance(src_.get("line"), int):
                 continue
             rid = train_row_id(src_["file"], src_["line"])
             if rid in wanted and rid not in matched:
                 matched.add(rid)
-                chosen.append(item)
+                cat = str(item.get("category", "?"))
+                target[cat] += 1
+                if cat in apply:
+                    chosen.append(item)
+                else:
+                    uncalibrated[cat] += 1
+        cal_cats = {c["category"]: c for c in calibration.get("by_category") or []}
         meta.update({"mode": MODE_LOCAL_JUDGE, "train_files": info, "train_labels": sorted(labels),
                      "train_rows_with_label": len(wanted), "train_rows_matched": len(matched),
-                     "train_rows_unmatched": len(set(wanted) - matched)})
+                     "train_rows_unmatched": len(set(wanted) - matched),
+                     "calibration": {"path": calibration.get("_path"), "sha256": calibration.get("_sha256"),
+                                     "created": calibration.get("created"),
+                                     "apply_categories": sorted(apply)},
+                     "uncalibrated_by_category": dict(sorted(uncalibrated.items())),
+                     "target_by_category": {
+                         c: {"rows": n, "applied": c in apply,
+                             "calibration_pairs": (cal_cats.get(c) or {}).get("n", 0),
+                             "calibration_agreement": (cal_cats.get(c) or {}).get("agreement")}
+                         for c, n in sorted(target.items())}})
     else:
         raise JudgeSetupError(f"--which must be max-judged or unjudged, not {which!r}")
     for item in chosen:
@@ -2506,13 +2648,20 @@ def _cell(pairs: list[tuple[str, str]]) -> tuple[int, int, int, int]:
 def calibration_report(items: list[dict[str, Any]], local_rows: list[dict[str, Any]],
                        max_rows: Iterable[dict[str, Any]], *, view: str = "outcome",
                        threshold: float = CALIBRATION_THRESHOLD,
-                       allow_missing: int | None = None) -> dict[str, Any]:
+                       allow_missing: int | None = None,
+                       min_category_pairs: int = CALIBRATION_MIN_CATEGORY_PAIRS) -> dict[str, Any]:
     """How well the local judge agrees with Max on the same items (same rubric, prompt and view).
 
     The set is the queued items Max judged; a pair is one the local judge also judged (its latest
     ``ok`` row, provider ``local``). Decision on the point agreement over the pairs: ``use-local-judge``
     at *threshold* or above, else ``do-not-use``; ``incomplete`` while more than *allow_missing* items
-    (default ``CALIBRATION_ALLOW_MISSING_SHARE`` of the set) have no local verdict."""
+    (default ``CALIBRATION_ALLOW_MISSING_SHARE`` of the set) have no local verdict.
+
+    The overall agreement is dominated by the biggest category, so it says nothing about the others.
+    ``apply_categories`` are the categories whose local verdicts may go to build.py: at least
+    *min_category_pairs* pairs in the category and its own agreement at *threshold* or above. A
+    category below that, or absent from the set, is uncalibrated: ``subset --which unjudged`` leaves
+    its rows as they are. ``use-local-judge`` needs the overall agreement AND one such category."""
     mx = max_verdicts(max_rows, view)
     category = {it["id"]: it.get("category", "?") for it in items}
     calib = [it["id"] for it in items if it["id"] in mx]
@@ -2538,25 +2687,41 @@ def calibration_report(items: list[dict[str, Any]], local_rows: list[dict[str, A
         cp = [(m, lo) for i, m, lo in pairs if category[i] == cat]
         ca, cb, cc, cd = _cell(cp)
         ck, _ = cohen_kappa(ca, cb, cc, cd)
+        c_rate = (ca + cd) / len(cp) if cp else None
+        if len(cp) < min_category_pairs:
+            apply_c, c_why = False, f"{len(cp)} pair(s) < {min_category_pairs}: uncalibrated"
+        elif c_rate is not None and c_rate >= threshold - 1e-12:
+            apply_c, c_why = True, f"{c_rate:.2%} >= {threshold:.0%} on {len(cp)} pairs"
+        else:
+            apply_c, c_why = False, f"{c_rate:.2%} < {threshold:.0%} on {len(cp)} pairs"
         by_cat.append({"category": cat, "set": sum(1 for i in calib if category[i] == cat), "n": len(cp),
                        "agreement": _rate(ca + cd, len(cp)), "ci95": _ci(ca + cd, len(cp)), "kappa": ck,
-                       "false_pass_k": cc, "max_fail_n": cc + cd, "false_fail_k": cb, "max_pass_n": ca + cb})
+                       "false_pass_k": cc, "max_fail_n": cc + cd, "false_fail_k": cb, "max_pass_n": ca + cb,
+                       "apply": apply_c, "apply_reason": c_why})
     by_cat.sort(key=lambda x: (x["agreement"] if x["agreement"] is not None else 2.0, x["category"]))
 
     rate = agree / n if n else None
+    apply_categories = sorted(c["category"] for c in by_cat if c["apply"])
     if not n:
         decision, why = "incomplete", "no item has both a Max and a local verdict yet"
     elif len(missing) > allow_missing:
         decision, why = "incomplete", (f"{len(missing)} of {len(calib)} Max-judged item(s) have no local verdict "
                                        f"(allowed: {allow_missing}): run the local judge again")
-    elif rate is not None and rate >= threshold - 1e-12:
-        decision, why = "use-local-judge", f"agreement {rate:.2%} >= {threshold:.0%}"
-    else:
+    elif rate is None or rate < threshold - 1e-12:
         decision, why = "do-not-use", f"agreement {rate:.2%} < {threshold:.0%}: train on the dataset as it is"
+    elif not apply_categories:
+        decision, why = "do-not-use", (f"agreement {rate:.2%} >= {threshold:.0%}, but no category has "
+                                       f"{min_category_pairs}+ pairs at {threshold:.0%}: train on the dataset as it is")
+    else:
+        decision, why = "use-local-judge", (f"agreement {rate:.2%} >= {threshold:.0%}; applied only in "
+                                            + ", ".join(apply_categories))
+    if decision != "use-local-judge":
+        apply_categories = []
     judged_by = [local[i] for i, _m, _lo in pairs]
     return {
-        "schema": "distill-judge-calibration/1", "created": iso(utc_now()), "view": view,
+        "schema": CALIBRATION_SCHEMA, "created": iso(utc_now()), "view": view,
         "rubric_version": RUBRIC_VERSION, "threshold": threshold,
+        "min_category_pairs": min_category_pairs, "apply_categories": apply_categories,
         "set": len(calib), "pairs": n, "missing": len(missing), "allow_missing": allow_missing,
         "missing_after_unparseable": sum(1 for i in missing if "unparseable" in seen_status[i]),
         "missing_after_error": sum(1 for i in missing if "error" in seen_status[i]),
@@ -2604,15 +2769,103 @@ def render_calibration(rep: dict[str, Any]) -> str:
         f"- Pass rate: Max {_pct(rep['pass_rate']['max'])}, local {_pct(rep['pass_rate']['local'])}.",
         "- Local judge: " + ", ".join(f"{k} ({v})" for k, v in rep["judge"]["models"].items())
         + "; host " + ", ".join(rep["judge"]["hosts"]) + "; quant " + ", ".join(rep["judge"]["quants"]) + ".",
+        ("- Applied only in: " + ", ".join(rep["apply_categories"]) + f" (each {rep['min_category_pairs']}+ pairs "
+         f"at {rep['threshold']:.0%}). Every other category is uncalibrated: its rows stay as they are."
+         if rep["apply_categories"] else "- Applied in: no category."),
         "",
-        "| Category | Compared | Agreement | 95% CI | kappa | Local pass / Max fail | Local fail / Max pass |",
-        "|---|---:|---:|---|---:|---:|---:|",
+        "| Category | Compared | Agreement | 95% CI | kappa | Local pass / Max fail | Local fail / Max pass | Apply |",
+        "|---|---:|---:|---|---:|---:|---:|---|",
     ]
     for c in rep["by_category"]:
         lines.append(f"| {c['category']} | {c['n']}/{c['set']} | {_pct(c['agreement'])} | "
                      f"{_ci_text(c['ci95']).strip()} | {'n/a' if c['kappa'] is None else format(c['kappa'], '.3f')} | "
-                     f"{c['false_pass_k']}/{c['max_fail_n']} | {c['false_fail_k']}/{c['max_pass_n']} |")
+                     f"{c['false_pass_k']}/{c['max_fail_n']} | {c['false_fail_k']}/{c['max_pass_n']} | "
+                     f"{'yes' if c['apply'] and rep['apply_categories'] else 'no'} ({c['apply_reason']}) |")
     return "\n".join(lines) + "\n"
+
+
+def local_verdict_keys(files: Iterable[Path]) -> tuple[dict[str, str], int]:
+    """(build.py's trace key ``<file>:<line + 1>`` -> verdict, later rows and files winning, as its
+    ``load_verdicts`` does) for the local judge's ``ok`` rows in *files*, and the number of ``ok``
+    local rows build.py could not apply (no ``source.file``: a calibration queue's)."""
+    out: dict[str, str] = {}
+    unusable = 0
+    for f in files:
+        for r in iter_jsonl(f):
+            if r.get("status") != "ok" or r.get("provider") != "local":
+                continue
+            src = r.get("source") if isinstance(r.get("source"), dict) else {}
+            file, line = src.get("file"), src.get("line")
+            if not file or type(line) is not int or line < 0 or r.get("verdict") not in LABELS:
+                unusable += 1
+                continue
+            out[f"{file}:{line + 1}"] = r["verdict"]
+    return out, unusable
+
+
+def _verdict_accounting(rep: dict[str, Any]) -> dict[str, Any]:
+    g = (rep.get("gates") or {}).get("verdicts") or {}
+    c = rep.get("counts") or {}
+    return {"loaded": int(g.get("loaded") or 0), "gate_pass": g.get("pass"),
+            "unmatched": g.get("unmatched"), "rows_unusable": g.get("rows_unusable"),
+            "max_judge": g.get("max_judge"), "judge_fail": int(c.get("excluded:judge_fail") or 0),
+            "tokenplan_max_judge": int(c.get("verdict_rows_tokenplan_max_judge") or 0),
+            "payg_max_judge": int(c.get("verdict_rows_payg_max_judge") or 0),
+            "fail_side": int(c.get("verdict_rows_fail_side") or 0)}
+
+
+def check_build(base: dict[str, Any], build: dict[str, Any], local: dict[str, str], *,
+                local_unusable: int = 0, train_rows: Iterable[dict[str, Any]] = ()) -> dict[str, Any]:
+    """Is *build* (a build.py ``report.json``) the *base* build plus the local judge's verdicts *local*
+    (``local_verdict_keys``), nothing lost? Its Max verdict rows must equal the base's (every
+    ``--verdicts`` file the base used is still there), its unique verdicts must be the base's plus
+    the local ones, and its ``judge_fail`` exclusions the base's plus the local fails. *train_rows*
+    (the build's train.jsonl) gives the labels left per category: ``tool-success`` rows are the ones
+    a further local-judge round would take (rows from past the coding cap's old cut, or the parallel
+    sibling of a dropped row, enter a rebuild with no verdict)."""
+    b, r = _verdict_accounting(base), _verdict_accounting(build)
+    n_fail = sum(1 for v in local.values() if v == "fail")
+    expected = {"loaded": b["loaded"] + len(local), "judge_fail": b["judge_fail"] + n_fail}
+    problems: list[str] = []
+    if r["tokenplan_max_judge"] != b["tokenplan_max_judge"] or r["payg_max_judge"] != b["payg_max_judge"] \
+            or r["fail_side"] != b["fail_side"]:
+        problems.append(
+            f"Max verdict rows differ from the base's (token-plan {r['tokenplan_max_judge']} vs "
+            f"{b['tokenplan_max_judge']}, payg {r['payg_max_judge']} vs {b['payg_max_judge']}, fail-side "
+            f"{r['fail_side']} vs {b['fail_side']}): pass every --verdicts file the base used, in its order, "
+            "then the local judge's files")
+    if r["loaded"] != expected["loaded"]:
+        problems.append(f"verdicts loaded {r['loaded']}, expected {expected['loaded']} (base {b['loaded']} + "
+                        f"{len(local)} local): a verdict file is missing, extra, or overlaps another")
+    if r["judge_fail"] != expected["judge_fail"]:
+        problems.append(f"judge_fail exclusions {r['judge_fail']}, expected {expected['judge_fail']} (base "
+                        f"{b['judge_fail']} + {n_fail} local fails)")
+    if not r["gate_pass"]:
+        problems.append(f"the build's verdicts gate fails (unmatched {r['unmatched']}, unusable "
+                        f"{r['rows_unusable']}, max_judge {r['max_judge']})")
+    if local_unusable:
+        problems.append(f"{local_unusable} local verdict row(s) have no trace file (a calibration workdir's): "
+                        "never pass the calibration verdicts to build.py")
+    labels: dict[str, Counter] = defaultdict(Counter)
+    for row in train_rows:
+        labels[str(row.get("label"))][str(row.get("category", "?"))] += 1
+    settings_b, settings_r = base.get("settings") or {}, build.get("settings") or {}
+    gates = build.get("gates") or {}
+    return {
+        "schema": "distill-judge-check-build/1", "created": iso(utc_now()),
+        "ok": not problems, "problems": problems,
+        "base": b, "build": r, "expected": expected,
+        "local": {"verdicts": len(local), "pass": len(local) - n_fail, "fail": n_fail, "unusable": local_unusable},
+        "train": {"base": ((base.get("inputs") or {}).get("written") or {}).get("train.jsonl"),
+                  "build": ((build.get("inputs") or {}).get("written") or {}).get("train.jsonl"),
+                  "size_gate": gates.get("train_size"), "overall": gates.get("overall")},
+        "train_labels_by_category": {k: dict(sorted(v.items())) for k, v in sorted(labels.items())},
+        "tool_success_left": sum(labels.get("tool-success", Counter()).values()),
+        "settings_changed": sorted(k for k in set(settings_b) | set(settings_r)
+                                   if settings_b.get(k) != settings_r.get(k)),
+        "inputs_changed": sorted(k for k in ("golden", "extra", "fail")
+                                 if (base.get("inputs") or {}).get(k) != (build.get("inputs") or {}).get(k)),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2994,16 +3247,25 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_subset(args: argparse.Namespace) -> int:
     """A local-judge queue cut from a judged workdir (``build_subset``)."""
     p = _paths(args)
-    src = Path(args.subset_from).expanduser().resolve()
-    if src == p["work"].resolve():
+    srcs = [Path(s).expanduser().resolve() for s in args.subset_from]
+    if p["work"].resolve() in srcs:
         raise JudgeSetupError("subset needs its own --workdir; the source workdir stays as it is")
+    if len(set(srcs)) != len(srcs):
+        raise JudgeSetupError("a --from workdir is named twice")
     if p["queue"].exists() and not args.force:
         print(f"{p['queue']} exists; pass --force to replace it", file=sys.stderr)
         return EXIT_ERROR
-    queue, meta = build_subset(src, args.which, verdict_files=args.max_verdicts, train_files=args.train_file or (),
-                               train_labels=args.train_label or ("tool-success",), seed=args.seed)
+    calibration = read_calibration(args.calibration) if args.which == "unjudged" and args.calibration else None
+    queue, meta = build_subset(srcs, args.which, verdict_files=args.max_verdicts, train_files=args.train_file or (),
+                               train_labels=args.train_label or ("tool-success",), seed=args.seed,
+                               side=args.side, calibration=calibration)
+    if not queue and args.which == "unjudged":
+        print(json.dumps({k: v for k, v in meta.items() if k not in ("max_verdict_files",)}, indent=1))
+        print("nothing left for the local judge in the calibrated categories: the rebuild loop is done "
+              "(no queue written)", file=sys.stderr)
+        return EXIT_NOTHING_LEFT
     if not queue:
-        raise JudgeSetupError(f"the {args.which} subset of {src} is empty")
+        raise JudgeSetupError(f"the {args.which} subset of {', '.join(map(str, srcs))} is empty")
     write_private(p["queue"], "".join(json.dumps(q, ensure_ascii=False) + "\n" for q in queue))
     write_private(p["meta"], json.dumps(meta, indent=1) + "\n")
     print(json.dumps({k: v for k, v in meta.items() if k not in ("max_verdict_files",)}, indent=1))
@@ -3019,7 +3281,8 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     meta = _read_meta(p)
     if meta.get("mode") != MODE_CALIBRATION:
         print(f"note: {p['queue']} is not a calibration queue (mode {meta.get('mode')!r})", file=sys.stderr)
-    files = args.max_verdicts or ([Path(meta["subset_from"]) / RESULTS_FILE] if meta.get("subset_from") else [])
+    files = args.max_verdicts or [Path(f) for f in meta.get("max_verdict_files") or []] \
+        or ([Path(meta["subset_from"]) / RESULTS_FILE] if meta.get("subset_from") else [])
     if not files:
         raise JudgeSetupError("--max-verdicts (the Max judge's judge-sample.jsonl) is required")
     max_rows: list[dict[str, Any]] = []
@@ -3030,13 +3293,48 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         max_rows.extend(iter_jsonl(f))
     report = calibration_report(items, read_jsonl(p["results"]), max_rows,
                                 view=args.view or meta.get("view") or "outcome", threshold=args.threshold,
-                                allow_missing=args.allow_missing)
+                                allow_missing=args.allow_missing, min_category_pairs=args.min_category_pairs)
+    report["max_verdict_files"] = [str(Path(f).expanduser()) for f in files]
     write_private(p["work"] / CALIBRATION_FILE, json.dumps(report, indent=1) + "\n")
     text = render_calibration(report)
     if args.markdown_out:
         write_private(Path(args.markdown_out), text)
     print(text)
     return EXIT_INCOMPLETE if report["decision"]["decision"] == "incomplete" else EXIT_DONE
+
+
+def _report_json(path: Path) -> dict[str, Any]:
+    path = Path(path).expanduser()
+    if path.is_dir():
+        path = path / "report.json"
+    if not path.is_file():
+        raise JudgeSetupError(f"no build report at {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def cmd_check_build(args: argparse.Namespace) -> int:
+    """A rebuild with the local judge's verdicts against its base build (``check_build``)."""
+    files = []
+    for f in args.local:
+        f = Path(f).expanduser()
+        f = f / RESULTS_FILE if f.is_dir() else f
+        if not f.is_file():
+            raise JudgeSetupError(f"no local verdicts at {f}")
+        files.append(f)
+    local, unusable = local_verdict_keys(files)
+    build_dir = Path(args.build).expanduser()
+    train = (build_dir if build_dir.is_dir() else build_dir.parent) / "train.jsonl"
+    rep = check_build(_report_json(args.base), _report_json(args.build), local, local_unusable=unusable,
+                      train_rows=iter_jsonl(train) if train.is_file() else ())
+    rep["local"]["files"] = [str(f) for f in files]
+    print(json.dumps(rep, indent=1))
+    if not rep["ok"]:
+        print("refused: " + "; ".join(rep["problems"]), file=sys.stderr)
+        return EXIT_FATAL
+    if rep["tool_success_left"]:
+        print(f"{rep['tool_success_left']} tool-success train row(s) left: run `subset --which unjudged` on this "
+              "build's train.jsonl in a new workdir (exit 8 there = none in a calibrated category)", file=sys.stderr)
+    return EXIT_DONE
 
 
 def _add_provider_args(r: argparse.ArgumentParser, *, view: bool = True) -> None:
@@ -3134,11 +3432,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     u = sub.add_parser("subset", help="a local-judge queue cut from a judged workdir: the Max-judged items "
                                       "(calibration) or the unjudged train rows")
-    u.add_argument("--from", dest="subset_from", type=Path, required=True,
-                   help="the judged workdir (the Phase 2 re-judge: its queue and Max verdicts)")
+    u.add_argument("--from", dest="subset_from", type=Path, action="append", required=True,
+                   help="a judged workdir (its queue and Max verdicts); repeatable: the Phase 2 re-judge and "
+                        "the Phase 2 sample (the only Max verdicts in sentinel/daemon and other)")
     u.add_argument("--which", choices=("max-judged", "unjudged"), required=True)
+    u.add_argument("--side", choices=("pass", "fail", "both"), default="pass",
+                   help="max-judged: the label side to calibrate on (default pass: the side the local "
+                        "judge is applied to)")
+    u.add_argument("--calibration", type=Path, default=None,
+                   help="unjudged (required): the calibration workdir (or its calibration-report.json); only "
+                        "its apply_categories are queued")
     u.add_argument("--max-verdicts", type=Path, action="append", default=None,
-                   help="the Max verdict file(s) (default: <from>/judge-sample.jsonl)")
+                   help="the Max verdict file(s) (default: each <from>/judge-sample.jsonl)")
     u.add_argument("--train-file", type=Path, action="append", default=None,
                    help="unjudged: the dataset build's train.jsonl (its rows' ids pick the items)")
     u.add_argument("--train-label", action="append", default=None,
@@ -3154,8 +3459,17 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--allow-missing", type=int, default=None,
                    help=f"items without a local verdict allowed (default {CALIBRATION_ALLOW_MISSING_SHARE * 100:.0f}%% "
                         "of the set)")
+    c.add_argument("--min-category-pairs", type=int, default=CALIBRATION_MIN_CATEGORY_PAIRS,
+                   help="a category's local verdicts are applied only with this many pairs in it, at the threshold")
     c.add_argument("--view", choices=VIEWS, default=None)
     c.add_argument("--markdown-out", type=Path, default=None)
+
+    k = sub.add_parser("check-build", help="a rebuild with the local verdicts against its base build: every Max "
+                                           "verdict kept, the local ones added, the tool-success rows left")
+    k.add_argument("--base", type=Path, required=True, help="the base build directory (or its report.json)")
+    k.add_argument("--build", type=Path, required=True, help="the rebuild's directory (or its report.json)")
+    k.add_argument("--local", type=Path, action="append", required=True,
+                   help="a local-judge workdir (or its judge-sample.jsonl) the rebuild was given; repeatable")
 
     q = sub.add_parser("report", help="agreement, false-pass rate and the Phase 2 gate")
     q.add_argument("--view", choices=VIEWS, default=None)
@@ -3181,6 +3495,8 @@ def main(argv: list[str] | None = None, **run_hooks: Any) -> int:
             return cmd_subset(args)
         if args.cmd == "calibrate":
             return cmd_calibrate(args)
+        if args.cmd == "check-build":
+            return cmd_check_build(args)
         return cmd_report(args)
     except JudgeSetupError as exc:
         print(f"refused: {exc}", file=sys.stderr)
