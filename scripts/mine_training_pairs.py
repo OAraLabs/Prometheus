@@ -216,6 +216,10 @@ def main() -> int:
             rejected=p["rejected"],
             chosen=p["chosen"],
             meta=p["meta"],
+            # The chosen side is a success = 1 call: it ran without error.
+            # No turn is known here, so turn_outcome stays for the backfill
+            # (`oara trace-labels`), which calls it unknown.
+            tool_ok=True,
         )
         for p in pairs
     )

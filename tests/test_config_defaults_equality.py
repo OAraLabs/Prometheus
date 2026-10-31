@@ -155,10 +155,6 @@ KNOWN_CONFLICTS: dict[str, str] = {
     "model.model": "DECIDE — 'qwen3.5-32b' (daemon.py:290, __main__.py:105) vs "
                    "'unknown'/'default' at report sites",
     "model.provider": "DECIDE — '' (daemon.py:334) vs 'llama_cpp' elsewhere",
-    "trajectory_export.enabled": "CODE-SUSPECT — daemon.py:1369 falls back False "
-                                 "(behaviour), doctor.py:594 falls back True "
-                                 "(report): doctor reports an exporter that is "
-                                 "not running",
 }
 
 # Roots the extractor could not bind to their real parent. Each is a NESTED
