@@ -1848,3 +1848,624 @@ def test_cli_build_applies_the_default_train_source_policy(
     assert report["data_policy"]["sources"][GYM]["excluded_by_reason"] == {
         "train_source_wrong_model": 88}
     assert report["settings"]["teacher_model"] == build.TEACHER_MODEL  # fails closed
+
+
+# ── Q6b: the explicit, recorded allow for Max-derived rows to train ────────
+
+AP = build.AP
+REF = "operator Q6b 2026-10-30"
+
+
+def allow_builder(root: Path, **kw: Any) -> Any:
+    root.mkdir(parents=True, exist_ok=True)
+    settings = {"train_sources": (GYM,), "eval_task_frac": 0.15, "val_frac": 0.05,
+                "holdout_max_group_share": 0.5, "val_share_range": (0.0, 1.0),
+                "allow_max_derived": True, "max_derived_approval": REF, **kw}
+    return make_builder(root, **settings)
+
+
+def test_q6b_dataset_manifest_name_is_the_policy_modules() -> None:
+    assert build.DATASET_MANIFEST == AP.DATASET_MANIFEST
+    assert build.REPORT_SCHEMA == AP.REPORT_SCHEMA
+
+
+def test_q6b_allow_needs_both_flags_and_a_tagged_output(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    golden, gym_file = policy_inputs(tmp_path)
+    pack = tmp_path / "pack.json"
+    pack.write_text(json.dumps(make_pack()))
+    monkeypatch.setattr(R.Student, "load", classmethod(lambda cls, d: make_student()))
+
+    def run(out: Path, *extra: str) -> int:
+        return build.main(["build", "--traces", str(golden), "--extra-traces", str(gym_file),
+                           "--pack", str(pack), "--tokenizer-dir", "unused", "--out", str(out),
+                           "--dry-run", "--eval-min", "1", "--train-range", "1", "1000",
+                           "--val-share-range", "0", "1", "--eval-task-frac", "0.15",
+                           "--holdout-max-group-share", "0.5", "--min-presence", "0", *extra])
+
+    plain, tagged = tmp_path / "phase3", tmp_path / "phase3-max-derived"
+    sessions = tmp_path / "exclude-sessions.txt"
+    sessions.write_text("# the 2026-10-13 Token-Plan incident session\nincident:s9\n")
+    excl = ("--exclude-sessions", str(sessions))
+    for extra in (["--allow-max-derived"], ["--max-derived-approval", REF]):
+        assert run(tagged, *extra, *excl) == 2
+        assert "go together" in capsys.readouterr().err
+    assert run(tagged, "--allow-max-derived", "--max-derived-approval", "  ", *excl) == 2
+    assert "not blank" in capsys.readouterr().err
+    assert run(plain, "--allow-max-derived", "--max-derived-approval", REF, *excl) == 2
+    assert "phase3-max-derived" in capsys.readouterr().err  # the tagged name it should use
+    assert run(tagged, "--allow-max-derived", "--max-derived-approval", REF, *excl,
+               "--report", str(tmp_path / "report.json")) == 2
+    # the incident session's exclusion list is required with the allow, and not empty
+    assert run(tagged, "--allow-max-derived", "--max-derived-approval", REF) == 2
+    assert "--exclude-sessions" in capsys.readouterr().err
+    empty = tmp_path / "none.txt"
+    empty.write_text("# nothing listed\n\n")
+    assert run(tagged, "--allow-max-derived", "--max-derived-approval", REF,
+               "--exclude-sessions", str(empty)) == 2
+    assert "lists no session" in capsys.readouterr().err
+    assert not plain.exists() and not tagged.exists()
+    # without the allow Max rows stay eval-only
+    assert run(plain) == 1
+    report = json.loads((plain / "report.json").read_text())
+    assert report["max_derived"] is False and report["tags"] == [] and not report["private"]
+    assert report["holds_max_rows"] is True  # eval-tools is Max material
+    assert report["data_policy"]["max_derived_allow"]["allowed"] is False
+    assert report["splits"]["train"]["max_derived"] == 0
+    assert report["data_policy"]["share"]["by_split"]["train"]["max"]["rows"] == 0
+    capsys.readouterr()
+    # with both: logged, recorded verbatim, and the dataset is tagged
+    assert run(tagged, "--allow-max-derived", "--max-derived-approval", REF, *excl) == 1  # INCOMPLETE
+    err = capsys.readouterr().err
+    assert "ALLOW (Q6b)" in err and REF in err
+    report = json.loads((tagged / "report.json").read_text())
+    assert report["max_derived"] is True and report["tags"] == ["max-derived"]
+    assert report["settings"]["max_derived_approval"] == REF
+    assert report["settings"]["allow_max_derived"] is True
+    allow = report["data_policy"]["max_derived_allow"]
+    assert allow["allowed"] and allow["approval"] == REF
+    assert allow["flags"] == [AP.BUILD_ALLOW_FLAG, AP.BUILD_APPROVAL_FLAG]
+    assert allow["excluded_sessions_listed"] == 1 and allow["excluded_session_rows"] == 0
+    assert report["settings"]["exclude_sessions"] == 1 and "incident:s9" not in json.dumps(report)
+    assert allow["rows_in_train_val"] == allow["covered_in_train_val"] > 0
+    assert report["gates"]["data_policy"]["pass"]
+    assert report["settings"]["teacher_model"] == build.TEACHER_MODEL  # the guards fail closed
+    assert AP.dataset_approval(report) == REF
+    assert not (tagged / build.DATASET_MANIFEST).exists()  # a dry run writes the report only
+
+
+def test_q6b_max_rows_train_under_the_same_gates_with_shares(tmp_path: Path) -> None:
+    golden, gym_file = policy_inputs(tmp_path)
+    b = allow_builder(tmp_path / "b")
+    feed(b, golden)
+    feed(b, gym_file, "extra")
+    assert b.max_allowed
+    info = b.split()
+    gates = b.gates()
+    train_val = b.final["train"] + b.final["val"]
+    max_tv = [e for e in train_val if e.max_derived]
+    gym_tv = [e for e in train_val if e.source == GYM]
+    assert max_tv and gym_tv and len(max_tv) + len(gym_tv) == len(train_val)
+    assert all(e.approval == REF and e.model == build.TEACHER_MODEL and e.train_ok
+               and e.kind == "golden" for e in max_tv)
+    assert all(not e.max_derived and e.approval == "" for e in gym_tv)
+    # the same gates: leakage across splits, the category cap over the mix, data policy
+    assert gates["leakage"]["pass"] and gates["category_cap"]["pass"]
+    dp = gates["data_policy"]
+    assert dp["pass"] and dp["max_derived_allowed"] and dp["max_derived_approval"] == REF
+    assert dp["max_derived_covered_in_train_val"] == len(max_tv) == dp["max_derived_in_train_val"]
+    assert dp["max_derived_uncovered_in_train_val"] == 0
+    assert dp["outside_train_sources_in_train_val"] == 0
+    assert gates["train_size"]["by_source"]["max-golden"] > 0  # Max rows count toward size
+    report = b.report(info, gates, catalog="stubs", head_tokens={}, inputs={}, elapsed=0.0)
+    assert report["max_derived"] is True and report["tags"] == ["max-derived"]
+    assert report["private"] is True and report["holds_max_rows"] is True
+    pol = report["data_policy"]
+    assert pol["rule"].startswith(build.POLICY_RULE) and build.MAX_ALLOW_RULE in pol["rule"]
+    share = pol["share"]
+    assert share["approval"] == REF and share["max_derived_allowed"] is True
+    for split, rows in b.final.items():
+        s = share["by_split"][split]
+        assert s["rows"] == len(rows)
+        assert sum(s[c]["rows"] for c in build.SHARE_CLASSES) == len(rows)
+        if rows:
+            assert abs(sum(s[c]["pct"] for c in build.SHARE_CLASSES) - 100.0) < 0.05
+    tr = share["by_split"]["train"]
+    assert tr["max"]["rows"] == sum(1 for e in b.final["train"] if e.max_derived) > 0
+    assert tr[GYM]["rows"] == sum(1 for e in b.final["train"] if e.source == GYM) > 0
+    mg, gs = pol["sources"]["max-golden"], pol["sources"][GYM]
+    assert mg["class"] == "max" and gs["class"] == GYM
+    assert mg["share"]["train"] == tr["max"]["pct"] and gs["share"]["train"] == tr[GYM]["pct"]
+    assert mg["max_derived_allowed"] == mg["accepted"] and gs["max_derived_allowed"] == 0
+    blob = json.dumps(report)
+    assert "please handle" not in blob and "git status" not in blob
+    # written rows carry the flag and the approval; the trainer reads both
+    out = tmp_path / "phase3-max-derived"
+    out.mkdir()
+    written = b.write(out)
+    (out / "report.json").write_text(json.dumps(report))
+    for row in read_jsonl(out / "train.jsonl") + read_jsonl(out / "val.jsonl"):
+        if row["source"] == GYM:
+            assert row["max_derived"] is False and row["max_derived_approval"] is None
+        else:
+            assert row["max_derived"] is True and row["max_derived_approval"] == REF
+    m = b.dataset_manifest(out, written, report, out / "report.json")
+    assert m["schema"] == AP.DATASET_MANIFEST_SCHEMA and m["max_derived"] is True
+    assert m["tags"] == ["max-derived"] and m["max_derived_allow"]["approval"] == REF
+    assert m["files"]["train.jsonl"]["rows"] == len(b.final["train"])
+    assert len(m["files"]["train.jsonl"]["sha256"]) == 64 and m["report"] == "report.json"
+    if (_DIR / "train_qlora.py").is_file():
+        T = _load("distill_train_qlora", "train_qlora.py")
+        assert T.builder_teacher_is_max(out / "train.jsonl") is True
+        assert T.dataset_record(out / "train.jsonl")["approval"] == REF
+
+
+def test_q6b_the_max_only_holdout_and_listed_tasks_stay_eval_tools(tmp_path: Path) -> None:
+    golden, gym_file = policy_inputs(tmp_path)
+    # what a Max-only build (the Phase 3 build) holds out
+    (tmp_path / "a").mkdir()
+    b0 = make_builder(tmp_path / "a", eval_task_frac=0.15, val_frac=0.05,
+                      holdout_max_group_share=0.5)
+    feed(b0, golden)
+    b0.split()
+    held0 = {e.task_id for e in b0.examples if e.split == "eval-tools"}
+    assert held0
+    b1 = allow_builder(tmp_path / "b")
+    feed(b1, golden)
+    feed(b1, gym_file, "extra")
+    info = b1.split()
+    tv = {e.task_id for k in ("train", "val") for e in b1.final[k]}
+    held1 = {e.task_id for e in b1.examples if e.split == "eval-tools"}
+    assert held0 <= held1 and not held0 & tv  # still eval data, never trained
+    assert info["plan"].max_holdout_tasks == len(held0)
+    assert any(e.source == GYM for e in b1.final["eval-tools"])  # the quota comes from gym
+    assert any(e.max_derived for e in b1.final["train"])
+    # an earlier eval set's tasks (--eval-holdout) stay eval-tools too
+    max_t = next(e.task_id for e in b1.final["train"] if e.max_derived)
+    gym_t = next(e.task_id for e in b1.final["train"] if e.source == GYM)
+    cases = write_jsonl(tmp_path / "eval-tools.jsonl", [{"meta": {"task_id": max_t}},
+                                                         {"task_id": gym_t}, {"meta": {}}])
+    tasks = build.read_holdout_tasks(cases)
+    assert tasks == {max_t, gym_t}
+    with pytest.raises(ValueError):
+        build.read_holdout_tasks(write_jsonl(tmp_path / "none.jsonl", [{"meta": {}}]))
+    b2 = allow_builder(tmp_path / "c")
+    b2.eval_holdout_tasks = frozenset(tasks)
+    feed(b2, golden)
+    feed(b2, gym_file, "extra")
+    info2 = b2.split()
+    split_of = {e.task_id: e.split for e in b2.examples}
+    assert split_of[max_t] == split_of[gym_t] == "eval-tools"
+    assert info2["plan"].listed_holdout_groups == 2
+    report = b2.report(info2, b2.gates(), catalog="stubs", head_tokens={}, inputs={}, elapsed=0)
+    assert report["eval_tools"]["eval_holdout_groups"] == 2
+    assert report["eval_tools"]["eval_holdout_tasks_listed"] == 2
+    assert max_t not in json.dumps(report)  # counts only
+
+
+def test_q6b_an_uncovered_max_row_fails_the_data_policy_gate(tmp_path: Path) -> None:
+    b = allow_builder(tmp_path / "b")
+    gym_rows = [ex(i, "other", f"g{i}", max_derived=False, model=GYM_MODEL) for i in range(2)]
+    for e in gym_rows:
+        e.source = GYM
+    covered = ex(10, "coding", "m0", model=build.TEACHER_MODEL, approval=REF)
+    for bad, field_, value in ((None, None, None), ("approval", "approval", ""),
+                               ("approval", "approval", "someone else"),
+                               ("model", "model", GYM_MODEL), ("kind", "kind", "fail"),
+                               ("train_ok", "train_ok", False)):
+        row = ex(11, "coding", "m1", model=build.TEACHER_MODEL, approval=REF)
+        if field_:
+            setattr(row, field_, value)
+        b.final = {"train": gym_rows + [covered, row], "val": [], "eval-tools": []}
+        dp = b.gates()["data_policy"]
+        assert dp["max_derived_in_train_val"] == 2
+        if bad is None:
+            assert dp["pass"] and dp["max_derived_covered_in_train_val"] == 2
+        else:
+            assert not dp["pass"] and dp["max_derived_uncovered_in_train_val"] == 1, bad
+    # the same covered row without the allow fails
+    b.s.allow_max_derived = False
+    b.final = {"train": gym_rows + [covered], "val": [], "eval-tools": []}
+    dp = b.gates()["data_policy"]
+    assert not dp["pass"] and dp["max_derived_uncovered_in_train_val"] == 1
+    assert dp["max_derived_allowed"] is False and dp["max_derived_approval"] is None
+
+
+def test_q6b_failing_verdicts_unverified_extras_and_fails_never_train(tmp_path: Path) -> None:
+    b = allow_builder(tmp_path / "b", eval_task_frac=0.0, val_frac=0.0, category_cap=1.0,
+                      verdicts={"golden_traces_1_1.jsonl:1": "fail",
+                                "golden_traces_1_1.jsonl:2": "pass"})
+    feed(b, write_jsonl(tmp_path / "golden_traces_1_1.jsonl", [
+        trace("alpha", "bash", {"command": "make alpha"}),   # judged fail: excluded
+        trace("bravo", "bash", {"command": "make bravo"}),   # judged pass
+        trace("charlie", "bash", {"command": "make charlie"}),   # tool-success label
+        trace("delta", "bash", {"command": "make delta"},
+              verification={"verified": True, "judge": {"verdict": "fail", "model": GYM_MODEL}}),
+    ]))
+    tool_ok = {"verified": True, "tool_success": True}
+    feed(b, write_jsonl(tmp_path / "maxgym.jsonl", [
+        trace("echo", "bash", {"command": "make echo"}, source="max-gym-2026-11-01",
+              session="gym:echo", verification=VERIFIED),                      # trains
+        trace("foxtrot", "bash", {"command": "make foxtrot"}, source="max-gym-2026-11-01",
+              session="gym:foxtrot", verdict="pass"),                          # eval-only
+        trace("golf", "bash", {"command": "make golf"}, source="max-gym-2026-11-01",
+              session="gym:golf", verification={"verified": True, "tool_success": False}),
+        trace("hotel", "bash", {"command": "make hotel"}, source="max-gym-2026-11-01",
+              session="gym:hotel", verification={**tool_ok, "judge": {
+                  "verdict": "pass", "model": "qwen3.8-max"}}),                # Max judge
+    ]), "extra")
+    feed(b, write_jsonl(tmp_path / "fail.jsonl", [
+        trace("india", "read_file", {"path": "missing.txt"})]), "fail")
+    assert b.stats["excluded:judge_fail"] == 1
+    assert b.stats["excluded:verification_failed"] == 3  # delta, golf, hotel
+    assert b.stats["max_derived_eval_only:no_record"] == 1  # foxtrot: a verdict alone
+    by_id = {e.trace_id: e for e in b.examples + b.fails}
+    assert by_id["golden_traces_1_1.jsonl:2"].label == "judge-pass"
+    assert by_id["golden_traces_1_1.jsonl:3"].label == "tool-success"
+    assert by_id["maxgym.jsonl:1"].train_ok and by_id["maxgym.jsonl:1"].approval == REF
+    assert not by_id["maxgym.jsonl:2"].train_ok and by_id["maxgym.jsonl:2"].approval == ""
+    assert not by_id["fail.jsonl:1"].train_ok and by_id["fail.jsonl:1"].approval == ""
+    b.split()
+    trained = {e.trace_id for k in ("train", "val") for e in b.final[k]}
+    assert trained == {"golden_traces_1_1.jsonl:2", "golden_traces_1_1.jsonl:3", "maxgym.jsonl:1"}
+    assert by_id["maxgym.jsonl:2"].split == "eval-tools"  # an eval-only row pins its group
+    assert "fail.jsonl:1" not in trained
+    assert b.gates()["data_policy"]["pass"]
+
+
+class _TinyBackend:
+    """The least train_qlora.Trainer needs: one float of weights, no torch."""
+
+    def __init__(self) -> None:
+        self.w = 0.0
+
+    def load(self, max_seq: int, revision: Any) -> None:
+        pass
+
+    def forward_backward(self, ids: Any, spans: Any, scale: float) -> float:
+        return 2.0 / (1.0 + self.w)
+
+    def step(self, lr: float) -> None:
+        self.w += lr
+
+    def zero_grad(self) -> None:
+        pass
+
+    def eval_loss(self, ids: Any, spans: Any) -> float:
+        return 1.0
+
+    def save(self, d: Path) -> None:
+        (d / "adapter").mkdir(parents=True)
+        (d / "adapter" / "w.json").write_text(json.dumps({"w": self.w}))
+
+    def restore(self, d: Path) -> None:
+        self.w = json.loads((d / "adapter" / "w.json").read_text())["w"]
+
+    def rng_state(self) -> Any:
+        return 0
+
+    def set_rng_state(self, state: Any) -> None:
+        pass
+
+    def save_rng(self, path: Path, state: Any) -> None:
+        path.write_text("0")
+
+    def load_rng(self, path: Path) -> Any:
+        return 0
+
+    def save_adapter(self, d: Path) -> None:
+        (d / "adapter_config.json").write_text("{}")
+        (d / "adapter_model.safetensors").write_bytes(b"\0")
+
+    def fingerprint(self) -> float:
+        return self.w
+
+    def peak_memory_gb(self) -> float | None:
+        return None
+
+    def free(self) -> None:
+        pass
+
+    def versions(self) -> dict[str, Any]:
+        return {"fake": "1"}
+
+
+def test_q6b_tags_flow_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mixed dataset (Max + local 27B gym) built under the allow -> a run on it
+    -> its adapter -> a quantized model beside it: every level is tagged and the
+    publish guard refuses every one. The same chain on a gym-only build is
+    untagged, and its model publishes (its dataset still holds Max eval rows)."""
+    if not (_DIR / "train_qlora.py").is_file():
+        pytest.skip("train_qlora.py not in this checkout")
+    T = _load("distill_train_qlora", "train_qlora.py")
+    golden, gym_file = policy_inputs(tmp_path)
+    pack = tmp_path / "pack.json"
+    pack.write_text(json.dumps(make_pack()))
+    monkeypatch.setattr(R.Student, "load", classmethod(lambda cls, d: make_student()))
+    monkeypatch.setattr(T, "hf_encoder", lambda d: FakeEncoder())
+
+    def no_template(d: Any) -> Any:
+        raise ImportError("jinja2")
+
+    monkeypatch.setattr(T, "template_refitter", no_template)
+    monkeypatch.setattr(T, "resolve_revision", lambda repo, rev: "b" * 40)
+    tok = tmp_path / "tok"
+    tok.mkdir()
+
+    def build_set(out: Path, *extra: str) -> None:
+        rc = build.main(["build", "--traces", str(golden), "--extra-traces", str(gym_file),
+                         "--pack", str(pack), "--tokenizer-dir", "unused", "--out", str(out),
+                         "--eval-min", "1", "--train-range", "1", "1000",
+                         "--val-share-range", "0", "1", "--eval-task-frac", "0.15",
+                         "--holdout-max-group-share", "0.5", "--min-presence", "0", *extra])
+        assert rc == 1  # INCOMPLETE (no spot-check server); everything is written
+
+    def train(data: Path, run: Path, *extra: str) -> int:
+        return T.main(["--data", str(data / "train.jsonl"), "--tokenizer-dir", str(tok),
+                       "--out", str(run), "--log-dir", str(run.parent / (run.name + "-logs")),
+                       "--grad-accum", "4", "--save-every", "1000", *extra],
+                      backend_factory=lambda c: _TinyBackend())
+
+    def quantized(adapter: Path, q: Path) -> Path:
+        (q / "merged").mkdir(parents=True)
+        (q / "merged" / "model.safetensors").write_bytes(b"\0")
+        (q / "student-Q4_K_M.gguf").write_bytes(b"GGUF")
+        (q / "quantize-manifest.json").write_text(json.dumps({
+            "schema": AP.QUANTIZE_MANIFEST_SCHEMA, "inputs": {"adapter": {"dir": str(adapter)}},
+            "max_derived": {"calibration_rows": 4, "calibration_max_derived": 0}}))
+        return q
+
+    # ── the mixed, approved chain ──
+    ds = tmp_path / "phase3-max-derived"
+    sessions = tmp_path / "exclude-sessions.txt"
+    sessions.write_text("incident:s9\n")
+    build_set(ds, "--allow-max-derived", "--max-derived-approval", REF,
+              "--exclude-sessions", str(sessions))
+    rep = json.loads((ds / "report.json").read_text())
+    man = json.loads((ds / build.DATASET_MANIFEST).read_text())
+    for doc in (rep, man):
+        assert doc["max_derived"] is True and doc["tags"] == ["max-derived"] and doc["private"]
+    assert man["max_derived_allow"]["approval"] == REF
+    assert man["share"]["by_split"]["train"]["max"]["rows"] > 0
+    assert man["share"]["by_split"]["train"][GYM]["rows"] > 0  # a mixed dataset
+    assert set(man["files"]) >= {"train.jsonl", "val.jsonl", "eval-tools.jsonl"}
+    run = tmp_path / "runs" / "9b-r32-max-derived"
+    assert train(ds, run) == 3  # the dataset's approval alone is not enough
+    untagged = tmp_path / "runs" / "9b-r32"
+    assert train(ds, untagged, T.APPROVAL_FLAG) == 2 and not untagged.exists()  # name it
+    assert train(ds, run, T.APPROVAL_FLAG) == 0
+    adapter = run / "adapter-max-derived"
+    assert (adapter / "adapter_config.json").is_file() and not (run / "adapter").exists()
+    rm = json.loads((run / "manifest.json").read_text())
+    assert rm["max_derived"] is True and rm["tags"] == ["max-derived"]
+    assert rm["approvals"]["dataset"]["approval"] == REF and rm["data"]["max_derived_rows"] > 0
+    q = quantized(adapter, tmp_path / "quant" / "9b-r32-q4")
+    levels = [ds, ds / "report.json", ds / build.DATASET_MANIFEST, ds / "train.jsonl",
+              ds / "eval-tools.jsonl", run, run / "manifest.json", adapter,
+              adapter / "adapter_model.safetensors", q, q / "quantize-manifest.json",
+              q / "student-Q4_K_M.gguf", q / "merged"]
+    for level in levels:
+        assert AP.is_max_derived(level) or AP.provenance(level).holds_max_rows, level
+        with pytest.raises(AP.NotPublishable):
+            AP.assert_publishable(level)
+    # the quantized model is Max-derived through its adapter, not its name
+    assert AP.provenance(q / "student-Q4_K_M.gguf").max_derived is True
+    assert AP.provenance(rm).max_derived is True  # a manifest dict, read the same way
+
+    # ── --report elsewhere: the dataset manifest in --out carries the approval ──
+    ds2 = tmp_path / "phase3b-max-derived"
+    rep2 = tmp_path / "reports-max-derived" / "report.json"
+    rep2.parent.mkdir()
+    build_set(ds2, "--allow-max-derived", "--max-derived-approval", REF,
+              "--exclude-sessions", str(sessions), "--report", str(rep2))
+    assert rep2.is_file() and not (ds2 / "report.json").exists()
+    assert T.dataset_record(ds2 / "train.jsonl")["approval"] == REF
+    assert T.builder_teacher_is_max(ds2 / "train.jsonl") is True
+    run2 = tmp_path / "runs" / "9b-b-max-derived"
+    assert train(ds2, run2, T.APPROVAL_FLAG) == 0
+    assert json.loads((run2 / "manifest.json").read_text())["approvals"]["dataset"][
+        "recorded_in"] == str(ds2 / build.DATASET_MANIFEST)
+
+    # ── the gym-only chain (no allow) ──
+    clean = tmp_path / "phase3"
+    build_set(clean)
+    crep = json.loads((clean / "report.json").read_text())
+    assert crep["max_derived"] is False and crep["holds_max_rows"] is True
+    crun = tmp_path / "runs" / "9b-gym"
+    assert train(clean, crun) == 0
+    cadapter = crun / "adapter"
+    assert (cadapter / "adapter_config.json").is_file()
+    assert json.loads((crun / "manifest.json").read_text())["tags"] == []
+    cq = quantized(cadapter, tmp_path / "quant" / "9b-gym-q4")
+    for level in (clean / "train.jsonl", crun, cadapter, cq, cq / "student-Q4_K_M.gguf"):
+        assert AP.provenance(level).max_derived is False, level
+        AP.assert_publishable(level)
+    for level in (clean, clean / "report.json", clean / "eval-tools.jsonl"):
+        with pytest.raises(AP.NotPublishable):  # Max eval rows: still private
+            AP.assert_publishable(level)
+
+
+# ── Q6b reviewer findings: never-train tags, strict gym records, the PAYG
+#    judge, the incident session ──
+
+MAXGYM = "max-gym-2026-11-01"
+
+
+def _payg_judge() -> dict[str, Any]:
+    """A judge object exactly as judge.py writes it for the pay-per-token Max judge."""
+    judge = _load("distill_judge", "judge.py")
+    rec = judge.verification_record({"verdict": "pass"}, model="qwen3.8-max",
+                                    served_model="qwen3.8-max", provider="max-payg")
+    return dict(rec["judge"])
+
+
+def test_q6b_a_max_model_smoke_or_relaxed_row_never_trains(tmp_path: Path) -> None:
+    rows = [
+        # a Max-mode teacher_gen --builtin-smoke row, fully verified
+        trace("alpha", "bash", {"command": "make alpha"}, source="builtin-smoke",
+              session="gym:alpha", verification=VERIFIED),
+        # a relaxed row from the Max model, its record claiming every part
+        trace("bravo", "bash", {"command": "make bravo"}, source="qwen38-27b-gym-relaxed",
+              session="gym:bravo", verification=VERIFIED),
+        trace("charlie", "bash", {"command": "make charlie"}, source=MAXGYM,
+              session="gym:charlie", verification=VERIFIED),
+    ]
+    for allow in (True, False):
+        name = f"smoke-{'allow' if allow else 'plain'}.jsonl"
+        b = allow_builder(tmp_path / f"b-{name}", eval_task_frac=0.0, val_frac=0.0, category_cap=1.0,
+                          allow_max_derived=allow, max_derived_approval=REF if allow else None)
+        feed(b, write_jsonl(tmp_path / name, rows), "extra")
+        assert b.stats["excluded:never_train_source"] == 1  # neither train nor eval
+        by_id = {e.trace_id: e for e in b.examples}
+        assert f"{name}:1" not in by_id
+        assert not by_id[f"{name}:2"].train_ok and by_id[f"{name}:2"].approval == ""
+        b.split()
+        trained = {e.trace_id for k in ("train", "val") for e in b.final[k]}
+        assert trained == ({f"{name}:3"} if allow else set())
+        assert b.gates()["data_policy"]["pass"]
+    assert b.max_row_trains(build.Trace("x:1", "extra", "x", 1, rows[1])) == (False,
+                                                                             "relaxed_source")
+    # the 27B's own smoke rows keep their reason
+    (tmp_path / "s").mkdir()
+    s = make_builder(tmp_path / "s", train_sources=(GYM,))
+    feed(s, write_jsonl(tmp_path / "s.jsonl", [gym("delta", "bash", {"command": "d"},
+                                                   source="builtin-smoke")]), "extra")
+    assert s.stats["excluded:non_teacher_model"] == 1 and not s.examples
+
+
+def test_q6b_a_max_gym_row_trains_only_on_the_strict_gym_record(tmp_path: Path) -> None:
+    payg = _payg_judge()
+    no = {k: v for k, v in VERIFIED.items()}
+    rows = [
+        ("tool-success only", {"verified": True, "tool_success": True}, "no_judge"),
+        ("no sandbox record", {k: v for k, v in no.items() if k != "sandboxed"},
+         "no_sandbox_record"),
+        ("no side-effects record", {k: v for k, v in no.items() if k != "side_effects"},
+         "no_side_effects_record"),
+        ("a judge not listed", {**no, "judge": {"verdict": "pass", "model": "qwen2.5:7b"}},
+         "judge_not_allowed"),
+        ("the local judge", VERIFIED, None),
+        ("the PAYG Max judge", {**no, "judge": payg}, None),
+    ]
+    traces = [trace(word(i), "bash", {"command": f"make {word(i)}"}, source=MAXGYM,
+                    session=f"gym:{word(i)}", verification=rec)
+              for i, (_, rec, _) in enumerate(rows)]
+    # a Max judge that is not the PAYG judge (the Token Plan key) verifies nothing
+    traces.append(trace("tp", "bash", {"command": "make tp"}, source=MAXGYM, session="gym:tp",
+                        verification={**no, "judge": {"verdict": "pass", "model": "qwen3.8-max"}}))
+    b = allow_builder(tmp_path / "b", eval_task_frac=0.0, val_frac=0.0, category_cap=1.0)
+    feed(b, write_jsonl(tmp_path / "maxgym.jsonl", traces), "extra")
+    assert b.excluded == [("maxgym.jsonl:7", "verification_failed")]
+    assert b.stats["verification:judge_is_max"] == 1
+    by_id = {e.trace_id: e for e in b.examples}
+    for i, (what, _rec, why) in enumerate(rows):
+        e = by_id[f"maxgym.jsonl:{i + 1}"]
+        assert e.train_ok is (why is None), what
+        if why:
+            assert b.stats[f"max_derived_eval_only:{why}"] == 1, what
+    assert by_id["maxgym.jsonl:6"].label == "judge-pass"
+    assert b.stats["verification:payg_max_judge"] == 1
+    b.split()
+    trained = {e.trace_id for k in ("train", "val") for e in b.final[k]}
+    assert trained == {"maxgym.jsonl:5", "maxgym.jsonl:6"}
+    assert b.gates()["data_policy"]["pass"]
+    # the local 27B's own gym rows still need a --judge-models judge: PAYG Max is not one
+    (tmp_path / "g").mkdir()
+    g = make_builder(tmp_path / "g", train_sources=(GYM,))
+    feed(g, write_jsonl(tmp_path / "gym.jsonl", [
+        gym("echo", "bash", {"command": "e"}, verification={**no, "judge": payg})]), "extra")
+    assert g.examples == [] and g.stats["verification:judge_is_max"] == 1
+
+
+def test_payg_max_judge_verdicts_are_applied_and_do_not_fail_the_gate(tmp_path: Path) -> None:
+    judge = _load("distill_judge", "judge.py")
+    ts = 1_790_000_000.0
+    golden = write_jsonl(tmp_path / "golden_traces_1_1.jsonl", [
+        trace(word(i), "bash", {"command": f"make {word(i)}"}, ts=ts + i) for i in range(3)])
+    index = [{"file": golden.name, "model": "qwen3.8-max", "h_prompt_call": f"k{i}",
+              "category": "coding", "rowid": 100 + i, "tool": "bash", "ts": ts + i}
+             for i in range(3)]
+
+    def rows_from(client: Any) -> list[dict[str, Any]]:
+        runner = types.SimpleNamespace(
+            config=types.SimpleNamespace(view="outcome"), client=client,
+            clock=lambda: datetime(2026, 10, 31, 6, 0, tzinfo=timezone.utc))
+        out = []
+        for item, v in zip(judge.pass_pool(index), ("pass", "fail", "pass")):
+            parsed = judge.parse_verdict(json.dumps({
+                "verdict": v, "reasons": ["r"], "rubric": {k: 1 for k in judge.RUBRIC_KEYS}}))
+            out.append(judge.JudgeRun._row(runner, item, status="ok", agrees=v == "pass",
+                                           **parsed))
+        return out
+
+    payg_client = types.SimpleNamespace(model="qwen3.8-max", provider=judge.PaygJudgeClient.provider,
+                                        judge_key=judge.PaygJudgeClient.judge_key, region="intl")
+    rows = rows_from(payg_client)
+    assert {(r["provider"], r["judge_key"], r["model"]) for r in rows} == {
+        ("max-payg", "payg", "qwen3.8-max")}
+    stats: collections.Counter = collections.Counter()
+    checks: dict[str, Any] = {}
+    verdicts = build.load_verdicts([str(write_jsonl(tmp_path / "payg.jsonl", rows))], stats,
+                                   checks)
+    assert verdicts == {"golden_traces_1_1.jsonl:1": "pass", "golden_traces_1_1.jsonl:2": "fail",
+                        "golden_traces_1_1.jsonl:3": "pass"}
+    assert stats["verdict_rows_payg_max_judge"] == 3 and stats["verdict_rows_max_judge"] == 0
+    b = make_builder(tmp_path, verdicts=verdicts, verdict_checks=checks,
+                     index=build.load_index(str(write_jsonl(tmp_path / "index.jsonl", index))))
+    b.stats.update(stats)
+    feed(b, golden)
+    assert {e.trace_id: e.label for e in b.examples} == {
+        "golden_traces_1_1.jsonl:1": "judge-pass", "golden_traces_1_1.jsonl:3": "judge-pass"}
+    assert b.stats["excluded:judge_fail"] == 1
+    b.split()
+    gate = b.gates()["verdicts"]
+    assert gate["pass"] and gate["payg_max_judge"] == 3 and gate["max_judge"] == 0
+    # the same rows without the PAYG provider and key (any other Max route) still fail it
+    for client in (types.SimpleNamespace(model="qwen3.8-max", provider="local", judge_key="none"),
+                   types.SimpleNamespace(model="qwen3.8-max", provider="max-payg",
+                                         judge_key="token-plan")):
+        st: collections.Counter = collections.Counter()
+        v = build.load_verdicts([str(write_jsonl(tmp_path / "other.jsonl", rows_from(client)))],
+                                st)
+        assert st["verdict_rows_max_judge"] == 3 and st["verdict_rows_payg_max_judge"] == 0
+        assert v == {"golden_traces_1_1.jsonl:2": "fail"}  # a fail still drops its row
+    # the record mirror: a Max row's PAYG-judged record verifies it; nothing else naming Max does
+    payg = {"verification": {"verified": True, "judge": _payg_judge()}}
+    assert build.verification_of(payg) == build.Verification(False, "judge_is_max")
+    v = build.verification_of(payg, payg_judge=True)
+    assert (v.decision, v.basis, v.payg_judge) == (True, "judge-pass", True)
+    tp = {"verification": {"verified": True, "judge": {**_payg_judge(), "judge_key": "sk-sp"}}}
+    assert build.verification_of(tp, payg_judge=True).basis == "judge_is_max"
+    lookalike = {"verification": {"verified": True, "judge": {
+        "verdict": "pass", "model": "qwen3.8-27b", "provider": "max-payg",
+        "served_model": "qwen3.8-max"}}}
+    assert build.verification_of(lookalike, payg_judge=True).basis == "judge_is_max"
+
+
+def test_q6b_listed_sessions_never_enter_the_dataset(tmp_path: Path) -> None:
+    golden = write_jsonl(tmp_path / "golden_traces_1_1.jsonl", [
+        trace("alpha", "bash", {"command": "make alpha"}, session="beacon:incident"),
+        trace("bravo", "bash", {"command": "make bravo"}, session="beacon:incident"),
+        trace("charlie", "bash", {"command": "make charlie"}, session="beacon:ok"),
+    ])
+    b = allow_builder(tmp_path / "b", eval_task_frac=0.0, val_frac=0.0, category_cap=1.0,
+                      exclude_sessions=("beacon:incident",),
+                      verdicts={"golden_traces_1_1.jsonl:1": "pass"})  # Phase 2 judged it
+    feed(b, golden)
+    assert b.stats["excluded:excluded_session"] == 2
+    assert b.stats["verdicts_on_excluded_sessions"] == 1
+    assert [e.trace_id for e in b.examples] == ["golden_traces_1_1.jsonl:3"]
+    info = b.split()
+    assert {e.trace_id for k in ("train", "val") for e in b.final[k]} == {
+        "golden_traces_1_1.jsonl:3"}
+    gates = b.gates()
+    assert gates["verdicts"]["pass"] and gates["verdicts"]["unmatched"] == 0
+    report = b.report(info, gates, catalog="stubs", head_tokens={}, inputs={}, elapsed=0.0)
+    allow = report["data_policy"]["max_derived_allow"]
+    assert allow["excluded_sessions_listed"] == 1 and allow["excluded_session_rows"] == 2
+    assert report["settings"]["exclude_sessions"] == 1
+    assert "beacon:incident" not in json.dumps(report)  # counts only, never the ids
+    lst = tmp_path / "sessions.txt"
+    lst.write_text("# incident\nbeacon:incident  # 2026-10-13\n\n")
+    assert build.read_session_list(lst) == {"beacon:incident"}

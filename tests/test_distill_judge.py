@@ -2,20 +2,21 @@
 
 No network and no model: the judge's client is a scripted fake, the clock and
 the sleep are injected, and every store is a synthetic SQLite file under
-tmp_path. Fixtures use neutral names only.
+tmp_path. Fixtures use neutral names only. The paid (max-payg) and local
+clients, the spend ledger and judge_run.sh are tested against a fake
+OpenAI-compatible server in tests/test_distill_spend.py.
 """
 
 from __future__ import annotations
 
 import asyncio
-import csv
 import hashlib
 import importlib.util
 import json
 import sqlite3
 import sys
 import types
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,8 @@ _DIR = Path(__file__).resolve().parent.parent / "scripts" / "distill"
 
 
 def _load(name: str, filename: str) -> Any:
+    if name in sys.modules:
+        return sys.modules[name]
     spec = importlib.util.spec_from_file_location(name, _DIR / filename)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -33,8 +36,15 @@ def _load(name: str, filename: str) -> Any:
     return module
 
 
+spend = _load("distill_spend", "spend.py")
 judge = _load("distill_judge", "judge.py")
 failset = _load("distill_build_fail_set", "build_fail_set.py")
+
+
+@pytest.fixture(autouse=True)
+def _home_in_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The one spend ledger is ~/distill/spend-ledger.csv: HOME keeps it (and its STOP) in tmp_path."""
+    monkeypatch.setenv("HOME", str(tmp_path))
 
 
 # ── fixtures ───────────────────────────────────────────────────────────────
@@ -47,10 +57,7 @@ BASH_TOOL = {
 }
 BASH_SCHEMA = json.dumps(BASH_TOOL["function"])
 
-# 02:00 America/New_York (EDT, UTC-4): inside the window.
-IN_WINDOW = datetime(2026, 10, 31, 6, 0, tzinfo=timezone.utc)
-# 08:00 America/New_York: outside it.
-OUT_OF_WINDOW = datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 31, 14, 0, tzinfo=timezone.utc)
 
 PASS_REPLY = json.dumps({
     "verdict": "pass", "reasons": ["right next step"],
@@ -92,20 +99,25 @@ def make_item(i: int, label: str = "pass", category: str = "coding",
 
 
 class FakeClient:
-    """Scripted judge model: each call pops the next reply (a string) or raises (an exception)."""
+    """Scripted judge client: each call pops the next reply (a string) or raises (an exception)."""
+
+    provider = "fake"
+    judge_key = "none"
+    region = ""
+    price = None
 
     def __init__(self, script: list[Any] | None = None, *, default: Any = PASS_REPLY,
-                 usage: tuple[int, int] = (1000, 100), billing_mode: str = "metered",
-                 price: tuple[float, float] | None = (2.0, 6.0), on_call: Any = None) -> None:
+                 usage: tuple[int, int] = (1000, 100), cost: float = 0.01, on_call: Any = None) -> None:
         self.script = list(script or [])
         self.default = default
         self.usage = usage
+        self.cost = cost
         self.model = "judge-model"
-        self.provider_name = "fake"
-        self.billing_mode = billing_mode
-        self.price = price
         self.calls: list[tuple[str, str, int]] = []
         self.on_call = on_call
+
+    def budget_describe(self) -> str:
+        return "fake budget"
 
     async def complete(self, system: str, user: str, *, max_tokens: int) -> Any:
         self.calls.append((system, user, max_tokens))
@@ -115,7 +127,8 @@ class FakeClient:
         if isinstance(step, BaseException):
             raise step
         return judge.CallResult(text=step, input_tokens=self.usage[0], output_tokens=self.usage[1],
-                                served_model="judge-model-served")
+                                served_model="judge-model-served", cost_usd=self.cost,
+                                call_id=f"call-{len(self.calls)}")
 
 
 class Clock:
@@ -132,22 +145,19 @@ def write_queue(work: Path, items: list[dict[str, Any]], meta: dict[str, Any] | 
     (work / judge.QUEUE_META_FILE).write_text(json.dumps(meta or {}))
 
 
-def make_run(tmp_path: Path, items: list[dict[str, Any]], client: FakeClient, *,
-             budget: Any = None, config: Any = None, clock: Any = None,
-             probe: Any = None, sleeps: list[float] | None = None) -> Any:
-    ledger = judge.SpendLedger(tmp_path / "ledger.csv", judge.PHASE)
-    if budget is None:
-        budget = judge.Budget(unit="usd", cap=100.0, price_in=2.0, price_out=6.0)
+def make_run(tmp_path: Path, items: list[dict[str, Any]], client: Any, *,
+             config: Any = None, clock: Any = None, probe: Any = None,
+             sleeps: list[float] | None = None) -> Any:
     recorded = sleeps if sleeps is not None else []
 
     async def fake_sleep(seconds: float) -> None:
         recorded.append(seconds)
 
     return judge.JudgeRun(
-        items, client=client, budget=budget, ledger=ledger,
+        items, client=client,
         results_path=tmp_path / judge.RESULTS_FILE, status_path=tmp_path / judge.STATUS_FILE,
         config=config or judge.RunConfig(jitter=0.0),
-        clock=clock or Clock(IN_WINDOW), sleep=fake_sleep, probe=probe,
+        clock=clock or Clock(NOW), sleep=fake_sleep, probe=probe,
     )
 
 
@@ -155,31 +165,17 @@ def results(tmp_path: Path) -> list[dict[str, Any]]:
     return judge.read_jsonl(tmp_path / judge.RESULTS_FILE)
 
 
-def ledger_rows(path: Path) -> list[dict[str, str]]:
-    with open(path, newline="") as fh:
-        return list(csv.DictReader(fh))
+def notify_script(tmp_path: Path) -> Path:
+    path = tmp_path / "notify.sh"
+    path.write_text("#!/bin/sh\ncat >> \"$(dirname \"$0\")/notified.txt\"\n")
+    path.chmod(0o755)
+    return path
 
 
-# ── window ─────────────────────────────────────────────────────────────────
+# ── the CLI's guard rails ────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("utc, expected", [
-    # EDT (UTC-4)
-    (datetime(2026, 10, 30, 4, 59, tzinfo=timezone.utc), False),   # 00:59
-    (datetime(2026, 10, 30, 5, 0, tzinfo=timezone.utc), True),     # 01:00
-    (datetime(2026, 10, 30, 9, 59, tzinfo=timezone.utc), True),    # 05:59
-    (datetime(2026, 10, 30, 10, 0, tzinfo=timezone.utc), False),   # 06:00
-    # EST (UTC-5) after the clocks change
-    (datetime(2026, 11, 3, 5, 30, tzinfo=timezone.utc), False),    # 00:30
-    (datetime(2026, 11, 3, 6, 0, tzinfo=timezone.utc), True),      # 01:00
-    (datetime(2026, 11, 3, 10, 59, tzinfo=timezone.utc), True),    # 05:59
-    (datetime(2026, 11, 3, 11, 0, tzinfo=timezone.utc), False),    # 06:00
-])
-def test_window_is_0100_to_0600_new_york_across_dst(utc: datetime, expected: bool) -> None:
-    assert judge.JudgeWindow().is_open(utc) is expected
-
-
-def test_run_outside_window_refuses_before_building_the_client(tmp_path: Path) -> None:
+def test_cli_needs_a_provider_and_cannot_raise_the_cap_or_change_the_phase(tmp_path: Path) -> None:
     write_queue(tmp_path, [make_item(1)])
     built: list[bool] = []
 
@@ -187,133 +183,49 @@ def test_run_outside_window_refuses_before_building_the_client(tmp_path: Path) -
         built.append(True)
         return FakeClient()
 
-    code = judge.main(["--workdir", str(tmp_path), "run", "--ledger", str(tmp_path / "l.csv"),
-                       "--no-live-probe"], client_factory=factory, clock=Clock(OUT_OF_WINDOW))
-    assert code == judge.EXIT_WINDOW
+    base = ["--workdir", str(tmp_path), "run", "--no-live-probe"]
+    for extra in ([], ["--provider", "token-plan"], ["--provider", "max-payg", "--cap-usd", "500"],
+                  ["--provider", "max-payg", "--ledger", str(tmp_path / "other.csv")],
+                  ["--provider", "max-payg", "--alert-usd", "500"], ["--provider", "local", "--phase", "x"],
+                  ["--provider", "local", "--ignore-window"]):
+        with pytest.raises(SystemExit):
+            judge.main(base + extra, client_factory=factory)
+    # The paid provider needs this phase's budget, and nothing is built without it.
+    assert judge.main(base + ["--provider", "max-payg", "--notify-cmd", str(notify_script(tmp_path))],
+                      client_factory=factory) == judge.EXIT_FATAL
+    assert built == []
+    assert judge.main(base + ["--provider", "local"], client_factory=factory) == judge.EXIT_DONE
+    assert built == [True]
+
+
+def test_max_payg_refuses_while_the_stop_file_exists(tmp_path: Path) -> None:
+    write_queue(tmp_path, [make_item(1)])
+    ledger = spend.Ledger()   # the one ledger: ~/distill (HOME is tmp_path)
+    ledger.stop_path.parent.mkdir(parents=True)
+    ledger.stop_path.write_text("2026-10-31T00:00:00Z distill spend STOP: test\n")
+    built: list[bool] = []
+    code = judge.main(["--workdir", str(tmp_path), "run", "--provider", "max-payg", "--budget-usd", "5",
+                       "--notify-cmd", str(notify_script(tmp_path))],
+                      client_factory=lambda: built.append(True))
+    assert code == judge.EXIT_BUDGET
     assert built == []
     status = json.loads((tmp_path / judge.STATUS_FILE).read_text())
-    assert status["state"] == "window_closed"
+    assert status["state"] == "budget_stop" and "STOP" in status["reason"]
     assert not (tmp_path / judge.RESULTS_FILE).exists()
 
 
-def test_cli_runs_in_window_and_cannot_skip_the_window_or_open_a_new_budget(tmp_path: Path) -> None:
-    write_queue(tmp_path, [make_item(1), make_item(2)])
-    client = FakeClient()
-    base = ["--workdir", str(tmp_path), "run", "--ledger", str(tmp_path / "l.csv"), "--no-live-probe"]
-    assert judge.main(base, client_factory=lambda: client, clock=Clock(IN_WINDOW)) == judge.EXIT_DONE
-    assert len(client.calls) == 2
-    assert {r["phase"] for r in ledger_rows(tmp_path / "l.csv")} == {judge.PHASE}
-    # Neither the window nor the phase's cap can be side-stepped from the command line.
-    for extra in (["--ignore-window"], ["--phase", "2-judge-rejudge"]):
-        with pytest.raises(SystemExit):
-            judge.main(base + extra, client_factory=lambda: client, clock=Clock(OUT_OF_WINDOW))
-    assert len(client.calls) == 2
+def test_max_payg_needs_a_working_notify_command_and_low_concurrency(tmp_path: Path) -> None:
+    write_queue(tmp_path, [make_item(1)])
+    base = ["--workdir", str(tmp_path), "run", "--provider", "max-payg", "--budget-usd", "5"]
+    built: list[bool] = []
+    assert judge.main(base + ["--notify-cmd", str(tmp_path / "missing.sh")],
+                      client_factory=lambda: built.append(True)) == judge.EXIT_FATAL
+    assert judge.main(base + ["--notify-cmd", str(notify_script(tmp_path)), "--concurrency", "8"],
+                      client_factory=lambda: built.append(True)) == judge.EXIT_FATAL
+    assert built == []
 
 
-def test_window_closing_mid_run_stops_before_the_next_call(tmp_path: Path) -> None:
-    clock = Clock(datetime(2026, 10, 31, 9, 20, tzinfo=timezone.utc))  # 05:20 EDT
-
-    def advance() -> None:
-        clock.now += timedelta(minutes=20)
-
-    client = FakeClient(on_call=advance)
-    run = make_run(tmp_path, [make_item(i) for i in range(5)], client, clock=clock)
-    outcome = asyncio.run(run.run())
-    # 05:20 and 05:40 are inside; the third check happens at 06:00.
-    assert len(client.calls) == 2
-    assert outcome.state == "window_closed"
-    assert outcome.exit_code == judge.EXIT_WINDOW
-    assert outcome.remaining == 3
-
-
-# ── budget ─────────────────────────────────────────────────────────────────
-
-
-def _worst(item: dict[str, Any], budget: Any, cfg: Any) -> float:
-    user, _ = judge.render_prompt(item, view=cfg.view)
-    return budget.cost(judge.token_upper_bound(judge.system_prompt(cfg.view), user), cfg.max_tokens)
-
-
-def test_budget_cap_stops_before_a_call_that_could_exceed_it(tmp_path: Path) -> None:
-    # Two-digit ids: every prompt is the same size, so every worst case is the same.
-    items = [make_item(i) for i in range(10, 60)]
-    cfg = judge.RunConfig(jitter=0.0)
-    budget = judge.Budget(unit="usd", cap=0.03, price_in=2.0, price_out=6.0)
-    worst = _worst(items[0], budget, cfg)
-    actual = budget.cost(1000, 100)
-    expected, spent = 0, 0.0
-    while spent + worst <= budget.cap:
-        spent += actual
-        expected += 1
-    assert 0 < expected < len(items)
-
-    client = FakeClient()
-    outcome = asyncio.run(make_run(tmp_path, items, client, budget=budget, config=cfg).run())
-    assert outcome.state == "budget_stop"
-    assert outcome.exit_code == judge.EXIT_BUDGET
-    assert len(client.calls) == expected
-    total = sum(float(r["est_usd"]) for r in ledger_rows(tmp_path / "ledger.csv"))
-    assert total <= budget.cap
-    assert total + worst > budget.cap  # the refused call really could have crossed it
-
-
-def test_budget_counts_spend_already_in_the_ledger(tmp_path: Path) -> None:
-    ledger = judge.SpendLedger(tmp_path / "ledger.csv", judge.PHASE)
-    ledger.append({"ts": "t", "phase": judge.PHASE, "calls": 1, "est_usd": "22.999"})
-    ledger.append({"ts": "t", "phase": "2b-teacher", "calls": 1, "est_usd": "50"})
-    budget = judge.build_budget(client=FakeClient(), billing="auto", ledger=ledger,
-                                quota_path=tmp_path / judge.QUOTA_FILE, max_usd=23.0)
-    assert budget.unit == "usd"
-    assert budget.spent == pytest.approx(22.999)  # the other phase's row is not this cap's
-    client = FakeClient()
-    outcome = asyncio.run(make_run(tmp_path, [make_item(1)], client, budget=budget).run())
-    assert client.calls == []
-    assert outcome.state == "budget_stop"
-
-
-def test_usage_missing_from_the_reply_is_charged_at_the_worst_case(tmp_path: Path) -> None:
-    item = make_item(1)
-    cfg = judge.RunConfig(jitter=0.0)
-    budget = judge.Budget(unit="usd", cap=10.0, price_in=2.0, price_out=6.0)
-    worst = _worst(item, budget, cfg)
-    asyncio.run(make_run(tmp_path, [item], FakeClient(usage=(0, 0)), budget=budget, config=cfg).run())
-    row = ledger_rows(tmp_path / "ledger.csv")[0]
-    assert float(row["est_usd"]) == pytest.approx(worst, abs=1e-6)
-    assert "usage-estimated" in row["note"]
-    assert results(tmp_path)[0]["usage_estimated"] is True
-
-
-def test_quota_plan_uses_a_fraction_of_the_quota_recorded_at_the_first_run(tmp_path: Path) -> None:
-    client = FakeClient(billing_mode="subscription", price=None)
-    ledger = judge.SpendLedger(tmp_path / "ledger.csv", judge.PHASE)
-    quota = tmp_path / judge.QUOTA_FILE
-    budget = judge.build_budget(client=client, billing="auto", ledger=ledger, quota_path=quota,
-                                quota_remaining=20, quota_unit="requests", plan_terms_ok=True)
-    assert (budget.unit, budget.cap) == ("requests", pytest.approx(4.0))
-    outcome = asyncio.run(make_run(tmp_path, [make_item(i) for i in range(10)], client,
-                                   budget=budget).run())
-    assert len(client.calls) == 4
-    assert outcome.state == "budget_stop"
-
-    # A later run keeps the first baseline, even if a bigger number is passed.
-    later = judge.build_budget(client=client, billing="quota", ledger=ledger, quota_path=quota,
-                               quota_remaining=1000, quota_unit="requests", plan_terms_ok=True)
-    assert later.cap == pytest.approx(4.0)
-    assert later.spent == pytest.approx(4.0)
-
-
-def test_quota_requests_count_every_attempt(tmp_path: Path) -> None:
-    client = FakeClient([judge.JudgeCallError("rate_limit", status=429)])
-    budget = judge.Budget(unit="requests", cap=2.0)
-    outcome = asyncio.run(make_run(tmp_path, [make_item(1), make_item(2)], client,
-                                   budget=budget).run())
-    assert len(client.calls) == 2  # the 429 and the retry; nothing left for item 2
-    assert outcome.state == "budget_stop"
-    assert [r["quota_units"] for r in ledger_rows(tmp_path / "ledger.csv")] == ["1", "1"]
-
-
-def test_a_second_run_is_refused_while_one_holds_the_workdir_or_the_ledger(tmp_path: Path) -> None:
-    ledger = tmp_path / "ledger.csv"
+def test_a_second_run_is_refused_while_one_holds_the_workdir(tmp_path: Path) -> None:
     work = tmp_path / "phase2"
     other = tmp_path / "phase2-rejudge"
     write_queue(work, [make_item(1)])
@@ -325,106 +237,48 @@ def test_a_second_run_is_refused_while_one_holds_the_workdir_or_the_ledger(tmp_p
         return FakeClient()
 
     def run(workdir: Path) -> int:
-        return judge.main(["--workdir", str(workdir), "run", "--ledger", str(ledger), "--no-live-probe"],
-                          client_factory=factory, clock=Clock(IN_WINDOW))
+        return judge.main(["--workdir", str(workdir), "run", "--provider", "local", "--no-live-probe"],
+                          client_factory=factory)
 
     # A run in progress on the same workdir: the second run does nothing, not
-    # even a status write. Another workdir with the ledger free may run.
+    # even a status write. Another workdir runs (the ledger is shared under its own lock).
     with judge.acquire_locks([work / judge.LOCK_FILE]):
         assert run(work) == judge.EXIT_BUSY
         assert run(other) == judge.EXIT_DONE
-    # A run in progress on another workdir that shares the ledger (and so the cap).
-    with judge.acquire_locks([judge.ledger_lock_path(ledger)]):
-        assert run(work) == judge.EXIT_BUSY
     assert not (work / judge.STATUS_FILE).exists()
     assert len(built) == 1
-
     assert run(work) == judge.EXIT_DONE   # released: it runs
     assert len(built) == 2
 
 
-def test_failed_attempts_the_provider_may_have_billed_are_charged_at_the_worst_case(
-        tmp_path: Path) -> None:
-    item = make_item(1)
-    cfg = judge.RunConfig(jitter=0.0)
-    budget = judge.Budget(unit="usd", cap=10.0, price_in=2.0, price_out=6.0)
-    worst = _worst(item, budget, cfg)
-    client = FakeClient([
-        judge.JudgeCallError("timeout"),                           # read timeout: may be billed
-        judge.JudgeCallError("unreachable", maybe_billed=False),   # never connected
-        judge.JudgeCallError("provider_error", status=503),        # refused with a status
-        judge.JudgeCallError("provider_error", "the stream ended without a reply"),
-    ])
-    outcome = asyncio.run(make_run(tmp_path, [item], client, budget=budget, config=cfg).run())
-    assert outcome.state == "done"
-    rows = ledger_rows(tmp_path / "ledger.csv")
-    assert [r["note"] for r in rows] == [
-        "error:timeout charged-worst-case", "error:unreachable", "error:provider_error",
-        "error:provider_error charged-worst-case", "ok"]
-    assert [float(r["est_usd"]) for r in rows[:4]] == pytest.approx([worst, 0.0, 0.0, worst], abs=1e-6)
-    assert budget.spent == pytest.approx(sum(float(r["est_usd"]) for r in rows), abs=1e-5)
+def test_a_rejudge_queue_spends_under_its_own_phase(tmp_path: Path) -> None:
+    write_queue(tmp_path, [make_item(1)], {"mode": "rejudge"})
+    client = FakeClient()
+    assert judge.main(["--workdir", str(tmp_path), "run", "--provider", "local", "--no-live-probe"],
+                      client_factory=lambda: client) == 0
+    assert {r["phase"] for r in results(tmp_path)} == {judge.PHASE_ALL}
 
 
-def _client_raising(exc: BaseException) -> Any:
-    class Provider:
-        async def _call_once(self, request: Any) -> Any:
-            raise exc
-            yield  # pragma: no cover - makes this an async generator
-
-    client = judge.PrometheusJudgeClient.__new__(judge.PrometheusJudgeClient)
-    client._provider = Provider()
-    client.model = "judge-model"
-    return client
+# ── budget stops, backoff and pause ─────────────────────────────────────────
 
 
-def test_the_client_marks_which_failures_may_have_been_billed() -> None:
-    import httpx
-
-    request = httpx.Request("POST", "http://127.0.0.1:9/v1/chat/completions")
-    cases = [
-        (httpx.ConnectError("refused", request=request), "unreachable", False),
-        (httpx.ConnectTimeout("slow connect", request=request), "timeout", False),
-        (httpx.ReadTimeout("slow reply", request=request), "timeout", True),
-        (httpx.RemoteProtocolError("dropped mid-stream", request=request), "unreachable", True),
-        (httpx.HTTPStatusError("busy", request=request, response=httpx.Response(503, request=request)),
-         "provider_error", False),
-        (httpx.HTTPStatusError("slow down", request=request, response=httpx.Response(429, request=request)),
-         "rate_limit", False),
-    ]
-    for exc, kind, billed in cases:
-        with pytest.raises(judge.JudgeCallError) as info:
-            asyncio.run(_client_raising(exc).complete("s", "u", max_tokens=8))
-        assert (info.value.kind, info.value.maybe_billed) == (kind, billed), type(exc).__name__
+def test_a_budget_refusal_stops_the_run_before_the_next_call(tmp_path: Path) -> None:
+    client = FakeClient([PASS_REPLY, judge.JudgeBudgetStop("the cap")])
+    outcome = asyncio.run(make_run(tmp_path, [make_item(i) for i in range(5)], client).run())
+    assert outcome.state == "budget_stop"
+    assert outcome.exit_code == judge.EXIT_BUDGET
+    assert len(client.calls) == 2 and outcome.calls == 1
+    assert outcome.remaining == 4
+    assert [r["status"] for r in results(tmp_path)] == ["ok"]
+    status = json.loads((tmp_path / judge.STATUS_FILE).read_text())
+    assert status["state"] == "budget_stop" and status["budget"] == "fake budget"
 
 
-def test_subscription_host_is_refused_without_plan_terms_ok(tmp_path: Path) -> None:
-    ledger = judge.SpendLedger(tmp_path / "ledger.csv", judge.PHASE)
-    with pytest.raises(judge.JudgeSetupError, match="plan-terms-ok"):
-        judge.build_budget(client=FakeClient(billing_mode="subscription"), billing="auto",
-                           ledger=ledger, quota_path=tmp_path / "q.json", quota_remaining=10)
-
-
-def test_unknown_billing_and_missing_quota_are_refused(tmp_path: Path) -> None:
-    ledger = judge.SpendLedger(tmp_path / "ledger.csv", judge.PHASE)
-    with pytest.raises(judge.JudgeSetupError, match="billed"):
-        judge.build_budget(client=FakeClient(billing_mode="unknown"), billing="auto",
-                           ledger=ledger, quota_path=tmp_path / "q.json")
-    with pytest.raises(judge.JudgeSetupError, match="quota-remaining"):
-        judge.build_budget(client=FakeClient(), billing="quota", ledger=ledger,
-                           quota_path=tmp_path / "q.json")
-    with pytest.raises(judge.JudgeSetupError, match="price"):
-        judge.build_budget(client=FakeClient(price=None), billing="per-token", ledger=ledger,
-                           quota_path=tmp_path / "q.json")
-
-
-def test_ledger_with_other_columns_is_refused(tmp_path: Path) -> None:
-    path = tmp_path / "ledger.csv"
-    path.write_text("when,cost\n1,2\n")
-    with pytest.raises(judge.JudgeSetupError, match="columns"):
-        judge.SpendLedger(path, judge.PHASE)
-
-
-# ── backoff and pause ───────────────────────────────────────────────────────
+def test_a_ledger_fault_is_fatal(tmp_path: Path) -> None:
+    client = FakeClient([judge.JudgeBudgetStop("ledger unreadable", state="fatal")])
+    outcome = asyncio.run(make_run(tmp_path, [make_item(1), make_item(2)], client).run())
+    assert outcome.state == "fatal" and outcome.exit_code == judge.EXIT_FATAL
+    assert len(client.calls) == 1
 
 
 def test_429_and_5xx_back_off_exponentially_then_succeed(tmp_path: Path) -> None:
@@ -438,9 +292,8 @@ def test_429_and_5xx_back_off_exponentially_then_succeed(tmp_path: Path) -> None
                                    config=judge.RunConfig(jitter=0.0, backoff_base=20.0)).run())
     assert sleeps == [20.0, 40.0]
     assert outcome.state == "done"
-    assert [r["status"] for r in results(tmp_path)] == ["ok"]
-    notes = [r["note"] for r in ledger_rows(tmp_path / "ledger.csv")]
-    assert notes == ["error:rate_limit", "error:provider_error", "ok"]
+    assert outcome.calls == 3
+    assert [(r["status"], r["attempts"]) for r in results(tmp_path)] == [("ok", 3)]
 
 
 def test_backoff_is_capped_and_honours_retry_after(tmp_path: Path) -> None:
@@ -479,12 +332,14 @@ def test_a_429_rechecks_the_live_probe_before_retrying(tmp_path: Path) -> None:
     assert outcome.state == "paused"
 
 
-def test_billing_error_is_fatal(tmp_path: Path) -> None:
-    client = FakeClient([judge.JudgeCallError("billing", status=402)])
-    outcome = asyncio.run(make_run(tmp_path, [make_item(1), make_item(2)], client).run())
-    assert outcome.state == "fatal"
-    assert outcome.exit_code == judge.EXIT_FATAL
-    assert len(client.calls) == 1
+def test_billing_and_auth_errors_are_fatal(tmp_path: Path) -> None:
+    for kind, status in (("billing", 402), ("auth", 401)):
+        work = tmp_path / kind
+        client = FakeClient([judge.JudgeCallError(kind, status=status)])
+        outcome = asyncio.run(make_run(work, [make_item(1), make_item(2)], client).run())
+        assert outcome.state == "fatal"
+        assert outcome.exit_code == judge.EXIT_FATAL
+        assert len(client.calls) == 1
 
 
 def test_non_retryable_error_is_recorded_and_the_run_moves_on(tmp_path: Path) -> None:
@@ -512,6 +367,40 @@ def test_live_error_probe_counts_recent_errors_for_the_provider(tmp_path: Path) 
     conn.close()
     assert "1 fake provider error" in probe()
     assert judge.live_error_probe(tmp_path / "missing.db", "fake")() is None
+
+
+# ── verdict rows ────────────────────────────────────────────────────────────
+
+
+def test_a_verdict_row_records_provider_model_cost_and_a_verification_record(tmp_path: Path) -> None:
+    item = make_item(1)
+    item["source"] = {"file": "golden_traces_1.jsonl", "line": 0, "telemetry_rowid": 1}
+    asyncio.run(make_run(tmp_path, [item, make_item(2, "fail")], FakeClient([PASS_REPLY, PASS_REPLY])).run())
+    row, fail_row = results(tmp_path)
+    assert row["status"] == "ok" and row["verdict"] == "pass" and row["agrees"] is True
+    assert (row["provider"], row["judge_key"], row["model"]) == ("fake", "none", "judge-model")
+    assert row["served_model"] == "judge-model-served"
+    assert row["cost_usd"] == pytest.approx(0.01) and row["call_id"] == "call-1"
+    assert row["source"] == item["source"]
+    assert row["verification"] == {"verified": True, "judge": {
+        "verdict": "pass", "model": "judge-model", "served_model": "judge-model-served", "provider": "fake"}}
+    assert fail_row["agrees"] is False
+
+
+def test_projection_counts_worst_and_typical_cost() -> None:
+    items = [make_item(i) for i in range(10, 20)]
+    cfg = judge.RunConfig(max_tokens=1000)
+    price = spend.price_for("qwen3.8-max", "ap-southeast-1")
+    out = judge.project_cost(items, cfg, price=price)
+    assert out["items"] == 10 and out["output_basis"] == "assumed"
+    assert out["output_tokens_bound"] == 10_000 and out["output_tokens_typical"] == 3000
+    assert out["input_tokens_bound"] > out["input_tokens_typical"] > 0
+    assert out["usd_worst_case"] == pytest.approx(
+        (out["input_tokens_bound"] * 2.0 + 10_000 * 6.0) / 1e6, abs=1e-4)
+    assert 0 < out["usd_typical"] < out["usd_worst_case"]
+    prior = [{"status": "ok", "output_tokens": 50}] * 10
+    assert judge.project_cost(items, cfg, price=price, prior_rows=prior)["output_per_call_typical"] == 50
+    assert judge.project_cost(items, cfg)["usd_worst_case"] == 0.0   # a local judge
 
 
 # ── resume ─────────────────────────────────────────────────────────────────
@@ -917,11 +806,13 @@ def test_fail_side_is_reported_from_the_blind_view_when_judged(tmp_path: Path) -
     write_queue(tmp_path, items, {"pass_pool": {"coding": 20}})
     (tmp_path / judge.RESULTS_FILE).write_text("".join(json.dumps(r) + "\n" for r in outcome_rows))
     client = FakeClient([FAIL_REPLY, PASS_REPLY, FAIL_REPLY, FAIL_REPLY])
-    code = judge.main(["--workdir", str(tmp_path), "run", "--view", "blind", "--only", "fail",
-                       "--ledger", str(tmp_path / "l.csv"), "--no-live-probe"],
-                      client_factory=lambda: client, clock=Clock(IN_WINDOW))
+    code = judge.main(["--workdir", str(tmp_path), "run", "--provider", "local", "--view", "blind",
+                       "--only", "fail", "--no-live-probe"],
+                      client_factory=lambda: client)
     assert code == judge.EXIT_DONE
     assert len(client.calls) == 4
+    # Its own ledger phase, so its --budget-usd is not what the outcome run left of 2-judge's.
+    assert {r["phase"] for r in results(tmp_path) if r["view"] == "blind"} == {judge.PHASE_BLIND}
     # Mixed views no longer need --view: the outcome view judged the pass side.
     report = judge.build_report(items, {"pass_pool": {"coding": 20}}, results(tmp_path))
     assert report["view"] == "outcome"

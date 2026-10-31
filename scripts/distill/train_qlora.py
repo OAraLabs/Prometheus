@@ -8,21 +8,53 @@
         --out data/distill/runs/9b-r32 --dry-run
     # 2. Smoke: 200 examples, 50 steps, loss must drop, checkpoint round trip
     #    (the training half of the smoke gate; the eval pipeline runs separately).
-    python3 scripts/distill/train_qlora.py ... --out data/distill/runs/smoke --smoke
+    #    The base comes from a staged, pinned download (see "Base model" below).
+    HF_HUB_OFFLINE=1 python3 scripts/distill/train_qlora.py ... \\
+        --base-model ~/distill/models/qwen3.5-9b-base \\
+        --base-revision c202236235762e1c871ad0ccb60c8ee5ba337b9a \\
+        --out data/distill/runs/smoke --smoke
     # 3. Full run (detached: scripts/distill/launch_detached.sh), resumable.
     python3 scripts/distill/train_qlora.py ... --out data/distill/runs/9b-r32 [--resume] \\
         [--stop-at 2026-11-01T06:45-05:00]
 
+Base model
+----------
+A real run (anything but ``--dry-run``) loads ``--base-model`` from a local
+directory: the full-precision checkpoint staged by a pinned, sha256-checked
+download that keeps the host's disk floor (Unsloth quantizes it to 4-bit on
+load; no 4-bit Qwen3.5-9B checkpoint is published). Pass its commit as
+``--base-revision`` so the manifest records it. A hub id is refused unless
+``HF_HUB_OFFLINE=1`` (load from the HF cache only, fail when absent) or
+``--allow-hub-download`` is given: from_pretrained would otherwise pull ~19 GB
+into the HF cache with no free-space check.
+
 Nothing here trains on teacher (Max-derived) data without the operator: a real
-run (anything but ``--dry-run``, smoke included) refuses unless
-``--i-have-operator-approval-for-max-derived-data`` is passed or no row in the
-data is Max-derived (DISTILL-OPEN-QUESTIONS #6). The guard fails closed: a row
-counts as Max-derived unless something shows otherwise. A provenance field
-(``source``, ``model``, also under ``_meta`` / ``meta``) naming Max always
-counts. Otherwise the builder's teacher decides: build.py keeps only its
-``--teacher-model``'s rows (whatever their ``source`` says) and names that
-model in the ``report.json`` it writes beside ``train.jsonl``. With no such
-report, only a builder-written ``max_derived: false`` on the row clears it.
+run (anything but ``--dry-run``, smoke included) on data with a Max-derived row
+refuses (exit 3) unless BOTH approvals are there (DISTILL-OPEN-QUESTIONS #6,
+Q6b ruling): ``--i-have-operator-approval-for-max-derived-data`` on this
+command line, and the dataset's own recorded approval -- build.py's
+``--allow-max-derived --max-derived-approval "<ref>"``, read from the
+``report.json`` beside ``train.jsonl`` (``data_policy.max_derived_allow``), else
+from the ``dataset-manifest.json`` there (a build whose ``--report`` went
+elsewhere; only while ``train.jsonl`` still has the sha256 it lists), or from a
+pre-tokenized directory's ``meta.json`` (copied from that report). The
+flag alone, or a dataset built without the allow, is refused. The guard fails
+closed: a row counts as Max-derived unless something shows otherwise. A
+provenance field (``source``, ``model``, also under ``_meta`` / ``meta``)
+naming Max always counts. Otherwise the builder's teacher decides: build.py
+names the one model whose rows train/val hold in its report
+(``settings.teacher_model``); with no such report, only a builder-written
+``max_derived: false`` on the row clears it.
+
+A run on Max-derived data is private (``artifact_policy.py``): its ``--out``
+must carry the tag in its name (``runs/9b-r32-max-derived``; otherwise exit 2),
+its adapter directory is ``<out>/adapter-max-derived`` (not ``<out>/adapter``),
+and its run manifest carries ``max_derived: true``, ``tags: ["max-derived"]``,
+``private: true`` and both approvals (``approvals``). Every checkpoint carries
+its own ``manifest.json`` with the same fields (and the run's data), so a
+checkpoint copied out of the run directory (a window close leaves the weights
+only there) still says what it is. ``publish_guard.py`` refuses them all;
+``modal_train.py`` never rents the data.
 
 Data
 ----
@@ -39,7 +71,8 @@ carries loss.
 
 Training
 --------
-QLoRA r=32 / alpha=32 on every linear layer, lr 1e-4 with linear warmup then
+QLoRA r=32 / alpha=32 on the language model's attention, gated-deltanet and
+MLP projections (``TARGET_MODULES``), lr 1e-4 with linear warmup then
 cosine to zero, 2 epochs, micro-batch 1 (no padding) with gradient
 accumulation, "unsloth" gradient checkpointing, 8-bit AdamW, loss normalised
 over the accumulation group's loss tokens. The sample order is a seeded
@@ -67,7 +100,7 @@ part of every checkpoint.
   at the last completed step, so a window close loses at most one group.
 
 Exit: 0 done (or stopped cleanly), 1 training failed or the smoke check
-failed, 2 usage or data error, 3 refused (Max-derived data without approval).
+failed, 2 usage or data error, 3 refused (Max-derived data without both approvals).
 """
 
 from __future__ import annotations
@@ -92,7 +125,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Protocol
+from typing import Any, Callable, Iterable, Mapping, Protocol
 
 REPO = Path(__file__).resolve().parents[2]
 MANIFEST_SCHEMA = "distill-train-manifest/1"
@@ -103,17 +136,28 @@ SEQ_LADDER = (16384, 12288, 8192)
 APPROVAL_FLAG = "--i-have-operator-approval-for-max-derived-data"
 RUN_STATE = "run_state.json"
 CKPT_PREFIX = "checkpoint-"
+CKPT_MANIFEST = "manifest.json"  # a checkpoint's own provenance (Q6b), the run manifest's schema
 PARTIAL = ".partial"
 COMPLETE = "COMPLETE"
 IGNORE = -100
-# Every linear layer of the language model (the vision tower is not trained).
-TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+# The language model's linear layers: attention (q/k/v/o, the full-attention
+# layers), the gated-deltanet token mixer (in_proj_qkv, in_proj_z, out_proj: the
+# linear-attention layers, 24 of the 9B's 32 and 48 of the 27B's 64) and the MLP.
+# Not targeted: the deltanet's tiny in_proj_a/in_proj_b gates, the embeddings and
+# head, and the vision tower (its layers are qkv, proj, linear_fc1/2: no match).
+# feasibility_27b.TARGET_MODULES is the same list (a test keeps them equal).
+TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj", "in_proj_qkv", "in_proj_z", "out_proj",
+                  "gate_proj", "up_proj", "down_proj")
 # Teacher provenance: "max-golden", "max-gym-<date>", "qwen3.8-max" ... A word
 # "max", not a substring of another word.
 MAX_RE = re.compile(r"(?<![a-z0-9])max(?![a-z0-9])", re.I)
 # build.py's report, written beside train.jsonl; settings.teacher_model names
 # the only model whose rows the build kept.
 BUILD_REPORT = "report.json"
+# build.py's dataset manifest (artifact_policy.DATASET_MANIFEST), always written
+# into its --out: the record the trainer falls back to when --report went elsewhere.
+DATASET_MANIFEST = "dataset-manifest.json"
+ADAPTER_DIR = "adapter"  # <out>/adapter; <out>/adapter-max-derived for Max-derived data
 VERSIONED = ("torch", "transformers", "unsloth", "unsloth_zoo", "peft", "trl", "bitsandbytes",
              "accelerate", "tokenizers", "huggingface_hub", "safetensors")
 
@@ -327,46 +371,180 @@ def is_max_derived(row: dict[str, Any], teacher_max: bool | None = None) -> bool
     return not says_not_max(row)
 
 
+def build_record(data: Path) -> tuple[Path, dict[str, Any]] | None:
+    """build.py's record beside *data*: its ``report.json``, else (a build run
+    with ``--report`` elsewhere) its ``dataset-manifest.json``, which always
+    goes into the output directory. None when neither is a readable object."""
+    for name in (BUILD_REPORT, DATASET_MANIFEST):
+        where = Path(data).parent / name
+        try:
+            doc = json.loads(where.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(doc, dict):
+            return where, doc
+    return None
+
+
 def builder_teacher_is_max(data: Path) -> bool | None:
     """Whether the build that wrote *data* kept a Max teacher's rows, from
-    build.py's report beside it; None when there is no readable report or it
+    build.py's report beside it (``settings.teacher_model``) or its dataset
+    manifest (``teacher_model``); None when there is no readable record or it
     names no teacher."""
-    try:
-        rep = json.loads((Path(data).parent / BUILD_REPORT).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    found = build_record(data)
+    if found is None:
         return None
-    settings = rep.get("settings") if isinstance(rep, dict) else None
-    teacher = settings.get("teacher_model") if isinstance(settings, dict) else None
+    where, rep = found
+    if where.name == DATASET_MANIFEST:
+        teacher = rep.get("teacher_model")
+    else:
+        settings = rep.get("settings")
+        teacher = settings.get("teacher_model") if isinstance(settings, dict) else None
     if not isinstance(teacher, str) or not teacher.strip():
         return None
     return bool(MAX_RE.search(teacher))
+
+
+def _load_policy() -> Any:
+    """``artifact_policy.py`` beside this file (Q6b: names, manifest fields,
+    approvals), loaded when first needed: the Modal image carries only this
+    file and render.py, and its container never trains Max-derived data."""
+    name = "distill_artifact_policy"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).resolve().with_name("artifact_policy.py"))
+    if spec is None or spec.loader is None:
+        raise ImportError("artifact_policy.py not found next to train_qlora.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return mod
+
+
+def dataset_record(data: Path | None = None, pretokenized: Path | None = None
+                   ) -> dict[str, Any]:
+    """The dataset's own record of the Max-derived allow (Q6b): build.py's
+    report beside ``train.jsonl`` (``data_policy.max_derived_allow``), or what a
+    pre-tokenized directory's ``meta.json`` copied from it. ``approval`` is the
+    recorded reference, None when the dataset records no allow."""
+    if pretokenized is not None:
+        where = Path(pretokenized) / "meta.json"
+        try:
+            meta = json.loads(where.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        rec = meta.get("dataset_policy") if isinstance(meta, dict) else None
+        rec = rec if isinstance(rec, dict) else {}
+        return {"source": str(where), "report": rec.get("report"),
+                "approval": _load_policy().dataset_approval(rec)}
+    if data is None:
+        return {"source": None, "report": None, "approval": None}
+    found = build_record(data)
+    if found is None:
+        return {"source": None, "report": None, "approval": None}
+    where, rep = found
+    if where.name != DATASET_MANIFEST:
+        return {"source": str(where), "report": str(where),
+                "approval": _load_policy().dataset_approval(rep)}
+    # The dataset manifest's approval covers the files it lists: a train.jsonl
+    # whose sha256 is not the one recorded there is not the approved data.
+    files = rep.get("files") if isinstance(rep.get("files"), dict) else {}
+    entry = files.get(Path(data).name)
+    want = entry.get("sha256") if isinstance(entry, dict) else None
+    try:
+        same = isinstance(want, str) and want == sha256_files([Path(data)])
+    except OSError:
+        same = False
+    report = rep.get("report")
+    return {"source": str(where), "report": report if isinstance(report, str) else None,
+            "approval": _load_policy().dataset_approval(rep) if same else None}
 
 
 @dataclass
 class GuardResult:
     total: int
     max_derived: int
-    approved: bool
+    approved: bool  # the operator's flag on this command line
+    # the approval the dataset recorded (build.py --max-derived-approval), None: none
+    dataset_approval: str | None = None
 
     @property
     def allowed(self) -> bool:
-        return self.approved or self.max_derived == 0
+        return self.max_derived == 0 or (self.approved and bool(self.dataset_approval))
+
+    @property
+    def data_max_derived(self) -> bool:
+        """The run trains on Max-derived data: its outputs are tagged and private."""
+        return self.max_derived > 0
 
     def message(self) -> str:
         if self.max_derived == 0:
             return f"provenance: none of {self.total} rows is Max-derived"
-        if self.approved:
+        if self.allowed:
             return (f"provenance: {self.max_derived}/{self.total} rows are Max-derived; "
-                    f"training them on the operator's approval ({APPROVAL_FLAG})")
-        return (f"REFUSED: {self.max_derived}/{self.total} rows are Max-derived (or nothing "
-                "shows they are not). Training on Max-derived data is on hold until the "
-                "operator answers "
-                f"DISTILL-OPEN-QUESTIONS #6; pass {APPROVAL_FLAG} only with that approval.")
+                    f"training them on the operator's approval ({APPROVAL_FLAG}) and the "
+                    f"dataset's recorded approval ({self.dataset_approval!r}) under the Q6b "
+                    "ruling: the adapter is private and tagged max-derived")
+        if not self.approved:
+            return (f"REFUSED: {self.max_derived}/{self.total} rows are Max-derived (or nothing "
+                    "shows they are not). Training on Max-derived data needs the operator "
+                    f"(DISTILL-OPEN-QUESTIONS #6, Q6b ruling): pass {APPROVAL_FLAG} only with "
+                    "that approval, on a dataset built with --allow-max-derived "
+                    "--max-derived-approval.")
+        return (f"REFUSED: {self.max_derived}/{self.total} rows are Max-derived and the dataset "
+                "records no Max-derived approval: build it with --allow-max-derived "
+                "--max-derived-approval \"<ref>\" (DISTILL-OPEN-QUESTIONS #6, Q6b ruling). "
+                f"{APPROVAL_FLAG} alone is not enough.")
 
 
-def guard(flags: Iterable[bool], approved: bool) -> GuardResult:
+def guard(flags: Iterable[bool], approved: bool, dataset_approval: str | None = None
+          ) -> GuardResult:
     fl = list(flags)
-    return GuardResult(total=len(fl), max_derived=sum(fl), approved=approved)
+    ref = dataset_approval if isinstance(dataset_approval, str) and dataset_approval.strip() \
+        else None
+    return GuardResult(total=len(fl), max_derived=sum(fl), approved=approved,
+                       dataset_approval=ref)
+
+
+def adapter_dir(out: Path, data_max_derived: bool) -> Path:
+    """Where the run's adapter goes: ``<out>/adapter``, tagged
+    (``<out>/adapter-max-derived``) when the data is Max-derived."""
+    name = _load_policy().tag_name(ADAPTER_DIR) if data_max_derived else ADAPTER_DIR
+    return Path(out) / name
+
+
+def out_tag_problem(out: Path, data_max_derived: bool) -> str | None:
+    """Why *out* may not hold a run on this data, or None: a run on
+    Max-derived data is named for it (Q6b), as build.py's ``--out`` is, so its
+    checkpoints, logs and adapter all sit under a tagged name."""
+    if not data_max_derived:
+        return None
+    pol = _load_policy()
+    if pol.has_tag(Path(out).name):
+        return None
+    return (f"the data is Max-derived: the run directory's name must carry the {pol.TAG} tag "
+            f"(DISTILL-OPEN-QUESTIONS Q6b), e.g. --out {pol.tag_path(out)}")
+
+
+def checkpoint_manifest(run_id: str, data_path: Path, source: Source,
+                        guard_result: GuardResult) -> dict[str, Any]:
+    """What every checkpoint of the run records about itself (Q6b): the
+    policy fields, the run, and the data it trains on, in the run manifest's
+    schema, so ``artifact_policy.provenance`` reads a copied checkpoint the
+    way it reads the run."""
+    return {"schema": MANIFEST_SCHEMA, "kind": "checkpoint", "run_id": run_id,
+            **_load_policy().policy_fields(guard_result.data_max_derived),
+            "approvals": {"operator_flag": {"flag": APPROVAL_FLAG,
+                                            "given": guard_result.approved},
+                          "dataset": {"approval": guard_result.dataset_approval}},
+            "data": {"path": str(Path(data_path).expanduser().resolve()),
+                     "sha256": source.sha256(), "rows": guard_result.total,
+                     "max_derived_rows": guard_result.max_derived}}
 
 
 def check_row(row: dict[str, Any], where: str) -> None:
@@ -590,7 +768,9 @@ class JsonlSource:
 def write_pretokenized(rows: list[dict[str, Any]], encoder: Encoder, out_dir: Path, *,
                        ladder: tuple[int, ...] = SEQ_LADDER, refit: Refit | None = None,
                        data_sha256: str = "", tokenizer_sha256: str = "",
-                       teacher_max: bool | None = None) -> dict[str, Any]:
+                       teacher_max: bool | None = None,
+                       dataset_policy: dict[str, Any] | None = None,
+                       source: str = "") -> dict[str, Any]:
     """Pre-tokenize rows for a run that must not tokenize on paid time.
 
     ``tokens.bin`` holds uint32 ids back to back; ``index.jsonl`` has one line
@@ -600,6 +780,10 @@ def write_pretokenized(rows: list[dict[str, Any]], encoder: Encoder, out_dir: Pa
     variant there (dropped at that length). Each row's ``max_derived`` flag is
     :func:`is_max_derived` with the builder's *teacher_max*
     (:func:`builder_teacher_is_max` of the source ``train.jsonl``).
+    ``meta.json`` carries the Q6b fields (``max_derived``, ``tags``,
+    ``private``), the *source* path, and *dataset_policy*: the source
+    dataset's recorded Max-derived allow (``{"report": ..., "max_derived_allow":
+    ...}``), which a run on this directory needs for Max-derived rows.
     """
     if sys.byteorder != "little":
         raise UsageError("pre-tokenized files are little-endian; this host is not")
@@ -651,6 +835,8 @@ def write_pretokenized(rows: list[dict[str, Any]], encoder: Encoder, out_dir: Pa
         "max_derived_rows": sum(flags), "data_sha256": data_sha256,
         "tokenizer_sha256": tokenizer_sha256,
         "content_sha256": sha256_files([out_dir / "index.jsonl", out_dir / "tokens.bin"]),
+        **_load_policy().policy_fields(sum(flags) > 0),
+        "source": source, "dataset_policy": dict(dataset_policy or {}),
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     return meta
@@ -1042,8 +1228,12 @@ class Trainer:
                  metrics_path: Path | None = None,
                  on_save: Callable[[Path], None] | None = None,
                  revision: str | None = None,
+                 checkpoint_manifest: dict[str, Any] | None = None,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self.cfg = cfg
+        # Q6b: written into every checkpoint (CKPT_MANIFEST), so a copied
+        # checkpoint carries its own provenance; None writes none
+        self.checkpoint_manifest = checkpoint_manifest
         self.revision = revision  # the resolved base revision (a sha when known)
         self.source = source
         self.out = Path(out_dir)
@@ -1272,6 +1462,9 @@ class Trainer:
             "plan_sha": self.run_state["plan_sha"],
             # what a restore of this checkpoint must bring back (checked on resume)
             "fingerprint": self.backend.fingerprint()})
+        if self.checkpoint_manifest is not None:
+            write_json(tmp / CKPT_MANIFEST, {**self.checkpoint_manifest, "checkpoint": final.name,
+                                             "step": self.step, "written_at": now_iso()})
         (tmp / COMPLETE).write_text(now_iso() + "\n", encoding="utf-8")
         tmp.replace(final)
         prune_checkpoints(self.out, self.cfg.keep_checkpoints)
@@ -1376,6 +1569,26 @@ def git_commit() -> str | None:
     return out.stdout.strip() or None
 
 
+def base_source_problem(base_model: str, *, env: Mapping[str, str],
+                        allow_download: bool) -> str | None:
+    """Why a real run must not load *base_model* this way, or None. A local
+    directory is fine (a staged, pinned download). A hub id loads from the HF
+    cache only under ``HF_HUB_OFFLINE=1`` (missing: the load fails), and
+    otherwise only with ``--allow-hub-download``: from_pretrained would
+    download the full-precision checkpoint (~19 GB for the 9B) into the HF
+    cache with no free-space check."""
+    if Path(base_model).expanduser().is_dir():
+        return None
+    if Path(base_model).expanduser().exists() or base_model.startswith(("/", "~", ".")):
+        return f"--base-model {base_model} is not a model directory"
+    if env.get("HF_HUB_OFFLINE", "") not in ("", "0", "false", "False") or allow_download:
+        return None
+    return (f"--base-model {base_model} is a hub id: loading it would download the base into the HF "
+            "cache with no disk-floor check. Stage it with a pinned download and pass its directory "
+            "(plus --base-revision <commit>), or set HF_HUB_OFFLINE=1 to load it from the cache "
+            "only, or pass --allow-hub-download")
+
+
 def resolve_revision(repo: str, revision: str | None) -> str | None:
     """The commit sha a Hugging Face repo revision points at (network), or
     None when it cannot be resolved here (local path, offline, no hub client)."""
@@ -1392,11 +1605,20 @@ def resolve_revision(repo: str, revision: str | None) -> str | None:
 
 def manifest(cfg: TrainConfig, source: Source, *, mode: str, run_id: str, data_path: Path,
              approved: bool, guard_result: GuardResult, revision_resolved: str | None,
-             fit: list[dict[str, Any]], versions: dict[str, Any], extra: dict[str, Any]
-             ) -> dict[str, Any]:
+             fit: list[dict[str, Any]], versions: dict[str, Any], extra: dict[str, Any],
+             dataset: dict[str, Any] | None = None) -> dict[str, Any]:
     script = Path(__file__).resolve()
+    ds = dataset or {}
     return {
         "schema": MANIFEST_SCHEMA, "run_id": run_id, "mode": mode, "written_at": now_iso(),
+        # Q6b: a run on Max-derived data is private and tagged; both approvals recorded
+        **_load_policy().policy_fields(guard_result.data_max_derived),
+        "approvals": {
+            "operator_flag": {"flag": APPROVAL_FLAG, "given": approved},
+            "dataset": {"approval": guard_result.dataset_approval,
+                        "recorded_in": ds.get("source")},
+            "ruling": "DISTILL-OPEN-QUESTIONS #6, Q6b",
+        },
         "script": {"path": str(script.relative_to(REPO)) if script.is_relative_to(REPO)
                    else script.name, "sha256": sha256_files([script]), "git_commit": git_commit()},
         "data": {"path": str(data_path), "sha256": source.sha256(), "rows": len(source.ids()),
@@ -1420,8 +1642,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="the student's tokenizer.json + chat template (the dir build.py used)")
     ap.add_argument("--out", type=Path, required=True, help="run directory (checkpoints, adapter)")
     ap.add_argument("--log-dir", type=Path, help="default: data/distill/logs/<out name>")
-    ap.add_argument("--base-model", default=STUDENT)
+    ap.add_argument("--base-model", default=STUDENT,
+                    help="a staged model directory (a real run refuses a hub id without "
+                         "HF_HUB_OFFLINE=1 or --allow-hub-download)")
     ap.add_argument("--base-revision", default=None, help="HF revision; resolved to a sha")
+    ap.add_argument("--allow-hub-download", action="store_true",
+                    help="let a hub-id --base-model download into the HF cache (no disk check)")
     ap.add_argument("--load", choices=("4bit", "16bit"), default="4bit")
     ap.add_argument("--r", type=int, default=32)
     ap.add_argument("--alpha", type=int, default=32)
@@ -1443,7 +1669,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--preview", type=int, default=2, help="examples to print in --dry-run")
     ap.add_argument("--smoke-min-drop", type=float, default=0.02)
     ap.add_argument(APPROVAL_FLAG, dest="approved", action="store_true",
-                    help="the operator approved training on Max-derived data (OPEN-QUESTIONS #6)")
+                    help="the operator approved training on Max-derived data (OPEN-QUESTIONS #6, "
+                         "Q6b); the dataset must also record its build-time approval")
     return ap
 
 
@@ -1516,7 +1743,8 @@ def dry_run(a: argparse.Namespace, cfg: TrainConfig, run_id: str, log_dir: Path)
         encoder = hf_encoder(a.tokenizer_dir) if a.tokenizer_dir else None
         js = JsonlSource(a.data, encoder)
         source, rows = js, js.rows
-    g = guard(source.max_derived(), a.approved)
+    ds = dataset_record(a.data, a.pretokenized)
+    g = guard(source.max_derived(), a.approved, ds["approval"])
     fits = []
     tokenized = rows is None or getattr(source, "encoder", None) is not None
     for i, L in enumerate(cfg.ladder):
@@ -1543,9 +1771,19 @@ def dry_run(a: argparse.Namespace, cfg: TrainConfig, run_id: str, log_dir: Path)
     print(f"\nconfig {cfg.sha()[:12]}: {json.dumps(cfg.as_dict())}")
     print(f"~{steps} optimizer steps at {cfg.grad_accum} examples/step; checkpoint every "
           f"{cfg.save_every}")
+    problem = base_source_problem(cfg.base_model, env=os.environ,
+                                  allow_download=a.allow_hub_download)
+    if problem:
+        print(f"note: a real run would refuse this: {problem}")
+    if g.data_max_derived:
+        print(f"note: the data is Max-derived: a real run's adapter would be "
+              f"{adapter_dir(a.out, True)} (private, tagged; Q6b)")
+        problem = out_tag_problem(a.out, True)
+        if problem:
+            print(f"note: a real run would refuse this: {problem}")
     m = manifest(cfg, source, mode="dry-run", run_id=run_id, data_path=a.data or a.pretokenized,
                  approved=a.approved, guard_result=g, revision_resolved=None, fit=fits,
-                 versions=package_versions(), extra={"status": "validated"})
+                 versions=package_versions(), extra={"status": "validated"}, dataset=ds)
     write_json(log_dir / "manifest.json", m)
     print(f"manifest: {log_dir / 'manifest.json'}")
     return 0
@@ -1569,11 +1807,20 @@ def main(argv: list[str] | None = None, *, backend_factory: Callable[[TrainConfi
         if a.dry_run:
             return dry_run(a, cfg, run_id, log_dir)
         source = make_source(a, need_encoder=True)
-        g = guard(source.max_derived(), a.approved)
+        ds = dataset_record(a.data, a.pretokenized)
+        g = guard(source.max_derived(), a.approved, ds["approval"])
         log.info("%s", g.message())
         if not g.allowed:
             print(g.message(), file=sys.stderr)
             return 3
+        problem = out_tag_problem(a.out, g.data_max_derived)
+        if problem:
+            raise UsageError(problem)
+        if backend_factory is None:  # the real backend loads (and may fetch) the base
+            problem = base_source_problem(cfg.base_model, env=os.environ,
+                                          allow_download=a.allow_hub_download)
+            if problem:
+                raise UsageError(problem)
         stop = StopFlag(stop_at=parse_stop_at(a.stop_at))
         prev_handler = signal.signal(signal.SIGTERM, lambda *_: setattr(stop, "reason", "SIGTERM"))
         val = None
@@ -1588,8 +1835,11 @@ def main(argv: list[str] | None = None, *, backend_factory: Callable[[TrainConfi
         if resolved is None and not (a.resume and (a.out / RUN_STATE).is_file()):
             resolved = resolve_revision(cfg.base_model, cfg.base_revision)
         trainer = Trainer(cfg, source, a.out, backend, stop=stop, only_ids=only, val=val,
-                          metrics_path=log_dir / "metrics.jsonl", revision=resolved)
+                          metrics_path=log_dir / "metrics.jsonl", revision=resolved,
+                          checkpoint_manifest=checkpoint_manifest(
+                              run_id, a.data or a.pretokenized, source, g))
         mode = "smoke" if a.smoke else "train"
+        dest = adapter_dir(a.out, g.data_max_derived)  # tagged for Max-derived data (Q6b)
 
         def write_manifest(status: str, extra: dict[str, Any]) -> None:
             m = manifest(cfg, source, mode=mode, run_id=run_id, data_path=a.data or a.pretokenized,
@@ -1599,7 +1849,8 @@ def main(argv: list[str] | None = None, *, backend_factory: Callable[[TrainConfi
                          versions=backend.versions(),
                          extra={"status": status, "seq_history": trainer.run_state.get(
                              "seq_history", []), "resumed_from": trainer.resumed_from,
-                             "step": trainer.step, "tokens_seen": trainer.tokens_seen, **extra})
+                             "step": trainer.step, "tokens_seen": trainer.tokens_seen, **extra},
+                         dataset=ds)
             write_json(log_dir / "manifest.json", m)
             write_json(a.out / "manifest.json", m)
 
@@ -1607,7 +1858,7 @@ def main(argv: list[str] | None = None, *, backend_factory: Callable[[TrainConfi
             trainer.setup(resume=a.resume)
             write_manifest("running", {})
             if a.smoke:
-                return smoke(trainer, a, write_manifest)
+                return smoke(trainer, a, write_manifest, adapter=dest)
             res = trainer.run()
         except StepDown as sd:
             log.warning("%s; re-executing with --resume", sd)
@@ -1616,7 +1867,7 @@ def main(argv: list[str] | None = None, *, backend_factory: Callable[[TrainConfi
         finally:
             signal.signal(signal.SIGTERM, prev_handler)
         if res.status == "done":
-            adapter = trainer.save_adapter(a.out / "adapter")
+            adapter = trainer.save_adapter(dest)
             write_manifest("done", {"adapter": str(adapter), "peak_gb": backend.peak_memory_gb()})
             log.info("done: %d steps, adapter %s", trainer.step, adapter)
         else:
@@ -1632,7 +1883,8 @@ def main(argv: list[str] | None = None, *, backend_factory: Callable[[TrainConfi
 
 
 def smoke(trainer: Trainer, a: argparse.Namespace,
-          write_manifest: Callable[[str, dict[str, Any]], None]) -> int:
+          write_manifest: Callable[[str, dict[str, Any]], None], *,
+          adapter: Path | None = None) -> int:
     """50 steps. At the halfway checkpoint the weights train a few steps on,
     then the checkpoint is restored and must bring back exactly the weights it
     saved; the loss must drop. A stop (SIGTERM, ``--stop-at``) is no verdict:
@@ -1662,7 +1914,7 @@ def smoke(trainer: Trainer, a: argparse.Namespace,
                  "passed": bool(trainer.restore_check["ok"] and trainer.restore_check["moved"])}
     round_trip = bool(check and check["passed"])
     ok, first, last = loss_decreased(trainer.losses, min_drop=a.smoke_min_drop)
-    adapter = trainer.save_adapter(a.out / "adapter")
+    adapter = trainer.save_adapter(adapter if adapter is not None else a.out / ADAPTER_DIR)
     passed = ok and round_trip
     write_manifest("smoke-train-pass" if passed else "smoke-train-fail", {
         "smoke": {"steps": trainer.step, "loss_first10": first, "loss_last10": last,

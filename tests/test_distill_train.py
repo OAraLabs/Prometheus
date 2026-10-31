@@ -340,7 +340,9 @@ def test_build_py_teacher_rows_without_max_in_their_source_are_refused(
 def test_guard_refuses_max_rows_without_the_flag() -> None:
     assert not T.guard([True, False], approved=False).allowed
     assert "OPEN-QUESTIONS #6" in T.guard([True], approved=False).message()
-    assert T.guard([True, False], approved=True).allowed
+    # Q6b: the flag and the dataset's recorded approval, both
+    assert not T.guard([True, False], approved=True).allowed
+    assert T.guard([True, False], approved=True, dataset_approval=APPROVAL_REF).allowed
     assert T.guard([False, False], approved=False).allowed
 
 
@@ -606,12 +608,28 @@ def cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
     monkeypatch.setattr(T, "resolve_revision", lambda repo, rev: "b" * 40)
     tok = tmp_path / "tok"
     tok.mkdir()
-    return {"tok": tok, "logs": tmp_path / "logs", "out": tmp_path / "out"}
+    # tagged: most runs here train on approved Max-derived rows, and such a run's
+    # --out must carry the tag (Q6b; test_q6b_a_max_run_needs_a_tagged_out)
+    return {"tok": tok, "logs": tmp_path / "logs", "out": tmp_path / "out-max-derived"}
 
 
 def base_args(data: Path, cli: dict[str, Any], *extra: str) -> list[str]:
     return ["--data", str(data), "--tokenizer-dir", str(cli["tok"]), "--out", str(cli["out"]),
             "--log-dir", str(cli["logs"]), *extra]
+
+
+APPROVAL_REF = "operator Q6b 2026-10-30"
+
+
+def approve_dataset(data: Path, ref: str = APPROVAL_REF) -> Path:
+    """build.py's report beside *data*, recording the operator's Q6b allow
+    (--allow-max-derived --max-derived-approval): what a run on Max-derived
+    rows needs besides the trainer's own flag."""
+    (data.parent / T.BUILD_REPORT).write_text(json.dumps({
+        "schema": "distill-phase3-report/1", "max_derived": True,
+        "settings": {"teacher_model": "qwen3.8-max"},
+        "data_policy": {"max_derived_allow": {"allowed": True, "approval": ref}}}))
+    return data
 
 
 def test_dry_run_validates_previews_and_writes_a_manifest(tmp_path: Path, cli: dict[str, Any],
@@ -645,6 +663,41 @@ def test_real_run_refuses_max_derived_data_without_the_flag(tmp_path: Path, cli:
     assert T.main(base_args(data, cli, "--smoke"), backend_factory=lambda c: FakeBackend()) == 3
 
 
+def test_base_must_be_staged_or_offline(tmp_path: Path) -> None:
+    """A hub-id base would download ~19 GB into the HF cache with no disk-floor
+    check: a real run takes a staged directory, the cache only (HF_HUB_OFFLINE=1),
+    or an explicit --allow-hub-download."""
+    staged = tmp_path / "qwen3.5-9b-base"
+    staged.mkdir()
+    assert T.base_source_problem(str(staged), env={}, allow_download=False) is None
+    hub = T.base_source_problem(T.STUDENT, env={}, allow_download=False)
+    assert hub and "hub id" in hub and "HF_HUB_OFFLINE=1" in hub
+    assert T.base_source_problem(T.STUDENT, env={"HF_HUB_OFFLINE": "1"}, allow_download=False) is None
+    assert T.base_source_problem(T.STUDENT, env={"HF_HUB_OFFLINE": "0"}, allow_download=False)
+    assert T.base_source_problem(T.STUDENT, env={}, allow_download=True) is None
+    missing = T.base_source_problem(str(tmp_path / "not-staged-yet"), env={"HF_HUB_OFFLINE": "1"},
+                                    allow_download=True)
+    assert missing and "not a model directory" in missing
+
+
+def test_real_backend_refuses_a_hub_base_before_anything_loads(tmp_path: Path, cli: dict[str, Any],
+                                                               monkeypatch: pytest.MonkeyPatch,
+                                                               capsys: pytest.CaptureFixture[str]
+                                                               ) -> None:
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(8)))
+
+    def no_backend(c: Any) -> Any:
+        raise AssertionError("the real backend is never built for a refused base")
+
+    monkeypatch.setattr(T, "UnslothBackend", no_backend)
+    assert T.main(base_args(data, cli, T.APPROVAL_FLAG)) == 2
+    assert "hub id" in capsys.readouterr().err and not cli["out"].exists()
+    # the dry run says so without refusing
+    assert T.main(base_args(data, cli, "--dry-run")) == 0
+    assert "a real run would refuse this" in capsys.readouterr().out
+
+
 def test_non_max_data_trains_without_the_flag(tmp_path: Path, cli: dict[str, Any]) -> None:
     rows = [make_row(i, 4, "local-gym-2026-11") for i in range(8)]
     data = write_rows(tmp_path / "train.jsonl", rows)
@@ -663,7 +716,7 @@ def test_non_max_data_trains_without_the_flag(tmp_path: Path, cli: dict[str, Any
 
 def test_smoke_runs_50_steps_round_trips_a_checkpoint_and_checks_the_loss(
         tmp_path: Path, cli: dict[str, Any], capsys: pytest.CaptureFixture[str]) -> None:
-    data = write_rows(tmp_path / "train.jsonl", rows_n(230))
+    data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(230)))
     flag = T.APPROVAL_FLAG
     assert T.main(base_args(data, cli, "--smoke", flag), backend_factory=lambda c: FakeBackend()) == 0
     m = json.loads((cli["logs"] / "manifest.json").read_text())
@@ -697,7 +750,7 @@ class NoOpRestore(FakeBackend):
 
 def test_smoke_round_trip_fails_when_the_restore_does_nothing(tmp_path: Path,
                                                               cli: dict[str, Any]) -> None:
-    data = write_rows(tmp_path / "train.jsonl", rows_n(230))
+    data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(230)))
     rc = T.main(base_args(data, cli, "--smoke", T.APPROVAL_FLAG),
                 backend_factory=lambda c: NoOpRestore())
     m = json.loads((cli["logs"] / "manifest.json").read_text())
@@ -722,7 +775,7 @@ def test_a_resume_refuses_a_restore_that_does_not_bring_the_weights_back(tmp_pat
 
 def test_a_stopped_smoke_is_no_verdict_and_resumes(tmp_path: Path, cli: dict[str, Any],
                                                    monkeypatch: pytest.MonkeyPatch) -> None:
-    data = write_rows(tmp_path / "train.jsonl", rows_n(230))
+    data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(230)))
     args = base_args(data, cli, "--smoke", T.APPROVAL_FLAG)
     for stop_step in (10, 30):  # in the first half, then in the second
         shutil.rmtree(cli["out"], ignore_errors=True)
@@ -748,7 +801,7 @@ def test_a_stopped_smoke_is_no_verdict_and_resumes(tmp_path: Path, cli: dict[str
 
 def test_oom_re_executes_with_resume(tmp_path: Path, cli: dict[str, Any],
                                      monkeypatch: pytest.MonkeyPatch) -> None:
-    data = write_rows(tmp_path / "train.jsonl", rows_n(6))
+    data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(6)))
     calls: list[list[str]] = []
     monkeypatch.setattr(T.os, "execv", lambda exe, args: calls.append(args))
     args = base_args(data, cli, T.APPROVAL_FLAG)
@@ -821,6 +874,10 @@ def test_feasibility_dry_run_assumes_speed_and_measures_nothing(tmp_path: Path,
 WINDOW = ("--stop-at", "2099-01-01T06:30-05:00", "--no-scope")
 
 
+def idle_gpu() -> int:
+    return 300  # MiB: an idle card
+
+
 def fake_probe(results: dict[int, dict[str, Any]]) -> Any:
     def runner(cmd: list[str], timeout: float) -> Any:
         assert cmd[0] == sys.executable and "--one" in cmd
@@ -836,7 +893,7 @@ def test_feasibility_execute_local_viable(tmp_path: Path) -> None:
            4096: {"fits": True, "peak_gb": 19.0, "tokens_per_s": 1000.0}}
     out = tmp_path / "rep.json"
     assert F.main(["--data", str(lengths_file(tmp_path)), "--execute", *WINDOW, "--out", str(out)],
-                  runner=fake_probe(res)) == 0
+                  runner=fake_probe(res), gpu_used=idle_gpu) == 0
     rep = json.loads(out.read_text())
     assert rep["decision"]["verdict"] == "local-viable" and rep["decision"]["max_seq"] == 8192
     r8 = next(r for r in rep["results"] if r["max_seq"] == 8192)
@@ -861,7 +918,7 @@ def test_feasibility_records_a_crashed_child(tmp_path: Path) -> None:
         return subprocess.CompletedProcess(cmd, -11, "", "Segmentation fault")
 
     a = F.build_parser().parse_args(["--data", "x"])
-    got = F.execute((8192,), a, runner=crash, stop_at=4e9, scope=False)
+    got = F.execute((8192,), a, runner=crash, stop_at=4e9, scope=False, gpu_used=idle_gpu)
     assert got[8192]["fits"] is None and "without a result" in got[8192]["error"]
 
 
@@ -872,7 +929,7 @@ def test_feasibility_measured_keeps_the_ooms(tmp_path: Path) -> None:
     probe = tmp_path / "feasibility-27b.json"
     data = str(lengths_file(tmp_path))
     assert F.main(["--data", data, "--execute", *WINDOW, "--out", str(probe)],
-                  runner=fake_probe(oom)) == 0
+                  runner=fake_probe(oom), gpu_used=idle_gpu) == 0
     first = json.loads(probe.read_text())
     assert first["decision"]["verdict"] == "rent"
     assert F.main(["--data", data, "--measured", str(probe)]) == 0
@@ -886,7 +943,7 @@ def test_feasibility_measured_keeps_the_ooms(tmp_path: Path) -> None:
              8192: {"fits": True, "peak_gb": 22.9, "tokens_per_s": 900.0},
              4096: {"fits": True, "peak_gb": 19.0, "tokens_per_s": 1000.0}}
     assert F.main(["--data", data, "--execute", *WINDOW, "--out", str(probe)],
-                  runner=fake_probe(mixed)) == 0
+                  runner=fake_probe(mixed), gpu_used=idle_gpu) == 0
     assert F.main(["--data", data, "--measured", str(probe)]) == 0
     again = json.loads((tmp_path / "feasibility-27b-reestimate.json").read_text())
     assert [r["fits"] for r in again["results"]] == [False, False, True, True]
@@ -930,17 +987,19 @@ def test_feasibility_execute_keeps_to_the_window(tmp_path: Path) -> None:
 
     # room for two worst cases: 16k and 12k run, 8k and 4k are not started
     got = F.execute(F.SEQS, a, runner=probe, stop_at=clock.t + 2 * F.CHILD_TIMEOUT_S + 100,
-                    scope=True, clock=clock.now, stamp="T1")
+                    scope=True, clock=clock.now, stamp="T1", gpu_used=idle_gpu)
     assert len(started) == 2
     assert started[0][:6] == ["systemd-run", "--user", "--scope", "--quiet", "--collect",
                               "--unit=distill-feas27b-16384-T1"]
     assert started[0][6] == sys.executable
     assert got[8192]["fits"] is None and "--stop-at" in got[8192]["error"]
     assert F.decide(F.assess([(9000, 9000)], F.SEQS, 2, got))["verdict"] == "incomplete"
-    # --execute without a window end is refused before anything starts
-    assert F.main(["--data", str(lengths_file(tmp_path)), "--execute", "--no-scope"],
-                  runner=probe) == 2
-    assert len(started) == 2
+    # --execute without a window end, or without a report path, is refused before anything starts
+    assert F.main(["--data", str(lengths_file(tmp_path)), "--execute", "--no-scope", "--out",
+                   str(tmp_path / "r.json")], runner=probe, gpu_used=idle_gpu) == 2
+    assert F.main(["--data", str(lengths_file(tmp_path)), "--execute", *WINDOW],
+                  runner=probe, gpu_used=idle_gpu) == 2
+    assert len(started) == 2 and not (tmp_path / "r.json").exists()
 
 
 def test_feasibility_stops_probing_when_a_restore_stops_a_child() -> None:
@@ -951,10 +1010,91 @@ def test_feasibility_stops_probing_when_a_restore_stops_a_child() -> None:
         started.append(int(cmd[cmd.index("--one") + 1]))
         return subprocess.CompletedProcess(cmd, -15, "", "")  # systemctl stop on the scope
 
-    got = F.execute(F.SEQS, a, runner=probe, stop_at=4e9, scope=True)
+    got = F.execute(F.SEQS, a, runner=probe, stop_at=4e9, scope=True, gpu_used=idle_gpu)
     assert started == [16384]
     assert "stopped" in got[16384]["error"]
     assert all(got[s]["fits"] is None and "not probed" in got[s]["error"] for s in F.SEQS[1:])
+
+
+def test_feasibility_starts_nothing_while_the_gpu_is_taken(tmp_path: Path) -> None:
+    """A hand run before the swap (the business model server still on the card,
+    ~20 GiB) or with nvidia-smi unreadable starts no child."""
+    a = F.build_parser().parse_args(["--data", "x"])
+    started: list[list[str]] = []
+
+    def probe(cmd: list[str], timeout: float) -> Any:
+        started.append(cmd)
+        raise AssertionError("no child may start")
+
+    busy = F.execute(F.SEQS, a, runner=probe, stop_at=4e9, scope=False, gpu_used=lambda: 20306)
+    assert not started
+    assert all(busy[s]["fits"] is None and "20306 MiB" in busy[s]["error"]
+               and busy[s]["error"].startswith("not probed") for s in F.SEQS)
+    unknown = F.execute(F.SEQS, a, runner=probe, stop_at=4e9, scope=False, gpu_used=lambda: None)
+    assert not started and all("unreadable" in unknown[s]["error"] for s in F.SEQS)
+    assert F.decide(F.assess([(9000, 9000)], F.SEQS, 2, busy))["verdict"] == "incomplete"
+    # the limit is a flag; the job runner's own check uses the same 1500 MiB
+    a2 = F.build_parser().parse_args(["--data", "x", "--gpu-max-used-mib", "25000"])
+    ok = F.execute((4096,), a2, runner=fake_probe({4096: {"fits": True, "tokens_per_s": 1.0}}),
+                   stop_at=4e9, scope=False, gpu_used=lambda: 20306)
+    assert ok[4096]["fits"] is True
+
+
+def test_feasibility_cpu_spill_is_does_not_fit() -> None:
+    """transformers' bitsandbytes refusal of a CPU device map, and Unsloth's
+    rewrite of it, mean the model does not fit: a measurement, not an error."""
+    hf = ValueError("Some modules are dispatched on the CPU or the disk. Make sure you have enough "
+                    "GPU RAM to fit the quantized model.")
+    us = ValueError("Unsloth: /m does not fit in GPU memory (cuda:0 has 1.20 GB free), so "
+                    "transformers placed part of it on the CPU, which bitsandbytes cannot quantize.")
+    assert F.oom_kind(hf) == F.oom_kind(us) == "cpu_spill" and F.is_oom(hf) and F.is_oom(us)
+    assert F.oom_kind(RuntimeError("CUDA out of memory. Tried to allocate 2 GiB")) == "cuda_oom"
+    assert F.oom_kind(ValueError("rope_scaling must be a dict")) is None
+    lengths = [(9000, 9000)] * 10
+    spilled = F.assess(lengths, F.SEQS, 2, {s: {"fits": False, "error": "cpu_spill"} for s in F.SEQS})
+    assert F.decide(spilled)["verdict"] == "rent"
+    assert all(r.wall_clock_h is None for r in spilled)
+
+
+def test_feasibility_offload_layers_replaces_gpu_gib_and_reaches_the_child() -> None:
+    a = F.build_parser().parse_args(["--data", "x", "--offload-layers", "auto"])
+    assert a.offload_layers == "auto"
+    assert F.build_parser().parse_args(["--data", "x", "--offload-layers", "6"]).offload_layers == 6
+    for bad in (["--offload-layers", "0"], ["--offload-layers", "many"], ["--gpu-gib", "18"]):
+        with pytest.raises(SystemExit):
+            F.build_parser().parse_args(["--data", "x", *bad])
+    seen: list[list[str]] = []
+
+    def probe(cmd: list[str], timeout: float) -> Any:
+        seen.append(cmd)
+        Path(cmd[cmd.index("--json-out") + 1]).write_text(json.dumps({"fits": False}))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    F.execute((4096,), a, runner=probe, stop_at=4e9, scope=False, gpu_used=idle_gpu)
+    assert seen[0][seen[0].index("--offload-layers") + 1] == "auto"
+    F.execute((4096,), F.build_parser().parse_args(["--data", "x"]), runner=probe, stop_at=4e9,
+              scope=False, gpu_used=idle_gpu)
+    assert "--offload-layers" not in seen[1]
+
+
+def test_feasibility_children_run_offline_unless_told_otherwise() -> None:
+    env = F.child_env({"PATH": "/usr/bin"})
+    assert env["HF_HUB_OFFLINE"] == "1" and env["TRANSFORMERS_OFFLINE"] == "1"
+    assert env["PATH"] == "/usr/bin"
+    assert F.child_env({"HF_HUB_OFFLINE": "0"})["HF_HUB_OFFLINE"] == "0"
+
+
+def test_feasibility_probes_the_adapter_the_trainer_trains() -> None:
+    """Same LoRA targets as train_qlora.py, including the gated-deltanet
+    projections of the linear-attention layers (48 of the 27B's 64 layers,
+    24 of the 9B's 32)."""
+    assert tuple(F.TARGET_MODULES) == tuple(T.TARGET_MODULES)
+    assert {"in_proj_qkv", "in_proj_z", "out_proj"} <= set(T.TARGET_MODULES)
+    assert {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"} <= set(
+        T.TARGET_MODULES)
+    # the vision tower's linear layers are not targeted
+    assert not {"qkv", "proj", "linear_fc1", "linear_fc2"} & set(T.TARGET_MODULES)
+    assert T.TrainConfig().target_modules == T.TARGET_MODULES
 
 
 # ── modal_train.py: cost math, ledger, budget ─────────────────────────────
@@ -1060,16 +1200,18 @@ def segment_env(tmp_path: Path, *, n_rows: int = 40, sec_per_token: float = 1.0,
 
     job = {"run_id": "r1", "gpu": "H100", "rate_per_s": 0.001, "max_usd": 100.0,
            "deadline": clock.t + 10 * 86400, "call_timeout_s": 86400, "calib_steps": 5,
-           "calib_skip": 1, "approved": True, "base_revision": "c" * 40,
+           "calib_skip": 1, "base_revision": "c" * 40,
            "expect_load_s": load_s, "expect_step_s": 0.0}
     return {"clock": clock, "job": job, "make": make_trainer, "run_dir": run_dir,
             "commits": commits, "backends": backends}
 
 
-def call(env: dict[str, Any], call_id: str = "", **job: Any) -> dict[str, Any]:
+def call(env: dict[str, Any], call_id: str = "", max_derived_rows: int = 0,
+         **job: Any) -> dict[str, Any]:
     return M.run_segment({**env["job"], **job}, make_trainer=env["make"],
                          commit=lambda: env["commits"].append(0), run_dir=env["run_dir"],
-                         max_derived_rows=40, clock=env["clock"].now, call_id=call_id)
+                         max_derived_rows=max_derived_rows, clock=env["clock"].now,
+                         call_id=call_id)
 
 
 def test_segment_calibrates_then_trains_to_the_end(tmp_path: Path) -> None:
@@ -1103,9 +1245,12 @@ def test_segment_hard_cap_stops_a_run_that_slows_down(tmp_path: Path) -> None:
     assert T.find_latest_checkpoint(env["run_dir"]).name == f"checkpoint-{res['step']:06d}"
 
 
-def test_segment_refuses_max_data_without_approval_before_loading(tmp_path: Path) -> None:
+def test_segment_refuses_max_data_before_loading_whatever_the_job_says(tmp_path: Path) -> None:
     env = segment_env(tmp_path)
-    res = call(env, approved=False)
+    res = call(env, max_derived_rows=40)
+    assert res["status"] == "refused" and env["backends"] == [] and "Q6b" in res["reason"]
+    # Q6b: no approval in the job lets Max-derived data train on a rented GPU
+    res = call(env, max_derived_rows=1, approved=True)
     assert res["status"] == "refused" and env["backends"] == []
 
 
@@ -1236,8 +1381,10 @@ class FakeOps:
         return ["adapter/adapter_model.safetensors"]
 
 
-def pretok_dir(tmp_path: Path, *, sources: tuple[str, ...] = ("max-golden",),
-               teacher_max: bool | None = None) -> Path:
+def pretok_dir(tmp_path: Path, *, sources: tuple[str, ...] = ("local-gym",),
+               teacher_max: bool | None = False) -> Path:
+    """Pre-tokenized rows; by default clean (non-Max rows, a non-Max teacher):
+    Max-derived data never rents (Q6b)."""
     rows = [make_row(i, 4, sources[i % len(sources)]) for i in range(10)]
     T.write_pretokenized(rows, ENC, tmp_path / "pt", ladder=(16384, 12288, 8192),
                          teacher_max=teacher_max)
@@ -1245,7 +1392,7 @@ def pretok_dir(tmp_path: Path, *, sources: tuple[str, ...] = ("max-golden",),
 
 
 def rent_args(data: Path, **kw: Any) -> Any:
-    return M.RentArgs(**{"data": data, "max_usd": 150.0, "launch": True, "approved": True,
+    return M.RentArgs(**{"data": data, "max_usd": 150.0, "launch": True,
                          "run_id": "r1", **kw})
 
 
@@ -1259,13 +1406,14 @@ def test_plan_is_print_only_without_launch(tmp_path: Path) -> None:
 def test_rent_refuses_max_data_without_approval(tmp_path: Path) -> None:
     ops = FakeOps([])
     lines: list[str] = []
-    assert M.orchestrate(rent_args(pretok_dir(tmp_path), approved=False), ops,
-                         echo=lines.append) == 3
-    assert ops.log == [] and "OPEN-QUESTIONS #6" in lines[-1]
-    unknown = pretok_dir(tmp_path / "b", sources=("local-gym",))  # no evidence: Max-derived
-    assert M.orchestrate(rent_args(unknown, approved=False, launch=False), None, echo=print) == 3
+    maxd = pretok_dir(tmp_path, sources=("max-golden",), teacher_max=None)
+    assert M.orchestrate(rent_args(maxd), ops, echo=lines.append) == 3
+    assert ops.log == [] and "OPEN-QUESTIONS #6" in lines[-1] and "Q6b" in lines[-1]
+    # no evidence: Max-derived
+    unknown = pretok_dir(tmp_path / "b", sources=("local-gym",), teacher_max=None)
+    assert M.orchestrate(rent_args(unknown, launch=False), None, echo=print) == 3
     ok = pretok_dir(tmp_path / "c", sources=("local-gym",), teacher_max=False)
-    assert M.orchestrate(rent_args(ok, approved=False, launch=False), None, echo=print) == 0
+    assert M.orchestrate(rent_args(ok, launch=False), None, echo=print) == 0
 
 
 def test_rent_refuses_a_cap_below_the_optimistic_estimate(tmp_path: Path) -> None:
@@ -1285,7 +1433,7 @@ def test_rent_chains_calls_and_downloads_the_adapter(tmp_path: Path) -> None:
     assert kinds == ["upload", "prefetch", "train", "train", "train", "download"]
     gpu, timeout, job = ops.log[2][1]
     assert gpu == "H100" and timeout == M.MODAL_MAX_TIMEOUT_S
-    assert job["max_usd"] == 150.0 and job["approved"] and job["calib_steps"] == 50
+    assert job["max_usd"] == 150.0 and "approved" not in job and job["calib_steps"] == 50
     assert job["config"]["r"] == 32 and job["config"]["base_model"].startswith("/models/")
     assert job["base_revision"] == "c" * 40
     assert job["rate_per_s"] == pytest.approx(M.rate_per_s(M.GPUS["H100"]))
@@ -1467,10 +1615,11 @@ def test_modal_wiring_pins_the_image_and_limits_the_gpu_function() -> None:
 def test_modal_entrypoint_is_print_only_by_default(tmp_path: Path) -> None:
     W = _load_modal_train("distill_modal_train_wired2", fake_modal())
     data = pretok_dir(tmp_path)
-    W.rent(data=str(data), max_usd=150.0, i_have_operator_approval_for_max_derived_data=True)
+    W.rent(data=str(data), max_usd=150.0)
     assert W.app.functions["train"].calls == []
+    maxd = pretok_dir(tmp_path / "m", sources=("max-golden",), teacher_max=None)
     with pytest.raises(SystemExit) as e:
-        W.rent(data=str(data), max_usd=150.0, launch=True)  # Max-derived, no approval
+        W.rent(data=str(maxd), max_usd=150.0, launch=True)  # Max-derived: never rents
     assert e.value.code == 3 and W.app.functions["train"].calls == []
 
 
@@ -1496,3 +1645,344 @@ def test_the_packets_launch_line_carries_no_approval_and_the_operators_cap() -> 
     for line in doc.splitlines():
         if T.APPROVAL_FLAG in line:  # only ever described, never part of a command
             assert not line.lstrip().startswith(("modal ", "python"))
+
+
+# ── Q6b: Max-derived training is explicit, recorded, tagged and never rented ──
+
+
+def test_q6b_flag_alone_or_dataset_approval_alone_is_refused(
+        tmp_path: Path, cli: dict[str, Any], capsys: pytest.CaptureFixture[str]) -> None:
+    """Max-derived rows train only with BOTH the operator's flag on the command
+    line and the approval the dataset recorded when build.py ran with
+    --allow-max-derived --max-derived-approval."""
+    data = write_rows(tmp_path / "train.jsonl", rows_n(8))
+    built: list[Any] = []
+
+    def factory(c: Any) -> Any:
+        built.append(c)
+        return FakeBackend()
+
+    # the flag, but the dataset records no allow (no report, then a report without one)
+    assert T.main(base_args(data, cli, T.APPROVAL_FLAG), backend_factory=factory) == 3
+    assert "records no Max-derived approval" in capsys.readouterr().err
+    (tmp_path / T.BUILD_REPORT).write_text(json.dumps({
+        "settings": {"teacher_model": "qwen3.8-max"},
+        "data_policy": {"max_derived_allow": {"allowed": False, "approval": None}}}))
+    assert T.main(base_args(data, cli, T.APPROVAL_FLAG), backend_factory=factory) == 3
+    # a blank reference is no approval
+    approve_dataset(data, ref="  ")
+    assert T.main(base_args(data, cli, T.APPROVAL_FLAG), backend_factory=factory) == 3
+    # the dataset's approval, but not the flag
+    approve_dataset(data)
+    assert T.main(base_args(data, cli), backend_factory=factory) == 3
+    assert "OPEN-QUESTIONS #6" in capsys.readouterr().err
+    assert built == [] and not cli["out"].exists()
+
+
+def test_q6b_run_on_approved_data_is_tagged_and_records_both_approvals(
+        tmp_path: Path, cli: dict[str, Any]) -> None:
+    data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(8)))
+    rc = T.main(base_args(data, cli, T.APPROVAL_FLAG, "--grad-accum", "2", "--save-every", "3"),
+                backend_factory=lambda c: FakeBackend())
+    assert rc == 0
+    # the adapter's directory name carries the tag; no untagged adapter is written
+    assert (cli["out"] / "adapter-max-derived" / "adapter.json").is_file()
+    assert not (cli["out"] / "adapter").exists()
+    for m in (json.loads((cli["out"] / "manifest.json").read_text()),
+              json.loads((cli["logs"] / "manifest.json").read_text())):
+        assert m["max_derived"] is True and m["tags"] == ["max-derived"] and m["private"] is True
+        assert m["approvals"]["operator_flag"] == {"flag": T.APPROVAL_FLAG, "given": True}
+        assert m["approvals"]["dataset"]["approval"] == APPROVAL_REF
+        assert m["approvals"]["dataset"]["recorded_in"] == str(tmp_path / T.BUILD_REPORT)
+        assert m["operator_approval_max_derived"] is True
+        assert m["adapter"].endswith("adapter-max-derived")
+        assert m["data"]["max_derived_rows"] == 8
+
+
+def test_q6b_clean_run_keeps_the_plain_adapter_name(tmp_path: Path, cli: dict[str, Any]) -> None:
+    rows = [make_row(i, 4, "qwen38-27b-gym") for i in range(8)]
+    for r in rows:
+        r["max_derived"] = False
+    data = write_rows(tmp_path / "train.jsonl", rows)
+    (tmp_path / T.BUILD_REPORT).write_text(
+        json.dumps({"settings": {"teacher_model": "qwen3.8-27b"}}))
+    rc = T.main(base_args(data, cli, "--grad-accum", "2"), backend_factory=lambda c: FakeBackend())
+    assert rc == 0 and (cli["out"] / "adapter" / "adapter.json").is_file()
+    m = json.loads((cli["out"] / "manifest.json").read_text())
+    assert m["max_derived"] is False and m["tags"] == [] and m["private"] is False
+    assert m["approvals"]["dataset"]["approval"] is None
+
+
+def test_q6b_dry_run_names_the_tagged_adapter_and_records_the_tag(
+        tmp_path: Path, cli: dict[str, Any], capsys: pytest.CaptureFixture[str]) -> None:
+    data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(4)))
+    assert T.main(base_args(data, cli, "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert "adapter-max-derived" in out and "a real run would be REFUSED" in out
+    m = json.loads((cli["logs"] / "manifest.json").read_text())
+    assert m["max_derived"] is True and m["tags"] == ["max-derived"]
+    assert m["approvals"]["dataset"]["approval"] == APPROVAL_REF
+    assert m["approvals"]["operator_flag"]["given"] is False
+
+
+def test_q6b_pretokenized_data_carries_the_dataset_approval(tmp_path: Path, cli: dict[str, Any]
+                                                            ) -> None:
+    rows = rows_n(6)
+    approve_dataset(write_rows(tmp_path / "train.jsonl", rows))
+    rec = T.dataset_record(tmp_path / "train.jsonl")
+    assert rec["approval"] == APPROVAL_REF
+    policy = {"report": rec["report"], "max_derived_allow": {"allowed": True,
+                                                             "approval": rec["approval"]}}
+    meta = T.write_pretokenized(rows, ENC, tmp_path / "pt", ladder=(16384,), teacher_max=True,
+                                dataset_policy=policy, source=str(tmp_path / "train.jsonl"))
+    assert meta["max_derived"] is True and meta["tags"] == ["max-derived"] and meta["private"]
+    assert meta["dataset_policy"] == policy and meta["source"].endswith("train.jsonl")
+    assert T.dataset_record(pretokenized=tmp_path / "pt")["approval"] == APPROVAL_REF
+    args = ["--pretokenized", str(tmp_path / "pt"), "--out", str(cli["out"]),
+            "--log-dir", str(cli["logs"]), "--grad-accum", "2"]
+    assert T.main(args, backend_factory=lambda c: FakeBackend()) == 3  # no flag
+    assert T.main([*args, T.APPROVAL_FLAG], backend_factory=lambda c: FakeBackend()) == 0
+    assert (cli["out"] / "adapter-max-derived").is_dir()
+    # without the recorded approval the flag is not enough
+    meta2 = T.write_pretokenized(rows, ENC, tmp_path / "pt2", ladder=(16384,), teacher_max=True)
+    assert meta2["dataset_policy"] == {}
+    assert T.dataset_record(pretokenized=tmp_path / "pt2")["approval"] is None
+    shutil.rmtree(cli["out"])
+    args2 = ["--pretokenized", str(tmp_path / "pt2"), "--out", str(cli["out"]),
+             "--log-dir", str(cli["logs"]), T.APPROVAL_FLAG]
+    assert T.main(args2, backend_factory=lambda c: FakeBackend()) == 3
+
+
+def test_q6b_rental_refuses_max_data_at_every_step(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                   capsys: pytest.CaptureFixture[str]) -> None:
+    # plan: the old approval flag is gone, not inert
+    clean = pretok_dir(tmp_path / "clean")
+    with pytest.raises(SystemExit) as e:
+        M.main(["plan", "--data", str(clean), "--max-usd", "150", T.APPROVAL_FLAG])
+    assert e.value.code == 2
+    assert M.main(["plan", "--data", str(clean), "--max-usd", "150"]) == 0
+    # a pre-tokenized dir whose meta says clean but whose name carries the tag
+    tagged = tmp_path / "pt-max-derived"
+    shutil.copytree(clean, tagged)
+    lines: list[str] = []
+    assert M.orchestrate(rent_args(tagged, launch=False), None, echo=lines.append) == 3
+    assert "Q6b" in lines[-1]
+    # meta without a Max-derived count: refused (fail closed)
+    nocount = tmp_path / "nocount"
+    shutil.copytree(clean, nocount)
+    meta = json.loads((nocount / "meta.json").read_text())
+    meta.pop("max_derived_rows")
+    (nocount / "meta.json").write_text(json.dumps(meta))
+    assert M.orchestrate(rent_args(nocount, launch=False), None, echo=print) == 3
+    # pretokenize, the rental's first step, refuses Max-derived rows (approved dataset or not)
+    data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(4)))
+    monkeypatch.setattr(T, "hf_encoder", lambda d: ENC)
+    monkeypatch.setattr(T, "template_refitter", lambda d: None)
+    tok = tmp_path / "tok"
+    tok.mkdir()
+    (tok / "tokenizer.json").write_text("{}")
+    rc = M.main(["pretokenize", "--data", str(data), "--tokenizer-dir", str(tok),
+                 "--out", str(tmp_path / "pt-out")])
+    assert rc == 3 and not (tmp_path / "pt-out").exists()
+    assert "never rents" in capsys.readouterr().err
+    # clean rows pre-tokenize, and the meta records the source and its (absent) allow
+    clean_rows = [dict(make_row(i, 4, "qwen38-27b-gym"), max_derived=False) for i in range(4)]
+    (tmp_path / "c").mkdir()
+    cdata = write_rows(tmp_path / "c" / "train.jsonl", clean_rows)
+    (tmp_path / "c" / T.BUILD_REPORT).write_text(
+        json.dumps({"settings": {"teacher_model": "qwen3.8-27b"}}))
+    assert M.main(["pretokenize", "--data", str(cdata), "--tokenizer-dir", str(tok),
+                   "--out", str(tmp_path / "pt-clean")]) == 0
+    meta = json.loads((tmp_path / "pt-clean" / "meta.json").read_text())
+    assert meta["max_derived"] is False and meta["max_derived_rows"] == 0
+    assert meta["dataset_policy"]["max_derived_allow"]["allowed"] is False
+    assert meta["source"] == str(cdata)
+
+
+def test_q6b_modal_upload_refuses_max_data_before_touching_the_volume(tmp_path: Path) -> None:
+    W = _load_modal_train("distill_modal_train_wired3", fake_modal())
+    maxd = pretok_dir(tmp_path / "m", sources=("max-golden",), teacher_max=None)
+    meta = json.loads((maxd / "meta.json").read_text())
+    with pytest.raises(RuntimeError, match="never rents"):
+        W.ModalOps().upload_data(maxd, "m", meta)
+    # a meta edited to say clean does not get past the rows' own count either
+    with pytest.raises(RuntimeError, match="Q6b"):
+        W.ModalOps().upload_data(maxd, "m", {**meta, "max_derived_rows": 0, "max_derived": False})
+
+
+# ── Q6b reviewer findings: rental upload, run names, checkpoints, records ──
+
+AP = T._load_policy()
+
+
+class FakeDataVolume:
+    """The data Volume's upload side: records what would leave our machines."""
+
+    def __init__(self) -> None:
+        self.put: list[str] = []
+
+    def read_file(self, path: str) -> Any:
+        raise FileNotFoundError(path)  # nothing there yet
+
+    def batch_upload(self, force: bool = False) -> Any:
+        vol = self
+
+        class Batch:
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *exc: Any) -> bool:
+                return False
+
+            def put_file(self, local: str, remote: str) -> None:
+                assert Path(local).is_file()
+                vol.put.append(remote)
+
+            def put_directory(self, local: str, remote: str) -> None:
+                raise AssertionError("a whole directory is never uploaded")
+
+        return Batch()
+
+
+def test_q6b_rental_refuses_max_rows_beside_a_clean_pretok_set_and_uploads_only_its_files(
+        tmp_path: Path) -> None:
+    # pretokenize --out <the dataset directory>: the pre-tokenized meta and the
+    # dataset's reports all say max_derived false, but the directory holds the
+    # dataset's Max eval rows (its holds_max_rows says so)
+    ds = tmp_path / "phase3"
+    ds.mkdir()
+    clean_rows = [dict(make_row(i, 4, "qwen38-27b-gym"), max_derived=False) for i in range(6)]
+    write_rows(ds / "train.jsonl", clean_rows)
+    write_rows(ds / "eval-tools.jsonl", [make_row(i, 4, "max-golden") for i in range(3)])
+    (ds / "report.json").write_text(json.dumps({
+        "schema": AP.REPORT_SCHEMA, **AP.policy_fields(False), "holds_max_rows": True,
+        "settings": {"teacher_model": "qwen3.8-27b"},
+        "splits": {"train": {"max_derived": 0}, "val": {"max_derived": 0},
+                   "eval-tools": {"max_derived": 3}}}))
+    (ds / "dataset-manifest.json").write_text(json.dumps({
+        "schema": AP.DATASET_MANIFEST_SCHEMA, **AP.policy_fields(False), "holds_max_rows": True}))
+    meta = T.write_pretokenized(clean_rows, ENC, ds, ladder=(16384, 12288, 8192),
+                                teacher_max=False, source=str(ds / "train.jsonl"))
+    assert meta["max_derived_rows"] == 0 and not AP.is_max_derived(ds)  # what passed before
+    refusal = M.rental_refusal(ds, meta)
+    assert refusal and "holds Max-derived rows" in refusal and "eval-tools.jsonl" in refusal
+    lines: list[str] = []
+    assert M.orchestrate(rent_args(ds, launch=False), None, echo=lines.append) == 3
+    assert "may not leave our machines" in lines[-1]
+    # the same pre-tokenized files in a directory of their own rent
+    pt = tmp_path / "pt-clean"
+    pt.mkdir()
+    for f in M.PRETOK_FILES:
+        shutil.copy(ds / f, pt / f)
+    assert M.rental_refusal(pt, meta) is None
+    # a stray JSONL copied in, or a missing pre-tokenized file, is refused
+    shutil.copy(ds / "eval-tools.jsonl", pt / "notes.jsonl")
+    assert "notes.jsonl" in (M.rental_refusal(pt, meta) or "")
+    (pt / "notes.jsonl").unlink()
+    (pt / "tokens.bin").rename(pt / "tokens.bak")
+    assert "no tokens.bin" in (M.rental_refusal(pt, meta) or "")
+    (pt / "tokens.bak").rename(pt / "tokens.bin")
+    # the upload sends the three pre-tokenized files, nothing else in the directory
+    (pt / "scratch.txt").write_text("not data")
+    W = _load_modal_train("distill_modal_train_wired4", fake_modal())
+    vol = FakeDataVolume()
+    W.data_vol = vol
+    assert "uploaded" in W.ModalOps().upload_data(pt, "pt-clean", meta)
+    assert sorted(vol.put) == sorted(f"/pt-clean/{f}" for f in M.PRETOK_FILES)
+    with pytest.raises(RuntimeError, match="may not leave"):
+        W.ModalOps().upload_data(ds, "phase3", meta)
+    assert len(vol.put) == 3  # the dataset directory never reached the Volume
+
+
+def test_rented_adapter_records_clean_provenance_and_publishes(tmp_path: Path) -> None:
+    assert M.CLEAN_POLICY_FIELDS == AP.policy_fields(False)  # the inlined copy
+    env = segment_env(tmp_path)
+    res = call(env)
+    assert res["status"] == "done"
+    man = json.loads((env["run_dir"] / "manifest.json").read_text())
+    assert {k: man[k] for k in M.CLEAN_POLICY_FIELDS} == M.CLEAN_POLICY_FIELDS
+    assert man["data"]["max_derived_rows"] == 0 and man["data"]["sha256"] is None
+    # what `fetch` brings home: the adapter beside the run's manifest
+    dest = tmp_path / "rental" / "r1"
+    shutil.copytree(env["run_dir"] / "adapter", dest / "adapter")
+    shutil.copy(env["run_dir"] / "manifest.json", dest / "manifest.json")
+    prov, reasons = AP.check_publishable(dest / "adapter")
+    assert prov.max_derived is False and reasons == []
+
+
+def test_q6b_a_max_run_needs_a_tagged_out_and_every_checkpoint_says_so(
+        tmp_path: Path, cli: dict[str, Any], capsys: pytest.CaptureFixture[str]) -> None:
+    data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(8)))
+    args = ["--data", str(data), "--tokenizer-dir", str(cli["tok"]), "--log-dir",
+            str(cli["logs"]), "--grad-accum", "2", "--save-every", "2", T.APPROVAL_FLAG]
+    plain = tmp_path / "runs" / "9b-r32"
+    assert T.main([*args, "--out", str(plain)], backend_factory=lambda c: FakeBackend()) == 2
+    assert "9b-r32-max-derived" in capsys.readouterr().err and not plain.exists()
+    assert T.main([*args, "--out", str(plain), "--dry-run"]) == 0  # the dry run says so
+    assert "would refuse this" in capsys.readouterr().out
+    run = tmp_path / "runs" / "9b-r32-max-derived"
+    assert T.main([*args, "--out", str(run)], backend_factory=lambda c: FakeBackend()) == 0
+    ckpts = sorted(run.glob(T.CKPT_PREFIX + "*"))
+    assert ckpts
+    for ck in ckpts:
+        m = json.loads((ck / T.CKPT_MANIFEST).read_text())
+        assert m["schema"] == T.MANIFEST_SCHEMA and m["checkpoint"] == ck.name
+        assert m["max_derived"] is True and m["tags"] == ["max-derived"] and m["private"]
+        assert m["data"]["max_derived_rows"] == 8 and m["run_id"] == run.name
+        assert m["approvals"]["dataset"]["approval"] == APPROVAL_REF
+    # a checkpoint copied into a clean run's directory still carries its tag
+    clean = tmp_path / "runs" / "9b-gym"
+    clean.mkdir()
+    (clean / "manifest.json").write_text(json.dumps({
+        "schema": T.MANIFEST_SCHEMA, **AP.policy_fields(False), "data": {"max_derived_rows": 0}}))
+    copied = clean / ckpts[-1].name
+    shutil.copytree(ckpts[-1], copied)
+    for level in (copied, copied / "adapter"):
+        prov, reasons = AP.check_publishable(level)
+        assert prov.max_derived is True and reasons, level
+    # a clean run's checkpoints say so too, and a copy of one publishes on its own
+    rows = [dict(make_row(i, 4, "qwen38-27b-gym"), max_derived=False) for i in range(8)]
+    (tmp_path / "c").mkdir()
+    cdata = write_rows(tmp_path / "c" / "train.jsonl", rows)
+    (tmp_path / "c" / T.BUILD_REPORT).write_text(json.dumps({
+        "schema": AP.REPORT_SCHEMA, **AP.policy_fields(False),
+        "settings": {"teacher_model": "qwen3.8-27b"},
+        "splits": {"train": {"max_derived": 0}, "val": {"max_derived": 0}}}))
+    crun = tmp_path / "runs" / "9b-clean"
+    assert T.main(["--data", str(cdata), "--tokenizer-dir", str(cli["tok"]), "--out", str(crun),
+                   "--log-dir", str(tmp_path / "clogs"), "--grad-accum", "2", "--save-every",
+                   "2"], backend_factory=lambda c: FakeBackend()) == 0
+    cck = sorted(crun.glob(T.CKPT_PREFIX + "*"))[-1]
+    assert json.loads((cck / T.CKPT_MANIFEST).read_text())["max_derived"] is False
+    alone = tmp_path / "elsewhere" / cck.name
+    shutil.copytree(cck, alone)
+    assert AP.check_publishable(alone / "adapter")[1] == []
+
+
+def test_q6b_the_dataset_manifest_carries_the_approval_when_the_report_went_elsewhere(
+        tmp_path: Path, cli: dict[str, Any]) -> None:
+    ds = tmp_path / "phase3-max-derived"
+    ds.mkdir()
+    data = write_rows(ds / "train.jsonl", rows_n(8))
+    (ds / T.DATASET_MANIFEST).write_text(json.dumps({
+        "schema": AP.DATASET_MANIFEST_SCHEMA, **AP.policy_fields(True), "holds_max_rows": True,
+        "teacher_model": "qwen3.8-max", "report": str(tmp_path / "rep-max-derived.json"),
+        "max_derived_allow": {"allowed": True, "approval": APPROVAL_REF},
+        "files": {"train.jsonl": {"rows": 8, "sha256": T.sha256_files([data])}}}))
+    rec = T.dataset_record(data)
+    assert rec["approval"] == APPROVAL_REF and rec["source"] == str(ds / T.DATASET_MANIFEST)
+    assert rec["report"] == str(tmp_path / "rep-max-derived.json")
+    assert T.builder_teacher_is_max(data) is True
+    args = base_args(data, cli, T.APPROVAL_FLAG, "--grad-accum", "2")
+    assert T.main(args, backend_factory=lambda c: FakeBackend()) == 0
+    m = json.loads((cli["out"] / "manifest.json").read_text())
+    assert m["approvals"]["dataset"] == {"approval": APPROVAL_REF,
+                                         "recorded_in": str(ds / T.DATASET_MANIFEST)}
+    # a train.jsonl the manifest does not list (other content) carries no approval
+    shutil.rmtree(cli["out"])
+    write_rows(data, rows_n(7))
+    assert T.dataset_record(data)["approval"] is None
+    assert T.main(args, backend_factory=lambda c: FakeBackend()) == 3
+    # report.json beside the data is still read first
+    approve_dataset(data, ref="from the report")
+    assert T.dataset_record(data)["approval"] == "from the report"

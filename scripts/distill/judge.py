@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """Distillation Phase 2: re-judge a stratified sample of teacher traces with a strict rubric.
 
-    python3 judge.py sample [--workdir ~/distill/phase2] [--n-pass 300 --n-fail 100] [--seed 20261030]
-    python3 judge.py run    [--workdir ...] [--billing auto] [--max-usd 23] [--concurrency 1]
-    python3 judge.py run    [--workdir ...] --view blind --only fail
-    python3 judge.py report [--workdir ...] [--markdown-out judge-report.md]
-    python3 judge.py --workdir ~/distill/phase2-rejudge sample --rejudge-from ~/distill/phase2
+    python3 judge.py sample   [--workdir ~/distill/phase2] [--n-pass 300 --n-fail 100] [--seed 20261030]
+    python3 judge.py estimate --provider max-payg [--workdir ...] [--view outcome]
+    python3 judge.py run      --provider max-payg --budget-usd 20 [--workdir ...] [--concurrency 2]
+    python3 judge.py run      --provider local --local-url http://127.0.0.1:<port> [--workdir ...]
+    python3 judge.py run      --provider max-payg --budget-usd 5 --view blind --only fail   # own budget
+    python3 judge.py report   [--workdir ...] [--markdown-out judge-report.md]
+    python3 judge.py --workdir ~/distill/phase2-rejudge run-all --rejudge-from ~/distill/phase2 \\
+        --provider max-payg --budget-usd 40
+
+``judge_run.sh`` wraps the Max path: preflight, sample, estimate, run, report
+and the optional re-judge, as a dry run unless ``--execute`` is given.
 
 Everything runs on the host that holds the traces, with Prometheus importable
-(the deployed tree on ``PYTHONPATH``). Trace text never leaves that host except
-inside the judge calls themselves. ``judge-report.json`` (aggregates only) is the
-one file meant to be copied off it.
+(the deployed tree on ``PYTHONPATH``). Trace text leaves that host only inside
+the judge calls themselves. ``judge-report.json`` (aggregates only) is the one
+file meant to be copied off it.
 
 sample
 ------
@@ -37,8 +43,34 @@ needs a finished report there whose gate says ``re-judge``, and its own
 whole deduped pass pool minus the ids already judged there, ordered by the
 report's ``rejudge_priority`` (worst category first, seeded shuffle within each
 category), so a run cut short by the budget has spent it on the worst
-categories. Run it with the same ``--view`` and ledger: the spend counts against
-the same Phase 2 cap.
+categories. ``run-all`` does this and then runs the queue.
+
+The providers
+-------------
+``--provider`` is required on every run. There is no third route: the Token
+Plan key (``QWEN_API_KEY``) is never used for judging.
+
+* ``max-payg``: Qwen Max (``--judge-model``, default qwen3.8-max) on the
+  PAY-PER-TOKEN key, through ``spend.py``. Every attempt is reserved at its
+  worst case in the one shared spend ledger (``~/distill/spend-ledger.csv``,
+  not configurable), then settled from the API's usage block. Refusals: the $150 hard cap; this phase's ``--budget-usd``
+  (required, checked against the ledger's total for ``judge`` and this
+  phase); the STOP file, written at the $140 alert, which every paid tool
+  honours. The key, its host and the price table are checked before
+  anything is sent (``spend.resolve_payg``, ``spend.price_for``). This key is
+  not the interactive plan, so there is no fixed window. Concurrency is kept
+  low: 2 by default, 4 at most. The judge runs with thinking off
+  (``--thinking-budget N`` turns it on, bounded) at temperature 0. The notify
+  command must exist (``--notify-cmd``, default ``~/distill/notify.sh``), or
+  the alert could not reach the operator and the run refuses.
+* ``local``: the local 27B on a loopback llama-server (``--local-url``). No
+  Authorization header, $0, each call counted in the same ledger as a
+  ``free`` row. The preflight refuses a server whose ``/v1/models`` id does
+  not match ``--local-model`` (default ``qwen3.8-27b*``) or names a Max model.
+  So the daemon's own model on a shared port cannot pass as the judge, and
+  neither can a proxy. The live probe below pauses the run when the daemon
+  that shares the server reports errors. STOP does not apply, since this
+  provider is the fallback when the paid budget is spent.
 
 run
 ---
@@ -46,50 +78,57 @@ Judges each queued item once with the strict rubric below and appends one row
 per item to ``judge-sample.jsonl``. Resumable: an id that already has an ``ok``
 row for the same view and rubric version is skipped; ``error`` and
 ``unparseable`` rows are retried on the next run. ``--only pass|fail`` judges
-one side of the queue. One run at a time: a run holds an exclusive lock on
-``<workdir>/judge.lock`` and on ``<ledger>.lock`` until it ends, and a second
-run exits at once (``busy``) without touching the status file.
+one side of the queue. One run per workdir at a time: a run holds an
+exclusive lock on ``<workdir>/judge.lock``, and a second run exits at once
+(``busy``) without touching the status file. Runs in different workdirs, and
+other paid tools, share the spend ledger under its own lock.
 
-The model call goes through ``PrometheusJudgeClient``: Prometheus's own env
-file, config loader, route resolver (``slash_commands.<route>``, default
-``qwen``) and provider registry build the provider, so the credential is read by
-Prometheus code and never by this script, and nothing here prints it. One
-attempt per request (the provider's own retry loop would hide a 429 from the
-rules below). Any object with ``model``, ``billing_mode``, ``price`` and an async
-``complete(system, user, max_tokens=)`` can stand in for it.
+The phase (the sub-budget's key in the ledger) is ``2-judge``;
+``2-judge-blind`` for the blind fail-side check (``--view blind --only
+fail``), so that check has its own ``--budget-usd`` and is not left with
+what the outcome run did not spend; or ``2-judge-all`` for a re-judge queue.
+Neither the phase, the ledger, the cap nor the alert can be changed from the
+command line. Before the first call, the run prints
+the projected cost of what is pending. That is a worst case (the
+reservations: prompt bytes as tokens plus ``--max-tokens``) and a typical
+case (3.93 characters per token, Phase 1's measured density, and the mean
+output of earlier verdicts, or 300 tokens).
 
-Before EVERY call, in this order:
-  1. the window: 01:00-06:00 America/New_York (no command-line override);
-  2. the live probe: any provider error the live daemon recorded for the same
-     provider in the last 15 minutes (``responses.response_kind = 'error'`` in
-     its telemetry, read ``mode=ro``) pauses the run: live traffic wins;
-  3. the budget: the call's worst case (prompt UTF-8 bytes as a token bound,
-     plus ``--max-tokens`` of output) must fit under the cap with everything
-     already spent and in flight. Per-token billing: ``--max-usd`` (default 23)
-     at Prometheus's own price for the model. Quota plans: at most
-     ``--max-quota-fraction`` (default 0.20) of ``--quota-remaining`` as first
-     recorded (``judge-quota.json``), in requests (every attempt counts) or
-     tokens. Spend is the ledger's total for phase ``2-judge``, so the cap holds
-     across runs and across workdirs.
-A 429 or 5xx, timeout or unreachable host backs off exponentially (``--backoff-base``
-doubling up to 10 minutes, or the server's Retry-After when longer) and retries
-the item up to ``--max-attempts`` times; a rate limit that persists through every
-attempt pauses the run. Billing and auth errors stop it. Concurrency defaults to 1.
-A failed attempt the provider may still have billed (a timeout, a dropped
-connection or a stream that broke after the request was sent: no HTTP error
-status, not a failure to connect) is charged at its reserved worst case and
-noted ``charged-worst-case``; one the provider answered with an error status, or
-that never connected, is charged nothing (one request on a request quota).
-A subscription-plan host is refused unless ``--plan-terms-ok`` (the plan's terms
-on automated use are the operator's call). Every attempt is one row in the spend
-ledger CSV: ts, phase, calls, input_tokens, output_tokens, est_usd, quota_units,
-quota_unit, model, note.
+Before every call, the live probe runs (``local`` only): any provider error
+the live daemon recorded for ``--live-provider`` (default ``llama_cpp``) in
+the last 15 minutes (``responses.response_kind = 'error'`` in its telemetry,
+read ``mode=ro``) pauses the run, because live traffic wins. A 429 or 5xx,
+timeout or unreachable host backs off exponentially (``--backoff-base``
+doubling up to 10 minutes, or the server's Retry-After when that is longer)
+and retries the item up to ``--max-attempts`` times. A rate limit that
+persists through every attempt pauses the run. Billing and auth errors stop
+it. Every paid attempt, failed or not, is its own ledger reservation. A
+failed attempt that may still have been billed (a read timeout, a dropped
+connection, a broken reply, a 5xx or 408 status) is charged its reservation.
+One the API refused with a 4xx status, or that never connected, costs nothing.
 
-Exit codes: 0 every item judged; 2 outside the window; 3 budget cap reached;
-4 paused (rate limit or live throttling); 5 fatal (billing, auth, setup);
-6 items remain (``--limit`` or item errors: run again); 7 busy (another run
-holds the lock; nothing was done). ``judge-status.json`` says which, and why
-(except for busy, which leaves the running run's status alone).
+Exit codes: 0 every item judged; 3 budget (cap, sub-budget or STOP); 4 paused
+(rate limit or live throttling); 5 fatal (billing, auth, setup, a refused key
+or endpoint); 6 items remain (``--limit`` or item errors: run again); 7 busy
+(another run holds the workdir; nothing was done). ``judge-status.json`` says
+which, and why (except for busy, which leaves the running run's status
+alone).
+
+Verdict rows
+------------
+Each ``ok`` row has the shape build.py's ``load_verdicts`` reads: ``status``,
+``verdict`` (the judge's, made strict, never the sampled ``label``),
+``source.file`` / ``source.line`` / ``source.telemetry_rowid``, and ``model``
+(the judge's model id). It also records ``provider`` (``max-payg`` | ``local``),
+``judge_key`` (``payg`` | ``none``), ``served_model``, the tokens, ``cost_usd``
+and ``call_id`` (the ledger row), plus a ``verification`` record in
+``_meta.verification`` shape (``{"verified": ..., "judge": {"verdict", "model",
+"served_model", "provider"}}``). build.py applies the verdicts of a local
+judge, and of this PAYG judge (``provider: max-payg`` with ``judge_key: payg``,
+counted under its ``verdict_rows_payg_max_judge``, which does not fail its
+verdicts gate). Any other judge whose model names Max is counted under its
+``verdict_rows_max_judge`` and its passes are not applied (its "the Token Plan
+key never judges" rule).
 
 The rubric (version 2). Each criterion scores 0 (fails), 1 (doubtful) or 2
 (clearly meets): right_tool, valid_args, sensible_order, task_progress,
@@ -114,6 +153,23 @@ decided on the unrounded point estimate: false-pass <= 5% -> ``trust-labels``;
 above -> ``re-judge``, with categories in re-judging order (worst pass-side
 agreement first). ``incomplete`` while more than ``--allow-missing`` sampled
 items have no verdict.
+
+run-all
+-------
+The gate's re-judge, end to end: ``--rejudge-from`` names the Phase 2 workdir.
+If its gate trusted the labels, there is nothing to do (exit 0). If it says
+``re-judge``, the deduped pass set minus what was judged there is queued in
+this ``--workdir``, worst-agreement category first (as ``sample
+--rejudge-from``), unless that queue already exists. The queue is then run
+in the report's view, under its own ``--budget-usd`` (phase ``2-judge-all``)
+and the global cap. A run cut short by the budget has re-judged the worst
+categories first, and running it again resumes.
+
+estimate
+--------
+The projected cost of the pending items, without calling anything. For
+``max-payg`` it is priced at the key's region when the key is usable here, else
+at the highest regional price.
 """
 
 from __future__ import annotations
@@ -121,10 +177,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import csv
 import fcntl
+import fnmatch
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import logging
 import math
@@ -134,63 +191,74 @@ import re
 import sqlite3
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
-from urllib.parse import quote
-from zoneinfo import ZoneInfo
+from urllib.parse import quote, urlsplit
 
 from prometheus.gym.ladder.record import wilson
 
+
+def _load_spend() -> Any:
+    """``spend.py`` beside this file (the shared ledger, cap and key checks)."""
+    name = "distill_spend"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name("spend.py"))
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+spend = _load_spend()
+
 TEACHER_MODEL = "qwen3.8-max"
+JUDGE_MODEL = "qwen3.8-max"
+TOOL = "judge"
 PHASE = "2-judge"
+PHASE_BLIND = "2-judge-blind"
+PHASE_ALL = "2-judge-all"
+PROVIDERS = ("max-payg", "local")
 RUBRIC_VERSION = "2"
 RUBRIC_KEYS = ("right_tool", "valid_args", "sensible_order", "task_progress", "no_fabrication")
 VIEWS = ("outcome", "blind")
 LABELS = ("pass", "fail")
 
-WINDOW_TZ = "America/New_York"
-WINDOW_START_HOUR = 1
-WINDOW_END_HOUR = 6
-
 FALSE_PASS_GATE = 0.05
-DEFAULT_MAX_USD = 23.0
-DEFAULT_MAX_QUOTA_FRACTION = 0.20
 DEFAULT_SEED = 20261030
 DEFAULT_WORKDIR = Path("~/distill/phase2")
-DEFAULT_LEDGER = Path("~/distill/spend-ledger.csv")
 DEFAULT_PHASE1_DIR = Path("~/distill/phase1")
 DEFAULT_TRAJECTORIES = Path("~/.prometheus/trajectories")
 DEFAULT_TELEMETRY_SNAPSHOT = Path("~/distill/snapshot/telemetry.db")
+DEFAULT_LOCAL_MODEL = "qwen3.8-27b*"
+DEFAULT_LIVE_PROVIDER = "llama_cpp"
+DEFAULT_CONCURRENCY = {"max-payg": 2, "local": 1}
+MAX_PAYG_CONCURRENCY = 4
 
 QUEUE_FILE = "judge-queue.jsonl"
 QUEUE_META_FILE = "judge-queue.meta.json"
 RESULTS_FILE = "judge-sample.jsonl"
 STATUS_FILE = "judge-status.json"
-QUOTA_FILE = "judge-quota.json"
 REPORT_FILE = "judge-report.json"
 LOCK_FILE = "judge.lock"
 FAIL_TRACES_FILE = "fail_traces.jsonl"
 
-LEDGER_FIELDS = (
-    "ts", "phase", "calls", "input_tokens", "output_tokens", "est_usd",
-    "quota_units", "quota_unit", "model", "note",
-)
-
 EXIT_DONE = 0
 EXIT_ERROR = 1
-EXIT_WINDOW = 2
 EXIT_BUDGET = 3
 EXIT_PAUSED = 4
 EXIT_FATAL = 5
 EXIT_INCOMPLETE = 6
 EXIT_BUSY = 7
 STATE_EXIT = {
-    "done": EXIT_DONE, "window_closed": EXIT_WINDOW, "budget_stop": EXIT_BUDGET,
-    "paused": EXIT_PAUSED, "fatal": EXIT_FATAL, "incomplete": EXIT_INCOMPLETE,
-    "busy": EXIT_BUSY,
+    "done": EXIT_DONE, "budget_stop": EXIT_BUDGET, "paused": EXIT_PAUSED, "fatal": EXIT_FATAL,
+    "incomplete": EXIT_INCOMPLETE, "busy": EXIT_BUSY,
 }
 
 RETRYABLE_KINDS = frozenset({"rate_limit", "provider_error", "timeout", "unreachable"})
@@ -198,21 +266,22 @@ FATAL_KINDS = frozenset({"billing", "auth"})
 # Kinds that only come from an HTTP error status: the provider refused the
 # request before generating anything, so it is not billed.
 UNBILLED_KINDS = frozenset({"rate_limit", "billing", "auth", "bad_request", "context_overflow"})
-# Exceptions raised before the request reached the provider (no connection).
-NOT_SENT_EXCEPTIONS = frozenset({"ConnectError", "ConnectTimeout", "PoolTimeout",
-                                 "ConnectionRefusedError", "gaierror"})
 BACKOFF_BASE_S = 20.0
 BACKOFF_MAX_S = 600.0
 RETRY_AFTER_MAX_S = 900.0
 LIVE_PROBE_WINDOW_S = 900.0
 # Chat-template framing per prompt part, added to the byte bound.
 FRAMING_TOKENS = 64
+# The cost projection's typical case: Phase 1's measured density, and the
+# output per verdict assumed until ten verdicts give a mean.
+CHARS_PER_TOKEN = 3.93
+ASSUMED_OUTPUT_TOKENS = 300
 
 log = logging.getLogger("distill.judge")
 
 
 class JudgeSetupError(RuntimeError):
-    """The run cannot start: bad inputs, unknown billing, a refused host."""
+    """The run cannot start: bad inputs, a refused key or endpoint, no price."""
 
 
 class ReportError(RuntimeError):
@@ -220,7 +289,17 @@ class ReportError(RuntimeError):
 
 
 class RunBusy(RuntimeError):
-    """Another judge run holds one of the run locks."""
+    """Another judge run holds the workdir lock."""
+
+
+class JudgeBudgetStop(Exception):
+    """The client refused a call before sending it: the cap, the sub-budget, the
+    STOP file (state ``budget_stop``), or a ledger or endpoint fault (``fatal``)."""
+
+    def __init__(self, reason: str, state: str = "budget_stop") -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.state = state
 
 
 # ---------------------------------------------------------------------------
@@ -296,11 +375,6 @@ def utc_now() -> datetime:
 
 def iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def ledger_lock_path(ledger: Path) -> Path:
-    ledger = Path(ledger).expanduser()
-    return ledger.with_name(ledger.name + ".lock")
 
 
 def acquire_locks(paths: Iterable[Path]) -> contextlib.ExitStack:
@@ -836,16 +910,19 @@ class CallResult:
     input_tokens: int = 0
     output_tokens: int = 0
     served_model: str | None = None
+    cached_input_tokens: int = 0
+    cost_usd: float = 0.0
+    usage_estimated: bool = False
+    call_id: str = ""
 
 
 class JudgeCallError(Exception):
     """One failed attempt, classified the way Prometheus classifies turn errors.
 
-    ``maybe_billed`` says whether the provider may have processed (and billed)
-    the request anyway. By default: only when there is no HTTP error status and
-    the kind is not one an error status implies (a timeout, a dropped or broken
-    stream, an unknown failure). The client sets it False for an attempt that
-    never connected.
+    The client has already settled it in the ledger. ``maybe_billed`` says
+    whether the provider may have processed (and billed) the request anyway.
+    By default that is true only when there is no HTTP error status and the
+    kind is not one an error status implies.
     """
 
     def __init__(self, kind: str, message: str = "", *, status: int | None = None,
@@ -859,100 +936,193 @@ class JudgeCallError(Exception):
         self.maybe_billed = maybe_billed
 
 
-def _retry_after_seconds(response: Any) -> float | None:
-    try:
-        from prometheus.api.turn_errors import quota_headers
+def judge_payload(system: str, user: str, *, model: str, max_tokens: int,
+                  thinking_budget: int = 0) -> dict[str, Any]:
+    """The chat-completions body for one Max judge call (temperature 0, thinking bounded or off)."""
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "max_tokens": int(max_tokens), "temperature": 0, "stream": False,
+        "enable_thinking": thinking_budget > 0,
+    }
+    if thinking_budget > 0:
+        body["thinking_budget"] = int(thinking_budget)
+    return body
 
-        value = quota_headers(response).get("retry-after")
-        return float(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
 
+class PaygJudgeClient:
+    """Qwen Max on the pay-per-token key: every call reserved and settled in the shared ledger."""
 
-class PrometheusJudgeClient:
-    """The judge's model, built by Prometheus from its own config and env file.
+    provider = "max-payg"
+    judge_key = "payg"
 
-    ``load_env_file`` puts the daemon's env file in the environment (variables
-    already set win), ``load_config_resolved`` reads the same config the daemon
-    reads (strict: an unreadable config refuses rather than falling back to
-    defaults that could name another account), ``resolve_slash_command_target``
-    picks the route (``slash_commands.qwen`` merged over its preset), and
-    ``ProviderRegistry.create`` resolves the endpoint and the key. This class
-    never touches the key. Billing comes from ``telemetry.cost``: the mode from
-    the resolved host, the price from Prometheus's table.
-    """
-
-    def __init__(self, *, route: str = "qwen", model: str | None = None,
-                 config_path: str | None = None, timeout: float = 180.0) -> None:
-        from prometheus.config.env_file import load_env_file
-        from prometheus.config.load import ConfigReadError, load_config_resolved
-        from prometheus.providers.registry import ProviderRegistry
-        from prometheus.router.model_router import resolve_slash_command_target
-        from prometheus.telemetry.cost import billing_for, billing_host_of, price_for
-
-        load_env_file()
+    def __init__(self, *, ledger: Any, phase: str, budget_usd: float, model: str = JUDGE_MODEL,
+                 thinking_budget: int = 0, env_file: Path | None = None, timeout: float = 300.0,
+                 creds: Any = None, opener: Any = None) -> None:
         try:
-            config = load_config_resolved(
-                config_path, subsystem="distill_judge",
-                substituting="no judge run", strict=True, strict_action="run the judge",
-            )
-        except ConfigReadError as exc:
+            creds = creds or spend.resolve_payg(env_file=env_file)
+            self._paid = spend.PaygClient(creds, ledger, tool=TOOL, phase=phase, model=model,
+                                          phase_budget_usd=budget_usd, timeout=timeout, opener=opener)
+        except spend.SpendError as exc:  # messages never hold the key or the URL
             raise JudgeSetupError(str(exc)) from None
-        target = resolve_slash_command_target(route, config)
-        if not target:
-            raise JudgeSetupError(f"no model route named {route!r}")
-        target = dict(target)
-        if model:
-            target["model"] = model
-        target.setdefault("timeout", timeout)
+        self.ledger = ledger
+        self.phase = phase
+        self.budget_usd = budget_usd
+        self.model = model
+        self.region = creds.region
+        self.price = self._paid.price
+        self.thinking_budget = max(0, int(thinking_budget))
+        self.endpoint = creds.describe()
+
+    def payload(self, system: str, user: str, max_tokens: int) -> dict[str, Any]:
+        return judge_payload(system, user, model=self.model, max_tokens=max_tokens,
+                             thinking_budget=self.thinking_budget)
+
+    def worst_case_usd(self, system: str, user: str, max_tokens: int) -> float:
+        return self._paid.worst_case(self.payload(system, user, max_tokens))[2]
+
+    def budget_describe(self) -> str:
         try:
-            self._provider = ProviderRegistry.create(target)
-        except ValueError as exc:
-            # The registry's messages name the variable, never its value.
-            raise JudgeSetupError(str(exc)) from None
-        self.model = str(target.get("model") or "")
-        # The name the daemon's telemetry files this provider's rounds under.
-        self.provider_name = str(getattr(self._provider, "provider_name", "") or target.get("provider", ""))
-        host = billing_host_of(self._provider)
-        self.billing_mode, _reason = billing_for(self.model, f"//{host}" if host else None)
-        self.price = price_for(self.model)
+            return self.ledger.describe(tool=TOOL, phase=self.phase, phase_budget_usd=self.budget_usd)
+        except spend.SpendError as exc:
+            return f"ledger unreadable: {exc}"
 
     async def complete(self, system: str, user: str, *, max_tokens: int) -> CallResult:
-        from prometheus.api.turn_errors import classify_turn_error
-        from prometheus.engine.messages import ConversationMessage
-        from prometheus.providers.base import ApiMessageCompleteEvent, ApiMessageRequest
-
-        request = ApiMessageRequest(
-            model=self.model,
-            messages=[ConversationMessage.from_user_text(user)],
-            system_prompt=system,
-            max_tokens=max_tokens,
-        )
-        final = None
+        payload = self.payload(system, user, max_tokens)
         try:
-            # One attempt. stream_message() wraps this in the provider's retry
-            # loop, which retries a 429 within seconds and would hide it from
-            # the backoff and pause rules this script enforces.
-            async for event in self._provider._call_once(request):
-                if isinstance(event, ApiMessageCompleteEvent):
-                    final = event
-        except Exception as exc:  # noqa: BLE001 - classified, then raised as one type
-            info = classify_turn_error(exc)
-            never_sent = bool({k.__name__ for k in type(exc).__mro__} & NOT_SENT_EXCEPTIONS)
-            raise JudgeCallError(
-                str(info.get("kind") or "unknown"), str(info.get("message") or ""),
-                status=info.get("status"),
-                retry_after=_retry_after_seconds(getattr(exc, "response", None)),
-                maybe_billed=False if never_sent else None,
-            ) from None
-        if final is None:
-            raise JudgeCallError("provider_error", "the stream ended without a reply")
-        return CallResult(
-            text=final.message.text or "",
-            input_tokens=int(final.usage.input_tokens or 0),
-            output_tokens=int(final.usage.output_tokens or 0),
-            served_model=final.served_model,
-        )
+            r = await asyncio.to_thread(self._paid.chat, payload)
+        except spend.SpendRefused as exc:
+            raise JudgeBudgetStop(str(exc)) from None
+        except spend.PaidCallError as exc:
+            raise JudgeCallError(exc.kind, exc.message, status=exc.status, retry_after=exc.retry_after,
+                                 maybe_billed=exc.maybe_billed) from None
+        except spend.SpendError as exc:  # the ledger, the price tier: nothing more can be spent safely
+            raise JudgeBudgetStop(str(exc), state="fatal") from None
+        return CallResult(text=r.text, input_tokens=r.input_tokens, output_tokens=r.output_tokens,
+                          served_model=r.served_model, cached_input_tokens=r.cached_input_tokens,
+                          cost_usd=r.usd, usage_estimated=r.usage_estimated, call_id=r.call_id)
+
+
+def names_max(name: Any) -> bool:
+    """True when *name* holds the token ``max`` (build.py's rule: ``qwen3.8-max`` does, ``maximal`` not)."""
+    return isinstance(name, str) and "max" in re.split(r"[^a-z0-9]+", name.lower())
+
+
+def check_local_url(url: str) -> str:
+    """*url* without a trailing slash, or ``JudgeSetupError``: http(s) on a loopback address only."""
+    parts = urlsplit(url or "")
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise JudgeSetupError(f"--local-url must be an http(s) URL, not {url!r}")
+    if parts.username or parts.password:
+        raise JudgeSetupError("--local-url must not carry credentials")
+    host = parts.hostname.lower()
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"
+    if not loopback:
+        raise JudgeSetupError(f"--local-url must be a loopback address (127.0.0.1, ::1, localhost), not {host}")
+    return url.rstrip("/")
+
+
+class LocalJudgeClient:
+    """The local 27B judge on a loopback llama-server: no Authorization header, $0, counted."""
+
+    provider = "local"
+    judge_key = "none"
+    price = None
+    region = ""
+
+    def __init__(self, url: str, *, ledger: Any, phase: str, model_glob: str = DEFAULT_LOCAL_MODEL,
+                 timeout: float = 300.0, opener: Any = None) -> None:
+        self.url = check_local_url(url)
+        self.ledger = ledger
+        self.phase = phase
+        self.model_glob = model_glob
+        self.timeout = timeout
+        self.model = ""
+        self.endpoint = f"local llama-server on {urlsplit(self.url).hostname}"
+        # No proxy from the environment (the address is loopback) and no credentials, ever.
+        self._opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def _http(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        request = urllib.request.Request(self.url + path, data=data, method="POST" if data else "GET",
+                                         headers={"Content-Type": "application/json"})
+        try:
+            with self._opener.open(request, timeout=self.timeout) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as exc:
+            kind = spend.classify_status(exc.code, "")
+            raise JudgeCallError(kind, f"HTTP {exc.code} from the local judge", status=exc.code) from None
+        except urllib.error.URLError as exc:
+            raise JudgeCallError("unreachable", f"{type(exc.reason).__name__}", maybe_billed=False) from None
+        except (TimeoutError, OSError) as exc:
+            raise JudgeCallError("timeout" if isinstance(exc, TimeoutError) else "unreachable",
+                                 type(exc).__name__) from None
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise JudgeCallError("provider_error", "the local judge's reply is not JSON") from None
+        if not isinstance(obj, dict):
+            raise JudgeCallError("provider_error", "the local judge's reply is not an object")
+        return obj
+
+    def _check_id(self, model_id: Any) -> str:
+        if not isinstance(model_id, str) or not model_id:
+            raise JudgeSetupError("the local endpoint's /v1/models names no model")
+        if names_max(model_id):
+            raise JudgeSetupError(f"the local endpoint serves {model_id!r}: a Max model is never the local judge")
+        if not fnmatch.fnmatchcase(model_id.lower(), self.model_glob.lower()):
+            raise JudgeSetupError(f"the local endpoint serves {model_id!r}, which does not match "
+                                  f"{self.model_glob!r} (--local-model)")
+        return model_id
+
+    def preflight(self) -> str:
+        """The served model id, checked against ``--local-model``; also sets ``self.model``."""
+        try:
+            data = (self._http("/v1/models").get("data") or [{}])[0]
+        except JudgeCallError as exc:
+            raise JudgeSetupError(f"the local judge is not answering: {exc}") from None
+        self.model = self._check_id(data.get("id") if isinstance(data, dict) else None)
+        return self.model
+
+    def budget_describe(self) -> str:
+        return "local judge ($0)"
+
+    async def complete(self, system: str, user: str, *, max_tokens: int) -> CallResult:
+        if not self.model:
+            raise JudgeBudgetStop("the local judge was not preflighted", state="fatal")
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "max_tokens": int(max_tokens), "temperature": 0, "stream": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        body = await asyncio.to_thread(self._http, "/v1/chat/completions", payload)
+        served = body.get("model") if isinstance(body.get("model"), str) else None
+        if served and served != self.model:
+            try:
+                self._check_id(served)
+            except JudgeSetupError as exc:
+                raise JudgeBudgetStop(f"the local endpoint changed model mid-run: {exc}", state="fatal") from None
+        choices = body.get("choices")
+        first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+        message = first.get("message") if isinstance(first.get("message"), dict) else {}
+        usage = spend.parse_usage(body.get("usage"))
+        in_tok = usage.input_tokens if usage else 0
+        out_tok = usage.output_tokens if usage else 0
+        try:
+            await asyncio.to_thread(self.ledger.record_free, tool=TOOL, phase=self.phase,
+                                    model=served or self.model, input_tokens=in_tok, output_tokens=out_tok,
+                                    note="local")
+        except spend.SpendError as exc:
+            raise JudgeBudgetStop(f"the spend ledger cannot count local calls: {exc}", state="fatal") from None
+        text = message.get("content") if isinstance(message, dict) else None
+        return CallResult(text=text if isinstance(text, str) else "", input_tokens=in_tok,
+                          output_tokens=out_tok, served_model=served,
+                          cached_input_tokens=usage.cached_input_tokens if usage else 0,
+                          usage_estimated=usage is None)
 
 
 def live_error_probe(path: Path, provider: str, *, window_s: float = LIVE_PROBE_WINDOW_S,
@@ -989,159 +1159,6 @@ def live_error_probe(path: Path, provider: str, *, window_s: float = LIVE_PROBE_
 
 
 # ---------------------------------------------------------------------------
-# Window, ledger, budget
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class JudgeWindow:
-    start_hour: int = WINDOW_START_HOUR
-    end_hour: int = WINDOW_END_HOUR
-    tz: str = WINDOW_TZ
-
-    def is_open(self, now: datetime) -> bool:
-        local = now.astimezone(ZoneInfo(self.tz))
-        return self.start_hour <= local.hour < self.end_hour
-
-    def describe(self) -> str:
-        return f"{self.start_hour:02d}:00-{self.end_hour:02d}:00 {self.tz}"
-
-
-def _num(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-class SpendLedger:
-    """The spend ledger CSV: one row per API attempt, shared by every phase."""
-
-    def __init__(self, path: Path, phase: str) -> None:
-        self.path = Path(path).expanduser()
-        self.phase = phase
-        if self.path.exists() and self.path.stat().st_size:
-            with open(self.path, encoding="utf-8", newline="") as fh:
-                header = next(csv.reader(fh), [])
-            if tuple(header) != LEDGER_FIELDS:
-                raise JudgeSetupError(
-                    f"{self.path} has columns {header}, expected {list(LEDGER_FIELDS)}")
-
-    def totals(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"calls": 0, "input_tokens": 0, "output_tokens": 0,
-                               "est_usd": 0.0, "quota_units": defaultdict(float)}
-        if not self.path.exists():
-            return out
-        with open(self.path, encoding="utf-8", newline="") as fh:
-            for row in csv.DictReader(fh):
-                if row.get("phase") != self.phase:
-                    continue
-                out["calls"] += int(_num(row.get("calls")))
-                out["input_tokens"] += int(_num(row.get("input_tokens")))
-                out["output_tokens"] += int(_num(row.get("output_tokens")))
-                out["est_usd"] += _num(row.get("est_usd"))
-                if row.get("quota_unit"):
-                    out["quota_units"][row["quota_unit"]] += _num(row.get("quota_units"))
-        return out
-
-    def append(self, row: dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        new = not self.path.exists() or not self.path.stat().st_size
-        with open(self.path, "a", encoding="utf-8", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=LEDGER_FIELDS)
-            if new:
-                writer.writeheader()
-            writer.writerow({k: row.get(k, "") for k in LEDGER_FIELDS})
-            fh.flush()
-
-
-@dataclass
-class Budget:
-    """A hard cap, checked before every call: spent + in flight + this call's worst case."""
-
-    unit: str            # "usd" | "requests" | "tokens"
-    cap: float
-    spent: float = 0.0
-    price_in: float = 0.0    # $ per million input tokens (unit "usd")
-    price_out: float = 0.0
-    reserved: float = 0.0
-
-    def cost(self, input_tokens: int, output_tokens: int, *, attempted: bool = True) -> float:
-        if self.unit == "usd":
-            return (input_tokens * self.price_in + output_tokens * self.price_out) / 1e6
-        if self.unit == "requests":
-            return 1.0 if attempted else 0.0
-        return float(input_tokens + output_tokens)
-
-    def try_reserve(self, amount: float) -> bool:
-        if self.spent + self.reserved + amount > self.cap + 1e-12:
-            return False
-        self.reserved += amount
-        return True
-
-    def settle(self, reserved: float, actual: float) -> None:
-        self.reserved = max(0.0, self.reserved - reserved)
-        self.spent += actual
-
-    def describe(self) -> str:
-        if self.unit == "usd":
-            return f"${self.spent:.4f} of ${self.cap:.2f}"
-        return f"{self.spent:g} of {self.cap:g} {self.unit}"
-
-
-def quota_baseline(path: Path, unit: str, remaining: float | None) -> float:
-    """The quota left when judging started, recorded once and reused by every later run."""
-    path = Path(path).expanduser()
-    if path.exists():
-        stored = json.loads(path.read_text(encoding="utf-8"))
-        if stored.get("unit") != unit:
-            raise JudgeSetupError(
-                f"{path.name} records a {stored.get('unit')!r} quota; this run counts {unit!r}")
-        base = float(stored["remaining_at_start"])
-        if remaining is not None and remaining != base:
-            log.warning("using the quota recorded at the first run (%g %s), not %g", base, unit, remaining)
-        return base
-    if remaining is None or remaining <= 0:
-        raise JudgeSetupError(
-            "a quota plan needs --quota-remaining (what the plan has left now) on the first run")
-    write_private(path, json.dumps(
-        {"unit": unit, "remaining_at_start": remaining, "recorded": iso(utc_now())}) + "\n")
-    return float(remaining)
-
-
-def build_budget(
-    *, client: Any, billing: str, ledger: SpendLedger, quota_path: Path,
-    max_usd: float = DEFAULT_MAX_USD, max_quota_fraction: float = DEFAULT_MAX_QUOTA_FRACTION,
-    quota_remaining: float | None = None, quota_unit: str = "requests", plan_terms_ok: bool = False,
-) -> Budget:
-    """The cap for this run, from the client's billing mode and the ledger's spend so far."""
-    mode = getattr(client, "billing_mode", "unknown")
-    if mode == "subscription" and not plan_terms_ok:
-        raise JudgeSetupError(
-            "the route resolves to a subscription-plan host; its terms limit automated use. "
-            "Pass --plan-terms-ok once the operator has confirmed the plan allows this")
-    if billing == "auto":
-        billing = {"metered": "per-token", "subscription": "quota"}.get(mode, "")
-        if not billing:
-            raise JudgeSetupError(
-                f"cannot tell how {client.model!r} is billed ({mode}); pass --billing per-token or quota")
-    totals = ledger.totals()
-    if billing == "per-token":
-        price = getattr(client, "price", None)
-        if not price:
-            raise JudgeSetupError(f"no per-token price for {client.model!r} in Prometheus's table")
-        return Budget(unit="usd", cap=float(max_usd), spent=totals["est_usd"],
-                      price_in=float(price[0]), price_out=float(price[1]))
-    if billing == "quota":
-        if not 0 < max_quota_fraction <= 1:
-            raise JudgeSetupError("--max-quota-fraction must be in (0, 1]")
-        base = quota_baseline(quota_path, quota_unit, quota_remaining)
-        return Budget(unit=quota_unit, cap=max_quota_fraction * base,
-                      spent=totals["quota_units"].get(quota_unit, 0.0))
-    raise JudgeSetupError(f"unknown billing {billing!r}")
-
-
-# ---------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------
 
@@ -1158,9 +1175,6 @@ class RunConfig:
     backoff_base: float = BACKOFF_BASE_S
     backoff_max: float = BACKOFF_MAX_S
     jitter: float = 0.1
-    # Programmatic only (tests inject a clock instead): the CLI has no way to
-    # skip the window or to start a second budget bucket.
-    ignore_window: bool = False
     phase: str = PHASE
 
 
@@ -1187,26 +1201,29 @@ def done_ids(rows: Iterable[dict[str, Any]], view: str) -> set[str]:
             and r.get("rubric_version") == RUBRIC_VERSION}
 
 
+def verification_record(parsed: dict[str, Any], *, model: str, served_model: str | None,
+                        provider: str) -> dict[str, Any]:
+    """The verdict as a ``_meta.verification`` record (build.py's ``verification_of`` shape)."""
+    return {"verified": parsed["verdict"] == "pass",
+            "judge": {"verdict": parsed["verdict"], "model": model, "served_model": served_model,
+                      "provider": provider}}
+
+
 class JudgeRun:
-    """Judges queued items under the window, the live probe and the budget."""
+    """Judges queued items through one client, under the live probe and the client's budget."""
 
     def __init__(
-        self, items: list[dict[str, Any]], *, client: Any, budget: Budget, ledger: SpendLedger,
-        results_path: Path, status_path: Path, config: RunConfig,
-        window: JudgeWindow = JudgeWindow(),
-        clock: Callable[[], datetime] = utc_now,
+        self, items: list[dict[str, Any]], *, client: Any, results_path: Path, status_path: Path,
+        config: RunConfig, clock: Callable[[], datetime] = utc_now,
         sleep: Callable[[float], Any] = asyncio.sleep,
         probe: Callable[[], str | None] | None = None,
         rng: random.Random | None = None,
     ) -> None:
         self.items = items
         self.client = client
-        self.budget = budget
-        self.ledger = ledger
         self.results_path = Path(results_path).expanduser()
         self.status_path = Path(status_path).expanduser()
         self.config = config
-        self.window = window
         self.clock = clock
         self.sleep = sleep
         self.probe = probe
@@ -1223,21 +1240,23 @@ class JudgeRun:
             self.outcome.reason = reason
             log.warning("judge run stopped (%s): %s", state, reason)
 
+    def _budget(self) -> str:
+        describe = getattr(self.client, "budget_describe", None)
+        return describe() if callable(describe) else ""
+
     def _write_status(self) -> None:
         o = self.outcome
         write_private(self.status_path, json.dumps({
             "ts": iso(self.clock()), "state": o.state, "reason": o.reason,
             "judged_this_run": o.judged, "unparseable_this_run": o.unparseable,
             "errors_this_run": o.errors, "calls_this_run": o.calls,
-            "remaining": o.remaining, "budget": self.budget.describe(),
+            "remaining": o.remaining, "budget": self._budget(),
+            "provider": getattr(self.client, "provider", ""), "model": getattr(self.client, "model", ""),
             "view": self.config.view, "phase": self.config.phase,
         }, indent=1) + "\n")
 
     def _gate(self) -> bool:
-        """Window and live probe, before every call. True when the call may go."""
-        if not self.config.ignore_window and not self.window.is_open(self.clock()):
-            self._halt("window_closed", f"outside the judging window ({self.window.describe()})")
-            return False
+        """The live probe, before every call. True when the call may go."""
         if self.probe is not None:
             signal = self.probe()
             if signal:
@@ -1252,26 +1271,17 @@ class JudgeRun:
             delay = max(delay, min(float(retry_after), RETRY_AFTER_MAX_S))
         return delay
 
-    def _ledger(self, *, input_tokens: int, output_tokens: int, cost: float, note: str) -> None:
-        price = getattr(self.client, "price", None)
-        if self.budget.unit == "usd":
-            usd, units, unit = cost, "", ""
-        else:
-            usd = ((input_tokens * price[0] + output_tokens * price[1]) / 1e6) if price else ""
-            units, unit = cost, self.budget.unit
-        self.ledger.append({
-            "ts": iso(self.clock()), "phase": self.config.phase, "calls": 1,
-            "input_tokens": input_tokens, "output_tokens": output_tokens,
-            "est_usd": f"{usd:.6f}" if isinstance(usd, float) else usd,
-            "quota_units": f"{units:g}" if isinstance(units, float) else units,
-            "quota_unit": unit, "model": getattr(self.client, "model", ""), "note": note,
-        })
-
     def _row(self, item: dict[str, Any], **fields: Any) -> dict[str, Any]:
+        # getattr throughout: build.py's tests call this on a minimal stand-in runner.
         row = {
             "id": item["id"], "label": item["label"], "category": item["category"],
             "source": item.get("source"), "view": self.config.view,
-            "rubric_version": RUBRIC_VERSION, "model": getattr(self.client, "model", ""),
+            "rubric_version": RUBRIC_VERSION,
+            "provider": getattr(self.client, "provider", ""),
+            "judge_key": getattr(self.client, "judge_key", ""),
+            "model": getattr(self.client, "model", ""),
+            "region": getattr(self.client, "region", ""),
+            "phase": getattr(self.config, "phase", PHASE),
             "ts": iso(self.clock()),
         }
         row.update(fields)
@@ -1284,34 +1294,17 @@ class JudgeRun:
         system = system_prompt(cfg.view)
         user, truncated = render_prompt(item, view=cfg.view, max_message_chars=cfg.max_message_chars,
                                         max_prompt_chars=cfg.max_prompt_chars)
-        est_in = token_upper_bound(system, user)
-        est_out = cfg.max_tokens
         for attempt in range(cfg.max_attempts):
             if self._stopped or not self._gate():
                 return
-            worst = self.budget.cost(est_in, est_out)
-            if not self.budget.try_reserve(worst):
-                self._halt("budget_stop",
-                           f"the next call could cost up to {worst:g} {self.budget.unit} and "
-                           f"{self.budget.describe()} is spent or in flight")
-                return
-            self.outcome.calls += 1
             try:
-                result = await self.client.complete(system, user, max_tokens=est_out)
+                result = await self.client.complete(system, user, max_tokens=cfg.max_tokens)
+            except JudgeBudgetStop as exc:
+                # Refused before anything was sent: the cap, the sub-budget or STOP.
+                self._halt(exc.state, exc.reason)
+                return
             except JudgeCallError as exc:
-                if exc.maybe_billed:
-                    # The provider may have processed it: charge the reserved
-                    # worst case, so the cap still bounds what was really billed.
-                    in_tok, out_tok, spent = est_in, est_out, worst
-                    note = f"error:{exc.kind} charged-worst-case"
-                else:
-                    # Refused with an error status, or never connected. A request
-                    # quota still counts the attempt.
-                    in_tok, out_tok = 0, 0
-                    spent = self.budget.cost(0, 0) if self.budget.unit == "requests" else 0.0
-                    note = f"error:{exc.kind}"
-                self.budget.settle(worst, spent)
-                self._ledger(input_tokens=in_tok, output_tokens=out_tok, cost=spent, note=note)
+                self.outcome.calls += 1
                 if exc.kind in FATAL_KINDS:
                     self._halt("fatal", f"{exc.kind} error from the judge model: {exc}")
                     return
@@ -1336,20 +1329,13 @@ class JudgeRun:
                 await self.sleep(delay)
                 continue
 
-            in_tok, out_tok = result.input_tokens, result.output_tokens
-            estimated = not (in_tok or out_tok)
-            if estimated:
-                # No usage reported: charge the worst case rather than nothing.
-                in_tok, out_tok = est_in, est_out
-            cost = self.budget.cost(in_tok, out_tok)
-            self.budget.settle(worst, cost)
-            self._ledger(input_tokens=in_tok, output_tokens=out_tok, cost=cost,
-                         note="ok" + (" usage-estimated" if estimated else ""))
+            self.outcome.calls += 1
             parsed = parse_verdict(result.text)
             common = dict(
-                served_model=result.served_model, input_tokens=in_tok, output_tokens=out_tok,
-                usage_estimated=estimated, cost=cost, cost_unit=self.budget.unit,
-                prompt_chars=len(user), truncated=truncated, attempts=attempt + 1,
+                served_model=result.served_model, input_tokens=result.input_tokens,
+                cached_input_tokens=result.cached_input_tokens, output_tokens=result.output_tokens,
+                usage_estimated=result.usage_estimated, cost_usd=round(result.cost_usd, 6),
+                call_id=result.call_id, prompt_chars=len(user), truncated=truncated, attempts=attempt + 1,
             )
             if parsed is None:
                 self.outcome.unparseable += 1
@@ -1357,8 +1343,12 @@ class JudgeRun:
                     item, status="unparseable", reply_head=clip(result.text, 300), **common))
             else:
                 self.outcome.judged += 1
+                verification = verification_record(
+                    parsed, model=getattr(self.client, "model", ""), served_model=result.served_model,
+                    provider=getattr(self.client, "provider", ""))
                 append_private(self.results_path, self._row(
-                    item, status="ok", agrees=parsed["verdict"] == item["label"], **parsed, **common))
+                    item, status="ok", agrees=parsed["verdict"] == item["label"], **parsed, **common,
+                    verification=verification))
             return
 
     # -- the loop --------------------------------------------------------------
@@ -1381,7 +1371,7 @@ class JudgeRun:
         left = [it for it in self.items
                 if it["id"] not in done_ids(read_jsonl(self.results_path), cfg.view)]
         self.outcome.remaining = len(left)
-        self.outcome.budget = self.budget.describe()
+        self.outcome.budget = self._budget()
         if not self._stopped:
             if left:
                 self.outcome.state = "incomplete"
@@ -1392,6 +1382,51 @@ class JudgeRun:
                 self.outcome.reason = "every queued item has a verdict"
         self._write_status()
         return self.outcome
+
+
+def project_cost(items: list[dict[str, Any]], config: RunConfig, *, price: Any = None,
+                 worst_case_usd: Callable[[str, str, int], float] | None = None,
+                 thinking_budget: int = 0,
+                 prior_rows: Iterable[dict[str, Any]] = ()) -> dict[str, Any]:
+    """The projected cost of judging *items*: worst case (the reservations) and typical.
+
+    Worst case: each call's reservation (*worst_case_usd*, else prompt bytes
+    plus framing as tokens, plus ``max_tokens`` and the thinking budget).
+    Typical: 3.93 characters per token in, and the mean output of earlier ``ok``
+    verdicts (at least ten) or 300 tokens out. With no *price* (a local judge),
+    both are $0.
+    """
+    system = system_prompt(config.view)
+    out_bound = config.max_tokens + max(0, thinking_budget)
+    outs = [r.get("output_tokens") for r in prior_rows if r.get("status") == "ok"]
+    outs = [o for o in outs if isinstance(o, int) and not isinstance(o, bool) and o > 0]
+    typical_out = round(sum(outs) / len(outs)) if len(outs) >= 10 else ASSUMED_OUTPUT_TOKENS
+    in_bound = in_typical = 0
+    usd_worst = usd_typical = 0.0
+    for item in items:
+        user, _ = render_prompt(item, view=config.view, max_message_chars=config.max_message_chars,
+                                max_prompt_chars=config.max_prompt_chars)
+        bound = token_upper_bound(system, user)
+        typical = math.ceil((len(system) + len(user)) / CHARS_PER_TOKEN)
+        in_bound += bound
+        in_typical += typical
+        if price is not None:
+            usd_worst += (worst_case_usd(system, user, config.max_tokens) if worst_case_usd
+                          else price.usd(bound, 0, out_bound))
+            usd_typical += price.usd(typical, 0, min(typical_out, out_bound))
+    out = {
+        "items": len(items),
+        "input_tokens_bound": in_bound, "input_tokens_typical": in_typical,
+        "output_tokens_bound": out_bound * len(items),
+        "output_tokens_typical": min(typical_out, out_bound) * len(items),
+        "output_per_call_typical": min(typical_out, out_bound),
+        "output_basis": f"mean of {len(outs)} earlier verdicts" if len(outs) >= 10 else "assumed",
+        "usd_worst_case": round(usd_worst, 4), "usd_typical": round(usd_typical, 4),
+    }
+    if price is not None:
+        out["price_usd_per_m"] = {"model": price.model, "region": price.region, "input": price.input_per_m,
+                                  "cached_input": price.cached_input_per_m, "output": price.output_per_m}
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1536,12 +1571,18 @@ def build_report(
                            c["category"]))]
 
     served = Counter(f"{r.get('model')} -> {r.get('served_model') or '?'}" for _it, r in judged)
+    providers = Counter(str(r.get("provider") or "?") for _it, r in judged)
+    # What this view's rows say they cost; the spend ledger is the authority.
+    cost = sum(float(r.get("cost_usd") or 0.0) for r in rows
+               if r.get("view") == view and isinstance(r.get("cost_usd"), (int, float)))
     return {
         "schema": "distill-judge-report/1",
         "created": iso(utc_now()),
         "view": view,
         "rubric_version": RUBRIC_VERSION,
         "judge_models": dict(served.most_common()),
+        "judge_providers": dict(providers.most_common()),
+        "cost_usd_rows": round(cost, 4),
         "sampled": {"pass": sum(1 for it in items if it["label"] == "pass"),
                     "fail": sum(1 for it in items if it["label"] == "fail")},
         "judged": {"pass": len(pass_j), "fail": len(fail_j)},
@@ -1584,6 +1625,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- False-pass (pool-weighted): {_pct(fp['rate'])}{_ci_text(fp['ci95'])}, "
         f"n_eff {fp['n_eff']}; raw {fp['k_raw']}/{fp['n_raw']} = {_pct(fp['rate_raw'])}{_ci_text(fp['ci95_raw'])}.",
         f"- Agreement: {ag['k']}/{ag['n']} = {_pct(ag['rate'])}{_ci_text(ag['ci95'])}.",
+        "- Judge: " + (", ".join(f"{k} ({v})" for k, v in (report.get("judge_providers") or {}).items())
+                       or "none") + "; models " + (", ".join(report.get("judge_models") or {}) or "none")
+        + f"; ${report.get('cost_usd_rows', 0.0):.2f} by the verdict rows (the spend ledger is authoritative).",
         f"- Fail-labelled items the judge also fails: {fs['judge_fail_k']}/{fs['n']} = "
         f"{_pct(fs['rate'])}{_ci_text(fs['ci95'])}"
         + (" (this view shows the judge the recorded error, so this is not a test of the judge)."
@@ -1625,8 +1669,19 @@ def _paths(args: argparse.Namespace) -> dict[str, Path]:
     return {
         "work": work, "queue": work / QUEUE_FILE, "meta": work / QUEUE_META_FILE,
         "results": work / RESULTS_FILE, "status": work / STATUS_FILE,
-        "quota": work / QUOTA_FILE, "report": work / REPORT_FILE, "lock": work / LOCK_FILE,
+        "report": work / REPORT_FILE, "lock": work / LOCK_FILE,
     }
+
+
+def _read_meta(p: dict[str, Path]) -> dict[str, Any]:
+    return json.loads(p["meta"].read_text(encoding="utf-8")) if p["meta"].exists() else {}
+
+
+def _gate_of(src: Path) -> dict[str, Any]:
+    report_path = Path(src).expanduser() / REPORT_FILE
+    if not report_path.is_file():
+        raise JudgeSetupError(f"no report at {report_path} (run `report` there first)")
+    return json.loads(report_path.read_text(encoding="utf-8")).get("gate") or {}
 
 
 def _rejudge_inputs(src: Path, work: Path) -> tuple[set[str], list[str], str]:
@@ -1650,26 +1705,33 @@ def _rejudge_inputs(src: Path, work: Path) -> tuple[set[str], list[str], str]:
     return judged, list(gate.get("rejudge_priority") or []), view
 
 
+def _write_rejudge_queue(args: argparse.Namespace, p: dict[str, Path]) -> dict[str, Any]:
+    index_rows = read_jsonl(args.index)
+    if not index_rows:
+        raise JudgeSetupError(f"no Phase 1 index at {args.index}")
+    judged, priority, view = _rejudge_inputs(args.rejudge_from, p["work"])
+    queue, meta = build_rejudge_queue(
+        index_rows, judged, priority, trajectories=args.trajectories, telemetry=args.telemetry,
+        seed=args.seed, model=args.model,
+    )
+    meta.update({"rejudge_from": str(Path(args.rejudge_from).expanduser()), "view": view})
+    write_private(p["queue"], "".join(json.dumps(q, ensure_ascii=False) + "\n" for q in queue))
+    write_private(p["meta"], json.dumps(meta, indent=1) + "\n")
+    return meta
+
+
 def cmd_sample(args: argparse.Namespace) -> int:
     p = _paths(args)
     if p["queue"].exists() and not args.force:
         print(f"{p['queue']} exists; pass --force to resample (judged rows for other ids are ignored)",
               file=sys.stderr)
         return EXIT_ERROR
+    if args.rejudge_from is not None:
+        print(json.dumps(_write_rejudge_queue(args, p), indent=1))
+        return EXIT_DONE
     index_rows = read_jsonl(args.index)
     if not index_rows:
         raise JudgeSetupError(f"no Phase 1 index at {args.index}")
-    if args.rejudge_from is not None:
-        judged, priority, view = _rejudge_inputs(args.rejudge_from, p["work"])
-        queue, meta = build_rejudge_queue(
-            index_rows, judged, priority, trajectories=args.trajectories, telemetry=args.telemetry,
-            seed=args.seed, model=args.model,
-        )
-        meta.update({"rejudge_from": str(Path(args.rejudge_from).expanduser()), "view": view})
-        write_private(p["queue"], "".join(json.dumps(q, ensure_ascii=False) + "\n" for q in queue))
-        write_private(p["meta"], json.dumps(meta, indent=1) + "\n")
-        print(json.dumps(meta, indent=1))
-        return EXIT_DONE
     fail_path = Path(args.fail or p["work"] / FAIL_TRACES_FILE).expanduser()
     fail_traces = read_jsonl(fail_path)
     if not fail_traces:
@@ -1686,67 +1748,168 @@ def cmd_sample(args: argparse.Namespace) -> int:
     return EXIT_DONE
 
 
-def cmd_run(args: argparse.Namespace, *, client_factory: Callable[[], Any] | None = None,
-            clock: Callable[[], datetime] = utc_now, sleep: Callable[[float], Any] = asyncio.sleep,
-            probe: Callable[[], str | None] | None = None) -> int:
-    p = _paths(args)
+def _queue_and_phase(args: argparse.Namespace, p: dict[str, Path]) -> tuple[list[dict[str, Any]], str]:
+    """The queued items (``--only`` applied) and the ledger phase: ``2-judge-all`` for a re-judge
+    queue, ``2-judge-blind`` for the blind fail-side check, else ``2-judge``."""
     items = read_jsonl(p["queue"])
     if not items:
         raise JudgeSetupError(f"no queue at {p['queue']} (run `sample` first)")
-    if args.only:
-        items = [it for it in items if it["label"] == args.only]
-    # One run at a time per workdir (same pending items) and per ledger (the cap
-    # is the ledger's total plus this process's in-flight reservations, so two
-    # runs would each see the whole remaining budget). Held until the run ends.
+    only = getattr(args, "only", None)
+    if only:
+        items = [it for it in items if it["label"] == only]
+    if _read_meta(p).get("mode") == "rejudge":
+        phase = PHASE_ALL
+    elif getattr(args, "view", None) == "blind" and only == "fail":
+        phase = PHASE_BLIND
+    else:
+        phase = PHASE
+    return items, phase
+
+
+def _run_config(args: argparse.Namespace, phase: str) -> RunConfig:
+    concurrency = args.concurrency or DEFAULT_CONCURRENCY[args.provider]
+    if args.provider == "max-payg" and concurrency > MAX_PAYG_CONCURRENCY:
+        raise JudgeSetupError(f"--concurrency {concurrency} is above {MAX_PAYG_CONCURRENCY} for the paid key")
+    if concurrency < 1:
+        raise JudgeSetupError("--concurrency must be at least 1")
+    return RunConfig(view=args.view, max_tokens=args.max_tokens, max_attempts=args.max_attempts,
+                     concurrency=concurrency, limit=args.limit, backoff_base=args.backoff_base,
+                     phase=phase)
+
+
+def _ledger(args: argparse.Namespace) -> Any:
+    """The one shared spend ledger (``spend.DEFAULT_LEDGER``): there is no option to pick another."""
+    return spend.Ledger(notify_cmd=args.notify_cmd)
+
+
+def _projection_price(args: argparse.Namespace) -> tuple[Any, str]:
+    """(price, basis) for an estimate: the key's region when the key is usable here, else the highest."""
     try:
-        locks = acquire_locks([p["lock"], ledger_lock_path(args.ledger)])
+        try:
+            creds = spend.resolve_payg(env_file=args.env_file)
+        except spend.KeyRefused as exc:
+            return (spend.highest_price(args.judge_model),
+                    f"key not usable here ({exc}); priced at the highest region")
+        return spend.price_for(args.judge_model, creds.region), f"priced at the key's region ({creds.region})"
+    except spend.PriceUnknown as exc:
+        raise JudgeSetupError(str(exc)) from None
+
+
+def cmd_estimate(args: argparse.Namespace) -> int:
+    p = _paths(args)
+    items, phase = _queue_and_phase(args, p)
+    rows = read_jsonl(p["results"])
+    pending = [it for it in items if it["id"] not in done_ids(rows, args.view)]
+    if args.limit is not None:
+        pending = pending[: max(0, args.limit)]
+    config = _run_config(args, phase)
+    out: dict[str, Any] = {"provider": args.provider, "phase": phase, "view": args.view}
+    if args.provider == "max-payg":
+        price, basis = _projection_price(args)
+        out["price_basis"] = basis
+
+        def worst(system: str, user: str, max_tokens: int) -> float:
+            body = judge_payload(system, user, model=args.judge_model, max_tokens=max_tokens,
+                                 thinking_budget=args.thinking_budget)
+            est_in, est_out = spend.worst_case_tokens(body)
+            return float(price.usd(est_in, 0, est_out))
+
+        out["projected"] = project_cost(pending, config, price=price, worst_case_usd=worst,
+                                        thinking_budget=args.thinking_budget, prior_rows=rows)
+        try:
+            ledger = _ledger(args)
+            t = ledger.totals()
+            mine = ledger.totals(tool=TOOL, phase=phase)
+            out["ledger"] = {"committed_usd": round(t.committed_usd, 4), "cap_usd": ledger.cap_usd,
+                             "alert_usd": ledger.alert_usd, "phase_committed_usd": round(mine.committed_usd, 4),
+                             "stop": ledger.stop_reason()}
+        except spend.SpendError as exc:
+            out["ledger"] = {"error": str(exc)}
+    else:
+        out["projected"] = project_cost(pending, config, prior_rows=rows)
+    print(json.dumps(out, indent=1))
+    return EXIT_DONE
+
+
+def cmd_run(args: argparse.Namespace, *, client_factory: Callable[[], Any] | None = None,
+            clock: Callable[[], datetime] = utc_now, sleep: Callable[[float], Any] = asyncio.sleep,
+            probe: Callable[[], str | None] | None = None, opener: Any = None) -> int:
+    p = _paths(args)
+    items, phase = _queue_and_phase(args, p)
+    # One run at a time per workdir (same pending items). The budget is the
+    # spend ledger's, shared by every paid tool under its own lock.
+    try:
+        locks = acquire_locks([p["lock"]])
     except RunBusy as exc:
         print(f"busy: {exc}", file=sys.stderr)
         return EXIT_BUSY
     with locks:
-        return _run_locked(args, p, items, client_factory=client_factory, clock=clock,
-                           sleep=sleep, probe=probe)
+        return _run_locked(args, p, items, phase, client_factory=client_factory, clock=clock,
+                           sleep=sleep, probe=probe, opener=opener)
 
 
-def _run_locked(args: argparse.Namespace, p: dict[str, Path], items: list[dict[str, Any]], *,
+def _refuse(p: dict[str, Path], clock: Callable[[], datetime], state: str, reason: str,
+            remaining: int) -> int:
+    write_private(p["status"], json.dumps({"ts": iso(clock()), "state": state, "reason": reason,
+                                           "remaining": remaining}) + "\n")
+    print(f"refused: {reason}", file=sys.stderr)
+    return STATE_EXIT[state]
+
+
+def _run_locked(args: argparse.Namespace, p: dict[str, Path], items: list[dict[str, Any]], phase: str, *,
                 client_factory: Callable[[], Any] | None, clock: Callable[[], datetime],
-                sleep: Callable[[float], Any], probe: Callable[[], str | None] | None) -> int:
-    config = RunConfig(
-        view=args.view, max_tokens=args.max_tokens, max_attempts=args.max_attempts,
-        concurrency=args.concurrency, limit=args.limit, backoff_base=args.backoff_base,
-    )
-    window = JudgeWindow()
-    pending = [it for it in items if it["id"] not in done_ids(read_jsonl(p["results"]), args.view)]
+                sleep: Callable[[float], Any], probe: Callable[[], str | None] | None,
+                opener: Any) -> int:
+    config = _run_config(args, phase)
+    rows = read_jsonl(p["results"])
+    pending = [it for it in items if it["id"] not in done_ids(rows, args.view)]
     if not pending:
         print("every queued item already has a verdict")
         return EXIT_DONE
-    if not window.is_open(clock()):
-        # Before the client is even built: outside the window nothing is read or sent.
-        reason = f"outside the judging window ({window.describe()})"
-        write_private(p["status"], json.dumps({"ts": iso(clock()), "state": "window_closed",
-                                               "reason": reason, "remaining": len(pending)}) + "\n")
-        print(f"refused: {reason}", file=sys.stderr)
-        return EXIT_WINDOW
-    client = client_factory() if client_factory else PrometheusJudgeClient(
-        route=args.route, model=args.judge_model, config_path=args.config)
-    ledger = SpendLedger(args.ledger, config.phase)
-    budget = build_budget(
-        client=client, billing=args.billing, ledger=ledger, quota_path=p["quota"],
-        max_usd=args.max_usd, max_quota_fraction=args.max_quota_fraction,
-        quota_remaining=args.quota_remaining, quota_unit=args.quota_unit,
-        plan_terms_ok=args.plan_terms_ok,
-    )
-    if probe is None and not args.no_live_probe:
+    ledger = _ledger(args)
+    if args.provider == "max-payg":
+        if args.budget_usd is None or args.budget_usd <= 0:
+            raise JudgeSetupError("--budget-usd (this phase's share of the global cap) is required for max-payg")
+        try:
+            ledger.check_open(tool=TOOL, phase=phase, model=args.judge_model)  # the ledger, STOP
+        except spend.StopActive as exc:
+            return _refuse(p, clock, "budget_stop", str(exc), len(pending))
+        except spend.SpendError as exc:
+            raise JudgeSetupError(str(exc)) from None
+        notify = Path(args.notify_cmd).expanduser()
+        if not (notify.is_file() and os.access(notify, os.X_OK)):
+            raise JudgeSetupError(f"the notify command {spend.display_path(notify)} is missing or not "
+                                  "executable: the $140 alert could not reach the operator")
+    if client_factory is not None:
+        client = client_factory()
+    elif args.provider == "max-payg":
+        client = PaygJudgeClient(ledger=ledger, phase=phase, budget_usd=args.budget_usd, model=args.judge_model,
+                                 thinking_budget=args.thinking_budget, env_file=args.env_file,
+                                 timeout=args.timeout, opener=opener)
+    else:
+        if not args.local_url:
+            raise JudgeSetupError("--local-url (the local judge's loopback llama-server) is required")
+        client = LocalJudgeClient(args.local_url, ledger=ledger, phase=phase, model_glob=args.local_model,
+                                  timeout=args.timeout, opener=opener)
+        client.preflight()
+    if args.provider == "local" and probe is None and not args.no_live_probe:
         live = args.live_telemetry
         if live is None:
             from prometheus.config.paths import config_dir_path
 
             live = Path(config_dir_path()) / "telemetry.db"
-        probe = live_error_probe(Path(live).expanduser(),
-                                 getattr(client, "provider_name", "") or args.route)
-    run = JudgeRun(items, client=client, budget=budget, ledger=ledger, results_path=p["results"],
-                   status_path=p["status"], config=config, window=window, clock=clock,
-                   sleep=sleep, probe=probe)
+        probe = live_error_probe(Path(live).expanduser(), args.live_provider)
+    todo = pending[: max(0, args.limit)] if args.limit is not None else pending
+    price = getattr(client, "price", None)
+    worst = getattr(client, "worst_case_usd", None)
+    projection = project_cost(todo, config, price=price, worst_case_usd=worst if callable(worst) else None,
+                              thinking_budget=getattr(client, "thinking_budget", 0), prior_rows=rows)
+    print(json.dumps({"provider": getattr(client, "provider", args.provider),
+                      "endpoint": getattr(client, "endpoint", ""), "model": getattr(client, "model", ""),
+                      "phase": phase, "budget": client.budget_describe(), "projected": projection}, indent=1),
+          flush=True)
+    run = JudgeRun(items, client=client, results_path=p["results"], status_path=p["status"], config=config,
+                   clock=clock, sleep=sleep, probe=probe)
     outcome = asyncio.run(run.run())
     print(json.dumps({"state": outcome.state, "reason": outcome.reason, "judged": outcome.judged,
                       "unparseable": outcome.unparseable, "errors": outcome.errors,
@@ -1755,12 +1918,36 @@ def _run_locked(args: argparse.Namespace, p: dict[str, Path], items: list[dict[s
     return outcome.exit_code
 
 
+def cmd_run_all(args: argparse.Namespace, **hooks: Any) -> int:
+    """The gate's re-judge, end to end (module docstring)."""
+    p = _paths(args)
+    decision = _gate_of(args.rejudge_from).get("decision")
+    if decision == "trust-labels":
+        print(f"the gate in {args.rejudge_from} trusted the labels (false-pass <= 5%): nothing to re-judge")
+        return EXIT_DONE
+    if p["queue"].exists():
+        meta = _read_meta(p)
+        src = Path(args.rejudge_from).expanduser().resolve()
+        if meta.get("mode") != "rejudge" or Path(str(meta.get("rejudge_from") or "")).expanduser().resolve() != src:
+            raise JudgeSetupError(f"{p['queue']} is not a re-judge queue from {args.rejudge_from}; "
+                                  "use a new --workdir")
+        _judged, _priority, view = _rejudge_inputs(args.rejudge_from, p["work"])
+    else:
+        meta = _write_rejudge_queue(args, p)
+        view = meta["view"]
+        print(json.dumps({"queued": meta["n_pass"], "priority": meta["priority"],
+                          "already_judged": meta["already_judged"]}, indent=1))
+    args.view = view
+    args.only = None
+    return cmd_run(args, **hooks)
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     p = _paths(args)
     items = read_jsonl(p["queue"])
     if not items:
         raise JudgeSetupError(f"no queue at {p['queue']}")
-    meta = json.loads(p["meta"].read_text(encoding="utf-8")) if p["meta"].exists() else {}
+    meta = _read_meta(p)
     try:
         report = build_report(items, meta, read_jsonl(p["results"]), view=args.view,
                               threshold=args.threshold, allow_missing=args.allow_missing)
@@ -1775,6 +1962,49 @@ def cmd_report(args: argparse.Namespace) -> int:
     return EXIT_DONE
 
 
+def _add_provider_args(r: argparse.ArgumentParser, *, view: bool = True) -> None:
+    r.add_argument("--provider", choices=PROVIDERS, required=True,
+                   help="max-payg: Qwen Max on the pay-per-token key; local: the loopback 27B judge")
+    if view:
+        r.add_argument("--view", choices=VIEWS, default="outcome")
+        r.add_argument("--only", choices=LABELS, default=None,
+                       help="judge only the pass- or fail-labelled items of the queue")
+    r.add_argument("--budget-usd", type=float, default=None,
+                   help="max-payg: this phase's sub-budget under the global cap (required)")
+    r.add_argument("--judge-model", default=JUDGE_MODEL, help="max-payg: the priced Max model")
+    r.add_argument("--thinking-budget", type=int, default=0,
+                   help="max-payg: reasoning tokens allowed (0 = thinking off)")
+    r.add_argument("--env-file", type=Path, default=None,
+                   help="max-payg: the 0600 env file holding the key (default: Prometheus's own)")
+    r.add_argument("--notify-cmd", default=spend.DEFAULT_NOTIFY,
+                   help="max-payg: gets the $140 alert (message on stdin, line limit as $1)")
+    r.add_argument("--local-url", default=None, help="local: the loopback llama-server")
+    r.add_argument("--local-model", default=DEFAULT_LOCAL_MODEL,
+                   help="local: glob the served /v1/models id must match (never a Max model)")
+    r.add_argument("--max-tokens", type=int, default=1024)
+    r.add_argument("--max-attempts", type=int, default=5)
+    r.add_argument("--backoff-base", type=float, default=BACKOFF_BASE_S)
+    r.add_argument("--concurrency", type=int, default=None,
+                   help=f"default {DEFAULT_CONCURRENCY['max-payg']} for max-payg (at most "
+                        f"{MAX_PAYG_CONCURRENCY}), {DEFAULT_CONCURRENCY['local']} for local")
+    r.add_argument("--limit", type=int, default=None, help="judge at most this many items this run")
+    r.add_argument("--timeout", type=float, default=300.0, help="seconds per request")
+    r.add_argument("--live-telemetry", type=Path, default=None,
+                   help="local: live telemetry.db for the throttle probe (default: Prometheus's own)")
+    r.add_argument("--live-provider", default=DEFAULT_LIVE_PROVIDER,
+                   help="local: the daemon's provider name in that telemetry")
+    r.add_argument("--no-live-probe", action="store_true")
+
+
+def _add_rejudge_source_args(s: argparse.ArgumentParser) -> None:
+    s.add_argument("--index", type=Path, default=DEFAULT_PHASE1_DIR / "trace_index.jsonl")
+    s.add_argument("--trajectories", type=Path, default=DEFAULT_TRAJECTORIES)
+    s.add_argument("--telemetry", type=Path, default=DEFAULT_TELEMETRY_SNAPSHOT,
+                   help="telemetry SNAPSHOT for pass results (default: %(default)s)")
+    s.add_argument("--model", default=TEACHER_MODEL, help="the teacher whose traces are judged")
+    s.add_argument("--seed", type=int, default=DEFAULT_SEED)
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--workdir", type=Path, default=DEFAULT_WORKDIR,
@@ -1782,44 +2012,27 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("sample", help="draw the stratified pass + fail sample")
-    s.add_argument("--index", type=Path, default=DEFAULT_PHASE1_DIR / "trace_index.jsonl")
+    _add_rejudge_source_args(s)
     s.add_argument("--phase1-dir", type=Path, default=DEFAULT_PHASE1_DIR)
-    s.add_argument("--trajectories", type=Path, default=DEFAULT_TRAJECTORIES)
     s.add_argument("--fail", type=Path, default=None, help="fail traces (default: <workdir>/fail_traces.jsonl)")
-    s.add_argument("--telemetry", type=Path, default=DEFAULT_TELEMETRY_SNAPSHOT,
-                   help="telemetry SNAPSHOT for pass results (default: %(default)s)")
-    s.add_argument("--model", default=TEACHER_MODEL)
     s.add_argument("--n-pass", type=int, default=300)
     s.add_argument("--n-fail", type=int, default=100)
-    s.add_argument("--seed", type=int, default=DEFAULT_SEED)
     s.add_argument("--min-per-stratum", type=int, default=10)
     s.add_argument("--force", action="store_true")
     s.add_argument("--rejudge-from", type=Path, default=None,
                    help="a Phase 2 workdir whose gate said re-judge: queue the rest of the pass pool, "
                         "worst category first (use a new --workdir)")
 
+    e = sub.add_parser("estimate", help="the projected cost of the pending items (calls nothing)")
+    _add_provider_args(e)
+
     r = sub.add_parser("run", help="judge the queue (resumable)")
-    r.add_argument("--view", choices=VIEWS, default="outcome")
-    r.add_argument("--route", default="qwen", help="Prometheus model route (slash_commands.<route>)")
-    r.add_argument("--judge-model", default=None, help="override the route's model name")
-    r.add_argument("--config", default=None, help="prometheus.yaml (default: Prometheus's own search)")
-    r.add_argument("--billing", choices=("auto", "per-token", "quota"), default="auto")
-    r.add_argument("--max-usd", type=float, default=DEFAULT_MAX_USD)
-    r.add_argument("--max-quota-fraction", type=float, default=DEFAULT_MAX_QUOTA_FRACTION)
-    r.add_argument("--quota-remaining", type=float, default=None)
-    r.add_argument("--quota-unit", choices=("requests", "tokens"), default="requests")
-    r.add_argument("--plan-terms-ok", action="store_true")
-    r.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
-    r.add_argument("--only", choices=LABELS, default=None,
-                   help="judge only the pass- or fail-labelled items of the queue")
-    r.add_argument("--max-tokens", type=int, default=1024)
-    r.add_argument("--max-attempts", type=int, default=5)
-    r.add_argument("--backoff-base", type=float, default=BACKOFF_BASE_S)
-    r.add_argument("--concurrency", type=int, default=1)
-    r.add_argument("--limit", type=int, default=None, help="judge at most this many items this run")
-    r.add_argument("--live-telemetry", type=Path, default=None,
-                   help="live telemetry.db for the throttle probe (default: Prometheus's own)")
-    r.add_argument("--no-live-probe", action="store_true")
+    _add_provider_args(r)
+
+    a = sub.add_parser("run-all", help="if the gate said re-judge: queue the rest of the pass set and judge it")
+    a.add_argument("--rejudge-from", type=Path, required=True, help="the Phase 2 workdir with the report")
+    _add_rejudge_source_args(a)
+    _add_provider_args(a, view=False)
 
     q = sub.add_parser("report", help="agreement, false-pass rate and the Phase 2 gate")
     q.add_argument("--view", choices=VIEWS, default=None)
@@ -1835,12 +2048,16 @@ def main(argv: list[str] | None = None, **run_hooks: Any) -> int:
     try:
         if args.cmd == "sample":
             return cmd_sample(args)
+        if args.cmd == "estimate":
+            return cmd_estimate(args)
         if args.cmd == "run":
             return cmd_run(args, **run_hooks)
+        if args.cmd == "run-all":
+            return cmd_run_all(args, **run_hooks)
         return cmd_report(args)
     except JudgeSetupError as exc:
         print(f"refused: {exc}", file=sys.stderr)
-        return EXIT_FATAL if args.cmd == "run" else EXIT_ERROR
+        return EXIT_FATAL if args.cmd in ("run", "run-all") else EXIT_ERROR
 
 
 if __name__ == "__main__":

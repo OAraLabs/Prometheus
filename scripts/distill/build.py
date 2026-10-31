@@ -99,7 +99,10 @@ Inputs
 Data policy (``--train-sources``)
 ---------------------------------
 Only rows whose own ``_meta.source`` tag matches a ``--train-sources`` pattern
-(fnmatch; default ``qwen38-27b-gym``) may enter train or val. Such a row needs
+(fnmatch; default ``qwen38-27b-gym``) may enter train or val (a ``builtin-smoke``
+row, from teacher_gen.py's hand-written task families, never does, whatever the
+patterns: it is excluded as ``non_teacher_model``, or ``never_train_source`` when
+the ``--max-model`` wrote it, so it is neither train nor eval data). Such a row needs
 a ``_meta.model`` that matches a ``--train-models`` pattern (the local teacher;
 case-insensitive fnmatch, default ``qwen3.8-27b*``; otherwise
 ``train_source_wrong_model``) and does not name Max (nor may its
@@ -124,6 +127,62 @@ every split. The report's ``settings.teacher_model`` is what the trainer's and
 the flywheel's Max guards read: the one model whose rows train/val hold when
 that is a single model that does not name Max, else the ``--max-model`` (the
 guards then treat every row as Max-derived, which fails closed).
+
+Max-derived training (``--allow-max-derived``, DISTILL-OPEN-QUESTIONS Q6b)
+--------------------------------------------------------------------------
+The operator may let Max-derived rows train a PRIVATE model. It is an explicit,
+recorded allow, never the default: ``--allow-max-derived`` and
+``--max-derived-approval "<ref>"`` go together (one without the other is a usage
+error, exit 2), and the reference (e.g. ``"operator Q6b 2026-10-30"``) is
+recorded verbatim in ``report.json`` (``settings``, ``data_policy.max_derived_allow``)
+and ``dataset-manifest.json``. Without them nothing changes: Max rows are
+eval-only. With them a Max row (the ``--max-model``'s: harvested golden traces,
+untagged or Max-tagged, and Max gym rows) may enter train/val under the same
+gates as any row: dedupe, leakage, category caps, and verification -- a golden
+trace has its tool-success label (it ran without error, by construction), an
+extra (gym) Max row needs the strict record a train-source gym row needs (tool
+success, a passing judge of the ``--judge-models`` or the pay-per-token Max
+judge, sandboxed, no side effects; otherwise it stays eval-only, counted under
+``max_derived_eval_only:<why>``), a ``relaxed`` tag never trains, and a verdict
+on the row must pass (a fail verdict or a failing record excludes it). Failed
+calls stay hard cases only. Each such row carries ``max_derived: true`` and the
+approval (``max_derived_approval``), and the ``data_policy`` gate passes only if
+every Max row in train/val is covered by the recorded approval.
+
+The allow also needs ``--exclude-sessions FILE`` (session ids, one per line):
+the 2026-10-13 Token-Plan incident session (DISTILL-OPEN-QUESTIONS #6) is
+excluded from any training data. Every row of a listed session (``_meta.session_id``)
+is dropped before anything else (``excluded_session``); the report records how
+many sessions were listed and rows dropped (``data_policy.max_derived_allow``),
+never the ids. The list may be given without the allow too.
+
+Judges. The Token Plan key never judges: a verdict or record whose judge names
+Max is refused (``verdict_rows_max_judge`` fails the verdicts gate;
+``judge_is_max``). The one exception is the pay-per-token Max judge (the
+operator's PAYG ruling: Phase 2 judging): a ``judge.py`` row with ``provider:
+max-payg`` and ``judge_key: payg`` is applied like a local judge's verdict and
+counted in ``verdict_rows_payg_max_judge`` (``gates.verdicts.payg_max_judge``,
+never a failure), and a Max row's record whose ``judge`` has ``provider:
+max-payg`` verifies it. A train-source (local 27B) row still needs a
+``--judge-models`` judge.
+
+The eval-tools hold-out stays Max-derived eval data: the Max groups a Max-only
+build holds out (``plan_splits`` over the Max rows alone, same seed and
+fractions: the Phase 3 eval-tools tasks, given the same inputs) and the tasks
+named in ``--eval-holdout`` case files (e.g. the Phase 3 ``eval-tools.jsonl``)
+are pinned to eval-tools whole; the eval quota for the rest is taken from the
+train-source groups only. Failed calls do not pin their groups under the allow
+(as in a Max-only build, a hard case whose task trains is dropped).
+
+Everything such a build writes is tagged (``artifact_policy.py``): the output
+directory's name must carry ``max-derived`` (``--out .../phase3-max-derived``,
+else exit 2; a ``--report`` path too), and ``report.json`` and
+``dataset-manifest.json`` carry ``max_derived: true`` and ``tags: ["max-derived"]``
+whenever train/val hold a Max row. ``data_policy.share`` gives rows and percent
+per class (``max`` / ``qwen38-27b-gym`` / ``other``) per split with the approval
+reference, and each ``data_policy.sources`` entry its own share per split.
+Max-derived data and models are private: ``publish_guard.py`` refuses them and
+``modal_train.py`` never rents them.
 
 Rebuilding the request
 ----------------------
@@ -282,8 +341,21 @@ DATE_SENTINEL = "@@DISTILL_TRACE_DATE@@"
 TEACHER_MODEL = "qwen3.8-max"  # the hosted Max teacher: its rows are eval-only
 #: The sources that may train (OPEN-QUESTIONS #6: the local 27B gym teacher).
 DEFAULT_TRAIN_SOURCES = ("qwen38-27b-gym",)
+#: Tags that never train, whatever ``--train-sources`` matches: teacher_gen.py's
+#: built-in task families (hand-written task text, not real-pattern tasks). The
+#: build excludes such a row: non_teacher_model, or never_train_source when the
+#: --max-model wrote it (a Max-mode smoke run), whatever the Q6b allow.
+NEVER_TRAIN_SOURCES = frozenset({"builtin-smoke"})
+#: The pay-per-token Max judge (judge.py ``--provider max-payg``; DISTILL-OPEN-QUESTIONS,
+#: the operator's PAYG ruling): its verdicts and records count. Any other judge naming
+#: Max may be the Token Plan key, which never judges.
+PAYG_PROVIDER = "max-payg"
+PAYG_JUDGE_KEY = "payg"
 #: The models a train-source row may come from: the local 27B teacher only.
 DEFAULT_TRAIN_MODELS = ("qwen3.8-27b*",)
+#: The local 27B teacher's tag: a share class of its own in the report.
+GYM_SOURCE = "qwen38-27b-gym"
+DATASET_MANIFEST = "dataset-manifest.json"  # artifact_policy.DATASET_MANIFEST
 DEFAULT_TRACES = "~/.prometheus/trajectories/golden_traces_*.jsonl"
 LIMIT_TOKENS = 16384
 SPLITS = ("train", "val", "eval-tools")
@@ -292,11 +364,10 @@ BAD_TURN_OUTCOMES = frozenset({"abandoned", "forced_stop", "forced stop"})
 CHARS_PER_TOKEN = 3.93
 
 
-def _load_render() -> Any:
-    name = "distill_render"
+def _load_sibling(name: str, file: str) -> Any:
     if name in sys.modules:
         return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name("render.py"))
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(file))
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
@@ -304,7 +375,13 @@ def _load_render() -> Any:
     return mod
 
 
+def _load_render() -> Any:
+    return _load_sibling("distill_render", "render.py")
+
+
 R = _load_render()
+#: The Max-derived artifact rule (names, manifest fields, approvals): Q6b.
+AP = _load_sibling("distill_artifact_policy", "artifact_policy.py")
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +589,20 @@ POLICY_RULE = (
     "effects; Max-derived rows (the --max-model's, a source naming Max, or no source tag, "
     "failed calls included) are eval-tools only, and a group holding one goes to eval-tools "
     "whole")
+MAX_ALLOW_RULE = (
+    "Max-derived rows may also train under the operator's recorded approval (--allow-max-derived "
+    "with --max-derived-approval; DISTILL-OPEN-QUESTIONS Q6b): the --max-model's rows, with their "
+    "tool-success label (golden) or the strict record a gym row needs (extra: tool success, a "
+    "local or pay-per-token Max judge, sandboxed, no side effects), never against a failing "
+    "verdict or record, relaxed tags and failed calls never, listed sessions (--exclude-sessions: "
+    "the Token-Plan incident session) never; every Max row in train/val must be covered by the "
+    "approval, and the Max-only eval-tools hold-out and --eval-holdout tasks stay eval-tools")
+SHARE_CLASSES = ("max", GYM_SOURCE, "other")
+
+
+def share_class(max_derived: bool, source: str) -> str:
+    """The report's share class of a row: Max-derived, the local 27B teacher's, or other."""
+    return "max" if max_derived else GYM_SOURCE if source == GYM_SOURCE else "other"
 
 
 def names_max(name: Any) -> bool:
@@ -572,19 +663,38 @@ def chat_mode_of(raw: dict[str, Any]) -> bool:
 class Verification:
     decision: bool | None  # None: the row carries no record
     basis: str  # on a pass, the label it earns; otherwise why it failed
+    payg_judge: bool = False  # the judge was the pay-per-token Max judge
+
+
+def is_relaxed_source(tag: Any) -> bool:
+    """A ``relaxed`` tag (teacher_gen's ``qwen38-27b-gym-relaxed``: verified only
+    under a relaxation of tool success): never a train row."""
+    return isinstance(tag, str) and "relaxed" in _TOKEN_SPLIT.split(tag.lower())
+
+
+def is_payg_judge(judge: Any, model: Any) -> bool:
+    """*judge* (a record's ``judge`` object) is the pay-per-token Max judge:
+    ``provider`` is ``max-payg``, a ``judge_key`` (when given) is ``payg``, and
+    its model names Max. Anything else naming Max is not."""
+    return (isinstance(judge, dict) and judge.get("provider") == PAYG_PROVIDER
+            and judge.get("judge_key", PAYG_JUDGE_KEY) == PAYG_JUDGE_KEY and names_max(model))
 
 
 EFFECT_KEYS = ("side_effects", "real_side_effects")
 
 
 def verification_of(meta: dict[str, Any], *, strict: bool = False,
-                    judge_models: tuple[str, ...] | None = None) -> Verification:
+                    judge_models: tuple[str, ...] | None = None,
+                    payg_judge: bool = False) -> Verification:
     """The row's ``_meta.verification`` record, read fail-closed (module docstring).
 
     Each part is either absent or exactly its safe value; any other value
     fails. *strict* (a train-source row) also fails a record that leaves a
     part out: tool success, a passing judge whose model matches
-    *judge_models*, sandboxed, no side effects."""
+    *judge_models*, sandboxed, no side effects. A judge naming Max fails
+    (``judge_is_max``) unless *payg_judge* allows the pay-per-token Max judge
+    (:func:`is_payg_judge`; a Max row's record, never a train-source row's),
+    which then also stands in for a *judge_models* match."""
     rec = meta.get("verification")
     if rec is None:
         return Verification(None, "absent")
@@ -610,7 +720,9 @@ def verification_of(meta: dict[str, Any], *, strict: bool = False,
     j_verdict = j_verdict if j_verdict is not None else rec.get("judge_verdict")
     j_model = j_model if j_model is not None else rec.get("judge_model")
     judged = judge is not None or j_verdict is not None or j_model is not None
-    if names_max(j_model) or (isinstance(judge, dict) and names_max(judge.get("served_model"))):
+    payg = payg_judge and is_payg_judge(judge, j_model)
+    if not payg and (names_max(j_model)
+                     or (isinstance(judge, dict) and names_max(judge.get("served_model")))):
         return Verification(False, "judge_is_max")
     if judged and (j_verdict is None or (isinstance(judge, dict) and judge.get("error"))):
         return Verification(False, "judge_no_verdict")  # a judge that never answered
@@ -629,15 +741,15 @@ def verification_of(meta: dict[str, Any], *, strict: bool = False,
             return Verification(False, "no_judge")
         if not isinstance(j_model, str) or not j_model.strip():
             return Verification(False, "judge_no_model")
-        if judge_models is not None and not matches_model(j_model, judge_models):
+        if judge_models is not None and not matches_model(j_model, judge_models) and not payg:
             return Verification(False, "judge_not_allowed")
         if "sandboxed" not in rec:
             return Verification(False, "no_sandbox_record")
         if not effects:
             return Verification(False, "no_side_effects_record")
-        return Verification(True, "judge-pass")
+        return Verification(True, "judge-pass", payg)
     if judged:
-        return Verification(True, "judge-pass")
+        return Verification(True, "judge-pass", payg)
     return Verification(True, "tool-success" if "tool_success" in rec else "verified")
 
 
@@ -672,8 +784,12 @@ def load_verdicts(paths: list[str], stats: collections.Counter,
 
     A verdict whose judge model names Max (judge.py's ``model``; on other rows
     ``judge_model``, else ``model``) is counted in ``verdict_rows_max_judge``,
-    which fails the verdicts gate: the Max key never judges. Its pass is not
-    loaded; its fail is (dropping a row is always safe).
+    which fails the verdicts gate: the Token Plan key never judges. Its pass is
+    not loaded; its fail is (dropping a row is always safe). The one exception
+    is a judge.py row from the pay-per-token Max judge (``provider: max-payg``,
+    ``judge_key: payg``; the operator's PAYG ruling for Phase 2 judging): it is
+    applied like a local judge's and counted in ``verdict_rows_payg_max_judge``,
+    which does not fail the gate.
     """
     out: dict[str, str] = {}
 
@@ -705,7 +821,10 @@ def load_verdicts(paths: list[str], stats: collections.Counter,
                     stats["verdict_rows_unusable"] += 1
                     continue
                 key = f"{file}:{lineno + 1}"
-                if max_judged(row.get("model"), v):
+                if row.get("provider") == PAYG_PROVIDER and row.get("judge_key") == PAYG_JUDGE_KEY \
+                        and names_max(row.get("model")):
+                    stats["verdict_rows_payg_max_judge"] += 1
+                elif max_judged(row.get("model"), v):
                     continue
                 out[key] = v
                 if checks is not None:
@@ -1291,6 +1410,8 @@ class Example:
     max_derived: bool = True
     train_ok: bool = True
     gen_task: str = ""  # "<source>\x1f<generator task id>", "" when none
+    # the recorded approval a Max-derived row trains under (Q6b), "" when none
+    approval: str = ""
 
 
 def approx_codes(context_source: str) -> list[str]:
@@ -1383,14 +1504,21 @@ class SplitPlan:
     pinned_groups: int = 0
     pinned_tasks: int = 0
     pinned_train_rows: int = 0  # train-source rows held out with them
+    # Q6b allow: the Max-only plan's eval-tools groups, kept as eval data
+    max_holdout_groups: int = 0
+    max_holdout_tasks: int = 0
+    # groups holding a task named by an --eval-holdout case file
+    listed_holdout_groups: int = 0
 
 
 def plan_splits(pool: list[Example], *, seed: str, eval_task_frac: float, val_frac: float,
-                max_group_share: float, pinned: set[str] | frozenset[str] = frozenset()
-                ) -> SplitPlan:
+                max_group_share: float, pinned: set[str] | frozenset[str] = frozenset(),
+                no_eval_quota: set[str] | frozenset[str] = frozenset()) -> SplitPlan:
     """Assign groups to splits, seeded. *pinned* groups go to eval-tools whole
     and take no part in the quotas or the hold-out size limit, which are
-    computed over the other groups."""
+    computed over the other groups. *no_eval_quota* groups are never picked
+    for the eval-tools quota (which is then a share of the other free
+    groups' tasks); they go to val or train."""
     free = [ex for ex in pool if ex.group not in pinned]
     rows = collections.Counter(ex.group for ex in free)
     tasks: dict[str, set[str]] = collections.defaultdict(set)
@@ -1398,14 +1526,15 @@ def plan_splits(pool: list[Example], *, seed: str, eval_task_frac: float, val_fr
         tasks[ex.group].add(ex.task_id)
     total_rows = len(free)
     total_tasks = len({ex.task_id for ex in free})
+    quota_tasks = len({ex.task_id for ex in free if ex.group not in no_eval_quota})
     order = sorted(rows, key=lambda g: seeded(seed, g))
     limit = max_group_share * total_rows
     eligible = {g for g in order if rows[g] <= limit}
     plan: dict[str, str] = {}
     eval_tasks = 0
-    want_eval = eval_task_frac * total_tasks
+    want_eval = eval_task_frac * quota_tasks
     for g in order:
-        if g in eligible and eval_tasks < want_eval:
+        if g in eligible and g not in no_eval_quota and eval_tasks < want_eval:
             plan[g] = "eval-tools"
             eval_tasks += len(tasks[g])
     rest_rows = sum(rows[g] for g in order if g not in plan)
@@ -1425,7 +1554,8 @@ def plan_splits(pool: list[Example], *, seed: str, eval_task_frac: float, val_fr
     return SplitPlan(plan, len(order) - len(eligible), eval_tasks, total_tasks,
                      pinned_groups=len({ex.group for ex in held}),
                      pinned_tasks=len({ex.task_id for ex in held}),
-                     pinned_train_rows=sum(1 for ex in held if ex.train_ok))
+                     pinned_train_rows=sum(1 for ex in held
+                                           if ex.train_ok and not ex.max_derived))
 
 
 def round_robin(examples: list[Example], seed: str) -> list[Example]:
@@ -1610,6 +1740,15 @@ class Settings:
     train_models: tuple[str, ...] = DEFAULT_TRAIN_MODELS
     judge_models: tuple[str, ...] | None = None
     exclude_bad_turns: bool = False
+    # Q6b: the operator's explicit, recorded allow for Max-derived rows to
+    # train (both or neither; the CLI refuses one without the other). The
+    # approval reference is recorded verbatim.
+    allow_max_derived: bool = False
+    max_derived_approval: str | None = None
+    # Sessions whose rows never enter the dataset (--exclude-sessions): the
+    # 2026-10-13 Token-Plan incident session (OPEN-QUESTIONS #6). The allow
+    # needs a list. The report records how many, never the ids.
+    exclude_sessions: tuple[str, ...] = ()
     train_range: tuple[int, int] = (5000, 10000)
     val_share_range: tuple[float, float] = (0.02, 0.05)
     eval_min: int = 200
@@ -1624,8 +1763,11 @@ class Builder:
     def __init__(self, *, student: Any, pack: dict[str, Any], catalog: str, settings: Settings,
                  index: dict[tuple[str, int], dict[str, Any]], verdicts: dict[str, str],
                  lcm: LcmSnapshot | None = None, spool: Path | None = None,
-                 verdict_checks: dict[str, Any] | None = None) -> None:
+                 verdict_checks: dict[str, Any] | None = None,
+                 eval_holdout_tasks: set[str] | frozenset[str] = frozenset()) -> None:
         self.student = student
+        # tasks (Phase 1 prompt hashes) an earlier eval set holds: they stay eval-tools
+        self.eval_holdout_tasks = frozenset(eval_holdout_tasks)
         self.student.encoder = HeadCachedEncoder(student.encoder)
         self.s = settings
         self.rebuilder = Rebuilder(pack, catalog, lcm, settings.lcm_max_messages,
@@ -1666,6 +1808,35 @@ class Builder:
         """The judge models a train-source row's record may name."""
         return self.s.judge_models if self.s.judge_models is not None else self.s.train_models
 
+    @property
+    def max_allowed(self) -> bool:
+        """Q6b: under a train-source policy, the operator's recorded allow lets
+        Max-derived rows train. Both parts are needed: the flag and a
+        non-empty approval reference."""
+        s = self.s
+        return (s.train_sources is not None and s.allow_max_derived
+                and isinstance(s.max_derived_approval, str) and bool(s.max_derived_approval.strip()))
+
+    def max_row_trains(self, trace: Trace) -> tuple[bool, str]:
+        """Under the allow, whether a kept Max row may enter train/val, and why
+        not: a golden trace has its tool-success label by construction; an
+        extra (gym) row needs the record a train-source gym row needs (tool
+        success, a passing judge of the --judge-models or the pay-per-token
+        Max judge, sandboxed, no side effects: :func:`verification_of` strict),
+        and a verdict alone shows none of it. A relaxed tag never trains.
+        Failing verdicts and records were excluded before this is asked."""
+        if is_relaxed_source(source_tag(trace.meta)):
+            return False, "relaxed_source"
+        if trace.kind == "golden":
+            return True, ""
+        if trace.kind != "extra":
+            return False, "not_a_teacher_row"
+        strict = verification_of(trace.meta, strict=True, judge_models=self.judge_models,
+                                 payg_judge=True)
+        if strict.decision is True:
+            return True, ""
+        return False, "no_record" if strict.decision is None else strict.basis
+
     def teacher_model(self) -> str:
         """``settings.teacher_model`` for the report: the one model whose rows
         train/val hold, read by the trainer's and the flywheel's Max guards as
@@ -1686,10 +1857,13 @@ class Builder:
         return model
 
     def is_train_source(self, trace: Trace) -> bool:
-        """A row the data policy lets train: a listed tag that does not name Max."""
+        """A row the data policy lets train: a listed tag that does not name Max
+        and is not a never-train tag (``NEVER_TRAIN_SOURCES``), whatever the
+        patterns: ``--train-sources '*'`` still never trains on them."""
         tag = source_tag(trace.meta)
         return (self.s.train_sources is not None and trace.kind != "fail"
-                and matches_source(tag, self.s.train_sources) and not names_max(tag))
+                and matches_source(tag, self.s.train_sources) and not names_max(tag)
+                and tag not in NEVER_TRAIN_SOURCES)
 
     def claim(self, trace: Trace, keys: TraceKeys) -> bool:
         """Take the row's dedupe key; False (and excluded) when an earlier row
@@ -1711,6 +1885,22 @@ class Builder:
         meta = trace.raw["_meta"]  # (trace.meta would hand back a copy of an empty one)
         src = source_label(trace)
         self.by_source[src]["input"] += 1
+        session_id = meta.get("session_id")
+        if self.s.exclude_sessions and session_id is not None \
+                and str(session_id).strip() in self.s.exclude_sessions:
+            # a listed session (the Token-Plan incident session): no split at all.
+            # A verdict on its row is accounted for (not "unmatched": the row is
+            # known, and deliberately left out).
+            try:
+                vkeys: tuple[str, ...] = (trace.trace_id, trace_keys(trace.raw).h_exact)
+            except Exception:  # a malformed row: its id is the only key it has
+                vkeys = (trace.trace_id,)
+            for k in vkeys:
+                if k in self.verdicts:
+                    self.verdicts_used.add(k)
+                    self.stats["verdicts_on_excluded_sessions"] += 1
+            self.exclude(trace, "excluded_session")
+            return
         model = meta.get("model")
         model_s = model.strip() if isinstance(model, str) else ""
         train_source = self.is_train_source(trace)
@@ -1733,6 +1923,11 @@ class Builder:
                 return
         elif (trace.kind != "fail" or meta.get("model")) and meta.get("model") != self.s.max_model:
             self.exclude(trace, "non_teacher_model")
+            return
+        elif source_tag(meta) in NEVER_TRAIN_SOURCES:
+            # a hand-written smoke task the Max model answered (teacher_gen.py
+            # --builtin-smoke): not real-pattern data, so neither train nor eval
+            self.exclude(trace, "never_train_source")
             return
         # Data policy: under one, everything kept that is not a train source is
         # the Max teacher's; with none (library default) every row may train.
@@ -1774,12 +1969,17 @@ class Builder:
                 verdict = None
         if verdict is None and meta.get("verdict"):
             verdict = str(meta["verdict"]).lower()
-        record = (verification_of(meta, strict=train_source, judge_models=self.judge_models)
+        # A Max row's record may name the pay-per-token Max judge; a train-source
+        # (local 27B) row's needs a --judge-models judge (OPEN-QUESTIONS #6)
+        record = (verification_of(meta, strict=train_source, judge_models=self.judge_models,
+                                  payg_judge=not train_source)
                   if trace.kind != "fail" else Verification(None, "absent"))
         if record.decision is not None:
             outcome_key = "verification:" + ("pass" if record.decision else record.basis)
             self.stats[outcome_key] += 1
             self.by_source[src][outcome_key] += 1
+            if record.payg_judge:
+                self.stats["verification:payg_max_judge"] += 1
         if trace.kind == "fail":
             label = "hard-case"
         elif verdict == "fail":
@@ -1812,6 +2012,17 @@ class Builder:
         if self.s.exclude_bad_turns and label == "tool-success" and outcome in BAD_TURN_OUTCOMES:
             self.exclude(trace, "bad_turn_outcome")
             return
+        approval = ""
+        if max_derived and trace.kind != "fail" and self.max_allowed:
+            # Q6b: the operator's recorded allow. The row has passed every gate
+            # a row passes here (dedupe, verdict, record); it trains only with
+            # tool success shown, and under the approval it was admitted with.
+            train_ok, why_not = self.max_row_trains(trace)
+            if train_ok:
+                approval = str(self.s.max_derived_approval)
+            else:
+                self.stats[f"max_derived_eval_only:{why_not}"] += 1
+                self.by_source[src][f"max_derived_eval_only:{why_not}"] += 1
         chat_mode = chat_mode_of(trace.raw)
         if trace.kind == "extra" and meta.get("category"):
             category = str(meta["category"])
@@ -1903,7 +2114,7 @@ class Builder:
             ((req.messages[-1].get("tool_calls") or [{}])[0].get("function") or {}).get("name"),
             turn_outcome=outcome, omitted_messages=req.omitted_messages,
             lcm_target=req.lcm_target, ctx_keys=ctx_keys, model=model_s,
-            max_derived=max_derived, train_ok=train_ok, gen_task=gen_task,
+            max_derived=max_derived, train_ok=train_ok, gen_task=gen_task, approval=approval,
         )
         if self._spool is not None:
             heavy = {
@@ -1927,6 +2138,7 @@ class Builder:
         counts["accepted"] += 1
         counts["train_eligible"] += ex.train_ok
         counts["max_derived"] += ex.max_derived
+        counts["max_derived_allowed"] += bool(ex.approval)
         counts["chat_mode"] += flags["chat_mode"]
         self.models_by_source[src][model_s or "unknown"] += 1
 
@@ -1955,13 +2167,35 @@ class Builder:
         s = self.s
         pool = self.examples
         assign_groups(pool + self.fails + self.unfittable)
-        # Under a data policy a group holding a row that may not train (a
-        # Max-derived row or a failed call) is eval-tools material whole.
-        pinned = ({e.group for e in pool + self.fails if not e.train_ok}
-                  if s.train_sources is not None else set())
+        # Tasks an earlier eval set holds (--eval-holdout) stay eval-tools, whole groups.
+        listed = {e.group for e in pool if e.task_id in self.eval_holdout_tasks}
+        hold: set[str] = set()
+        no_quota: set[str] = set()
+        if s.train_sources is None:
+            pinned = set(listed)
+        elif self.max_allowed:
+            # Q6b allow: the eval-tools hold-out stays Max-derived eval data.
+            # The Max groups a Max-only build holds out (the same plan over the
+            # Max rows alone) and the groups holding a row that still may not
+            # train are pinned; the eval quota for the rest comes from the
+            # train-source groups. A failed call pins nothing: as in a Max-only
+            # build, a hard case whose task trains is dropped.
+            max_only = plan_splits([e for e in pool if e.max_derived], seed=s.seed,
+                                   eval_task_frac=s.eval_task_frac, val_frac=s.val_frac,
+                                   max_group_share=s.holdout_max_group_share)
+            hold = {g for g, sp in max_only.groups.items() if sp == "eval-tools"}
+            pinned = hold | listed | {e.group for e in pool if not e.train_ok}
+            no_quota = {e.group for e in pool if e.max_derived}
+        else:
+            # Under a data policy a group holding a row that may not train (a
+            # Max-derived row or a failed call) is eval-tools material whole.
+            pinned = listed | {e.group for e in pool + self.fails if not e.train_ok}
         plan = plan_splits(pool, seed=s.seed, eval_task_frac=s.eval_task_frac,
                            val_frac=s.val_frac, max_group_share=s.holdout_max_group_share,
-                           pinned=pinned)
+                           pinned=pinned, no_eval_quota=no_quota)
+        plan.max_holdout_groups = len(hold)
+        plan.max_holdout_tasks = len({e.task_id for e in pool if e.group in hold})
+        plan.listed_holdout_groups = len(listed)
         for ex in pool:
             ex.split = plan.groups[ex.group]
         # (train_ok is already true of every row here; kept as the last word)
@@ -1998,16 +2232,40 @@ class Builder:
                     "note": "library default: every accepted row may train; the CLI always "
                             "sets --train-sources"}
         rows = self.final["train"] + self.final["val"]
-        max_rows = sum(1 for e in rows if e.max_derived or not e.train_ok)
-        other = sum(1 for e in rows if not matches_source(e.source, s.train_sources)
-                    or names_max(e.source) or names_max(e.model) or e.model == s.max_model)
-        wrong_model = sum(1 for e in rows if not matches_model(e.model, s.train_models))
+
+        def is_max(e: Example) -> bool:
+            return e.max_derived or not e.train_ok
+
+        def outside(e: Example) -> bool:
+            return (not matches_source(e.source, s.train_sources) or names_max(e.source)
+                    or names_max(e.model) or e.model == s.max_model)
+
+        def unlisted(e: Example) -> bool:
+            return not matches_model(e.model, s.train_models)
+
+        def covered(e: Example) -> bool:
+            # Q6b: a Max row admitted under the recorded approval, as the Max model's
+            return (self.max_allowed and e.max_derived and e.train_ok and e.kind != "fail"
+                    and e.approval == s.max_derived_approval and e.model == s.max_model)
+
+        cov = [e for e in rows if covered(e)]
+        rest = [e for e in rows if not covered(e)]
+        uncovered = sum(1 for e in rest if is_max(e))
+        other = sum(1 for e in rest if outside(e))
+        wrong_model = sum(1 for e in rest if unlisted(e))
         return {"train_sources": list(s.train_sources), "train_models": list(s.train_models),
                 "max_model": s.max_model,
-                "max_derived_in_train_val": max_rows,
+                # every Max-derived (or not-train-ok) row; the next two count the
+                # rows the approval does not cover (all rows without the allow)
+                "max_derived_in_train_val": sum(1 for e in rows if is_max(e)),
                 "outside_train_sources_in_train_val": other,
                 "unlisted_model_in_train_val": wrong_model,
-                "pass": max_rows == 0 and other == 0 and wrong_model == 0}
+                # Q6b: Max rows the recorded approval covers, and the rest
+                "max_derived_allowed": self.max_allowed,
+                "max_derived_approval": s.max_derived_approval if self.max_allowed else None,
+                "max_derived_covered_in_train_val": len(cov),
+                "max_derived_uncovered_in_train_val": uncovered,
+                "pass": uncovered == 0 and other == 0 and wrong_model == 0}
 
     def gates(self) -> dict[str, Any]:
         s = self.s
@@ -2021,6 +2279,8 @@ class Builder:
               "unmatched": len(set(self.verdicts) - self.verdicts_used),
               "index_mismatch": self.stats["verdict_index_mismatch"]}
         g["verdicts"] = {"loaded": len(self.verdicts), **vg,
+                         # the pay-per-token Max judge's verdicts (applied; never a failure)
+                         "payg_max_judge": self.stats["verdict_rows_payg_max_judge"],
                          "pass": not any(vg.values())}
         g["data_policy"] = self.policy_gate()
         g["train_size"] = {"value": len(tr), "range": list(s.train_range),
@@ -2052,6 +2312,8 @@ class Builder:
             "category": ex.category, "source": ex.source, "label": ex.label,
             # provenance the trainer's Max guard reads (it fails closed without it)
             "model": ex.model or None, "max_derived": ex.max_derived,
+            # Q6b: the recorded approval a Max-derived row trains under
+            "max_derived_approval": ex.approval or None,
             "context_source": ex.context_source, "approximate": True,
             "approx": approx_codes(ex.context_source), "flags": ex.flags,
             "truncated": ({"dropped_messages": ex.dropped_messages,
@@ -2142,9 +2404,16 @@ class Builder:
         return {
             "schema": REPORT_SCHEMA,
             "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            # Q6b: max_derived / tags / private say whether train/val hold a
+            # Max-derived row (what a model trained on this dataset inherits);
+            # holds_max_rows whether any written set does (eval-tools included)
+            **AP.policy_fields(self.train_val_max_derived()),
+            "holds_max_rows": self.holds_max_rows(),
             "elapsed_s": round(elapsed, 1),
             "settings": {**{k: (list(v) if isinstance(v, tuple) else v)
                             for k, v in vars(s).items()},
+                         # how many sessions --exclude-sessions listed (never the ids)
+                         "exclude_sessions": len(s.exclude_sessions),
                          # what the trainer's and the flywheel's Max guards read
                          "teacher_model": self.teacher_model()},
             "catalog": catalog,
@@ -2196,8 +2465,66 @@ class Builder:
                            # tasks the quotas were taken from (not pinned)
                            "splittable_tasks": plan.total_tasks,
                            "pinned_groups": plan.pinned_groups,
-                           "pinned_tasks": plan.pinned_tasks},
+                           "pinned_tasks": plan.pinned_tasks,
+                           # Q6b allow: the Max-only hold-out kept as eval data
+                           "max_holdout_groups": plan.max_holdout_groups,
+                           "max_holdout_tasks": plan.max_holdout_tasks,
+                           "eval_holdout_tasks_listed": len(self.eval_holdout_tasks),
+                           "eval_holdout_groups": plan.listed_holdout_groups},
             "gates": gates,
+        }
+
+    def train_val_max_derived(self) -> bool:
+        """Train or val holds a Max-derived row: the dataset, and anything
+        trained on it, is Max-derived (Q6b)."""
+        return any(e.max_derived for k in ("train", "val") for e in self.final[k])
+
+    def holds_max_rows(self) -> bool:
+        """Any set this build writes holds a Max-derived row (eval-tools and the
+        long-context candidates are built from Max traces too)."""
+        return any(e.max_derived for e in self.examples + self.fails + self.unfittable)
+
+    def share(self) -> dict[str, Any]:
+        """Rows and percent per share class (Max-derived / the local 27B
+        teacher's / other) per split, with the approval Max rows train under."""
+        by_split: dict[str, Any] = {}
+        for k, rows in self.final.items():
+            c = collections.Counter(share_class(e.max_derived, e.source) for e in rows)
+            n = len(rows)
+            by_split[k] = {"rows": n, **{cls: {"rows": c[cls],
+                                               "pct": round(100.0 * c[cls] / n, 2) if n else 0.0}
+                                         for cls in SHARE_CLASSES}}
+        return {"classes": list(SHARE_CLASSES), "by_split": by_split,
+                "max_derived_allowed": self.max_allowed,
+                "approval": self.s.max_derived_approval if self.max_allowed else None}
+
+    def dataset_manifest(self, out: Path, written: dict[str, int], report: dict[str, Any],
+                         report_path: Path) -> dict[str, Any]:
+        """``dataset-manifest.json``: what this dataset is, for the trainer, the
+        publish guard and the rental tool (Q6b): the Max-derived flag and tag,
+        the recorded approval, the share table and each written file's rows
+        and sha256. Aggregates and hashes only."""
+        files = {}
+        for name, n in sorted(written.items()):
+            p = out / name
+            if p.is_file():
+                digest = hashlib.sha256()
+                with p.open("rb") as fh:
+                    for chunk in iter(lambda: fh.read(1 << 20), b""):
+                        digest.update(chunk)
+                files[name] = {"rows": n, "sha256": digest.hexdigest()}
+        dp = report["data_policy"]
+        return {
+            "schema": AP.DATASET_MANIFEST_SCHEMA,
+            "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            **AP.policy_fields(self.train_val_max_derived()),
+            "holds_max_rows": self.holds_max_rows(),
+            "max_derived_allow": dp["max_derived_allow"],
+            "teacher_model": report["settings"]["teacher_model"],
+            "share": dp["share"],
+            "report": report_path.name if report_path.parent == out else str(report_path),
+            "files": files,
+            "gates_overall": report["gates"].get("overall"),
         }
 
     def policy_report(self, split_info: dict[str, Any]) -> dict[str, Any]:
@@ -2205,9 +2532,12 @@ class Builder:
         s = self.s
         plan: SplitPlan = split_info["plan"]
         per_split: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+        classes: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
         for k, rows in self.final.items():
             for e in rows:
                 per_split[e.source][k] += 1
+                classes[e.source][share_class(e.max_derived, e.source)] += 1
+        split_rows = {k: len(rows) for k, rows in self.final.items()}
         sources: dict[str, Any] = {}
         for src in sorted(self.by_source):
             c = self.by_source[src]
@@ -2222,16 +2552,37 @@ class Builder:
                 "excluded": sum(excluded.values()), "excluded_by_reason": excluded,
                 "verification": part("verification:"),
                 "train_eligible": c["train_eligible"], "max_derived": c["max_derived"],
+                "max_derived_allowed": c["max_derived_allowed"],
                 "chat_mode": c["chat_mode"],
                 "models": dict(self.models_by_source[src].most_common()),
                 **{k: per_split[src][k] for k in SPLITS},
+                # this source's rows as a percent of each split, and its share class
+                "share": {k: round(100.0 * per_split[src][k] / split_rows[k], 2)
+                          if split_rows[k] else 0.0 for k in SPLITS},
+                "class": (classes[src].most_common(1)[0][0] if classes[src]
+                          else share_class(c["max_derived"] > 0, src)),
             }
+        allow = AP.approval_record(s.max_derived_approval if self.max_allowed else None)
+        train_val = self.final["train"] + self.final["val"]
+        allow.update({
+            "rows_in_train_val": sum(1 for e in train_val if e.max_derived),
+            "covered_in_train_val": sum(1 for e in train_val if e.max_derived and e.approval),
+            # --exclude-sessions (the Token-Plan incident session): listed, rows dropped
+            "excluded_sessions_listed": len(s.exclude_sessions),
+            "excluded_session_rows": self.stats["excluded:excluded_session"],
+            "max_holdout_groups": plan.max_holdout_groups,
+            "max_holdout_tasks": plan.max_holdout_tasks,
+        })
+        rule = POLICY_RULE + ("; " + MAX_ALLOW_RULE if self.max_allowed else "")
         return {
             "train_sources": list(s.train_sources) if s.train_sources is not None else None,
             "train_models": list(s.train_models), "judge_models": list(self.judge_models),
             "max_model": s.max_model, "teacher_model": self.teacher_model(),
-            "rule": POLICY_RULE if s.train_sources is not None else
+            "rule": rule if s.train_sources is not None else
             "none (library default): every accepted row may train",
+            # Q6b: the explicit, recorded allow (or its absence) and the shares
+            "max_derived_allow": allow,
+            "share": self.share(),
             "sources": sources,
             "train_source_rows_held_out_with_max_rows": plan.pinned_train_rows,
             "not_train_ok_in_train_val_groups": split_info.get(
@@ -2295,6 +2646,31 @@ def cmd_build(a: argparse.Namespace) -> int:
         print(f"error: input file names must be unique (trace ids are <file name>:<line>);"
               f" given more than once: {', '.join(dupes)}", file=sys.stderr)
         return 2
+    problem = max_allow_problem(a)
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+    excluded_sessions: set[str] = set()
+    if a.exclude_sessions:
+        try:
+            excluded_sessions = read_session_list(Path(a.exclude_sessions).expanduser())
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            print(f"error: --exclude-sessions {a.exclude_sessions}: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            return 2
+    holdout_tasks: set[str] = set()
+    for path in a.eval_holdout or []:
+        try:
+            holdout_tasks |= read_holdout_tasks(Path(path).expanduser())
+        except (OSError, ValueError) as exc:
+            print(f"error: --eval-holdout {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
+    if a.allow_max_derived:
+        # the explicit, logged allow (the reference is recorded in report.json
+        # and dataset-manifest.json too); counts only, never row text
+        print(f"ALLOW (Q6b): Max-derived rows may train under the operator's approval "
+              f"{a.max_derived_approval!r}; every output is tagged {AP.TAG} and stays private; "
+              f"{len(excluded_sessions)} listed session(s) excluded", file=sys.stderr)
     policy: dict[str, tuple[str, ...]] = {}
     for flag, given, default in (("--train-sources", a.train_sources, DEFAULT_TRAIN_SOURCES),
                                  ("--train-models", a.train_models, DEFAULT_TRAIN_MODELS),
@@ -2325,7 +2701,10 @@ def cmd_build(a: argparse.Namespace) -> int:
         eval_success=a.eval_success, max_model=a.max_model,
         train_sources=policy["--train-sources"], train_models=policy["--train-models"],
         judge_models=policy.get("--judge-models"),
-        exclude_bad_turns=a.exclude_bad_turns, train_range=(a.train_range[0], a.train_range[1]),
+        exclude_bad_turns=a.exclude_bad_turns,
+        allow_max_derived=a.allow_max_derived, max_derived_approval=a.max_derived_approval,
+        exclude_sessions=tuple(sorted(excluded_sessions)),
+        train_range=(a.train_range[0], a.train_range[1]),
         val_share_range=(a.val_share_range[0], a.val_share_range[1]), eval_min=a.eval_min,
         min_presence=a.min_presence, lcm_max_messages=a.lcm_max_messages,
         prewindow_chars_per_token=a.prewindow_chars_per_token,
@@ -2343,7 +2722,7 @@ def cmd_build(a: argparse.Namespace) -> int:
     spool = None if a.dry_run else out / "spool.jsonl"
     b = Builder(student=student, pack=pack, catalog=catalog, settings=s,
                 index=load_index(a.index), verdicts=verdicts, lcm=lcm, spool=spool,
-                verdict_checks=checks)
+                verdict_checks=checks, eval_holdout_tasks=holdout_tasks)
     b.stats.update(stats)
     n = 0
     for paths, kind in ((golden, "golden"), (extra, "extra"), (fail, "fail")):
@@ -2375,10 +2754,79 @@ def cmd_build(a: argparse.Namespace) -> int:
     report["library_log_records"] = dict(handler.counts)
     report_path = Path(a.report).expanduser() if a.report else out / "report.json"
     report_path.write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
-    print(json.dumps({"report": str(report_path), "gates": {
-        k: (v.get("pass") if isinstance(v, dict) and "pass" in v else v)
-        for k, v in gates.items()}}, indent=1))
+    summary: dict[str, Any] = {"report": str(report_path), "max_derived": report["max_derived"],
+                               "tags": report["tags"]}
+    if not a.dry_run:
+        manifest = b.dataset_manifest(out, inputs["written"], report, report_path)
+        (out / DATASET_MANIFEST).write_text(json.dumps(manifest, indent=1) + "\n",
+                                            encoding="utf-8")
+        summary["dataset_manifest"] = str(out / DATASET_MANIFEST)
+    summary["gates"] = {k: (v.get("pass") if isinstance(v, dict) and "pass" in v else v)
+                        for k, v in gates.items()}
+    print(json.dumps(summary, indent=1))
     return 0 if gates["overall"] == "PASS" else 1
+
+
+def max_allow_problem(a: argparse.Namespace) -> str | None:
+    """Why the command line's Max-derived allow (Q6b) is unusable, or None.
+    The flag and the approval reference go together, the reference is not
+    blank, and the output directory (and a ``--report`` path) carries the
+    ``max-derived`` tag so the dataset's name says what it is."""
+    allow, ref = bool(a.allow_max_derived), a.max_derived_approval
+    if allow != (ref is not None):
+        return (f"{AP.BUILD_ALLOW_FLAG} and {AP.BUILD_APPROVAL_FLAG} go together: the allow for "
+                "Max-derived rows to train is explicit and records the operator's approval "
+                f"(DISTILL-OPEN-QUESTIONS Q6b), e.g. {AP.BUILD_ALLOW_FLAG} "
+                f"{AP.BUILD_APPROVAL_FLAG} \"operator Q6b 2026-10-30\"")
+    if not allow:
+        return None
+    if not ref.strip():
+        return f"{AP.BUILD_APPROVAL_FLAG} needs the approval reference (not blank)"
+    out = Path(a.out).expanduser()
+    if not AP.has_tag(out.name):
+        return (f"with {AP.BUILD_ALLOW_FLAG} the output is Max-derived: its directory name must "
+                f"carry the {AP.TAG} tag (e.g. --out {AP.tag_path(out)})")
+    if a.report and not AP.path_has_tag(Path(a.report).expanduser()):
+        return (f"with {AP.BUILD_ALLOW_FLAG} the report's path must carry the {AP.TAG} tag "
+                f"(e.g. --report {AP.tag_path(Path(a.report))})")
+    if not a.exclude_sessions:
+        return (f"with {AP.BUILD_ALLOW_FLAG}, --exclude-sessions FILE is required: it lists the "
+                "2026-10-13 Token-Plan incident session (DISTILL-OPEN-QUESTIONS #6), whose rows "
+                "never enter training data")
+    return None
+
+
+def read_session_list(path: Path) -> set[str]:
+    """Session ids, one per line (blank lines and ``#`` comments skipped);
+    a file that lists none is an error, so an empty list cannot stand in for
+    the exclusion the allow requires."""
+    ids: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        text = line.split("#", 1)[0].strip()
+        if text:
+            ids.add(text)
+    if not ids:
+        raise ValueError("lists no session id")
+    return ids
+
+
+def read_holdout_tasks(path: Path) -> set[str]:
+    """Task ids (Phase 1 prompt hashes) of an earlier eval set: score.py case
+    rows (``meta.task_id``) or build.py training rows (``task_id``)."""
+    tasks: set[str] = set()
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            meta = row.get("meta") if isinstance(row, dict) else None
+            task = (meta or {}).get("task_id") if isinstance(meta, dict) else None
+            task = task or (row.get("task_id") if isinstance(row, dict) else None)
+            if isinstance(task, str) and task:
+                tasks.add(task)
+    if not tasks:
+        raise ValueError("no task ids (meta.task_id or task_id) in it")
+    return tasks
 
 
 def cmd_pack(a: argparse.Namespace) -> int:
@@ -2539,6 +2987,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bd.add_argument("--judge-models", nargs="+", metavar="MODEL",
                     help="judge model patterns a train-source row's verification record may "
                          "name (default: the --train-models). A model naming Max is refused.")
+    bd.add_argument("--allow-max-derived", action="store_true",
+                    help="Q6b: let Max-derived rows train a PRIVATE model under the same gates; "
+                         "needs --max-derived-approval, an --out named *max-derived*, and tags "
+                         "every output max-derived")
+    bd.add_argument("--max-derived-approval", metavar="REF",
+                    help="the operator's approval for --allow-max-derived, recorded verbatim "
+                         "(e.g. \"operator Q6b 2026-10-30\"); only together with it")
+    bd.add_argument("--exclude-sessions", metavar="FILE",
+                    help="session ids (one per line, # comments) whose rows never enter the "
+                         "dataset; required with --allow-max-derived: it lists the 2026-10-13 "
+                         "Token-Plan incident session (OPEN-QUESTIONS #6)")
+    bd.add_argument("--eval-holdout", action="append", metavar="CASES",
+                    help="an earlier eval set (eval-tools.jsonl / val-cases.jsonl): its tasks "
+                         "stay in eval-tools, whole groups")
     bd.add_argument("--exclude-bad-turns", action="store_true")
     bd.add_argument("--train-range", type=int, nargs=2, default=[5000, 10000])
     bd.add_argument("--val-share-range", type=float, nargs=2, default=[0.02, 0.05])

@@ -243,17 +243,21 @@ so local and rented runs share one environment.
 3. Phase 4 picks the bake-off winner. The dataset is re-rendered with the winner's own
    tokenizer and template: `build.py build --tokenizer-dir <winner tokenizer>`. The 9B's
    counts are close but not exact.
-4. On the 4090, inside a window. Both jobs hold the GPU, so both stop before the window
-   ends (`--stop-at`, the window's end with its UTC offset) and run where a
-   `setups.py apply business` restore can stop them:
-   - `feasibility_27b.py --data <train.jsonl> --execute --stop-at <window end>`. It starts
-     a length only when its worst case ends before `--stop-at`, and runs each length in a
-     `distill-feas27b-*` systemd scope. If ≥8k fits and the full run takes ≤5 days, the
-     operator chooses CONTINUOUS / NIGHTLY / NO, and the run may not need renting at all.
-     An `incomplete` verdict means a length ≥8k was not measured: probe it again.
+4. On the 4090, inside a window. Both jobs hold the GPU, so both stop before the window's
+   restore (`--stop-at` 06:35 ET with that morning's UTC offset, not the 07:00 window end)
+   and run where a `setups.py apply business` restore can stop them:
+   - The feasibility probe runs only as the tower job runner's `qwen38-27b-feasibility` step
+     (`scripts/distill/tower/job_runner.py`, in the window's detached unit after the
+     rehearsal gate and `apply flywheel`): `feasibility_27b.py --execute` once per length,
+     with `--out` per length, the staged 4-bit checkpoint as `--base-model`, and
+     `HF_HUB_OFFLINE=1`. It starts a length only when its worst case ends before `--stop-at`
+     and the GPU is free, and runs each length in a `distill-feas27b-*` systemd scope. If
+     ≥8k fits and the full run takes ≤5 days, the operator chooses CONTINUOUS / NIGHTLY / NO,
+     and the run may not need renting at all. An `incomplete` verdict means a length ≥8k was
+     not measured: probe it again.
    - A tiny 27B smoke, detached in a `distill-train-*` unit: `scripts/distill/launch_detached.sh
-     --execute -- --smoke --base-model unsloth/Qwen3.8-27B-unsloth-bnb-4bit --max-seq 8192
-     --stop-at <window end> ...`, with CPU offload. It must load, train, checkpoint,
+     --execute -- --smoke --base-model <staged 4-bit checkpoint dir> --max-seq 8192
+     --stop-at <06:35 ET> ...`, with CPU offload. It must load, train, checkpoint,
      restore and save the adapter (manifest status `smoke-train-pass`). A `stopped`
      status is no verdict: launch it again with `--resume`. The eval pipeline (merge,
      quantize, score) then runs on the smoke adapter.

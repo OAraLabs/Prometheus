@@ -15,8 +15,14 @@
     # Fetch the adapter of a run whose client went away.
     modal run scripts/distill/modal_train.py::fetch --run-id <id>
 
-Flow (``rent``): refuse Max-derived data without the operator's approval flag
-(DISTILL-OPEN-QUESTIONS #6) -> print the cost plan and refuse when even the
+Max-derived data never rents (DISTILL-OPEN-QUESTIONS #6, Q6b ruling): renting
+uploads the training data off our machines, and data with a Max-derived row
+(or one nothing shows is not) stays on them. ``pretokenize``, ``plan``,
+``rent``, the upload and the GPU call each refuse it, and no flag overrides
+that (the operator's approval lets such data train locally with
+``train_qlora.py``, never here).
+
+Flow (``rent``): refuse Max-derived data -> print the cost plan and refuse when even the
 optimistic estimate is over ``--max-usd`` -> without ``--launch`` stop there ->
 upload the pre-tokenized data to a Volume (skipped when the same content is
 there) -> download the base weights into a Volume on a CPU-only function (no
@@ -101,7 +107,53 @@ DEADLINE_MARGIN_S = 600  # stop this long before a deadline: save + commit
 MIN_SEGMENT_S = 3600  # a call shorter than this is not worth its load time
 MAX_SEGMENTS = 8
 MAX_FAILED_CALLS = 1
-APPROVAL_FLAG = T.APPROVAL_FLAG
+
+
+def _policy() -> Any:
+    """``artifact_policy.py`` (Q6b), on the local side only: the GPU container
+    holds neither it nor Max-derived data."""
+    return T._load_policy()
+
+
+#: ``artifact_policy.policy_fields(False)``, inlined: the GPU container carries
+#: neither artifact_policy.py nor Max-derived data (a test keeps the two equal).
+CLEAN_POLICY_FIELDS: dict[str, Any] = {
+    "max_derived": False, "tags": [], "private": False,
+    "publish": "only after publish_guard.py check passes"}
+
+#: What a pre-tokenized directory holds (``train_qlora.write_pretokenized``):
+#: the only files the rental uploads, never the rest of the directory.
+PRETOK_FILES = ("meta.json", "index.jsonl", "tokens.bin")
+
+
+def rental_refusal(data: Path, meta: dict[str, Any]) -> str | None:
+    """Why *data* (a pre-tokenized directory) may not be rented, or None. Any
+    Max-derived row, a missing count, a ``max-derived`` tag in its name or
+    manifest, a provenance chain that does not show it is clean, or anything
+    else in the directory the publish guard would refuse (a dataset's Max
+    eval rows beside the pre-tokenized files, a stray JSONL, a link) refuses
+    it (Q6b); nothing overrides this."""
+    rows = meta.get("rows")
+    md = meta.get("max_derived_rows")
+    if not isinstance(md, int) or isinstance(md, bool) or md:
+        n = md if isinstance(md, int) and not isinstance(md, bool) else "?"
+        return f"REFUSED: {n}/{rows} rows are Max-derived. {_policy().RENTAL_REFUSAL}"
+    if _policy().is_max_derived(Path(data)):
+        return (f"REFUSED: {data} is Max-derived (its name or manifest says so, or nothing shows "
+                f"otherwise). {_policy().RENTAL_REFUSAL}")
+    missing = [f for f in PRETOK_FILES if not (Path(data) / f).is_file()]
+    if missing:
+        return f"REFUSED: {data} is not a complete pre-tokenized directory (no {', '.join(missing)})"
+    # Data leaving our machines must be shown clean the way a publish is:
+    # the directory's own manifests (holds_max_rows included) and every file in it.
+    _prov, reasons = _policy().check_publishable(Path(data))
+    if reasons:
+        return (f"REFUSED: {data} holds data that may not leave our machines: "
+                + "; ".join(reasons[:5]) + (f" (+{len(reasons) - 5} more)" if len(reasons) > 5
+                                             else "")
+                + f". Pre-tokenize into a directory of its own. {_policy().RENTAL_REFUSAL}")
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Prices (Modal list price, https://modal.com/pricing, read 2026-10-30) and GPUs
@@ -476,8 +528,9 @@ def run_segment(job: dict[str, Any], *, make_trainer: Callable[[dict[str, Any]],
         return {"status": status, "segment": seg.id, "spent_usd": round(ledger.spent_usd(), 2),
                 **extra}
 
-    if max_derived_rows and not job.get("approved"):
-        return finish("refused", reason="Max-derived data without the operator's approval")
+    if max_derived_rows:  # Q6b: never, whatever the job says
+        return finish("refused", reason="Max-derived data never rents (DISTILL-OPEN-QUESTIONS #6, "
+                                        "Q6b ruling)")
     # A resume needs the weights the run started on: a moved branch would
     # change the config hash, and the trainer would refuse after the load.
     started_on = ledger.run.get("base_revision")
@@ -565,7 +618,13 @@ def run_segment(job: dict[str, Any], *, make_trainer: Callable[[dict[str, Any]],
     adapter = trainer.save_adapter(run_dir / "adapter")
     T.write_json(run_dir / "manifest.json", {
         "schema": T.MANIFEST_SCHEMA, "mode": "modal", "run_id": job["run_id"],
-        "written_at": T.now_iso(), "gpu": job["gpu"], "rate_per_s": job["rate_per_s"],
+        "written_at": T.now_iso(),
+        # Q6b: only data with no Max-derived row rents (refused above otherwise),
+        # so the adapter is not Max-derived; its manifest says so for the publish guard
+        **CLEAN_POLICY_FIELDS,
+        "data": {"name": job.get("data"), "sha256": job.get("data_sha256"),
+                 "max_derived_rows": max_derived_rows},
+        "gpu": job["gpu"], "rate_per_s": job["rate_per_s"],
         "max_usd": job["max_usd"], "data_sha256": job.get("data_sha256"),
         "base_model": {"id": job.get("base_model"), "revision_resolved": job.get("base_revision"),
                        "load": trainer.cfg.load},
@@ -652,7 +711,6 @@ class RentArgs:
     calib_steps: int = 50
     out: Path = Path("data/distill/rental")
     launch: bool = False
-    approved: bool = False
 
 
 def train_config(a: RentArgs, model_dir: str) -> dict[str, Any]:
@@ -688,11 +746,9 @@ def orchestrate(a: RentArgs, ops: Ops | None, *, clock: Callable[[], float] = ti
     if str(a.max_seq) not in {str(x) for x in meta.get("ladder", [])}:
         echo(f"error: the data has no variants for max_seq {a.max_seq}")
         return 2
-    md = int(meta.get("max_derived_rows", meta.get("rows", 1)))
-    if md and not a.approved:
-        echo(f"REFUSED: {md}/{meta.get('rows')} rows are Max-derived. Training on Max-derived data "
-             f"is on hold (DISTILL-OPEN-QUESTIONS #6); {APPROVAL_FLAG} only with the operator's "
-             "approval.")
+    refusal = rental_refusal(Path(a.data), meta)
+    if refusal:
+        echo(refusal)
         return 3
     tokens = int(meta["tokens_by_seq"][str(a.max_seq)]) * a.epochs
     kept = int(meta["kept_by_seq"][str(a.max_seq)]) or 1
@@ -735,7 +791,7 @@ def orchestrate(a: RentArgs, ops: Ops | None, *, clock: Callable[[], float] = ti
     deadline = clock() + a.max_hours * 3600
     job = {"run_id": run_id, "data": name, "gpu": gpu.key, "rate_per_s": rate,
            "max_usd": a.max_usd, "deadline": deadline, "calib_steps": a.calib_steps,
-           "calib_skip": 10, "approved": a.approved, "base_model": a.base_model,
+           "calib_skip": 10, "base_model": a.base_model,
            "base_revision": model["sha"],
            "config": train_config(a, model["dir"]), "data_sha256": meta.get("content_sha256"),
            # until a calibration measures them: the worst-case load and one
@@ -870,15 +926,21 @@ if modal is not None:
 
     class ModalOps:
         def upload_data(self, local: Path, name: str, meta: dict[str, Any]) -> str:
+            # the last line before data leaves our machines (Q6b): checked again
+            refusal = rental_refusal(Path(local), meta)
+            if refusal:
+                raise RuntimeError(refusal)
             try:
                 there = json.loads(b"".join(data_vol.read_file(f"{name}/meta.json")))
             except Exception:
                 there = None
             if there and there.get("content_sha256") == meta.get("content_sha256"):
                 return "already on the Volume"
+            # the pre-tokenized files only, never whatever else sits in the directory
             with data_vol.batch_upload(force=True) as batch:
-                batch.put_directory(str(local), f"/{name}")
-            return f"{name} uploaded"
+                for f in PRETOK_FILES:
+                    batch.put_file(str(Path(local) / f), f"/{name}/{f}")
+            return f"{name} uploaded ({', '.join(PRETOK_FILES)})"
 
         def prefetch_model(self, repo: str, revision: str | None) -> dict[str, Any]:
             return prefetch.remote(repo, revision)
@@ -900,11 +962,11 @@ if modal is not None:
              run_id: str = "", base_model: str = DEFAULT_BASE, base_revision: str = "",
              max_seq: int = 16384, epochs: int = 2, r: int = 32, alpha: int = 32,
              lr: float = 1e-4, grad_accum: int = 8, save_every: int = 200, calib_steps: int = 50,
-             out: str = "data/distill/rental", launch: bool = False,
-             i_have_operator_approval_for_max_derived_data: bool = False) -> None:
+             out: str = "data/distill/rental", launch: bool = False) -> None:
+        # (no approval parameter: Max-derived data never rents, Q6b)
         a = RentArgs(Path(data), gpu, max_usd, max_hours, run_id, base_model, base_revision,
                      max_seq, epochs, r, alpha, lr, grad_accum, save_every, calib_steps,
-                     Path(out), launch, i_have_operator_approval_for_max_derived_data)
+                     Path(out), launch)
         code = orchestrate(a, ModalOps())
         if code:
             sys.exit(code)
@@ -943,13 +1005,24 @@ def cmd_estimate(a: argparse.Namespace) -> int:
 
 def cmd_pretokenize(a: argparse.Namespace) -> int:
     rows = T.read_jsonl(a.data)
+    teacher_max = T.builder_teacher_is_max(a.data)
+    md = sum(1 for r in rows if T.is_max_derived(r, teacher_max))
+    if md or _policy().path_has_tag(Path(a.data).expanduser().resolve()):
+        # pre-tokenizing is the rental's first step, and Max-derived data never rents
+        print(f"REFUSED: {md}/{len(rows)} rows of {a.data} are Max-derived (or its path says so). "
+              f"{_policy().RENTAL_REFUSAL}", file=sys.stderr)
+        return 3
     encoder = T.hf_encoder(a.tokenizer_dir)
     refit = T.template_refitter(a.tokenizer_dir)
     tok_json = Path(a.tokenizer_dir).expanduser() / "tokenizer.json"
+    ds = T.dataset_record(a.data)
     meta = T.write_pretokenized(rows, encoder, a.out, refit=refit,
                                 data_sha256=T.sha256_files([a.data]),
                                 tokenizer_sha256=T.sha256_files([tok_json]),
-                                teacher_max=T.builder_teacher_is_max(a.data))
+                                teacher_max=teacher_max, source=str(a.data),
+                                dataset_policy={"report": ds["report"],
+                                                "max_derived_allow": _policy().approval_record(
+                                                    ds["approval"])})
     print(json.dumps({k: meta[k] for k in ("rows", "kept_by_seq", "tokens_by_seq",
                                            "max_derived_rows", "content_sha256")}, indent=2))
     return 0
@@ -957,7 +1030,7 @@ def cmd_pretokenize(a: argparse.Namespace) -> int:
 
 def cmd_plan(a: argparse.Namespace) -> int:
     ra = RentArgs(data=a.data, gpu=a.gpu, max_usd=a.max_usd, max_hours=a.max_hours,
-                  max_seq=a.max_seq, epochs=a.epochs, approved=a.approved)
+                  max_seq=a.max_seq, epochs=a.epochs)
     return orchestrate(ra, None)
 
 
@@ -981,7 +1054,6 @@ def main(argv: list[str] | None = None) -> int:
     pl.add_argument("--max-hours", type=float, default=40.0)
     pl.add_argument("--max-seq", type=int, default=16384)
     pl.add_argument("--epochs", type=int, default=2)
-    pl.add_argument(APPROVAL_FLAG, dest="approved", action="store_true")
     a = ap.parse_args(argv)
     return {"estimate": cmd_estimate, "pretokenize": cmd_pretokenize, "plan": cmd_plan}[a.cmd](a)
 
