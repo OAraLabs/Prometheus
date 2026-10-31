@@ -1,70 +1,57 @@
 # Distillation + flywheel — status
 
-_Updated 2026-10-30 21:49 ET. Refreshed on every check-in. Details: `DISTILL-LOG.md`; decisions: `DISTILL-OPEN-QUESTIONS.md`._
+_Updated 2026-10-31 ~10:50 ET. Refreshed on every check-in. Details: `DISTILL-LOG.md`; decisions: `DISTILL-OPEN-QUESTIONS.md`._
 
 ## In one paragraph
 
-No model has been trained yet, and no GPU has been used so far. Tonight (01:00–07:00) both GPUs start work. The 3090 Ti
-runs a gentle read-only baseline of Saluki. The 4090 rehearses its stop/restore round trip, then runs the base-9B
-baseline and the 27B feasibility test, and its business model server is restored and checked by 07:00. From Saturday
-morning the 3090 Ti switches to flywheel mode: the daemon uses Max, and a local Qwen3.8-27B teacher generates practice
-tasks built from your real task patterns. That starts after an IQ3-vs-Q4 teacher quality test.
+No model has been trained yet. The dataset has 2,056 training rows against a 5,000-row gate, and the Max quota ran out
+Saturday morning (it resets Nov 16). The 3090 Ti is in its flywheel window: the local 27B teacher has Saluki's port and
+generates practice tasks, but slowly (about 15 verified rows an hour). Tonight the 4090 runs a first small training
+test on the 9B, and the 3090 Ti runs half of the teacher quality test. The plan for speed is to let the 4090 serve the
+teacher at night while the sandboxed tools stay on the 3090 Ti host.
 
 ## Done
 
-- **Phase 5–8 code committed:** trainer, quantize, shadow mode (off by default), weekly flywheel job (off by default), and
-  a rental cost packet (H100 about $140 per run; never launched). Full test suite green.
-
-- **Phase 0 – hardware check.** Both GPUs mapped. The 4090 is off-limits: it backs a customer tunnel and an overnight job.
-- **Phase 1 – data audit.** 11,152 harvested traces, but only ~300 distinct tasks, 86% coding, no chat-mode examples.
-- **Phase 3 – dataset builder** (dry run). Works and checks for leaks, but the data fails its own gate: 1,323 training
-  rows against a 5,000–10,000 target, and no chat-mode.
-- **Eval sets** built on the 3090 Ti host: long-context (32K–256K), prompt-injection and general-sanity tests.
-- **Tools, all adversarially reviewed and fixed:** GPU setup save/apply with an automatic restore timer, the scorer,
-  the judge, the dataset and eval-set builders.
-- **Plan terms checked.** The Qwen Max key is a Token Plan: interactive use only. It is never used for batch work
-  here, and 0 Max calls have been made.
-
-## Answers from the earlier session's notes (done)
-
-- **Qwen key:** a Token Plan (interactive only). Your own Oct 25 ruling was "nothing automated on it", so Max stays out of
-  batch judging and generation.
-- **4090:** it now serves only the business tunnel: about 5 requests a day, none overnight. The overnight benchmark has
-  never actually run. The 4090's nights are free if you want them; until you say so, it stays untouched.
-- **~22K traces:** a double count. Each of the 11,152 traces has a twin copy in another database. There are 11,207 distinct
-  teacher calls from about 300 tasks.
+- **Phase 0–1:** hardware mapped; data audited (about 300 distinct tasks, mostly coding).
+- **Phase 2 (judge):** Max re-judged 2,874 of 9,895 traces before the quota ran out; it resumes after the reset.
+  So far Max fails 20.5% of the traces the old labels passed.
+- **Phase 2b (Max teacher):** 787 verified rows from 1,409 tasks built from your real task patterns.
+- **Phase 3 (dataset v3, max-derived, private):** 2,056 train rows (Max 2,052, local 27B 4). Every gate passes except
+  size. Coding is the limiting category.
+- **Phase 4 (baselines):** base-9B, Saluki and Qwen3.8-27B scored on sanity, tool use, injection and long context.
+  The 27B leads; Glimmer 30B is partly done.
+- **Phase 5–8 code:** trainer, quantize, shadow mode and the weekly flywheel job are committed but not run (off by
+  default).
+- **/qwen turns:** saving them as training examples was a config switch; it's on now, and the next /qwen turn will
+  confirm it.
 
 ## Running now
 
-- **Tonight, armed (both GPUs, 01:00–07:00):**
-  - 3090 Ti: read-only Saluki baseline in three windows.
-  - 4090: rehearsal at 01:00. Then, from 01:20, the base-9B baseline, the 27B feasibility test and the bake-off. The
-    business server is restored and checked at 06:40, with a backup restore at 07:15.
-- **Code being built (no GPU, no Max):**
-  - Teacher pipeline fed only by your real task patterns, plus the IQ3-vs-Q4 teacher test.
-  - 3090 Ti window setup: the teacher takes Saluki's port.
-  - Max-derived training policy and tags (your Q6b ruling).
-  - The $150 spend ledger for the pay-per-token key.
-  - Quantize and flywheel hardening.
-- **Investigating:** why your /qwen turns since Oct 15 aren't saved as training examples.
+- **3090 Ti (window until Sun 18:00):** local 27B generation, 49 rows so far. The voice probe is healthy (50 tok/s).
+- **Tonight 01:00:** teacher A/B arm A (IQ3) on the 3090 Ti. Arm B (Q4) is skipped: it would run under the voice-probe
+  floor (OQ #12). Generation resumes afterwards.
+- **Tonight 01:00–07:00, 4090:** rehearsal, a 9B training smoke test (200 examples, private, max-derived), the rest of
+  the Glimmer baseline, and the business server restored and checked by 06:40.
+  Clocks fall back at 02:00.
 
 ## Your approvals in effect
 
-- 3090 Ti: swap windows (continuous until Sun 18:00, then nightly 01:00–07:00); daemon on Max during windows (interactive only).
-- 4090: nightly 01:00–07:00 only; notify path installed; restore + tunnel check at every window end.
-- Ollama on the 3090 Ti may be stopped in nightly windows only, if the bigger teacher quant wins.
-- Long-context gate now uses confidence intervals (Q8).
+- 3090 Ti: the teacher takes Saluki's port in windows (continuous until Sun 18:00, then nightly 01:00–07:00).
+  Saluki is restored at every window end.
+- 4090: nightly 01:00–07:00 only; business server restored and checked at every window end.
+- Max-derived data may train a private model (Q6b). It is tagged and never published.
+- Token Plan key allowed for distillation Max work. It is exhausted until Nov 16, 16:00 UTC.
 
-## Blocked / waiting on you
+## Waiting on you (nothing blocks)
 
-- **Pay-per-token Max key:** `QWEN_PAYG_KEY` isn't on the 3090 Ti host yet. Max judging and generation start once it's
-  in `~/.config/prometheus/env`.
-
+- **OQ #12:** how to run teacher A/B arm B. Default: on the 4090 at night.
+- **OQ #11:** the 4090 can't sandbox tool commands (needs sudo). Default: tools stay on the 3090 Ti host.
+- **Pay-per-token key:** `QWEN_PAYG_KEY` still isn't on the 3090 Ti host.
 - **4060 Ti box:** still no SSH.
 
 ## Next
 
-1. Tonight: Saluki baseline (read-only, about 777 test cases).
-2. Saturday morning: rehearsal swap on the 3090 Ti, then the flywheel window. The teacher generates tasks until the
-   dataset passes its gate.
-3. Then: 9B QLoRA training on the 3090 Ti, quantize, and score against base and Saluki.
+1. Build cross-host generation: the 4090 serves the teacher on the tailnet, the 3090 Ti runs the sandboxed tools.
+   Target: Sunday night.
+2. Grow the dataset to 5,000 train rows, then a full 9B QLoRA run, quantize, and score against base and Saluki.
+3. After Nov 16: resume the Max re-judge and Max generation.
