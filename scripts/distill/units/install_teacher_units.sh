@@ -3,31 +3,43 @@
 #
 #   scripts/distill/units/install_teacher_units.sh <ssh-target>             # print the commands (default)
 #   scripts/distill/units/install_teacher_units.sh <ssh-target> --execute   # run them
+#   scripts/distill/units/install_teacher_units.sh <ssh-target> --only ab [--execute]  # the A/B units only
 #
 # Copies distill-teacher.service, distill-teacher-q4.service and their OnFailure= handler
-# window-mini-teacher-failed.service into ~/.config/systemd/user/ on the
+# window-mini-teacher-failed.service, and the teacher A/B's distill-teacher-q4-partial.service and its
+# OnFailure= handler window-mini-ab-restore.service (`--only ab`: just those two, so they can be added
+# while a window's teacher runs) into ~/.config/systemd/user/ on the
 # host (0644, through a temporary name and an atomic rename), checks them with
 # `systemd-analyze --user verify`, then `systemctl --user daemon-reload` so the user manager knows them.
 # It refuses to replace a unit that is running (stop it with `setups.py apply business` first) and
 # refuses when the host lacks the model file or the llama-server binary a unit names, or the staged
-# window scripts the handler runs (mini_window.py stage first).
+# window scripts the handlers run (mini_window.py stage first).
 # No unit has an [Install] section: nothing here makes them start, now or at boot. setups.py
 # starts the teachers (apply flywheel / flywheel-night-q4) and stops them (apply business); only a
 # teacher's failure starts the handler.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-units=(distill-teacher.service distill-teacher-q4.service window-mini-teacher-failed.service)
+teacher_units=(distill-teacher.service distill-teacher-q4.service window-mini-teacher-failed.service)
+ab_units=(distill-teacher-q4-partial.service window-mini-ab-restore.service)
 target=""
 execute=0
-for a in "$@"; do
-  case "$a" in
+only=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --execute) execute=1 ;;
-    -h|--help) sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    -*) echo "unknown option: $a" >&2; exit 64 ;;
-    *) [ -z "$target" ] || { echo "one ssh target only" >&2; exit 64; }; target="$a" ;;
+    --only) only="${2:-}"; shift ;;
+    -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "unknown option: $1" >&2; exit 64 ;;
+    *) [ -z "$target" ] || { echo "one ssh target only" >&2; exit 64; }; target="$1" ;;
   esac
+  shift
 done
+case "$only" in
+  "") units=("${teacher_units[@]}" "${ab_units[@]}") ;;
+  ab) units=("${ab_units[@]}") ;;
+  *) echo "--only takes ab" >&2; exit 64 ;;
+esac
 [ -n "$target" ] || { echo "usage: $0 <ssh-target> [--execute]" >&2; exit 64; }
 
 for u in "${units[@]}"; do
@@ -46,7 +58,8 @@ done
 for f in "$HOME/ladder/src/llama.cpp-9d57ce456/build/bin/llama-server" \
          "$HOME/distill/models/teacher/Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf" \
          "$HOME/distill/models/teacher-q4/Qwen3.8-27B-Q4_K_M.gguf" \
-         "$HOME/distill/window/mini_window.py" "$HOME/distill/window/window.conf"; do
+         "$HOME/distill/window/mini_window.py" "$HOME/distill/window/mini_ab.py" \
+         "$HOME/distill/window/window.conf"; do
   [ -r "$f" ] || { echo "missing on the host: $f"; exit 1; }
 done
 echo "preconditions ok"'

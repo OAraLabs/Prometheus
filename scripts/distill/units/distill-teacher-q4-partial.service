@@ -1,0 +1,44 @@
+# Teacher quant A/B, arm B and the judge: Qwen3.8-27B Q4_K_M PARTLY offloaded, on the local model port, while
+# Ollama's model stays loaded (Q9 allows stopping Ollama only in nightly windows AFTER Q4_K_M has won the A/B).
+# The same server shape as distill-teacher.service (2 slots, one unified q8_0 KV pool, ubatch 512, the same
+# reasoning budget and sampling flags), with 16,384 tokens of context and only the last NGL layers on the GPU.
+#
+# Started and stopped only by scripts/distill/mini_window/mini_ab.py (the A/B night), which stops
+# distill-teacher.service first, reads the free VRAM, and writes NGL and MIN_FREE_MIB (its projected size plus
+# 600 MiB of headroom) to the EnvironmentFile below right before the start; without that file it does not
+# start. No [Install] section (never at boot); named distill-* so every `setups.py apply business` restore (the
+# dead-man, window-end) stops it too.
+#
+# VRAM per mini_ab.py's projection (from the GGUF's own tensor table), the card holding speech, STT, image and
+# the Ollama model (~13,265 MiB free once the IQ3 teacher stops):
+#   weights on the GPU    the last NGL of the 64 trunk layers (215-342 MiB each); the output matrix (995 MiB)
+#                         and the token embeddings stay on the CPU below -ngl 65, the MTP block is never loaded
+#   KV, q8_0              544 MiB (CTX 16,384 x 34,816 B; counted in full)
+#   recurrent state       300 MiB (2 slots; counted in full)
+#   context + buffers   1,192 MiB (as for distill-teacher.service) + 512 MiB for partial-offload copies
+#   -> about -ngl 45-46 with 600 MiB to spare. ~8-9 tok/s decode (the CPU reads ~5 GiB per token).
+[Unit]
+Description=distill teacher A/B: Qwen3.8-27B Q4_K_M partly offloaded on the local model port (arm B + judge)
+After=network.target distill-teacher.service
+# One server on the port: starting this stops either full teacher, and the other way round.
+Conflicts=distill-teacher.service distill-teacher-q4.service
+# A crash leaves the port dark: put the IQ3 teacher back at once (mini_ab.py restore; it does nothing while the
+# A/B run itself is alive, which swaps back on its own).
+OnFailure=window-mini-ab-restore.service
+
+[Service]
+Type=simple
+Environment=CTX=16384
+# NGL=<layers> and MIN_FREE_MIB=<projected + 600>, written by mini_ab.py right before each start.
+EnvironmentFile=%h/distill/window/state/q4-partial.env
+ExecStartPre=/bin/sh -c 'case "$${NGL:-}" in ""|*[!0-9]*) echo "distill-teacher-q4-partial: no NGL in the env file: not starting" >&2; exit 1;; esac; free=$$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -n 1 | tr -d " "); if [ "$${free:-0}" -ge "$${MIN_FREE_MIB:-999999}" ]; then exit 0; fi; echo "distill-teacher-q4-partial: only $${free:-?} MiB VRAM free, needs $${MIN_FREE_MIB:-?} (-ngl $${NGL}, 600 MiB headroom): not starting" >&2; exit 1'
+ExecStart=%h/ladder/src/llama.cpp-9d57ce456/build/bin/llama-server \
+  -m %h/distill/models/teacher-q4/Qwen3.8-27B-Q4_K_M.gguf --no-mmproj \
+  --alias qwen3.8-27b-q4_k_m \
+  --host 127.0.0.1 --port 8092 --no-slots -ngl ${NGL} --fit off -c ${CTX} --parallel 2 --kv-unified \
+  --flash-attn on -ctk q8_0 -ctv q8_0 --jinja --batch-size 2048 --ubatch-size 512 \
+  --temp 1.0 --top-k 20 --top-p 0.95 --min-p 0.0 \
+  --reasoning-budget 2048 --reasoning-budget-message "[REASONING_BUDGET_EXHAUSTED]"
+# No restarts: a crash goes to OnFailure= (the IQ3 teacher back), never a loop with the port dark.
+Restart=no
+TimeoutStopSec=90

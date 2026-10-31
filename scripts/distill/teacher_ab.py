@@ -60,6 +60,13 @@ server's own sampler defaults (repeat/presence penalties, DRY, XTC, sampler
 order, ...: a GGUF's metadata can set them). An arm whose server differs from
 the other arm's in any of these, or runs on the same model file, is refused
 before its first task, and the report refuses a decision on such records.
+One exception, chosen at ``select`` (``--allow-ctx-difference``, recorded in
+``ab_settings.json``): the per-slot context may differ, for an arm A that runs
+on the serving teacher (57,344 tokens) and an arm B that only fits with less
+(a partly offloaded Q4_K_M at 16,384). Every record then carries its largest
+call's context (prompt + reply tokens), and the report lists the pairs whose
+largest call needed more than the smaller server holds (``context``), with the
+verdict without them beside the one over all pairs.
 ``models`` checks the two GGUF files before any server starts: two different
 files, B (the judge) the bigger one, the same embedded chat template.
 
@@ -174,6 +181,8 @@ PROPS_SAMPLER_KEYS = (
     "samplers", "chat_format", "reasoning_format", "reasoning_in_content")
 #: server facts both arms must share (the model file is the one thing that must differ)
 SERVER_SAME_KEYS = ("chat_template_sha", "sampler_sha", "n_ctx")
+#: of those, the one ``--allow-ctx-difference`` lets differ
+CTX_KEY = "n_ctx"
 
 
 def _load_sibling(name: str, file: str) -> Any:
@@ -308,12 +317,14 @@ async def server_props(url: str, timeout: float) -> dict[str, Any]:
     return props_record(body)
 
 
-def server_differences(a: dict[str, Any] | None, b: dict[str, Any] | None) -> list[str]:
+def server_differences(a: dict[str, Any] | None, b: dict[str, Any] | None,
+                       ctx_may_differ: bool = False) -> list[str]:
     """Why two arms' servers are not like for like: a fact that differs
-    (SERVER_SAME_KEYS), or the same model file on both."""
+    (SERVER_SAME_KEYS; the per-slot context only without *ctx_may_differ*), or
+    the same model file on both."""
     if not a or not b:
         return ["a server's settings were not recorded"]
-    out = [k for k in SERVER_SAME_KEYS if a.get(k) != b.get(k)]
+    out = [k for k in SERVER_SAME_KEYS if a.get(k) != b.get(k) and not (ctx_may_differ and k == CTX_KEY)]
     if a.get("model_path") and a.get("model_path") == b.get("model_path"):
         out.append("the same model file")
     return out
@@ -509,6 +520,8 @@ def build_conf(a: argparse.Namespace) -> dict[str, Any]:
         "allow_lan": bool(a.allow_lan_endpoints),
         "labels": {"A": a.label_a, "B": a.label_b}, "threshold_pts": THRESHOLD_PTS,
         "max_consecutive_errors": a.max_consecutive_errors,
+        # not a request setting (not in GEN_KEYS): which server facts the arms must share
+        "ctx_may_differ": bool(getattr(a, "allow_ctx_difference", False)),
     }
 
 
@@ -634,12 +647,16 @@ async def _one_task(task: Any, settings: Any, conf: dict[str, Any], arm: str, wo
                 base["n_rows"] = len(tg.rows_for(out, settings, dict(record, verified=True)))
                 if not base["n_rows"]:
                     det_ok, reasons = False, ["no_rows"]
+        calls = list(out.calls) + list(getattr(out, "summary_calls", None) or [])
         return {
             **base, "det_ok": det_ok, "reasons": reasons,
             "transcript": tg.judge_transcript(out, conf["judge_max_chars"]),
             "teacher_calls": len(out.calls), "tokens_in": sum(c.input_tokens for c in out.calls),
             "tokens_out": sum(c.output_tokens for c in out.calls), "duration_s": round(out.duration_s, 1),
             "compactions": out.compactions, "injections_fired": int(out.env.injections_fired),
+            # the most context one call of this task held (prompt + reply): what a server with
+            # less context per slot than this would have refused
+            "max_call_context": max((int(c.input_tokens or 0) + int(c.output_tokens or 0) for c in calls), default=0),
         }
     finally:
         shutil.rmtree(out.env.root, ignore_errors=True)
@@ -672,7 +689,7 @@ async def run_arm(paths: Paths, conf: dict[str, Any], arm: str, url: str, until:
                              f"this one serves {server['model_file']}")
     other = next((r.get("server") for r in read_records(paths.arm("B" if arm == "A" else "A"))), None)
     if other is not None:
-        diff = server_differences(server, other)
+        diff = server_differences(server, other, bool(conf.get("ctx_may_differ")))
         if diff:
             raise InputError(f"arm {arm}'s server is not like for like with the other arm's: {', '.join(diff)} "
                              f"({server['model_file']} vs {other.get('model_file')})")
@@ -882,8 +899,9 @@ def build_report(paths: Paths, conf: dict[str, Any], min_pairs: int | None = Non
             problems.append(f"arm {arm}'s server settings (/props) were not recorded")
         elif len(servers[arm]) > 1:
             problems.append(f"arm {arm} ran on more than one server")
+    ctx_may_differ = bool(conf.get("ctx_may_differ"))
     if all(len(servers[arm]) == 1 and servers[arm][0] for arm in ARMS):
-        diff = server_differences(servers["A"][0], servers["B"][0])
+        diff = server_differences(servers["A"][0], servers["B"][0], ctx_may_differ)
         if diff:
             problems.append(f"the arms' servers differ: {', '.join(diff)}")
     judge_ids = sorted({str(r.get("judge_served")) for r in judges.values()})
@@ -949,6 +967,7 @@ def build_report(paths: Paths, conf: dict[str, Any], min_pairs: int | None = Non
     else:
         decision = decide(k["A"], k["B"], n, conf["threshold_pts"])
     judged_n = sum(1 for arm in ARMS for r in recs[arm].values() if (arm, r["task_id"]) in judges)
+    context = context_report(conf, servers, recs, pairs, outcome, decision)
     return {
         "schema": REPORT_SCHEMA, "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "selection": {k2: selection[k2] for k2 in ("taskset", "taskset_sha256", "seed", "n", "ids", "strata",
@@ -974,7 +993,33 @@ def build_report(paths: Paths, conf: dict[str, Any], min_pairs: int | None = Non
             "a_minus_b_pts": round(100.0 * (k["A"] - k["B"]) / n, 2) if n else None,
             "pairs": n, "min_pairs": need, "problems": problems,
         },
+        "context": context,
     }
+
+
+def context_report(conf: dict[str, Any], servers: dict[str, list[Any]], recs: dict[str, dict[str, Any]],
+                   pairs: list[str], outcome: dict[str, dict[str, bool]], decision: str) -> dict[str, Any]:
+    """The arms' per-slot contexts and, when they differ (``--allow-ctx-difference``),
+    the pairs whose largest call needed more than the smaller server holds (or that
+    the smaller server refused as a context overflow), with the verdict without them."""
+    n_ctx = {arm: (servers[arm][0] or {}).get(CTX_KEY) if len(servers[arm]) == 1 else None for arm in ARMS}
+    out: dict[str, Any] = {"may_differ": bool(conf.get("ctx_may_differ")), "n_ctx": n_ctx}
+    known = [v for v in n_ctx.values() if isinstance(v, int)]
+    if len(known) < 2 or known[0] == known[1]:
+        return out
+    limit = min(known)
+    bound = [t for t in pairs if any(
+        int(recs[arm][t].get("max_call_context") or 0) > limit or "context_overflow" in (recs[arm][t].get("reasons") or [])
+        for arm in ARMS)]
+    unknown = sum(1 for t in pairs for arm in ARMS if "max_call_context" not in recs[arm][t])
+    rest = [t for t in pairs if t not in bound]
+    k_a = sum(1 for t in rest if outcome["A"][t])
+    k_b = sum(1 for t in rest if outcome["B"][t])
+    without = decide(k_a, k_b, len(rest), conf["threshold_pts"]) if decision in (DECISION_Q4, DECISION_IQ3) \
+        and rest else None
+    out.update(limit=limit, bound_pairs=bound, records_without_context=unknown,
+               pass_without_bound={"A": k_a, "B": k_b, "pairs": len(rest)}, verdict_without_bound=without)
+    return out
 
 
 def summary_lines(rep: dict[str, Any]) -> list[str]:
@@ -997,6 +1042,12 @@ def summary_lines(rep: dict[str, Any]) -> list[str]:
     diff = (f"{A['label']} - {B['label']}: {p.get('diff_pts'):+.1f} pts, 95% CI [{ci[0]:+.1f}, {ci[1]:+.1f}] "
             f"(paired Newcombe); McNemar p={p.get('mcnemar_exact_p')}") if ci else "no finished pairs yet"
     t = p["table"]
+    ctx = rep.get("context") or {}
+    ctx_note = ""
+    if ctx.get("limit") is not None:
+        ctx_note = (f"; ctx {ctx['n_ctx']['A']}/{ctx['n_ctx']['B']}: {len(ctx['bound_pairs'])} pairs needed more than "
+                    f"{ctx['limit']}" + (f" (without them: {ctx['verdict_without_bound']})"
+                                          if ctx.get("verdict_without_bound") else ""))
     return [
         head,
         f"Pass: {rate(A)} vs {rate(B)}",
@@ -1004,7 +1055,7 @@ def summary_lines(rep: dict[str, Any]) -> list[str]:
         f"Pairs: both {t['a']}, {B['label']} only {t['b']}, {A['label']} only {t['c']}, neither {t['d']}; "
         f"tool ok {A['tool_success']} vs {B['tool_success']}, judge pass {A['judge_pass']} vs {B['judge_pass']}",
         f"Rule: {A['label']} more than {dec['threshold_pts']} pts below {B['label']} -> {DECISION_Q4}, "
-        f"else {DECISION_IQ3}; one judge: {rep['judge']['served']}",
+        f"else {DECISION_IQ3}; one judge: {rep['judge']['served']}{ctx_note}",
     ]
 
 
@@ -1131,6 +1182,9 @@ def _select_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--max-consecutive-errors", type=int, default=5)
     p.add_argument("--jail", choices=tg.JAIL_MODES, default="auto")
     p.add_argument("--allow-lan-endpoints", action="store_true")
+    p.add_argument("--allow-ctx-difference", action="store_true",
+                   help="the arms' servers may differ in per-slot context (arm A on the serving teacher, arm B "
+                        "partly offloaded with less); the report lists the pairs that needed more than the smaller")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

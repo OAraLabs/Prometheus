@@ -1292,6 +1292,8 @@ def cmd_stage(args: argparse.Namespace) -> int:
             "eval_slot_exit.sh": HERE / "eval_slot_exit.sh",
             "gen_runner.py": HERE / "gen_runner.py",
             "gen_runner.sh": HERE / "gen_runner.sh",
+            "mini_ab.py": HERE / "mini_ab.py",
+            "mini_ab_tonight.sh": HERE / "mini_ab_tonight.sh",
             "window.conf": conf_path,
             "setups/setups.py": repo / "scripts" / "distill" / "setups.py",
             "setups/daemon_switch.py": repo / "scripts" / "distill" / "daemon_switch.py",
@@ -1304,7 +1306,7 @@ def cmd_stage(args: argparse.Namespace) -> int:
             ("ssh", f"mkdir -p {dest}/setups {dest}/state && chmod 700 {dest} {dest}/setups {dest}/state"),
         ]
         for rel, src in files.items():
-            mode = "0700" if rel.endswith((".sh", "mini_window.py", "gen_runner.py")) else "0600"
+            mode = "0700" if rel.endswith((".sh", "mini_window.py", "gen_runner.py", "mini_ab.py")) else "0600"
             steps.append(("put", (rel, src, mode)))
         steps.append(("ssh", f"ls -la {dest} {dest}/setups"))
         for kind, step in steps:

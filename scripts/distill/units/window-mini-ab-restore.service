@@ -1,0 +1,20 @@
+# OnFailure= handler of distill-teacher-q4-partial.service (the teacher quant A/B's arm B server).
+#
+# A partly offloaded Q4 teacher that crashes (or refuses its start) leaves the local model port dark. This runs
+# `mini_ab.py restore --execute`: when no A/B run is alive (a live run swaps back on its own) and the IQ3
+# teacher does not serve the port, it stops the Q4 unit, starts distill-teacher.service, verifies it (healthy,
+# the next voice probe OK, daemon /health), falls back to the business restore if the teacher will not come
+# back, stops the A/B's probe guard and restarts the generation the A/B paused. Also run by the backstop timer
+# after the A/B night.
+#
+# NOT named distill-*: `apply business` stops every running distill-* unit, which would stop this restore.
+# No [Install] section: only OnFailure= (or the backstop timer) starts it. Install: install_teacher_units.sh.
+[Unit]
+Description=distill teacher A/B: put the IQ3 teacher back after the Q4 teacher failed (OnFailure)
+
+[Service]
+Type=oneshot
+TimeoutStartSec=60min
+KillMode=mixed
+TimeoutStopSec=20min
+ExecStart=/usr/bin/python3 -I %h/distill/window/mini_ab.py --conf %h/distill/window/window.conf restore --execute

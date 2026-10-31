@@ -887,7 +887,7 @@ def test_the_teacher_failure_handler_unit():
     exec_start = re.search(r"^ExecStart=(.+)$", text, re.M).group(1)
     assert exec_start.endswith("mini_window.py --conf %h/distill/window/window.conf teacher-failed --execute")
     installer = (REPO / "scripts" / "distill" / "units" / "install_teacher_units.sh").read_text()
-    assert name in re.search(r"^units=\((.+)\)$", installer, re.M).group(1)
+    assert name in re.search(r"^teacher_units=\((.+)\)$", installer, re.M).group(1)
 
 
 @pytest.mark.parametrize("wrapper", ["mini_rehearsal.sh", "mini_window_start.sh", "mini_window_end.sh",

@@ -1300,3 +1300,49 @@ def test_a_signal_leaves_no_server_and_no_step_running(tmp_path, phase):
         for pid in tree:  # by recorded PID only
             if _alive(pid):
                 os.kill(pid, signal.SIGKILL)
+
+
+def test_a_context_difference_is_allowed_only_when_selected_and_reported(tmp_path, no_outbound, monkeypatch):
+    """Arm A on the serving teacher (57,344 per slot), arm B partly offloaded with 16,384: refused unless
+    ``select --allow-ctx-difference``; then every record carries its largest call's context and the report
+    lists the pairs that needed more than the smaller server holds, with the verdict without them."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for allow, want_b in ((False, 2), (True, 0)):
+        out = tmp_path / f"ab-{allow}"
+        extra = ("--allow-ctx-difference",) if allow else ()
+        assert select(tmp_path, AB_ROWS[:2], out, "--n", "2", "--concurrency", "1", *extra) == 0
+        with ArmServer("qwen3.8-27b-iq3_xxs") as a_srv, ArmServer("qwen3.8-27b-q4_k_m") as b_srv:
+            a_srv.props["default_generation_settings"] = dict(a_srv.props["default_generation_settings"], n_ctx=57344)
+            assert ab.main(["arm", "--out", str(out), "--arm", "A", "--url", a_srv.url]) == 0
+            assert ab.main(["arm", "--out", str(out), "--arm", "B", "--url", b_srv.url]) == want_b
+            if not allow:
+                assert b_srv.kinds["agent"] == 0
+                continue
+            assert ab.main(["judge", "--out", str(out), "--judge-url", b_srv.url]) == 0
+        recs = [json.loads(x) for x in (out / "arm-A.jsonl").read_text().splitlines()]
+        assert all(r["max_call_context"] >= 120 for r in recs)  # the fake's usage: 100 prompt + 20 reply per call
+        assert ab.main(["report", "--out", str(out)]) == 0
+        rep = json.loads((out / "ab_report.json").read_text())
+        assert rep["decision"]["problems"] == []
+        assert rep["context"]["n_ctx"] == {"A": 57344, "B": 16384} and rep["context"]["limit"] == 16384
+        assert rep["context"]["bound_pairs"] == []
+        assert "ctx 57344/16384: 0 pairs needed more than 16384" in (out / "ab_summary.txt").read_text()
+    # a pair whose largest call on A needed more than B holds is listed, and the verdict without it is given
+    out = tmp_path / "hand"
+    conf = _write_ab(out, 20, 13, 15, server_b={"n_ctx": 16384})
+    conf["ctx_may_differ"] = True
+    (out / "ab_settings.json").write_text(json.dumps(conf))
+    rows = [json.loads(x) for x in (out / "arm-A.jsonl").read_text().splitlines()]
+    for i, r in enumerate(rows):
+        r["server"] = dict(SERVER_A, n_ctx=57344)
+        r["max_call_context"] = 30000 if i == 14 else 9000
+    write_jsonl(out / "arm-A.jsonl", rows)
+    rep = ab.build_report(ab.Paths(out), conf)
+    assert rep["decision"]["problems"] == [] and rep["decision"]["verdict"] == ab.DECISION_Q4  # 65 vs 75
+    ctx = rep["context"]
+    assert ctx["bound_pairs"] == ["ts-000000000000000e"] and ctx["pass_without_bound"] == {"A": 13, "B": 14,
+                                                                                         "pairs": 19}
+    assert ctx["verdict_without_bound"] == ab.DECISION_Q4  # 68.4 vs 73.7: still more than 5 points
+    # without the flag the same records are not like for like
+    conf["ctx_may_differ"] = False
+    assert ab.build_report(ab.Paths(out), conf)["decision"]["verdict"] == ab.DECISION_INVALID
