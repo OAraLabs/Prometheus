@@ -74,3 +74,7 @@ none holds teacher data.
   - The Token Plan key stays off all batch and automated work (judging, generation, daemon background jobs). No change there.
   - Dataset plan: combine the Max traces (~300 real tasks) with the local-27B teacher data from the real-pattern taskset, under the same category caps and gates. The Phase 3 report shows the Max vs 27B share.
   - Follow-on (no Max involved): Phase 2 re-judging of the Max traces can use the local 27B as judge during GPU windows, which improves on the weak "tool didn't error" labels.
+- **Pay-per-token Max key (operator, 2026-10-30 ~21:40):** a separate pay-as-you-go Model Studio key (`QWEN_PAYG_KEY`, not the Token Plan) may be used for Phase 2 judging and Phase 2b teacher generation (real-pattern taskset only, sandboxed gym tools).
+  - Hard cap **$150 total**, logged in `spend-ledger.csv`; at $140 everything stops and the operator is told.
+  - It is never used for daemon or background jobs. Max becomes the primary teacher, and the local 27B fills the remaining gaps.
+  - **Status:** the key isn't on the 3090 Ti host yet. Checked `~/.config/prometheus/env`, shell profiles, `environment.d` and the login environment; the operator has been told where to add it. The code (a shared spend ledger and cap, a Max judge mode, then a Max mode for teacher generation) is being built so it starts once the key is present. Every paid call checks that the key's prefix matches its host and refuses the Token Plan key or host.
