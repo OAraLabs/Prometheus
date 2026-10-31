@@ -728,8 +728,10 @@ def test_smoke_runs_50_steps_round_trips_a_checkpoint_and_checks_the_loss(
     assert m["smoke"]["checkpoint_round_trip"] and m["smoke"]["loss_decreased"]
     gate = m["smoke"]["gate"]
     assert gate["passed"] and all(gate["checks"].values())
-    assert set(gate["checks"]) == {"val_loss_decreased", "probe_loss_decreased", "losses_finite",
-                                   "grad_norms_finite", "grad_norm_stable", "checkpoint_round_trip"}
+    assert set(gate["checks"]) == {"val_loss_decreased", "probe_loss_decreased", "held_out_rows",
+                                   "losses_finite", "grad_norms_finite", "grad_norm_stable",
+                                   "checkpoint_round_trip"}
+    assert gate["held_out_rows"] == {"val_subset": 20, "probe": 20, "min": 8}
     # step 0 (before any update) and both checkpoints; the round trip's replay kept no stale point
     for key in ("val", "probe"):
         assert [p[0] for p in gate[key]["points"]] == [0, 25, 50], key
@@ -774,6 +776,28 @@ def test_smoke_runs_50_steps_round_trips_a_checkpoint_and_checks_the_loss(
     m = json.loads((cli["logs"] / "manifest.json").read_text())
     assert m["status"] == "smoke-train-fail"
     assert "step 0" in m["smoke"]["gate"]["val"]["why"] and "step 0" in m["smoke"]["gate"]["probe"]["why"]
+
+    # a val split with too few rows for either set: no verdict can pass on 1-3 rows
+    shutil.rmtree(cli["out"])
+    assert T.main(base_args(data, cli, "--smoke", flag, *with_val(tmp_path, 6)),
+                  backend_factory=lambda c: FakeBackend()) == 1
+    gate = json.loads((cli["logs"] / "manifest.json").read_text())["smoke"]["gate"]
+    assert [k for k, ok in gate["checks"].items() if not ok] == ["held_out_rows"]
+
+
+def test_held_out_rows_fit_at_the_runs_starting_length(tmp_path: Path, cli: dict[str, Any]) -> None:
+    """build.py's val rows run to the full 16k: fitted at the ladder's bottom
+    (8,192), almost none survived (the first v4 smoke start: 2 of 114). They
+    are fitted at --max-seq, once, so the sets stay the same rows after a
+    step-down."""
+    data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(230)))
+    long_val = write_rows(tmp_path / "val.jsonl", [make_row(5000 + i, 5000) for i in range(40)])
+    n = json.loads(long_val.read_text().splitlines()[0])["n_tokens"]
+    assert T.SEQ_LADDER[-1] < n <= T.SEQ_LADDER[0]
+    args = base_args(data, cli, "--smoke", T.APPROVAL_FLAG, "--val", str(long_val))
+    assert T.main(args, backend_factory=lambda c: FakeBackend()) == 0
+    held = json.loads((cli["out"] / "run_state.json").read_text())["held_out"]
+    assert held["val_rows_fitting"] == 40 and held["probe"]["n"] == 20 and held["val_subset"]["n"] == 20
 
 
 class Diverging(FakeBackend):
@@ -1030,7 +1054,7 @@ class NoOpRestore(FakeBackend):
 def test_smoke_round_trip_fails_when_the_restore_does_nothing(tmp_path: Path,
                                                               cli: dict[str, Any]) -> None:
     data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(230)))
-    rc = T.main(base_args(data, cli, "--smoke", T.APPROVAL_FLAG, *with_val(tmp_path)),
+    rc = T.main(base_args(data, cli, "--smoke", T.APPROVAL_FLAG, *with_val(tmp_path, 40)),
                 backend_factory=lambda c: NoOpRestore())
     m = json.loads((cli["logs"] / "manifest.json").read_text())
     assert rc == 1 and m["status"] == "smoke-train-fail"
@@ -1055,7 +1079,7 @@ def test_a_resume_refuses_a_restore_that_does_not_bring_the_weights_back(tmp_pat
 def test_a_stopped_smoke_is_no_verdict_and_resumes(tmp_path: Path, cli: dict[str, Any],
                                                    monkeypatch: pytest.MonkeyPatch) -> None:
     data = approve_dataset(write_rows(tmp_path / "train.jsonl", rows_n(230)))
-    args = base_args(data, cli, "--smoke", T.APPROVAL_FLAG, *with_val(tmp_path))
+    args = base_args(data, cli, "--smoke", T.APPROVAL_FLAG, *with_val(tmp_path, 40))
     for stop_step in (10, 30):  # in the first half, then in the second
         shutil.rmtree(cli["out"], ignore_errors=True)
 

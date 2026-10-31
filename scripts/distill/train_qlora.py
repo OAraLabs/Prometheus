@@ -105,7 +105,8 @@ is part of every checkpoint. ``run_state.json`` ``order`` records the evidence
   so a window close loses at most one group.
 * **Held-out loss** before the first update (step 0) and at every
   interval, epoch and end checkpoint, on two fixed, disjoint sets of ``--val``
-  rows (none of whose ids, tasks or groups train): the val subset
+  rows fitted at ``--max-seq`` (none of whose ids, tasks or groups train;
+  each needs ``MIN_HELD_OUT`` rows for the smoke gate): the val subset
   (``--val-rows``, 64) and the probe batch (``--probe-size`` 32 rows chosen by
   ``--probe-seed``). Kept in ``run_state.json`` (``val_history``; the sets in
   ``held_out``; epoch ends in ``epochs_done``; ``progress`` has the token rate
@@ -994,6 +995,7 @@ def select_smoke(ids: Iterable[str], seed: int, n: int = SMOKE_EXAMPLES) -> list
 # quarter of the steps), and the checkpoint round trip passes.
 PROBE_SIZE = 32
 VAL_SUBSET = 64
+MIN_HELD_OUT = 8  # fewer rows in the val subset or the probe batch: the gate cannot pass
 GRAD_NORM_GROWTH_MAX = 10.0
 # Consecutive optimizer steps with a non-finite loss or grad norm (each one
 # skipped, no update) before the run stops as diverged.
@@ -1085,21 +1087,27 @@ def grad_norm_check(grad_norms: list[float | None]) -> dict[str, Any]:
 
 def smoke_verdict(losses: list[float], history: list[dict[str, Any]],
                   grad_norms: list[float | None], round_trip: bool, *,
-                  min_val_drop: float = 0.0) -> dict[str, Any]:
+                  held: dict[str, Any] | None = None, min_val_drop: float = 0.0) -> dict[str, Any]:
     """The training half of the smoke gate (see above). *history* is the
     run's ``val_history``: one entry per held-out evaluation, step 0 first,
-    with ``val_loss`` and ``probe_loss``."""
+    with ``val_loss`` and ``probe_loss``; *held* is its ``held_out`` record
+    (the set sizes: each needs MIN_HELD_OUT rows; None skips that check)."""
+    sizes = None
+    if held is not None:
+        sizes = {"val_subset": (held.get("val_subset") or {}).get("n", 0),
+                 "probe": (held.get("probe") or {}).get("n", 0), "min": MIN_HELD_OUT}
     val = held_out_check(history, "val_loss", min_drop=min_val_drop)
     probe = held_out_check(history, "probe_loss")
     probe["rows_improved"] = rows_improved(history)
     grads = grad_norm_check(grad_norms)
     fin = [x for x in losses if finite(x)]
     checks = {"val_loss_decreased": val["ok"], "probe_loss_decreased": probe["ok"],
+              "held_out_rows": sizes is None or min(sizes["val_subset"], sizes["probe"]) >= MIN_HELD_OUT,
               "losses_finite": bool(losses) and len(fin) == len(losses),
               "grad_norms_finite": grads["all_finite"], "grad_norm_stable": grads["stable"],
               "checkpoint_round_trip": bool(round_trip)}
     return {"passed": all(checks.values()), "checks": checks, "val": val, "probe": probe,
-            "grad_norm": grads,
+            "held_out_rows": sizes, "grad_norm": grads,
             "train_loss": {"steps": len(losses), "mean": sum(fin) / len(fin) if fin else None,
                            "gated": False,
                            "note": "per-step train loss is which rows a step drew: not gated"}}
@@ -1586,6 +1594,9 @@ class Trainer:
         self.run_state["held_out"] = rec
         log.info("held out: val subset %d rows, probe batch %d rows (seed %d), none in train",
                  len(self.val_ids), len(self.probe_ids), self.probe_seed)
+        if min(len(self.val_ids), len(self.probe_ids)) < MIN_HELD_OUT:
+            log.warning("held-out sets under %d rows: the smoke gate cannot pass on them",
+                        MIN_HELD_OUT)
 
     def order_report(self) -> dict[str, Any]:
         """The evidence that training sees a shuffled order: the plan's sampler
@@ -2270,7 +2281,11 @@ def main(argv: list[str] | None = None, *, backend_factory: Callable[[TrainConfi
         if a.val:
             val = make_source(argparse.Namespace(**{**vars(a), "data": a.val, "pretokenized": None}),
                               need_encoder=True)
-            val.fit(SEQ_LADDER[-1])
+            # at the run's starting length (--max-seq, unchanged by a step-down), so the
+            # held-out sets stay the same rows for the whole run: build.py's rows all fit it,
+            # and an eval forward needs far less memory than a training step at that length
+            vfit = val.fit(cfg.max_seq)
+            log.info("val: %d of %d rows fit %d tokens", vfit.kept, vfit.total, cfg.max_seq)
         only = select_smoke(source.ids(), cfg.seed) if a.smoke else None
         backend = (backend_factory or (lambda c: UnslothBackend(c)))(cfg)
         resolved = cfg.base_revision if cfg.base_revision and re.fullmatch(
@@ -2391,6 +2406,7 @@ def smoke(trainer: Trainer, a: argparse.Namespace,
     round_trip = bool(check and check["passed"])
     verdict = smoke_verdict(trainer.losses, trainer.val_history,
                             [r.grad_norm for r in trainer.records], round_trip,
+                            held=trainer.run_state.get("held_out") or {},
                             min_val_drop=a.smoke_min_drop)
     adapter = trainer.save_adapter(adapter if adapter is not None else a.out / ADAPTER_DIR)
     passed = verdict["passed"]
