@@ -112,3 +112,15 @@ Append-only, times in ET.
     The keeps that are only kept to be safe are the Gemma 4 GGUF + mmproj-BF16 (~17 GB) and Qwen3.6-27B (~16 GB). The 129 GB Hugging Face cache was not touched.
 - 2026-10-31 13:51 — **Phase 6 placement:** the merge + GGUF conversion + quantize run on the 3090 Ti host on CPU (216 GB free), from the official Qwen3.5-9B weights downloaded there by the base-provenance check. The 4090, now at 76 GiB free, is the fallback. Scoring uses whichever GPU is free (4090 until Mon 06:00 EST, else the 3090 Ti host's nightly window).
 - 2026-10-31 14:11 — **Base provenance verified.** The third-party bnb4 copy is byte-for-byte what bitsandbytes (nf4, blocksize 64, double quant) produces from official Qwen/Qwen3.5-9B @c2022362 (the tokenizer's revision): 248/248 quantized linears match on all six stored parts, and 464/464 same-dtype tensors are bit-exact. 48 fp32 tensors are bf16 in the copy, bit-exact after the cast, which the trainer applies anyway; the 15 MTP tensors aren't loaded by transformers. Recorded in PROVENANCE.json beside the copy on the 4090. The full run keeps that base. Official weights are on the 3090 Ti host for Phase 6 (19.3 GB). Calibration is at 1,614/4,653, ETA ~16:15 ET. Mini local generation: 120 rows.
+- 2026-10-31 14:42 — Calibration at 2,372/4,653: 0 errors, 3 unparseable, 0 pauses; ETA ~16:15 ET. Chain waiting. Mini local generation: 124 rows.
+- 2026-10-31 15:13 — Calibration at 3,146/4,653 (0 errors, 3 unparseable), ETA ~16:15 ET. Mini local generation: 125 rows (harvests +7, +1; uneven).
+- 2026-10-31 16:28 — **Local 27B judge calibration vs Max: 85.40% agreement (3,972/4,651 pairs; overall 95% CI ≈ 84.4–86.4) → use-local-judge**, by the operator's ≥85% rule.
+  - **Agreement:** kappa 0.54. The local judge passes 81.3% of items, Max 79.6%.
+  - **Confusion:** it passes 379 of 948 Max fails (40%) and fails 300 of 3,703 Max passes (8.1%). So it removes about 60% of what Max would remove, and about a third of the rows it drops are ones Max would keep.
+  - **Per category:**
+    - coding 85.5% [84.4, 86.5] (n=4,489): applied
+    - sentinel/daemon 85.7% [68.5, 94.3] (n=28): applied
+    - memory/wiki 83.2% (n=113): not applied
+    - other 76.2% (n=21): not applied
+  - **Process:** 193.7 min, 0 errors, 2 items still unparseable after one retry.
+  - **Round 1:** judging the unjudged v4 rows in the applied categories: coding 1,211 + daemon 459. ETA ~70 min, then rebuild and further rounds.
