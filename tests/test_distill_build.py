@@ -498,6 +498,49 @@ def test_class_and_category_caps_hold_together_and_report_what_each_dropped() ->
     assert [e.id for e in both] == [e.id for e in alone]
 
 
+def test_a_category_cap_override_raises_one_category_and_keeps_the_rest_at_the_base_cap() -> None:
+    # operator 2026-10-31: coding may go to 70% while every other category stays at 35%
+    rows = ([ex(i, "coding", f"c{i % 30}") for i in range(300)]
+            + [ex(1000 + i, "daemon", f"d{i}") for i in range(200)]
+            + [ex(2000 + i, "other", f"o{i}") for i in range(20)])
+    base, _ = build.cap_categories(rows, 0.35, "seed")
+    kept, report = build.cap_categories(rows, 0.35, "seed", {"coding": 0.7})
+    n = len(kept)
+    counts = collections.Counter(e.category for e in kept)
+    assert n > len(base)
+    assert counts["coding"] <= 0.7 * n and counts["coding"] > 0.35 * n
+    assert counts["daemon"] <= 0.35 * n  # the daemon is held at the base cap
+    assert report["daemon"]["dropped"] > 0 and report["other"]["dropped"] == 0
+    # an override at the base cap is the base cap
+    same, _ = build.cap_categories(rows, 0.35, "seed", {"coding": 0.35})
+    assert [e.id for e in same] == [e.id for e in base]
+    # cap_train passes it through and the class caps still hold
+    caps = {"reported_blocked": 0.15, "no_tool_answer": 0.20}
+    both, cats, _ = build.cap_train(rows, 0.35, caps, "seed", {"coding": 0.7})
+    assert [e.id for e in both] == [e.id for e in kept] and cats["coding"]["kept"] == counts["coding"]
+
+
+def test_cap_scan_reports_each_cap_from_the_same_split_and_what_binds() -> None:
+    train = ([ex(i, "coding", f"c{i % 30}") for i in range(300)]
+             + [ex(1000 + i, "other", f"o{i}", classes=["reported_blocked"] if i < 20 else [])
+                for i in range(60)]
+             + [ex(2000 + i, "daemon", f"d{i}") for i in range(40)])
+    val = [ex(5000 + i, "coding", f"vc{i}") for i in range(20)] + [ex(6000, "other", "vo")]
+    s = build.Settings(train_range=(150, 10000), cap_scan=("coding", (0.35, 0.5, 0.7)))
+    scan = build.cap_scan(train, val, s)
+    rows = {k: v["train"] for k, v in scan["by_cap"].items()}
+    assert list(rows) == ["0.35", "0.5", "0.7"] and rows["0.35"] < rows["0.5"] < rows["0.7"]
+    for k, v in scan["by_cap"].items():
+        assert v["category_share"]["coding"] <= float(k) + 1e-9
+        assert v["class_share"]["reported_blocked"] <= 0.15 + 1e-9
+        assert v["binding"].get("category:coding") == float(k)  # coding is over every cap here
+        assert v["source"] == {"max-golden": v["train"]} and v["label_by_source"]
+        assert v["train_size_pass"] == (v["train"] >= 150)
+    # the same numbers a build at that cap gives
+    t, *_ = build.capped_splits(train, val, s, {"coding": 0.5})
+    assert len(t) == rows["0.5"]
+
+
 def test_val_keeps_the_share_of_each_class_train_kept() -> None:
     val = ([ex(i, "other", f"b{i}", classes=["reported_blocked"]) for i in range(8)]
            + [ex(100 + i, "other", f"p{i}") for i in range(8)])
@@ -1972,6 +2015,57 @@ def test_cli_build_applies_the_default_train_source_policy(
     assert report["data_policy"]["sources"][GYM]["excluded_by_reason"] == {
         "train_source_wrong_model": 88}
     assert report["settings"]["teacher_model"] == build.TEACHER_MODEL  # fails closed
+
+
+def test_cli_coding_cap_size_floor_and_cap_scan_are_recorded(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    golden, gym_file = policy_inputs(tmp_path)
+    pack = tmp_path / "pack.json"
+    pack.write_text(json.dumps(make_pack()))
+    monkeypatch.setattr(R.Student, "load", classmethod(lambda cls, d: make_student()))
+    out = tmp_path / "out"
+
+    def run(*extra: str) -> int:
+        return build.main(["build", "--traces", str(golden), "--extra-traces", str(gym_file),
+                           "--pack", str(pack), "--tokenizer-dir", "unused",
+                           "--out", str(out), "--dry-run", "--eval-min", "1",
+                           "--val-share-range", "0", "1", "--eval-task-frac", "0.15",
+                           "--holdout-max-group-share", "0.5", "--min-presence", "0", *extra])
+
+    why = "operator 2026-10-31: first full 9B run"
+    # the default floor stays 5,000; a lower one needs its reason
+    assert run() == 1
+    report = json.loads((out / "report.json").read_text())
+    assert report["gates"]["train_size"]["range"] == [5000, 10000]
+    assert report["gates"]["train_size"]["min_reason"] is None
+    capsys.readouterr()
+    assert run("--min-train-rows", "3500") == 2
+    assert "--min-train-rows-reason" in capsys.readouterr().err
+    assert run("--min-train-rows", "20000") == 2
+    assert "above the train-range ceiling" in capsys.readouterr().err
+    # a category's own cap needs its reason; shares are checked
+    assert run("--category-cap-for", "coding=0.6") == 2
+    assert "--category-cap-reason" in capsys.readouterr().err
+    for bad in ("coding", "coding=1.5", "=0.5", "coding=x"):
+        assert run("--category-cap-for", bad, "--category-cap-reason", why) == 2
+    for bad in ("coding", "coding=", "coding=0,2"):
+        assert run("--cap-scan", bad) == 2
+    capsys.readouterr()
+    assert run("--min-train-rows", "1", "--min-train-rows-reason", why,
+               "--category-cap-for", "coding=0.6", "--category-cap-reason", why,
+               "--cap-scan", "coding=0.35,0.6") == 1  # INCOMPLETE: no spot check server
+    report = json.loads((out / "report.json").read_text())
+    g = report["gates"]
+    assert g["train_size"]["range"] == [1, 10000] and g["train_size"]["min_reason"] == why
+    assert g["train_size"]["pass"]
+    assert g["category_cap"]["caps"] == {"coding": 0.6} and g["category_cap"]["caps_reason"] == why
+    assert g["category_cap"]["pass"] and g["category_cap"]["over"] == {}
+    assert report["settings"]["category_caps"] == {"coding": 0.6}
+    assert report["settings"]["train_min_reason"] == why
+    scan = report["cap_scan"]
+    assert scan["category"] == "coding" and set(scan["by_cap"]) == {"0.35", "0.6"}
+    assert scan["by_cap"]["0.6"]["train"] == report["splits"]["train"]["rows"]
 
 
 # ── Q6b: the explicit, recorded allow for Max-derived rows to train ────────

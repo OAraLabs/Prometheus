@@ -311,7 +311,9 @@ Splits and gates
   in prose while tools were offered is not chat mode: it keeps the catalog
   (``final_answer`` flag). A tool call in a chat-mode turn is excluded
   (``call_in_chat_mode``): no tool was offered to call.
-* Category cap: no category above ``--category-cap`` (35%) of train; the
+* Category cap: no category above ``--category-cap`` (35%) of train, or above
+  its own share for a category ``--category-cap-for`` names (``coding=0.6``;
+  needs ``--category-cap-reason``, recorded in the report); the
   largest fixed point is kept, round-robin over tasks so task diversity
   survives; val keeps the same per-category share train kept, so it mirrors
   train's mix. What was dropped is reported.
@@ -321,13 +323,16 @@ Splits and gates
   (``--no-tool-answer-cap``, 20%). Applied with the category cap until both
   hold, round-robin over tasks from the seed (deterministic); val keeps the
   share of each class train kept. What each cap dropped is reported
-  (``caps.class_caps``) and gated (``class_caps``).
+  (``caps.class_caps``) and gated (``class_caps``). ``--cap-scan
+  coding=0.35,0.5`` also reports (``cap_scan``) the train/val each cap for
+  one category would give from the same split, and which cap binds.
 * Gates (in code; FAIL is reported, never worked around): no task / group /
   prefix / exact / prompt+call / generator-task hash, and no session user
   message of a final request, in two splits (whatever the rows' sources);
   every verdict row applied; nothing but the listed train sources in
   train/val (``data_policy``); train size (listed sources) in
-  ``--train-range``; val share in ``--val-share-range``; eval-tools at least
+  ``--train-range`` (its floor ``--min-train-rows``; below the default 5,000 it
+  needs ``--min-train-rows-reason``, recorded in the report); val share in ``--val-share-range``; eval-tools at least
   ``--eval-min``; max train category share ≤ cap; chat-mode, error/recovery and
   compacted-history examples present in train. The byte-for-byte spot check
   needs a server: ``--spot-check-server`` runs it on the written train.jsonl
@@ -1635,11 +1640,14 @@ def round_robin(examples: list[Example], seed: str) -> list[Example]:
     return out
 
 
-def cap_categories(examples: list[Example], cap: float, seed: str
+def cap_categories(examples: list[Example], cap: float, seed: str,
+                   caps: dict[str, float] | None = None
                    ) -> tuple[list[Example], dict[str, dict[str, int]]]:
-    """Keep the largest set in which no category exceeds *cap* of the total.
+    """Keep the largest set in which no category exceeds its cap of the total:
+    *caps*' share for a category it names (``--category-cap-for``, e.g. a raised
+    coding cap), *cap* for every other.
 
-    The kept total T is the largest fixed point of T = sum_c min(n_c, floor(cap*T)),
+    The kept total T is the largest fixed point of T = sum_c min(n_c, floor(cap_c*T)),
     reached by iterating down from the full size. Within a capped category the
     rows kept are a round-robin over its tasks.
     """
@@ -1647,9 +1655,10 @@ def cap_categories(examples: list[Example], cap: float, seed: str
     for ex in examples:
         by_cat[ex.category].append(ex)
     n = {c: len(v) for c, v in by_cat.items()}
+    cap_of = {c: (caps or {}).get(c, cap) for c in n}
     total = sum(n.values())
     while True:
-        keep = {c: min(k, math.floor(cap * total)) for c, k in n.items()}
+        keep = {c: min(k, math.floor(cap_of[c] * total)) for c, k in n.items()}
         nxt = sum(keep.values())
         if nxt == total:
             break
@@ -1667,6 +1676,9 @@ def cap_categories(examples: list[Example], cap: float, seed: str
 #: "could not be done here, said so" reply, and an agent turn that answered without a
 #: tool. Right in moderation; never more than these shares of train.
 CLASS_CAPS = {"reported_blocked": 0.15, "no_tool_answer": 0.20}
+
+#: The Phase 3 train-size floor; a lower one (--min-train-rows) is recorded with its reason
+DEFAULT_MIN_TRAIN_ROWS = 5000
 
 
 def row_classes(meta: dict[str, Any]) -> list[str]:
@@ -1703,9 +1715,11 @@ def cap_classes(examples: list[Example], caps: dict[str, float], seed: str
     return kept, report
 
 
-def cap_train(examples: list[Example], category_cap: float, class_caps: dict[str, float], seed: str
+def cap_train(examples: list[Example], category_cap: float, class_caps: dict[str, float], seed: str,
+              category_caps: dict[str, float] | None = None
               ) -> tuple[list[Example], dict[str, dict[str, int]], dict[str, Any]]:
-    """Train under the class caps and the category cap together: each applied in
+    """Train under the class caps and the category caps together (*category_caps*
+    for the categories it names, *category_cap* for the rest): each applied in
     turn until neither drops a row (a category cap can raise a class's share and
     the other way round). Returns (kept, category report, class report); the
     category report's ``dropped`` counts the rows the category cap dropped (val
@@ -1717,7 +1731,7 @@ def cap_train(examples: list[Example], category_cap: float, class_caps: dict[str
         after_class, _ = cap_classes(kept, class_caps, seed)
         ids = {id(e) for e in after_class}
         why.update({id(e): "class_cap" for e in kept if id(e) not in ids})
-        after_cat, _ = cap_categories(after_class, category_cap, seed)
+        after_cat, _ = cap_categories(after_class, category_cap, seed, category_caps)
         ids = {id(e) for e in after_cat}
         why.update({id(e): "category_cap" for e in after_class if id(e) not in ids})
         done = len(after_cat) == len(after_class)
@@ -1880,6 +1894,14 @@ def split_summary(rows: list[Example], limit: int) -> dict[str, Any]:
 class Settings:
     max_tokens: int = LIMIT_TOKENS
     category_cap: float = 0.35
+    # Per-category caps that replace category_cap for the categories named
+    # (--category-cap-for; operator 2026-10-31: coding up to 70% for the first
+    # full 9B run), with the recorded reason (--category-cap-reason)
+    category_caps: dict[str, float] = field(default_factory=dict)
+    category_caps_reason: str | None = None
+    # Report-only (--cap-scan): train/val under each of these caps for one
+    # category, the other caps unchanged, from the same split
+    cap_scan: tuple[str, tuple[float, ...]] | None = None
     # CLASS_CAPS: each class's largest share of train (teacher_gen writes every verified row)
     class_caps: dict[str, float] = field(default_factory=lambda: dict(CLASS_CAPS))
     val_frac: float = 0.03
@@ -1916,7 +1938,9 @@ class Settings:
     # 2026-10-13 Token-Plan incident session (OPEN-QUESTIONS #6). The allow
     # needs a list. The report records how many, never the ids.
     exclude_sessions: tuple[str, ...] = ()
-    train_range: tuple[int, int] = (5000, 10000)
+    train_range: tuple[int, int] = (DEFAULT_MIN_TRAIN_ROWS, 10000)
+    # Why train_range's floor is below DEFAULT_MIN_TRAIN_ROWS (--min-train-rows-reason)
+    train_min_reason: str | None = None
     val_share_range: tuple[float, float] = (0.02, 0.05)
     eval_min: int = 200
     min_presence: int = 1
@@ -1924,6 +1948,64 @@ class Settings:
     prewindow_chars_per_token: int = 6
     split_turns: bool = True
     limit: int | None = None
+
+
+def capped_splits(train_all: list[Example], val_all: list[Example], s: Settings,
+                  category_caps: dict[str, float]) -> tuple[Any, ...]:
+    """Train under the category and class caps; val keeps the share of each
+    category and class train kept. (train, train caps, train class caps, val,
+    val caps, val class caps)."""
+    train, train_caps, train_class_caps = cap_train(train_all, s.category_cap, s.class_caps, s.seed,
+                                                    category_caps)
+    ratios = {c: 1 - r["dropped"] / r["before"] for c, r in train_caps.items() if r["before"]}
+    val, val_caps = apply_ratios(val_all, ratios, s.seed)
+    val, val_class_caps = apply_class_ratios(val, class_ratios(train_class_caps, s.class_caps), s.seed)
+    return train, train_caps, train_class_caps, val, val_caps, val_class_caps
+
+
+def cap_of(s: Settings, category: str) -> float:
+    """The category's cap: its --category-cap-for share, else --category-cap."""
+    return s.category_caps.get(category, s.category_cap)
+
+
+def cap_scan(train_all: list[Example], val_all: list[Example], s: Settings) -> dict[str, Any]:
+    """--cap-scan: what train and val would be under each scanned cap for one
+    category (the other caps as set), from this build's one split. Counts only.
+    ``binding`` names what dropped rows: a category cap (and its share) or a
+    class cap; none means the pool, not a cap, limits the size."""
+    assert s.cap_scan is not None
+    category, values = s.cap_scan
+    out: dict[str, Any] = {"category": category, "train_min": s.train_range[0], "by_cap": {}}
+    for v in values:
+        caps = {**s.category_caps, category: v}
+        tr, tc, tcl, va, _, _ = capped_splits(train_all, val_all, s, caps)
+        n = len(tr)
+        cats = collections.Counter(e.category for e in tr)
+        src = collections.Counter(e.source for e in tr)
+        binding = {f"category:{c}": caps.get(c, s.category_cap)
+                   for c, r in sorted(tc.items()) if r["dropped"]}
+        binding |= {f"class:{c}": s.class_caps[c] for c in sorted(s.class_caps)
+                    if tcl[c]["dropped_by_class_cap"]}
+        out["by_cap"][f"{v:g}"] = {
+            "train": n, "val": len(va),
+            "val_share": round(len(va) / (n + len(va)), 4) if (n or va) else 0.0,
+            "train_size_pass": s.train_range[0] <= n <= s.train_range[1],
+            "category": dict(cats.most_common()),
+            "category_share": {c: round(k / n, 4) for c, k in cats.most_common()} if n else {},
+            "class_share": {c: tcl[c]["share"] for c in sorted(s.class_caps)},
+            "dropped": {"category_cap": {c: r["dropped"] for c, r in sorted(tc.items()) if r["dropped"]},
+                        "class_cap": {c: tcl[c]["dropped_by_class_cap"] for c in sorted(s.class_caps)
+                                      if tcl[c]["dropped_by_class_cap"]}},
+            "binding": binding,
+            "presence": {k: sum(e.flags[k] for e in tr)
+                         for k in ("chat_mode", "error_recovery", "compacted")},
+            "source": dict(src.most_common()),
+            "max_derived": sum(1 for e in tr if e.max_derived),
+            "label_by_source": {f"{k[0]}/{k[1]}": c for k, c in sorted(
+                collections.Counter((e.source, e.label) for e in tr).items())},
+            "val_source": dict(collections.Counter(e.source for e in va).most_common()),
+        }
+    return out
 
 
 class Builder:
@@ -1961,6 +2043,7 @@ class Builder:
         self.index_disagree: collections.Counter = collections.Counter()
         self.lcm_match: collections.Counter = collections.Counter()
         self.final: dict[str, list[Example]] = {k: [] for k in SPLITS}
+        self.cap_scan: dict[str, Any] | None = None
         self.spool_path = spool
         self._spool = spool.open("wb") if spool else None
         self._reader: Any = None
@@ -2414,10 +2497,9 @@ class Builder:
         train_all = [e for e in pool if e.split == "train" and e.train_ok]
         val_all = [e for e in pool if e.split == "val" and e.train_ok]
         held = [e for e in pool if e.split == "eval-tools"]
-        train, train_caps, train_class_caps = cap_train(train_all, s.category_cap, s.class_caps, s.seed)
-        ratios = {c: 1 - r["dropped"] / r["before"] for c, r in train_caps.items() if r["before"]}
-        val, val_caps = apply_ratios(val_all, ratios, s.seed)
-        val, val_class_caps = apply_class_ratios(val, class_ratios(train_class_caps, s.class_caps), s.seed)
+        train, train_caps, train_class_caps, val, val_caps, val_class_caps = capped_splits(
+            train_all, val_all, s, s.category_caps)
+        self.cap_scan = cap_scan(train_all, val_all, s) if s.cap_scan else None
         eval_rows = sample_per_task(held, s.eval_max_per_task, s.seed)
         fail_used, fail_dropped = [], 0
         for ex in self.fails:
@@ -2500,6 +2582,8 @@ class Builder:
                          "pass": not any(vg.values())}
         g["data_policy"] = self.policy_gate()
         g["train_size"] = {"value": len(tr), "range": list(s.train_range),
+                           # a floor below DEFAULT_MIN_TRAIN_ROWS, and the reason recorded
+                           "min_reason": s.train_min_reason,
                            "by_source": dict(collections.Counter(e.source for e in tr)
                                              .most_common()),
                            "pass": s.train_range[0] <= len(tr) <= s.train_range[1]}
@@ -2509,8 +2593,15 @@ class Builder:
         g["eval_tools_size"] = {"value": len(ev), "min": s.eval_min, "pass": len(ev) >= s.eval_min}
         cats = collections.Counter(e.category for e in tr)
         top = max(cats.values()) / len(tr) if tr else 0.0
+        over = {c: round(k / len(tr), 4) for c, k in sorted(cats.items())
+                if k / len(tr) > cap_of(s, c) + 1e-9} if tr else {}
         g["category_cap"] = {"max_share": round(top, 4), "cap": s.category_cap,
-                             "pass": bool(tr) and top <= s.category_cap + 1e-9}
+                             # categories with their own cap (--category-cap-for) and why
+                             "caps": dict(sorted(s.category_caps.items())),
+                             "caps_reason": s.category_caps_reason,
+                             "share": {c: round(k / len(tr), 4) for c, k in cats.most_common()}
+                             if tr else {},
+                             "over": over, "pass": bool(tr) and not over}
         shares = {c: round(sum(1 for e in tr if c in e.classes) / len(tr), 4) if tr else 0.0
                   for c in sorted(s.class_caps)}
         g["class_caps"] = {"share": shares, "cap": dict(sorted(s.class_caps.items())),
@@ -2675,6 +2766,7 @@ class Builder:
                     e.split or "dropped" for e in all_built if e.longctx)),
             },
             "splits": {k: split_summary(v, s.max_tokens) for k, v in self.final.items()},
+            **({"cap_scan": self.cap_scan} if self.cap_scan else {}),
             "caps": {"train": split_info["train_caps"], "val": split_info["val_caps"],
                      "class_caps": {"train": split_info["train_class_caps"],
                                     "val": split_info["val_class_caps"]}},
@@ -2876,10 +2968,16 @@ def cmd_build(a: argparse.Namespace) -> int:
         print(f"error: {problem}", file=sys.stderr)
         return 2
     for flag, cap in (("--reported-blocked-cap", a.reported_blocked_cap),
-                      ("--no-tool-answer-cap", a.no_tool_answer_cap)):
+                      ("--no-tool-answer-cap", a.no_tool_answer_cap),
+                      ("--category-cap", a.category_cap)):
         if not 0.0 <= cap <= 1.0:
             print(f"error: {flag} must be a share between 0 and 1, not {cap:g}", file=sys.stderr)
             return 2
+    try:
+        category_caps, scan, train_range = cap_and_size_args(a)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     excluded_sessions: set[str] = set()
     if a.exclude_sessions:
         try:
@@ -2935,7 +3033,9 @@ def cmd_build(a: argparse.Namespace) -> int:
         exclude_bad_turns=a.exclude_bad_turns,
         allow_max_derived=a.allow_max_derived, max_derived_approval=a.max_derived_approval,
         exclude_sessions=tuple(sorted(excluded_sessions)),
-        train_range=(a.train_range[0], a.train_range[1]),
+        train_range=train_range, train_min_reason=(a.min_train_rows_reason or "").strip() or None,
+        category_caps=category_caps, category_caps_reason=(a.category_cap_reason or "").strip() or None,
+        cap_scan=scan,
         val_share_range=(a.val_share_range[0], a.val_share_range[1]), eval_min=a.eval_min,
         min_presence=a.min_presence, lcm_max_messages=a.lcm_max_messages,
         prewindow_chars_per_token=a.prewindow_chars_per_token,
@@ -3001,6 +3101,48 @@ def cmd_build(a: argparse.Namespace) -> int:
                         for k, v in gates.items()}
     print(json.dumps(summary, indent=1))
     return 0 if gates["overall"] == "PASS" else 1
+
+
+def parse_share(text: str, flag: str) -> float:
+    try:
+        v = float(text)
+    except ValueError:
+        raise ValueError(f"{flag}: {text!r} is not a share between 0 and 1") from None
+    if not 0.0 < v <= 1.0:
+        raise ValueError(f"{flag}: {text!r} is not a share between 0 and 1")
+    return v
+
+
+def cap_and_size_args(a: argparse.Namespace
+                      ) -> tuple[dict[str, float], tuple[str, tuple[float, ...]] | None, tuple[int, int]]:
+    """--category-cap-for, --cap-scan and --min-train-rows, checked: (category
+    caps, cap scan, train range). A category cap or a floor below
+    DEFAULT_MIN_TRAIN_ROWS needs its recorded reason (ValueError otherwise)."""
+    caps: dict[str, float] = {}
+    for item in a.category_cap_for or []:
+        cat, sep, val = item.partition("=")
+        if not sep or not cat.strip():
+            raise ValueError(f"--category-cap-for wants CATEGORY=SHARE, not {item!r}")
+        caps[cat.strip()] = parse_share(val, "--category-cap-for")
+    if caps and not (a.category_cap_reason or "").strip():
+        raise ValueError("--category-cap-for needs --category-cap-reason (recorded in the report)")
+    scan = None
+    if a.cap_scan:
+        cat, sep, vals = a.cap_scan.partition("=")
+        values = tuple(parse_share(v, "--cap-scan") for v in vals.split(",") if v.strip())
+        if not sep or not cat.strip() or not values:
+            raise ValueError(f"--cap-scan wants CATEGORY=S1,S2,..., not {a.cap_scan!r}")
+        scan = (cat.strip(), values)
+    lo, hi = a.train_range
+    if a.min_train_rows is not None:
+        lo = a.min_train_rows
+        if lo > hi:
+            raise ValueError(f"--min-train-rows {lo} is above the train-range ceiling {hi}")
+    if a.min_train_rows is not None and lo < DEFAULT_MIN_TRAIN_ROWS \
+            and not (a.min_train_rows_reason or "").strip():
+        raise ValueError(f"--min-train-rows {lo} is below {DEFAULT_MIN_TRAIN_ROWS}: "
+                         "needs --min-train-rows-reason (recorded in the report)")
+    return caps, scan, (lo, hi)
 
 
 def max_allow_problem(a: argparse.Namespace) -> str | None:
@@ -3250,6 +3392,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bd.add_argument("--catalog", choices=("auto", "stubs", "full"), default="auto")
     bd.add_argument("--max-tokens", type=int, default=LIMIT_TOKENS)
     bd.add_argument("--category-cap", type=float, default=0.35)
+    bd.add_argument("--category-cap-for", action="append", metavar="CATEGORY=SHARE",
+                    help="a category's own cap in place of --category-cap (e.g. coding=0.6); "
+                         "needs --category-cap-reason")
+    bd.add_argument("--category-cap-reason", metavar="TEXT",
+                    help="why --category-cap-for is set (recorded in the report)")
+    bd.add_argument("--cap-scan", metavar="CATEGORY=S1,S2,...",
+                    help="report-only: train/val under each cap for CATEGORY (report.cap_scan)")
     bd.add_argument("--reported-blocked-cap", type=float, default=CLASS_CAPS["reported_blocked"],
                     help="largest share of train for rows the judge passed as reported_blocked")
     bd.add_argument("--no-tool-answer-cap", type=float, default=CLASS_CAPS["no_tool_answer"],
@@ -3290,7 +3439,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="an earlier eval set (eval-tools.jsonl / val-cases.jsonl): its tasks "
                          "stay in eval-tools, whole groups")
     bd.add_argument("--exclude-bad-turns", action="store_true")
-    bd.add_argument("--train-range", type=int, nargs=2, default=[5000, 10000])
+    bd.add_argument("--train-range", type=int, nargs=2, default=[DEFAULT_MIN_TRAIN_ROWS, 10000])
+    bd.add_argument("--min-train-rows", type=int, metavar="N",
+                    help=f"the train-size floor (default {DEFAULT_MIN_TRAIN_ROWS}); below it needs "
+                         "--min-train-rows-reason")
+    bd.add_argument("--min-train-rows-reason", metavar="TEXT",
+                    help="why the floor is below the default (recorded in the report)")
     bd.add_argument("--val-share-range", type=float, nargs=2, default=[0.02, 0.05])
     bd.add_argument("--eval-min", type=int, default=200)
     bd.add_argument("--min-presence", type=int, default=1)
