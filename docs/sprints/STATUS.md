@@ -1,13 +1,14 @@
 # Distillation + flywheel — status
 
-_Updated 2026-10-30 20:09 ET. Refreshed on every check-in. Details: `DISTILL-LOG.md`; decisions: `DISTILL-OPEN-QUESTIONS.md`._
+_Updated 2026-10-30 20:51 ET. Refreshed on every check-in. Details: `DISTILL-LOG.md`; decisions: `DISTILL-OPEN-QUESTIONS.md`._
 
 ## In one paragraph
 
-The groundwork is done and tested, but no model has been trained yet. Nothing has used a GPU so far. Tonight a
-read-only baseline of the current local model (Saluki) runs on the 3090 Ti, gently, around its health checks. After
-that, the 3090 Ti switches to "flywheel" mode: a local Qwen3.8-27B teacher generates new practice tasks, because the
-existing Max traces can't be used for training. Then the 9B student trains on that. The 4090 is left alone.
+No model has been trained yet, and no GPU has been used so far. Tonight (01:00–07:00) both GPUs start work. The 3090 Ti
+runs a gentle read-only baseline of Saluki. The 4090 rehearses its stop/restore round trip, then runs the base-9B
+baseline and the 27B feasibility test, and its business model server is restored and checked by 07:00. From Saturday
+morning the 3090 Ti switches to flywheel mode: the daemon uses Max, and a local Qwen3.8-27B teacher generates practice
+tasks built from your real task patterns. That starts after an IQ3-vs-Q4 teacher quality test.
 
 ## Done
 
@@ -42,10 +43,16 @@ existing Max traces can't be used for training. Then the 9B student trains on th
 - **Your extra items:** the confidence-interval long-context gate, the task generator built from real task patterns, a
   real tiny-model quantize run, and flywheel end-to-end tests with this week's Monday reviewer file.
 
+## Your approvals in effect
+
+- 3090 Ti: swap windows (continuous until Sun 18:00, then nightly 01:00–07:00); daemon on Max during windows (interactive only).
+- 4090: nightly 01:00–07:00 only; notify path installed; restore + tunnel check at every window end.
+- Ollama on the 3090 Ti may be stopped in nightly windows only, if the bigger teacher quant wins.
+- Long-context gate now uses confidence intervals (Q8).
+
 ## Blocked / waiting on you
 
 - **Training on the existing Max traces:** on hold until you decide (open question 6).
-- **4090:** unchanged per your call. No GPU work there.
 - **4060 Ti box:** still no SSH.
 
 ## Next
