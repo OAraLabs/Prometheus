@@ -1017,3 +1017,47 @@ def test_dry_run_shows_the_smoke_first_and_ab_off(box: Box) -> None:
     assert "[     ok] Max-derived approval flag passed" in out
     assert "--stop-at <time box end>" in out and "--i-have-operator-approval-for-max-derived-data" in out
     assert box.log("smoke-calls.log") == [] and not (box.d / "phase5").exists()
+
+
+# ---------------------------------------------------------------------------
+# continuous window (DJR_WINDOW_UNTIL) and DJR_ONLY
+# ---------------------------------------------------------------------------
+
+
+def _hours_not_now() -> dict[str, str]:
+    later = (time.localtime().tm_hour + 2) % 24
+    return {"DJR_ANYTIME": "0", "DJR_GATES": "0", "DJR_WINDOW_START": f"{later:02d}:00",
+            "DJR_WINDOW_END": f"{(later + 1) % 24:02d}:00" if later != 23 else "23:59"}
+
+
+def test_a_continuous_window_lifts_the_nightly_hours_and_the_7h_cap(box: Box) -> None:
+    now = int(time.time())
+    env = {**_hours_not_now(), "DJR_ONLY": "base-9b-baseline"}
+    cp = box.run(stop_in=120, env=env)
+    assert cp.returncode == 2 and "outside the window" in box.progress()["stop_reason"]
+    # open until well after a stop-at 8 h away: runs
+    cp = box.run(stop_in=8 * 3600, env={**env, "DJR_WINDOW_UNTIL": str(now + 9 * 3600)})
+    assert cp.returncode == 0, cp.stdout[-3000:]
+    assert [s["name"] for s in box.progress()["steps"]] == ["base-9b-baseline"]
+
+
+def test_a_continuous_window_refuses_a_stop_at_after_its_end(box: Box) -> None:
+    now = int(time.time())
+    cp = box.run(stop_in=3600, env={**_hours_not_now(), "DJR_WINDOW_UNTIL": str(now + 600)})
+    assert cp.returncode == 2 and "after the continuous window's end" in box.progress()["stop_reason"]
+    # a continuous window that already ended: the nightly hours apply again
+    cp = box.run(stop_in=120, env={**_hours_not_now(), "DJR_WINDOW_UNTIL": str(now - 60)})
+    assert cp.returncode == 2 and "outside the window" in box.progress()["stop_reason"]
+
+
+def test_only_limits_the_queue_and_refuses_unknown_names(box: Box) -> None:
+    _smoke_inputs(box, DJR_SMOKE_MAX_MIN="1")
+    cp = box.run(stop_in=120, env={"DJR_ONLY": "train-smoke"})
+    assert cp.returncode == 0, cp.stdout[-3000:]
+    assert [s["name"] for s in box.progress()["steps"]] == ["train-smoke"]
+    assert box.step("train-smoke")["status"] == "done"
+    assert box.log("server-starts.log") == []
+    cp = box.run(stop_in=120, env={"DJR_ONLY": "train-smoke,full-train"})
+    assert cp.returncode == 2 and "unknown steps: full-train" in box.progress()["stop_reason"]
+    dry = box.run(execute=False, stop_in=None, env={"DJR_ONLY": "train-smoke"})
+    assert "queue limited to DJR_ONLY: train-smoke" in dry.stdout

@@ -91,8 +91,9 @@ stop, never a crash: no context step-down, no failure counted. A crashed
 earlier run's processes are found through the PID files in ``DJR_RUN`` and
 stopped first. Every process it starts has core dumps off (RLIMIT_CORE 0).
 
-Refuses to start (``--execute``) outside ``DJR_WINDOW_START``-``DJR_WINDOW_END``,
-with the NO-SWAPS flag present, while the production unit is active, with the
+Refuses to start (``--execute``) outside ``DJR_WINDOW_START``-``DJR_WINDOW_END``
+(unless a continuous window ``DJR_WINDOW_UNTIL``, epoch seconds, is still open: then
+stop-at must be by its end and the 7 h stop-at cap is off), with the NO-SWAPS flag present, while the production unit is active, with the
 GPU holding more than ``DJR_GPU_MAX_USED_MIB``, with the port taken, or under the
 disk floor; and (``DJR_GATES``, on unless ``DJR_ANYTIME``) unless the last
 rehearsal PASSED (``DJR_REHEARSAL_LAST``) and the dead-man restore timer
@@ -101,6 +102,8 @@ launched only by the window start (window_start.sh), which passes the same
 settings. GPU-holding children run in ``distill-*`` systemd scopes when
 ``systemd-run`` works, so a ``setups.py apply business`` restore can stop them
 even if this runner is gone.
+
+``DJR_ONLY`` (comma-separated step names) limits the queue to those steps.
 
 Progress: ``$DJR_LOGS/progress.json`` (schema ``distill-tower-runner/1``),
 rewritten atomically on every change. Logs: ``$DJR_LOGS/<run id>/``.
@@ -171,6 +174,12 @@ DEFAULTS: Dict[str, str] = {
     "DJR_WINDOW_END": "07:00",
     "DJR_STOP_AT": "06:35",
     "DJR_ANYTIME": "0",          # tests only: skip the window-hours check
+    # a continuous window (operator 2026-10-31: the 4090 until Mon 2026-11-02 11:00 UTC): epoch seconds.
+    # Before it, the DJR_WINDOW_START/END hours and the 7 h stop-at cap do not apply; stop-at must be
+    # no later than it. Empty or past: the nightly hours apply as before.
+    "DJR_WINDOW_UNTIL": "",
+    # comma-separated step names: run only these (empty: the whole queue)
+    "DJR_ONLY": "",
     "DJR_FEAS_RESERVE_MIN": "75",
     "DJR_FEAS_SEQS": "16384,12288,8192,4096",
     "DJR_FEAS_CHILD_S": "1800",  # feasibility_27b.CHILD_TIMEOUT_S
@@ -234,6 +243,8 @@ STOP_REASONS = ("sigterm", "no-swaps", "production-unit-active", "disk-floor", "
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 SET_RETRIES = 3     # score.py passes per set that may end with errors before it is left as is
 STEP_FAILURES = 2   # a step that failed this often is skipped until someone looks
+KNOWN_STEPS = ("train-smoke", "teacher-ab", "base-9b-baseline", "qwen38-27b-feasibility",
+               "qwen38-27b-baseline", "glimmer-30b-baseline")  # DJR_ONLY must name these
 
 # Rough speeds for the plan's time estimate only (RTX 4090; see DISTILL notes):
 # prefill tok/s at short depth, decode tok/s, the depth at which attention costs as
@@ -302,6 +313,9 @@ class Cfg:
         self.window = (raw["DJR_WINDOW_START"], raw["DJR_WINDOW_END"])
         self.stop_at_raw = raw["DJR_STOP_AT"]
         self.anytime = raw["DJR_ANYTIME"] == "1"
+        until = raw["DJR_WINDOW_UNTIL"].strip()
+        self.window_until = float(until) if until else None
+        self.only = [x.strip() for x in raw["DJR_ONLY"].split(",") if x.strip()]
         self.feas_reserve = float(raw["DJR_FEAS_RESERVE_MIN"]) * 60
         self.feas_seqs = [int(s) for s in raw["DJR_FEAS_SEQS"].split(",") if s.strip()]
         self.feas_child_s = float(raw["DJR_FEAS_CHILD_S"])
@@ -1142,7 +1156,7 @@ class Runner:
             {"name": "train-smoke", "kind": "train", "out": "base-9b/train-smoke-max-derived",
              "min_s": self.cfg.smoke_min_s, "must": False},
         ] if self.cfg.smoke else []
-        return smoke + ab + [
+        queue = smoke + ab + [
             {"name": "base-9b-baseline", "kind": "baseline", "label": "base-9b", "out": "base-9b/baseline",
              "find": find_9b, "fixed_ctx": 262144, "ub": self.cfg.ub_9b, "min_s": self.cfg.min_9b_s,
              "must": True},
@@ -1156,6 +1170,9 @@ class Runner:
              "ub": self.cfg.ub_bake, "min_s": self.cfg.min_bake_s, "must": False,
              "optional_model": True},
         ]
+        if self.cfg.only:
+            queue = [s for s in queue if s["name"] in self.cfg.only]
+        return queue
 
     def reserve_after(self, steps: List[Dict[str, Any]], i: int) -> float:
         """Time to keep for later must-run steps that are still to do."""
@@ -1983,7 +2000,11 @@ def dry_run(cfg: Cfg, stop_at: float) -> int:
     print("tower job runner: DRY RUN (nothing is started or written)")
     ws, we = cfg.window
     h = datetime.fromtimestamp(t)
-    in_window = cfg.anytime or (parse_hhmm(ws) <= (h.hour, h.minute) < parse_hhmm(we))
+    in_window = cfg.anytime or continuous(cfg, t) or (parse_hhmm(ws) <= (h.hour, h.minute) < parse_hhmm(we))
+    if continuous(cfg, t):
+        ws, we = "continuous", f"until {iso(cfg.window_until)}"
+    if cfg.only:
+        print(f"queue limited to DJR_ONLY: {', '.join(cfg.only)}")
     print(f"now {iso(t)}; stop-at {iso(stop_at)}; window {ws}-{we}"
           + ("" if in_window else " (--execute would refuse now: outside the window)"))
     print("checks:")
@@ -2433,10 +2454,22 @@ def no_core_dumps() -> None:
         pass
 
 
+def continuous(cfg: Cfg, t: float) -> bool:
+    """A continuous window (DJR_WINDOW_UNTIL) is open at *t*."""
+    return cfg.window_until is not None and t < cfg.window_until
+
+
 def refuse_reason(cfg: Cfg, t: float, stop_at: float) -> Optional[str]:
     h = datetime.fromtimestamp(t)
     ws, we = cfg.window
-    if not cfg.anytime:
+    if cfg.only:
+        unknown = [n for n in cfg.only if n not in KNOWN_STEPS]
+        if unknown:
+            return f"DJR_ONLY names unknown steps: {', '.join(unknown)}"
+    if cfg.window_until is not None and continuous(cfg, t):
+        if stop_at > cfg.window_until:
+            return f"stop-at {iso(stop_at)} is after the continuous window's end {iso(cfg.window_until)}"
+    elif not cfg.anytime:
         if not (parse_hhmm(ws) <= (h.hour, h.minute) < parse_hhmm(we)):
             return f"outside the window {ws}-{we} (now {h:%H:%M})"
         end = h.replace(hour=parse_hhmm(we)[0], minute=parse_hhmm(we)[1], second=0, microsecond=0)
@@ -2444,7 +2477,7 @@ def refuse_reason(cfg: Cfg, t: float, stop_at: float) -> Optional[str]:
             return f"stop-at {iso(stop_at)} is after the window end {we}"
     if stop_at - t < cfg.min_run_s:
         return f"stop-at {iso(stop_at)} is less than {cfg.min_run_s / 60:.0f} min away"
-    if stop_at - t > 7 * 3600:
+    if stop_at - t > 7 * 3600 and not continuous(cfg, t):
         return f"stop-at {iso(stop_at)} is more than 7 h away"
     for p in cfg.no_swaps:
         if os.path.exists(p):
