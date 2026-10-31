@@ -747,9 +747,17 @@ def switch_hooks(setup: dict[str, Any], host: str, phase: str) -> list[str]:
     return out
 
 
+# A host's own window scripts (the 4090's data/distill/window/) arm their dead-man under this suffix, so a
+# Mac-side `setups.py deadman` can neither re-arm nor cancel it. It restores with `apply business` too.
+WINDOW_DEADMAN_SUFFIX = "-window"
+
+
 def deadman_armed(live: dict[str, Any], host: str) -> bool:
-    """Whether the probe saw this host's dead-man timer active (armed, waiting to restore)."""
-    return (live.get("deadman_timer_states") or {}).get(f"{DEADMAN_PREFIX}{host}.timer") == "active"
+    """Whether the probe saw this host's dead-man timer active (armed, waiting to restore): the one
+    ``setups.py deadman`` arms (``distill-deadman-<host>``) or the host window's own
+    (``distill-deadman-<host>-window``)."""
+    states = live.get("deadman_timer_states") or {}
+    return any(states.get(f"{DEADMAN_PREFIX}{host}{sfx}.timer") == "active" for sfx in ("", WINDOW_DEADMAN_SUFFIX))
 
 
 def restore_gaps(switching: list[dict[str, Any]], restore: dict[str, Any] | None,
@@ -1314,7 +1322,8 @@ def apply_once(setup: dict[str, Any], keys: list[str], runner: Runner, hosts: Ho
     unarmed = [h for h in keys if h in why and not deadman_armed(live[h], h)]
     if unarmed:
         gaps = [f"{h}: {why[h]}, but no dead-man restore is armed "
-                f"({DEADMAN_PREFIX}{h}.timer is not active): run `setups.py deadman {RESTORE_SETUP} --at "
+                f"({DEADMAN_PREFIX}{h}.timer and {DEADMAN_PREFIX}{h}{WINDOW_DEADMAN_SUFFIX}.timer are not active): "
+                f"run `setups.py deadman {RESTORE_SETUP} --at "
                 "<window end> --execute` first" for h in unarmed]
         if execute:
             return 2, gaps

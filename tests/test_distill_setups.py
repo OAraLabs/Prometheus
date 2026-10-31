@@ -323,6 +323,11 @@ def test_probe_main_lists_jobs_classifies_by_uid_and_reads_the_last_apply(tmp_pa
     assert out["deadman_units"] == {"distill-deadman-alpha.service": "failed"}
     assert out["deadman_timer_states"] == {"distill-deadman-alpha.timer": "active"}
     assert S.deadman_armed(out, "alpha") and not S.deadman_armed(out, "beta")
+    # the host window's own dead-man (the 4090 window scripts) counts too; other names never do
+    assert S.deadman_armed({"deadman_timer_states": {"distill-deadman-alpha-window.timer": "active"}}, "alpha")
+    for states in ({"distill-deadman-alpha-window.timer": "inactive"}, {"distill-deadman-alpha-x.timer": "active"},
+                   {"distill-deadman-alphabeta.timer": "active"}, {"distill-deadman-beta-window.timer": "active"}):
+        assert not S.deadman_armed({"deadman_timer_states": states}, "alpha"), states
     assert out["units"]["llm.service"]["load"] == "loaded"
     assert out["last_apply"]["result"] == "failed"
     assert "hf_SECRET" not in json.dumps(out)
@@ -655,9 +660,10 @@ class FakeRunner:
     state: host -> {"units": {unit: (active, vram) or (active, vram, healthy)}}.
     """
 
-    def __init__(self, state, extra_procs=None, hook_rc=None, python="python3", armed=None):
+    def __init__(self, state, extra_procs=None, hook_rc=None, python="python3", armed=None, deadman_suffix=""):
         self.state = state
         self.armed = set(state) if armed is None else set(armed)  # hosts with a dead-man timer waiting
+        self.deadman_suffix = deadman_suffix  # "-window": the host window's own dead-man name
         self.extra_procs = extra_procs or {}
         self.calls = []
         self.shell = []
@@ -696,7 +702,8 @@ class FakeRunner:
                 a, _, healthy = self._unit(host, u)
                 info[u] = unit_info(active=a, ok=a == "active" and healthy)
             lv = live_host(procs, info, used=sum(p["vram_mib"] for p in procs))
-            lv["deadman_timer_states"] = {f"distill-deadman-{host}.timer": "active"} if host in self.armed else {}
+            lv["deadman_timer_states"] = ({f"distill-deadman-{host}{self.deadman_suffix}.timer": "active"}
+                                          if host in self.armed else {})
             out = json.dumps(lv)
             return subprocess.CompletedProcess(argv, 0, out + "\n", "")
         if argv[0] == "sh":
@@ -981,6 +988,17 @@ def test_a_swap_that_stops_a_business_unit_needs_an_armed_dead_man(tmp_path, cap
     runner.calls.clear()
     assert S.cmd_apply(args_for(tmp_path, "flywheel", True), HOSTS, runner) == 0
     assert not [c for c in runner.calls if c[1][2] == "stop"]
+
+
+def test_the_host_windows_own_dead_man_lets_a_swap_execute(tmp_path):
+    # The 4090 window arms distill-deadman-<host>-window (a Mac-side `setups.py deadman` cannot touch it);
+    # its rehearsal and window_start run `apply flywheel --execute` with only that one armed.
+    write_setups(tmp_path)
+    state = business_state()
+    runner = FakeRunner(state, deadman_suffix="-window")
+    assert S.cmd_apply(args_for(tmp_path, "flywheel", True), HOSTS, runner) == 0
+    assert ("alpha", ["systemctl", "--user", "stop", "llm.service"]) in runner.calls
+    assert json.loads(S.last_apply_path().read_text())["result"] != "refused"
 
 
 def test_a_start_target_the_user_manager_has_not_loaded_blocks_before_anything_stops(tmp_path):
