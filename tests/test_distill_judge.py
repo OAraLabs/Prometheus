@@ -10,15 +10,19 @@ OpenAI-compatible server in tests/test_distill_spend.py.
 from __future__ import annotations
 
 import asyncio
+import collections
 import hashlib
 import importlib.util
 import json
 import sqlite3
 import sys
+import threading
+import time
 import types
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import pytest
 
@@ -1050,3 +1054,543 @@ def test_build_fail_set_cli_snapshots_then_builds(tmp_path: Path, monkeypatch: p
     # Pointing it at the live directory is refused.
     assert failset.main(["--lcm", str(live / "lcm.db"), "--telemetry", str(snap / "telemetry.db"),
                          "--out", str(tmp_path / "x.jsonl"), "--model", "teacher"]) == 2
+
+
+# ── the local 27B judge served over the tailnet (--judge-url) ──────────────────
+
+REMOTE_KEY = "a" * 16 + "0123456789abcdef" * 3   # a test value, never a real key
+REMOTE_ALIAS = "qwen3.8-27b-ud-q4_k_xl"
+
+
+class FakeJudgeServer:
+    """llama-server's shape as serve_teacher.sh runs it: /health and /v1/models public, everything else
+    needs ``Bearer <key>``; /tools refused (403) unless ``tools_status`` says otherwise; ``loading``
+    answers 503; ``stop``/``start`` take the port away and bring it back. A chat reply's verdict is
+    ``fail`` when the prompt holds ``JUDGE-FAIL``, else ``pass``."""
+
+    def __init__(self, *, key: str = REMOTE_KEY, slots: int = 2, model: str = REMOTE_ALIAS,
+                 model_path: str = "/models/Qwen3.8-27B-UD-Q4_K_XL.gguf", delay: float = 0.05) -> None:
+        self.key, self.slots, self.model, self.model_path, self.delay = key, slots, model, model_path, delay
+        self.open = False
+        self.loading = False
+        self.tools_status = 403
+        self.cors_proxy = False
+        self.lock = threading.Lock()
+        self.auth_seen: list[str | None] = []
+        self.inflight = 0
+        self.max_inflight = 0
+        self.chats = 0
+        self.on_chat: Any = None
+        self.port = 0
+        self.server: ThreadingHTTPServer | None = None
+        self.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def _handler(self) -> type:
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a: Any) -> None:
+                pass
+
+            def _json(self, code: int, obj: Any) -> None:
+                data = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _authorized(self) -> bool:
+                got = self.headers.get("Authorization")
+                with outer.lock:
+                    outer.auth_seen.append(got)
+                return outer.open or got == f"Bearer {outer.key}"
+
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path == "/health":
+                    self._json(503 if outer.loading else 200, {"status": "loading" if outer.loading else "ok"})
+                elif outer.loading:
+                    self._json(503, {"error": {"message": "Loading model"}})
+                elif self.path == "/v1/models":
+                    self._json(200, {"object": "list", "data": [{"id": outer.model}]})
+                elif not self._authorized():
+                    self._json(401, {"error": {"message": "Invalid API Key"}})
+                elif self.path == "/props":
+                    self._json(200, {"total_slots": outer.slots, "model_path": outer.model_path,
+                                     "cors_proxy_enabled": outer.cors_proxy, "ui": False,
+                                     "endpoint_slots": False, "endpoint_props": False, "endpoint_metrics": False})
+                elif self.path == "/tools":
+                    self._json(outer.tools_status, {"error": {"message": "tools off"}} if outer.tools_status != 200
+                               else [{"name": "exec_shell_command"}])
+                else:
+                    self._json(404, {"error": "not found"})
+
+            def do_POST(self) -> None:  # noqa: N802
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"{}")
+                if not self._authorized():
+                    self._json(401, {"error": {"message": "Invalid API Key"}})
+                    return
+                if outer.loading:
+                    self._json(503, {"error": {"message": "Loading model"}})
+                    return
+                with outer.lock:
+                    outer.chats += 1
+                    outer.inflight += 1
+                    outer.max_inflight = max(outer.max_inflight, outer.inflight)
+                    count = outer.chats
+                try:
+                    if outer.on_chat is not None:
+                        outer.on_chat(count)
+                    time.sleep(outer.delay)
+                    user = body["messages"][-1]["content"]
+                    verdict = FAIL_REPLY if "JUDGE-FAIL" in user else PASS_REPLY
+                    self._json(200, {"model": outer.model, "choices": [
+                        {"message": {"role": "assistant", "content": verdict}, "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 1200, "completion_tokens": 90}})
+                finally:
+                    with outer.lock:
+                        outer.inflight -= 1
+
+        return Handler
+
+    def start(self) -> None:
+        srv = ThreadingHTTPServer(("127.0.0.1", self.port), self._handler())
+        srv.daemon_threads = True
+        self.server = srv
+        self.port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
+
+    def stop(self) -> None:
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+            self.server = None
+
+
+@pytest.fixture
+def judge_server(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A fake judge server; --judge-url's tailnet check stands in for the one a real name passes
+    (the fake listens on loopback), and the pause timings are short."""
+    srv = FakeJudgeServer()
+    monkeypatch.setattr(judge, "check_tailnet_url", lambda url: srv.url)
+    monkeypatch.setattr(judge, "REMOTE_WAIT_POLL_S", 0.02)
+    monkeypatch.setattr(judge, "REMOTE_BACKOFF_S", (0.05, 0.2))
+    yield srv
+    srv.stop()
+
+
+def remote_key(tmp_path: Path, mode: int = 0o600, key: str = REMOTE_KEY) -> Path:
+    p = tmp_path / "secrets" / "judge-4090.key"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# the judge server's key\n" + key + "\n")
+    p.chmod(mode)
+    return p
+
+
+def golden_item(i: int, *, fail: bool = False, category: str = "coding") -> dict[str, Any]:
+    """A re-judge queue item located in a golden trace file (0-based line), as build_rejudge_queue writes it."""
+    item = make_item(i, category=category)
+    item["id"] = f"pass-{i:04d}"
+    item["source"] = {"file": "golden_traces_1_1.jsonl", "line": i, "telemetry_rowid": 100 + i}
+    if fail:
+        item["messages"][0]["content"] += " JUDGE-FAIL"
+    return item
+
+
+def max_row(item: dict[str, Any], verdict: str, status: str = "ok") -> dict[str, Any]:
+    row = {"id": item["id"], "label": item["label"], "category": item["category"], "source": item["source"],
+           "view": "outcome", "rubric_version": judge.RUBRIC_VERSION, "provider": "max-token-plan",
+           "judge_key": "token-plan", "model": "qwen3.8-max", "status": status}
+    if status == "ok":
+        row["verdict"] = verdict
+    return row
+
+
+def remote_args(work: Path, key: Path, *extra: str) -> list[str]:
+    return ["--workdir", str(work), "run", "--provider", "local", "--judge-url", "http://gpu-tower:18094",
+            "--judge-key-file", str(key), "--backoff-base", "0", *extra]
+
+
+def test_judge_url_is_tailnet_only_and_pinned_to_the_checked_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    addrs = {"gpu-tower": ["fd7a:115c:a1e0::39", "100.64.0.39"], "v6": ["fd7a:115c:a1e0::1"],
+             "lan": ["192.168.1.20"], "pub": ["203.0.113.7"], "lo": ["127.0.0.1"], "me": ["100.64.0.21"],
+             "mixed": ["100.64.0.39", "192.168.1.20"]}
+    looked: list[str] = []
+
+    def resolve(h: str) -> list[str]:
+        looked.append(h)
+        return addrs[h]
+
+    monkeypatch.setattr(judge, "host_addresses", resolve)
+    monkeypatch.setattr(judge, "is_local_address", lambda a: a == "100.64.0.21")
+    assert judge.check_tailnet_url("http://gpu-tower:18094") == "http://100.64.0.39:18094"
+    assert judge.check_tailnet_url("http://v6:18094/") == "http://[fd7a:115c:a1e0::1]:18094"
+    for bad, why in (("http://lan:18094", "not a tailnet address"), ("http://pub:18094", "not a tailnet"),
+                     ("http://lo:18094", "not a tailnet"), ("http://mixed:18094", "not a tailnet"),
+                     ("http://me:18094", "is this host"), ("https://gpu-tower:18094", "must be http"),
+                     ("http://gpu-tower", "needs its port"), ("http://gpu-tower:18094/v1", "only"),
+                     ("http://u:p@gpu-tower:18094", "credentials"),
+                     ("http://dashscope.aliyuncs.com:80", "hosted API")):
+        with pytest.raises(judge.JudgeSetupError, match=why):
+            judge.check_tailnet_url(bad)
+
+
+def test_judge_key_file_must_be_a_private_regular_file_and_is_never_echoed(tmp_path: Path) -> None:
+    good = remote_key(tmp_path)
+    assert judge.load_key_file(good) == REMOTE_KEY
+    loose = remote_key(tmp_path / "loose", mode=0o644)
+    short = remote_key(tmp_path / "short", key="abc")
+    link = tmp_path / "link.key"
+    link.symlink_to(good)
+    comments = tmp_path / "c.key"
+    comments.write_text("# nothing\n\n")
+    comments.chmod(0o600)
+    for path, why in ((loose, "must be 0600"), (short, "no key of at least"), (link, "symlink"),
+                      (comments, "no key of at least"), (tmp_path / "none.key", "cannot open")):
+        with pytest.raises(judge.JudgeSetupError, match=why) as info:
+            judge.load_key_file(path)
+        assert REMOTE_KEY not in str(info.value) and "abc" not in str(info.value).split(":")[-1]
+
+
+def test_remote_judge_end_to_end_caps_concurrency_at_the_slots_and_records_its_server(
+        tmp_path: Path, judge_server: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    key = remote_key(tmp_path)
+    items = [golden_item(i, fail=i % 4 == 0) for i in range(12)]
+    work = tmp_path / "local-v4"
+    write_queue(work, items, {"mode": judge.MODE_LOCAL_JUDGE, "view": "outcome"})
+    argv = remote_args(work, key, "--concurrency", "5", "--judge-host", "gpu-tower", "--warmup", "4")
+    assert judge.main(argv) == judge.EXIT_DONE
+    out, err = capsys.readouterr()
+    assert "cut to 2: the judge server has 2 slot(s)" in err
+    assert judge_server.max_inflight <= 2 and judge_server.chats == 12
+    rows = judge.read_jsonl(work / judge.RESULTS_FILE)
+    assert len(rows) == 12 and {r["status"] for r in rows} == {"ok"}
+    for r in rows:
+        assert (r["provider"], r["model"], r["judge_route"], r["judge_host"], r["judge_quant"]) == (
+            "local", REMOTE_ALIAS, "remote", "gpu-tower", "UD-Q4_K_XL")
+        assert r["judge_sha256"] == judge.REMOTE_SHA256 and r["judge_model_file"] == "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+        assert r["phase"] == judge.PHASE_LOCAL and r["elapsed_s"] >= 0
+        assert r["verification"]["judge"] == {
+            "verdict": r["verdict"], "model": REMOTE_ALIAS, "served_model": REMOTE_ALIAS, "provider": "local",
+            "route": "remote", "host": "gpu-tower", "quant": "UD-Q4_K_XL", "sha256": judge.REMOTE_SHA256}
+    assert sum(r["verdict"] == "fail" for r in rows) == 3
+    # the key: only ever the Authorization header; never argv, output, rows, status or the ledger
+    keyed = [a for a in judge_server.auth_seen if a]
+    assert keyed and set(keyed) == {f"Bearer {REMOTE_KEY}"}
+    blob = out + err + " ".join(argv) + (work / judge.RESULTS_FILE).read_text() + \
+        (work / judge.STATUS_FILE).read_text() + (tmp_path / "distill" / "spend-ledger.csv").read_text()
+    assert REMOTE_KEY not in blob
+    summary = json.loads(out[out.rindex("\n{\n") + 1:])
+    assert summary["verdicts"] == {"pass": 9, "fail": 3} and summary["judge_host"] == "gpu-tower"
+    assert summary["concurrency"] == 2 and summary["projection"]["pending"] == 0
+    warm = [json.loads(line) for line in out.splitlines() if line.startswith('{"projection"')]
+    assert warm and warm[0]["projection"]["pending"] == 8 and warm[0]["projection"]["verdicts_per_hour"] > 0
+    status = json.loads((work / judge.STATUS_FILE).read_text())
+    assert status["state"] == "done" and status["judge_host"] == "gpu-tower" and status["concurrency"] == 2
+
+
+def test_remote_judge_refuses_tools_an_open_server_a_wrong_quant_a_max_model_and_a_wrong_key(
+        tmp_path: Path, judge_server: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    key = remote_key(tmp_path)
+    work = tmp_path / "w"
+    write_queue(work, [golden_item(1)], {"mode": judge.MODE_LOCAL_JUDGE})
+    cases = [("tools_status", 200, "built-in tools or MCP"), ("cors_proxy", True, "MCP proxy on"),
+             ("open", True, "without a key"), ("model_path", "/m/Qwen3.8-27B-IQ3_XXS.gguf", "not the UD-Q4_K_XL"),
+             ("model", "qwen3.8-max", "never the local judge"), ("key", "b" * 64, "refused our key"),
+             ("tools_status", 500, "HTTP 500")]
+    for attr, value, why in cases:
+        before = getattr(judge_server, attr)
+        setattr(judge_server, attr, value)
+        try:
+            assert judge.main(remote_args(work, key)) == judge.EXIT_FATAL, attr
+            assert why in capsys.readouterr().err, attr
+        finally:
+            setattr(judge_server, attr, before)
+    assert judge_server.chats == 0 and not (work / judge.RESULTS_FILE).exists()
+    # a server still loading: paused (exit 4), start it and run again
+    judge_server.loading = True
+    assert judge.main(remote_args(work, key)) == judge.EXIT_PAUSED
+    assert "not ready (loading)" in capsys.readouterr().err
+    judge_server.loading = False
+    # the key file is required, and a loopback URL is --local-url's
+    r = judge.main(["--workdir", str(work), "run", "--provider", "local", "--judge-url", "http://gpu-tower:18094"])
+    assert r == judge.EXIT_FATAL and "needs --judge-key-file" in capsys.readouterr().err
+    r = judge.main(["--workdir", str(work), "run", "--provider", "local", "--local-url", "http://127.0.0.1:9",
+                    "--judge-key-file", str(key)])
+    assert r == judge.EXIT_FATAL and "is for --judge-url" in capsys.readouterr().err
+    # a local-judge queue is never judged by a Max route
+    r = judge.main(["--workdir", str(work), "run", "--provider", "token-plan"])
+    assert r == judge.EXIT_FATAL and "the local judge judges it" in capsys.readouterr().err
+
+
+def _remote_run(tmp_path: Path, items: list[dict[str, Any]], srv: Any, **kw: Any) -> Any:
+    ledger = spend.Ledger(notify_cmd=str(notify_script(tmp_path)))
+    client = judge.RemoteJudgeClient("http://gpu-tower:18094", key_file=remote_key(tmp_path), ledger=ledger,
+                                     phase=judge.PHASE_LOCAL, host="gpu-tower", timeout=5.0)
+    client.preflight()
+    config = judge.RunConfig(jitter=0.0, backoff_base=0.0,
+                             concurrency=judge.remote_concurrency(kw.pop("concurrency", None), client.slots))
+    return judge.JudgeRun(items, client=client, results_path=tmp_path / judge.RESULTS_FILE,
+                          status_path=tmp_path / judge.STATUS_FILE, config=config, clock=Clock(NOW),
+                          sleep=asyncio.sleep, **kw)
+
+
+def test_a_server_that_goes_away_pauses_the_run_and_it_resumes_with_the_slots_it_comes_back_with(
+        tmp_path: Path, judge_server: Any) -> None:
+    items = [golden_item(i) for i in range(10)]
+
+    def outage(count: int) -> None:
+        if count == 4:
+            def restart() -> None:
+                judge_server.stop()
+                time.sleep(0.6)
+                judge_server.slots = 1
+                judge_server.start()
+            threading.Thread(target=restart, daemon=True).start()
+
+    judge_server.on_chat = outage
+    judge_server.delay = 0.15
+    run = _remote_run(tmp_path, items, judge_server)
+    assert run.limit == 2
+    outcome = asyncio.run(asyncio.wait_for(run.run(), 60))
+    assert outcome.state == "done" and outcome.remaining == 0 and outcome.errors == 0, outcome
+    assert run.pauses >= 1 and run.limit == 1
+    rows = results(tmp_path)
+    assert {r["status"] for r in rows} == {"ok"} and {r["id"] for r in rows} == {it["id"] for it in items}
+
+
+def test_a_server_that_comes_back_changed_stops_the_run(tmp_path: Path, judge_server: Any) -> None:
+    items = [golden_item(i) for i in range(6)]
+
+    def swap(count: int) -> None:
+        if count == 2:
+            def restart() -> None:
+                judge_server.stop()
+                time.sleep(0.3)
+                judge_server.tools_status = 200      # someone started it with --tools all
+                judge_server.start()
+            threading.Thread(target=restart, daemon=True).start()
+
+    judge_server.on_chat = swap
+    judge_server.delay = 0.15
+    outcome = asyncio.run(asyncio.wait_for(_remote_run(tmp_path, items, judge_server).run(), 60))
+    assert outcome.state == "fatal" and "came back changed" in outcome.reason and "GET /tools" in outcome.reason
+    assert outcome.exit_code == judge.EXIT_FATAL and outcome.remaining > 0
+
+
+def test_a_server_gone_longer_than_max_pause_ends_the_run_paused_and_the_next_run_resumes(
+        tmp_path: Path, judge_server: Any) -> None:
+    items = [golden_item(i) for i in range(6)]
+    judge_server.on_chat = lambda count: threading.Thread(target=judge_server.stop, daemon=True).start() \
+        if count == 3 else None
+    judge_server.delay = 0.1
+    outcome = asyncio.run(asyncio.wait_for(_remote_run(tmp_path, items, judge_server, max_pause_s=0.5).run(), 60))
+    assert outcome.state == "paused" and "run again to resume" in outcome.reason and outcome.remaining > 0
+    assert not [r for r in results(tmp_path) if r["status"] != "ok"]     # nothing recorded as an error
+    judge_server.on_chat = None
+    judge_server.start()
+    again = asyncio.run(asyncio.wait_for(_remote_run(tmp_path, items, judge_server).run(), 60))
+    assert again.state == "done" and {r["id"] for r in results(tmp_path)} == {it["id"] for it in items}
+
+
+def _build_helpers() -> Any:
+    name = "distill_build_test_helpers"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name("test_distill_build.py"))
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_remote_verdicts_are_read_by_build_a_fail_drops_the_row_and_a_pass_is_a_judge_pass(
+        tmp_path: Path, judge_server: Any) -> None:
+    bt = _build_helpers()
+    build = bt.build
+    ts = 1_790_000_000.0
+    golden = bt.write_jsonl(tmp_path / "golden_traces_1_1.jsonl", [
+        bt.trace(bt.word(i), "bash", {"command": f"make {bt.word(i)}"}, ts=ts + i) for i in range(3)])
+    index = [{"file": golden.name, "model": "qwen3.8-max", "h_prompt_call": f"k{i}", "category": "coding",
+              "rowid": 100 + i, "tool": "bash", "ts": ts + i} for i in range(3)]
+    items = [judge.queue_item({**it, "trace": {"messages": [{"role": "user", "content": f"task {n}"
+                                                             + (" JUDGE-FAIL" if n == 1 else "")},
+                                                            {"role": "assistant", "content": "",
+                                                             "tool_calls": [{"function": {"name": "bash",
+                                                                                          "arguments": "{}"}}]}],
+                                               "tools": [], "_meta": {}},
+                               "stratum_weight": 1.0, "outcome": {"status": "success", "text": None}})
+             for n, it in enumerate(judge.pass_pool(index))]
+    asyncio.run(_remote_run(tmp_path, items, judge_server).run())
+    vfile = tmp_path / judge.RESULTS_FILE
+    stats: collections.Counter = collections.Counter()
+    checks: dict[str, Any] = {}
+    verdicts = build.load_verdicts([str(vfile)], stats, checks)
+    assert verdicts == {"golden_traces_1_1.jsonl:1": "pass", "golden_traces_1_1.jsonl:2": "fail",
+                        "golden_traces_1_1.jsonl:3": "pass"}
+    assert stats["verdict_rows_max_judge"] == 0 and stats["verdict_rows_unusable"] == 0
+    b = bt.make_builder(tmp_path, verdicts=verdicts, verdict_checks=checks,
+                        index=build.load_index(str(bt.write_jsonl(tmp_path / "index.jsonl", index))))
+    b.stats.update(stats)
+    bt.feed(b, golden)
+    assert {e.trace_id: e.label for e in b.examples} == {
+        "golden_traces_1_1.jsonl:1": "judge-pass", "golden_traces_1_1.jsonl:3": "judge-pass"}
+    assert b.stats["excluded:judge_fail"] == 1
+    b.split()
+    assert b.gates()["verdicts"]["pass"]
+    # a CALIBRATION queue's verdicts are never applied: fed to build.py by mistake, they fail its gate
+    cal = [{**it, "source": {"calibration_of": it["source"]}} for it in items]
+    rows = [{**r, "source": c["source"]} for r, c in zip(judge.read_jsonl(vfile), cal)]
+    st: collections.Counter = collections.Counter()
+    assert build.load_verdicts([str(bt.write_jsonl(tmp_path / "cal.jsonl", rows))], st) == {}
+    assert st["verdict_rows_unusable"] == 3
+
+
+def _src_workdir(tmp_path: Path, items: list[dict[str, Any]], max_rows: list[dict[str, Any]]) -> Path:
+    src = tmp_path / "phase2-rejudge"
+    write_queue(src, items, {"mode": "rejudge", "view": "outcome"})
+    (src / judge.RESULTS_FILE).write_text("".join(json.dumps(r) + "\n" for r in max_rows))
+    return src
+
+
+def test_subset_cuts_the_calibration_set_and_the_unjudged_train_rows(tmp_path: Path,
+                                                                     capsys: pytest.CaptureFixture[str]) -> None:
+    bt = _build_helpers()
+    items = [golden_item(i) for i in range(10)]
+    max_rows = [max_row(items[i], "pass" if i % 3 else "fail") for i in range(5)]
+    max_rows += [max_row(items[5], "", status="unparseable"),
+                 {**max_row(items[6], "pass"), "provider": "local", "model": "qwen3.8-27b"}]  # not a Max verdict
+    src = _src_workdir(tmp_path, items, max_rows)
+    # build.py's own id for each item's train row
+    for it in items:
+        assert judge.train_row_id(it["source"]["file"], it["source"]["line"]) == \
+            "p3-" + bt.build.h(f"{it['source']['file']}:{it['source']['line'] + 1}")
+    train = [{"id": judge.train_row_id(it["source"]["file"], it["source"]["line"]),
+              "label": "judge-pass" if i < 5 else ("tool-success" if i < 9 else "judge-pass")}
+             for i, it in enumerate(items)]
+    train.append({"id": "p3-0000000000000000", "label": "tool-success"})  # a gym row: no queue item
+    tf = tmp_path / "train.jsonl"
+    tf.write_text("".join(json.dumps(r) + "\n" for r in train))
+
+    cal = tmp_path / "cal"
+    assert judge.main(["--workdir", str(cal), "subset", "--from", str(src), "--which", "max-judged"]) == 0
+    q = judge.read_jsonl(cal / judge.QUEUE_FILE)
+    assert sorted(it["id"] for it in q) == [items[i]["id"] for i in range(5)]
+    assert all(set(it["source"]) == {"calibration_of"} for it in q)
+    meta = json.loads((cal / judge.QUEUE_META_FILE).read_text())
+    assert meta["mode"] == judge.MODE_CALIBRATION and meta["max_verdicts"] == {"fail": 2, "pass": 3}
+    assert judge.main(["--workdir", str(cal), "subset", "--from", str(src), "--which", "max-judged"]) == 1  # exists
+
+    unj = tmp_path / "unj"
+    assert judge.main(["--workdir", str(unj), "subset", "--from", str(src), "--which", "unjudged",
+                       "--train-file", str(tf)]) == 0
+    q = judge.read_jsonl(unj / judge.QUEUE_FILE)
+    assert [it["id"] for it in q] == [items[i]["id"] for i in (5, 6, 7, 8)]   # source order, sources kept
+    assert all("file" in it["source"] for it in q)
+    meta = json.loads((unj / judge.QUEUE_META_FILE).read_text())
+    assert meta["mode"] == judge.MODE_LOCAL_JUDGE and meta["train_rows_with_label"] == 5
+    assert meta["train_rows_matched"] == 4 and meta["train_rows_unmatched"] == 1
+    assert meta["train_files"][0]["sha256"] == hashlib.sha256(tf.read_bytes()).hexdigest()
+    with pytest.raises(SystemExit):
+        judge.main(["--workdir", str(unj), "subset", "--from", str(src), "--which", "everything"])
+    assert judge.main(["--workdir", str(src), "subset", "--from", str(src), "--which", "unjudged",
+                       "--train-file", str(tf), "--force"]) == judge.EXIT_ERROR
+    assert "its own --workdir" in capsys.readouterr().err
+
+
+def test_cohen_kappa_reference_values() -> None:
+    # 2x2 with a=20, b=5, c=10, d=15: po = 0.7, pe = 0.5 * 0.6 + 0.5 * 0.4 = 0.5, kappa = 0.4
+    k, ci = judge.cohen_kappa(20, 5, 10, 15)
+    assert k == pytest.approx(0.4) and ci[0] < 0.4 < ci[1]
+    assert judge.cohen_kappa(10, 0, 0, 10)[0] == pytest.approx(1.0)
+    assert judge.cohen_kappa(0, 0, 0, 0) == (None, None)
+
+
+def test_calibration_reports_agreement_kappa_confusion_and_decides_at_85_percent(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    items = [golden_item(i, category="coding" if i < 60 else "other") for i in range(100)]
+    # Max: 70 pass, 30 fail. Local agrees on 85 of 100: 10 Max passes it fails, 5 Max fails it passes.
+    mx = {it["id"]: ("pass" if i < 70 else "fail") for i, it in enumerate(items)}
+    flip = {items[i]["id"] for i in list(range(10)) + list(range(70, 75))}
+    src = _src_workdir(tmp_path, items, [max_row(it, mx[it["id"]]) for it in items])
+    cal = tmp_path / "cal"
+    assert judge.main(["--workdir", str(cal), "subset", "--from", str(src), "--which", "max-judged"]) == 0
+    queue = judge.read_jsonl(cal / judge.QUEUE_FILE)
+    capsys.readouterr()
+
+    def local_rows(ids: Iterable[str]) -> list[dict[str, Any]]:
+        out = []
+        for it in queue:
+            if it["id"] not in ids:
+                continue
+            v = mx[it["id"]] if it["id"] not in flip else ("fail" if mx[it["id"]] == "pass" else "pass")
+            out.append({"id": it["id"], "status": "ok", "verdict": v, "view": "outcome",
+                        "rubric_version": judge.RUBRIC_VERSION, "provider": "local", "model": REMOTE_ALIAS,
+                        "judge_host": "gpu-tower", "judge_quant": "UD-Q4_K_XL", "judge_sha256": "0" * 64})
+        return out
+
+    all_ids = {it["id"] for it in queue}
+    (cal / judge.RESULTS_FILE).write_text("".join(json.dumps(r) + "\n" for r in local_rows(all_ids)))
+    assert judge.main(["--workdir", str(cal), "calibrate"]) == judge.EXIT_DONE
+    text = capsys.readouterr().out
+    rep = json.loads((cal / judge.CALIBRATION_FILE).read_text())
+    assert rep["set"] == 100 and rep["pairs"] == 100 and rep["agreement"]["k"] == 85
+    assert rep["decision"]["decision"] == "use-local-judge" and "DECISION: use the local judge" in text
+    assert rep["confusion"] == {"max_pass": {"local_pass": 60, "local_fail": 10},
+                                "max_fail": {"local_pass": 5, "local_fail": 25}}
+    # po = 0.85, pe = 0.7 * 0.65 + 0.3 * 0.35 = 0.56, kappa = 0.29 / 0.44
+    assert rep["kappa"]["value"] == pytest.approx(round(0.29 / 0.44, 4))
+    assert rep["false_pass"]["k"] == 5 and rep["false_pass"]["n"] == 30
+    assert rep["false_pass"]["share_of_local_passes"] == pytest.approx(round(5 / 65, 4))
+    assert rep["false_fail"]["k"] == 10 and rep["false_fail"]["n"] == 70
+    lo, hi = rep["agreement"]["ci95"]
+    assert lo < 0.85 < hi
+    cats = {c["category"]: c for c in rep["by_category"]}
+    assert cats["coding"]["n"] == 60 and cats["coding"]["agreement"] == pytest.approx(50 / 60, abs=1e-4)
+    assert cats["other"]["agreement"] == pytest.approx(35 / 40, abs=1e-4)
+    assert rep["judge"]["hosts"] == {"gpu-tower": 100} and rep["judge"]["quants"] == {"UD-Q4_K_XL": 100}
+
+    # one more disagreement: 84% < 85%: train on the dataset as it is
+    flip.add(items[20]["id"])
+    (cal / judge.RESULTS_FILE).write_text("".join(json.dumps(r) + "\n" for r in local_rows(all_ids)))
+    assert judge.main(["--workdir", str(cal), "calibrate"]) == judge.EXIT_DONE
+    assert "DECISION: do not use the local judge" in capsys.readouterr().out
+    assert json.loads((cal / judge.CALIBRATION_FILE).read_text())["decision"]["decision"] == "do-not-use"
+
+    # three items without a local verdict: more than the 2 (2%) allowed -> incomplete (exit 6)
+    some = {it["id"] for it in queue[3:]}
+    (cal / judge.RESULTS_FILE).write_text("".join(json.dumps(r) + "\n" for r in local_rows(some)))
+    assert judge.main(["--workdir", str(cal), "calibrate"]) == judge.EXIT_INCOMPLETE
+    assert "incomplete" in capsys.readouterr().out
+    assert judge.main(["--workdir", str(cal), "calibrate", "--allow-missing", "3"]) == judge.EXIT_DONE
+    capsys.readouterr()
+
+
+def test_the_local_judge_uses_the_max_judges_rubric_and_prompt(judge_server: Any, tmp_path: Path) -> None:
+    """Apples to apples: the remote judge sends exactly the Max judge's system prompt and user prompt."""
+    seen: list[dict[str, Any]] = []
+    orig = judge.RemoteJudgeClient._request
+
+    def spy(self: Any, path: str, body: Any = None, **kw: Any) -> Any:
+        if body is not None:
+            seen.append(body)
+        return orig(self, path, body, **kw)
+
+    item = golden_item(3)
+    item["outcome"] = {"status": "success", "text": "3 files"}
+    run = _remote_run(tmp_path, [item], judge_server)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(judge.RemoteJudgeClient, "_request", spy)
+        asyncio.run(run.run())
+    body = seen[0]
+    user, _ = judge.render_prompt(item, view="outcome")
+    max_body = judge.judge_payload(judge.system_prompt("outcome"), user, model="qwen3.8-max", max_tokens=1024)
+    assert body["messages"] == max_body["messages"]
+    assert body["temperature"] == 0 and body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert body["max_tokens"] == max_body["max_tokens"]

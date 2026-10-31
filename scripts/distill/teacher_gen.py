@@ -272,13 +272,18 @@ none, so nothing ever executes there).
 * The URL must resolve to tailnet addresses only (``TAILNET_NETS``: Tailscale's
   100.64.0.0/10 and fd7a:115c:a1e0::/48), never loopback, a LAN, a public name
   or one of this host's own addresses; scheme://host:port, nothing else. It is
-  checked once per run (``Settings.teacher_endpoint`` keeps the checked URL).
+  checked once per run, and every request goes to the address that check
+  validated (``Settings.teacher_endpoint`` keeps the URL pinned to it: the
+  name is never resolved again in the run).
 * The key file must be a regular 0600 file owned by this user; its key goes
   only into the ``Authorization: Bearer`` header of requests to that endpoint
   (the teacher, its summarizer and its self-judge), never into argv, a log, a
   row, the report or settings.json. The preflight checks that the server
   REFUSES ``/props`` without the key (an open server is refused) and accepts it
-  with the key.
+  with the key, and that llama-server's built-in tools, MCP servers and MCP
+  proxy are off (``GET /tools`` must not answer 200, ``/props``
+  ``cors_proxy_enabled`` must not be true): they would run commands on the
+  teacher host, which has no jail. The same check runs after every pause.
 * ``--tool-host`` must name this host and ``--teacher-host`` another one; the
   jail is ``require`` (``--jail off`` is refused); no probe guard, no
   ``--judge-url`` (the teacher judges itself, with the same gates).
@@ -297,7 +302,8 @@ none, so nothing ever executes there).
   loads; for hours while the 4090 trains) PAUSES the run: after a task ends in
   a transport error the server's ``/health`` is read; unless it answers 200 no
   new task starts, the tasks in flight finish as errors (not done: they rerun
-  in this run), and those errors do not count towards
+  in this run, at the tail too: a worker that finds no next task waits while
+  others are in flight before the run ends ``no_tasks``), and those errors do not count towards
   ``--max-consecutive-errors``. ``/health`` is polled with a doubling backoff
   (``REMOTE_BACKOFF_S``) until it is ready again; then the served model id and
   ``/props`` (key enforced, slots) are read again and the run resumes. A server
@@ -730,12 +736,17 @@ def is_local_address(addr: str) -> bool:
         return False
 
 
-def check_tailnet_endpoint(url: str) -> str:
+def check_tailnet_endpoint(url: str, *, pin: bool = False) -> str:
     """The URL of a REMOTE teacher (``--teacher-key-file``) without a trailing slash, or
     EndpointError: every address its host resolves to is a tailnet address (``TAILNET_NETS``),
     none is loopback or one of this host's own (the teacher host is never the tool host).
     A LAN or public address (the business tunnel's public name, say) is refused, and so are
-    hosted-API hosts, credentials in the URL and a path."""
+    hosted-API hosts, credentials in the URL and a path.
+
+    With *pin* (an ``http`` URL): the host name is replaced by the address this check
+    validated (IPv4 first), so no later request resolves the name again. A run lasts days and
+    waits out hours of the server being gone; a resolver that later maps the bare name to a LAN
+    address (MagicDNS down, a search domain) would otherwise get the key and the trace text."""
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise EndpointError(f"not an http(s) URL: {url!r}")
@@ -757,6 +768,10 @@ def check_tailnet_endpoint(url: str) -> str:
         if is_local_address(addr):
             raise EndpointError(f"{host} ({addr}) is this host: a remote teacher runs on another machine "
                                 "(the tools run here)")
+    if pin and parts.scheme == "http":
+        addr = min(addrs, key=lambda a: (ipaddress.ip_address(a).version, a))
+        literal = f"[{addr}]" if ipaddress.ip_address(addr).version == 6 else addr
+        return f"http://{literal}" + (f":{parts.port}" if parts.port is not None else "")
     return url.rstrip("/")
 
 
@@ -3904,9 +3919,13 @@ class Settings:
             if self.probe_guard_url:
                 raise EndpointError("a remote teacher has no probe guard (the guard fronts this host's GPU)")
             # checked once per URL (it resolves the name and probes this host's own addresses), then
-            # kept: every task and judge call reads this property
+            # kept PINNED to the address it validated: every task and judge call reads this property,
+            # and no later request resolves the name again
             if self._remote_checked != self.teacher_url:
-                self._remote_url = check_tailnet_endpoint(self.teacher_url)
+                # the key and the trace text never go through a proxy: every entry point drops the
+                # proxy settings first (isolate_state_dirs); again here, before the first keyed request
+                drop_proxy_env()
+                self._remote_url = check_tailnet_endpoint(self.teacher_url, pin=True)
                 self._remote_checked = self.teacher_url
             return self._remote_url
         return check_endpoint(self.probe_guard_url or self.teacher_url, allow_lan=self.allow_lan)
@@ -6571,6 +6590,18 @@ async def run(settings: Settings, gen: Generator, store: Store, guard: EvalGuard
                 if stop_reason():
                     return
             task = sched.next_task()
+            if task is None and gate is not None:
+                # remote tail: a task still in flight may end in error (the teacher stopped for
+                # training, say) and is then not done; it reruns in this run once the server is
+                # back. So wait while others are in flight, and look again with the kinds an
+                # earlier empty look marked exhausted cleared (an errored task of a taskset is
+                # pickable again; a generator never re-makes one).
+                if isinstance(sched.gen, FixedGenerator) and sched.exhausted:
+                    sched.exhausted.clear()
+                    task = sched.next_task()
+                if task is None and sched.reserved:
+                    await asyncio.sleep(REMOTE_WAIT_POLL_S)
+                    continue
             if task is None:
                 state["stop"] = state["stop"] or "no_tasks"
                 return
@@ -7039,8 +7070,14 @@ async def remote_props(settings: Settings, timeout: float) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             bare = await client.get(url)
             keyed = await client.get(url, headers=settings.teacher_headers)
+            tools = await client.get(f"{settings.teacher_endpoint}/tools", headers=settings.teacher_headers)
     except Exception as exc:  # noqa: BLE001
         raise EndpointError(f"{settings.teacher_endpoint}/props is unreachable ({type(exc).__name__})") from exc
+    # llama-server's built-in tools / MCP servers would run commands on the TEACHER host, which has no jail
+    # (serve_teacher.sh turns them off; this refuses a server where they are on anyway)
+    if tools.status_code == 200:
+        raise EndpointError("the remote teacher answers GET /tools: llama-server's built-in tools or MCP servers "
+                            "are on (they would run unjailed on its host); refusing it")
     if bare.status_code not in (401, 403):
         raise EndpointError(f"the remote teacher answers /props without a key (HTTP {bare.status_code}): it "
                             "must be started with --api-key-file; refusing an open server")
@@ -7051,6 +7088,8 @@ async def remote_props(settings: Settings, timeout: float) -> dict[str, Any]:
         body = keyed.json()
     except ValueError as exc:
         raise EndpointError("the remote teacher's /props is not JSON") from exc
+    if isinstance(body, dict) and body.get("cors_proxy_enabled") is True:
+        raise EndpointError("the remote teacher has its MCP proxy on (/props cors_proxy_enabled); refusing it")
     return body if isinstance(body, dict) else {}
 
 

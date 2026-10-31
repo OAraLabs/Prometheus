@@ -10,6 +10,10 @@
 #   (the 3090 Ti host then pulls the key and pushes the base chat template: gen_runner.py remote-setup)
 #   ~/distill/teacher-serve/serve_teacher.sh plan       # read-only
 #
+# `systemctl --user start` returns once the server is VERIFIED (ExecStartPost: /health up, the key enforced,
+# the slots as asked, GET /tools refused, no MCP proxy, no web UI). A failed verify fails the unit and stops
+# llama-server: built-in tools never run here (this host has no jail).
+#
 # Start (business server stopped first, its "down" Telegram sent, the dead-man armed):
 #   systemctl --user stop llama-server.service && systemctl --user start distill-teacher-serve.service
 # Stop (for training, say; the 3090 Ti host's generation pauses and resumes by itself):
@@ -31,6 +35,9 @@ Type=simple
 Environment=TEACHER_SLOTS=4
 Environment=TEACHER_CTX_PER_SLOT=32768
 ExecStart=%h/distill/teacher-serve/serve_teacher.sh exec
+ExecStartPost=%h/distill/teacher-serve/serve_teacher.sh verify
+# the model load (17 GB) + the verify's wait for /health (TEACHER_VERIFY_WAIT_S, 420 s)
+TimeoutStartSec=600
 Restart=on-failure
 RestartSec=20
 TimeoutStopSec=60

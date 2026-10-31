@@ -11,6 +11,16 @@
     python3 judge.py --workdir ~/distill/phase2-rejudge run-all --rejudge-from ~/distill/phase2 \\
         --provider max-payg --budget-usd 40
 
+The local 27B served by the 4090 on the tailnet (tower/serve_teacher.sh), calibrated against Max first:
+
+    python3 judge.py --workdir ~/distill/phase2-local-cal subset --from ~/distill/phase2-rejudge --which max-judged
+    python3 judge.py --workdir ~/distill/phase2-local-cal run --provider local \\
+        --judge-url http://<tailnet host>:<port> --judge-key-file ~/distill/secrets/teacher-4090.key [--limit 24]
+    python3 judge.py --workdir ~/distill/phase2-local-cal calibrate          # agreement, kappa, the >= 85% decision
+    python3 judge.py --workdir ~/distill/phase2-local-v4 subset --from ~/distill/phase2-rejudge --which unjudged \\
+        --train-file ~/distill/phase3/<build>/train.jsonl
+    python3 judge.py --workdir ~/distill/phase2-local-v4 run --provider local --judge-url ... --judge-key-file ...
+
 ``judge_run.sh`` wraps the Max path: preflight, sample, estimate, run, report
 and the optional re-judge, as a dry run unless ``--execute`` is given.
 
@@ -85,6 +95,45 @@ The providers
   neither can a proxy. The live probe below pauses the run when the daemon
   that shares the server reports errors. STOP does not apply, since this
   provider is the fallback when the paid budget is spent.
+
+  ``--judge-url http://<tailnet host>:<port> --judge-key-file <0600 file>``
+  (instead of ``--local-url``): the same judge served by ANOTHER machine on the
+  tailnet, the 4090's ``tower/serve_teacher.sh`` (UD-Q4_K_XL, several slots, an
+  API key). Same rubric, system prompt, context builder (``render_prompt``),
+  view, temperature 0 and thinking off as the Max judge, so its verdicts are
+  comparable with Max's. Only the transport differs:
+
+  - The URL must resolve to tailnet addresses only (100.64.0.0/10,
+    fd7a:115c:a1e0::/48; never loopback, a LAN, a public name or this host) and
+    is PINNED to the validated address: the name is never resolved again.
+  - The key file is a regular 0600 file of this user; the key goes only into
+    the ``Authorization: Bearer`` header: never argv, a log, a row, the status
+    file or an error message. No proxy from the environment, ever.
+  - The preflight wants ``/health`` ready (else exit 4, ``paused``: start the
+    server and run again), a served id matching ``--local-model`` (never Max),
+    ``/props`` refused without the key and answered with it, the served file
+    named for ``--judge-quant`` (default UD-Q4_K_XL), its MCP proxy off and
+    ``GET /tools`` not 200 (no built-in tools or MCP servers: that host has no
+    jail). ``--concurrency`` defaults to the server's ``/props`` slots and is
+    never more.
+  - The server going away (refused, reset, a timeout or a 5xx, then ``/health``
+    not 200; for hours while the 4090 trains) PAUSES the run: no new item
+    starts, the items in flight go back on the queue (no attempt counted),
+    ``/health`` is polled with a doubling backoff (15 s to 5 min); when it is
+    back the same identity checks run again (a different model, key, quant or
+    tools on: ``fatal``, exit 5) and the run resumes at most at its slots. Gone
+    for more than ``--max-pause`` (default 6 h): ``paused`` (exit 4); every
+    verdict already written stays, and the next run resumes after them.
+  - Every row records ``provider: local``, the served ``model`` id,
+    ``judge_route: remote``, ``judge_host`` (``--judge-host``, default the URL's
+    host), ``judge_quant``, ``judge_sha256`` (``--judge-sha256``, default the
+    pinned UD-Q4_K_XL file) and ``judge_model_file``; its ``verification.judge``
+    the same. build.py reads these rows as any local judge's: a fail excludes
+    the row (``judge_fail``), a pass makes it ``judge-pass``.
+  - After ``--warmup`` verdicts (default 24) and every 200 after, the run prints
+    a wall-time projection for everything still pending (``{"projection": ...}``;
+    also in the status file and the final summary): ``run --limit 24`` is the
+    warm-up.
 
 run
 ---
@@ -185,6 +234,36 @@ in the report's view, under its own ``--budget-usd`` (phase ``2-judge-all``)
 and the global cap. A run cut short by the budget has re-judged the worst
 categories first, and running it again resumes.
 
+subset
+------
+A queue for the local judge cut from a judged workdir (``--from``, the Phase 2
+Max re-judge), in its own ``--workdir``:
+
+* ``--which max-judged``: every item Max judged (an ``ok`` row of a Max
+  provider), shuffled (seeded) so a partial run is a fair sample. Ledger phase
+  ``2-judge-local-cal``. Its ``source`` becomes ``{"calibration_of": ...}``: no
+  file, so build.py never applies these verdicts (they would override Max's on
+  the same traces); fed to it by mistake, they fail its verdicts gate.
+* ``--which unjudged --train-file <build>/train.jsonl``: every item WITHOUT a
+  Max verdict whose train row (build.py's id: ``p3-`` + sha1 of
+  ``<file>:<line + 1>``) is in the train file with ``--train-label`` (default
+  ``tool-success``: the rows that train on the harvested label alone). Ledger
+  phase ``2-judge-local``. These verdicts go to build.py (``--verdicts``, after
+  the Max file): a fail drops the row, a pass labels it ``judge-pass``.
+  ``report`` in that workdir counts them (false-pass = rows dropped).
+
+calibrate
+---------
+The local judge's verdicts in a calibration workdir against the Max verdicts
+(``--max-verdicts``, default the subset source's ``judge-sample.jsonl``) on the
+same items: agreement (Wilson 95%), Cohen's kappa (95%), the confusion matrix,
+false pass (the local judge passes what Max fails; also as a share of its
+passes) and false fail, pass rates, per-category agreement, and the decision:
+``use-local-judge`` at ``--threshold`` (0.85) or above, else ``do-not-use``
+(train on the dataset as it is); ``incomplete`` (exit 6) while more than
+``--allow-missing`` (default 2% of the set) items lack a local verdict.
+Writes ``calibration-report.json`` (aggregates only).
+
 estimate
 --------
 The projected cost of the pending items, without calling anything. For
@@ -201,6 +280,7 @@ import copy
 import fcntl
 import fnmatch
 import hashlib
+import http.client
 import importlib.util
 import ipaddress
 import json
@@ -210,7 +290,9 @@ import os
 import random
 import re
 import signal
+import socket
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -265,6 +347,42 @@ DEFAULT_TELEMETRY_SNAPSHOT = Path("~/distill/snapshot/telemetry.db")
 DEFAULT_LOCAL_MODEL = "qwen3.8-27b*"
 DEFAULT_LIVE_PROVIDER = "llama_cpp"
 DEFAULT_CONCURRENCY = {"max-payg": 2, "token-plan": 8, "local": 1}
+
+#: --provider local --judge-url: the local 27B served by ANOTHER machine on the tailnet (the 4090's
+#: tower/serve_teacher.sh). Tailscale's address ranges; the URL must resolve to these only.
+TAILNET_NETS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+_FORBIDDEN_HOST_PARTS = ("dashscope", "aliyuncs", "alibabacloud", "alicloud", "openai.com",
+                         "anthropic.com", "openrouter", "googleapis", "together.xyz", "groq.com")
+REMOTE_KEY_MIN_LEN = 32
+#: What the 4090 serves (serve_teacher.sh: unsloth/Qwen3.8-27B-GGUF UD-Q4_K_XL, sha256 pinned there):
+#: recorded on every verdict; the quant is also checked against the served file's name.
+REMOTE_QUANT = "UD-Q4_K_XL"
+REMOTE_SHA256 = "bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372"
+#: A paused remote run polls /health first after this many seconds, doubling up to the second.
+REMOTE_BACKOFF_S = (15.0, 300.0)
+#: How often a worker waiting out a pause (or for the work in flight) looks again.
+REMOTE_WAIT_POLL_S = 5.0
+REMOTE_HEALTH_TIMEOUT_S = 10.0
+#: A remote server gone longer than this ends the run ``paused`` (exit 4; run again to resume).
+REMOTE_MAX_PAUSE_S = 6 * 3600.0
+REMOTE_MAX_CONCURRENCY = 8
+#: Transport failures after which a remote judge's /health is read: unless it is ready, the run pauses.
+SERVER_LOSS_KINDS = frozenset({"unreachable", "timeout", "provider_error"})
+#: Verdicts judged in a run before its wall-time projection is printed (and every PROJECT_EVERY after).
+DEFAULT_WARMUP = 24
+PROJECT_EVERY = 200
+#: calibrate: the local judge is used only at this agreement with Max or above (operator, 2026-10-31).
+CALIBRATION_THRESHOLD = 0.85
+#: calibrate: the share of the calibration set that may stay without a local verdict by default.
+CALIBRATION_ALLOW_MISSING_SHARE = 0.02
+#: Queue modes of ``subset`` (their ledger phases: $0 rows of the local judge).
+MODE_CALIBRATION = "calibration"
+MODE_LOCAL_JUDGE = "local-judge"
+PHASE_LOCAL_CAL = "2-judge-local-cal"
+PHASE_LOCAL = "2-judge-local"
+CALIBRATION_FILE = "calibration-report.json"
+#: The Max judges whose verdicts calibrate the local one (judge.py's own Max routes).
+MAX_PROVIDERS = frozenset({"max-payg", "max-token-plan"})
 MAX_PAYG_CONCURRENCY = 4
 #: --provider token-plan: workers (the client's adaptive limit gates them) and the limit's start.
 MAX_TOKEN_PLAN_CONCURRENCY = spend.TP_MAX_CONCURRENCY
@@ -1181,6 +1299,8 @@ class LocalJudgeClient:
     judge_key = "none"
     price = None
     region = ""
+    #: what the ledger's free row notes
+    ledger_note = "local"
 
     def __init__(self, url: str, *, ledger: Any, phase: str, model_glob: str = DEFAULT_LOCAL_MODEL,
                  timeout: float = 300.0, opener: Any = None) -> None:
@@ -1194,21 +1314,34 @@ class LocalJudgeClient:
         # No proxy from the environment (the address is loopback) and no credentials, ever.
         self._opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    def _http(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _auth_headers(self) -> dict[str, str]:
+        return {}
+
+    def _request(self, path: str, body: dict[str, Any] | None = None, *, auth: bool = True,
+                 timeout: float | None = None) -> tuple[int, bytes]:
+        """(HTTP status, body) of one request; JudgeCallError only for a transport failure."""
         data = json.dumps(body).encode("utf-8") if body is not None else None
+        headers = {"Content-Type": "application/json", **(self._auth_headers() if auth else {})}
         request = urllib.request.Request(self.url + path, data=data, method="POST" if data else "GET",
-                                         headers={"Content-Type": "application/json"})
+                                         headers=headers)
         try:
-            with self._opener.open(request, timeout=self.timeout) as resp:
-                raw = resp.read()
+            with self._opener.open(request, timeout=timeout or self.timeout) as resp:
+                return int(resp.status), resp.read()
         except urllib.error.HTTPError as exc:
-            kind = spend.classify_status(exc.code, "")
-            raise JudgeCallError(kind, f"HTTP {exc.code} from the local judge", status=exc.code) from None
+            return int(exc.code), b""
         except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise JudgeCallError("timeout", "TimeoutError") from None
             raise JudgeCallError("unreachable", f"{type(exc.reason).__name__}", maybe_billed=False) from None
-        except (TimeoutError, OSError) as exc:
+        except (TimeoutError, OSError, http.client.HTTPException) as exc:
             raise JudgeCallError("timeout" if isinstance(exc, TimeoutError) else "unreachable",
                                  type(exc).__name__) from None
+
+    def _http(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        status, raw = self._request(path, body)
+        if status >= 400:
+            kind = spend.classify_status(status, "")
+            raise JudgeCallError(kind, f"HTTP {status} from the {self.provider} judge", status=status)
         try:
             obj = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
@@ -1264,7 +1397,7 @@ class LocalJudgeClient:
         try:
             await asyncio.to_thread(self.ledger.record_free, tool=TOOL, phase=self.phase,
                                     model=served or self.model, input_tokens=in_tok, output_tokens=out_tok,
-                                    note="local")
+                                    note=self.ledger_note)
         except spend.SpendError as exc:
             raise JudgeBudgetStop(f"the spend ledger cannot count local calls: {exc}", state="fatal") from None
         text = message.get("content") if isinstance(message, dict) else None
@@ -1272,6 +1405,251 @@ class LocalJudgeClient:
                           output_tokens=out_tok, served_model=served,
                           cached_input_tokens=usage.cached_input_tokens if usage else 0,
                           usage_estimated=usage is None)
+
+
+class JudgeNotReady(JudgeSetupError):
+    """The remote judge server is not up yet (loading or gone): the run ends ``paused``, not fatal."""
+
+
+def host_addresses(host: str) -> list[str]:
+    """Every address *host* resolves to (an IP literal is itself)."""
+    try:
+        return [str(ipaddress.ip_address(host.strip("[]")))]
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as exc:
+        raise JudgeSetupError(f"cannot resolve {host!r}: {exc.strerror or type(exc).__name__}") from None
+    return sorted({str(i[4][0]) for i in infos})
+
+
+def is_local_address(addr: str) -> bool:
+    """Whether *addr* is assigned to this host (a socket can bind it)."""
+    ip = ipaddress.ip_address(addr)
+    fam = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+    try:
+        with socket.socket(fam, socket.SOCK_DGRAM) as s:
+            s.bind((str(ip), 0))
+        return True
+    except OSError:
+        return False
+
+
+def check_tailnet_url(url: str) -> str:
+    """``--judge-url`` PINNED to the address it was validated at, or JudgeSetupError.
+
+    ``http://<host>:<port>`` only (no credentials, path or query; no hosted-API host); every address
+    the host resolves to is a tailnet address (``TAILNET_NETS``), none loopback or this host's own.
+    The returned URL names the validated address (IPv4 first), so no later request resolves the
+    name again: a run waits out hours of the server being gone, and a resolver that later maps the
+    bare name to a LAN address would otherwise get the key and the trace text."""
+    parts = urlsplit(url or "")
+    if parts.scheme != "http" or not parts.hostname:
+        raise JudgeSetupError(f"--judge-url must be http://<tailnet host>:<port>, not {url!r}")
+    if parts.username or parts.password:
+        raise JudgeSetupError("--judge-url must not carry credentials (the key comes from --judge-key-file)")
+    if parts.path.strip("/") or parts.query or parts.fragment:
+        raise JudgeSetupError("--judge-url is http://<host>:<port> only")
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    if port is None:
+        raise JudgeSetupError("--judge-url needs its port")
+    host = parts.hostname.lower()
+    if any(p in host for p in _FORBIDDEN_HOST_PARTS):
+        raise JudgeSetupError(f"{host} is a hosted API; --judge-url is a llama-server on the tailnet")
+    addrs = host_addresses(host)
+    if not addrs:
+        raise JudgeSetupError(f"{host} resolves to no address")
+    for addr in addrs:
+        ip = ipaddress.ip_address(addr)
+        if ip.is_loopback or not any(ip in net for net in TAILNET_NETS):
+            raise JudgeSetupError(f"{host} ({addr}) is not a tailnet address: --judge-url is reached over the "
+                                  "tailnet only (a loopback server is --local-url)")
+        if is_local_address(addr):
+            raise JudgeSetupError(f"{host} ({addr}) is this host: use --local-url for a loopback server")
+    addr = min(addrs, key=lambda a: (ipaddress.ip_address(a).version, a))
+    literal = f"[{addr}]" if ipaddress.ip_address(addr).version == 6 else addr
+    return f"http://{literal}:{port}"
+
+
+def load_key_file(path: str | Path) -> str:
+    """The API key in ``--judge-key-file``: a regular file (not a symlink) owned by this user, mode
+    0600 or tighter, holding one key (the first line that is not blank or a ``#`` comment) of at
+    least ``REMOTE_KEY_MIN_LEN`` printable characters. The key goes into the Authorization header
+    and nowhere else: never argv, a log, a row, the status file or an error message."""
+    p = Path(path).expanduser()
+    try:
+        fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise JudgeSetupError(f"{p}: cannot open the key file ({exc.strerror or type(exc).__name__}; "
+                              "a symlink is refused)") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise JudgeSetupError(f"{p}: not a regular file")
+        if st.st_uid != os.geteuid():
+            raise JudgeSetupError(f"{p}: owned by uid {st.st_uid}, not this user")
+        if st.st_mode & 0o077:
+            raise JudgeSetupError(f"{p}: mode {st.st_mode & 0o777:o}; a key file must be 0600")
+        if st.st_size > 4096:
+            raise JudgeSetupError(f"{p}: {st.st_size} bytes is not a key file")
+        raw = os.read(fd, 4097)
+    finally:
+        os.close(fd)
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError:
+        raise JudgeSetupError(f"{p}: the key file is not ASCII") from None
+    key = next((ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")), "")
+    if len(key) < REMOTE_KEY_MIN_LEN:
+        raise JudgeSetupError(f"{p}: no key of at least {REMOTE_KEY_MIN_LEN} characters")
+    if not all(33 <= ord(ch) < 127 for ch in key) or "," in key:
+        raise JudgeSetupError(f"{p}: the key holds spaces, commas or control characters")
+    return key
+
+
+class RemoteJudgeClient(LocalJudgeClient):
+    """The local 27B as the judge, served by ANOTHER machine on the tailnet (the 4090's
+    ``tower/serve_teacher.sh``: UD-Q4_K_XL, several slots, an API key).
+
+    The same rubric, prompt, context builder and request as the loopback judge (and the
+    Phase 2 Max judge's rubric and prompt): only the transport differs. The URL is pinned to its
+    validated tailnet address; the key goes only into the Authorization header; no proxy. The
+    preflight (and the identity check after every pause) wants: ``/health`` ready, a served id
+    matching ``--local-model`` (never Max), ``/props`` refused without the key and answered with it,
+    the served file named for ``--judge-quant``, the MCP proxy off and ``GET /tools`` not 200 (no
+    built-in tools or MCP servers: they would run on that host, which has no jail). ``slots`` is
+    the server's ``total_slots``: the run never has more calls in flight."""
+
+    route = "remote"
+    ledger_note = "local-remote"
+
+    def __init__(self, url: str, *, key_file: str | Path, ledger: Any, phase: str, host: str | None = None,
+                 quant: str = REMOTE_QUANT, sha256: str = REMOTE_SHA256, model_glob: str = DEFAULT_LOCAL_MODEL,
+                 timeout: float = 300.0, opener: Any = None) -> None:
+        given = (urlsplit(url or "").hostname or "").lower()
+        self.url = check_tailnet_url(url)
+        self.ledger = ledger
+        self.phase = phase
+        self.model_glob = model_glob
+        self.timeout = timeout
+        self.model = ""
+        self.host = (host or given).strip()
+        if not self.host:
+            raise JudgeSetupError("--judge-host is empty")
+        if not quant.strip() or not re.fullmatch(r"[0-9a-f]{64}", sha256 or ""):
+            raise JudgeSetupError("--judge-quant must be set and --judge-sha256 must be 64 hex characters")
+        self.quant = quant.strip()
+        self.sha256 = sha256
+        self.slots = 0
+        self.model_file = ""
+        self.__key = load_key_file(key_file)
+        self.endpoint = f"remote llama-server on {self.host} (tailnet, keyed)"
+        self._opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def __repr__(self) -> str:  # never the key
+        return f"RemoteJudgeClient(host={self.host!r}, model={self.model!r}, slots={self.slots})"
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.__key}"}
+
+    @property
+    def row_fields(self) -> dict[str, Any]:
+        """What every verdict row of this judge records beside provider/model."""
+        return {"judge_route": self.route, "judge_host": self.host, "judge_quant": self.quant,
+                "judge_sha256": self.sha256, "judge_model_file": self.model_file or None}
+
+    @property
+    def record_fields(self) -> dict[str, Any]:
+        """The same, in the verdict's ``verification.judge`` record."""
+        return {"route": self.route, "host": self.host, "quant": self.quant, "sha256": self.sha256}
+
+    def health(self) -> str:
+        """``ready`` (/health 200), ``loading`` (503), ``gone`` (no answer) or ``http-<code>``. Public: no key."""
+        try:
+            status, _ = self._request("/health", auth=False, timeout=REMOTE_HEALTH_TIMEOUT_S)
+        except JudgeCallError:
+            return "gone"
+        if status == 200:
+            return "ready"
+        return "loading" if status == 503 else f"http-{status}"
+
+    def _check_server(self) -> None:
+        """The key enforced and ours accepted, the quant, no MCP proxy, no tools; sets ``slots``."""
+        bare, _ = self._request("/props", auth=False)
+        if bare not in (401, 403):
+            raise JudgeSetupError(f"the judge server answers /props without a key (HTTP {bare}): it must be "
+                                  "started with --api-key-file (serve_teacher.sh); refusing an open server")
+        status, raw = self._request("/props")
+        if status in (401, 403):
+            raise JudgeSetupError(f"the judge server refused our key (HTTP {status}): the key files on the "
+                                  "two hosts differ")
+        if status != 200:
+            raise JudgeCallError("provider_error", f"HTTP {status} on /props", status=status)
+        try:
+            props = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise JudgeSetupError("the judge server's /props is not JSON") from None
+        if not isinstance(props, dict):
+            raise JudgeSetupError("the judge server's /props is not an object")
+        if props.get("cors_proxy_enabled") is True:
+            raise JudgeSetupError("the judge server has its MCP proxy on (/props cors_proxy_enabled); refusing it")
+        model_file = Path(str(props.get("model_path") or "")).name
+        if self.quant.lower() not in model_file.lower():
+            raise JudgeSetupError(f"the judge server's model file {model_file or '(unknown)'!r} is not the "
+                                  f"{self.quant} quant (--judge-quant)")
+        slots = props.get("total_slots")
+        if isinstance(slots, bool) or not isinstance(slots, int) or slots < 1:
+            raise JudgeSetupError(f"the judge server's /props has no total_slots ({slots!r})")
+        tools, _ = self._request("/tools")
+        if tools == 200:
+            raise JudgeSetupError("the judge server answers GET /tools: llama-server's built-in tools or MCP "
+                                  "servers are on (they would run unjailed on its host); refusing it")
+        if tools not in (403, 404):
+            raise JudgeSetupError(f"the judge server answered GET /tools with HTTP {tools} (403: tools off, "
+                                  "expected)")
+        self.model_file = model_file
+        self.slots = slots
+
+    def preflight(self) -> str:
+        state = self.health()
+        if state != "ready":
+            raise JudgeNotReady(f"the judge server on {self.host} is not ready ({state}): start it "
+                                "(distill-teacher-serve) and run again")
+        try:
+            data = (self._http("/v1/models").get("data") or [{}])[0]
+        except JudgeCallError as exc:
+            raise JudgeNotReady(f"the judge server on {self.host} is not answering /v1/models ({exc})") from None
+        model = self.model = self._check_id(data.get("id") if isinstance(data, dict) else None)
+        try:
+            self._check_server()
+        except JudgeCallError as exc:
+            raise JudgeNotReady(f"the judge server on {self.host} stopped answering ({exc})") from None
+        return model
+
+    def identity(self) -> int:
+        """After a pause: still the server this run started on (same served id, key enforced and ours
+        accepted, same quant, no tools). Returns its slots; JudgeBudgetStop (fatal) when it changed;
+        JudgeCallError when it is still not answering."""
+        before = self.model
+        data = (self._http("/v1/models").get("data") or [{}])[0]
+        served = data.get("id") if isinstance(data, dict) else None
+        if served != before:
+            raise JudgeBudgetStop(f"the judge server came back serving {served!r}, not {before!r}", state="fatal")
+        try:
+            self._check_server()
+        except JudgeSetupError as exc:
+            raise JudgeBudgetStop(f"the judge server came back changed: {exc}", state="fatal") from None
+        return self.slots
+
+
+def remote_concurrency(want: int | None, slots: int) -> int:
+    """Calls in flight against a remote judge: *want* (``--concurrency``; None: as many as it has
+    slots), never more than its slots or ``REMOTE_MAX_CONCURRENCY``, at least 1."""
+    return max(1, min(want or REMOTE_MAX_CONCURRENCY, max(1, int(slots)), REMOTE_MAX_CONCURRENCY))
 
 
 def live_error_probe(path: Path, provider: str, *, window_s: float = LIVE_PROBE_WINDOW_S,
@@ -1351,15 +1729,25 @@ def done_ids(rows: Iterable[dict[str, Any]], view: str) -> set[str]:
 
 
 def verification_record(parsed: dict[str, Any], *, model: str, served_model: str | None,
-                        provider: str) -> dict[str, Any]:
-    """The verdict as a ``_meta.verification`` record (build.py's ``verification_of`` shape)."""
+                        provider: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The verdict as a ``_meta.verification`` record (build.py's ``verification_of`` shape);
+    *extra* (a remote judge's route, host, quant and sha256) goes into its ``judge``."""
     return {"verified": parsed["verdict"] == "pass",
             "judge": {"verdict": parsed["verdict"], "model": model, "served_model": served_model,
-                      "provider": provider}}
+                      "provider": provider, **(extra or {})}}
 
 
 class JudgeRun:
-    """Judges queued items through one client, under the live probe and the client's budget."""
+    """Judges queued items through one client, under the live probe and the client's budget.
+
+    A REMOTE client (one with ``health``: ``--judge-url``) also gets the pause: a transport failure
+    (refused, reset, timeout, 5xx) reads the server's ``/health``; unless it is ready no new item
+    starts, the items in flight go back on the queue (their attempt does not count), and one monitor
+    polls ``/health`` with a doubling backoff (``REMOTE_BACKOFF_S``). Once it answers, the server's
+    identity is checked again (same model, key, quant, no tools: else ``fatal``) and the run resumes
+    with at most its slots in flight. Gone longer than *max_pause_s*: the run ends ``paused``.
+    After *warmup* verdicts (and every ``PROJECT_EVERY``) it prints a wall-time projection for
+    everything still pending (``projection`` in the status file too)."""
 
     def __init__(
         self, items: list[dict[str, Any]], *, client: Any, results_path: Path, status_path: Path,
@@ -1367,6 +1755,8 @@ class JudgeRun:
         sleep: Callable[[float], Any] = asyncio.sleep,
         probe: Callable[[], str | None] | None = None,
         rng: random.Random | None = None,
+        max_pause_s: float = REMOTE_MAX_PAUSE_S, warmup: int = DEFAULT_WARMUP,
+        wall: Callable[[], float] = time.monotonic,
     ) -> None:
         self.items = items
         self.client = client
@@ -1379,6 +1769,22 @@ class JudgeRun:
         self.rng = rng or random.Random()
         self.outcome = RunOutcome(state="running", reason="")
         self._stopped = False
+        self.remote = callable(getattr(client, "health", None)) and callable(getattr(client, "identity", None))
+        self.max_pause_s = max_pause_s
+        self.warmup = max(1, int(warmup))
+        self.wall = wall
+        self.limit = max(1, config.concurrency)
+        self.pauses = 0
+        self.paused_s = 0.0
+        self.pause_reason = ""
+        self._pause_started = 0.0
+        self._ready: asyncio.Event | None = None
+        self._monitor: asyncio.Task[None] | None = None
+        self._inflight = 0
+        self._t0: float | None = None
+        self._pending_at_start = 0
+        self._tokens = [0, 0]
+        self.projection: dict[str, Any] | None = None
 
     # -- state -------------------------------------------------------------
 
@@ -1388,6 +1794,8 @@ class JudgeRun:
             self.outcome.state = state
             self.outcome.reason = reason
             log.warning("judge run stopped (%s): %s", state, reason)
+            if self._ready is not None:
+                self._ready.set()  # wake the workers waiting out a pause so they see the stop
 
     def _budget(self) -> str:
         describe = getattr(self.client, "budget_describe", None)
@@ -1395,14 +1803,25 @@ class JudgeRun:
 
     def _write_status(self) -> None:
         o = self.outcome
-        write_private(self.status_path, json.dumps({
+        status = {
             "ts": iso(self.clock()), "state": o.state, "reason": o.reason,
             "judged_this_run": o.judged, "unparseable_this_run": o.unparseable,
             "errors_this_run": o.errors, "calls_this_run": o.calls,
             "remaining": o.remaining, "budget": self._budget(),
             "provider": getattr(self.client, "provider", ""), "model": getattr(self.client, "model", ""),
             "view": self.config.view, "phase": self.config.phase,
-        }, indent=1) + "\n")
+        }
+        if self.remote:
+            status.update({"judge_host": getattr(self.client, "host", ""), "concurrency": self.limit,
+                           "paused": self.paused, "pause_reason": self.pause_reason if self.paused else "",
+                           "pauses": self.pauses, "paused_s": round(self.paused_s, 1)})
+        if self.projection is not None:
+            status["projection"] = self.projection
+        write_private(self.status_path, json.dumps(status, indent=1) + "\n")
+
+    @property
+    def paused(self) -> bool:
+        return self._ready is not None and not self._ready.is_set()
 
     def _gate(self) -> bool:
         """The live probe, before every call. True when the call may go."""
@@ -1433,44 +1852,144 @@ class JudgeRun:
             "phase": getattr(self.config, "phase", PHASE),
             "ts": iso(self.clock()),
         }
+        extra = getattr(self.client, "row_fields", None)
+        if isinstance(extra, dict):
+            row.update(extra)
         row.update(fields)
         return row
 
+    # -- the remote pause ------------------------------------------------------
+
+    async def _loss_check(self) -> bool:
+        """After a transport failure on a remote judge: whether the run is (now) paused."""
+        if self.paused:
+            return True
+        state = await asyncio.to_thread(self.client.health)
+        if state == "ready" or self._stopped:
+            return False
+        if self.paused:  # another worker paused it while this one read /health
+            return True
+        assert self._ready is not None
+        self._ready.clear()
+        self.pauses += 1
+        self._pause_started = self.wall()
+        self.pause_reason = f"judge server {state}"
+        log.warning("the judge server on %s is not ready (%s): paused; no new item starts, the items in "
+                    "flight go back on the queue", getattr(self.client, "host", "?"), state)
+        self._write_status()
+        self._monitor = asyncio.create_task(self._watch(state))
+        return True
+
+    async def _watch(self, state: str) -> None:
+        delay, cap = REMOTE_BACKOFF_S
+        try:
+            while not self._stopped:
+                if self.wall() - self._pause_started >= self.max_pause_s:
+                    self._halt("paused", f"the judge server has not been ready for {self.max_pause_s / 3600:.1f} h "
+                                         f"({state}); run again to resume")
+                    break
+                await self.sleep(min(delay, max(0.0, self.max_pause_s - (self.wall() - self._pause_started))))
+                if self._stopped:
+                    break
+                state = await asyncio.to_thread(self.client.health)
+                if state == "ready":
+                    try:
+                        slots = await asyncio.to_thread(self.client.identity)
+                    except JudgeBudgetStop as exc:
+                        self._halt(exc.state, exc.reason)
+                        break
+                    except (JudgeCallError, JudgeSetupError):
+                        state = "gone"
+                    else:
+                        self.limit = remote_concurrency(self.config.concurrency, slots)
+                        log.warning("the judge server on %s is back (%d slots): %d calls in flight again",
+                                    getattr(self.client, "host", "?"), slots, self.limit)
+                        return
+                delay = min(cap, delay * 2)
+        finally:
+            self.paused_s += self.wall() - self._pause_started
+            self.pause_reason = ""
+            if self._ready is not None:
+                self._ready.set()
+            self._write_status()
+
+    async def _wait_turn(self, wid: int, work_left: Callable[[], bool]) -> None:
+        """Until worker *wid* may start an item (not paused, *wid* under ``limit``), the run stops, or
+        no work is left (nothing queued and nothing in flight)."""
+        assert self._ready is not None
+        while not self._stopped and work_left() and (self.paused or wid >= self.limit):
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._ready.wait(), REMOTE_WAIT_POLL_S)
+            if not self._stopped and not self.paused and wid >= self.limit:
+                await asyncio.sleep(REMOTE_WAIT_POLL_S)
+
+    # -- the projection ----------------------------------------------------------
+
+    def _project(self, final: bool = False) -> None:
+        """Wall time for what is still pending, from this run's pace (pauses left out)."""
+        done = self.outcome.judged + self.outcome.unparseable
+        if self._t0 is None or not done or getattr(self.client, "provider", "") != "local":
+            return  # the Max routes have their cost projection instead
+        if not final and done != self.warmup and (done < self.warmup or (done - self.warmup) % PROJECT_EVERY):
+            return
+        active = max(1e-6, self.wall() - self._t0 - self.paused_s)
+        per_hour = done / active * 3600.0
+        left = max(0, self._pending_at_start - self.outcome.judged)
+        hours = left / per_hour if per_hour else None
+        finish = (iso(datetime.fromtimestamp(self.clock().timestamp() + hours * 3600.0, timezone.utc))
+                  if hours is not None else None)
+        self.projection = {
+            "basis": f"{done} verdict(s) in {active / 60:.1f} min at {self.limit} in flight",
+            "verdicts_per_hour": round(per_hour, 1), "pending": left,
+            "projected_hours": round(hours, 2) if hours is not None else None, "projected_finish_utc": finish,
+            "mean_input_tokens": round(self._tokens[0] / done), "mean_output_tokens": round(self._tokens[1] / done),
+        }
+        print(json.dumps({"projection": self.projection}), flush=True)
+        self._write_status()
+
     # -- one item ------------------------------------------------------------
 
-    async def _judge(self, item: dict[str, Any]) -> None:
+    async def _judge(self, item: dict[str, Any]) -> bool:
+        """Judge one item; True when it goes back on the queue (the remote server is gone: a pause)."""
         cfg = self.config
         system = system_prompt(cfg.view)
         user, truncated = render_prompt(item, view=cfg.view, max_message_chars=cfg.max_message_chars,
                                         max_prompt_chars=cfg.max_prompt_chars)
         for attempt in range(cfg.max_attempts):
             if self._stopped or not self._gate():
-                return
+                return False
+            if self.paused:
+                return True
+            started = self.wall()
+            if self._t0 is None:
+                self._t0 = started
             try:
                 result = await self.client.complete(system, user, max_tokens=cfg.max_tokens)
             except JudgeBudgetStop as exc:
                 # Refused before anything was sent: the cap, the sub-budget or STOP.
                 self._halt(exc.state, exc.reason)
-                return
+                return False
             except JudgeCallError as exc:
                 self.outcome.calls += 1
                 if exc.kind in FATAL_KINDS:
                     self._halt("fatal", f"{exc.kind} error from the judge model: {exc}")
-                    return
+                    return False
+                if self.remote and exc.kind in SERVER_LOSS_KINDS and await self._loss_check():
+                    return True  # the server is gone or loading: a pause, not an attempt
                 last = attempt + 1 >= cfg.max_attempts
                 if exc.kind not in RETRYABLE_KINDS or last:
                     if exc.kind == "rate_limit":
                         self._halt("paused", f"rate limited on all {cfg.max_attempts} attempts")
-                        return
+                        return False
                     self.outcome.errors += 1
                     append_private(self.results_path, self._row(
                         item, status="error", error=exc.kind, attempts=attempt + 1))
-                    return
+                    return False
                 if exc.kind == "rate_limit" and self.probe is not None:
                     signal = self.probe()
                     if signal:
                         self._halt("paused", signal)
-                        return
+                        return False
                 delay = self.backoff_delay(attempt, exc.retry_after)
                 self.outcome.sleeps.append(delay)
                 log.warning("%s on %s (attempt %d/%d); backing off %.0fs",
@@ -1479,12 +1998,15 @@ class JudgeRun:
                 continue
 
             self.outcome.calls += 1
+            self._tokens[0] += result.input_tokens
+            self._tokens[1] += result.output_tokens
             parsed = parse_verdict(result.text)
             common = dict(
                 served_model=result.served_model, input_tokens=result.input_tokens,
                 cached_input_tokens=result.cached_input_tokens, output_tokens=result.output_tokens,
                 usage_estimated=result.usage_estimated, cost_usd=round(result.cost_usd, 6),
                 call_id=result.call_id, prompt_chars=len(user), truncated=truncated, attempts=attempt + 1,
+                elapsed_s=round(self.wall() - started, 3),
             )
             if parsed is None:
                 self.outcome.unparseable += 1
@@ -1492,13 +2014,17 @@ class JudgeRun:
                     item, status="unparseable", reply_head=clip(result.text, 300), **common))
             else:
                 self.outcome.judged += 1
+                extra = getattr(self.client, "record_fields", None)
                 verification = verification_record(
                     parsed, model=getattr(self.client, "model", ""), served_model=result.served_model,
-                    provider=getattr(self.client, "provider", ""))
+                    provider=getattr(self.client, "provider", ""),
+                    extra=extra if isinstance(extra, dict) else None)
                 append_private(self.results_path, self._row(
                     item, status="ok", agrees=parsed["verdict"] == item["label"], **parsed, **common,
                     verification=verification))
-            return
+            self._project()
+            return False
+        return False
 
     # -- the loop --------------------------------------------------------------
 
@@ -1506,16 +2032,42 @@ class JudgeRun:
         cfg = self.config
         judged = done_ids(read_jsonl(self.results_path), cfg.view)
         pending = [it for it in self.items if it["id"] not in judged]
+        self._pending_at_start = len(pending)
         if cfg.limit is not None:
             pending = pending[: max(0, cfg.limit)]
+        self._ready = asyncio.Event()
+        self._ready.set()
         self._write_status()
         queue = list(pending)
 
-        async def worker() -> None:
-            while queue and not self._stopped:
-                await self._judge(queue.pop(0))
+        async def worker(wid: int) -> None:
+            while not self._stopped:
+                if self.remote:
+                    await self._wait_turn(wid, lambda: bool(queue) or self._inflight > 0)
+                    if self._stopped:
+                        return
+                if not queue:
+                    if self.remote and self._inflight:
+                        # an item in flight may yet go back on the queue (the server went away)
+                        await asyncio.sleep(REMOTE_WAIT_POLL_S)
+                        continue
+                    return
+                item = queue.pop(0)
+                self._inflight += 1
+                try:
+                    requeue = await self._judge(item)
+                finally:
+                    self._inflight -= 1
+                if requeue:
+                    queue.insert(0, item)
 
-        await asyncio.gather(*(worker() for _ in range(max(1, cfg.concurrency))))
+        try:
+            await asyncio.gather(*(worker(wid) for wid in range(max(1, cfg.concurrency))))
+        finally:
+            if self._monitor is not None and not self._monitor.done():
+                self._monitor.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._monitor
 
         left = [it for it in self.items
                 if it["id"] not in done_ids(read_jsonl(self.results_path), cfg.view)]
@@ -1529,6 +2081,7 @@ class JudgeRun:
             else:
                 self.outcome.state = "done"
                 self.outcome.reason = "every queued item has a verdict"
+        self._project(final=True)
         self._write_status()
         return self.outcome
 
@@ -1809,6 +2362,260 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# The local judge's queues (subset) and its calibration against Max
+# ---------------------------------------------------------------------------
+
+
+def iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
+    """The rows of a JSONL file one at a time (the re-judge queue is >100 MB)."""
+    with open(Path(path).expanduser(), encoding="utf-8") as fh:
+        for lineno, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise JudgeSetupError(f"{Path(path).name}:{lineno}: not JSON ({exc.msg})") from None
+
+
+def train_row_id(file: str, line: int) -> str:
+    """build.py's id of the train row a judge.py item becomes: ``p3-`` + the first 16 hex of the
+    sha1 of its trace id ``<file name>:<line + 1>`` (judge.py's line is 0-based, the trace id's 1-based)."""
+    return "p3-" + hashlib.sha1(f"{file}:{line + 1}".encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def max_verdicts(rows: Iterable[dict[str, Any]], view: str) -> dict[str, str]:
+    """id -> ``pass`` | ``fail`` from the Max judge's ``ok`` rows (rubric v2, *view*; a Max provider and
+    a model naming Max). Later rows win; unparseable and error rows carry no verdict."""
+    out: dict[str, str] = {}
+    for r in rows:
+        if (r.get("status") == "ok" and r.get("rubric_version") == RUBRIC_VERSION and r.get("view") == view
+                and r.get("provider") in MAX_PROVIDERS and names_max(r.get("model"))
+                and r.get("verdict") in LABELS):
+            out[str(r["id"])] = r["verdict"]
+    return out
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def build_subset(src: Path, which: str, *, verdict_files: list[Path] | None = None,
+                 train_files: Iterable[Path] = (), train_labels: Iterable[str] = ("tool-success",),
+                 seed: int = DEFAULT_SEED) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """A queue for the local judge, cut from a judged workdir *src* (the Phase 2 Max re-judge).
+
+    ``max-judged`` (calibration): every item with a Max verdict, shuffled (seeded) so a partial run
+    is a fair sample. Its ``source`` becomes ``{"calibration_of": <source>}``: no file, so build.py
+    can never apply these verdicts (they would override Max's); fed to it by mistake they fail its
+    verdicts gate. ``unjudged``: every item WITHOUT a Max verdict whose build.py train row
+    (``train_row_id``) is in *train_files* with a label in *train_labels* (``tool-success``: the rows
+    trained on the harvested label only), in the source queue's order, sources kept: these verdicts
+    are build.py's to apply (a fail excludes the row, a pass makes it ``judge-pass``)."""
+    src = Path(src).expanduser()
+    queue_path, meta_path = src / QUEUE_FILE, src / QUEUE_META_FILE
+    if not queue_path.is_file():
+        raise JudgeSetupError(f"no queue at {queue_path}")
+    src_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
+    view = src_meta.get("view") or "outcome"
+    files = [Path(f).expanduser() for f in (verdict_files or [src / RESULTS_FILE])]
+    verdicts: dict[str, str] = {}
+    for f in files:
+        if not f.is_file():
+            raise JudgeSetupError(f"no Max verdicts at {f}")
+        verdicts.update(max_verdicts(iter_jsonl(f), view))
+    meta: dict[str, Any] = {"schema": "distill-judge-queue/1", "created": iso(utc_now()),
+                            "subset_from": str(src), "view": view, "seed": seed,
+                            "max_verdict_files": [str(f) for f in files]}
+    chosen: list[dict[str, Any]] = []
+    if which == "max-judged":
+        for item in iter_jsonl(queue_path):
+            if item["id"] in verdicts:
+                item["source"] = {"calibration_of": item.get("source")}
+                chosen.append(item)
+        chosen.sort(key=lambda it: it["id"])
+        random.Random(f"{seed}:calibration").shuffle(chosen)
+        meta.update({"mode": MODE_CALIBRATION,
+                     "max_verdicts": dict(Counter(verdicts[it["id"]] for it in chosen))})
+    elif which == "unjudged":
+        labels = {str(x) for x in train_labels}
+        wanted: dict[str, str] = {}
+        info = []
+        for tf in train_files:
+            tf = Path(tf).expanduser()
+            n = k = 0
+            for row in iter_jsonl(tf):
+                n += 1
+                if str(row.get("label")) in labels:
+                    wanted[str(row["id"])] = str(row.get("label"))
+                    k += 1
+            info.append({"name": tf.name, "sha256": _sha256_file(tf), "rows": n, "rows_with_label": k})
+        if not info:
+            raise JudgeSetupError("--which unjudged needs --train-file (the dataset build's train.jsonl)")
+        matched: set[str] = set()
+        for item in iter_jsonl(queue_path):
+            src_ = item.get("source") or {}
+            if item["id"] in verdicts or not src_.get("file") or not isinstance(src_.get("line"), int):
+                continue
+            rid = train_row_id(src_["file"], src_["line"])
+            if rid in wanted and rid not in matched:
+                matched.add(rid)
+                chosen.append(item)
+        meta.update({"mode": MODE_LOCAL_JUDGE, "train_files": info, "train_labels": sorted(labels),
+                     "train_rows_with_label": len(wanted), "train_rows_matched": len(matched),
+                     "train_rows_unmatched": len(set(wanted) - matched)})
+    else:
+        raise JudgeSetupError(f"--which must be max-judged or unjudged, not {which!r}")
+    for item in chosen:
+        item["stratum_weight"] = 1.0
+    sizes = Counter(it["category"] for it in chosen if it.get("label") == "pass")
+    meta.update({"n_pass": sum(1 for it in chosen if it.get("label") == "pass"),
+                 "n_fail": sum(1 for it in chosen if it.get("label") == "fail"),
+                 "pass_pool": dict(sorted(sizes.items())),
+                 "queued_by_category": dict(sorted(Counter(it["category"] for it in chosen).items()))})
+    return chosen, meta
+
+
+def cohen_kappa(a: int, b: int, c: int, d: int) -> tuple[float | None, list[float] | None]:
+    """Cohen's kappa of a 2x2 table (a: both pass, b: Max pass / local fail, c: Max fail / local pass,
+    d: both fail) and its 95% interval (the large-sample standard error, Cohen 1960)."""
+    n = a + b + c + d
+    if not n:
+        return None, None
+    po = (a + d) / n
+    pe = ((a + b) / n) * ((a + c) / n) + ((c + d) / n) * ((b + d) / n)
+    if pe >= 1.0:
+        return (1.0 if po >= 1.0 else 0.0), None
+    kappa = (po - pe) / (1.0 - pe)
+    se = math.sqrt(po * (1.0 - po) / (n * (1.0 - pe) ** 2))
+    return round(kappa, 4), [round(kappa - 1.96 * se, 4), round(kappa + 1.96 * se, 4)]
+
+
+def _cell(pairs: list[tuple[str, str]]) -> tuple[int, int, int, int]:
+    a = sum(1 for m, lo in pairs if m == "pass" and lo == "pass")
+    b = sum(1 for m, lo in pairs if m == "pass" and lo == "fail")
+    c = sum(1 for m, lo in pairs if m == "fail" and lo == "pass")
+    d = sum(1 for m, lo in pairs if m == "fail" and lo == "fail")
+    return a, b, c, d
+
+
+def calibration_report(items: list[dict[str, Any]], local_rows: list[dict[str, Any]],
+                       max_rows: Iterable[dict[str, Any]], *, view: str = "outcome",
+                       threshold: float = CALIBRATION_THRESHOLD,
+                       allow_missing: int | None = None) -> dict[str, Any]:
+    """How well the local judge agrees with Max on the same items (same rubric, prompt and view).
+
+    The set is the queued items Max judged; a pair is one the local judge also judged (its latest
+    ``ok`` row, provider ``local``). Decision on the point agreement over the pairs: ``use-local-judge``
+    at *threshold* or above, else ``do-not-use``; ``incomplete`` while more than *allow_missing* items
+    (default ``CALIBRATION_ALLOW_MISSING_SHARE`` of the set) have no local verdict."""
+    mx = max_verdicts(max_rows, view)
+    category = {it["id"]: it.get("category", "?") for it in items}
+    calib = [it["id"] for it in items if it["id"] in mx]
+    local: dict[str, dict[str, Any]] = {}
+    seen_status: dict[str, set[str]] = defaultdict(set)
+    for r in local_rows:
+        if r.get("view") != view or r.get("rubric_version") != RUBRIC_VERSION or r.get("provider") != "local":
+            continue
+        seen_status[str(r.get("id"))].add(str(r.get("status")))
+        if r.get("status") == "ok" and r.get("verdict") in LABELS and not names_max(r.get("model")):
+            local[str(r["id"])] = r
+    pairs = [(i, mx[i], local[i]["verdict"]) for i in calib if i in local]
+    missing = [i for i in calib if i not in local]
+    if allow_missing is None:
+        allow_missing = int(math.floor(CALIBRATION_ALLOW_MISSING_SHARE * len(calib)))
+    a, b, c, d = _cell([(m, lo) for _i, m, lo in pairs])
+    n = len(pairs)
+    agree = a + d
+    kappa, kappa_ci = cohen_kappa(a, b, c, d)
+
+    by_cat = []
+    for cat in sorted({category[i] for i in calib}):
+        cp = [(m, lo) for i, m, lo in pairs if category[i] == cat]
+        ca, cb, cc, cd = _cell(cp)
+        ck, _ = cohen_kappa(ca, cb, cc, cd)
+        by_cat.append({"category": cat, "set": sum(1 for i in calib if category[i] == cat), "n": len(cp),
+                       "agreement": _rate(ca + cd, len(cp)), "ci95": _ci(ca + cd, len(cp)), "kappa": ck,
+                       "false_pass_k": cc, "max_fail_n": cc + cd, "false_fail_k": cb, "max_pass_n": ca + cb})
+    by_cat.sort(key=lambda x: (x["agreement"] if x["agreement"] is not None else 2.0, x["category"]))
+
+    rate = agree / n if n else None
+    if not n:
+        decision, why = "incomplete", "no item has both a Max and a local verdict yet"
+    elif len(missing) > allow_missing:
+        decision, why = "incomplete", (f"{len(missing)} of {len(calib)} Max-judged item(s) have no local verdict "
+                                       f"(allowed: {allow_missing}): run the local judge again")
+    elif rate is not None and rate >= threshold - 1e-12:
+        decision, why = "use-local-judge", f"agreement {rate:.2%} >= {threshold:.0%}"
+    else:
+        decision, why = "do-not-use", f"agreement {rate:.2%} < {threshold:.0%}: train on the dataset as it is"
+    judged_by = [local[i] for i, _m, _lo in pairs]
+    return {
+        "schema": "distill-judge-calibration/1", "created": iso(utc_now()), "view": view,
+        "rubric_version": RUBRIC_VERSION, "threshold": threshold,
+        "set": len(calib), "pairs": n, "missing": len(missing), "allow_missing": allow_missing,
+        "missing_after_unparseable": sum(1 for i in missing if "unparseable" in seen_status[i]),
+        "missing_after_error": sum(1 for i in missing if "error" in seen_status[i]),
+        "agreement": {"k": agree, "n": n, "rate": _rate(agree, n), "rate_exact": rate, "ci95": _ci(agree, n)},
+        "agreement_strict": {"k": agree, "n": len(calib), "rate": _rate(agree, len(calib))},
+        "kappa": {"value": kappa, "ci95": kappa_ci},
+        "confusion": {"max_pass": {"local_pass": a, "local_fail": b},
+                      "max_fail": {"local_pass": c, "local_fail": d}},
+        "false_pass": {"k": c, "n": c + d, "rate": _rate(c, c + d), "ci95": _ci(c, c + d),
+                       "share_of_local_passes": _rate(c, a + c), "ci95_share": _ci(c, a + c)},
+        "false_fail": {"k": b, "n": a + b, "rate": _rate(b, a + b), "ci95": _ci(b, a + b),
+                       "share_of_local_fails": _rate(b, b + d)},
+        "pass_rate": {"max": _rate(a + b, n), "local": _rate(a + c, n)},
+        "by_category": by_cat,
+        "judge": {"models": dict(Counter(str(r.get("model")) for r in judged_by).most_common()),
+                  "hosts": dict(Counter(str(r.get("judge_host") or "loopback") for r in judged_by).most_common()),
+                  "quants": dict(Counter(str(r.get("judge_quant") or "?") for r in judged_by).most_common()),
+                  "sha256": sorted({str(r.get("judge_sha256")) for r in judged_by if r.get("judge_sha256")})},
+        "decision": {"decision": decision, "reason": why},
+    }
+
+
+def render_calibration(rep: dict[str, Any]) -> str:
+    ag, fp, ff, cm, dec = rep["agreement"], rep["false_pass"], rep["false_fail"], rep["confusion"], rep["decision"]
+    head = {"use-local-judge": "DECISION: use the local judge",
+            "do-not-use": "DECISION: do not use the local judge; train on the dataset as it is",
+            "incomplete": "DECISION: not yet (incomplete)"}[dec["decision"]]
+    kappa = rep["kappa"]
+    lines = [
+        f"# Local judge calibration against Max ({rep['view']} view, rubric v{rep['rubric_version']})", "",
+        f"**{head}** ({dec['reason']}).", "",
+        f"- Compared: {rep['pairs']} of the {rep['set']} Max-judged items ({rep['missing']} without a local verdict: "
+        f"{rep['missing_after_unparseable']} unparseable, {rep['missing_after_error']} errors; "
+        f"allowed {rep['allow_missing']}).",
+        f"- Agreement: {ag['k']}/{ag['n']} = {_pct(ag['rate'])}{_ci_text(ag['ci95'])}; counting the items "
+        f"without a local verdict as disagreements: {_pct(rep['agreement_strict']['rate'])}.",
+        "- Cohen's kappa: " + ("n/a" if kappa["value"] is None else f"{kappa['value']:.3f}"
+                                + (f" [{kappa['ci95'][0]:.3f}, {kappa['ci95'][1]:.3f}]" if kappa["ci95"] else "")) + ".",
+        f"- Confusion (Max / local): pass/pass {cm['max_pass']['local_pass']}, pass/fail {cm['max_pass']['local_fail']}, "
+        f"fail/pass {cm['max_fail']['local_pass']}, fail/fail {cm['max_fail']['local_fail']}.",
+        f"- False pass vs Max: the local judge passes {fp['k']} of the {fp['n']} items Max fails "
+        f"({_pct(fp['rate'])}{_ci_text(fp['ci95'])}); {_pct(fp['share_of_local_passes'])} of its passes are Max fails.",
+        f"- False fail vs Max: it fails {ff['k']} of the {ff['n']} items Max passes ({_pct(ff['rate'])}"
+        f"{_ci_text(ff['ci95'])}); {_pct(ff['share_of_local_fails'])} of its fails are Max passes.",
+        f"- Pass rate: Max {_pct(rep['pass_rate']['max'])}, local {_pct(rep['pass_rate']['local'])}.",
+        "- Local judge: " + ", ".join(f"{k} ({v})" for k, v in rep["judge"]["models"].items())
+        + "; host " + ", ".join(rep["judge"]["hosts"]) + "; quant " + ", ".join(rep["judge"]["quants"]) + ".",
+        "",
+        "| Category | Compared | Agreement | 95% CI | kappa | Local pass / Max fail | Local fail / Max pass |",
+        "|---|---:|---:|---|---:|---:|---:|",
+    ]
+    for c in rep["by_category"]:
+        lines.append(f"| {c['category']} | {c['n']}/{c['set']} | {_pct(c['agreement'])} | "
+                     f"{_ci_text(c['ci95']).strip()} | {'n/a' if c['kappa'] is None else format(c['kappa'], '.3f')} | "
+                     f"{c['false_pass_k']}/{c['max_fail_n']} | {c['false_fail_k']}/{c['max_pass_n']} |")
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1906,7 +2713,13 @@ def _queue_and_phase(args: argparse.Namespace, p: dict[str, Path]) -> tuple[list
     only = getattr(args, "only", None)
     if only:
         items = [it for it in items if it["label"] == only]
-    if _read_meta(p).get("mode") == "rejudge":
+    mode = _read_meta(p).get("mode")
+    if mode in (MODE_CALIBRATION, MODE_LOCAL_JUDGE):
+        if getattr(args, "provider", "local") != "local":
+            raise JudgeSetupError(f"{p['queue']} is a {mode} queue (subset): the local judge judges it "
+                                  "(--provider local)")
+        phase = PHASE_LOCAL_CAL if mode == MODE_CALIBRATION else PHASE_LOCAL
+    elif mode == "rejudge":
         phase = PHASE_ALL
     elif getattr(args, "view", None) == "blind" and only == "fail":
         phase = PHASE_BLIND
@@ -2062,13 +2875,33 @@ def _run_locked(args: argparse.Namespace, p: dict[str, Path], items: list[dict[s
                                           max_concurrency=config.concurrency)
         except JudgeBudgetStop as exc:
             return _refuse(p, clock, exc.state, exc.reason, len(pending))
+    elif getattr(args, "judge_url", None):
+        if args.local_url:
+            raise JudgeSetupError("--local-url (a loopback server) and --judge-url (the tailnet): one or the other")
+        if not args.judge_key_file:
+            raise JudgeSetupError("--judge-url needs --judge-key-file (the 0600 key file; never a command-line key)")
+        client = RemoteJudgeClient(args.judge_url, key_file=args.judge_key_file, ledger=ledger, phase=phase,
+                                   host=args.judge_host, quant=args.judge_quant, sha256=args.judge_sha256,
+                                   model_glob=args.local_model, timeout=args.timeout, opener=opener)
+        try:
+            client.preflight()
+        except JudgeNotReady as exc:
+            return _refuse(p, clock, "paused", str(exc), len(pending))
+        config.concurrency = remote_concurrency(args.concurrency, client.slots)
+        if args.concurrency and args.concurrency > config.concurrency:
+            print(f"--concurrency {args.concurrency} cut to {config.concurrency}: the judge server has "
+                  f"{client.slots} slot(s)", file=sys.stderr)
     else:
+        if getattr(args, "judge_key_file", None):
+            raise JudgeSetupError("--judge-key-file is for --judge-url (a loopback --local-url takes no key)")
         if not args.local_url:
-            raise JudgeSetupError("--local-url (the local judge's loopback llama-server) is required")
+            raise JudgeSetupError("--local-url (the local judge's loopback llama-server) or --judge-url "
+                                  "(the tailnet server) is required")
         client = LocalJudgeClient(args.local_url, ledger=ledger, phase=phase, model_glob=args.local_model,
                                   timeout=args.timeout, opener=opener)
         client.preflight()
-    if args.provider == "local" and probe is None and not args.no_live_probe:
+    remote = isinstance(client, RemoteJudgeClient)
+    if args.provider == "local" and probe is None and not args.no_live_probe and not remote:
         live = args.live_telemetry
         if live is None:
             from prometheus.config.paths import config_dir_path
@@ -2085,17 +2918,32 @@ def _run_locked(args: argparse.Namespace, p: dict[str, Path], items: list[dict[s
                       "phase": phase, "budget": client.budget_describe(), "projected": projection}, indent=1),
           flush=True)
     run = JudgeRun(items, client=client, results_path=p["results"], status_path=p["status"], config=config,
-                   clock=clock, sleep=sleep, probe=probe)
+                   clock=clock, sleep=sleep, probe=probe,
+                   max_pause_s=getattr(args, "max_pause", REMOTE_MAX_PAUSE_S),
+                   warmup=getattr(args, "warmup", DEFAULT_WARMUP))
     # a paid run that is stopped records its calls in flight instead of leaving them unlogged
     restore_signals = install_paid_signal_handlers(getattr(client, "paid", None))
     try:
         outcome = asyncio.run(run.run())
     finally:
         restore_signals()
-    print(json.dumps({"state": outcome.state, "reason": outcome.reason, "judged": outcome.judged,
-                      "unparseable": outcome.unparseable, "errors": outcome.errors,
-                      "calls": outcome.calls, "remaining": outcome.remaining,
-                      "budget": outcome.budget}, indent=1))
+    summary: dict[str, Any] = {"state": outcome.state, "reason": outcome.reason, "judged": outcome.judged,
+                               "unparseable": outcome.unparseable, "errors": outcome.errors,
+                               "calls": outcome.calls, "remaining": outcome.remaining,
+                               "budget": outcome.budget}
+    if args.provider == "local":
+        # this workdir's verdicts so far (the latest per item): for a local-judge queue, its fails are
+        # the rows a rebuild drops
+        latest = {r["id"]: r["verdict"] for r in read_jsonl(p["results"])
+                  if r.get("status") == "ok" and r.get("view") == args.view
+                  and r.get("rubric_version") == RUBRIC_VERSION}
+        summary["verdicts"] = dict(Counter(latest.values()))
+        if remote:
+            summary.update({"judge_host": client.host, "concurrency": run.limit, "pauses": run.pauses,
+                            "paused_s": round(run.paused_s, 1)})
+        if run.projection is not None:
+            summary["projection"] = run.projection
+    print(json.dumps(summary, indent=1))
     return outcome.exit_code
 
 
@@ -2143,6 +2991,54 @@ def cmd_report(args: argparse.Namespace) -> int:
     return EXIT_DONE
 
 
+def cmd_subset(args: argparse.Namespace) -> int:
+    """A local-judge queue cut from a judged workdir (``build_subset``)."""
+    p = _paths(args)
+    src = Path(args.subset_from).expanduser().resolve()
+    if src == p["work"].resolve():
+        raise JudgeSetupError("subset needs its own --workdir; the source workdir stays as it is")
+    if p["queue"].exists() and not args.force:
+        print(f"{p['queue']} exists; pass --force to replace it", file=sys.stderr)
+        return EXIT_ERROR
+    queue, meta = build_subset(src, args.which, verdict_files=args.max_verdicts, train_files=args.train_file or (),
+                               train_labels=args.train_label or ("tool-success",), seed=args.seed)
+    if not queue:
+        raise JudgeSetupError(f"the {args.which} subset of {src} is empty")
+    write_private(p["queue"], "".join(json.dumps(q, ensure_ascii=False) + "\n" for q in queue))
+    write_private(p["meta"], json.dumps(meta, indent=1) + "\n")
+    print(json.dumps({k: v for k, v in meta.items() if k not in ("max_verdict_files",)}, indent=1))
+    return EXIT_DONE
+
+
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    """The local judge against Max on the calibration queue (``calibration_report``)."""
+    p = _paths(args)
+    items = read_jsonl(p["queue"])
+    if not items:
+        raise JudgeSetupError(f"no queue at {p['queue']} (run `subset --which max-judged` first)")
+    meta = _read_meta(p)
+    if meta.get("mode") != MODE_CALIBRATION:
+        print(f"note: {p['queue']} is not a calibration queue (mode {meta.get('mode')!r})", file=sys.stderr)
+    files = args.max_verdicts or ([Path(meta["subset_from"]) / RESULTS_FILE] if meta.get("subset_from") else [])
+    if not files:
+        raise JudgeSetupError("--max-verdicts (the Max judge's judge-sample.jsonl) is required")
+    max_rows: list[dict[str, Any]] = []
+    for f in files:
+        f = Path(f).expanduser()
+        if not f.is_file():
+            raise JudgeSetupError(f"no Max verdicts at {f}")
+        max_rows.extend(iter_jsonl(f))
+    report = calibration_report(items, read_jsonl(p["results"]), max_rows,
+                                view=args.view or meta.get("view") or "outcome", threshold=args.threshold,
+                                allow_missing=args.allow_missing)
+    write_private(p["work"] / CALIBRATION_FILE, json.dumps(report, indent=1) + "\n")
+    text = render_calibration(report)
+    if args.markdown_out:
+        write_private(Path(args.markdown_out), text)
+    print(text)
+    return EXIT_INCOMPLETE if report["decision"]["decision"] == "incomplete" else EXIT_DONE
+
+
 def _add_provider_args(r: argparse.ArgumentParser, *, view: bool = True) -> None:
     r.add_argument("--provider", choices=PROVIDERS, required=True,
                    help="max-payg: Qwen Max on the pay-per-token key; token-plan: Qwen Max on the Token Plan "
@@ -2163,6 +3059,21 @@ def _add_provider_args(r: argparse.ArgumentParser, *, view: bool = True) -> None
     r.add_argument("--local-url", default=None, help="local: the loopback llama-server")
     r.add_argument("--local-model", default=DEFAULT_LOCAL_MODEL,
                    help="local: glob the served /v1/models id must match (never a Max model)")
+    r.add_argument("--judge-url", default=None,
+                   help="local: http://<tailnet host>:<port>, the local 27B served by another machine on the "
+                        "tailnet (tower/serve_teacher.sh); instead of --local-url")
+    r.add_argument("--judge-key-file", type=Path, default=None,
+                   help="--judge-url: the 0600 file holding its API key (only ever sent as the Authorization header)")
+    r.add_argument("--judge-host", default=None,
+                   help="--judge-url: the host name each verdict records (default: the URL's host)")
+    r.add_argument("--judge-quant", default=REMOTE_QUANT,
+                   help="--judge-url: the quant each verdict records; the served file's name must contain it")
+    r.add_argument("--judge-sha256", default=REMOTE_SHA256,
+                   help="--judge-url: the model file's sha256 each verdict records (serve_teacher.sh pins it)")
+    r.add_argument("--max-pause", type=float, default=REMOTE_MAX_PAUSE_S,
+                   help="--judge-url: seconds the server may stay gone before the run ends paused (exit 4)")
+    r.add_argument("--warmup", type=int, default=DEFAULT_WARMUP,
+                   help="local: verdicts before the wall-time projection is printed")
     r.add_argument("--max-tokens", type=int, default=1024)
     r.add_argument("--max-attempts", type=int, default=5)
     r.add_argument("--backoff-base", type=float, default=BACKOFF_BASE_S)
@@ -2170,7 +3081,7 @@ def _add_provider_args(r: argparse.ArgumentParser, *, view: bool = True) -> None
                    help=f"default {DEFAULT_CONCURRENCY['max-payg']} for max-payg (at most "
                         f"{MAX_PAYG_CONCURRENCY}), {DEFAULT_CONCURRENCY['token-plan']} for token-plan (at most "
                         f"{MAX_TOKEN_PLAN_CONCURRENCY}: the adaptive limit's ceiling), "
-                        f"{DEFAULT_CONCURRENCY['local']} for local")
+                        f"{DEFAULT_CONCURRENCY['local']} for local; --judge-url: the server's slots (never more)")
     r.add_argument("--tp-start-concurrency", type=int, default=TOKEN_PLAN_START_CONCURRENCY,
                    help="token-plan: calls in flight to start with (the limit halves on a 429 burst and "
                         "grows back slowly, up to --concurrency)")
@@ -2221,6 +3132,31 @@ def build_parser() -> argparse.ArgumentParser:
     _add_rejudge_source_args(a)
     _add_provider_args(a, view=False)
 
+    u = sub.add_parser("subset", help="a local-judge queue cut from a judged workdir: the Max-judged items "
+                                      "(calibration) or the unjudged train rows")
+    u.add_argument("--from", dest="subset_from", type=Path, required=True,
+                   help="the judged workdir (the Phase 2 re-judge: its queue and Max verdicts)")
+    u.add_argument("--which", choices=("max-judged", "unjudged"), required=True)
+    u.add_argument("--max-verdicts", type=Path, action="append", default=None,
+                   help="the Max verdict file(s) (default: <from>/judge-sample.jsonl)")
+    u.add_argument("--train-file", type=Path, action="append", default=None,
+                   help="unjudged: the dataset build's train.jsonl (its rows' ids pick the items)")
+    u.add_argument("--train-label", action="append", default=None,
+                   help="unjudged: the train rows' label to judge (default: tool-success)")
+    u.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    u.add_argument("--force", action="store_true")
+
+    c = sub.add_parser("calibrate", help="the local judge's agreement with Max on the same items, and the "
+                                         ">= 85%% decision")
+    c.add_argument("--max-verdicts", type=Path, action="append", default=None,
+                   help="the Max verdict file(s) (default: the subset source's judge-sample.jsonl)")
+    c.add_argument("--threshold", type=float, default=CALIBRATION_THRESHOLD)
+    c.add_argument("--allow-missing", type=int, default=None,
+                   help=f"items without a local verdict allowed (default {CALIBRATION_ALLOW_MISSING_SHARE * 100:.0f}%% "
+                        "of the set)")
+    c.add_argument("--view", choices=VIEWS, default=None)
+    c.add_argument("--markdown-out", type=Path, default=None)
+
     q = sub.add_parser("report", help="agreement, false-pass rate and the Phase 2 gate")
     q.add_argument("--view", choices=VIEWS, default=None)
     q.add_argument("--threshold", type=float, default=FALSE_PASS_GATE)
@@ -2241,6 +3177,10 @@ def main(argv: list[str] | None = None, **run_hooks: Any) -> int:
             return cmd_run(args, **run_hooks)
         if args.cmd == "run-all":
             return cmd_run_all(args, **run_hooks)
+        if args.cmd == "subset":
+            return cmd_subset(args)
+        if args.cmd == "calibrate":
+            return cmd_calibrate(args)
         return cmd_report(args)
     except JudgeSetupError as exc:
         print(f"refused: {exc}", file=sys.stderr)
