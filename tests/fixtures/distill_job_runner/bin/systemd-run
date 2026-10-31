@@ -1,0 +1,18 @@
+#!/bin/bash
+# Fake systemd-run --scope: logs the unit name, drops the options, execs the command (same PID).
+# FAKE_SCOPE_FAIL_PREFIX: units starting with it fail the way a refused transient scope does.
+unit=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --) shift; break ;;
+    --unit=*) unit=${1#--unit=}; shift ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+echo "$unit" >> "$FAKE_STATE/scopes.log"
+if [ -n "$FAKE_SCOPE_FAIL_PREFIX" ] && [ "${unit#$FAKE_SCOPE_FAIL_PREFIX}" != "$unit" ]; then
+  echo "Failed to start transient scope unit: Unit $unit.scope already exists." >&2
+  exit 1
+fi
+exec "$@"

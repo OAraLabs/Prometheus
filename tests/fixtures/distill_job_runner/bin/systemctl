@@ -1,0 +1,20 @@
+#!/bin/bash
+# Fake systemctl:
+#   `systemctl --user is-active <unit>`: active while $FAKE_STATE/prod-active exists.
+#   `systemctl --user show <timer> -p ...`: loaded/active/waiting with the next elapse
+#     "@<epoch>" read from $FAKE_STATE/deadman-next; not-found while that file is missing.
+if [ "$1" = "--user" ] && [ "$2" = "is-active" ]; then
+  if [ -e "$FAKE_STATE/prod-active" ]; then echo active; exit 0; fi
+  echo inactive; exit 3
+fi
+if [ "$1" = "--user" ] && [ "$2" = "show" ]; then
+  if [ -s "$FAKE_STATE/deadman-next" ]; then
+    printf 'NextElapseUSecRealtime=@%s\nLoadState=loaded\nActiveState=active\nSubState=waiting\n' \
+      "$(cat "$FAKE_STATE/deadman-next")"
+  else
+    printf 'NextElapseUSecRealtime=\nLoadState=not-found\nActiveState=inactive\nSubState=dead\n'
+  fi
+  exit 0
+fi
+echo "fake systemctl: unsupported: $*" >&2
+exit 1

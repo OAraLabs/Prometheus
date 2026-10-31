@@ -1,0 +1,13 @@
+#!/bin/bash
+# Fake nvidia-smi: 12000 MiB used per live fake server (gpu.<pid> markers in $FAKE_STATE).
+used=${FAKE_GPU_BASE_MIB:-3}
+for f in "$FAKE_STATE"/gpu.*; do
+  [ -e "$f" ] || continue
+  pid=${f##*.}
+  if kill -0 "$pid" 2>/dev/null; then used=$((used + 12000)); fi
+done
+case "$*" in
+  *--query-gpu=memory.used*) echo "$used" ;;
+  *--query-compute-apps*) ;;
+  *) echo "fake nvidia-smi" ;;
+esac
