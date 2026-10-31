@@ -439,6 +439,130 @@ def test_category_cap_is_a_no_op_when_nothing_dominates() -> None:
     assert len(kept) == 12 and all(r["dropped"] == 0 for r in report.values())
 
 
+# ── class caps (teacher_gen writes every verified row; build caps the dataset) ──
+
+
+def _class_rows() -> list[Any]:
+    # 10 reported_blocked rows (5 tasks), 10 no-tool answers (one also blocked), 30 plain rows
+    rows = [ex(i, "other", f"b{i % 5}", classes=["reported_blocked"]) for i in range(10)]
+    rows += [ex(100 + i, "memory", f"n{i}", classes=["no_tool_answer"]) for i in range(9)]
+    rows.append(ex(110, "memory", "nb", classes=["no_tool_answer", "reported_blocked"]))
+    rows += [ex(200 + i, ["a", "b", "c"][i % 3], f"p{i}") for i in range(30)]
+    return rows
+
+
+def test_class_caps_keep_each_class_under_its_share_of_train() -> None:
+    rows = _class_rows()
+    caps = {"reported_blocked": 0.15, "no_tool_answer": 0.20}
+    kept, report = build.cap_classes(rows, caps, "seed")
+    n = len(kept)
+    for c, cap in caps.items():
+        assert sum(1 for e in kept if c in e.classes) <= cap * n
+        assert report[c]["before"] - report[c]["dropped"] == report[c]["kept"]
+    assert report["reported_blocked"]["dropped"] > 0 and report["no_tool_answer"]["dropped"] > 0
+    # plain rows are never dropped by a class cap
+    assert sum(1 for e in kept if not e.classes) == 30
+    # round-robin: the blocked rows kept come from as many tasks as possible
+    blocked = [e for e in kept if "reported_blocked" in e.classes]
+    assert len({e.task_id for e in blocked}) == min(len(blocked), 6)
+    # deterministic by seed; another seed may keep other rows, never another count
+    again, _ = build.cap_classes(_class_rows(), caps, "seed")
+    assert [e.id for e in again] == [e.id for e in kept]
+    other, _ = build.cap_classes(_class_rows(), caps, "other-seed")
+    assert len(other) == len(kept)
+
+
+def test_class_and_category_caps_hold_together_and_report_what_each_dropped() -> None:
+    # coding dominates: the category cap's drops raise the classes' shares, so the
+    # class caps run again until neither drops a row
+    rows = ([ex(i, "coding", f"c{i}") for i in range(40)]
+            + [ex(100 + i, "other", f"o{i}", classes=["reported_blocked"]) for i in range(8)]
+            + [ex(200 + i, "memory", f"m{i}", classes=["no_tool_answer"]) for i in range(10)]
+            + [ex(300 + i, "daemon", f"d{i}") for i in range(12)])
+    caps = {"reported_blocked": 0.15, "no_tool_answer": 0.20}
+    kept, cats, classes = build.cap_train(rows, 0.35, caps, "seed")
+    n = len(kept)
+    counts = collections.Counter(e.category for e in kept)
+    assert max(counts.values()) <= 0.35 * n
+    for c, cap in caps.items():
+        k = sum(1 for e in kept if c in e.classes)
+        assert k <= cap * n and classes[c]["kept"] == k and classes[c]["share"] == round(k / n, 4)
+        assert classes[c]["dropped"] == classes[c]["dropped_by_class_cap"] + classes[c]["dropped_by_category_cap"]
+    assert cats["coding"]["dropped"] > 0 and cats["coding"]["kept"] == counts["coding"]
+    assert classes["rows_dropped"]["class_cap"] + classes["rows_dropped"]["category_cap"] == len(rows) - n
+    assert classes["rows_dropped"]["class_cap"] > 0
+    # without classes it is the category cap alone
+    plain = [ex(i, "coding", f"c{i % 7}") for i in range(86)] + [ex(100 + i, "daemon", f"d{i}") for i in range(8)]
+    alone, _ = build.cap_categories(plain, 0.35, "seed")
+    both, _, _ = build.cap_train(plain, 0.35, caps, "seed")
+    assert [e.id for e in both] == [e.id for e in alone]
+
+
+def test_val_keeps_the_share_of_each_class_train_kept() -> None:
+    val = ([ex(i, "other", f"b{i}", classes=["reported_blocked"]) for i in range(8)]
+           + [ex(100 + i, "other", f"p{i}") for i in range(8)])
+    kept, report = build.apply_class_ratios(val, {"reported_blocked": 0.25, "no_tool_answer": 1.0}, "seed")
+    assert report["reported_blocked"] == {"before": 8, "kept": 2, "dropped": 6}
+    assert report["no_tool_answer"] == {"before": 0, "kept": 0, "dropped": 0}
+    assert len(kept) == 10 and sum(1 for e in kept if not e.classes) == 8
+
+
+def test_val_does_not_count_category_cap_drops_twice_for_a_class() -> None:
+    # every 5th coding row is reported_blocked and coding dominates: in train the
+    # category cap drops blocked rows along with coding, never the class cap. Val's
+    # category ratio already drops those; the class ratio must not drop them again.
+    def rows(off: int) -> list[Any]:
+        r = [ex(off + i, "coding", f"c{i}", classes=["reported_blocked"] if i % 5 == 0 else [])
+             for i in range(100)]
+        return r + [ex(off + 100 + i, ["a", "b", "c"][i % 3], f"p{i}") for i in range(50)]
+
+    caps = {"reported_blocked": 0.15, "no_tool_answer": 0.20}
+    train, cats, classes = build.cap_train(rows(0), 0.35, caps, "seed")
+    blocked = classes["reported_blocked"]
+    assert blocked["dropped_by_category_cap"] > 0 and blocked["dropped_by_class_cap"] == 0
+    ratios = build.class_ratios(classes, caps)
+    assert ratios == {"reported_blocked": 1.0}
+    val, _ = build.apply_ratios(rows(1000), {c: 1 - r["dropped"] / r["before"] for c, r in cats.items()}, "seed")
+    val, report = build.apply_class_ratios(val, ratios, "seed")
+    assert report["reported_blocked"]["dropped"] == 0
+    share = sum(1 for e in val if "reported_blocked" in e.classes) / len(val)
+    assert abs(share - blocked["share"]) < 0.01
+
+
+def test_builder_caps_reported_blocked_and_no_tool_rows_from_their_meta_tags(tmp_path: Path) -> None:
+    rows = [gym("plain" + word(t), "bash", {"command": f"make p{t}"}, category=["coding", "other", "memory/wiki"][t % 3])
+            for t in range(12)]
+    rows += [gym("blocked" + word(t), "bash", {"command": f"ls b{t}"}, category="other",
+                 judge_outcome="reported_blocked") for t in range(6)]
+    for t in range(6):
+        r = gym("prose" + word(t), "bash", {}, category="sentinel/daemon", no_tool_answer=True, judge_outcome="done")
+        r["messages"][-1] = {"role": "assistant", "content": f"No tool needed: answer {word(t)}."}
+        r["_meta"].pop("tool_name")
+        rows.append(r)
+    b = make_builder(tmp_path, train_sources=(GYM,), eval_task_frac=0.0, val_frac=0.0, category_cap=1.0)
+    feed(b, write_jsonl(tmp_path / "gym.jsonl", rows), "extra")
+    tagged = collections.Counter(c for e in b.examples for c in e.classes)
+    assert tagged == {"reported_blocked": 6, "no_tool_answer": 6}
+    info = b.split()
+    gates = b.gates()
+    train = b.final["train"]
+    for c, cap in build.CLASS_CAPS.items():
+        assert sum(1 for e in train if c in e.classes) <= cap * len(train)
+    assert gates["class_caps"]["pass"] and gates["class_caps"]["cap"] == build.CLASS_CAPS
+    dropped = info["train_class_caps"]
+    assert dropped["reported_blocked"]["dropped"] > 0 and dropped["no_tool_answer"]["dropped"] > 0
+    assert dropped["rows_dropped"]["class_cap"] == len(b.examples) - len(train)
+    report = b.report(info, gates, catalog="stubs", head_tokens={}, inputs={}, elapsed=0.0)
+    assert report["caps"]["class_caps"]["train"]["reported_blocked"]["cap"] == 0.15
+    assert report["settings"]["class_caps"] == build.CLASS_CAPS
+    # deterministic: the same inputs and seed keep the same rows
+    (tmp_path / "again").mkdir()
+    b2 = make_builder(tmp_path / "again", train_sources=(GYM,), eval_task_frac=0.0, val_frac=0.0, category_cap=1.0)
+    feed(b2, tmp_path / "gym.jsonl", "extra")
+    b2.split()
+    assert [e.id for e in b2.final["train"]] == [e.id for e in train]
+
+
 # ── task split and leakage ─────────────────────────────────────────────────
 
 

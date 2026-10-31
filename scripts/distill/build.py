@@ -315,6 +315,13 @@ Splits and gates
   largest fixed point is kept, round-robin over tasks so task diversity
   survives; val keeps the same per-category share train kept, so it mirrors
   train's mix. What was dropped is reported.
+* Class caps: teacher_gen.py writes every verified row, tagged; here no class
+  is above its share of train: ``_meta.judge_outcome`` reported_blocked
+  (``--reported-blocked-cap``, 15%) and ``_meta.no_tool_answer``
+  (``--no-tool-answer-cap``, 20%). Applied with the category cap until both
+  hold, round-robin over tasks from the seed (deterministic); val keeps the
+  share of each class train kept. What each cap dropped is reported
+  (``caps.class_caps``) and gated (``class_caps``).
 * Gates (in code; FAIL is reported, never worked around): no task / group /
   prefix / exact / prompt+call / generator-task hash, and no session user
   message of a final request, in two splits (whatever the rows' sources);
@@ -1460,6 +1467,8 @@ class Example:
     gen_task: str = ""  # "<source>\x1f<generator task id>", "" when none
     # the recorded approval a Max-derived row trains under (Q6b), "" when none
     approval: str = ""
+    # CLASS_CAPS classes (teacher_gen's _meta tags): capped as shares of train
+    classes: list[str] = field(default_factory=list)
 
 
 def approx_codes(context_source: str) -> list[str]:
@@ -1654,6 +1663,114 @@ def cap_categories(examples: list[Example], cap: float, seed: str
     return kept, report
 
 
+#: Dataset caps on row classes teacher_gen.py tags (it holds nothing back): a judged
+#: "could not be done here, said so" reply, and an agent turn that answered without a
+#: tool. Right in moderation; never more than these shares of train.
+CLASS_CAPS = {"reported_blocked": 0.15, "no_tool_answer": 0.20}
+
+
+def row_classes(meta: dict[str, Any]) -> list[str]:
+    """The ``CLASS_CAPS`` classes of a row, from its ``_meta`` tags."""
+    out = []
+    if meta.get("judge_outcome") == "reported_blocked":
+        out.append("reported_blocked")
+    if meta.get("no_tool_answer") is True:
+        out.append("no_tool_answer")
+    return out
+
+
+def cap_classes(examples: list[Example], caps: dict[str, float], seed: str
+                ) -> tuple[list[Example], dict[str, dict[str, int]]]:
+    """Keep the largest set found in which no class of *caps* holds more than its
+    share of the total: drop the rows of one class over its cap past floor(cap*T),
+    the tail of a seeded round-robin over its tasks, and repeat (T shrinks) until
+    every class fits. A row may be in two classes."""
+    kept = list(examples)
+    while True:
+        total = len(kept)
+        over = next((c for c in sorted(caps)
+                     if sum(1 for e in kept if c in e.classes) > math.floor(caps[c] * total)), None)
+        if over is None:
+            break
+        members = [e for e in kept if over in e.classes]
+        drop = {id(e) for e in round_robin(members, seed)[math.floor(caps[over] * total):]}
+        kept = [e for e in kept if id(e) not in drop]
+    keep_ids = {id(e) for e in kept}
+    report = {c: {"before": sum(1 for e in examples if c in e.classes),
+                  "kept": sum(1 for e in kept if c in e.classes),
+                  "dropped": sum(1 for e in examples if c in e.classes and id(e) not in keep_ids)}
+              for c in sorted(caps)}
+    return kept, report
+
+
+def cap_train(examples: list[Example], category_cap: float, class_caps: dict[str, float], seed: str
+              ) -> tuple[list[Example], dict[str, dict[str, int]], dict[str, Any]]:
+    """Train under the class caps and the category cap together: each applied in
+    turn until neither drops a row (a category cap can raise a class's share and
+    the other way round). Returns (kept, category report, class report); the
+    category report's ``dropped`` counts the rows the category cap dropped (val
+    mirrors 1 - dropped / before) and ``dropped_by_class_cap`` the rest, and the
+    class report says what each cap dropped of every class."""
+    kept = list(examples)
+    why: dict[int, str] = {}
+    while True:
+        after_class, _ = cap_classes(kept, class_caps, seed)
+        ids = {id(e) for e in after_class}
+        why.update({id(e): "class_cap" for e in kept if id(e) not in ids})
+        after_cat, _ = cap_categories(after_class, category_cap, seed)
+        ids = {id(e) for e in after_cat}
+        why.update({id(e): "category_cap" for e in after_class if id(e) not in ids})
+        done = len(after_cat) == len(after_class)
+        kept = after_cat
+        if done:
+            break
+    by_cat: dict[str, list[Example]] = collections.defaultdict(list)
+    for ex in examples:
+        by_cat[ex.category].append(ex)
+    cat_report = {}
+    for c, rows in sorted(by_cat.items()):
+        by_cap = sum(1 for e in rows if why.get(id(e)) == "category_cap")
+        by_class = sum(1 for e in rows if why.get(id(e)) == "class_cap")
+        cat_report[c] = {"before": len(rows), "kept": len(rows) - by_cap - by_class, "dropped": by_cap,
+                         "dropped_by_class_cap": by_class}
+    n = len(kept)
+    class_report: dict[str, Any] = {}
+    for c in sorted(class_caps):
+        rows = [e for e in examples if c in e.classes]
+        k = sum(1 for e in kept if c in e.classes)
+        class_report[c] = {"before": len(rows), "kept": k, "dropped": len(rows) - k,
+                           "dropped_by_class_cap": sum(1 for e in rows if why.get(id(e)) == "class_cap"),
+                           "dropped_by_category_cap": sum(1 for e in rows if why.get(id(e)) == "category_cap"),
+                           "cap": class_caps[c], "share": round(k / n, 4) if n else 0.0}
+    class_report["rows_dropped"] = {"class_cap": sum(1 for v in why.values() if v == "class_cap"),
+                                    "category_cap": sum(1 for v in why.values() if v == "category_cap")}
+    return kept, cat_report, class_report
+
+
+def class_ratios(class_report: dict[str, Any], caps: dict[str, float]) -> dict[str, float]:
+    """The share of each class the class caps kept in train (``cap_train``'s class
+    report), for val. Only the class caps' own drops count: val's category ratios
+    already drop that class's rows the category cap dropped in train, so counting
+    them again here would keep fewer of the class in val than train kept."""
+    return {c: 1 - class_report[c]["dropped_by_class_cap"] / class_report[c]["before"]
+            for c in caps if class_report[c]["before"]}
+
+
+def apply_class_ratios(examples: list[Example], ratios: dict[str, float], seed: str
+                       ) -> tuple[list[Example], dict[str, dict[str, int]]]:
+    """Keep the share of each class train kept (val mirrors train, like apply_ratios)."""
+    kept = list(examples)
+    report: dict[str, dict[str, int]] = {}
+    for c in sorted(ratios):
+        members = [e for e in kept if c in e.classes]
+        ratio = ratios[c]
+        k = len(members) if ratio >= 1.0 else max(1 if ratio > 0 and members else 0, round(len(members) * ratio))
+        drop = {id(e) for e in round_robin(members, seed)[k:]}
+        kept = [e for e in kept if id(e) not in drop]
+        report[c] = {"before": len(members), "kept": len(members) - len(drop), "dropped": len(drop)}
+    return kept, report
+
+
 def apply_ratios(examples: list[Example], ratios: dict[str, float], seed: str
                  ) -> tuple[list[Example], dict[str, dict[str, int]]]:
     """Keep the same share of each category that the train cap kept, so val
@@ -1763,6 +1880,8 @@ def split_summary(rows: list[Example], limit: int) -> dict[str, Any]:
 class Settings:
     max_tokens: int = LIMIT_TOKENS
     category_cap: float = 0.35
+    # CLASS_CAPS: each class's largest share of train (teacher_gen writes every verified row)
+    class_caps: dict[str, float] = field(default_factory=lambda: dict(CLASS_CAPS))
     val_frac: float = 0.03
     eval_task_frac: float = 0.10
     eval_max_per_task: int = 20
@@ -2204,6 +2323,7 @@ class Builder:
             turn_outcome=outcome, omitted_messages=req.omitted_messages,
             lcm_target=req.lcm_target, ctx_keys=ctx_keys, model=model_s,
             max_derived=max_derived, train_ok=train_ok, gen_task=gen_task, approval=approval,
+            classes=row_classes(meta),
         )
         if self._spool is not None:
             heavy = {
@@ -2294,9 +2414,10 @@ class Builder:
         train_all = [e for e in pool if e.split == "train" and e.train_ok]
         val_all = [e for e in pool if e.split == "val" and e.train_ok]
         held = [e for e in pool if e.split == "eval-tools"]
-        train, train_caps = cap_categories(train_all, s.category_cap, s.seed)
-        ratios = {c: r["kept"] / r["before"] for c, r in train_caps.items() if r["before"]}
+        train, train_caps, train_class_caps = cap_train(train_all, s.category_cap, s.class_caps, s.seed)
+        ratios = {c: 1 - r["dropped"] / r["before"] for c, r in train_caps.items() if r["before"]}
         val, val_caps = apply_ratios(val_all, ratios, s.seed)
+        val, val_class_caps = apply_class_ratios(val, class_ratios(train_class_caps, s.class_caps), s.seed)
         eval_rows = sample_per_task(held, s.eval_max_per_task, s.seed)
         fail_used, fail_dropped = [], 0
         for ex in self.fails:
@@ -2310,6 +2431,7 @@ class Builder:
         self.final = {"train": train, "val": val, "eval-tools": eval_rows + fail_used}
         return {
             "plan": plan, "train_caps": train_caps, "val_caps": val_caps,
+            "train_class_caps": train_class_caps, "val_class_caps": val_class_caps,
             "held_rows": len(held), "eval_sampled": len(eval_rows),
             "fail_used": len(fail_used), "fail_dropped_task_in_train_or_val": fail_dropped,
             "not_train_ok_in_train_val_groups": sum(
@@ -2389,6 +2511,10 @@ class Builder:
         top = max(cats.values()) / len(tr) if tr else 0.0
         g["category_cap"] = {"max_share": round(top, 4), "cap": s.category_cap,
                              "pass": bool(tr) and top <= s.category_cap + 1e-9}
+        shares = {c: round(sum(1 for e in tr if c in e.classes) / len(tr), 4) if tr else 0.0
+                  for c in sorted(s.class_caps)}
+        g["class_caps"] = {"share": shares, "cap": dict(sorted(s.class_caps.items())),
+                           "pass": all(shares[c] <= s.class_caps[c] + 1e-9 for c in shares)}
         pres = {k: sum(e.flags[k] for e in tr) for k in ("chat_mode", "error_recovery", "compacted")}
         g["presence"] = {**pres, "min": s.min_presence,
                          "pass": all(v >= s.min_presence for v in pres.values())}
@@ -2549,7 +2675,9 @@ class Builder:
                     e.split or "dropped" for e in all_built if e.longctx)),
             },
             "splits": {k: split_summary(v, s.max_tokens) for k, v in self.final.items()},
-            "caps": {"train": split_info["train_caps"], "val": split_info["val_caps"]},
+            "caps": {"train": split_info["train_caps"], "val": split_info["val_caps"],
+                     "class_caps": {"train": split_info["train_class_caps"],
+                                    "val": split_info["val_class_caps"]}},
             "eval_tools": {"held_out_rows": split_info["held_rows"],
                            "sampled": split_info["eval_sampled"],
                            "fail_cases": split_info["fail_used"],
@@ -2747,6 +2875,11 @@ def cmd_build(a: argparse.Namespace) -> int:
     if problem:
         print(f"error: {problem}", file=sys.stderr)
         return 2
+    for flag, cap in (("--reported-blocked-cap", a.reported_blocked_cap),
+                      ("--no-tool-answer-cap", a.no_tool_answer_cap)):
+        if not 0.0 <= cap <= 1.0:
+            print(f"error: {flag} must be a share between 0 and 1, not {cap:g}", file=sys.stderr)
+            return 2
     excluded_sessions: set[str] = set()
     if a.exclude_sessions:
         try:
@@ -2793,6 +2926,7 @@ def cmd_build(a: argparse.Namespace) -> int:
     root.setLevel(logging.WARNING)
     s = Settings(
         max_tokens=a.max_tokens, category_cap=a.category_cap, val_frac=a.val_frac,
+        class_caps={"reported_blocked": a.reported_blocked_cap, "no_tool_answer": a.no_tool_answer_cap},
         eval_task_frac=a.eval_task_frac, eval_max_per_task=a.eval_max_per_task,
         holdout_max_group_share=a.holdout_max_group_share, prefix_n=a.prefix_n, seed=a.seed,
         eval_success=a.eval_success, max_model=a.max_model,
@@ -3116,6 +3250,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bd.add_argument("--catalog", choices=("auto", "stubs", "full"), default="auto")
     bd.add_argument("--max-tokens", type=int, default=LIMIT_TOKENS)
     bd.add_argument("--category-cap", type=float, default=0.35)
+    bd.add_argument("--reported-blocked-cap", type=float, default=CLASS_CAPS["reported_blocked"],
+                    help="largest share of train for rows the judge passed as reported_blocked")
+    bd.add_argument("--no-tool-answer-cap", type=float, default=CLASS_CAPS["no_tool_answer"],
+                    help="largest share of train for agent turns that answered without a tool")
     bd.add_argument("--val-frac", type=float, default=0.03)
     bd.add_argument("--eval-task-frac", type=float, default=0.10)
     bd.add_argument("--eval-max-per-task", type=int, default=20)

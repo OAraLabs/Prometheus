@@ -95,14 +95,20 @@ the target share; ties go to the earlier kind, and a kind whose pass rate is
 very low after 10 attempts is scheduled less), in this priority order:
 
 * ``chat-mode``: no tools (``run_loop(mode="chat")``, which sets
-  ``suppress_tools``): questions, explanations, plans and FAQs over sections of
+  ``suppress_tools``; the turn's system prompt ends with ``CHAT_MODE_NOTE``,
+  saying no tools are available in this turn, and a request that put tools on
+  the wire anyway is ``chat_mode_tools_offered``): questions, explanations, plans and FAQs over sections of
   the repo's own docs (``--repo``: git-tracked ``docs/``, ``wiki/`` and
   ``README.md``; the distillation sprint docs are skipped), and over synthetic
   wiki-style service notes with answers a predicate can check.
 * ``compacted-history``: a long seeded session forced through the REAL
   ``ContextCompactor`` with a small window (``--compaction-history-tokens`` of
-  history room above the system prompt, tools and output), then continued. The
-  teacher's summary call goes through its own provider and is never a row; the
+  history room above the system prompt, tools and output), then continued. When
+  the system prompt alone (as the compactor counts it, calibration included)
+  leaves no room under that window's compaction line, the window is sized as
+  system-prompt tokens + the history budget so a pass can converge; rows carry
+  the window (``_meta.compaction_window``: configured, effective, line,
+  system_tokens, resized, converged). The teacher's summary call goes through its own provider and is never a row; the
   rows carry the render view the teacher actually saw, summary included.
 * ``error-recovery``: the sandbox injects a failure (a timeout, an HTTP 503, a
   locked store, a moved file) on a chosen call; the teacher has to retry, work
@@ -110,10 +116,10 @@ very low after 10 attempts is scheduled less), in this priority order:
 * ``agentic``: non-coding agent work: memory, wiki, cron scheduling, background
   tasks, service health and resources (simulated host), SENTINEL status,
   research over a mocked web, notes and TODO files, a mocked message send.
-* ``coding``: small edits and lookups in a generated Python project. Coding rows
-  can never exceed ``--coding-cap`` (35%) of the kept rows: a verified coding
-  task that would cross it is held (``.held.jsonl``) and released when other
-  rows make room.
+* ``coding``: small edits and lookups in a generated Python project. Every
+  verified coding row is written (``_meta.category`` coding); the report keeps
+  its share against ``--coding-cap`` (35%), and build.py's ``--category-cap``
+  caps it over the whole dataset.
 
 Every task is checked against the eval sets before it runs: the eval-injection
 manifest (``build_eval_sets.InjectionManifest``: shingles, markers, whole
@@ -235,8 +241,9 @@ Verification (all must hold; only then are rows written)
   item 1 passes it), never not_done. Kept rows carry ``_meta.judge_outcome``;
   reported_blocked rows and no-tool answers (``_meta.no_tool_answer``: a
   real-pattern agent turn answered without a tool, a row even without
-  ``--emit-final-turns``, its tools kept) are held past ``CLASS_CAPS``, like
-  coding rows past the coding cap. The judge is
+  ``--emit-final-turns``, its tools kept) are written like every verified row
+  and tagged; ``CLASS_CAPS`` are dataset caps build.py enforces (the report
+  keeps this run's shares, ``shares``), never a run-level hold. The judge is
   the teacher itself (``self-judge``) unless ``--judge-url``
   names another local endpoint (``local-judge``). The record names it the way
   build.py reads it: ``provider: local``, ``judge_key: none`` (the local
@@ -362,7 +369,8 @@ Outputs (``--out``, file prefix ``--name``)
   categories: chat-mode, memory/wiki, sentinel/daemon, other, coding),
   ``task_category`` (the kind), ``task_id``, ``task_family``, ``run_id``,
   ``verdict: pass``, ``max_derived`` (false; true for a Max teacher's row),
-  ``teacher``, ``compaction_pad`` (a padded row), ``suppress_tools``, ``compacted``,
+  ``teacher``, ``compaction_pad`` (a padded row), ``compaction_window`` (a compaction
+  task), ``suppress_tools``, ``compacted``, ``judge_outcome``, ``no_tool_answer``,
   ``error_recovery``, and ``verification``: the full record in the shape
   build.py's data policy reads strictly (``verified``, ``tool_success``,
   ``judge`` with ``verdict``/``model``/``pass``, ``sandboxed: true``,
@@ -377,7 +385,8 @@ Outputs (``--out``, file prefix ``--name``)
   a row unless ``--emit-final-turns`` (build.py renders a turn with no call as
   chat-mode, without tools). Within a task, rows build.py would dedupe as the
   same prompt + call keep the one with an error in its context.
-* ``<name>.held.jsonl``: verified coding rows waiting under the cap.
+* ``<name>.held.jsonl``: only from an earlier generator that held rows behind
+  run-level caps; its rows are released into the traces when the run resumes.
 * ``<name>.relaxed.jsonl``: rows verified only under a relaxation (above).
 * ``<name>.tasks.jsonl``: the append-only ledger, one event per task outcome
   (kept / held / released / rejected / skipped) with reasons, the judge record
@@ -529,11 +538,20 @@ DOMAINS = ("chat-mode", "memory/wiki", "sentinel/daemon", "other", "coding")
 DEFAULT_MIX = {"chat-mode": 0.30, "compacted-history": 0.20, "error-recovery": 0.20,
                "agentic": 0.22, "coding": 0.08}
 CODING_CAP = 0.35
-#: kept rows of a class that is right in moderation but must not dominate (Store.fits):
-#: a judged "could not be done here, said so" reply, and an agent turn that answered
-#: without a tool. Rows past the share are held, like coding rows past CODING_CAP.
+#: kept rows of a class that is right in moderation but must not dominate: a judged
+#: "could not be done here, said so" reply, and an agent turn that answered without a
+#: tool. Dataset caps: every verified row is written, tagged; build.py drops rows past
+#: these shares of train (its defaults match), and the report keeps the run's shares.
 CLASS_CAPS = {"reported_blocked": 0.15, "no_tool_answer": 0.20}
 SUMMARY_MARKER = "[Compacted summary of turns"
+#: Appended to a chat-mode (suppress_tools) task's system prompt for its own turn: the
+#: request offers no tools, and the prompt says so, so the teacher does not write a call
+#: it cannot make (one that still arrives is ``chat_mode_tool_call``). Harness text, never
+#: the teacher's; build.py renders every row under the pack's own prompt.
+CHAT_MODE_NOTE = ("# Tools\n\nNo tools are available in this turn. Answer in plain text from the "
+                  "conversation and what you already know; do not write a tool call.")
+#: The compactor's threshold, as a share of its window (when the window is the plain one).
+COMPACTION_THRESHOLD_PCT = 0.85
 SEED_CALL_PREFIX = "call_seed_"
 ORCHESTRATOR = "orchestrator"
 _DIR = Path(__file__).resolve().parent
@@ -4124,6 +4142,20 @@ def teacher_provider(settings: "Settings") -> Any:
                                      sampling=settings.sampling)
 
 
+def chat_system_prompt(system_prompt: str) -> str:
+    """A chat-mode turn's system prompt: the task's, then ``CHAT_MODE_NOTE``."""
+    return f"{system_prompt.rstrip()}\n\n{CHAT_MODE_NOTE}"
+
+
+def tools_on_wire(provider: Any, call: Any) -> int:
+    """How many tools *call*'s request put on the wire (the provider's own payload)."""
+    try:
+        return len(provider._build_request_payload(call.request).get("tools") or [])
+    except Exception:  # noqa: BLE001 - a provider without the builder: what the request carried
+        req = call.request
+        return 0 if getattr(req, "suppress_tools", False) else len(getattr(req, "tools", None) or [])
+
+
 def seed_messages(seed: list[dict[str, Any]]) -> list[Any]:
     """The gym's seed format, with deterministic tool-call ids."""
     from prometheus.engine.messages import ConversationMessage, TextBlock, ToolResultBlock, ToolUseBlock
@@ -4161,6 +4193,8 @@ class TaskOutcome:
     observed: dict[str, dict[str, Any]]
     env: SandboxEnv
     compactions: int = 0
+    #: the compactor's window (``HarnessCompactor.window_info``): configured, effective, ...
+    compaction_window: dict[str, Any] | None = None
     error: str = ""
     transport_error: bool = False
     #: a deterministic provider refusal (context overflow, another 4xx): the task is
@@ -4379,12 +4413,14 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
     # teacher (tier light, like the 27B) runs the loop exactly as the local teacher does.
     adapter = create_adapter({"provider": "llama_cpp", "model": settings.model_name}, {})
     system_prompt = settings.system_prompt(root)
+    # a chat-mode turn offers no tools and its system prompt says so (pad turns keep the plain one)
+    turn_prompt = chat_system_prompt(system_prompt) if task.mode == "chat" else system_prompt
     counter = {"n": 0}
     compactor = None
     summarizer = None
     if task.compaction:
         summarizer = teacher_provider(settings)
-        compactor = _make_compactor(settings, system_prompt, registry, counter, chat=task.mode == "chat",
+        compactor = _make_compactor(settings, turn_prompt, registry, counter, chat=task.mode == "chat",
                                     provider=summarizer)
     seeded = seed_messages(task.seed)
     messages = list(seeded)
@@ -4397,7 +4433,7 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
 
     gate = _gym_gate_cls()(env, workspace_root=root, mode="default")
     context = LoopContext(
-        provider=provider, model=settings.model_name, system_prompt=system_prompt,
+        provider=provider, model=settings.model_name, system_prompt=turn_prompt,
         max_tokens=settings.max_tokens, tool_registry=registry, permission_checker=gate,
         permission_prompt=gym_permission_prompt,
         adapter=adapter, telemetry=_telemetry(settings), cwd=root,
@@ -4408,7 +4444,7 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
         workspace_resolver=lambda _session: root)
     out = TaskOutcome(task=task, run_id=f"{task.id}@{uuid.uuid4().hex[:10]}", messages=messages,
                       n_seed=len(seeded), calls=provider.calls, observed=observed, env=env, provider=provider,
-                      system_prompt=system_prompt,
+                      system_prompt=turn_prompt,
                       tools_offered=[] if task.mode == "chat" else sorted(t.name for t in registry.list_tools()))
     if summarizer is not None:
         out.summary_calls = summarizer.calls
@@ -4418,7 +4454,8 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
             # earlier turns: other real-pattern prompts, each answered by this teacher, with
             # the compactor off and the task's injections held back for its own turn
             env.injections_armed = False
-            await _pad_turns(task, settings, dataclasses.replace(context, compactor=None), out)
+            await _pad_turns(task, settings, dataclasses.replace(context, compactor=None,
+                                                                 system_prompt=system_prompt), out)
             env.injections_armed = True
             out.n_seed = len(messages)
             out.pad_calls = len(provider.calls)
@@ -4443,6 +4480,8 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
     finally:
         out.duration_s = time.monotonic() - t0
         out.compactions = counter["n"]
+        if compactor is not None:
+            out.compaction_window = dict(compactor.window_info)
     if out.payg_stop is None:
         # a refused paid call the loop or the compactor caught and did not re-raise
         for p in (provider, summarizer):
@@ -4642,23 +4681,100 @@ def classify_summarizer_errors(out: TaskOutcome, summarizer: Any) -> None:
         out.error = out.error or f"summarizer: {errors[-1]}"
 
 
+def _harness_compactor_cls() -> type:
+    """The real ``ContextCompactor`` with the harness's window rule (``_make_compactor``)."""
+    cached = globals().get("_HARNESS_COMPACTOR")
+    if cached is not None:
+        return cached
+    from prometheus.context.compactor import ContextCompactor, compaction_threshold
+
+    class HarnessCompactor(ContextCompactor):
+        """Its window is fixed cost + ``history_tokens`` + the output cap, so a long
+        history has to be compacted. When the system prompt (and tool schemas) alone,
+        as the compactor counts them this pass (its estimate x its calibration), leave
+        no room under that window's compaction line for even the summary, no pass could
+        converge: the window is then sized as system-prompt tokens + ``history_tokens``
+        (the line), plus the output room and the largest recent tool result the
+        compactor's projected-overflow rule sets aside. ``window_info`` records it."""
+
+        def __init__(self, *, history_tokens: int, **kw: Any) -> None:
+            super().__init__(**kw)
+            self.history_tokens = int(history_tokens)
+            self.configured_window = int(kw["effective_limit"])
+            self.configured_line = compaction_threshold(self.configured_window, float(kw["threshold_pct"]))
+            self.out_room = int(kw["reserve_tokens"])
+            self.summary_room = int(kw["max_summary_tokens"])
+            #: (window, line) of this pass when resized, else None (the configured window)
+            self.sized: tuple[int, int] | None = None
+            self.window_info: dict[str, Any] = {
+                "configured": self.configured_window, "configured_line": self.configured_line,
+                "effective": self.configured_window, "line": self.configured_line,
+                "system_tokens": None, "history_tokens": self.history_tokens,
+                "resized": False, "passes": 0, "resized_passes": 0, "converged": None}
+
+        def limit_for(self, model: str | None = None, backend: str | None = None) -> int:
+            return self.sized[0] if self.sized else super().limit_for(model, backend)
+
+        def threshold_for(self, model: str | None = None, backend: str | None = None) -> tuple[int, str]:
+            return (self.sized[1], "distill_system_prompt") if self.sized else super().threshold_for(model, backend)
+
+        def size_for(self, messages: list[Any], *, session_id: str = "", system_prompt: str = "",
+                     tools_chars: int = 0, model: str | None = None,
+                     max_tokens: int | None = None) -> tuple[int, int, int]:
+            """(system tokens, window, line) for one pass; sets ``sized``."""
+            ratio = self.calibration_for(session_id, model)
+            sys_tokens = int(self.estimate_total(system_prompt, [], tools_chars) * ratio)
+            out_room = int(max_tokens) if max_tokens else self.out_room
+            largest = int(self._largest_recent_result_tokens(messages) * ratio)
+            ceiling = min(self.configured_line, self.configured_window - out_room - largest)
+            if sys_tokens + int(self.summary_room * ratio) > ceiling:
+                line = sys_tokens + self.history_tokens
+                self.sized = (line + out_room + largest, line)
+            else:
+                self.sized = None
+            return (sys_tokens, *(self.sized or (self.configured_window, self.configured_line)))
+
+        async def apply(self, messages: list[Any], **kwargs: Any) -> list[Any]:  # type: ignore[override]
+            sys_tokens, window, line = self.size_for(messages, **kwargs)
+            view = await super().apply(messages, **kwargs)
+            info = self.window_info
+            info.update(system_tokens=sys_tokens, effective=window, line=line)
+            if self.sized:
+                info["resized"] = True
+            if view is not messages:
+                info["passes"] += 1
+                info["resized_passes"] += bool(self.sized)
+                ratio = self.calibration_for(kwargs.get("session_id", ""), kwargs.get("model"))
+                after = int(self.estimate_total(kwargs.get("system_prompt", ""), view,
+                                                kwargs.get("tools_chars", 0)) * ratio)
+                out_room = int(kwargs.get("max_tokens") or self.out_room)
+                largest = int(self._largest_recent_result_tokens(messages) * ratio)
+                info["converged"] = after <= max(1, min(line, window - out_room - largest))
+            return view
+
+    globals()["_HARNESS_COMPACTOR"] = HarnessCompactor
+    return HarnessCompactor
+
+
 def _make_compactor(settings: Settings, system_prompt: str, registry: Any, counter: dict[str, int],
                     *, chat: bool = False, provider: Any = None) -> Any:
-    """The real compactor with a window of the fixed cost (system prompt and,
-    unless chat-mode, the tool schemas) + ``compaction_history_tokens`` + the
-    output cap, so a long history has to be compacted. Its summarizer is the
-    teacher (*provider*, default ``teacher_provider``): the summaries are the
-    teacher's own output, and its calls are recorded but never rows."""
-    from prometheus.context.compactor import ContextCompactor
+    """The real compactor (``HarnessCompactor``) with a window of the fixed cost
+    (system prompt and, unless chat-mode, the tool schemas) +
+    ``compaction_history_tokens`` + the output cap, so a long history has to be
+    compacted; resized per pass when the system prompt alone leaves no room
+    under that window (``HarnessCompactor``). Its summarizer is the teacher
+    (*provider*, default ``teacher_provider``): the summaries are the teacher's
+    own output, and its calls are recorded but never rows."""
     from prometheus.context.token_estimation import estimate_tokens
 
     tools_chars = 0 if chat else len(str(registry.to_api_schema()))
     fixed = estimate_tokens(system_prompt) + tools_chars // 4
-    comp = ContextCompactor(
+    comp = _harness_compactor_cls()(
+        history_tokens=settings.compaction_history_tokens,
         provider=provider if provider is not None else teacher_provider(settings),
         model=settings.model_name,
         effective_limit=fixed + settings.compaction_history_tokens + settings.max_tokens,
-        threshold_pct=0.85, reserve_tokens=settings.max_tokens, protect_recent_turns=2,
+        threshold_pct=COMPACTION_THRESHOLD_PCT, reserve_tokens=settings.max_tokens, protect_recent_turns=2,
         max_summary_tokens=512)
     orig = comp.apply
 
@@ -4747,8 +4863,15 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
         allowed = {settings.model_name} | ({settings.teacher_served} if settings.teacher_served else set())
         if any(has_max_token(m) or (settings.teacher_served and m not in allowed) for m in served):
             reasons.append("served_model_mismatch")
-    if task.mode == "chat" and events:
-        reasons.append("chat_mode_tool_call")
+    if task.mode == "chat":
+        # no tools on the wire for any of the turn's requests (the loop's chat mode and the
+        # providers drop them; checked, not assumed), and still no call
+        offered = sum(1 for c in calls if tools_on_wire(out.provider, c))
+        if offered:
+            record["chat_requests_with_tools"] = offered
+            reasons.append("chat_mode_tools_offered")
+        if events:
+            reasons.append("chat_mode_tool_call")
     recovered: bool | None = None
     # Any task carrying an injection (a taskset row with inject_errors and
     # force_compaction is a compacted-history task) must see it fire: a flag
@@ -4782,6 +4905,8 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
         in_request = any(SUMMARY_MARKER in (getattr(m, "text", "") or "")
                          for c in calls for m in c.request.messages)
         record["compaction"] = {"events": out.compactions, "summary_in_request": in_request}
+        if out.compaction_window is not None:
+            record["compaction"]["window"] = out.compaction_window
         if not out.compactions or not in_request:
             reasons.append("compaction_not_exercised")
     pred: dict[str, Any] = {"checked": sorted(task.score) + sorted(f"answer.{k}" for k in task.answer),
@@ -5144,6 +5269,8 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
                         cost_usd=round(call.cost_usd, 6), thinking_budget=settings.thinking_budget)
         if out.pad is not None:
             meta["compaction_pad"] = out.pad
+        if out.compaction_window is not None:
+            meta["compaction_window"] = out.compaction_window
         if settings.sampling:
             meta["sampling"] = dict(sorted(settings.sampling.items()))
         # a taskset's provenance (taskset, provenance, template ids, ...) and its task group
@@ -5168,7 +5295,7 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
 
 
 # ---------------------------------------------------------------------------
-# Store: outputs, ledger, resume, the coding cap
+# Store: outputs, ledger, resume, the shares
 # ---------------------------------------------------------------------------
 
 
@@ -5316,13 +5443,17 @@ class Store:
             self.rows_kind[r["_meta"]["task_category"]] += 1
             self.rows_domain[r["_meta"]["category"]] += 1
             self.rows_class.update(row_classes(r))
+        # Rows an earlier generator held behind its run-level caps (<name>.held.jsonl):
+        # nothing is held any more (build.py caps the dataset), so they are released
+        # into the traces on the next open, each run once, in the order they were held.
         self.held_queue: list[tuple[str, list[dict[str, Any]]]] = []
-        by_run: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
+        by_run: dict[str, list[dict[str, Any]]] = {}
         for r in kept_h:
-            by_run[r["_meta"]["run_id"]].append(r)
+            by_run.setdefault(r["_meta"]["run_id"], []).append(r)
         for run_id, rs in by_run.items():
             self.held_queue.append((run_id, rs))
         self.stats: collections.Counter = collections.Counter()
+        self.release_held()
 
     # -- queries ---------------------------------------------------------------------
 
@@ -5344,21 +5475,17 @@ class Store:
               if e.get("kind") == kind and e["status"] in ("kept", "held", "released")]
         return sum(rs) / len(rs) if rs else default
 
-    def coding_fits(self, n_coding: int, n_total: int) -> bool:
-        coding = self.rows_domain["coding"] + n_coding
-        total = self.total_rows + n_total
-        return coding <= self.coding_cap * total + 1e-9
-
-    def fits(self, rows: list[dict[str, Any]]) -> bool:
-        """*rows* (one task's) keep the coding share and every ``class_caps`` share."""
-        n_coding = sum(1 for r in rows if r["_meta"].get("category") == "coding")
-        if n_coding and not self.coding_fits(n_coding, len(rows)):
-            return False
-        total = self.total_rows + len(rows)
-        add: collections.Counter = collections.Counter()
-        for r in rows:
-            add.update(row_classes(r))
-        return all(self.rows_class[c] + n <= self.class_caps.get(c, 1.0) * total + 1e-9 for c, n in add.items())
+    def shares(self) -> dict[str, Any]:
+        """The run's shares of the capped classes (reported, never enforced here:
+        build.py caps them over the whole dataset). ``over_cap``: the share is
+        above its dataset cap in this run, so build.py may drop some of these rows."""
+        total = self.total_rows
+        out: dict[str, Any] = {}
+        for c, cap in sorted({"coding": self.coding_cap, **self.class_caps}.items()):
+            n = self.rows_domain["coding"] if c == "coding" else self.rows_class[c]
+            share = round(n / total, 3) if total else 0.0
+            out[c] = {"rows": n, "cap": cap, "share": share, "over_cap": bool(total) and n > cap * total + 1e-9}
+        return out
 
     # -- writes ----------------------------------------------------------------------
 
@@ -5384,10 +5511,13 @@ class Store:
 
     def commit(self, task: GenTask, run_id: str, status: str, rows: list[dict[str, Any]],
                reasons: list[str], extra: dict[str, Any] | None = None) -> str:
-        """Write one task's outcome. *status* is kept / relaxed / rejected / error;
-        a kept coding task over the cap becomes held. Relaxed rows go to their own
-        file and count toward nothing (no target, mix, cap or dedupe). Returns the
-        final status."""
+        """Write one task's outcome. *status* is kept / relaxed / rejected / error.
+        Every kept (verified) row goes to the traces, tagged (``_meta.category``
+        coding, ``_meta.judge_outcome``, ``_meta.no_tool_answer``): nothing is held
+        behind a run-level share; build.py caps those classes over the whole
+        dataset, and the report keeps this run's shares (``shares``). Relaxed rows
+        go to their own file and count toward nothing (no target, mix, cap or
+        dedupe). Returns the final status."""
         if status == "relaxed":
             fresh = [r for r in rows if self.guard is None or not self.guard.row_overlaps(r)]
             if not fresh:
@@ -5418,26 +5548,20 @@ class Store:
         ev = {"task_id": task.id, "task_hash": task.task_hash, "kind": task.kind, "domain": task.domain,
               "family": task.family, "run_id": run_id, "reasons": reasons, "rows": len(rows), **(extra or {})}
         if status == "kept":
-            if not self.fits(rows):
-                _append(self.held, rows)
-                self.held_queue.append((run_id, rows))
-                self.keys.update(prompt_call_key(r) for r in rows)
-                self._event(dict(ev, status="held"))
-                return "held"
             _append(self.traces, rows)
             self._count(rows)
             self._event(dict(ev, status="kept"))
-            self.release_held()
             return "kept"
         self._event(dict(ev, status=status, rows=0))
         return status
 
     def release_held(self) -> int:
+        """Move every held run (an earlier generator's ``.held.jsonl``) into the
+        traces, one ``released`` event each; the held file is rewritten after each
+        run, so a crash leaves every row in exactly one file. Returns the runs moved."""
         released = 0
         while self.held_queue:
             run_id, rows = self.held_queue[0]
-            if not self.fits(rows):
-                break
             self.held_queue.pop(0)
             _append(self.traces, rows)
             for r in rows:
@@ -5501,6 +5625,8 @@ class Store:
             "by_class": {c: {"rows": self.rows_class[c], "cap": cap,
                              "share": round(self.rows_class[c] / total, 3) if total else 0.0}
                          for c, cap in sorted(self.class_caps.items())},
+            # every verified row is written; build.py enforces these caps on the dataset
+            "shares": {"enforced_by": "build.py", "classes": self.shares()},
             "judge_calls": judge_n, "judge_pass_rate": round(judge_pass / judge_n, 3) if judge_n else None,
             "rejection_reasons": dict(reasons.most_common()),
             "row_filters": dict(self.stats), "resume_repairs": dict(self.repairs),
@@ -6114,7 +6240,6 @@ async def run(settings: Settings, gen: Generator, store: Store, guard: EvalGuard
                       file=sys.stderr, flush=True)
 
     await asyncio.gather(*(worker(i) for i in range(max(1, settings.concurrency))))
-    store.release_held()
     final: dict[str, Any] = {"stop": stop_reason() or "done", "tasks_started": state["started"]}
     if state["stop_detail"]:
         final["stop_detail"] = state["stop_detail"]

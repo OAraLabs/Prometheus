@@ -278,19 +278,85 @@ def _row(task_id: str, run_id: str, i: int, **meta: Any) -> dict[str, Any]:
                       "category": "other", **meta}}
 
 
-def test_reported_blocked_and_no_tool_rows_are_held_past_their_share(tmp_path):
-    store = tg.Store(tmp_path / "s", "x", {"x": 1}, 1.0, class_caps={"reported_blocked": 0.25})
+def test_reported_blocked_and_no_tool_rows_are_written_tagged_with_their_shares(tmp_path):
+    # the Max trial: 13 verified, 12 held behind run-level caps, 1 row written. Now every
+    # verified row is written, tagged; build.py enforces the caps over the dataset.
+    store = tg.Store(tmp_path / "s", "x", {"x": 1}, 1.0, class_caps={"reported_blocked": 0.15,
+                                                                    "no_tool_answer": 0.20})
     blocked = [_row("b1", "rb1", 0, judge_outcome="reported_blocked")]
-    assert store.commit(task(id="b1"), "rb1", "kept", blocked, []) == "held"
+    assert store.commit(task(id="b1"), "rb1", "kept", blocked, []) == "kept"
     for k in range(3):
-        assert store.commit(task(id=f"d{k}"), f"rd{k}", "kept", [_row(f"d{k}", f"rd{k}", k)], []) == "kept"
-    # the fourth row made room: the held one went in
-    assert store.rows_class["reported_blocked"] == 1 and store.total_rows == 4 and not store.held_queue
-    assert store.report(settings_for(tmp_path, "http://127.0.0.1:1"), 0.0)["by_class"]["reported_blocked"] == {
-        "rows": 1, "cap": 0.25, "share": 0.25}
-    again = tg.Store(tmp_path / "s", "x", {"x": 1}, 1.0, class_caps={"reported_blocked": 0.25})
-    assert again.rows_class["reported_blocked"] == 1
+        assert store.commit(task(id=f"n{k}"), f"rn{k}", "kept",
+                            [_row(f"n{k}", f"rn{k}", k, no_tool_answer=True, judge_outcome="done")], []) == "kept"
+    assert store.commit(task(id="d0"), "rd0", "kept", [_row("d0", "rd0", 0, judge_outcome="done")], []) == "kept"
+    rows = [json.loads(x) for x in store.traces.read_text().splitlines()]
+    assert len(rows) == 5 and not store.held.exists() and not store.held_queue
+    assert [r["_meta"]["judge_outcome"] for r in rows] == ["reported_blocked", "done", "done", "done", "done"]
+    assert sum(bool(r["_meta"].get("no_tool_answer")) for r in rows) == 3
+    report = store.report(settings_for(tmp_path, "http://127.0.0.1:1"), 0.0)
+    assert report["by_class"]["reported_blocked"] == {"rows": 1, "cap": 0.15, "share": 0.2}
+    assert report["shares"]["classes"]["reported_blocked"]["over_cap"]
+    assert report["shares"]["classes"]["no_tool_answer"] == {"rows": 3, "cap": 0.2, "share": 0.6,
+                                                             "over_cap": True}
+    again = tg.Store(tmp_path / "s", "x", {"x": 1}, 1.0)
+    assert again.rows_class["reported_blocked"] == 1 and again.rows_class["no_tool_answer"] == 3
     assert tg.row_classes(_row("n", "r", 0, no_tool_answer=True)) == ["no_tool_answer"]
+
+
+def _held_output(out: Path, *, torn_release: bool = False) -> None:
+    """An output dir as the run-level-cap generator left it: one kept run, two held."""
+    out.mkdir(parents=True)
+    (out / "x.settings.json").write_text(json.dumps({"x": 1}, indent=1) + "\n")
+    kept = [_row("k1", "rk1", 0, judge_outcome="done")]
+    held1 = [_row("h1", "rh1", 0, judge_outcome="reported_blocked"),
+             _row("h1", "rh1", 1, judge_outcome="reported_blocked")]
+    held1[1]["messages"][0]["content"] += " again"
+    held2 = [_row("h2", "rh2", 0, no_tool_answer=True)]
+    events = [{"task_id": "k1", "run_id": "rk1", "kind": "agentic", "status": "kept", "rows": 1},
+              {"task_id": "h1", "run_id": "rh1", "kind": "agentic", "status": "held", "rows": 2},
+              {"task_id": "h2", "run_id": "rh2", "kind": "agentic", "status": "held", "rows": 1}]
+    traces = kept + (held1 if torn_release else [])  # a crash after the append, before the event
+    (out / "x.tasks.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    (out / "x.traces.jsonl").write_text("".join(json.dumps(r) + "\n" for r in traces))
+    (out / "x.held.jsonl").write_text("".join(json.dumps(r) + "\n" for r in held1 + held2))
+
+
+@pytest.mark.parametrize("torn_release", [False, True])
+def test_a_held_rows_file_from_an_earlier_run_is_released_on_resume(tmp_path, torn_release):
+    out = tmp_path / "s"
+    _held_output(out, torn_release=torn_release)
+    store = tg.Store(out, "x", {"x": 1}, 1.0)
+    rows = [json.loads(x) for x in store.traces.read_text().splitlines()]
+    # every row once, in held order, the held file emptied, a released event per held run
+    assert [(r["_meta"]["run_id"], r["messages"][0]["content"]) for r in rows] == [
+        ("rk1", "question kb"), ("rh1", "question hb"), ("rh1", "question hb again"), ("rh2", "question hc")]
+    assert not store.held.read_text().strip() and not store.held_queue
+    assert store.total_rows == 4 and store.rows_class["reported_blocked"] == 2
+    assert {t: store.status[t]["status"] for t in ("k1", "h1", "h2")} == {
+        "k1": "kept", "h1": "released", "h2": "released"}
+    ledger = [json.loads(x) for x in (out / "x.tasks.jsonl").read_text().splitlines()]
+    assert [e["task_id"] for e in ledger if e["status"] == "released"] == ["h1", "h2"]
+    assert store.repairs.get("orphan_trace_rows", 0) == (2 if torn_release else 0)
+    # the next open finds nothing to release or repair
+    again = tg.Store(out, "x", {"x": 1}, 1.0)
+    assert again.total_rows == 4 and not again.repairs
+    assert len(again.traces.read_text().splitlines()) == 4
+
+
+def test_a_release_cut_off_after_its_event_drops_the_stale_held_copy(tmp_path):
+    # a crash after h1's rows and its released event were written, before the held
+    # file was rewritten: h1's rows are in both files; the held copy is the orphan
+    out = tmp_path / "s"
+    _held_output(out, torn_release=True)
+    with (out / "x.tasks.jsonl").open("a") as fh:
+        fh.write(json.dumps({"task_id": "h1", "status": "released", "run_id": "rh1"}) + "\n")
+    store = tg.Store(out, "x", {"x": 1}, 1.0)
+    rows = [json.loads(x) for x in store.traces.read_text().splitlines()]
+    assert [r["_meta"]["run_id"] for r in rows] == ["rk1", "rh1", "rh1", "rh2"]
+    assert store.repairs == {"orphan_held_rows": 2} and not store.held.read_text().strip()
+    ledger = [json.loads(x) for x in (out / "x.tasks.jsonl").read_text().splitlines()]
+    assert [e["task_id"] for e in ledger if e["status"] == "released"] == ["h1", "h2"]
+    assert store.total_rows == 4
 
 
 # ── host inspection in the sandbox ────────────────────────────────────────────
@@ -500,3 +566,125 @@ def test_a_list_part_after_a_failed_cd_never_runs_in_another_directory(tmp_path)
     assert "SECRET" not in res.output and "can't cd to nodir" in res.output and res.is_error
     ok = _bash(env, reg, "mkdir sub; cd sub; df -h | head -1; pwd")
     assert not ok.is_error and ok.output.splitlines()[-1].endswith("/sub")
+
+
+# ── chat mode: no tools offered, and the system prompt says so ─────────────────
+
+
+def test_chat_mode_turn_offers_no_tools_and_its_system_prompt_says_so(tmp_path, no_outbound):
+    t = task(kind="chat-mode", domain="chat-mode", mode="chat",
+             prompt="# amber-ledger\n- Runs on: edge-02\n\nWhich host runs amber-ledger?",
+             score={"expect_text_contains": "edge-02"})
+    with FakeTeacher() as fake:
+        s = settings_for(tmp_path, fake.url)
+        out, ok, reasons, record = run_and_verify(t, s)
+        agent = [r for r in fake.requests if r.get("stream")]
+    assert ok, reasons
+    for req in agent:
+        assert not req.get("tools") and "tool_choice" not in req
+        system = req["messages"][0]
+        assert system["role"] == "system" and system["content"].rstrip().endswith(tg.CHAT_MODE_NOTE)
+    assert out.system_prompt.endswith(tg.CHAT_MODE_NOTE) and "chat_requests_with_tools" not in record
+    # an agent turn's prompt has no such note
+    t2 = task(prompt="Which host runs cobalt-intake? Use the wiki.", fixtures={"wiki": WIKI})
+    with FakeTeacher(scripted({"cobalt-intake": [("call", "wiki_query", {"query": "cobalt"}), "echo"]})) as fake:
+        out2, _ok, _r, _rec = run_and_verify(t2, settings_for(tmp_path / "b", fake.url))
+        first = next(r for r in fake.requests if r.get("stream"))
+    assert tg.CHAT_MODE_NOTE not in first["messages"][0]["content"] and first.get("tools")
+    assert tg.CHAT_MODE_NOTE not in out2.system_prompt
+
+
+def test_chat_mode_call_is_still_rejected_and_tools_on_the_wire_are_caught(tmp_path, monkeypatch):
+    t = task(kind="chat-mode", domain="chat-mode", mode="chat", prompt="Which host runs amber-ledger?")
+    with FakeTeacher(scripted({"amber-ledger": [("call", "wiki_query", {"query": "amber"}), "echo"]})) as fake:
+        out, ok, reasons, _record = run_and_verify(t, settings_for(tmp_path, fake.url))
+        agent = [r for r in fake.requests if r.get("stream")]
+    assert all(not r.get("tools") for r in agent)
+    assert not ok and "chat_mode_tool_call" in reasons and "chat_mode_tools_offered" not in reasons
+    # a provider that put tools on the wire anyway: the row is refused, not trusted
+    t2 = task(kind="chat-mode", domain="chat-mode", mode="chat",
+              prompt="# amber-ledger\n- Runs on: edge-02\n\nWhich host runs amber-ledger?")
+    with FakeTeacher() as fake:
+        s = settings_for(tmp_path / "b", fake.url)
+        out2 = asyncio.run(tg.run_task(t2, s))
+    real = out2.provider._build_request_payload
+    monkeypatch.setattr(out2.provider, "_build_request_payload",
+                        lambda req: {**real(req), "tools": [{"type": "function", "function": {"name": "bash"}}]})
+    ok2, reasons2, record2 = tg.deterministic_checks(out2, s)
+    assert not ok2 and "chat_mode_tools_offered" in reasons2 and record2["chat_requests_with_tools"] >= 1
+
+
+# ── compaction: a system prompt larger than the small window ───────────────────
+
+
+def _big_prompt(tokens: int) -> str:
+    line = "Policy: answer from the conversation and keep replies short and plain. "
+    return "You are a test agent.\n" + line * (tokens * 4 // len(line))
+
+
+def _chat_compaction_task() -> Any:
+    seed = []
+    for i in range(10):
+        seed += [{"user": ("We decided the deploy day is Thursday. " if i == 0 else "")
+                  + f"Reference {i}: " + ("lorem ipsum dolor sit amet consectetur " * 60)},
+                 {"assistant_text": f"Noted reference {i}."}]
+    return task(kind="compacted-history", domain="chat-mode", mode="chat", prompt="Which deploy day did we pick?",
+                seed=seed, compaction=True)
+
+
+def test_a_system_prompt_over_the_small_window_gets_a_window_the_compactor_can_converge_in(
+        tmp_path, no_outbound, caplog):
+    from prometheus.context.compactor import ContextCompactor
+    from prometheus.context.token_estimation import estimate_tokens
+
+    big = _big_prompt(40_000)
+    t = _chat_compaction_task()
+    with FakeTeacher(scripted({"deploy day": [("text", "We picked Thursday.")]})) as fake:
+        s = settings_for(tmp_path, fake.url, base_system_prompt=big)
+        out, ok, reasons, record = run_and_verify(t, s)
+        assert fake.kinds["summary"] >= 1
+    assert ok, reasons
+    # the compactor's own word: no pass landed over its line
+    assert not [r for r in caplog.records if "did NOT converge" in r.getMessage()]
+    win = record["compaction"]["window"]
+    sys_tokens = estimate_tokens(out.system_prompt)
+    hist, room = s.compaction_history_tokens, s.max_tokens
+    assert win["resized"] and win["converged"] and win["passes"] >= 1 and win["resized_passes"] >= 1
+    assert win["configured"] == sys_tokens + hist + room          # the plain small window
+    assert win["system_tokens"] == sys_tokens and win["history_tokens"] == hist
+    assert win["line"] == sys_tokens + hist and win["effective"] == sys_tokens + hist + room
+    assert sys_tokens + 512 > win["configured_line"]               # why: no room under its line
+    rows = tg.rows_for(out, s, record)
+    assert len(rows) == 1 and rows[0]["_meta"]["compacted"] and rows[0]["_meta"]["compaction_window"] == win
+    # the plain compactor at the configured window cannot get under its own line
+    plain = ContextCompactor(provider=None, model=s.model_name, effective_limit=win["configured"],
+                             threshold_pct=tg.COMPACTION_THRESHOLD_PCT, reserve_tokens=room)
+    floor = sys_tokens + 512
+    assert floor > min(plain.threshold_for()[0], plain.limit_for() - room)
+
+
+def test_the_window_follows_the_compactors_calibration_and_is_unchanged_when_it_fits(tmp_path):
+    from prometheus.context.token_estimation import estimate_tokens
+
+    from prometheus.engine.messages import ConversationMessage
+
+    s = settings_for(tmp_path, "http://127.0.0.1:1")
+    msgs = [ConversationMessage.from_user_text("hello")]
+    # a small prompt: the configured window, untouched
+    small = "You are a test agent."
+    comp = tg._make_compactor(s, small, None, {"n": 0}, chat=True, provider=object())
+    sys_t, window, line = comp.size_for(msgs, session_id="system", system_prompt=small, model=s.model_name,
+                                        max_tokens=s.max_tokens)
+    assert comp.sized is None and window == comp.configured_window and line == comp.configured_line
+    # a prompt that fits at the bare estimate but not once the server counted 1.4x
+    mid = _big_prompt(24_000)
+    comp = tg._make_compactor(s, mid, None, {"n": 0}, chat=True, provider=object())
+    comp.size_for(msgs, session_id="system", system_prompt=mid, model=s.model_name, max_tokens=s.max_tokens)
+    assert comp.sized is None
+    comp.observe_prompt_tokens(session_id="system", model=s.model_name, estimated=1000, reported=1400)
+    sys_t, window, line = comp.size_for(msgs, session_id="system", system_prompt=mid, model=s.model_name,
+                                        max_tokens=s.max_tokens)
+    assert sys_t == int(estimate_tokens(mid) * 1.4)
+    assert comp.sized == (window, line) and line == sys_t + s.compaction_history_tokens
+    assert window == line + s.max_tokens
+    assert comp.limit_for(s.model_name) == window and comp.threshold_for(s.model_name)[0] == line

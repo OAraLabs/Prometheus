@@ -783,21 +783,21 @@ def _row(task_id: str, run_id: str, kind: str, domain: str, i: int) -> dict[str,
                                    "task_id": task_id, "tool_name": "memory"}}
 
 
-def test_coding_rows_never_pass_the_cap_and_held_rows_are_released(tmp_path):
+def test_coding_rows_are_written_past_the_cap_and_their_share_is_reported(tmp_path):
+    # nothing is held at run level: build.py's --category-cap caps coding over the dataset
     store = tg.Store(tmp_path, "q", {"x": 1}, 0.35)
     c1 = task(id="code-1", kind="coding", domain="coding")
     assert store.commit(c1, "r-c1", "kept", [_row("code-1", "r-c1", "coding", "coding", i) for i in range(3)],
-                        []) == "held"
-    assert store.total_rows == 0
+                        []) == "kept"
+    assert store.total_rows == 3 and store.rows_domain["coding"] == 3 and not store.held.exists()
     a1 = task(id="ag-1", kind="agentic", domain="other")
     assert store.commit(a1, "r-a1", "kept", [_row("ag-1", "r-a1", "agentic", "other", i) for i in range(4)],
                         []) == "kept"
-    assert store.rows_domain["coding"] == 0  # 3 / 7 = 43% > 35%
-    a2 = task(id="ag-2", kind="agentic", domain="other")
-    store.commit(a2, "r-a2", "kept", [_row("ag-2", "r-a2", "agentic", "other", i) for i in range(2)], [])
-    assert store.rows_domain["coding"] == 3 and store.rows_domain["coding"] / store.total_rows <= 0.35
-    assert store.status["code-1"]["status"] == "released"
-    assert not store.held.read_text().strip()
+    assert store.shares()["coding"] == {"rows": 3, "cap": 0.35, "share": 0.429, "over_cap": True}
+    report = store.report(settings_for(tmp_path, "http://127.0.0.1:1"), 0.0)
+    assert report["rows_total"] == 7 and report["rows_held"] == 0
+    assert report["shares"]["enforced_by"] == "build.py" and report["shares"]["classes"]["coding"]["over_cap"]
+    assert len(store.traces.read_text().splitlines()) == 7
     # resume sees the same state
     again = tg.Store(tmp_path, "q", {"x": 1}, 0.35)
     assert again.rows_domain == store.rows_domain and not again.held_queue and not again.repairs
