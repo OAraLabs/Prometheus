@@ -136,3 +136,8 @@ none holds teacher data.
     4. non-coding/daily-agent tasks.
   - **Replay:** round 2's dataset keeps a sample of v4b rows so round-1 skills aren't forgotten.
   - **Target:** enough new verified rows for a round-2 run within about a week. Rows/hour by category goes in the daily 09:00 heartbeat.
+- **Operator answer, Sun 2026-11-01 ~01:30 ET: capacity measurements before long-context generation.**
+  - **Teacher context, 4090:** measure the max stable context for the 27B teacher on the dedicated 4090 at night, for both Q4_K_XL and the IQ3 quant, with q8 KV cache and flash attention.
+  - **Teacher context, 3090 Ti:** measure its current limit.
+  - **Use:** take the highest stable context for long-context teacher rows, and cap long-context rows at what the teacher can actually read.
+  - **Training sequence length:** measure the longest sequence the 9B QLoRA can train at on the 4090 with activation offload to its 64 GB RAM (16K/32K/64K), and report tokens/sec at each.
