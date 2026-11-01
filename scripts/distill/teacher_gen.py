@@ -455,7 +455,12 @@ information only (``judge.info_only``), and every row with a call is
 ``judge_pending`` (``_meta.judge_scope: calibrated-pending``, ``verifier:
 judge-pending``): ``build.py judge-pending`` exports them to judge.py's local-judge
 queue, the calibrated judge rates them, and build.py trains them only on that
-verdict. A prose row there (``not-applicable``: the calibrated rubric rates calls)
+verdict. A call whose OWN result was an injected failure or carries the planted
+adversarial text is outside what the calibration saw (pass-side calls, real
+results that succeeded): ``outside-calibration-domain``, ``judge_skipped_reason:
+outside_calibration_domain``, kept only by the task's deterministic verifier
+(recovery, injection; ``verifier: deterministic``); the calls after it wait as
+usual. A prose row there (``not-applicable``: the calibrated rubric rates calls)
 and every row of another category (``uncalibrated-category``) keeps on its
 deterministic checks or tool success alone; its record says ``judge: {"applied":
 false, ...}``. Every round-2 record and row says ``round: 2``, ``target_area``,
@@ -5401,8 +5406,14 @@ def r2_checks(out: TaskOutcome, events: list[dict[str, Any]], text: str, reasons
         rec["recovery"] = {"families": [f.get("family") for f in out.env.failure_fired],
                            "fired": len(out.env.failure_fired),
                            "final_call": (last or {}).get("outcome"), "final_tool": (last or {}).get("name")}
-        if out.env.failure_fired and (last is None or last["outcome"] not in ("ok", "simulated")):
-            failed.append("final_call_failed")
+        if out.env.failure_fired:
+            # the recovery verifier (deterministic): a later call succeeded and the turn's last one did
+            checks.append("recovery")
+            seq0 = min(f["seq"] for f in out.env.failure_fired)
+            if not any(ev["outcome"] in ("ok", "simulated") for ev in ordered if ev["seq"] > seq0):
+                failed.append("not_recovered")
+            if last is None or last["outcome"] not in ("ok", "simulated"):
+                failed.append("final_call_failed")
     if task.context_reads:
         rec["context"] = out.context
         g = r2.get("grounding")
@@ -5905,18 +5916,36 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
             # with a call in a calibrated category waits for the calibrated judge (judge_pending);
             # a prose row there has no calibrated judge (it rates calls): its own checks verify it
             pending_cat = bool((verification.get("judge") or {}).get("pending"))
-            scope = ("calibrated-pending" if pending_cat and uses else
+            # The calibration saw pass-side calls only: real results that succeeded. A call whose OWN
+            # result (the one judge.py's outcome view shows) is an injected failure, or carries the
+            # planted adversarial text (an instruction aimed at whoever reads it: the judge too), is
+            # outside that domain: only the task's deterministic verifier (recovery, injection) keeps
+            # it. The calls after it (clean results) wait for the calibrated judge as usual.
+            ev0 = (events.get(uses[0].id) or {}) if uses else {}
+            fired = out.env.adversarial_fired or {}
+            injected = bool(uses) and ev0.get("outcome") == "injected"
+            planted = bool(uses) and bool(fired) and fired.get("call") == uses[0].id
+            det = ((verification.get("r2") or {}).get("deterministic") or {})
+            outside = (injected or planted) and bool(det.get("checks")) and det.get("pass") is True
+            scope = ("outside-calibration-domain" if pending_cat and uses and outside else
+                     "calibrated-pending" if pending_cat and uses else
                      "not-applicable" if pending_cat else "uncalibrated-category")
             meta.update(round=2, target_area=task.r2.get("area"), r2_bucket=task.sched_key,
                         r2_variant=task.variant, judge_scope=scope, judge_pending=scope == "calibrated-pending",
-                        verifier="judge-pending" if scope == "calibrated-pending" else verification.get("verifier"),
+                        verifier=("judge-pending" if scope == "calibrated-pending" else
+                                  "deterministic" if scope == "outside-calibration-domain"
+                                  else verification.get("verifier")),
                         verifiers=verification.get("verifiers"))
+            if scope == "outside-calibration-domain":
+                meta["judge_skipped_reason"] = "outside_calibration_domain"
         if uses:
             # the first call's own result, as the sandbox returned it (the calibrated judge's outcome view)
             ev0 = events.get(uses[0].id) or {}
+            fired = out.env.adversarial_fired or {}
             meta["call_result"] = {"status": "error" if ev0.get("is_error") else "success",
                                    "text": str(ev0.get("result") or "")[:6000],
-                                   "injected": ev0.get("outcome") == "injected"}
+                                   "injected": ev0.get("outcome") == "injected",
+                                   "planted": bool(fired) and fired.get("call") == uses[0].id}
         rows.append({"messages": wire + [target],
                      "tools": [] if task.mode == "chat" else list(payload.get("tools") or []),
                      "_meta": meta})

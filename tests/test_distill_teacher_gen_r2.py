@@ -216,8 +216,9 @@ def test_in_a_calibrated_category_the_run_judge_is_information_only_and_call_row
     row; the rows with a call wait for the calibrated judge (judge_pending), the prose row does not."""
     t = _inj_task("Look it up in the wiki: which host runs cobalt-intake?", category="coding")
     bad = {"verdict": "fail", "outcome": "not_done", "tools_ok": True, "grounded": True, "reason": "no"}
+    later = ("call", "wiki_query", {"query": "cobalt-intake port"})
     for verdict in (None, bad):
-        with FakeTeacher(scripted({"cobalt-intake": [WIKI_CALL, "echo"]}), verdict=verdict) as fake:
+        with FakeTeacher(scripted({"cobalt-intake": [WIKI_CALL, later, "echo"]}), verdict=verdict) as fake:
             status, rows, reasons, extra = _process(t, _settings(tmp_path / str(bool(verdict)), fake.url))
             assert fake.kinds["judge"] == 1  # asked, for the record
         assert status == "kept", reasons  # a fail of this judge drops nothing
@@ -225,11 +226,18 @@ def test_in_a_calibrated_category_the_run_judge_is_information_only_and_call_row
         assert j["applied"] is False and j["pending"] is True and j["calibration_judge_match"] is False
         assert j["info_only"]["verdict"] == ("fail" if verdict else "pass")
         assert extra["verification"]["judge_pending"] is True
-        call_row, prose_row = rows
+        carrier, call_row, prose_row = rows
+        # the call whose own result carried the planted text: outside what the calibration saw
+        assert carrier["_meta"]["judge_scope"] == "outside-calibration-domain"
+        assert carrier["_meta"]["judge_pending"] is False and carrier["_meta"]["verifier"] == "deterministic"
+        assert carrier["_meta"]["judge_skipped_reason"] == "outside_calibration_domain"
+        assert carrier["_meta"]["call_result"]["planted"] is True
+        assert t.adversarial["instruction"] in carrier["_meta"]["call_result"]["text"]
+        # the call after it (a clean result) waits for the calibrated judge
         assert call_row["_meta"]["judge_pending"] is True and call_row["_meta"]["verifier"] == "judge-pending"
         assert call_row["_meta"]["judge_scope"] == "calibrated-pending"
-        assert call_row["_meta"]["call_result"]["status"] == "success"
-        assert t.adversarial["instruction"] in call_row["_meta"]["call_result"]["text"]
+        assert call_row["_meta"]["call_result"] == {"status": "success", "text": call_row["_meta"]["call_result"]["text"],
+                                                    "injected": False, "planted": False}
         assert prose_row["_meta"]["judge_pending"] is False and prose_row["_meta"]["judge_scope"] == "not-applicable"
         assert prose_row["_meta"]["verifier"] == "deterministic" and "call_result" not in prose_row["_meta"]
 
@@ -244,8 +252,8 @@ def test_an_uncalibrated_category_asks_no_judge_and_its_rows_never_wait(tmp_path
     assert not any(r["_meta"]["judge_pending"] for r in rows)
 
 
-def _err_task(prompt: str, fams: list[dict[str, Any]]) -> Any:
-    row = r2t.make_row(_base(prompt), taskset="t-errrec", area="error-recovery", variant="err:test",
+def _err_task(prompt: str, fams: list[dict[str, Any]], category: str = "memory/wiki") -> Any:
+    row = r2t.make_row(_base(prompt, category), taskset="t-errrec", area="error-recovery", variant="err:test",
                        verifier="tool-success", needs_ctx=20000, failure={"families": fams, "source": "harvest"})
     task = tg.tasks_from_taskset_rows([row], Path("."))[0]
     task.fixtures = {"wiki": dict(PAGES)}
@@ -265,7 +273,8 @@ def test_recovery_from_a_harvest_failure_is_kept_and_a_failed_last_call_is_not(t
     assert status == "kept", reasons
     rec = extra["verification"]
     assert rec["r2"]["recovery"]["final_call"] == "ok" and rec["r2"]["recovery"]["families"] == ["tool_timeout"]
-    assert rec["verifier"] == "tool-success" and rows[-1]["_meta"]["error_recovery"] is True
+    assert rec["verifier"] == "deterministic" and "recovery" in rec["r2"]["deterministic"]["checks"]
+    assert rows[-1]["_meta"]["error_recovery"] is True
     sticky = [dict(TIMEOUT[0], tool="wiki_query", sticky=True)]
     t2 = _err_task("Check the wiki: which host runs cobalt-intake?", sticky)
     with FakeTeacher(scripted({"cobalt-intake": [WIKI_CALL, WIKI_CALL, ("text", "The wiki timed out twice.")]})) as fake:
@@ -415,3 +424,22 @@ def test_until_hhmm_is_the_next_real_occurrence_across_dst() -> None:
     # passed today: tomorrow, refused past the horizon
     with pytest.raises(ValueError, match="passed today"):
         tg.parse_until("01:00", now=datetime(2026, 11, 2, 9, 0, tzinfo=et), max_ahead_hours=12)
+
+
+def test_a_call_that_got_an_injected_failure_is_outside_the_calibrated_domain(tmp_path: Path,
+                                                                              no_outbound: Any) -> None:
+    """The calibration saw only calls whose result succeeded: the call that got the injected failure is
+    kept by the deterministic recovery verifier alone; the recovery call after it waits for the judge."""
+    t = _err_task("Check the wiki: which host runs cobalt-intake?", TIMEOUT, category="coding")
+    retry = ("call", "wiki_query", {"query": "cobalt-intake runs on"})
+    with FakeTeacher(scripted({"cobalt-intake": [WIKI_CALL, retry, "echo"]})) as fake:
+        status, rows, reasons, extra = _process(t, _settings(tmp_path, fake.url))
+    assert status == "kept", reasons
+    failed, recovered, final = rows
+    assert failed["_meta"]["call_result"]["injected"] is True
+    assert failed["_meta"]["judge_scope"] == "outside-calibration-domain" and failed["_meta"]["judge_pending"] is False
+    assert failed["_meta"]["verifier"] == "deterministic"
+    assert failed["_meta"]["judge_skipped_reason"] == "outside_calibration_domain"
+    assert recovered["_meta"]["judge_pending"] is True and recovered["_meta"]["call_result"]["injected"] is False
+    assert final["_meta"]["judge_scope"] == "not-applicable"
+    assert "recovery" in extra["verification"]["r2"]["deterministic"]["checks"]

@@ -856,8 +856,11 @@ def verification_of(meta: dict[str, Any], *, strict: bool = False,
                 return Verification(False, "unjudged_verifier_not_allowed")
             category = meta.get("category")
             if category in ((skipped_judge or {}).get("calibrated_categories") or ()) \
-                    and meta.get("judge_scope") != "not-applicable":
+                    and meta.get("judge_scope") not in ("not-applicable", "outside-calibration-domain"):
                 return Verification(False, "judge_skipped_in_calibrated_category")
+            if meta.get("judge_scope") == "outside-calibration-domain" and verifier != "deterministic":
+                # outside the calibrated domain only a deterministic verifier keeps a row
+                return Verification(False, "outside_domain_needs_deterministic")
             det = (rec.get("r2") or {}).get("deterministic") or {}
             if verifier == "deterministic" and not (det.get("checks") and det.get("pass") is True):
                 return Verification(False, "deterministic_not_passed")
@@ -2461,6 +2464,13 @@ class Builder:
             verdict = str(meta["verdict"]).lower()
         if meta.get("judge_scope") == "not-applicable" and (trace.raw["messages"][-1].get("tool_calls")):
             self.exclude(trace, "judge_scope_mismatch")  # a call is never outside the calibrated judge
+            return
+        cr = meta.get("call_result") if isinstance(meta.get("call_result"), dict) else {}
+        if meta.get("judge_scope") == "outside-calibration-domain" and not (
+                trace.raw["messages"][-1].get("tool_calls") and (cr.get("injected") is True or cr.get("planted") is True)):
+            # outside the calibrated domain only a call whose own result was an injected failure or
+            # carried the planted text
+            self.exclude(trace, "judge_scope_mismatch")
             return
         # A Max row's record may name the pay-per-token Max judge; a train-source
         # (local 27B) row's needs a --judge-models judge (OPEN-QUESTIONS #6)

@@ -330,3 +330,28 @@ def test_a_prose_scope_that_holds_a_call_is_refused(tmp_path: Path) -> None:
     b = _builder(tmp_path / "a", [], _calibration(tmp_path))
     feed(b, write_jsonl(tmp_path / "x.jsonl", [row]), "extra")
     assert b.stats["excluded:judge_scope_mismatch"] == 1 and not b.examples
+
+
+def test_outside_the_calibrated_domain_a_call_trains_on_its_deterministic_verifier_only(tmp_path: Path) -> None:
+    cal = _calibration(tmp_path)
+
+    def outside(task: str, *, injected: bool = True, verifier: str = "deterministic") -> dict[str, Any]:
+        row = _pending(task, scope="outside-calibration-domain")
+        row["_meta"].update(judge_skipped_reason="outside_calibration_domain", verifier="deterministic")
+        row["_meta"]["call_result"].update(injected=injected, planted=False)
+        rec = row["_meta"]["verification"]
+        rec["verifier"] = verifier
+        rec["r2"]["deterministic"] = {"checks": ["recovery"], "pass": True, "failed": []}
+        return row
+
+    rows = [outside("gyma"), outside("gymb", injected=False), outside("gymc", verifier="tool-success")]
+    (tmp_path / "a").mkdir()
+    b = _builder(tmp_path / "a", [], cal)
+    feed(b, write_jsonl(tmp_path / "o.jsonl", rows), "extra")
+    assert [e.label for e in b.examples] == ["r2-deterministic"]   # no calibrated verdict needed
+    assert b.stats["excluded:judge_scope_mismatch"] == 1             # its own result was not injected
+    assert b.stats["verification:outside_domain_needs_deterministic"] == 1
+    # never queued for the calibrated judge
+    a = build.parse_args(["judge-pending", "--traces", str(tmp_path / "o.jsonl"), "--calibration", str(cal),
+                          "--workdir", str(tmp_path / "jp")])
+    assert build.cmd_judge_pending(a) == 8
