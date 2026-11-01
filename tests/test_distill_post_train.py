@@ -676,3 +676,20 @@ def test_phase6_pause_exit_waits_and_resumes(tmp_path: Path) -> None:
     assert rcs == [] and clock.t - t0 >= 600  # two 5-min waits
     assert pipe.state["steps"]["phase6"]["status"] == "done"
     assert any(c.startswith("test -s") and "Q5_K_M.gguf" in c for c in tower.cmds)
+
+
+def test_an_unreadable_manifest_is_read_again_before_deciding(tmp_path: Path) -> None:
+    pipe, tower, clock, sent = make(tmp_path, done_manifest(), SUN_10)
+    orig = tower.__call__
+    calls = {"n": 0}
+
+    def flaky(script: str) -> Tuple[int, str]:
+        if script.startswith("cat ") and "phase5" in script and "manifest.json" in script:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return 1, "cat: transient"
+        return orig(script)
+
+    pipe.ops.t = flaky  # type: ignore[assignment]
+    pipe.step_verdict()
+    assert calls["n"] == 3 and pipe.state["steps"]["verdict"]["status"] == "done" and not sent

@@ -802,8 +802,14 @@ class Pipeline:
 
     def step_verdict(self) -> None:
         run_rel = f"distill/phase5/runs/{self.cfg.run}"
-        rc, out = self.ops.tower(f"cat {q(self.tp(run_rel + '/manifest.json'))}")
-        man = read_json_text(out) if rc == 0 else None
+        man = None
+        for attempt in range(3):  # a read that failed is not a verdict: try again before deciding
+            rc, out = self.ops.tower(f"cat {q(self.tp(run_rel + '/manifest.json'))}")
+            man = read_json_text(out) if rc == 0 else None
+            if isinstance(man, dict) or not self.cfg.execute:
+                break
+            self.log(f"  the run manifest did not read (rc {rc}); again in 30 s")
+            self.sleep(30)
         rc, out = self.ops.tower(f"cat {q(self.tp(run_rel + '/run_state.json'))}")
         rs = read_json_text(out) if rc == 0 else None
         ad = self.tp(f"{run_rel}/{self.cfg.adapter_name}")
