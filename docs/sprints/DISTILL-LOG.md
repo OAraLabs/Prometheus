@@ -143,3 +143,9 @@ Append-only, times in ET.
   - **Run:** 124.1M tokens over 2 epochs, ~13.6 h, ETA ~Sun 09:15 EST. Stop-at Mon 05:20 EST, hourly checkpoints, keep 2.
   - **Watcher:** flywheel-train-watch-20261031T195413 Telegrams at start, each epoch and the end (val curve), then restores business.
   - **Base:** provenance-verified bnb4 of official Qwen3.5-9B.
+- 2026-10-31 20:16 — Full run is healthy at step 23/1,120: ~2,540 tok/s (~45 s per optimizer step), grad norm ~0.55, loss 0.89–1.30 (per-step noise), peak 12.7 GiB, 73 GB disk free. Projected end ~Sun 10:00 EST.
+- 2026-10-31 21:15 — Full run at step 101/1,120. Mean loss 1.171 (steps 1–25) → 1.054 (27–51) → 1.014 (77–101); grad norm ~0.62; 2,540 tok/s; first checkpoint (83) saved; 72 GB free. ETA ~Sun 10:00 EST.
+- 2026-10-31 22:15 — Full run at step 179/1,120: loss ~0.95–0.96 (from 1.17), grad norm ~0.64, 2,541 tok/s, checkpoints 83 and 166 kept. Mini: local generation 182 rows; A/B (01:00 EDT) and window-end (Sun 18:00) timers armed.
+- 2026-10-31 23:14 — Full run at step 255/1,120: loss ~0.87 (from 1.17), grad norm ~0.56, 2,540 tok/s, checkpoints 166 and 200 kept (retention working).
+- 2026-11-01 00:13 — Full run at step 332/1,120. Loss means over 25-step windows: 0.874 for 258–282, 0.992 for 308–332 (per-batch variance; the epoch-1 val comes at step 560); grad norm 0.53; checkpoints 200 and 282. The mini A/B timer is due at 01:00 EDT.
+- 2026-11-01 00:32 — Operator: after the run, score Q4_K_M and Q5_K_M on eval-tools + sanity and BF16 on a 100-case eval-tools subset, side by side; flag 4-bit as the bottleneck if Q5 − Q4 > 3 pts. An agent is building an automatic post-training pipeline (phase6 keeping BF16 → scoring) to start when the run ends.
