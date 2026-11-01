@@ -14,9 +14,15 @@
 #             would hold ~19 GB, more than this host may use). -> ~/distill/phase6/<run>/merged
 #   calib     quantize.py calibrate, here (the splits and eval sets live here): the train-only imatrix
 #             text, checked against every eval file, the Phase 4 eval-tools set included.
-#   push      merged/ and calib/ to ~/distill/phase6/<run>/ on the 4090 host, sha256-checked.
-#   quantize  on the 4090 host: quantize.py run --no-adapter --base <merged> (convert, imatrix on
-#             its GPU, Q4_K_M + Q5_K_M, perplexity and metadata sanity, manifest), as the user unit
+#   push      merged/ and calib/ to ~/distill/phase6/<run>/ on the 4090 host, sha256-checked. First the
+#             4090 disk preflight (disk_preflight.py there, the shared check of every 4090 job): only what
+#             the REMAINING stages still have to write counts (merged/, the BF16 GGUF, the imatrix's Q8_0
+#             copy, each quant: a file already there counts only for its missing part), plus 1 GiB fixed
+#             and the 10 GiB floor the post-train pipeline keeps; it prints the plan. Too little: it logs,
+#             Telegrams the operator and this exits 28 (nothing changed).
+#   quantize  on the 4090 host: quantize.py run --no-adapter --base <merged> (convert, imatrix on its GPU
+#             on a Q8_0 copy of the BF16 GGUF (the BF16 cuBLAS path aborted on 2026-11-01: quantize.py
+#             step 5), Q4_K_M + Q5_K_M from the BF16 GGUF, perplexity and metadata sanity, manifest), as the user unit
 #             distill-quantize-p6-<run> (a setups.py restore stops it; the same command resumes).
 #             It needs the GPU free (training over, judge and business servers down): checked first.
 #   fetch     the GGUFs, imatrix and manifest back here, sha256-checked against the manifest.
@@ -47,6 +53,7 @@
 #   --keep-bf16          cleanup keeps the BF16 GGUF on the 4090 host (it is scored there as a
 #                        reference); merged/ and base-view/ are still removed
 # Environment: TOWER (the 4090 host's ssh target, required), FLOOR_GIB (default 8).
+# Exit: 0 done, 2 error, 28 the 4090 disk preflight refused (logged and Telegrammed there).
 #
 # Rehearsed 2026-10-31 with the 9B smoke adapter (the 4090 step with --tower-cpu, its GPU being
 # busy): pull 1 s, merge 3.7 min (here, 4.3 GB cap), calib 4 s, push 3.7 min, 4090 step 11.6 min
@@ -204,13 +211,48 @@ fi
 
 # -- push (here -> 4090 host) ---------------------------------------------------------------------
 TCODE=$P6REL/code
+# The 4090 disk preflight for the stages still to run there: LABEL:GIB:PATH items for disk_preflight.py (a
+# file or dir already there counts only for what it still lacks). Sizes from the merge here (the BF16 GGUF is
+# ~1.02x the merged weights; each quant its quantize.py SIZE_RATIO of the BF16 file).
+disk_items() {
+  local mb m bf q r items have_imatrix
+  mb=$(du -sb "$OUT/merged" 2>/dev/null | cut -f1)
+  [ -n "$mb" ] || mb=$(tower "du -sb ~/$P6REL/merged 2>/dev/null | cut -f1")
+  [ -n "$mb" ] || die "no merged/ here or on the 4090 host to size the plan from"
+  m=$(awk -v b="$mb" 'BEGIN{printf "%.2f", b/1073741824}')
+  bf=$(awk -v m="$m" 'BEGIN{printf "%.2f", m*1.03}')
+  items="--item merged:$m:$HOME_T/$P6REL/merged --item BF16:$bf:$HOME_T/$P6REL/gguf/$RUN-BF16.gguf"
+  have_imatrix=$(tower "test -e ~/$P6REL/gguf/$RUN.imatrix.gguf && echo yes || echo no")
+  if [ "$have_imatrix" != yes ]; then
+    items="$items --item imatrix-Q8_0-copy:$(awk -v b="$bf" 'BEGIN{printf "%.2f", b*0.54}'):$HOME_T/$P6REL/gguf/$RUN.imatrix-src-Q8_0.gguf"
+  fi
+  IFS=, read -ra QS <<< "$QUANTS"
+  for q in "${QS[@]}"; do
+    case $q in Q4_K_S) r=0.29 ;; Q4_K_M) r=0.31 ;; Q5_K_S) r=0.35 ;; Q5_K_M) r=0.36 ;; Q6_K) r=0.41 ;; Q8_0) r=0.54 ;; *) r=0.6 ;; esac
+    items="$items --item $q:$(awk -v b="$bf" -v r="$r" 'BEGIN{printf "%.2f", b*r}'):$HOME_T/$P6REL/gguf/$RUN-$q.gguf"
+  done
+  echo "$items"
+}
+disk_preflight() {  # $1 = --no-notify (the plan: report only)
+  local rc=0 out items
+  HOME_T=$(tower 'echo $HOME')
+  items=$(disk_items) || die "could not size the 4090 plan"
+  out=$(tower "python3 -I ~/$TCODE/disk_preflight.py check --job 'Phase 6 $RUN' --path ~ --need-gib 1 --floor-gib 10 $items --detail 'Phase 6 stages still to run on the 4090: push, convert, imatrix (Q8_0 copy), quantize.' ${1:-}") || rc=$?
+  echo "  $out"
+  [ -z "${1:-}" ] || return 0
+  if [ "$rc" = 28 ]; then echo "phase6: the 4090 disk preflight refused: $out" >&2; exit 28; fi
+  [ "$rc" = 0 ] || die "the 4090 disk preflight did not run (exit $rc): $out"
+}
+if want push && [ "$EXECUTE" != 1 ] && tower "test -f ~/$TCODE/disk_preflight.py"; then
+  say "push (plan): the 4090 disk preflight with the code there now (report only)"
+  disk_preflight --no-notify || true
+fi
 if want push && [ "$EXECUTE" = 1 ]; then
-  NEED_GB=60
-  FREE_GB=$(tower "df --output=avail -BG ~ | tail -1 | tr -dc 0-9")
-  [ "$FREE_GB" -ge "$NEED_GB" ] || die "the 4090 host has ${FREE_GB} GB free; this needs ~${NEED_GB} GB"
   tower "mkdir -p -m 700 ~/$P6REL ~/$TCODE"
   rsync -a --delete --exclude __pycache__ -e "${SSH[*]}" "$CODE/" "$TOWER:$TCODE/"
-  say "push: merged/ + calib/ (~19 GB)"
+  say "push: disk preflight on the 4090 host (only what the remaining stages still write counts)"
+  disk_preflight
+  say "push: merged/ + calib/ (~19 GB; rsync skips what is already there)"
   rsync -a --chmod=Du=rwx,Dgo=,Fu=rw,Fgo= -e "${SSH[*]}" "$OUT/merged" "$OUT/calib" "$TOWER:$P6REL/"
   (cd "$OUT" && sha256sum merged/*.safetensors calib/*) > "$LOGS/push.sha256"
   tower "cd ~/$P6REL && sha256sum -c --quiet" < "$LOGS/push.sha256" || die "sha256 mismatch on the 4090 host"

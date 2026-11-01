@@ -96,10 +96,23 @@ Steps (``--execute``)
    head stale) while ``config.json`` still declares ``mtp_num_hidden_layers``;
    without ``--no-mtp`` the converter declares a nextn layer it has no
    tensors for. The base goes through the same flag, so both share a layout.
-5. imatrix: ``llama-imatrix --parse-special`` on the bf16 GGUF, ``-c`` = ``-b`` =
+5. imatrix: ``llama-imatrix --parse-special``, ``-c`` = ``-b`` =
    ``--imatrix-ctx`` so each chunk is one sequence (no multi-sequence
-   recurrent state for the hybrid linear-attention layers).
-6. quantize: ``llama-quantize --imatrix`` for each of ``--quants``.
+   recurrent state for the hybrid linear-attention layers), on a Q8_0 copy of
+   the 16-bit GGUF (``--imatrix-from``, default Q8_0; llama.cpp's own
+   practice), made with ``llama-quantize`` and deleted after step 6. Why not
+   the bf16 file itself: on the 4090 (CUDA build, the distro's cuBLAS 12.0)
+   ``llama-imatrix`` on the bf16 GGUF aborted on 2026-11-01 after 88 of 128
+   chunks with ``CUBLAS_STATUS_INVALID_VALUE`` ("an unsupported value or
+   parameter was passed to the function") in ``cublasGemmEx`` of
+   ``ggml_cuda_mul_mat_cublas_impl<BF16>``: not out of memory, and not the
+   data (the same chunks from 84 on passed when run again). A Q8_0 model's
+   matrix products run in llama.cpp's own int8 kernels (MMQ), not that cuBLAS
+   bf16 path. ``--imatrix-from ref`` keeps the old behaviour (the 16-bit file).
+   A kept imatrix records its source beside it (``<label>.imatrix.json``); a
+   run asking for another source refuses it (delete it to remake).
+6. quantize: ``llama-quantize --imatrix`` for each of ``--quants``, from the
+   16-bit GGUF (never from the Q8_0 copy).
 7. sanity: each GGUF (bf16 reference included) loads in ``llama-perplexity``
    and scores the perplexity slice; a quant passes when its perplexity is
    finite, under ``--max-ppl`` (a broken-model ceiling) and within
@@ -108,6 +121,9 @@ Steps (``--execute``)
    nextn layers, and a context length that holds the 256k serve line.
    llama-perplexity tokenizes special-token text as plain text (it has no
    ``--parse-special``); every model scores the same tokens, so the ratio holds.
+   The 16-bit reference's perplexity that fails on the GPU (the cuBLAS bf16
+   abort above) is tried once more there, then on the CPU (``-ngl 0``); the
+   manifest records where it ran.
    The metadata is read with gguf-py under ``--convert-python`` (the
    interpreter the converter ran with), in a child process.
 8. manifest: ``quantize-manifest.json``: inputs, settings, each command, every
@@ -223,6 +239,8 @@ FILE_TYPES = {"F16": 1, "Q4_K_S": 14, "Q4_K_M": 15, "Q5_K_S": 16, "Q5_K_M": 17,
 # Size of a quant relative to the 16-bit file, for the disk preflight only.
 SIZE_RATIO = {"Q4_K_S": 0.29, "Q4_K_M": 0.31, "Q5_K_S": 0.35, "Q5_K_M": 0.36,
               "Q6_K": 0.41, "Q8_0": 0.54}
+# What llama-imatrix may run on (--imatrix-from): a copy at one of these types, or "ref".
+IMATRIX_FROM = ("Q8_0", "F16", "ref")
 DISK_MARGIN = 5 * 1024**3
 
 # HF architectures -> the GGUF arch the converter writes. The Qwen3.5 rows
@@ -403,6 +421,11 @@ def imatrix_cmd(llama: LlamaCpp, model: Path, calib: Path, out: Path, *, ctx: in
 def quantize_cmd(llama: LlamaCpp, src: Path, imatrix: Path, dst: Path, qtype: str) -> list[str]:
     return [str(llama.tool("llama-quantize")), "--imatrix", str(imatrix), str(src), str(dst),
             qtype]
+
+
+def requant_cmd(llama: LlamaCpp, src: Path, dst: Path, qtype: str) -> list[str]:
+    """A plain copy at another type (no imatrix): the imatrix's Q8_0/F16 source."""
+    return [str(llama.tool("llama-quantize")), str(src), str(dst), qtype]
 
 
 def perplexity_cmd(llama: LlamaCpp, model: Path, text: Path, *, ctx: int, chunks: int,
@@ -1147,6 +1170,9 @@ class Settings:
     max_ppl: float = 100.0
     port: int = 8080
     approved: bool = False  # APPROVAL_FLAG: Max-derived calibration text allowed
+    # what llama-imatrix runs on: a Q8_0 (or F16) copy of the 16-bit GGUF, or "ref" (that file)
+    imatrix_from: str = "Q8_0"
+    keep_imatrix_src: bool = False
     stop_at: float | None = None  # epoch seconds (STOP_MARGIN_S already taken off)
     train_sha256: str | None = None  # the train.jsonl this model goes with
     # Decided before anything runs (output_provenance): the outputs are
@@ -1172,6 +1198,17 @@ class Settings:
     @property
     def imatrix_chunks(self) -> int:
         return max(1, self.calib_tokens // self.imatrix_ctx)
+
+    @property
+    def imatrix_src(self) -> Path:
+        """The GGUF llama-imatrix reads: the 16-bit file, or its Q8_0/F16 copy (deleted after quantize)."""
+        if self.imatrix_from == "ref":
+            return self.gguf(self.ref_name)
+        return self.out / "gguf" / f"{self.label}.imatrix-src-{self.imatrix_from}.gguf"
+
+    @property
+    def imatrix_info(self) -> Path:
+        return self.out / "gguf" / f"{self.label}.imatrix.json"
 
     def fingerprint(self) -> dict[str, Any]:
         """What makes two runs the same run: an --out holding another is refused."""
@@ -1372,8 +1409,14 @@ def preflight(s: Settings, arch: str | None, *, need_bytes: int) -> dict[str, An
             "family), rebuild, and pass --llama-cpp-commit")
     free = shutil.disk_usage(s.out).free
     if free < need_bytes:
+        # the shared 4090 disk preflight: logged and Telegrammed, never a silent stop
+        dp = _sibling("distill_disk_preflight", "disk_preflight.py")
+        v = dp.verdict(f"quantize {s.label}", free / dp.GIB, need_bytes / dp.GIB,
+                       [f"outputs not made yet + {DISK_MARGIN / dp.GIB:.0f} margin"])
+        sent = dp.send(dp.refusal_text(v, path=str(s.out)), dp.DEFAULT_NOTIFY, job=v.job)
+        dp.log_line(dp.DEFAULT_LOG, v, f"telegram {sent}")
         raise QuantizeError(f"{free / 1e9:.1f} GB free under {s.out}; this run needs about "
-                            f"{need_bytes / 1e9:.1f} GB")
+                            f"{need_bytes / 1e9:.1f} GB (Telegram {sent})")
     return {"head": head, "builds": builds, "converter_registers": arch,
             "disk_free_bytes": free, "disk_need_bytes": need_bytes}
 
@@ -1386,6 +1429,8 @@ def need_bytes(s: Settings) -> int:
         need += base
     if not s.gguf(s.ref_name).exists():
         need += base
+    if s.imatrix_from != "ref" and not s.imatrix.exists() and not s.imatrix_src.exists():
+        need += int(base * SIZE_RATIO.get(s.imatrix_from, 1.0))
     for q in s.quants:
         if not s.gguf(q).exists():
             need += int(base * SIZE_RATIO.get(q, 0.6))
@@ -1446,12 +1491,16 @@ def print_plan(s: Settings, arch: str | None, cal_note: str, name_problems: list
     print("[4/8] convert")
     show(convert_cmd(s.python, llama, model_dir, _partial(ref), outtype=s.outtype,
                      model_name=s.label))
-    print("[5/8] imatrix")
-    show(imatrix_cmd(llama, ref, calib, _partial(s.imatrix), ctx=s.imatrix_ctx,
+    print(f"[5/8] imatrix (on {'the 16-bit GGUF' if s.imatrix_from == 'ref' else 'a ' + s.imatrix_from + ' copy'})")
+    if s.imatrix_from != "ref":
+        show(requant_cmd(llama, ref, _partial(s.imatrix_src), s.imatrix_from))
+    show(imatrix_cmd(llama, s.imatrix_src, calib, _partial(s.imatrix), ctx=s.imatrix_ctx,
                      chunks=s.imatrix_chunks, ngl=s.ngl))
     print("[6/8] quantize")
     for q in s.quants:
         show(quantize_cmd(llama, ref, s.imatrix, _partial(s.gguf(q)), q))
+    if s.imatrix_from != "ref" and not s.keep_imatrix_src:
+        print(f"  then delete {s.imatrix_src.name} (only the imatrix needed it)")
     print(f"[7/8] sanity (max ppl {s.max_ppl}; ratio to {s.ref_name}: "
           + ", ".join(f"{q} <= {s.max_ppl_ratio[q]}" for q in s.quants) + ")")
     for name in (s.ref_name, *s.quants):
@@ -1588,17 +1637,9 @@ def _run_steps(s: Settings, arch: str | None, fp: dict[str, Any], old: dict[str,
     manifest["steps"]["convert"] = {"cmd": cmd}
 
     calib, ppl_txt = calib_dir / "calibration.txt", calib_dir / "ppl.txt"
-    cmd = imatrix_cmd(llama, ref, calib, _partial(s.imatrix), ctx=s.imatrix_ctx,
-                      chunks=s.imatrix_chunks, ngl=s.ngl)
-    print("[5/8] imatrix")
-    if s.imatrix.exists():
-        print(f"  kept {s.imatrix.name}")
-    else:
-        _partial(s.imatrix).unlink(missing_ok=True)
-        _step(cmd, logs / "imatrix.log", "llama-imatrix")
-        _partial(s.imatrix).rename(s.imatrix)
-    manifest["steps"]["imatrix"] = {"cmd": cmd, "ctx": s.imatrix_ctx,
-                                    "chunks": s.imatrix_chunks, "parse_special": True}
+    print(f"[5/8] imatrix (on {'the 16-bit GGUF' if s.imatrix_from == 'ref' else 'a ' + s.imatrix_from + ' copy'})")
+    manifest["steps"]["imatrix"] = run_imatrix(s, pre["head"], ref, calib, logs)
+    save()
 
     print("[6/8] quantize")
     manifest["steps"]["quantize"] = {}
@@ -1630,6 +1671,10 @@ def _run_steps(s: Settings, arch: str | None, fp: dict[str, Any], old: dict[str,
             _partial(dst).rename(dst)
         manifest["llama_cpp"]["builds"]["llama-quantize"] = built
         manifest["steps"]["quantize"][q] = {"cmd": cmd}
+    if s.imatrix_from != "ref" and not s.keep_imatrix_src and s.imatrix_src.exists():
+        s.imatrix_src.unlink()
+        print(f"  deleted {s.imatrix_src.name} (only the imatrix needed it)")
+        manifest["steps"]["imatrix"]["source_deleted"] = True
     save()
 
     print("[7/8] sanity")
@@ -1655,6 +1700,75 @@ def _run_steps(s: Settings, arch: str | None, fp: dict[str, Any], old: dict[str,
     return 0 if sanity["pass"] else EXIT_SANITY
 
 
+def _check_built(text: str, head: str, what: str, partial: Path | None = None) -> str:
+    built = built_from(text)
+    if built is None or not head.startswith(built):
+        if partial is not None:
+            partial.unlink(missing_ok=True)
+        raise QuantizeError(f"{what} is not built from {head[:12]} (its log says "
+                            f"{built or 'no build'}); rebuild at the pin")
+    return built
+
+
+def run_imatrix(s: Settings, head: str, ref: Path, calib: Path, logs: Path) -> dict[str, Any]:
+    """Step 5: the imatrix, on the 16-bit GGUF or (default) a Q8_0 copy of it made first. Returns the
+    manifest's step record; a kept imatrix must say it came from the source this run asks for."""
+    llama = s.llama
+    assert llama is not None
+    src = s.imatrix_src
+    cmd = imatrix_cmd(llama, src, calib, _partial(s.imatrix), ctx=s.imatrix_ctx,
+                      chunks=s.imatrix_chunks, ngl=s.ngl)
+    rec: dict[str, Any] = {"cmd": cmd, "ctx": s.imatrix_ctx, "chunks": s.imatrix_chunks,
+                           "parse_special": True, "from": s.imatrix_from}
+    if s.imatrix.exists():
+        info = (json.loads(s.imatrix_info.read_text(encoding="utf-8"))
+                if s.imatrix_info.is_file() else {"from": "ref"})  # made before the record existed
+        if info.get("from") != s.imatrix_from:
+            raise QuantizeError(f"kept {s.imatrix.name} was computed on {info.get('from')}, this run asks "
+                                f"for {s.imatrix_from} (--imatrix-from): delete it to remake it")
+        print(f"  kept {s.imatrix.name} (computed on {info.get('from')})")
+        return {**rec, "kept": True, "source": info.get("source")}
+    source: dict[str, Any] | None = None
+    if s.imatrix_from != "ref":
+        qcmd = requant_cmd(llama, ref, _partial(src), s.imatrix_from)
+        if src.exists():
+            print(f"  kept {src.name}")
+        else:
+            _partial(src).unlink(missing_ok=True)
+            text = _step(qcmd, logs / f"imatrix-src-{s.imatrix_from}.log",
+                         f"llama-quantize {s.imatrix_from} (the imatrix's source)")
+            _check_built(text, head, "llama-quantize", _partial(src))
+            _partial(src).rename(src)
+        source = {"cmd": qcmd, "name": src.name, "bytes": src.stat().st_size, "sha256": sha256_file(src)}
+        rec["source"] = source
+    _partial(s.imatrix).unlink(missing_ok=True)
+    _step(cmd, logs / "imatrix.log", "llama-imatrix")
+    _write_json(s.imatrix_info, {"from": s.imatrix_from, "source": source, "at": _now(),
+                                 "ngl": s.ngl, "ctx": s.imatrix_ctx, "chunks": s.imatrix_chunks})
+    _partial(s.imatrix).rename(s.imatrix)
+    return rec
+
+
+def _ppl_ref(s: Settings, cmd: list[str], log: Path) -> tuple[int, str, list[dict[str, Any]]]:
+    """The 16-bit reference's perplexity: on the GPU, once more there, then on the CPU (-ngl 0): the
+    cuBLAS bf16 abort (module docstring, step 5) must not fail a sound model."""
+    tries: list[dict[str, Any]] = []
+    attempts = [cmd, cmd]
+    if s.ngl != "0":
+        cpu = list(cmd)
+        cpu[cpu.index("-ngl") + 1] = "0"
+        attempts.append(cpu)
+    rc, text = 1, ""
+    for i, c in enumerate(attempts):
+        if i:
+            print(f"  $ {shlex.join(c)}  (attempt {i + 1}: the one before exited {rc})")
+        rc, text = _run_logged(c, log.with_name(log.stem + (f".try{i + 1}" if i else "") + log.suffix))
+        tries.append({"ngl": c[c.index("-ngl") + 1], "exit": rc})
+        if rc == 0 and parse_ppl(text) is not None:
+            break
+    return rc, text, tries
+
+
 def run_sanity(s: Settings, arch: str | None, template_sha: str, ppl_txt: Path,
                logs: Path) -> dict[str, Any]:
     llama = s.llama
@@ -1665,7 +1779,11 @@ def run_sanity(s: Settings, arch: str | None, template_sha: str, ppl_txt: Path,
         path = s.gguf(name)
         cmd = perplexity_cmd(llama, path, ppl_txt, ctx=s.ppl_ctx, chunks=s.ppl_chunks, ngl=s.ngl)
         print(f"  $ {shlex.join(cmd)}")
-        rc, text = _run_logged(cmd, logs / f"ppl-{name}.log")
+        tries: list[dict[str, Any]] | None = None
+        if name == s.ref_name:
+            rc, text, tries = _ppl_ref(s, cmd, logs / f"ppl-{name}.log")
+        else:
+            rc, text = _run_logged(cmd, logs / f"ppl-{name}.log")
         ppl = parse_ppl(text) if rc == 0 else None
         try:
             meta: dict[str, Any] = read_gguf_metadata(llama.dir, path, s.python)
@@ -1676,7 +1794,8 @@ def run_sanity(s: Settings, arch: str | None, template_sha: str, ppl_txt: Path,
         checks["loads"] = rc == 0
         checks["ppl_finite"] = ppl is not None and math.isfinite(ppl)
         checks["ppl_under_ceiling"] = checks["ppl_finite"] and ppl is not None and ppl <= s.max_ppl
-        results[name] = {"ppl": ppl, "exit": rc, "metadata": meta, "checks": checks}
+        results[name] = {"ppl": ppl, "exit": rc, "metadata": meta, "checks": checks,
+                         **({"attempts": tries} if tries and len(tries) > 1 else {})}
     ref_ppl = results[s.ref_name]["ppl"]
     for q in s.quants:
         r = results[q]
@@ -1941,6 +2060,7 @@ def _cmd_run(a: argparse.Namespace) -> int:
     s.max_ppl_ratio = _ratio_map(a.max_ppl_ratio, quants)
     s.max_ppl = a.max_ppl
     s.approved, s.stop_at = a.approved, parse_stop_at(a.stop_at)
+    s.imatrix_from, s.keep_imatrix_src = a.imatrix_from, a.keep_imatrix_src
     s.train_sha256 = a.train_sha256.lower() if a.train_sha256 else None
     cfg = base / "config.json"
     arch = None
@@ -2163,6 +2283,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="ISO time with a UTC offset (the window's end): stop before it, exit 75")
     r.add_argument("--detach", action="store_true",
                    help=f"with --execute: run as systemd user unit {UNIT_PREFIX}<UTC stamp>")
+    r.add_argument("--imatrix-from", choices=IMATRIX_FROM, default="Q8_0",
+                   help="what llama-imatrix runs on: a Q8_0 (default) or F16 copy of the 16-bit GGUF, "
+                        "deleted after quantize, or 'ref' (the 16-bit GGUF itself)")
+    r.add_argument("--keep-imatrix-src", action="store_true",
+                   help="keep the imatrix's Q8_0/F16 copy after quantize")
     r.add_argument("--train-sha256", default=None,
                    help="sha256 of the train.jsonl this model goes with (default: from the "
                         "adapter's trainer manifest)")

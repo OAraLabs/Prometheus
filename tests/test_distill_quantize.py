@@ -616,7 +616,8 @@ def test_execute_runs_every_step_and_writes_the_manifest(host, capsys):
     tools = host.proc.tools()
     order = [t for t in tools if t in ("convert_hf_to_gguf.py", "llama-imatrix",
                                        "llama-quantize", "llama-perplexity")]
-    assert order == ["convert_hf_to_gguf.py", "llama-imatrix", "llama-quantize",
+    # the imatrix runs on a Q8_0 copy of the bf16 GGUF (the cuBLAS bf16 abort), made first
+    assert order == ["convert_hf_to_gguf.py", "llama-quantize", "llama-imatrix", "llama-quantize",
                      "llama-quantize", "llama-perplexity", "llama-perplexity",
                      "llama-perplexity"]
     m = json.loads((host.out / "quantize-manifest.json").read_text())
@@ -645,6 +646,93 @@ def test_execute_runs_every_step_and_writes_the_manifest(host, capsys):
     assert "TRAINTEXT" in text and not any(mk in text for mk in EVAL_MARKERS)
     rec = json.loads((host.out / "calib" / "calibration.json").read_text())
     assert not set(rec["calibration_ids"] + rec["ppl_ids"]) & EVAL_IDS
+    # the Q8_0 copy: made from the bf16 GGUF without an imatrix, read by llama-imatrix, then deleted;
+    # every quant is made from the bf16 GGUF
+    src = host.out / "gguf" / "run7-max-derived.imatrix-src-Q8_0.gguf"
+    qz = [c for c in host.proc.calls if c[0].endswith("llama-quantize")]
+    assert qz[0][1:] == [str(host.out / "gguf" / "run7-max-derived-BF16.gguf"),
+                         str(host.out / "gguf" / "run7-max-derived.imatrix-src-Q8_0.partial.gguf"), "Q8_0"]
+    assert all(c[c.index("--imatrix") + 2] == str(host.out / "gguf" / "run7-max-derived-BF16.gguf")
+               for c in qz[1:])
+    assert im[im.index("-m") + 1] == str(src) and not src.exists()
+    assert m["steps"]["imatrix"]["from"] == "Q8_0" and m["steps"]["imatrix"]["source_deleted"] is True
+    assert m["steps"]["imatrix"]["source"]["sha256"] == hashlib.sha256(b"GGUF-Q8_0").hexdigest()
+    info = json.loads((host.out / "gguf" / "run7-max-derived.imatrix.json").read_text())
+    assert info["from"] == "Q8_0" and info["source"]["name"] == src.name
+
+
+def test_imatrix_from_ref_runs_on_the_bf16_gguf_as_before(host):
+    assert Q.main(host.argv + ["--execute", "--imatrix-from", "ref"]) == 0
+    im = next(c for c in host.proc.calls if c[0].endswith("llama-imatrix") and "-f" in c)
+    assert im[im.index("-m") + 1] == str(host.out / "gguf" / "run7-max-derived-BF16.gguf")
+    qz = [c for c in host.proc.calls if c[0].endswith("llama-quantize")]
+    assert [c[-1] for c in qz] == ["Q4_K_M", "Q5_K_M"]
+    m = json.loads((host.out / "quantize-manifest.json").read_text())
+    assert m["steps"]["imatrix"]["from"] == "ref" and "source" not in m["steps"]["imatrix"]
+
+
+def test_a_kept_imatrix_from_another_source_is_refused(host, capsys):
+    # an imatrix an older run made (no record beside it: it was computed on the bf16 GGUF)
+    assert Q.main(host.argv + ["--execute", "--imatrix-from", "ref"]) == 0
+    (host.out / "gguf" / "run7-max-derived.imatrix.json").unlink()
+    host.proc.calls.clear()
+    assert Q.main(host.argv + ["--execute"]) == 2
+    assert "computed on ref, this run asks for Q8_0" in capsys.readouterr().err
+    assert Q.main(host.argv + ["--execute", "--imatrix-from", "ref"]) == 0
+
+
+def test_a_resume_after_the_bf16_imatrix_abort_makes_the_q8_copy_and_goes_on(host):
+    """2026-11-01: attempt 1 left the merged dir, the bf16 GGUF and an imatrix .partial; the rerun keeps the
+    first two, makes the Q8_0 copy, runs the imatrix on it and quantizes."""
+    def boom(argv):
+        if "-f" in argv:  # the run, not preflight's --version
+            raise SystemExit("cuBLAS abort")  # stands in for llama-imatrix dying mid-run
+    host.proc.hooks["llama-imatrix"] = boom
+    with pytest.raises(SystemExit):
+        Q.main(host.argv + ["--execute", "--imatrix-from", "ref"])
+    bf16 = host.out / "gguf" / "run7-max-derived-BF16.gguf"
+    assert bf16.exists() and not (host.out / "gguf" / "run7-max-derived.imatrix.gguf").exists()
+    (host.out / "gguf" / "run7-max-derived.imatrix.partial.gguf").write_bytes(b"partial")
+    host.proc.hooks.clear()
+    host.proc.calls.clear()
+    assert Q.main(host.argv + ["--execute"]) == 0
+    tools = host.proc.tools()
+    assert "convert_hf_to_gguf.py" not in tools
+    assert [t for t in tools if t in ("llama-quantize", "llama-imatrix")] == [
+        "llama-quantize", "llama-imatrix", "llama-quantize", "llama-quantize"]
+    assert not list(host.out.rglob("*.partial*"))
+
+
+def test_the_disk_need_counts_the_q8_copy_only_while_the_imatrix_is_missing(host, monkeypatch):
+    seen = []
+    real = Q.preflight
+    monkeypatch.setattr(Q, "preflight", lambda s, arch, need_bytes: seen.append(
+        (need_bytes, s.imatrix.exists())) or real(s, arch, need_bytes=need_bytes))
+    assert Q.main(host.argv + ["--execute"]) == 0
+    assert Q.main(host.argv + ["--execute"]) == 0
+    base = sum(f.stat().st_size for f in Path(host.argv[host.argv.index("--base") + 1]).glob("*.safetensors"))
+    assert seen[0] == (base + base + int(base * 0.54) + int(base * 0.31) + int(base * 0.36), False)
+    assert seen[1] == (0, True)  # everything made: nothing more to write (DISK_MARGIN is 0 here)
+
+
+def test_the_bf16_reference_perplexity_retries_then_runs_on_the_cpu(host, monkeypatch):
+    tries = []
+    real = Q._run_logged
+
+    def flaky(cmd, log):
+        if Path(cmd[0]).name == "llama-perplexity" and "BF16" in cmd[cmd.index("-m") + 1]:
+            tries.append(cmd[cmd.index("-ngl") + 1])
+            if len(tries) < 3:  # the cuBLAS bf16 abort, twice on the GPU
+                return 134, "CUDA error: an unsupported value or parameter was passed to the function\n"
+        return real(cmd, log)
+    monkeypatch.setattr(Q, "_run_logged", flaky)
+    assert Q.main(host.argv + ["--execute"]) == 0
+    assert tries == ["99", "99", "0"]
+    m = json.loads((host.out / "quantize-manifest.json").read_text())
+    bf = m["sanity"]["models"]["BF16"]
+    assert bf["pass"] is True and [a["ngl"] for a in bf["attempts"]] == ["99", "99", "0"]
+    assert m["sanity"]["models"]["Q4_K_M"]["ratio_to_ref"] == pytest.approx(4.2 / 4.0)
+    assert "attempts" not in m["sanity"]["models"]["Q4_K_M"]
 
 
 def test_execute_fails_sanity_on_a_degraded_quant(host):

@@ -43,7 +43,12 @@ Steps, in order (expected durations at the 4090's speed):
     ``~/distill/evalsets``; priority order:
       a. Q4_K_M eval-tools + sanity (~25 min)        b. Q5_K_M eval-tools + sanity (~25 min)
       c. BF16 on the 100-case subset (~12 min; -c the largest of 262144/131072/65536/32768 that
-         loads on 24 GB, recorded; the longest eval-tools prompt + max_tokens is ~20.4K)
+         loads on 24 GB, recorded; the longest eval-tools prompt + max_tokens is ~20.4K). First a quick
+         probe (one ~12K-token prompt, then two short ones). If the BF16 server dies with the CUDA error
+         of 2026-11-01 (cuBLAS bf16 GEMM; quantize.py step 5) in the probe or during the item, F16 is
+         scored instead: the BF16 GGUF converted to F16 on the 4090 (llama-quantize, CPU), the item
+         rerun from scratch under the F16 label, the reason in the state and the report. The F16 file is
+         deleted when the item ends (the recipe needs the disk).
       d. Q4_K_M eval-injection + eval-longctx (~80 min)
       e. the official base 9B through the student's exact recipe: the BF16 GGUF moves to this host
          (sha256-checked) to free the 4090's disk, the official bf16 is pushed there, the same
@@ -66,6 +71,17 @@ Guards, checked before and during every GPU step: ``--stop-at`` (default Mon 202
 scoring stops, then release; the hard deadline is 05:20 EST), a NO-SWAPS flag, business coming back
 from elsewhere (continuous_end, the dead-man: stop ours, release), free disk under 10 GiB on either
 host (stop with a message), SIGTERM (``systemctl --user stop`` of this unit: stop ours, release).
+Disk preflight (``disk_preflight.py``, the shared check of every 4090 job): Phase 6 checks what its
+remaining stages need (exit 28: a disk stop, not a retry), each scoring item declares 1 GiB plus the
+10 GiB floor, the F16 fallback the F16 file's size, the recipe its unwritten outputs. Too little: the
+step does not start, the plan is logged and Telegrammed.
+
+Hand-off (``--handoff-unit/--handoff-state/--handoff-until``): when the round-2 chain is armed and
+waiting for this pipeline, the window is open and the pipeline completed, the release does NOT restore
+business (the chain takes the 4090 for teacher generation minutes later: no down/up flap). The pipeline
+then watches the chain's state for ``--handoff-wait-min`` (45): once its 4090 teacher is up (phase
+``ab`` or ``generating``) the hand-off is done; if the chain ends, stops or does not get there in time,
+business is restored here after all (``train_end.sh``) with a Telegram.
 
 Dry run (no ``--execute``): read-only probes run (unit states, the manifest, disk, VRAM); every
 command that would change something is printed instead; waits do not wait; ``phase6_student.sh``
@@ -75,6 +91,10 @@ llama-server, ``fake-setup`` builds it): every step, unit, retry and report path
 
 Max-derived (DISTILL-OPEN-QUESTIONS Q6b): every label and file name carries ``max-derived``;
 nothing is uploaded anywhere; files move between our two hosts only.
+
+Rerun (``arm --rerun``): the earlier marker is kept as ``PIPELINE-DONE.<stamp>.json`` and the state's
+failure counters and failure Telegrams are reset (a backup of the state is kept); finished steps and
+artifacts are reused.
 
 Exit: 0 finished (any outcome; the marker says which), 1 crashed (the unit restarts and resumes),
 2 usage.
@@ -126,6 +146,34 @@ CTX_LADDER = {"q4": (CTX_FULL,), "recipe": (CTX_FULL,), "q5": (CTX_FULL, 131072,
 # Phase 6 attempts: the 4090 step at full offload; once more; then with fewer layers on the GPU
 # (the BF16 imatrix holds 17.9 GB of weights on a 24 GB card) -- quantize.py resumes either way.
 PHASE6_ATTEMPTS: Tuple[Tuple[str, ...], ...] = ((), (), ("--tower-ngl", "20"))
+EXIT_DISK = 28  # phase6_student.sh / disk_preflight.py: the disk preflight refused
+SCORE_DISK_GIB = 1.0  # what a scoring item writes on the 4090 (results, logs), on top of the floor
+HANDOFF_WAIT_MIN = 45.0
+HANDOFF_TAKEN = ("ab", "generating")  # the round-2 chain's phases once its 4090 teacher is up
+HANDOFF_WAITING = ("wait-pipeline", "wait-capacity")
+CUDA_ERR_RE = re.compile(r"CUDA error|cublas|CUBLAS_STATUS", re.I)
+_PROBE_PY = r'''
+import json, sys, time, urllib.request
+port = sys.argv[1]
+para = ("The quarterly report lists every service, its owner, the last incident and the open follow-ups. "
+        "Each row names the host, the port, the version and the date the config last changed. ")
+def ask(text, n):
+    body = json.dumps({"messages": [{"role": "user", "content": text}], "max_tokens": n,
+                       "temperature": 0}).encode()
+    req = urllib.request.Request("http://127.0.0.1:%s/v1/chat/completions" % port, data=body,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=600) as r:
+        return json.loads(r.read())["usage"]["prompt_tokens"]
+try:
+    t0 = time.time()
+    n = ask(para * 420 + "
+Summarize the report in one line.", 8)
+    ask("Say ok.", 4)
+    ask("Name one prime number.", 4)
+    print("probe=ok prompt_tokens=%s seconds=%.0f" % (n, time.time() - t0))
+except Exception as e:  # noqa: BLE001
+    print("probe=error %s: %s" % (type(e).__name__, str(e)[:200]))
+'''
 SET_TIMEOUT = {"sanity": 600, "eval-tools": 900, "eval-injection": 900, "eval-longctx": 1800,
                "eval-tools-subset": 900}
 SET_PASSES = 3
@@ -407,6 +455,56 @@ def to_float(x: Any, default: Optional[float] = None) -> Optional[float]:
         return default
 
 
+def disk_mod() -> Any:
+    """disk_preflight.py beside this file (the shared 4090 disk check)."""
+    name = "distill_disk_preflight"
+    mod = sys.modules.get(name)
+    if mod is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name("disk_preflight.py"))
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    return mod
+
+
+def reset_for_rerun(p7: Path, execute: bool, stamp: Optional[str] = None) -> List[str]:
+    """Before arming a rerun: keep the old marker under another name, reset the failure counters and
+    the failure Telegrams (a backup of the state first). Finished steps and artifacts stay."""
+    stamp = stamp or datetime.now(ET).strftime("%Y%m%dT%H%M%S")
+    done, stp = p7 / "PIPELINE-DONE.json", p7 / "state.json"
+    did: List[str] = []
+    if done.is_file():
+        did.append(f"{done.name} -> PIPELINE-DONE.{stamp}.json")
+        if execute:
+            done.rename(p7 / f"PIPELINE-DONE.{stamp}.json")
+    st = read_json_text(stp.read_text(encoding="utf-8")) if stp.is_file() else None
+    if isinstance(st, dict):
+        if execute:
+            (p7 / f"state.{stamp}.json").write_text(json.dumps(st, indent=1) + "\n", encoding="utf-8")
+        if st.pop("phase6_failures", None):
+            did.append("phase6 failures reset")
+        for k in ("outcome", "finished", "handoff"):
+            st.pop(k, None)
+        for k in ("abort", "report"):
+            if st.get("steps", {}).pop(k, None):
+                did.append(f"step {k} cleared")
+        tg = st.get("telegrams", {})
+        for k in list(tg):
+            if k in ("phase6-failed", "end", "stop", "results", "not-run", "gpu-busy", "flag",
+                     "too-many-starts", "restore-check") or k.startswith(("disk", "handoff")):
+                tg.pop(k)
+                did.append(f"telegram key {k} cleared")
+        for it in st.get("items", {}).values():
+            if it.get("status") == "running":
+                it["status"] = "pending"
+        st.setdefault("notes", []).append(f"rerun armed {stamp}: " + "; ".join(did)[:300])
+        if execute:
+            write_json(stp, st)
+    return did
+
+
 # ---------------------------------------------------------------------------
 # Configuration and the two hosts
 # ---------------------------------------------------------------------------
@@ -454,6 +552,10 @@ class Cfg:
         self.phase6_cmd = [str(self.code / "scripts" / "distill" / "phase6_student.sh")] \
             if not a.phase6_cmd else shlex.split(a.phase6_cmd)
         self.skip_recipe = bool(a.skip_recipe)
+        self.handoff_unit = getattr(a, "handoff_unit", "") or ""
+        self.handoff_state = Path(a.handoff_state).expanduser() if getattr(a, "handoff_state", "") else None
+        self.handoff_until = parse_iso(a.handoff_until) if getattr(a, "handoff_until", "") else None
+        self.handoff_wait_s = 60.0 * float(getattr(a, "handoff_wait_min", HANDOFF_WAIT_MIN) or HANDOFF_WAIT_MIN)
 
     @property
     def labels(self) -> Dict[str, str]:
@@ -618,6 +720,17 @@ class Pipeline:
 
     # -- 4090 paths ---------------------------------------------------------------------------
     @property
+    def ref16(self) -> str:
+        """The full-precision reference scored in item c: BF16, or F16 after the BF16 CUDA error."""
+        return str((self.state.get("ref16") or {}).get("quant") or "BF16")
+
+    @property
+    def labels(self) -> Dict[str, str]:
+        lab = dict(self.cfg.labels)
+        lab["bf16"] = f"{self.cfg.run}-{self.ref16}"
+        return lab
+
+    @property
     def T(self) -> str:
         return self.ops.thome
 
@@ -639,8 +752,12 @@ class Pipeline:
     def gguf(self, model: str) -> str:
         r = self.cfg.run
         return {"q4": f"{self.t_p6}/gguf/{r}-Q4_K_M.gguf", "q5": f"{self.t_p6}/gguf/{r}-Q5_K_M.gguf",
-                "bf16": f"{self.t_p6}/gguf/{r}-BF16.gguf",
+                "bf16": f"{self.t_p6}/gguf/{r}-{self.ref16}.gguf",
                 "recipe": f"{self.t_recipe}/gguf/{RECIPE_RUN}-Q4_K_M.gguf"}[model]
+
+    def t_bf16(self) -> str:
+        """The student's BF16 GGUF itself (whatever item c scores)."""
+        return f"{self.t_p6}/gguf/{self.cfg.run}-BF16.gguf"
 
     def cases_t(self, sname: str) -> str:
         if sname == "eval-tools-subset":
@@ -764,6 +881,41 @@ class Pipeline:
             if self.clock() >= end or self.term:
                 return False, used
             self.sleep(5)
+
+    def remote_sizes(self, paths: Sequence[str]) -> Dict[str, int]:
+        """Bytes at each 4090 path (a dir: its files; missing: 0), one ssh round trip."""
+        if not paths:
+            return {}
+        script = "for p in " + " ".join(q(p) for p in paths) + "; do printf '%s\\t' \"$p\"; " \
+                 "if [ -e \"$p\" ]; then du -sb \"$p\" | cut -f1; else echo 0; fi; done"
+        rc, out = self.ops.tower(script, timeout=120)
+        sizes: Dict[str, int] = {}
+        for line in out.splitlines():
+            k, _, v = line.partition("\t")
+            if k in paths and v.strip().isdigit():
+                sizes[k] = int(v.strip())
+        return sizes
+
+    def disk_gate(self, job: str, *, items: Sequence[Tuple[str, float, Optional[str]]] = (),
+                  need_gib: float = 0.0, detail: str = "") -> Tuple[bool, str]:
+        """The shared 4090 disk preflight for one step: (ok, summary). Too little: logged, Telegrammed."""
+        dp = disk_mod()
+        free = to_float(kv1(self.probe(force=True), "free_gb"))
+        sizes = self.remote_sizes([pth for _, _, pth in items if pth])
+        need, lines = dp.plan([dp.Item(lbl, gib, pth) for lbl, gib, pth in items], need_gib=need_gib,
+                              floor_gib=DISK_FLOOR_GIB, size_of=lambda pth: sizes.get(pth, 0))
+        if free is None:
+            self.log(f"  disk preflight {job}: the 4090's free space did not read; needs {need:.1f} GiB "
+                     f"({', '.join(lines)}); the guard keeps checking")
+            return True, "unknown"
+        v = dp.verdict(job, free, need, lines)
+        self.log(f"  {v.summary()} on the 4090 ({', '.join(lines)})")
+        self.state.setdefault("disk", {})[job] = {"free_gib": round(free, 1), "need_gib": round(need, 1),
+                                                  "ok": v.ok, "at": now_iso()}
+        self.save()
+        if not v.ok:
+            self.notify(f"disk-{job}", dp.refusal_text(v, host="4090", path="~", detail=detail))
+        return v.ok, v.summary()
 
     # -- steps ----------------------------------------------------------------------------------
     def step_wait_train(self) -> None:
@@ -960,6 +1112,8 @@ class Pipeline:
             if rc == 0:
                 break
             tail = self.tail(log_path, 3)
+            if rc == EXIT_DISK:
+                raise Stop(f"disk pressure: Phase 6's 4090 disk preflight refused ({tail[-300:]})")
             if rc in (75, 99):
                 pauses += 1
                 if pauses > 12:
@@ -1042,7 +1196,7 @@ class Pipeline:
         return [self.tp("llama.cpp/build/bin/llama-server"), "-m", self.gguf(model), "-c", str(ctx),
                 "-np", "1", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "--jinja", "-ngl", "99",
                 "-fit", "off", "-b", "2048", "-ub", "2048", "--host", LOOPBACK, "--port", str(self.cfg.port),
-                "--alias", self.cfg.labels[model]]
+                "--alias", self.labels[model]]
 
     def start_server(self, key: str, model: str, ctx: int) -> Tuple[str, str]:
         """('ok' | 'load-failed' | 'error', detail). One tenant: the GPU must be free first."""
@@ -1065,6 +1219,7 @@ class Pipeline:
                   + shlex.join(argv))
         self.record_unit(name, "server", key)
         it["server_unit"] = name
+        it["server_log"] = logf
         self.save()
         rc, out = self.ops.tower(script, mut=True)
         if not self.cfg.execute:
@@ -1101,7 +1256,7 @@ class Pipeline:
     def run_set(self, key: str, model: str, sname: str) -> str:
         """'done' | 'errors' | 'refused' | 'crash' | 'failed'. score.py resumes finished cases."""
         it = self.state["items"][key]
-        label = self.cfg.labels[model]
+        label = self.labels[model]
         rdir = f"{self.t_p7}/results/{label}"
         out = f"{rdir}/{sname}.jsonl"
         n = it.setdefault("score_runs", 0) + 1
@@ -1179,7 +1334,7 @@ class Pipeline:
                 if ctx in it.get("ctx_failed", []):
                     continue
                 res, detail = self.start_server(key, model, ctx)
-                self.log(f"  [{key}] server {self.cfg.labels[model]} -c {ctx}: {res}: {detail}")
+                self.log(f"  [{key}] server {self.labels[model]} -c {ctx}: {res}: {detail}")
                 if res == "ok":
                     started = ctx
                     break
@@ -1195,6 +1350,18 @@ class Pipeline:
                 if it["crashes"] > 1:
                     return self.skip_item(key, "the server would not start twice")
                 continue
+            if model == "bf16" and self.ref16 == "BF16" and not it.get("probe"):
+                res, detail = self.bf16_probe(key)
+                self.log(f"  [{key}] BF16 quick probe: {res}: {detail[:200]}")
+                if res == "cuda-error":
+                    return self.fall_back_to_f16(key, model, sets, detail)
+                if res == "crash":
+                    self.stop_unit(it.get("server_unit", ""), wait_vram=True)
+                    it["crashes"] = it.get("crashes", 0) + 1
+                    self.save()
+                    if it["crashes"] > 1:
+                        return self.skip_item(key, "the server crashed twice")
+                    continue
             crashed = False
             for sname in sets:
                 if (it["sets"].get(sname) or "") in ("done", "done-with-errors"):
@@ -1217,6 +1384,10 @@ class Pipeline:
                 if crashed or it["sets"].get(sname) in ("refused", "failed"):
                     break
             self.stop_unit(it.get("server_unit", ""), wait_vram=True)
+            if crashed and model == "bf16" and self.ref16 == "BF16":
+                err = self.server_cuda_error(key)
+                if err:
+                    return self.fall_back_to_f16(key, model, sets, err)
             if crashed:
                 it["crashes"] = it.get("crashes", 0) + 1
                 if len(ladder) > 1 and started != ladder[-1]:
@@ -1239,6 +1410,86 @@ class Pipeline:
         self.note(f"item {key} skipped: {why}")
         return "skipped"
 
+    # -- the full-precision reference: BF16, or F16 after the BF16 CUDA error ---------------------
+    def server_cuda_error(self, key: str) -> str:
+        """The CUDA/cuBLAS error line in this item's server log, or ''."""
+        logf = self.state["items"][key].get("server_log")
+        if not logf:
+            return ""
+        rc, out = self.ops.tower(f"tail -n 60 {q(logf)} 2>/dev/null")
+        hits = [ln.strip() for ln in out.splitlines() if CUDA_ERR_RE.search(ln)]
+        # the descriptive line ("CUDA error: <what>") first, then where it happened
+        hits.sort(key=lambda ln: 0 if "error:" in ln.lower() else 1)
+        return " | ".join(hits[:2])[:300]
+
+    def bf16_probe(self, key: str) -> Tuple[str, str]:
+        """'ok' | 'http-error' | 'crash' | 'cuda-error', detail: a ~12K-token prompt, then two short ones."""
+        it = self.state["items"][key]
+        if not self.cfg.execute:
+            return "ok", "planned"
+        rc, out = self.ops.tower(f"python3 -c {q(_PROBE_PY)} {self.cfg.port}", timeout=1500)
+        line = (out.strip().splitlines() or [""])[-1]
+        srv_up = self.unit_state(f"{it.get('server_unit', '')}.service") in ACTIVE
+        it["probe"] = {"result": line[:200], "server_up": srv_up, "at": now_iso()}
+        self.save()
+        if srv_up:
+            return ("ok" if line.startswith("probe=ok") else "http-error"), line
+        err = self.server_cuda_error(key)
+        return ("cuda-error", err) if err else ("crash", line or f"exit {rc}")
+
+    def fall_back_to_f16(self, key: str, model: str, sets: Sequence[str], why: str) -> str:
+        """BF16 died with the CUDA error: make the F16 GGUF from it, score item c on F16 from scratch."""
+        it = self.state["items"][key]
+        self.stop_unit(it.get("server_unit", ""), wait_vram=True)
+        self.note(f"BF16 server hit the CUDA error ({why[:160]}): F16 is the full-precision reference")
+        src, dst = self.t_bf16(), f"{self.t_p6}/gguf/{self.cfg.run}-F16.gguf"
+        size = self.remote_sizes([src]).get(src, 0) / 2**30 or 16.7
+        ok, msg = self.disk_gate("F16 reference GGUF", items=[("F16", round(size, 2), dst)],
+                                 detail="BF16 hit the CUDA error; F16 would be scored instead.")
+        if not ok:
+            return self.skip_item(key, f"BF16 hit the CUDA error and the F16 copy does not fit: {msg}")
+        if self.cfg.execute:
+            n = int(self.state.get("f16_runs", 0)) + 1
+            self.state["f16_runs"] = n
+            unit, rcf = f"{self.cfg.prefix}f16-{n}", f"{self.t_p7}/logs/f16-{n}.rc"
+            logf = f"{self.t_p7}/logs/{unit}.log"
+            tool = self.tp("distill/phase6-rehearsal/llama.cpp-9d57ce456-cuda/build/bin/llama-quantize")
+            part = dst[:-len(".gguf")] + ".partial.gguf"
+            inner = (f"rm -f {q(part)} && {q(tool)} {q(src)} {q(part)} F16 && mv -f {q(part)} {q(dst)}; "
+                     f"echo $? > {q(rcf)}")
+            self.record_unit(unit, "quantize", key)
+            self.ops.tower(f"mkdir -p -m 700 {q(self.t_p7 + '/logs')} && rm -f {q(rcf)} && systemd-run --user "
+                           f"--quiet --collect --unit={q(unit)} -p Nice=5 -p LimitCORE=0 "
+                           f"-p StandardOutput=append:{q(logf)} -p StandardError=append:{q(logf)} "
+                           f"--setenv=CUDA_VISIBLE_DEVICES= -- /bin/bash -c {q(inner)}", mut=True)
+            while self.unit_state(f"{unit}.service") in ACTIVE + ("unknown",):
+                try:
+                    self.guard()
+                except Stop:
+                    self.stop_unit(unit)
+                    raise
+                self.sleep(15)
+            rc, out = self.ops.tower(f"cat {q(rcf)} 2>/dev/null; test -s {q(dst)} && echo have-f16")
+            if "have-f16" not in out or not out.strip().startswith("0"):
+                return self.skip_item(key, f"BF16 hit the CUDA error and making F16 failed ({out.strip()[-120:]})")
+        self.state["ref16"] = {"quant": "F16", "why": why[:300], "at": now_iso(),
+                               "bf16_sets": dict(it.get("sets") or {})}
+        it.update(status="pending", sets={}, crashes=0, ctx_failed=[], probe=None)
+        it.pop("ctx", None)
+        self.save()
+        self.log(f"  [{key}] scoring F16 instead of BF16 (from scratch, label {self.labels[model]})")
+        return self.score_item(key, model, sets)
+
+    def drop_f16(self) -> None:
+        """After item c: the F16 copy goes (the recipe needs the disk; it can be made again)."""
+        ref = self.state.get("ref16") or {}
+        if ref.get("quant") != "F16" or ref.get("deleted"):
+            return
+        self.ops.tower(f"rm -f {q(self.t_p6 + '/gguf/' + self.cfg.run + '-F16.gguf')}", mut=True)
+        ref["deleted"] = now_iso()
+        self.save()
+        self.log("  the F16 copy was deleted from the 4090 (item c is over)")
+
     def step_item(self, key: str, model: str, sets: Sequence[str], optional: bool) -> None:
         cfg = self.cfg
         need = EST_MIN[key] * (1.2 if optional else 0.0) + 15
@@ -1255,7 +1506,7 @@ class Pipeline:
         if not cfg.execute:
             self.state["items"].setdefault(key, {"status": "pending", "sets": {}, "crashes": 0})
             ladder = CTX_LADDER[model]
-            self.log(f"[score-{key}] {cfg.labels[model]}: {', '.join(sets)}; server -c "
+            self.log(f"[score-{key}] {self.labels[model]}: {', '.join(sets)}; server -c "
                      f"{'/'.join(map(str, ladder))} (first that loads)")
             self.start_server(key, model, ladder[0])
             for s in sets:
@@ -1265,7 +1516,13 @@ class Pipeline:
                      f".service; wait for VRAM <= {IDLE_VRAM_MAX_MIB} MiB")
             self.state["items"][key]["status"] = "pending"
             return
+        ok, msg = self.disk_gate(f"scoring {key}", need_gib=SCORE_DISK_GIB,
+                                 detail=f"Scoring item {key} ({self.labels[model]}) did not start.")
+        if not ok:
+            raise Stop(f"disk pressure: {msg} (scoring item {key})")
         status = self.score_item(key, model, sets)
+        if model == "bf16":
+            self.drop_f16()
         self.mark(f"score-{key}", status if status != "skipped" else "skipped",
                   json.dumps(self.state["items"][key].get("sets")))
 
@@ -1283,7 +1540,8 @@ class Pipeline:
         man_here = self.cfg.hd / "phase6" / cfg.run / "quantize-manifest.json"
         want = bf16_sha(read_json_text(man_here.read_text(encoding="utf-8")) if man_here.is_file() else None)
         # 1. the student's BF16 GGUF moves here (kept), freeing the 4090's disk
-        rc, _ = self.ops.tower(f"test -e {q(self.gguf('bf16'))}")
+        self.drop_f16()
+        rc, _ = self.ops.tower(f"test -e {q(self.t_bf16())}")
         if rc == 0 or not cfg.execute:
             self.guard(force=True)
             rb.parent.mkdir(parents=True, exist_ok=True)
@@ -1295,18 +1553,31 @@ class Pipeline:
                     self.mark("recipe", "skipped", f"moving the BF16 GGUF failed or its sha256 differs "
                                                    f"(rc {rc}, {have[:12]} vs {str(want)[:12]})")
                     return
-            self.ops.tower(f"rm -f {q(self.gguf('bf16'))}", mut=True)
+            self.ops.tower(f"rm -f {q(self.t_bf16())}", mut=True)
             self.state["bf16_kept_here"] = True
             self.save()
-        # 2. room for it: the official bf16 (~19 GB) + its BF16 GGUF (~18 GB) + Q4_K_M (~6 GB)
-        kv = self.probe(force=True)
-        free = to_float(kv1(kv, "free_gb"))
-        if cfg.execute and (free is None or free < 45 + DISK_FLOOR_GIB):
-            self.mark("recipe", "skipped", f"the 4090 host has {free} GiB free (needs {45 + DISK_FLOOR_GIB:g})")
-            return
-        # 3. the official bf16 there, sha256-checked
+        # 2. room for it (the shared disk preflight): the official bf16, its BF16 GGUF, the imatrix's Q8_0
+        #    copy (unless the imatrix is made), the Q4_K_M; what is already there counts only for its rest
         official = self.cfg.hd / "models" / "qwen3.5-9b-official"
         tr = self.t_recipe
+        try:
+            off_gib = sum(f.stat().st_size for f in official.iterdir() if f.is_file()) / 2**30
+        except OSError:
+            off_gib = 18.0
+        gg = 16.7  # the student's BF16 GGUF (the same text-only layout)
+        items: List[Tuple[str, float, Optional[str]]] = [
+            ("official bf16", round(off_gib, 2), f"{tr}/base"),
+            ("BF16 GGUF", gg, f"{tr}/gguf/{RECIPE_RUN}-BF16.gguf")]
+        rc_im, _ = self.ops.tower(f"test -e {q(tr + '/gguf/' + RECIPE_RUN + '.imatrix.gguf')}")
+        if rc_im != 0:
+            items.append(("imatrix Q8_0 copy", round(gg * 0.54, 2), f"{tr}/gguf/{RECIPE_RUN}.imatrix-src-Q8_0.gguf"))
+        items.append(("Q4_K_M", round(gg * 0.31, 2), f"{tr}/gguf/{RECIPE_RUN}-Q4_K_M.gguf"))
+        ok, msg = self.disk_gate("same-recipe base", items=items, need_gib=1.0,
+                                 detail="The same-recipe base 9B (item e) did not start; the scores so far stand.")
+        if cfg.execute and not ok:
+            self.mark("recipe", "skipped", f"disk: {msg}")
+            return
+        # 3. the official bf16 there, sha256-checked
         self.ops.tower(f"mkdir -p -m 700 {q(tr + '/base')} {q(tr + '/nodata')} {q(tr + '/logs')}", mut=True)
         rc, out = self.ops.rsync([str(official) + "/"], self.ops.remote(f"distill/phase6/{RECIPE_RUN}/base/"))
         sums = cfg.p7 / "logs" / "official.sha256"
@@ -1367,11 +1638,97 @@ class Pipeline:
         self.mark("recipe", "done" if cfg.execute else "planned", "same-recipe base Q4_K_M ready")
 
     # -- release + report -------------------------------------------------------------------------
-    def release(self, why: str) -> None:
+    def chain_phase(self) -> Tuple[str, str]:
+        """(the round-2 chain's phase from its state file, its unit's state here)."""
+        cfg = self.cfg
+        phase = ""
+        if cfg.handoff_state is not None and cfg.handoff_state.is_file():
+            st = read_json_text(cfg.handoff_state.read_text(encoding="utf-8"))
+            phase = str((st or {}).get("phase") or "") if isinstance(st, dict) else ""
+        ustate = "unknown"
+        if cfg.handoff_unit:
+            rc, out = self.ops.here(["systemctl", "--user", "is-active", cfg.handoff_unit], timeout=30)
+            ustate = (out.strip().splitlines() or ["unknown"])[-1].strip() or "unknown"
+        return phase, ustate
+
+    def handoff_ready(self) -> Tuple[bool, str]:
+        cfg = self.cfg
+        if not (cfg.handoff_unit and cfg.handoff_state is not None and cfg.handoff_until):
+            return False, "no hand-off configured"
+        if self.term:
+            return False, "stopped by hand"
+        if self.clock() >= cfg.handoff_until - 900:
+            return False, f"the chain's latest start {et(cfg.handoff_until)} is less than 15 min away"
+        phase, ustate = self.chain_phase()
+        if ustate not in ACTIVE:
+            return False, f"the chain unit {cfg.handoff_unit} is {ustate}"
+        if phase not in HANDOFF_WAITING:
+            return False, f"the chain is in phase {phase or 'unknown'}, not waiting for this pipeline"
+        biz = kv1(self.probe(force=True), "biz")
+        if biz in ACTIVE:
+            return False, f"{cfg.biz_unit} is {biz}"
+        return True, f"the chain {cfg.handoff_unit} is {ustate} in phase {phase}"
+
+    def release(self, why: str, completed: bool = False) -> None:
         if self.cfg.execute and (self.state.get("released") or not self.state.get("gpu_taken")):
             return
         self.log(f"[release] {why}")
         self.stop_own_units()
+        if completed and self.cfg.execute:
+            ok, reason = self.handoff_ready()
+            self.log(f"  hand-off to the round-2 chain: {'yes' if ok else 'no'} ({reason})")
+            if ok:
+                self.state["released"] = True
+                self.state["handoff"] = {"to": self.cfg.handoff_unit, "at": now_iso(), "status": "pending",
+                                         "why": reason}
+                self.state["restore"] = {"ok": True, "unit": None,
+                                         "train_end": f"handed off to the round-2 chain ({reason}); business stays down"}
+                self.mark("release", "handed-off", f"business stays down for {self.cfg.handoff_unit} (no flap); "
+                          f"restored here if it has not taken the 4090 within {self.cfg.handoff_wait_s / 60:.0f} min")
+                return
+        self._restore(why)
+
+    def watch_handoff(self) -> None:
+        """After a hand-off: wait for the chain's 4090 teacher; restore business here if it never comes."""
+        h = self.state.get("handoff") or {}
+        if h.get("status") != "pending" or not self.cfg.execute:
+            return
+        t0 = self.clock()
+        while True:
+            phase, ustate = self.chain_phase()
+            if phase in HANDOFF_TAKEN:
+                h.update(status="taken", taken_at=now_iso(), phase=phase)
+                self.save()
+                self.log(f"hand-off done: the round-2 chain is in phase {phase} (its 4090 teacher is up)")
+                return
+            why = ""
+            if phase not in HANDOFF_WAITING + ("tower-start",):
+                why = f"the chain ended in phase {phase or 'unknown'}"
+            elif ustate not in ACTIVE and ustate != "unknown":
+                why = f"the chain unit is {ustate}"
+            elif self.clock() - t0 >= self.cfg.handoff_wait_s:
+                why = f"no 4090 teacher after {self.cfg.handoff_wait_s / 60:.0f} min (phase {phase})"
+            if why:
+                h.update(status="restored", why_restored=why)
+                self.state["released"] = False
+                self.save()
+                biz = kv1(self.probe(force=True), "biz")
+                if biz in ACTIVE:
+                    self.log(f"hand-off: {why}, but {self.cfg.biz_unit} is already {biz}: nothing to restore")
+                    self.state["released"] = True
+                    self.save()
+                    return
+                self.log(f"hand-off failed ({why}): restoring business here")
+                self._restore(f"hand-off failed: {why}")
+                self.notify("handoff-failed", "\n".join([
+                    f"Post-training: the round-2 chain did not take the 4090 ({why[:150]}).",
+                    f"{self.biz_name} was restored by the pipeline: "
+                    + ("OK." if (self.state.get("restore") or {}).get("ok") else "the restore did NOT report OK; "
+                       "the window end (Mon 05:40 EST) and the dead-man (06:00 EST) retry it.")]))
+                return
+            self.sleep(30)
+
+    def _restore(self, why: str) -> None:
         msg, rcf = f"{self.t_p7}/restore.msg", f"{self.t_p7}/restore.rc"
         line = f"Post-training pipeline {why[:200]}; " + (
             "stopped by hand: arm it again to resume." if self.term else "results Telegram follows.")
@@ -1425,7 +1782,7 @@ class Pipeline:
             return
         sal = cfg.here_home / SALUKI_SUMMARY_REL
         summaries: Dict[str, Dict[str, Any]] = {}
-        for model, label in cfg.labels.items():
+        for model, label in self.labels.items():
             d = res_here / label
             sets = [p.stem for p in sorted(d.glob("*.jsonl"))] if d.is_dir() else []
             if not sets:
@@ -1453,7 +1810,7 @@ class Pipeline:
         gdir = cfg.p7 / "gates"
         gdir.mkdir(parents=True, exist_ok=True)
         base_files = {"base-9b": summ / "base-9b.summary.json",
-                      "recipe": summ / f"{cfg.labels['recipe']}.summary.json"}
+                      "recipe": summ / f"{self.labels['recipe']}.summary.json"}
         for cand in ("q4", "q5"):
             if cand not in summaries:
                 continue
@@ -1462,14 +1819,14 @@ class Pipeline:
                     continue
                 also = [str(sal)] if sal.is_file() else []
                 for other in ("q5", "q4", "recipe"):
-                    f = summ / f"{cfg.labels[other]}.summary.json"
+                    f = summ / f"{self.labels[other]}.summary.json"
                     if other != cand and other in summaries and f != bfile:
                         also.append(str(f))
                 if bname == "recipe" and base_files["base-9b"].is_file():
                     also.append(str(base_files["base-9b"]))
                 name = f"{cand}-vs-{bname}"
                 argv = [cfg.here_py, str(cfg.code / "scripts" / "distill" / "score.py"), "compare",
-                        "--base", str(bfile), "--candidate", str(summ / f"{cfg.labels[cand]}.summary.json"),
+                        "--base", str(bfile), "--candidate", str(summ / f"{self.labels[cand]}.summary.json"),
                         "--markdown-out", str(gdir / f"{name}.md"), "--json-out", str(gdir / f"{name}.json")]
                 for a_ in also:
                     argv += ["--also", a_]
@@ -1481,7 +1838,7 @@ class Pipeline:
                                if (gdir / f"{name}.md").is_file() else out[-500:]}
         sub = read_json_text((cfg.p7 / "subset" / f"eval-tools-subset{cfg.subset_n}.ids.json").read_text(encoding="utf-8")) \
             if (cfg.p7 / "subset" / f"eval-tools-subset{cfg.subset_n}.ids.json").is_file() else None
-        data = {"run": cfg.run, "labels": cfg.labels, "summaries": summaries, "base9b": base9b, "saluki": saluki,
+        data = {"run": cfg.run, "labels": self.labels, "summaries": summaries, "base9b": base9b, "saluki": saluki,
                 "subset": sub, "state": self.state, "gates": gates, "generated": now_iso(),
                 "server_flags": " ".join(self.server_argv("q4", CTX_FULL)[3:]).replace(self.gguf("q4"), "<gguf>")}
         text = scrub(render_report(data))
@@ -1592,7 +1949,7 @@ class Pipeline:
             if "disk pressure" in str(exc) or "NO-SWAPS" in str(exc):
                 self.notify("stop", f"Post-training pipeline stopped: {str(exc)[:200]}.\n"
                                     f"{self.biz_name} is being restored; partial results are kept.")
-        self.release(why)
+        self.release(why, completed=outcome.startswith("completed"))
         try:
             if any(self.state["items"].get(k, {}).get("sets") for k, *_ in ITEMS) or not cfg.execute:
                 self.step_report()
@@ -1605,6 +1962,7 @@ class Pipeline:
                 f"Post-training pipeline ended: {outcome[:200]}.",
                 f"Scored items: {', '.join(done) or 'none'}; state on the 3090 Ti host (phase7/{cfg.run})."]))
         self.finish(outcome if not self.term else f"interrupted: {outcome}")
+        self.watch_handoff()
         return 0
 
 
@@ -1684,6 +2042,7 @@ def headline_lines(data: Dict[str, Any]) -> List[str]:
                                   {"eval-tools": pts(q5, "eval-tools", "task_success"), "sanity": pts(q5, "sanity", "sanity_score")})
     sub = {k: _sub(s.get(k), "eval-tools", ids) for k in ("q4", "q5")}
     sub["bf16"] = _sub(s.get("bf16"), "eval-tools", ids)
+    refq = (((data.get("state") or {}).get("ref16") or {}).get("quant")) or "BF16"
     gates = data.get("gates") or {}
     lines = [
         f"Phase 7 scores ({data.get('run')}): eval-tools task success Q4 {_fmt(pts(q4, 'eval-tools', 'task_success'))}, "
@@ -1691,7 +2050,7 @@ def headline_lines(data: Dict[str, Any]) -> List[str]:
         f"same-recipe base {_fmt(pts(rc, 'eval-tools', 'task_success'))}.",
         f"Sanity Q4 {_fmt(pts(q4, 'sanity', 'sanity_score'))}, Q5 {_fmt(pts(q5, 'sanity', 'sanity_score'))} "
         f"(base-9b {_fmt(pts(b9, 'sanity', 'sanity_score'))}). {len(ids)}-case subset: Q4 {_subtxt(sub['q4'])}, "
-        f"Q5 {_subtxt(sub['q5'])}, BF16 {_subtxt(sub['bf16'])}.",
+        f"Q5 {_subtxt(sub['q5'])}, {refq} {_subtxt(sub['bf16'])}.",
         fline[:240],
         f"Gate Q4 vs base-9b: {(gates.get('q4-vs-base-9b') or {}).get('verdict') or 'n/a'}; vs same-recipe base: "
         f"{(gates.get('q4-vs-recipe') or {}).get('verdict') or 'n/a'}. Long-ctx Q4 {_fmt(pts(q4, 'eval-longctx', 'recall'))} "
@@ -1714,6 +2073,8 @@ def render_report(data: Dict[str, Any]) -> str:
         {"eval-tools": pts(q5, "eval-tools", "task_success"), "sanity": pts(q5, "sanity", "sanity_score")})
     items = st.get("items") or {}
     tr = st.get("training") or {}
+    ref16 = st.get("ref16") or {}
+    refq = ref16.get("quant") or "BF16"
     L: List[str] = []
     L += [f"# Phase 7: scores of the first full 9B student ({data.get('run')})", "",
           f"**Generated:** {data.get('generated')} by `scripts/distill/post_train.py` (unattended). "
@@ -1721,10 +2082,14 @@ def render_report(data: Dict[str, Any]) -> str:
     if tr:
         L += [f"**Training:** {tr.get('why')}.", ""]
     L += [f"**{fline}**", ""]
-    L += ["## Side by side: Q4_K_M, Q5_K_M, BF16", "",
-          "Q4 and Q5 ran the full sets; BF16 ran only the fixed 100-case eval-tools subset (reference). "
-          "The subset columns for Q4, Q5 and the bases come from their full runs, on exactly the same ids.", "",
-          "| Measure | Q4_K_M | Q5_K_M | BF16 | base-9b (Unsloth Q4_K_M) | base-9b, same recipe (Q4_K_M) |",
+    L += [f"## Side by side: Q4_K_M, Q5_K_M, {refq}", "",
+          f"Q4 and Q5 ran the full sets; {refq} ran only the fixed 100-case eval-tools subset (reference). "
+          "The subset columns for Q4, Q5 and the bases come from their full runs, on exactly the same ids.", ""]
+    if refq == "F16":
+        L += [f"**Full-precision reference is F16, not BF16:** the BF16 server hit the CUDA error "
+              f"({str(ref16.get('why'))[:200]}), so the BF16 GGUF was converted to F16 (llama-quantize) and the "
+              "item was scored on it from scratch. Both hold the same weights up to F16 rounding.", ""]
+    L += [f"| Measure | Q4_K_M | Q5_K_M | {refq} | base-9b (Unsloth Q4_K_M) | base-9b, same recipe (Q4_K_M) |",
           "|---|---|---|---|---|---|"]
     L.append("| eval-tools task success, full set | " + " | ".join([
         _kn(q4, "eval-tools", "task_success"), _kn(q5, "eval-tools", "task_success"), "not run (subset only)",
@@ -1744,10 +2109,10 @@ def render_report(data: Dict[str, Any]) -> str:
         if q4 and q5 else None
     r4, rb = _sub(q4, "eval-tools", ids), _sub(bf, "eval-tools", ids)
     L += ["", f"- Q5_K_M − Q4_K_M, eval-tools: {'n/a' if d_tools is None else f'{d_tools:+.1f} pts'}; "
-              f"BF16 − Q4_K_M on the subset: "
+              f"{refq} − Q4_K_M on the subset: "
               + ("n/a" if r4.get("rate") is None or rb.get("rate") is None
                  else f"{100 * (rb['rate'] - r4['rate']):+.1f} pts") + ".",
-          f"- BF16 server context: {items.get('c', {}).get('ctx') or 'n/a'} (the largest of "
+          f"- {refq} server context: {items.get('c', {}).get('ctx') or 'n/a'} (the largest of "
           f"{'/'.join(map(str, BF16_CTX_LADDER))} that loaded on 24 GB; failed: {items.get('c', {}).get('ctx_failed') or 'none'}). "
           f"Q5_K_M at {items.get('b', {}).get('ctx') or 'n/a'}; Q4_K_M and the bases at 262144.", ""]
     gates = data.get("gates") or {}
@@ -2049,6 +2414,11 @@ def add_run_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--dry-adapter", default="", help="dry run: phase6 plan mode on this adapter instead "
                                                      "(e.g. distill/phase5/runs/9b-smoke-v4-max-derived/adapter-max-derived)")
     p.add_argument("--skip-recipe", action="store_true", help="no same-recipe base (item e)")
+    p.add_argument("--handoff-unit", default="", help="the round-2 chain's unit on this host (no-flap hand-off)")
+    p.add_argument("--handoff-state", default="", help="the chain's state file (its 'phase')")
+    p.add_argument("--handoff-until", default="", help="the chain's latest start (ISO with offset)")
+    p.add_argument("--handoff-wait-min", type=float, default=HANDOFF_WAIT_MIN,
+                   help="minutes to wait for the chain's 4090 teacher before restoring here")
     p.add_argument("--fake-root", default="", help="run against a fake 4090 tree on this host (fake-setup)")
     p.add_argument("--execute", action="store_true")
 
@@ -2091,7 +2461,9 @@ def cmd_arm(a: argparse.Namespace) -> int:
     log = p7 / "unit.log"
     fwd: List[str] = []
     for k, v in sorted(vars(a).items()):
-        if k in ("cmd", "execute", "func") or v in (None, "", False):
+        if k in ("cmd", "execute", "func", "rerun") or v in (None, "", False):
+            continue
+        if k == "handoff_wait_min" and v == HANDOFF_WAIT_MIN:
             continue
         flag = "--" + k.replace("_", "-")
         fwd += [flag] if v is True else [flag, str(v)]
@@ -2102,6 +2474,9 @@ def cmd_arm(a: argparse.Namespace) -> int:
             "--setenv=TZ=America/New_York", "--setenv=PYTHONUNBUFFERED=1", "--expand-environment=no",
             "/usr/bin/python3", "-I", str(me), "run", *fwd, "--execute"]
     print(shlex.join(argv))
+    if getattr(a, "rerun", False):
+        did = reset_for_rerun(p7, bool(a.execute))
+        print(("rerun: " if a.execute else "rerun (dry run, nothing changed): ") + ("; ".join(did) or "nothing to reset"))
     if not a.execute:
         print("dry run: nothing started (--execute starts it)")
         return 0
@@ -2152,6 +2527,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     add_run_args(r)
     ar = sub.add_parser("arm")
     add_run_args(ar)
+    ar.add_argument("--rerun", action="store_true",
+                    help="a rerun after a failed pipeline: keep the old marker aside, reset the failure counters")
     s = sub.add_parser("status")
     s.add_argument("--run", default=RUN_DEFAULT)
     s.add_argument("--state-dir", default="")

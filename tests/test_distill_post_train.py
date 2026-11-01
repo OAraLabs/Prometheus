@@ -311,6 +311,9 @@ class FakeTower:
         self.server_deaths = 0  # how many scoring servers die right after their first set starts
         self.rc_files: Dict[str, str] = {}
         self.ctx: Dict[str, int] = {}
+        self.probe = "ok"  # the BF16 quick probe: ok | cuda (the server dies with the cuBLAS error)
+        self.log_tail = ""
+        self.free_gb = 60.0
 
     def __call__(self, script: str) -> Tuple[int, str]:
         self.cmds.append(script)
@@ -320,6 +323,9 @@ class FakeTower:
         if m:
             u = m.group(1).strip("'")
             st = self.units.get(u, "inactive")
+            if u.startswith("distill-p7-f16-") and st == "active":
+                self.units[u] = "inactive"  # the F16 conversion finishes on its first poll
+                return 0, "active"
             if u.startswith("distill-p7-score-") and st == "active":
                 # a scoring unit finishes on its first poll, unless its server is to die
                 srv = next((k for k, v in self.units.items() if k.startswith("distill-p7-srv-") and v == "active"), None)
@@ -334,7 +340,7 @@ class FakeTower:
             used = 0 if self.units.get("llama-server.service") != "active" else 20000
             if any(v == "active" for k, v in self.units.items() if k.startswith("distill-p7-srv-")):
                 used = 9000
-            return 0, f"biz={self.units.get('llama-server.service', 'inactive')}\nfree_gb=60.0\nvram={used}\n"
+            return 0, f"biz={self.units.get('llama-server.service', 'inactive')}\nfree_gb={self.free_gb}\nvram={used}\n"
         if script.startswith("cat ") and "manifest.json" in script and "phase5" in script:
             return 0, json.dumps(self.manifest)
         if script.startswith("cat ") and "run_state.json" in script:
@@ -357,6 +363,19 @@ class FakeTower:
         if m:
             self.units[m.group(1).strip("'")] = "inactive"
             return 0, ""
+        if script.startswith("python3 -c") and "probe=" in script:
+            if self.probe == "cuda":
+                srv = next((k for k, v in self.units.items() if k.startswith("distill-p7-srv-") and v == "active"), "")
+                self.units[srv] = "failed"
+                self.log_tail = ("ggml-cuda.cu:106: CUDA error\nCUDA error: an unsupported value or parameter was "
+                                 "passed to the function\n  in function ggml_cuda_mul_mat_cublas_impl")
+                self.probe = "ok"  # once
+                return 0, "probe=error RemoteDisconnected: closed"
+            return 0, "probe=ok prompt_tokens=16800 seconds=9"
+        if script.startswith("tail -n 60"):
+            return 0, self.log_tail
+        if "have-f16" in script:
+            return 0, "0\nhave-f16"
         if script.startswith("python3 -c"):
             srv = next((k for k, v in self.units.items() if k.startswith("distill-p7-srv-") and v == "active"), "")
             return 0, f"health=200\nn_ctx={self.ctx.get(srv[:-8], 0)}\nmodel=x\n"
@@ -693,3 +712,199 @@ def test_an_unreadable_manifest_is_read_again_before_deciding(tmp_path: Path) ->
     pipe.ops.t = flaky  # type: ignore[assignment]
     pipe.step_verdict()
     assert calls["n"] == 3 and pipe.state["steps"]["verdict"]["status"] == "done" and not sent
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-01 rerun: the cuBLAS bf16 abort, the disk preflight, the hand-off
+# ---------------------------------------------------------------------------
+
+
+def test_phase6_disk_refusal_is_a_disk_stop_not_a_retry(tmp_path: Path) -> None:
+    pipe, tower, _, _ = make(tmp_path, done_manifest(), SUN_10)
+    pipe.state["gpu_taken"] = True
+    tower.units["llama-server.service"] = "inactive"
+    seen: List[Any] = []
+
+    def refused(argv: Any, log_path: Path, env: Any, on_stop: Any) -> int:
+        seen.append(argv)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("phase6: the 4090 disk preflight refused: disk REFUSED: Phase 6 x needs 60.0 GiB\n")
+        return PT.EXIT_DISK
+
+    pipe.run_child = refused  # type: ignore[method-assign]
+    with pytest.raises(PT.Stop, match="disk pressure: Phase 6's 4090 disk preflight refused"):
+        pipe.step_phase6()
+    assert len(seen) == 1 and not pipe.state.get("phase6_failures")
+
+
+def test_bf16_probe_cuda_error_scores_f16_from_scratch_then_drops_it(tmp_path: Path) -> None:
+    pipe, tower, _, sent = make(tmp_path, done_manifest(), SUN_10)
+    pipe.state["gpu_taken"] = True
+    tower.units["llama-server.service"] = "inactive"
+    tower.probe = "cuda"
+    pipe.step_item("c", "bf16", ("eval-tools-subset",), False)
+    it = pipe.state["items"]["c"]
+    assert it["status"] == "done" and it["crashes"] == 0
+    ref = pipe.state["ref16"]
+    assert ref["quant"] == "F16" and "unsupported value" in ref["why"]
+    conv = next(c for c in tower.cmds if "systemd-run" in c and "--unit=distill-p7-f16-1" in c)
+    assert "-BF16.gguf" in conv and "-F16.partial.gguf" in conv and " F16 " in conv
+    assert "CUDA_VISIBLE_DEVICES=" in conv and "phase6-rehearsal/llama.cpp-9d57ce456-cuda" in conv
+    # the item ran on the F16 GGUF under the F16 label; the BF16 server was stopped first
+    srv = [c for c in tower.cmds if "systemd-run" in c and "-srv-c-" in c]
+    assert "-BF16.gguf" in srv[0] and "-F16.gguf" in srv[-1] and "--alias 9b-run-max-derived-F16" in srv[-1]
+    score = [c for c in tower.cmds if "systemd-run" in c and "-score-c-" in c]
+    assert len(score) == 1 and "results/9b-run-max-derived-F16" in score[0]
+    assert pipe.labels["bf16"] == "9b-run-max-derived-F16"
+    # then the F16 copy goes (the recipe needs the disk); the BF16 GGUF stays
+    assert any(c.startswith("rm -f") and c.rstrip("'").endswith("-F16.gguf") for c in tower.cmds)
+    assert ref.get("deleted")
+    assert not any(c.startswith("rm -f") and "-BF16.gguf" in c for c in tower.cmds)
+    assert any("full-precision reference" in n for n in pipe.state["notes"])
+
+
+def test_bf16_crash_with_the_cuda_error_during_the_item_switches_to_f16(tmp_path: Path) -> None:
+    pipe, tower, _, _ = make(tmp_path, done_manifest(), SUN_10)
+    pipe.state["gpu_taken"] = True
+    tower.units["llama-server.service"] = "inactive"
+    tower.server_deaths = 1
+    tower.log_tail = "CUDA error: an unsupported value or parameter was passed to the function"
+    assert pipe.score_item("c", "bf16", ("eval-tools-subset",)) == "done"
+    assert pipe.ref16 == "F16" and pipe.state["items"]["c"]["crashes"] == 0
+
+
+def test_bf16_crash_without_a_cuda_error_is_an_ordinary_crash(tmp_path: Path) -> None:
+    pipe, tower, _, _ = make(tmp_path, done_manifest(), SUN_10)
+    pipe.state["gpu_taken"] = True
+    tower.units["llama-server.service"] = "inactive"
+    tower.server_deaths = 1
+    tower.log_tail = "srv  load_model: something else"
+    assert pipe.score_item("c", "bf16", ("eval-tools-subset",)) == "done"
+    assert pipe.ref16 == "BF16" and pipe.state["items"]["c"]["crashes"] == 1
+
+
+def test_a_scoring_item_without_disk_room_stops_with_a_telegram(tmp_path: Path) -> None:
+    pipe, tower, _, sent = make(tmp_path, done_manifest(), SUN_10)
+    pipe.state["gpu_taken"] = True
+    tower.units["llama-server.service"] = "inactive"
+    tower.free_gb = 10.5  # above the guard's floor, below floor + the item's own 1 GiB
+    with pytest.raises(PT.Stop, match="disk pressure"):
+        pipe.step_item("a", "q4", ("eval-tools", "sanity"), False)
+    assert not [c for c in tower.cmds if "systemd-run" in c]
+    assert len(sent) == 1 and "NOT started" in sent[0] and "10.5 GiB free" in sent[0]
+    assert pipe.state["disk"]["scoring a"]["ok"] is False
+
+
+def test_the_recipe_disk_need_counts_only_what_is_not_there(tmp_path: Path) -> None:
+    pipe, tower, _, sent = make(tmp_path, done_manifest(), SUN_10)
+    pipe.state["gpu_taken"] = True
+    tower.free_gb = 40.0
+    orig = tower.__call__
+
+    def sizes(script: str) -> Tuple[int, str]:
+        if script.startswith("for p in "):
+            paths = re.findall(r"'([^']+)'|(\S+)", script.split(" in ", 1)[1].split("; do")[0])
+            ps = [a or b for a, b in paths]
+            # the official weights are already pushed (18 GiB)
+            return 0, "\n".join(f"{p}\t{18 * 2**30 if p.endswith('/base') else 0}" for p in ps)
+        return orig(script)
+
+    pipe.ops.t = sizes  # type: ignore[assignment]
+    ok, msg = pipe.disk_gate("same-recipe base", items=[("official bf16", 18.0, "/home/t/x/base"),
+                                                          ("BF16 GGUF", 16.7, "/home/t/x/b.gguf")], need_gib=1.0)
+    assert ok and "needs 27.7 GiB" in msg  # 0 + 16.7 + 1 fixed + 10 floor
+    tower.free_gb = 20.0
+    ok, msg = pipe.disk_gate("same-recipe base", items=[("BF16 GGUF", 16.7, "/home/t/x/b.gguf")], need_gib=1.0)
+    assert not ok and len(sent) == 1 and "same-recipe base NOT started" in sent[0]
+
+
+def _handoff(tmp_path: Path, phase: str, unit_state: str = "active") -> Tuple[Any, FakeTower, Clock, List[str]]:
+    chain = tmp_path / "sunday.json"
+    chain.write_text(json.dumps({"phase": phase}))
+    pipe, tower, clock, sent = make(tmp_path, done_manifest(), SUN_10, handoff_unit="r2-tower-chain-x.service",
+                                    handoff_state=str(chain), handoff_until="2026-11-02T04:00:00-05:00",
+                                    handoff_wait_min=45.0)
+    pipe.ops.here = lambda argv, **kw: (0, unit_state) if "is-active" in argv else (0, "")  # type: ignore
+    pipe.state["gpu_taken"] = True
+    tower.units["llama-server.service"] = "inactive"
+    return pipe, tower, clock, sent
+
+
+def test_a_completed_pipeline_hands_the_4090_to_the_waiting_chain_without_a_restore(tmp_path: Path) -> None:
+    pipe, tower, clock, sent = _handoff(tmp_path, "wait-pipeline")
+    pipe.release("finished", completed=True)
+    assert pipe.state["handoff"]["status"] == "pending" and pipe.state["released"]
+    assert not [c for c in tower.cmds if "flywheel-p7-restore-" in c]
+    assert pipe.state["steps"]["release"]["status"] == "handed-off"
+    # the chain takes the 4090 a few polls later
+    (tmp_path / "sunday.json").write_text(json.dumps({"phase": "ab"}))
+    pipe.watch_handoff()
+    assert pipe.state["handoff"]["status"] == "taken"
+    assert not [c for c in tower.cmds if "flywheel-p7-restore-" in c] and not sent
+
+
+def test_a_chain_that_gives_up_after_the_handoff_gets_business_restored_here(tmp_path: Path) -> None:
+    pipe, tower, clock, sent = _handoff(tmp_path, "wait-capacity")
+    pipe.release("finished", completed=True)
+    (tmp_path / "sunday.json").write_text(json.dumps({"phase": "skipped"}))
+    pipe.watch_handoff()
+    assert pipe.state["handoff"]["status"] == "restored"
+    assert len([c for c in tower.cmds if "systemd-run" in c and "flywheel-p7-restore-" in c]) == 1
+    assert any("did not take the 4090" in m for m in sent)
+
+
+def test_no_handoff_after_a_failure_or_when_the_chain_is_not_waiting(tmp_path: Path) -> None:
+    pipe, tower, _, _ = _handoff(tmp_path, "wait-pipeline")
+    pipe.release("stopped early (x)", completed=False)
+    assert "handoff" not in pipe.state
+    assert len([c for c in tower.cmds if "flywheel-p7-restore-" in c and "systemd-run" in c]) == 1
+    pipe2, tower2, _, _ = _handoff(tmp_path / "b", "skipped") if (tmp_path / "b").mkdir() is None else (None,) * 4
+    pipe2.release("finished", completed=True)
+    assert "handoff" not in pipe2.state
+    pipe3, tower3, _, _ = _handoff(tmp_path / "c", "wait-pipeline", unit_state="inactive") \
+        if (tmp_path / "c").mkdir() is None else (None,) * 4
+    pipe3.release("finished", completed=True)
+    assert "handoff" not in pipe3.state
+
+
+def test_a_handoff_that_waits_too_long_restores(tmp_path: Path) -> None:
+    pipe, tower, clock, sent = _handoff(tmp_path, "wait-pipeline")
+    pipe.release("finished", completed=True)
+    (tmp_path / "sunday.json").write_text(json.dumps({"phase": "tower-start"}))
+    t0 = clock.t
+    pipe.watch_handoff()
+    assert clock.t - t0 >= 45 * 60 and pipe.state["handoff"]["status"] == "restored"
+    assert "no 4090 teacher after 45 min" in pipe.state["handoff"]["why_restored"]
+
+
+def test_rerun_reset_keeps_the_old_marker_and_clears_the_failure_counters(tmp_path: Path) -> None:
+    p7 = tmp_path / "p7"
+    p7.mkdir()
+    (p7 / "PIPELINE-DONE.json").write_text('{"outcome": "stopped: Phase 6 failed 3 times"}')
+    st = {"schema": PT.STATE_SCHEMA, "phase6_failures": 3, "released": True, "gpu_taken": True,
+          "outcome": "stopped", "steps": {"verdict": {"status": "done"}, "abort": {"status": "stopped"},
+                                          "release": {"status": "done"}},
+          "telegrams": {"down": "t", "phase6-failed": "t", "end": "t"}, "items": {}, "notes": []}
+    (p7 / "state.json").write_text(json.dumps(st))
+    did = PT.reset_for_rerun(p7, execute=True, stamp="S")
+    assert (p7 / "PIPELINE-DONE.S.json").is_file() and not (p7 / "PIPELINE-DONE.json").exists()
+    assert (p7 / "state.S.json").is_file()
+    new = json.loads((p7 / "state.json").read_text())
+    assert "phase6_failures" not in new and "outcome" not in new and "abort" not in new["steps"]
+    assert new["telegrams"] == {"down": "t"} and new["steps"]["verdict"]["status"] == "done"
+    assert "phase6 failures reset" in did
+    # resume_after_release (at the run's start) then takes the GPU again
+    pipe, tower, _, _ = make(tmp_path, done_manifest(), SUN_10)
+    pipe.resume_after_release()
+    assert "release" not in pipe.state["steps"] and not pipe.state.get("released")
+
+
+def test_arm_rerun_dry_run_changes_nothing(tmp_path: Path, capsys: Any) -> None:
+    (tmp_path / "PIPELINE-DONE.json").write_text("{}")
+    rc = PT.main(["arm", "--tower", "u@t", "--state-dir", str(tmp_path), "--rerun",
+                  "--handoff-unit", "r2-x.service", "--handoff-state", str(tmp_path / "s.json"),
+                  "--handoff-until", "2026-11-02T04:00:00-05:00"])
+    out = capsys.readouterr().out
+    assert rc == 0 and (tmp_path / "PIPELINE-DONE.json").exists()
+    assert "rerun (dry run" in out and "--rerun" not in out.splitlines()[0]
+    assert "--handoff-unit r2-x.service" in out.splitlines()[0]
