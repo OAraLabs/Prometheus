@@ -149,3 +149,16 @@ Append-only, times in ET.
 - 2026-10-31 23:14 — Full run at step 255/1,120: loss ~0.87 (from 1.17), grad norm ~0.56, 2,540 tok/s, checkpoints 166 and 200 kept (retention working).
 - 2026-11-01 00:13 — Full run at step 332/1,120. Loss means over 25-step windows: 0.874 for 258–282, 0.992 for 308–332 (per-batch variance; the epoch-1 val comes at step 560); grad norm 0.53; checkpoints 200 and 282. The mini A/B timer is due at 01:00 EDT.
 - 2026-11-01 00:32 — Operator: after the run, score Q4_K_M and Q5_K_M on eval-tools + sanity and BF16 on a 100-case eval-tools subset, side by side; flag 4-bit as the bottleneck if Q5 − Q4 > 3 pts. An agent is building an automatic post-training pipeline (phase6 keeping BF16 → scoring) to start when the run ends.
+- 2026-11-01 01:12 EDT — Full run at step 406/1,120: loss ~0.92, grad norm 0.57, checkpoints 367 and 400. The mini A/B arm A (IQ3, 30 tasks from real-v3-excl) started 01:00 EDT; local generation is paused for it as designed. The post-train pipeline unit is armed and waiting on the mini (flywheel-post-train-20261101T010832); its builder agent is still finishing.
+- 2026-11-01 01:20 EDT — **Post-train pipeline armed** (2409733, bc34dcf): unit flywheel-post-train-20261101T011919 on the 3090 Ti host, state in ~/distill/phase7/9b-r32-v4b-max-derived/.
+  - **Gate:** it waits for the trainer, checks the manifest (done, both epochs, val and probe down), then takes the GPU with a Telegram.
+  - **Steps:**
+    1. Phase 6 with --keep-bf16.
+    2. Q4 eval-tools + sanity.
+    3. Q5 eval-tools + sanity.
+    4. BF16 on the fixed 100-case eval-tools subset (DISTILL-PHASE7-SUBSET.json: coding 79 / daemon 10 / other 10 / memory 1; base-9b scores 77/100 on it).
+    5. Q4 injection + long-context.
+    6. The same-recipe base.
+    7. Restore business, Telegram, report (flags 4-bit as the bottleneck if Q5 − Q4 > 3).
+  - **Expected:** ~5 h after training, done ~15:30 EST Sun. Scoring stops Mon 05:00 EST.
+  - **Tests:** 44 unit tests, a dry run on the real hosts, and a full run against a fake 4090.
