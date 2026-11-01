@@ -7303,20 +7303,32 @@ def parse_until(text: str | None, now: dt.datetime | None = None,
         hhmm = dt.time(int(m.group(1)), int(m.group(2)))
         zone = now.tzinfo if now is not None else None
         system_zone = now is None
+        now_ts = local_now.timestamp()
 
-        def on(day: dt.date) -> dt.datetime:
-            naive = dt.datetime.combine(day, hhmm)
-            return naive.astimezone() if system_zone else naive.replace(tzinfo=zone)
+        def at(day: dt.date, fold: int) -> float:
+            naive = dt.datetime.combine(day, hhmm).replace(fold=fold)
+            return (naive.astimezone() if system_zone else naive.replace(tzinfo=zone)).timestamp()
 
-        target = on(local_now.date())
-        if target <= local_now:
-            target = on(local_now.date() + dt.timedelta(days=1))
-        ahead_h = (target - local_now).total_seconds() / 3600
+        def wall(ts: float) -> tuple[int, int]:
+            w = dt.datetime.fromtimestamp(ts) if system_zone else dt.datetime.fromtimestamp(ts, zone)
+            return w.hour, w.minute
+
+        # Every real occurrence of HH:MM today and tomorrow (an hour the clocks repeat has two; one
+        # they skip is read with fold 0), the first one still ahead, all compared in UTC: aware
+        # datetimes of one zone compare and subtract by WALL time, an hour off across a DST change.
+        cands: list[float] = []
+        for day in (local_now.date(), local_now.date() + dt.timedelta(days=1)):
+            real = sorted({t for t in (at(day, 0), at(day, 1)) if wall(t) == (hhmm.hour, hhmm.minute)})
+            cands += real or [at(day, 0)]
+        target_ts = min(t for t in cands if t > now_ts)
+        ahead_h = (target_ts - now_ts) / 3600
         if max_ahead_hours is not None and ahead_h > max_ahead_hours:
-            raise ValueError(f"--until {text.strip()} is next at {target.isoformat(timespec='minutes')}, "
+            shown = (dt.datetime.fromtimestamp(target_ts).astimezone() if system_zone
+                     else dt.datetime.fromtimestamp(target_ts, zone))
+            raise ValueError(f"--until {text.strip()} is next at {shown.isoformat(timespec='minutes')}, "
                              f"{ahead_h:.1f} h away (more than {max_ahead_hours:g} h): it has most likely "
                              "passed today; give an ISO time to mean tomorrow")
-        return target.timestamp()
+        return target_ts
     when = dt.datetime.fromisoformat(text.strip())
     if when.tzinfo is None:
         when = when.astimezone()

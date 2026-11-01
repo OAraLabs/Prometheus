@@ -134,7 +134,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
 from zoneinfo import ZoneInfo
@@ -501,10 +501,7 @@ class Gen:
         if text:
             if re.fullmatch(r"\d{1,2}:\d{2}", text.strip()):
                 h, m = (int(x) for x in text.strip().split(":"))
-                at = et_now.replace(hour=h, minute=m, second=0, microsecond=0)
-                if at.timestamp() <= now:
-                    at += timedelta(days=1)
-                t = at.timestamp()
+                t = MW.next_wall(now, h, m, self.tz)  # the next occurrence, in UTC (DST-safe)
             else:
                 dt = datetime.fromisoformat(text.strip())
                 t = (dt if dt.tzinfo else dt.replace(tzinfo=self.tz)).timestamp()
@@ -539,9 +536,10 @@ class Gen:
         mins = self.w.minutes_to_next_eval()
         if mins < float(self.c["GEN_EVAL_PAUSE_BEFORE_MIN"]):
             return f"a nightly eval starts in {mins:.0f} min"
-        now = self.w.et()
+        now = self.w.now()
         for t in self.c["EVAL_TIMES"].split(","):
-            since = (now - self.w.at_today(t.strip())).total_seconds() / 60
+            # minutes since today's start time, in UTC (a wall-clock difference is an hour off across DST)
+            since = (now - self.w.at_today(t.strip()).timestamp()) / 60
             if 0 <= since < float(self.c["GEN_EVAL_PAUSE_AFTER_MIN"]):
                 return f"the {t.strip()} nightly eval is due (cron may start it late)"
         return None
@@ -1291,10 +1289,7 @@ class RemoteGen(Gen):
         raw = (text or self.c["GEN_REMOTE_UNTIL"]).strip()
         if re.fullmatch(r"\d{1,2}:\d{2}", raw):
             h, m = (int(x) for x in raw.split(":"))
-            at = datetime.fromtimestamp(now, self.tz).replace(hour=h, minute=m, second=0, microsecond=0)
-            if at.timestamp() <= now:
-                at += timedelta(days=1)  # ZoneInfo arithmetic: wall time, the offset of that day (DST)
-            t = at.timestamp()
+            t = MW.next_wall(now, h, m, self.tz)  # the next occurrence, in UTC (DST-safe)
         else:
             dt = datetime.fromisoformat(raw)
             t = (dt if dt.tzinfo else dt.replace(tzinfo=self.tz)).timestamp()

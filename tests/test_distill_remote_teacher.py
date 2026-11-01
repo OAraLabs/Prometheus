@@ -605,7 +605,8 @@ def _remote_rig(tmp_path: Path) -> tuple[Any, Path, dict[str, str]]:
 def test_the_remote_runner_retries_an_absent_teacher_then_ends_with_the_taskset(tmp_path):
     rig, key, env = _remote_rig(tmp_path)
     try:
-        until = (dt.datetime.now(ET) + dt.timedelta(seconds=60)).isoformat(timespec="seconds")
+        until = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=60)).astimezone(ET).isoformat(
+            timespec="seconds")
         dry = subprocess.run([sys.executable, "-I", str(REPO / "scripts/distill/mini_window/gen_runner.py"),
                               "--conf", str(rig.conf), "remote", "--until", until], env=env, capture_output=True,
                              text=True, timeout=120)
@@ -641,7 +642,8 @@ def test_the_remote_runner_refuses_a_key_file_others_can_read(tmp_path):
     rig, key, env = _remote_rig(tmp_path)
     try:
         key.chmod(0o644)
-        until = (dt.datetime.now(ET) + dt.timedelta(seconds=60)).isoformat(timespec="seconds")
+        until = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=60)).astimezone(ET).isoformat(
+            timespec="seconds")
         cp = subprocess.run([sys.executable, "-I", str(REPO / "scripts/distill/mini_window/gen_runner.py"),
                              "--conf", str(rig.conf), "remote", "--execute", "--until", until], env=env,
                             capture_output=True, text=True, timeout=120)

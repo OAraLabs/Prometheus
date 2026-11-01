@@ -388,3 +388,30 @@ def test_the_round2_scheduler_follows_the_steering_shares_and_skips_tasks_over_t
     import os
     os.utime(sp, (1, 1))
     assert sched.next_task() is None and len(sched.over_cap) == 5
+
+
+# ── --until across DST (the remote teacher's stop time) ──────────────────────
+
+def test_until_hhmm_is_the_next_real_occurrence_across_dst() -> None:
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+
+    def utc(s: str) -> float:
+        return datetime.fromisoformat(s).replace(tzinfo=timezone.utc).timestamp()
+
+    # inside the repeated hour, second pass (01:30 EST): 01:45 is 15 min ahead, never the passed 01:45 EDT
+    est = datetime(2026, 11, 1, 1, 30, tzinfo=et, fold=1)
+    assert tg.parse_until("01:45", now=est, max_ahead_hours=12) == utc("2026-11-01T06:45:00")
+    # first pass (01:30 EDT): 01:15 comes again at 01:15 EST, 45 min ahead (not tomorrow, not refused)
+    edt = datetime(2026, 11, 1, 1, 30, tzinfo=et, fold=0)
+    assert tg.parse_until("01:15", now=edt, max_ahead_hours=12) == utc("2026-11-01T06:15:00")
+    assert tg.parse_until("05:30", now=edt) == utc("2026-11-01T10:30:00")
+    # spring forward: 03:03 EDT is 5 min after 01:58 EST; the skipped 02:30 reads as 03:30 EDT
+    spring = datetime(2027, 3, 14, 1, 58, tzinfo=et)
+    assert tg.parse_until("03:03", now=spring, max_ahead_hours=0.5) == utc("2027-03-14T07:03:00")
+    assert tg.parse_until("02:30", now=spring) == utc("2027-03-14T07:30:00")
+    # passed today: tomorrow, refused past the horizon
+    with pytest.raises(ValueError, match="passed today"):
+        tg.parse_until("01:00", now=datetime(2026, 11, 2, 9, 0, tzinfo=et), max_ahead_hours=12)

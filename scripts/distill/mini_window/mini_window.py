@@ -194,6 +194,20 @@ def load_conf(path: Path, home: str | None = None) -> dict[str, str]:
     return conf
 
 
+def next_wall(now: float, h: int, m: int, tz: Any) -> float:
+    """Epoch of the next wall-clock H:M in *tz* strictly after *now* (an epoch). An hour the clocks
+    repeat (the fall back) has two occurrences and either may be next; an H:M the clocks skip (the
+    spring forward) is read with fold 0 (its pre-change offset), as ZoneInfo does. Compared in UTC:
+    two aware datetimes of one zone compare and subtract by WALL time, an hour off across a change."""
+    day = datetime.fromtimestamp(now, tz).date()
+    cands: list[float] = []
+    for d in (day, day + timedelta(days=1)):
+        both = sorted({datetime(d.year, d.month, d.day, h, m, tzinfo=tz, fold=f).timestamp() for f in (0, 1)})
+        real = [t for t in both if (datetime.fromtimestamp(t, tz).hour, datetime.fromtimestamp(t, tz).minute) == (h, m)]
+        cands += real or [datetime(d.year, d.month, d.day, h, m, tzinfo=tz, fold=0).timestamp()]
+    return min(t for t in cands if t > now)
+
+
 def hhmm(text: str) -> tuple[int, int]:
     if not re.fullmatch(r"\d{4}", text):
         raise SystemExit(f"bad HHMM {text!r}")
@@ -490,13 +504,13 @@ class Window:
                 (self.state / "slot.active").unlink()
 
     def minutes_to_next_eval(self) -> float:
-        now = self.et()
+        # in UTC (next_wall): a wall-clock difference is an hour off across a DST change (the spring
+        # forward would say 65 min to an eval 5 min away, and generation would not pause for it)
+        now = self.now()
         best = None
         for t in self.c["EVAL_TIMES"].split(","):
-            at = self.at_today(t.strip())
-            if at <= now:
-                at += timedelta(days=1)
-            mins = (at - now).total_seconds() / 60
+            h, m = hhmm(t.strip())
+            mins = (next_wall(now, h, m, self.tz) - now) / 60
             best = mins if best is None else min(best, mins)
         return best if best is not None else 1e9
 

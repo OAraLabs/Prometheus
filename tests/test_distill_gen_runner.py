@@ -17,7 +17,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -34,6 +34,12 @@ import gen_runner as G  # noqa: E402
 pytestmark = pytest.mark.skipif(not sys.platform.startswith(("linux", "darwin")), reason="posix only")
 
 ET = ZoneInfo("America/New_York")
+
+
+def et_in(**delta: float) -> datetime:
+    """Now + *delta* as an ET wall time. In UTC first: ``datetime.now(ET) + timedelta`` is
+    wall-clock arithmetic (fold reset), an hour off inside the repeated hour of the fall back."""
+    return (datetime.now(timezone.utc) + timedelta(**delta)).astimezone(ET)
 IQ3 = "qwen3.8-27b-gsq-rco-iq3_xxs"
 BUSINESS = "/models/local.gguf"
 
@@ -105,8 +111,7 @@ class Rig:
         notify.chmod(0o755)
         self.proc = root / "proc"
         self.proc.mkdir()
-        now = datetime.now(ET)
-        evals = ",".join((now + timedelta(hours=h)).strftime("%H%M") for h in (3, 4))
+        evals = ",".join(et_in(hours=h).strftime("%H%M") for h in (3, 4))
         self.envfile = root / "prometheus.env"
         self.envfile.write_text("# nothing\n")
         self.envfile.chmod(0o600)
@@ -140,7 +145,7 @@ class Rig:
         if execute:
             a.append("--execute")
         if until_s is not None:
-            a += ["--until", (datetime.now(ET) + timedelta(seconds=until_s)).isoformat(timespec="seconds")]
+            a += ["--until", et_in(seconds=until_s).isoformat(timespec="seconds")]
         return a
 
     def run(self, cmd: str = "run", execute: bool = True, until_s: float | None = 3.0,
@@ -705,3 +710,47 @@ def test_eval_pause_covers_the_minutes_around_a_nightly_eval(tmp_path: Path) -> 
     (proc / "77").mkdir()
     (proc / "77" / "cmdline").write_bytes(b"python3\0scripts/run_nightly_evals.py\0")
     assert _gen(f"PROC_ROOT={proc}\n", "2026-11-02T03:20:00", tmp_path).eval_pause() == "a nightly eval is running"
+
+
+# ── DST: next occurrences and minutes are computed in UTC ────────────────────
+
+def _utc(text: str) -> float:
+    return datetime.fromisoformat(text).replace(tzinfo=timezone.utc).timestamp()
+
+
+def test_next_wall_time_is_dst_safe() -> None:
+    # 2026-11-01: 01:00-02:00 ET happens twice (EDT 05:00-06:00 UTC, then EST 06:00-07:00 UTC)
+    second_pass = _utc("2026-11-01T06:30:00")          # 01:30 EST
+    assert G.MW.next_wall(second_pass, 1, 45, ET) == _utc("2026-11-01T06:45:00")   # 15 min ahead, not passed
+    first_pass = _utc("2026-11-01T05:30:00")           # 01:30 EDT
+    assert G.MW.next_wall(first_pass, 1, 15, ET) == _utc("2026-11-01T06:15:00")    # the EST 01:15, 45 min ahead
+    assert G.MW.next_wall(first_pass, 1, 45, ET) == _utc("2026-11-01T05:45:00")    # the EDT 01:45 comes first
+    assert G.MW.next_wall(second_pass, 6, 35, ET) == _utc("2026-11-01T11:35:00")   # 06:35 EST
+    # 2027-03-14: 02:00-03:00 ET does not exist; 03:03 EDT is 5 min after 01:58 EST
+    spring = _utc("2027-03-14T06:58:00")
+    assert G.MW.next_wall(spring, 3, 3, ET) == _utc("2027-03-14T07:03:00")
+    assert G.MW.next_wall(spring, 2, 30, ET) == _utc("2027-03-14T07:30:00")        # a skipped time: fold 0
+    assert G.MW.next_wall(_utc("2026-11-02T12:00:00"), 6, 0, ET) == _utc("2026-11-03T11:00:00")
+
+
+def test_eval_minutes_and_until_across_dst(tmp_path: Path) -> None:
+    def gen(at_utc: str, evals: str) -> G.Gen:
+        conf = tmp_path / "w.conf"
+        conf.write_text("LOCAL_MODEL_UNIT=m.service\nPROBE_UNIT=p.service\nOLLAMA_MODEL=j:7b\n"
+                        f"EVAL_TIMES={evals}\n")
+        t = _utc(at_utc)
+        return G.Gen(G.load(conf), False, out=lambda s: None, clock=lambda: t, env={})
+
+    # spring forward: an eval at 03:03 EDT is 5 minutes after 01:58 EST (wall clock says 65)
+    g = gen("2027-03-14T06:58:00", "0303")
+    assert round(g.w.minutes_to_next_eval()) == 5
+    # fall back: from 01:30 EDT an eval at 02:30 EST is 2 h away (wall clock says 1 h)
+    assert round(gen("2026-11-01T05:30:00", "0230").w.minutes_to_next_eval()) == 120
+    # --until HH:MM in the repeated hour: the occurrence still ahead, never one that has passed
+    g = gen("2026-11-01T06:30:00", "0430")
+    g.c["GEN_MIN_RUN_S"] = "60"
+    assert g.resolve_until("01:45") == _utc("2026-11-01T06:45:00")  # 01:45 EST, not the passed 01:45 EDT
+    assert g.resolve_until("05:30") == _utc("2026-11-01T10:30:00")
+    rg = G.RemoteGen(G.load(tmp_path / "w.conf"), False, out=lambda s: None, clock=lambda: _utc("2026-11-01T05:30:00"),
+                     env={})
+    assert rg.resolve_until("05:30") == _utc("2026-11-01T10:30:00")
