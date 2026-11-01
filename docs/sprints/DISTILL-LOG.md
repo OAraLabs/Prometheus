@@ -184,3 +184,9 @@ Append-only, times in ET.
   - **DST:** three real live-code bugs fixed (mini_window.minutes_to_next_eval at spring-forward, teacher_gen.parse_until and gen_runner --until in the repeated hour). The 27 test failures were the test rigs' wall-clock arithmetic. Full suite: 1,693 passed.
   - **Pending:** restage ~/distill/window on the mini before March. Error-recovery injected-failure rows are outside the judge's calibration domain; sent back to the agent.
 - 2026-11-01 02:02 EST — IQ3 teacher GGUF restored at 02:02 EST: sha256 fdfcb6a2… verified, 10,094,357,632 B, read-only. The teacher can restart again, and the 4090 IQ3 ladder can copy it.
+- 2026-11-01 02:03 EST — eb23bd1: rows whose own call got an injected failure (error-recovery) or the planted injection text are outside the judge's calibration domain. They are kept or dropped only by their deterministic verifier; later clean calls stay judge_pending in coding/daemon. Restaged ~/distill/round2/code.
+- 2026-11-01 02:09 EST — **Round-2 automation armed** (6a05355…466c8af; config ~/distill/round2/round2.conf on the mini).
+  - **Sunday chain** r2-tower-chain-20261101: PIPELINE-DONE → CAPACITY-DONE (or a 3 h timeout) → the 4090 teacher via distill-jobs-r2teacher@ → teacher A/B (arm A re-run on the 4090 IQ3 when copied, plus arm B on Q4_K_XL; ≤90 min) → remote generation until Mon 05:18 → flywheel-r2-end restores business at 05:20 EST.
+  - **Nightly:** the 4090 r2-tower-night 01:12 ET from Tue; the mini window-mini-night-start 01:05 / end 06:40 ET from Mon.
+  - **Heartbeat:** r2-heartbeat 09:00 ET daily, ≤10 lines with rows/hour by area.
+  - **Sent back to the agent:** switch the configs and the live mini generation to the round-2 tasksets; long-context profile nights on the 4090 from Tue; reset-failed the A/B unit.
