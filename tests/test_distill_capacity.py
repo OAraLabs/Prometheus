@@ -905,3 +905,24 @@ def test_iq3_copy_without_a_source_touches_nothing(tmp_path: Path, builder: Any)
     b._copy_iq3()
     assert b.state["iq3_copy"] == {"status": "failed", "reason": "the IQ3 source file is missing on this host"}
     assert tower.calls == []
+
+
+def test_wait_skips_when_no_pipeline_unit_runs_for_an_hour(tmp_path: Path, builder: Any,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = FakeClock(SUN_1530)
+    tower = FakeTower(clock, max_ctx={"q4": 65536, "iq3": 65536})
+    alive: Dict[str, Any] = {"v": ["flywheel-post-train-x.service"]}
+    monkeypatch.setattr(C, "here_units_alive", lambda pat: alive["v"])
+    b = _block(tmp_path, tower, clock, builder, pipeline_unit="flywheel-post-train-*", poll="300")
+    real_sleep = b._sleep
+
+    def sleep(s: float) -> None:
+        real_sleep(s)
+        if clock.t > SUN_1530 + 7200:
+            alive["v"] = []  # the pipeline unit went away without a marker
+    b._sleep = sleep
+    assert b.run() == 0
+    done = json.loads((tmp_path / "cap" / "CAPACITY-DONE.json").read_text())
+    assert done["status"] == "skipped" and "for an hour" in done["reason"]
+    assert SUN_1530 + 7200 + 3600 <= clock.t < SUN_1530 + 7200 + 3600 + 900
+    assert tower.units["llama-server.service"] == "active"

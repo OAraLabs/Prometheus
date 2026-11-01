@@ -1578,13 +1578,15 @@ class Block:
                          f"appears or {et(c.skip_at)}; the dry run goes on as if it had")
                 return
             if c.pipeline_unit:
-                st = here_unit_state(c.pipeline_unit)
-                if st in ACTIVE or st == "unknown":
+                # a unit pattern (the pipeline may be re-armed under a new stamp): none of them running or
+                # restarting for an hour, and still no marker, means it will not come
+                alive = here_units_alive(c.pipeline_unit)
+                if alive is None or alive:
                     dead_since = None
                 elif dead_since is None:
                     dead_since = now
-                elif now - dead_since > 1800:
-                    raise NotRun(f"the post-train pipeline unit is {st} for 30 min with no PIPELINE-DONE")
+                elif now - dead_since > 3600:
+                    raise NotRun(f"no {c.pipeline_unit} unit has run for an hour and there is no PIPELINE-DONE")
             if now - last_log >= 3600:
                 self.log(f"waiting for {c.pipeline_done.name} (skip at {et(c.skip_at)})")
                 last_log = now
@@ -2357,12 +2359,18 @@ def load_failure_reason(tail: str) -> str:
     return re.sub(r"/\S+", "<path>", last[0])[:160]
 
 
-def here_unit_state(unit: str) -> str:
+def here_units_alive(pattern: str) -> Optional[List[str]]:
+    """User units here matching ``pattern`` that are running or (re)starting; None when systemd cannot
+    be asked (then nothing is concluded)."""
     try:
-        p = subprocess.run(["systemctl", "--user", "is-active", unit], capture_output=True, text=True, timeout=20)
-        return (p.stdout.strip().splitlines() or ["unknown"])[-1] or "unknown"
+        p = subprocess.run(["systemctl", "--user", "list-units", "--plain", "--no-legend", "--no-pager",
+                            "--state=active,activating,deactivating,reloading", pattern],
+                           capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.TimeoutExpired):
-        return "unknown"
+        return None
+    if p.returncode != 0:
+        return None
+    return [ln.split()[0] for ln in p.stdout.splitlines() if ln.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -2544,7 +2552,8 @@ def add_block_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--capdir", default=None)
     ap.add_argument("--key-file", default=None, help="here: the 4090 teacher key (default ~/distill/secrets/teacher-4090.key)")
     ap.add_argument("--pipeline-done", default=None)
-    ap.add_argument("--pipeline-unit", default="", help="the post-train unit here (a dead one with no marker: skip)")
+    ap.add_argument("--pipeline-unit", default="flywheel-post-train-*",
+                    help="the post-train unit pattern here (none alive for an hour and no marker: skip)")
     ap.add_argument("--skip-at", default="2026-11-02T03:00:00-05:00")
     ap.add_argument("--restore-after", default="2026-11-02T04:00:00-05:00")
     ap.add_argument("--window-end", default="2026-11-02T05:40:00-05:00")
