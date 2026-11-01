@@ -680,6 +680,24 @@ def planned_verifier(area: str, category: str, calibrated: set[str], determinist
 
 _TOOLY_SUBCATS = frozenset({"coding", "daemon-ops", "research", "wiki", "memory", "scheduling"})
 
+#: A request about the owner's live hosts, accounts and services (PRs, deploys, hosts, GPUs, models,
+#: mail...). The sandbox holds none of them, so the teacher reaches for real paths, the network or
+#: host commands and the task ends refused or failed: round 1 (same teacher, same gym) kept 7-12% of
+#: such agentic tasks against 19-21% of the rest. The conditioned areas (injection, recovery, long
+#: context) take the rest only (``--live-prompts keep`` to take them too); daily-agent and coding
+#: keep the real mix.
+LIVE_HOST = re.compile(
+    r"(?i)\b(gh|github|pull requests?|prs?|pr\s*#?\d+|#\d{2,}|merge[ds]?|push(ed)?|deploy\w*|ssh|scp|rsync|"
+    r"restart\w*|reboot|install\w*|upgrade\w*|apt|brew|docker|mini|4090|3090\w*|tower|tailscale|"
+    r"approv\w*|telegram|e-?mail|inbox|send|calendar|invoice|bank|stripe|login|password|vps|server|"
+    r"cron|systemd|service|daemon|nvidia|gpu|disk|mount|ollama|llama|model|saluki|qwen|beacon|"
+    r"youtube|video|image|photo|pdf|website|url|https?://)\b")
+CONDITIONED_AREAS = ("injection-resistance", "error-recovery", "long-context")
+
+
+def live_host_prompt(prompt: str) -> bool:
+    return bool(LIVE_HOST.search(prompt))
+
 
 def tool_likely(row: dict[str, Any]) -> bool:
     return row["mode"] == "agentic" and (row["flags"]["inject_errors"] or row["intent"] in TS.TOOL_INTENTS
@@ -766,6 +784,9 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
     if not lib:
         raise R2Error("no real failure pattern found in the harvest (--fail-traces / --lcm-snapshot)")
     wiki_pool = [f for f in pool if f.path.startswith("wiki/") and f.tokens < 3000]
+    # the conditioned areas take the requests the sandbox can serve (LIVE_HOST)
+    cond_rows = [r for r in base_rows if a.live_prompts == "keep" or not live_host_prompt(r["prompt"])]
+    stats["conditioned_areas_live_host_prompts_skipped"] = len(base_rows) - len(cond_rows)
     rows: dict[str, list[dict[str, Any]]] = {area: [] for area in AREAS}
     name = a.name
 
@@ -774,7 +795,7 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
 
     # injection-resistance: per eligible agentic row, --inj-variants goals not in conflict with its request
     combos = [(g, s, v) for g in GOALS for s in STYLES for v in VECTORS]
-    for r in base_rows:
+    for r in cond_rows:
         if r["mode"] != "agentic":
             continue
         vec_pref = "memory" if r["subcategory"] == "memory" else "wiki" if r["subcategory"] == "wiki" else None
@@ -809,7 +830,7 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
             used_goals.add(goal_key)
             made += 1
     # error-recovery: every tool-likely agentic row, one failure family per tool
-    for r in base_rows:
+    for r in cond_rows:
         if not tool_likely(r):
             continue
         variant = "err:harvest"
@@ -820,7 +841,7 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
             needs_ctx=needs_ctx(prompt_tokens(r)), failure=build_failure(lib, rng)))
     # long-context: agentic rows, each in one bucket (seeded), files sized to the bucket
     buckets = [b for b in CTX_BUCKETS if b in a.ctx_buckets.split(",")]
-    for r in base_rows:
+    for r in cond_rows:
         if r["mode"] != "agentic":
             continue
         for k, bucket in enumerate(sorted(buckets, key=lambda b: rank(seed, "lc-bucket|" + r["id"], b))):
@@ -978,6 +999,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     b.add_argument("--inj-variants", type=int, default=2, help="injection rows per eligible real row")
     b.add_argument("--lc-variants", type=int, default=1, help="long-context rows per real row (buckets)")
     b.add_argument("--ctx-buckets", default="32k,64k,128k")
+    b.add_argument("--live-prompts", choices=("skip", "keep"), default="skip",
+                   help="requests about the owner's live hosts and accounts (LIVE_HOST) in the conditioned areas")
     c = sub.add_parser("check-disjoint")
     c.add_argument("--tasks", required=True)
     c.add_argument("--injection-manifest", default=TS.DEFAULT_MANIFEST)

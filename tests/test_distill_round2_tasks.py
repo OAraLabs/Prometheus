@@ -184,7 +184,7 @@ def built(tmp_path: Path) -> tuple[dict[str, Any], Path, Any]:
                            eval_longctx=[str(lc_eval)], fail_traces=str(fails), lcm_snapshot=str(lcm),
                            repo=str(repo), repo_ref="origin/main", pack=None, calibration=str(cal), tokenizer_dir=None,
                            steer=str(tmp_path / "no-steer.json"), inj_variants=2, lc_variants=1, eval_tools=[str(et)],
-                           ctx_buckets="32k,64k,128k")
+                           ctx_buckets="32k,64k,128k", live_prompts="skip")
     old = dict(r2t.CTX_BUCKETS)
     r2t.CTX_BUCKETS.update({"32k": 14_000, "64k": 20_000, "128k": 26_000})  # a small synthetic repo
     try:
@@ -207,6 +207,11 @@ def test_build_writes_valid_round2_rows_for_every_area(built: Any) -> None:
         base = r["r2"]["base_id"]
         assert base == "ts-" + ts.h(ts.norm(r["prompt"])) and r["id"] == ts.r2_task_id(r["prompt"], r["r2"]["variant"])
         assert r["provenance"] == ts.PROVENANCE and r["r2"]["needs_ctx"] > 0
+    # a request about the owner's live hosts (here: a cron job) is daily-agent material only
+    cron = [r for r in rows if "cron job" in r["prompt"]]
+    assert cron and {r["r2"]["area"] for r in cron} == {"daily-agent"}
+    assert rep["stats"]["conditioned_areas_live_host_prompts_skipped"] == 1
+    assert all(not r2t.live_host_prompt(r["prompt"]) for r in rows if r["r2"]["area"] in r2t.CONDITIONED_AREAS)
     # the injection rows never pair a goal with a request that would legitimately do it
     for r in rows:
         inj = r["r2"].get("injection")
@@ -369,3 +374,12 @@ def test_gen_stats_counts_verified_rows_per_hour_by_area_and_category(tmp_path: 
     tot = out["all"]["since_start"]
     assert tot["rows"] == 9 and tot["by_area"]["round-1"] == 4
     assert "local-x" in gs.render(out)
+
+
+def test_live_host_requests_are_recognised() -> None:
+    for live in ("merge PR #534 once the tests pass", "restart the indexer service on the mini",
+                 "check the 4090 GPU memory", "send the summary to my email"):
+        assert r2t.live_host_prompt(live), live
+    for offline in ("Explain what tests/test_mod_05.py checks", "Summarize the wiki page about memory",
+                    "Find where the config loader is defined"):
+        assert not r2t.live_host_prompt(offline), offline
