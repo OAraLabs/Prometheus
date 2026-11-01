@@ -335,7 +335,8 @@ def next_rung(ladder: Sequence[int], rungs: Sequence[Dict[str, Any]]) -> Optiona
     return None
 
 
-def ladder_summary(ladder: Sequence[int], rungs: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+def ladder_summary(ladder: Sequence[int], rungs: Sequence[Dict[str, Any]],
+                   top_label: str = "top of the ladder (the model's trained context)") -> Dict[str, Any]:
     final = sorted((r for r in rungs if r.get("final")), key=lambda r: int(r["ctx"]))
     stable = [r for r in final if r.get("stable")]
     unstable = [r for r in final if not r.get("stable")]
@@ -345,7 +346,7 @@ def ladder_summary(ladder: Sequence[int], rungs: Sequence[Dict[str, Any]]) -> Di
     if first_bad is not None:
         bound = "unstable rung above"
     elif top_reached:
-        bound = "top of the ladder (the model's trained context)"
+        bound = top_label
     else:
         bound = "not bounded (ladder not finished)"
     out: Dict[str, Any] = {
@@ -1200,7 +1201,7 @@ def cmd_mini(a: argparse.Namespace) -> int:
         log(f"stopped: {exc}")
     finally:
         watch.stop()
-    summ = ladder_summary(ladder, rungs)
+    summ = ladder_summary(ladder, rungs, top_label=f"the configured context ({n_ctx:,}) is the top")
     free_all = [s[2] for s in watch.samples if s[2] is not None]
     comp = computed_mini(min(free_all) if free_all else None, n_ctx, n_ctx_train, apps.get("ollama"))
     doc["measured"] = {"max_readable_ctx": summ["max_stable_ctx"], "bounded_by": summ["bounded_by"],
@@ -1683,7 +1684,7 @@ class Block:
             return {"used_max": None, "free_min": None, "avail_min_kb": None, "samples": 0}
         f = self.sampler_file()
         rc, out = self.tower.run(
-            f"awk -F, -v a={int(t0) - 1} -v b={int(t1) + 1} '$1>=a && $1<=b && $2!=\"\" "
+            f"awk -F, -v a={int(t0) + 1} -v b={int(t1)} '$1>=a && $1<=b && $2!=\"\" "
             "{n++; if ($2>u) u=$2; if (f==\"\" || $3<f) f=$3; if (m==\"\" || $4<m) m=$4} "
             f"END {{print \"n=\" n; print \"used=\" u; print \"free=\" f; print \"avail=\" m}}' {q(f)} 2>/dev/null")
         kv = kv_lines(out)
@@ -1851,20 +1852,24 @@ class Block:
         if meta.get("n_ctx_train"):
             self.state.setdefault("n_ctx_train", {})[key] = to_int(meta.get("n_ctx_train"))
         used, vfree = self.vram()
-        rung.update(load="ok", load_detail="verified", vram_used_mib=used, vram_free_after_load_mib=vfree)
+        rung.update(load="ok", load_detail="verified", vram_used_mib=used, vram_free_after_load_mib=vfree,
+                    t_ready=self.clock())
 
     def server_alive(self, rung: Dict[str, Any]) -> bool:
         st = self.unit_state(rung["unit"])
         return st in ACTIVE or st == "unknown"
 
     def finish_rung(self, rung: Dict[str, Any]) -> None:
+        # the headroom window: from the verified load to the last request, before the stop (a sample from
+        # the previous server or from the release must not count)
+        t1 = self.clock()
+        pk = self.peaks(rung["t_ready"], t1) if rung.get("t_ready") else \
+            {"used_max": None, "free_min": None, "avail_min_kb": None, "samples": 0}
+        rung["sampler"] = pk
         if rung.get("unit"):
             self.stop_unit(rung["unit"])
             if self.cfg.execute:
                 self.wait_vram_free(120)
-        t1 = self.clock()
-        pk = self.peaks(rung.get("t_start") or t1, t1)
-        rung["sampler"] = pk
         free_pts = [x for x in (pk.get("free_min"), rung.get("vram_free_after_load_mib")) if x is not None]
         if rung.get("load") == "ok":
             rung["headroom_min_mib"] = int(min(free_pts)) if free_pts else None
@@ -2139,7 +2144,7 @@ class Block:
                 quants[key] = {"label": qd["label"], "status": "skipped", "skip_reason": "not reached",
                                "summary": {"max_stable_ctx": None}, "rungs": []}
                 continue
-            rungs = [{k: v for k, v in r.items() if k not in ("t_start",)} for r in qs.get("rungs", [])]
+            rungs = [{k: v for k, v in r.items() if k not in ("t_start", "t_ready")} for r in qs.get("rungs", [])]
             s = qs.get("summary") or ladder_summary(qs.get("ladder") or self.cfg.ladder, rungs)
             status = qs.get("status", "partial")
             if status not in ("measured", "partial", "skipped", "failed"):
