@@ -1,0 +1,13 @@
+# Closes the 3090 Ti's nightly window: mini_window_end.sh --execute (apply business: Saluki back, the
+# teacher and every distill-* unit stopped; verified: local model, daemon /health, Ollama, the next voice
+# probe). Skips before R2_MINI_NIGHTLY_FROM (it would end the continuous window early).
+[Unit]
+Description=distill round 2: 3090 Ti nightly window end
+
+[Service]
+Type=simple
+Environment=TZ=America/New_York
+ExecStart=%h/distill/round2/bin/round2_chain.sh mini-night end --execute
+KillMode=mixed
+TimeoutStopSec=20min
+RuntimeMaxSec=75min

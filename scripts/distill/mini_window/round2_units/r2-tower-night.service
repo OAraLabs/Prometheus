@@ -1,0 +1,14 @@
+# The nightly 4090 window's teacher + this host's remote generation (round2_chain.py tower-night): the 4090
+# serves the teacher (round2_tower.sh start --mode night, before its own 01:20 window_start), generation runs
+# here in the bwrap gym until R2_TOWER_NIGHT_END - margin, the 4090 restores business at R2_TOWER_NIGHT_END.
+# Not distill-*: a restore on either host must not stop it. Skips (exit 0) before R2_TOWER_NIGHTLY_FROM.
+[Unit]
+Description=distill round 2: nightly 4090 teacher + remote generation
+
+[Service]
+Type=simple
+Environment=TZ=America/New_York
+ExecStart=%h/distill/round2/bin/round2_chain.sh tower-night --execute
+KillMode=mixed
+TimeoutStopSec=10min
+RuntimeMaxSec=6h

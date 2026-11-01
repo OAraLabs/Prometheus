@@ -1,0 +1,14 @@
+# The 3090 Ti's own nightly window (operator 2026-10-30: nightly 01:00-07:00 ET after the continuous window):
+# round2_chain.py mini-night start -> mini_window_start.sh --execute (dead-man first; the teacher on Saluki's
+# port; the voice-probe guard; Ollama stays loaded) with the round-2 local generation as its GEN_RUNNER.
+# Not distill-*: apply business stops every distill-* unit. Skips before R2_MINI_NIGHTLY_FROM.
+[Unit]
+Description=distill round 2: 3090 Ti nightly window start
+
+[Service]
+Type=simple
+Environment=TZ=America/New_York
+ExecStart=%h/distill/round2/bin/round2_chain.sh mini-night start --execute
+KillMode=mixed
+TimeoutStopSec=20min
+RuntimeMaxSec=50min

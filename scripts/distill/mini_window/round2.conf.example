@@ -1,0 +1,60 @@
+# round2.conf for scripts/distill/mini_window/round2_chain.py (copy to the 3090 Ti host's
+# ~/distill/round2/round2.conf). KEY=VALUE, shell syntax; ~ and $HOME expand. The live file names this
+# site's hosts, so it lives on the host (and the gitignored data/distill/ tree), never in the repo.
+# Defaults: R2_DEFAULTS in round2_chain.py. `round2_chain.sh config` prints the resolved settings.
+#
+# Read at every start: the Sunday chain reads it once when it starts the 4090 teacher and its generation;
+# the nightly units (01:05, 01:12 ET) read it each night. Change it any time; it applies from the next start.
+
+# The 4090 (host-specific)
+R2_TOWER_SSH=user@tower-host            # this host -> the 4090 (BatchMode ssh); never the other way round
+R2_TOWER_HOST=tower-host                # recorded as teacher_host in every row
+R2_TOWER_URL=http://tower-host:18094    # the teacher on the 4090's tailnet address (serve_teacher.sh)
+# R2_TOWER_QUANT=UD-Q4_K_XL
+
+# ---- Where the round-2 code agent plugs in -------------------------------------------------------
+# The code: a HEAD export (from the repo machine:
+#   uv run python scripts/distill/mini_window/gen_runner.py stage-code --ssh <this host> --dest distill/round2/code --execute)
+# R2_CODE=~/distill/round2/code
+# The tasksets (taskset_gen.py exclude output: gen_runner's preflight refuses one holding an excluded session's row)
+# R2_TOWER_TASKS=~/distill/phase2b/tasksets/real-v3-excl.jsonl
+# R2_LOCAL_TASKS=~/distill/phase2b/tasksets/real-v3-excl.jsonl
+# Extra `teacher_gen.py run` flags, appended last (shell words; no spaces inside one argument), e.g.
+#   R2_TOWER_EXTRA_ARGS=--mix error-recovery=0.4,chat-mode=0.3,agentic=0.3 --coding-cap 0.2
+# R2_TOWER_EXTRA_ARGS=
+# R2_LOCAL_EXTRA_ARGS=
+# The run directories under R2_RUNS (default: a name with a hash of the code commit, taskset and flags, so a
+# change starts a new output instead of teacher_gen refusing the old one; all round-2 runs skip each other's
+# finished tasks). Set only to pin a name.
+# R2_TOWER_RUN_NAME=
+# R2_LOCAL_NAME=                         # "{alias}" is replaced by the served teacher's alias
+# Any GEN_* key (gen_runner.py's GEN_DEFAULTS) is passed to gen_runner as it is, e.g. GEN_HARVEST_EVERY_MIN=15.
+# The heartbeat's 3 generation lines: auto = the round-2 code's gen_stats.py when staged in R2_CODE (else
+# computed here from the ledgers); or a command ({py} {code} {runs} {since} {now} are filled in; its first
+# 3 stdout lines are used; a failure falls back to the ledgers); empty = always the ledgers.
+# R2_GEN_STATS_CMD=auto
+
+# ---- The 4090 teacher's serve profile -------------------------------------------------------------
+# standard: R2_STANDARD_PROFILE (4 slots x 32768, today's shape)
+# longctx:  1 slot at the capacity block's measured max stable context for R2_CTX_HOST_MATCH/R2_CTX_QUANT_MATCH
+#           in R2_TEACHER_CTX_JSON (capped at R2_LONGCTX_CAP), for the long-context tasks; standard when
+#           the file is missing or holds no such value
+# SxC:      an explicit shape, e.g. 2x65536
+# The 4090 falls back to the standard profile when the first one does not verify.
+# R2_TOWER_PROFILE=standard
+# R2_LONGCTX_CAP=131072
+# R2_LONGCTX_CTX=                       # a context to use instead of the file's
+
+# ---- Windows ---------------------------------------------------------------------------------------
+# R2_SUN_LATEST_START=2026-11-02T04:00:00-05:00
+# R2_SUN_END=2026-11-02T05:20:00-05:00
+# R2_CAPACITY_TIMEOUT_H=3
+# R2_PIPELINE_UNIT=                      # the post-train unit (its end without PIPELINE-DONE.json = failed)
+# R2_TOWER_NIGHTLY=on                    # off: the window machinery's own 01:20 window_start runs its job queue
+# R2_TOWER_NIGHT_END=06:22               # the 4090's restore (ET); generation stops R2_GEN_MARGIN_S before
+# R2_MINI_NIGHTLY=on
+
+# ---- Heartbeat -------------------------------------------------------------------------------------
+# R2_START=2026-11-01T01:30:00-04:00
+# R2_TRAIN_RUN=9b-r32-v4b-max-derived
+# R2_DATASETS=~/distill/phase3/build-v4b-max-derived

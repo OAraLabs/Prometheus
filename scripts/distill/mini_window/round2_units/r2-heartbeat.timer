@@ -1,0 +1,10 @@
+[Unit]
+Description=distill round 2: daily heartbeat at 09:00 ET (DST-safe: the timer carries the zone)
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 America/New_York
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

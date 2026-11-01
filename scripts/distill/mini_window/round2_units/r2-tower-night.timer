@@ -1,0 +1,10 @@
+[Unit]
+Description=distill round 2: nightly 4090 teacher at 01:12 ET
+
+[Timer]
+OnCalendar=*-*-* 01:12:00 America/New_York
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

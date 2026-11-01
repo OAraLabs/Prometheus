@@ -198,6 +198,15 @@ GEN_DEFAULTS: dict[str, str] = {
     "GEN_MAX_HOURS": "40",                            # refuse an --until further out than this
     "GEN_MIN_RUN_S": "600",                           # refuse an --until closer than this
     "GEN_MIN_START_S": "180",                         # no child (re)started closer to --until than this
+    # round 2 (operator 2026-11-01; scripts/distill/mini_window/round2_chain.py writes these into the conf it
+    # starts the runner with): extra ``teacher_gen.py run`` flags per branch (shell words, appended last;
+    # no spaces inside one argument), and the local branch's run directory name under GEN_RUNS (empty:
+    # local-<served alias>; "{alias}" in it is replaced by that alias). teacher_gen refuses to resume an
+    # output written with other settings, so a
+    # change of these flags (or of the code) needs a new run directory.
+    "GEN_LOCAL_EXTRA_ARGS": "",
+    "GEN_LOCAL_NAME": "",
+    "GEN_REMOTE_EXTRA_ARGS": "",
     # ``remote``: the 4090's teacher on the tailnet (module docstring)
     "GEN_REMOTE_CODE": "~/distill/phase2b/code-remote",
     # host-specific, set in window.conf (never committed): the 4090's tailnet name, its URL and the ssh target
@@ -546,6 +555,9 @@ class Gen:
         return env
 
     def local_out(self) -> Path:
+        name = self.c.get("GEN_LOCAL_NAME", "").strip()
+        if name:  # "{alias}" in it: the served teacher's alias (the IQ3 and Q4 teachers never share an output)
+            return self.runs / slug(name.replace("{alias}", slug(self.alias or "teacher")).lower())
         return self.runs / f"local-{slug(self.alias or 'teacher')}"
 
     def paid_out(self, mode: str = ROUTE_PAYG) -> Path:
@@ -607,7 +619,8 @@ class Gen:
                 + (["--teacher", "local"] if self.has_teacher_flag() else [])
                 + ["--out", str(self.local_out()), "--teacher-url", c["MODEL_URL"], "--probe-guard-url",
                    self.guard_url, "--concurrency", c["GEN_LOCAL_CONCURRENCY"],
-                   "--sandbox-root", self.sandbox_root("local")] + self.common_args(until))
+                   "--sandbox-root", self.sandbox_root("local")] + self.common_args(until)
+                + shlex.split(c.get("GEN_LOCAL_EXTRA_ARGS", "")))
 
     def judge_argv(self, mode: str = ROUTE_PAYG) -> list[str]:
         c = self.c
@@ -1307,7 +1320,7 @@ class RemoteGen(Gen):
         glob_ = self.skip_glob()
         if glob_:
             a += ["--skip-done-in", glob_]
-        return a + self.common_args(until)
+        return a + self.common_args(until) + shlex.split(c.get("GEN_REMOTE_EXTRA_ARGS", ""))
 
     def preflight(self, until: float) -> list[str]:
         c = self.c

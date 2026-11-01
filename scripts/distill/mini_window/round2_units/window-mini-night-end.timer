@@ -1,0 +1,10 @@
+[Unit]
+Description=distill round 2: 3090 Ti nightly window end at 06:40 ET
+
+[Timer]
+OnCalendar=*-*-* 06:40:00 America/New_York
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

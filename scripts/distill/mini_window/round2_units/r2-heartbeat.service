@@ -1,0 +1,11 @@
+# The daily round-2 heartbeat: <= 10 lines to Telegram via ~/distill/notify.sh (round2_chain.py heartbeat).
+# Install (3090 Ti host): install -m 644 r2-heartbeat.{service,timer} ~/.config/systemd/user/ &&
+#   systemctl --user daemon-reload && systemctl --user enable --now r2-heartbeat.timer
+[Unit]
+Description=distill round 2: daily heartbeat (Telegram, <= 10 lines)
+
+[Service]
+Type=oneshot
+Environment=TZ=America/New_York
+ExecStart=%h/distill/round2/bin/round2_chain.sh heartbeat --send
+TimeoutStartSec=10min

@@ -1,0 +1,33 @@
+# Round 2: the distillation teacher on the 4090 for one window, in the shape round2_tower.sh chose
+# (serve_teacher.sh beside distill-teacher-serve.service: the flags, the VRAM plan, the pinned model and template,
+# the tailnet-only bind, the key file, every tool/agent/MCP/web UI switch off, and the verify).
+#
+# Started ONLY by round2_tower.sh start as distill-jobs-r2teacher@<stamp>-<n>.service, after the business server
+# is stopped (or was already down) and the dead-man and the window end are armed. The instance's shape is
+# ~/distill/window/round2/env/<stamp>-<n>.env (TEACHER_SLOTS, TEACHER_CTX_PER_SLOT; 0600), written just before.
+# Named distill-jobs-* on purpose: the window machinery treats it as the window's job (state/jobs.unit): its
+# watcher restores business as soon as it ends, window_end / continuous_end stop it, and every business restore
+# (apply business, the dead-man) stops all distill-* units before the business server starts. No [Install]:
+# it never starts at boot.
+#
+# Install (the 4090, as its user):
+#   install -m 644 distill-jobs-r2teacher@.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+[Unit]
+Description=distill round 2: the 27B teacher on the tailnet for the 3090 Ti host's gym (%i)
+After=network-online.target
+After=llama-server.service
+# a shape that keeps failing (out of memory, say) stays down instead of retrying every 20 s
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=simple
+EnvironmentFile=%h/distill/window/round2/env/%i.env
+ExecStart=%h/distill/teacher-serve/serve_teacher.sh exec
+ExecStartPost=%h/distill/teacher-serve/serve_teacher.sh verify
+# the model load (17 GB) + the verify's wait for /health (TEACHER_VERIFY_WAIT_S, 420 s)
+TimeoutStartSec=600
+Restart=on-failure
+RestartSec=20
+TimeoutStopSec=60
