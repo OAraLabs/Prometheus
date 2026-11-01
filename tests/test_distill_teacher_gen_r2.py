@@ -209,18 +209,39 @@ def test_a_computed_code_in_the_reply_is_following_and_no_exposure_is_no_row(tmp
     assert status == "rejected" and "injection_not_exposed" in reasons
 
 
-def test_the_calibrated_judge_gates_a_calibrated_category(tmp_path: Path, no_outbound: Any) -> None:
+def test_in_a_calibrated_category_the_run_judge_is_information_only_and_call_rows_wait(tmp_path: Path,
+                                                                                       no_outbound: Any) -> None:
+    """The calibration holds for judge.py's per-call rubric on the 4090's quant, not for this
+    run's self-judge (another rubric and view, any quant): its verdict neither passes nor drops a
+    row; the rows with a call wait for the calibrated judge (judge_pending), the prose row does not."""
     t = _inj_task("Look it up in the wiki: which host runs cobalt-intake?", category="coding")
+    bad = {"verdict": "fail", "outcome": "not_done", "tools_ok": True, "grounded": True, "reason": "no"}
+    for verdict in (None, bad):
+        with FakeTeacher(scripted({"cobalt-intake": [WIKI_CALL, "echo"]}), verdict=verdict) as fake:
+            status, rows, reasons, extra = _process(t, _settings(tmp_path / str(bool(verdict)), fake.url))
+            assert fake.kinds["judge"] == 1  # asked, for the record
+        assert status == "kept", reasons  # a fail of this judge drops nothing
+        j = extra["verification"]["judge"]
+        assert j["applied"] is False and j["pending"] is True and j["calibration_judge_match"] is False
+        assert j["info_only"]["verdict"] == ("fail" if verdict else "pass")
+        assert extra["verification"]["judge_pending"] is True
+        call_row, prose_row = rows
+        assert call_row["_meta"]["judge_pending"] is True and call_row["_meta"]["verifier"] == "judge-pending"
+        assert call_row["_meta"]["judge_scope"] == "calibrated-pending"
+        assert call_row["_meta"]["call_result"]["status"] == "success"
+        assert t.adversarial["instruction"] in call_row["_meta"]["call_result"]["text"]
+        assert prose_row["_meta"]["judge_pending"] is False and prose_row["_meta"]["judge_scope"] == "not-applicable"
+        assert prose_row["_meta"]["verifier"] == "deterministic" and "call_result" not in prose_row["_meta"]
+
+
+def test_an_uncalibrated_category_asks_no_judge_and_its_rows_never_wait(tmp_path: Path, no_outbound: Any) -> None:
+    t = _inj_task("Look it up in the wiki: which host runs cobalt-intake?", category="other")
     with FakeTeacher(scripted({"cobalt-intake": [WIKI_CALL, "echo"]})) as fake:
         status, rows, _reasons, extra = _process(t, _settings(tmp_path, fake.url))
-        assert fake.kinds["judge"] == 1
-    assert status == "kept" and extra["verification"]["judge"]["applied"] is True
-    assert extra["verification"]["verifiers"] == ["tool-success", "deterministic", "judge"]
-    assert rows[-1]["_meta"]["verifier"] == "deterministic"
-    bad = {"verdict": "fail", "outcome": "not_done", "tools_ok": True, "grounded": True, "reason": "no"}
-    with FakeTeacher(scripted({"cobalt-intake": [WIKI_CALL, "echo"]}), verdict=bad) as fake:
-        status, _rows, reasons, _extra = _process(t, _settings(tmp_path / "b", fake.url))
-    assert status == "rejected" and reasons == ["judge_fail"]
+        assert fake.kinds["judge"] == 0
+    assert status == "kept" and extra["verification"]["judge"]["pending"] is False
+    assert {r["_meta"]["judge_scope"] for r in rows} == {"uncalibrated-category"}
+    assert not any(r["_meta"]["judge_pending"] for r in rows)
 
 
 def _err_task(prompt: str, fams: list[dict[str, Any]]) -> Any:

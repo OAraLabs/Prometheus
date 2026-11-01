@@ -770,7 +770,8 @@ UNJUDGED_VERIFIERS = ("deterministic", "tool-success")
 def verification_of(meta: dict[str, Any], *, strict: bool = False,
                     judge_models: tuple[str, ...] | None = None,
                     payg_judge: bool = False,
-                    unjudged_verifiers: tuple[str, ...] | None = None) -> Verification:
+                    unjudged_verifiers: tuple[str, ...] | None = None,
+                    calibrated_pass: bool = False) -> Verification:
     """The row's ``_meta.verification`` record, read fail-closed (module docstring).
 
     Each part is either absent or exactly its safe value; any other value
@@ -785,9 +786,13 @@ def verification_of(meta: dict[str, Any], *, strict: bool = False,
     local judge because the row's category is not calibrated) has no judge at all. Under
     *strict* it verifies only with ``round: 2``, a ``verifier`` in *unjudged_verifiers*,
     a row category outside the record's ``calibrated_categories`` (a skipped judge in a
-    calibrated category fails closed), and for ``deterministic`` its passing checks
-    (``r2.deterministic``); basis ``r2-<verifier>``. Without *unjudged_verifiers* it
-    fails ``no_judge`` as before."""
+    calibrated category fails closed, except a prose row: ``_meta.judge_scope:
+    not-applicable``, the calibrated rubric rates calls), and for ``deterministic`` its
+    passing checks (``r2.deterministic``); basis ``r2-<verifier>``. Without
+    *unjudged_verifiers* it fails ``no_judge`` as before. A row whose ``_meta.judge_pending``
+    is true (a call in a calibrated category) verifies ONLY with *calibrated_pass* (the
+    calibrated judge passed it: ``Builder.calibrated_verdict``), basis
+    ``r2-calibrated-judge``; else it fails ``judge_pending``."""
     rec = meta.get("verification")
     if rec is None:
         return Verification(None, "absent")
@@ -835,6 +840,14 @@ def verification_of(meta: dict[str, Any], *, strict: bool = False,
     if strict:
         if "tool_success" not in rec:
             return Verification(False, "no_tool_success")
+        if not judged and meta.get("judge_pending") is True:
+            if not calibrated_pass:
+                return Verification(False, "judge_pending")
+            if "sandboxed" not in rec:
+                return Verification(False, "no_sandbox_record")
+            if not effects:
+                return Verification(False, "no_side_effects_record")
+            return Verification(True, "r2-calibrated-judge")
         if not judged:
             if not (not_applied and unjudged_verifiers):
                 return Verification(False, "no_judge")
@@ -842,7 +855,8 @@ def verification_of(meta: dict[str, Any], *, strict: bool = False,
             if rec.get("round") != 2 or verifier not in unjudged_verifiers:
                 return Verification(False, "unjudged_verifier_not_allowed")
             category = meta.get("category")
-            if category in ((skipped_judge or {}).get("calibrated_categories") or ()):
+            if category in ((skipped_judge or {}).get("calibrated_categories") or ()) \
+                    and meta.get("judge_scope") != "not-applicable":
                 return Verification(False, "judge_skipped_in_calibrated_category")
             det = (rec.get("r2") or {}).get("deterministic") or {}
             if verifier == "deterministic" and not (det.get("checks") and det.get("pass") is True):
@@ -883,7 +897,8 @@ def load_index(path: str | None) -> dict[tuple[str, int], dict[str, Any]]:
 
 
 def load_verdicts(paths: list[str], stats: collections.Counter,
-                   checks: dict[str, Any] | None = None) -> dict[str, str]:
+                   checks: dict[str, Any] | None = None, judges: dict[str, dict[str, Any]] | None = None,
+                   aliases: dict[str, str] | None = None) -> dict[str, str]:
     """trace key -> "pass" | "fail". Later files (and later rows) win.
 
     A ``judge.py`` row (it has a ``source`` object) counts only with
@@ -903,6 +918,12 @@ def load_verdicts(paths: list[str], stats: collections.Counter,
     ``judge_key: payg``; the operator's PAYG ruling for Phase 2 judging): it is
     applied like a local judge's and counted in ``verdict_rows_payg_max_judge``,
     which does not fail the gate.
+
+    Round 2: *judges* (key -> who judged: provider, model, route, host, quant, sha256, view,
+    rubric version) is filled for judge.py rows, so build.py can tell the calibrated judge's
+    verdicts from any other; *aliases* maps a judge.py row's ``source.h_exact`` (``build.py
+    judge-pending`` items carry it) to its key, so the verdict still finds its trace when the
+    trace file was copied or renamed. An alias is not a second verdict (never "unmatched").
     """
     out: dict[str, str] = {}
 
@@ -945,6 +966,11 @@ def load_verdicts(paths: list[str], stats: collections.Counter,
                 out[key] = v
                 if checks is not None:
                     checks[key] = src.get("telemetry_rowid")
+                if judges is not None:
+                    judges[key] = {k: row.get(k) for k in ("provider", "model", "judge_route", "judge_host",
+                                                           "judge_quant", "judge_sha256", "view", "rubric_version")}
+                if aliases is not None and isinstance(src.get("h_exact"), str):
+                    aliases[src["h_exact"]] = key
                 continue
             key = row.get("trace_id") or row.get("h_exact")
             if not key and row.get("file") and row.get("line") is not None:
@@ -2012,6 +2038,9 @@ class Settings:
     replay_from: str | None = None
     replay_share: float = 0.4
     replay_seed: str = "replay-v1"
+    # Round 2: the calibrated judge (--judge-calibration: the report's judge, view and rubric).
+    # Only its verdicts decide a judge_pending row; None: every judge_pending row waits
+    calibrated_judge: dict[str, Any] | None = None
 
 
 def capped_splits(train_all: list[Example], val_all: list[Example], s: Settings,
@@ -2147,8 +2176,13 @@ class Builder:
                  lcm: LcmSnapshot | None = None, spool: Path | None = None,
                  verdict_checks: dict[str, Any] | None = None,
                  eval_holdout_tasks: set[str] | frozenset[str] = frozenset(),
-                 excluded_prompts: set[str] | frozenset[str] = frozenset()) -> None:
+                 excluded_prompts: set[str] | frozenset[str] = frozenset(),
+                 verdict_judges: dict[str, dict[str, Any]] | None = None,
+                 verdict_aliases: dict[str, str] | None = None) -> None:
         self.student = student
+        # round 2: who judged each judge.py verdict, and h_exact -> its key
+        self.verdict_judges = verdict_judges or {}
+        self.verdict_aliases = verdict_aliases or {}
         # tasks (Phase 1 prompt hashes) an earlier eval set holds: they stay eval-tools
         self.eval_holdout_tasks = frozenset(eval_holdout_tasks)
         # task proxies of every user message a --exclude-sessions session holds
@@ -2187,6 +2221,24 @@ class Builder:
         self.models_by_source: dict[str, collections.Counter] = collections.defaultdict(
             collections.Counter)
         self.replay_info: dict[str, Any] | None = None
+
+    def calibrated_verdict(self, key: str | None) -> bool:
+        """The verdict under *key* is the calibrated judge's: judge.py's local judge with the
+        calibration report's quant, host and file sha256, in its view and rubric version."""
+        cal = self.s.calibrated_judge
+        who = self.verdict_judges.get(key or "")
+        if not cal or not who or who.get("provider") != "local":
+            return False
+
+        def within(value: Any, allowed: Any) -> bool:
+            return not allowed or (value is not None and str(value) in {str(a) for a in allowed})
+
+        return (within(who.get("judge_quant"), cal.get("quants")) and bool(who.get("judge_quant"))
+                and within(who.get("judge_host"), cal.get("hosts"))
+                and within(who.get("judge_sha256"), cal.get("sha256"))
+                and within(who.get("view"), [cal["view"]] if cal.get("view") else None)
+                and within(who.get("rubric_version"),
+                           [cal["rubric_version"]] if cal.get("rubric_version") else None))
 
     def exclude(self, trace: Trace, reason: str) -> None:
         self.stats[f"excluded:{reason}"] += 1
@@ -2385,6 +2437,9 @@ class Builder:
             return
         # label
         vkey = next((k for k in (trace.trace_id, keys.h_exact) if k in self.verdicts), None)
+        if vkey is None and keys.h_exact in self.verdict_aliases \
+                and self.verdict_aliases[keys.h_exact] in self.verdicts:
+            vkey = self.verdict_aliases[keys.h_exact]
         verdict = self.verdicts[vkey] if vkey is not None else None
         if vkey is not None:
             self.verdicts_used.add(vkey)
@@ -2393,12 +2448,25 @@ class Builder:
                 # the corpus moved since judging: the verdict may be another trace's
                 self.stats["verdict_index_mismatch"] += 1
                 verdict = None
-        if verdict is None and meta.get("verdict"):
+        pending = meta.get("judge_pending") is True and trace.kind == "extra"
+        calibrated_pass = False
+        if pending:
+            # round 2: only the calibrated judge's verdict decides it, pass or drop; any other
+            # verdict (the generating run's self-judge, another quant or host) is ignored
+            if verdict is not None and not self.calibrated_verdict(vkey):
+                self.stats["judge_pending_uncalibrated_verdict_ignored"] += 1
+                verdict = None
+            calibrated_pass = verdict == "pass"
+        elif verdict is None and meta.get("verdict"):
             verdict = str(meta["verdict"]).lower()
+        if meta.get("judge_scope") == "not-applicable" and (trace.raw["messages"][-1].get("tool_calls")):
+            self.exclude(trace, "judge_scope_mismatch")  # a call is never outside the calibrated judge
+            return
         # A Max row's record may name the pay-per-token Max judge; a train-source
         # (local 27B) row's needs a --judge-models judge (OPEN-QUESTIONS #6)
         record = (verification_of(meta, strict=train_source or payg_gym, judge_models=self.judge_models,
-                                  payg_judge=not train_source, unjudged_verifiers=self.s.unjudged_verifiers)
+                                  payg_judge=not train_source, unjudged_verifiers=self.s.unjudged_verifiers,
+                                  calibrated_pass=calibrated_pass)
                   if trace.kind != "fail" else Verification(None, "absent"))
         if record.decision is not None:
             outcome_key = "verification:" + ("pass" if record.decision else record.basis)
@@ -2412,7 +2480,8 @@ class Builder:
             self.exclude(trace, "judge_fail")
             return
         elif record.decision is False:
-            self.exclude(trace, "verification_failed")
+            # a judge_pending row with no calibrated verdict yet: not trainable until one exists
+            self.exclude(trace, "judge_pending" if record.basis == "judge_pending" else "verification_failed")
             return
         elif train_source:
             # Only the row's own strict record verifies it: a verdict (from
@@ -3279,6 +3348,13 @@ def cmd_build(a: argparse.Namespace) -> int:
     if unjudged and set(unjudged) - set(UNJUDGED_VERIFIERS):
         print(f"error: --unjudged-verifiers takes {','.join(UNJUDGED_VERIFIERS)} or none", file=sys.stderr)
         return 2
+    calibrated_judge = None
+    if a.judge_calibration:
+        try:
+            calibrated_judge = calibrated_judge_of(a.judge_calibration)
+        except (OSError, ValueError) as exc:
+            print(f"error: --judge-calibration: {exc}", file=sys.stderr)
+            return 2
     if a.replay_from:
         if not 0.0 < a.replay_share < 1.0:
             print("error: --replay-share is a share of the final train set, above 0 and below 1", file=sys.stderr)
@@ -3320,7 +3396,7 @@ def cmd_build(a: argparse.Namespace) -> int:
         prewindow_chars_per_token=a.prewindow_chars_per_token,
         split_turns=not a.no_split_turns, limit=a.limit,
         unjudged_verifiers=unjudged, replay_from=a.replay_from, replay_share=a.replay_share,
-        replay_seed=a.replay_seed,
+        replay_seed=a.replay_seed, calibrated_judge=calibrated_judge,
     )
     out = Path(a.out).expanduser()
     out.mkdir(parents=True, exist_ok=True)
@@ -3329,7 +3405,9 @@ def cmd_build(a: argparse.Namespace) -> int:
     student = R.Student.load(a.tokenizer_dir)
     stats: collections.Counter = collections.Counter()
     checks: dict[str, Any] = {}
-    verdicts = load_verdicts(a.verdicts or [], stats, checks)
+    judges: dict[str, dict[str, Any]] = {}
+    aliases: dict[str, str] = {}
+    verdicts = load_verdicts(a.verdicts or [], stats, checks, judges, aliases)
     lcm = LcmSnapshot(a.lcm_snapshot) if a.lcm_snapshot else None
     spool = None if a.dry_run else out / "spool.jsonl"
     # a pre-pass: the listed sessions' prompts, so a gym row built from one (no
@@ -3339,7 +3417,7 @@ def cmd_build(a: argparse.Namespace) -> int:
     b = Builder(student=student, pack=pack, catalog=catalog, settings=s,
                 index=load_index(a.index), verdicts=verdicts, lcm=lcm, spool=spool,
                 verdict_checks=checks, eval_holdout_tasks=holdout_tasks,
-                excluded_prompts=excluded_prompts)
+                excluded_prompts=excluded_prompts, verdict_judges=judges, verdict_aliases=aliases)
     b.stats.update(stats)
     n = 0
     for paths, kind in ((golden, "golden"), (extra, "extra"), (fail, "fail")):
@@ -3384,6 +3462,139 @@ def cmd_build(a: argparse.Namespace) -> int:
                         for k, v in gates.items()}
     print(json.dumps(summary, indent=1))
     return 0 if gates["overall"] == "PASS" else 1
+
+
+def calibrated_judge_of(path: str | Path) -> dict[str, Any]:
+    """The judge a calibration report (judge.py ``calibrate``) measured, and where it applies:
+    {quants, hosts, sha256, models, view, rubric_version, apply, sha256_report}. A report that did
+    not decide ``use-local-judge`` applies nowhere."""
+    raw = Path(path).expanduser().read_bytes()
+    rep = json.loads(raw)
+    if not isinstance(rep, dict) or not str(rep.get("schema") or "").startswith("distill-judge-calibration/"):
+        raise ValueError(f"{path} is not a judge calibration report")
+    judge = rep.get("judge") or {}
+    use = (rep.get("decision") or {}).get("decision") == "use-local-judge"
+    return {"quants": sorted(judge.get("quants") or {}), "hosts": sorted(judge.get("hosts") or {}),
+            "sha256": sorted(judge.get("sha256") or []), "models": sorted(judge.get("models") or {}),
+            "view": rep.get("view"), "rubric_version": rep.get("rubric_version"),
+            "apply": sorted(c["category"] for c in rep.get("by_category") or []
+                            if use and isinstance(c, dict) and c.get("apply") is True),
+            "sha256_report": hashlib.sha256(raw).hexdigest()}
+
+
+JUDGE_QUEUE_SCHEMA = "distill-judge-queue/1"
+JUDGE_LOCAL_MODE = "local-judge"  # judge.py MODE_LOCAL_JUDGE: run --provider local, ledger phase 2-judge-local
+
+
+def pending_call_result(row: dict[str, Any], later: list[dict[str, Any]]) -> dict[str, Any]:
+    """The judged call's own result for judge.py's outcome view: teacher_gen's ``call_result``,
+    else the tool message answering that call in a later row of the same run."""
+    meta = row.get("_meta") or {}
+    cr = meta.get("call_result")
+    if isinstance(cr, dict) and cr.get("status") in ("success", "error"):
+        return {"status": cr["status"], "text": cr.get("text") or None}
+    calls = row["messages"][-1].get("tool_calls") or []
+    cid = (calls[0] or {}).get("id") if calls else None
+    for r in later:
+        for m in r.get("messages") or []:
+            if m.get("role") == "tool" and cid and m.get("tool_call_id") == cid:
+                return {"status": "error" if m.get("is_error") else "success",
+                        "text": content_text(m.get("content"))[:6000] or None}
+    return {"status": "success", "text": None}
+
+
+def cmd_judge_pending(a: argparse.Namespace) -> int:
+    """``judge-pending``: every round-2 row teacher_gen marked ``judge_pending`` (a call in a
+    calibrated category) as an item of judge.py's local-judge queue in ``--workdir``: the trace
+    exactly as build.py reads it, its category, ``source`` = {file name, 0-based line, h_exact}
+    (build.py's verdict keys), and the call's own result (the outcome view). Rows already
+    judged in a ``--done`` verdict file (by h_exact) are left out. Then, on this host:
+
+        judge.py --workdir <workdir> run --provider local --judge-url http://<4090>:18094 \\
+            --judge-key-file ~/distill/secrets/teacher-4090.key
+
+    and the build reads ``<workdir>/judge-sample.jsonl`` with ``--verdicts`` (last) and
+    ``--judge-calibration``. Exit 8 when nothing is pending (as judge.py subset)."""
+    cal = calibrated_judge_of(a.calibration)
+    work = Path(a.workdir).expanduser()
+    queue_path, meta_path = work / "judge-queue.jsonl", work / "judge-queue.meta.json"
+    if queue_path.exists() and not a.force:
+        print(f"{queue_path} exists; pass --force to replace it (judge.py resumes by item id)", file=sys.stderr)
+        return 1
+    done: set[str] = set()
+    for f in a.done:
+        p = Path(f).expanduser()
+        if p.is_file():
+            for line in p.read_text(encoding="utf-8").split("\n"):
+                if line.strip():
+                    r = json.loads(line)
+                    h_ex = (r.get("source") or {}).get("h_exact")
+                    if r.get("status") == "ok" and h_ex:
+                        done.add(str(h_ex))
+    paths = sorted(expand(a.traces), key=lambda x: x.name)
+    if len({x.name for x in paths}) != len(paths):
+        print("error: trace file names must be unique (verdict keys are <file name>:<line>)", file=sys.stderr)
+        return 2
+    items: list[dict[str, Any]] = []
+    counts: collections.Counter = collections.Counter()
+    files: list[dict[str, Any]] = []
+    for path in paths:
+        rows = [json.loads(x) for x in path.read_text(encoding="utf-8").split("\n") if x.strip()]
+        files.append({"name": path.name, "rows": len(rows), "sha256": _file_sha256(path)})
+        by_run: dict[str, list[tuple[int, dict[str, Any]]]] = collections.defaultdict(list)
+        for i, r in enumerate(rows):
+            by_run[str((r.get("_meta") or {}).get("run_id"))].append((i, r))
+        for i, r in enumerate(rows):
+            meta = r.get("_meta") or {}
+            if meta.get("judge_pending") is not True:
+                continue
+            counts["pending"] += 1
+            cat = str(meta.get("category"))
+            if cat not in cal["apply"]:
+                counts["not_a_calibrated_category"] += 1  # the calibration changed since generation
+                continue
+            if not (r["messages"][-1].get("tool_calls")):
+                counts["no_call"] += 1
+                continue
+            h_ex = trace_keys(r).h_exact
+            if h_ex in done:
+                counts["already_judged"] += 1
+                continue
+            later = [rr for j, rr in by_run[str(meta.get("run_id"))] if j > i]
+            items.append({
+                "id": "r2p-" + h_ex, "label": "pass", "category": cat, "stratum_weight": 1.0,
+                "source": {"file": path.name, "line": i, "h_exact": h_ex, "round": 2},
+                "messages": r["messages"], "tools": r.get("tools") or [],
+                "meta": {k: meta.get(k) for k in ("source", "model", "task_id", "target_area", "run_id", "step",
+                                                  "teacher_host", "teacher_quant", "tool_name")},
+                "outcome": pending_call_result(r, later)})
+            counts["queued"] += 1
+            counts[f"queued:{cat}"] += 1
+    ids = [it["id"] for it in items]
+    if len(set(ids)) != len(ids):  # the same call twice (a row copied into two files): judge it once
+        seen: set[str] = set()
+        items = [it for it in items if not (it["id"] in seen or seen.add(it["id"]))]
+    meta_out = {"schema": JUDGE_QUEUE_SCHEMA, "mode": JUDGE_LOCAL_MODE,
+                "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "round2_pending": dict(sorted(counts.items())), "trace_files": files,
+                "calibration": {"path": str(Path(a.calibration).expanduser()), "sha256": cal["sha256_report"],
+                                "apply_categories": cal["apply"], "judge_quants": cal["quants"],
+                                "judge_hosts": cal["hosts"], "view": cal["view"],
+                                "rubric_version": cal["rubric_version"]},
+                "n_pass": len(items), "n_fail": 0}
+    print(json.dumps({"queued": len(items), **{k: v for k, v in meta_out.items()
+                                               if k in ("round2_pending", "calibration")}}, indent=1))
+    if not items:
+        print("nothing pending for the calibrated judge (no queue written)", file=sys.stderr)
+        return 8
+    work.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for path, text in ((queue_path, "".join(json.dumps(it, ensure_ascii=False) + "\n" for it in items)),
+                       (meta_path, json.dumps(meta_out, indent=1) + "\n")):
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    return 0
 
 
 def parse_share(text: str, flag: str) -> float:
@@ -3731,6 +3942,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bd.add_argument("--unjudged-verifiers", default=",".join(UNJUDGED_VERIFIERS),
                     help="round 2: verifiers a row whose record skipped the local judge (category not "
                          "calibrated) may train on: deterministic,tool-success (default), a subset, or none")
+    bd.add_argument("--judge-calibration", metavar="REPORT",
+                    help="round 2: the judge calibration report; a judge_pending row trains only on a verdict "
+                         "of the judge it calibrated (provider local, its quant, host, file sha256, view, rubric)")
     bd.add_argument("--exclude-bad-turns", action="store_true")
     bd.add_argument("--train-range", type=int, nargs=2, default=[DEFAULT_MIN_TRAIN_ROWS, 10000])
     bd.add_argument("--min-train-rows", type=int, metavar="N",
@@ -3749,6 +3963,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bd.add_argument("--keep-spool", action="store_true")
     bd.add_argument("--progress", action="store_true")
 
+    jp = sub.add_parser("judge-pending", help="round 2: judge_pending rows -> a judge.py local-judge queue")
+    jp.add_argument("--traces", action="append", required=True,
+                    help="teacher_gen trace files (glob, repeatable): the SAME files build reads (--extra-traces)")
+    jp.add_argument("--calibration", required=True, help="the judge calibration report (calibration-report.json)")
+    jp.add_argument("--workdir", required=True, help="judge.py's --workdir for the pass (queue + verdicts)")
+    jp.add_argument("--done", action="append", default=[],
+                    help="verdict files already holding calibrated verdicts (judge-sample.jsonl; rows judged "
+                         "there are not queued again)")
+    jp.add_argument("--force", action="store_true", help="replace an existing queue (judge.py resumes by id)")
     sc = sub.add_parser("spot-check", help="compare renders with llama-server /apply-template")
     sc.add_argument("--server", required=True)
     sc.add_argument("--rows", required=True)
@@ -3766,6 +3989,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_pack(a)
     if a.cmd == "build":
         return cmd_build(a)
+    if a.cmd == "judge-pending":
+        return cmd_judge_pending(a)
     return cmd_spot_check(a)
 
 

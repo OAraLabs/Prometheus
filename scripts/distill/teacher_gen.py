@@ -445,20 +445,27 @@ real prompt and adds one execution condition, applied by the sandbox:
   (``not_grounded``).
 
 Judging (``--judge-calibration``, default ``R2_DEFAULT_CALIBRATION``, required):
-the local judge is called and gates a row only in the categories the
-calibration report applies (``use-local-judge`` and ``by_category[].apply``;
-coding and sentinel/daemon today). Elsewhere no judge is called and no verdict
-keeps or drops a row: it is kept on its deterministic checks or tool success
-alone, its record says ``judge: {"applied": false, ...}``. Every round-2 record
-and row says ``round: 2``, ``target_area``, ``verifier`` (deterministic when a
-task-specific deterministic check passed, else judge when the calibrated judge
-passed it, else tool-success), ``verifiers`` (every gate passed) and its
-steering bucket; a judged record says whether the judge is the calibrated one
-(``calibration_judge_match``: the calibration measured one quant). The final
-prose turn of an injection, recovery or long-context task is a row
+no verdict of this run's judge ever keeps or drops a round-2 row. The calibration
+(>= 85% against Max) was measured for judge.py's per-call rubric v2 in the outcome
+view on the 4090's UD-Q4_K_XL; this file's self-judge has another rubric and view
+(the whole task, done / reported_blocked), so it is calibrated nowhere, on any quant
+(``calibration_judge_match: false``). In a category the report applies (coding,
+sentinel/daemon today) the self-judge still runs, its verdict recorded as
+information only (``judge.info_only``), and every row with a call is
+``judge_pending`` (``_meta.judge_scope: calibrated-pending``, ``verifier:
+judge-pending``): ``build.py judge-pending`` exports them to judge.py's local-judge
+queue, the calibrated judge rates them, and build.py trains them only on that
+verdict. A prose row there (``not-applicable``: the calibrated rubric rates calls)
+and every row of another category (``uncalibrated-category``) keeps on its
+deterministic checks or tool success alone; its record says ``judge: {"applied":
+false, ...}``. Every round-2 record and row says ``round: 2``, ``target_area``,
+``verifier`` (deterministic when a task-specific deterministic check passed, else
+tool-success, or judge-pending), ``verifiers`` and its steering bucket; a row with a
+call carries ``call_result`` (the first call's own result: the outcome view). The
+final prose turn of an injection, recovery or long-context task is a row
 (``R2_FINAL_TURN_AREAS``). build.py trains an unjudged row only with
-``--unjudged-verifiers`` (default deterministic,tool-success) and never in a
-calibrated category.
+``--unjudged-verifiers`` (default deterministic,tool-success), never one in a
+calibrated category unless it is a prose row.
 
 Steering (``--steer``, default ``R2_DEFAULT_STEER``; ``steer.py``): the
 ``R2Scheduler`` balances the buckets (areas; daily-agent by category) to the
@@ -5894,10 +5901,22 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
             if k == "task_id" or k not in meta:
                 meta[k] = v
         if task.r2:
-            # round 2: which area this row serves, how it was verified, its steering bucket
-            meta.update(round=2, target_area=task.r2.get("area"), verifier=verification.get("verifier"),
-                        verifiers=verification.get("verifiers"), r2_bucket=task.sched_key,
-                        r2_variant=task.variant)
+            # round 2: which area this row serves, how it was verified, its steering bucket. A row
+            # with a call in a calibrated category waits for the calibrated judge (judge_pending);
+            # a prose row there has no calibrated judge (it rates calls): its own checks verify it
+            pending_cat = bool((verification.get("judge") or {}).get("pending"))
+            scope = ("calibrated-pending" if pending_cat and uses else
+                     "not-applicable" if pending_cat else "uncalibrated-category")
+            meta.update(round=2, target_area=task.r2.get("area"), r2_bucket=task.sched_key,
+                        r2_variant=task.variant, judge_scope=scope, judge_pending=scope == "calibrated-pending",
+                        verifier="judge-pending" if scope == "calibrated-pending" else verification.get("verifier"),
+                        verifiers=verification.get("verifiers"))
+        if uses:
+            # the first call's own result, as the sandbox returned it (the calibrated judge's outcome view)
+            ev0 = events.get(uses[0].id) or {}
+            meta["call_result"] = {"status": "error" if ev0.get("is_error") else "success",
+                                   "text": str(ev0.get("result") or "")[:6000],
+                                   "injected": ev0.get("outcome") == "injected"}
         rows.append({"messages": wire + [target],
                      "tools": [] if task.mode == "chat" else list(payload.get("tools") or []),
                      "_meta": meta})
@@ -6921,14 +6940,31 @@ async def process(task: GenTask, settings: Settings, worker: int) -> tuple[str, 
             return "rejected", [], reasons, extra
         import httpx
 
-        if task.r2 and not settings.judge_applies(task.domain):
-            # Round 2: the local judge is a gate only where the calibration report applies it.
-            # Elsewhere no judge verdict keeps or drops a row: it is kept on its deterministic
-            # checks (or tool success alone), and labelled so (``verifier``).
-            record["judge"] = {"applied": False, "kind": settings.judge_kind,
-                               "reason": f"category {task.domain} is not calibrated for the local judge",
+        if task.r2:
+            # Round 2: no verdict of this run's judge keeps or drops a row. In a category the
+            # calibration report applies, the calibrated judge decides LATER (judge.py, rubric v2,
+            # outcome view, the 4090's UD-Q4_K_XL, fed by ``build.py judge-pending``): the rows
+            # with a call are judge_pending, and this run's self-judge verdict is recorded as
+            # information only (its rubric and view are not the calibrated ones; calibrated
+            # nowhere, so calibration_judge_match is false whatever the quant). Elsewhere no judge
+            # is asked: rows keep on their deterministic checks or tool success (``verifier``).
+            calibrated = settings.judge_applies(task.domain)
+            record["judge"] = {"applied": False, "pending": calibrated, "kind": settings.judge_kind,
+                               "reason": (f"category {task.domain} is calibrated, but only for judge.py's rubric "
+                                          f"v{settings.calibration_info.get('rubric_version') or '2'} on the "
+                                          "calibrated judge: its rows with a call wait for that judge (judge_pending)"
+                                          if calibrated else
+                                          f"category {task.domain} is not calibrated for the local judge"),
+                               "calibration_judge_match": False,
                                "calibration_sha256": settings.calibration_info.get("sha256"),
                                "calibrated_categories": sorted(settings.calibrated)}
+            if calibrated:
+                try:
+                    info = await judge(out, settings)
+                    record["judge"]["info_only"] = {k: info.get(k) for k in (
+                        "verdict", "outcome", "pass", "served_model", "reason", "kind", "provider")}
+                except Exception as exc:  # noqa: BLE001 - information only: never the task's outcome
+                    record["judge"]["info_only"] = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
             label_r2(record, judged=False)
             extra["judge"] = record["judge"]
             if settings.payg:
@@ -6966,15 +7002,6 @@ async def process(task: GenTask, settings: Settings, worker: int) -> tuple[str, 
             return "rejected", [], ["judge_model_refused"], extra
         if not record["judge"]["pass"]:
             return "rejected", [], ["judge_fail"], extra
-        if task.r2:
-            # the calibration was measured on one judge (its quant): say whether this one is it
-            quants = settings.calibration_info.get("judge_quants") or []
-            served = _norm_tag(record["judge"].get("served_model"))
-            record["judge"].update(applied=True, calibration_sha256=settings.calibration_info.get("sha256"),
-                                   calibrated_categories=sorted(settings.calibrated),
-                                   calibration_judge_match=bool(served) and any(
-                                       _norm_tag(q) and _norm_tag(q) in served for q in quants))
-            label_r2(record, judged=True)
         record["verified"] = True
         rows = rows_for(out, settings, record)
         if not rows:
@@ -6987,13 +7014,16 @@ async def process(task: GenTask, settings: Settings, worker: int) -> tuple[str, 
 
 
 def label_r2(record: dict[str, Any], *, judged: bool) -> None:
-    """A round-2 row's verifier: ``deterministic`` when a task-specific deterministic check
-    passed (the injection, the grounding), else ``judge`` when the calibrated local judge
-    passed it, else ``tool-success``; ``verifiers`` lists every gate the row passed."""
+    """A round-2 task's verifier: ``deterministic`` when a task-specific deterministic check
+    passed (the injection, the grounding), else ``tool-success``; ``verifiers`` lists every
+    gate the task passed (``judged``: a calibrated judge passed it in this run, which no
+    teacher_gen judge is today). ``judge_pending``: its category is calibrated, so its rows
+    with a call wait for the calibrated judge (each row says so: ``_meta.judge_pending``)."""
     det = ((record.get("r2") or {}).get("deterministic") or {})
     gates = ["tool-success"] + (["deterministic"] if det.get("checks") and det.get("pass") else []) \
         + (["judge"] if judged else [])
     record["round"] = 2
+    record["judge_pending"] = bool((record.get("judge") or {}).get("pending"))
     record["verifiers"] = gates
     record["verifier"] = "deterministic" if "deterministic" in gates else "judge" if judged else "tool-success"
 
@@ -7785,6 +7815,8 @@ def load_calibration(path: str | Path) -> tuple[frozenset[str], dict[str, Any]]:
     judge = rep.get("judge") or {}
     return apply, {"sha256": hashlib.sha256(raw).hexdigest(), "decision": decision,
                    "threshold": rep.get("threshold"), "apply": sorted(apply),
+                   "view": rep.get("view"), "rubric_version": rep.get("rubric_version"),
+                   "judge_hosts": sorted((judge.get("hosts") or {})),
                    "judge_models": sorted((judge.get("models") or {})), "judge_quants": sorted((judge.get("quants") or {})),
                    "judge_sha256": judge.get("sha256")}
 

@@ -9,6 +9,7 @@ from typing import Any
 
 from tests.test_distill_build import (  # noqa: F401 - helpers
     GYM,
+    _load,
     GYM_MODEL,
     VERIFIED,
     build,
@@ -209,3 +210,123 @@ def test_allocate_is_proportional_and_capped() -> None:
     assert build.allocate({"a": 70, "b": 20, "c": 10}, 10) == {"a": 7, "b": 2, "c": 1}
     assert build.allocate({"a": 3, "b": 100}, 50) == {"a": 1, "b": 49}
     assert sum(build.allocate({"a": 1, "b": 1}, 5).values()) == 2
+
+
+# ── judge_pending: only the calibrated judge decides ─────────────────────────
+
+CAL_HOST, CAL_SHA, CAL_QUANT = "tower-4090", "b" * 64, "UD-Q4_K_XL"
+def _calibration(tmp_path: Path) -> Path:
+    rep = {"schema": "distill-judge-calibration/2", "view": "outcome", "rubric_version": "2",
+           "decision": {"decision": "use-local-judge"},
+           "by_category": [{"category": "coding", "apply": True}, {"category": "other", "apply": False}],
+           "judge": {"models": {"qwen3.8-27b-ud-q4_k_xl": 9}, "hosts": {CAL_HOST: 9}, "quants": {CAL_QUANT: 9},
+                     "sha256": [CAL_SHA]}}
+    p = tmp_path / "calibration-report.json"
+    p.write_text(json.dumps(rep))
+    return p
+
+
+def _pending(task: str, *, scope: str = "calibrated-pending", category: str = "coding",
+             prose: bool = False) -> dict[str, Any]:
+    rec = r2_record("tool-success")
+    rec["judge"].update(pending=True)
+    rec["judge_pending"] = True
+    row = gym(task, "bash", {"command": f"make {task}"}, category=category, verification=rec, round=2,
+              judge_scope=scope, judge_pending=scope == "calibrated-pending", run_id=f"run-{task}",
+              call_result={"status": "success", "text": f"built {task}", "injected": False})
+    if prose:
+        row["messages"][-1] = {"role": "assistant", "content": f"Done: {task} is built and the tests pass."}
+        row["_meta"].pop("tool_name")
+        row["_meta"].pop("call_result")
+    return row
+
+
+def _verdict(item: dict[str, Any], verdict: str, **who: Any) -> dict[str, Any]:
+    row = {"id": item["id"], "label": "pass", "category": item["category"], "source": item["source"],
+           "view": "outcome", "rubric_version": "2", "provider": "local", "judge_key": "none",
+           "model": "qwen3.8-27b-ud-q4_k_xl", "judge_route": "remote", "judge_host": CAL_HOST,
+           "judge_quant": CAL_QUANT, "judge_sha256": CAL_SHA, "status": "ok", "verdict": verdict}
+    row.update(who)
+    return row
+
+
+def _builder(tmp_path: Path, verdict_files: list[Path], cal: Path | None) -> Any:
+    stats: Any = build.collections.Counter()
+    checks: dict[str, Any] = {}
+    judges: dict[str, Any] = {}
+    aliases: dict[str, str] = {}
+    verdicts = build.load_verdicts([str(p) for p in verdict_files], stats, checks, judges, aliases)
+    s = build.Settings(train_range=(1, 100000), eval_min=0, min_presence=0, train_sources=(GYM,),
+                       eval_task_frac=0.0, val_frac=0.0, category_cap=1.0,
+                       calibrated_judge=build.calibrated_judge_of(cal) if cal else None)
+    from tests.test_distill_build import make_pack, make_student
+    b = build.Builder(student=make_student(), pack=make_pack(), catalog="stubs", settings=s, index={},
+                      verdicts=verdicts, spool=tmp_path / "spool.jsonl", verdict_checks=checks,
+                      verdict_judges=judges, verdict_aliases=aliases)
+    b.stats.update(stats)
+    return b
+
+
+def test_judge_pending_rows_train_only_on_the_calibrated_judges_verdict(tmp_path: Path, capsys: Any) -> None:
+    cal = _calibration(tmp_path)
+    rows = [_pending("gym" + word(t)) for t in range(6)] + [_pending("prose", scope="not-applicable", prose=True)]
+    traces = write_jsonl(tmp_path / "qwen38-27b-gym.r2.traces.jsonl", rows)
+    work = tmp_path / "judge-pending"
+    a = build.parse_args(["judge-pending", "--traces", str(traces), "--calibration", str(cal),
+                          "--workdir", str(work)])
+    assert build.cmd_judge_pending(a) == 0
+    items = read_jsonl(work / "judge-queue.jsonl")
+    meta = json.loads((work / "judge-queue.meta.json").read_text())
+    assert meta["mode"] == "local-judge" and meta["calibration"]["judge_quants"] == [CAL_QUANT]
+    assert len(items) == 6 and all(it["outcome"]["text"].startswith("built ") for it in items)
+    assert all(it["source"]["file"] == traces.name and it["id"] == "r2p-" + it["source"]["h_exact"] for it in items)
+    # judge.py renders the item in its outcome view, result included
+    jd = _load("distill_judge", "judge.py")
+    text, _cut = jd.render_prompt(items[0], view="outcome")
+    assert "## What the tool returned" in text and items[0]["outcome"]["text"] in text
+    # no verdict yet: the call rows wait, the prose row trains on its own checks
+    (tmp_path / "a").mkdir()
+    b = _builder(tmp_path / "a", [], cal)
+    feed(b, traces, "extra")
+    assert b.stats["excluded:judge_pending"] == 6
+    assert [e.label for e in b.examples] == ["r2-tool-success"]
+    # the calibrated judge's verdicts: 4 pass, 1 fail; one row judged by the IQ3 run judge (ignored)
+    vs = [_verdict(it, "pass") for it in items[:4]] + [_verdict(items[4], "fail")] \
+        + [_verdict(items[5], "pass", judge_quant="IQ3_XXS", judge_host="mini-host", judge_sha256="c" * 64)]
+    vfile = write_jsonl(work / "judge-sample.jsonl", vs)
+    (tmp_path / "b").mkdir()
+    b = _builder(tmp_path / "b", [vfile], cal)
+    feed(b, traces, "extra")
+    labels = sorted(e.label for e in b.examples)
+    assert labels.count("r2-calibrated-judge") == 4 and "r2-tool-success" in labels
+    assert b.stats["excluded:judge_fail"] == 1 and b.stats["excluded:judge_pending"] == 1
+    assert b.stats["judge_pending_uncalibrated_verdict_ignored"] == 1
+    b.split()
+    assert b.gates()["verdicts"]["pass"]
+    # without --judge-calibration nothing is the calibrated judge: every call row waits
+    (tmp_path / "c").mkdir()
+    b = _builder(tmp_path / "c", [vfile], None)
+    feed(b, traces, "extra")
+    assert b.stats["excluded:judge_pending"] == 6
+    # the verdicts still find their rows when the trace file is copied under another name (h_exact)
+    (tmp_path / "inputs-r2").mkdir()
+    copied = write_jsonl(tmp_path / "inputs-r2" / "qwen38-27b-gym.copy.jsonl", rows)
+    (tmp_path / "d").mkdir()
+    b = _builder(tmp_path / "d", [vfile], cal)
+    feed(b, copied, "extra")
+    assert sorted(e.label for e in b.examples).count("r2-calibrated-judge") == 4
+    b.split()
+    assert b.gates()["verdicts"]["unmatched"] == 0
+    # a second export leaves out what the calibrated judge already rated
+    a = build.parse_args(["judge-pending", "--traces", str(traces), "--calibration", str(cal),
+                          "--workdir", str(work), "--done", str(vfile), "--force"])
+    assert build.cmd_judge_pending(a) == 8
+    capsys.readouterr()
+
+
+def test_a_prose_scope_that_holds_a_call_is_refused(tmp_path: Path) -> None:
+    row = _pending("sneaky", scope="not-applicable")  # a call, but labelled as outside the judge's reach
+    (tmp_path / "a").mkdir()
+    b = _builder(tmp_path / "a", [], _calibration(tmp_path))
+    feed(b, write_jsonl(tmp_path / "x.jsonl", [row]), "extra")
+    assert b.stats["excluded:judge_scope_mismatch"] == 1 and not b.examples
