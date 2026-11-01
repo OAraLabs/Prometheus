@@ -221,6 +221,12 @@ primary's group only: ``build.py`` reads one ``_meta.task_id``, so the
 partner's group (``"tg-" + sources[1].pattern_hash``) is not joined today;
 carry it as ``_meta.partner_task_id`` for when ``build.py`` unions on it.
 
+Round 2: ``round2_tasks.py`` writes rows of this schema plus an ``r2`` block
+(``validate_r2``): the area, the planned verifier, ``needs_ctx`` and at most one
+execution condition (injection / failure / longctx). Such a row's id is
+``r2_task_id(prompt, variant)`` (a variant of a prompt a round-1 run already did
+is a new task in every ledger); ``r2.base_id`` is the real prompt's own id.
+
 Determinism: one ``--seed``; every draw comes from ``random.Random`` streams
 keyed by the seed and a template id, inputs are read in sorted order, so the
 same seed over the same inputs gives a byte-identical task file.
@@ -2286,9 +2292,121 @@ _ID = re.compile(r"ts-[0-9a-f]{16}")
 _TPL = re.compile(r"tpl-[0-9a-f]{16}")
 _HASH = re.compile(r"[0-9a-f]{16}")
 
+# ---------------------------------------------------------------------------
+# Round 2 (``round2_tasks.py``): execution conditions on a real-pattern row
+# ---------------------------------------------------------------------------
+#
+# A round-2 row is a real-pattern row (its prompt, slots, sources and provenance
+# unchanged and still traceable) plus an ``r2`` block that ``round2_tasks.py``
+# wrote by code: the target area, the planned verifier, the context the teacher
+# must hold (``needs_ctx``) and at most one execution condition: adversarial
+# content placed in a tool result (``injection``), a real failure pattern from
+# the harvest (``failure``) or real repo files already read into the turn
+# (``longctx``). Its id is salted with the variant, so a round-2 row of a prompt
+# a round-1 run already did is a new task in every ledger.
+
+R2_SCHEMA = "distill-r2/1"
+R2_AREAS = ("injection-resistance", "error-recovery", "long-context", "daily-agent", "coding")
+R2_VERIFIERS = ("deterministic", "tool-success", "calibrated-judge")
+R2_VECTORS = ("tool_output", "memory", "wiki")
+R2_CTX_BUCKETS = ("32k", "64k", "128k")
+_R2_KEYS = {"schema", "round", "area", "variant", "base_id", "verifier", "needs_ctx", "ctx_bucket",
+            "injection", "failure", "longctx"}
+_R2_INJ_KEYS = {"vector", "style", "goal", "template_id", "instruction", "carriers", "placement",
+                "forbidden_tools", "forbidden_args", "forbidden_strings", "setup_files", "fixtures"}
+
+
+def r2_task_id(prompt: str, variant: str) -> str:
+    """A round-2 row's id: the prompt's task proxy salted with its variant."""
+    return "ts-" + h(norm(prompt) + "\x00r2\x00" + variant)
+
+
+def r2_task_hash(prompt: str, variant: str) -> str:
+    return r2_task_id(prompt, variant)[3:]
+
+
+def validate_r2(r2: Any, row: dict[str, Any]) -> list[str]:
+    """Schema problems of a row's ``r2`` block (empty: valid)."""
+    if not isinstance(r2, dict):
+        return ["r2: not an object"]
+    p: list[str] = []
+    extra = set(r2) - _R2_KEYS
+    if extra:
+        p.append(f"r2: unknown keys {sorted(extra)}")
+    if r2.get("schema") != R2_SCHEMA or r2.get("round") != 2:
+        p.append(f"r2: schema must be {R2_SCHEMA} and round 2")
+    if r2.get("area") not in R2_AREAS:
+        p.append(f"r2.area: {r2.get('area')!r} not in {R2_AREAS}")
+    if r2.get("verifier") not in R2_VERIFIERS:
+        p.append(f"r2.verifier: {r2.get('verifier')!r} not in {R2_VERIFIERS}")
+    if not isinstance(r2.get("variant"), str) or not r2["variant"]:
+        p.append("r2.variant: missing")
+    if not isinstance(r2.get("base_id"), str) or not _ID.fullmatch(r2["base_id"]):
+        p.append("r2.base_id: bad format")
+    elif r2["base_id"] != "ts-" + h(norm(row.get("prompt") or "")):
+        p.append("r2.base_id: is not the real prompt's own id")
+    if not isinstance(r2.get("needs_ctx"), int) or isinstance(r2.get("needs_ctx"), bool) or r2["needs_ctx"] <= 0:
+        p.append("r2.needs_ctx: a positive int")
+    if r2.get("ctx_bucket") not in (None,) + R2_CTX_BUCKETS:
+        p.append("r2.ctx_bucket: none or one of " + "/".join(R2_CTX_BUCKETS))
+    conds = [k for k in ("injection", "failure", "longctx") if r2.get(k) is not None]
+    if len(conds) > 1:
+        p.append("r2: at most one of injection / failure / longctx")
+    area = r2.get("area")
+    want = {"injection-resistance": "injection", "error-recovery": "failure", "long-context": "longctx"}.get(area)
+    if want and conds != [want]:
+        p.append(f"r2: a {area} row carries exactly its {want} block")
+    if not want and conds:
+        p.append(f"r2: a {area} row carries no execution condition")
+    if want and row.get("mode") != "agentic":
+        p.append(f"r2: a {area} row is an agentic row")
+    flags = row.get("flags") if isinstance(row.get("flags"), dict) else {}
+    if flags.get("force_compaction"):
+        p.append("r2: a round-2 row is never a force_compaction row")
+    if bool(flags.get("inject_errors")) != (area == "error-recovery"):
+        p.append("r2: flags.inject_errors is set exactly on an error-recovery row")
+    inj = r2.get("injection")
+    if inj is not None:
+        if not isinstance(inj, dict) or set(inj) - _R2_INJ_KEYS:
+            p.append("r2.injection: bad block")
+        else:
+            if inj.get("vector") not in R2_VECTORS:
+                p.append("r2.injection.vector: bad")
+            if not isinstance(inj.get("instruction"), str) or not inj["instruction"].strip():
+                p.append("r2.injection.instruction: missing")
+            if not (isinstance(inj.get("carriers"), list) and inj["carriers"]
+                    and all(isinstance(c, str) for c in inj["carriers"])):
+                p.append("r2.injection.carriers: a non-empty list of tool names")
+            if not any(inj.get(k) for k in ("forbidden_tools", "forbidden_args", "forbidden_strings")):
+                p.append("r2.injection: no deterministic check (forbidden tools / args / strings)")
+            pl = inj.get("placement")
+            if not isinstance(pl, (int, float)) or not 0 <= pl <= 1:
+                p.append("r2.injection.placement: a share in [0, 1]")
+    fail = r2.get("failure")
+    if fail is not None:
+        fams = fail.get("families") if isinstance(fail, dict) else None
+        if not (isinstance(fams, list) and fams and all(
+                isinstance(f, dict) and isinstance(f.get("tool"), str) and isinstance(f.get("output"), str)
+                and f["output"].strip() and isinstance(f.get("family"), str)
+                and isinstance(f.get("count"), int) and f["count"] > 0 for f in fams)):
+            p.append("r2.failure.families: each {tool, family, output, count > 0}")
+    lc = r2.get("longctx")
+    if lc is not None:
+        reads = lc.get("reads") if isinstance(lc, dict) else None
+        if not (isinstance(reads, list) and reads and all(
+                isinstance(x, dict) and isinstance(x.get("path"), str) and x["path"]
+                and not Path(x["path"]).is_absolute() and ".." not in Path(x["path"]).parts
+                and isinstance(x.get("limit"), int) and 1 <= x["limit"] <= 2000
+                and isinstance(x.get("offset", 0), int) for x in reads)):
+            p.append("r2.longctx.reads: relative paths with an offset and a limit (1..2000)")
+        if r2.get("ctx_bucket") is None:
+            p.append("r2: a long-context row names its ctx_bucket")
+    return p
+
 
 def validate_task(row: Any) -> list[str]:
-    """Schema problems of one taskset row (empty: valid)."""
+    """Schema problems of one taskset row (empty: valid). A row with an ``r2``
+    block (``round2_tasks.py``) is a round-2 row: its id is ``r2_task_id``."""
     if not isinstance(row, dict):
         return ["row is not an object"]
     p: list[str] = []
@@ -2298,14 +2416,21 @@ def validate_task(row: Any) -> list[str]:
     for k, typ in want.items():
         if not isinstance(row.get(k), typ):
             p.append(f"{k}: missing or not {typ.__name__}")
-    extra = set(row) - set(want)
+    extra = set(row) - set(want) - {"r2"}
     if extra:
         p.append(f"unknown keys {sorted(extra)}")
     if p:
         return p
+    r2 = row.get("r2")
+    if "r2" in row:
+        p += validate_r2(r2, row)
+        if p:
+            return p
     if not _ID.fullmatch(row["id"]):
         p.append("id: bad format")
-    elif row["id"] != "ts-" + h(norm(row["prompt"])):
+    elif r2 is not None and row["id"] != r2_task_id(row["prompt"], r2["variant"]):
+        p.append("id: does not match the prompt and its round-2 variant")
+    elif r2 is None and row["id"] != "ts-" + h(norm(row["prompt"])):
         p.append("id: does not match the prompt")
     if not row["prompt"].strip():
         p.append("prompt: empty")

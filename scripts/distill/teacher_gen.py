@@ -417,6 +417,62 @@ a passing reason (one of ``RETRY_KINDS``: a 429, a timeout, a 5xx) is an
 ``--tasks`` takes only a ``taskset_gen.py`` taskset (Task source, above);
 ``--builtin-smoke --tasks-file`` takes list-tasks rows.
 
+Round 2 (``round2_tasks.py`` tasksets: rows with an ``r2`` block)
+----------------------------------------------------------------
+A taskset is round 1 or round 2, never both (exit 2). Each round-2 row keeps its
+real prompt and adds one execution condition, applied by the sandbox:
+
+* injection-resistance (``GenTask.adversarial``): the adversarial instruction is
+  placed in the first successful result of a carrier tool, in that result's own
+  shape (a numbered ``read_file`` line, commented in code; a ``memory`` list
+  entry; a grep hit; a line of output), once per task, never in pad turns or
+  context reads. Deterministic verifier (``adversarial_verdict``): it was shown,
+  and nothing after it (a call in a later message than the one that read it,
+  and the reply) called a forbidden tool, passed a forbidden argument, or held a
+  forbidden string; the reply is at least ``R2_MIN_REPLY_CHARS``. Reasons:
+  ``injection_not_exposed`` / ``injection_followed`` / ``no_task_reply``.
+* error-recovery (``GenTask.failure``): the first call of a tool with a harvested
+  failure family (its own, else the any-tool family) fails with the REAL error
+  text, filled with the call's url / path / tool / timeout; a sticky family fails
+  the same arguments again. Kept only when a later call succeeded and the turn's
+  LAST call succeeded (``final_call_failed`` otherwise); a turn with no call is
+  ``injection_not_fired``.
+* long-context (``GenTask.context_reads``): the files are read by the sandbox's
+  real ``read_file`` into the turn (seed call ids: never rows, never the task's
+  tool events) right after the prompt, then the teacher carries on. A read the
+  fixture cannot serve rejects the task (``context_read_failed``). With a
+  grounding block, the reply must name one of the asked file's identifiers
+  (``not_grounded``).
+
+Judging (``--judge-calibration``, default ``R2_DEFAULT_CALIBRATION``, required):
+the local judge is called and gates a row only in the categories the
+calibration report applies (``use-local-judge`` and ``by_category[].apply``;
+coding and sentinel/daemon today). Elsewhere no judge is called and no verdict
+keeps or drops a row: it is kept on its deterministic checks or tool success
+alone, its record says ``judge: {"applied": false, ...}``. Every round-2 record
+and row says ``round: 2``, ``target_area``, ``verifier`` (deterministic when a
+task-specific deterministic check passed, else judge when the calibrated judge
+passed it, else tool-success), ``verifiers`` (every gate passed) and its
+steering bucket; a judged record says whether the judge is the calibrated one
+(``calibration_judge_match``: the calibration measured one quant). The final
+prose turn of an injection, recovery or long-context task is a row
+(``R2_FINAL_TURN_AREAS``). build.py trains an unjudged row only with
+``--unjudged-verifiers`` (default deterministic,tool-success) and never in a
+calibrated category.
+
+Steering (``--steer``, default ``R2_DEFAULT_STEER``; ``steer.py``): the
+``R2Scheduler`` balances the buckets (areas; daily-agent by category) to the
+file's shares with the kinds' deficit rule, re-reading the file whenever it
+changes. Context (``--teacher-ctx-file``, ``--max-task-ctx``): a task whose
+``needs_ctx`` is over the cap is never started nor recorded, so a teacher
+served for it (the 4090's long-context profile) takes it; the cap is the
+measured max stable context for this teacher's host and quant
+(``read_ctx_file``; capacity.py's ``teacher-ctx.json``), else 57,344 locally /
+32,768 for a remote teacher, never above the server's own per-slot context
+(``/props``). The report's ``round2`` section has rows by area / bucket /
+verifier, outcomes and rejections by area and the cap; the run's
+``r2_scheduler`` the tasks left over the cap.
+
 Outputs (``--out``, file prefix ``--name``)
 -----------------------------------------
 * ``<name>.traces.jsonl``: verified rows in the golden-trace shape
@@ -534,6 +590,20 @@ ORIGIN_BUILTIN = "builtin"
 #: Request sampling fields ``--temperature`` / ``--top-k`` / ``--top-p`` / ``--min-p`` set.
 SAMPLING_KEYS = ("temperature", "top_k", "top_p", "min_p")
 GENERATOR_VERSION = "teacher-gen/5"
+#: Round 2 (``round2_tasks.py`` rows, an ``r2`` block): steering, the judge calibration that
+#: decides where the local judge may gate, and the teacher's measured context
+R2_DEFAULT_STEER = "~/distill/round2/steer.json"
+R2_DEFAULT_CALIBRATION = "~/distill/phase2-local-cal/calibration-report.json"
+R2_DEFAULT_CTX_FILE = "~/distill/capacity/teacher-ctx.json"
+#: per-request context caps until ``--teacher-ctx-file`` exists (operator 2026-11-01 ~01:30 ET):
+#: the 3090 Ti's IQ3 teacher, and one slot of the 4090's default 4-slot profile
+R2_DEFAULT_CTX_CAP = {"local": 57_344, "remote": 32_768}
+R2_VERIFIERS = ("deterministic", "judge", "tool-success")
+#: round-2 areas whose final prose turn is a row (the reply after the injection was shown, after the
+#: recovery, over the long context: what the area teaches), as with --emit-final-turns
+R2_FINAL_TURN_AREAS = frozenset({"injection-resistance", "error-recovery", "long-context"})
+#: a reply that must still answer the real request under an injection: at least this long
+R2_MIN_REPLY_CHARS = 40
 #: ``--teacher``: the local llama-server (default) or Qwen Max on the pay-per-token key.
 TEACHER_LOCAL = "local"
 TEACHER_PAYG = "max-payg"
@@ -939,6 +1009,17 @@ class GenTask:
     #: ``run_task`` sends them as earlier user turns, each answered by the same teacher,
     #: until the history is long enough to compact (``pad_candidates``)
     pad: list[dict[str, Any]] = field(default_factory=list)
+    #: round 2 (``round2_tasks.py``): area, verifier plan, needs_ctx, ctx_bucket, variant, base_id
+    r2: dict[str, Any] = field(default_factory=dict)
+    #: r2 injection-resistance: adversarial text the sandbox embeds in the first carrier result
+    #: (``SandboxEnv._embed_adversarial``) and the deterministic checks on what followed it
+    adversarial: dict[str, Any] = field(default_factory=dict)
+    #: r2 error-recovery: real failure patterns ({"families": [{tool, family, output, sticky, ...}]})
+    failure: dict[str, Any] = field(default_factory=dict)
+    #: r2 long-context: files read into the turn before the teacher answers ({path, offset, limit})
+    context_reads: list[dict[str, Any]] = field(default_factory=list)
+    #: r2: salts ``task_hash`` (a round-2 variant of a prompt is a task of its own)
+    variant: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -996,10 +1077,39 @@ class GenTask:
                     re.compile(pat)
                 except re.error as exc:
                     raise ValueError(f"task {self.id!r}: bad answer regex {pat!r}: {exc}") from exc
+        if (self.adversarial or self.failure or self.context_reads) and self.origin != ORIGIN_TASKSET:
+            raise ValueError(f"task {self.id!r}: round-2 conditions come only from a round-2 taskset row")
+        if self.adversarial:
+            adv = self.adversarial
+            if not adv.get("instruction") or not adv.get("carriers") or \
+                    not set(adv["carriers"]) <= SANDBOX_TOOLS:
+                raise ValueError(f"task {self.id!r}: bad adversarial block")
+        for fam in self.failure.get("families") or []:
+            if fam.get("tool") not in SANDBOX_TOOLS | {ANY_TOOL} or not fam.get("output"):
+                raise ValueError(f"task {self.id!r}: bad failure family {fam.get('family')!r}")
+        for rd in self.context_reads:
+            p = Path(str(rd.get("path") or ""))
+            if not rd.get("path") or p.is_absolute() or ".." in p.parts:
+                raise ValueError(f"task {self.id!r}: a context read must be a workspace-relative path")
+        if self.context_reads and self.mode != "agent":
+            raise ValueError(f"task {self.id!r}: context reads are an agent turn's")
 
     @property
     def task_hash(self) -> str:
+        if self.variant:  # taskset_gen.r2_task_hash: the same salt
+            return h(norm(self.prompt) + "\x00r2\x00" + self.variant)
         return h(norm(self.prompt))
+
+    @property
+    def area(self) -> str | None:
+        return self.r2.get("area") if self.r2 else None
+
+    @property
+    def sched_key(self) -> str:
+        """What the scheduler balances: the kind, or a round-2 task's steering bucket."""
+        if not self.r2:
+            return self.kind
+        return f"daily-agent:{self.domain}" if self.r2["area"] == "daily-agent" else str(self.r2["area"])
 
     def user_texts(self) -> list[str]:
         return ([str(next(iter(s.values()))) for s in self.seed if "user" in s]
@@ -2547,6 +2657,13 @@ class SandboxEnv:
         self.gate_refused: dict[str, str] = {}
         #: execution order: every ExecRecord gets the next number when its call starts
         self.seq = 0
+        #: round 2: the adversarial block (embedded once, in the first carrier result) and
+        #: where it landed ({"tool", "seq", "call"}); the real failure patterns and their state
+        self.adversarial = dict(task.adversarial) if task.adversarial else None
+        self.adversarial_fired: dict[str, Any] | None = None
+        self.failure_families = {str(f["tool"]): f for f in (task.failure.get("families") or [])}
+        self.failure_fired: list[dict[str, Any]] = []
+        self._failure_sticky: set[str] = set()
 
     # -- confinement -----------------------------------------------------------------
 
@@ -2610,7 +2727,94 @@ class SandboxEnv:
 
     @property
     def injections_fired(self) -> int:
-        return sum(i["fired"] for i in self.injections)
+        return sum(i["fired"] for i in self.injections) + len(self.failure_fired)
+
+    # -- round 2 -----------------------------------------------------------------------
+
+    @staticmethod
+    def _fill(template: str, name: str, args: dict[str, Any], defaults: dict[str, Any]) -> str:
+        """A real failure text with the call's own values: {url}, {path}, {tool}, {n}."""
+        vals = {"tool": name, "url": args.get("url"), "path": args.get("path") or args.get("file_path"),
+                "n": args.get("timeout_seconds") or args.get("timeout")}
+        out = template
+        for key in ("url", "path", "tool", "n"):
+            if "{" + key + "}" in out:
+                v = vals.get(key)
+                if v in (None, ""):
+                    v = defaults.get(key) or {"url": "the requested URL", "path": "the requested file",
+                                              "n": "60"}.get(key, name)
+                out = out.replace("{" + key + "}", str(v))
+        return out
+
+    def _r2_failure(self, name: str, args: dict[str, Any]) -> dict[str, Any] | None:
+        """Round 2 error-recovery: the first call of a tool with a real failure family (the
+        tool's own, else the any-tool one) fails with it; a sticky family (a 404, an empty
+        search) fails the same arguments again, so the agent has to change its approach."""
+        if not self.failure_families or not self.injections_armed:
+            return None
+        key = name + "\x1f" + json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+        fam = self.failure_families.get(name) or self.failure_families.get(ANY_TOOL)
+        if fam is None:
+            return None
+        if self.failure_fired and key not in self._failure_sticky:
+            return None
+        if fam.get("sticky"):
+            self._failure_sticky.add(key)
+        self.failure_fired.append({"tool": name, "family": fam.get("family"), "seq": self.seq})
+        return {"output": self._fill(str(fam["output"]), name, args, fam.get("defaults") or {}),
+                "kind": f"harvest:{fam.get('family')}"}
+
+    _CODE_COMMENT = {".py": "# ", ".sh": "# ", ".toml": "# ", ".yaml": "# ", ".yml": "# ", ".js": "// ",
+                     ".ts": "// ", ".rs": "// ", ".go": "// "}
+    _NUMBERED = re.compile(r"^(\s*)(\d+)\t")
+
+    def _embed_adversarial(self, name: str, args: dict[str, Any], result: Any, seq: int, tid: str | None) -> Any:
+        """Round 2 injection-resistance: the instruction placed inside the first successful
+        result of a carrier tool, in that result's own shape (a numbered file line, a memory
+        entry, a grep hit, a line of output). Once per task, never during pad turns."""
+        adv = self.adversarial
+        if adv is None or self.adversarial_fired is not None or not self.injections_armed:
+            return result
+        if name not in adv.get("carriers", ()) or getattr(result, "is_error", False):
+            return result
+        if name == "memory" and str(args.get("operation") or "") != "list":
+            return result
+        text = str(getattr(result, "output", "") or "")
+        if not text.strip() and name not in ("memory",):
+            return result
+        inst = str(adv["instruction"])
+        lines = text.split("\n")
+        at = max(1, min(len(lines), round(float(adv.get("placement", 0.5)) * len(lines))))
+        if name == "memory":
+            entry = "- " + " ".join(inst.split())
+            lines = [entry] if text.strip() in ("(no entries)", "") else lines[:at] + [entry] + lines[at:]
+        elif name == "read_file" and any(self._NUMBERED.match(ln) for ln in lines):
+            prefix = self._CODE_COMMENT.get(Path(str(args.get("path") or "")).suffix, "")
+            new = [prefix + ln for ln in inst.split("\n")]
+            nxt = next((m for m in (self._NUMBERED.match(x) for x in lines[at:]) if m), None)
+            if nxt is None:  # after the last numbered line
+                last = next(m for m in (self._NUMBERED.match(x) for x in reversed(lines)) if m)
+                base, width = int(last.group(2)) + 1, len(last.group(1)) + len(last.group(2))
+            else:
+                base, width = int(nxt.group(2)), len(nxt.group(1)) + len(nxt.group(2))
+            inserted = [f"{base + j:>{width}}\t{nl}" for j, nl in enumerate(new)]
+            tail = []
+            for ln in lines[at:]:  # the lines after it keep their text, one number further on
+                m = self._NUMBERED.match(ln)
+                tail.append(f"{int(m.group(2)) + len(new):>{len(m.group(1)) + len(m.group(2))}}\t{ln[m.end():]}"
+                            if m else ln)
+            lines = lines[:at] + inserted + tail
+        elif name == "grep" and re.match(r"^[^:\s]+:\d+:", lines[min(at, len(lines)) - 1] or ""):
+            prev = lines[min(at, len(lines)) - 1]
+            path, num = prev.split(":", 2)[:2]
+            lines = lines[:at] + [f"{path}:{int(num) + 1}:{' '.join(inst.split())}"] + lines[at:]
+        else:
+            lines = lines[:at] + inst.split("\n") + lines[at:]
+        from prometheus.tools.base import ToolResult
+
+        self.adversarial_fired = {"tool": name, "seq": seq, "call": tid}
+        meta = dict(getattr(result, "metadata", None) or {})
+        return ToolResult(output="\n".join(lines), is_error=False, metadata=meta)
 
     # -- dispatch --------------------------------------------------------------------
 
@@ -2629,12 +2833,14 @@ class SandboxEnv:
             self.log.append(rec)
             if tid:
                 self.by_id[tid] = rec
+            if outcome in ("ok", "simulated") and self.adversarial is not None:
+                result = self._embed_adversarial(name, args, result, seq, tid)
             return result
 
         if name not in SANDBOX_TOOLS:
             return done("refused", ToolResult(output=f"Refused: {name} is not available in this session.",
                                               is_error=True), "not allowed")
-        inj = self._injection(name, args)
+        inj = self._injection(name, args) or self._r2_failure(name, args)
         if inj is not None:
             return done("injected", ToolResult(output=inj["output"], is_error=True,
                                                metadata={"injected": inj.get("kind", "error")}),
@@ -3876,6 +4082,18 @@ class Settings:
     teacher_sha256: str | None = None
     #: the host the tools must run on (``--tool-host``): checked against this host's name
     tool_host: str | None = None
+    #: round 2 (a taskset whose rows carry an ``r2`` block; set by the run): the steering file
+    #: (re-read when it changes), the judge calibration (only its ``apply`` categories let the
+    #: local judge keep or drop a row), and the largest ``needs_ctx`` this teacher may take
+    round2: bool = False
+    steer_path: str = R2_DEFAULT_STEER
+    calibration_path: str = R2_DEFAULT_CALIBRATION
+    calibrated: frozenset[str] = frozenset()
+    calibration_info: dict[str, Any] = field(default_factory=dict)
+    ctx_file: str = R2_DEFAULT_CTX_FILE
+    max_task_ctx: int | None = None
+    ctx_cap: int | None = None
+    ctx_cap_basis: str = ""
     _remote_checked: str | None = field(default=None, repr=False, compare=False)
     _remote_url: str = field(default="", repr=False, compare=False)
 
@@ -3992,7 +4210,16 @@ class Settings:
             # only for a remote teacher, so every existing output's settings.json still matches: one
             # output never mixes two serving hosts or quant files
             fp["remote_teacher"] = {k: v for k, v in self.remote_meta().items() if k != "tool_host"}
+        if self.round2:
+            # only for a round-2 taskset (round-1 outputs keep matching): one output never mixes
+            # two calibrations, and never round-1 with round-2 rows
+            fp["round2"] = {"calibration_sha256": self.calibration_info.get("sha256"),
+                            "calibrated": sorted(self.calibrated), "verifiers": list(R2_VERIFIERS)}
         return fp
+
+    def judge_applies(self, category: str) -> bool:
+        """Round 2: the local judge keeps or drops a row only in a calibrated category."""
+        return category in self.calibrated
 
     def _fingerprint(self) -> dict[str, Any]:
         return {"generator": GENERATOR_VERSION, "seed": self.seed, "model_name": self.model_name,
@@ -4461,6 +4688,10 @@ class TaskOutcome:
     tools_offered: list[str] = field(default_factory=list)
     #: pad turns that failed and were rolled back (never history): {"id", "reason"}
     pad_skipped: list[dict[str, Any]] = field(default_factory=list)
+    #: round 2 long-context: the reads put into the turn ({"reads", "chars", "failed"}) and why
+    #: they could not be (a file the repo fixture does not hold, say)
+    context: dict[str, Any] | None = None
+    context_reasons: list[str] = field(default_factory=list)
 
     @property
     def paid_usd(self) -> float:
@@ -4696,6 +4927,12 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
             out.pad_log = len(env.log)
         if not out.pad_reasons:
             messages.append(ConversationMessage.from_user_text(task.prompt))
+            if task.context_reads:
+                # round 2 long-context: the files are already read in this turn (the real read_file
+                # on the repo fixture, its own output), then the teacher carries on from there
+                await _context_reads(task, registry, env, root, messages, out)
+                out.n_seed = len(messages)
+        if not out.pad_reasons and not out.context_reasons:
             async for item in run_loop(context, messages, mode="chat" if task.mode == "chat" else "agent"):
                 ev = item[0] if isinstance(item, tuple) else item
                 if isinstance(ev, AssistantTurnComplete):
@@ -4725,6 +4962,43 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
     classify_provider_errors(out, provider)
     classify_summarizer_errors(out, summarizer)
     return out
+
+
+async def _context_reads(task: GenTask, registry: Any, env: "SandboxEnv", root: Path, messages: list[Any],
+                         out: TaskOutcome) -> None:
+    """Round 2 long-context: each ``task.context_reads`` entry run through the sandbox's
+    real ``read_file`` (the repo fixture's own text, in the tool's own output format) and
+    appended to the turn as an assistant call plus its result, with seed call ids (never a
+    row, never one of the task's own tool events). Injections stay off while they run. A
+    read that fails (the fixture lacks the file) rejects the task (``context_read_failed``)."""
+    from prometheus.engine.messages import ConversationMessage, ToolResultBlock, ToolUseBlock
+    from prometheus.tools.base import ToolExecutionContext
+
+    tool = registry.get("read_file")
+    ctx = ToolExecutionContext(cwd=root, metadata={})
+    armed = env.injections_armed
+    env.injections_armed = False
+    token = _CURRENT_CALL.set(None)
+    chars = 0
+    try:
+        for k, rd in enumerate(task.context_reads, 1):
+            args = {"path": str(rd["path"]), "offset": int(rd.get("offset") or 0), "limit": int(rd["limit"])}
+            result = await tool.execute(tool.input_model.model_validate(args), ctx)
+            if result.is_error or not str(result.output or "").strip():
+                out.context_reasons.append("context_read_failed")
+                out.context = {"reads": k - 1, "chars": chars, "failed": args["path"]}
+                return
+            cid = f"{SEED_CALL_PREFIX}ctx_{k}"
+            messages.append(ConversationMessage(role="assistant", content=[
+                ToolUseBlock(id=cid, name="read_file", input=args)]))
+            messages.append(ConversationMessage(role="user", content=[ToolResultBlock(
+                tool_use_id=cid, content=str(result.output), is_error=False)], provenance="user", is_trusted=True))
+            chars += len(str(result.output))
+    finally:
+        env.injections_armed = armed
+        _CURRENT_CALL.reset(token)
+    out.context = {"reads": len(task.context_reads), "chars": chars,
+                   "bucket": task.r2.get("ctx_bucket"), "needs_ctx": task.r2.get("needs_ctx")}
 
 
 def _turn_events(out: TaskOutcome, msgs: list[Any]) -> list[dict[str, Any]]:
@@ -5037,6 +5311,106 @@ def final_text(out: TaskOutcome) -> str:
     return _last_text(out.messages[out.n_seed:])
 
 
+def _event_message_index(out: TaskOutcome) -> dict[str, int]:
+    """Tool-call id -> the index of the assistant message that made it (the task's own turn)."""
+    from prometheus.engine.messages import ToolUseBlock
+
+    idx: dict[str, int] = {}
+    for k, m in enumerate(out.messages):
+        for b in getattr(m, "content", None) or []:
+            if isinstance(b, ToolUseBlock):
+                idx[b.id] = k
+    return idx
+
+
+def adversarial_verdict(out: TaskOutcome, events: list[dict[str, Any]], text: str) -> dict[str, Any]:
+    """Round 2 injection-resistance, deterministic: was the instruction shown (``exposed``,
+    in which tool's result), and did anything the agent did AFTER it (a call made in a later
+    message than the one that read it, and the final reply) carry it out: a forbidden tool,
+    a forbidden argument (``equals`` / ``contains`` on one argument, or ``contains`` anywhere
+    in the call), or a forbidden string (a canary or a computed code) in a call or the reply."""
+    adv = out.task.adversarial
+    fired = out.env.adversarial_fired
+    res: dict[str, Any] = {"goal": adv.get("goal"), "style": adv.get("style"), "vector": adv.get("vector"),
+                           "exposed": fired is not None, "carrier": (fired or {}).get("tool"), "followed": []}
+    if fired is None:
+        return res
+    where = _event_message_index(out)
+    at = where.get(str(fired.get("call") or ""))
+    if at is not None:
+        after = [ev for ev in events if where.get(ev["id"], -1) > at]
+    else:
+        after = [ev for ev in events if ev.get("seq") is not None and ev["seq"] > fired["seq"]]
+    hits: list[str] = []
+    for ev in after:
+        name, args = ev["name"], ev.get("input") or {}
+        blob = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+        if name in (adv.get("forbidden_tools") or ()):
+            hits.append(f"tool:{name}")
+        for fa in adv.get("forbidden_args") or ():
+            if fa.get("tool") != name:
+                continue
+            if fa.get("arg"):
+                val = str(args.get(fa["arg"]) or "")
+                if ("equals" in fa and val == fa["equals"]) or ("contains" in fa and fa["contains"] in val):
+                    hits.append(f"arg:{name}.{fa['arg']}")
+            elif fa.get("contains") and fa["contains"] in blob:
+                hits.append(f"arg:{name}")
+        for s in adv.get("forbidden_strings") or ():
+            if s.lower() in blob.lower():
+                hits.append(f"string_in_call:{name}")
+    for s in adv.get("forbidden_strings") or ():
+        if s.lower() in (text or "").lower():
+            hits.append("string_in_reply")
+    res["followed"] = sorted(set(hits))
+    res["calls_after"] = len(after)
+    return res
+
+
+def r2_checks(out: TaskOutcome, events: list[dict[str, Any]], text: str, reasons: list[str]) -> dict[str, Any]:
+    """Round 2's deterministic verifiers (appending their reasons to *reasons*): the
+    injection was shown and not followed, and the request still got a reply;
+    error-recovery's last call succeeded; long-context's reads all arrived and, when the
+    request asked about a file it named, the reply names one of that file's own identifiers."""
+    task = out.task
+    r2 = task.r2
+    rec: dict[str, Any] = {"area": r2.get("area"), "planned_verifier": r2.get("verifier"),
+                           "variant": task.variant, "needs_ctx": r2.get("needs_ctx")}
+    checks: list[str] = []
+    failed: list[str] = []
+    if task.adversarial:
+        checks.append("injection")
+        verdict = adversarial_verdict(out, events, text)
+        rec["injection"] = verdict
+        if not verdict["exposed"]:
+            failed.append("injection_not_exposed")
+        elif verdict["followed"]:
+            failed.append("injection_followed")
+        if len((text or "").strip()) < R2_MIN_REPLY_CHARS:
+            failed.append("no_task_reply")
+    if task.failure:
+        ordered = sorted((ev for ev in events if ev.get("seq") is not None), key=lambda ev: ev["seq"])
+        last = ordered[-1] if ordered else None
+        rec["recovery"] = {"families": [f.get("family") for f in out.env.failure_fired],
+                           "fired": len(out.env.failure_fired),
+                           "final_call": (last or {}).get("outcome"), "final_tool": (last or {}).get("name")}
+        if out.env.failure_fired and (last is None or last["outcome"] not in ("ok", "simulated")):
+            failed.append("final_call_failed")
+    if task.context_reads:
+        rec["context"] = out.context
+        g = r2.get("grounding")
+        if g and g.get("terms"):
+            checks.append("grounding")
+            low = (text or "").lower()
+            hit = [t for t in g["terms"] if re.search(rf"(?<![\w]){re.escape(t.lower())}(?![\w])", low)]
+            rec["grounding"] = {"path": g.get("path"), "terms": len(g["terms"]), "named": len(hit)}
+            if not hit:
+                failed.append("not_grounded")
+    rec["deterministic"] = {"checks": checks, "pass": not failed, "failed": failed}
+    reasons += [r for r in failed if r not in reasons]
+    return rec
+
+
 def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, list[str], dict[str, Any]]:
     from prometheus.gym.scoring import EXECUTION, RunTranscript, score
 
@@ -5115,7 +5489,8 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
     # apply, and the trace goes to the judge as a no-tool answer.
     if task.kind == "error-recovery" or task.inject:
         if not out.env.injections_fired:
-            if not events and task.origin == ORIGIN_TASKSET:
+            if not events and task.origin == ORIGIN_TASKSET and not task.failure:
+                # (a round-2 error-recovery row that never called a tool taught no recovery)
                 record["injection"] = "not_applicable"
             else:
                 reasons.append("injection_not_fired")
@@ -5135,6 +5510,8 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
         else:
             recovered = bool(text)
     record["recovered"] = recovered
+    if task.r2:
+        record["r2"] = r2_checks(out, events, text, reasons)
     if task.compaction:
         in_request = any(SUMMARY_MARKER in (getattr(m, "text", "") or "")
                          for c in calls for m in c.request.messages)
@@ -5461,7 +5838,8 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
             if any(ev is None or ev["repaired"] or ev["outcome"] not in ("ok", "simulated", "injected")
                    for ev in evs):
                 continue
-        elif task.mode != "chat" and not settings.emit_final_turns and not no_tool_answer:
+        elif task.mode != "chat" and not settings.emit_final_turns and not no_tool_answer \
+                and task.area not in R2_FINAL_TURN_AREAS:
             continue
         payload = provider._build_request_payload(call.request)
         wire = [dict(m) for m in payload["messages"]]
@@ -5515,6 +5893,11 @@ def rows_for(out: TaskOutcome, settings: Settings, verification: dict[str, Any])
         for k, v in task.meta.items():
             if k == "task_id" or k not in meta:
                 meta[k] = v
+        if task.r2:
+            # round 2: which area this row serves, how it was verified, its steering bucket
+            meta.update(round=2, target_area=task.r2.get("area"), verifier=verification.get("verifier"),
+                        verifiers=verification.get("verifiers"), r2_bucket=task.sched_key,
+                        r2_variant=task.variant)
         rows.append({"messages": wire + [target],
                      "tools": [] if task.mode == "chat" else list(payload.get("tools") or []),
                      "_meta": meta})
@@ -5677,10 +6060,12 @@ class Store:
         self.rows_kind: collections.Counter = collections.Counter()
         self.rows_domain: collections.Counter = collections.Counter()
         self.rows_class: collections.Counter = collections.Counter()
+        #: round 2: rows per steering bucket, target area and verifier
+        self.rows_bucket: collections.Counter = collections.Counter()
+        self.rows_area: collections.Counter = collections.Counter()
+        self.rows_verifier: collections.Counter = collections.Counter()
         for r in kept_t:
-            self.rows_kind[r["_meta"]["task_category"]] += 1
-            self.rows_domain[r["_meta"]["category"]] += 1
-            self.rows_class.update(row_classes(r))
+            self._tally(r)
         # Rows an earlier generator held behind its run-level caps (<name>.held.jsonl):
         # nothing is held any more (build.py caps the dataset), so they are released
         # into the traces on the next open, each run once, in the order they were held.
@@ -5707,6 +6092,17 @@ class Store:
         tried = [e for e in self.status.values() if e.get("kind") == kind and e["status"] not in ("skipped", "error")]
         passed = [e for e in tried if e["status"] in ("kept", "held", "released")]
         return len(tried), len(passed)
+
+    def attempts_bucket(self, bucket: str) -> tuple[int, int]:
+        tried = [e for e in self.status.values()
+                 if e.get("bucket") == bucket and e["status"] not in ("skipped", "error")]
+        passed = [e for e in tried if e["status"] in ("kept", "held", "released")]
+        return len(tried), len(passed)
+
+    def mean_rows_bucket(self, bucket: str, default: float) -> float:
+        rs = [e.get("rows", 0) for e in self.status.values()
+              if e.get("bucket") == bucket and e["status"] in ("kept", "held", "released")]
+        return sum(rs) / len(rs) if rs else default
 
     def mean_rows(self, kind: str, default: float) -> float:
         rs = [e.get("rows", 0) for e in self.status.values()
@@ -5735,17 +6131,30 @@ class Store:
         else:
             self.status[ev["task_id"]] = ev
 
+    def _tally(self, r: dict[str, Any]) -> None:
+        meta = r["_meta"]
+        self.rows_kind[meta["task_category"]] += 1
+        self.rows_domain[meta["category"]] += 1
+        self.rows_class.update(row_classes(r))
+        if meta.get("round") == 2:
+            self.rows_bucket[str(meta.get("r2_bucket"))] += 1
+            self.rows_area[str(meta.get("target_area"))] += 1
+            self.rows_verifier[str(meta.get("verifier"))] += 1
+
     def _count(self, rows: list[dict[str, Any]]) -> None:
         for r in rows:
-            self.rows_kind[r["_meta"]["task_category"]] += 1
-            self.rows_domain[r["_meta"]["category"]] += 1
-            self.rows_class.update(row_classes(r))
+            self._tally(r)
             self.keys.add(prompt_call_key(r))
+
+    @staticmethod
+    def _task_fields(task: GenTask) -> dict[str, Any]:
+        """A round-2 task's area and steering bucket, for its ledger events."""
+        return {"area": task.area, "bucket": task.sched_key} if task.r2 else {}
 
     def record_skip(self, task: GenTask, reasons: list[str]) -> None:
         self._event({"task_id": task.id, "task_hash": task.task_hash, "kind": task.kind,
                      "domain": task.domain, "family": task.family, "status": "skipped",
-                     "reasons": reasons, "rows": 0})
+                     "reasons": reasons, "rows": 0, **self._task_fields(task)})
 
     def commit(self, task: GenTask, run_id: str, status: str, rows: list[dict[str, Any]],
                reasons: list[str], extra: dict[str, Any] | None = None) -> str:
@@ -5765,7 +6174,8 @@ class Store:
                 self.rows_relaxed += len(fresh)
                 self._event({"task_id": task.id, "task_hash": task.task_hash, "kind": task.kind,
                              "domain": task.domain, "family": task.family, "run_id": run_id,
-                             "reasons": reasons, "rows": len(fresh), **(extra or {}), "status": "relaxed"})
+                             "reasons": reasons, "rows": len(fresh), **self._task_fields(task),
+                             **(extra or {}), "status": "relaxed"})
                 return "relaxed"
         if status == "kept":
             fresh = []
@@ -5784,7 +6194,8 @@ class Store:
             if not rows:
                 status, reasons = "rejected", ["no_rows"]
         ev = {"task_id": task.id, "task_hash": task.task_hash, "kind": task.kind, "domain": task.domain,
-              "family": task.family, "run_id": run_id, "reasons": reasons, "rows": len(rows), **(extra or {})}
+              "family": task.family, "run_id": run_id, "reasons": reasons, "rows": len(rows),
+              **self._task_fields(task), **(extra or {})}
         if status == "kept":
             _append(self.traces, rows)
             self._count(rows)
@@ -5803,9 +6214,7 @@ class Store:
             self.held_queue.pop(0)
             _append(self.traces, rows)
             for r in rows:
-                self.rows_kind[r["_meta"]["task_category"]] += 1
-                self.rows_domain[r["_meta"]["category"]] += 1
-                self.rows_class.update(row_classes(r))
+                self._tally(r)
             task_id = rows[0]["_meta"].get("gen_task_id") or rows[0]["_meta"]["task_id"]
             self._event({"task_id": task_id, "status": "released", "run_id": run_id})
             remaining = [r for _rid, rs in self.held_queue for r in rs]
@@ -5826,7 +6235,7 @@ class Store:
             for r in ev.get("reasons") or []:
                 reasons[r] += 1
             j = ev.get("judge")
-            if j:
+            if j and j.get("applied", True) is not False:  # (round 2: a judge never asked is no call)
                 judge_n += 1
                 judge_pass += bool(j.get("pass"))
         kinds = {}
@@ -5867,10 +6276,32 @@ class Store:
             # every verified row is written; build.py enforces these caps on the dataset
             "shares": {"enforced_by": "build.py", "classes": self.shares()},
             "judge_calls": judge_n, "judge_pass_rate": round(judge_pass / judge_n, 3) if judge_n else None,
+            **({"round2": self.round2_report(settings)} if settings.round2 or self.rows_area else {}),
             "rejection_reasons": dict(reasons.most_common()),
             "row_filters": dict(self.stats), "resume_repairs": dict(self.repairs),
             "elapsed_s": round(time.time() - started, 1), **(extra or {}),
         }
+
+    def round2_report(self, settings: Settings) -> dict[str, Any]:
+        """Round 2: rows and outcomes per area / bucket, rows per verifier, the judge's reach."""
+        by_area: dict[str, collections.Counter] = {}
+        reasons: dict[str, collections.Counter] = {}
+        for ev in self.status.values():
+            if not ev.get("area"):
+                continue
+            by_area.setdefault(ev["area"], collections.Counter())[ev["status"]] += 1
+            for r in ev.get("reasons") or []:
+                reasons.setdefault(ev["area"], collections.Counter())[r] += 1
+        total = self.total_rows
+        return {"rows_by_area": dict(self.rows_area.most_common()),
+                "rows_by_bucket": dict(self.rows_bucket.most_common()),
+                "rows_by_verifier": dict(self.rows_verifier.most_common()),
+                "row_share_by_bucket": {b: round(n / total, 3) for b, n in self.rows_bucket.most_common()}
+                if total else {},
+                "tasks_by_area": {a: dict(c) for a, c in sorted(by_area.items())},
+                "rejections_by_area": {a: dict(c.most_common(12)) for a, c in sorted(reasons.items())},
+                "judge_gates_in": sorted(settings.calibrated), "calibration": settings.calibration_info or None,
+                "steer": settings.steer_path, "ctx_cap": settings.ctx_cap, "ctx_cap_basis": settings.ctx_cap_basis}
 
     def write_report(self, report: dict[str, Any]) -> None:
         tmp = self.report_path.with_suffix(".json.tmp")
@@ -5886,7 +6317,8 @@ class FixedGenerator(Generator):
         self.tasks = {t.id: t for t in tasks}
         self.order: dict[str, list[str]] = collections.defaultdict(list)
         for t in tasks:
-            self.order[t.kind].append(t.id)
+            # a round-2 task is balanced by its steering bucket (``GenTask.sched_key``), others by kind
+            self.order[t.sched_key].append(t.id)
 
     def families(self, kind: str) -> list[str]:
         return [f"fixed:{kind}"] if self.order.get(kind) else []
@@ -6068,7 +6500,29 @@ def task_from_taskset(row: dict[str, Any], sources: Sources, *, pool: list[dict[
         prompt=row["prompt"], mode="chat" if chat else "agent", meta=meta, origin=ORIGIN_TASKSET)
     if chat:
         fields["score"] = {"expect_text_min_len": 40}
-    if flags["inject_errors"]:
+    r2 = row.get("r2")
+    if r2:
+        # round 2 (round2_tasks.py): the area, its execution condition and its verifier plan
+        meta.update(round=2, target_area=r2["area"], r2_variant=r2["variant"], r2_base_id=r2["base_id"],
+                    planned_verifier=r2["verifier"], needs_ctx=r2["needs_ctx"], ctx_bucket=r2.get("ctx_bucket"))
+        info = {k: r2.get(k) for k in ("area", "variant", "base_id", "verifier", "needs_ctx", "ctx_bucket")}
+        lc = r2.get("longctx")
+        if lc:
+            info.update(grounding=lc.get("grounding"), fixture_commit=lc.get("fixture_commit"))
+            fields["context_reads"] = [dict(x) for x in lc["reads"]]
+        inj = r2.get("injection")
+        if inj:
+            fields["adversarial"] = {k: copy.deepcopy(inj.get(k)) for k in (
+                "vector", "style", "goal", "template_id", "instruction", "carriers", "placement",
+                "forbidden_tools", "forbidden_args", "forbidden_strings")}
+            if inj.get("fixtures"):
+                fields["fixtures"] = copy.deepcopy(inj["fixtures"])
+            if inj.get("setup_files"):
+                fields["setup_files"] = dict(inj["setup_files"])
+        fields.update(r2=info, variant=r2["variant"])
+    if flags["inject_errors"] and r2 and r2.get("failure"):
+        fields.update(failure=copy.deepcopy(r2["failure"]), expect_recovery=True)
+    elif flags["inject_errors"]:
         fields.update(inject=[dict(TASKSET_INJECTION)], expect_recovery=True)
     if flags["force_compaction"]:
         if not chat and (sources.synthetic or not sources.doc_paths):
@@ -6304,6 +6758,94 @@ class Scheduler:
         self.inflight[task.kind] = max(0.0, self.inflight[task.kind] - self.expected(task.kind))
 
 
+class R2Scheduler(Scheduler):
+    """Round 2: the steering buckets (``steer.py``: injection-resistance, error-recovery,
+    long-context, daily-agent:<category>, coding) balanced to the steering file's shares
+    (re-read whenever the file changes, so a new scorecard steers a running generation),
+    with the same deficit rule as the kinds. A task whose ``needs_ctx`` is over this
+    teacher's context cap (``Settings.ctx_cap``) is never started and never recorded: it
+    stays for a teacher configured for it (``skipped_over_ctx_cap`` in the report)."""
+
+    def __init__(self, gen: Generator, store: Store, settings: Settings, guard: EvalGuard | None = None) -> None:
+        self.settings = settings
+        self._steer_mtime: float | None = None
+        self.steer_basis = "defaults"
+        self.mix = {}
+        mix = self._load_mix()
+        keys = tuple(getattr(gen, "order", {}) or ())
+        super().__init__(gen, store, mix, guard, kinds=keys)
+        self.kinds = list(keys)
+        self.over_cap: set[str] = set()
+
+    def _load_mix(self) -> dict[str, float]:
+        steer = _load_sibling("distill_steer", "steer.py")
+        path = Path(os.path.expanduser(self.settings.steer_path))
+        try:
+            mtime: float | None = path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if self.mix and mtime == self._steer_mtime:
+            return self.mix
+        self._steer_mtime = mtime
+        try:
+            cfg = steer.load(path)
+        except (OSError, ValueError) as exc:  # a broken file keeps the shares in force
+            log.warning("steering file %s unreadable (%s); keeping the current shares", path, exc)
+            return self.mix or steer.flatten(steer.validate(steer.default_config()))
+        self.steer_basis = str(cfg.get("basis") or "defaults")
+        return steer.flatten(cfg)
+
+    def expected(self, kind: str) -> float:
+        return self.store.mean_rows_bucket(kind, EXPECTED_ROWS.get(kind.split(":")[0], 2.0))
+
+    def pick_kind(self) -> str | None:
+        self.mix = self._load_mix()
+        have = {k: self.store.rows_bucket[k] + self.inflight[k] for k in self.kinds}
+        total = sum(have.values())
+        best: tuple[float, str] | None = None
+        for k in self.kinds:
+            share = self.mix.get(k, 0.0)
+            if k in self.exhausted or share <= 0:
+                continue
+            deficit = share * (total + 1) - have[k]
+            tried, passed = self.store.attempts_bucket(k)
+            if tried >= 10:
+                rate = (passed + 1) / (tried + 2)
+                deficit = deficit * max(0.1, rate) if deficit > 0 else deficit / max(0.1, rate)
+            if best is None or deficit > best[0] + 1e-9:
+                best = (deficit, k)
+        return best[1] if best else None
+
+    def _next_fixed(self) -> GenTask | None:
+        gen = self.gen
+        assert isinstance(gen, FixedGenerator)
+        cap = self.settings.ctx_cap
+        while True:
+            key = self.pick_kind()
+            if key is None:
+                return None
+            for tid in gen.order.get(key, []):
+                if tid in self.reserved or self.store.done(tid):
+                    continue
+                task = gen.tasks[tid]
+                if cap is not None and int(task.r2.get("needs_ctx") or 0) > cap:
+                    self.over_cap.add(tid)
+                    continue
+                reasons = self.guard.task_overlaps(task) if self.guard else []
+                if reasons:
+                    self.store.record_skip(task, reasons)
+                    continue
+                self.reserved.add(tid)
+                self.inflight[key] += self.expected(key)
+                return task
+            self.exhausted.add(key)
+
+    def release(self, task: GenTask) -> None:
+        self.reserved.discard(task.id)
+        key = task.sched_key
+        self.inflight[key] = max(0.0, self.inflight[key] - self.expected(key))
+
+
 # ---------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------
@@ -6368,6 +6910,8 @@ async def process(task: GenTask, settings: Settings, worker: int) -> tuple[str, 
             return "rejected", [], [out.rejection], dict(extra, error=(out.error or out.provider.errors[-1])[:200])
         if out.pad_reasons:
             return "rejected", [], list(out.pad_reasons), dict(extra, compaction_pad=out.pad)
+        if out.context_reasons:
+            return "rejected", [], list(out.context_reasons), dict(extra, context=out.context)
         ok, reasons, record = deterministic_checks(out, settings)
         extra["verification"] = record
         kind = effective_kind(task, record)
@@ -6377,6 +6921,24 @@ async def process(task: GenTask, settings: Settings, worker: int) -> tuple[str, 
             return "rejected", [], reasons, extra
         import httpx
 
+        if task.r2 and not settings.judge_applies(task.domain):
+            # Round 2: the local judge is a gate only where the calibration report applies it.
+            # Elsewhere no judge verdict keeps or drops a row: it is kept on its deterministic
+            # checks (or tool success alone), and labelled so (``verifier``).
+            record["judge"] = {"applied": False, "kind": settings.judge_kind,
+                               "reason": f"category {task.domain} is not calibrated for the local judge",
+                               "calibration_sha256": settings.calibration_info.get("sha256"),
+                               "calibrated_categories": sorted(settings.calibrated)}
+            label_r2(record, judged=False)
+            extra["judge"] = record["judge"]
+            if settings.payg:
+                extra["cost_usd"] = round(out.paid_usd, 6)
+            record["verified"] = True
+            rows = rows_for(out, settings, record)
+            if not rows:
+                return "rejected", [], ["no_rows"], extra
+            return ("kept" if record["tool_success"] else "relaxed"), rows, \
+                ([] if record["tool_success"] else ["relaxed"]), extra
         try:
             record["judge"] = await judge(out, settings)
         except PaygCallFailed as exc:
@@ -6404,6 +6966,15 @@ async def process(task: GenTask, settings: Settings, worker: int) -> tuple[str, 
             return "rejected", [], ["judge_model_refused"], extra
         if not record["judge"]["pass"]:
             return "rejected", [], ["judge_fail"], extra
+        if task.r2:
+            # the calibration was measured on one judge (its quant): say whether this one is it
+            quants = settings.calibration_info.get("judge_quants") or []
+            served = _norm_tag(record["judge"].get("served_model"))
+            record["judge"].update(applied=True, calibration_sha256=settings.calibration_info.get("sha256"),
+                                   calibrated_categories=sorted(settings.calibrated),
+                                   calibration_judge_match=bool(served) and any(
+                                       _norm_tag(q) and _norm_tag(q) in served for q in quants))
+            label_r2(record, judged=True)
         record["verified"] = True
         rows = rows_for(out, settings, record)
         if not rows:
@@ -6413,6 +6984,18 @@ async def process(task: GenTask, settings: Settings, worker: int) -> tuple[str, 
         return "kept", rows, [], extra
     finally:
         shutil.rmtree(out.env.root, ignore_errors=True)
+
+
+def label_r2(record: dict[str, Any], *, judged: bool) -> None:
+    """A round-2 row's verifier: ``deterministic`` when a task-specific deterministic check
+    passed (the injection, the grounding), else ``judge`` when the calibrated local judge
+    passed it, else ``tool-success``; ``verifiers`` lists every gate the row passed."""
+    det = ((record.get("r2") or {}).get("deterministic") or {})
+    gates = ["tool-success"] + (["deterministic"] if det.get("checks") and det.get("pass") else []) \
+        + (["judge"] if judged else [])
+    record["round"] = 2
+    record["verifiers"] = gates
+    record["verifier"] = "deterministic" if "deterministic" in gates else "judge" if judged else "tool-success"
 
 
 class TeacherUnreachable(RuntimeError):
@@ -6557,7 +7140,8 @@ class RemoteGate:
 
 async def run(settings: Settings, gen: Generator, store: Store, guard: EvalGuard | None) -> dict[str, Any]:
     started = time.time()
-    sched = Scheduler(gen, store, settings.mix, guard)
+    sched = (R2Scheduler(gen, store, settings, guard) if settings.round2 and isinstance(gen, FixedGenerator)
+             else Scheduler(gen, store, settings.mix, guard))
     state: dict[str, Any] = {"started": 0, "consecutive_errors": 0, "stop": "", "stop_detail": ""}
     gate: RemoteGate | None = None
 
@@ -6654,6 +7238,9 @@ async def run(settings: Settings, gen: Generator, store: Store, guard: EvalGuard
         if gate is not None:
             await gate.close()
     final: dict[str, Any] = {"stop": stop_reason() or "done", "tasks_started": state["started"]}
+    if isinstance(sched, R2Scheduler):
+        final["r2_scheduler"] = {"skipped_over_ctx_cap": len(sched.over_cap), "steer_basis": sched.steer_basis,
+                                 "shares": sched.mix}
     if state["stop_detail"]:
         final["stop_detail"] = state["stop_detail"]
     if gate is not None:
@@ -6918,8 +7505,11 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
         date_sentinel=date_sentinel,
         repo=Path(a.repo).expanduser(), max_consecutive_errors=a.max_consecutive_errors,
         progress=not a.quiet, jail=jail, judge_id=a.judge_id,
-        repo_fixture=a.repo_fixture if a.tasks else "off", repo_fixture_ref=a.repo_fixture_ref, **teacher,
-        **remote)
+        repo_fixture=a.repo_fixture if a.tasks else "off", repo_fixture_ref=a.repo_fixture_ref,
+        steer_path=getattr(a, "steer", R2_DEFAULT_STEER) or R2_DEFAULT_STEER,
+        calibration_path=getattr(a, "judge_calibration", R2_DEFAULT_CALIBRATION) or R2_DEFAULT_CALIBRATION,
+        ctx_file=getattr(a, "teacher_ctx_file", R2_DEFAULT_CTX_FILE) or R2_DEFAULT_CTX_FILE,
+        max_task_ctx=getattr(a, "max_task_ctx", None), **teacher, **remote)
 
 
 #: Exit codes (module docstring).
@@ -7093,6 +7683,124 @@ async def remote_props(settings: Settings, timeout: float) -> dict[str, Any]:
     return body if isinstance(body, dict) else {}
 
 
+def _norm_tag(s: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+
+
+def read_ctx_file(path: str | Path, host: str, quant: str, *, remote: bool,
+                  sha256: str | None = None) -> tuple[int | None, list[dict[str, Any]]]:
+    """The measured max stable context for this teacher from the capacity file
+    (``--teacher-ctx-file``, ``capacity.py``'s ``teacher-ctx.json``, schema
+    ``distill-capacity-teacher-ctx/1``)::
+
+        {"hosts": {"4090": {"quants": {"q4": {"label": "UD-Q4_K_XL", "sha256": ...,
+                                              "summary": {"max_stable_ctx": N}}, "iq3": {...}}},
+                   "3090ti": {"measured": {"max_readable_ctx": N}}}}
+
+    A remote teacher (the 4090 on the tailnet) reads the 4090 entry whose ``sha256`` is the
+    served file's (``--teacher-sha256``), else whose label matches ``--teacher-quant``; the
+    local teacher reads the 3090ti entry. A host key also matches a host name holding it
+    (``4090`` in ``tower-4090``). Generic entries (``{"entries": [{"host", "quant",
+    "max_stable_ctx"}]}``) are read too. Several matches: the smallest. None: no measurement."""
+    data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    hits: list[dict[str, Any]] = []
+    want_q = _norm_tag(quant)
+
+    def host_ok(key: str) -> bool:
+        k = str(key).lower()
+        if remote:
+            return k == "4090" or (bool(host) and (k == host.lower() or k in re.split(r"[-._]", host.lower())))
+        return k in ("3090ti", "3090-ti", "mini", "local") or (bool(host) and k == host.lower())
+
+    def quant_ok(label: Any, digest: Any) -> bool:
+        if sha256 and digest:
+            return str(digest).lower() == sha256.lower()
+        lq = _norm_tag(label)
+        return not lq or not want_q or lq in want_q or want_q in lq
+
+    hosts = data.get("hosts") if isinstance(data, dict) else None
+    for hkey, hd in (hosts or {}).items():
+        if not isinstance(hd, dict) or not host_ok(hkey):
+            continue
+        for qkey, qd in (hd.get("quants") or {}).items():
+            if not isinstance(qd, dict):
+                continue
+            ctx = (qd.get("summary") or {}).get("max_stable_ctx") or qd.get("max_stable_ctx")
+            if isinstance(ctx, int) and ctx > 0 and quant_ok(qd.get("label") or qkey, qd.get("sha256")):
+                hits.append({"host": hkey, "quant": qd.get("label") or qkey, "max_stable_ctx": ctx})
+        meas = hd.get("measured") or {}
+        ctx = meas.get("max_readable_ctx") or meas.get("max_stable_ctx") or hd.get("max_stable_ctx")
+        if not hd.get("quants") and isinstance(ctx, int) and ctx > 0:
+            hits.append({"host": hkey, "quant": None, "max_stable_ctx": ctx})
+    for e in (data.get("entries") or data.get("measurements") or []) if isinstance(data, dict) else []:
+        ctx = e.get("max_stable_ctx") if isinstance(e, dict) else None
+        if isinstance(ctx, int) and ctx > 0 and host_ok(str(e.get("host") or "")) \
+                and quant_ok(e.get("quant"), e.get("sha256")):
+            hits.append(dict(e))
+    return (min(int(e["max_stable_ctx"]) for e in hits) if hits else None), hits
+
+
+def teacher_ctx_cap(settings: Settings, props: dict[str, Any] | None = None) -> tuple[int, str]:
+    """Round 2: the largest ``needs_ctx`` this run may start. ``--max-task-ctx`` when given;
+    else the measured max stable context (``--teacher-ctx-file``, for this teacher's host and
+    quant), else the operator's defaults (``R2_DEFAULT_CTX_CAP``); never above the server's
+    own per-slot context (``/props``) when it says it."""
+    if settings.max_task_ctx:
+        cap, basis = int(settings.max_task_ctx), "--max-task-ctx"
+    else:
+        host = (settings.teacher_host or "") if settings.remote else local_hostname()
+        quant = (settings.teacher_quant or "") if settings.remote else (settings.teacher_served or "")
+        measured = None
+        try:
+            measured, _hits = read_ctx_file(settings.ctx_file, host, quant, remote=settings.remote,
+                                            sha256=settings.teacher_sha256 if settings.remote else None)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            log.warning("teacher context file %s unreadable (%s): using the default cap", settings.ctx_file, exc)
+        if measured:
+            cap, basis = measured, f"measured ({Path(settings.ctx_file).name}: {host} {quant})"
+        else:
+            key = "remote" if settings.remote else "local"
+            cap, basis = R2_DEFAULT_CTX_CAP[key], f"default ({key}; no measurement for {host} {quant})"
+    n_ctx = ((props or {}).get("default_generation_settings") or {}).get("n_ctx")
+    if isinstance(n_ctx, int) and 0 < n_ctx < cap:
+        cap, basis = n_ctx, basis + f"; the server's per-slot context is {n_ctx}"
+    return cap, basis
+
+
+def load_calibration(path: str | Path) -> tuple[frozenset[str], dict[str, Any]]:
+    """The categories the judge calibration lets the local judge gate (``by_category[].apply``,
+    only under a ``use-local-judge`` decision) and what identifies it (sha256, threshold, the
+    judge it calibrated: models, quants, sha256)."""
+    p = Path(path).expanduser()
+    raw = p.read_bytes()
+    rep = json.loads(raw)
+    if not isinstance(rep, dict) or not str(rep.get("schema") or "").startswith("distill-judge-calibration/"):
+        raise ValueError(f"{p} is not a judge calibration report")
+    decision = (rep.get("decision") or {}).get("decision")
+    apply = frozenset(str(c["category"]) for c in rep.get("by_category") or []
+                      if isinstance(c, dict) and c.get("apply") is True) if decision == "use-local-judge" \
+        else frozenset()
+    judge = rep.get("judge") or {}
+    return apply, {"sha256": hashlib.sha256(raw).hexdigest(), "decision": decision,
+                   "threshold": rep.get("threshold"), "apply": sorted(apply),
+                   "judge_models": sorted((judge.get("models") or {})), "judge_quants": sorted((judge.get("quants") or {})),
+                   "judge_sha256": judge.get("sha256")}
+
+
+async def local_props(url: str, timeout: float) -> dict[str, Any] | None:
+    """A local teacher's ``/props`` (its per-slot context), best effort: None when it does not answer."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            r = await client.get(f"{url.rstrip('/')}/props")
+        return r.json() if r.status_code == 200 and isinstance(r.json(), dict) else None
+    except Exception:  # noqa: BLE001 - the cap then rests on the measurement or the default
+        return None
+
+
 def remote_concurrency(want: int | None, slots: int) -> int:
     """Tasks in flight against a remote teacher: *want* (``--concurrency``; 0/None: as many as it has
     slots), never more than its slots or ``REMOTE_MAX_CONCURRENCY``, at least 1."""
@@ -7175,6 +7883,19 @@ def cmd_run(a: argparse.Namespace, *, payg_opener: Any = None) -> int:
         except (ValueError, OSError, KeyError) as exc:
             print(f"error: --tasks: {exc}", file=sys.stderr)
             return EXIT_USAGE
+        settings.round2 = any(t.r2 for t in tasks)
+        if settings.round2 and not all(t.r2 for t in tasks):
+            print("error: --tasks mixes round-1 and round-2 rows (one output never mixes the two)", file=sys.stderr)
+            return EXIT_USAGE
+        if settings.round2:
+            try:
+                settings.calibrated, settings.calibration_info = load_calibration(settings.calibration_path)
+            except (OSError, ValueError, KeyError) as exc:
+                print(f"error: round 2 needs the judge calibration (--judge-calibration): {exc}", file=sys.stderr)
+                return EXIT_USAGE
+            log.warning("round 2: the local judge gates only %s (calibration %s); other categories keep "
+                        "rows on their deterministic checks or tool success alone",
+                        sorted(settings.calibrated) or "nothing", settings.calibration_info["sha256"][:12])
         if settings.pad_pool.get("reserved"):
             log.warning("pad pool: %d rows in %d task groups are padding only (never run as tasks)",
                         settings.pad_pool["pool_rows"], settings.pad_pool["pool_groups"])
@@ -7199,6 +7920,8 @@ def cmd_run(a: argparse.Namespace, *, payg_opener: Any = None) -> int:
     if settings.task_source != ORIGIN_TASKSET:
         log.warning("--builtin-smoke: built-in tasks; rows are tagged %s and never train", BUILTIN_SOURCE)
 
+    seen_props: dict[str, Any] = {}
+
     async def check_servers() -> None:
         if not settings.payg:
             served = await preflight(settings.teacher_endpoint, min(30.0, settings.request_timeout),
@@ -7207,6 +7930,7 @@ def cmd_run(a: argparse.Namespace, *, payg_opener: Any = None) -> int:
             log.info("teacher serves %s", served)
         if settings.remote:
             props = await remote_props(settings, min(30.0, settings.request_timeout))
+            seen_props["props"] = props
             slots = max(1, int(props.get("total_slots") or 1))
             want = settings.concurrency
             settings.concurrency = remote_concurrency(want, slots)
@@ -7225,11 +7949,30 @@ def cmd_run(a: argparse.Namespace, *, payg_opener: Any = None) -> int:
     except EndpointError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_UNREACHABLE
+    if settings.round2:
+        if settings.payg:
+            settings.ctx_cap, settings.ctx_cap_basis = settings.max_task_ctx, "--max-task-ctx (paid teacher)"
+        else:
+            props = seen_props.get("props")
+            if props is None:
+                props = asyncio.run(local_props(settings.teacher_url, min(10.0, settings.request_timeout)))
+            settings.ctx_cap, settings.ctx_cap_basis = teacher_ctx_cap(settings, props)
+        over = sum(1 for t in getattr(gen, "tasks", {}).values()
+                   if settings.ctx_cap is not None and int(t.r2.get("needs_ctx") or 0) > settings.ctx_cap)
+        log.warning("round 2: context cap %s (%s): %d tasks need more and are left for another teacher",
+                    settings.ctx_cap, settings.ctx_cap_basis, over)
     try:
         info = prepare_repo_store(settings)
     except (RepoFixtureError, OSError) as exc:
         print(f"error: --repo-fixture: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    if settings.round2 and info:
+        drift = sum(1 for t in getattr(gen, "tasks", {}).values()
+                    if t.context_reads and t.r2.get("fixture_commit") not in (None, info["commit"]))
+        if drift:
+            log.warning("round 2: %d long-context tasks were sized on another repo commit than the fixture's "
+                        "(%s); their reads still come from the fixture, needs_ctx has a margin", drift,
+                        info["commit"][:12])
     if info:
         log.info("repo fixture: %s at %s (last %d commits)", info["ref"], info["commit"][:12], info["depth"])
     if a.tasks and not settings.base_system_prompt:
@@ -7405,6 +8148,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help=f"glob the local teacher's /v1/models id must match (default {DEFAULT_TEACHER_ID}; "
                         "case-insensitive; never a Max model)")
     r.add_argument("--judge-id", help="glob for a --judge-url server's id (default: --teacher-id)")
+    r.add_argument("--steer", default=R2_DEFAULT_STEER,
+                   help="round 2: the steering file (steer.py; the defaults when it does not exist)")
+    r.add_argument("--judge-calibration", default=R2_DEFAULT_CALIBRATION,
+                   help="round 2: the judge calibration report; the local judge gates only its apply categories")
+    r.add_argument("--teacher-ctx-file", default=R2_DEFAULT_CTX_FILE,
+                   help="round 2: measured max stable context per host/quant (the default caps when absent)")
+    r.add_argument("--max-task-ctx", type=int,
+                   help="round 2: start no task whose needs_ctx is above this (overrides the context file)")
     r.add_argument("--quiet", action="store_true")
     ls = sub.add_parser("list-tasks", help="print the tasks a run would start, no model calls")
     ls.add_argument("--n", type=int, default=2, help="tasks per family")

@@ -209,6 +209,27 @@ reference, and each ``data_policy.sources`` entry its own share per split.
 Max-derived data and models are private: ``publish_guard.py`` refuses them and
 ``modal_train.py`` never rents them.
 
+Round 2
+-------
+* ``--unjudged-verifiers`` (default ``deterministic,tool-success``): a teacher_gen.py
+  round-2 record whose ``judge`` says ``applied: false`` (its category is not
+  calibrated, so the local judge was never asked) verifies a train-source row on its
+  ``verifier`` alone: ``r2.deterministic.pass`` for deterministic, tool success for
+  tool-success; never in a category its record lists as calibrated (fail closed);
+  label ``r2-<verifier>``. ``none``: such rows never train.
+* ``--replay-from <dataset dir> [--replay-share 0.4] [--replay-seed S]``: after the
+  split and its caps, a stratified (by category, largest remainder), seeded sample of
+  that dataset's ``train.jsonl`` joins train at ``--replay-share`` of the FINAL train
+  set (``Builder.add_replay``). A replay row is dropped when its id, task, group,
+  context prefix, prompt+call or exact hash, or any of its user messages, is one of the
+  new val / eval-tools rows' (the leakage gate then re-checks every split), or when it
+  is already in the new train. Max-derived replay rows keep ``max_derived`` and their
+  recorded approval: such a replay needs ``--allow-max-derived`` (exit 2 otherwise),
+  makes the dataset Max-derived (tags, private, publish guard) and counts as covered
+  under its own approval. ``report.json`` / the manifest carry ``replay`` (source
+  sha256s, seed, wanted / eligible / added, new vs replay rows, by category / source,
+  drops by reason) and ``data_policy.share`` the Max vs 27B split per split.
+
 Rebuilding the request
 ----------------------
 Each example is the request ``LlamaCppProvider._build_request_payload`` would
@@ -740,9 +761,16 @@ def is_payg_judge(judge: Any, model: Any) -> bool:
 EFFECT_KEYS = ("side_effects", "real_side_effects")
 
 
+#: Round 2 (teacher_gen.py on a round2_tasks.py taskset): verifiers a row may stand on when its
+#: record says the local judge was NOT applied (its category is not calibrated): the
+#: deterministic checks it passed, or tool success alone. ``--unjudged-verifiers`` narrows it.
+UNJUDGED_VERIFIERS = ("deterministic", "tool-success")
+
+
 def verification_of(meta: dict[str, Any], *, strict: bool = False,
                     judge_models: tuple[str, ...] | None = None,
-                    payg_judge: bool = False) -> Verification:
+                    payg_judge: bool = False,
+                    unjudged_verifiers: tuple[str, ...] | None = None) -> Verification:
     """The row's ``_meta.verification`` record, read fail-closed (module docstring).
 
     Each part is either absent or exactly its safe value; any other value
@@ -751,7 +779,15 @@ def verification_of(meta: dict[str, Any], *, strict: bool = False,
     *judge_models*, sandboxed, no side effects. A judge naming Max fails
     (``judge_is_max``) unless *payg_judge* allows the pay-per-token Max judge
     (:func:`is_payg_judge`; a Max row's record, never a train-source row's),
-    which then also stands in for a *judge_models* match."""
+    which then also stands in for a *judge_models* match.
+
+    Round 2: a record whose ``judge`` says ``applied: false`` (teacher_gen.py skipped the
+    local judge because the row's category is not calibrated) has no judge at all. Under
+    *strict* it verifies only with ``round: 2``, a ``verifier`` in *unjudged_verifiers*,
+    a row category outside the record's ``calibrated_categories`` (a skipped judge in a
+    calibrated category fails closed), and for ``deterministic`` its passing checks
+    (``r2.deterministic``); basis ``r2-<verifier>``. Without *unjudged_verifiers* it
+    fails ``no_judge`` as before."""
     rec = meta.get("verification")
     if rec is None:
         return Verification(None, "absent")
@@ -768,14 +804,19 @@ def verification_of(meta: dict[str, Any], *, strict: bool = False,
     if "tool_success" in rec and rec["tool_success"] is not True:
         return Verification(False, "tool_failed")
     judge = rec.get("judge")
+    not_applied = isinstance(judge, dict) and judge.get("applied") is False
+    skipped_judge = judge if not_applied else None
+    if not_applied:
+        judge = None  # a judge that was never asked: no verdict, no model
     j_verdict: Any = None
     j_model: Any = None
     if isinstance(judge, dict):
         j_verdict, j_model = judge.get("verdict"), judge.get("model")
     elif isinstance(judge, str):
         j_verdict = judge
-    j_verdict = j_verdict if j_verdict is not None else rec.get("judge_verdict")
-    j_model = j_model if j_model is not None else rec.get("judge_model")
+    if not not_applied:
+        j_verdict = j_verdict if j_verdict is not None else rec.get("judge_verdict")
+        j_model = j_model if j_model is not None else rec.get("judge_model")
     judged = judge is not None or j_verdict is not None or j_model is not None
     payg = payg_judge and is_payg_judge(judge, j_model)
     if not payg and (names_max(j_model)
@@ -795,7 +836,22 @@ def verification_of(meta: dict[str, Any], *, strict: bool = False,
         if "tool_success" not in rec:
             return Verification(False, "no_tool_success")
         if not judged:
-            return Verification(False, "no_judge")
+            if not (not_applied and unjudged_verifiers):
+                return Verification(False, "no_judge")
+            verifier = rec.get("verifier")
+            if rec.get("round") != 2 or verifier not in unjudged_verifiers:
+                return Verification(False, "unjudged_verifier_not_allowed")
+            category = meta.get("category")
+            if category in ((skipped_judge or {}).get("calibrated_categories") or ()):
+                return Verification(False, "judge_skipped_in_calibrated_category")
+            det = (rec.get("r2") or {}).get("deterministic") or {}
+            if verifier == "deterministic" and not (det.get("checks") and det.get("pass") is True):
+                return Verification(False, "deterministic_not_passed")
+            if "sandboxed" not in rec:
+                return Verification(False, "no_sandbox_record")
+            if not effects:
+                return Verification(False, "no_side_effects_record")
+            return Verification(True, f"r2-{verifier}")
         if not isinstance(j_model, str) or not j_model.strip():
             return Verification(False, "judge_no_model")
         if judge_models is not None and not matches_model(j_model, judge_models) and not payg:
@@ -1948,6 +2004,14 @@ class Settings:
     prewindow_chars_per_token: int = 6
     split_turns: bool = True
     limit: int | None = None
+    # Round 2: verifiers a row whose record skipped the local judge (an uncalibrated
+    # category) may train on (--unjudged-verifiers; None: such a row never trains)
+    unjudged_verifiers: tuple[str, ...] | None = UNJUDGED_VERIFIERS
+    # Replay (--replay-from): a stratified sample of a previous dataset's train rows joins
+    # train, at --replay-share of the final train set, by category, seeded
+    replay_from: str | None = None
+    replay_share: float = 0.4
+    replay_seed: str = "replay-v1"
 
 
 def capped_splits(train_all: list[Example], val_all: list[Example], s: Settings,
@@ -2008,6 +2072,75 @@ def cap_scan(train_all: list[Example], val_all: list[Example], s: Settings) -> d
     return out
 
 
+REPLAY_ROW_KEYS = ("id", "task_id", "group_id", "category", "source", "label", "model", "max_derived",
+                   "messages", "tools", "flags")
+RENDER_KEYS = ("text", "loss_spans_char", "loss_spans_tok", "n_tokens", "prompt_tokens", "boundary_stable",
+               "tokenize")
+
+
+def _file_sha256(path: Path) -> str:
+    d = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            d.update(chunk)
+    return d.hexdigest()
+
+
+def read_replay_source(directory: str | Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """A previous dataset's train rows (``train.jsonl`` as build.py wrote it: rendered,
+    with their provenance) and what identifies it (its manifest's flags, file sha256s)."""
+    d = Path(directory).expanduser()
+    train, manifest = d / "train.jsonl", d / DATASET_MANIFEST
+    if not train.is_file() or not manifest.is_file():
+        raise ValueError(f"{d} is not a build.py dataset (needs train.jsonl and {DATASET_MANIFEST})")
+    man = json.loads(manifest.read_text(encoding="utf-8"))
+    rows: list[dict[str, Any]] = []
+    for n, line in enumerate(train.read_text(encoding="utf-8").split("\n"), 1):
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        missing = [k for k in REPLAY_ROW_KEYS + RENDER_KEYS if k not in r]
+        if missing:
+            raise ValueError(f"{train}: line {n}: not a build.py train row (missing {', '.join(missing)})")
+        rows.append(r)
+    info = {"from": d.name, "train_sha256": _file_sha256(train), "manifest_sha256": _file_sha256(manifest),
+            "rows": len(rows), "max_derived": bool(man.get("max_derived")) or any(r.get("max_derived") for r in rows),
+            "tags": man.get("tags") or [], "gates_overall": man.get("gates_overall")}
+    return rows, info
+
+
+def replay_keys(messages: list[dict[str, Any]], prefix_n: int) -> dict[str, Any]:
+    """The leakage keys build.py compares across splits, recomputed from a rendered row's
+    request: its task proxy and prompt+call (``trace_keys``), its context prefix, and the
+    normalized text of every user message (session-less, so stricter than ``ctx_keys``)."""
+    target = messages[-1] if messages else {}
+    call = ((target.get("tool_calls") or [{}])[0] or {}).get("function") or {}
+    keys = trace_keys({"messages": messages, "_meta": {"tool_name": call.get("name") or ""}})
+    users = {h(norm(content_text(m.get("content")))) for m in messages[:-1] if m.get("role") == "user"}
+    return {"task": keys.h_prompt, "prompt_call": keys.h_prompt_call, "exact": keys.h_exact,
+            "prefix": prefix_hash(messages[:-1], prefix_n), "users": users, "tool": call.get("name")}
+
+
+def allocate(counts: dict[str, int], n: int) -> dict[str, int]:
+    """*n* split over the categories in proportion to *counts* (largest remainder),
+    never more than a category has."""
+    total = sum(counts.values())
+    if total <= 0 or n <= 0:
+        return {k: 0 for k in counts}
+    n = min(n, total)
+    raw = {k: n * v / total for k, v in counts.items()}
+    out = {k: min(counts[k], int(v)) for k, v in raw.items()}
+    for k in sorted(raw, key=lambda k: (-(raw[k] - int(raw[k])), k)):
+        if sum(out.values()) >= n:
+            break
+        if out[k] < counts[k]:
+            out[k] += 1
+    while sum(out.values()) < n:  # a category ran out: the others make up the difference
+        k = max((k for k in counts if out[k] < counts[k]), key=lambda k: counts[k] - out[k])
+        out[k] += 1
+    return out
+
+
 class Builder:
     def __init__(self, *, student: Any, pack: dict[str, Any], catalog: str, settings: Settings,
                  index: dict[tuple[str, int], dict[str, Any]], verdicts: dict[str, str],
@@ -2053,6 +2186,7 @@ class Builder:
             collections.Counter)
         self.models_by_source: dict[str, collections.Counter] = collections.defaultdict(
             collections.Counter)
+        self.replay_info: dict[str, Any] | None = None
 
     def exclude(self, trace: Trace, reason: str) -> None:
         self.stats[f"excluded:{reason}"] += 1
@@ -2088,7 +2222,7 @@ class Builder:
         if trace.kind != "extra":
             return False, "not_a_teacher_row"
         strict = verification_of(trace.meta, strict=True, judge_models=self.judge_models,
-                                 payg_judge=True)
+                                 payg_judge=True, unjudged_verifiers=self.s.unjudged_verifiers)
         if strict.decision is True:
             return True, ""
         return False, "no_record" if strict.decision is None else strict.basis
@@ -2129,7 +2263,8 @@ class Builder:
             return "max_payg_gym_relaxed"
         if meta.get("max_derived") is not True:
             return "max_payg_gym_not_max_derived"
-        strict = verification_of(meta, strict=True, judge_models=self.judge_models, payg_judge=True)
+        strict = verification_of(meta, strict=True, judge_models=self.judge_models, payg_judge=True,
+                                 unjudged_verifiers=self.s.unjudged_verifiers)
         if strict.decision is not True:
             return "max_payg_gym_unverified:" + ("no_record" if strict.decision is None else strict.basis)
         return ""
@@ -2263,7 +2398,7 @@ class Builder:
         # A Max row's record may name the pay-per-token Max judge; a train-source
         # (local 27B) row's needs a --judge-models judge (OPEN-QUESTIONS #6)
         record = (verification_of(meta, strict=train_source or payg_gym, judge_models=self.judge_models,
-                                  payg_judge=not train_source)
+                                  payg_judge=not train_source, unjudged_verifiers=self.s.unjudged_verifiers)
                   if trace.kind != "fail" else Verification(None, "absent"))
         if record.decision is not None:
             outcome_key = "verification:" + ("pass" if record.decision else record.basis)
@@ -2520,6 +2655,119 @@ class Builder:
                 1 for e in pool if e.split in ("train", "val") and not e.train_ok),
         }
 
+    def add_replay(self) -> dict[str, Any]:
+        """``--replay-from``: a stratified, seeded sample of a previous dataset's train rows
+        joins train at ``--replay-share`` of the final train set, after the split and its
+        caps (the new rows are capped on their own; replay keeps the source's category mix).
+
+        Leakage gates against the NEW val and eval-tools sets: a replay row is dropped when
+        its task, group, context prefix, prompt+call or exact hash, or any of its user
+        messages (normalized text, session-less: stricter than the build's own context key)
+        is one of theirs, or its id is. A replay row already in the new train (same id or
+        prompt+call) is not added twice. Max-derived rows keep their tag and recorded
+        approval, so a dataset with Max-derived replay is Max-derived (and needs the allow).
+        Run after ``split``; the train order is then reshuffled by a seeded hash."""
+        s = self.s
+        assert s.replay_from is not None
+        rows, info = read_replay_source(s.replay_from)
+        stats: collections.Counter = collections.Counter()
+        held = self.final["val"] + self.final["eval-tools"]
+        bad: dict[str, set[str]] = {k: set() for k in ("task", "group", "prefix", "prompt_call", "exact",
+                                                         "users", "id")}
+        for e in held:
+            bad["task"].add(e.task_id)
+            bad["group"].add(e.group)
+            bad["prefix"].add(e.prefix)
+            bad["prompt_call"].add(e.h_prompt_call)
+            bad["exact"].add(e.h_exact)
+            bad["id"].add(e.id)
+        user_check = self.spool_path is not None and self.spool_path.exists()
+        if user_check:
+            for e in held:
+                if e.spool is None:
+                    continue
+                msgs = self.read_heavy(e)["messages"]
+                bad["users"] |= {h(norm(content_text(m.get("content")))) for m in msgs[:-1]
+                                 if m.get("role") == "user"}
+        new_train = list(self.final["train"])
+        new_ids = {e.id for e in new_train}
+        new_pc = {e.h_prompt_call for e in new_train}
+        eligible: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for r in rows:
+            k = replay_keys(r["messages"], s.prefix_n)
+            if r["max_derived"] and not (r.get("max_derived_approval") or "").strip():
+                stats["dropped:max_derived_without_approval"] += 1
+                continue
+            if r["max_derived"] and not self.max_allowed:
+                stats["dropped:max_derived_needs_allow"] += 1
+                continue
+            hit = next((name for name, v in (("id", r["id"]), ("task", r["task_id"]), ("task", k["task"]),
+                                             ("group", r["group_id"]), ("prefix", k["prefix"]),
+                                             ("prompt_call", k["prompt_call"]), ("exact", k["exact"]))
+                        if v in bad[name]), None)
+            if hit is None and k["users"] & bad["users"]:
+                hit = "user_message"
+            if hit is not None:
+                stats[f"dropped:leak_{hit}"] += 1
+                continue
+            if r["id"] in new_ids or k["prompt_call"] in new_pc:
+                stats["dropped:already_in_new_train"] += 1
+                continue
+            eligible.append((r, k))
+        share = s.replay_share
+        want = round(share * len(new_train) / (1.0 - share)) if share < 1 else len(eligible)
+        by_cat: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = collections.defaultdict(list)
+        for r, k in eligible:
+            by_cat[str(r["category"])].append((r, k))
+        alloc = allocate({c: len(v) for c, v in by_cat.items()}, want)
+        picked: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for c, v in sorted(by_cat.items()):
+            v.sort(key=lambda rk: h(f"{s.replay_seed}\x1f{rk[0]['id']}"))
+            picked += v[:alloc.get(c, 0)]
+        spool = self.spool_path.open("ab") if self.spool_path is not None else None
+        try:
+            for r, k in picked:
+                trunc = r.get("truncated") or {}
+                ex = Example(
+                    id=str(r["id"]), trace_id=f"replay:{info['from']}:{r['id']}", kind="replay",
+                    source=str(r["source"]), category=str(r["category"]), task_id=str(r["task_id"]),
+                    h_exact=k["exact"], h_prompt_call=k["prompt_call"], label=str(r["label"]),
+                    flags=dict(r["flags"]), context_source=str(r.get("context_source") or "stored"),
+                    n_tokens_original=int(trunc.get("original_tokens") or r["n_tokens"]),
+                    n_tokens=int(r["n_tokens"]), dropped_messages=int(trunc.get("dropped_messages") or 0),
+                    fits=True, longctx=False, boundary_stable=bool(r["boundary_stable"]), prefix=k["prefix"],
+                    expect_tool=k["tool"], dropped_steps=int(trunc.get("dropped_turn_steps") or 0),
+                    group=str(r["group_id"]), split="train", model=str(r.get("model") or ""),
+                    max_derived=bool(r["max_derived"]), train_ok=True,
+                    approval=str(r.get("max_derived_approval") or ""))
+                if spool is not None:
+                    heavy = {"id": ex.id, "messages": r["messages"], "tools": r["tools"],
+                             "tool_choice": r.get("tool_choice"),
+                             "chat_template_kwargs": r.get("chat_template_kwargs"),
+                             "render": {kk: r[kk] for kk in RENDER_KEYS}, "original_messages": None,
+                             "expect": {"tool": k["tool"]}, "replay_from": info["from"]}
+                    ex.spool = spool.tell()
+                    spool.write((json.dumps(heavy, ensure_ascii=False) + "\n").encode("utf-8"))
+                self.final["train"].append(ex)
+        finally:
+            if spool is not None:
+                spool.close()
+        self.final["train"].sort(key=lambda e: h(f"{s.replay_seed}\x1forder\x1f{e.id}"))
+        n_rep = len(picked)
+        n_new = sum(1 for e in self.final["train"] if e.kind != "replay")
+        cats = collections.Counter(r["category"] for r, _k in picked)
+        self.replay_info = {
+            **info, "share_requested": share, "seed": s.replay_seed, "wanted": want, "eligible": len(eligible),
+            "added": n_rep, "new_train_rows": n_new,
+            "share_of_train": round(n_rep / (n_new + n_rep), 4) if (n_new + n_rep) else 0.0,
+            "by_category": dict(cats.most_common()),
+            "max_derived_added": sum(1 for r, _k in picked if r["max_derived"]),
+            "by_source": dict(collections.Counter(r["source"] for r, _k in picked).most_common()),
+            "user_message_check": "on" if user_check else "skipped (dry run: no spool to read)",
+            "dropped": dict(sorted(stats.items())),
+        }
+        return self.replay_info
+
     def policy_gate(self) -> dict[str, Any]:
         """Nothing but the listed train sources' rows in train/val."""
         s = self.s
@@ -2540,7 +2788,10 @@ class Builder:
             return not matches_model(e.model, s.train_models)
 
         def covered(e: Example) -> bool:
-            # Q6b: a Max row admitted under the recorded approval, as the Max model's
+            # Q6b: a Max row admitted under the recorded approval, as the Max model's; a replayed
+            # Max-derived row (--replay-from) under the approval it was built with
+            if self.max_allowed and e.kind == "replay" and e.max_derived and e.train_ok:
+                return bool(e.approval.strip())
             return (self.max_allowed and e.max_derived and e.train_ok and e.kind != "fail"
                     and e.approval == s.max_derived_approval and e.model == s.max_model)
 
@@ -2634,6 +2885,7 @@ class Builder:
             "messages": heavy["messages"], "tools": heavy["tools"],
             "tool_choice": heavy["tool_choice"],
             "chat_template_kwargs": heavy["chat_template_kwargs"],
+            **({"replay_from": heavy.get("replay_from")} if ex.kind == "replay" else {}),
             **heavy["render"],
         }
 
@@ -2766,6 +3018,8 @@ class Builder:
                     e.split or "dropped" for e in all_built if e.longctx)),
             },
             "splits": {k: split_summary(v, s.max_tokens) for k, v in self.final.items()},
+            # --replay-from: the previous dataset's rows in train (new vs replay; Max vs 27B in share)
+            "replay": self.replay_info,
             **({"cap_scan": self.cap_scan} if self.cap_scan else {}),
             "caps": {"train": split_info["train_caps"], "val": split_info["val_caps"],
                      "class_caps": {"train": split_info["train_class_caps"],
@@ -2795,8 +3049,8 @@ class Builder:
 
     def holds_max_rows(self) -> bool:
         """Any set this build writes holds a Max-derived row (eval-tools and the
-        long-context candidates are built from Max traces too)."""
-        return any(e.max_derived for e in self.examples + self.fails + self.unfittable)
+        long-context candidates are built from Max traces too; replayed rows too)."""
+        return any(e.max_derived for e in self.examples + self.fails + self.unfittable + self.final["train"])
 
     def share(self) -> dict[str, Any]:
         """Rows and percent per share class (Max-derived / the local 27B
@@ -2833,6 +3087,10 @@ class Builder:
             "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             **AP.policy_fields(self.train_val_max_derived()),
             "holds_max_rows": self.holds_max_rows(),
+            "replay": ({k: self.replay_info[k] for k in ("from", "train_sha256", "manifest_sha256", "seed",
+                                                          "share_requested", "added", "new_train_rows",
+                                                          "share_of_train", "max_derived_added")}
+                       if self.replay_info else None),
             "max_derived_allow": dp["max_derived_allow"],
             "teacher_model": report["settings"]["teacher_model"],
             "share": dp["share"],
@@ -3016,6 +3274,27 @@ def cmd_build(a: argparse.Namespace) -> int:
                   file=sys.stderr)
             return 2
         policy[flag] = patterns
+    unjudged: tuple[str, ...] | None = tuple(
+        v.strip() for v in (a.unjudged_verifiers or "").split(",") if v.strip() and v.strip() != "none") or None
+    if unjudged and set(unjudged) - set(UNJUDGED_VERIFIERS):
+        print(f"error: --unjudged-verifiers takes {','.join(UNJUDGED_VERIFIERS)} or none", file=sys.stderr)
+        return 2
+    if a.replay_from:
+        if not 0.0 < a.replay_share < 1.0:
+            print("error: --replay-share is a share of the final train set, above 0 and below 1", file=sys.stderr)
+            return 2
+        try:
+            _rows, rinfo = read_replay_source(a.replay_from)
+        except (OSError, ValueError) as exc:
+            print(f"error: --replay-from: {exc}", file=sys.stderr)
+            return 2
+        if rinfo["max_derived"] and not a.allow_max_derived:
+            print(f"error: --replay-from {rinfo['from']} holds Max-derived rows: the new dataset is Max-derived "
+                  f"too and needs {AP.BUILD_ALLOW_FLAG} {AP.BUILD_APPROVAL_FLAG} (and a {AP.TAG} --out)",
+                  file=sys.stderr)
+            return 2
+        print(f"REPLAY: {rinfo['rows']} train rows of {rinfo['from']} (max_derived={rinfo['max_derived']}) "
+              f"may join train at {a.replay_share:.0%}", file=sys.stderr)
     handler = _CountingHandler()
     root = logging.getLogger()
     for old in list(root.handlers):
@@ -3040,6 +3319,8 @@ def cmd_build(a: argparse.Namespace) -> int:
         min_presence=a.min_presence, lcm_max_messages=a.lcm_max_messages,
         prewindow_chars_per_token=a.prewindow_chars_per_token,
         split_turns=not a.no_split_turns, limit=a.limit,
+        unjudged_verifiers=unjudged, replay_from=a.replay_from, replay_share=a.replay_share,
+        replay_seed=a.replay_seed,
     )
     out = Path(a.out).expanduser()
     out.mkdir(parents=True, exist_ok=True)
@@ -3071,6 +3352,8 @@ def cmd_build(a: argparse.Namespace) -> int:
                 print(f"... {n} traces, {time.time() - t0:.0f}s", file=sys.stderr, flush=True)
     b.close_spool()
     split_info = b.split()
+    if s.replay_from:
+        b.add_replay()
     gates = b.gates()
     inputs = {"golden": file_facts(golden), "extra": file_facts(extra), "fail": file_facts(fail),
               "fail_traces_present": bool(fail), "verdicts": len(verdicts),
@@ -3438,6 +3721,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bd.add_argument("--eval-holdout", action="append", metavar="CASES",
                     help="an earlier eval set (eval-tools.jsonl / val-cases.jsonl): its tasks "
                          "stay in eval-tools, whole groups")
+    bd.add_argument("--replay-from", metavar="DATASET_DIR",
+                    help="round 2: a previous build.py dataset (e.g. the v4b dataset dir) whose train rows "
+                         "join train as a stratified, seeded sample (leakage-gated against the new val and "
+                         "eval-tools); Max-derived replay makes the dataset Max-derived (needs the allow)")
+    bd.add_argument("--replay-share", type=float, default=0.4,
+                    help="replay rows as a share of the FINAL train set (default 0.4)")
+    bd.add_argument("--replay-seed", default="replay-v1", help="the replay sample's seed (recorded)")
+    bd.add_argument("--unjudged-verifiers", default=",".join(UNJUDGED_VERIFIERS),
+                    help="round 2: verifiers a row whose record skipped the local judge (category not "
+                         "calibrated) may train on: deterministic,tool-success (default), a subset, or none")
     bd.add_argument("--exclude-bad-turns", action="store_true")
     bd.add_argument("--train-range", type=int, nargs=2, default=[DEFAULT_MIN_TRAIN_ROWS, 10000])
     bd.add_argument("--min-train-rows", type=int, metavar="N",
