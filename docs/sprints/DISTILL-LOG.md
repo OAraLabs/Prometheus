@@ -190,3 +190,5 @@ Append-only, times in ET.
   - **Nightly:** the 4090 r2-tower-night 01:12 ET from Tue; the mini window-mini-night-start 01:05 / end 06:40 ET from Mon.
   - **Heartbeat:** r2-heartbeat 09:00 ET daily, ≤10 lines with rows/hour by area.
   - **Sent back to the agent:** switch the configs and the live mini generation to the round-2 tasksets; long-context profile nights on the 4090 from Tue; reset-failed the A/B unit.
+- 2026-11-01 02:23 EST — Round-2 local generation is live on the mini (distill-gen-20261101-021250, code eb23bd1, real-v4-r2, until 17:50 EST); config switched for both runners. 4090 nights from Tue alternate longctx and standard (1493805, 73ca7fd). First 13 round-2 tasks: 1 kept (error-recovery), 10 injection rejected (sandbox_refusal 8, tool_error 7), 1 failed with a guard 502. Sent to the round-2 code agent to diagnose. Voice probe OK 51 tok/s.
+- 2026-11-01 02:23 EST — **Epoch 1/2 done at step 560 (02:09 EST): val_loss 0.7972** (0.8137 @400 → 0.8050 @483 → 0.7972 @560). Epoch 2 is running at 2,543 tok/s; ETA ~09:15 EST.
