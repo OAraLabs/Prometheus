@@ -973,7 +973,7 @@ def cmd_mini_night(cx: Ctx, which: str) -> int:
         if not overrides:
             cx.log(f"no {runner}: the window's own generation runner is used")
         conf = cx.write_conf("window-night.conf", overrides, "nightly window start")
-        env["DISTILL_WINDOW_CONF"] = str(conf if cx.execute else c["R2_WINDOW_CONF"])
+        env["DISTILL_WINDOW_CONF"] = str(conf)
     cx.log("exec: " + shlex.join(argv))
     sys.stdout.flush()
     os.execve(argv[0], argv, env)
@@ -986,7 +986,7 @@ def cmd_gen_local(cx: Ctx, rest: list[str]) -> int:
     env = dict(os.environ)
     if os.access(runner, os.X_OK):
         conf = cx.write_conf("gen-local.conf", local_overrides(c), "local window generation")
-        env["DISTILL_WINDOW_CONF"] = str(conf if cx.execute else c["R2_WINDOW_CONF"])
+        env["DISTILL_WINDOW_CONF"] = str(conf)
     else:
         runner = Path(c["R2_WIN_DIR"]) / "gen_runner.sh"
         env["DISTILL_WINDOW_CONF"] = c["R2_WINDOW_CONF"]

@@ -486,3 +486,21 @@ def test_gen_stats_lines_read_the_real_gen_stats_output(tmp_path: Path) -> None:
     lines = R.gen_stats_lines(out[0], out[1], "since")
     assert lines[0].startswith("Gen 24h: 3 rows") and "4090 0.1" in lines[0] and "error-recovery" in lines[0]
     assert lines[1].startswith("since: 3 rows, 1.5/h") and lines[2].startswith("24h by category/h: other")
+
+
+def test_measured_ctx_reads_the_capacity_blocks_teacher_ctx() -> None:
+    doc = {"schema": "distill-capacity-teacher-ctx/1", "hosts": {
+        "4090": {"gpu": "RTX 4090 24 GB", "usable_mib": 24073, "quants": {
+            "q4": {"label": "UD-Q4_K_XL", "status": "measured",
+                   "summary": {"max_stable_ctx": 163840, "first_unstable": {"ctx": 196608, "reason": "oom"},
+                               "max_verified_prompt_tokens": 160000},
+                   "rungs": [{"ctx": 131072, "stable": True}, {"ctx": 196608, "stable": False}],
+                   "multi_slot": [{"slots": 2, "ctx": 163840, "stable": True}],
+                   "recommended_profile": {"parallel": 1, "ctx": 163840,
+                                           "env": {"TEACHER_SLOTS": 1, "TEACHER_CTX_PER_SLOT": 163840},
+                                           "long_context_row_cap_tokens": 155000}},
+            "iq3": {"label": "IQ3_XXS", "status": "measured", "summary": {"max_stable_ctx": 262144}}}},
+        "3090ti": {"measured": {"max_readable_ctx": 57344}}},
+        "recommendation": {"quant": "iq3", "max_stable_ctx": 262144}}
+    assert R.measured_ctx(doc, "4090", "q4_k_xl") == 163840
+    assert R.measured_ctx(doc, "4090", "iq3_xxs") == 262144
