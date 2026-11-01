@@ -30,7 +30,11 @@ The 4090 (``tower/round2_tower.sh`` there; this host may ssh to it, never the ot
 * ``tower-night``: the same for a nightly 4090 window (``--mode night``), from ``R2_TOWER_NIGHTLY_FROM`` (after
   the continuous window), started at 01:12 ET, before the window machinery's own 01:20 ``window_start``
   (which then finds the window open and skips); generation until ``R2_TOWER_NIGHT_END`` - margin, the 4090's
-  end at ``R2_TOWER_NIGHT_END`` (06:22 ET), so its 06:40 window end only verifies.
+  end at ``R2_TOWER_NIGHT_END`` (06:22 ET), so its 06:40 window end only verifies. Each night serves tonight's
+  entry of ``R2_TOWER_NIGHT_ROTATION`` (default ``longctx standard``: Tue 2026-11-03 longctx, Wed standard, ...):
+  ``longctx`` = one slot at the measured max with ``R2_TOWER_TASKS_LONGCTX``, ``standard`` = 4x32768 with
+  ``R2_TOWER_TASKS``, ``split`` = longctx for the first half of the night, then a swap (business stays down) to
+  standard.
 * The serve profile (``R2_TOWER_PROFILE``): ``standard`` (``R2_STANDARD_PROFILE``, 4x32768), ``longctx``
   (one slot at the capacity block's measured max stable context for this host and quant, from
   ``R2_TEACHER_CTX_JSON``, capped at ``R2_LONGCTX_CAP``; the standard profile when the file is missing or
@@ -134,6 +138,12 @@ R2_DEFAULTS: dict[str, str] = {
     "R2_TOWER_NIGHTLY": "on",
     "R2_TOWER_NIGHTLY_FROM": "2026-11-02T06:10:00-05:00",
     "R2_TOWER_NIGHT_END": "06:22",
+    # the nightly 4090 serve plan, one entry per night in turn from R2_TOWER_ROTATION_START (an ET date):
+    # standard (R2_STANDARD_PROFILE, R2_TOWER_TASKS), longctx (one slot at the capacity block's measured max,
+    # R2_TOWER_TASKS_LONGCTX), or split (longctx for the first half of the night, then standard)
+    "R2_TOWER_NIGHT_ROTATION": "longctx standard",
+    "R2_TOWER_ROTATION_START": "2026-11-03",
+    "R2_TOWER_TASKS_LONGCTX": "~/distill/phase2b/tasksets/real-v4-r2-longctx.jsonl",
     "R2_MINI_NIGHTLY": "on",
     "R2_MINI_NIGHTLY_FROM": "2026-11-01T18:00:00-05:00",
     # the 3090 Ti teacher's GGUF: no nightly window start while it is missing (a re-download, say)
@@ -1111,13 +1121,15 @@ def swap_to_generation(cx: Ctx, st: dict[str, Any], name: str) -> bool:
     return True
 
 
-def gen_watch(cx: Ctx, st: dict[str, Any], name: str, gen_until: float, end: float, tag: str) -> str:
-    """Keeps the remote generation unit going until ``end`` (+3 min: the 4090's end timer runs first). Returns
-    why it stopped watching: "end", or "early: ..." when generation is over before its time (nothing left, or
-    it could not be (re)started ``R2_GEN_RESTARTS`` times): then the 4090 window should end now, not idle."""
+def gen_watch(cx: Ctx, st: dict[str, Any], name: str, gen_until: float, end: float, tag: str,
+              grace: float = 180) -> str:
+    """Keeps the remote generation unit going until ``end`` (+``grace``: at a window's end the 4090's end timer
+    runs first). Returns why it stopped watching: "end", or "early: ..." when generation is over before its time
+    (nothing left, or it could not be (re)started ``R2_GEN_RESTARTS`` times): then the 4090 window (or this part
+    of the night) should end now, not idle."""
     c = cx.c
     restarts = int(st.get("gen_restarts", 0))
-    while cx.now() < end + 180:
+    while cx.now() < end + grace:
         unit = st.get("gen_unit")
         ustate = cx.unit_state(unit) if unit else "none"
         if ustate not in ACTIVE and cx.now() < gen_until - 900:
@@ -1136,7 +1148,7 @@ def gen_watch(cx: Ctx, st: dict[str, Any], name: str, gen_until: float, end: flo
             st.update(gen_unit=cx.start_remote_gen(gen_until, tag), gen_restarts=restarts)
             cx.save_state(name, st)
             continue
-        cx.sleep(min(float(c["R2_POLL_S"]) * 5, max(5.0, end + 180 - cx.now())))
+        cx.sleep(min(float(c["R2_POLL_S"]) * 5, max(5.0, end + grace - cx.now())))
     return "end"
 
 
@@ -1176,6 +1188,28 @@ def sunday_generate(cx: Ctx, st: dict[str, Any], name: str, gen_until: float, en
     return 0
 
 
+def night_plan(c: dict[str, str], now: float, end: float) -> list[tuple[str, dict[str, str], float]]:
+    """Tonight's 4090 parts: (kind, the settings for that part, its end). The kind is tonight's entry of
+    R2_TOWER_NIGHT_ROTATION, counted in ET nights from R2_TOWER_ROTATION_START (before it: the first entry);
+    a ``split`` night is longctx until half way, then standard."""
+    rot = [k for k in c["R2_TOWER_NIGHT_ROTATION"].lower().split() if k in ("standard", "longctx", "split")]
+    rot = rot or ["standard"]
+    start = datetime.fromisoformat(c["R2_TOWER_ROTATION_START"]).date()
+    nights = (datetime.fromtimestamp(now, ET).date() - start).days
+    kind = rot[max(nights, 0) % len(rot)]
+
+    def part(k: str) -> dict[str, str]:
+        cc = dict(c, R2_TOWER_PROFILE=k)
+        if k == "longctx":
+            cc["R2_TOWER_TASKS"] = c["R2_TOWER_TASKS_LONGCTX"]
+        return cc
+
+    if kind == "split":
+        mid = now + (end - now) / 2
+        return [("longctx", part("longctx"), mid), ("standard", part("standard"), end)]
+    return [(kind, part(kind), end)]
+
+
 def cmd_tower_night(cx: Ctx) -> int:
     c = cx.c
     now = cx.now()
@@ -1198,21 +1232,50 @@ def cmd_tower_night(cx: Ctx) -> int:
         if not got:
             cx.log("another round-2 4090 command holds state/tower.lock")
             return 2
-        status, res = tower_start(cx, "night", end, False)
-        if status != "ok":
-            cx.log(f"4090 nightly teacher not started ({status}: {res.get('why')}); the window machinery's own "
-                   "01:20 window_start runs its job queue instead")
-            return 0 if status == "refused" or not cx.execute else 1
-        gen_until = end - float(c["R2_GEN_MARGIN_S"])
-        st: dict[str, Any] = {"date": et(now, "%F"), "phase": "generating", "tower": res,
-                              "gen_unit": cx.start_remote_gen(gen_until, "night")}
-        cx.save_state("night.json", st)
+        plan = night_plan(c, now, end)
+        cx.log("tonight: " + ", then ".join(f"{k} until {et(t_)}" for k, _, t_ in plan))
+        st: dict[str, Any] = {"date": et(now, "%F"), "phase": "generating", "plan": [k for k, _, _ in plan]}
+        why = ""
+        try:
+            for i, (kind, cc, part_end) in enumerate(plan):
+                last = i == len(plan) - 1
+                cx.c = cc
+                profiles, pwhy = resolve_profiles(cc)
+                cx.log(f"part {i + 1}/{len(plan)}: {kind}: serve {' then '.join(profiles)} ({pwhy}); tasks "
+                       f"{cc['R2_TOWER_TASKS']}")
+                if i == 0:
+                    status, res = tower_start(cx, "night", end, False, profiles)
+                    if status != "ok":
+                        cx.log(f"4090 nightly teacher not started ({status}: {res.get('why')}); the window "
+                               "machinery's own 01:20 window_start runs its job queue instead")
+                        return 0 if status == "refused" or not cx.execute else 1
+                else:
+                    rc, res = cx.tower_run("swap", ["--profiles", " ".join(profiles), "--req", f"night-{int(cx.now())}"],
+                                           float(c["R2_START_TIMEOUT_S"]))
+                    if cx.execute and res.get("status") != "ok":
+                        cx.log(f"the 4090 swap to {kind} failed ({res.get('why')}): business restored there")
+                        st.update(phase="failed", why=f"swap to {kind} failed", tower=res)
+                        cx.save_state("night.json", st)
+                        return 1
+                gen_until = (end - float(c["R2_GEN_MARGIN_S"])) if last else part_end - 60
+                st.update(tower=res, part=kind, gen_restarts=0,
+                          gen_unit=cx.start_remote_gen(gen_until, f"night-{kind}"))
+                cx.save_state("night.json", st)
+                if not cx.execute:
+                    cx.log(f"[dry run] then: watch generation until {et(part_end)}"
+                           + ("; stop it; the 4090's flywheel-r2-end restores business (from here if it did not run)"
+                              if last else f"; stop it; swap the 4090 to {plan[i + 1][0]}"))
+                    continue
+                why = gen_watch(cx, st, "night.json", gen_until, part_end, f"night-{kind}", 180 if last else 0)
+                cx.log(f"part {kind} over: {why}")
+                if not last:
+                    unit = st.get("gen_unit")
+                    if unit and cx.unit_state(unit) in ACTIVE:
+                        cx.act(["systemctl", "--user", "stop", unit], timeout=200)
+        finally:
+            cx.c = c
         if not cx.execute:
-            cx.log(f"[dry run] then: watch generation until {et(end)}; stop it; the 4090's flywheel-r2-end "
-                   "restores business (from here if it did not run)")
             return 0
-        why = gen_watch(cx, st, "night.json", gen_until, end, "night")
-        cx.log(f"generation over: {why}")
         gen_close(cx, st, why)
         st.update(phase="done", why=why, ended_at=iso(cx.now()))
         cx.save_state("night.json", st)

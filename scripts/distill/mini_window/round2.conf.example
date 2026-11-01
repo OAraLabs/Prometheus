@@ -52,6 +52,15 @@ R2_TOWER_URL=http://tower-host:18094    # the teacher on the 4090's tailnet addr
 # R2_PIPELINE_UNIT=                      # the post-train unit (its end without PIPELINE-DONE.json = failed)
 # R2_TOWER_NIGHTLY=on                    # off: the window machinery's own 01:20 window_start runs its job queue
 # R2_TOWER_NIGHT_END=06:22               # the 4090's restore (ET); generation stops R2_GEN_MARGIN_S before
+# The nightly 4090 plan: one entry per night in turn from R2_TOWER_ROTATION_START (an ET date; the Sun->Mon chain
+# keeps R2_TOWER_PROFILE): standard = R2_STANDARD_PROFILE (4x32768) with R2_TOWER_TASKS; longctx = one slot at
+# the capacity block's measured max stable context (<= R2_LONGCTX_CAP) with R2_TOWER_TASKS_LONGCTX; split =
+# longctx for the first half of the night, then a swap to standard (business stays down; one model reload).
+# Alternating whole nights keeps each night to one server shape and one generation run; split gives both kinds
+# of rows every night at the cost of one reload and a generation restart.
+# R2_TOWER_NIGHT_ROTATION=longctx standard   # Tue 2026-11-03 longctx, Wed standard, Thu longctx, ...
+# R2_TOWER_ROTATION_START=2026-11-03
+# R2_TOWER_TASKS_LONGCTX=~/distill/phase2b/tasksets/real-v4-r2-longctx.jsonl
 # R2_MINI_NIGHTLY=on
 
 # ---- Heartbeat -------------------------------------------------------------------------------------

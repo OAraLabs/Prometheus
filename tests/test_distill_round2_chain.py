@@ -660,3 +660,49 @@ def test_mini_night_start_skips_without_the_teacher_gguf(tmp_path: Path, monkeyp
     assert fake.notes and "missing" in fake.notes[0][0]
     fake.now = t("2026-11-01T12:00:00-05:00")
     assert R.cmd_mini_night(cx, "end") == 0, "before R2_MINI_NIGHTLY_FROM: the continuous window's"
+
+
+def test_night_plan_rotation(tmp_path: Path) -> None:
+    c = conf(tmp_path, "R2_TOWER_TASKS=/t/real-v4-r2.jsonl\nR2_TOWER_TASKS_LONGCTX=/t/real-v4-r2-longctx.jsonl\n")
+    def kinds(day: str, cc: dict[str, str] = c) -> list[tuple[str, str, str]]:
+        now = t(f"{day}T01:12:00-05:00")
+        return [(k, p["R2_TOWER_PROFILE"], p["R2_TOWER_TASKS"]) for k, p, _ in R.night_plan(cc, now, now + 5 * 3600)]
+    assert kinds("2026-11-03") == [("longctx", "longctx", "/t/real-v4-r2-longctx.jsonl")], "Tue: long context"
+    assert kinds("2026-11-04") == [("standard", "standard", "/t/real-v4-r2.jsonl")], "Wed: standard"
+    assert kinds("2026-11-05")[0][0] == "longctx" and kinds("2026-11-06")[0][0] == "standard"
+    assert kinds("2026-11-02")[0][0] == "longctx", "before the start date: the first entry"
+    split = dict(c, R2_TOWER_NIGHT_ROTATION="split")
+    now = t("2026-11-03T01:12:00-05:00")
+    parts = R.night_plan(split, now, now + 4 * 3600)
+    assert [(k, e - now) for k, _, e in parts] == [("longctx", 7200), ("standard", 4 * 3600)]
+    assert kinds("2026-11-03", dict(c, R2_TOWER_NIGHT_ROTATION="bogus")) == [("standard", "standard", "/t/real-v4-r2.jsonl")]
+
+
+def test_a_split_night_swaps_half_way(tmp_path: Path) -> None:
+    (tmp_path / "teacher-ctx.json").write_text(json.dumps(
+        {"hosts": {"4090": {"quants": {"q4": {"label": "UD-Q4_K_XL", "summary": {"max_stable_ctx": 163840}}}}}}))
+    fake = Fake("2026-11-03T01:12:00-05:00")
+    cx = ctx(tmp_path, fake, "R2_TOWER_NIGHT_ROTATION=split\nR2_TOWER_TASKS_LONGCTX=/t/lc.jsonl\n")
+    cx.cmd = "tower-night"
+    seen: list[str] = []
+    real_start = cx.start_remote_gen
+
+    def start_gen(until: float, tag: str) -> str:
+        seen.append(cx.c["R2_TOWER_TASKS"])
+        return real_start(until, tag)
+
+    cx.start_remote_gen = start_gen  # type: ignore[method-assign]
+
+    def night_end(f: Fake) -> None:
+        if f.now >= t("2026-11-03T06:22:00-05:00"):
+            f.tower.update(jobs_unit="none", r2_units="")
+
+    fake.on_sleep.append(night_end)
+    assert R.cmd_tower_night(cx) == 0
+    calls = [(w, a[a.index("--profiles") + 1]) for w, a in fake.tower_calls]
+    assert calls == [("start", "1x131072 4x32768"), ("swap", "4x32768")]
+    mid = t("2026-11-03T01:12:00-05:00") + (t("2026-11-03T06:22:00-05:00") - t("2026-11-03T01:12:00-05:00")) / 2
+    assert fake.gen_starts == [mid - 60, t("2026-11-03T06:20:00-05:00")]
+    assert seen[0] == "/t/lc.jsonl" and seen[1].endswith("real-v3-excl.jsonl")
+    assert cx.c["R2_TOWER_PROFILE"] == "standard", "the settings are restored after the night"
+    assert cx.load_state("night.json")["plan"] == ["longctx", "standard"]
