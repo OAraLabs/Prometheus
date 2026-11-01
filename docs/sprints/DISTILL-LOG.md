@@ -235,3 +235,9 @@ Append-only, times in ET.
   - **Deployed now:** the 4090's serve_teacher.sh, round2_tower.sh and ~/distill/disk_preflight.py.
   - **Deployed later:** job_runner.py goes with the next window bundle install (that needs a rehearsal). train_full.py and capacity.py are staged per run.
   - **Long context:** a `longctx` night now serves the 4090's IQ3 copy at 1×262,144, with Q4 1×163,840 then 4×32K as fallbacks; generation is labelled IQ3_XXS with its sha256 and gets its own run dir. The Sunday chain stays standard 4×32K on Q4. The chain bin on the 3090 Ti host is updated for the nightly runs.
+- 2026-11-01 12:49 EST — **Phase 6 passes on rerun; scoring running** (flywheel-post-train-20261101T123320, ETA ~17:30 EST).
+  - **Root cause:** an intermittent cuBLAS BF16 GEMM fault ("unsupported value or parameter") in the distro cuBLAS 12.0 build; not out-of-memory, not the data.
+  - **Fix:** the imatrix runs on a Q8_0 copy (llama.cpp's own int8 kernels). Q4_K_M (4e8a76a2…) and Q5_K_M (f57a7648…) are quantized from BF16. The BF16 scoring item falls back to F16 if the server crashes.
+  - **Disk:** freed 27 → 52 GiB with distill-owned items only (the 27B bnb4 test download, the old venv, smoke runs, checkpoints, verified dataset copies), each logged; Gemma and the HF cache untouched. A disk preflight with Telegram is now in every 4090 job (job-runner part deploys with the next bundle install).
+  - **Chain:** r2-tower-chain-20261101b waits for the pipeline, with no business flap (a 45-min handoff watch). Long-context nights use IQ3 at 262,144.
+  - **Odd:** held-back perplexity is BF16 9.340 / Q4 8.574 / Q5 9.243 (Q4 below BF16 is unusual). A CPU BF16 cross-check is running; I'll recheck before trusting the BF16 reference.
