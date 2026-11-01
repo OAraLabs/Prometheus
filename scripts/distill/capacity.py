@@ -124,7 +124,8 @@ REPLY_RESERVE = 4096  # a long-context row's reply: reasoning budget 2048 + answ
 REQUEST_TIMEOUT_S = 1800
 LOAD_TIMEOUT_S = 600
 IDLE_VRAM_MAX_MIB = 1500
-DISK_FLOOR_GB = 15.0  # the 4090 window's MIN_FREE_DISK_GB
+DISK_FLOOR_GB = 15.0  # the 4090 window's MIN_FREE_DISK_GB: kept after the IQ3 copy
+DISK_STOP_GB = 10.0  # post_train's floor: below it nothing starts (and a running block stops)
 MAX_STARTS = 4
 NOTIFY_LINES = 5
 CAP_SEED = "capacity-2026-11-01"
@@ -1287,9 +1288,10 @@ class Tower:
 
     @staticmethod
     def _run(argv: Sequence[str], timeout: float, env: Optional[Dict[str, str]] = None,
-             stdin: Optional[str] = None) -> Tuple[int, str]:
+             stdin: Optional[str] = None, cwd: Optional[str] = None) -> Tuple[int, str]:
         try:
-            p = subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout, env=env, input=stdin)
+            p = subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout, env=env, input=stdin,
+                               cwd=cwd)
         except subprocess.TimeoutExpired:
             return 124, f"timed out after {timeout:.0f}s"
         except OSError as exc:
@@ -1304,9 +1306,11 @@ class Tower:
             self.log("  [plan] 4090: " + script[:600])
             return 0, ""
         if self.cfg.fake:
-            env = dict(os.environ, HOME=str(self.cfg.fake / "tower"),
-                       PATH=f"{self.cfg.fake / 'tower' / 'bin'}:{os.environ.get('PATH', '')}")
-            return self._run(["bash", "-c", script], timeout, env=env, stdin=stdin)
+            # the fake home is also the working directory: a relative path must never reach this host's
+            # real files (it did once: a rehearsal's cleanup removed a real model file here)
+            home = str(self.cfg.fake / "tower")
+            env = dict(os.environ, HOME=home, PATH=f"{self.cfg.fake / 'tower' / 'bin'}:{os.environ.get('PATH', '')}")
+            return self._run(["bash", "-c", script], timeout, env=env, stdin=stdin, cwd=home)
         rc, out = 255, ""
         for attempt in range(3):
             rc, out = self._run(self.ssh_argv() + [script], timeout, stdin=stdin)
@@ -1518,7 +1522,7 @@ class Block:
             self.state["biz_back_elsewhere"] = True
             raise Stop(f"{self.cfg.biz_unit} is {kv1(kv, 'biz')} again (restored elsewhere)")
         free = to_float(kv1(kv, "free_gb"))
-        if free is not None and free < DISK_FLOOR_GB - 5:
+        if free is not None and free < DISK_STOP_GB:
             raise Stop(f"disk pressure on the 4090 ({free:.1f} GB free)")
 
     def time_left(self) -> float:
@@ -1601,8 +1605,8 @@ class Block:
         if kv.get("flag") and c.execute:
             raise NotRun(f"NO-SWAPS flag present on the 4090 ({', '.join(kv['flag'])[:150]})")
         free = to_float(kv1(kv, "free_gb"))
-        if free is not None and free < DISK_FLOOR_GB and c.execute:
-            raise NotRun(f"the 4090 has {free:.1f} GB free (< {DISK_FLOOR_GB:g})")
+        if free is not None and free < DISK_STOP_GB and c.execute:
+            raise NotRun(f"the 4090 has {free:.1f} GB free (< {DISK_STOP_GB:g})")
         others = self.foreign_units(kv)
         if others and c.execute:
             raise NotRun(f"other distill units run on the 4090: {', '.join(others)[:200]}")
@@ -1695,7 +1699,8 @@ class Block:
         if st.get("status") in ("verified", "skipped"):
             return
         qd = self.cfg.quant("iq3")
-        rc, out = self.tower.run(f"test -s {q(qd['file'])} && stat -c %s {q(qd['file'])} || echo none", timeout=60) \
+        f = self.tower.p(qd["file"])
+        rc, out = self.tower.run(f"test -s {q(f)} && stat -c %s {q(f)} || echo none", timeout=60) \
             if self.cfg.execute else (0, "none")
         size = to_int((out.splitlines() or [""])[-1])
         kv = self.probe()
@@ -1714,6 +1719,7 @@ class Block:
         with self._lock:
             st = self.state.setdefault("iq3_copy", {})
         qd = self.cfg.quant("iq3")
+        f, man = self.tower.p(qd["file"]), self.tower.p(qd["manifest"])
 
         def put(**kw: Any) -> None:
             with self._lock:
@@ -1721,10 +1727,14 @@ class Block:
 
         try:
             t0 = self.clock()
-            rc, out = self.tower.run(f"mkdir -p -m 700 {q(str(Path(qd['file']).parent))} && "
-                                     f"stat -c %s {q(qd['file'])} 2>/dev/null || echo 0", mut=True, timeout=60)
+            if not self.cfg.iq3_src.is_file():
+                put(status="failed", reason="the IQ3 source file is missing on this host")
+                return
+            rc, out = self.tower.run(f"mkdir -p -m 700 {q(str(Path(f).parent))} && "
+                                     f"stat -c %s {q(f)} 2>/dev/null || echo 0", mut=True, timeout=60)
             have = to_int((out.splitlines() or ["0"])[-1], 0) if self.cfg.execute else 0
-            if have != qd["bytes"]:
+            transferred = have != qd["bytes"]
+            if transferred:
                 rc, out = self.tower.rsync_to(self.cfg.iq3_src, qd["file"], timeout=5400)
                 if rc != 0:
                     put(status="failed", reason=f"rsync exit {rc}: {out[-160:]}")
@@ -1736,15 +1746,18 @@ class Block:
             if not self.cfg.execute:
                 put(status="planned")
                 return
-            rc, out = self.tower.run(f"sha256sum {q(qd['file'])} | cut -d' ' -f1; "
-                                     f"grep -o '\"sha256\": *\"[0-9a-f]\\{{64\\}}\"' {q(qd['manifest'])} | head -n 1 "
+            rc, out = self.tower.run(f"sha256sum {q(f)} | cut -d' ' -f1; "
+                                     f"grep -o '\"sha256\": *\"[0-9a-f]\\{{64\\}}\"' {q(man)} | head -n 1 "
                                      "| grep -o '[0-9a-f]\\{64\\}'", timeout=900)
             lines = [x.strip() for x in out.splitlines() if re.fullmatch(r"[0-9a-f]{64}", x.strip())]
             if len(lines) >= 2 and lines[0] == qd["sha256"] and lines[1] == qd["sha256"]:
                 put(status="verified", seconds=round(self.clock() - t0), sha256=qd["sha256"])
             else:
-                put(status="failed", reason="sha256 mismatch after the copy (the copy is removed)")
-                self.tower.run(f"rm -f {q(qd['file'])}", mut=True)
+                if transferred and not self.cfg.fake and f.startswith(self.tower.home + "/distill/"):
+                    put(status="failed", reason="sha256 mismatch after the copy (this run's copy is removed)")
+                    self.tower.run(f"rm -f -- {q(f)}", mut=True)
+                else:
+                    put(status="failed", reason="sha256 mismatch (nothing removed)")
         except Exception as exc:  # noqa: BLE001 - reported, the IQ3 ladder is skipped
             put(status="failed", reason=f"{type(exc).__name__}: {str(exc)[:160]}")
         finally:

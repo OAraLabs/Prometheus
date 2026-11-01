@@ -582,6 +582,7 @@ def test_block_full_run_leaves_business_down_for_generation(tmp_path: Path, buil
     clock = FakeClock(SUN_1530)
     tower = FakeTower(clock, max_ctx={"q4": 163840, "iq3": 262144}, qlora_max=49152)
     (tmp_path / "PIPELINE-DONE.json").write_text(json.dumps({"outcome": "completed"}))
+    (tmp_path / "iq3.gguf").write_bytes(b"x")
     b = _block(tmp_path, tower, clock, builder)
     assert b.run() == 0
     cap = tmp_path / "cap"
@@ -842,3 +843,65 @@ def test_bench_dry_run_plans_without_torch(tmp_path: Path, monkeypatch: pytest.M
 
 def test_sampler_script_parses() -> None:
     assert subprocess.run(["bash", "-n", str(_DIR / "tower" / "cap_sampler.sh")]).returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# never touch a real file from a rehearsal (a fake run once removed a real model file: relative paths
+# in the fake tower shell resolved against this host's home)
+# ---------------------------------------------------------------------------
+
+
+def test_fake_tower_shell_runs_in_the_fake_home(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path, fake_root=str(tmp_path / "rig"))
+    (tmp_path / "rig" / "tower").mkdir(parents=True)
+    t = C.Tower(cfg, lambda m: None)
+    rc, out = t.run("pwd; echo $HOME; touch relative-file")
+    assert rc == 0
+    assert out.splitlines() == [str((tmp_path / "rig" / "tower").resolve())] * 2
+    assert (tmp_path / "rig" / "tower" / "relative-file").is_file()
+    assert t.p("distill/x") == str((tmp_path / "rig" / "tower").resolve()) + "/distill/x"
+
+
+class _ShaTower(FakeTower):
+    def __init__(self, clock: FakeClock, sha: str, have: int = 0) -> None:
+        super().__init__(clock, max_ctx={"q4": 1, "iq3": 1})
+        self.sha, self.have = sha, have
+
+    def run(self, script: str, *, mut: bool = False, timeout: float = 120, stdin: Optional[str] = None) -> Tuple[int, str]:
+        self.calls.append(script)
+        if script.startswith("sha256sum"):
+            return 0, f"{self.sha}\n{C.QUANTS['iq3']['sha256']}"
+        if "stat -c %s" in script:
+            return 0, str(self.have)
+        return 0, ""
+
+
+@pytest.mark.parametrize("have,fake,removed", [(0, False, True), (C.QUANTS["iq3"]["bytes"], False, False)])
+def test_iq3_copy_removes_only_what_it_transferred(tmp_path: Path, builder: Any, have: int, fake: bool,
+                                                   removed: bool) -> None:
+    clock = FakeClock(SUN_1530)
+    tower = _ShaTower(clock, "0" * 64, have=have)
+    (tmp_path / "iq3.gguf").write_bytes(b"x")
+    b = _block(tmp_path, tower, clock, builder)
+    b.tower = tower
+    b._copy_iq3()
+    st = b.state["iq3_copy"]
+    assert st["status"] == "failed" and "mismatch" in st["reason"]
+    rms = [c for c in tower.calls if c.startswith("rm ")]
+    assert bool(rms) is removed
+    for c in rms:
+        assert c == f"rm -f -- {tower.home}/{C.QUANTS['iq3']['file']}"
+    # every path the copy touched on the 4090 is absolute
+    for c in tower.calls:
+        if "Qwen3.8-27B-GSQ" in c and not c.startswith("rsync"):
+            assert f"{tower.home}/distill/models/teacher/" in c
+
+
+def test_iq3_copy_without_a_source_touches_nothing(tmp_path: Path, builder: Any) -> None:
+    clock = FakeClock(SUN_1530)
+    tower = _ShaTower(clock, C.QUANTS["iq3"]["sha256"])
+    b = _block(tmp_path, tower, clock, builder)
+    b.tower = tower
+    b._copy_iq3()
+    assert b.state["iq3_copy"] == {"status": "failed", "reason": "the IQ3 source file is missing on this host"}
+    assert tower.calls == []
