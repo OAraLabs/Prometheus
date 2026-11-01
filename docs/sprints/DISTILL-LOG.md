@@ -199,3 +199,7 @@ Append-only, times in ET.
   - **Keep after fix:** 3/24 (12.5%): injection 1/10, error recovery 1/6, long context 1/8.
   - **Steering:** injection share lowered 0.30 → 0.15 (still under 15% kept), daily agent raised to 0.35. Defaults saved as steer.defaults-20261101.json.
   - **Throughput:** the 3090 Ti host alone gives ~1–2 kept tasks/h. The 4090's 4 slots from Sunday evening should be the main source.
+- 2026-11-01 03:57 EST — Step 698. Held-out val 0.7972 (epoch 1) → 0.8049 (600) → 0.8064 (682) while train loss falls to 0.716 and probe loss keeps falling (0.8954 → 0.8895). Mild epoch-2 overfit on val (64 rows, noisy). Epoch-1 checkpoint is preserved; both get compared after the run. Round-2 run 5122750b: 19 verified rows (error-recovery 8, daily-agent 6, injection 4, long-context 1).
+- 2026-11-01 04:56 EST — Step 775. Held-out val at 765: 0.8002 (back down from 0.8064), probe 0.8878 (still falling). Round-2 run: 34 rows (daily-agent 14, error-recovery 8, injection 4, long-context 4, coding 4).
+- 2026-11-01 05:55 EST — Step 851. Val 0.8012 at step 800 (flat at ~0.80), probe 0.8892. Round-2 local: 149 tasks tried since 02:27, pool qwen38-27b-gym 293 rows; paused for the 06:00 nightly eval as designed.
+- 2026-11-01 06:55 EST — Step 930/1,120. Val 0.7991 at step 883 (epoch 1 was 0.7972), probe 0.8810, still improving. ETA ~09:20 EST. Round-2 local: 178 tasks tried.
