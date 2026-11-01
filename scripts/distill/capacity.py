@@ -2425,6 +2425,7 @@ def fake_server(argv: Sequence[str]) -> int:
                                     "predicted_ms": 400.0, "predicted_per_second": 30.0, "cache_n": 0}})
 
     srv = http.server.ThreadingHTTPServer((LOOPBACK, port), H)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # a unit stop frees the fake VRAM (finally below)
     print(f"fake llama-server {alias} -c {ctx} x{slots} on {LOOPBACK}:{port} ({used} MiB)", flush=True)
     try:
         srv.serve_forever()
@@ -2437,15 +2438,22 @@ def fake_server(argv: Sequence[str]) -> int:
 
 
 def fake_setup(root: Path, code_rel: str, *, max_ctx: Dict[str, int], max_read: Optional[int] = None,
-               qlora_max: int = 32768) -> None:
+               qlora_max: int = 32768, data_dir: Optional[Path] = None, tokenizer_dir: Optional[Path] = None) -> None:
     """A fake 4090 tree under ROOT/tower (serve script, nvidia-smi, notify, train_end.sh, the bench
     python) and a fake here under ROOT/here. The business stand-in is the unit capfake-biz.service."""
     t, h = root / "tower", root / "here"
     for d in ("bin", "distill/teacher-serve", "distill/window/state", "distill/capacity", "models",
               "distill/models/teacher", "distill/models/qwen38-27b-gguf", "distill/venv-train/bin",
-              "distill/phase3/build-v4b-max-derived", "distill/models/qwen3.5-9b-tokenizer",
-              "distill/models/qwen3.5-9b-bnb4"):
+              "distill/phase3", "distill/models/qwen3.5-9b-bnb4"):
         (t / d).mkdir(parents=True, exist_ok=True)
+    # the benchmark reads real rows with the real tokenizer here (read only), through links
+    for rel, src in (("distill/phase3/build-v4b-max-derived", data_dir),
+                     ("distill/models/qwen3.5-9b-tokenizer", tokenizer_dir)):
+        dst = t / rel
+        if src is not None and not dst.exists():
+            dst.symlink_to(Path(src).expanduser().resolve())
+        elif not dst.exists():
+            dst.mkdir(parents=True)
     for d in ("distill/secrets", "distill/capacity", "distill/phase7/run", "distill/models/teacher"):
         (h / d).mkdir(parents=True, exist_ok=True)
     me = Path(__file__).resolve()
@@ -2483,7 +2491,7 @@ def fake_setup(root: Path, code_rel: str, *, max_ctx: Dict[str, int], max_read: 
     (root / "quant-override.json").write_text(json.dumps({"iq3": {"bytes": src.stat().st_size, "sha256": sha}}))
     # the bench: the system python runs seqlen_bench.py with its fake backend
     vpy = t / "distill/venv-train/bin/python"
-    vpy.write_text(sh + f"export FAKE_QLORA_MAX={qlora_max}\nexec /usr/bin/python3 -I \"$@\"\n")
+    vpy.write_text(sh + f"export FAKE_QLORA_MAX={qlora_max}\nexec /usr/bin/python3 -E -P \"$@\"\n")
     vpy.chmod(0o755)
     code_dst = t / code_rel
     if not code_dst.exists():
@@ -2576,7 +2584,8 @@ def cmd_arm(a: argparse.Namespace) -> int:
             "-p", "KillMode=mixed", "-p", "TimeoutStopSec=1800", "-p", "Restart=on-failure", "-p", "RestartSec=120",
             "-p", f"StandardOutput=append:{log}", "-p", f"StandardError=append:{log}",
             "--setenv=TZ=America/New_York", "--setenv=PYTHONUNBUFFERED=1", "--expand-environment=no",
-            "/usr/bin/python3", "-I", str(me), "block", *fwd, "--execute"]
+            # -E -P, not -I: the tokenizer package lives in the user's site-packages here
+            "/usr/bin/python3", "-E", "-P", str(me), "block", *fwd, "--execute"]
     print(shlex.join(argv))
     if not a.execute:
         print("dry run: nothing started (--execute starts it)")
@@ -2654,6 +2663,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     fs.add_argument("--max-ctx", default="q4=163840,iq3=262144")
     fs.add_argument("--max-read", default=None)
     fs.add_argument("--qlora-max", default="32768")
+    fs.add_argument("--data-dir", default=None, help="a v4b build to link (read only)")
+    fs.add_argument("--tokenizer-dir", default=None)
     sub.add_parser("fake-server", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
     if a.cmd == "mini":
@@ -2669,7 +2680,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.cmd == "fake-setup":
         mc = {k: int(v) for k, v in (x.split("=") for x in a.max_ctx.split(",") if x)}
         fake_setup(Path(a.fake_root).expanduser().resolve(), a.code_rel, max_ctx=mc,
-                   max_read=to_int(a.max_read), qlora_max=int(a.qlora_max))
+                   max_read=to_int(a.max_read), qlora_max=int(a.qlora_max),
+                   data_dir=Path(a.data_dir) if a.data_dir else None,
+                   tokenizer_dir=Path(a.tokenizer_dir) if a.tokenizer_dir else None)
         print(f"fake 4090 tree under {a.fake_root}")
         return 0
     if a.cmd == "fake-server":
