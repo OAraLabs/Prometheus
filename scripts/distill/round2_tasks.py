@@ -625,6 +625,27 @@ def grounding_terms(target: SrcFile, others: list[SrcFile], prompt: str, k: int 
 # Rows
 # ---------------------------------------------------------------------------
 
+def eval_tools_keys(paths: list[Path]) -> tuple[set[str], set[str]]:
+    """Task proxies and 8-token shingles of every user message in eval-tools case files:
+    exactly what ``teacher_gen.EvalGuard`` refuses a task for (so no row here is skipped there)."""
+    ids: set[str] = set()
+    shingles: set[str] = set()
+    for path in paths:
+        for line in path.read_text(encoding="utf-8").split("\n"):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            tid = (row.get("meta") or {}).get("task_id")
+            if tid:
+                ids.add(str(tid))
+            for m in row.get("messages") or []:
+                if m.get("role") == "user":
+                    text = _first_text(m.get("content"))
+                    ids.add(TS.h(TS.norm(text)))
+                    shingles |= BES.shingle_hashes(text)
+    return ids, shingles
+
+
 def make_row(base: dict[str, Any], *, taskset: str, area: str, variant: str, verifier: str, needs_ctx: int,
              ctx_bucket: str | None = None, injection: dict[str, Any] | None = None,
              failure: dict[str, Any] | None = None, longctx: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -717,6 +738,13 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
     if any("r2" in r for r in base_rows):
         raise R2Error("--base is already a round-2 taskset")
     stats: collections.Counter = collections.Counter()
+    eval_tools = [Path(os.path.expanduser(p)) for p in (a.eval_tools or [])]
+    if eval_tools:
+        ev_ids, ev_sh = eval_tools_keys(eval_tools)
+        kept = [r for r in base_rows
+                if TS.h(TS.norm(r["prompt"])) not in ev_ids and not (BES.shingle_hashes(r["prompt"]) & ev_sh)]
+        stats["base_rows_eval_tools_overlap_dropped"] = len(base_rows) - len(kept)
+        base_rows = kept
     counter = TokenCounter(Path(os.path.expanduser(a.tokenizer_dir)) if a.tokenizer_dir else None)
     overhead, overhead_basis = overhead_tokens(Path(os.path.expanduser(a.pack)) if a.pack else None, counter)
     calibrated, cal_sha = calibrated_categories(Path(os.path.expanduser(a.calibration)) if a.calibration else None)
@@ -867,6 +895,7 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
         "base_sha256": TS._sha256(base_path), "base_rows": len(base_rows),
         "files": files, "combined": {"file": combined.name, "rows": len(merged), "sha256": TS._sha256(combined)},
         "rows_by_area": {area: len(rows[area]) for area in AREAS},
+        "eval_tools_files": [p.name for p in eval_tools],
         "rows_by_area_category": {area: dict(collections.Counter(r["category"] for r in rows[area]).most_common())
                                   for area in AREAS},
         "planned_verifier": {area: dict(collections.Counter(r["r2"]["verifier"] for r in rows[area]))
@@ -915,9 +944,13 @@ def check_disjoint(a: argparse.Namespace) -> dict[str, Any]:
            "longctx_rows": len(lc), "eval_longctx_paths": len(lc_eval),
            "longctx_reads_in_eval": sum(1 for r in lc for x in r["r2"]["longctx"]["reads"]
                                         if _norm_path(x["path"]) in lc_eval)}
+    if a.eval_tools:
+        ids, sh = eval_tools_keys([Path(os.path.expanduser(p)) for p in a.eval_tools])
+        out["eval_tools_overlaps"] = sum(1 for r in rows if TS.h(TS.norm(r["prompt"])) in ids
+                                         or BES.shingle_hashes(r["prompt"]) & sh)
     out["pass"] = (out["static"]["pass"] and not out["injection_overlaps"] and not out["injection_goals_in_eval"]
                    and not out["injection_styles_in_eval"] and not out["longctx_reads_in_eval"]
-                   and bool(lc_eval))
+                   and not out.get("eval_tools_overlaps") and bool(lc_eval))
     return out
 
 
@@ -931,6 +964,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     b.add_argument("--seed", type=int, default=DEFAULT_SEED)
     b.add_argument("--injection-manifest", default=TS.DEFAULT_MANIFEST)
     b.add_argument("--eval-longctx", action="append", required=True)
+    b.add_argument("--eval-tools", action="append", default=[],
+                   help="eval-tools case files: a real row sharing a task or an 8-token shingle with one is "
+                        "dropped (teacher_gen.py's eval guard would skip it)")
     b.add_argument("--fail-traces", default="~/distill/phase2/fail_traces.jsonl")
     b.add_argument("--lcm-snapshot", default=TS.DEFAULT_LCM)
     b.add_argument("--repo", default=TS.DEFAULT_REPO)
@@ -946,6 +982,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     c.add_argument("--tasks", required=True)
     c.add_argument("--injection-manifest", default=TS.DEFAULT_MANIFEST)
     c.add_argument("--eval-longctx", action="append", required=True)
+    c.add_argument("--eval-tools", action="append", default=[])
     return ap.parse_args(argv)
 
 

@@ -170,6 +170,10 @@ def built(tmp_path: Path) -> tuple[dict[str, Any], Path, Any]:
     manifest = _eval_manifest()
     mpath = tmp_path / "manifest.json"
     mpath.write_text(json.dumps(manifest.data))
+    # an eval-tools case whose user message shares 8 tokens with one real row: that row is dropped
+    et = tmp_path / "eval-tools.jsonl"
+    et.write_text(json.dumps({"id": "e1", "meta": {"task_id": "x"}, "messages": [
+        {"role": "user", "content": "please Run the status check for the indexer service now"}]}) + "\n")
     cal = tmp_path / "cal.json"
     cal.write_text(json.dumps({"schema": "distill-judge-calibration/2", "decision": {"decision": "use-local-judge"},
                                "by_category": [{"category": "coding", "apply": True},
@@ -179,7 +183,7 @@ def built(tmp_path: Path) -> tuple[dict[str, Any], Path, Any]:
     a = argparse.Namespace(name="real-t-r2", out=str(out), base=str(base), seed=7, injection_manifest=str(mpath),
                            eval_longctx=[str(lc_eval)], fail_traces=str(fails), lcm_snapshot=str(lcm),
                            repo=str(repo), repo_ref="origin/main", pack=None, calibration=str(cal), tokenizer_dir=None,
-                           steer=str(tmp_path / "no-steer.json"), inj_variants=2, lc_variants=1,
+                           steer=str(tmp_path / "no-steer.json"), inj_variants=2, lc_variants=1, eval_tools=[str(et)],
                            ctx_buckets="32k,64k,128k")
     old = dict(r2t.CTX_BUCKETS)
     r2t.CTX_BUCKETS.update({"32k": 14_000, "64k": 20_000, "128k": 26_000})  # a small synthetic repo
@@ -195,6 +199,8 @@ def test_build_writes_valid_round2_rows_for_every_area(built: Any) -> None:
     rep, out, _ = built
     rows = ts.load_taskset(out / "real-t-r2.jsonl")
     assert len(rows) == rep["combined"]["rows"] == sum(rep["rows_by_area"].values())
+    assert rep["stats"]["base_rows_eval_tools_overlap_dropped"] == 1
+    assert not any("indexer service" in r["prompt"] for r in rows)
     areas = {r["r2"]["area"] for r in rows}
     assert areas == set(ts.R2_AREAS)
     for r in rows:
@@ -263,7 +269,7 @@ def test_failure_patterns_come_from_the_harvest_and_never_carry_a_home_path(buil
 def test_check_disjoint_passes_on_the_build_and_fails_on_a_planted_eval_source(built: Any, tmp_path: Path) -> None:
     rep, out, (a, lc_eval, mpath) = built
     ns = argparse.Namespace(tasks=str(out / "real-t-r2.jsonl"), injection_manifest=str(mpath),
-                            eval_longctx=[str(lc_eval)])
+                            eval_longctx=[str(lc_eval)], eval_tools=[])
     res = r2t.check_disjoint(ns)
     assert res["pass"] and res["injection_overlaps"] == 0 and res["longctx_reads_in_eval"] == 0
     rows = ts.load_taskset(out / "real-t-r2.jsonl")
