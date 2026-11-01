@@ -260,6 +260,9 @@ class Fake:
         self.on_sleep: list[Any] = []
         self.gen_ends_at: float | None = None
         self.progress: dict[str, Any] = {}
+        self.iq3 = True
+        self.ab_jobs: list[dict[str, list[str]]] = []
+        self.notes: list[list[str]] = []
 
     def clock(self) -> float:
         return self.now
@@ -283,10 +286,17 @@ def ctx(tmp_path: Path, fake: Fake, extra: str = "") -> R.Ctx:
 
     def tower_run(what: str, args: list[str], wait_s: float) -> tuple[int, dict[str, Any]]:
         fake.tower_calls.append((what, args))
-        if what == "start":
+        if what in ("start", "swap"):
             req = args[args.index("--req") + 1]
+            first = args[args.index("--profiles") + 1].split()[0]
+            model, _, shape = first.rpartition(":")
+            model = model or "q4"
+            if model == "iq3" and not fake.iq3:
+                model, shape = "q4", args[args.index("--profiles") + 1].split()[-1]
+            slots, ctx_ = shape.split("x")
             fake.tower.update(jobs_unit="distill-jobs-r2teacher@x-1.service", r2_units="distill-jobs-r2teacher@x-1.service")
-            return 0, {"status": "ok", "req": req, "unit": "distill-jobs-r2teacher@x-1.service"}
+            return 0, {"status": "ok", "req": req, "unit": "distill-jobs-r2teacher@x-1.service", "model": model,
+                       "slots": slots, "ctx": ctx_}
         fake.tower.update(jobs_unit="none", r2_units="")
         return 0, {}
 
@@ -296,8 +306,23 @@ def ctx(tmp_path: Path, fake: Fake, extra: str = "") -> R.Ctx:
         fake.units[u] = "active"
         return u
 
+    def ab_run(jobs: dict[str, list[str]], deadline: float) -> dict[str, int]:
+        fake.ab_jobs.append(jobs)
+        fake.now += 600
+        for argv in jobs.values():
+            out = Path(argv[argv.index("--out") + 1])
+            if argv[5] == "arm":
+                arm = argv[argv.index("--arm") + 1]
+                (out / f"arm-{arm}.jsonl").write_text("\n".join(json.dumps(
+                    {"label": arm, "server": {"model_file": f"{arm}.gguf", "n_ctx": 32768}}) for _ in range(3)) + "\n")
+            if argv[5] == "report":
+                (out / "ab_summary.txt").write_text(f"Teacher A/B: keep IQ3 ({out.name})\n")
+        return {k: 0 for k in jobs}
+
     cx.tower_run = tower_run  # type: ignore[method-assign]
     cx.start_remote_gen = start_gen  # type: ignore[method-assign]
+    cx.ab_run = ab_run  # type: ignore[method-assign]
+    cx.notify = lambda lines, n=5: fake.notes.append(lines)  # type: ignore[method-assign]
     return cx
 
 
@@ -513,3 +538,114 @@ def test_released_rows_keep_the_held_kind() -> None:
            ("local-r2-a", {"task_id": "x", "status": "released", "ts": now - 40})]
     s = R.gen_stats(evs, now - 3600, now)
     assert s["kind"] == {"chat-mode": 2} and s["domain"] == {"chat-mode": 2}
+
+
+def test_sunday_gives_business_back_when_the_teacher_never_starts(tmp_path: Path) -> None:
+    fake = Fake("2026-11-02T03:00:00-05:00")
+    marker(tmp_path, "completed", "2026-11-01T15:00:00-05:00")
+    cap = Path(conf(tmp_path)["R2_CAPACITY_DONE"])
+    cap.parent.mkdir(parents=True, exist_ok=True)
+    cap.write_text("{}")
+    cx = ctx(tmp_path, fake)
+
+    def refused(what: str, args: list[str], wait_s: float) -> tuple[int, dict[str, Any]]:
+        fake.tower_calls.append((what, args))
+        if what == "start":
+            return 2, {"status": "refused", "why": "the GPU is still owned by: distill-x", "req": args[args.index("--req") + 1]}
+        return 0, {}
+
+    cx.tower_run = refused  # type: ignore[method-assign]
+    assert R.cmd_sunday(cx) == 0
+    st = cx.load_state("sunday.json")
+    assert st["phase"] == "skipped" and "still refused at Mon 04:00 EST" in st["why"]
+    assert [w for w, _ in fake.tower_calls][-1] == "end" and fake.gen_starts == []
+    assert sum(1 for w, _ in fake.tower_calls if w == "start") == 12, "every 5 min until the latest start"
+
+
+def ab_dirs(tmp_path: Path, arm_a: int = 3) -> tuple[Path, Path]:
+    mini, tower = tmp_path / "ab" / "mini-v3", tmp_path / "ab" / "tower-v3"
+    mini.mkdir(parents=True)
+    for f in ("ab_selection.json", "ab_settings.json"):
+        (mini / f).write_text("{}")
+    (mini / "ab_tasks.jsonl").write_text("{}\n{}\n{}\n")
+    (mini / "arm-A.jsonl").write_text("{}\n" * arm_a)
+    (mini / "ab_summary.txt").write_text("Teacher A/B: INCOMPLETE (0 of 3 pairs done; rerun to resume)\n")
+    return mini, tower
+
+
+def ab_conf(tmp_path: Path) -> str:
+    code = tmp_path / "code-ab" / "scripts" / "distill"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "teacher_ab.py").write_text("")
+    return f"R2_AB_DIR={tmp_path}/ab/mini-v3\nR2_AB_TOWER_DIR={tmp_path}/ab/tower-v3\nR2_AB_CODE={tmp_path}/code-ab\n"
+
+
+def test_ab_wanted(tmp_path: Path) -> None:
+    fake = Fake("2026-11-01T16:00:00-05:00")
+    cx = ctx(tmp_path, fake, ab_conf(tmp_path))
+    assert R.ab_wanted(cx) == "", "no arm A recorded"
+    mini, tower = ab_dirs(tmp_path, arm_a=2)
+    assert R.ab_wanted(cx) == "", "arm A not complete"
+    (mini / "arm-A.jsonl").write_text("{}\n" * 3)
+    assert R.ab_wanted(cx) == "both"
+    tower.mkdir()
+    (tower / "arm-A.jsonl").write_text("{}\n" * 3)
+    assert R.ab_wanted(cx) == "b"
+    (mini / "arm-B.jsonl").write_text("{}\n" * 3)
+    (mini / "ab_summary.txt").write_text("Teacher A/B: keep IQ3\n")
+    assert R.ab_wanted(cx) == ""
+    assert R.ab_wanted(dict_ctx(cx, R2_AB="off")) == ""
+
+
+def run_sunday_with_ab(tmp_path: Path, fake: Fake, extra: str = "") -> R.Ctx:
+    marker(tmp_path, "completed", "2026-11-01T15:00:00-05:00")
+    cap = Path(conf(tmp_path)["R2_CAPACITY_DONE"])
+    cap.parent.mkdir(parents=True, exist_ok=True)
+    cap.write_text("{}")
+
+    def teacher_ends(f: Fake) -> None:
+        if f.now >= t("2026-11-02T05:20:00-05:00"):
+            f.tower.update(jobs_unit="none", r2_units="")
+            for u in f.units:
+                if u.startswith("r2-gen"):
+                    f.units[u] = "inactive"
+
+    fake.on_sleep.append(teacher_ends)
+    cx = ctx(tmp_path, fake, ab_conf(tmp_path) + extra)
+    assert R.cmd_sunday(cx) == 0
+    return cx
+
+
+def test_sunday_runs_the_ab_on_the_4090_first_then_generates(tmp_path: Path) -> None:
+    mini, tower = ab_dirs(tmp_path)
+    fake = Fake("2026-11-01T15:00:00-05:00")
+    cx = run_sunday_with_ab(tmp_path, fake)
+    calls = [(w, a[a.index("--profiles") + 1] if "--profiles" in a else "") for w, a in fake.tower_calls]
+    assert calls == [("start", "iq3:4x32768 4x32768"), ("swap", "4x32768")], "IQ3 first, Q4 after; gen keeps it"
+    steps = [sorted(j) for j in fake.ab_jobs]
+    assert steps == [["A'"], ["mini", "tower"], ["mini", "tower"], ["mini", "tower"]]
+    arm_a = fake.ab_jobs[0]["A'"]
+    assert arm_a[arm_a.index("--teacher-quant") + 1] == "IQ3_XXS" and "--record-server-diff" not in arm_a
+    arm_b = fake.ab_jobs[1]["mini"]
+    assert arm_b[arm_b.index("--arm") + 1] == "B" and "--record-server-diff" in arm_b
+    assert arm_b[arm_b.index("--teacher-quant") + 1] == "UD-Q4_K_XL"
+    assert arm_b[arm_b.index("--tool-host") + 1] == R.this_host()
+    assert (tower / "ab_tasks.jsonl").read_bytes() == (mini / "ab_tasks.jsonl").read_bytes()
+    sv = json.loads((mini / "ab_servers.json").read_text())
+    assert sv["reasoning_budget"] == 2048 and "model_file" in sv["differences"]
+    assert fake.notes and fake.notes[0][0].startswith("Teacher A/B, arm B on the 4090")
+    assert fake.gen_starts, "generation after the A/B"
+    assert cx.load_state("sunday.json")["phase"] == "done"
+
+
+def test_sunday_ab_without_the_iq3_copy_and_a_longctx_generation_profile(tmp_path: Path) -> None:
+    mini, tower = ab_dirs(tmp_path)
+    (tmp_path / "teacher-ctx.json").write_text(json.dumps(
+        {"hosts": {"4090": {"quants": {"q4": {"label": "UD-Q4_K_XL", "summary": {"max_stable_ctx": 98304}}}}}}))
+    fake = Fake("2026-11-01T15:00:00-05:00")
+    fake.iq3 = False
+    run_sunday_with_ab(tmp_path, fake, "R2_TOWER_PROFILE=longctx\n")
+    calls = [(w, a[a.index("--profiles") + 1] if "--profiles" in a else "") for w, a in fake.tower_calls]
+    assert calls == [("start", "iq3:4x32768 4x32768"), ("swap", "1x98304 4x32768")]
+    assert [sorted(j) for j in fake.ab_jobs] == [["mini"], ["mini"], ["mini"]], "no same-hardware pair"
+    assert fake.gen_starts

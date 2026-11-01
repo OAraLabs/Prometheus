@@ -37,6 +37,16 @@ The 4090 (``tower/round2_tower.sh`` there; this host may ssh to it, never the ot
   holds no such value) or an explicit ``SLOTSxCTX``. The 4090 tries the profiles in order and falls back
   to the standard one if the first does not verify.
 
+The teacher quant A/B (coordinator 2026-11-01, OQ #12 option c), the Sunday chain's first job once the 4090
+teacher is up and before generation, when arm A (IQ3 on the 3090 Ti, ``R2_AB_DIR``) is complete and arm B is
+not: the 4090 starts its IQ3 copy first when it has one (``iq3:R2_AB_PROFILE``; else the Q4 teacher) and arm A
+runs there again into ``R2_AB_TOWER_DIR`` (same tasks and settings: a same-hardware pair); then the Q4 teacher
+(``round2_tower.sh swap``, business stays down): arm B of both directories (``--record-server-diff``), one Q4
+judge pass each, ``report``, ``ab_servers.json`` (quant, per-slot context, template/sampler hashes, reasoning
+budget of each arm's server) and a Telegram; then the generation profile (a swap if it differs). All of it
+``teacher_ab.py`` from ``R2_AB_CODE`` with teacher_gen's remote flags (tools here, bwrap), time-boxed to
+``R2_AB_MAX_MIN``; a failure is logged and generation starts anyway.
+
 The 3090 Ti's own windows (``mini_window.py``; the teacher takes Saluki's port, Saluki is restored at every
 window end, the voice-probe guard stays in front of the local teacher, Ollama stays loaded):
 * ``mini-night start``: from ``R2_MINI_NIGHTLY_FROM`` (after the continuous window), ``mini_window_start.sh
@@ -67,6 +77,7 @@ import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -128,6 +139,21 @@ R2_DEFAULTS: dict[str, str] = {
     "R2_LOCAL_TASKS": "~/distill/phase2b/tasksets/real-v3-excl.jsonl",
     "R2_LOCAL_EXTRA_ARGS": "",
     "R2_LOCAL_NAME": "",                            # empty: local-r2-{alias}-<hash>
+    # the teacher quant A/B's arm B on the 4090 (OQ #12 option c), the Sunday chain's first job on the teacher
+    "R2_AB": "on",                                  # off: straight to generation
+    "R2_AB_DIR": "~/distill/teacher-ab/mini-v3",    # arm A done on the 3090 Ti (IQ3): arm B + judge + report here
+    "R2_AB_TOWER_DIR": "~/distill/teacher-ab/tower-v3",  # both arms on the 4090 (when its IQ3 copy serves)
+    "R2_AB_PY": "~/prometheus-deploy/.venv/bin/python",
+    # its own code export (gen_runner.py stage-code --dest distill/round2/code-ab): arm A's settings must keep
+    # matching, whatever round-2 code is staged into R2_CODE later
+    "R2_AB_CODE": "~/distill/round2/code-ab",
+    "R2_AB_PROFILE": "4x32768",                     # both 4090 arms and the judge in one shape
+    "R2_AB_MAX_MIN": "90",
+    "R2_TOWER_KEY_FILE": "~/distill/secrets/teacher-4090.key",
+    "R2_TOWER_SHA256": "bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372",
+    "R2_IQ3_QUANT": "IQ3_XXS",
+    "R2_IQ3_SHA256": "fdfcb6a29b11188956dfbfd904223588a6c1b77eb250c3e8a36e1bd269df91f7",
+    "R2_REASONING_BUDGET": "2048",                  # both teachers' --reasoning-budget (units / serve_teacher.sh)
     # heartbeat
     "R2_START": "2026-11-01T01:30:00-04:00",
     "R2_TRAIN_RUN": "9b-r32-v4b-max-derived",
@@ -654,7 +680,7 @@ class Ctx:
                 code = kv.get("ExecMainStatus", "")
                 self.ssh(f"systemctl --user reset-failed {unit} 2>/dev/null; true", timeout=30)
                 res: dict[str, Any] = {}
-                if what == "start":
+                if what in ("start", "swap"):
                     r = self.ssh("cat ~/distill/window/state/r2-start.json", timeout=30)
                     with contextlib.suppress(ValueError):
                         res = json.loads(r.stdout or "{}")
@@ -713,6 +739,43 @@ class Ctx:
         self.log(f"remote generation {unit} until {et(until)} into {self.c['R2_RUNS']}/{tower_run_name(self.c)}")
         return unit
 
+    def ab_run(self, jobs: dict[str, list[str]], deadline: float) -> dict[str, int | None]:
+        """teacher_ab.py commands in parallel (PYTHONPATH = R2_AB_CODE's src), each logging to
+        R2_HOME/logs/ab-<step>.log; returns their exit codes (None: still running at the deadline + 10 min,
+        then stopped: its --until has passed)."""
+        if not jobs:
+            return {}
+        if not self.execute:
+            for k, argv in jobs.items():
+                self.log(f"[dry run] teacher A/B {k}: " + shlex.join(argv))
+            return {k: 0 for k in jobs}
+        env = {**os.environ, "PYTHONPATH": str(Path(self.c["R2_AB_CODE"]) / "src"), "PYTHONUNBUFFERED": "1"}
+        procs = {}
+        for k, argv in jobs.items():
+            self.log(f"teacher A/B {k}: " + shlex.join(argv))
+            fh = open(self.log_dir / f"ab-{slug(k)}.log", "ab")
+            procs[k] = (subprocess.Popen(argv, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                         env=env, cwd=str(self.home)), fh)
+        rcs: dict[str, int | None] = {}
+        hard = deadline + 600
+        while procs:
+            for k in list(procs):
+                p, fh = procs[k]
+                if p.poll() is not None or time.time() > hard:
+                    if p.poll() is None:
+                        p.terminate()
+                        with contextlib.suppress(subprocess.TimeoutExpired):
+                            p.wait(60)
+                        if p.poll() is None:
+                            p.kill()
+                    rcs[k] = p.returncode if time.time() <= hard else None
+                    fh.close()
+                    del procs[k]
+                    self.log(f"teacher A/B {k} exited {rcs[k]}")
+            if procs:
+                self.sleep(10)
+        return rcs
+
     def remote_progress(self) -> dict[str, Any]:
         try:
             return json.loads((Path(self.c["R2_RUNS"]) / "state" / "remote-progress.json").read_text())
@@ -736,10 +799,13 @@ def cmd_config(cx: Ctx) -> int:
     return 0
 
 
-def tower_start(cx: Ctx, mode: str, end: float, preempt: bool) -> tuple[str, dict[str, Any]]:
-    """ok / refused / failed, and the 4090's result."""
-    profiles, why = resolve_profiles(cx.c)
-    cx.log(f"serve profile: {' then '.join(profiles)} ({why})")
+def tower_start(cx: Ctx, mode: str, end: float, preempt: bool,
+                profiles: list[str] | None = None) -> tuple[str, dict[str, Any]]:
+    """ok / refused / failed, and the 4090's result. ``profiles``: [MODEL:]SxC in order (default: the
+    generation profile)."""
+    if profiles is None:
+        profiles, why = resolve_profiles(cx.c)
+        cx.log(f"serve profile: {' then '.join(profiles)} ({why})")
     req = f"{mode}-{datetime.fromtimestamp(cx.now(), ET).strftime('%Y%m%dT%H%M%S')}"
     args = ["--mode", mode, "--profiles", " ".join(profiles), "--end-utc", utc_cal(end), "--req", req]
     if preempt:
@@ -825,27 +891,222 @@ def sunday(cx: Ctx) -> int:
             cx.save_state(name, dict(st, waiting=why))
             cx.sleep(poll)
 
+    def give_back(why: str) -> int:
+        """No teacher after the capacity block (which leaves business down for us): business back now, not at the
+        window end hours later (the 4090's end restores only when business does not verify healthy)."""
+        cx.log(f"{why}: the 4090's end restores business if it is down")
+        rc, _ = cx.tower_run("end", [], 2400)
+        return finish("failed" if "did not start" in why else "skipped", f"{why} (4090 end exit {rc})")
+
+    ab = ab_wanted(cx)
     while st["phase"] == "tower-start":
         if cx.now() >= latest:
-            return finish("skipped", f"nothing done: past {et(latest)} before the 4090 teacher started")
-        status, res = tower_start(cx, "cont", end, bool(st.get("preempt")))
+            return give_back(f"nothing done: past {et(latest)} before the 4090 teacher started")
+        profiles = None
+        if ab:  # the A/B first: the IQ3 copy (arm A on the 4090) if it serves, else Q4 in the A/B shape
+            shape = c["R2_AB_PROFILE"]
+            profiles = ([f"iq3:{shape}"] if ab == "both" else []) + [shape]
+            cx.log(f"teacher A/B first ({ab}): serve profile {' then '.join(profiles)}")
+        status, res = tower_start(cx, "cont", end, bool(st.get("preempt")), profiles)
         if status == "ok":
-            st.update(phase="generating", tower=res)
+            st.update(phase="ab" if ab else "generating", tower=res)
             cx.save_state(name, st)
-        elif status == "refused" and cx.execute and cx.now() + 300 < latest:
+        elif status == "refused" and cx.execute:
+            if cx.now() + 300 >= latest:
+                return give_back(f"nothing done: the 4090 still refused at {et(latest)} ({res.get('why')})")
             cx.log(f"4090 refused ({res.get('why')}): again in 5 min")
             cx.save_state(name, dict(st, waiting=f"4090 refused: {res.get('why')}"))
             cx.sleep(300)
         else:
             if not cx.execute:
                 cx.log(f"[dry run] 4090 start dry run exit status '{status}'")
-                st["phase"] = "generating"
+                st.update(phase="ab" if ab else "generating", tower={"model": "q4"})
                 break
-            return finish("failed", f"the 4090 teacher did not start: {res.get('why')}")
+            return give_back(f"the 4090 teacher did not start: {res.get('why')}")
 
+    if st["phase"] == "ab":
+        try:
+            ok = sunday_ab(cx, st, name, gen_until)
+        except Exception as e:  # noqa: BLE001 - the A/B never blocks generation
+            cx.log(f"teacher A/B failed: {type(e).__name__}: {e}")
+            ok = True
+        if not ok:
+            return finish("failed", "the 4090 teacher was lost in a swap (business restored there)")
+        st["phase"] = "generating"
+        cx.save_state(name, st)
     if st["phase"] == "generating":
         return sunday_generate(cx, st, name, gen_until, end)
     return 0
+
+
+# ── the teacher A/B's arm B on the 4090 ──────────────────────────────────────
+
+
+def this_host() -> str:
+    return socket.gethostname().split(".")[0].lower()
+
+
+def jsonl_count(path: Path) -> int:
+    try:
+        return sum(1 for ln in path.read_text(encoding="utf-8", errors="replace").split("\n") if ln.strip())
+    except OSError:
+        return 0
+
+
+def ab_wanted(cx: Ctx) -> str:
+    """"" (no A/B: off, or arm B already recorded), "b" (arm B + judge + report here), "both" (also the
+    same-hardware pair on the 4090, IQ3 first, when its arm A is not done)."""
+    c = cx.c
+    if not on(c["R2_AB"]):
+        return ""
+    d = Path(c["R2_AB_DIR"])
+    n = jsonl_count(d / "ab_tasks.jsonl")
+    if not n or jsonl_count(d / "arm-A.jsonl") < n:
+        cx.log(f"teacher A/B: {d} has no complete arm A: skipped")
+        return ""
+    summary = d / "ab_summary.txt"
+    if jsonl_count(d / "arm-B.jsonl") >= n and summary.is_file() and "INCOMPLETE" not in summary.read_text(errors="replace"):
+        return ""
+    if not (Path(c["R2_AB_CODE"]) / "scripts" / "distill" / "teacher_ab.py").is_file():
+        cx.log(f"teacher A/B: no teacher_ab.py in R2_AB_CODE {c['R2_AB_CODE']}: skipped")
+        return ""
+    t = Path(c["R2_AB_TOWER_DIR"])
+    return "b" if jsonl_count(t / "arm-A.jsonl") >= n else "both"
+
+
+def ab_cmd(c: dict[str, str], *args: str) -> list[str]:
+    return ["nice", "-n", "10", c["R2_AB_PY"], str(Path(c["R2_AB_CODE"]) / "scripts" / "distill" / "teacher_ab.py"),
+            *args]
+
+
+def ab_remote(c: dict[str, str], model: str) -> list[str]:
+    quant, sha = ((c["R2_IQ3_QUANT"], c["R2_IQ3_SHA256"]) if model == "iq3"
+                  else (c["R2_TOWER_QUANT"], c["R2_TOWER_SHA256"]))
+    return ["--teacher-key-file", c["R2_TOWER_KEY_FILE"], "--teacher-host", c["R2_TOWER_HOST"],
+            "--teacher-quant", quant, "--teacher-sha256", sha, "--tool-host", this_host()]
+
+
+def ab_prepare_tower_dir(c: dict[str, str], execute: bool) -> Path:
+    """The same-hardware pair's directory: arm A's selection, settings and frozen tasks, byte for byte."""
+    src, dst = Path(c["R2_AB_DIR"]), Path(c["R2_AB_TOWER_DIR"])
+    if execute:
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in ("ab_selection.json", "ab_settings.json", "ab_tasks.jsonl"):
+            if not (dst / f).exists():
+                (dst / f).write_bytes((src / f).read_bytes())
+    return dst
+
+
+def ab_servers(d: Path, c: dict[str, str]) -> dict[str, Any]:
+    """The servers each arm and the judge ran on, from the records (+ the reasoning budget both teachers set)."""
+    out: dict[str, Any] = {"schema": "distill-teacher-ab-servers/1", "reasoning_budget": int(c["R2_REASONING_BUDGET"]),
+                           "reasoning_budget_source": "--reasoning-budget of distill-teacher.service (3090 Ti) and "
+                                                      "serve_teacher.sh (4090)"}
+    for arm in ("A", "B"):
+        try:
+            first = json.loads((d / f"arm-{arm}.jsonl").read_text(encoding="utf-8").split("\n", 1)[0])
+        except (OSError, ValueError, IndexError):
+            continue
+        srv = first.get("server") or {}
+        out[arm] = {"label": first.get("label"), "served": first.get("served"),
+                    "host": first.get("teacher_host") or "3090 Ti host (local port)",
+                    "quant": first.get("teacher_quant") or first.get("label"),
+                    "model_file": srv.get("model_file"), "n_ctx_per_slot": srv.get("n_ctx"),
+                    "chat_template_sha": srv.get("chat_template_sha"), "sampler_sha": srv.get("sampler_sha"),
+                    "server_diff": first.get("server_diff")}
+    if "A" in out and "B" in out:
+        out["differences"] = {k: [out["A"].get(k), out["B"].get(k)] for k in
+                              ("host", "quant", "model_file", "n_ctx_per_slot", "chat_template_sha", "sampler_sha")
+                              if out["A"].get(k) != out["B"].get(k)}
+    return out
+
+
+def ab_server_line(sv: dict[str, Any]) -> str:
+    a, b = sv.get("A") or {}, sv.get("B") or {}
+    diff = ", ".join(k for k in (sv.get("differences") or {}) if k not in ("model_file",)) or "none"
+    return (f"servers: A {a.get('quant')} ctx {a.get('n_ctx_per_slot')} / B {b.get('quant')} ctx "
+            f"{b.get('n_ctx_per_slot')} on {b.get('host')}; reasoning budget {sv.get('reasoning_budget')} both; "
+            f"differ in: {diff}")
+
+
+def sunday_ab(cx: Ctx, st: dict[str, Any], name: str, gen_until: float) -> bool:
+    """The teacher A/B on the 4090 before generation (coordinator 2026-11-01): arm A' on the 4090's IQ3 copy if
+    it serves (same-hardware pair), then the Q4 server: arm B for both directories, the one Q4 judge pass each,
+    the reports and a server-difference note; then the generation profile. False: the teacher was lost in a swap
+    (the 4090 restored business)."""
+    c = cx.c
+    ab = ab_wanted(cx)
+    deadline = min(cx.now() + 60 * float(c["R2_AB_MAX_MIN"]), gen_until - 1800)
+    until = iso(deadline)
+    url = c["R2_TOWER_URL"]
+    mini, tower = Path(c["R2_AB_DIR"]), Path(c["R2_AB_TOWER_DIR"])
+    model = str((st.get("tower") or {}).get("model") or "q4")
+    st.setdefault("ab", {})["started"] = iso(cx.now())
+    cx.log(f"teacher A/B on the 4090 ({ab or 'nothing to do'}), current teacher {model}, until {et(deadline)}")
+    if not ab:
+        return swap_to_generation(cx, st, name)
+    if model == "iq3":
+        ab_prepare_tower_dir(c, cx.execute)
+        rcs = cx.ab_run({"A'": ab_cmd(c, "arm", "--out", str(tower), "--arm", "A", "--url", url, "--until", until,
+                                      *ab_remote(c, "iq3"))}, deadline)
+        st["ab"]["tower_arm_A"] = rcs
+        rc, res = cx.tower_run("swap", ["--profiles", c["R2_AB_PROFILE"], "--req", f"ab-{int(cx.now())}"],
+                               float(c["R2_START_TIMEOUT_S"]))
+        if cx.execute and res.get("status") != "ok":
+            st["ab"]["swap"] = res
+            cx.save_state(name, st)
+            return False
+        model = "q4"
+        st["tower"] = dict(st.get("tower") or {}, **({k: res.get(k) for k in ("unit", "model", "slots", "ctx")}
+                                                    if cx.execute else {"model": "q4"}))
+        cx.save_state(name, st)
+    elif ab == "both":
+        cx.log("the 4090's IQ3 copy did not serve (missing or not verified): only arm B against arm A's records")
+    pair = jsonl_count(tower / "arm-A.jsonl") >= jsonl_count(mini / "ab_tasks.jsonl") > 0
+    dirs = {"mini": mini} | ({"tower": tower} if pair else {})
+    q4 = ab_remote(c, "q4")
+    st["ab"]["arm_B"] = cx.ab_run({k: ab_cmd(c, "arm", "--out", str(d), "--arm", "B", "--url", url, "--until", until,
+                                            *q4, "--record-server-diff") for k, d in dirs.items()}, deadline)
+    st["ab"]["judge"] = cx.ab_run({k: ab_cmd(c, "judge", "--out", str(d), "--judge-url", url, "--until", until, *q4)
+                                   for k, d in dirs.items()}, deadline)
+    st["ab"]["report"] = cx.ab_run({k: ab_cmd(c, "report", "--out", str(d)) for k, d in dirs.items()},
+                                   cx.now() + 300)
+    lines = ["Teacher A/B, arm B on the 4090 (UD-Q4_K_XL; tools on this host):"]
+    for k, d in dirs.items():
+        sv = ab_servers(d, c)
+        if cx.execute:
+            (d / "ab_servers.json").write_text(json.dumps(sv, indent=1) + "\n")
+        try:
+            head = (d / "ab_summary.txt").read_text(errors="replace").split("\n")[0]
+        except OSError:
+            head = "no summary"
+        lines.append(f"{'3090 Ti A vs 4090 B' if k == 'mini' else 'both on the 4090'}: {head}")
+        lines.append(ab_server_line(sv))
+    cx.notify(lines[:5])
+    st["ab"]["ended"] = iso(cx.now())
+    cx.save_state(name, st)
+    return swap_to_generation(cx, st, name)
+
+
+def swap_to_generation(cx: Ctx, st: dict[str, Any], name: str) -> bool:
+    """After the A/B: the generation profile, unless the teacher already serves it."""
+    profiles, why = resolve_profiles(cx.c)
+    t = st.get("tower") or {}
+    cur = f"{t.get('model') or 'q4'}:{t.get('slots')}x{t.get('ctx')}"
+    want = profiles[0] if ":" in profiles[0] else f"q4:{profiles[0]}"
+    if cur == want or (not cx.execute and want == f"q4:{cx.c['R2_AB_PROFILE']}"):
+        return True
+    cx.log(f"generation profile {' then '.join(profiles)} ({why}): swapping the 4090 teacher (serves {cur})")
+    rc, res = cx.tower_run("swap", ["--profiles", " ".join(profiles), "--req", f"gen-{int(cx.now())}"],
+                           float(cx.c["R2_START_TIMEOUT_S"]))
+    if cx.execute and res.get("status") != "ok":
+        st["gen_swap"] = res
+        cx.save_state(name, st)
+        return False
+    if cx.execute:
+        st["tower"] = dict(t, **{k: res.get(k) for k in ("unit", "model", "slots", "ctx")})
+    cx.save_state(name, st)
+    return True
 
 
 def gen_watch(cx: Ctx, st: dict[str, Any], name: str, gen_until: float, end: float, tag: str) -> str:

@@ -37,8 +37,14 @@
 #       Telegram "<BIZ_NAME> back". A failed restore: NO-SWAPS flag + a loud Telegram; the dead-man retries.
 #       A job runner recorded instead (not ours) is left to window_end. Nothing recorded and business healthy:
 #       nothing to do.
+#   swap --profiles "[MODEL:]SxC ..." [--req ID]
+#       Under the window lock, while a round-2 teacher is the recorded window job: stops its watcher and the
+#       teacher, starts the first profile that verifies (the teacher A/B's IQ3 arm, then the generation shape),
+#       records it, starts a new watcher. Business stays down (no flap). Nothing verifies: business restored.
 #   status   read-only key=value lines (the round-2 chain and the heartbeat read them)
 #   plan     read-only: serve_teacher.sh plan for each --profiles shape
+# A profile is [MODEL:]SLOTSxCTX_PER_SLOT; MODEL is q4 (the pinned UD-Q4_K_XL, the default) or iq3 (the 3090 Ti
+# teacher's IQ3_XXS, copied here by the capacity block: the teacher A/B's same-hardware arm A).
 # --dry-run prints every action (read-only checks still run) and changes nothing.
 #
 # Install (from the repo machine; not part of window.conf BUNDLE_FILES, so no new rehearsal is needed):
@@ -54,7 +60,7 @@ END_UTC=""
 REQ=""
 PREEMPT=""
 _args=()
-usage() { echo "usage: $0 {start|end|status|plan} [--mode cont|night] [--profiles 'SxC ...'] [--end-utc T] [--req ID] [--preempt-prefix P] [--dry-run]" >&2; }
+usage() { echo "usage: $0 {start|swap|end|status|plan} [--mode cont|night] [--profiles '[MODEL:]SxC ...'] [--end-utc T] [--req ID] [--preempt-prefix P] [--dry-run]" >&2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --mode) MODE="${2:-}"; shift 2 || { usage; exit 64; } ;;
@@ -66,7 +72,7 @@ while [ $# -gt 0 ]; do
     *) usage; exit 64 ;;
   esac
 done
-case "$CMD" in start|end|status|plan) ;; *) usage; exit 64 ;; esac
+case "$CMD" in start|swap|end|status|plan) ;; *) usage; exit 64 ;; esac
 SCRIPT_NAME="round2_$CMD"
 # shellcheck source=/dev/null
 . "${WIN_DIR:-$HOME/distill/window}/lib.sh"
@@ -87,13 +93,13 @@ r2_units() {
 gpu_used_mib() { nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' '; }
 json_str() { local s=${1//\\/\/}; s=${s//\"/\'}; printf '%s' "${s//$'\n'/ }"; }
 
-R_UNIT=""; R_SLOTS=""; R_CTX=""; R_BIZ=""
+R_UNIT=""; R_SLOTS=""; R_CTX=""; R_BIZ=""; R_MODEL=""
 result() {  # $1 ok|refused|failed, $2 why
   log "result: $1: $2"
   [ "$DRY_RUN" = 1 ] && return 0
   local tmp="$STATE/.r2-start.$$"
-  printf '{"status": "%s", "why": "%s", "req": "%s", "mode": "%s", "unit": "%s", "slots": "%s", "ctx": "%s", "business": "%s", "end_utc": "%s", "at": "%s"}\n' \
-    "$1" "$(json_str "$2")" "$(json_str "$REQ")" "$MODE" "$R_UNIT" "$R_SLOTS" "$R_CTX" "$R_BIZ" \
+  printf '{"status": "%s", "why": "%s", "req": "%s", "cmd": "%s", "mode": "%s", "unit": "%s", "model": "%s", "slots": "%s", "ctx": "%s", "business": "%s", "end_utc": "%s", "at": "%s"}\n' \
+    "$1" "$(json_str "$2")" "$(json_str "$REQ")" "$CMD" "$MODE" "$R_UNIT" "$R_MODEL" "$R_SLOTS" "$R_CTX" "$R_BIZ" \
     "$(json_str "$END_UTC")" "$(date -u +%FT%TZ)" > "$tmp"
   mv -f "$tmp" "$RESULT"
 }
@@ -103,9 +109,27 @@ refuse() {  # nothing changed: exit 2 (a dry run logs and goes on)
   exit 2
 }
 
-# "SxC" -> SLOTS and CTX; refuses anything serve_teacher.sh would (1..8 slots, ctx a multiple of 1024 >= 8192)
+# The served model of a profile: q4 = serve_teacher.sh's own pinned defaults; iq3 = the 3090 Ti teacher's
+# IQ3_XXS (state.json teacher_model; the capacity block's copy here, sha256-verified against its manifest).
+IQ3_FILE="$HOME/distill/models/teacher/Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf"
+IQ3_BYTES=10094357632
+IQ3_SHA256=fdfcb6a29b11188956dfbfd904223588a6c1b77eb250c3e8a36e1bd269df91f7
+model_env() {  # $1 model -> MENV (KEY=VALUE words for the env file and the plan)
+  case "$1" in
+    q4) MENV=() ;;
+    iq3) MENV=("TEACHER_MODEL=$IQ3_FILE" "TEACHER_MODEL_BYTES=$IQ3_BYTES" "TEACHER_SHA256=$IQ3_SHA256"
+               "TEACHER_MANIFEST=$HOME/distill/models/teacher/MANIFEST.json"
+               "TEACHER_ALIAS=qwen3.8-27b-gsq-rco-iq3_xxs" "TEACHER_WEIGHTS_MIB=9000") ;;
+    *) return 1 ;;
+  esac
+}
+# "[MODEL:]SxC" -> P_MODEL, P_SLOTS and P_CTX; refuses anything serve_teacher.sh would (1..8 slots, ctx a
+# multiple of 1024 >= 8192) and an unknown model
 parse_profile() {
   local p=$1 s c
+  P_MODEL=q4
+  case "$p" in *:*) P_MODEL=${p%%:*}; p=${p#*:} ;; esac
+  model_env "$P_MODEL" || return 1
   case "$p" in *x*) ;; *) return 1 ;; esac
   s=${p%%x*}; c=${p#*x}
   case "$s$c" in ''|*[!0-9]*) return 1 ;; esac
@@ -113,11 +137,14 @@ parse_profile() {
   P_SLOTS=$s; P_CTX=$c
 }
 # serve_teacher.sh's own VRAM plan says this shape fits this card (read-only)
-profile_fits() {  # $1 slots, $2 ctx   (output captured first: grep -q on a pipe would SIGPIPE it under pipefail)
+profile_fits() {  # $1 slots, $2 ctx, $3 model   (output captured first: grep -q on a pipe would SIGPIPE under pipefail)
   local out
-  out=$(TEACHER_SLOTS=$1 TEACHER_CTX_PER_SLOT=$2 "$SERVE" plan 2>/dev/null) || return 1
-  printf '%s\n' "$out" | grep -E "^slots $1 x ctx $2: .*: fits$" >/dev/null
+  model_env "${3:-q4}" || return 1
+  out=$(env ${MENV[@]+"${MENV[@]}"} TEACHER_SLOTS="$1" TEACHER_CTX_PER_SLOT="$2" "$SERVE" plan 2>/dev/null) || return 1
+  printf '%s\n' "$out" | grep -E "^slots $1 x ctx $2: .*: fits$" >/dev/null || return 1
+  if [ "${3:-q4}" = iq3 ] && [ "$(file_size "$IQ3_FILE" 2>/dev/null || echo 0)" != "$IQ3_BYTES" ]; then return 1; fi
 }
+file_size() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
 
 cmd_status() {
   local u st
@@ -131,6 +158,7 @@ cmd_status() {
   echo "cont_on=$(cont_on && echo 1 || echo 0)"
   if [ -e "$FLAG" ]; then echo "flag=$(flag_reason)"; else echo "flag=none"; fi
   echo "start_result=$(head -1 "$RESULT" 2>/dev/null || echo none)"
+  if [ "$(file_size "$IQ3_FILE" 2>/dev/null || echo 0)" = "$IQ3_BYTES" ]; then echo "iq3_file=ok"; else echo "iq3_file=missing"; fi
   echo "end_last=$(head -1 "$STATE/r2-end.last" 2>/dev/null || echo none)"
   echo "verify_last=$(verify_line)"
   for t in "$R2_END_UNIT" flywheel-window-start "$END_TIMER" "${CONT_END_UNIT:-flywheel-window-cont-end}" \
@@ -143,8 +171,8 @@ cmd_status() {
 cmd_plan() {
   local p
   for p in $PROFILES; do
-    if ! parse_profile "$p"; then echo "profile $p: not SLOTSxCTX (1..8 slots, ctx a multiple of 1024 >= 8192)"; continue; fi
-    if profile_fits "$P_SLOTS" "$P_CTX"; then echo "profile $p: fits"; else echo "profile $p: does NOT fit (serve_teacher.sh would refuse it)"; fi
+    if ! parse_profile "$p"; then echo "profile $p: not [q4:|iq3:]SLOTSxCTX (1..8 slots, ctx a multiple of 1024 >= 8192)"; continue; fi
+    if profile_fits "$P_SLOTS" "$P_CTX" "$P_MODEL"; then echo "profile $p: fits"; else echo "profile $p: does NOT fit or its model file is missing"; fi
   done
   TEACHER_SLOTS=${P_SLOTS:-4} TEACHER_CTX_PER_SLOT=${P_CTX:-32768} "$SERVE" plan 2>&1 | sed 's/^/    /' || true
 }
@@ -163,7 +191,7 @@ arm_end() {  # $1 = END_UTC
 }
 
 cmd_start() {
-  local p tried=() t_end latest now llama st used left u pid i unit stamp down_word fit_list=()
+  local t_end latest now llama st used left u pid stamp down_word
   case "$MODE" in cont|night) ;; *) usage; exit 64 ;; esac
   [ -n "$PROFILES" ] || { usage; exit 64; }
   [ -n "$END_UTC" ] || { usage; exit 64; }
@@ -202,12 +230,8 @@ cmd_start() {
   window_check || refuse "outside the swap hours"
   disk_check || refuse "less than ${MIN_FREE_DISK_GB} GB free on disk"
   [ -x "$SERVE" ] || refuse "no $SERVE"
-  for p in $PROFILES; do
-    if ! parse_profile "$p"; then log "profile '$p' skipped: not SLOTSxCTX"; continue; fi
-    if profile_fits "$P_SLOTS" "$P_CTX"; then fit_list+=("$P_SLOTS:$P_CTX"); log "profile $p: fits"
-    else log "profile $p skipped: serve_teacher.sh's VRAM plan says it does not fit"; fi
-  done
-  [ "${#fit_list[@]}" -gt 0 ] || refuse "no profile of '$PROFILES' fits"
+  fitting
+  [ "${#FIT[@]}" -gt 0 ] || refuse "no profile of '$PROFILES' fits"
   ensure_window_end || refuse "the window end ($(end_label)) is not scheduled and could not be armed"
   ensure_deadman || refuse "the dead-man restore could not be armed"
 
@@ -248,23 +272,55 @@ cmd_start() {
       exit 1   # EXIT trap restores + notifies
     fi
   fi
+  start_first "$stamp" || { result failed "no profile verified (tried ${TRIED[*]})"; exit 1; }   # EXIT trap restores
+  record_job "$R_UNIT" 1
+  SWAP_PENDING=0   # handed over: the end timer, the watcher, the window end and the dead-man own it now
+  endnote="restore $(when_label "$t_end")"
+  arm_end "$END_UTC" || endnote="the end timer did NOT arm: restore at $(end_label)"
+  watch=started
+  start_watch "$stamp" || watch="FAILED to start"
+  result ok "teacher $R_UNIT $R_MODEL ${R_SLOTS}x$R_CTX verified ($R_BIZ)"
+  printf '%s %s: 4090 teacher generation until %s.\nTeacher %s (%s), %s slots x %s verified; %s; watcher %s.\nBackstops: window end %s, dead-man %s.\n' \
+    "${BIZ_NAME:-business}" "$down_word" "$(when_label "$t_end")" "$R_UNIT" "$R_MODEL" "$R_SLOTS" "$R_CTX" "$endnote" \
+    "$watch" "$(end_label)" "${DEADMAN_AT:-$(deadman_label)}" | notify
+}
+
+# The profiles of $PROFILES that serve_teacher.sh's VRAM plan accepts (and whose model file is here): FIT
+fitting() {
+  local p
+  FIT=()
+  for p in $PROFILES; do
+    if ! parse_profile "$p"; then log "profile '$p' skipped: not [q4:|iq3:]SLOTSxCTX"; continue; fi
+    if profile_fits "$P_SLOTS" "$P_CTX" "$P_MODEL"; then FIT+=("$P_MODEL:$P_SLOTS:$P_CTX"); log "profile $p: fits"
+    else log "profile $p skipped: serve_teacher.sh's VRAM plan refuses it or its model file is missing"; fi
+  done
+}
+
+# Start the first of FIT that verifies as ${R2_TEMPLATE}<stamp>-<n>.service; sets R_UNIT R_MODEL R_SLOTS R_CTX.
+start_first() {  # $1 stamp
+  local p i=0 u used
+  TRIED=()
   [ "$DRY_RUN" = 1 ] || install -d -m 700 "$R2_ENV_DIR"
-  i=0
-  unit=""
-  for p in "${fit_list[@]}"; do
+  for p in "${FIT[@]}"; do
     i=$((i + 1))
-    P_SLOTS=${p%%:*}; P_CTX=${p#*:}
-    u="${R2_TEMPLATE}${stamp}-$i.service"
-    tried+=("${P_SLOTS}x$P_CTX")
+    IFS=: read -r P_MODEL P_SLOTS P_CTX <<< "$p"
+    model_env "$P_MODEL"
+    u="${R2_TEMPLATE}$1-$i.service"
+    TRIED+=("$P_MODEL:${P_SLOTS}x$P_CTX")
     if [ "$DRY_RUN" = 1 ]; then
-      log "[dry-run] would write $R2_ENV_DIR/${stamp}-$i.env (TEACHER_SLOTS=$P_SLOTS TEACHER_CTX_PER_SLOT=$P_CTX)"
+      log "[dry-run] would write $R2_ENV_DIR/$1-$i.env (TEACHER_SLOTS=$P_SLOTS TEACHER_CTX_PER_SLOT=$P_CTX ${MENV[*]:-})"
       act systemctl --user start "$u"
-      unit=$u; break
+      R_UNIT=$u; R_MODEL=$P_MODEL; R_SLOTS=$P_SLOTS; R_CTX=$P_CTX
+      return 0
     fi
-    printf 'TEACHER_SLOTS=%s\nTEACHER_CTX_PER_SLOT=%s\n' "$P_SLOTS" "$P_CTX" > "$R2_ENV_DIR/${stamp}-$i.env"
-    chmod 600 "$R2_ENV_DIR/${stamp}-$i.env"
-    log "starting $u (${P_SLOTS} x $P_CTX; returns once serve_teacher.sh verify passed)"
-    if act systemctl --user start "$u"; then unit=$u; break; fi
+    { printf 'TEACHER_SLOTS=%s\nTEACHER_CTX_PER_SLOT=%s\n' "$P_SLOTS" "$P_CTX"
+      [ "${#MENV[@]}" -eq 0 ] || printf '%s\n' "${MENV[@]}"; } > "$R2_ENV_DIR/$1-$i.env"
+    chmod 600 "$R2_ENV_DIR/$1-$i.env"
+    log "starting $u ($P_MODEL, $P_SLOTS x $P_CTX; returns once serve_teacher.sh verify passed)"
+    if act systemctl --user start "$u"; then
+      R_UNIT=$u; R_MODEL=$P_MODEL; R_SLOTS=$P_SLOTS; R_CTX=$P_CTX
+      return 0
+    fi
     log "$u did not verify: stopping it by name"
     systemctl --user stop "$u" 2>/dev/null || true
     systemctl --user reset-failed "$u" 2>/dev/null || true
@@ -272,30 +328,65 @@ cmd_start() {
       used=$(gpu_used_mib); [ "${used:-99999}" -le "$IDLE_VRAM_MAX_MIB" ] && break; sleep 5
     done
   done
-  if [ -z "$unit" ]; then
-    result failed "no profile verified (tried ${tried[*]})"
-    exit 1   # EXIT trap restores + notifies
-  fi
-  R_UNIT=$unit; R_SLOTS=$P_SLOTS; R_CTX=$P_CTX
-  if [ "$DRY_RUN" = 0 ]; then
-    printf '%s\n' "$unit" > "$STATE/jobs.unit"
-    pid=$(systemctl --user show -p MainPID --value "$unit" 2>/dev/null || echo 0)
-    printf '%s %s\n' "$pid" "$unit" > "$STATE/jobs.pid"
+  return 1
+}
+
+# The teacher as the window's job (window_end, window_watch, continuous_end and window_start read it)
+record_job() {  # $1 unit, $2 1 = a new window (the started/closed markers)
+  local pid
+  [ "$DRY_RUN" = 0 ] || return 0
+  printf '%s\n' "$1" > "$STATE/jobs.unit"
+  pid=$(systemctl --user show -p MainPID --value "$1" 2>/dev/null || echo 0)
+  printf '%s %s\n' "$pid" "$1" > "$STATE/jobs.pid"
+  if [ "${2:-0}" = 1 ]; then
     rm -f "$STATE/window-$(today).closed"
-    printf '%s %s\n' "$(et '+%F %T %Z')" "$unit" > "$STATE/window-$(today).started"
+    printf '%s %s\n' "$(et '+%F %T %Z')" "$1" > "$STATE/window-$(today).started"
   fi
-  SWAP_PENDING=0   # handed over: the end timer, the watcher, the window end and the dead-man own it now
-  endnote="restore $(when_label "$t_end")"
-  arm_end "$END_UTC" || endnote="the end timer did NOT arm: restore at $(end_label)"
-  watch=started
-  act systemd-run --user --unit="$WATCH_PREFIX-r2-$stamp" --collect \
+}
+
+# window_watch.sh as a recorded unit (a swap stops it first: it would restore business between the two teachers)
+start_watch() {  # $1 stamp
+  local w="$WATCH_PREFIX-r2-$1"
+  act systemd-run --user --unit="$w" --collect \
     --description="flywheel window: restore as soon as the round-2 teacher ends" \
     -p KillMode=mixed -p TimeoutStopSec="$UNIT_STOP_TIMEOUT_S" --expand-environment=no \
-    /bin/bash "$WIN_DIR/window_watch.sh" || watch="FAILED to start"
-  result ok "teacher $unit ${R_SLOTS}x$R_CTX verified ($R_BIZ)"
-  printf '%s %s: 4090 teacher generation until %s.\nTeacher %s, %s slots x %s verified; %s; watcher %s.\nBackstops: window end %s, dead-man %s.\n' \
-    "${BIZ_NAME:-business}" "$down_word" "$(when_label "$t_end")" "$unit" "$R_SLOTS" "$R_CTX" "$endnote" "$watch" \
-    "$(end_label)" "${DEADMAN_AT:-$(deadman_label)}" | notify
+    /bin/bash "$WIN_DIR/window_watch.sh" || return 1
+  [ "$DRY_RUN" = 1 ] || printf '%s.service\n' "$w" > "$STATE/r2-watch.unit"
+}
+
+cmd_swap() {
+  local u st w stamp used
+  [ -n "$PROFILES" ] || { usage; exit 64; }
+  take_lock 1800 || refuse "another window script held the lock for 30 min"
+  u=$(cat "$STATE/jobs.unit" 2>/dev/null || true)
+  case "$u" in "$R2_TEMPLATE"*) ;; *) refuse "no round-2 teacher is the window's job (state/jobs.unit: ${u:-none})" ;; esac
+  st=$(systemctl --user is-active "$u" 2>/dev/null || true)
+  [ "$st" = active ] || refuse "$u is '${st:-?}', not active"
+  if [ -e "$FLAG" ]; then refuse "NO-SWAPS flag is set ($(flag_reason))"; fi
+  if cont_on; then MODE=cont; else MODE=night; fi
+  fitting
+  [ "${#FIT[@]}" -gt 0 ] || refuse "no profile of '$PROFILES' fits"
+  R_BIZ=was-down
+  stamp=$(et +%Y%m%d-%H%M%S)
+  w=$(cat "$STATE/r2-watch.unit" 2>/dev/null || true)
+  case "$w" in
+    "$WATCH_PREFIX"-r2-*.service) log "stopping the watcher $w (it would restore business between the teachers)"
+                                   act systemctl --user stop "$w" || log "stop $w exited $?" ;;
+    *) log "no round-2 watcher recorded" ;;
+  esac
+  SWAP_PENDING=1   # from here a failure restores business (lib.sh EXIT trap)
+  [ "$DRY_RUN" = 1 ] && SWAP_PENDING=0
+  act systemctl --user stop "$u" || log "stop $u exited $?"
+  [ "$DRY_RUN" = 1 ] || systemctl --user reset-failed "$u" 2>/dev/null || true
+  for _ in $(seq 1 18); do
+    [ "$DRY_RUN" = 1 ] && break
+    used=$(gpu_used_mib); [ "${used:-99999}" -le "$IDLE_VRAM_MAX_MIB" ] && break; sleep 5
+  done
+  start_first "$stamp" || { result failed "swap: no profile verified (tried ${TRIED[*]})"; exit 1; }
+  record_job "$R_UNIT" 0
+  SWAP_PENDING=0
+  start_watch "$stamp" || log "the new watcher did not start: the window end restores"
+  result ok "swapped $u -> $R_UNIT $R_MODEL ${R_SLOTS}x$R_CTX"
 }
 
 cmd_end() {
@@ -361,5 +452,6 @@ case "$CMD" in
   status) cmd_status ;;
   plan) cmd_plan ;;
   start) start_log; cmd_start ;;
+  swap) start_log; cmd_swap ;;
   end) start_log; cmd_end ;;
 esac
