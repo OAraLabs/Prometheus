@@ -162,3 +162,4 @@ Append-only, times in ET.
     7. Restore business, Telegram, report (flags 4-bit as the bottleneck if Q5 − Q4 > 3).
   - **Expected:** ~5 h after training, done ~15:30 EST Sun. Scoring stops Mon 05:00 EST.
   - **Tests:** 44 unit tests, a dry run on the real hosts, and a full run against a fake 4090.
+- 2026-11-01 01:30 EDT — Operator: round 2 uses the local 27B (no wait for Max), with weakness-steered generation, replay of v4b, and rows/hour by category in the daily heartbeat. Launching agents: (A) automation — cross-host generation after scoring until Mon 05:20 EST, nightly windows, and the 09:00 heartbeat timer; (B) round-2 code — steered tasksets, judging only in calibrated categories, deterministic verifiers, and replay in build.py.

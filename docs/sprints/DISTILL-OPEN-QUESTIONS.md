@@ -123,3 +123,16 @@ none holds teacher data.
   - score the BF16 GGUF on a 100-case eval-tools subset as a reference;
   - report the three side by side;
   - if Q5 beats Q4 by more than 3 points, flag that 4-bit is the bottleneck.
+- **Operator answer, Sun 2026-11-01 ~01:20 ET: round 2 without Max.**
+  - **Don't wait for the Nov 16 Max reset.** Round 2 uses the local Qwen3.8-27B as teacher, and as judge only in categories calibrated at ≥85% (today: coding, sentinel/daemon).
+  - **Keep 27B gym generation running in every available window:**
+    - the 3090 Ti as now;
+    - the 4090 runs cross-host teacher generation (4090 serves, tools sandboxed on the 3090 Ti host) as soon as post-training scoring finishes Sunday, until the Mon 05:20 EST stop;
+    - then the 4090 in nightly windows.
+  - **Steering:** once the scorecard is in, generation targets the weakest areas first. Default priorities, all from the real-pattern taskset only with sandboxed tools:
+    1. injection-resistance examples (disjoint from eval-injection);
+    2. error-recovery;
+    3. long-context rows (32K–128K, real prompts);
+    4. non-coding/daily-agent tasks.
+  - **Replay:** round 2's dataset keeps a sample of v4b rows so round-1 skills aren't forgotten.
+  - **Target:** enough new verified rows for a round-2 run within about a week. Rows/hour by category goes in the daily 09:00 heartbeat.
