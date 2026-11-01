@@ -41,7 +41,11 @@
 #                        of VRAM: 17.9 GB of weights plus buffers on a 24 GB card)
 #   --quants LIST        default Q4_K_M,Q5_K_M (Q4_K_M is what base-9b was scored at)
 #   --calib-tokens N --imatrix-ctx N --ppl-ctx N --ppl-chunks N   passed to quantize.py (rehearsal)
+#   --stop-at ISO        passed to quantize.py on the 4090 host (with a UTC offset): it stops before
+#                        then and exits 75 (paused); the same command resumes
 #   --keep-intermediates skip cleanup
+#   --keep-bf16          cleanup keeps the BF16 GGUF on the 4090 host (it is scored there as a
+#                        reference); merged/ and base-view/ are still removed
 # Environment: TOWER (the 4090 host's ssh target, required), FLOOR_GIB (default 8).
 #
 # Rehearsed 2026-10-31 with the 9B smoke adapter (the 4090 step with --tower-cpu, its GPU being
@@ -75,7 +79,7 @@ say() { echo "[$(date +%H:%M:%S)] $*"; }
 # relative to the 4090 host's home: "~/x", "x" and "/home/<user>/x" all name x
 ADAPTER_REMOTE=$(printf '%s' "${1%/}" | sed -E 's#^~/##; s#^/home/[^/]+/##')
 shift
-EXECUTE=0; ONLY=""; LOCAL=0; TOWER_CPU=0; TOWER_NGL=99; QUANTS=Q4_K_M,Q5_K_M; KEEP=0; SIZES=()
+EXECUTE=0; ONLY=""; LOCAL=0; TOWER_CPU=0; TOWER_NGL=99; QUANTS=Q4_K_M,Q5_K_M; KEEP=0; KEEP_BF16=0; STOP_AT=""; SIZES=()
 while [ $# -gt 0 ]; do
   case $1 in
     --execute) EXECUTE=1 ;;
@@ -86,6 +90,8 @@ while [ $# -gt 0 ]; do
     --quants) QUANTS=$2; shift ;;
     --calib-tokens|--imatrix-ctx|--ppl-ctx|--ppl-chunks) SIZES+=("$1" "$2"); shift ;;
     --keep-intermediates) KEEP=1 ;;
+    --keep-bf16) KEEP_BF16=1 ;;
+    --stop-at) STOP_AT=$2; shift ;;
     *) die "unknown option $1" ;;
   esac
   shift
@@ -221,10 +227,16 @@ if want quantize; then
   UNIT=distill-quantize-p6-$(echo "$RUN" | tr -c 'A-Za-z0-9-\n' '-')
   NGL=$TOWER_NGL; SETENV=""  # python -I ignores PYTHON* variables: -u unbuffers instead
   if [ "$TOWER_CPU" = 1 ]; then NGL=0; SETENV="$SETENV --setenv=CUDA_VISIBLE_DEVICES="; fi
+  STOPS=()
+  if [ -n "$STOP_AT" ]; then
+    case $STOP_AT in *[!0-9T:+-]*) die "--stop-at takes an ISO time with a UTC offset, e.g. 2026-11-02T05:00:00-05:00" ;; esac
+    STOPS=(--stop-at "$STOP_AT")
+  fi
   QCMD=("$THOME/$T_QPY" -I -u "$THOME/$TCODE/quantize.py" run --no-adapter --base "$T/merged"
         --label "$RUN" --out "$T" --data "$T/nodata" --evalsets= --train-sha256 "${TRAIN_SHA:-x}"
         --template-dir "$THOME/$TEMPLATE_REL" --llama-cpp-dir "$THOME/$T_LLAMA"
-        --convert-python "$THOME/$T_QPY" --ngl "$NGL" --quants "$QUANTS" "${SIZES[@]}" "$APPROVAL")
+        --convert-python "$THOME/$T_QPY" --ngl "$NGL" --quants "$QUANTS" "${SIZES[@]}"
+        "${STOPS[@]}" "$APPROVAL")
   if [ "$EXECUTE" = 1 ]; then
     if tower "systemctl --user is-active --quiet $UNIT"; then
       say "quantize: $UNIT is already running on the 4090 host; waiting for it"
@@ -284,8 +296,14 @@ fi
 # -- cleanup --------------------------------------------------------------------------------------
 if want cleanup && [ "$EXECUTE" = 1 ] && [ "$KEEP" = 0 ]; then
   [ -f "$OUT/quantize-manifest.json" ] || die "no fetched manifest here: not cleaning up"
-  tower "rm -rf ~/$P6REL/merged ~/$P6REL/base-view ~/$P6REL/gguf/$RUN-BF16.gguf"
-  rm -rf "$OUT/merged"
-  say "cleanup: merged/ and the BF16 GGUF removed (the quantized GGUFs stay on both hosts)"
+  if [ "$KEEP_BF16" = 1 ]; then
+    tower "rm -rf ~/$P6REL/merged ~/$P6REL/base-view"
+    rm -rf "$OUT/merged"
+    say "cleanup: merged/ removed; the BF16 GGUF stays on the 4090 host (--keep-bf16)"
+  else
+    tower "rm -rf ~/$P6REL/merged ~/$P6REL/base-view ~/$P6REL/gguf/$RUN-BF16.gguf"
+    rm -rf "$OUT/merged"
+    say "cleanup: merged/ and the BF16 GGUF removed (the quantized GGUFs stay on both hosts)"
+  fi
 fi
 say "done"
