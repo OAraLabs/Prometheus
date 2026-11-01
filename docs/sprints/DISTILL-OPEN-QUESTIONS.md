@@ -141,3 +141,9 @@ none holds teacher data.
   - **Teacher context, 3090 Ti:** measure its current limit.
   - **Use:** take the highest stable context for long-context teacher rows, and cap long-context rows at what the teacher can actually read.
   - **Training sequence length:** measure the longest sequence the 9B QLoRA can train at on the 4090 with activation offload to its 64 GB RAM (16K/32K/64K), and report tokens/sec at each.
+- **Operator answer, Sun 2026-11-01 ~11:50 ET: Phase 6 disk failure.**
+  - **Priority:** scoring is now the top priority, ahead of cross-host generation.
+  - **Freeing the 4090:** first clear what the distill run no longer needs: old checkpoints (except the final adapter and the saved epoch-1 copy), staged copies already verified elsewhere, and test downloads. If still short, the Gemma 4 safetensors folder (49 GiB) and unreferenced Hugging Face cache entries may go, ONLY if no service, timer, config or script references them; log each with size + sha256.
+  - **Keep:** the business model, the bartowski Qwen3.8 Q4_K_M, Qwen3.6-27B and the IQ3 teacher.
+  - **Order:** rerun Phase 6 + the full scoring (Q4/Q5/BF16 + same-recipe base 9B) as soon as the capacity tests finish, before cross-host generation.
+  - **Guard:** add a disk-space preflight to every 4090 job.

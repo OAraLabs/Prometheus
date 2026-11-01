@@ -205,3 +205,8 @@ Append-only, times in ET.
 - 2026-11-01 06:55 EST — Step 930/1,120. Val 0.7991 at step 883 (epoch 1 was 0.7972), probe 0.8810, still improving. ETA ~09:20 EST. Round-2 local: 178 tasks tried.
 - 2026-11-01 07:54 EST — Step 1,005/1,120. Val 0.7966 at step 1,000, now slightly below epoch 1's 0.7972; probe 0.8785 still falling. The epoch-1 fallback looks unnecessary. Post-train, capacity and r2 chain units are all waiting. Round-2 local: 230 tasks tried.
 - 2026-11-01 09:26 EST — **Phase 5 DONE:** the full 9B run finished at 09:23 EST. Final val 0.7960 and probe 0.8776 are both the best of the run (baseline 1.0000 / 1.1303). Adapter sha256 d2fba6bf…. Post-train pipeline took the GPU (verdict done) and is running Phase 6. The 09:00 heartbeat was sent.
+- 2026-11-01 12:02 EST — **Post-train pipeline stopped (09:42).**
+  - **Root cause:** Phase 6 attempt 1 merged and converted to BF16 GGUF, then llama-imatrix aborted with a CUDA error in the cuBLAS BF16 GEMM. Attempts 2–3 (fewer GPU layers) then failed the script's 60 GB disk preflight because attempt 1's 35 GB of artifacts were still on disk.
+  - **Knock-on:** the round-2 chain skipped (pipeline not completed). The capacity block ran anyway (done 10:28) and left business down, so the 4090 sat idle until now.
+  - **Capacity results:** the 4090 max stable teacher context is Q4_K_XL 163,840 and IQ3 262,144; QLoRA max sequence 49,152.
+  - **Operator ruling (OQ above):** scoring first. An agent is freeing disk under the operator's rules, fixing the imatrix (GPU-safe Q8_0/F16 path), making the preflight count only remaining stages, adding a disk preflight with Telegram to every 4090 job, rerunning the pipeline now, then re-arming the chain after it.
