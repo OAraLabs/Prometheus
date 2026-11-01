@@ -649,3 +649,14 @@ def test_sunday_ab_without_the_iq3_copy_and_a_longctx_generation_profile(tmp_pat
     assert calls == [("start", "iq3:4x32768 4x32768"), ("swap", "1x98304 4x32768")]
     assert [sorted(j) for j in fake.ab_jobs] == [["mini"], ["mini"], ["mini"]], "no same-hardware pair"
     assert fake.gen_starts
+
+
+def test_mini_night_start_skips_without_the_teacher_gguf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = Fake("2026-11-02T01:05:00-05:00")
+    cx = ctx(tmp_path, fake, f"R2_MINI_TEACHER_GGUF={tmp_path}/none.gguf\n")
+    cx.cmd = "mini-night"
+    monkeypatch.setattr(R.os, "execve", lambda *a: pytest.fail("must not start the window"))
+    assert R.cmd_mini_night(cx, "start") == 0
+    assert fake.notes and "missing" in fake.notes[0][0]
+    fake.now = t("2026-11-01T12:00:00-05:00")
+    assert R.cmd_mini_night(cx, "end") == 0, "before R2_MINI_NIGHTLY_FROM: the continuous window's"

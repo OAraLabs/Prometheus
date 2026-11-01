@@ -136,6 +136,8 @@ R2_DEFAULTS: dict[str, str] = {
     "R2_TOWER_NIGHT_END": "06:22",
     "R2_MINI_NIGHTLY": "on",
     "R2_MINI_NIGHTLY_FROM": "2026-11-01T18:00:00-05:00",
+    # the 3090 Ti teacher's GGUF: no nightly window start while it is missing (a re-download, say)
+    "R2_MINI_TEACHER_GGUF": "~/distill/models/teacher/Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf",
     "R2_LOCAL_TASKS": "~/distill/phase2b/tasksets/real-v3-excl.jsonl",
     "R2_LOCAL_EXTRA_ARGS": "",
     "R2_LOCAL_NAME": "",                            # empty: local-r2-{alias}-<hash>
@@ -1230,6 +1232,11 @@ def cmd_mini_night(cx: Ctx, which: str) -> int:
     if which == "start":
         if not on(c["R2_MINI_NIGHTLY"]):
             cx.log("R2_MINI_NIGHTLY is off: no 3090 Ti nightly window")
+            return 0
+        gguf = Path(c["R2_MINI_TEACHER_GGUF"])
+        if not gguf.is_file():
+            cx.log(f"the teacher GGUF {gguf} is missing: no 3090 Ti nightly window tonight (Saluki stays)")
+            cx.notify([f"3090 Ti nightly window skipped: the teacher GGUF {gguf.name} is missing; Saluki stays up."])
             return 0
         runner = HERE / "gen_local.sh"
         overrides = {"GEN_RUNNER": str(runner)} if os.access(runner, os.X_OK) else {}
