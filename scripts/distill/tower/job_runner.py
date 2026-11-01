@@ -279,6 +279,9 @@ SETS: List[Tuple[str, str, int]] = [
 ]
 BUCKET_CTX = (131072, 65536, 32768)  # step-down contexts: each still holds a whole bucket
 # Stop reasons that end the runner's night (anything else is per step: "deadline", "server-died").
+# The shared 4090 disk preflight (disk_preflight.py): what each step kind writes, on top of the runner's own
+# floor (DJR_DISK_FLOOR_GIB + DJR_DISK_MARGIN_GIB). A step without that room does not start: logged, Telegrammed.
+STEP_DISK_GIB = {"baseline": 1.0, "feasibility": 1.0, "ab": 2.0, "train": 3.0, "train-full": 4.0}
 STOP_REASONS = ("sigterm", "no-swaps", "production-unit-active", "disk-floor", "stop-at", "external-stop")
 # A child that ended by one of these was stopped (a restore stops distill-* units and scopes with
 # SIGTERM), not crashed. llama-server exits 0 on SIGTERM once loaded (its handler), and dies by the
@@ -543,6 +546,25 @@ def port_in_use(host: str, port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1.0)
         return s.connect_ex((host, port)) == 0
+
+
+def disk_mod() -> Any:
+    """disk_preflight.py: the repo's scripts/distill/, beside this file, or ~/distill/; None if absent."""
+    import importlib.util
+    here = Path(__file__).resolve().parent
+    for cand in (here.parent / "disk_preflight.py", here / "disk_preflight.py",
+                 Path.home() / "distill" / "disk_preflight.py"):
+        if cand.is_file():
+            name = "distill_disk_preflight"
+            if name not in sys.modules:
+                spec = importlib.util.spec_from_file_location(name, cand)
+                if spec is None or spec.loader is None:
+                    return None
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules[name] = mod
+                spec.loader.exec_module(mod)
+            return sys.modules[name]
+    return None
 
 
 def disk_free(path: str) -> float:
@@ -885,6 +907,21 @@ class Runner:
         self.progress["updated_at"] = iso(now())
         write_json(os.path.join(self.cfg.logs, "progress.json"), self.progress)
         write_json(os.path.join(self.run_dir, "progress.json"), self.progress)
+
+    def step_disk_ok(self, step: Dict[str, Any]) -> Tuple[bool, str]:
+        """The shared 4090 disk preflight for one step: (ok, why). Too little: logged and Telegrammed."""
+        dp = disk_mod()
+        if dp is None:
+            return True, "no disk_preflight.py"
+        floor = (self.cfg.disk_floor + self.cfg.disk_margin) / 2**30
+        need, lines = dp.plan([], need_gib=STEP_DISK_GIB.get(step["kind"], 1.0), floor_gib=floor)
+        v = dp.verdict(f"4090 runner step {step['name']}", disk_free(self.cfg.home) / 2**30, need, lines)
+        dp.log_line(os.path.join(self.cfg.home, "logs", "disk-preflight.log"), v)
+        if v.ok:
+            return True, v.summary()
+        self.note(f"{v.summary()}: {step['name']} not started")
+        self.notify(dp.refusal_text(v, host="4090", path=self.cfg.home).splitlines())
+        return False, v.summary()
 
     def note(self, msg: str) -> None:
         self.log("NOTE " + msg)
@@ -1295,6 +1332,11 @@ class Runner:
                 p.update(status="not-started",
                          detail=f"{max(0, left) / 60:.0f} min left before its deadline "
                                 f"{hm(deadline)} (needs {step['min_s'] / 60:.0f})")
+                self.save()
+                continue
+            ok, why = self.step_disk_ok(step)
+            if not ok:
+                p.update(status="not-started", detail=why[:300])
                 self.save()
                 continue
             t0 = now()

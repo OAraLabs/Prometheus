@@ -246,3 +246,18 @@ def test_watch_refuses_a_unit_it_did_not_start(tmp_path: Path) -> None:
     assert TF.main(["watch", "--unit", "llama-server.service", "--out", str(tmp_path)], host=host) == 2
     assert TF.main(["watch", "--unit", "distill-train-full-1.service", "--out", str(run_dir(tmp_path))],
                    host=host) == 0  # a dry run: one pass
+
+
+
+def test_launch_disk_refusal_with_execute_telegrams_the_plan(tmp_path: Path,
+                                                              capsys: pytest.CaptureFixture[str]) -> None:
+    """The shared 4090 disk preflight: a refused start is never silent (2026-11-01)."""
+    host = FakeHost(tmp_path, free=12.0)
+    ds = dataset(tmp_path)
+    assert TF.main(launch_args(tmp_path, ds, "--max-derived-ok", "--execute"), host=host) == 1
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "free disk" in out.split("REFUSED")[1] and "needs 13.0" in out
+    assert len(host.sent) == 1 and "4090 9B training NOT started: 12.0 GiB free" in host.sent[0]
+    assert host.ran == []
+    log = json.loads((tmp_path / "logs" / "disk-preflight.log").read_text())  # beside the window dir, not ~
+    assert log["ok"] is False and log["need_gib"] == 13.0

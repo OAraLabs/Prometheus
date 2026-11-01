@@ -146,6 +146,24 @@ profile_fits() {  # $1 slots, $2 ctx, $3 model   (output captured first: grep -q
 }
 file_size() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
 
+# The shared 4090 disk preflight (disk_preflight.py beside this script, else ~/distill/): the teacher's and its
+# watcher's logs (R2_DISK_NEED_GIB, default 2) on top of the 10 GiB floor. Too little: logged and Telegrammed
+# there (once per 30 min); `start` refuses. A dry run reports only.
+R2_DISK_WHY=""
+r2_disk_preflight() {
+  local py="$R2_DIR/disk_preflight.py" out rc=0 quiet=""
+  [ -f "$py" ] || py="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../disk_preflight.py"   # the repo's layout
+  [ -f "$py" ] || py="$HOME/distill/disk_preflight.py"
+  if [ ! -f "$py" ]; then log "note: no disk_preflight.py: only the window's own disk check ran"; return 0; fi
+  [ "$DRY_RUN" = 1 ] && quiet=--no-notify
+  out=$(python3 -I "$py" check --job "round-2 4090 teacher ($MODE)" --need-gib "${R2_DISK_NEED_GIB:-2}" \
+        --path "$HOME" $quiet 2>&1) || rc=$?
+  log "$out"
+  [ "$rc" = 0 ] && return 0
+  R2_DISK_WHY=${out:-exit $rc}
+  return 1
+}
+
 cmd_status() {
   local u st
   u=$(cat "$STATE/jobs.unit" 2>/dev/null || true)
@@ -229,6 +247,7 @@ cmd_start() {
   preflight || refuse "preflight failed (see log)"
   window_check || refuse "outside the swap hours"
   disk_check || refuse "less than ${MIN_FREE_DISK_GB} GB free on disk"
+  r2_disk_preflight || refuse "disk preflight: $R2_DISK_WHY"
   [ -x "$SERVE" ] || refuse "no $SERVE"
   fitting
   [ "${#FIT[@]}" -gt 0 ] || refuse "no profile of '$PROFILES' fits"

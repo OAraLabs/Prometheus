@@ -126,8 +126,9 @@ def test_resolve_profiles(tmp_path: Path) -> None:
     profs, why = R.resolve_profiles(lc)
     assert profs == ["4x32768"] and "unreadable" in why, "no file: today's 4x32K"
     (tmp_path / "teacher-ctx.json").write_text(json.dumps({"gpu-tower-4090": {"UD-Q4_K_XL": {"max_stable_ctx": 150000}}}))
-    assert R.resolve_profiles(lc)[0] == ["1x131072", "4x32768"], "capped at R2_LONGCTX_CAP, standard as the fallback"
-    assert R.resolve_profiles(dict(lc, R2_LONGCTX_CAP="262144"))[0] == ["1x149504", "4x32768"], "floored to 1024"
+    assert R.resolve_profiles(dict(lc, R2_LONGCTX_CAP="131072"))[0] == ["1x131072", "4x32768"], \
+        "capped at R2_LONGCTX_CAP, standard as the fallback"
+    assert R.resolve_profiles(lc)[0] == ["1x149504", "4x32768"], "floored to 1024 (default cap 262144)"
     (tmp_path / "teacher-ctx.json").write_text(json.dumps({"gpu-tower-4090": {"UD-Q4_K_XL": {"max_stable_ctx": 20000}}}))
     assert R.resolve_profiles(lc)[0] == ["4x32768"]
     (tmp_path / "teacher-ctx.json").write_text("{}")
@@ -700,7 +701,7 @@ def test_a_split_night_swaps_half_way(tmp_path: Path) -> None:
     fake.on_sleep.append(night_end)
     assert R.cmd_tower_night(cx) == 0
     calls = [(w, a[a.index("--profiles") + 1]) for w, a in fake.tower_calls]
-    assert calls == [("start", "1x131072 4x32768"), ("swap", "4x32768")]
+    assert calls == [("start", "1x163840 4x32768"), ("swap", "4x32768")]
     mid = t("2026-11-03T01:12:00-05:00") + (t("2026-11-03T06:22:00-05:00") - t("2026-11-03T01:12:00-05:00")) / 2
     assert fake.gen_starts == [mid - 60, t("2026-11-03T06:20:00-05:00")]
     assert seen[0] == "/t/lc.jsonl" and seen[1].endswith("real-v3-excl.jsonl")
@@ -720,3 +721,69 @@ def test_a_longctx_night_without_a_measurement_uses_the_standard_taskset(tmp_pat
     assert R.cmd_tower_night(cx) == 0
     assert [a[a.index("--profiles") + 1] for _, a in fake.tower_calls] == ["4x32768"]
     assert seen == ["/t/full.jsonl"]
+
+
+
+# ── the long-context profile on the 4090's IQ3 copy (capacity block, 2026-11-01) ──
+
+
+CAPACITY_CTX = {"hosts": {"4090": {"quants": {
+    "q4": {"label": "UD-Q4_K_XL", "status": "measured", "summary": {"max_stable_ctx": 163840}},
+    "iq3": {"label": "IQ3_XXS", "status": "measured", "summary": {"max_stable_ctx": 262144}}}},
+    "3090ti": {"measured": {"max_readable_ctx": 57344}}}, "recommendation": {"quant": "iq3", "max_stable_ctx": 262144}}
+
+
+def test_longctx_serves_the_iq3_copy_at_its_measured_262144(tmp_path: Path) -> None:
+    (tmp_path / "teacher-ctx.json").write_text(json.dumps(CAPACITY_CTX))
+    lc = dict(conf(tmp_path), R2_TOWER_PROFILE="longctx")
+    profs, why = R.resolve_profiles(lc)
+    assert profs == ["iq3:1x262144", "1x163840", "4x32768"], why
+    assert "measured q4 163840, iq3 262144" in why
+    assert R.resolve_profiles(dict(lc, R2_LONGCTX_QUANT="q4"))[0] == ["1x163840", "4x32768"]
+    assert R.resolve_profiles(dict(lc, R2_LONGCTX_QUANT="iq3"))[0] == ["iq3:1x262144", "4x32768"]
+    # capped equal: the configured Q4 teacher is kept (IQ3 only when it reads more)
+    assert R.resolve_profiles(dict(lc, R2_LONGCTX_CAP="131072"))[0] == ["1x131072", "4x32768"]
+    # the standard profile never changes model
+    assert R.resolve_profiles(dict(lc, R2_TOWER_PROFILE="standard"))[0] == ["4x32768"]
+
+
+def test_generation_names_the_teacher_the_4090_actually_serves(tmp_path: Path) -> None:
+    c = conf(tmp_path, "R2_TOWER_HOST=gpu\nR2_TOWER_URL=http://gpu:18094\n")
+    q4 = R.remote_overrides(R.served(c, "q4"), t("2026-11-03T06:20:00-05:00"))
+    iq3 = R.remote_overrides(R.served(c, "iq3"), t("2026-11-03T06:20:00-05:00"))
+    assert q4["GEN_REMOTE_QUANT"] == "UD-Q4_K_XL" and q4["GEN_REMOTE_SHA256"] == c["R2_TOWER_SHA256"]
+    assert iq3["GEN_REMOTE_QUANT"] == "IQ3_XXS" and iq3["GEN_REMOTE_SHA256"] == c["R2_IQ3_SHA256"]
+    assert "iq3_xxs" in iq3["GEN_REMOTE_NAME"] and iq3["GEN_REMOTE_NAME"] != q4["GEN_REMOTE_NAME"]
+    assert R.served(c, None) is c
+
+
+def test_a_longctx_night_on_the_iq3_copy_generates_as_the_iq3_teacher(tmp_path: Path) -> None:
+    (tmp_path / "teacher-ctx.json").write_text(json.dumps(CAPACITY_CTX))
+    fake = Fake("2026-11-03T01:12:00-05:00")
+    cx = ctx(tmp_path, fake, "R2_TOWER_TASKS_LONGCTX=/t/lc.jsonl\n")
+    cx.cmd = "tower-night"
+    seen: list[tuple[str, str, str]] = []
+    real_start = cx.start_remote_gen
+    cx.start_remote_gen = lambda until, tag: (seen.append(  # type: ignore[method-assign]
+        (cx.c["R2_TOWER_TASKS"], cx.c["R2_TOWER_QUANT"], cx.c["R2_TOWER_SHA256"])), real_start(until, tag))[1]
+    fake.on_sleep.append(lambda f: f.tower.update(jobs_unit="none", r2_units="")
+                         if f.now >= t("2026-11-03T06:22:00-05:00") else None)
+    assert R.cmd_tower_night(cx) == 0
+    assert [a[a.index("--profiles") + 1] for _, a in fake.tower_calls][0] == "iq3:1x262144 1x163840 4x32768"
+    assert seen == [("/t/lc.jsonl", "IQ3_XXS", R.R2_DEFAULTS["R2_IQ3_SHA256"])]
+    assert cx.c["R2_TOWER_QUANT"] == "UD-Q4_K_XL", "the settings are restored after the night"
+    # no IQ3 copy on the 4090: it serves Q4, and generation says Q4
+    fake2 = Fake("2026-11-03T01:12:00-05:00")
+    fake2.iq3 = False
+    cx2 = ctx(tmp_path / "b", fake2, "R2_TOWER_TASKS_LONGCTX=/t/lc.jsonl\n") if (tmp_path / "b").mkdir() is None \
+        else None
+    assert cx2 is not None
+    (tmp_path / "b" / "teacher-ctx.json").write_text(json.dumps(CAPACITY_CTX))
+    cx2.cmd = "tower-night"
+    seen2: list[str] = []
+    real2 = cx2.start_remote_gen
+    cx2.start_remote_gen = lambda until, tag: (seen2.append(cx2.c["R2_TOWER_QUANT"]), real2(until, tag))[1]  # type: ignore[method-assign]
+    fake2.on_sleep.append(lambda f: f.tower.update(jobs_unit="none", r2_units="")
+                          if f.now >= t("2026-11-03T06:22:00-05:00") else None)
+    assert R.cmd_tower_night(cx2) == 0
+    assert seen2 == ["UD-Q4_K_XL"]

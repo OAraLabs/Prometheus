@@ -12,8 +12,10 @@ the dataset directory (``train.jsonl`` and ``val.jsonl`` against the sha256 in i
 the staged trainer code (``<code>/scripts/distill/train_qlora.py`` + ``COMMIT``), the base model and
 tokenizer, the training python, no NO-SWAPS flag, no ``distill-*`` unit running but the dead-man (a
 teacher or judge server must have ended), the continuous window's end and dead-man timers armed,
-``--stop-at`` at least 30 min away and at least 10 min before the window end, free disk at least
-``--min-free-gib`` + 3 GiB, and the GPU free (or only the business server on it). It prints the
+``--stop-at`` at least 30 min away and at least 10 min before the window end, free disk for the shared 4090
+disk preflight (``disk_preflight.py``: ``--disk-need-gib``, the checkpoints, adapter and logs the run writes, on
+top of a floor of the larger of 10 GiB and ``--min-free-gib``; with ``--execute`` a refusal is Telegrammed and
+logged), and the GPU free (or only the business server on it). It prints the
 trainer command, the projected end (train tokens x epochs at ``--assume-tok-s``) and the units.
 
 With ``--execute`` it then: Telegrams "<business> going down" with the projected ETA (or "9B training
@@ -89,6 +91,26 @@ UNIT_RECORD = "train-full.unit"
 NOTIFY_LINES = 5
 
 Runner = Callable[[Sequence[str]], Tuple[int, str]]
+
+
+def disk_mod() -> Any:
+    """The shared 4090 disk preflight (disk_preflight.py in the repo's scripts/distill/, beside this file
+    when installed alone, or ~/distill/), or None."""
+    import importlib.util
+    here = Path(__file__).resolve().parent
+    for cand in (here.parent / "disk_preflight.py", here / "disk_preflight.py", D / "disk_preflight.py"):
+        if cand.is_file():
+            name = "distill_disk_preflight"
+            if name in sys.modules:
+                return sys.modules[name]
+            spec = importlib.util.spec_from_file_location(name, cand)
+            if spec is None or spec.loader is None:
+                return None
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[name] = mod
+            spec.loader.exec_module(mod)
+            return mod
+    return None
 
 
 def run_cmd(cmd: Sequence[str], timeout: float = 60) -> Tuple[int, str]:
@@ -378,7 +400,13 @@ def launch(a: argparse.Namespace, host: Host) -> int:
     plan.chk(stop_at >= now + 1800 and stop_at <= latest, "--stop-at in the window",
              f"{et(stop_at)} (>= 30 min from now; by {et(latest)}, 10 min before the window end)")
     free = host.free_gib(out)
-    plan.chk(free >= a.min_free_gib + 3, "free disk", f"{free:.1f} GiB (needs {a.min_free_gib:g} + 3 GiB)")
+    dp = disk_mod()
+    if dp is not None:
+        need, dlines = dp.plan([], need_gib=a.disk_need_gib, floor_gib=max(dp.FLOOR_GIB, a.min_free_gib))
+    else:
+        need, dlines = a.min_free_gib + 3, [f"{a.min_free_gib:g} + 3 (no disk_preflight.py)"]
+    disk_short = free < need
+    plan.chk(not disk_short, "free disk", f"{free:.1f} GiB (needs {need:.1f}: {', '.join(dlines)})")
     biz = host.unit_state(BUSINESS_UNIT)
     used = host.vram_used_mib()
     if biz in ("active", "activating"):
@@ -413,6 +441,11 @@ def launch(a: argparse.Namespace, host: Host) -> int:
     print("  [plan] watcher: " + " ".join(watcher_unit))
     if not plan.ok:
         print("REFUSED: " + "; ".join(w for ok, w, _ in plan.checks if not ok))
+        if disk_short and execute and dp is not None:  # never a silent stop on the disk (2026-11-01)
+            v = dp.verdict("4090 9B training", free, need, dlines)
+            sent = host.notify(dp.refusal_text(v, host="4090", path=str(out)), execute=True)
+            dp.log_line(str(host.win_dir.parent / "logs" / "disk-preflight.log"), v,
+                        f"telegram {'sent' if sent else 'failed'} (train_full)")
         return 1
     if not execute:
         print("dry run: every check passed; nothing was started (--execute launches)")
@@ -560,6 +593,8 @@ def build_parser() -> argparse.ArgumentParser:
     la.add_argument("--save-every-minutes", type=float, default=60.0)
     la.add_argument("--keep", type=int, default=2)
     la.add_argument("--min-free-gib", type=float, default=6.0)
+    la.add_argument("--disk-need-gib", type=float, default=3.0,
+                    help="what the run writes (checkpoints, adapter, logs), for the shared disk preflight")
     la.add_argument("--stop-timeout", type=int, default=STOP_TIMEOUT_S)
     la.add_argument("--assume-tok-s", type=float, default=ASSUMED_TOK_S)
     la.add_argument("--max-derived-ok", action="store_true",

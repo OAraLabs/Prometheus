@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import socket
 import struct
@@ -1116,3 +1117,19 @@ def test_only_limits_the_queue_and_refuses_unknown_names(box: Box) -> None:
     assert "base-9b-baseline is not in the queue" in dry.stdout
     dry = box.run(execute=False, stop_in=None, env={"DJR_ONLY": "base-9b-baseline"})
     assert dry.returncode == 0, dry.stdout + dry.stderr
+
+
+def test_a_step_without_disk_room_does_not_start_and_telegrams(box: Box) -> None:
+    """The shared 4090 disk preflight (2026-11-01): each step declares what it writes; the runner's start
+    check passes here, but the 9B baseline's 1 GiB on top of the floor does not fit."""
+    free = shutil.disk_usage(box.d).free / 2**30
+    env = {"DJR_DISK_FLOOR_GIB": f"{free - 0.5:.3f}", "DJR_DISK_MARGIN_GIB": "0"}
+    cp = box.run(stop_in=120, env=env)
+    assert cp.returncode == 0, cp.stdout[-2000:]
+    st = box.step("base-9b-baseline")
+    assert st["status"] == "not-started" and "disk REFUSED: 4090 runner step base-9b-baseline" in st["detail"]
+    assert box.log("server-starts.log") == []
+    sent = " ".join(box.log("notify.log"))
+    assert "4090 runner step base-9b-baseline NOT started" in sent
+    rec = [json.loads(x) for x in (box.d / "logs" / "disk-preflight.log").read_text().splitlines()]
+    assert rec and rec[0]["ok"] is False

@@ -1089,3 +1089,24 @@ def test_serve_teacher_verify_checks_the_running_server_and_never_shows_the_key(
     unit = (SERVE.parent / "distill-teacher-serve.service").read_text()
     assert "ExecStartPost=%h/distill/teacher-serve/serve_teacher.sh verify" in unit
     assert "TimeoutStartSec=600" in unit
+
+
+def test_serve_teacher_refuses_to_start_without_disk_room_and_telegrams(tmp_path):
+    """The shared 4090 disk preflight (2026-11-01): exec refuses, logs and Telegrams; check only reports."""
+    env, key = _serve_rig(tmp_path)
+    assert _serve(env, "keygen").returncode == 0
+    sent = tmp_path / "sent.txt"
+    notify = tmp_path / "distill" / "notify.sh"
+    notify.parent.mkdir(parents=True, exist_ok=True)
+    notify.write_text(f"#!/bin/sh\ncat >> {sent}\n")
+    notify.chmod(0o755)
+    ok = _serve(env, "exec", SERVE_TEACHER_DRY="1")
+    assert ok.returncode == 0 and "disk ok: 4090 teacher serve (4x32768)" in ok.stderr
+    chk = _serve(env, "check", TEACHER_DISK_NEED_GIB="1000000")
+    assert chk.returncode == 1 and "REFUSED: disk preflight: disk REFUSED" in chk.stderr
+    assert not sent.exists()
+    run = _serve(env, "exec", SERVE_TEACHER_DRY="1", TEACHER_DISK_NEED_GIB="1000000")
+    assert run.returncode == 1 and "--host" not in run.stdout
+    assert "4090 teacher serve (4x32768) NOT started" in sent.read_text()
+    log = (tmp_path / "distill" / "logs" / "disk-preflight.log").read_text().splitlines()
+    assert json.loads(log[-1])["ok"] is False

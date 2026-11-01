@@ -129,6 +129,9 @@ set -euo pipefail
 # verify (ExecStartPost): how long the model may take to load, and the python that checks the running server
 : "${TEACHER_VERIFY_WAIT_S:=420}"
 : "${TEACHER_PYTHON:=python3}"
+# the shared 4090 disk preflight (disk_preflight.py beside this script, else ~/distill/): what serving writes
+# (its logs) on top of the 10 GiB floor; too little and `exec` refuses, logs and Telegrams (`check` reports only)
+: "${TEACHER_DISK_NEED_GIB:=2}"
 
 KEY_MIN_LEN=32
 die() { echo "serve_teacher: $*" >&2; exit 1; }
@@ -414,6 +417,23 @@ print(f"serve_teacher: verified: key enforced, {slots} slots, no tools, no MCP, 
 PY
 }
 
+# The shared disk preflight; $1 = --no-notify (check: report only). A refusal is a problem.
+disk_preflight() {
+  local here py out rc=0
+  here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  py="$here/disk_preflight.py"
+  [ -f "$py" ] || py="$here/../disk_preflight.py"   # the repo's layout
+  [ -f "$py" ] || py="$HOME/distill/disk_preflight.py"
+  if [ ! -f "$py" ]; then
+    echo "serve_teacher: NOTE: no disk_preflight.py beside this script or in ~/distill: disk not checked" >&2
+    return 0
+  fi
+  out=$("$TEACHER_PYTHON" -I "$py" check --job "4090 teacher serve (${TEACHER_SLOTS}x${TEACHER_CTX_PER_SLOT})" \
+        --need-gib "$TEACHER_DISK_NEED_GIB" --path "$HOME" ${1:-} 2>&1) || rc=$?
+  echo "serve_teacher: $out" >&2
+  [ "$rc" = 0 ] || problem "disk preflight: ${out:-exit $rc}"
+}
+
 report_problems() {
   local p
   for p in ${problems[@]+"${problems[@]}"}; do echo "serve_teacher: REFUSED: $p" >&2; done
@@ -457,6 +477,7 @@ case "$cmd" in
   check)
     report_scrubbed
     run_checks
+    disk_preflight --no-notify
     server_argv
     server_env
     check_no_tools
@@ -467,6 +488,7 @@ case "$cmd" in
   exec)
     report_scrubbed
     run_checks
+    disk_preflight
     server_argv
     server_env
     check_no_tools

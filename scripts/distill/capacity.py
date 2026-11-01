@@ -126,6 +126,22 @@ LOAD_TIMEOUT_S = 600
 IDLE_VRAM_MAX_MIB = 1500
 DISK_FLOOR_GB = 15.0  # the 4090 window's MIN_FREE_DISK_GB: kept after the IQ3 copy
 DISK_STOP_GB = 10.0  # post_train's floor: below it nothing starts (and a running block stops)
+# The shared 4090 disk preflight (disk_preflight.py): what the block writes there (server logs, the QLoRA
+# tests' checkpoints and logs), on top of the floor; the IQ3 copy is checked on its own below.
+CAP_DISK_GIB = 3.0
+
+
+def disk_mod() -> Any:
+    """disk_preflight.py beside this file."""
+    import importlib.util
+    name = "distill_disk_preflight"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name("disk_preflight.py"))
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    return sys.modules[name]
 MAX_STARTS = 4
 NOTIFY_LINES = 5
 CAP_SEED = "capacity-2026-11-01"
@@ -1608,8 +1624,11 @@ class Block:
         if kv.get("flag") and c.execute:
             raise NotRun(f"NO-SWAPS flag present on the 4090 ({', '.join(kv['flag'])[:150]})")
         free = to_float(kv1(kv, "free_gb"))
-        if free is not None and free < DISK_STOP_GB and c.execute:
-            raise NotRun(f"the 4090 has {free:.1f} GB free (< {DISK_STOP_GB:g})")
+        dp = disk_mod()
+        need, lines = dp.plan([], need_gib=CAP_DISK_GIB, floor_gib=DISK_STOP_GB)
+        if free is not None and free < need and c.execute:  # the skip Telegram says why (never silent)
+            raise NotRun(f"disk: {dp.verdict('capacity block', free, need, lines).summary()} on the 4090 "
+                         f"({', '.join(lines)})")
         others = self.foreign_units(kv)
         if others and c.execute:
             raise NotRun(f"other distill units run on the 4090: {', '.join(others)[:200]}")

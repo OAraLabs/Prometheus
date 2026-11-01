@@ -36,10 +36,14 @@ The 4090 (``tower/round2_tower.sh`` there; this host may ssh to it, never the ot
   ``R2_TOWER_TASKS``, ``split`` = longctx for the first half of the night, then a swap (business stays down) to
   standard.
 * The serve profile (``R2_TOWER_PROFILE``): ``standard`` (``R2_STANDARD_PROFILE``, 4x32768), ``longctx``
-  (one slot at the capacity block's measured max stable context for this host and quant, from
-  ``R2_TEACHER_CTX_JSON``, capped at ``R2_LONGCTX_CAP``; the standard profile when the file is missing or
-  holds no such value) or an explicit ``SLOTSxCTX``. The 4090 tries the profiles in order and falls back
-  to the standard one if the first does not verify.
+  (one slot at the capacity block's measured max stable context for this host, from ``R2_TEACHER_CTX_JSON``,
+  capped at ``R2_LONGCTX_CAP``; the standard profile when the file is missing or holds no such value) or an
+  explicit ``SLOTSxCTX``. The 4090 tries the profiles in order and falls back to the standard one if the
+  first does not verify. ``longctx`` serves the quant ``R2_LONGCTX_QUANT`` names: ``auto`` (default) the
+  one with the larger measured context, ``q4`` or ``iq3``. Measured 2026-11-01 on the 4090: Q4_K_XL 163,840,
+  IQ3_XXS 262,144, so ``auto`` serves ``iq3:1x262144`` with ``1x163840`` (Q4) as the first fallback. Whatever
+  the 4090 ends up serving names the remote generation's teacher (quant + sha256: ``R2_IQ3_*`` for iq3), so
+  its rows go to their own run directory and carry the right teacher.
 
 The teacher quant A/B (coordinator 2026-11-01, OQ #12 option c), the Sunday chain's first job once the 4090
 teacher is up and before generation, when arm A (IQ3 on the 3090 Ti, ``R2_AB_DIR``) is complete and arm B is
@@ -117,11 +121,13 @@ R2_DEFAULTS: dict[str, str] = {
     "R2_TOWER_PROFILE": "standard",                 # standard | longctx | SLOTSxCTX
     "R2_STANDARD_PROFILE": "4x32768",
     "R2_LONGCTX_CTX": "",                           # explicit context; empty: from R2_TEACHER_CTX_JSON
-    "R2_LONGCTX_CAP": "131072",
+    "R2_LONGCTX_CAP": "262144",                     # the capacity block's measured max (IQ3, 2026-11-01)
+    "R2_LONGCTX_QUANT": "auto",                     # auto (the larger measured context) | q4 | iq3
     "R2_LONGCTX_MIN": "32768",
     "R2_TEACHER_CTX_JSON": "~/distill/capacity/teacher-ctx.json",
     "R2_CTX_HOST_MATCH": "4090",
     "R2_CTX_QUANT_MATCH": "q4_k_xl",
+    "R2_CTX_IQ3_MATCH": "iq3",
     # the Sunday -> Monday chain
     "R2_PIPELINE_DONE": "~/distill/phase7/9b-r32-v4b-max-derived/PIPELINE-DONE.json",
     "R2_PIPELINE_UNIT": "",
@@ -263,6 +269,11 @@ def on(v: str) -> bool:
 # ── the 4090's serve profile ─────────────────────────────────────────────────
 
 
+def profile_model(profile: str) -> str:
+    """The model of a ``[MODEL:]SxC`` profile (q4 by default)."""
+    return profile.split(":", 1)[0] if ":" in profile else "q4"
+
+
 def parse_profile(text: str) -> tuple[int, int] | None:
     """``SLOTSxCTX`` (1..8 slots; ctx a multiple of 1024, at least 8192: serve_teacher.sh's own limits)."""
     m = PROFILE_RE.match(text.strip().lower())
@@ -316,24 +327,42 @@ def resolve_profiles(c: dict[str, str], read: Callable[[Path], str] | None = Non
     if want == "standard":
         return [std], f"standard {std}"
     if want == "longctx":
-        raw: int | None = None
-        src = ""
+        cap, low = int(c["R2_LONGCTX_CAP"]), int(c["R2_LONGCTX_MIN"])
+
+        def fit(raw: int | None) -> int | None:
+            ctx = min(raw, cap) // 1024 * 1024 if raw else 0
+            return ctx if ctx >= low else None
+
         if c["R2_LONGCTX_CTX"].strip():
-            raw, src = int(c["R2_LONGCTX_CTX"]), "R2_LONGCTX_CTX"
-        else:
-            path = Path(c["R2_TEACHER_CTX_JSON"])
-            try:
-                raw = measured_ctx(json.loads(read(path)), c["R2_CTX_HOST_MATCH"], c["R2_CTX_QUANT_MATCH"])
-                src = path.name
-            except (OSError, ValueError) as e:
-                return [std], f"longctx asked, {path.name} unreadable ({type(e).__name__}): standard {std}"
-            if raw is None:
-                return [std], f"longctx asked, {path.name} has no stable context for this host/quant: standard {std}"
-        ctx = min(raw, int(c["R2_LONGCTX_CAP"])) // 1024 * 1024
-        if ctx < int(c["R2_LONGCTX_MIN"]):
-            return [std], f"longctx asked, measured {raw} < R2_LONGCTX_MIN: standard {std}"
-        prof = f"1x{ctx}"
-        return ([prof, std] if prof != std else [std]), f"longctx {prof} (measured {raw} from {src}), fallback {std}"
+            raw = int(c["R2_LONGCTX_CTX"])
+            ctx = fit(raw)
+            if ctx is None:
+                return [std], f"longctx asked, R2_LONGCTX_CTX {raw} < R2_LONGCTX_MIN: standard {std}"
+            prof = f"1x{ctx}"
+            return ([prof, std] if prof != std else [std]), f"longctx {prof} (R2_LONGCTX_CTX), fallback {std}"
+        path = Path(c["R2_TEACHER_CTX_JSON"])
+        pick = (c.get("R2_LONGCTX_QUANT") or "auto").strip().lower()
+        try:
+            data = json.loads(read(path))
+        except (OSError, ValueError) as e:
+            return [std], f"longctx asked, {path.name} unreadable ({type(e).__name__}): standard {std}"
+        host = c["R2_CTX_HOST_MATCH"]
+        raw_q4 = measured_ctx(data, host, c["R2_CTX_QUANT_MATCH"]) if pick in ("auto", "q4") else None
+        raw_iq3 = measured_ctx(data, host, c.get("R2_CTX_IQ3_MATCH") or "iq3") if pick in ("auto", "iq3") else None
+        q4c, iq3c = fit(raw_q4), fit(raw_iq3)
+        if q4c is None and iq3c is None:
+            got = ", ".join(f"{k} {v}" for k, v in (("q4", raw_q4), ("iq3", raw_iq3)) if v) or "none"
+            return [std], (f"longctx asked ({pick}), {path.name} has no stable context >= R2_LONGCTX_MIN for this "
+                           f"host (measured: {got}): standard {std}")
+        profs: list[str] = []
+        if iq3c is not None and (q4c is None or iq3c > q4c):
+            profs.append(f"iq3:1x{iq3c}")
+        if q4c is not None:
+            profs.append(f"1x{q4c}")
+        if std not in profs:
+            profs.append(std)
+        meas = ", ".join(f"{k} {v}" for k, v in (("q4", raw_q4), ("iq3", raw_iq3)) if v)
+        return profs, f"longctx {profs[0]} ({pick}; measured {meas} from {path.name}), then {' then '.join(profs[1:])}"
     p = parse_profile(want)
     if not p:
         return [std], f"R2_TOWER_PROFILE {want!r} is not standard/longctx/SLOTSxCTX: standard {std}"
@@ -408,6 +437,14 @@ def local_run_name(c: dict[str, str]) -> str:
     return f"local-r2-{{alias}}-{run_hash(code_commit(c), c['R2_LOCAL_TASKS'], c['R2_LOCAL_EXTRA_ARGS'])}"
 
 
+def served(c: dict[str, str], model: str | None) -> dict[str, str]:
+    """The settings for generation against what the 4090 actually serves: its IQ3 copy names the IQ3 teacher
+    (quant + sha256; its own run directory), anything else the configured Q4 teacher."""
+    if (model or "q4") == "iq3":
+        return dict(c, R2_TOWER_QUANT=c["R2_IQ3_QUANT"], R2_TOWER_SHA256=c["R2_IQ3_SHA256"])
+    return c
+
+
 def remote_overrides(c: dict[str, str], until: float) -> dict[str, str]:
     """window.conf keys for ``gen_runner.py remote`` against the 4090 (plus every GEN_* key of round2.conf)."""
     runs = c["R2_RUNS"]
@@ -415,6 +452,7 @@ def remote_overrides(c: dict[str, str], until: float) -> dict[str, str]:
     o = {"GEN_RUNS": runs, "GEN_POOL": c["R2_POOL"], "GEN_REMOTE_CODE": c["R2_CODE"],
          "GEN_REMOTE_URL": c["R2_TOWER_URL"], "GEN_REMOTE_HOST": c["R2_TOWER_HOST"],
          "GEN_REMOTE_SSH": c["R2_TOWER_SSH"], "GEN_REMOTE_QUANT": c["R2_TOWER_QUANT"],
+         "GEN_REMOTE_SHA256": c["R2_TOWER_SHA256"],
          "GEN_REMOTE_TASKS": c["R2_TOWER_TASKS"], "GEN_REMOTE_NAME": tower_run_name(c),
          "GEN_REMOTE_UNTIL": iso(until), "GEN_REMOTE_SKIP_DONE_IN": f"{runs}/local-*/*.tasks.jsonl",
          "GEN_REMOTE_EXTRA_ARGS": f"{skips} {c['R2_TOWER_EXTRA_ARGS']}".strip()}
@@ -1170,6 +1208,7 @@ def gen_close(cx: Ctx, st: dict[str, Any], why: str) -> None:
 
 
 def sunday_generate(cx: Ctx, st: dict[str, Any], name: str, gen_until: float, end: float) -> int:
+    cx.c = served(cx.c, (st.get("tower") or {}).get("model"))
     if not st.get("gen_unit") or cx.unit_state(st["gen_unit"]) not in ACTIVE:
         if cx.now() < gen_until - 600:
             st["gen_unit"] = cx.start_remote_gen(gen_until, "sun")
@@ -1263,6 +1302,10 @@ def cmd_tower_night(cx: Ctx) -> int:
                         cx.save_state("night.json", st)
                         return 1
                 gen_until = (end - float(c["R2_GEN_MARGIN_S"])) if last else part_end - 60
+                cc = served(cc, str(res.get("model") or "q4") if cx.execute else profile_model(profiles[0]))
+                cx.c = cc
+                if cc["R2_TOWER_QUANT"] != c["R2_TOWER_QUANT"]:
+                    cx.log(f"the 4090 serves {cc['R2_TOWER_QUANT']}: generation names that teacher (own run dir)")
                 st.update(tower=res, part=kind, gen_restarts=0,
                           gen_unit=cx.start_remote_gen(gen_until, f"night-{kind}"))
                 cx.save_state("night.json", st)
