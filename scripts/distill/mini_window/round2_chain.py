@@ -1241,6 +1241,11 @@ def cmd_tower_night(cx: Ctx) -> int:
                 last = i == len(plan) - 1
                 cx.c = cc
                 profiles, pwhy = resolve_profiles(cc)
+                if kind == "longctx" and profiles[0] == cc["R2_STANDARD_PROFILE"]:
+                    # no measured long context (no teacher-ctx.json yet): a 32K server would skip most
+                    # long-context rows, so this part generates from the standard taskset instead
+                    cc["R2_TOWER_TASKS"] = c["R2_TOWER_TASKS"]
+                    pwhy += "; the standard taskset, as no long-context profile is available"
                 cx.log(f"part {i + 1}/{len(plan)}: {kind}: serve {' then '.join(profiles)} ({pwhy}); tasks "
                        f"{cc['R2_TOWER_TASKS']}")
                 if i == 0:

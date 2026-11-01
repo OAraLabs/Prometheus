@@ -706,3 +706,17 @@ def test_a_split_night_swaps_half_way(tmp_path: Path) -> None:
     assert seen[0] == "/t/lc.jsonl" and seen[1].endswith("real-v3-excl.jsonl")
     assert cx.c["R2_TOWER_PROFILE"] == "standard", "the settings are restored after the night"
     assert cx.load_state("night.json")["plan"] == ["longctx", "standard"]
+
+
+def test_a_longctx_night_without_a_measurement_uses_the_standard_taskset(tmp_path: Path) -> None:
+    fake = Fake("2026-11-03T01:12:00-05:00")
+    cx = ctx(tmp_path, fake, "R2_TOWER_TASKS=/t/full.jsonl\nR2_TOWER_TASKS_LONGCTX=/t/lc.jsonl\n")
+    cx.cmd = "tower-night"
+    seen: list[str] = []
+    real_start = cx.start_remote_gen
+    cx.start_remote_gen = lambda until, tag: (seen.append(cx.c["R2_TOWER_TASKS"]), real_start(until, tag))[1]  # type: ignore[method-assign]
+    fake.on_sleep.append(lambda f: f.tower.update(jobs_unit="none", r2_units="")
+                         if f.now >= t("2026-11-03T06:22:00-05:00") else None)
+    assert R.cmd_tower_night(cx) == 0
+    assert [a[a.index("--profiles") + 1] for _, a in fake.tower_calls] == ["4x32768"]
+    assert seen == ["/t/full.jsonl"]
