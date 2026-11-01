@@ -504,3 +504,12 @@ def test_measured_ctx_reads_the_capacity_blocks_teacher_ctx() -> None:
         "recommendation": {"quant": "iq3", "max_stable_ctx": 262144}}
     assert R.measured_ctx(doc, "4090", "q4_k_xl") == 163840
     assert R.measured_ctx(doc, "4090", "iq3_xxs") == 262144
+
+
+def test_released_rows_keep_the_held_kind() -> None:
+    now = t("2026-11-01T09:00:00-05:00")
+    evs = [("local-r2-a", {"task_id": "x", "status": "held", "rows": 2, "kind": "chat-mode", "domain": "chat-mode",
+                           "ts": now - 50}),
+           ("local-r2-a", {"task_id": "x", "status": "released", "ts": now - 40})]
+    s = R.gen_stats(evs, now - 3600, now)
+    assert s["kind"] == {"chat-mode": 2} and s["domain"] == {"chat-mode": 2}

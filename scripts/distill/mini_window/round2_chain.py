@@ -446,7 +446,7 @@ def gen_stats(events: list[tuple[str, dict[str, Any]]], since: float, until: flo
     by_kind: Counter[str] = Counter()
     by_domain: Counter[str] = Counter()
     by_group: Counter[str] = Counter()
-    held: dict[tuple[str, str], int] = {}
+    held: dict[tuple[str, str], dict[str, Any]] = {}
     total = 0
     for run_dir, ev in events:
         try:
@@ -456,9 +456,11 @@ def gen_stats(events: list[tuple[str, dict[str, Any]]], since: float, until: flo
             continue
         key = (run_dir, str(ev.get("task_id")))
         if ev.get("status") == "held":
-            held[key] = rows
-        if ev.get("status") == "released":
-            rows = held.get(key, 0)
+            held[key] = ev
+        if ev.get("status") == "released":  # its rows, kind and domain are the held event's
+            h = held.get(key) or {}
+            rows = int(h.get("rows") or 0)
+            ev = {**h, **{k: v for k, v in ev.items() if v not in (None, "")}, "status": "released"}
         if ev.get("status") not in ("kept", "released") or rows <= 0 or not since <= ts < until:
             continue
         total += rows
@@ -1111,7 +1113,7 @@ def gen_lines(cx: Ctx, now: float) -> list[str]:
     cmd = c["R2_GEN_STATS_CMD"].strip()
     since = when(c["R2_START"])
     hours_r2 = max((now - since) / 3600, 0.01)
-    since_label = f"Gen since r2 {et(since, '%a %H:%M')} ({hours_r2:.{0 if hours_r2 >= 10 else 1}f} h)"
+    since_label = f"Gen since r2 {et(since, '%a %H:%M %Z')} ({hours_r2:.{0 if hours_r2 >= 10 else 1}f} h)"
     staged = Path(c["R2_CODE"]) / "scripts" / "distill" / "gen_stats.py"
     if cmd == "auto" and staged.is_file():
         try:
@@ -1140,9 +1142,11 @@ def gen_lines(cx: Ctx, now: float) -> list[str]:
 
 def windows_lines(cx: Ctx, now: float, tw: dict[str, str]) -> list[str]:
     nxt = []
+    guard = {"window-mini-night-start": "R2_MINI_NIGHTLY_FROM", "window-mini-night-end": "R2_MINI_NIGHTLY_FROM",
+             "r2-tower-night": "R2_TOWER_NIGHTLY_FROM"}
     for t, label in MINI_TIMERS:
         n = cx.timer_next(t)
-        if n:
+        if n and not (t in guard and n < when(cx.c[guard[t]])):  # a firing before its guard only skips
             nxt.append((n, label))
     for t, label in TOWER_TIMERS:
         v = tw.get(f"timer {t}", "-")
