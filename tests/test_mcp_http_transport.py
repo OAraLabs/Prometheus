@@ -16,76 +16,28 @@ from __future__ import annotations
 
 import logging
 import socket
-import threading
-import time
 from collections.abc import Iterator
 
 import pytest
 
 pytest.importorskip("mcp")
-uvicorn = pytest.importorskip("uvicorn")
-
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+pytest.importorskip("uvicorn")
 
 from prometheus.mcp.runtime import McpRuntime  # noqa: E402
 from prometheus.mcp.store import McpServerStore, McpStoreError  # noqa: E402
+from tests.support.mcp_http_server import McpHttpServer  # noqa: E402
 
 CANARY = "Bearer canary-7f3a91e0"
 
 
-class _Server:
-    def __init__(self, transport: str) -> None:
-        mcp = FastMCP("remote-tools", host="127.0.0.1")
-
-        @mcp.tool()
-        def echo(text: str) -> str:
-            """Say it back."""
-            return f"echo: {text}"
-
-        inner = mcp.streamable_http_app() if transport == "streamable-http" else mcp.sse_app()
-        self.seen_auth: list[str] = []
-
-        async def app(scope, receive, send):  # records what reached the server
-            if scope["type"] == "http":
-                for name, value in scope["headers"]:
-                    if name == b"authorization":
-                        self.seen_auth.append(value.decode())
-            await inner(scope, receive, send)
-
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            self.port = s.getsockname()[1]
-        self.path = "/mcp" if transport == "streamable-http" else "/sse"
-        self._server = uvicorn.Server(uvicorn.Config(
-            app, host="127.0.0.1", port=self.port, log_level="warning", lifespan="on"))
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
-
-    @property
-    def url(self) -> str:
-        return f"http://127.0.0.1:{self.port}{self.path}"
-
-    def __enter__(self) -> "_Server":
-        self._thread.start()
-        deadline = time.monotonic() + 10
-        while not self._server.started:
-            assert time.monotonic() < deadline, "test MCP server did not start"
-            time.sleep(0.02)
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self._server.should_exit = True
-        self._thread.join(timeout=10)
-
-
 @pytest.fixture(params=["streamable-http", "sse"])
-def server(request) -> Iterator[_Server]:
-    with _Server(request.param) as srv:
-        srv.transport = request.param
+def server(request) -> Iterator[McpHttpServer]:
+    with McpHttpServer(request.param) as srv:
         yield srv
 
 
-def _config(server: _Server) -> dict:
-    return {"url": server.url, "transport": server.transport, "headers": {"Authorization": CANARY}}
+def _config(server: McpHttpServer) -> dict:
+    return server.config(Authorization=CANARY)
 
 
 @pytest.mark.asyncio
@@ -96,7 +48,7 @@ async def test_an_http_server_connects_lists_and_answers(server, caplog):
         await runtime.connect_all()
         status = {s.name: s for s in runtime.list_statuses()}["remote"]
         assert status.state == "connected", status.detail
-        assert [t.tool_name for t in runtime.list_tools()] == ["echo"]
+        assert sorted(t.tool_name for t in runtime.list_tools()) == ["echo", "whoami"]
         assert await runtime.call_tool("remote", "echo", {"text": "hi"}) == "echo: hi"
         assert await runtime.probe("remote") is True
     finally:
