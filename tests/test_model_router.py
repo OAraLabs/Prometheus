@@ -596,9 +596,10 @@ class TestRuleAndFallbackFields:
 
     @pytest.mark.parametrize("section", ["rules", "fallback"])
     def test_a_key_its_provider_never_reads_is_refused_at_load(self, section, caplog):
-        # api_key_env is real, but llama.cpp sends no key, so a llama.cpp
-        # entry carrying one would run unauthenticated without a word.
-        entry = {"provider": "llama_cpp", "model": "qwen3.8-27b", "api_key_env": "MY_KEY"}
+        # api_key_env is real, but Ollama sends no key, so an Ollama entry
+        # carrying one would run unauthenticated without a word. (llama.cpp
+        # reads one since its server can be started with --api-key.)
+        entry = {"provider": "ollama", "model": "qwen3.5:9b", "api_key_env": "MY_KEY"}
         if section == "rules":
             entry["task_type"] = "code_generation"
 
@@ -608,7 +609,7 @@ class TestRuleAndFallbackFields:
         assert (cfg.task_rules if section == "rules" else cfg.fallback_chain) == []
         warnings = _router_warnings(caplog)
         assert "api_key_env" in warnings
-        assert "llama_cpp" in warnings
+        assert "ollama" in warnings
 
     @pytest.mark.parametrize("section", ["rules", "fallback"])
     def test_an_unknown_provider_is_refused_at_load(self, section, caplog):
@@ -674,7 +675,7 @@ class TestRuleAndFallbackFields:
             cfg = load_router_config({"router": {
                 "fallback": [
                     LIVE_SHAPED_CHAIN[0],
-                    {"provider": "llama_cpp", "model": "q", "api_key_env": "K"},
+                    {"provider": "ollama", "model": "q", "api_key_env": "K"},
                 ],
                 "rules": [
                     {"task_type": "reasoning", "provider": "openai", "model": "g",
@@ -684,7 +685,7 @@ class TestRuleAndFallbackFields:
 
         assert cfg.fallback_chain == [LIVE_SHAPED_CHAIN[0]]
         fallback_line, rule_line = _router_warnings(caplog).splitlines()
-        assert fallback_line.startswith("router.fallback[1] llama_cpp/q refused: api_key_env is not read")
+        assert fallback_line.startswith("router.fallback[1] ollama/q refused: api_key_env is not read")
         assert rule_line.startswith("router.rules[0] openai/g refused: api_key_evn, timout are not read")
         assert cfg.problems == [fallback_line, rule_line]
 

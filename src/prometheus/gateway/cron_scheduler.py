@@ -549,8 +549,9 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
     # with its scrubbed environment (security/shell_floor.py); a required
     # floor that is unavailable refuses the run like the gate does. Every
     # other job — the operator's, and every job stored before origin existed —
-    # runs exactly as before: the operator's jobs need the environment and
-    # the writes the floor removes.
+    # runs as before: the operator's jobs need the environment and the
+    # writes the floor removes. But not in a login shell: a login file a
+    # floored shell could write would run here unconfined.
     #
     # `python3` in an OPERATOR's job is the daemon's own interpreter
     # (utils/job_python.py): bare python3 under the daemon's inherited
@@ -565,15 +566,18 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
         floored_argv,
         model_shell_env,
     )
+    from prometheus.security.unconfined_shell import UNCONFINED_SHELL, unconfined_shell_env
     from prometheus.utils.job_python import job_shell_command
 
-    env: dict[str, str] | None = None
     try:
         if is_model_job(job):
             argv, _floors = floored_argv(command, cwd=resolved_cwd)
             env = model_shell_env()
         else:
-            argv = ["/bin/bash", "-lc", job_shell_command(command)]
+            # Outside the floor, so no login file runs first (security/unconfined_shell.py): the daemon's own
+            # environment, minus BASH_ENV and ENV.
+            argv = [*UNCONFINED_SHELL, job_shell_command(command)]
+            env = unconfined_shell_env()
     except ShellFloorRefused as exc:
         logger.warning("Cron job %r REFUSED by the shell floor: %s", name, exc)
         entry = {

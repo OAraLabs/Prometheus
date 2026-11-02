@@ -11,6 +11,9 @@ Shared design choices (kept in sync with the Telegram impl):
 - **STT** via the existing :class:`WhisperSTTTool` — same engine, same
   config. The tool already handles ogg↔wav conversion and chooses
   faster-whisper vs whisper CLI based on what's installed.
+- **Remote servers** — ``stt.url`` / ``tts.url`` (see
+  :mod:`prometheus.infra.voice_remote`) are tried first when set, with
+  the local engines below as the fallback, as on Telegram.
 - **TTS** via piper directly (subprocess), not via the ``TTSTool`` — we
   need the raw WAV output path, and the tool's interface returns a
   string message instead. Half a dozen lines of subprocess is cheaper
@@ -248,8 +251,13 @@ def play_wav(wav_path: str | Path) -> bool:
 # STT (Whisper) — reuses the existing tool
 # ---------------------------------------------------------------------------
 
-async def transcribe_wav(wav_path: str | Path) -> str | None:
-    """Transcribe a WAV via :class:`WhisperSTTTool`. Returns text or ``None``."""
+async def transcribe_wav(
+    wav_path: str | Path, config: dict[str, Any] | None = None,
+) -> str | None:
+    """Transcribe a WAV via :class:`WhisperSTTTool`. Returns text or ``None``.
+
+    *config* is the loaded prometheus.yaml (for ``stt.url``).
+    """
     try:
         from prometheus.tools.base import ToolExecutionContext
         from prometheus.tools.builtin.whisper_stt import (
@@ -260,7 +268,7 @@ async def transcribe_wav(wav_path: str | Path) -> str | None:
         logger.warning("Whisper STT module unavailable: %s", exc)
         return None
 
-    tool = WhisperSTTTool()
+    tool = WhisperSTTTool(config=config)
     result = await tool.execute(
         WhisperSTTInput(audio_path=str(wav_path)),
         ToolExecutionContext(cwd=Path.cwd()),
@@ -281,6 +289,26 @@ async def transcribe_wav(wav_path: str | Path) -> str | None:
 # ---------------------------------------------------------------------------
 
 async def synthesize_wav(
+    text: str, voice_config: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> Path | None:
+    """Synthesize *text* to a WAV. Returns path or ``None``.
+
+    The ``tts.url`` remote first when *config* (the loaded prometheus.yaml)
+    sets one, then piper.
+    """
+    from prometheus.infra.voice_remote import remote_settings, synthesize_remote
+
+    remote = remote_settings("tts", config or {})
+    if remote is not None:
+        out_wav = tempfile.mktemp(suffix=".wav")
+        if await synthesize_remote(remote, text, out_wav):
+            return Path(out_wav)
+        Path(out_wav).unlink(missing_ok=True)
+    return await _synthesize_piper(text, voice_config)
+
+
+async def _synthesize_piper(
     text: str, voice_config: dict[str, Any],
 ) -> Path | None:
     """Synthesize *text* to a WAV via piper. Returns path or ``None``."""
@@ -338,13 +366,15 @@ async def synthesize_wav(
 # High-level convenience: one voice turn end-to-end
 # ---------------------------------------------------------------------------
 
-async def cli_voice_capture(max_seconds: int = 60) -> str | None:
+async def cli_voice_capture(
+    max_seconds: int = 60, config: dict[str, Any] | None = None,
+) -> str | None:
     """Record one mic turn and return the transcribed text (or None)."""
     wav_path = await record_push_to_talk(max_seconds=max_seconds)
     if wav_path is None:
         return None
     try:
-        text = await transcribe_wav(wav_path)
+        text = await transcribe_wav(wav_path, config)
         if text:
             print(f"  You: {text}")
         else:
@@ -356,6 +386,7 @@ async def cli_voice_capture(max_seconds: int = 60) -> str | None:
 
 async def cli_voice_speak(
     text: str, voice_config: dict[str, Any],
+    config: dict[str, Any] | None = None,
 ) -> bool:
     """Synthesize *text* via TTS and play it. Returns True on success."""
     clean = strip_text_for_tts(text)
@@ -364,7 +395,7 @@ async def cli_voice_speak(
     max_chars = int(voice_config.get("max_chars", 800))
     if len(clean) > max_chars:
         clean = clean[: max_chars - 1].rsplit(" ", 1)[0] + "…"
-    wav_path = await synthesize_wav(clean, voice_config)
+    wav_path = await synthesize_wav(clean, voice_config, config)
     if wav_path is None:
         return False
     try:

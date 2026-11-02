@@ -38,6 +38,10 @@ WHAT IS NOT FLOORED, AND WHY
   model only fires the hook and its payload travels as data, never as code.
   Their environment is allowlisted (``hooks/executor.py``).
 
+Both, and an operator's cron jobs, run without a login shell
+(``security/unconfined_shell.py``): a login file is the user's, a floored
+shell can write it, and these shells run outside the floor.
+
 The composition itself — read floor inside, write floor outside, and the
 refusal policy — is ``confinement.apply_floors``. Nothing here re-implements
 it.

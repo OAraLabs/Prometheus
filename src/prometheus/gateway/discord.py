@@ -862,7 +862,9 @@ class DiscordAdapter(BasePlatformAdapter):
                         f"not be stored for transcription]"
                     )
                     continue
-                transcription = await media_services.transcribe_audio(cached)
+                transcription = await media_services.transcribe_audio(
+                    cached, config=self._prometheus_config,
+                )
                 parts.append(
                     transcription
                     or "[Voice message received but transcription unavailable]"

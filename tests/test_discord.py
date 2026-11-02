@@ -752,7 +752,9 @@ class TestMediaRouting:
         text, urls, types, mtype = await adapter._ingest_attachments(
             [att], caption="", chat_id=1,
         )
-        transcribe.assert_awaited_once_with(str(cached))
+        transcribe.assert_awaited_once_with(
+            str(cached), config=adapter._prometheus_config,
+        )
         assert text == "hello prometheus"
         assert mtype == MessageType.VOICE
 
