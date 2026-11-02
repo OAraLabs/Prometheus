@@ -238,17 +238,37 @@ def test_only_the_owner_can_give_a_key(world, keyed_box, env_file):
     assert not env_file.exists() or KEY not in env_file.read_text()
 
 
-def test_the_agents_file_tools_cannot_read_the_env_file(world, keyed_box, tmp_path):
-    """The daemon's env file (``~/.config/prometheus/env``) is under the gate's always-denied floor."""
-    from pathlib import Path
+def test_the_agents_file_tools_cannot_read_the_env_file(tmp_path, monkeypatch, keyed_box):
+    """Through the real dispatch path: the model's read_file of an env file at the floor's shape
+    (``<home>/.config/<app>/env``) is refused before the prompt is asked, and the key never reaches the result."""
+    import asyncio
 
+    from prometheus.__main__ import create_tool_registry
+    from prometheus.engine.agent_loop import LoopContext, _execute_tool_call
+    from prometheus.infra import pieces
     from prometheus.permissions.checker import SecurityGate
 
+    env = tmp_path / "home" / ".config" / "prometheus" / "env"
+    monkeypatch.setenv("PROMETHEUS_ENV_FILE", str(env))
+    w = World(tmp_path, recording=False)
+    monkeypatch.setattr(pieces, "devices_db_path", lambda: w.path)
     _, port = keyed_box
-    approve(world, found(world, port)["id"], secret=KEY)
-    gate = SecurityGate(audit_logger=None, workspace_root=str(tmp_path))
-    path = str(Path.home() / ".config" / "prometheus" / "env")
-    assert not gate.evaluate("read_file", file_path=path, is_read_only=True, origin="user").allowed
+    assert approve(w, found(w, port)["id"], secret=KEY).status_code == 200
+    assert KEY in env.read_text()
+
+    asked: list[str] = []
+
+    async def yes(tool_name, reason):
+        asked.append(reason)
+        return True
+
+    gate = SecurityGate(workspace_root=[str(tmp_path)])
+    ctx = LoopContext(provider=None, model="t", system_prompt="", max_tokens=512,
+                      tool_registry=create_tool_registry({}, gate), permission_checker=gate, permission_prompt=yes)
+    result = asyncio.run(_execute_tool_call(ctx, "read_file", "t1", {"path": str(env)}))
+    assert result.is_error
+    assert KEY not in result.content
+    assert not asked
 
 
 def test_the_agents_shell_never_sees_the_key_variable(world, keyed_box, env_file, monkeypatch):
