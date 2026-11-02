@@ -582,3 +582,39 @@ def test_night_refuses_a_server_that_is_not_the_standard_profile(tmp_path: Path,
     assert at.main(["night", "--work", str(work), "--judge-url", "http://x", "--judge-key-file", "k",
                     "--until", "04:55"]) == 0  # a dry run: prints the judge command, judges nothing
     assert not (work / "judge" / judge.RESULTS_FILE).exists()
+
+
+def test_night_judges_the_before_queues_first_then_its_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cf, paths, _ = _write_inputs(tmp_path)
+    work = tmp_path / "w"
+    assert at.main(["prepare", "--work", str(work), "--cases", str(cf), "--results", f"base={paths['base']}",
+                    "--positives", "1", "--negatives", "0"]) == 0
+    r2 = tmp_path / "r2"
+    _write_queue(r2, [{"id": "r2p-1"}, {"id": "r2p-2"}], judge.MODE_LOCAL_JUDGE)
+    monkeypatch.setattr(at, "server_check", lambda *a, **k: None)
+    sent: list[list[str]] = []
+    monkeypatch.setattr(at, "notify", lambda cmd, lines, execute: sent.append(lines))
+    ran: list[list[str]] = []
+
+    def fake_run(argv: list[str], until: Any, env: Any) -> int:
+        ran.append(argv)
+        wdir = Path(argv[argv.index("--workdir") + 1])
+        view = argv[argv.index("--view") + 1]
+        q = judge.read_jsonl(wdir / judge.QUEUE_FILE)
+        rows = [{**_verdict_row(it["id"], _rubric()), "view": view} for it in q]
+        (wdir / judge.RESULTS_FILE).write_text("".join(json.dumps(r) + "\n" for r in rows))
+        return 0
+
+    monkeypatch.setattr(at, "run_judge_until", fake_run)
+    argv = ["night", "--work", str(work), "--judge-url", "http://x", "--judge-key-file", "k", "--until", "04:50",
+            "--before", f"{r2}=03:15", "--concurrency", "2", "--execute"]
+    assert at.main(argv) == 0
+    assert [Path(a[a.index("--workdir") + 1]) for a in ran] == [r2, (work / "judge").resolve()]
+    assert [a[a.index("--view") + 1] for a in ran] == ["outcome", judge.TOOL_CHOICE_VIEW]
+    assert all(a[a.index("--concurrency") + 1] == "2" for a in ran)
+    assert sent[-1][0].startswith("4090 judge slot: r2 done 2/2") and "acceptable-tools done" in sent[-1][0]
+    assert (work / at.REPORT_FILE).exists()
+    ran.clear()
+    assert at.main(argv) == 0 and not ran  # everything ruled and reported: nothing to do
+    with pytest.raises(SystemExit, match="WORKDIR=HH:MM"):
+        at.main([*argv[:-1], "--before", "nodeadline"])

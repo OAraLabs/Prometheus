@@ -1058,21 +1058,49 @@ def run_judge_until(argv: list[str], until: datetime, env: dict[str, str]) -> in
         return None
 
 
+def queue_state(workdir: Path) -> tuple[str, int, int]:
+    """(the view a judge.py workdir's queue is judged in, items queued, items with an ok ruling)."""
+    j = J()
+    meta_path = workdir / j.QUEUE_META_FILE
+    meta = read_json(meta_path) if meta_path.is_file() else {}
+    view = j.TOOL_CHOICE_VIEW if meta.get("mode") == j.MODE_TOOL_CHOICE else "outcome"
+    queue = j.read_jsonl(workdir / j.QUEUE_FILE)
+    done = j.done_ids(j.read_jsonl(workdir / j.RESULTS_FILE), view)
+    return view, len(queue), sum(1 for it in queue if it["id"] in done)
+
+
+def parse_before(specs: list[str], now: datetime) -> list[tuple[Path, datetime]]:
+    out = []
+    for spec in specs:
+        w, eq, hhmm = spec.rpartition("=")
+        if not eq or not w or not re.fullmatch(r"\d{1,2}:\d{2}", hhmm):
+            raise SystemExit(f"--before wants WORKDIR=HH:MM, got {spec!r}")
+        out.append((Path(w).expanduser().resolve(), deadline_today(hhmm, now)))
+    return out
+
+
 def cmd_night(args: argparse.Namespace) -> int:
+    """One window's judge slot on the calibrated server: every ``--before`` queue first (in order, each until
+    its own deadline: the round-2 judge_pending pass), then this work's tool-choice queue until ``--until``,
+    then ``finish``. The server must be the calibrated judge in the standard shape (``--min-slots``)."""
     j = J()
     work = Path(args.work).expanduser().resolve()
     now = datetime.now(ET)
     until = deadline_today(args.until, now)
     log = lambda msg: print(f"{datetime.now(ET):%F %T %Z} acceptable-tools night: {msg}", flush=True)  # noqa: E731
-    queue = j.read_jsonl(work / JUDGE_DIR / j.QUEUE_FILE)
-    done = j.done_ids(j.read_jsonl(work / JUDGE_DIR / j.RESULTS_FILE), j.TOOL_CHOICE_VIEW)
-    left = [it for it in queue if it["id"] not in done]
-    log(f"{len(left)} of {len(queue)} items without a ruling; judge until {until:%a %H:%M %Z}")
-    if not left and (work / REPORT_FILE).exists():
+    passes = [*parse_before(args.before, now), (work / JUDGE_DIR, until)]
+    names = {work / JUDGE_DIR: "acceptable-tools"}
+    left_total = 0
+    for wdir, dl in passes:
+        view, queued, ruled = queue_state(wdir)
+        left_total += queued - ruled
+        log(f"{names.get(wdir, wdir.name)}: {queued - ruled} of {queued} items without a ruling ({view} view); "
+            f"judge until {dl:%a %H:%M %Z}")
+    if not left_total and (work / REPORT_FILE).exists():
         log("nothing left to judge and the report exists: nothing to do")
         return 0
-    judge_state = "nothing to judge"
-    if left:
+    results: list[str] = []
+    if left_total:
         start_by = now + timedelta(minutes=args.wait_min)
         why = None
         while True:
@@ -1090,22 +1118,37 @@ def cmd_night(args: argparse.Namespace) -> int:
                 break
         if why:
             log(why)
-            notify(args.notify, ["acceptable-tools judge pass: not run tonight", why[:280],
-                                 f"{len(left)} items wait in {work / JUDGE_DIR}"], args.execute)
+            notify(args.notify, ["4090 judge slot: not run tonight", why[:280],
+                                 f"{left_total} items wait ({', '.join(names.get(w, w.name) for w, _ in passes)})"],
+                   args.execute)
             return 3
-        argv = [args.py, str(HERE / "judge.py"), "--workdir", str(work / JUDGE_DIR), "run", "--provider", "local",
-                "--judge-url", args.judge_url, "--judge-key-file", args.judge_key_file, "--view", j.TOOL_CHOICE_VIEW,
-                "--concurrency", str(args.concurrency), "--timeout", str(args.timeout), "--max-pause", "1800"]
-        if not args.execute:
-            log("[dry run] would run: " + " ".join(shlex.quote(a) for a in argv))
-            return 0
         env = {**os.environ, "PYTHONPATH": os.environ.get("PYTHONPATH", "")}
-        rc = run_judge_until(argv, until, env)
-        if rc == j.EXIT_INCOMPLETE and datetime.now(ET) < until - timedelta(minutes=5):
-            log("unparseable or failed items left: one more pass")
-            rc = run_judge_until(argv, until, env)
-        judge_state = {None: "stopped at the deadline", 0: "done"}.get(rc, f"judge.py exit {rc}")
-        log(judge_state)
+        for wdir, dl in passes:
+            view, queued, ruled = queue_state(wdir)
+            name = names.get(wdir, wdir.name)
+            if ruled >= queued:
+                results.append(f"{name} nothing to judge")
+                continue
+            argv = [args.py, str(HERE / "judge.py"), "--workdir", str(wdir), "run", "--provider", "local",
+                    "--judge-url", args.judge_url, "--judge-key-file", args.judge_key_file, "--view", view,
+                    "--concurrency", str(args.concurrency), "--timeout", str(args.timeout), "--max-pause", "1800"]
+            if not args.execute:
+                log(f"[dry run] {name}: would run until {dl:%H:%M}: " + " ".join(shlex.quote(a) for a in argv))
+                continue
+            if datetime.now(ET) >= dl - timedelta(minutes=2):
+                results.append(f"{name} skipped (past {dl:%H:%M})")
+                continue
+            t0 = time.monotonic()
+            rc = run_judge_until(argv, dl, env)
+            if rc == j.EXIT_INCOMPLETE and datetime.now(ET) < dl - timedelta(minutes=5):
+                log(f"{name}: unparseable or failed items left: one more pass")
+                rc = run_judge_until(argv, dl, env)
+            state = {None: "stopped at its deadline", 0: "done"}.get(rc, f"judge.py exit {rc}")
+            _, queued, ruled = queue_state(wdir)
+            results.append(f"{name} {state} {ruled}/{queued} in {(time.monotonic() - t0) / 60:.0f} min")
+            log(results[-1])
+            if rc in (j.EXIT_PAUSED, j.EXIT_FATAL):
+                break  # the server went away or changed: the later passes would fail the same way
     if not args.execute:
         log("[dry run] then: finish (annotation, agreement, report, scorecard section)")
         return 0
@@ -1113,11 +1156,11 @@ def cmd_night(args: argparse.Namespace) -> int:
     a = rep["agreement"]
     pick = [p for p in rep["pairs"] if p.get("new")][:2]
     notify(args.notify, [
-        f"acceptable-tools judge pass: {judge_state}; {a['ruled']}/{a['queued']} ruled",
-        f"view check {a['check']}: refs accepted {_agree_line(a, 'control-positive')}; "
+        "4090 judge slot: " + "; ".join(results),
+        f"tool-choice view check {a['check']}: refs accepted {_agree_line(a, 'control-positive')}; "
         f"wrong rejected {_agree_line(a, 'control-negative')}",
-        "annotation " + ("complete" if rep["annotation_complete"] else
-                         f"partial ({rep['annotation']['decisions'].get('undecided', 0)} undecided)"),
+        "acceptable-tool annotation " + ("complete" if rep["annotation_complete"] else
+                                         f"partial ({rep['annotation']['decisions'].get('undecided', 0)} undecided)"),
         "; ".join(f"{p['candidate']} vs {p['base']} new Δ {_delta(p['new'])[0]}" for p in pick) or "no pairs",
         f"report: {work / REPORT_MD}",
     ], args.execute)
@@ -1162,6 +1205,9 @@ def main(argv: list[str] | None = None) -> int:
     n.add_argument("--judge-url", required=True)
     n.add_argument("--judge-key-file", required=True)
     n.add_argument("--until", required=True, help="HH:MM ET: stop judging then")
+    n.add_argument("--before", action="append", default=[], metavar="WORKDIR=HH:MM",
+                   help="a judge.py workdir to judge first, until HH:MM ET (repeatable, in order): e.g. the "
+                        "round-2 judge_pending queue (build.py judge-pending)")
     n.add_argument("--min-slots", type=int, default=4, help="refuse a server with fewer slots (not standard)")
     n.add_argument("--concurrency", type=int, default=1)
     n.add_argument("--timeout", type=float, default=600.0)

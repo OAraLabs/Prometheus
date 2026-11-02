@@ -208,7 +208,7 @@ Sources: `~/scratch-arg-equiv/out/` on the 3090 Ti host (`full.json`, `bf16.json
 <!-- acceptable-tools:begin -->
 ## Acceptable-tool wrong-tool rate (added 2026-11-02, pending)
 
-**Pending: the judge pass hasn't run yet.** It runs on the next standard 4090 night, Wed 2026-11-04 01:20–04:50 EST (fallback: Fri 2026-11-06). `acceptable_tools.py night` then writes this section on the 3090 Ti host (`~/distill/acceptable-tools/scorecard-section.md`), and `acceptable_tools.py section --report report.json --scorecard <this file>` replaces this placeholder with it.
+**Pending: the judge pass hasn't run yet.** It runs on the next standard 4090 night, Wed 2026-11-04, beside that night's generation (fallback: Fri 2026-11-06). The round-2 judge_pending pass goes first, 01:20 until done or 03:15 EST; this pass follows, until done or 04:50. `acceptable_tools.py night` then writes this section on the 3090 Ti host (`~/distill/acceptable-tools/scorecard-section.md`), and `acceptable_tools.py section --report report.json --scorecard <this file>` replaces this placeholder with it.
 
 Operator ask (Mon ~08:00): replace the single-reference wrong-tool metric with an acceptable-tool set per case, built from Max + 27B + judge agreement, plus an outcome check where the gym can run it.
 
