@@ -6030,6 +6030,19 @@ async def _execute_tool_call(
                     is_error=True,
                 )
 
+    if _decided_path is None and context.permission_checker is None:
+        # No gate (a bare loop, a test harness): the same resolution the gate would have been handed, so the tool
+        # still opens one path through no link and the post-result hooks still know which file it was.
+        try:
+            from prometheus.permissions.tool_paths import gate_path_for as _gate_path_for
+
+            _schema = tool.input_model.model_json_schema() if getattr(tool, "input_model", None) else None
+            _cwd, _roots = _run_paths(context)
+            _decided_path = _gate_path_for(tool_name, tool_input, schema=_schema, base=_cwd,
+                                           write_base=_cwd if _roots else None)[0] or None
+        except Exception:  # noqa: BLE001 — without it the tool resolves its own argument, as it always did
+            _decided_path = None
+
     from prometheus.tools.base import ToolExecutionContext
     # M5: bound tool execution so a hung tool can't freeze the turn/session.
     # The timeout wraps ONLY tool.execute() — not the permission prompt above,
