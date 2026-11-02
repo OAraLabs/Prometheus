@@ -64,10 +64,10 @@ class TestStore:
         (ws / "src" / "new.py").write_text("created by the turn\n")
         d = store.diff(rec.id)
         assert d["changed"] == ["src/app.py"] and d["deleted"] == ["README.md"] and d["added"] == ["src/new.py"]
-        dry = store.restore(rec.id, dry_run=True)
+        dry = store.restore(rec.id, workspace=ws, dry_run=True)
         assert dry["dry_run"] and sorted(dry["restored"]) == ["README.md", "src/app.py"] and dry["deleted"] == ["src/new.py"]
         assert (ws / "src" / "app.py").read_text() == "print('v2')\n"      # dry run touched nothing
-        res = store.restore(rec.id)
+        res = store.restore(rec.id, workspace=ws)
         assert (ws / "src" / "app.py").read_text() == "print('v1')\n"
         assert (ws / "README.md").read_text() == "readme v1\n"
         assert not (ws / "src" / "new.py").exists()
@@ -83,7 +83,7 @@ class TestStore:
         (ws / "big.bin").write_bytes(b"y" * 5000)
         d = store.diff(rec.id)
         assert d["uncaptured"] == ["big.bin"] and "big.bin" not in d["added"]
-        res = store.restore(rec.id)
+        res = store.restore(rec.id, workspace=ws)
         assert (ws / "big.bin").read_bytes() == b"y" * 5000               # never touched
         assert res["uncaptured"] == ["big.bin"]
 
@@ -190,12 +190,15 @@ class TestLoop:
 
 
 class TestRoutes:
-    def _client(self, tmp_path, store=None):
+    def _client(self, tmp_path, store=None, workspaces=None):
         pytest.importorskip("fastapi")
         from fastapi.testclient import TestClient
         from prometheus.web.server import create_app
         app = create_app({})
         app.state.checkpoint_store = store
+        bound = dict(workspaces or {})
+        app.state.lcm_engine = SimpleNamespace(conversation_store=SimpleNamespace(
+            get_session_workspace=bound.get, set_session_workspace=lambda *a, **k: None))
         return TestClient(app)
 
     def test_without_a_store_is_503(self, tmp_path) -> None:
@@ -206,7 +209,7 @@ class TestRoutes:
         store = FileCheckpointStore(tmp_path / "cp")
         rec = store.create("desktop:s1", ws, "turn one")
         (ws / "README.md").write_text("changed\n"); (ws / "extra.txt").write_text("new\n")
-        client = self._client(tmp_path, store)
+        client = self._client(tmp_path, store, {"desktop:s1": str(ws)})
         assert client.get("/api/sessions/desktop:s1/checkpoints").json()["checkpoints"][0]["id"] == rec.id
         body = client.get(f"/api/sessions/desktop:s1/checkpoints/{rec.id}").json()
         assert body["diff"]["changed"] == ["README.md"] and body["diff"]["added"] == ["extra.txt"]
