@@ -145,7 +145,8 @@ class McpServerStore:
 
     def _save(self, servers: dict[str, dict[str, Any]]) -> None:
         tmp = self._path.with_name(self._path.name + ".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # O_NOFOLLOW: a symlink planted as the side file would otherwise take the definitions, credentials and all.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(servers, fh, indent=2)
         os.replace(tmp, self._path)
@@ -297,9 +298,21 @@ def merged_server_configs(config: dict[str, Any],
     ``enabled: false`` (store-managed only) keeps the definition but
     excludes it from the merge — the runtime never sees it, so its tools
     are structurally absent rather than registered-then-hidden.
+
+    Each store definition passes the REST door's own ``validate`` again here,
+    on the way to being STARTED: the file is read at boot, and a definition
+    that reached it some other way than the door (written by hand, or by
+    anything that could write the data directory) is skipped and named, not
+    launched.
     """
     merged: dict[str, dict[str, Any]] = {}
     for name, definition in store.load().items():
+        try:
+            store.validate(name, definition)
+        except McpStoreError as exc:
+            logger.warning("MCP: store server %r NOT started — the definition fails the store's own check: %s",
+                           name, exc)
+            continue
         if definition.get("enabled", True):
             merged[name] = {
                 k: v for k, v in definition.items() if k != "enabled"

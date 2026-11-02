@@ -53,8 +53,8 @@ def _fake_tool_cls(recorder: dict, result: _FakeToolResult | Exception):
     """A stand-in for VisionTool / WhisperSTTTool recording execute() args."""
 
     class _FakeTool:
-        def __init__(self):
-            pass
+        def __init__(self, **kwargs):
+            recorder["init"] = kwargs
 
         async def execute(self, tool_input, context):
             recorder["input"] = tool_input
@@ -146,6 +146,8 @@ class TestTranscribeAudioPins:
         out = await adapter._transcribe_audio("/tmp/audio_ab.ogg")
         assert out == "hello prometheus"
         assert rec["input"].audio_path == "/tmp/audio_ab.ogg"
+        # The adapter's own config reaches the tool, for stt.url.
+        assert rec["init"] == {"config": adapter._prometheus_config}
 
     @pytest.mark.asyncio
     async def test_transcribe_failure_pin(self, monkeypatch):
