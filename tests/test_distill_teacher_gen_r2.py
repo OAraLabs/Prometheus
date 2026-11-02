@@ -347,6 +347,22 @@ def test_an_lc2_row_lists_the_files_with_the_real_glob_before_the_reads(tmp_path
     assert rec["tool_calls"] == 0  # seeded calls are never the task's own tool events
 
 
+def test_a_long_context_turn_gets_its_own_tool_call_cap_and_a_cap_stop_is_its_own_reason(
+        tmp_path: Path, no_outbound: Any) -> None:
+    files = {"docs/a.md": "# Alpha\n" + "alpha text\n" * 30, "docs/b.md": "# Bravo\ndef frobnicate_widgets():\n"}
+    reads = [("call", "read_file", {"path": "docs/a.md", "offset": k, "limit": 2}) for k in range(20)]
+    answer = ("text", "docs/b.md defines frobnicate_widgets, and docs/a.md is a page of alpha text.")
+    t = _lc_task(tmp_path, files, None)
+    with FakeTeacher(scripted({"Summarize": reads + [answer]})) as fake:
+        status, _rows, reasons, _extra = _process(t, _settings(tmp_path, fake.url))
+    assert status == "kept", reasons  # 18 calls (2 of the 20 steps are the seeded reads): within 24, over 12
+    with FakeTeacher(scripted({"Summarize": reads + [answer]})) as fake:
+        status, _rows, reasons, extra = _process(_lc_task(tmp_path, files, None),
+                                                 _settings(tmp_path / "b", fake.url, max_tool_iterations_longctx=12))
+    assert status == "rejected" and "iteration_cap" in reasons and "tool_error" not in reasons
+    assert extra["verification"]["not_run_calls"] >= 1
+
+
 def test_a_listing_that_matches_nothing_rejects_the_task(tmp_path: Path, no_outbound: Any) -> None:
     t = _lc_task(tmp_path, {"docs/a.md": "# A\n"}, None)
     t.context_listings = [{"pattern": "nowhere/*", "limit": 10}]

@@ -709,6 +709,8 @@ CHAT_MODE_NOTE = ("# Tools\n\nNo tools are available in this turn. Answer in pla
 #: The compactor's threshold, as a share of its window (when the window is the plain one).
 COMPACTION_THRESHOLD_PCT = 0.85
 SEED_CALL_PREFIX = "call_seed_"
+#: how the loop answers a call its tool-call cap stopped (agent_loop._unanswered_tool_results)
+NOT_RUN_MARK = "NOT EXECUTED: the turn was halted"
 ORCHESTRATOR = "orchestrator"
 _DIR = Path(__file__).resolve().parent
 _REPO_DEFAULT = _DIR.parent.parent
@@ -4045,6 +4047,9 @@ class Settings:
     coding_cap: float = CODING_CAP
     max_tokens: int = 4096
     max_tool_iterations: int = 12
+    #: a long-context task's own cap: its turn starts with the files read and lists, and the 12-call cap
+    #: stopped 121 of 178 rejected long-context turns on 2026-11-01 (the shipped runtime allows 500)
+    max_tool_iterations_longctx: int = 24
     tool_timeout: float = 60.0
     task_timeout: float = 900.0
     request_timeout: float = 300.0
@@ -4925,7 +4930,8 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
         max_tokens=settings.max_tokens, tool_registry=registry, permission_checker=gate,
         permission_prompt=gym_permission_prompt,
         adapter=adapter, telemetry=_telemetry(settings), cwd=root,
-        max_tool_iterations=settings.max_tool_iterations, tool_timeout_seconds=settings.tool_timeout,
+        max_tool_iterations=(settings.max_tool_iterations_longctx if task.context_reads
+                             else settings.max_tool_iterations), tool_timeout_seconds=settings.tool_timeout,
         session_id="system", tool_call_observer=_observe, compactor=compactor,
         # The session-workspace path the daemon uses: relative paths, the tool
         # cwd and the gate's write boundary are all the sandbox.
@@ -5074,6 +5080,9 @@ def _turn_events(out: TaskOutcome, msgs: list[Any]) -> list[dict[str, Any]]:
             ev["outcome"] = "empty_args"
         elif ev["is_error"] is None:
             ev["outcome"] = "unanswered"
+        elif rec is None and ev["is_error"] and str(ev["result"]).startswith(NOT_RUN_MARK):
+            # the loop's tool-call cap stopped the turn before this call ran: a budget stop, not the tool
+            ev["outcome"] = "not_run"
         elif ev["is_error"]:
             ev["outcome"] = "error"
         else:
@@ -5166,7 +5175,8 @@ async def _pad_turns(task: GenTask, settings: Settings, context: Any, out: TaskO
             continue
         turns.append({"id": cand["id"], "task_group": cand["task_group"], "mode": cand["mode"],
                       "prompt_hash": h(norm(cand["prompt"])), "teacher_calls": len(calls),
-                      "tool_calls": len(events), "tool_errors": outcomes["error"] + outcomes["unanswered"],
+                      "tool_calls": len(events),
+                      "tool_errors": outcomes["error"] + outcomes["unanswered"] + outcomes["not_run"],
                       "reads": sum(1 for e in events if e["name"] in ("read_file", "grep", "glob", "bash")
                                    and e["outcome"] == "ok")})
         if len(turns) >= PAD_MIN_TURNS and sum(estimate_message_tokens(m) for m in messages) >= target:
@@ -5510,6 +5520,10 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
         reasons.append("breaker_tripped")
     if natural > settings.max_natural_errors:
         reasons.append("tool_error")
+    if counts["not_run"]:
+        # the turn hit the tool-call cap (``--max-tool-iterations``) with calls left: it did not finish
+        record["not_run_calls"] = counts["not_run"]
+        reasons.append("iteration_cap")
     if counts["refused"] and not settings.keep_refused:
         reasons.append("sandbox_refusal")
     if repaired:
@@ -7620,6 +7634,7 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
         max_tasks=a.max_tasks,
         target_rows=a.target_rows, seed=a.seed, mix=parse_mix(a.mix), coding_cap=a.coding_cap,
         max_tokens=a.max_tokens, max_tool_iterations=a.max_tool_iterations, tool_timeout=a.tool_timeout,
+        max_tool_iterations_longctx=a.max_tool_iterations_longctx,
         task_timeout=a.task_timeout,
         request_timeout=a.request_timeout or (600.0 if a.probe_guard_url else 300.0),
         compaction_history_tokens=a.compaction_history_tokens, emit_final_turns=a.emit_final_turns,
@@ -8248,6 +8263,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     r.add_argument("--coding-cap", type=float, default=CODING_CAP)
     r.add_argument("--max-tokens", type=int, default=4096)
     r.add_argument("--max-tool-iterations", type=int, default=12)
+    r.add_argument("--max-tool-iterations-longctx", type=int, default=24,
+                   help="the tool-call cap of a round-2 long-context task (files already read into its turn)")
     r.add_argument("--tool-timeout", type=float, default=60.0)
     r.add_argument("--task-timeout", type=float, default=900.0)
     r.add_argument("--request-timeout", type=float)
