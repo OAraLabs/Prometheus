@@ -176,3 +176,100 @@ On the 3090 Ti host: `~/distill/phase3/code/` holds the builder; `build.py pack`
 - **Data policy:** all 4,587 Max-derived train/val rows are covered by the Q6b approval. Private, tagged max-derived.
 - **Hashes:** manifest sha256 `f05b6d5c4037bf18c1ee6394d9c7195e5568a44949455149f3521e5d5fffe45c`, train sha256 `ba2cc33652d4b3aea86d93e4fa5a33a01ecc4a8eef6c86a8e38bb2874a33b46b`. Staged to the 4090 and verified there.
 - **Known gap (also in v4):** a parallel sibling call can bring a failed turn back into train. To be fixed before the next dataset.
+
+## Round 2 dataset plan (added 2026-11-02)
+
+**Operator rule (Mon ~08:00 ET):** injection ≤ 20%, daily-agent ≤ 30%, coding ≤ 30%; long-context and tool-choice keep everything that passes; keep the 40% v4b replay.
+
+### How the rule is read
+
+- **The caps are shares of the new round-2 train rows,** not of the final train set. Replay is a separate 40% block of v4b's own mix, and its rows carry no target area.
+  - This is the stricter reading. An area's share of the final set is 0.6 × its share of the new rows, so a set that meets this reading also meets the final-set reading.
+  - Read against the final set instead, the caps would become 33% / 50% / 50% of the new rows, and replay would act as filler.
+- **The cap key is the row's `target_area`** (teacher_gen's `_meta.target_area`), not its category.
+  - The round-1 category caps are off for the new rows (`--category-cap 1.0`). The area caps replace them.
+  - Replay keeps v4b's capped mix: 70% coding by category.
+- **Error-recovery isn't named, so it is uncapped:** it keeps every row that passes. It can't break a cap, because caps are maxima.
+- **Uncapped areas are never down-sampled.** Neither the area caps nor the class caps (reported_blocked 15%, no-tool answer 20%) nor a category cap ever drops a long-context, tool-choice or error-recovery row. If protected rows alone keep a class over its cap, the class-cap gate fails rather than drop them.
+- **Sampling:**
+  - It takes the largest fixed point of T = Σ min(n_area, ⌊cap × T⌋), where uncapped areas count in full.
+  - Within an area it takes a round-robin over tasks, seeded by `--seed phase3-r2-v1`, which the report records.
+  - Val keeps the same per-area share that train kept.
+  - `caps.area_caps` and `round2` in report.json record what each cap removed, per area.
+
+### Replay and the caps
+
+- **Replay is drawn after the caps,** so it scales with the capped new rows: replay = 0.4 / 0.6 × new train rows.
+- **Fewer new rows means less replay.** A tighter cap shrinks the new rows, and the replay shrinks with them.
+- **Replay rows are leakage-gated** against the new val and eval-tools sets, and against every eval set (below). The area-cap gate counts only the new rows.
+
+### Recipe
+
+`build.py round2 --out ~/distill/phase3/build-r2-<tag>-max-derived [--dry-run]` runs one `build` with `R2_RECIPE`. Add `--print` to show the full command without running it.
+
+- **Inputs:**
+  - every round-2 pool file, from both the 3090 Ti and the 4090 runs (`~/distill/phase2b/pool/qwen38-27b-gym.*r2*.traces.jsonl`);
+  - no golden traces (`--no-golden`): the Max rows return only through replay;
+  - train source is the local 27B gym.
+- **Verification:**
+  - `--unjudged-verifiers deterministic,tool-success` (also build.py's default).
+  - The calibration report (`--judge-calibration`) applies. A `judge_pending` row trains only on the calibrated local judge's verdict.
+  - The `build.py judge-pending` workdir's `judge-sample.jsonl` is passed as `--verdicts` once it exists. Until then, every judge_pending row is excluded.
+- **Caps:** area caps 0.2 / 0.3 / 0.3, category cap off, class caps unchanged.
+- **Replay:** `--replay-from ~/distill/phase3/build-v4b-r6-c70-max-derived --replay-share 0.4`, run under the Q6b allow (`--allow-max-derived --max-derived-approval "operator Q6b 2026-10-30"`, excluded-sessions list). The replay rows are Max-derived, so the dataset is tagged max-derived and private.
+- **Leakage:**
+  - v4b eval-tools and val-cases tasks are pinned to eval-tools (`--eval-holdout`).
+  - `--eval-disjoint` (new) runs on v4b eval-tools, v4b val-cases, v2 eval-tools, eval-injection, eval-longctx, sanity and eval-longctx-tools. Any row holding one of their user messages (normalized, ≥ 12 characters) is excluded, and so is any matching replay row.
+  - The usual cross-split leakage gate still runs.
+- **Plan file:** `round2-plan.json` is written beside the report. It gives, per area, rows in, what passes, train before and after caps, and what a `--target-train` final set (default 5,000) needs.
+
+### Dry run on the 3090 Ti host, 2026-11-02 ~09:00 ET
+
+- **Inputs:** 2,932 round-2 rows from 5 runs, three on the 3090 Ti and two on the 4090. The run outputs were read-only; the report went to a scratch dir.
+- **Overall: FAIL, on train size only.** Train is 602 rows against the 5,000 floor. Every other gate passes: leakage, verdicts, data policy, val share, eval-tools size, category, class, area caps, eval-disjoint, presence. The spot check was not run.
+
+| Area | Rows in | judge_pending | Deterministic | Tool-success | Pass | Train before caps | Removed by caps | Train | Val |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| injection-resistance (≤ 20%) | 1,200 | 235 | 965 | 0 | 846 | 721 | 649 | 72 | 2 |
+| daily-agent (≤ 30%) | 1,117 | 23 | 0 | 1,094 | 1,079 | 938 | 830 | 108 | 3 |
+| coding (≤ 30%) | 253 | 217 | 0 | 36 | 32 | 27 | 0 | 27 | 1 |
+| error-recovery (uncapped) | 287 | 133 | 154 | 0 | 137 | 106 | 0 | 106 | 5 |
+| long-context (uncapped) | 48 | 15 | 0 | 33 | 32 | 30 | 0 | 30 | 2 |
+| tool-choice (uncapped) | 27 | 9 | 18 | 0 | 18 | 18 | 0 | 18 | 0 |
+| **Total** | **2,932** | **632** | **1,137** | **1,163** | **2,144** | **1,840** | **1,479** | **361** | **13** |
+
+- **Where the rows that didn't pass went:** 632 are judge_pending, 154 are duplicates and 2 hit a render error. Nothing was excluded for eval-set overlap.
+- **What happened to the rows that passed:** 245 went to the new eval-tools (10% of tasks, mostly daily-agent and injection) and 59 to val before caps.
+- **Projected dataset:** train 602 (361 new + 241 replay, 40.0%), val 13, eval-tools 245.
+  - The v4b replay had 4,468 rows eligible. It dropped 2 for a val/eval-tools task, 6 for holding an eval-set user message and 4 already in the new train.
+  - Those 6 v4b train rows share a user message with v4b eval-tools, v4b val-cases or v2 eval-tools (3 each, by this cross-session check). This is stricter than v4b's own session-scoped grouping, which let them through.
+- **New-row shares:** daily-agent 29.9%, error-recovery 29.4%, injection 19.9%, long-context 8.3%, coding 7.5%, tool-choice 5.0%.
+- **Why the caps cut so deep:** injection and daily-agent together may be at most 50% of the new rows. Only 181 passing train rows sit outside them (coding 27 + error-recovery 106 + long-context 30 + tool-choice 18). That holds the new set to about 2 × 181 = 361 rows, and the caps remove 649 injection and 830 daily-agent rows that passed.
+- **For comparison, the final-set reading** (caps 33% / 50% / 50% of the new rows) would give 1,084 new + 723 replay = 1,807 train. It would still fail the 5,000 floor.
+
+### What a ~5,000-row round-2 train set needs (final train = new + replay)
+
+At 40% replay, 5,000 final train rows means 3,000 new train rows: injection ≤ 600, daily-agent ≤ 900, coding ≤ 900, and the uncapped areas the rest. On this run, about 85% of passing rows reached the pre-cap train split.
+
+| Area | Train rows at the cap | Have (before caps) | Short (train rows) | Short (passing rows) |
+|---|---:|---:|---:|---:|
+| injection-resistance | 600 | 721 | 0 | 0 |
+| daily-agent | 900 | 938 | 0 | 0 |
+| coding | 900 | 27 | 873 | ~1,035 |
+| error-recovery + long-context + tool-choice | ≥ 600 | 154 | 446 | ~542 |
+
+- **The binding need is 1,319 more train rows outside injection and daily-agent** (about 1,580 passing rows), in any mix of coding, error-recovery, long-context and tool-choice with coding ≤ 900.
+  - Uncapped rows can replace missing coding rows one for one.
+  - Injection and daily-agent already have enough. Generating more of either adds nothing until the other areas catch up.
+- **Steering consequence:** the current steer shares (coding 0.05, injection 0.12, daily-agent 0.15) are far from what these caps need. Coding, error-recovery, long-context and tool-choice should take nearly all generation until the shortfall closes.
+- **If the target is 5,000 new rows** (final ≈ 8,333): injection 1,000 (short 279), daily-agent 1,500 (short 562), coding 1,500 (short 1,473), uncapped ≥ 1,000 (short 846).
+
+### judge_pending backlog (blocks training until the calibrated judge pass runs)
+
+- **632 rows wait for the calibrated 4090 judge:** coding 217, injection 235, error-recovery 133, daily-agent 23, long-context 15, tool-choice 9.
+  - 374 of them are in the scarce areas: coding, error-recovery, long-context, tool-choice.
+  - At v4b's local-judge pass rate (76%), they would add roughly 285 passing rows, about 240 train rows. That is far short of the 1,319 needed.
+- **No round-2 judge workdir exists yet.** The pass is:
+  1. `build.py judge-pending --traces '<pool glob>' --calibration ~/distill/phase2-local-cal/calibration-report.json --workdir ~/distill/phase2-local-r2`;
+  2. `judge.py --workdir ~/distill/phase2-local-r2 run --provider local` against the calibrated 4090 judge;
+  3. rerun the recipe, which picks up `judge-sample.jsonl` by itself.

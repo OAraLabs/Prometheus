@@ -229,6 +229,35 @@ Round 2
   under its own approval. ``report.json`` / the manifest carry ``replay`` (source
   sha256s, seed, wanted / eligible / added, new vs replay rows, by category / source,
   drops by reason) and ``data_policy.share`` the Max vs 27B split per split.
+* ``--area-cap-for AREA=SHARE`` (+ ``--area-cap-reason``): a round-2 target area
+  (``_meta.target_area``, ``R2_AREAS``) at most SHARE of the NEW train rows, i.e. the
+  train rows of this build before replay joins (replay rows are the previous dataset's
+  own mix and carry no area). Applied with the class and category caps until all hold
+  (``cap_train``): the largest fixed point, round-robin over tasks from ``--seed``.
+  An area the caps do not name is uncapped AND protected: no cap (area, class or
+  category) drops its rows; a class or category left over its cap by protected rows
+  fails its gate instead. Val keeps the share of each area train kept. Replay is drawn
+  after the caps, so it scales with the capped new rows (``--replay-share`` of the
+  final train set). With caps c_a and replay share r, an area's share of the final
+  train set is (1 - r) x its share of the new rows. ``caps.area_caps``, the
+  ``area_caps`` gate (capped shares within caps, no uncapped row dropped) and
+  ``round2`` (per area: rows in by verifier, judge_pending, exclusions, labels, splits)
+  report it.
+* ``--eval-disjoint CASES`` (repeatable): eval case files (eval-tools, val-cases,
+  eval-injection, eval-longctx, sanity: any JSONL with ``messages``). A row holding one
+  of their user messages (normalized, at least ``EVAL_DISJOINT_MIN_CHARS``) is excluded
+  as it is read (``eval_set_overlap``), a replay row dropped (``leak_eval_set``);
+  gate ``eval_disjoint``. ``--no-golden``: no golden traces (round 2: the harvested Max
+  rows return only through the replay).
+* ``round2``: the operator's round-2 recipe (``R2_RECIPE``) as one build: every round-2
+  pool file, ``--no-golden``, the local 27B train source, ``--unjudged-verifiers
+  deterministic,tool-success``, the calibration report (judge_pending rows wait for its
+  verdicts: the judge-pending workdir's ``judge-sample.jsonl`` joins ``--verdicts`` once
+  it exists), area caps injection 0.2 / daily-agent 0.3 / coding 0.3, category cap off
+  (1.0), 40% replay of v4b under the Q6b approval with the excluded-sessions list, and
+  the eval sets as ``--eval-holdout`` / ``--eval-disjoint``. Writes ``round2-plan.json``
+  beside the report: per area what passes and what the caps keep, and what a
+  ``--target-train`` final train set needs per area. ``--print`` shows the command.
 
 Rebuilding the request
 ----------------------
@@ -384,6 +413,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -1559,6 +1589,9 @@ class Example:
     approval: str = ""
     # CLASS_CAPS classes (teacher_gen's _meta tags): capped as shares of train
     classes: list[str] = field(default_factory=list)
+    # round 2: the row's _meta.target_area (R2_AREAS), "" for any other row (round 1, golden,
+    # replay): --area-cap-for caps areas as shares of the new train rows
+    area: str = ""
 
 
 def approx_codes(context_source: str) -> list[str]:
@@ -1726,7 +1759,8 @@ def round_robin(examples: list[Example], seed: str) -> list[Example]:
 
 
 def cap_categories(examples: list[Example], cap: float, seed: str,
-                   caps: dict[str, float] | None = None
+                   caps: dict[str, float] | None = None, *,
+                   key: Any = None, protected: Any = None
                    ) -> tuple[list[Example], dict[str, dict[str, int]]]:
     """Keep the largest set in which no category exceeds its cap of the total:
     *caps*' share for a category it names (``--category-cap-for``, e.g. a raised
@@ -1735,15 +1769,23 @@ def cap_categories(examples: list[Example], cap: float, seed: str,
     The kept total T is the largest fixed point of T = sum_c min(n_c, floor(cap_c*T)),
     reached by iterating down from the full size. Within a capped category the
     rows kept are a round-robin over its tasks.
+
+    *key* (default: the row's category) names what is capped: ``area_of`` caps round-2
+    target areas (``--area-cap-for``). *protected* (a predicate) marks rows a cap never
+    drops (round 2: the rows of an uncapped area); a category keeps at least its
+    protected rows, T = sum_c min(n_c, max(p_c, floor(cap_c*T))), so it may stay over
+    its cap, and the gate then says so.
     """
+    key = key or (lambda e: e.category)
     by_cat: dict[str, list[Example]] = collections.defaultdict(list)
     for ex in examples:
-        by_cat[ex.category].append(ex)
+        by_cat[key(ex)].append(ex)
     n = {c: len(v) for c, v in by_cat.items()}
+    p = {c: sum(1 for e in v if protected is not None and protected(e)) for c, v in by_cat.items()}
     cap_of = {c: (caps or {}).get(c, cap) for c in n}
     total = sum(n.values())
     while True:
-        keep = {c: min(k, math.floor(cap_of[c] * total)) for c, k in n.items()}
+        keep = {c: min(k, max(p[c], math.floor(cap_of[c] * total))) for c, k in n.items()}
         nxt = sum(keep.values())
         if nxt == total:
             break
@@ -1751,7 +1793,13 @@ def cap_categories(examples: list[Example], cap: float, seed: str,
     kept: list[Example] = []
     report: dict[str, dict[str, int]] = {}
     for c, rows in sorted(by_cat.items()):
-        chosen = round_robin(rows, seed)[:keep[c]] if keep[c] < len(rows) else rows
+        if keep[c] >= len(rows):
+            chosen = rows
+        elif p[c]:
+            safe = [e for e in rows if protected(e)]
+            chosen = safe + round_robin([e for e in rows if not protected(e)], seed)[:keep[c] - len(safe)]
+        else:
+            chosen = round_robin(rows, seed)[:keep[c]]
         kept += chosen
         report[c] = {"before": len(rows), "kept": len(chosen), "dropped": len(rows) - len(chosen)}
     return kept, report
@@ -1776,21 +1824,29 @@ def row_classes(meta: dict[str, Any]) -> list[str]:
     return out
 
 
-def cap_classes(examples: list[Example], caps: dict[str, float], seed: str
-                ) -> tuple[list[Example], dict[str, dict[str, int]]]:
+def cap_classes(examples: list[Example], caps: dict[str, float], seed: str,
+                protected: Any = None) -> tuple[list[Example], dict[str, dict[str, int]]]:
     """Keep the largest set found in which no class of *caps* holds more than its
     share of the total: drop the rows of one class over its cap past floor(cap*T),
     the tail of a seeded round-robin over its tasks, and repeat (T shrinks) until
-    every class fits. A row may be in two classes."""
+    every class fits. A row may be in two classes. A *protected* row (round 2: an
+    uncapped area's) is never dropped: the excess comes from the class's other rows,
+    and a class with none left stays over its cap (the class_caps gate says so)."""
     kept = list(examples)
+    stuck: set[str] = set()
     while True:
         total = len(kept)
-        over = next((c for c in sorted(caps)
-                     if sum(1 for e in kept if c in e.classes) > math.floor(caps[c] * total)), None)
+        over = next((c for c in sorted(caps) if c not in stuck
+                     and sum(1 for e in kept if c in e.classes) > math.floor(caps[c] * total)), None)
         if over is None:
             break
         members = [e for e in kept if over in e.classes]
-        drop = {id(e) for e in round_robin(members, seed)[math.floor(caps[over] * total):]}
+        droppable = [e for e in members if protected is None or not protected(e)]
+        if not droppable:
+            stuck.add(over)
+            continue
+        excess = len(members) - math.floor(caps[over] * total)
+        drop = {id(e) for e in round_robin(droppable, seed)[max(0, len(droppable) - excess):]}
         kept = [e for e in kept if id(e) not in drop]
     keep_ids = {id(e) for e in kept}
     report = {c: {"before": sum(1 for e in examples if c in e.classes),
@@ -1800,8 +1856,32 @@ def cap_classes(examples: list[Example], caps: dict[str, float], seed: str
     return kept, report
 
 
+#: Round-2 target areas (taskset_gen.R2_AREAS; teacher_gen.py writes ``_meta.target_area``)
+R2_AREAS = ("injection-resistance", "error-recovery", "long-context", "daily-agent", "coding", "tool-choice")
+
+
+def area_of(ex: Example) -> str:
+    """The round-2 target area a cap counts a row under ("" for a row with none)."""
+    return ex.area
+
+
+def r2_area(meta: Any) -> str:
+    """A row's round-2 target area from its ``_meta`` ("" when it has none)."""
+    area = meta.get("target_area") if isinstance(meta, dict) else None
+    return area.strip() if isinstance(area, str) and area.strip() else ""
+
+
+def area_protected(area_caps: dict[str, float] | None) -> Any:
+    """With area caps on: a row of a round-2 area the caps do not name (an uncapped
+    area: it keeps everything that passes) is never dropped by any cap. None without."""
+    if not area_caps:
+        return None
+    return lambda e: bool(e.area) and e.area not in area_caps
+
+
 def cap_train(examples: list[Example], category_cap: float, class_caps: dict[str, float], seed: str,
-              category_caps: dict[str, float] | None = None
+              category_caps: dict[str, float] | None = None,
+              area_caps: dict[str, float] | None = None
               ) -> tuple[list[Example], dict[str, dict[str, int]], dict[str, Any]]:
     """Train under the class caps and the category caps together (*category_caps*
     for the categories it names, *category_cap* for the rest): each applied in
@@ -1809,19 +1889,30 @@ def cap_train(examples: list[Example], category_cap: float, class_caps: dict[str
     the other way round). Returns (kept, category report, class report); the
     category report's ``dropped`` counts the rows the category cap dropped (val
     mirrors 1 - dropped / before) and ``dropped_by_class_cap`` the rest, and the
-    class report says what each cap dropped of every class."""
+    class report says what each cap dropped of every class.
+
+    *area_caps* (round 2, ``--area-cap-for``): each named target area at most its share
+    of these rows (the NEW train rows: replay joins later), applied first in each turn;
+    a round-2 area it does not name is uncapped and protected: no cap drops its rows.
+    The class report then carries ``area_caps`` (what each area cap dropped, by area)."""
     kept = list(examples)
     why: dict[int, str] = {}
+    protected = area_protected(area_caps)
     while True:
-        after_class, _ = cap_classes(kept, class_caps, seed)
+        before = len(kept)
+        if area_caps:
+            after_area, _ = cap_categories(kept, 1.0, seed, area_caps, key=area_of)
+            ids = {id(e) for e in after_area}
+            why.update({id(e): "area_cap" for e in kept if id(e) not in ids})
+            kept = after_area
+        after_class, _ = cap_classes(kept, class_caps, seed, protected)
         ids = {id(e) for e in after_class}
         why.update({id(e): "class_cap" for e in kept if id(e) not in ids})
-        after_cat, _ = cap_categories(after_class, category_cap, seed, category_caps)
+        after_cat, _ = cap_categories(after_class, category_cap, seed, category_caps, protected=protected)
         ids = {id(e) for e in after_cat}
         why.update({id(e): "category_cap" for e in after_class if id(e) not in ids})
-        done = len(after_cat) == len(after_class)
         kept = after_cat
-        if done:
+        if len(kept) == before:
             break
     by_cat: dict[str, list[Example]] = collections.defaultdict(list)
     for ex in examples:
@@ -1830,8 +1921,10 @@ def cap_train(examples: list[Example], category_cap: float, class_caps: dict[str
     for c, rows in sorted(by_cat.items()):
         by_cap = sum(1 for e in rows if why.get(id(e)) == "category_cap")
         by_class = sum(1 for e in rows if why.get(id(e)) == "class_cap")
-        cat_report[c] = {"before": len(rows), "kept": len(rows) - by_cap - by_class, "dropped": by_cap,
-                         "dropped_by_class_cap": by_class}
+        by_area = sum(1 for e in rows if why.get(id(e)) == "area_cap")
+        cat_report[c] = {"before": len(rows), "kept": len(rows) - by_cap - by_class - by_area, "dropped": by_cap,
+                         "dropped_by_class_cap": by_class,
+                         **({"dropped_by_area_cap": by_area} if area_caps else {})}
     n = len(kept)
     class_report: dict[str, Any] = {}
     for c in sorted(class_caps):
@@ -1843,7 +1936,28 @@ def cap_train(examples: list[Example], category_cap: float, class_caps: dict[str
                            "cap": class_caps[c], "share": round(k / n, 4) if n else 0.0}
     class_report["rows_dropped"] = {"class_cap": sum(1 for v in why.values() if v == "class_cap"),
                                     "category_cap": sum(1 for v in why.values() if v == "category_cap")}
+    if area_caps:
+        class_report["rows_dropped"]["area_cap"] = sum(1 for v in why.values() if v == "area_cap")
+        class_report["area_caps"] = area_report(examples, kept, why, area_caps)
     return kept, cat_report, class_report
+
+
+def area_report(examples: list[Example], kept: list[Example], why: dict[int, str],
+                area_caps: dict[str, float]) -> dict[str, dict[str, Any]]:
+    """Per target area ("" = rows with none): rows before and kept, what each cap dropped,
+    its cap (None: uncapped) and its share of the kept rows."""
+    n = len(kept)
+    out: dict[str, dict[str, Any]] = {}
+    for a in sorted({e.area for e in examples}):
+        rows = [e for e in examples if e.area == a]
+        k = sum(1 for e in kept if e.area == a)
+        out[a or "none"] = {
+            "before": len(rows), "kept": k,
+            "dropped_by_area_cap": sum(1 for e in rows if why.get(id(e)) == "area_cap"),
+            "dropped_by_class_cap": sum(1 for e in rows if why.get(id(e)) == "class_cap"),
+            "dropped_by_category_cap": sum(1 for e in rows if why.get(id(e)) == "category_cap"),
+            "cap": area_caps.get(a), "share": round(k / n, 4) if n else 0.0}
+    return out
 
 
 def class_ratios(class_report: dict[str, Any], caps: dict[str, float]) -> dict[str, float]:
@@ -1870,14 +1984,16 @@ def apply_class_ratios(examples: list[Example], ratios: dict[str, float], seed: 
     return kept, report
 
 
-def apply_ratios(examples: list[Example], ratios: dict[str, float], seed: str
+def apply_ratios(examples: list[Example], ratios: dict[str, float], seed: str, key: Any = None
                  ) -> tuple[list[Example], dict[str, dict[str, int]]]:
     """Keep the same share of each category that the train cap kept, so val
     mirrors train's mix. (Capping a few hundred val rows on their own can
-    empty a split that happens to hold one category.)"""
+    empty a split that happens to hold one category.) *key*: what the ratios are
+    keyed by (default the category; ``area_of`` for round-2 area caps)."""
+    key = key or (lambda e: e.category)
     by_cat: dict[str, list[Example]] = collections.defaultdict(list)
     for ex in examples:
-        by_cat[ex.category].append(ex)
+        by_cat[key(ex)].append(ex)
     kept: list[Example] = []
     report: dict[str, dict[str, int]] = {}
     for c, rows in sorted(by_cat.items()):
@@ -1958,6 +2074,7 @@ def split_summary(rows: list[Example], limit: int) -> dict[str, Any]:
         "context_source": dict(C(e.context_source for e in rows).most_common()),
         "source": dict(C(e.source for e in rows).most_common()),
         "max_derived": sum(1 for e in rows if e.max_derived),
+        "area": dict(C(e.area or "none" for e in rows).most_common()),
         "chat_mode": sum(e.flags["chat_mode"] for e in rows),
         "final_answer": sum(e.flags.get("final_answer", False) for e in rows),
         "error_recovery": sum(e.flags["error_recovery"] for e in rows),
@@ -1984,6 +2101,11 @@ class Settings:
     # full 9B run), with the recorded reason (--category-cap-reason)
     category_caps: dict[str, float] = field(default_factory=dict)
     category_caps_reason: str | None = None
+    # Round 2 (--area-cap-for): each named target area at most this share of the NEW train
+    # rows (before replay); areas not named keep every row that passes (never down-sampled),
+    # with the recorded reason (--area-cap-reason)
+    area_caps: dict[str, float] = field(default_factory=dict)
+    area_caps_reason: str | None = None
     # Report-only (--cap-scan): train/val under each of these caps for one
     # category, the other caps unchanged, from the same split
     cap_scan: tuple[str, tuple[float, ...]] | None = None
@@ -2048,14 +2170,23 @@ class Settings:
 
 def capped_splits(train_all: list[Example], val_all: list[Example], s: Settings,
                   category_caps: dict[str, float]) -> tuple[Any, ...]:
-    """Train under the category and class caps; val keeps the share of each
-    category and class train kept. (train, train caps, train class caps, val,
-    val caps, val class caps)."""
+    """Train under the area (round 2), category and class caps; val keeps the share of
+    each area, category and class train kept. (train, train caps, train class caps, val,
+    val caps, val class caps); with area caps the class reports carry ``area_caps``."""
     train, train_caps, train_class_caps = cap_train(train_all, s.category_cap, s.class_caps, s.seed,
-                                                    category_caps)
+                                                    category_caps, s.area_caps or None)
+    val = list(val_all)
+    val_area: dict[str, Any] | None = None
+    if s.area_caps:
+        rep = train_class_caps["area_caps"]
+        a_ratios = {("" if a == "none" else a): 1 - r["dropped_by_area_cap"] / r["before"]
+                    for a, r in rep.items() if r["before"]}
+        val, val_area = apply_ratios(val, a_ratios, s.seed, key=area_of)
     ratios = {c: 1 - r["dropped"] / r["before"] for c, r in train_caps.items() if r["before"]}
-    val, val_caps = apply_ratios(val_all, ratios, s.seed)
+    val, val_caps = apply_ratios(val, ratios, s.seed)
     val, val_class_caps = apply_class_ratios(val, class_ratios(train_class_caps, s.class_caps), s.seed)
+    if val_area is not None:
+        val_class_caps["area_caps"] = {(a or "none"): r for a, r in val_area.items()}
     return train, train_caps, train_class_caps, val, val_caps, val_class_caps
 
 
@@ -2082,6 +2213,8 @@ def cap_scan(train_all: list[Example], val_all: list[Example], s: Settings) -> d
                    for c, r in sorted(tc.items()) if r["dropped"]}
         binding |= {f"class:{c}": s.class_caps[c] for c in sorted(s.class_caps)
                     if tcl[c]["dropped_by_class_cap"]}
+        binding |= {f"area:{a}": r["cap"] for a, r in sorted((tcl.get("area_caps") or {}).items())
+                    if r["dropped_by_area_cap"]}
         out["by_cap"][f"{v:g}"] = {
             "train": n, "val": len(va),
             "val_share": round(len(va) / (n + len(va)), 4) if (n or va) else 0.0,
@@ -2151,6 +2284,46 @@ def replay_keys(messages: list[dict[str, Any]], prefix_n: int) -> dict[str, Any]
     users = {h(norm(content_text(m.get("content")))) for m in messages[:-1] if m.get("role") == "user"}
     return {"task": keys.h_prompt, "prompt_call": keys.h_prompt_call, "exact": keys.h_exact,
             "prefix": prefix_hash(messages[:-1], prefix_n), "users": users, "tool": call.get("name")}
+
+
+#: --eval-disjoint ignores a user message shorter than this once normalized ("yes", "go on"):
+#: a reply that short is no eval prompt, and would match rows by chance
+EVAL_DISJOINT_MIN_CHARS = 12
+
+
+def user_hashes(messages: Any) -> set[str]:
+    """Hashes of the normalized text of every user message (``norm`` / ``h``, as the
+    Phase 1 task proxy), at least ``EVAL_DISJOINT_MIN_CHARS`` long."""
+    out: set[str] = set()
+    for m in messages or []:
+        if isinstance(m, dict) and m.get("role") == "user":
+            text = norm(content_text(m.get("content")))
+            if len(text) >= EVAL_DISJOINT_MIN_CHARS:
+                out.add(h(text))
+    return out
+
+
+def read_eval_users(paths: list[Path]) -> tuple[frozenset[str], dict[str, Any]]:
+    """``--eval-disjoint``: the user-message hashes of eval case files (eval-tools,
+    val-cases, eval-injection, eval-longctx, sanity: any JSONL whose rows carry
+    ``messages``). A file with no such row is an input error (ValueError)."""
+    keys: set[str] = set()
+    files: list[dict[str, Any]] = []
+    for path in paths:
+        cases = 0
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if isinstance(row, dict) and isinstance(row.get("messages"), list):
+                    cases += 1
+                    keys |= user_hashes(row["messages"])
+        if not cases:
+            raise ValueError(f"{path}: no case rows with messages")
+        files.append({"name": path.name, "cases": cases, "sha256": _file_sha256(path)})
+    return frozenset(keys), {"files": files, "user_messages": len(keys),
+                             "min_chars": EVAL_DISJOINT_MIN_CHARS}
 
 
 def allocate(counts: dict[str, int], n: int) -> dict[str, int]:
@@ -2224,6 +2397,12 @@ class Builder:
         self.models_by_source: dict[str, collections.Counter] = collections.defaultdict(
             collections.Counter)
         self.replay_info: dict[str, Any] | None = None
+        # round 2: per target area, what came in and what became of it (report ``round2``)
+        self.by_area: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+        # --eval-disjoint: normalized user-message hashes of the eval sets no row may share
+        self.eval_users: frozenset[str] = frozenset()
+        self.eval_disjoint_info: dict[str, Any] | None = None
+        self.split_info: dict[str, Any] | None = None
 
     def calibrated_verdict(self, key: str | None) -> bool:
         """The verdict under *key* is the calibrated judge's: judge.py's local judge with the
@@ -2246,6 +2425,9 @@ class Builder:
     def exclude(self, trace: Trace, reason: str) -> None:
         self.stats[f"excluded:{reason}"] += 1
         self.by_source[source_label(trace)][f"excluded:{reason}"] += 1
+        area = r2_area(trace.raw.get("_meta"))
+        if area:
+            self.by_area[area][f"excluded:{reason}"] += 1
         self.excluded.append((trace.trace_id, reason))
 
     @property
@@ -2353,6 +2535,16 @@ class Builder:
         meta = trace.raw["_meta"]  # (trace.meta would hand back a copy of an empty one)
         src = source_label(trace)
         self.by_source[src]["input"] += 1
+        area = r2_area(meta)
+        if area:
+            rec = meta.get("verification") if isinstance(meta.get("verification"), dict) else {}
+            self.by_area[area]["input"] += 1
+            self.by_area[area]["input:judge_pending" if meta.get("judge_pending") is True
+                               else f"input:verifier:{rec.get('verifier') or 'none'}"] += 1
+        if self.eval_users and trace.kind != "fail" and user_hashes(trace.raw.get("messages")) & self.eval_users:
+            # --eval-disjoint: a user message of an eval set's case: never train, val or eval-tools
+            self.exclude(trace, "eval_set_overlap")
+            return
         session_id = meta.get("session_id")
         if self.s.exclude_sessions and session_id is not None \
                 and str(session_id).strip() in self.s.exclude_sessions:
@@ -2620,7 +2812,7 @@ class Builder:
             turn_outcome=outcome, omitted_messages=req.omitted_messages,
             lcm_target=req.lcm_target, ctx_keys=ctx_keys, model=model_s,
             max_derived=max_derived, train_ok=train_ok, gen_task=gen_task, approval=approval,
-            classes=row_classes(meta),
+            classes=row_classes(meta), area=area,
         )
         if self._spool is not None:
             heavy = {
@@ -2640,6 +2832,9 @@ class Builder:
             self.unfittable.append(ex)
         else:
             self.examples.append(ex)
+        if area:
+            self.by_area[area]["accepted" if ex.fits else "accepted_unfittable"] += 1
+            self.by_area[area][f"label:{label}"] += 1
         counts = self.by_source[src]
         counts["accepted"] += 1
         counts["train_eligible"] += ex.train_ok
@@ -2725,6 +2920,7 @@ class Builder:
         for ex in self.unfittable:
             ex.split = plan.groups.get(ex.group, "unassigned")
         self.final = {"train": train, "val": val, "eval-tools": eval_rows + fail_used}
+        self.split_info = {"train_class_caps": train_class_caps}
         return {
             "plan": plan, "train_caps": train_caps, "val_caps": val_caps,
             "train_class_caps": train_class_caps, "val_class_caps": val_class_caps,
@@ -2786,6 +2982,8 @@ class Builder:
                         if v in bad[name]), None)
             if hit is None and k["users"] & bad["users"]:
                 hit = "user_message"
+            if hit is None and self.eval_users and user_hashes(r["messages"]) & self.eval_users:
+                hit = "eval_set"  # --eval-disjoint: an eval case's user message
             if hit is not None:
                 stats[f"dropped:leak_{hit}"] += 1
                 continue
@@ -2936,6 +3134,17 @@ class Builder:
                   for c in sorted(s.class_caps)}
         g["class_caps"] = {"share": shares, "cap": dict(sorted(s.class_caps.items())),
                            "pass": all(shares[c] <= s.class_caps[c] + 1e-9 for c in shares)}
+        if s.area_caps:
+            g["area_caps"] = self.area_gate(tr)
+        if self.eval_disjoint_info is not None:
+            ed = self.eval_disjoint_info
+            g["eval_disjoint"] = {
+                "sets": len(ed["files"]), "user_messages": ed["user_messages"],
+                "excluded_input_rows": self.stats["excluded:eval_set_overlap"],
+                "replay_dropped": ((self.replay_info or {}).get("dropped") or {}).get("dropped:leak_eval_set", 0),
+                # every row is checked as it is read (and every replay row as it is drawn): an
+                # overlapping row never reaches a split
+                "pass": ed["user_messages"] > 0}
         pres = {k: sum(e.flags[k] for e in tr) for k in ("chat_mode", "error_recovery", "compacted")}
         g["presence"] = {**pres, "min": s.min_presence,
                          "pass": all(v >= s.min_presence for v in pres.values())}
@@ -2944,6 +3153,46 @@ class Builder:
                                   "llama-server serving the student GGUF"}
         g["overall"] = overall_verdict(g)
         return g
+
+    def area_gate(self, tr: list[Example]) -> dict[str, Any]:
+        """--area-cap-for: every capped area within its share of the NEW train rows (replay
+        rows are v4b's own mix and carry no area), and no uncapped area's row dropped by a cap."""
+        s = self.s
+        new = [e for e in tr if e.kind != "replay"]
+        n = len(new)
+        areas = collections.Counter(e.area or "none" for e in new)
+        share = {a: round(k / n, 4) for a, k in areas.most_common()} if n else {}
+        over = {a: share.get(a, 0.0) for a, cap in sorted(s.area_caps.items())
+                if n and areas.get(a, 0) / n > cap + 1e-9}
+        rep = (self.split_info or {}).get("train_class_caps", {}).get("area_caps") or {}
+        uncapped_dropped = {a: r["before"] - r["kept"] for a, r in rep.items()
+                            if a != "none" and r["cap"] is None and r["before"] > r["kept"]}
+        return {"base": "new round-2 train rows (replay excluded)", "new_train_rows": n,
+                "caps": dict(sorted(s.area_caps.items())), "reason": s.area_caps_reason,
+                "share": share, "share_of_final_train": {a: round(k / len(tr), 4) for a, k in areas.most_common()}
+                if tr else {},
+                "over": over, "uncapped_dropped": uncapped_dropped,
+                "pass": not over and not uncapped_dropped}
+
+    def round2_report(self) -> dict[str, Any]:
+        """Per round-2 target area: rows in, by verifier (judge_pending apart), exclusions by
+        reason, accepted by label, rows per split, and the area caps' drops (aggregates only)."""
+        out: dict[str, Any] = {}
+        for a in sorted(self.by_area):
+            c = self.by_area[a]
+            out[a] = {
+                "input": c["input"],
+                "input_by_verifier": {k.split(":", 2)[-1]: v for k, v in sorted(c.items())
+                                      if k.startswith("input:verifier:")},
+                "input_judge_pending": c["input:judge_pending"],
+                "excluded": {k.split(":", 1)[1]: v for k, v in sorted(c.items()) if k.startswith("excluded:")},
+                "accepted": c["accepted"], "accepted_unfittable": c["accepted_unfittable"],
+                "label": {k.split(":", 1)[1]: v for k, v in sorted(c.items()) if k.startswith("label:")},
+                "pool_by_split": dict(collections.Counter(e.split or "none" for e in self.examples
+                                                          if e.area == a).most_common()),
+                "final": {k: sum(1 for e in self.final[k] if e.area == a) for k in SPLITS},
+            }
+        return out
 
     # ----------------------------------------------------------------- write
 
@@ -3102,7 +3351,17 @@ class Builder:
             **({"cap_scan": self.cap_scan} if self.cap_scan else {}),
             "caps": {"train": split_info["train_caps"], "val": split_info["val_caps"],
                      "class_caps": {"train": split_info["train_class_caps"],
-                                    "val": split_info["val_class_caps"]}},
+                                    "val": split_info["val_class_caps"]},
+                     # --area-cap-for (round 2): shares of the NEW train rows; uncapped areas protected
+                     **({"area_caps": {"base": "new round-2 train rows (replay excluded)",
+                                       "seed": s.seed, "caps": dict(sorted(s.area_caps.items())),
+                                       "reason": s.area_caps_reason,
+                                       "train": split_info["train_class_caps"].get("area_caps"),
+                                       "val": split_info["val_class_caps"].get("area_caps")}}
+                        if s.area_caps else {})},
+            # round 2: per target area, in -> excluded -> accepted -> splits (aggregates only)
+            **({"round2": self.round2_report()} if self.by_area else {}),
+            **({"eval_disjoint": self.eval_disjoint_info} if self.eval_disjoint_info else {}),
             "eval_tools": {"held_out_rows": split_info["held_rows"],
                            "sampled": split_info["eval_sampled"],
                            "fail_cases": split_info["fail_used"],
@@ -3292,7 +3551,10 @@ class _CountingHandler(logging.Handler):
 
 def cmd_build(a: argparse.Namespace) -> int:
     t0 = time.time()
-    golden = expand(a.traces or [DEFAULT_TRACES])
+    if a.no_golden and a.traces:
+        print("error: --no-golden and --traces cannot be used together", file=sys.stderr)
+        return 2
+    golden = [] if a.no_golden else expand(a.traces or [DEFAULT_TRACES])
     extra = expand(a.extra_traces or [])
     fail = expand(a.fail_traces or [])
     dupes = duplicate_names(golden + extra + fail)
@@ -3312,9 +3574,19 @@ def cmd_build(a: argparse.Namespace) -> int:
             return 2
     try:
         category_caps, scan, train_range = cap_and_size_args(a)
+        area_caps = area_cap_args(a)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    eval_users: frozenset[str] = frozenset()
+    eval_disjoint_info = None
+    if a.eval_disjoint:
+        paths = [Path(x).expanduser() for x in a.eval_disjoint]
+        try:
+            eval_users, eval_disjoint_info = read_eval_users(paths)
+        except (OSError, ValueError) as exc:
+            print(f"error: --eval-disjoint: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
     excluded_sessions: set[str] = set()
     if a.exclude_sessions:
         try:
@@ -3400,6 +3672,7 @@ def cmd_build(a: argparse.Namespace) -> int:
         exclude_sessions=tuple(sorted(excluded_sessions)),
         train_range=train_range, train_min_reason=(a.min_train_rows_reason or "").strip() or None,
         category_caps=category_caps, category_caps_reason=(a.category_cap_reason or "").strip() or None,
+        area_caps=area_caps, area_caps_reason=(a.area_cap_reason or "").strip() or None,
         cap_scan=scan,
         val_share_range=(a.val_share_range[0], a.val_share_range[1]), eval_min=a.eval_min,
         min_presence=a.min_presence, lcm_max_messages=a.lcm_max_messages,
@@ -3429,6 +3702,7 @@ def cmd_build(a: argparse.Namespace) -> int:
                 verdict_checks=checks, eval_holdout_tasks=holdout_tasks,
                 excluded_prompts=excluded_prompts, verdict_judges=judges, verdict_aliases=aliases)
     b.stats.update(stats)
+    b.eval_users, b.eval_disjoint_info = eval_users, eval_disjoint_info
     n = 0
     for paths, kind in ((golden, "golden"), (extra, "extra"), (fail, "fail")):
         for trace in iter_traces(paths, kind, b.stats):
@@ -3607,6 +3881,175 @@ def cmd_judge_pending(a: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Round-2 recipe (``build.py round2``): the operator's round-2 dataset rules as one command
+# ---------------------------------------------------------------------------
+
+#: The round-2 dataset recipe (operator Mon 2026-11-02 ~08:00 ET, DISTILL-OPEN-QUESTIONS):
+#: paths on the host that holds the generation pool. Every value can be overridden.
+R2_RECIPE: dict[str, Any] = {
+    # every round-2 run's traces, harvested into the pool (local and cross-host runs alike)
+    "pool": ["~/distill/phase2b/pool/qwen38-27b-gym.*r2*.traces.jsonl"],
+    "pack": "~/distill/phase3/request_pack.json",
+    "tokenizer_dir": "~/distill/models/qwen3.5-9b-tokenizer",
+    "replay_from": "~/distill/phase3/build-v4b-r6-c70-max-derived",
+    "replay_share": 0.4,
+    "replay_seed": "replay-v1",
+    "seed": "phase3-r2-v1",
+    # judge only where calibrated: a judge_pending row trains only on this judge's verdict
+    "judge_calibration": "~/distill/phase2-local-cal/calibration-report.json",
+    # build.py judge-pending --workdir: its judge-sample.jsonl joins --verdicts once it exists
+    "judge_workdir": "~/distill/phase2-local-r2",
+    "unjudged_verifiers": ",".join(UNJUDGED_VERIFIERS),
+    "area_caps": {"injection-resistance": 0.2, "daily-agent": 0.3, "coding": 0.3},
+    "area_cap_reason": ("operator Mon 2026-11-02 ~08:00 ET: round-2 caps injection <=20%, daily-agent <=30%, "
+                        "coding <=30% of the new round-2 train rows; long-context, tool-choice (and "
+                        "error-recovery, not named) keep every row that passes"),
+    # the area caps replace the round-1 category caps for the new rows; replay keeps v4b's capped mix
+    "category_cap": 1.0,
+    "approval": "operator Q6b 2026-10-30",
+    "exclude_sessions": "~/distill/policy/exclude-sessions.txt",
+    # earlier eval sets: their tasks stay eval-tools (whole groups) ...
+    "eval_holdout": ["~/distill/phase3/build-v4b-r6-c70-max-derived/eval-tools.jsonl",
+                     "~/distill/phase3/build-v4b-r6-c70-max-derived/val-cases.jsonl"],
+    # ... and no row (new or replay) holds a user message of any eval set
+    "eval_disjoint": ["~/distill/phase3/build-v4b-r6-c70-max-derived/eval-tools.jsonl",
+                      "~/distill/phase3/build-v4b-r6-c70-max-derived/val-cases.jsonl",
+                      "~/distill/phase3/build-v2/eval-tools.jsonl",
+                      "~/distill/phase3/evalsets/eval-injection.jsonl",
+                      "~/distill/phase3/evalsets/eval-longctx.jsonl",
+                      "~/distill/phase3/evalsets/sanity.jsonl",
+                      "~/distill/phase3/evalsets/ungated/eval-longctx-tools.jsonl"],
+    "target_train": 5000,
+}
+
+
+def round2_argv(a: argparse.Namespace) -> tuple[list[str], list[str]]:
+    """The ``build`` command line the round-2 recipe runs, and notes on what it found
+    (calibrated verdicts present or not)."""
+    r = R2_RECIPE
+    notes: list[str] = []
+    argv = ["build", "--no-golden", "--out", a.out,
+            "--pack", a.pack or r["pack"], "--tokenizer-dir", a.tokenizer_dir or r["tokenizer_dir"]]
+    for pat in a.pool or r["pool"]:
+        argv += ["--extra-traces", pat]
+    argv += ["--train-sources", GYM_SOURCE, "--train-models", *DEFAULT_TRAIN_MODELS,
+             "--unjudged-verifiers", r["unjudged_verifiers"],
+             "--judge-calibration", a.judge_calibration or r["judge_calibration"]]
+    verdicts = [Path(v).expanduser() for v in a.verdicts] if a.verdicts else \
+        [Path(a.judge_workdir or r["judge_workdir"]).expanduser() / "judge-sample.jsonl"]
+    present = [v for v in verdicts if v.is_file()]
+    for v in present:
+        argv += ["--verdicts", str(v)]
+    if not present:
+        notes.append("no calibrated round-2 verdicts yet: every judge_pending row is excluded until "
+                     "build.py judge-pending + judge.py run --provider local have ruled")
+    for area, share in r["area_caps"].items():
+        argv += ["--area-cap-for", f"{area}={share:g}"]
+    argv += ["--area-cap-reason", r["area_cap_reason"], "--category-cap", f"{r['category_cap']:g}",
+             "--replay-from", a.replay_from or r["replay_from"], "--replay-share", f"{a.replay_share:g}",
+             "--replay-seed", r["replay_seed"], "--seed", r["seed"],
+             "--allow-max-derived", "--max-derived-approval", r["approval"],
+             "--exclude-sessions", r["exclude_sessions"]]
+    for path in r["eval_holdout"]:
+        argv += ["--eval-holdout", path]
+    for path in r["eval_disjoint"]:
+        argv += ["--eval-disjoint", path]
+    if a.dry_run:
+        argv.append("--dry-run")
+    if a.progress:
+        argv.append("--progress")
+    extra = list(a.build_args or [])
+    if extra[:1] == ["--"]:
+        extra = extra[1:]
+    return argv + extra, notes
+
+
+def round2_plan(report: dict[str, Any], target_train: int, replay_share: float) -> dict[str, Any]:
+    """From a round-2 build report: per target area, rows in (judge_pending apart), rows that
+    pass, train rows before and after the area caps; then what a final train set of
+    *target_train* rows (replay at *replay_share*) needs per area at these caps, filling each
+    capped area to its cap and the uncapped areas (together) to the rest. Aggregates only."""
+    r2 = report.get("round2") or {}
+    caps_rep = ((report.get("caps") or {}).get("area_caps") or {})
+    caps = caps_rep.get("caps") or {}
+    train_caps = caps_rep.get("train") or {}
+    rep_info = report.get("replay") or {}
+    new_target = round(target_train * (1 - replay_share))
+    areas: dict[str, Any] = {}
+    for a in R2_AREAS:
+        c = r2.get(a) or {}
+        tc = train_caps.get(a) or {}
+        accepted = int(c.get("accepted") or 0)
+        before = int(tc.get("before") or 0)
+        areas[a] = {
+            "input": int(c.get("input") or 0),
+            "judge_pending": int(c.get("input_judge_pending") or 0),
+            "deterministic": int((c.get("input_by_verifier") or {}).get("deterministic") or 0),
+            "tool_success": int((c.get("input_by_verifier") or {}).get("tool-success") or 0),
+            "passes": accepted,
+            "train_before_caps": before,
+            "dropped_by_caps": before - int(tc.get("kept") or 0),
+            "train": int(tc.get("kept") or 0),
+            "val": int((c.get("final") or {}).get("val") or 0),
+            "cap": caps.get(a),
+            # the share of passing rows that reached the pre-cap train split (val / eval-tools took the rest)
+            "train_yield": round(before / accepted, 3) if accepted else None,
+        }
+    uncapped = [a for a in R2_AREAS if a not in caps]
+    rest = max(0.0, 1.0 - sum(caps.values()))
+    need: dict[str, Any] = {}
+    for a, v in areas.items():
+        if a in caps:
+            want = math.ceil(caps[a] * new_target)
+            short = max(0, want - v["train_before_caps"])
+            y = v["train_yield"] or 0.87
+            need[a] = {"train_rows_at_cap": want, "train_rows_short": short,
+                       "passing_rows_short": math.ceil(short / y) if short else 0}
+    have_u = sum(areas[a]["train_before_caps"] for a in uncapped)
+    pass_u = sum(areas[a]["passes"] for a in uncapped)
+    want_u = math.ceil(rest * new_target)
+    short_u = max(0, want_u - have_u)
+    y_u = (have_u / pass_u) if pass_u else 0.87
+    need["uncapped (" + ", ".join(uncapped) + ")"] = {
+        "train_rows_at_least": want_u, "train_rows_short": short_u,
+        "passing_rows_short": math.ceil(short_u / y_u) if short_u else 0}
+    gates = report.get("gates") or {}
+    return {"areas": areas, "new_train_rows": (gates.get("area_caps") or {}).get("new_train_rows"),
+            "replay_rows": rep_info.get("added"), "final_train": (gates.get("train_size") or {}).get("value"),
+            "final_val": ((report.get("splits") or {}).get("val") or {}).get("rows"),
+            "eval_tools": ((report.get("splits") or {}).get("eval-tools") or {}).get("rows"),
+            "judge_pending_backlog": sum(v["judge_pending"] for v in areas.values()),
+            "target": {"final_train": target_train, "replay_share": replay_share, "new_train": new_target,
+                       "need": need}}
+
+
+def cmd_round2(a: argparse.Namespace) -> int:
+    """``round2``: the round-2 dataset recipe (``R2_RECIPE``) as one ``build`` run, then the
+    per-area plan (``round2_plan``) printed beside the build's summary (``--print`` shows the
+    command and runs nothing)."""
+    if not 0.0 < a.replay_share < 1.0:
+        print("error: --replay-share is a share of the final train set, above 0 and below 1", file=sys.stderr)
+        return 2
+    argv, notes = round2_argv(a)
+    for n in notes:
+        print(f"NOTE: {n}", file=sys.stderr)
+    if a.print:
+        print(" ".join(shlex.quote(x) for x in ["python3", "build.py", *argv]))
+        return 0
+    rc = cmd_build(parse_args(argv))
+    report_path = Path(a.out).expanduser() / "report.json"
+    if "--report" in argv:
+        report_path = Path(argv[argv.index("--report") + 1]).expanduser()
+    if report_path.is_file():
+        plan = round2_plan(json.loads(report_path.read_text(encoding="utf-8")), a.target_train, a.replay_share)
+        plan_path = report_path.with_name("round2-plan.json")
+        plan_path.write_text(json.dumps(plan, indent=1) + "\n", encoding="utf-8")
+        print(json.dumps({"round2_plan": str(plan_path), **{k: plan[k] for k in (
+            "new_train_rows", "replay_rows", "final_train", "final_val", "judge_pending_backlog")}}, indent=1))
+    return rc
+
+
 def parse_share(text: str, flag: str) -> float:
     try:
         v = float(text)
@@ -3647,6 +4090,23 @@ def cap_and_size_args(a: argparse.Namespace
         raise ValueError(f"--min-train-rows {lo} is below {DEFAULT_MIN_TRAIN_ROWS}: "
                          "needs --min-train-rows-reason (recorded in the report)")
     return caps, scan, (lo, hi)
+
+
+def area_cap_args(a: argparse.Namespace) -> dict[str, float]:
+    """--area-cap-for AREA=SHARE (repeatable), checked: a known round-2 area (``R2_AREAS``)
+    and a share in (0, 1]; any needs --area-cap-reason (ValueError otherwise)."""
+    caps: dict[str, float] = {}
+    for item in a.area_cap_for or []:
+        area, sep, val = item.partition("=")
+        area = area.strip()
+        if not sep or not area:
+            raise ValueError(f"--area-cap-for wants AREA=SHARE, not {item!r}")
+        if area not in R2_AREAS:
+            raise ValueError(f"--area-cap-for: unknown area {area!r} (areas: {', '.join(R2_AREAS)})")
+        caps[area] = parse_share(val, "--area-cap-for")
+    if caps and not (a.area_cap_reason or "").strip():
+        raise ValueError("--area-cap-for needs --area-cap-reason (recorded in the report)")
+    return caps
 
 
 def max_allow_problem(a: argparse.Namespace) -> str | None:
@@ -3880,6 +4340,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     bd = sub.add_parser("build", help="build train / val / eval-tools")
     bd.add_argument("--traces", action="append", help=f"glob (default {DEFAULT_TRACES})")
+    bd.add_argument("--no-golden", action="store_true",
+                    help="no golden traces at all (round 2: the harvested Max rows come back through "
+                         "--replay-from, never as new rows)")
     bd.add_argument("--index")
     bd.add_argument("--pack", required=True)
     bd.add_argument("--tokenizer-dir", required=True)
@@ -3901,6 +4364,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "needs --category-cap-reason")
     bd.add_argument("--category-cap-reason", metavar="TEXT",
                     help="why --category-cap-for is set (recorded in the report)")
+    bd.add_argument("--area-cap-for", action="append", metavar="AREA=SHARE",
+                    help="round 2: a target area at most SHARE of the NEW train rows (replay excluded), e.g. "
+                         "injection-resistance=0.2; areas not named keep every row that passes (no cap drops "
+                         "them); needs --area-cap-reason")
+    bd.add_argument("--area-cap-reason", metavar="TEXT", help="why --area-cap-for is set (recorded in the report)")
+    bd.add_argument("--eval-disjoint", action="append", metavar="CASES",
+                    help="an eval case file (eval-tools, eval-injection, eval-longctx, sanity, ...): a row "
+                         "holding one of its user messages is excluded (eval_set_overlap), a replay row "
+                         "dropped (leak_eval_set)")
     bd.add_argument("--cap-scan", metavar="CATEGORY=S1,S2,...",
                     help="report-only: train/val under each cap for CATEGORY (report.cap_scan)")
     bd.add_argument("--reported-blocked-cap", type=float, default=CLASS_CAPS["reported_blocked"],
@@ -3973,6 +4445,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bd.add_argument("--keep-spool", action="store_true")
     bd.add_argument("--progress", action="store_true")
 
+    r2 = sub.add_parser("round2", help="the round-2 dataset recipe (R2_RECIPE) as one build run + a per-area plan")
+    r2.add_argument("--out", required=True, help="the dataset directory (its name must carry max-derived: "
+                                                 "the v4b replay is Max-derived)")
+    r2.add_argument("--dry-run", action="store_true", help="report only (report.json + round2-plan.json)")
+    r2.add_argument("--print", action="store_true", help="print the build command line and run nothing")
+    r2.add_argument("--pool", action="append", help=f"round-2 trace globs (default {R2_RECIPE['pool'][0]})")
+    r2.add_argument("--pack")
+    r2.add_argument("--tokenizer-dir")
+    r2.add_argument("--replay-from", help=f"default {R2_RECIPE['replay_from']}")
+    r2.add_argument("--replay-share", type=float, default=R2_RECIPE["replay_share"])
+    r2.add_argument("--judge-calibration")
+    r2.add_argument("--judge-workdir", help=f"judge-pending's workdir (default {R2_RECIPE['judge_workdir']}); "
+                                            "its judge-sample.jsonl is read when present")
+    r2.add_argument("--verdicts", action="append", help="calibrated verdict files in place of the workdir's")
+    r2.add_argument("--target-train", type=int, default=R2_RECIPE["target_train"],
+                    help="the final train size (new + replay) the plan sizes generation for")
+    r2.add_argument("--progress", action="store_true")
+    r2.add_argument("build_args", nargs=argparse.REMAINDER, help="-- then more build options")
+
     jp = sub.add_parser("judge-pending", help="round 2: judge_pending rows -> a judge.py local-judge queue")
     jp.add_argument("--traces", action="append", required=True,
                     help="teacher_gen trace files (glob, repeatable): the SAME files build reads (--extra-traces)")
@@ -4001,6 +4492,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_build(a)
     if a.cmd == "judge-pending":
         return cmd_judge_pending(a)
+    if a.cmd == "round2":
+        return cmd_round2(a)
     return cmd_spot_check(a)
 
 
