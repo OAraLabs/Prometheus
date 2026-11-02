@@ -116,6 +116,9 @@ R2_DEFAULTS: dict[str, str] = {
     "R2_TOWER_QUANT": "UD-Q4_K_XL",
     "R2_TOWER_SCRIPT": "distill/window/round2/round2_tower.sh",   # relative to the 4090's home
     "R2_TOWER_TASKS": "~/distill/phase2b/tasksets/real-v3-excl.jsonl",
+    # tasksets to go on with (in order, space-separated) once the run's own has nothing left, instead of
+    # ending the window early (gen_runner GEN_REMOTE_TASKS_FALLBACK / GEN_TASKS_FALLBACK); empty: none
+    "R2_TOWER_TASKS_FALLBACK": "",
     "R2_TOWER_EXTRA_ARGS": "",
     "R2_TOWER_RUN_NAME": "",                        # empty: r2-tower-<host>-<quant>-<hash>
     "R2_TOWER_PROFILE": "standard",                 # standard | longctx | SLOTSxCTX
@@ -150,11 +153,13 @@ R2_DEFAULTS: dict[str, str] = {
     "R2_TOWER_NIGHT_ROTATION": "longctx standard",
     "R2_TOWER_ROTATION_START": "2026-11-03",
     "R2_TOWER_TASKS_LONGCTX": "~/distill/phase2b/tasksets/real-v4-r2-longctx.jsonl",
+    "R2_TOWER_TASKS_LONGCTX_FALLBACK": "",          # a longctx part's fallbacks (one slot: still better than idle)
     "R2_MINI_NIGHTLY": "on",
     "R2_MINI_NIGHTLY_FROM": "2026-11-01T18:00:00-05:00",
     # the 3090 Ti teacher's GGUF: no nightly window start while it is missing (a re-download, say)
     "R2_MINI_TEACHER_GGUF": "~/distill/models/teacher/Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf",
     "R2_LOCAL_TASKS": "~/distill/phase2b/tasksets/real-v3-excl.jsonl",
+    "R2_LOCAL_TASKS_FALLBACK": "",
     "R2_LOCAL_EXTRA_ARGS": "",
     "R2_LOCAL_NAME": "",                            # empty: local-r2-{alias}-<hash>
     # the teacher quant A/B's arm B on the 4090 (OQ #12 option c), the Sunday chain's first job on the teacher
@@ -453,7 +458,8 @@ def remote_overrides(c: dict[str, str], until: float) -> dict[str, str]:
          "GEN_REMOTE_URL": c["R2_TOWER_URL"], "GEN_REMOTE_HOST": c["R2_TOWER_HOST"],
          "GEN_REMOTE_SSH": c["R2_TOWER_SSH"], "GEN_REMOTE_QUANT": c["R2_TOWER_QUANT"],
          "GEN_REMOTE_SHA256": c["R2_TOWER_SHA256"],
-         "GEN_REMOTE_TASKS": c["R2_TOWER_TASKS"], "GEN_REMOTE_NAME": tower_run_name(c),
+         "GEN_REMOTE_TASKS": c["R2_TOWER_TASKS"], "GEN_REMOTE_TASKS_FALLBACK": c["R2_TOWER_TASKS_FALLBACK"],
+         "GEN_REMOTE_NAME": tower_run_name(c),
          "GEN_REMOTE_UNTIL": iso(until), "GEN_REMOTE_SKIP_DONE_IN": f"{runs}/local-*/*.tasks.jsonl",
          "GEN_REMOTE_EXTRA_ARGS": f"{skips} {c['R2_TOWER_EXTRA_ARGS']}".strip()}
     o.update({k: v for k, v in c.items() if k.startswith("GEN_")})
@@ -465,7 +471,7 @@ def local_overrides(c: dict[str, str]) -> dict[str, str]:
     runs = c["R2_RUNS"]
     skips = f"--skip-done-in {runs}/r2-tower-*/*.tasks.jsonl --skip-done-in {runs}/local-*/*.tasks.jsonl"
     o = {"GEN_RUNS": runs, "GEN_POOL": c["R2_POOL"], "GEN_CODE": c["R2_CODE"], "GEN_TASKS": c["R2_LOCAL_TASKS"],
-         "GEN_LOCAL_NAME": local_run_name(c),
+         "GEN_TASKS_FALLBACK": c["R2_LOCAL_TASKS_FALLBACK"], "GEN_LOCAL_NAME": local_run_name(c),
          "GEN_LOCAL_EXTRA_ARGS": f"{skips} {c['R2_LOCAL_EXTRA_ARGS']}".strip()}
     o.update({k: v for k, v in c.items() if k.startswith("GEN_")})
     return o
@@ -841,8 +847,12 @@ def cmd_config(cx: Ctx) -> int:
     profiles, why = resolve_profiles(c)
     cx.out(f"serve profile: {' then '.join(profiles)} ({why})")
     cx.out(f"code: {c['R2_CODE']} @ {code_commit(c)}")
-    cx.out(f"4090 run: {c['R2_RUNS']}/{tower_run_name(c)} (tasks {c['R2_TOWER_TASKS']})")
-    cx.out(f"local run: {c['R2_RUNS']}/{local_run_name(c)} (tasks {c['R2_LOCAL_TASKS']})")
+    cx.out(f"4090 run: {c['R2_RUNS']}/{tower_run_name(c)} (tasks {c['R2_TOWER_TASKS']}; then "
+           f"{c['R2_TOWER_TASKS_FALLBACK'] or 'no fallback'})")
+    cx.out(f"4090 longctx parts: tasks {c['R2_TOWER_TASKS_LONGCTX']}; then "
+           f"{c['R2_TOWER_TASKS_LONGCTX_FALLBACK'] or 'no fallback'}")
+    cx.out(f"local run: {c['R2_RUNS']}/{local_run_name(c)} (tasks {c['R2_LOCAL_TASKS']}; then "
+           f"{c['R2_LOCAL_TASKS_FALLBACK'] or 'no fallback'})")
     for k in sorted(c):
         if k.startswith(("R2_", "GEN_")):
             cx.out(f"  {k}={c[k]}")
@@ -1174,6 +1184,12 @@ def gen_watch(cx: Ctx, st: dict[str, Any], name: str, gen_until: float, end: flo
             reason = str(cx.remote_progress().get("stop_reason") or "") if unit else ""
             result, code = cx.unit_result(unit) if unit else ("", "")
             if reason == "nothing left to do":
+                left = max(0.0, end - cx.now()) / 3600
+                cx.notify([f"4090 {tag}: remote generation has nothing left to do at {et(cx.now(), '%H:%M %Z')}",
+                           f"tasks {Path(c['R2_TOWER_TASKS']).name}, fallbacks: "
+                           + (" ".join(Path(x).name for x in c["R2_TOWER_TASKS_FALLBACK"].split()) or "none"),
+                           f"the 4090 window ends {left:.1f} h early; business is restored now",
+                           "more tasks: round2_tasks.py build/merge, then R2_*TASKS* in round2.conf"])
                 return "early: remote generation finished (nothing left to do)"
             if restarts >= int(c["R2_GEN_RESTARTS"]):
                 return f"early: remote generation is down ({unit or 'not started'}, {restarts} restarts)"
@@ -1241,6 +1257,7 @@ def night_plan(c: dict[str, str], now: float, end: float) -> list[tuple[str, dic
         cc = dict(c, R2_TOWER_PROFILE=k)
         if k == "longctx":
             cc["R2_TOWER_TASKS"] = c["R2_TOWER_TASKS_LONGCTX"]
+            cc["R2_TOWER_TASKS_FALLBACK"] = c["R2_TOWER_TASKS_LONGCTX_FALLBACK"]
         return cc
 
     if kind == "split":
@@ -1284,9 +1301,10 @@ def cmd_tower_night(cx: Ctx) -> int:
                     # no measured long context (no teacher-ctx.json yet): a 32K server would skip most
                     # long-context rows, so this part generates from the standard taskset instead
                     cc["R2_TOWER_TASKS"] = c["R2_TOWER_TASKS"]
+                    cc["R2_TOWER_TASKS_FALLBACK"] = c["R2_TOWER_TASKS_FALLBACK"]
                     pwhy += "; the standard taskset, as no long-context profile is available"
                 cx.log(f"part {i + 1}/{len(plan)}: {kind}: serve {' then '.join(profiles)} ({pwhy}); tasks "
-                       f"{cc['R2_TOWER_TASKS']}")
+                       f"{cc['R2_TOWER_TASKS']}; fallbacks {cc['R2_TOWER_TASKS_FALLBACK'] or 'none'}")
                 if i == 0:
                     status, res = tower_start(cx, "night", end, False, profiles)
                     if status != "ok":

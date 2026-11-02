@@ -422,6 +422,40 @@ def test_local_exit_1_with_its_report_is_done(rig: Rig) -> None:
     assert prog["local"]["state"] == "done" and "kept nothing" in prog["local"]["detail"]
 
 
+def test_a_dry_taskset_goes_on_with_the_fallbacks_and_tells_the_operator(rig: Rig) -> None:
+    inp = rig.root / "in"
+    for n in ("fb1.jsonl", "fb2.jsonl"):
+        (inp / n).write_text("{}\n")
+    rig.conf.write_text(rig.conf.read_text() + f"GEN_TASKS_FALLBACK='{inp / 'fb1.jsonl'} {inp / 'gone.jsonl'} "
+                                               f"{inp / 'fb2.jsonl'}'\n")
+    cp = rig.run(until_s=6, env={"FAKE_TG_DRY": "tasks.jsonl,fb1.jsonl"})
+    assert cp.returncode == 0, cp.stdout[-3000:]
+    used = [_opt(c, "--tasks") for c in rig.calls("tg-calls.log")]
+    assert [Path(u).name for u in used] == ["tasks.jsonl", "fb1.jsonl", "fb2.jsonl"]
+    # each fallback passed the excluded-session check; the missing one was dropped, said in a note
+    checked = [_opt(c, "--tasks") for c in rig.calls("ts-calls.log")]
+    assert [Path(x).name for x in checked] == ["tasks.jsonl", "fb1.jsonl", "fb2.jsonl"]
+    prog = rig.progress()
+    assert prog["tasks"].endswith("fb2.jsonl") and prog["stop_reason"] == "until"
+    assert any("fallback taskset dropped" in n and "gone.jsonl missing" in n for n in prog["notes"])
+    notes = (rig.state / "notify.log").read_text()
+    assert notes.count("has nothing left that fits this teacher") == 2
+    assert "going on with the fallback fb1.jsonl" in notes and "going on with the fallback fb2.jsonl" in notes
+    assert finished(rig.runs / f"local-{IQ3}", "qwen38-27b-gym")
+
+
+def test_a_dry_taskset_without_a_fallback_ends_the_branch_and_says_so(rig: Rig) -> None:
+    cp = rig.run(until_s=20, env={"FAKE_TG_DRY": "tasks.jsonl"})
+    assert cp.returncode == 0, cp.stdout[-3000:]
+    assert len(rig.calls("tg-calls.log")) == 1
+    prog = rig.progress()
+    assert prog["local"]["state"] == "done" and "no_tasks" in prog["local"]["detail"]
+    assert prog["stop_reason"] == "nothing left to do"
+    notes = (rig.state / "notify.log").read_text()
+    assert "no fallback taskset left" in notes and "early" in notes
+    # at most 5 lines per notice (the exhaustion one, then the end of the run)
+    assert all(len(block.strip().splitlines()) <= 5 for block in notes.split("mini gen ") if block.strip())
+
 def test_the_window_closing_stops_everything(rig: Rig) -> None:
     p = rig.start(until_s=60)
     rig.wait_for(lambda: (rig.state / "local-pid").exists(), what="the local teacher_gen")

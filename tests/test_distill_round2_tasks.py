@@ -305,6 +305,125 @@ def test_validate_r2_refuses_rows_that_lost_their_check_or_mix_conditions() -> N
                                                 "forbidden_strings": []})
 
 
+
+# ── expansion: more variants per real row, never a task an earlier taskset holds or a run attempted ──
+
+
+def _rebuild(a: argparse.Namespace, out: Path, **kw: Any) -> dict[str, Any]:
+    b = argparse.Namespace(**{**vars(a), "out": str(out), **kw})
+    old = dict(r2t.CTX_BUCKETS)
+    r2t.CTX_BUCKETS.update({"32k": 14_000, "64k": 20_000, "128k": 26_000, "256k": 32_000})
+    try:
+        return r2t.build(b)
+    finally:
+        r2t.CTX_BUCKETS.clear()
+        r2t.CTX_BUCKETS.update(old)
+
+
+def test_a_larger_build_minus_the_first_one_holds_only_new_variants(built: Any, tmp_path: Path) -> None:
+    rep1, out1, (a, lc_eval, mpath) = built
+    first = ts.load_taskset(out1 / "real-t-r2.jsonl")
+    # a run attempted one more task the first build does not hold: a round-1 task of a real prompt
+    plain_prompt = next(r["prompt"] for r in first if r["r2"]["area"] == "daily-agent")
+    ledger = tmp_path / "runs" / "local-x" / "qwen38-27b-gym.tasks.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(json.dumps({"task_id": "ts-" + ts.h(ts.norm(plain_prompt)), "task_hash": ts.h(ts.norm(plain_prompt)),
+                                  "status": "error"}) + "\n" + '{"torn')
+    rep = _rebuild(a, tmp_path / "out2", inj_variants=5, err_variants=4, lc_variants=4,
+                   ctx_buckets="32k,64k,128k,256k", lc_alt_buckets="32k", lc_alt_variants=1,
+                   exclude_tasks=[str(out1 / "real-t-r2.jsonl")], exclude_ledgers=[str(tmp_path / "runs" / "*" / "*.tasks.jsonl")])
+    new = ts.load_taskset(tmp_path / "out2" / "real-t-r2.jsonl")
+    old_ids = {r["id"] for r in first}
+    assert new and not {r["id"] for r in new} & old_ids
+    # the exclusion took exactly the first build's rows (same seed: its variants come first in every row)
+    ex = rep["excluded"]["by_area"]
+    assert ex["injection-resistance"] == rep1["rows_by_area"]["injection-resistance"]
+    assert ex["error-recovery"] == rep1["rows_by_area"]["error-recovery"]
+    assert ex["daily-agent"] == rep1["rows_by_area"]["daily-agent"] and rep["rows_by_area"]["daily-agent"] == 0
+    assert rep["rows_by_area"]["coding"] == 0
+    # injection: other goal x style x vector combinations of the same real rows, a goal once per row
+    inj = [r for r in new if r["r2"]["area"] == "injection-resistance"]
+    assert inj
+    per_row: dict[str, list[str]] = {}
+    for r in first + new:
+        if r["r2"]["area"] == "injection-resistance":
+            per_row.setdefault(r["r2"]["base_id"], []).append(r["r2"]["injection"]["goal"])
+    assert all(len(g) == len(set(g)) and len(g) <= 5 for g in per_row.values())
+    # error recovery: focus variants, one real family alone, never a web family, edit only where it edits
+    err = [r for r in new if r["r2"]["area"] == "error-recovery"]
+    assert err and all(r["r2"]["variant"].startswith("err:focus:") for r in err)
+    for r in err:
+        fams = r["r2"]["failure"]["families"]
+        assert len(fams) == 1 and fams[0]["family"] == r["r2"]["variant"].split(":")[2]
+        assert fams[0]["tool"] not in ("web_fetch", "web_search")
+        if fams[0]["tool"] == "edit_file":
+            assert r["category"] == "coding" or r["intent"] in ("edit", "fix", "create")
+    tasks = tg.tasks_from_taskset_rows(new, Path("."))
+    assert all(t.failure for t in tasks if t.area == "error-recovery")
+    # long context: the other buckets (256k too) and another file mix in 32k, never an eval source
+    lc = [r for r in new if r["r2"]["area"] == "long-context"]
+    assert {r["r2"]["ctx_bucket"] for r in lc} >= {"256k"}
+    alt = [r for r in lc if r["r2"]["variant"] == "lc:32k:alt1"]
+    assert alt
+    for r in alt:
+        main = next((x for x in first + new if x["r2"]["base_id"] == r["r2"]["base_id"]
+                     and x["r2"]["variant"] == "lc:32k"), None)
+        if main is not None:
+            assert {x["path"] for x in r["r2"]["longctx"]["reads"]} != {x["path"] for x in main["r2"]["longctx"]["reads"]}
+    assert all(r["r2"]["needs_ctx"] <= r2t.MAX_NEEDS_CTX for r in lc)
+    assert set(rep["fits"]) == set(r2t.TEACHER_CAPS)
+    ns = argparse.Namespace(tasks=str(tmp_path / "out2" / "real-t-r2.jsonl"), injection_manifest=str(mpath),
+                            eval_longctx=[str(lc_eval)], eval_tools=[])
+    assert r2t.check_disjoint(ns)["pass"]
+
+
+def test_a_plain_row_whose_prompt_a_run_attempted_is_not_made_again(built: Any, tmp_path: Path) -> None:
+    _rep1, _out1, (a, _lc, _m) = built
+    rows = ts.load_taskset(_out1 / "real-t-r2.jsonl")
+    plain = next(r for r in rows if r["r2"]["area"] == "daily-agent")
+    ledger = tmp_path / "l.tasks.jsonl"
+    ledger.write_text(json.dumps({"task_id": "ts-other", "task_hash": ts.h(ts.norm(plain["prompt"])),
+                                  "status": "kept"}) + "\n")
+    rep = _rebuild(a, tmp_path / "out3", areas="daily-agent,coding", exclude_ledgers=[str(ledger)])
+    got = ts.load_taskset(tmp_path / "out3" / "real-t-r2.jsonl")
+    assert {r["r2"]["area"] for r in got} <= {"daily-agent", "coding"}
+    assert plain["prompt"] not in {r["prompt"] for r in got} and rep["excluded"]["by_area"]["daily-agent"] == 1
+    with pytest.raises(r2t.R2Error, match="no file matches"):
+        _rebuild(a, tmp_path / "out4", exclude_ledgers=[str(tmp_path / "nothing-*.jsonl")])
+    with pytest.raises(r2t.R2Error, match="--areas"):
+        _rebuild(a, tmp_path / "out5", areas="daily")
+
+
+def test_merge_keeps_each_task_once_and_writes_the_area_files(built: Any, tmp_path: Path) -> None:
+    rep1, out1, (a, _lc, _m) = built
+    _rebuild(a, tmp_path / "more", inj_variants=4, exclude_tasks=[str(out1 / "real-t-r2.jsonl")],
+             areas="injection-resistance")
+    more = ts.load_taskset(tmp_path / "more" / "real-t-r2.jsonl")
+    ns = argparse.Namespace(name="real-t-m", out=str(tmp_path / "m"), steer=str(tmp_path / "no-steer.json"),
+                            tasks=[str(out1 / "real-t-r2.jsonl"), str(tmp_path / "more" / "real-t-r2.jsonl"),
+                                   str(out1 / "real-t-r2-injection.jsonl")],
+                            exclude_tasks=[], exclude_ledgers=[])
+    rep = r2t.merge(ns)
+    got = ts.load_taskset(tmp_path / "m" / "real-t-m.jsonl")
+    assert len(got) == len({r["id"] for r in got}) == rep1["combined"]["rows"] + len(more)
+    assert rep["stats"]["duplicate_id"] == rep1["rows_by_area"]["injection-resistance"]
+    inj = ts.load_taskset(tmp_path / "m" / "real-t-m-injection.jsonl")
+    assert len(inj) == rep["rows_by_area"]["injection-resistance"] == rep1["rows_by_area"]["injection-resistance"] + len(more)
+    # a filtered merge: only the long-context rows of some buckets
+    lc_rows = ts.load_taskset(out1 / "real-t-r2-longctx.jsonl")
+    one = lc_rows[0]["r2"]["ctx_bucket"]
+    rep2 = r2t.merge(argparse.Namespace(**{**vars(ns), "name": "real-t-lc", "areas": "long-context",
+                                           "ctx_buckets": one}))
+    got2 = ts.load_taskset(tmp_path / "m" / "real-t-lc.jsonl")
+    assert got2 and {r["r2"]["ctx_bucket"] for r in got2} == {one}
+    assert len(got2) == sum(1 for r in lc_rows if r["r2"]["ctx_bucket"] == one) and rep2["stats"]["filtered_out"] > 0
+    # a round-1 taskset is refused
+    r1 = tmp_path / "r1.jsonl"
+    r1.write_text(json.dumps(_base_rows()[0]) + "\n")
+    ns.tasks, ns.name = [str(r1)], "x"
+    with pytest.raises(r2t.R2Error, match="not a round-2 taskset"):
+        r2t.merge(ns)
+
 # ── steer.py ─────────────────────────────────────────────────────────────────
 
 

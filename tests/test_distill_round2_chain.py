@@ -416,6 +416,10 @@ def test_sunday_capacity_timeout_preempts_and_early_finish_ends_the_window(tmp_p
     assert start_args[start_args.index("--preempt-prefix") + 1] == "distill-cap-"
     assert st["capacity"].startswith("no CAPACITY-DONE.json 3 h")
     assert fake.now < t("2026-11-01T23:00:00-05:00")
+    # the operator hears it, in <= 5 lines: nothing left, which tasksets, how early the window ends
+    early = [n for n in fake.notes if "nothing left to do" in n[0]]
+    assert len(early) == 1 and len(early[0]) <= 5
+    assert "fallbacks: none" in early[0][1] and "h early" in early[0][2]
 
 
 def test_sunday_restarts_failed_generation_then_gives_the_gpu_back(tmp_path: Path) -> None:
@@ -678,6 +682,26 @@ def test_night_plan_rotation(tmp_path: Path) -> None:
     assert [(k, e - now) for k, _, e in parts] == [("longctx", 7200), ("standard", 4 * 3600)]
     assert kinds("2026-11-03", dict(c, R2_TOWER_NIGHT_ROTATION="bogus")) == [("standard", "standard", "/t/real-v4-r2.jsonl")]
 
+
+def test_fallback_tasksets_reach_both_runners_and_the_longctx_part(tmp_path: Path) -> None:
+    c = conf(tmp_path, "R2_TOWER_TASKS=/t/main.jsonl\nR2_TOWER_TASKS_FALLBACK=/t/fb1.jsonl ~/fb2.jsonl\n"
+                       "R2_TOWER_TASKS_LONGCTX=/t/lc.jsonl\nR2_TOWER_TASKS_LONGCTX_FALLBACK=/t/main.jsonl\n"
+                       "R2_LOCAL_TASKS=/t/main.jsonl\nR2_LOCAL_TASKS_FALLBACK=/t/fb1.jsonl\n")
+    home = str(tmp_path / "home")
+    until = t("2026-11-04T06:20:00-05:00")
+    assert R.remote_overrides(c, until)["GEN_REMOTE_TASKS_FALLBACK"] == f"/t/fb1.jsonl {home}/fb2.jsonl"
+    assert R.local_overrides(c)["GEN_TASKS_FALLBACK"] == "/t/fb1.jsonl"
+    now = t("2026-11-03T01:12:00-05:00")
+    (_k, lc, _e), = R.night_plan(c, now, now + 5 * 3600)
+    assert lc["R2_TOWER_TASKS"] == "/t/lc.jsonl" and lc["R2_TOWER_TASKS_FALLBACK"] == "/t/main.jsonl"
+    # the derived conf gen_runner reads carries them, and gen_runner maps the remote one onto its branch
+    base = "LOCAL_MODEL_UNIT=m.service\nPROBE_UNIT=p.service\nOLLAMA_MODEL=j:7b\nNOTIFY=/bin/true\n"
+    w = G.load(_write(tmp_path / "w.conf", R.derived_conf(base, R.remote_overrides(lc, until), "t")))
+    rg = G.RemoteGen(w, False, out=lambda s: None)
+    assert rg.c["GEN_TASKS"] == "/t/lc.jsonl" and rg.fallbacks == ["/t/main.jsonl"]
+    # unset: no fallback, as before
+    d = conf(tmp_path)
+    assert R.remote_overrides(d, until)["GEN_REMOTE_TASKS_FALLBACK"] == "" and R.local_overrides(d)["GEN_TASKS_FALLBACK"] == ""
 
 def test_a_split_night_swaps_half_way(tmp_path: Path) -> None:
     (tmp_path / "teacher-ctx.json").write_text(json.dumps(

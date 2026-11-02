@@ -71,6 +71,12 @@ Stops (children by process group, SIGTERM then SIGKILL after ``GEN_CHILD_GRACE_S
   Max judge (``judge_run.sh``) calls only the paid API and runs on. On a Q4 night slot-enter stops this
   unit before the eval instead, and slot-exit starts a new one.
 
+Exhausted taskset (``GEN_TASKS_FALLBACK`` / ``GEN_REMOTE_TASKS_FALLBACK``): when teacher_gen ends with stop
+``no_tasks`` (nothing left in its taskset that this teacher can take: done elsewhere, or over its context cap),
+the runner Telegrams the operator (<= 5 lines) and starts teacher_gen again on the next fallback taskset (same
+output, same flags; the preflight ran the excluded-session check on each and dropped a missing or failing one),
+so a dry taskset does not end a window hours early. With none left the branch is done, said in the same notice.
+
 Resume: teacher_gen and judge.py resume from their own ledgers; the harvest from ``<pool>/.harvest-state.json``
 (written after every pool file's append; a pool file longer than recorded is cut back to its recorded
 size and one the state never recorded is removed, then their rows are copied again, so an interrupted
@@ -151,6 +157,10 @@ GEN_DEFAULTS: dict[str, str] = {
     # the real-pattern taskset with the excluded sessions' rows dropped (taskset_gen.py exclude); the
     # preflight refuses a taskset that still holds one (GEN_EXCLUDE_SESSIONS: the operator's list)
     "GEN_TASKS": "~/distill/phase2b/tasksets/real-v1-excl.jsonl",
+    # tasksets to go on with, in order, once the current one has nothing left that fits this teacher
+    # (teacher_gen stop ``no_tasks``), instead of ending the window early; space-separated, empty: none.
+    # Each passes the same excluded-session check (a failing or missing one is dropped, noted).
+    "GEN_TASKS_FALLBACK": "",
     "GEN_EXCLUDE_SESSIONS": "~/distill/policy/exclude-sessions.txt",
     "GEN_EXCLUDE_CHECK_TIMEOUT_S": "900",
     # each teacher_gen run its own sandbox root (<root>-local, <root>-max-payg): a shared one would have the
@@ -221,6 +231,7 @@ GEN_DEFAULTS: dict[str, str] = {
     "GEN_REMOTE_QUANT": "UD-Q4_K_XL",
     "GEN_REMOTE_SHA256": "bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372",
     "GEN_REMOTE_TASKS": "~/distill/phase2b/tasksets/real-v3-excl.jsonl",
+    "GEN_REMOTE_TASKS_FALLBACK": "",                  # as GEN_TASKS_FALLBACK, for the remote run
     "GEN_REMOTE_NAME": "",                            # empty: remote-<GEN_REMOTE_HOST>-<quant>
     "GEN_REMOTE_SKIP_DONE_IN": "",                    # empty: <runs>/local-*/*.tasks.jsonl; "off": none
     "GEN_REMOTE_UNTIL": "2026-11-02T10:30:00+00:00",
@@ -417,6 +428,10 @@ class Gen:
         self.notes: list[str] = []
         self.progress: dict[str, Any] = {"schema": SCHEMA, "pid": os.getpid(), "state": "starting",
                                          "started_at": self.iso(self.now())}
+        #: tasksets still to go on with once GEN_TASKS runs dry (vetted by the preflight), and those run dry
+        self.fallbacks: list[str] = [os.path.expanduser(x) for x in conf.get("GEN_TASKS_FALLBACK", "").split()]
+        self.exhausted: list[str] = []
+        self.until: float | None = None
         # mini_window's helpers (loopback HTTP without a proxy, the nightly-eval checks), read-only use
         self.w = MW.Window(conf, False, "gen", clock=clock, out=lambda _s: None)
 
@@ -733,6 +748,7 @@ class Gen:
             problem = self.exclusion_problem()
             if problem:
                 problems.append(problem)
+            self.vet_fallbacks()
         for p in c["GEN_EVAL_TOOLS"].split():
             if not Path(p).is_file():
                 problems.append(f"GEN_EVAL_TOOLS {p} missing")
@@ -745,8 +761,8 @@ class Gen:
             problems.append(f"notify command {c['NOTIFY']} is not executable")
         return problems
 
-    def exclusion_problem(self) -> str | None:
-        """Why GEN_TASKS may not feed a teacher (DISTILL-OPEN-QUESTIONS #6: the excluded sessions are in no
+    def exclusion_problem(self, tasks: str | None = None) -> str | None:
+        """Why GEN_TASKS (or *tasks*) may not feed a teacher (DISTILL-OPEN-QUESTIONS #6: the excluded sessions are in no
         training data, and a gym row carries no session id to drop it by later): ``taskset_gen.py exclude
         --check`` against the operator's list finds a row built from a listed session's prompt, the list is
         missing, or the check could not run. None: clean."""
@@ -754,8 +770,9 @@ class Gen:
         lst = c.get("GEN_EXCLUDE_SESSIONS", "")
         if not lst or not Path(lst).is_file():
             return f"GEN_EXCLUDE_SESSIONS {lst or '(empty)'} missing: the excluded sessions cannot be checked"
+        tasks = tasks or c["GEN_TASKS"]
         argv = [c["GEN_PY"], "-B", str(self.distill / "taskset_gen.py"), "exclude", "--check",
-                "--tasks", c["GEN_TASKS"], "--exclude-sessions", lst]
+                "--tasks", tasks, "--exclude-sessions", lst]
         try:
             cp = subprocess.run(argv, capture_output=True, text=True, env=self.py_env(),
                                 timeout=float(c["GEN_EXCLUDE_CHECK_TIMEOUT_S"]))
@@ -763,16 +780,67 @@ class Gen:
             return f"the excluded-session check did not run: {type(e).__name__}"
         last = (cp.stderr.strip().splitlines() or cp.stdout.strip().splitlines() or ["?"])[-1][:240]
         if cp.returncode == 0:
-            self.log(f"GEN_TASKS holds no row of an excluded session ({Path(c['GEN_TASKS']).name})")
+            what = "GEN_TASKS" if tasks == c["GEN_TASKS"] else "the fallback taskset"
+            self.log(f"{what} holds no row of an excluded session ({Path(tasks).name})")
             return None
         if cp.returncode == 1:
             try:
                 n = json.loads(cp.stdout.strip().splitlines()[-1]).get("rows_dropped", "?")
             except (ValueError, IndexError, AttributeError):
                 n = "?"
-            return (f"GEN_TASKS {c['GEN_TASKS']} holds {n} rows built from an excluded session's prompts: "
+            return (f"{tasks} holds {n} rows built from an excluded session's prompts: "
                     f"run taskset_gen.py exclude and point GEN_TASKS at its output")
         return f"the excluded-session check failed (exit {cp.returncode}): {last}"
+
+    def vet_fallbacks(self) -> None:
+        """Keep only the fallback tasksets that exist, are not the current one and pass the excluded-session
+        check; a dropped one is noted (the run itself still starts: its own taskset is fine)."""
+        kept: list[str] = []
+        for f in self.fallbacks:
+            if f == self.c["GEN_TASKS"] or f in kept:
+                continue
+            why = (f"{f} missing" if not Path(f).is_file() else self.exclusion_problem(f))
+            if why:
+                self.note(f"fallback taskset dropped: {why}"[:300])
+                continue
+            kept.append(f)
+        self.fallbacks = kept
+        self.log("fallback tasksets: " + (", ".join(Path(f).name for f in kept) or "none"))
+
+    def tasks_exhausted(self, who: str) -> bool:
+        """The current taskset has nothing left that fits this teacher (teacher_gen stop ``no_tasks``): Telegram
+        the operator (<= 5 lines) and go on with the next fallback taskset (True), or say generation ends early
+        (False: none left)."""
+        cur = self.c["GEN_TASKS"]
+        self.exhausted.append(Path(cur).name)
+        now = self.now()
+        at = datetime.fromtimestamp(now, self.tz).strftime("%H:%M")
+        left = f"{max(0.0, (self.until or now) - now) / 3600:.1f} h"
+        nxt = self.fallbacks.pop(0) if self.fallbacks else None
+        if nxt is None:
+            self.note(f"{who}: taskset {Path(cur).name} has nothing left (no_tasks) at {at}; no fallback taskset")
+            self.notify([f"{who} gen: taskset {Path(cur).name} has nothing left that fits this teacher ({at})",
+                         f"no fallback taskset left (GEN_TASKS_FALLBACK / round2.conf R2_*_TASKS_FALLBACK): "
+                         f"generation ends {left} early",
+                         "exhausted: " + ", ".join(self.exhausted)])
+            return False
+        self.c["GEN_TASKS"] = nxt
+        self.progress["tasks"] = nxt
+        self.note(f"{who}: taskset {Path(cur).name} exhausted at {at}; going on with {Path(nxt).name}")
+        self.notify([f"{who} gen: taskset {Path(cur).name} has nothing left that fits this teacher ({at})",
+                     f"going on with the fallback {Path(nxt).name} ({left} left in the window)",
+                     f"fallbacks after it: {', '.join(Path(f).name for f in self.fallbacks) or 'none'}"])
+        return True
+
+    def child_stop(self, ch: Child | None, out: Path, name: str) -> str:
+        """The stop teacher_gen's report names (\"\" when that child wrote none)."""
+        if not self.wrote_report(ch, out, name):
+            return ""
+        try:
+            rep = json.loads((out / f"{name}.report.json").read_text())
+        except (OSError, ValueError):
+            return ""
+        return str(rep.get("stop") or "")
 
     def paid_plan(self, mode: str | None = None) -> tuple[bool, str]:
         """Whether the Max branch may start on *mode* (default: the route the keys pick now; key present +
@@ -800,6 +868,8 @@ class Gen:
         self.log(f"plan, until {self.iso(until)} (local concurrency {self.c['GEN_LOCAL_CONCURRENCY']}):")
         self.log("  a. probe guard: " + shlex.join(self.guard_argv(until)))
         self.log(f"  b. local teacher -> {self.local_out()}: " + shlex.join(self.local_argv(until)))
+        self.log("     its taskset run dry (no_tasks): " + (" then ".join(self.fallbacks) or "the end (no fallback "
+                                                             "taskset)"))
         route = self.paid_mode() or ROUTE_PAYG
         ok, why = self.paid_plan()
         self.log(f"  c. paid branch ({'route ' + route if self.paid_mode() else 'no key'}): "
@@ -913,7 +983,15 @@ class Gen:
             if crashed:
                 self.note(f"local teacher_gen crashed (exit {rc}"
                           f"{'' if rc == TG_EXIT_CRASH else ', no report from this run'}): see {b.child.log_path}")
-            if rc in (0, 1) and not crashed:
+            if rc in (0, 1) and not crashed and self.child_stop(b.child, self.local_out(), LOCAL_NAME) == "no_tasks":
+                if self.tasks_exhausted("mini"):
+                    b.state, b.resume_at = "waiting", time.monotonic()
+                    b.detail = f"going on with the fallback taskset {Path(self.c['GEN_TASKS']).name}"
+                else:
+                    b.state = "done"
+                    b.detail = f"taskset {self.exhausted[-1]} has nothing left (no_tasks); no fallback"
+                self.log(f"local: {b.detail}")
+            elif rc in (0, 1) and not crashed:
                 b.state = "done"
                 b.detail = "teacher_gen finished (exit 0)" if rc == 0 else "teacher_gen kept nothing this run (exit 1)"
                 self.log(f"local: {b.detail}")
@@ -1150,7 +1228,8 @@ class Gen:
 
     def run(self, until: float) -> int:
         """The supervised run (execute only). Returns the exit code."""
-        self.progress.update(state="running", until=self.iso(until), teacher=self.alias,
+        self.until = until
+        self.progress.update(state="running", until=self.iso(until), teacher=self.alias, tasks=self.c["GEN_TASKS"],
                              code=(self.code / "COMMIT").read_text().strip()[:12])
         self.save()
         harvest_every = 60 * float(self.c["GEN_HARVEST_EVERY_MIN"])
@@ -1262,6 +1341,7 @@ class RemoteGen(Gen):
                 conf[k] = home + conf[k][1:]
         conf["GEN_CODE"] = conf["GEN_REMOTE_CODE"]
         conf["GEN_TASKS"] = conf["GEN_REMOTE_TASKS"]
+        conf["GEN_TASKS_FALLBACK"] = conf.get("GEN_REMOTE_TASKS_FALLBACK", "")
         super().__init__(conf, execute, **kw)
         self.child: Child | None = None
         self.state = "pending"
@@ -1355,6 +1435,7 @@ class RemoteGen(Gen):
             problem = self.exclusion_problem()
             if problem:
                 problems.append(problem)
+            self.vet_fallbacks()
         for p in c["GEN_EVAL_TOOLS"].split():
             if not Path(p).is_file():
                 problems.append(f"GEN_EVAL_TOOLS {p} missing")
@@ -1363,6 +1444,8 @@ class RemoteGen(Gen):
         return problems
 
     def print_plan(self, until: float) -> None:
+        self.log(f"plan: tasks {self.c['GEN_TASKS']}; then, once it has nothing left: "
+                 + (" then ".join(self.fallbacks) or "the end (no fallback taskset)"))
         self.log(f"plan: remote teacher {self.c['GEN_REMOTE_HOST']} ({self.c['GEN_REMOTE_QUANT']}) at "
                  f"{self.c['GEN_REMOTE_URL']} until {self.iso(until)}; tools here ({this_host()}, bwrap)")
         self.log("plan: " + shlex.join(self.remote_argv(until)))
@@ -1381,14 +1464,7 @@ class RemoteGen(Gen):
 
     def report_stop(self) -> str:
         """The stop teacher_gen's last report names (\"\" when it wrote none during this child's run)."""
-        name = LOCAL_NAME
-        if not self.wrote_report(self.child, self.out_dir(), name):
-            return ""
-        try:
-            rep = json.loads((self.out_dir() / f"{name}.report.json").read_text())
-        except (OSError, ValueError):
-            return ""
-        return str(rep.get("stop") or "")
+        return self.child_stop(self.child, self.out_dir(), LOCAL_NAME)
 
     def wait_after(self, why: str) -> None:
         self.waits += 1
@@ -1410,6 +1486,12 @@ class RemoteGen(Gen):
             stop = self.report_stop()
             self.child = None
             self.log(f"teacher_gen exited {rc} (report stop: {stop or 'none'})")
+            if stop == "no_tasks" and rc in (TG_EXIT_DONE, TG_EXIT_NOTHING) \
+                    and self.tasks_exhausted(f"remote ({self.c['GEN_REMOTE_HOST']} {self.c['GEN_REMOTE_QUANT']})"):
+                self.state, self.resume_at = "pending", 0.0
+                self.detail = f"going on with the fallback taskset {Path(self.c['GEN_TASKS']).name}"
+                self.save()
+                return
             if stop in ("no_tasks", "until", "max_tasks", "target_rows") and rc in (TG_EXIT_DONE, TG_EXIT_NOTHING):
                 self.state, self.detail = "done", f"teacher_gen: {stop}"
                 return
@@ -1453,7 +1535,9 @@ class RemoteGen(Gen):
         return None
 
     def run(self, until: float) -> int:
+        self.until = until
         self.progress.update(state="running", until=self.iso(until), teacher=self.c["GEN_REMOTE_HOST"],
+                             tasks=self.c["GEN_TASKS"],
                              code=(self.code / "COMMIT").read_text().strip()[:12])
         self.save()
         self.notify([f"remote gen started: teacher {self.c['GEN_REMOTE_HOST']} {self.c['GEN_REMOTE_QUANT']} over the "

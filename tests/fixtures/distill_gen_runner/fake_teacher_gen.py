@@ -8,7 +8,8 @@ appended to <out>/<name>.traces.jsonl, then a ``kept`` ledger event in <name>.ta
 order). A rerun resumes from the ledger. FAKE_TG_FAIL_LOCAL=N makes the first N local runs exit 3 at once;
 FAKE_TG_MAX_RC=N makes every Max (--teacher max-payg / max-token-plan) run exit N at once; FAKE_TG_LOCAL_RC=N every local
 run (after writing <name>.report.json only when FAKE_TG_LOCAL_REPORT=1, as a normal end does: a crash
-writes none). A run that reaches --until writes <name>.report.json, like the real one.
+writes none). A run that reaches --until writes <name>.report.json, like the real one. A local run whose
+--tasks file name is listed in FAKE_TG_DRY (comma-separated) has nothing left: report stop ``no_tasks``, exit 1.
 Its PID goes to $FAKE_STATE/<local|max>-pid.
 """
 
@@ -59,6 +60,10 @@ def main() -> int:
         if n < int(os.environ.get("FAKE_TG_FAIL_LOCAL", "0")):
             print("error: 5 errors in a row")
             return 3
+        if a.tasks and Path(a.tasks).name in os.environ.get("FAKE_TG_DRY", "").split(","):
+            out.mkdir(parents=True, exist_ok=True)
+            (out / f"{name}.report.json").write_text('{"rows_total": 0, "stop": "no_tasks"}\n')
+            return 1
         if os.environ.get("FAKE_TG_LOCAL_RC"):
             if os.environ.get("FAKE_TG_LOCAL_REPORT") == "1":
                 out.mkdir(parents=True, exist_ok=True)

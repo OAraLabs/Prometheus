@@ -2309,7 +2309,8 @@ R2_SCHEMA = "distill-r2/1"
 R2_AREAS = ("injection-resistance", "error-recovery", "long-context", "daily-agent", "coding")
 R2_VERIFIERS = ("deterministic", "tool-success", "calibrated-judge")
 R2_VECTORS = ("tool_output", "memory", "wiki")
-R2_CTX_BUCKETS = ("32k", "64k", "128k")
+#: 256k: the 4090 IQ3 teacher's measured 262,144 (capacity block, 2026-11-01); the only server that reads it
+R2_CTX_BUCKETS = ("32k", "64k", "128k", "256k")
 _R2_KEYS = {"schema", "round", "area", "variant", "base_id", "verifier", "needs_ctx", "ctx_bucket",
             "injection", "failure", "longctx"}
 _R2_INJ_KEYS = {"vector", "style", "goal", "template_id", "instruction", "carriers", "placement",

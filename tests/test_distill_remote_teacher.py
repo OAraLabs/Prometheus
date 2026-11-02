@@ -638,6 +638,33 @@ def test_the_remote_runner_retries_an_absent_teacher_then_ends_with_the_taskset(
         rig.close()
 
 
+def test_the_remote_runner_goes_on_with_a_fallback_taskset_when_its_own_runs_dry(tmp_path):
+    rig, key, env = _remote_rig(tmp_path)
+    try:
+        fb = tmp_path / "in" / "real-r2c.jsonl"
+        fb.write_text("{}\n")
+        with open(rig.conf, "a") as f:
+            f.write(f"GEN_REMOTE_TASKS_FALLBACK={fb}\n")
+        until = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=60)).astimezone(ET).isoformat(
+            timespec="seconds")
+        runner = str(REPO / "scripts/distill/mini_window/gen_runner.py")
+        dry = subprocess.run([sys.executable, "-I", runner, "--conf", str(rig.conf), "remote", "--until", until],
+                             env=env, capture_output=True, text=True, timeout=120)
+        assert dry.returncode == 0 and "then, once it has nothing left: " + str(fb) in dry.stdout, dry.stdout
+        cp = subprocess.run([sys.executable, "-I", runner, "--conf", str(rig.conf), "remote", "--execute",
+                             "--until", until], env=env, capture_output=True, text=True, timeout=120)
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        calls = [json.loads(x)["argv"] for x in (rig.state / "remote-calls.jsonl").read_text().splitlines()]
+        assert [Path(a[a.index("--tasks") + 1]).name for a in calls] == ["real-v3-excl.jsonl"] * 2 + ["real-r2c.jsonl"]
+        assert len({a[a.index("--out") + 1] for a in calls}) == 1
+        prog = json.loads((rig.runs / "state" / "remote-progress.json").read_text())
+        assert prog["state"] == "finished" and prog["tasks"] == str(fb)
+        notes = (rig.state / "notify.log").read_text()
+        assert "going on with the fallback real-r2c.jsonl" in notes and "no fallback taskset left" in notes
+        assert KEY not in notes
+    finally:
+        rig.close()
+
 def test_the_remote_runner_refuses_a_key_file_others_can_read(tmp_path):
     rig, key, env = _remote_rig(tmp_path)
     try:

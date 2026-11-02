@@ -13,6 +13,14 @@
         [--tokenizer-dir ~/distill/models/qwen3.5-9b-tokenizer] [--seed N]
     python3 round2_tasks.py check-disjoint --tasks ~/distill/phase2b/tasksets/real-v4-r2.jsonl \\
         --injection-manifest ... --eval-longctx ... --eval-longctx ...
+    # More tasks once a taskset runs out: the same build at the same seed with more variants per real row,
+    # minus every row an earlier taskset holds and every task a run attempted (any outcome):
+    python3 round2_tasks.py build ... --inj-variants 5 --err-variants 4 --lc-variants 4 \\
+        --ctx-buckets 32k,64k,128k,256k --lc-alt-buckets 32k --lc-alt-variants 1 \\
+        --exclude-tasks '~/distill/phase2b/tasksets/real-v4-r2.jsonl' \\
+        --exclude-ledgers '~/distill/phase2b/runs/*/*.tasks.jsonl' [--areas injection-resistance,...]
+    # Several round-2 tasksets as one (per-area files + the steering-interleaved combined file):
+    python3 round2_tasks.py merge --name real-r2c --tasks A.jsonl --tasks B.jsonl [--exclude-ledgers ...]
 
 The rule this file keeps
 ------------------------
@@ -44,6 +52,13 @@ plus an ``r2`` block (``taskset_gen.validate_r2``) this file builds by code:
   margin); ``teacher_gen.py`` never starts a row over its teacher's measured cap.
 * ``daily-agent`` / ``coding``: the real rows of those categories, unchanged.
 
+Expansion (``--inj-variants``, ``--err-variants``, ``--lc-variants``, ``--lc-alt-*``, ``--exclude-*``): every
+variant's id is salted with its name (``inj:<goal>:<style>:<vector>``, ``err:harvest`` / ``err:focus:<family>``
+(that one real family alone, on its own tool), ``lc:<bucket>`` / ``lc:<bucket>:alt<j>`` (another file mix)), and
+the order of each row's variants is seeded, so a larger build at the same seed holds the smaller one and the
+exclusions leave exactly the new rows. A plain (daily-agent / coding) row is also dropped when a run attempted
+its real prompt as a round-1 task (unsalted id / hash).
+
 Disjointness from the eval sets
 -------------------------------
 * eval-injection: (1) no goal key, style name or template of ``build_eval_sets``
@@ -69,6 +84,7 @@ from __future__ import annotations
 import argparse
 import collections
 import copy
+import glob
 import importlib.util
 import json
 import os
@@ -108,8 +124,14 @@ AREA_FILE = {"injection-resistance": "injection", "error-recovery": "errrec", "l
 GROWTH_TOKENS = 8192
 OUTPUT_TOKENS = 4096
 CTX_MARGIN = 1.03
-#: the prompt a long-context row starts with (system prompt + tools + request + reads), per bucket
-CTX_BUCKETS = {"32k": 28_000, "64k": 56_000, "128k": 112_000}
+#: the prompt a long-context row starts with (system prompt + tools + request + reads), per bucket.
+#: 256k is sized for the 4090 IQ3 teacher's measured 262,144 (needs_ctx ~252K with the margin).
+CTX_BUCKETS = {"32k": 28_000, "64k": 56_000, "128k": 112_000, "256k": 232_000}
+#: the measured readable context of each teacher (capacity block 2026-11-01): a row is never sized above
+#: the largest of them, and the report says how many rows each one can take
+TEACHER_CAPS = {"mini_iq3_57344": 57_344, "slot_32768": 32_768, "tower_q4_163840": 163_840,
+                "tower_iq3_262144": 262_144}
+MAX_NEEDS_CTX = max(TEACHER_CAPS.values())
 #: what an unknown pack costs (system prompt + the sandbox's tool schemas), in tokens
 DEFAULT_OVERHEAD = 10_000
 LC_DIRS = ("docs", "wiki", "src", "tests", "scripts")
@@ -463,6 +485,33 @@ def failure_library(errors: list[tuple[str, str, str]]) -> dict[str, Any]:
     return lib
 
 
+#: Tools a focus variant never targets: the gym has no network, so their calls fail on their own
+FOCUS_SKIP_TOOLS = frozenset({"web_fetch", "web_search"})
+#: A family only a request that edits files meets (a focus variant elsewhere would never fire)
+_EDIT_INTENTS = frozenset({"edit", "fix", "create"})
+
+
+def focus_families(lib: dict[str, Any], row: dict[str, Any]) -> list[str]:
+    """The harvested families a focus variant of *row* may inject alone: every family whose tool the
+    sandbox can serve, the edit family only on a request that edits (coding, or an edit / fix / create)."""
+    out = []
+    for name, f in sorted(lib.items()):
+        if f["tool"] in FOCUS_SKIP_TOOLS:
+            continue
+        if f["tool"] == "edit_file" and not (row["category"] == "coding" or row["intent"] in _EDIT_INTENTS):
+            continue
+        out.append(name)
+    return out
+
+
+def build_focus_failure(lib: dict[str, Any], family: str) -> dict[str, Any]:
+    """One real family alone: the first call of ITS tool fails (wherever in the turn that call comes), not
+    the turn's first call: another real failure pattern of the same request."""
+    f = lib[family]
+    return {"families": [{k: f[k] for k in ("tool", "family", "output", "sticky", "defaults", "count")}],
+            "source": "harvest", "focus": family}
+
+
 def build_failure(lib: dict[str, Any], rng: random.Random) -> dict[str, Any]:
     """One family per tool (drawn by harvest count where a tool has several)."""
     per_tool: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
@@ -743,6 +792,84 @@ def needs_ctx(prompt_tokens: int) -> int:
     return int((prompt_tokens + GROWTH_TOKENS + OUTPUT_TOKENS) * CTX_MARGIN) + 1
 
 
+PLAIN_AREAS = ("daily-agent", "coding")
+
+
+def fits(rows: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, int]]:
+    """Rows per area each measured teacher context can take (``TEACHER_CAPS``)."""
+    return {cap_name: {area: sum(1 for r in rows.get(area, []) if r["r2"]["needs_ctx"] <= cap) for area in AREAS}
+            for cap_name, cap in TEACHER_CAPS.items()}
+
+
+def _globs(patterns: Iterable[str]) -> list[Path]:
+    out: list[Path] = []
+    for pat in patterns:
+        hits = sorted(glob.glob(os.path.expanduser(pat)))
+        if not hits:
+            raise R2Error(f"{pat}: no file matches (an exclusion that reads nothing excludes nothing)")
+        out += [Path(h) for h in hits]
+    return out
+
+
+def exclusion_keys(task_globs: Iterable[str], ledger_globs: Iterable[str]) -> tuple[set[str], set[str], dict[str, int]]:
+    """(task ids, task hashes, counts) of every task an earlier taskset holds (``--exclude-tasks``: its row
+    ids and their salted hashes) or a run already attempted, whatever its outcome (``--exclude-ledgers``:
+    every ledger event's ``task_id`` / ``task_hash``)."""
+    ids: set[str] = set()
+    hashes: set[str] = set()
+    counts: collections.Counter = collections.Counter()
+    for path in _globs(task_globs):
+        for r in TS.load_taskset(path):
+            ids.add(r["id"])
+            hashes.add(r["id"][3:] if r.get("r2") else TS.h(TS.norm(r["prompt"])))
+            counts["taskset_rows"] += 1
+        counts["taskset_files"] += 1
+    for path in _globs(ledger_globs):
+        for line in path.read_text(encoding="utf-8", errors="replace").split("\n"):
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue  # a torn last line
+            if not isinstance(ev, dict):
+                continue
+            if ev.get("task_id"):
+                ids.add(str(ev["task_id"]))
+            if ev.get("task_hash"):
+                hashes.add(str(ev["task_hash"]))
+            counts["ledger_events"] += 1
+        counts["ledger_files"] += 1
+    return ids, hashes, dict(counts)
+
+
+def already_seen(row: dict[str, Any], ids: set[str], hashes: set[str]) -> bool:
+    """A round-2 row an earlier taskset holds or a run attempted (its salted id or hash). A plain row
+    (daily-agent / coding) also when its real prompt itself was attempted or listed (a round-1 run's
+    unsalted id or hash): it would be the same task again."""
+    if row["id"] in ids or row["id"][3:] in hashes:
+        return True
+    if row["r2"]["area"] in PLAIN_AREAS:
+        base = row["r2"]["base_id"]
+        return base in ids or base[3:] in hashes
+    return False
+
+
+def interleave(every: list[dict[str, Any]], steer_path: str) -> list[dict[str, Any]]:
+    """The combined order: the areas interleaved by the steering shares, so any prefix follows them."""
+    weights = STEER.flatten(STEER.load(steer_path))
+    queues = {b: [r for r in every if STEER.bucket_of(r["r2"]["area"], r["category"]) == b] for b in weights}
+    queues = {b: q for b, q in queues.items() if q}
+    left = [r for r in every if STEER.bucket_of(r["r2"]["area"], r["category"]) not in queues]
+    taken: collections.Counter = collections.Counter()
+    merged: list[dict[str, Any]] = []
+    while queues:
+        b = max(queues, key=lambda x: (weights.get(x, 0) * (len(merged) + 1) - taken[x], x))
+        merged.append(queues[b].pop(0))
+        taken[b] += 1
+        if not queues[b]:
+            del queues[b]
+    return merged + left
+
+
 def build(a: argparse.Namespace) -> dict[str, Any]:
     t0 = time.monotonic()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", a.name):
@@ -789,6 +916,11 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
     stats["conditioned_areas_live_host_prompts_skipped"] = len(base_rows) - len(cond_rows)
     rows: dict[str, list[dict[str, Any]]] = {area: [] for area in AREAS}
     name = a.name
+    want = set(AREAS) if not getattr(a, "areas", None) else {x.strip() for x in a.areas.split(",") if x.strip()}
+    if want - set(AREAS):
+        raise R2Error(f"--areas: unknown {sorted(want - set(AREAS))} (areas: {', '.join(AREAS)})")
+    excl_ids, excl_hashes, excl_counts = exclusion_keys(getattr(a, "exclude_tasks", None) or [],
+                                                        getattr(a, "exclude_ledgers", None) or [])
 
     def prompt_tokens(r: dict[str, Any]) -> int:
         return overhead + counter(r["prompt"]) + 16
@@ -796,7 +928,7 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
     # injection-resistance: per eligible agentic row, --inj-variants goals not in conflict with its request
     combos = [(g, s, v) for g in GOALS for s in STYLES for v in VECTORS]
     for r in cond_rows:
-        if r["mode"] != "agentic":
+        if r["mode"] != "agentic" or "injection-resistance" not in want:
             continue
         vec_pref = "memory" if r["subcategory"] == "memory" else "wiki" if r["subcategory"] == "wiki" else None
         order = sorted(combos, key=lambda c: rank(seed, "inj-combo|" + r["id"], "|".join(c)))
@@ -829,34 +961,54 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
                 injection=inj))
             used_goals.add(goal_key)
             made += 1
-    # error-recovery: every tool-likely agentic row, one failure family per tool
+    # error-recovery: every tool-likely agentic row: one failure family per tool (``err:harvest``), then
+    # --err-variants - 1 focus variants, each one real family alone on its own tool (seeded order)
+    err_variants = int(getattr(a, "err_variants", 1))
     for r in cond_rows:
-        if not tool_likely(r):
+        if not tool_likely(r) or "error-recovery" not in want or err_variants < 1:
             continue
         variant = "err:harvest"
         rng = random.Random(f"{seed}|{variant}|{r['id']}")
-        rows["error-recovery"].append(make_row(
-            r, taskset=f"{name}-errrec", area="error-recovery", variant=variant,
-            verifier=planned_verifier("error-recovery", r["category"], calibrated, False),
-            needs_ctx=needs_ctx(prompt_tokens(r)), failure=build_failure(lib, rng)))
-    # long-context: agentic rows, each in one bucket (seeded), files sized to the bucket
-    buckets = [b for b in CTX_BUCKETS if b in a.ctx_buckets.split(",")]
-    for r in cond_rows:
-        if r["mode"] != "agentic":
-            continue
-        for k, bucket in enumerate(sorted(buckets, key=lambda b: rank(seed, "lc-bucket|" + r["id"], b))):
-            if k >= a.lc_variants:
+        plan: list[tuple[str, dict[str, Any]]] = [(variant, build_failure(lib, rng))]
+        for fam in sorted(focus_families(lib, r), key=lambda f: rank(seed, "err-focus|" + r["id"], f)):
+            if len(plan) >= err_variants:
                 break
-            variant = f"lc:{bucket}"
+            plan.append((f"err:focus:{fam}", build_focus_failure(lib, fam)))
+        for variant, failure in plan[:err_variants]:
+            rows["error-recovery"].append(make_row(
+                r, taskset=f"{name}-errrec", area="error-recovery", variant=variant,
+                verifier=planned_verifier("error-recovery", r["category"], calibrated, False),
+                needs_ctx=needs_ctx(prompt_tokens(r)), failure=failure))
+    # long-context: agentic rows, each in --lc-variants buckets (seeded order), files sized to the bucket;
+    # then --lc-alt-variants other file mixes in each --lc-alt-buckets bucket (``lc:<bucket>:alt<j>``)
+    buckets = [b for b in CTX_BUCKETS if b in a.ctx_buckets.split(",")]
+    alt_buckets = {b for b in (getattr(a, "lc_alt_buckets", "") or "").split(",") if b in buckets}
+    alt_n = int(getattr(a, "lc_alt_variants", 0) or 0)
+    for r in cond_rows:
+        if r["mode"] != "agentic" or "long-context" not in want:
+            continue
+        order = sorted(buckets, key=lambda b: rank(seed, "lc-bucket|" + r["id"], b))
+        lc_plan = [(b, f"lc:{b}") for k, b in enumerate(order) if k < a.lc_variants]
+        lc_plan += [(b, f"lc:{b}:alt{j}") for b in order if b in alt_buckets for j in range(1, alt_n + 1)]
+        seen_reads: set[tuple[str, ...]] = set()
+        for bucket, variant in lc_plan:
             budget = CTX_BUCKETS[bucket] - prompt_tokens(r)
             chosen, target, depth = plan_reads(r, pool, budget, seed, variant + "|" + r["id"])
             if not chosen:
                 stats["lc_no_files"] += 1
                 continue
+            key = tuple(sorted(f.path for f in chosen))
+            if key in seen_reads:
+                stats["lc_same_reads_as_another_variant"] += 1
+                continue
+            seen_reads.add(key)
             reads_tokens = sum(f.tokens for f in chosen) + 40 * len(chosen)
             total = prompt_tokens(r) + reads_tokens
             if total < CTX_BUCKETS[bucket] * 0.8:
                 stats[f"lc_short_of_bucket:{bucket}"] += 1
+                continue
+            if needs_ctx(total) > MAX_NEEDS_CTX:
+                stats[f"lc_over_the_largest_teacher:{bucket}"] += 1
                 continue
             grounding = None
             if target is not None and r["intent"] in GROUNDING_INTENTS:
@@ -874,10 +1026,19 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
     # daily-agent and coding: the real rows of those categories, as they are
     for r in base_rows:
         area = "coding" if r["category"] == "coding" else "daily-agent"
+        if area not in want:
+            continue
         rows[area].append(make_row(
             r, taskset=f"{name}-{AREA_FILE[area]}", area=area, variant=f"{AREA_FILE[area]}:plain",
             verifier=planned_verifier(area, r["category"], calibrated, False),
             needs_ctx=needs_ctx(prompt_tokens(r))))
+    # tasks an earlier taskset holds or a run attempted are never made again
+    excluded: dict[str, int] = {}
+    if excl_ids or excl_hashes:
+        for area in AREAS:
+            keep = [r for r in rows[area] if not already_seen(r, excl_ids, excl_hashes)]
+            excluded[area] = len(rows[area]) - len(keep)
+            rows[area] = keep
     # outputs
     out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     every: list[dict[str, Any]] = []
@@ -892,17 +1053,7 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
     if len(ids) != len(set(ids)):
         raise R2Error("round-2 ids repeat")
     # the combined file interleaves the areas by the steering shares, so any prefix follows them
-    weights = STEER.flatten(STEER.load(a.steer))
-    queues = {b: [r for r in every if STEER.bucket_of(r["r2"]["area"], r["category"]) == b] for b in weights}
-    queues = {b: q for b, q in queues.items() if q}
-    taken = collections.Counter()
-    merged: list[dict[str, Any]] = []
-    while queues:
-        b = max(queues, key=lambda x: (weights.get(x, 0) * (len(merged) + 1) - taken[x], x))
-        merged.append(queues[b].pop(0))
-        taken[b] += 1
-        if not queues[b]:
-            del queues[b]
+    merged = interleave(every, a.steer)
     combined = out_dir / f"{name}.jsonl"
     TS._write_atomic(combined, "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in merged))
     for r in merged:  # every row as teacher_gen reads it
@@ -924,14 +1075,16 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
         "calibration": {"sha256": cal_sha, "apply_categories": sorted(calibrated)},
         "needs_ctx": {area: {"max": max((r["r2"]["needs_ctx"] for r in rows[area]), default=0),
                              "p50": TS._pct([r["r2"]["needs_ctx"] for r in rows[area]], 0.5)} for area in AREAS},
-        "fits": {cap_name: {area: sum(1 for r in rows[area] if r["r2"]["needs_ctx"] <= cap)
-                            for area in AREAS}
-                 for cap_name, cap in (("mini_iq3_57344", 57_344), ("slot_32768", 32_768), ("slot_131072", 131_072))},
+        "fits": fits(rows),
+        "excluded": {"by_area": excluded, "inputs": excl_counts},
+        "areas": sorted(want),
         "injection": {"goals": dict(collections.Counter(r["r2"]["injection"]["goal"] for r in inj_rows)),
                       "styles": dict(collections.Counter(r["r2"]["injection"]["style"] for r in inj_rows)),
                       "vectors": dict(collections.Counter(r["r2"]["injection"]["vector"] for r in inj_rows)),
                       "static_disjointness": static, "manifest_cases": len(manifest.data.get("cases") or []),
                       "injection_overlaps": sum(1 for r in inj_rows if manifest.record_overlaps(r["r2"]["injection"]))},
+        "error_recovery": {"variants": dict(collections.Counter(r["r2"]["variant"]
+                                                                for r in rows["error-recovery"]))},
         "long_context": {"buckets": dict(collections.Counter(r["r2"]["ctx_bucket"] for r in lc_rows)),
                          "grounded": sum(1 for r in lc_rows if r["r2"]["longctx"]["grounding"]),
                          "fixture_commit": commit, "repo_ref": a.repo_ref, "pool_files": len(pool),
@@ -975,6 +1128,80 @@ def check_disjoint(a: argparse.Namespace) -> dict[str, Any]:
     return out
 
 
+def merge(a: argparse.Namespace) -> dict[str, Any]:
+    """Round-2 tasksets (``build`` outputs) as one: every row as it is (validated again), an id only once
+    (the first file wins), per-area files and the combined file interleaved by the steering shares, as
+    ``build`` writes them; ``--exclude-tasks`` / ``--exclude-ledgers`` drop rows as in ``build``; ``--areas`` /
+    ``--ctx-buckets`` keep only those areas / long-context buckets (a 4090-only long-context file, say)."""
+    t0 = time.monotonic()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", a.name):
+        raise R2Error("--name: letters, digits, dot, dash, underscore")
+    out_dir = Path(os.path.expanduser(a.out))
+    if TS._inside_git_tree(out_dir):
+        raise R2Error(f"{out_dir} is inside a git work tree; task text never goes near a repo")
+    excl_ids, excl_hashes, excl_counts = exclusion_keys(a.exclude_tasks or [], a.exclude_ledgers or [])
+    want = {x for x in (getattr(a, "areas", "") or "").split(",") if x} or set(AREAS)
+    buckets = {x for x in (getattr(a, "ctx_buckets", "") or "").split(",") if x}
+    if want - set(AREAS) or buckets - set(CTX_BUCKETS):
+        raise R2Error(f"--areas / --ctx-buckets: unknown {sorted((want - set(AREAS)) | (buckets - set(CTX_BUCKETS)))}")
+    rows: dict[str, list[dict[str, Any]]] = {area: [] for area in AREAS}
+    seen: set[str] = set()
+    sources = []
+    stats: collections.Counter = collections.Counter()
+    for path in _globs(a.tasks):
+        got = TS.load_taskset(path)
+        if not got or not all(r.get("r2") for r in got):
+            raise R2Error(f"{path}: not a round-2 taskset (every row carries an r2 block)")
+        n = 0
+        for r in got:
+            if r["r2"]["area"] not in want or (buckets and r["r2"]["area"] == "long-context"
+                                                and r["r2"]["ctx_bucket"] not in buckets):
+                stats["filtered_out"] += 1
+                continue
+            if r["id"] in seen:
+                stats["duplicate_id"] += 1
+                continue
+            if already_seen(r, excl_ids, excl_hashes):
+                stats[f"excluded:{r['r2']['area']}"] += 1
+                continue
+            seen.add(r["id"])
+            rows[r["r2"]["area"]].append(r)
+            n += 1
+        sources.append({"file": path.name, "sha256": TS._sha256(path), "rows": len(got), "taken": n})
+    out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    files: dict[str, Any] = {}
+    every: list[dict[str, Any]] = []
+    for area in AREAS:
+        rs = rows[area]
+        path = out_dir / f"{a.name}-{AREA_FILE[area]}.jsonl"
+        TS._write_atomic(path, "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in rs))
+        files[area] = {"file": path.name, "rows": len(rs), "sha256": TS._sha256(path)}
+        every += rs
+    merged = interleave(every, a.steer)
+    combined = out_dir / f"{a.name}.jsonl"
+    TS._write_atomic(combined, "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in merged))
+    for r in merged:
+        problems = TS.validate_task(r)
+        if problems:
+            raise R2Error(f"written row fails validation: {problems[0]}")
+    report = {
+        "schema": REPORT_SCHEMA, "name": a.name, "merged_from": sources, "files": files,
+        "combined": {"file": combined.name, "rows": len(merged), "sha256": TS._sha256(combined)},
+        "rows_by_area": {area: len(rows[area]) for area in AREAS},
+        "rows_by_variant_kind": {area: dict(collections.Counter(":".join(r["r2"]["variant"].split(":")[:2])
+                                                                for r in rows[area]))
+                                 for area in AREAS},
+        "fits": fits(rows),
+        "needs_ctx": {area: {"max": max((r["r2"]["needs_ctx"] for r in rows[area]), default=0),
+                             "p50": TS._pct([r["r2"]["needs_ctx"] for r in rows[area]], 0.5)} for area in AREAS},
+        "long_context": {"buckets": dict(collections.Counter(r["r2"]["ctx_bucket"] for r in rows["long-context"]))},
+        "excluded": {"inputs": excl_counts}, "stats": dict(sorted(stats.items())),
+        "elapsed_s": round(time.monotonic() - t0, 1), "built_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    TS._write_atomic(out_dir / f"{a.name}.report.json", json.dumps(report, indent=1, sort_keys=True) + "\n")
+    return report
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="round2_tasks.py", description=(__doc__ or "").split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -996,11 +1223,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     b.add_argument("--calibration", default="~/distill/phase2-local-cal/calibration-report.json")
     b.add_argument("--tokenizer-dir", default="~/distill/models/qwen3.5-9b-tokenizer")
     b.add_argument("--steer", default=STEER.DEFAULT_PATH)
-    b.add_argument("--inj-variants", type=int, default=2, help="injection rows per eligible real row")
+    b.add_argument("--inj-variants", type=int, default=2,
+                   help="injection rows per eligible real row (goal x style x vector combinations, seeded order; "
+                        "with --exclude-tasks of an earlier build at the same seed, the ones beyond it)")
+    b.add_argument("--err-variants", type=int, default=1,
+                   help="error-recovery rows per eligible real row: err:harvest, then focus variants (one real "
+                        "family alone on its own tool)")
     b.add_argument("--lc-variants", type=int, default=1, help="long-context rows per real row (buckets)")
-    b.add_argument("--ctx-buckets", default="32k,64k,128k")
+    b.add_argument("--ctx-buckets", default="32k,64k,128k",
+                   help="of " + ",".join(CTX_BUCKETS) + " (256k: the 4090 IQ3 teacher only)")
+    b.add_argument("--lc-alt-buckets", default="", help="buckets that get --lc-alt-variants other file mixes")
+    b.add_argument("--lc-alt-variants", type=int, default=0)
+    b.add_argument("--areas", default="", help="only these areas (comma-separated; default every area)")
+    b.add_argument("--exclude-tasks", action="append", default=[], metavar="GLOB",
+                   help="tasksets whose rows are never made again (by id / salted hash)")
+    b.add_argument("--exclude-ledgers", action="append", default=[], metavar="GLOB",
+                   help="run ledgers (<run>/*.tasks.jsonl): every task a run attempted is never made again")
     b.add_argument("--live-prompts", choices=("skip", "keep"), default="skip",
                    help="requests about the owner's live hosts and accounts (LIVE_HOST) in the conditioned areas")
+    m = sub.add_parser("merge")
+    m.add_argument("--tasks", action="append", required=True, metavar="GLOB", help="round-2 tasksets, in order")
+    m.add_argument("--name", required=True)
+    m.add_argument("--out", default=TS.DEFAULT_OUT)
+    m.add_argument("--steer", default=STEER.DEFAULT_PATH)
+    m.add_argument("--exclude-tasks", action="append", default=[], metavar="GLOB")
+    m.add_argument("--exclude-ledgers", action="append", default=[], metavar="GLOB")
+    m.add_argument("--areas", default="", help="only these areas (comma-separated)")
+    m.add_argument("--ctx-buckets", default="", help="only these long-context buckets (comma-separated)")
     c = sub.add_parser("check-disjoint")
     c.add_argument("--tasks", required=True)
     c.add_argument("--injection-manifest", default=TS.DEFAULT_MANIFEST)
@@ -1018,7 +1267,12 @@ def main(argv: list[str] | None = None) -> int:
                               "fits": rep["fits"], "injection_overlaps": rep["injection"]["injection_overlaps"],
                               "files_read_eval_overlap": rep["long_context"]["files_read_eval_overlap"],
                               "failure_families": sorted(rep["failures"]["families"]),
-                              "elapsed_s": rep["elapsed_s"]}, indent=1))
+                              "excluded": rep["excluded"], "elapsed_s": rep["elapsed_s"]}, indent=1))
+            return 0
+        if a.cmd == "merge":
+            rep = merge(a)
+            print(json.dumps({k: rep[k] for k in ("rows_by_area", "combined", "fits", "stats", "merged_from",
+                                                  "long_context")}, indent=1))
             return 0
         out = check_disjoint(a)
         print(json.dumps(out, indent=1))

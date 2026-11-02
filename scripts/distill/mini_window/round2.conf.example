@@ -19,6 +19,11 @@ R2_TOWER_URL=http://tower-host:18094    # the teacher on the 4090's tailnet addr
 # The tasksets (taskset_gen.py exclude output: gen_runner's preflight refuses one holding an excluded session's row)
 # R2_TOWER_TASKS=~/distill/phase2b/tasksets/real-v3-excl.jsonl
 # R2_LOCAL_TASKS=~/distill/phase2b/tasksets/real-v3-excl.jsonl
+# Fallback tasksets (space-separated, in order): when a run's taskset has nothing left that fits its teacher
+# (teacher_gen stop no_tasks), gen_runner Telegrams the operator and goes on with the next one instead of ending
+# the window early; each passes the same excluded-session check. Empty: none (the run ends, with a notice).
+# R2_TOWER_TASKS_FALLBACK=
+# R2_LOCAL_TASKS_FALLBACK=
 # Extra `teacher_gen.py run` flags, appended last (shell words; no spaces inside one argument), e.g.
 #   R2_TOWER_EXTRA_ARGS=--mix error-recovery=0.4,chat-mode=0.3,agentic=0.3 --coding-cap 0.2
 # R2_TOWER_EXTRA_ARGS=
@@ -61,6 +66,7 @@ R2_TOWER_URL=http://tower-host:18094    # the teacher on the 4090's tailnet addr
 # R2_TOWER_NIGHT_ROTATION=longctx standard   # Tue 2026-11-03 longctx, Wed standard, Thu longctx, ...
 # R2_TOWER_ROTATION_START=2026-11-03
 # R2_TOWER_TASKS_LONGCTX=~/distill/phase2b/tasksets/real-v4-r2-longctx.jsonl
+# R2_TOWER_TASKS_LONGCTX_FALLBACK=       # e.g. the standard taskset: one long slot still beats an idle GPU
 # R2_MINI_NIGHTLY=on
 
 # ---- Heartbeat -------------------------------------------------------------------------------------
