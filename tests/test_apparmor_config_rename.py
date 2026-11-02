@@ -59,6 +59,11 @@ def _label_ok(monkeypatch, rename: str):
     # The device-registry half is tests/test_devices_db_floor.py's; held current here.
     monkeypatch.setattr(C, "_registry_detail", lambda profile: ("; writing the device registry refused", False))
     monkeypatch.setattr(C, "_trusted_detail", lambda profile: ("; writing trusted state refused", False))
+    # The node-key and launch-configuration half is tests/test_state_floor_keys_launch.py's.
+    monkeypatch.setattr(C, "_keys_and_launch_detail",
+                        lambda profile: ("; reading the node keys refused; writing launch configuration refused", False))
+    # The what-starts-Prometheus half is tests/test_startup_floor.py's.
+    monkeypatch.setattr(C, "_startup_detail", lambda profile: ("; writing what starts Prometheus refused", False))
 
 
 def test_a_current_profile_is_active_and_says_the_rename_is_refused(monkeypatch, caplog):
