@@ -147,3 +147,4 @@ none holds teacher data.
   - **Keep:** the business model, the bartowski Qwen3.8 Q4_K_M, Qwen3.6-27B and the IQ3 teacher.
   - **Order:** rerun Phase 6 + the full scoring (Q4/Q5/BF16 + same-recipe base 9B) as soon as the capacity tests finish, before cross-host generation.
   - **Guard:** add a disk-space preflight to every 4090 job.
+- **Operator answer, Sun 2026-11-01 ~22:50 ET:** "Yes, snapshot it." This covers one fresh read-only snapshot of the 3090 Ti host's conversation DB to find new real prompts for round-2 generation. It doesn't cover writes to live DBs or reads of any other live DB.
