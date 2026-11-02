@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from prometheus.lsp.languages import EXTENSION_TO_LANGUAGE, LSPServerDef
+from prometheus.security import safe_fs
 
 log = logging.getLogger(__name__)
 
@@ -256,7 +257,8 @@ class LSPClient:
     async def did_open(self, filepath: str | Path) -> None:
         """Notify the server a document was opened (full content sync)."""
         path = str(Path(filepath).resolve())
-        content = Path(path).read_text(encoding="utf-8", errors="replace")
+        # Read through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q): the text goes to the language server.
+        content = safe_fs.read_text(Path(path), errors="replace")
         uri = _path_to_uri(path)
         ext = Path(path).suffix.lower()
         lang_id = EXTENSION_TO_LANGUAGE.get(ext, "plaintext")
@@ -285,7 +287,8 @@ class LSPClient:
         if path not in self._open_files:
             await self.did_open(filepath)
             return
-        content = Path(path).read_text(encoding="utf-8", errors="replace")
+        # Read through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q): the text goes to the language server.
+        content = safe_fs.read_text(Path(path), errors="replace")
         self._open_files[path] += 1
         self._send_notification("textDocument/didChange", {
             "textDocument": {

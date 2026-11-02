@@ -126,6 +126,8 @@ TOOL_PATH_PARAM: dict[str, str] = {
     "video_generate": "image_path",
     "download_file": "destination",
     "youtube_transcript": "save_to",
+    # Registered only when lsp.enabled. It reads the file and hands its text to the language server.
+    "lsp": "file",
     # Directory roots. Read-only tools, so they never reach the
     # workspace prompt (_APPROVE_TOOLS is write_file/edit_file only)
     # — mapping them buys denied_paths enforcement and nothing else,

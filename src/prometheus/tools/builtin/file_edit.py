@@ -53,8 +53,8 @@ class FileEditTool(BaseTool):
             original = safe_fs.read_text(path)
         except safe_fs.PathChanged as exc:
             return ToolResult(output=str(exc), is_error=True)
-        except (FileNotFoundError, NotADirectoryError):
-            return ToolResult(output=f"File not found: {path}", is_error=True)
+        except FileNotFoundError:
+            return ToolResult(output=f"File not found: {arguments.path}", is_error=True)
         # The advertised schema has long promised that "the edit fails if old_str is not
         # unique". It never did: the code replaced the FIRST match and reported success, so an
         # ambiguous edit silently changed the wrong place. The description was added deliberately

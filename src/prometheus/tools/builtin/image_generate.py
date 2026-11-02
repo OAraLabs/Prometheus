@@ -221,9 +221,13 @@ class ImageGenerateTool(BaseTool):
         meta = getattr(context, "metadata", None) or {}
         roots_token = _SESSION_IMAGE_ROOTS.set(
             _session_image_roots(meta.get("workspace_roots")))
+        checked_token = _CHECKED_OUTPUT.set(None)
         try:
             return await self._execute(arguments, context)
+        except safe_fs.PathChanged as exc:
+            return ToolResult(output=f"image_generate: {exc}", is_error=True)
         finally:
+            _CHECKED_OUTPUT.reset(checked_token)
             _SESSION_IMAGE_ROOTS.reset(roots_token)
 
     async def _execute(
@@ -241,15 +245,20 @@ class ImageGenerateTool(BaseTool):
             # — made absolute HERE so the guard and every sink rule on the one
             # path. Left relative, both resolved it against the daemon
             # PROCESS's directory.
-            requested = Path(arguments.output_path).expanduser()
-            if not requested.is_absolute():
-                arguments = arguments.model_copy(update={
-                    "output_path": str(Path(context.cwd) / requested),
-                })
+            #
+            # Resolved ONCE, here, against the path the gate checked, and never again: generation takes seconds,
+            # and a folder swapped for a link meanwhile must not move the write (security/safe_fs.py,
+            # GHSA-wgcv-xw9m-9q9q). The sink writes this exact path through no link.
+            try:
+                dest = safe_fs.resolve_tool_path(arguments.output_path, Path(context.cwd), context.metadata)
+            except safe_fs.PathChanged as exc:
+                return ToolResult(output=f"image_generate: {exc}", is_error=True)
+            arguments = arguments.model_copy(update={"output_path": str(dest)})
             try:
                 assert_path_under_roots(
                     arguments.output_path, _allowed_image_roots()
                 )
+                _CHECKED_OUTPUT.set(dest)
             except ValueError as exc:
                 return ToolResult(
                     output=(
@@ -963,6 +972,11 @@ def _ext_from_content_type(content_type: str) -> str:
 _SESSION_IMAGE_ROOTS: contextvars.ContextVar[tuple[Path, ...]] = (
     contextvars.ContextVar("prometheus_session_image_roots", default=()))
 
+#: The output path this call checked at its start, resolved. The sink writes exactly this path, without resolving it
+#: again (a link swapped in during generation would otherwise move the write).
+_CHECKED_OUTPUT: contextvars.ContextVar[Path | None] = (
+    contextvars.ContextVar("prometheus_checked_image_output", default=None))
+
 
 def _session_image_roots(workspace_roots: Any) -> tuple[Path, ...]:
     """``<workspace>/images`` for each session workspace root.
@@ -1050,9 +1064,14 @@ def _save_image_bytes(
         # that escapes the allow-list is rejected even if the literal string
         # starts under an allowed root. Raises ValueError on violation — the
         # backend callers convert that into a ToolResult(is_error=True).
-        path = assert_path_under_roots(override_path, _allowed_image_roots())
-        # Written through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q): a folder under an image root swapped
-        # for a link after the check above cannot redirect it.
+        checked = _CHECKED_OUTPUT.get()
+        if checked is not None and Path(override_path) == checked:
+            # Resolved and checked once, at the start of this call; resolving again here would follow a link
+            # swapped in during generation.
+            path = checked
+        else:
+            path = assert_path_under_roots(override_path, _allowed_image_roots())
+        # Written through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q).
         safe_fs.write_bytes(path, data)
         return str(path)
     from prometheus.gateway.media_cache import cache_image_from_bytes

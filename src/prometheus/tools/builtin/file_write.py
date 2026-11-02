@@ -60,6 +60,8 @@ class FileWriteTool(BaseTool):
         except FileNotFoundError:
             return ToolResult(output=f"Folder not found: {Path(arguments.path).parent} (create_directories is off)",
                               is_error=True)
+        except OSError as exc:
+            return ToolResult(output=f"Could not write {arguments.path}: {exc.strerror or exc}", is_error=True)
         return ToolResult(output=f"Wrote {path}")
 
 

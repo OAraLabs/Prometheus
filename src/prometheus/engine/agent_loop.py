@@ -5830,11 +5830,9 @@ async def _execute_tool_call(
             tool_name, tool_input, schema=_gate_schema, base=_run_cwd,
             write_base=_run_cwd if _run_roots else None,
         )
-        if _file_path:
-            try:
-                _decided_path = str(Path(_file_path).expanduser().resolve())
-            except (OSError, RuntimeError):
-                _decided_path = None
+        # Exactly the string the gate is handed (gate_path_for resolves it): a second resolution here could
+        # land somewhere else, and that would be what the tool opened.
+        _decided_path = _file_path or None
         # Whether that path gets WRITTEN to, from the parameter's own
         # declaration. This is what the workspace boundary keys on; it used to
         # key on a list of two tool names, and four writing tools were not in
