@@ -175,3 +175,10 @@ none holds teacher data.
      Neither one blocks the operator's conditions. **Keep-rate baseline:** across the 6,046 round-2 tasks, 351 of the refused calls were python or multi-line (201 python, 150 multi-line). Most refusals were paths outside the workspace (4,729 bash calls) and `$`/substitution (588). Only 23 tasks could be pinned to python/multi-line refusals alone, because concurrency makes most calls ambiguous. None of those 23 had sandbox_refusal as their only rejection reason. The A/B replay of 39 of these tasks (control vs flag on, same teacher, through the window's guard) is staged on the host but not armed.
   2. **Eval fix before round-2 training:** replace the single-reference wrong-tool metric with an acceptable-tool set per task, built from Max + 27B + judge agreement, plus an outcome check where the gym can run it. Report old vs new wrong-tool rates for all models.
   3. **Round-2 dataset caps:** injection ≤20%, daily-agent ≤30%, coding ≤30%. Long-context and tool-choice keep everything that passes. Keep the 40% v4b replay.
+16. **Round-2 target size vs supply.** Under the operator's caps (injection ≤20%, daily ≤30%, coding ≤30% of new rows; 40% replay), the existing real-pattern supply projects to a final train set of about 3,200–3,500 rows by around Nov 13, not 5,000. Coding, daily-agent and tool-choice have no unattempted tasks left; coding is stuck at ~27 train-ready rows plus whatever Wednesday's judge pass admits. Options:
+    - (a) train round 2 at the size reached, with a 3,500 floor like round 1;
+    - (b) re-seed coding from the same real patterns (~30–70 train rows per seed, near-duplicate risk);
+    - (c) wait for new real prompts (none since Oct 28) or Max after Nov 16 for tool-choice references;
+    - (d) relax the caps.
+
+    Default if unanswered: (a), training once the uncapped areas reach ≥600 train rows (est. ~Nov 9) and the judge pass has run.
