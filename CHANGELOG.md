@@ -6,6 +6,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 - Tasks: a `file_watch` task fires again when watchdog 7 is installed. watchdog 7.0 (2026-10-31) matches a handler's patterns against the whole path, so `*.json` stopped matching `/dir/result.json` and the task waited until its timeout. 0.9.18 allows watchdog 7, so a fresh pip install on Linux or on a Mac with Python 3.13 or older, and the Homebrew formula, got it; installs from the lock (the Mac app, `scripts/deploy.sh`) kept 6.0.0. The file's name is now matched against the pattern the same way the check for a file that is already there does.
 - Install: watchdog is a base dependency on every platform again, from 7.0, the first release with macOS wheels for Python 3.14. 0.9.18 skipped it on exactly that platform; a Mac on Python 3.14 now installs it from a wheel and gets event-driven `file_watch` instead of polling. Polling stays for an install without watchdog.
+- The model is no longer told where your machines are. The Infrastructure section of its prompt and the `anatomy` tool's answers keep what the machines can do (CPU, RAM, GPU and VRAM, the model, its engine, context window and vision) and leave out hostnames, IP addresses, URLs, the tailnet peer list and the folder a model file sits in, on local and hosted models alike. Before, a reply could quote the model server's address or list your tailnet peers. `anatomy.include_addresses: true` restores the old text. The `/anatomy` command you run yourself is unchanged.
 
 ## 0.9.18 (2026-11-02)
 
