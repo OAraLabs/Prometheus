@@ -251,3 +251,8 @@ Append-only, times in ET.
   - **Other findings:** exact arguments ~10% for all models; adapter-repair gap 0.0 for all; the CPU BF16 PPL check agrees with the GPU (9.339 vs 9.340).
   - **Round 2 since Sunday:** 1,316 rows (daily 514, injection 498, coding 182, error-recovery 108, long-context 14).
   - **Problem:** the 4090 run exhausted the taskset at 21:20 EST; an expansion agent is working on it.
+- 2026-11-01 22:30 EST — **Round-2 taskset expanded** (abddf12): 6,498 new real-pattern tasks (injection 2,242, error-recovery 861, long-context 2,412 incl. a new 256K bucket ≤254K tokens for the 4090 IQ3, daily-agent 831, coding 152), disjoint from eval sets.
+  - **Config:** round2.conf → real-r2c (5,322), with real-r2c-reserve (1,176) as fallback; 4090 long-context nights use real-r2c-lc4090 (1,789).
+  - **Exhaustion handling:** a run that runs dry now Telegrams and continues with its fallback instead of ending the window.
+  - **4090 tonight:** asked the agent to run round-2 generation tonight until the Mon 05:20 stop (operator's continuous approval) instead of leaving it idle.
+  - **Follow-ups:** long-context keep rate is ~4% (tool_error / sandbox_refusal) — the real bottleneck; steer.py ignores the 256K bucket; no new real prompts since 10-15 (a fresh conversation snapshot needs the operator's go to read the mini's live DB).
