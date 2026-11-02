@@ -2,6 +2,10 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## Unreleased
+
+- Devices: the operator can hold a device to a profile (`PUT /api/devices/{id}/profile`). Every run under that device's sessions is offered only the profile's tools and refused any other at the call, with no fallback that widens it, and the device cannot lift or change the hold. One instance can then serve its owner with every tool beside a server-to-server caller that stays read-only.
+
 ## 0.9.19 (2026-11-02)
 
 0.9.19 is a small patch release. Its fix: file_watch tasks never fired with watchdog 7 (fresh pip and Homebrew installs of 0.9.18). It also:
