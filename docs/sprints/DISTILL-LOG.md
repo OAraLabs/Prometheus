@@ -267,3 +267,8 @@ Append-only, times in ET.
   - **Path:** filter prompts to a 10–90% pass rate → single-step pilot of 300 steps → multi-turn only if it passes.
   - **Key choices:** no judge in the reward loop; the KL reference must be the merged round-2 SFT model.
   - **Next:** a ~30-min dry run in a window decides go/no-go (≥9 steps/h).
+- 2026-11-01 23:09 EST — **Scorer: wrong-tool rate + argument equivalence** (008479c, scorecard section 197e291).
+  - **Tool choice:** the student's whole gain is calling a tool at all (no-call 11.6% → 1.2%). Wrong-tool rate did not improve: Q4 17.6% vs same-recipe base 13.4% (+4.3 [−0.2, +8.7]) and Unsloth base 15.2%.
+  - **Arguments:** equivalence (canonical + sandboxed execution) adds one case in six runs, so the ~10% exact-argument rate is real. Most pairs are undecidable because expected calls touch paths outside the gym snapshot.
+  - **Checker check:** 19/19 decisive verdicts matched hand labels.
+  - **Round 2:** tool choice is the priority; confusion pairs were sent to the tool-choice agent.
