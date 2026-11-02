@@ -60,10 +60,11 @@ def resolve_denied(denied_paths: Iterable[str] | None) -> tuple[str, ...]:
     floored file: the root is not denied, and the prune saw only the config.
     """
     from prometheus.config.local_pairing import pairing_dir
-    from prometheus.permissions.checker import _ALWAYS_DENIED_PATHS
+    from prometheus.permissions.checker import _ALWAYS_DENIED_PATHS, _this_process_state
 
     out: list[str] = []
-    for raw in (*_ALWAYS_DENIED_PATHS, str(pairing_dir().resolve()), *(denied_paths or ())):
+    for raw in (*_ALWAYS_DENIED_PATHS, str(pairing_dir().resolve()), *_this_process_state(writes=False),
+                *(denied_paths or ())):
         text = str(raw).strip()
         if not text:
             continue

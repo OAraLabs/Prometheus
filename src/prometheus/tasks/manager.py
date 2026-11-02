@@ -1200,7 +1200,10 @@ class BackgroundTaskManager:
         # for another: the overlay only ever holds what this process was given.
         overlay = self._task_env.get(task_id)
         if task_id in self._unfloored:
-            argv = ["/bin/bash", "-lc", task.command]
+            # Outside the floor, so no login file runs first (security/unconfined_shell.py).
+            from prometheus.security.unconfined_shell import UNCONFINED_SHELL, unconfined_shell_env
+
+            argv = [*UNCONFINED_SHELL, task.command]
             # A command the daemon built (a worker, a spawned agent, a coding
             # run): provider keys and nothing else secret. Never os.environ
             # whole, with or without an overlay: it holds the API token, and a
@@ -1208,7 +1211,7 @@ class BackgroundTaskManager:
             # (tasks/child_env.py).
             from prometheus.tasks.child_env import task_child_env
 
-            env = task_child_env(overlay, config_path=self.child_config_path)
+            env = unconfined_shell_env(task_child_env(overlay, config_path=self.child_config_path))
         else:
             # A model-written command: the bash tool's read floor, write floor
             # and environment scrub. Raises ShellFloorRefused BEFORE anything

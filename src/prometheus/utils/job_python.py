@@ -13,9 +13,9 @@ WHAT. ``job_shell_command`` wraps a job's command so that, inside the job's
 shell, ``python3`` and ``python`` resolve to ``sys.executable``: the
 interpreter the daemon itself runs, with the packages ``uv.lock`` describes.
 The wrappers are two small scripts in ``<data dir>/job-python``, put first on
-PATH AFTER the login shell has read its profile (the jobs run under
-``bash -lc``, and ``~/.profile`` prepends to PATH), so a command finds them
-wherever it says ``python3``: ``cd x && python3``, ``timeout 60 python3``,
+PATH in front of the daemon's own (the jobs run under ``bash --noprofile
+--norc -c``, security/unconfined_shell.py: no login file runs), so a command
+finds them wherever it says ``python3``: ``cd x && python3``, ``timeout 60 python3``,
 ``env python3``. An absolute interpreter path is the job author's choice and
 is left alone.
 
@@ -95,7 +95,7 @@ def ensure_python_shims() -> Path:
 
 
 def job_shell_command(command: str) -> str:
-    """The script a cron job's ``bash -lc`` runs: ``command``, with ``python3`` = the daemon's.
+    """The script a cron job's shell runs: ``command``, with ``python3`` = the daemon's.
 
     If the wrappers cannot be written the command runs unchanged and the miss
     is a WARNING: a job is never refused over this.
