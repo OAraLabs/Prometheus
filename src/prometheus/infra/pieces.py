@@ -152,7 +152,7 @@ def _resolve(host: str) -> list[str]:
         return []
     seen: list[str] = []
     for info in infos:
-        address = str(ipaddress.ip_address(info[4][0].split("%", 1)[0]))
+        address = str(ipaddress.ip_address(str(info[4][0]).split("%", 1)[0]))
         if address not in seen:
             seen.append(address)
     return seen
