@@ -678,6 +678,14 @@ class Doctor:
                 message=f"{state.gpu_name} detected but VRAM stats unavailable",
                 fix="Ensure nvidia-smi is accessible (locally or via SSH).",
             )
+        if state.gpu_is_remote and state.gpu_probe_method == "not_configured":
+            # Inference runs on another machine and no SSH user is set to read
+            # its card. That is not "no GPU", and it is not running on CPU.
+            return DiagnosticCheck(
+                name="GPU", category="resources", status="info",
+                message="Inference GPU on another machine: not configured",
+                fix="Set anatomy.ssh_user and anatomy.ssh_key to read its VRAM.",
+            )
         return DiagnosticCheck(
             name="GPU", category="resources", status="warning",
             message="No GPU detected",
