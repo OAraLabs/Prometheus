@@ -970,7 +970,8 @@ class TestDaemonOrdering:
             "session_manager / agent_loop wiring": wired,
             "adapter / job .start()": adapter_starts,
             "cron scheduler": calls("run_scheduler_loop"),
-            "memory extractor": calls("MemoryExtractor"),
+            # Built inside start_memory_extraction (memory.extraction.enabled).
+            "memory extractor": calls("start_memory_extraction"),
             "golden-trace exporter": calls("GoldenTraceExporter"),
             "web server": calls("launch_web"),
         }
