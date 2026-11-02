@@ -321,3 +321,12 @@ Append-only, times in ET.
     - Thu: same as Tue.
     - Fri: same as Tue. Its remote-generation preflight stopped on gen_runner's real-clock 72 h limit.
     - The 4090's "end after the window end" notes on Wed–Fri come from the same real-clock checks; the 4090 side doesn't take the faked clock.
+
+## 2026-11-02 ~10:00 EST: sandbox review → not enabled
+- **Verdict:** the adversarial review of the hardened gym profile (74df06d) is NOT SAFE yet.
+  - **What held:** network, host paths, secrets/env, fds, kill paths, tar traversal and fail-closed.
+  - **Finding 1 (HIGH):** importer sparse-member amplification.
+  - **Finding 2:** socket-family filter missing.
+  - **Finding 3:** the jail keeps the host uid's groups (needs a dedicated account → root → OQ17).
+  - **Findings 4–5:** LOW.
+- **Next:** a fix agent is working on findings 1, 2, 4 and 5. `--hardened-exec` stays OFF; there's no keep-rate A/B until the fixes land and pass a re-review.

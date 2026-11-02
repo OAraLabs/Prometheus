@@ -182,3 +182,15 @@ none holds teacher data.
     - (d) relax the caps.
 
     Default if unanswered: (a), training once the uncapped areas reach ≥600 train rows (est. ~Nov 9) and the judge pass has run.
+17. **OQ14 follow-up: the hardened sandbox is NOT enabled.** The independent adversarial review (2026-11-02) found no escape from the jail itself. It did find:
+    - **HIGH:** a forged export of sparse tar members makes the trusted importer use unbounded host memory and disk (20 KB in → 384 MiB on disk);
+    - **MEDIUM:** socket families are not filtered, so AF_ALG and netlink are reachable;
+    - **LOW:** partial apply on a malformed export, and smaller hardening items.
+
+    Fixes are in progress (flag stays OFF). One condition needs root and therefore you:
+    - **Problem:** inside its namespace the jail is uid 65534, but at the kernel level it is still the main account (uid 1000) and keeps that account's supplementary groups (sudo, docker, adm).
+    - **Why it matters:** nothing in the jail can use them today, but a kernel escape would land with docker-group rights.
+    - **Fix:** run the gym under a dedicated account with no sudo or docker membership, like the existing sandbox user pattern.
+    - **Ask:** create that account (needs sudo), or accept the risk explicitly.
+
+    Default if unanswered: keep python and multi-line bash disabled.
