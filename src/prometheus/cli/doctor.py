@@ -293,13 +293,28 @@ def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[Diagn
     # httpx turns ``user:pass@`` into a Basic auth header. Only what is
     # DISPLAYED goes through redact_url below.
     from prometheus.providers.openai_compat import models_url
-    from prometheus.providers.registry import resolve_model_base_url
+    from prometheus.providers.registry import local_server_headers, resolve_model_base_url
 
     base_url = resolve_model_base_url(model_cfg)
+    try:
+        # A server started with a key (llama.cpp's --api-key) answers only with it.
+        headers = local_server_headers(model_cfg)
+    except ValueError as exc:
+        reach = DiagnosticCheck(
+            name="Inference", category="connectivity", status="error",
+            message=f"{provider} at {redact_url(base_url)}: {exc}",
+            fix=f"Add the key to {get_env_file_path()}, or clear model.api_key_env if the server takes none.",
+        )
+        model = DiagnosticCheck(
+            name="Model", category="model", status="error",
+            message="no model detected (the server's key is not set)",
+            fix=None,
+        )
+        return reach, model
     detected: list[str] = []
     error: str | None = None
     try:
-        resp = httpx.get(models_url(base_url), timeout=timeout)
+        resp = httpx.get(models_url(base_url), timeout=timeout, headers=headers)
         resp.raise_for_status()
         detected = [str(m.get("id", "")) for m in resp.json().get("data", [])]
     except Exception as exc:
