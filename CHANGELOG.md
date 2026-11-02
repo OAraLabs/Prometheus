@@ -4,6 +4,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- The model is no longer told where your machines are. The Infrastructure section of its prompt and the `anatomy` tool's answers keep what the machines can do (CPU, RAM, GPU and VRAM, the model, its engine, context window and vision) and leave out hostnames, IP addresses, URLs, the tailnet peer list and the folder a model file sits in, on local and hosted models alike. Before, a reply could quote the model server's address or list your tailnet peers. `anatomy.include_addresses: true` restores the old text. The `/anatomy` command you run yourself is unchanged.
 - `memory.extraction.enabled: false` stops memory being learned from chats. The fact extractor, the wiki compile after it, the SENTINEL insight writer, the agent's `memory` tool and `wiki_query`'s saving of questions are not built or started. Recall, `/note` and the memory editor are unchanged. `prometheus doctor` reports the switch.
 
 ## 0.9.18 (2026-11-02)

@@ -90,7 +90,7 @@ def test_only_a_literal_true_sends_the_layout_to_hosted_routes(config, on):
 def test_the_boot_prompt_fences_the_section_on_both_build_paths(home, tmp_path, profile):
     prompt = _boot(tmp_path, profile)
     assert prompt.count(INFRASTRUCTURE_START) == 1 and prompt.count(INFRASTRUCTURE_END) == 1
-    assert "peer-alpha" in prompt, "a local route must still see the layout"
+    assert "Example GPU 24 GB" in prompt, "a local route must still see the layout (its capabilities; addresses: test_anatomy_model_view.py)"
 
 
 @pytest.mark.parametrize("profile", [None, AgentProfile(name="full")], ids=["toggles", "profile"])
@@ -152,12 +152,12 @@ def test_what_a_hosted_model_is_sent_has_no_layout(home, tmp_path, provider_name
 @pytest.mark.parametrize("provider_name", ["llama_cpp", "ollama"])
 def test_what_a_local_model_is_sent_keeps_the_layout(home, tmp_path, provider_name):
     sent = _send(_Recorder(provider_name), _boot(tmp_path), tmp_path)
-    assert "peer-alpha" in sent and INFRASTRUCTURE_ON_DEMAND not in sent
+    assert "Example GPU 24 GB" in sent and INFRASTRUCTURE_ON_DEMAND not in sent
 
 
 def test_the_setting_sends_the_layout_to_a_hosted_model(home, tmp_path):
     sent = _send(_Recorder("anthropic"), _boot(tmp_path), tmp_path, infrastructure_in_hosted_prompt=True)
-    assert "peer-alpha" in sent
+    assert "Example GPU 24 GB" in sent
 
 
 def test_a_session_routed_to_a_hosted_model_is_judged_by_its_route(home, tmp_path):

@@ -2155,9 +2155,16 @@ class TestSprint18AnatomyWiring:
             prompt = build_runtime_system_prompt(cwd=str(tmp_path))
 
         static, _ = prompt.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
-        # The real hostname should appear in the static section via ANATOMY.md
-        assert state.hostname in static
+        # The section arrives with what the machine can do, but not its name:
+        # the model reads "this machine" (infra/model_view.py). A hostname that
+        # local_names() skips (loopback, under 3 characters) stays readable.
+        from prometheus.infra.model_view import local_names
+
         assert "## Infrastructure" in static
+        assert state.cpu[:40] in static
+        if state.hostname.lower() in local_names():
+            assert state.hostname not in static
+            assert "| this machine | Host |" in static
 
     def test_update_active_preserves_architecture(self, tmp_path: Path) -> None:
         """AnatomyWriter.update_active_section updates VRAM without clobbering other sections."""
