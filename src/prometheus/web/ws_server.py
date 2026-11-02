@@ -1739,6 +1739,9 @@ class WebSocketBridge:
         # Why the LOOP ended the turn (AssistantTurnComplete.stop_reason), or
         # None when the model chose to stop. Sent on chat_done.
         stop_reason: str | None = None
+        # The model that answered the turn's last answered round
+        # (AssistantTurnComplete.served_model). Sent on chat_done as served_by.
+        served_by: str | None = None
         last_usage: Any = None
         original_len: int | None = None
         messages: list | None = None
@@ -1780,6 +1783,7 @@ class WebSocketBridge:
                             "payload": {"session_id": session_id, "content": rest, "message_id": msg_id},
                         })
                     stop_reason = getattr(event, "stop_reason", None) or None
+                    served_by = getattr(event, "served_model", None) or served_by
                     # One model call finished; anything further is a new round.
                     progress["round"] = int(progress["round"]) + 1
                     round_start = len(accumulated)
@@ -1890,6 +1894,10 @@ class WebSocketBridge:
             if stop_reason:
                 # Additive, like the round cap's: why the loop ended the turn.
                 done_payload["stop_reason"] = stop_reason
+            if served_by:
+                # Additive too: the model that answered, which a fallback makes
+                # differ from the configured one.
+                done_payload["served_by"] = served_by
             await self.broadcast({
                 "type": "chat_done",
                 "timestamp": time.time(),
@@ -1931,6 +1939,8 @@ class WebSocketBridge:
             # the same row the stream left it on.
             if interrupted_row_id is not None:
                 done_payload["row_id"] = interrupted_row_id
+            if served_by:
+                done_payload["served_by"] = served_by
             await self.broadcast({
                 "type": "chat_done",
                 "timestamp": time.time(),
@@ -1975,6 +1985,8 @@ class WebSocketBridge:
             }
             if capped_row_id is not None:
                 done_payload["row_id"] = capped_row_id
+            if served_by:
+                done_payload["served_by"] = served_by
             await self.broadcast({
                 "type": "chat_done",
                 "timestamp": time.time(),

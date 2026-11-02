@@ -93,6 +93,8 @@ class RunResult:
     messages: list[ConversationMessage]
     usage: UsageSnapshot = field(default_factory=UsageSnapshot)
     turns: int = 0
+    # The model that answered the turn's last answered round (AssistantTurnComplete.served_model).
+    served_model: str | None = None
 
 
 class _IterationReason:
@@ -3163,7 +3165,13 @@ async def _run_loop(
                     }
                 )
             messages.append(final_message)
-            yield AssistantTurnComplete(message=final_message, usage=usage), usage
+            # What the server said it ran, else the fallback that took the round, else the
+            # model the round asked for. A degrade with no name is unknown, never the primary.
+            _deg = degrade_notice_this_turn[0] if degrade_notice_this_turn else None
+            answered_by = served_model_this_turn or (
+                _deg.model if _deg is not None else context.model) or None
+            yield AssistantTurnComplete(
+                message=final_message, usage=usage, served_model=answered_by), usage
             # SUNRISE PeriodicNudge: one completed assistant round. Ask the
             # nudge whether this round is a multiple of its interval and, if
             # so, owe the text to the NEXT model call (below). A run that
@@ -6539,6 +6547,7 @@ class AgentLoop:
 
         last_text = ""
         last_usage = UsageSnapshot()
+        served_model: str | None = None
         turns = 0
         self._tool_trace = []
         # Each call's input, by tool_use id, so a trace entry can say WHAT was
@@ -6557,6 +6566,7 @@ class AgentLoop:
             if isinstance(event, AssistantTurnComplete):
                 last_text = event.message.text
                 last_usage = event.usage
+                served_model = event.served_model or served_model
                 turns += 1
             elif isinstance(event, ToolExecutionStarted):
                 started_inputs[event.tool_use_id] = dict(event.tool_input or {})
@@ -6575,6 +6585,7 @@ class AgentLoop:
             messages=messages,
             usage=last_usage,
             turns=turns,
+            served_model=served_model,
         )
 
         # Post-task learning hooks — fire each in registration order;
