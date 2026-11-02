@@ -549,7 +549,12 @@ def _tc_inputs(tmp_path: Path) -> dict[str, Any]:
 def test_tool_choice_rows_carry_the_max_reference_and_its_confused_neighbours(built: Any, tmp_path: Path) -> None:
     _rep, _out, (a, lc_eval, mpath) = built
     x = _tc_inputs(tmp_path)
-    rep = _rebuild(a, tmp_path / "tc", areas="tool-choice", eval_tools=[str(x["cases"])],
+    gym_only = _rebuild(a, tmp_path / "tc0", areas="tool-choice", eval_tools=[str(x["cases"])],
+                        tc_gym_traces=[str(x["gym"])], tc_golden=[str(x["golden"])],
+                        tc_eval_results=[str(tmp_path / "results" / "*" / "eval-tools.jsonl")],
+                        tc_base=[str(x["tc_base"])])
+    assert gym_only["tool_choice"]["by_source"] == {"gym-max": 1}  # golden references are opt-in
+    rep = _rebuild(a, tmp_path / "tc", areas="tool-choice", eval_tools=[str(x["cases"])], tc_allow_golden=True,
                    tc_gym_traces=[str(x["gym"])], tc_golden=[str(x["golden"])],
                    tc_eval_results=[str(tmp_path / "results" / "*" / "eval-tools.jsonl")], tc_base=[str(x["tc_base"])])
     rows = ts.load_taskset(tmp_path / "tc" / "real-t-r2-toolchoice.jsonl")

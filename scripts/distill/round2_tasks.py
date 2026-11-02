@@ -55,9 +55,11 @@ plus an ``r2`` block (``taskset_gen.validate_r2``) this file builds by code:
   unrelated mix and no listing the teacher read files it guessed the names of.
 * ``daily-agent`` / ``coding``: the real rows of those categories, unchanged.
 * ``tool-choice`` (``--tc-*``): a real row whose right first tool a Max trace shows: Max's own
-  first call on that exact gym task (``--tc-gym-traces``), else the first call after the real
-  prompt the row was built from in the live golden traces (``--tc-golden``: a slot-filled row of
-  it, or a recombined row ending on it), kept only when that tool has near-neighbours
+  first call on that exact gym task (``--tc-gym-traces``); with ``--tc-allow-golden`` also the first
+  call after the real prompt the row was built from in the live golden traces (``--tc-golden``: a
+  slot-filled row of it, or a recombined row ending on it; off by default: chosen with the
+  conversation's history, it rarely is the right first call in the gym), kept only when that tool
+  has near-neighbours
   (``tool_neighbours``: the eval-tools wrong-tool confusions of scored models, its family, an
   overlapping description). Deterministic verifier (``teacher_gen.py``): the turn's first call
   (a ``todo_write`` plan skipped) is the reference (``TC_EQUIVALENT``: none yet), and the task
@@ -963,12 +965,13 @@ def row_hashes(row: dict[str, Any]) -> set[str]:
     return {x for x in out if x}
 
 
-def tc_reference(row: dict[str, Any], gym: dict[str, str], golden: dict[str, str]) -> tuple[str | None, str]:
+def tc_reference(row: dict[str, Any], gym: dict[str, str], golden: dict[str, str],
+                 allow_golden: bool = False) -> tuple[str | None, str]:
     """(the row's right first tool, where it came from): Max's own first call on this exact gym task, else
     (golden) the first call after the real prompt the row was built from: a slot_fill / slot_swap row's
     template; a recombined row's last piece (the request it ends on), when its first piece agrees or has none."""
     ref = gym.get(row["id"][3:])
-    if ref:
+    if ref or not allow_golden:
         return ref, "gym-max"
     srcs = row.get("sources") or []
     if row.get("transform") in ("slot_fill", "slot_swap"):
@@ -1424,7 +1427,7 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
             if row_hashes(r) & ev_hashes:
                 stats["tc_eval_tools_task_dropped"] += 1
                 continue
-            ref, src = tc_reference(r, gym, golden)
+            ref, src = tc_reference(r, gym, golden, allow_golden=bool(getattr(a, "tc_allow_golden", False)))
             if ref is None:
                 continue
             if src == "golden-max" and (len(r["prompt"].split()) < TC_MIN_WORDS or live_host_prompt(r["prompt"])):
@@ -1673,6 +1676,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="tool-choice references: traces of a Max teacher run in the gym (teacher_gen.py)")
     b.add_argument("--tc-golden", action="append", default=[], metavar="GLOB",
                    help="tool-choice references: built train/val rows holding the live golden Max steps")
+    b.add_argument("--tc-allow-golden", action="store_true",
+                   help="also use the golden references (off by default: chosen with the conversation's history, "
+                        "they matched the gym teacher's first call 1 time in 21 on 2026-11-02, against 13 in 35 "
+                        "for the gym references)")
     b.add_argument("--tc-eval-results", action="append", default=[], metavar="GLOB",
                    help="score.py per-case eval-tools results of any model: the wrong-tool confusions")
     b.add_argument("--tc-base", action="append", default=[], metavar="GLOB",
