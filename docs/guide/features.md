@@ -216,6 +216,8 @@ The local engines stay as the fallback:
 - **Key refused (401 or 403):** that request runs locally too, but the log gets an ERROR, because a wrong key does not fix itself.
 - **Request rejected (400, such as an unknown voice or model):** the same, with an ERROR that quotes the server's reason.
 
+**Without editing a file.** A voice box can also join by its address alone: the owner sends `POST /api/pieces/probe {"address": "<machine>[:<port>]"}` (Beacon does this when you type the address), Prometheus finds the speech-to-text and text-to-speech servers there and asks once, "Found a voice box… Use it?", and after `POST /api/pieces/{id}/approve` voice uses it from the next message, with no restart. For now this works for a box on this machine or a mesh VPN address over plain HTTP. Such a box can't prove who it is, so it is labelled "not verified" and is given no key. A `stt.url` or `tts.url` in `prometheus.yaml` still wins.
+
 `oara doctor` shows a **Remote STT** or **Remote TTS** row for each url you set. It reports whether the server answers and whether it refused the key. Doctor asks for the server's `/health` first, at the server root beside `/v1`. It then asks for the `/v1/models` list, if the server has one, to check the key. A server that serves only `/health` counts as reachable. The key is sent as you configured it, so use https or a private network for a server on another machine.
 
 ### Paperclip gateway — Default: off. Experimental

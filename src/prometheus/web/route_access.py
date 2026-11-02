@@ -215,6 +215,11 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     # /api/pieces — the fleet view of the services Prometheus connects out to (docs/contracts/pieces.md);
     # approving one is the owner's, and so is seeing them.
     ("GET", "/api/pieces"),
+    ("POST", "/api/pieces/probe"),
+    ("POST", "/api/pieces/{piece_id}/approve"),
+    ("POST", "/api/pieces/{piece_id}/deny"),
+    ("POST", "/api/pieces/{piece_id}/ignore"),
+    ("DELETE", "/api/pieces/{piece_id}"),
     # /api/pair
     ("GET", "/api/pair/requests"),
     ("POST", "/api/pair/requests/{request_id}/approve"),
