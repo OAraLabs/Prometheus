@@ -256,3 +256,4 @@ Append-only, times in ET.
   - **Exhaustion handling:** a run that runs dry now Telegrams and continues with its fallback instead of ending the window.
   - **4090 tonight:** asked the agent to run round-2 generation tonight until the Mon 05:20 stop (operator's continuous approval) instead of leaving it idle.
   - **Follow-ups:** long-context keep rate is ~4% (tool_error / sandbox_refusal) — the real bottleneck; steer.py ignores the 256K bucket; no new real prompts since 10-15 (a fresh conversation snapshot needs the operator's go to read the mini's live DB).
+- 2026-11-01 22:35 EST — The 4090 is back on round-2 generation since 22:31: teacher distill-jobs-r2teacher@20261101-2231-1 (4×32K, GPU 95%), mini r2-gen-tower-sun-20261101-223124 on real-r2c with reserve fallback, until Mon 05:18; flywheel-r2-end restores business at 05:20. Agents working: snapshot (backup API), scorer metrics, long-context fix + tool-choice, GRPO plan.
