@@ -109,3 +109,98 @@ The +3.0-pt rule fires by 10 cases (+3.04), but the paired interval includes 0. 
 - **Phase 6 path:** the GPU BF16 imatrix crashed, so it now runs on a Q8_0 copy. See DISTILL-LOG, Sun 11:50–12:50.
 
 Sources: `~/distill/phase7/9b-r32-v4b-max-derived/report/DISTILL-PHASE7-SCORES.md` and `summaries/` on the 3090 Ti host. The subset ids are in `DISTILL-PHASE7-SUBSET.json`.
+
+## Tool choice and argument equivalence (added 2026-11-01)
+
+Operator ask (Sun ~23:00): make wrong-tool rate a headline metric, and add an argument-equivalence check beside exact match. Same stored eval-tools replies as above (the six full runs, plus Student BF16 on the 100-case subset); no new requests.
+
+**What changed in the scorer.** `score.py` (still v4: the gated metrics are unchanged) now gives every scored eval-tools case exactly one outcome, so the misses add up with the successes to 100%:
+
+- **wrong tool:** the first call names an offered tool other than the expected one;
+- **no call:** no call when one was needed;
+- **extra call:** a call when none was needed (this set has no such cases, so it is 0 everywhere);
+- **other misses:** a tool the case doesn't offer, the right tool but the case still failed, or no readable reply.
+
+`compare` prints these as headline rows with paired deltas. They are information only: the Phase 6 gate is unchanged and none of them is gated.
+
+**Argument equivalence** (`scripts/distill/arg_equiv.py`) sits beside exact match. Two calls to the same tool are equivalent when they would have the same effect. Every case records the tier that decided it:
+
+1. **exact:** equal the way exact match compares.
+2. **canonical:** equal after identities that can be proven:
+   - JSON normalization;
+   - schema defaults filled in, and null optional arguments dropped;
+   - paths: `~`, relative paths against the case's working directory, `./`, doubled slashes, and a directory's trailing slash;
+   - shell: whitespace, quoting (except where it changes meaning), an unquoted `~`, a trailing `;`, a leading `cd` to the working directory, and the order of boolean flags for a few programs.
+3. **execution:** for bash and read_file. Both calls run in the gym's sandbox: the `teacher_gen` grammar, bwrap, and a clone of the gym's repo store (27055dbf). Each call runs in two snapshots, the fixture and a padded copy, and the first snapshot is run twice. A pair is "equivalent" only when both calls exit 0 with output that isn't empty and the output and workspace effects are identical in both snapshots. It is "not equivalent" when both run cleanly and differ.
+4. **conservative:** a write tool (edit, write, task or memory) with different arguments counts as not equivalent and is never run.
+5. **undecidable:** everything else. It is counted on its own and never guessed. The proven rate is a lower bound. The upper bound adds the undecidable cases.
+
+### Per model
+
+| Model | Task success | Wrong tool | No call | Extra call | Other misses | Exact args | Arg equivalence (proven) | Undecidable | Equivalence upper bound |
+|---|---|---|---|---|---|---|---|---|---|
+| Student Q4 | 80.5% [75.9, 84.5] | **17.6%** (58) [13.9, 22.1] | 1.2% (4) [0.5, 3.1] | 0.0% | 0.6% (2) | 9.0% (24/267) [6.1, 13.0] | 9.0% (24/267) [6.1, 13.0] | 227 | 94.0% |
+| Student Q5 | 83.6% [79.2, 87.2] | **14.6%** (48) [11.2, 18.8] | 1.8% (6) [0.8, 3.9] | 0.0% | 0.0% | 8.7% (24/275) [5.9, 12.7] | 8.7% (24/275) [5.9, 12.7] | 237 | 94.9% |
+| Student BF16 (100-case subset) | 81.0% [72.2, 87.5] | **18.0%** (18) [11.7, 26.7] | 1.0% (1) [0.2, 5.4] | 0.0% | 0.0% | 4.9% (4/81) [1.9, 12.0] | 4.9% (4/81) [1.9, 12.0] | 70 | 91.4% |
+| Base (same recipe) | 75.1% [70.1, 79.4] | **13.4%** (44) [10.1, 17.5] | 11.6% (38) [8.5, 15.5] | 0.0% | 0.0% | 9.7% (24/247) [6.6, 14.1] | 9.7% (24/247) [6.6, 14.1] | 210 | 94.7% |
+| Base (Unsloth) | 72.3% [67.3, 76.9] | **15.2%** (50) [11.7, 19.5] | 12.5% (41) [9.3, 16.5] | 0.0% | 0.0% | 10.1% (24/238) [6.9, 14.6] | 10.1% (24/238) [6.9, 14.6] | 204 | 95.8% |
+| 27B | 72.9% [67.9, 77.5] | **19.8%** (65) [15.8, 24.4] | 7.3% (24) [5.0, 10.6] | 0.0% | 0.0% | 11.2% (27/240) [7.8, 15.9] | 11.7% (28/240) [8.2, 16.3] | 201 | 95.4% |
+| Saluki | 70.5% [65.4, 75.2] | **24.3%** (80) [20.0, 29.2] | 5.2% (17) [3.3, 8.1] | 0.0% | 0.0% | 9.5% (22/232) [6.3, 13.9] | 9.5% (22/232) [6.3, 13.9] | 196 | 94.0% |
+
+Each row sums to 100%: task success, wrong tool, no call, extra call and other misses. Brackets are Wilson 95% intervals. Both argument columns count only cases where the right tool was named, the same denominator as exact args. Student Q4's 2 other misses are the 2 calls cut off at the output limit.
+
+**Which tier decided each case:**
+
+| Model | Exact | Canonical | Execution (all "differ") | Conservative | Undecidable |
+|---|---|---|---|---|---|
+| Student Q4 | 24 | 0 | 10 | 6 | 227 |
+| Student Q5 | 24 | 0 | 10 | 4 | 237 |
+| Student BF16 (subset) | 4 | 0 | 5 | 2 | 70 |
+| Base (same recipe) | 24 | 0 | 7 | 6 | 210 |
+| Base (Unsloth) | 24 | 0 | 8 | 2 | 204 |
+| 27B | 27 | 1 | 7 | 4 | 201 |
+| Saluki | 22 | 0 | 8 | 6 | 196 |
+
+### Student vs base, paired
+
+| Comparison | Wrong-tool rate Δ (n = 329) | Paired 95% CI | Arg equivalence Δ (cases where both named the tool) | Paired 95% CI |
+|---|---|---|---|---|
+| Q4 vs base (same recipe) | +4.3 (13.4 → 17.6) | [−0.2, +8.7] | −0.5 (n = 222) | [−2.4, +1.3] |
+| Q4 vs base (Unsloth) | +2.4 (15.2 → 17.6) | [−2.2, +7.1] | +0.0 (n = 216) | [−2.1, +2.1] |
+| Q5 vs base (same recipe) | +1.2 (13.4 → 14.6) | [−2.8, +5.3] | −0.9 (n = 228) | [−3.0, +1.0] |
+| Q5 vs base (Unsloth) | −0.6 (15.2 → 14.6) | [−5.0, +3.8] | −0.5 (n = 221) | [−2.4, +1.4] |
+
+Δ is the student minus the base. A positive wrong-tool Δ means more wrong tools. Intervals are Newcombe intervals.
+
+### Checker vs hand labels
+
+Labelled sample: **50 inexact pairs.**
+- 25 most similar pairs (word overlap, across all six models), plus 15 random ones;
+- every distinct pair that execution decided (12 more);
+- 2 pairs dropped as unknowable: an edit whose wider context appears nowhere in the case.
+
+Labels were made from the call shapes. The labels and the report are kept on the 3090 Ti host as ids and verdicts only.
+
+Results:
+- **Proven "equivalent": precision 1/1, recall 1/2.** The miss is an edit whose wider context is in the file. The checker rightly calls it undecidable, since only the file can tell.
+- **Every decisive verdict agrees with the labels (19/19):** 1 canonical, 13 execution "differ", 5 conservative.
+- **Undecidable pairs:** 31, of which the labels call 1 equivalent and 30 not.
+- **True equivalence is rare even in the similarity-enriched sample:** only 2 of the 50 labelled pairs are equivalent.
+
+### What this says
+
+- **(a) Tool choice:** the student is not better at picking the tool. Its wrong-tool rate is 17.6% at Q4, vs 13.4% for the same-recipe base. That difference is not significant: the interval reaches −0.2. Its whole gain is in making a call at all: no-call misses drop from 11.6% to 1.2%.
+  - **Where the student's calls went** (Q4 vs same-recipe base):
+    - 25 base no-calls became successes;
+    - 10 base no-calls became wrong tools;
+    - 24 base successes became wrong tools, and 19 cases went the other way.
+  - **The student's wrong tools:** bash ↔ edit_file (16), bash → read_file (5), and the task_* tools ↔ bash (19).
+  - Round 2's focus on tool choice targets the right thing.
+- **(b) Arguments:** equivalence moves the number by at most one case per model. The only canonical match is the 27B writing `~/…` for an absolute path. Every pair that execution could decide (50 across the six runs) really differs.
+  - **Why most pairs are undecidable:**
+    - 77% of them have an expected call that names paths the fixture can't have: other repos, worktrees, `/tmp`, and `~/.prometheus`.
+    - 20% have an expected call that uses something the sandbox refuses: `gh`, docker, interpreters, the network, `$` expansions, and multi-line scripts.
+  - **So** the ~10% exact-match rate is not a scoring artefact. The reference calls are long diagnostic scripts, and the models write different, if often reasonable, ones. With an upper bound of 94–96%, this eval set can't separate "equivalent" from "different but fine".
+  - **Next step:** a usefulness judgement on the call ("does it make the same progress?") would be a different metric, not equivalence.
+
+Sources: `~/scratch-arg-equiv/out/` on the 3090 Ti host (`full.json`, `bf16.json`, `validate.json`, `labels.json`, ids and verdicts only).
