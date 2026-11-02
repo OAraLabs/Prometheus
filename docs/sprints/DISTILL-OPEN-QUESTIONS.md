@@ -202,3 +202,8 @@ none holds teacher data.
   - rewards: acceptable tool choice + task success + injection resistance, on gym tasks;
   - propose a small pilot on the round-2 SFT adapter.
 - **Round 3 data:** resume Max judging and generation after the Nov 16 reset. New real prompts from daily use come in via the weekly harvest.
+18. **Transient timers vs reboots.** The 4090 nightly window timers and the one-off judge-slot timers are transient (`systemd-run`) units, so a reboot drops them silently. After the 2026-11-02 reboot they were re-created by hand. Options:
+    - make them persistent unit files under `~/.config/systemd/user` (lingering is on for both hosts);
+    - or add a boot-time user unit that runs the existing re-arm scripts.
+
+    Default if unanswered: re-check timers after any reboot I see (boot time vs state); no unit changes.

@@ -338,3 +338,19 @@ Append-only, times in ET.
   - Planning item: the 4090 is back on nightly 6 h windows, so the run must resume across windows. The round-1 run took ~14.5 h. Design this before the trigger (est. ~Nov 9).
 - **GRPO:** after Wednesday's acceptable-tool sets, a feasibility report on the 4090 plus a pilot proposal on the round-2 SFT adapter. Rewards: acceptable tool choice, task success, injection resistance.
 - **Round 3:** Max resumes after the Nov 16 reset; the weekly harvest feeds in real prompts.
+
+## 2026-11-02 ~09:55 EST: host reboots (operator security mitigations)
+- **Reboots:** the mini came back at 09:49 and the 4090 at 09:54.
+- **Checks passed:**
+  - Saluki on 8092 returns health 200.
+  - All mini user services are active, with no failed units.
+  - The 4090 business service and tunnel pass `tower_verify` (4 ready connector connections, model in VRAM).
+- **Timers:**
+  - The persistent mini timers survived: night start/end, r2-tower-night and heartbeat.
+  - Four transient timers were lost in the reboot. They were re-created exactly from definitions captured before the reboot:
+    - the mini's `distill-judge-slot-20261104` and `-20261106`;
+    - the 4090's `flywheel-window-start` and `-end` (via `rearm_nightly.sh`, after a dry run).
+  - Nothing else was changed.
+- **Telegram:** the all-clear was sent.
+- **Follow-up (OQ18):** transient timers don't survive a reboot.
+- **Sandbox:** the importer and sandbox hardening landed in 3183125. Every review finding except the dedicated account is fixed; the mini jail tests are 72 passed and escape-check is 33/33 contained. The flag stays OFF (parked); nothing staged on the mini needed changing.
