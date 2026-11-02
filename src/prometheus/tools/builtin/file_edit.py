@@ -12,6 +12,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from prometheus.permissions.path_schema import PATH_FIELD_WRITE
+from prometheus.security import safe_fs
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -46,11 +47,14 @@ class FileEditTool(BaseTool):
         arguments: FileEditToolInput,
         context: ToolExecutionContext,
     ) -> ToolResult:
-        path = _resolve_path(context.cwd, arguments.path)
-        if not path.exists():
+        # The path the gate checked, opened through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q).
+        try:
+            path = safe_fs.resolve_tool_path(arguments.path, context.cwd, context.metadata)
+            original = safe_fs.read_text(path)
+        except safe_fs.PathChanged as exc:
+            return ToolResult(output=str(exc), is_error=True)
+        except (FileNotFoundError, NotADirectoryError):
             return ToolResult(output=f"File not found: {path}", is_error=True)
-
-        original = path.read_text(encoding="utf-8")
         # The advertised schema has long promised that "the edit fails if old_str is not
         # unique". It never did: the code replaced the FIRST match and reported success, so an
         # ambiguous edit silently changed the wrong place. The description was added deliberately
@@ -79,7 +83,10 @@ class FileEditTool(BaseTool):
         else:
             updated = original.replace(arguments.old_str, arguments.new_str, 1)
 
-        path.write_text(updated, encoding="utf-8")
+        try:
+            safe_fs.write_text(path, updated, create_parents=False)
+        except safe_fs.PathChanged as exc:
+            return ToolResult(output=str(exc), is_error=True)
         return ToolResult(output=f"Updated {path}")
 
 

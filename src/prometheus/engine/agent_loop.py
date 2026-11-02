@@ -5785,6 +5785,9 @@ async def _execute_tool_call(
         except Exception:
             log.debug("tool_call_observer raised (ignored)", exc_info=True)
 
+    # The path the gate rules on, resolved: the file tool opens exactly this one, through no link
+    # (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q). None when there is no gate or no path.
+    _decided_path: str | None = None
     # Permission check (Sprint 4 + TRUST-CONTEXT)
     if context.permission_checker is not None:
         # THE DEFECT THIS REPLACES: `tool_input.get("file_path")` — a key NO
@@ -5827,6 +5830,11 @@ async def _execute_tool_call(
             tool_name, tool_input, schema=_gate_schema, base=_run_cwd,
             write_base=_run_cwd if _run_roots else None,
         )
+        if _file_path:
+            try:
+                _decided_path = str(Path(_file_path).expanduser().resolve())
+            except (OSError, RuntimeError):
+                _decided_path = None
         # Whether that path gets WRITTEN to, from the parameter's own
         # declaration. This is what the workspace boundary keys on; it used to
         # key on a list of two tool names, and four writing tools were not in
@@ -6046,6 +6054,8 @@ async def _execute_tool_call(
                     metadata={
                         # Item W: the session's write boundary, when it has one.
                         "workspace_roots": _run_paths(context)[1],
+                        # The path the gate ruled on, resolved (security/safe_fs.py).
+                        **({"decided_path": _decided_path} if _decided_path else {}),
                         "tool_registry": context.tool_registry,
                         "ask_user_prompt": context.ask_user_prompt,
                         # Managed tasks: the creating session id, so task_create
