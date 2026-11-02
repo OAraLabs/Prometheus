@@ -21,7 +21,9 @@ transcribing audio it just produced via TTS), register via
 
 Counterpart to the existing TTSTool (tts.py).  Accepts an audio file path
 (typically .ogg from Telegram voice memos), converts to WAV if needed via
-ffmpeg, then transcribes via whisper CLI or faster-whisper.
+ffmpeg, then transcribes via whisper CLI or faster-whisper. When ``stt.url``
+names a remote server (see :mod:`prometheus.infra.voice_remote`) the original
+file goes there first, and the local engines are the fallback.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ import logging
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -55,10 +58,24 @@ class WhisperSTTTool(BaseTool):
     )
     input_model = WhisperSTTInput
 
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        # The loaded prometheus.yaml, for ``stt.url``. None reads the file.
+        self._config = config
+
     async def execute(self, arguments: WhisperSTTInput, context: ToolExecutionContext) -> ToolResult:
         audio_path = Path(arguments.audio_path)
         if not audio_path.is_file():
             return ToolResult(output=f"Audio file not found: {arguments.audio_path}", is_error=True)
+
+        from prometheus.infra.voice_remote import remote_settings, transcribe_remote
+
+        remote = remote_settings("stt", self._config)
+        if remote is not None:
+            # OpenAI-compatible servers take ogg/mp3/wav as sent, so the
+            # original file goes up unconverted. None means fall back.
+            text = await transcribe_remote(remote, audio_path, arguments.language)
+            if text is not None:
+                return ToolResult(output=text or "(empty transcription)")
 
         # Convert to WAV if not already WAV (Whisper prefers WAV)
         wav_path = audio_path

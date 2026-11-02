@@ -11,6 +11,7 @@ checks a fresh install actually trips over:
 - API token set (auth ENABLED vs OPEN)
 - ~/.prometheus data dirs writable
 - whisper available when voice is enabled
+- a configured remote voice server (``stt.url`` / ``tts.url``) reachable
 
 Output is human-readable ✓/✗ lines; the exit code is nonzero when any
 check errors — "run oara doctor" is the eternal support answer.
@@ -1360,6 +1361,51 @@ def check_whisper(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+def check_voice_remotes(
+    config: dict[str, Any], timeout: float = 5.0,
+) -> list[DiagnosticCheck]:
+    """One row per configured remote voice server: does it answer?
+
+    No row when ``stt.url`` / ``tts.url`` are unset — local voice is the
+    default, not a missing piece. An unreachable server is a warning because
+    voice still works on the local engines; a refused key is an error because
+    it will not fix itself, matching the ERROR the daemon logs for it.
+    """
+    from prometheus.infra.voice_remote import KINDS, probe, remote_settings
+
+    rows: list[DiagnosticCheck] = []
+    for kind in KINDS:
+        settings = remote_settings(kind, config)
+        if settings is None:
+            continue
+        name = f"Remote {kind.upper()}"
+        shown = settings.shown_url()
+        state, status = probe(settings, timeout=timeout)
+        if state == "ok":
+            rows.append(DiagnosticCheck(
+                name=name, category="connectivity", status="ok",
+                message=f"reachable at {shown}",
+            ))
+        elif state == "refused":
+            rows.append(DiagnosticCheck(
+                name=name, category="connectivity", status="error",
+                message=f"{shown} refused the key (HTTP {status}) — "
+                        f"{settings.label} falls back to the local engine",
+                fix=f"Check ${settings.api_key_env} in the environment or "
+                    f"{get_env_file_path()}.",
+            ))
+        else:
+            why = f"HTTP {status}" if status else "no answer"
+            rows.append(DiagnosticCheck(
+                name=name, category="connectivity", status="warning",
+                message=f"not reachable at {shown} ({why}) — "
+                        f"{settings.label} falls back to the local engine",
+                fix=f"Start the voice server, or fix {kind}.url in prometheus.yaml "
+                    f"(empty = local only).",
+            ))
+    return rows
+
+
 def check_pairing_telegram(config: dict[str, Any]) -> DiagnosticCheck | None:
     """Telegram prompts for pairing requests are opt-in; say so when they are on but nothing could get one.
 
@@ -1498,6 +1544,7 @@ def run_extended_checks(
         check_config_pins(),
         check_trajectory_export(config),
         check_whisper(config),
+        *check_voice_remotes(config, timeout=timeout),
     ]
 
 

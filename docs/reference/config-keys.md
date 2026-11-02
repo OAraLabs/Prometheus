@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **449** of
+Every key in `config/prometheus.yaml.default` — **456** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -36,8 +36,6 @@ none either — the key is documented so its absence is visible.
 | `model.max_tool_iterations` | `500` |
 | `model.max_tool_iterations_cloud` | `500` |
 | `model.max_turns` | `200` |
-| `model.fallback_provider` | `ollama` |
-| `model.fallback_url` | `http://localhost:11434` |
 | `compaction` | *(section)* |
 | `compaction.enabled` | `True` |
 | `compaction.max_summary_tokens` | `512` |
@@ -104,9 +102,6 @@ none either — the key is documented so its absence is visible.
 | `infrastructure` | *(section)* |
 | `infrastructure.archive_enabled` | `True` |
 | `infrastructure.telemetry_enabled` | `True` |
-| `infrastructure.gpu_host` | `` |
-| `infrastructure.mini_host` | `` |
-| `infrastructure.mini_port` | `8005` |
 | `gateway` | *(section)* |
 | `gateway.telegram_enabled` | `False` |
 | `gateway.telegram_token` | `` |
@@ -167,6 +162,18 @@ none either — the key is documented so its absence is visible.
 | `whisper.model` | `base` |
 | `whisper.device` | `auto` |
 | `whisper.language` | `en` |
+| `whisper.url` | `` |
+| `stt` | *(section)* |
+| `stt.url` | `` |
+| `stt.api_key_env` | `` |
+| `stt.model` | `whisper-1` |
+| `stt.timeout_seconds` | `60` |
+| `tts` | *(section)* |
+| `tts.url` | `` |
+| `tts.api_key_env` | `` |
+| `tts.model` | `tts-1` |
+| `tts.voice` | `` |
+| `tts.timeout_seconds` | `60` |
 | `router` | *(section)* |
 | `router.overrides` | *(section)* |
 | `router.overrides.enabled` | `True` |

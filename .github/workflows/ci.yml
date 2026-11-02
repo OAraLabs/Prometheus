@@ -78,7 +78,7 @@ jobs:
       # that is the exact change this comment exists to prevent. It reinstates a
       # third-party codeload fetch on every job in the matrix.
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install uv (from PyPI — deliberately not astral-sh/setup-uv)
@@ -140,7 +140,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Python 3.14
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
       - name: Install uv (from PyPI — see the test job for why not setup-uv)
@@ -178,7 +178,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Python 3.12
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
       - name: Install uv (from PyPI — matching the test job)
@@ -241,7 +241,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Python 3.12
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
       - name: Install uv
@@ -397,7 +397,7 @@ jobs:
           # has one, which is all it needs.
           fetch-depth: 1
       - name: Set up Python 3.12
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: FIRSTLIGHT ${{ matrix.leg }} leg (${{ matrix.install }} install)
