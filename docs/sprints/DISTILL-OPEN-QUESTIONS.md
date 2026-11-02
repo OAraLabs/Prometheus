@@ -158,3 +158,14 @@ none holds teacher data.
   4. **GRPO stage (plan only, don't run):** after the round-2 SFT, run on gym tasks with automatic rewards for correct tool choice + task success + injection resistance. Report feasibility on the 4090 (memory, speed) in the next status.
 14. **Gym sandbox: allow python and multi-line bash?** Many round-2 rejections across all areas come from the gym refusing `python` and multi-line shell commands (beside paths outside the workspace and offline web search). Allowing an interpreter inside the bwrap sandbox would raise keep rates but widens what generated tool calls can run on the 3090 Ti host. This is a security call. Default if unanswered: keep refusing.
 15. **Tool-choice references are ambiguous.** On the new tool-choice tasks the 27B teacher picks a different first tool than Max's reference 72% of the time (25 of 41 are a listed near-neighbour). Many of those may be equally valid choices rather than errors. That matches the eval-tools finding that exact first-tool match is a noisy target. Default: keep the area at a 0.30 share but judge its value by the round-2 scorecard's wrong-tool rate, not by its keep rate.
+- **Operator answer, Mon 2026-11-02 ~08:00 ET:**
+  1. **OQ14:** ALLOW python and multi-line bash in the gym sandbox ONLY if all of these hold:
+     - no network;
+     - an unprivileged user;
+     - read-only snapshot mounts and a writable tmpfs only;
+     - no secrets or env tokens inside;
+     - CPU, memory and time limits with a hard kill.
+
+     Add tests proving escape attempts fail (network, host paths, writing outside tmpfs, reading ~/.ssh or env secrets), plus an adversarial review, before enabling. Report the keep-rate change.
+  2. **Eval fix before round-2 training:** replace the single-reference wrong-tool metric with an acceptable-tool set per task, built from Max + 27B + judge agreement, plus an outcome check where the gym can run it. Report old vs new wrong-tool rates for all models.
+  3. **Round-2 dataset caps:** injection ≤20%, daily-agent ≤30%, coding ≤30%. Long-context and tool-choice keep everything that passes. Keep the 40% v4b replay.
