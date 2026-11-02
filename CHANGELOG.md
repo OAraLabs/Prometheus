@@ -2,6 +2,10 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## Unreleased
+
+- The model is no longer told where your machines are. The Infrastructure section of its prompt and the `anatomy` tool's answers keep what the machines can do (CPU, RAM, GPU and VRAM, the model, its engine, context window and vision) and leave out hostnames, IP addresses, URLs, the tailnet peer list and the folder a model file sits in, on local and hosted models alike. Before, a reply could quote the model server's address or list your tailnet peers. `anatomy.include_addresses: true` restores the old text. The `/anatomy` command you run yourself is unchanged.
+
 ## 0.9.18 (2026-11-02)
 
 0.9.18 fixes two security issues: a model's shell and file tools could read this machine's private keys and change what the daemon starts at boot, and an agent profile's tool list hid tools from the model without stopping it calling them. It updates authlib, dnspython, joserfc, pyasn1 and graphql-core for published advisories. It also:

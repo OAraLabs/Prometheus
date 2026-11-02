@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **456** of
+Every key in `config/prometheus.yaml.default` — **457** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -430,6 +430,7 @@ none either — the key is documented so its absence is visible.
 | `anatomy.scan_on_startup` | `True` |
 | `anatomy.include_in_system_prompt` | `True` |
 | `anatomy.include_in_hosted_prompt` | `False` |
+| `anatomy.include_addresses` | `False` |
 | `anatomy.ssh_user` | `` |
 | `anatomy.ssh_key` | `` |
 | `mcp_servers` | `{}` *(open map)* |
