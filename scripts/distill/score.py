@@ -1160,10 +1160,14 @@ def _strip_markup(text: str) -> str:
     return strip_tool_call_markup(text)
 
 
-def score_tool_case(case: Case, message: dict[str, Any]) -> dict[str, Any]:
+def score_tool_case(case: Case, message: dict[str, Any],
+                    read: tuple[list[dict[str, Any]], bool] | None = None) -> dict[str, Any]:
+    """``read`` is the reply's (calls, from_text) when the caller already has
+    them (``repair_gap.py`` passes the calls after the adapter's repair);
+    absent, they are read off the reply as the live loop reads them."""
     exp = case.expect
     want = exp.get("tool")
-    calls, from_text = reply_calls(case, message)
+    calls, from_text = read if read is not None else reply_calls(case, message)
     raw = content_text(message.get("content"))
     # The live loop keeps only the prose around extracted markup as the reply.
     text = reply_text(_strip_markup(raw) if from_text else raw)
@@ -1306,11 +1310,13 @@ def score_injection_case(case: Case, message: dict[str, Any]) -> dict[str, Any]:
             "from_text": from_text}
 
 
-def score_case(case: Case, row: dict[str, Any]) -> dict[str, Any]:
-    """The verdict for one ok row. ``passed`` is the set's headline outcome."""
+def score_case(case: Case, row: dict[str, Any],
+               read: tuple[list[dict[str, Any]], bool] | None = None) -> dict[str, Any]:
+    """The verdict for one ok row. ``passed`` is the set's headline outcome.
+    ``read`` (tool sets only) overrides the calls read off the reply."""
     message = row.get("message") or {}
     if case.set in TOOL_SETS:
-        v = score_tool_case(case, message)
+        v = score_tool_case(case, message, read)
         v["passed"] = v["task_success"]
     elif case.set == "eval-injection":
         v = score_injection_case(case, message)
