@@ -259,13 +259,17 @@ def test_a_use_the_piece_does_not_offer_is_refused(world, two_port_box, monkeypa
     assert response.status_code == 400 and response.json()["error"] == "invalid_request"
 
 
-def test_no_secret_goes_to_an_unverified_piece_over_plain_http(world, voice_box):
+def test_a_key_offered_to_a_piece_on_this_machine_is_kept_and_never_repeated(world, voice_box, tmp_path,
+                                                                           monkeypatch):
+    """Since the owner may give an approved piece on loopback or a mesh address its key (contract 5.2 rule 3; the
+    rules themselves are tests/test_pieces_voice_key.py), a key sent with the approval is kept, not refused."""
+    monkeypatch.setenv("PROMETHEUS_ENV_FILE", str(tmp_path / "piece-env"))
     _, port = voice_box
     found = probe(world, f"127.0.0.1:{port}").json()["found"][0]
     response = world.as_("global", "POST", f"/api/pieces/{found['id']}/approve", json={"secret": "box-key"})
-    assert response.status_code == 422 and response.json()["error"] == "secret_needs_proof"
+    assert response.status_code == 200, response.text
     assert "box-key" not in response.text
-    assert world.as_("global", "GET", "/api/pieces").json()["pieces"][0]["state"] == "pending"
+    assert world.as_("global", "GET", "/api/pieces").json()["pieces"][0]["state"] == "approved"
 
 
 def test_a_yaml_entry_wins_and_shows_read_only(tmp_path, voice_box, monkeypatch):

@@ -12,8 +12,11 @@ Contract: docs/contracts/pieces.md. This module builds the typed-address half fo
 * **Pending pieces live in memory**, bounded and expiring (contract 3.4). Only approval writes ``devices.db``.
 * **Voice reads approved pieces read-only** (:func:`approved_offer`). A missing registry is "none", never created.
 
-Pieces found this way have no card and no key of their own: they are "not verified" and are given no secret
-(contract 5.2 rule 3). Cards, the identity challenge and pinned TLS come with ``oara piece announce``.
+Pieces found this way have no card and no key of their own: they are "not verified". One whose audio routes ask for
+a key gets it from the owner, once, with the approval, and only on loopback or a mesh VPN address (contract 5.2 rule
+3): it is kept in the env file (under the trusted-state floor, and stripped from the agent shell's environment) and
+sent only to that piece, only while it is approved. Cards, the identity challenge and pinned TLS come with
+``oara piece announce``.
 
 Source: novel code for Prometheus, 2026-11-02.
 """
@@ -24,6 +27,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import re
 import secrets
 import socket
 import sqlite3
@@ -46,6 +50,12 @@ PENDING_LIMIT = 16
 PENDING_PER_HOST = 4
 #: How long a pending piece waits, in seconds.
 PENDING_TTL_S = 600.0
+
+#: Where a piece may be given its key: never a LAN or public address (contract 5.2 rule 3).
+KEY_CLASSES = ("loopback", "mesh")
+#: What a key may be: one env-file line that no shell or service manager reads differently (no space, quote,
+#: backslash, ``$`` or backtick).
+_KEY_RE = re.compile(r"[A-Za-z0-9._~+/=:@%,!*^#-]{1,4096}")
 
 _REQUEST_TIMEOUT_S = 3.0
 _PROBE_DEADLINE_S = 10.0
@@ -233,6 +243,20 @@ def new_piece(target: Target, offers: tuple[dict[str, str], ...], *, now: float)
         uses=kinds, secret_env=None, source="manual", created_at=now, updated_at=now)
 
 
+def needs_key(piece: Piece) -> bool:
+    """Whether the piece's audio routes asked for a key when probed."""
+    return any(isinstance(o, dict) and o.get("auth") == "bearer" for o in piece.card.get("offers", []))
+
+
+def key_env_name(piece_id: str) -> str:
+    """The env-file variable that holds a piece's key. A ``*_KEY`` name, so the agent shell's scrub drops it."""
+    return f"PROMETHEUS_PIECE_{piece_id.upper()}_KEY"
+
+
+def valid_key(value: object) -> bool:
+    return isinstance(value, str) and _KEY_RE.fullmatch(value) is not None
+
+
 def prompt(piece: Piece) -> str:
     """The one sentence the owner is asked (contract 7.1)."""
     kinds = [offer.get("kind") for offer in piece.card.get("offers", []) if isinstance(offer, dict)]
@@ -243,7 +267,8 @@ def prompt(piece: Piece) -> str:
         tuple(k for k in ("stt", "tts") if k in kinds), "")
     verified = "" if piece.node_pub else (
         " It can't prove who it is, so something else on your network could pretend to be it.")
-    return f"Found a {piece.name}. It offers {offered}. {sent}{verified} Use it?".replace("  ", " ")
+    key = " It asks for a key: you'll be asked for it once." if needs_key(piece) else ""
+    return f"Found a {piece.name}. It offers {offered}. {sent}{verified}{key} Use it?".replace("  ", " ")
 
 
 def host_of(address: str) -> str:
@@ -307,11 +332,31 @@ def devices_db_path() -> Path:
     return data_dir_path() / "devices.db"
 
 
-def approved_offer(kind: str) -> str | None:
-    """The server root of the approved piece serving *kind* (``stt``/``tts``), or None.
+@dataclass(frozen=True)
+class ApprovedOffer:
+    """What voice uses for one use: the server root, and the env variable of its key (None: send no key)."""
+
+    url: str
+    key_env: str | None
+
+
+def _may_get_key(address_class_stored: str, url: str) -> bool:
+    """Both what the row says and where its url points must be loopback or a mesh VPN address."""
+    if address_class_stored not in KEY_CLASSES:
+        return False
+    host = urlsplit(url).hostname or ""
+    try:
+        return address_class(ipaddress.ip_address(host)) in KEY_CLASSES
+    except ValueError:
+        return False                                       # a name is not checked here, so it gets no key
+
+
+def approved_offer(kind: str) -> ApprovedOffer | None:
+    """What the approved piece serving *kind* (``stt``/``tts``) is reached at, or None.
 
     Read-only: a missing registry, or one with no ``pieces`` table, is "none" and nothing is created. The oldest
-    approved piece for the use wins, so approving another does not silently move voice.
+    approved piece for the use wins, so approving another does not silently move voice. Its key goes with it only
+    where a key may go (:data:`KEY_CLASSES`), checked again here against the url itself.
     """
     path = devices_db_path()
     if not path.is_file():
@@ -325,13 +370,14 @@ def approved_offer(kind: str) -> str | None:
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pieces'").fetchone() is None:
             return None
         rows = conn.execute(
-            "SELECT uses, card_json FROM pieces WHERE state = 'approved' ORDER BY created_at, id").fetchall()
+            "SELECT uses, card_json, address_class, secret_env FROM pieces WHERE state = 'approved'"
+            " ORDER BY created_at, id").fetchall()
     except sqlite3.Error as exc:
         logger.debug("pieces: cannot read %s (%s)", path, exc)
         return None
     finally:
         conn.close()
-    for uses_json, card_json in rows:
+    for uses_json, card_json, stored_class, secret_env in rows:
         try:
             uses, card = json.loads(uses_json), json.loads(card_json)
         except ValueError:
@@ -340,5 +386,7 @@ def approved_offer(kind: str) -> str | None:
             continue
         for offer in card.get("offers") or []:
             if isinstance(offer, dict) and offer.get("kind") == kind and isinstance(offer.get("url"), str):
-                return str(offer["url"])
+                url = str(offer["url"])
+                key_env = secret_env if secret_env and _may_get_key(str(stored_class), url) else None
+                return ApprovedOffer(url=url, key_env=key_env)
     return None

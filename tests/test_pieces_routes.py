@@ -19,7 +19,7 @@ from tests.support.pairing_world import World  # noqa: E402
 
 NODE_PUB = base64.b64encode(bytes(range(32))).decode("ascii")
 ENTRY_KEYS = {"id", "name", "kind", "state", "source", "verified", "editable", "fp", "tls_spki_sha256", "address",
-              "address_class", "offers", "uses", "health", "created_at", "updated_at", "last_seen"}
+              "address_class", "offers", "uses", "needs_key", "health", "created_at", "updated_at", "last_seen"}
 
 
 def save(world: World, **over) -> None:

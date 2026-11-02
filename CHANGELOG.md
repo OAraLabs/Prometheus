@@ -4,6 +4,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Voice: a voice box that asks for a key can now join by its address too. When Prometheus finds one, it asks you for the key once, with the approval (`POST /api/pieces/{id}/approve` with `secret`). It is kept in the env file, which the agent's tools cannot read, and sent only to that box, and only when it is on this computer or a mesh VPN address, never a local-network or public one. It never appears in an answer or a log, and forgetting the box removes it.
 - Voice: a voice box can join without editing a file. Give Prometheus its address (`POST /api/pieces/probe`, which Beacon calls when you type it); Prometheus finds the speech-to-text and text-to-speech servers there, asks once, and after you approve (`POST /api/pieces/{id}/approve`) voice uses it from the next message, with no restart. The local engines stay the fallback. For now this works for a box on this computer or a mesh VPN address over plain HTTP; such a box is labelled "not verified" and is given no key. A `stt.url` or `tts.url` in `prometheus.yaml` still wins. New routes: `POST /api/pieces/probe`, `POST /api/pieces/{id}/approve|deny|ignore` and `DELETE /api/pieces/{id}`, all operator only.
 
 ## 0.9.18 (2026-11-02)
