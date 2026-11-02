@@ -148,3 +148,11 @@ none holds teacher data.
   - **Order:** rerun Phase 6 + the full scoring (Q4/Q5/BF16 + same-recipe base 9B) as soon as the capacity tests finish, before cross-host generation.
   - **Guard:** add a disk-space preflight to every 4090 job.
 - **Operator answer, Sun 2026-11-01 ~22:50 ET:** "Yes, snapshot it." This covers one fresh read-only snapshot of the 3090 Ti host's conversation DB to find new real prompts for round-2 generation. It doesn't cover writes to live DBs or reads of any other live DB.
+- **Operator answer, Sun 2026-11-01 ~23:00 ET:**
+  1. **Snapshot:** approved as a read-only snapshot using SQLite's backup API; trace text stays on the host.
+  2. **Standing rule:** agents never attempt sudo on any host. If something needs root: stop, log it here and Telegram the operator. This follows an agent's `sudo true` probe on the 4090 at 12:02, which was refused.
+  3. **Round-2 focus, from the scorecard:**
+     - (a) tool CHOICE: prioritise tasks where several tools are plausible and only one is right, and make wrong-tool rate a headline metric;
+     - (b) replace exact-argument match with an equivalence check (same effect/result), reporting both;
+     - (c) fix the long-context keep rate (sandbox tool errors) before Tuesday's 4090 long-context night.
+  4. **GRPO stage (plan only, don't run):** after the round-2 SFT, run on gym tasks with automatic rewards for correct tool choice + task success + injection resistance. Report feasibility on the 4090 (memory, speed) in the next status.
