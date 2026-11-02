@@ -688,6 +688,8 @@ LC_LIST_DIR_MAX = 120
 #: the share of a long-context row's token budget its listings may take (at most LC_LIST_MAX_TOKENS)
 LC_LIST_SHARE = 0.12
 LC_LIST_MAX_TOKENS = 12_000
+#: at most this many listing calls per row (an agent lists a few places, then reads)
+LC_LIST_MAX_CALLS = 4
 
 
 def _name_prefix(path: str) -> str:
@@ -702,11 +704,14 @@ def plan_listings(chosen: list[SrcFile], children: dict[str, list[str]], counter
     """The ``glob`` calls that show where the reads came from, before them (what an agent runs first):
     each read's directory whole (``<FIXTURE_DIR>/<dir>/*``) when it holds at most ``LC_LIST_DIR_MAX``
     entries, else the entries sharing the read's name prefix (``<FIXTURE_DIR>/<dir>/<prefix>*``). In
-    the order the reads first need them, while they fit *budget* tokens. Returns (listings, tokens)."""
+    the order the reads first need them, at most ``LC_LIST_MAX_CALLS``, while they fit *budget* tokens.
+    Returns (listings, tokens)."""
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     used = 0
     for f in chosen:
+        if len(out) >= LC_LIST_MAX_CALLS:
+            break
         d = str(Path(f.path).parent)
         entries = children.get(d) or []
         if not entries:

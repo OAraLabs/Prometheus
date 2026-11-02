@@ -301,6 +301,9 @@ def test_relevance_puts_the_files_a_request_is_about_first_and_listings_fit_thei
     pats = {x["pattern"]: x for x in listings}
     assert pats["Prometheus/src/pkg/*"]["limit"] == 2               # a small directory, whole
     assert pats["Prometheus/tests/test_mcp*"]["entries"] == 1       # tests/ (big): by the read's name prefix
+    many = [f(f"tests/test_k{i}_x.py", "x") for i in range(9)]
+    capped, _u = r2t.plan_listings(many, {"tests": [x.path for x in many] * 20}, lambda t: 1, 10_000)
+    assert len(capped) == r2t.LC_LIST_MAX_CALLS
     none, used0 = r2t.plan_listings(chosen[:2], children, lambda t: 10_000, 50)
     assert none == [] and used0 == 0
 
