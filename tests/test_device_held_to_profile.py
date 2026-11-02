@@ -24,21 +24,24 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
-import httpx
 import pytest
-from pydantic import BaseModel
 
-from prometheus.config.device_store import DeviceStore
-from prometheus.config.profiles import ActiveProfileState, ProfileStore
-from prometheus.engine.agent_loop import AgentLoop, LoopContext, run_loop
-from prometheus.engine.messages import ConversationMessage, TextBlock, ToolUseBlock
-from prometheus.engine.session import SessionManager
-from prometheus.engine.usage import UsageSnapshot
-from prometheus.permissions.checker import SecurityGate
-from prometheus.permissions.modes import PermissionMode
-from prometheus.providers.base import ApiMessageCompleteEvent, ModelProvider
-from prometheus.tools.base import BaseTool, ToolRegistry, ToolResult
-from prometheus.web.server import create_app
+pytest.importorskip("fastapi")
+
+import httpx  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+
+from prometheus.config.device_store import DeviceStore  # noqa: E402
+from prometheus.config.profiles import ActiveProfileState, ProfileStore  # noqa: E402
+from prometheus.engine.agent_loop import AgentLoop, LoopContext, run_loop  # noqa: E402
+from prometheus.engine.messages import ConversationMessage, TextBlock, ToolUseBlock  # noqa: E402
+from prometheus.engine.session import SessionManager  # noqa: E402
+from prometheus.engine.usage import UsageSnapshot  # noqa: E402
+from prometheus.permissions.checker import SecurityGate  # noqa: E402
+from prometheus.permissions.modes import PermissionMode  # noqa: E402
+from prometheus.providers.base import ApiMessageCompleteEvent, ModelProvider  # noqa: E402
+from prometheus.tools.base import BaseTool, ToolRegistry, ToolResult  # noqa: E402
+from prometheus.web.server import create_app  # noqa: E402
 
 GLOBAL = "held-profile-global-token"
 RAN: list[str] = []
@@ -241,7 +244,7 @@ async def test_a_held_devices_session_cannot_be_rebound_to_another_profile(rig):
         assert r.status_code == 409, r.text
         assert "relay" in r.text
         shown = (await c.get("/api/sessions/web:s1/profile")).json()
-    assert shown["effective"] == "relay" and shown["source"] == "device"
+    assert shown["effective"] == "relay" and shown["source"] == "held"
 
 
 # ── who can be held, and by whom ──────────────────────────────────────────

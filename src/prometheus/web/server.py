@@ -2234,7 +2234,8 @@ def create_app(
         """Which profile this session runs under, and WHY.
 
         `source` is the point: `session` means someone chose it for this conversation,
-        `global` means it follows the daemon-wide active profile. Returning only the
+        `global` means it follows the daemon-wide active profile, and `held` means its device is held to a
+        profile, which no binding can change (PUT /api/devices/{id}/profile). Returning only the
         effective name would make "chosen" and "inherited" indistinguishable — and a
         client cannot offer "reset to automatic" for a value it cannot tell apart from
         a default.
@@ -2242,7 +2243,7 @@ def create_app(
         held = _session_hold(session_id)
         if held:
             # Its device is held to a profile, which wins over any binding and cannot be changed here.
-            return {"session_id": session_id, "profile": held, "effective": held, "source": "device",
+            return {"session_id": session_id, "profile": held, "effective": held, "source": "held",
                     "dangling": profile_state is None or profile_state._store.get(held) is None}
         lcm = getattr(app.state, "lcm_engine", None)
         store = lcm.conversation_store if lcm is not None else None
