@@ -19,7 +19,12 @@ first event:
   ``long-context``, ``daily-agent``, ``coding``); a round-1 task is ``round-1``;
 * ``by_category``: rows by category (chat-mode, memory/wiki, sentinel/daemon, other,
   coding);
-* ``tasks``: finished tasks by status and the keep rate (kept / attempted).
+* ``tasks``: finished tasks by status and the keep rate (kept / attempted);
+* ``keep_rate_by_area``: kept / attempted per round-2 area;
+* ``tool_choice`` (headline, operator 2026-11-01 ~23:00 ET): over the attempted tool-choice
+  tasks, how many made a first call other than the reference tool (``wrong_tool``) or no
+  call (``no_call``), and ``wrong_tool_rate`` = (wrong + no call) / tasks with a verdict
+  (``teacher_gen.py``'s ``verification.r2.toolchoice``).
 
 The daily 09:00 heartbeat calls ``gen_stats.py --json`` (or the text form, a few lines).
 """
@@ -85,6 +90,9 @@ def tally(events: list[dict[str, Any]], since: float, now: float) -> dict[str, A
     by_cat: collections.Counter = collections.Counter()
     status: collections.Counter = collections.Counter()
     hours: set[int] = set()
+    area_tried: collections.Counter = collections.Counter()
+    area_kept: collections.Counter = collections.Counter()
+    tc: collections.Counter = collections.Counter()
     for ev in events:
         ts = float(ev["ts"])
         if ts < since or ts > now:
@@ -94,6 +102,17 @@ def tally(events: list[dict[str, Any]], since: float, now: float) -> dict[str, A
             status[st] += 1
         if st in ATTEMPTED:
             hours.add(int(ts // 3600))
+            area = str(ev.get("area") or "round-1")
+            area_tried[area] += 1
+            area_kept[area] += st in VERIFIED or st == "held"
+            v = (((ev.get("verification") or {}).get("r2") or {}).get("toolchoice")
+                 if isinstance(ev.get("verification"), dict) else None)
+            if isinstance(v, dict) and "right" in v:
+                tc["tasks"] += 1
+                tc["right"] += bool(v["right"])
+                tc["no_call"] += v.get("first") is None
+                tc["wrong_tool"] += (not v["right"]) and v.get("first") is not None
+                tc["wrong_neighbour"] += bool(v.get("neighbour"))
         if st not in VERIFIED:
             continue
         n = int(ev.get("rows") or 0) if st == "kept" else held.get(str(ev.get("task_id")), 0)
@@ -110,7 +129,12 @@ def tally(events: list[dict[str, Any]], since: float, now: float) -> dict[str, A
             "by_area_per_hour": {k: round(v / span_h, 2) for k, v in by_area.most_common()},
             "by_category_per_hour": {k: round(v / span_h, 2) for k, v in by_cat.most_common()},
             "tasks": dict(status.most_common()),
-            "keep_rate": round(kept / attempted, 3) if attempted else None}
+            "keep_rate": round(kept / attempted, 3) if attempted else None,
+            "keep_rate_by_area": {a: {"kept": area_kept[a], "tried": n, "rate": round(area_kept[a] / n, 3)}
+                                  for a, n in area_tried.most_common()},
+            "tool_choice": {**{k: tc[k] for k in ("tasks", "right", "wrong_tool", "no_call", "wrong_neighbour")},
+                            "wrong_tool_rate": round((tc["wrong_tool"] + tc["no_call"]) / tc["tasks"], 3)
+                            if tc["tasks"] else None}}
 
 
 def stats(patterns: Iterable[str], hours: float = 24.0, now: float | None = None) -> dict[str, Any]:
@@ -150,6 +174,10 @@ def render(out: dict[str, Any]) -> str:
         lines.append(f"  last {h:g}h per hour by area: {_fmt(last, 'by_area_per_hour')}")
         lines.append(f"  last {h:g}h per hour by category: {_fmt(last, 'by_category_per_hour')}")
         lines.append(f"  since start by area: {_fmt(tot, 'by_area')}; by category: {_fmt(tot, 'by_category')}")
+        tc = last.get("tool_choice") or {}
+        if tc.get("tasks"):
+            lines.append(f"  last {h:g}h tool choice: wrong-tool rate {tc['wrong_tool_rate']:.1%} "
+                         f"({tc['wrong_tool']} wrong, {tc['no_call']} no call of {tc['tasks']})")
     return "\n".join(lines) or "no generation runs found"
 
 

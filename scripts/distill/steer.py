@@ -21,6 +21,12 @@ Areas (``AREAS``) and the operator's default priorities (2026-11-01 ~01:20 ET):
 
 and ``coding`` (plain coding tasks) at a small share, never above ``CODING_MAX``.
 
+``tool-choice`` (operator 2026-11-01 ~23:00 ET, from the Phase 7 scorecard: the student's
+eval-tools misses are wrong-tool choices, not syntax): real tasks whose right first tool is
+known from a Max trace and has near-neighbours the evals confuse it with. It takes the
+largest default share (``DEFAULT_WEIGHTS``). A config written before it existed (no
+``tool-choice`` weight) still loads: the area gets 0 there.
+
 ``steer`` maps a phase-7 scorecard (``score.py`` summaries) onto the areas:
 
 * ``eval-injection`` -> injection-resistance (``injection_resistance``);
@@ -30,7 +36,8 @@ and ``coding`` (plain coding tasks) at a small share, never above ``CODING_MAX``
   category): coding -> coding, the others -> daily-agent's own category; a case whose
   request holds a failed tool result after its last user message also counts for
   error-recovery;
-* ``sanity`` -> daily-agent's chat-mode.
+* ``sanity`` -> daily-agent's chat-mode;
+* every ``eval-tools`` case -> tool-choice too (its outcome needs the right tool first).
 
 An area's weakness is ``1 - score`` (plus the drop below ``--base`` when a base summary is
 given). The new share is the default share times ``1 + STRENGTH * (weakness - mean) /
@@ -55,11 +62,14 @@ from typing import Any, Iterable
 
 SCHEMA = "distill-steer/1"
 DEFAULT_PATH = "~/distill/round2/steer.json"
-AREAS = ("injection-resistance", "error-recovery", "long-context", "daily-agent", "coding")
+AREAS = ("injection-resistance", "error-recovery", "long-context", "daily-agent", "coding", "tool-choice")
 DAILY_CATEGORIES = ("sentinel/daemon", "memory/wiki", "other", "chat-mode")
-#: the operator's order: injection, error recovery, long context, daily agent; coding small
-DEFAULT_WEIGHTS = {"injection-resistance": 0.30, "error-recovery": 0.25, "long-context": 0.18,
-                   "daily-agent": 0.20, "coding": 0.07}
+#: the operator's order (2026-11-01 ~01:20 ET): injection, error recovery, long context, daily agent; coding
+#: small; then (~23:00 ET) tool CHOICE first: 0.30, the other shares scaled to the remaining 0.70
+DEFAULT_WEIGHTS = {"tool-choice": 0.30, "injection-resistance": 0.21, "error-recovery": 0.175,
+                   "long-context": 0.126, "daily-agent": 0.14, "coding": 0.049}
+#: areas a config written before them may leave out (they get a share of 0 there)
+LATER_AREAS = ("tool-choice",)
 DEFAULT_DAILY_SPLIT = {"sentinel/daemon": 0.30, "memory/wiki": 0.30, "other": 0.20, "chat-mode": 0.20}
 CODING_MAX = 0.10
 STRENGTH = 1.0
@@ -75,7 +85,8 @@ def default_config() -> dict[str, Any]:
     return {"schema": SCHEMA, "basis": "defaults", "weights": dict(DEFAULT_WEIGHTS),
             "daily_split": dict(DEFAULT_DAILY_SPLIT), "coding_max": CODING_MAX,
             "reasoning": ["operator priorities 2026-11-01: injection-resistance, error-recovery, "
-                          "long-context, daily-agent; coding at a small share (no scorecard yet)"]}
+                          "long-context, daily-agent; coding at a small share (no scorecard yet)",
+                          "operator 2026-11-01 ~23:00 ET: tool choice first (0.30); the others scaled by 0.70"]}
 
 
 def _normalise(d: dict[str, float]) -> dict[str, float]:
@@ -90,6 +101,8 @@ def validate(cfg: Any) -> dict[str, Any]:
     if not isinstance(cfg, dict) or cfg.get("schema") != SCHEMA:
         raise SteerError(f"not a {SCHEMA} config")
     w = cfg.get("weights")
+    if isinstance(w, dict):
+        w = dict(w, **{k: 0.0 for k in LATER_AREAS if k not in w})
     if not isinstance(w, dict) or set(w) != set(AREAS) or not all(
             isinstance(v, (int, float)) and v >= 0 for v in w.values()):
         raise SteerError(f"weights must give every area of {AREAS} a share >= 0")
@@ -216,6 +229,7 @@ def area_scores(summaries: list[dict[str, Any]], facts: dict[str, dict[str, Any]
                 add(f"daily-agent:{cat}", ok)
             if f.get("error_recovery"):
                 add("error-recovery", ok)
+            add("tool-choice", ok)
         for _cid, ok in ((sets.get("sanity") or {}).get("outcomes") or {}).items():
             add("daily-agent", ok)
             add("daily-agent:chat-mode", ok)

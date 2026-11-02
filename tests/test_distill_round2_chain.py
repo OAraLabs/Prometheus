@@ -501,6 +501,14 @@ def test_gen_stats_json_lines() -> None:
     assert lines[2] == "24h by category/h: other 1, coding 0.5"
 
 
+def test_the_heartbeat_shows_the_tool_choice_wrong_tool_rate() -> None:
+    js = {"hours": 24, "runs": {}, "all": {"last_hours": {
+        "rows": 4, "hours": 24, "rows_per_hour": 0.17, "keep_rate": 0.3, "by_area_per_hour": {"tool-choice": 0.17},
+        "tool_choice": {"tasks": 20, "wrong_tool": 5, "no_call": 1, "wrong_tool_rate": 0.3}}}}
+    lines = R.gen_stats_lines(js, js, "since")
+    assert "keep 0.3 | wrong-tool 30% of 20 | by area/h: tool-choice 0.17" in lines[0]
+
+
 def test_gen_stats_lines_read_the_real_gen_stats_output(tmp_path: Path) -> None:
     gs = REPO / "scripts" / "distill" / "gen_stats.py"
     if not gs.is_file():

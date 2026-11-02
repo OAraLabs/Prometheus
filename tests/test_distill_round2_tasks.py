@@ -202,7 +202,8 @@ def test_build_writes_valid_round2_rows_for_every_area(built: Any) -> None:
     assert rep["stats"]["base_rows_eval_tools_overlap_dropped"] == 1
     assert not any("indexer service" in r["prompt"] for r in rows)
     areas = {r["r2"]["area"] for r in rows}
-    assert areas == set(ts.R2_AREAS)
+    # tool-choice needs Max references (--tc-*): a build without them makes every other area
+    assert areas == set(ts.R2_AREAS) - {"tool-choice"} and rep["stats"]["tc_skipped_no_references"] == 1
     for r in rows:
         base = r["r2"]["base_id"]
         assert base == "ts-" + ts.h(ts.norm(r["prompt"])) and r["id"] == ts.r2_task_id(r["prompt"], r["r2"]["variant"])
@@ -477,6 +478,125 @@ def test_merge_keeps_each_task_once_and_writes_the_area_files(built: Any, tmp_pa
     with pytest.raises(r2t.R2Error, match="not a round-2 taskset"):
         r2t.merge(ns)
 
+# ── tool choice ──────────────────────────────────────────────────────────────
+
+
+def _tc_inputs(tmp_path: Path) -> dict[str, Any]:
+    """A gym Max trace, golden train rows, eval-tools cases with a scored model's wrong first calls."""
+    def row(prompt: str, sph: str | None = None, transform: str = "slot_fill",
+            sources: list[str] | None = None) -> dict[str, Any]:
+        r = _taskset_row(prompt)
+        r["category"], r["subcategory"], r["intent"] = "other", "general", "find"
+        if sph:
+            r["source_pattern_hash"], r["task_group"] = sph, "tg-" + sph
+            r["sources"][0]["pattern_hash"] = sph
+            r["template_id"] = r["sources"][0]["template_id"] = f"tpl-{sph}"
+        if sources:
+            r["transform"] = transform
+            r["sources"] = [{"template_id": f"tpl-{x}", "pattern_hash": x, "origin": "lcm", "span": [0, 3]}
+                            for x in sources]
+            r["source_pattern_hash"], r["task_group"] = sources[0], "tg-" + sources[0]
+            r["template_id"] = f"tpl-{sources[0]}"
+        return r
+
+    H = lambda t: ts.h(ts.norm(t))  # noqa: E731
+    gold_text = {"bash": "Show me the last lines of the build log for the backup job please",
+                 "read": "Open the release notes file and tell me what changed in it",
+                 "evalp": "Count the open approvals for the indexer and list them by age"}
+    rows = {
+        "gym": row("Find which tests cover the grep tool in this repository"),
+        "slot": row("Show me the last lines of the build log for the nightly job please", sph=H(gold_text["bash"])),
+        "recomb_disagree": row("Show me the build log. Open the release notes and summarize them for me",
+                               transform="recombine", sources=[H(gold_text["bash"]), H(gold_text["read"])]),
+        "recomb_agree": row("Show me the backup log first. Then show me the last lines of the build log too",
+                            transform="recombine", sources=["0" * 16, H(gold_text["bash"])]),
+        "eval": row("Count the open approvals for the indexer and list them oldest first", sph=H(gold_text["evalp"])),
+        "short": row("yes run it", sph=H("yes run it")),
+    }
+    for r in rows.values():
+        assert ts.validate_task(r) == [], ts.validate_task(r)
+    tc_base = tmp_path / "tc-base.jsonl"
+    tc_base.write_text("".join(json.dumps(r) + "\n" for r in rows.values()))
+
+    def call(name: str) -> dict[str, Any]:
+        return {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c", "type": "function", "function": {"name": name, "arguments": "{}"}}]}
+    gym = tmp_path / "max-gym.traces.jsonl"
+    g = rows["gym"]
+    gym.write_text(json.dumps({"_meta": {"task_hash": g["id"][3:], "verdict": "pass", "step": 0},
+                               "messages": [{"role": "system", "content": "s"}, {"role": "user", "content": g["prompt"]},
+                                            call("todo_write"), {"role": "tool", "content": "ok"}, call("grep")]}) + "\n")
+    golden = tmp_path / "train.jsonl"
+    golden.write_text("".join(json.dumps({"source": "max-golden", "messages": [
+        {"role": "system", "content": "s"}, {"role": "user", "content": text}, call(tool)]}) + "\n"
+        for text, tool in ((gold_text["bash"], "bash"), (gold_text["read"], "read_file"),
+                           (gold_text["evalp"], "task_list"), ("yes run it", "bash"))))
+    cases = tmp_path / "eval-tools-tc.jsonl"
+    cases.write_text("".join(json.dumps(c) + "\n" for c in (
+        {"id": "e1", "expect": {"tool": "bash"}, "meta": {"task_id": "abc", "group_id": "abc"},
+         "messages": [{"role": "user", "content": "run the tests"}]},
+        {"id": "e2", "expect": {"tool": "grep"}, "meta": {"task_id": H(gold_text["evalp"])},
+         "messages": [{"role": "user", "content": "where is it defined"}]})))
+    results = tmp_path / "results" / "m" / "eval-tools.jsonl"
+    results.parent.mkdir(parents=True)
+    results.write_text("".join(json.dumps(r) + "\n" for r in (
+        {"id": "e1", "message": str({"content": "", "tool_calls": [{"function": {"name": "edit_file", "arguments": "{}"}}]})},
+        {"id": "e2", "message": {"content": "", "tool_calls": [{"function": {"name": "glob", "arguments": "{}"}}]}},
+        {"id": "e1", "message": {"content": "", "tool_calls": [{"function": {"name": "bash", "arguments": "{}"}}]}})))
+    return {"rows": rows, "tc_base": tc_base, "gym": gym, "golden": golden, "cases": cases, "results": results}
+
+
+def test_tool_choice_rows_carry_the_max_reference_and_its_confused_neighbours(built: Any, tmp_path: Path) -> None:
+    _rep, _out, (a, lc_eval, mpath) = built
+    x = _tc_inputs(tmp_path)
+    rep = _rebuild(a, tmp_path / "tc", areas="tool-choice", eval_tools=[str(x["cases"])],
+                   tc_gym_traces=[str(x["gym"])], tc_golden=[str(x["golden"])],
+                   tc_eval_results=[str(tmp_path / "results" / "*" / "eval-tools.jsonl")], tc_base=[str(x["tc_base"])])
+    rows = ts.load_taskset(tmp_path / "tc" / "real-t-r2-toolchoice.jsonl")
+    got = {r["prompt"]: r["r2"]["toolchoice"] for r in rows}
+    gym, slot, agree = (x["rows"][k]["prompt"] for k in ("gym", "slot", "recomb_agree"))
+    assert set(got) == {gym, slot, agree}
+    # the gym reference is Max's own first call on that task (the plan call skipped)
+    assert got[gym]["reference"] == "grep" and got[gym]["source"] == "gym-max" and "glob" in got[gym]["neighbours"]
+    # golden: a slot-filled row of the real prompt; a recombined row whose last piece names it (first unknown)
+    assert got[slot]["reference"] == "bash" and got[slot]["source"] == "golden-max"
+    assert "edit_file" in got[slot]["neighbours"] and got[agree]["reference"] == "bash"
+    assert all(t["accept"] == [t["reference"]] for t in got.values())
+    # never: two pieces whose references disagree, an eval-tools task's prompt, a request too short to stand alone
+    assert rep["stats"]["tc_eval_tools_task_dropped"] == 1 and rep["stats"]["tc_golden_short_or_live_host"] == 1
+    tcr = rep["tool_choice"]
+    assert tcr["confusion_pairs"] == {"bash->edit_file": 1, "grep->glob": 1} and tcr["by_source"] == {
+        "gym-max": 1, "golden-max": 2}
+    for r in rows:
+        assert r["r2"]["variant"] == "tc:" + r["r2"]["toolchoice"]["reference"]
+        assert r["r2"]["verifier"] == "deterministic" and ts.validate_task(r) == []
+    tasks = tg.tasks_from_taskset_rows(rows, Path("."))
+    assert all(t.r2["toolchoice"]["reference"] for t in tasks) and {t.sched_key for t in tasks} == {"tool-choice"}
+    ns = argparse.Namespace(tasks=str(tmp_path / "tc" / "real-t-r2.jsonl"), injection_manifest=str(mpath),
+                            eval_longctx=[str(lc_eval)], eval_tools=[str(x["cases"])])
+    chk = r2t.check_disjoint(ns)
+    assert chk["pass"] and chk["toolchoice_rows"] == 3 and chk["toolchoice_eval_task_overlaps"] == 0
+    # a case built from one of the rows' real prompts makes the check fail
+    planted = tmp_path / "eval-planted.jsonl"
+    planted.write_text(json.dumps({"id": "p", "expect": {"tool": "bash"}, "meta": {"group_id": "tg-" + x["rows"]["slot"]["source_pattern_hash"]},
+                                   "messages": [{"role": "user", "content": "unrelated words here"}]}) + "\n")
+    assert not r2t.check_disjoint(argparse.Namespace(**{**vars(ns), "eval_tools": [str(planted)]}))["pass"]
+    # a block that lost its reference or names it as a neighbour is refused
+    bad = json.loads(json.dumps(rows[0]))
+    bad["r2"]["toolchoice"]["neighbours"] = [bad["r2"]["toolchoice"]["reference"]]
+    assert any("toolchoice" in p for p in ts.validate_task(bad))
+    with pytest.raises(r2t.R2Error, match="tc-gym-traces"):
+        _rebuild(a, tmp_path / "tc2", areas="tool-choice")
+
+
+def test_tool_choice_order_covers_every_reference_tool_first() -> None:
+    rows = [{"id": f"ts-{i:016x}", "r2": {"toolchoice": {"reference": t, "weight": w}}}
+            for i, (t, w) in enumerate([("bash", 9)] * 6 + [("task_create", 3)] * 2 + [("grep", 1)])]
+    out = r2t.tc_order(rows, 7)
+    assert [r["r2"]["toolchoice"]["reference"] for r in out[:3]] == ["bash", "task_create", "grep"]
+    assert len(out) == len(rows)
+
+
 # ── steer.py ─────────────────────────────────────────────────────────────────
 
 
@@ -493,6 +613,11 @@ def test_defaults_follow_the_operator_order_and_flatten_to_buckets() -> None:
     cfg = steer.validate(steer.default_config())
     w = cfg["weights"]
     assert w["injection-resistance"] > w["error-recovery"] > w["long-context"] and w["coding"] <= steer.CODING_MAX
+    assert w["tool-choice"] == max(w.values()) == 0.3  # operator 2026-11-01 ~23:00: tool choice first
+    # a config written before tool-choice existed still loads; the new area gets nothing there
+    old = {k: v for k, v in steer.default_config().items() if k != "weights"}
+    old["weights"] = {k: v for k, v in steer.DEFAULT_WEIGHTS.items() if k != "tool-choice"}
+    assert steer.validate(old)["weights"]["tool-choice"] == 0.0
     flat = steer.flatten(cfg)
     assert abs(sum(flat.values()) - 1.0) < 1e-3 and "daily-agent:chat-mode" in flat
     assert steer.bucket_of("daily-agent", "other") == "daily-agent:other"
@@ -543,9 +668,28 @@ def test_gen_stats_counts_verified_rows_per_hour_by_area_and_category(tmp_path: 
     assert last["rows"] == 5 and last["by_area"] == {"error-recovery": 3, "injection-resistance": 2}
     assert last["by_category"] == {"memory/wiki": 3, "other": 2} and last["rows_per_hour"] == round(5 / 24, 2)
     assert last["active_hours"] == 1 and last["keep_rate"] == round(2 / 4, 3)
+    assert last["keep_rate_by_area"]["error-recovery"] == {"kept": 1, "tried": 2, "rate": 0.5}
     tot = out["all"]["since_start"]
     assert tot["rows"] == 9 and tot["by_area"]["round-1"] == 4
     assert "local-x" in gs.render(out)
+
+
+def test_gen_stats_reports_the_wrong_tool_rate_of_tool_choice_tasks(tmp_path: Path) -> None:
+    now = 1_800_000_000.0
+    run = tmp_path / "runs" / "local-y"
+    run.mkdir(parents=True)
+
+    def ev(i: int, status: str, first: str | None, right: bool, neighbour: bool = False) -> dict[str, Any]:
+        return {"ts": now - 100 * i, "status": status, "rows": 2 if status == "kept" else 0, "domain": "other",
+                "area": "tool-choice", "task_id": f"t{i}", "verification": {"r2": {"toolchoice": {
+                    "reference": "bash", "first": first, "right": right, "neighbour": neighbour}}}}
+    evs = [ev(1, "kept", "bash", True), ev(2, "rejected", "edit_file", False, True), ev(3, "rejected", None, False),
+           ev(4, "rejected", "bash", True), {"ts": now - 50, "status": "error", "area": "tool-choice", "task_id": "t5"}]
+    (run / "g.tasks.jsonl").write_text("".join(json.dumps(e) + "\n" for e in evs))
+    out = gs.stats([str(tmp_path / "runs" / "*")], 24, now)
+    tc = out["all"]["last_hours"]["tool_choice"]
+    assert tc == {"tasks": 4, "right": 2, "wrong_tool": 1, "no_call": 1, "wrong_neighbour": 1, "wrong_tool_rate": 0.5}
+    assert "wrong-tool rate 50.0% (1 wrong, 1 no call of 4)" in gs.render(out)
 
 
 def test_live_host_requests_are_recognised() -> None:

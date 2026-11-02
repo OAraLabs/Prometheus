@@ -2306,13 +2306,17 @@ _HASH = re.compile(r"[0-9a-f]{16}")
 # a round-1 run already did is a new task in every ledger.
 
 R2_SCHEMA = "distill-r2/1"
-R2_AREAS = ("injection-resistance", "error-recovery", "long-context", "daily-agent", "coding")
+R2_AREAS = ("injection-resistance", "error-recovery", "long-context", "daily-agent", "coding", "tool-choice")
 R2_VERIFIERS = ("deterministic", "tool-success", "calibrated-judge")
 R2_VECTORS = ("tool_output", "memory", "wiki")
 #: 256k: the 4090 IQ3 teacher's measured 262,144 (capacity block, 2026-11-01); the only server that reads it
 R2_CTX_BUCKETS = ("32k", "64k", "128k", "256k")
 _R2_KEYS = {"schema", "round", "area", "variant", "base_id", "verifier", "needs_ctx", "ctx_bucket",
-            "injection", "failure", "longctx"}
+            "injection", "failure", "longctx", "toolchoice"}
+#: a tool-choice row's block: the right first tool (from a Max trace of this real prompt), the tools a
+#: first call may also be (provably equivalent ones only), its near-neighbours, where the reference came from
+_R2_TC_KEYS = {"reference", "accept", "neighbours", "source", "weight"}
+R2_TC_SOURCES = ("gym-max", "golden-max")
 _R2_INJ_KEYS = {"vector", "style", "goal", "template_id", "instruction", "carriers", "placement",
                 "forbidden_tools", "forbidden_args", "forbidden_strings", "setup_files", "fixtures"}
 
@@ -2350,11 +2354,12 @@ def validate_r2(r2: Any, row: dict[str, Any]) -> list[str]:
         p.append("r2.needs_ctx: a positive int")
     if r2.get("ctx_bucket") not in (None,) + R2_CTX_BUCKETS:
         p.append("r2.ctx_bucket: none or one of " + "/".join(R2_CTX_BUCKETS))
-    conds = [k for k in ("injection", "failure", "longctx") if r2.get(k) is not None]
+    conds = [k for k in ("injection", "failure", "longctx", "toolchoice") if r2.get(k) is not None]
     if len(conds) > 1:
-        p.append("r2: at most one of injection / failure / longctx")
+        p.append("r2: at most one of injection / failure / longctx / toolchoice")
     area = r2.get("area")
-    want = {"injection-resistance": "injection", "error-recovery": "failure", "long-context": "longctx"}.get(area)
+    want = {"injection-resistance": "injection", "error-recovery": "failure", "long-context": "longctx",
+            "tool-choice": "toolchoice"}.get(area)
     if want and conds != [want]:
         p.append(f"r2: a {area} row carries exactly its {want} block")
     if not want and conds:
@@ -2391,6 +2396,18 @@ def validate_r2(r2: Any, row: dict[str, Any]) -> list[str]:
                 and f["output"].strip() and isinstance(f.get("family"), str)
                 and isinstance(f.get("count"), int) and f["count"] > 0 for f in fams)):
             p.append("r2.failure.families: each {tool, family, output, count > 0}")
+    tc = r2.get("toolchoice")
+    if tc is not None:
+        if not isinstance(tc, dict) or set(tc) - _R2_TC_KEYS:
+            p.append("r2.toolchoice: bad block")
+        elif not (isinstance(tc.get("reference"), str) and tc["reference"]
+                  and isinstance(tc.get("accept"), list) and tc["reference"] in tc["accept"]
+                  and all(isinstance(x, str) and x for x in tc["accept"])
+                  and isinstance(tc.get("neighbours"), list) and tc["neighbours"]
+                  and not set(tc["neighbours"]) & set(tc["accept"]) and tc.get("source") in R2_TC_SOURCES):
+            p.append("r2.toolchoice: a reference among accept, near-neighbours outside it, a known source")
+        if r2.get("verifier") != "deterministic":
+            p.append("r2: a tool-choice row is checked deterministically")
     lc = r2.get("longctx")
     if lc is not None:
         reads = lc.get("reads") if isinstance(lc, dict) else None

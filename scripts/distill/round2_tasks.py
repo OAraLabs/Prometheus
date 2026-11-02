@@ -50,7 +50,18 @@ plus an ``r2`` block (``taskset_gen.validate_r2``) this file builds by code:
   distinctive identifiers (``grounding``: deterministic). Every row carries
   ``needs_ctx``: what the serving teacher must hold (prompt + growth + output +
   margin); ``teacher_gen.py`` never starts a row over its teacher's measured cap.
+  ``lc2`` (default, ``--lc-style``): the reads are the files the request is about (``Relevance``),
+  and the sandbox's real ``glob`` first lists where they are (``plan_listings``): with an
+  unrelated mix and no listing the teacher read files it guessed the names of.
 * ``daily-agent`` / ``coding``: the real rows of those categories, unchanged.
+* ``tool-choice`` (``--tc-*``): a real row whose right first tool a Max trace shows: Max's own
+  first call on that exact gym task (``--tc-gym-traces``), else the first call after the real
+  prompt the row was built from in the live golden traces (``--tc-golden``: a slot-filled row of
+  it, or a recombined row ending on it), kept only when that tool has near-neighbours
+  (``tool_neighbours``: the eval-tools wrong-tool confusions of scored models, its family, an
+  overlapping description). Deterministic verifier (``teacher_gen.py``): the turn's first call
+  (a ``todo_write`` plan skipped) is the reference (``TC_EQUIVALENT``: none yet), and the task
+  succeeds. Never a row whose own task, group or source prompt is an eval-tools case's.
 
 Expansion (``--inj-variants``, ``--err-variants``, ``--lc-variants``, ``--lc-alt-*``, ``--exclude-*``): every
 variant's id is salted with its name (``inj:<goal>:<style>:<vector>``, ``err:harvest`` / ``err:focus:<family>``
@@ -119,7 +130,7 @@ REPORT_SCHEMA = "distill-r2-taskset-report/1"
 DEFAULT_SEED = 20261102
 AREAS = TS.R2_AREAS
 AREA_FILE = {"injection-resistance": "injection", "error-recovery": "errrec", "long-context": "longctx",
-             "daily-agent": "daily", "coding": "coding"}
+             "daily-agent": "daily", "coding": "coding", "tool-choice": "toolchoice"}
 #: tokens a teacher turn may add after the prompt (further calls and their results) and its output
 GROWTH_TOKENS = 8192
 OUTPUT_TOKENS = 4096
@@ -787,6 +798,204 @@ def grounding_terms(target: SrcFile, others: list[SrcFile], prompt: str, k: int 
 
 
 # ---------------------------------------------------------------------------
+# Tool choice: real prompts whose right first tool a Max trace shows
+# ---------------------------------------------------------------------------
+
+#: a first call that chooses nothing (a plan): the choice is the call after it, in a trace and in a run
+TC_TRANSPARENT = frozenset({"todo_write"})
+#: provably equivalent first calls (same effect on the same arguments). None so far: every pair the evals
+#: confuse (bash vs edit_file / read_file / task_*, web_* vs bash, memory vs bash) does something else
+TC_EQUIVALENT: dict[str, frozenset[str]] = {}
+#: a golden reference was chosen with its conversation's history; a request this short leans on it
+TC_MIN_WORDS = 5
+#: tools whose descriptions share this much of their words are near-neighbours too
+TC_DESC_JACCARD = 0.25
+TC_SOURCES = TS.R2_TC_SOURCES
+
+
+def first_tool(msgs: list[dict[str, Any]]) -> str | None:
+    """The first tool the assistant called after the last user message (``TC_TRANSPARENT`` skipped)."""
+    last_user = max((k for k, m in enumerate(msgs) if m.get("role") == "user"), default=-1)
+    if last_user < 0:
+        return None
+    for m in msgs[last_user + 1:]:
+        if m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            name = (tc.get("function") or {}).get("name")
+            if name and name not in TC_TRANSPARENT:
+                return str(name)
+    return None
+
+
+def _jsonl(path: Path) -> Iterable[dict[str, Any]]:
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            if line.strip():
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict):
+                    yield row
+
+
+def gym_references(paths: list[Path]) -> dict[str, str]:
+    """task hash -> the first tool Max called on that exact gym task (``teacher_gen.py`` traces of a Max
+    teacher run: the same sandbox, tools and system prompt as round 2), when every row of the task passed."""
+    tools: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    bad: set[str] = set()
+    for path in paths:
+        for row in _jsonl(path):
+            meta = row.get("_meta") or {}
+            th = meta.get("task_hash")
+            if not th:
+                continue
+            if meta.get("verdict") != "pass":
+                bad.add(th)
+            t = first_tool(row.get("messages") or [])
+            if t:
+                tools[th][t] += 1
+    return {th: c.most_common(1)[0][0] for th, c in tools.items() if th not in bad and len(c) == 1}
+
+
+def golden_references(paths: list[Path]) -> dict[str, str]:
+    """real prompt's task proxy (``h(norm(prompt))``, a taskset row's ``pattern_hash``) -> the first tool
+    Max called right after it in the live golden traces (built train/val rows, ``source: max-golden``,
+    whose last message before the target is the user's), when at least 2/3 of its steps agree."""
+    votes: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    for path in paths:
+        for row in _jsonl(path):
+            if row.get("source") != "max-golden":
+                continue
+            msgs = row.get("messages") or []
+            if len(msgs) < 2 or msgs[-1].get("role") != "assistant" or msgs[-2].get("role") != "user":
+                continue
+            t = first_tool(msgs)
+            if t:
+                votes[TS.h(TS.norm(_first_text(msgs[-2].get("content"))))][t] += 1
+    out: dict[str, str] = {}
+    for k, c in votes.items():
+        t, n = c.most_common(1)[0]
+        if n * 3 >= sum(c.values()) * 2:
+            out[k] = t
+    return out
+
+
+def confusion_pairs(case_paths: list[Path], result_paths: list[Path]) -> collections.Counter:
+    """(expected tool, chosen tool) -> how often a scored model called the other tool first on an
+    eval-tools case (``score.py`` per-case results of any model; tool names only)."""
+    import ast
+
+    expect: dict[str, str] = {}
+    for path in case_paths:
+        for c in _jsonl(path):
+            t = (c.get("expect") or {}).get("tool")
+            if t and c.get("id"):
+                expect[str(c["id"])] = str(t)
+    pairs: collections.Counter = collections.Counter()
+    for path in result_paths:
+        for r in _jsonl(path):
+            exp = expect.get(str(r.get("id")))
+            if not exp:
+                continue
+            msg = r.get("message")
+            if isinstance(msg, str):
+                try:
+                    msg = ast.literal_eval(msg)
+                except (ValueError, SyntaxError):
+                    msg = None
+            calls = (msg or {}).get("tool_calls") if isinstance(msg, dict) else None
+            got = ((calls or [{}])[0].get("function") or {}).get("name") if calls else None
+            if got and got != exp:
+                pairs[(exp, str(got))] += 1
+    return pairs
+
+
+def tool_neighbours(pairs: collections.Counter, schemas: list[dict[str, Any]], offered: Iterable[str]
+                    ) -> dict[str, list[str]]:
+    """tool -> its near-neighbours among *offered*: tools the evals confuse it with (either way), tools of
+    its family (the name before ``_``: task_*, cron_*, web_*, wiki_*) and tools whose descriptions overlap
+    (word Jaccard >= ``TC_DESC_JACCARD``)."""
+    offered = set(offered)
+    desc = {(t.get("function") or t).get("name"): words_of(str((t.get("function") or t).get("description") or ""))
+            for t in schemas}
+    out: dict[str, set[str]] = collections.defaultdict(set)
+    for (a, b), n in pairs.items():
+        if n > 0 and a in offered and b in offered:
+            out[a].add(b)
+            out[b].add(a)
+    names = sorted(offered)
+    for a in names:
+        for b in names:
+            if a >= b:
+                continue
+            fam = "_" in a and "_" in b and a.split("_")[0] == b.split("_")[0]
+            da, db = desc.get(a) or frozenset(), desc.get(b) or frozenset()
+            jac = len(da & db) / len(da | db) if da and db else 0.0
+            if fam or jac >= TC_DESC_JACCARD:
+                out[a].add(b)
+                out[b].add(a)
+    return {t: sorted(v - {t} - TC_EQUIVALENT.get(t, frozenset())) for t, v in out.items()}
+
+
+def eval_task_hashes(paths: list[Path]) -> set[str]:
+    """Every task / group id of an eval-tools case (prefix stripped) and its user messages' task proxies:
+    a tool-choice row whose own id, group or source prompt is one of them is never built."""
+    out: set[str] = set()
+    for path in paths:
+        for c in _jsonl(path):
+            meta = c.get("meta") if isinstance(c.get("meta"), dict) else {}
+            for k in ("task_id", "group_id"):
+                v = str(meta.get(k) or "")
+                if v:
+                    out.add(v.split("-", 1)[1] if v[:3] in ("ts-", "tg-") else v)
+            for m in c.get("messages") or []:
+                if m.get("role") == "user":
+                    out.add(TS.h(TS.norm(_first_text(m.get("content")))))
+    return out
+
+
+def row_hashes(row: dict[str, Any]) -> set[str]:
+    """A taskset row's own task proxy, its group and every real prompt it was built from."""
+    out = {row["id"][3:], str(row.get("task_group") or "")[3:], str(row.get("source_pattern_hash") or "")}
+    out |= {str(s.get("pattern_hash") or "") for s in row.get("sources") or []}
+    return {x for x in out if x}
+
+
+def tc_reference(row: dict[str, Any], gym: dict[str, str], golden: dict[str, str]) -> tuple[str | None, str]:
+    """(the row's right first tool, where it came from): Max's own first call on this exact gym task, else
+    (golden) the first call after the real prompt the row was built from: a slot_fill / slot_swap row's
+    template; a recombined row's last piece (the request it ends on), when its first piece agrees or has none."""
+    ref = gym.get(row["id"][3:])
+    if ref:
+        return ref, "gym-max"
+    srcs = row.get("sources") or []
+    if row.get("transform") in ("slot_fill", "slot_swap"):
+        return golden.get(row["source_pattern_hash"]), "golden-max"
+    if len(srcs) == 2:
+        t0, t1 = golden.get(srcs[0]["pattern_hash"]), golden.get(srcs[1]["pattern_hash"])
+        if t1 and t0 in (None, t1):
+            return t1, "golden-max"
+    return None, "golden-max"
+
+
+def tc_order(rows: list[dict[str, Any]], seed: int) -> list[dict[str, Any]]:
+    """Round-robin over reference tools (most-confused first, each queue in a seeded order): any prefix
+    covers every tool, so bash (most rows) never crowds the others out of a short run."""
+    queues: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
+    for r in sorted(rows, key=lambda r: rank(seed, "order|tool-choice", r["id"])):
+        queues[r["r2"]["toolchoice"]["reference"]].append(r)
+    order = sorted(queues, key=lambda t: (-queues[t][0]["r2"]["toolchoice"]["weight"], t))
+    out: list[dict[str, Any]] = []
+    while any(queues.values()):
+        for t in order:
+            if queues[t]:
+                out.append(queues[t].pop(0))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Rows
 # ---------------------------------------------------------------------------
 
@@ -813,13 +1022,16 @@ def eval_tools_keys(paths: list[Path]) -> tuple[set[str], set[str]]:
 
 def make_row(base: dict[str, Any], *, taskset: str, area: str, variant: str, verifier: str, needs_ctx: int,
              ctx_bucket: str | None = None, injection: dict[str, Any] | None = None,
-             failure: dict[str, Any] | None = None, longctx: dict[str, Any] | None = None) -> dict[str, Any]:
+             failure: dict[str, Any] | None = None, longctx: dict[str, Any] | None = None,
+             toolchoice: dict[str, Any] | None = None) -> dict[str, Any]:
     row = copy.deepcopy(base)
     row["taskset"] = taskset
     row["flags"] = dict(row["flags"], force_compaction=False, inject_errors=area == "error-recovery")
     row["r2"] = {"schema": TS.R2_SCHEMA, "round": 2, "area": area, "variant": variant, "base_id": base["id"],
                  "verifier": verifier, "needs_ctx": int(needs_ctx), "ctx_bucket": ctx_bucket,
                  "injection": injection, "failure": failure, "longctx": longctx}
+    if toolchoice is not None:
+        row["r2"]["toolchoice"] = toolchoice
     row["id"] = TS.r2_task_id(row["prompt"], variant)
     problems = TS.validate_task(row)
     if problems:
@@ -1000,6 +1212,8 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
         raise R2Error("--base is already a round-2 taskset")
     stats: collections.Counter = collections.Counter()
     eval_tools = [Path(os.path.expanduser(p)) for p in (a.eval_tools or [])]
+    ev_ids: set[str] = set()
+    ev_sh: set[str] = set()
     if eval_tools:
         ev_ids, ev_sh = eval_tools_keys(eval_tools)
         kept = [r for r in base_rows
@@ -1172,6 +1386,64 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
             r, taskset=f"{name}-{AREA_FILE[area]}", area=area, variant=f"{AREA_FILE[area]}:plain",
             verifier=planned_verifier(area, r["category"], calibrated, False),
             needs_ctx=needs_ctx(prompt_tokens(r))))
+    # tool-choice: real rows whose right first tool a Max trace shows, with near-neighbours to confuse it with
+    tc_info: dict[str, Any] = {}
+    tc_refs = bool(getattr(a, "tc_gym_traces", None) or getattr(a, "tc_golden", None))
+    if "tool-choice" in want and not tc_refs:
+        if getattr(a, "areas", None):
+            raise R2Error("--areas tool-choice: give --tc-gym-traces and/or --tc-golden (the Max references)")
+        stats["tc_skipped_no_references"] = 1
+    elif "tool-choice" in want:
+        gym = gym_references(_globs(a.tc_gym_traces or []))
+        golden = golden_references(_globs(a.tc_golden or []))
+        pairs = confusion_pairs(eval_tools, _globs(a.tc_eval_results or []))
+        try:
+            schemas = BES.load_tool_schemas()
+        except Exception:  # noqa: BLE001 - a drifted snapshot: confusions and families only
+            schemas = []
+        neigh = tool_neighbours(pairs, schemas, SANDBOX_TOOLS)
+        weight: collections.Counter = collections.Counter()
+        for (x, y), n in pairs.items():
+            weight[x] += n
+            weight[y] += n
+        ev_hashes = eval_task_hashes(eval_tools)
+        cands = list(base_rows)
+        seen_ids = {r["id"] for r in cands}
+        for path in _globs(getattr(a, "tc_base", None) or []):
+            for r in TS.load_taskset(path):
+                if r["id"] in seen_ids or "r2" in r:
+                    continue
+                if eval_tools and (TS.h(TS.norm(r["prompt"])) in ev_ids or BES.shingle_hashes(r["prompt"]) & ev_sh):
+                    stats["tc_base_eval_tools_overlap_dropped"] += 1
+                    continue
+                seen_ids.add(r["id"])
+                cands.append(r)
+        for r in cands:
+            if r["mode"] != "agentic":
+                continue
+            if row_hashes(r) & ev_hashes:
+                stats["tc_eval_tools_task_dropped"] += 1
+                continue
+            ref, src = tc_reference(r, gym, golden)
+            if ref is None:
+                continue
+            if src == "golden-max" and (len(r["prompt"].split()) < TC_MIN_WORDS or live_host_prompt(r["prompt"])):
+                stats["tc_golden_short_or_live_host"] += 1
+                continue
+            if ref not in SANDBOX_TOOLS:
+                stats[f"tc_reference_not_offered:{ref}"] += 1
+                continue
+            if not neigh.get(ref):
+                stats["tc_no_neighbours"] += 1
+                continue
+            tc = {"reference": ref, "accept": sorted({ref} | set(TC_EQUIVALENT.get(ref, ()))),
+                  "neighbours": neigh[ref], "source": src, "weight": int(weight[ref])}
+            rows["tool-choice"].append(make_row(
+                r, taskset=f"{name}-toolchoice", area="tool-choice", variant=f"tc:{ref}", verifier="deterministic",
+                needs_ctx=needs_ctx(prompt_tokens(r)), toolchoice=tc))
+        tc_info = {"references": {"gym": len(gym), "golden": len(golden)},
+                   "confusion_pairs": {f"{x}->{y}": n for (x, y), n in pairs.most_common(40)},
+                   "neighbours": {t: neigh[t] for t in sorted(neigh)}, "eval_task_hashes": len(ev_hashes)}
     # tasks an earlier taskset holds or a run attempted are never made again
     excluded: dict[str, int] = {}
     if excl_ids or excl_hashes:
@@ -1184,7 +1456,8 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
     every: list[dict[str, Any]] = []
     files: dict[str, Any] = {}
     for area in AREAS:
-        rs = sorted(rows[area], key=lambda r: rank(seed, "order|" + area, r["id"]))
+        rs = (tc_order(rows[area], seed) if area == "tool-choice"
+              else sorted(rows[area], key=lambda r: rank(seed, "order|" + area, r["id"])))
         path = out_dir / f"{name}-{AREA_FILE[area]}.jsonl"
         TS._write_atomic(path, "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in rs))
         files[area] = {"file": path.name, "rows": len(rs), "sha256": TS._sha256(path)}
@@ -1235,6 +1508,11 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
                                                         if _norm_path(x["path"]) in lc_eval),
                          "token_count": counter.method, "overhead_tokens": overhead,
                          "overhead_basis": overhead_basis},
+        "tool_choice": dict(tc_info, rows=len(rows["tool-choice"]),
+                            by_reference=dict(collections.Counter(r["r2"]["toolchoice"]["reference"]
+                                                                  for r in rows["tool-choice"]).most_common()),
+                            by_source=dict(collections.Counter(r["r2"]["toolchoice"]["source"]
+                                                               for r in rows["tool-choice"]))),
         "failures": {"harvest": err_stats, "families": {k: {kk: v[kk] for kk in ("tool", "count", "variants",
                                                                                  "sticky", "sources")}
                                                         for k, v in lib.items()}},
@@ -1261,12 +1539,19 @@ def check_disjoint(a: argparse.Namespace) -> dict[str, Any]:
            "longctx_reads_in_eval": sum(1 for r in lc for x in r["r2"]["longctx"]["reads"]
                                         if _norm_path(x["path"]) in lc_eval)}
     if a.eval_tools:
-        ids, sh = eval_tools_keys([Path(os.path.expanduser(p)) for p in a.eval_tools])
+        ev_paths = [Path(os.path.expanduser(p)) for p in a.eval_tools]
+        ids, sh = eval_tools_keys(ev_paths)
         out["eval_tools_overlaps"] = sum(1 for r in rows if TS.h(TS.norm(r["prompt"])) in ids
                                          or BES.shingle_hashes(r["prompt"]) & sh)
+        tc_rows = [r for r in rows if (r.get("r2") or {}).get("toolchoice")]
+        if tc_rows:
+            evh = eval_task_hashes(ev_paths)
+            out["toolchoice_rows"] = len(tc_rows)
+            out["toolchoice_eval_task_overlaps"] = sum(1 for r in tc_rows if row_hashes(r) & evh)
     out["pass"] = (out["static"]["pass"] and not out["injection_overlaps"] and not out["injection_goals_in_eval"]
                    and not out["injection_styles_in_eval"] and not out["longctx_reads_in_eval"]
-                   and not out.get("eval_tools_overlaps") and bool(lc_eval))
+                   and not out.get("eval_tools_overlaps") and not out.get("toolchoice_eval_task_overlaps")
+                   and bool(lc_eval))
     return out
 
 
@@ -1384,6 +1669,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="tasksets whose rows are never made again (by id / salted hash)")
     b.add_argument("--exclude-ledgers", action="append", default=[], metavar="GLOB",
                    help="run ledgers (<run>/*.tasks.jsonl): every task a run attempted is never made again")
+    b.add_argument("--tc-gym-traces", action="append", default=[], metavar="GLOB",
+                   help="tool-choice references: traces of a Max teacher run in the gym (teacher_gen.py)")
+    b.add_argument("--tc-golden", action="append", default=[], metavar="GLOB",
+                   help="tool-choice references: built train/val rows holding the live golden Max steps")
+    b.add_argument("--tc-eval-results", action="append", default=[], metavar="GLOB",
+                   help="score.py per-case eval-tools results of any model: the wrong-tool confusions")
+    b.add_argument("--tc-base", action="append", default=[], metavar="GLOB",
+                   help="more real-pattern tasksets whose rows may be tool-choice rows (a gym reference's own)")
     b.add_argument("--live-prompts", choices=("skip", "keep"), default="skip",
                    help="requests about the owner's live hosts and accounts (LIVE_HOST) in the conditioned areas")
     m = sub.add_parser("merge")

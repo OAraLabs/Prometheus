@@ -1495,9 +1495,12 @@ def gen_stats_lines(day: dict[str, Any], r2: dict[str, Any], since_label: str) -
         hours = float(tot.get("hours") or js.get("hours") or 1) or 1.0
         shown = ["3090Ti", "4090"] + [g for g in ("Max", "other") if groups.get(g)]
         area = ", ".join(f"{k} {v:g}" for k, v in list((tot.get("by_area_per_hour") or {}).items())[:6]) or "-"
+        tc = tot.get("tool_choice") or {}
+        wrong = (f" | wrong-tool {tc['wrong_tool_rate']:.0%} of {tc['tasks']}"
+                 if tc.get("tasks") and tc.get("wrong_tool_rate") is not None else "")
         out.append(f"{label}: {tot.get('rows', 0)} rows, {float(tot.get('rows_per_hour') or 0):.1f}/h ("
                    + " ".join(f"{g} {groups.get(g, 0) / hours:.1f}" for g in shown)
-                   + f"), keep {tot.get('keep_rate')} | by area/h: {area}")
+                   + f"), keep {tot.get('keep_rate')}{wrong} | by area/h: {area}")
     cat = ((day.get("all") or {}).get("last_hours") or {}).get("by_category_per_hour") or {}
     out.append("24h by category/h: " + (", ".join(f"{k} {v:g}" for k, v in list(cat.items())[:6]) or "-"))
     return out

@@ -360,6 +360,45 @@ def test_a_listing_that_matches_nothing_rejects_the_task(tmp_path: Path, no_outb
         bad.validate()
 
 
+def _tc_task(prompt: str, reference: str = "wiki_query") -> Any:
+    tc = {"reference": reference, "accept": [reference], "neighbours": ["lcm_grep", "memory"],
+          "source": "gym-max", "weight": 3}
+    row = r2t.make_row(_base(prompt), taskset="t-toolchoice", area="tool-choice", variant=f"tc:{reference}",
+                       verifier="deterministic", needs_ctx=20000, toolchoice=tc)
+    assert ts.validate_task(row) == []
+    task = tg.tasks_from_taskset_rows([row], Path("."))[0]
+    task.fixtures = {"wiki": dict(PAGES)}
+    return task
+
+
+def test_tool_choice_keeps_the_reference_first_call_and_rejects_a_neighbour(tmp_path: Path,
+                                                                           no_outbound: Any) -> None:
+    t = _tc_task("Which host runs cobalt-intake? Check the wiki.")
+    assert t.sched_key == "tool-choice" and t.r2["toolchoice"]["reference"] == "wiki_query"
+    answer = ("text", "The wiki says cobalt-intake runs on node-bravo, port 8417, owned by platform.")
+    plan = [("call", "todo_write", {"item": "look it up in the wiki"}),
+            WIKI_CALL, answer]
+    with FakeTeacher(scripted({"cobalt-intake": plan})) as fake:
+        status, _rows, reasons, extra = _process(t, _settings(tmp_path, fake.url))
+    assert status == "kept", reasons
+    rec = extra["verification"]["r2"]
+    assert rec["toolchoice"] == {"reference": "wiki_query", "first": "wiki_query", "right": True,
+                                 "source": "gym-max", "neighbour": False}
+    assert "tool_choice" in rec["deterministic"]["checks"] and extra["verification"]["verifier"] == "deterministic"
+    # a near-neighbour first (it works, but it is not the right tool): rejected as wrong_tool
+    wrong = [("call", "lcm_grep", {"pattern": "cobalt-intake"}), WIKI_CALL, answer]
+    with FakeTeacher(scripted({"cobalt-intake": wrong})) as fake:
+        status, _rows, reasons, extra = _process(_tc_task("Which host runs cobalt-intake? Check the wiki."),
+                                                 _settings(tmp_path / "b", fake.url))
+    assert status == "rejected" and "wrong_tool" in reasons
+    assert extra["verification"]["r2"]["toolchoice"]["neighbour"] is True
+    # no call at all
+    with FakeTeacher(scripted({"cobalt-intake": [answer]})) as fake:
+        status, _rows, reasons, _extra = _process(_tc_task("Which host runs cobalt-intake? Check the wiki."),
+                                                  _settings(tmp_path / "c", fake.url))
+    assert status == "rejected" and "no_tool_call" in reasons
+
+
 # ── context cap, calibration, steering ───────────────────────────────────────
 
 

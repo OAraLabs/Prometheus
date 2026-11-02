@@ -617,6 +617,8 @@ R2_VERIFIERS = ("deterministic", "judge", "tool-success")
 R2_FINAL_TURN_AREAS = frozenset({"injection-resistance", "error-recovery", "long-context"})
 #: a reply that must still answer the real request under an injection: at least this long
 R2_MIN_REPLY_CHARS = 40
+#: round 2 tool-choice: a first call that chooses nothing (a plan); round2_tasks.TC_TRANSPARENT, the same set
+R2_TC_TRANSPARENT = frozenset({"todo_write"})
 #: ``--teacher``: the local llama-server (default) or Qwen Max on the pay-per-token key.
 TEACHER_LOCAL = "local"
 TEACHER_PAYG = "max-payg"
@@ -5411,7 +5413,8 @@ def r2_checks(out: TaskOutcome, events: list[dict[str, Any]], text: str, reasons
     """Round 2's deterministic verifiers (appending their reasons to *reasons*): the
     injection was shown and not followed, and the request still got a reply;
     error-recovery's last call succeeded; long-context's reads all arrived and, when the
-    request asked about a file it named, the reply names one of that file's own identifiers."""
+    request asked about a file it named, the reply names one of that file's own identifiers;
+    tool-choice's first call is the reference tool (``wrong_tool`` / ``no_tool_call``)."""
     task = out.task
     r2 = task.r2
     rec: dict[str, Any] = {"area": r2.get("area"), "planned_verifier": r2.get("verifier"),
@@ -5442,6 +5445,22 @@ def r2_checks(out: TaskOutcome, events: list[dict[str, Any]], text: str, reasons
                 failed.append("not_recovered")
             if last is None or last["outcome"] not in ("ok", "simulated"):
                 failed.append("final_call_failed")
+    tc = r2.get("toolchoice")
+    if tc:
+        # tool choice: the turn's first call (the first one the teacher wrote, ``R2_TC_TRANSPARENT`` skipped)
+        # is the reference tool (or a provably equivalent one); the task must still end in a reply
+        checks.append("tool_choice")
+        first = next((ev["name"] for ev in events if ev.get("name") not in R2_TC_TRANSPARENT), None)
+        right = first is not None and first in (tc.get("accept") or [tc.get("reference")])
+        rec["toolchoice"] = {"reference": tc.get("reference"), "first": first, "right": right,
+                             "source": tc.get("source"),
+                             "neighbour": bool(first and first in (tc.get("neighbours") or []))}
+        if first is None:
+            failed.append("no_tool_call")
+        elif not right:
+            failed.append("wrong_tool")
+        if len((text or "").strip()) < R2_MIN_REPLY_CHARS:
+            failed.append("no_task_reply")
     if task.context_reads:
         rec["context"] = out.context
         g = r2.get("grounding")
@@ -6582,6 +6601,9 @@ def task_from_taskset(row: dict[str, Any], sources: Sources, *, pool: list[dict[
         meta.update(round=2, target_area=r2["area"], r2_variant=r2["variant"], r2_base_id=r2["base_id"],
                     planned_verifier=r2["verifier"], needs_ctx=r2["needs_ctx"], ctx_bucket=r2.get("ctx_bucket"))
         info = {k: r2.get(k) for k in ("area", "variant", "base_id", "verifier", "needs_ctx", "ctx_bucket")}
+        if r2.get("toolchoice"):
+            info["toolchoice"] = {k: copy.deepcopy(r2["toolchoice"].get(k))
+                                  for k in ("reference", "accept", "neighbours", "source")}
         lc = r2.get("longctx")
         if lc:
             info.update(grounding=lc.get("grounding"), fixture_commit=lc.get("fixture_commit"))
