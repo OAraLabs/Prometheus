@@ -31,6 +31,7 @@ import contextlib
 import errno
 import os
 import stat
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -257,9 +258,23 @@ def _protected_roots() -> list[Path]:
     return out
 
 
+_IDENTITY_TTL = 5.0
+_identity_cache: tuple[float, set[tuple[int, int]]] | None = None
+
+
 def _protected_identities() -> set[tuple[int, int]]:
-    """``(st_dev, st_ino)`` of every protected file that exists now. Computed per call: it is only asked for a file
-    with more than one link, which is rare."""
+    """``(st_dev, st_ino)`` of every protected file that exists now. Only asked for a file with more than one link;
+    kept for a few seconds, so a grep over a venv (uv hard-links its cache) walks the floor once, not per file."""
+    global _identity_cache
+    now = time.monotonic()
+    if _identity_cache is not None and now - _identity_cache[0] < _IDENTITY_TTL:
+        return _identity_cache[1]
+    ids = _walk_identities()
+    _identity_cache = (now, ids)
+    return ids
+
+
+def _walk_identities() -> set[tuple[int, int]]:
     ids: set[tuple[int, int]] = set()
     for root in _protected_roots():
         try:

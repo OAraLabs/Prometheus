@@ -50,6 +50,7 @@ from urllib.parse import quote
 import httpx
 from pydantic import BaseModel, Field
 
+from prometheus.security import safe_fs
 from prometheus.security.path_guard import assert_path_under_roots
 from prometheus.permissions.path_schema import PATH_FIELD_WRITE
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
@@ -1050,8 +1051,9 @@ def _save_image_bytes(
         # starts under an allowed root. Raises ValueError on violation — the
         # backend callers convert that into a ToolResult(is_error=True).
         path = assert_path_under_roots(override_path, _allowed_image_roots())
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        # Written through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q): a folder under an image root swapped
+        # for a link after the check above cannot redirect it.
+        safe_fs.write_bytes(path, data)
         return str(path)
     from prometheus.gateway.media_cache import cache_image_from_bytes
     return cache_image_from_bytes(data, ext=ext)

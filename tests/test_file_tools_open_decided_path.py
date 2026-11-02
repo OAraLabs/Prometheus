@@ -38,6 +38,7 @@ def world(tmp_path, monkeypatch):
     (elsewhere / "nb.ipynb").write_text(json.dumps(_notebook("PROTECTED")))
     monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(root / "cfg"))
     monkeypatch.setattr(safe_fs, "before_open", lambda path: None)
+    monkeypatch.setattr(safe_fs, "_identity_cache", None, raising=False)
     return ws, elsewhere
 
 
@@ -256,3 +257,111 @@ async def test_the_loop_hands_the_tool_the_path_the_gate_ruled_on(world, monkeyp
         pass
     assert seen["decided_path"] == expected, seen
     _untouched(elsewhere)
+
+
+# ── the other file tools ─────────────────────────────────────────────────────
+
+def test_grep_does_not_read_a_hard_link_to_a_protected_file(protected_key):
+    from prometheus.tools.builtin.grep import GrepTool, GrepToolInput
+
+    ws, _key, _alias = protected_key
+    result = _run(GrepTool(), GrepToolInput(pattern="PRIVATE", root=str(ws), file_glob="**/*"), _ctx(ws, None))
+    assert "PRIVATE KEY" not in result.output, result.output
+
+
+def test_tts_saves_through_no_link(world, monkeypatch):
+    from prometheus.tools.base import ToolResult
+    from prometheus.tools.builtin import tts as T
+
+    ws, elsewhere = world
+
+    async def fake_synthesize(self, arguments, out_path):
+        Path(out_path).write_bytes(b"RIFF-EVIL")
+        return ToolResult(output=f"Audio saved to {out_path}")
+
+    monkeypatch.setattr(T.TTSTool, "_synthesize", fake_synthesize)
+    swapped = []
+
+    def swap_once(path):
+        if not swapped:
+            swapped.append(path)
+            _swap(ws, elsewhere)
+
+    monkeypatch.setattr(safe_fs, "before_open", swap_once)
+    target = ws / "sub" / "speech.wav"
+    result = _run(T.TTSTool(), T.TTSInput(text="hi", output_path=str(target)), _ctx(ws, target.resolve()))
+    assert swapped and result.is_error, result.output
+    _untouched(elsewhere)
+
+
+def test_tts_saves_where_asked_without_a_race(world, monkeypatch):
+    from prometheus.tools.base import ToolResult
+    from prometheus.tools.builtin import tts as T
+
+    ws, _ = world
+
+    async def fake_synthesize(self, arguments, out_path):
+        Path(out_path).write_bytes(b"RIFF")
+        return ToolResult(output=f"Audio saved to {out_path}")
+
+    monkeypatch.setattr(T.TTSTool, "_synthesize", fake_synthesize)
+    target = ws / "sub" / "speech.wav"
+    result = _run(T.TTSTool(), T.TTSInput(text="hi", output_path=str(target)), _ctx(ws, target.resolve()))
+    assert not result.is_error and target.read_bytes() == b"RIFF", result.output
+
+
+def test_image_generate_saves_through_no_link(world, monkeypatch):
+    from prometheus.tools.builtin import image_generate as IG
+
+    ws, elsewhere = world
+    monkeypatch.setattr(IG, "_allowed_image_roots", lambda: [ws])
+    swapped = []
+
+    def swap_once(path):
+        if not swapped:
+            swapped.append(path)
+            _swap(ws, elsewhere)
+
+    monkeypatch.setattr(safe_fs, "before_open", swap_once)
+    with pytest.raises(safe_fs.PathChanged):
+        IG._save_image_bytes(b"PNG-EVIL", ext="png", override_path=str(ws / "sub" / "pic.png"))
+    _untouched(elsewhere)
+
+
+def test_download_file_refuses_a_destination_that_moved_after_the_check(world):
+    from prometheus.tools.builtin.download_file import DownloadFileInput, DownloadFileTool
+
+    ws, elsewhere = world
+    target = ws / "sub" / "file.bin"
+    decided = target.resolve()
+    _swap(ws, elsewhere)
+    args = DownloadFileInput(url="https://example.com/file.bin", destination=str(target))
+    result = _run(DownloadFileTool(), args, _ctx(ws, decided))
+    assert result.is_error and "changed after the check" in result.output, result.output
+    _untouched(elsewhere)
+
+
+# ── the shell cannot make the hard link (macOS) ──────────────────────────────
+
+@pytest.mark.skipif(not (os.uname().sysname == "Darwin" and Path("/usr/bin/sandbox-exec").exists()),
+                    reason="needs macOS with /usr/bin/sandbox-exec")
+@pytest.mark.parametrize("rel", [".prometheus/node/node.key", ".prometheus/data/devices.db", ".prometheus/data/lcm.db",
+                                 ".ssh/id_x", ".prometheus/prometheus.yaml"])
+def test_a_confined_shell_cannot_hard_link_a_protected_file(tmp_path, rel, monkeypatch):
+    """Measured: the Seatbelt profile's write rules refuse link(2) on the source, so a model's shell on a Mac cannot
+    make the second name the file tools now refuse anyway. The AppArmor profile's `l` does the same on Linux."""
+    import subprocess
+
+    from prometheus.permissions import confinement as C
+
+    for name in ("PROMETHEUS_CONFIG_DIR", "PROMETHEUS_DATA_DIR", "PROMETHEUS_NODE_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    home = tmp_path.resolve()
+    src = home / rel
+    src.parent.mkdir(parents=True)
+    src.write_text("x\n")
+    (home / "ws").mkdir()
+    dst = home / "ws" / "alias"
+    rc = subprocess.run([C.SANDBOX_EXEC, "-p", C.seatbelt_profile(home), "/bin/ln", str(src), str(dst)],
+                        capture_output=True, text=True, timeout=30).returncode
+    assert rc != 0 and not dst.exists(), rel

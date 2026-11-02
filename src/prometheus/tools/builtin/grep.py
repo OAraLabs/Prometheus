@@ -15,6 +15,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from prometheus.security import safe_fs
 from prometheus.permissions.path_schema import DIR_FIELD_READ
 from prometheus.tools.denied_prune import (
     is_denied,
@@ -107,9 +108,15 @@ class GrepTool(BaseTool):
             if is_denied(path, self._denied):
                 withheld += 1
                 continue
+            # Read through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q): the name the glob listed may lead
+            # elsewhere by now, and a second name for a protected file is not read.
+            real = path.resolve()
+            if real != path and is_denied(real, self._denied):
+                withheld += 1
+                continue
             try:
-                raw = path.read_bytes()
-            except OSError:
+                raw = safe_fs.read_bytes(real)
+            except OSError:  # safe_fs.PathChanged included
                 continue
             if b"\x00" in raw:
                 continue
