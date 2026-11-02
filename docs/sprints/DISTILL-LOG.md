@@ -262,3 +262,8 @@ Append-only, times in ET.
   - **Rows:** lcm_messages 29,283 (154 sessions), lcm_summaries 4,791, checkpoints 2,855, session_titles 129, session_tombstones 66, message_client_ids 200. Newest message 2026-10-28 01:01 UTC.
   - **Against the 10-30 snapshots:** 0 new message rows, 0 new sessions, 0 new user-typed prompts; message, summary and tombstone content identical. The file is byte-identical (same sha256) to the 10-30 21:34 copy. The golden-trace exports are the same 21 files as the real-v4/v5 builds (newest 10-15).
   - **Result:** no new base taskset or round-2 variants (they would only re-mine the prompts real-v4/v5 already used, which the 22:30 expansion covers). round2.conf unchanged. The next new real prompts need fresh conversations with the daemon.
+- 2026-11-01 22:42 EST — **GRPO plan written** (DISTILL-GRPO-PLAN.md, 235e87a; nothing run).
+  - **Verdict:** feasible on the 4090 in single-step form. Memory ~14–16 GiB with 8 samples per prompt at ~10K-token prompts; speed is the limit (no vLLM path for Qwen3.5): ~9–16 steps/h with stock TRL+Unsloth, so 500 steps ≈ 31–58 h (a weekend or 6–10 nights).
+  - **Path:** filter prompts to a 10–90% pass rate → single-step pilot of 300 steps → multi-turn only if it passes.
+  - **Key choices:** no judge in the reward loop; the KL reference must be the merged round-2 SFT model.
+  - **Next:** a ~30-min dry run in a window decides go/no-go (≥9 steps/h).
