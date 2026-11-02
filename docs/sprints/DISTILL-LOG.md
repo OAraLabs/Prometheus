@@ -354,3 +354,9 @@ Append-only, times in ET.
 - **Telegram:** the all-clear was sent.
 - **Follow-up (OQ18):** transient timers don't survive a reboot.
 - **Sandbox:** the importer and sandbox hardening landed in 3183125. Every review finding except the dedicated account is fixed; the mini jail tests are 72 passed and escape-check is 33/33 contained. The flag stays OFF (parked); nothing staged on the mini needed changing.
+
+## 2026-11-02 ~11:40 EST: round-2 training across nightly windows (built, not armed)
+- **What landed (a4b0f49):** the `train-nights` job. Training resumes exactly from 20-min checkpoints, with val and probe evals every 90 min and at each epoch end. A SIGTERM save fits inside the window stop timeout. There's one Telegram per night, and the run chains through the val/probe gate into the restartable post-train pipeline.
+- **Testing:** verified with fakes only (five ways of cutting the run all give the same data order and final weights). Nothing was staged or armed on the hosts.
+- **Estimate:** about 4.6–6.6 nights of training plus 1–2 nights of post-train, assuming roughly 3,750 new rows plus 40% replay. It will be re-estimated from the real build.
+- **Launch:** needs the 9-step procedure in DISTILL-PHASE5-TRAINING.md, including a new rehearsal and disarming the round-2 teacher nights. It runs when the OQ16 trigger holds.
