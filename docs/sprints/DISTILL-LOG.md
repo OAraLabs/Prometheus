@@ -311,3 +311,13 @@ Append-only, times in ET.
     - (c) Tool-choice needs new Max gym references (a Max run; operator approval). The 83 gym-reference tasks kept 9.
     - (d) Error-recovery `--err-variants` on the v5 base would be mostly dead families. Measured keep: tool_timeout 15%, err:harvest 12%, bash_timeout ~5%, read_file_missing 1/176, edit_old_str_missing 0/146. Worth it only with a family filter (~20 train rows).
     - The biggest multiplier across all four areas is the keep rate. tool_error and sandbox_refusal are the first rejection reason in most rejected tasks.
+- 2026-11-02 09:45 EST — **4090 nights: long-context every night except Wed 11-04 (coordinator go).**
+  - **Correction to the 09:25 entry:** proposal (a) said the Wed judge slot would be "unaffected". That was wrong. judge-slot.sh (`acceptable_tools.py night`, `server_check`) refuses a judge server with fewer than 4 slots, and a long-context night serves 1 slot.
+  - **round2.conf** (additive, backup round2.conf.bak-20261102T0940): the rotation is a cycle from R2_TOWER_ROTATION_START with no per-date exception. It is now a 28-night cycle with one standard entry. Every night is long-context except Wed 11-04, which is standard (UD-Q4_K_XL, 4×32768). The cycle repeats on Tue 12-01, so the next standard night is Wed 12-02. Checked over 31 nights.
+  - **Fri 11-06, the fallback judge night, is now long-context.** A judge run there refuses (1 slot) and Telegrams. If Wed's judge doesn't finish, Fri needs the third rotation entry set to `standard`.
+  - **Dry runs with the clock faked to 01:12 each night:**
+    - Tue: IQ3 1×262144 (then 1×163840, 4×32768), real-r2d-lc4090 first.
+    - Wed: Q4 4×32768, real-r2c, then real-r2d-tc and real-r2c-reserve. Remote generation on UD-Q4_K_XL.
+    - Thu: same as Tue.
+    - Fri: same as Tue. Its remote-generation preflight stopped on gen_runner's real-clock 72 h limit.
+    - The 4090's "end after the window end" notes on Wed–Fri come from the same real-clock checks; the 4090 side doesn't take the faked clock.
