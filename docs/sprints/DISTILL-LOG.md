@@ -330,3 +330,4 @@ Append-only, times in ET.
   - **Finding 3:** the jail keeps the host uid's groups (needs a dedicated account → root → OQ17).
   - **Findings 4–5:** LOW.
 - **Next:** a fix agent is working on findings 1, 2, 4 and 5. `--hardened-exec` stays OFF; there's no keep-rate A/B until the fixes land and pass a re-review.
+- 2026-11-02 09:25 EST — **Fri 11-06 is standard too (coordinator go):** the fallback judge night is now the 4th entry of the 4090 rotation (the 09:45 entry wrongly said 3rd, and its backup is round2.conf.bak-20261102T0921, not T0940); backup round2.conf.bak-20261102T0923; faked-clock check: Wed standard 4×32768, Thu long-context (IQ3 1×262144), Fri standard 4×32768, Sat long-context; the coordinator flips Fri back on Thu if Wednesday's judge pass succeeds.
