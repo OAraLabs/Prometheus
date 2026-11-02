@@ -5,6 +5,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 ## Unreleased
 
 - `memory.extraction.enabled: false` stops memory being learned from chats. The fact extractor, the wiki compile after it, the SENTINEL insight writer, the agent's `memory` tool and `wiki_query`'s saving of questions are not built or started. Recall, `/note` and the memory editor are unchanged. `prometheus doctor` reports the switch.
+- MCP servers can be remote: a `url` connects over streamable HTTP (`transport: streamable-http`) or SSE (the default). Before, a `url` server was always marked failed as "not yet implemented". The server's stored `headers` are sent on every request to it and are never shown or logged. The server store now refuses a `url` that isn't `http://` or `https://`, and a header name or value that could break the request.
 
 ## 0.9.19 (2026-11-02)
 
