@@ -58,6 +58,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ### Also
 
+- API clients: `GET /api/pieces` (operator only) lists the pieces Prometheus connects out to, such as a voice box or a model server, as the pieces contract describes: name, whether it is verified, its key fingerprint, address, what it offers and what it is used for, and its health. Nothing adds a piece yet, so the list is empty. Approved pieces will be kept in a new `pieces` table in `devices.db`, created the first time one is saved. (#871)
 - Install: a Mac on Python 3.14 installs `oara-prometheus` without a compiler. watchdog has no macOS wheel for 3.14, so pip and uv built it from source there and needed Apple's command line tools. It is now skipped on exactly that platform, and a `file_watch` task checks its folder twice a second instead of being notified. Linux, and Macs on Python 3.11 to 3.13, keep watchdog as before. CI now checks that a Mac installs from wheels alone (#872).
 - Docs: a contract for pieces (`docs/contracts/pieces.md`, `pieces/0.1`), the services Prometheus connects out to, such as a voice box or a model server on another computer: found on the local network or at an address you type, approved once, its key pinned and checked, with fallback when it stops answering. Nothing is built from it yet.
 - Tests: the worker end-listener test no longer fails now and then under full-suite load (#783, #863).
