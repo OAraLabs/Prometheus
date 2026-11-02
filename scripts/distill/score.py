@@ -187,6 +187,16 @@ eval-tools / val:
                       not proven (a lower bound); the set's
                       ``arg_equivalence_upper`` adds them, and
                       ``arg_equivalence_tiers`` counts which tier decided each.
+  wrong_tool_rate_set with ``summarize --acceptable-tools <annotation>``
+                      (acceptable_tools.py): the first call names an offered
+                      tool OUTSIDE the case's acceptable-tool set (Max's tool
+                      plus every tool ruled acceptable for that case).
+                      ``tool_outcomes_set`` splits the wrong tools into
+                      acceptable_tool / wrong_tool / undecided_tool (no
+                      ruling yet; ``wrong_tool_rate_set_upper`` counts them
+                      wrong). An annotation whose ids or case shas do not
+                      match the cases is not applied (``acceptable_tools``
+                      says why).
   ``compare`` prints these as eval-tools headline rows with paired deltas
   (wrong-tool rate and argument equivalence, Newcombe 95%); they are
   information, never gated (the Phase 6 gate below is unchanged). The per-case
@@ -279,6 +289,7 @@ import random
 import re
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -315,6 +326,10 @@ TOOL_OUTCOMES = ("success", "wrong_tool", "no_call", "extra_call", "unknown_tool
 #: The misses ``other_miss_rate`` counts: a tool not offered, the right tool
 #: but the case still failed, no readable reply.
 OTHER_MISS_OUTCOMES = ("unknown_tool", "failed_call", "no_reply")
+#: ``summarize --acceptable-tools``: an acceptable-tool set per case (acceptable_tools.py) splits every
+#: ``wrong_tool`` outcome in three. The other outcomes are unchanged.
+ACCEPTABLE_TOOLS_SCHEMA = "distill-acceptable-tools/1"
+SET_SPLIT_OUTCOMES = ("acceptable_tool", "wrong_tool", "undecided_tool")
 ARG_EQUIV_TIERS = ("exact", "canonical", "execution", "conservative", "undecidable")
 SETS = ("eval-tools", "eval-longctx", "eval-injection", "sanity", "val")
 GATED_SETS = ("eval-tools", "eval-longctx", "eval-injection", "sanity")
@@ -1293,6 +1308,54 @@ def tool_outcome(want: str | None, first: dict[str, Any] | None, offered: set[st
     return "wrong_tool" if first["name"] in offered else "unknown_tool"
 
 
+def load_acceptable_tools(path: str | Path) -> dict[str, Any]:
+    """An acceptable-tool annotation (``acceptable_tools.py build``): ``{"schema", "set", "cases": {id: {"sha",
+    "expected", "acceptable": [tool, ...], "rejected": [...], "undecided": [...], ...}}, "complete", ...}``.
+    ``file_sha256`` (of the bytes read) is added. Raises CaseError on a malformed file."""
+    p = Path(path).expanduser()
+    raw = p.read_bytes()
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise CaseError(f"{p}: not JSON: {exc}") from None
+    if not isinstance(data, dict) or data.get("schema") != ACCEPTABLE_TOOLS_SCHEMA:
+        raise CaseError(f"{p}: not an acceptable-tool annotation ({ACCEPTABLE_TOOLS_SCHEMA})")
+    cases = data.get("cases")
+    if not isinstance(cases, dict) or not all(
+            isinstance(e, dict) and isinstance(e.get("sha"), str)
+            and all(isinstance(e.get(k, []), list) for k in ("acceptable", "rejected", "undecided"))
+            for e in cases.values()):
+        raise CaseError(f"{p}: 'cases' must map ids to {{sha, acceptable, rejected, undecided}}")
+    data["file_sha256"] = hashlib.sha256(raw).hexdigest()
+    return data
+
+
+def acceptable_problem(annotation: dict[str, Any], group: list[Case]) -> str | None:
+    """Why *annotation* does not apply to these cases (an id missing, or a case whose content changed since
+    the annotation was made: its ``sha`` differs), or None."""
+    by_id = annotation.get("cases") or {}
+    missing = [c.id for c in group if c.id not in by_id]
+    changed = [c.id for c in group if c.id in by_id and by_id[c.id].get("sha") != c.sha]
+    if missing or changed:
+        return (f"the acceptable-tool annotation does not match these cases: {len(missing)} id(s) missing "
+                f"{missing[:3]}, {len(changed)} changed since it was made {changed[:3]}")
+    return None
+
+
+def set_tool_outcome(outcome: str, first_tool: str | None, entry: dict[str, Any]) -> str:
+    """A case's tool outcome against its acceptable-tool set: a ``wrong_tool`` becomes ``acceptable_tool``
+    (the first call's tool is in the set: Max's tool, or ruled acceptable here), stays ``wrong_tool`` (ruled
+    out) or becomes ``undecided_tool`` (no ruling on that tool yet: it counts as wrong in the upper bound
+    only). Every other outcome is returned as it is."""
+    if outcome != "wrong_tool":
+        return outcome
+    if first_tool in (entry.get("acceptable") or ()):
+        return "acceptable_tool"
+    if first_tool in (entry.get("rejected") or ()):
+        return "wrong_tool"
+    return "undecided_tool"
+
+
 def _arg_equiv() -> Any:
     """scripts/distill/arg_equiv.py, loaded once beside this module."""
     mod = sys.modules.get("distill_arg_equiv")
@@ -1476,7 +1539,8 @@ def _distinct(values: list[Any]) -> list[Any]:
 
 
 def summarize(cases: list[Case], rows: dict[tuple[str, str], dict[str, Any]], *,
-              label: str, executor: Any = None) -> dict[str, Any]:
+              label: str, executor: Any = None,
+              acceptable: dict[str, Any] | None = None) -> dict[str, Any]:
     by_set: dict[str, list[Case]] = {}
     for c in cases:
         by_set.setdefault(c.set, []).append(c)
@@ -1538,6 +1602,8 @@ def summarize(cases: list[Case], rows: dict[tuple[str, str], dict[str, Any]], *,
             entry["case_tool_outcome"] = {c.id: v["tool_outcome"] for c, _, v in scored}
             entry["case_arg_equiv"] = {c.id: v["arg_equiv"]["equivalent"]
                                        for c, _, v in scored if "arg_equiv" in v}
+            if acceptable is not None and sname == acceptable.get("set", "eval-tools"):
+                _apply_acceptable(entry, m, group, scored, acceptable)
         elif sname == "eval-longctx":
             m["recall"] = rate(sum(v["passed"] for v in vs), len(vs))
             m["recall_by_depth"] = {
@@ -1607,6 +1673,33 @@ def summarize(cases: list[Case], rows: dict[tuple[str, str], dict[str, Any]], *,
     }
 
 
+def _apply_acceptable(entry: dict[str, Any], m: dict[str, Any], group: list[Case],
+                      scored: list[tuple[Case, dict[str, Any], dict[str, Any]]],
+                      acceptable: dict[str, Any]) -> None:
+    """``summarize --acceptable-tools``: the wrong-tool rate against each case's acceptable-tool set
+    (``wrong_tool_rate_set``: the first call names an offered tool OUTSIDE the set), its upper bound
+    (``wrong_tool_rate_set_upper``: the tools with no ruling yet counted wrong), the split outcomes and the
+    per-case ones compare pairs on. Information only, never gated. An annotation that does not match the
+    cases (an id missing, a case changed) is not applied, and says why."""
+    info: dict[str, Any] = {"file_sha256": acceptable.get("file_sha256"),
+                            "annotation_complete": bool(acceptable.get("complete"))}
+    problem = acceptable_problem(acceptable, group)
+    if problem:
+        entry["acceptable_tools"] = {**info, "applied": False, "problem": problem}
+        return
+    by_id = acceptable["cases"]
+    per_case = {c.id: set_tool_outcome(v["tool_outcome"], v.get("first_tool"), by_id[c.id])
+                for c, _, v in scored}
+    outs = Counter(per_case.values())
+    n = len(per_case)
+    m["wrong_tool_rate_set"] = rate(outs["wrong_tool"], n)
+    entry["wrong_tool_rate_set_upper"] = rate(outs["wrong_tool"] + outs["undecided_tool"], n)
+    entry["tool_outcomes_set"] = {o: outs[o] for o in (*TOOL_OUTCOMES, "acceptable_tool", "undecided_tool")}
+    entry["case_tool_outcome_set"] = per_case
+    entry["acceptable_tools"] = {**info, "applied": True, "wrong_tool_acceptable": outs["acceptable_tool"],
+                                 "wrong_tool_undecided": outs["undecided_tool"]}
+
+
 def _pct(r: dict[str, Any] | None) -> str:
     if not r or r.get("rate") is None:
         return "n/a"
@@ -1654,6 +1747,15 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
                          f"({e.get('arg_equivalence_method', 'static')}): "
                          + ", ".join(f"{k} {v}" for k, v in tiers.items())
                          + f"; upper bound {_pct(e.get('arg_equivalence_upper'))}")
+        acc = e.get("acceptable_tools")
+        if acc and acc.get("applied"):
+            lines.append(f"{sname} wrong tool against the acceptable-tool set: "
+                         f"{acc['wrong_tool_acceptable']} acceptable, "
+                         f"{(e.get('tool_outcomes_set') or {}).get('wrong_tool', 0)} wrong, "
+                         f"{acc['wrong_tool_undecided']} undecided; upper bound "
+                         f"{_pct(e.get('wrong_tool_rate_set_upper'))}")
+        elif acc:
+            lines.append(f"{sname} acceptable-tool set not applied: {acc.get('problem')}")
     lines += ["", "| Set | Cases | Scored | Errors | Missing | Context exceeded | Cut by context"
                   " | Unparseable | Calls from text | p50 latency (s) |",
               "|---|---|---|---|---|---|---|---|---|---|"]
@@ -2529,6 +2631,7 @@ _METHOD_LINE = (
 HEADLINE_ROWS = (
     ("task success", "task_success", "metrics"),
     ("wrong-tool rate", "wrong_tool_rate", "metrics"),
+    ("wrong-tool rate (acceptable set)", "wrong_tool_rate_set", "metrics"),
     ("no call when one was needed", "no_call_rate", "metrics"),
     ("call when none was needed", "extra_call_rate", "metrics"),
     ("other misses", "other_miss_rate", "metrics"),
@@ -2553,6 +2656,7 @@ def headline_pairs(base: dict[str, Any], cand: dict[str, Any]) -> dict[str, Any]
     ce = (cand.get("sets") or {}).get("eval-tools") or {}
     out: dict[str, Any] = {}
     for key, field_, pick in (("wrong_tool_rate", "case_tool_outcome", lambda x: x == "wrong_tool"),
+                              ("wrong_tool_rate_set", "case_tool_outcome_set", lambda x: x == "wrong_tool"),
                               ("arg_equivalence", "case_arg_equiv", lambda x: x is True)):
         bo, co = be.get(field_), ce.get(field_)
         if not isinstance(bo, dict) or not isinstance(co, dict):
@@ -2587,8 +2691,11 @@ def _headline_lines(summaries: list[dict[str, Any]], *, markdown: bool) -> list[
         out += ["", "| Paired, candidate - base | n | Base | Candidate | Delta (pts) "
                 "| Paired 95% CI (pts) |", "|---|---|---|---|---|---|"]
         for key, name in (("wrong_tool_rate", "wrong-tool rate"),
+                          ("wrong_tool_rate_set", "wrong-tool rate (acceptable set)"),
                           ("arg_equivalence", "argument equivalence (both named the tool)")):
             p = pairs.get(key)
+            if key == "wrong_tool_rate_set" and not p:
+                continue  # neither summary was made with --acceptable-tools
             out.append(f"| {name} | n/a | | | | |" if not p else
                        f"| {name} | {p['n']} | {_num(p['base_rate_pts'])} | {_num(p['candidate_rate_pts'])}"
                        f" | {_diff_text(p)} | {_ci_text(p)} |")
@@ -2601,6 +2708,7 @@ def _headline_lines(summaries: list[dict[str, Any]], *, markdown: bool) -> list[
             out.append(f"{name:<{width}}  " + "".join(
                 f"{_pct(_headline_value(s, key, where)):<28}" for s in summaries))
         for key, name in (("wrong_tool_rate", "wrong-tool rate"),
+                          ("wrong_tool_rate_set", "wrong-tool rate (acceptable set)"),
                           ("arg_equivalence", "argument equivalence")):
             p = pairs.get(key)
             if p:
@@ -3000,6 +3108,8 @@ def main(argv: list[str] | None = None, *, transport: httpx.AsyncBaseTransport |
                                          "also runs side-effect-free calls in the gym sandbox")
     s.add_argument("--equiv-work", help="scratch directory the equivalence executor owns")
     s.add_argument("--equiv-jail", default="require", choices=("auto", "require", "off"))
+    s.add_argument("--acceptable-tools", help="an acceptable-tool annotation (acceptable_tools.py build): "
+                                              "also report the wrong-tool rate against each case's set")
 
     c = sub.add_parser("compare", help="evaluate the Phase 6 shadow gate")
     c.add_argument("--base", required=True, help="base model summary JSON")
@@ -3073,6 +3183,13 @@ def main(argv: list[str] | None = None, *, transport: httpx.AsyncBaseTransport |
             print(f"error: {results} mixes labels {sorted(labels)}", file=sys.stderr)
             return 2
         label = args.label or (next(iter(labels)) if labels else results.stem)
+        acceptable = None
+        if args.acceptable_tools:
+            try:
+                acceptable = load_acceptable_tools(args.acceptable_tools)
+            except (OSError, CaseError) as exc:
+                print(f"error: --acceptable-tools: {exc}", file=sys.stderr)
+                return 2
         executor = None
         if args.equiv_store:
             if not args.equiv_work:
@@ -3082,7 +3199,7 @@ def main(argv: list[str] | None = None, *, transport: httpx.AsyncBaseTransport |
                 Path(args.equiv_store).expanduser(), Path(args.equiv_work).expanduser(),
                 jail=args.equiv_jail)
         try:
-            summary = summarize(cases, rows, label=label, executor=executor)
+            summary = summarize(cases, rows, label=label, executor=executor, acceptable=acceptable)
         finally:
             if executor is not None:
                 executor.cleanup()
