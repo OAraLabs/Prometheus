@@ -78,7 +78,7 @@ log = logging.getLogger(__name__)
 # grant — the operator is asked about every relative read forever, with no
 # answer that stops it (measured on a live daemon, 2026-08-30: two pending
 # read_file approvals, both with zero extents, on every surface at once).
-READ_ONLY_FILE_TARGETS: frozenset[str] = frozenset({"read_file"})
+READ_ONLY_FILE_TARGETS: frozenset[str] = frozenset({"read_file", "lsp"})
 
 # WRITE tools whose relative path resolves against the tool context's cwd —
 # and so, in a workspace session, against the session's workspace.

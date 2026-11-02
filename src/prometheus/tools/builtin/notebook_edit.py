@@ -63,6 +63,8 @@ class NotebookEditTool(BaseTool):
                 nb = json.loads(safe_fs.read_text(path))
         except safe_fs.PathChanged as exc:
             return ToolResult(output=str(exc), is_error=True)
+        except OSError as exc:
+            return ToolResult(output=f"Cannot read notebook {arguments.path}: {exc.strerror or exc}", is_error=True)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             return ToolResult(output=f"Cannot parse notebook: {exc}", is_error=True)
         if not present and arguments.create_if_missing:
@@ -115,6 +117,8 @@ class NotebookEditTool(BaseTool):
             safe_fs.write_text(path, json.dumps(nb, indent=2, ensure_ascii=False))
         except safe_fs.PathChanged as exc:
             return ToolResult(output=str(exc), is_error=True)
+        except OSError as exc:
+            return ToolResult(output=f"Could not write {arguments.path}: {exc.strerror or exc}", is_error=True)
 
         return ToolResult(
             output=f"{action} cell {arguments.cell_index} in {path} "

@@ -45,14 +45,20 @@ class LSPDiagnosticsHook:
         if tool_result.is_error:
             return tool_result
 
-        # Extract the file path from tool input
-        filepath = tool_input.get("path")
-        if not filepath:
+        # The path the gate ruled on, which is the one the tool wrote (resolved once, against the session's cwd).
+        # Re-resolving the argument here would resolve it against the daemon's cwd and follow a
+        # link swapped in since (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q). A call with no decided path is skipped.
+        from prometheus.engine.tool_context import DECIDED_PATH
+
+        written = DECIDED_PATH.get()
+        if not written:
             return tool_result
+        filepath = str(written)
 
         try:
-            filepath = str(Path(filepath).expanduser().resolve())
-            if not Path(filepath).exists():
+            from prometheus.security import safe_fs
+
+            if not safe_fs.exists(Path(filepath)):
                 return tool_result
 
             # Notify LSP of the change

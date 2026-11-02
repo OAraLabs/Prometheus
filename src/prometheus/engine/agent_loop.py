@@ -6287,11 +6287,16 @@ async def _execute_tool_call(
 
     # Sprint 20: Post-result hooks (e.g., LSP diagnostics — can modify result)
     if context.post_result_hooks:
-        for hook in context.post_result_hooks:
-            try:
-                tool_result = await hook(tool_name, tool_input, tool_result)
-            except Exception:
-                log.debug("Post-result hook failed", exc_info=True)
+        from prometheus.engine.tool_context import DECIDED_PATH as _DECIDED_PATH
+        _decided_token = _DECIDED_PATH.set(_decided_path)
+        try:
+            for hook in context.post_result_hooks:
+                try:
+                    tool_result = await hook(tool_name, tool_input, tool_result)
+                except Exception:
+                    log.debug("Post-result hook failed", exc_info=True)
+        finally:
+            _DECIDED_PATH.reset(_decided_token)
 
     return tool_result
 

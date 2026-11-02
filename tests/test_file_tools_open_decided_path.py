@@ -539,3 +539,42 @@ def test_the_coding_run_tools_open_through_no_link(world, monkeypatch, which):
     assert swapped and result.is_error, result.output
     assert "PROTECTED" not in result.output
     _untouched(elsewhere)
+
+
+# ── found by the second review pass ──────────────────────────────────────────
+
+async def test_the_lsp_client_reads_the_path_it_was_handed_not_a_new_resolution(world):
+    """The lsp tool hands over the checked path; the client re-resolved it (after a server spawn that takes seconds)
+    and sent whatever a swapped link pointed at to the language server."""
+    from prometheus.lsp.client import LSPClient, as_given
+
+    ws, elsewhere = world
+    target = ws / "sub" / "notes.txt"
+    handed = target.resolve()
+    _swap(ws, elsewhere)
+    assert as_given(handed) == handed, "an absolute path is used as handed over"
+    sent: list = []
+    client = LSPClient.__new__(LSPClient)
+    client._open_files = {}
+    client._send_notification = lambda method, params: sent.append((method, params))
+    with pytest.raises(safe_fs.PathChanged):
+        await client.did_open(handed)
+    assert not any("PROTECTED" in json.dumps(p) for _, p in sent), sent
+
+
+def test_a_relative_lsp_file_is_resolved_by_the_gate_like_read_file():
+    from prometheus.permissions.tool_paths import gate_path_for
+    from prometheus.tools.builtin.lsp import LSPToolInput
+
+    path, unknown = gate_path_for("lsp", {"action": "hover", "file": "src/a.py"},
+                                  schema=LSPToolInput.model_json_schema(), base=Path("/tmp/proj"))
+    assert unknown is None and path and path.endswith("/proj/src/a.py"), (path, unknown)
+
+
+def test_edit_file_through_a_file_where_a_folder_should_be_is_an_error_result(world):
+    ws, _ = world
+    from prometheus.tools.builtin.file_edit import FileEditTool, FileEditToolInput
+
+    target = ws / "sub" / "notes.txt" / "inner.txt"
+    result = _run(FileEditTool(), FileEditToolInput(path=str(target), old_str="a", new_str="b"), _ctx(ws, None))
+    assert result.is_error, result.output

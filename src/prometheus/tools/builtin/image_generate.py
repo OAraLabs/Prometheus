@@ -224,8 +224,8 @@ class ImageGenerateTool(BaseTool):
         checked_token = _CHECKED_OUTPUT.set(None)
         try:
             return await self._execute(arguments, context)
-        except safe_fs.PathChanged as exc:
-            return ToolResult(output=f"image_generate: {exc}", is_error=True)
+        except OSError as exc:   # safe_fs.PathChanged included: from a sink, which only catches ValueError
+            return ToolResult(output=f"image_generate: could not save the image: {exc}", is_error=True)
         finally:
             _CHECKED_OUTPUT.reset(checked_token)
             _SESSION_IMAGE_ROOTS.reset(roots_token)

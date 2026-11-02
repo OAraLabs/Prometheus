@@ -216,7 +216,7 @@ def atomic_writer(path: Path, *, create_parents: bool = True) -> Iterator[Any]:
             os.replace(tmp_name, path.name, src_dir_fd=dfd, dst_dir_fd=dfd)
             tmp_made = False
         except OSError as exc:
-            if exc.errno not in (errno.EBUSY, errno.EXDEV) or st is None:
+            if exc.errno != errno.EBUSY or st is None:
                 raise
             _rewrite_in_place(dfd, tmp_name, path)
     finally:
@@ -297,11 +297,20 @@ def _read_floor_identities() -> set[tuple[int, int]]:
     return ids
 
 
+#: System trees on the shipped denied list. Hard-linking into them takes root, and walking them every few seconds
+#: (/sys, /etc) costs far more than it buys, so the hard-link check does not.
+_NOT_WALKED = ("/etc", "/sys", "/boot", "/proc", "/dev", "/private/etc")
+
+
 def _walk_identities(entries: Iterable[str]) -> set[tuple[int, int]]:
+    """The identities of the files the entries name. ``/*/`` is read as this user's home: a hard link cannot cross
+    filesystems, and the home is where an agent's workspace and a user's secrets share one."""
     home = str(Path.home().resolve())
     ids: set[tuple[int, int]] = set()
     for entry in entries:
         pattern = entry.replace("/*/", home + "/", 1) if entry.startswith("/*/") else entry
+        if any(pattern == p or pattern.startswith(p + "/") for p in _NOT_WALKED):
+            continue
         for hit in _glob.glob(pattern):
             try:
                 st = os.lstat(hit)
