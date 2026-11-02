@@ -1387,13 +1387,12 @@ def check_voice_remotes(
                 message=f"reachable at {shown}",
             ))
         elif state == "refused":
-            key = (f"${settings.api_key_env}" if settings.api_key_env
-                   else f"{kind}.api_key_env (unset, so no key was sent)")
             rows.append(DiagnosticCheck(
                 name=name, category="connectivity", status="error",
                 message=f"{shown} refused the key (HTTP {status}) — "
                         f"{settings.label} falls back to the local engine",
-                fix=f"Check {key} in the environment or {get_env_file_path()}.",
+                fix=f"Check ${settings.api_key_env} in the environment or "
+                    f"{get_env_file_path()}.",
             ))
         else:
             why = f"HTTP {status}" if status else "no answer"

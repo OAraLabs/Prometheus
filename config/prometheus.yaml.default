@@ -23,8 +23,10 @@ bootstrap:
   load_agents: true     # ~/.prometheus/AGENTS.md
 
 model:
-  # Env var holding this provider's API key (cloud providers only; local
-  # llama_cpp / ollama / lm_studio / vllm need none). Resolved by
+  # Env var holding this provider's API key (cloud providers; local
+  # ollama / lm_studio / vllm need none, and llama_cpp needs one only when
+  # its server was started with --api-key, then sent as a bearer token on
+  # every request; empty means no key). Resolved by
   # providers/registry.py::_resolve_api_key and reported by
   # cli/doctor.py::_cloud_key_source, which look in the same order:
   # api_key below, then this variable, then the provider's built-in default
@@ -126,8 +128,6 @@ model:
   max_tool_iterations: 500              # Max tool calls per user message before hard stop (local/llama)
   max_tool_iterations_cloud: 500        # Cloud (tier=off) cap. EQUAL to local since 2026-09-07: one ceiling per session, so a turn that routes to cloud mid-run does not change its iteration budget. Cost is governed by the budget/quota layer + the provider plan, not by this backstop.
   max_turns: 200                        # Max MODEL ROUNDS in one turn (a round can carry several tool calls). Reaching it is a budget stop, not a failure: the turn's work is kept and saved, and the next message continues from it (#774).
-  fallback_provider: "ollama"
-  fallback_url: "http://localhost:11434"
 
 # Assembly-time context compaction (the relief valve). Sprint 2 (OAra):
 # this was config-dark since birth — the compactor only exists when
@@ -443,6 +443,11 @@ security:
     - "/*/.prometheus/data/cron_history.jsonl*"
     - "/*/.prometheus/data/cron_undelivered.jsonl*"
     - "/*/.prometheus/data/cron_scheduler.pid*"
+    # The machine's private keys (node.key, instance.key: paired apps pin them) and the MCP store, whose
+    # servers the daemon starts at boot with their own credentials.
+    - "/*/.prometheus/node"
+    - "/*/.prometheus/data/mcp_servers.json*"
+    - "/*/.prometheus/xai_oauth.json*"   # the xAI OAuth tokens
   # THE ABOVE DOES NOT COVER bash. denied_paths is only consulted when a call
   # passes a file_path, and bash is handed a command string — so at BOTH
   # origins `cat ~/.ssh/id_*` is ALLOW. Measured, not inferred. Any check on
@@ -590,12 +595,6 @@ security:
 infrastructure:
   archive_enabled: true
   telemetry_enabled: true
-
-  # Local topology. Values are machine-specific and MUST stay in the live
-  # config only — the pre-commit hook blocks real hosts/IPs in this template.
-  gpu_host: ""
-  mini_host: ""
-  mini_port: 8005
 gateway:
   telegram_enabled: false
   telegram_token: ""                # Set via PROMETHEUS_TELEGRAM_TOKEN env var
@@ -780,6 +779,7 @@ whisper:
   model: "base"
   device: "auto"
   language: "en"
+  url: ""                  # another name for stt.url (below); stt.url wins when both are set
 
 # Remote voice servers — optional. Empty url (the default) keeps voice on
 # this machine: faster-whisper / whisper for speech-to-text, piper / espeak
@@ -787,23 +787,29 @@ whisper:
 # another machine and Prometheus tries it first, everywhere it listens or
 # speaks (Telegram and Discord voice notes, `oara --voice`, the tts tool):
 #   - unreachable or failing -> the local engine, and one log line
-#   - 401 / 403 (key refused) -> the local engine, and an ERROR in the log
-# `oara doctor` shows a row for each url that is set.
+#   - 401 / 403 (key refused) or 400 (unknown voice or model) -> the local
+#     engine, and an ERROR in the log
+# `oara doctor` shows a row for each url that is set (it asks the server's
+# /health, then /v1/models if the server has one).
+#
+# A url is the server, e.g. http://127.0.0.1:8001 (or .../v1); the
+# /v1/audio/... route is added. A full route is used as written.
+# whisper.url is accepted for stt.url; stt.url wins when both are set.
 #
 # The key is NEVER read from this file. api_key_env names the variable that
-# holds it, in the environment or in ~/.config/prometheus/env, e.g.
-#   PROMETHEUS_STT_API_KEY=...
-# Empty api_key_env sends no key. An api_key written here is ignored.
+# holds it, in the environment or in ~/.config/prometheus/env. Empty means
+# PROMETHEUS_STT_API_KEY / PROMETHEUS_TTS_API_KEY; if that variable is unset
+# too, no key is sent. An api_key written here is ignored.
 stt:
-  url: ""                  # full endpoint: http(s)://<host>:<port>/v1/audio/transcriptions
-  api_key_env: ""          # e.g. PROMETHEUS_STT_API_KEY
+  url: ""                  # e.g. http://127.0.0.1:8001
+  api_key_env: ""          # empty = PROMETHEUS_STT_API_KEY
   model: "whisper-1"       # the model name the server expects
   timeout_seconds: 60
 tts:
-  url: ""                  # full endpoint: http(s)://<host>:<port>/v1/audio/speech
-  api_key_env: ""          # e.g. PROMETHEUS_TTS_API_KEY
+  url: ""                  # e.g. http://127.0.0.1:8003
+  api_key_env: ""          # empty = PROMETHEUS_TTS_API_KEY
   model: "tts-1"           # the model name the server expects
-  voice: "alloy"           # the server's voice name (the tts tool's voice argument overrides)
+  voice: ""                # the server's voice name; empty = the server's default
   timeout_seconds: 60
 
 # NOTE — this section was named `model_router:` before GRAFT-ROUTER-WIRE v3.
@@ -1448,6 +1454,8 @@ profiles:
 #     4090:
 #       provider: llama_cpp
 #       base_url: http://gpu-box:8080
+#       api_key_env: GPU_BOX_LLAMA_KEY       # only for a server started with --api-key: the
+#                                            # variable's NAME; the key goes in the env file
 #     mini:
 #       provider: ollama
 #       base_url: http://localhost:11434
@@ -1457,7 +1465,8 @@ profiles:
 backends: {}
 
 # How the registry probes. A probe is HTTP only (llama.cpp /props + /v1/models;
-# ollama /api/tags, /api/ps, /api/show) — no SSH, no credentials.
+# ollama /api/tags, /api/ps, /api/show) — no SSH. A llama.cpp backend with
+# api_key_env sends its key as a bearer token; nothing else is sent.
 backend_probe:
   ttl_s: 60          # a read older than this re-probes; /backends refresh forces it
   timeout_s: 5.0     # per backend; a dead box costs one timeout, never a hang

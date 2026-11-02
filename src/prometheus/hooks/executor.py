@@ -331,16 +331,15 @@ class HookExecutor:
 
 
 #: The leader of a command hook's session: a constant, non-login bash that runs
-#: the operator's command in a login bash as its CHILD, then exits with its
-#: status. See _command_launch.
+#: the operator's command in another non-login bash as its CHILD, then exits
+#: with its status. See _command_launch.
 _SESSION_LEADER_SCRIPT = (
-    '{ case $# in 2) BASH_ENV=$2; export BASH_ENV;; esac; '
-    '/bin/bash -lc "$1" 2>&3 3>&-; exit $?; } 3>&2 2>/dev/null'
+    '{ /bin/bash --noprofile --norc -c "$1" 2>&3 3>&-; exit $?; } 3>&2 2>/dev/null'
 )
 
 
 def _command_launch(command: str, env: dict[str, str]) -> tuple[list[str], dict[str, str]]:
-    """argv and environment for a command hook: ``bash -lc <command>``, one level down.
+    """argv and environment for a command hook: ``bash -c <command>``, one level down.
 
     The hook gets its own session so a timeout can stop everything it started.
     Run directly, ``bash -lc cmd`` execs a single simple command in place, and
@@ -355,14 +354,16 @@ def _command_launch(command: str, env: dict[str, str]) -> tuple[list[str], dict[
 
     - Its own stderr goes to /dev/null (the command keeps the real one), so
       when the command dies from a signal the leader's job-status line
-      ("Killed: 9 /bin/bash -lc ...") does not become the hook's output.
+      ("Killed: 9 /bin/bash -c ...") does not become the hook's output.
     - ``--norc``: bash sources ~/.bashrc for a non-login ``-c`` shell whose
       stdin is a socket (its rshd/sshd heuristic), and a daemon started with
       socket stdio would otherwise run it before every hook.
-    - A non-interactive bash sources ``$BASH_ENV`` before its script runs, so
-      an allowlisted BASH_ENV would run twice, the first time before the
-      operator's profile. The leader gets it as an argument instead and
-      exports it, unchanged, for the command's login bash only.
+
+    Neither bash is a login shell, and ``BASH_ENV`` and ``ENV`` are dropped
+    even when allowlisted (GHSA-9ff8-vhh2-r2cw): the hook runs outside the
+    floor, and a login file or a ``$BASH_ENV`` script is a file a floored
+    shell could write (security/unconfined_shell.py). A hook that relied on
+    its profile sets up what it needs itself.
 
     Differences that remain, listed in the hooks contract (§15): the command's
     ``$PPID`` is the leader, not the daemon; ``SHLVL`` is one higher; a command
@@ -371,12 +372,10 @@ def _command_launch(command: str, env: dict[str, str]) -> tuple[list[str], dict[
     an ``LC_ALL`` naming a missing locale), appears twice; and a fork failure
     in the leader itself leaves no message.
     """
-    env = dict(env)
-    argv = ["/bin/bash", "--norc", "-c", _SESSION_LEADER_SCRIPT, "prometheus-hook", command]
-    bash_env = env.pop("BASH_ENV", None)
-    if bash_env is not None:
-        argv.append(bash_env)
-    return argv, env
+    from prometheus.security.unconfined_shell import UNCONFINED_SHELL, unconfined_shell_env
+
+    argv = [*UNCONFINED_SHELL, _SESSION_LEADER_SCRIPT, "prometheus-hook", command]
+    return argv, unconfined_shell_env(env)
 
 
 #: After a command hook times out, how long to keep killing its process group
@@ -606,9 +605,8 @@ def _command_environment(
     goes last so an allowlisted name can never replace it. A name on the
     allowlist that the daemon doesn't have is left unset.
 
-    The shell is still ``bash -l``, so the operator's own login files still
-    run and can export what they like. This bounds what the daemon hands over,
-    not what the operator's profile adds.
+    The shell is not a login shell (``_command_launch``), so no login file
+    adds to it, and ``BASH_ENV`` and ``ENV`` are dropped even when listed.
     """
     env = {
         name: value

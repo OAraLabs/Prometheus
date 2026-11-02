@@ -7,6 +7,9 @@ another machine:
 * ``stt.url`` — a ``POST /v1/audio/transcriptions`` endpoint (multipart upload)
 * ``tts.url`` — a ``POST /v1/audio/speech`` endpoint (JSON in, audio out)
 
+Either url may also name just the server (``http://127.0.0.1:8001`` or
+``.../v1``); the route is added. ``whisper.url`` is accepted for ``stt.url``.
+
 The remote is a PREFERENCE, never a dependency. Every caller tries it first
 and keeps its local path as the fallback:
 
@@ -14,10 +17,13 @@ and keeps its local path as the fallback:
 * unreachable, timed out, or any other failure — local runs, one WARNING line
 * 401 / 403 — local runs, but the refusal is an ERROR: a wrong key does not
   fix itself, and quietly speaking with the local voice would hide it
+* 400 — the same: the server rejected what was configured (an unknown voice
+  or model), which is a configuration error, not an outage
 
 The bearer key is read from the environment or the env file
 (``~/.config/prometheus/env``) under the name ``api_key_env`` gives, the same
-way model providers name theirs. It is NEVER read from prometheus.yaml: an
+way model providers name theirs. Unset, it defaults to
+``PROMETHEUS_STT_API_KEY`` / ``PROMETHEUS_TTS_API_KEY``. It is NEVER read from prometheus.yaml: an
 ``api_key`` written there is ignored, so a config file that is shared or
 committed cannot carry the credential.
 """
@@ -38,6 +44,10 @@ logger = logging.getLogger(__name__)
 
 KINDS = ("stt", "tts")
 _LABEL = {"stt": "speech-to-text", "tts": "text-to-speech"}
+_ROUTE = {"stt": "/audio/transcriptions", "tts": "/audio/speech"}
+# Like a cloud provider's default_env: the name looked up when api_key_env
+# is unset.
+DEFAULT_KEY_ENV = {"stt": "PROMETHEUS_STT_API_KEY", "tts": "PROMETHEUS_TTS_API_KEY"}
 
 # A refused connection should fail over to the local engine at once, so the
 # connect phase gets its own short limit; timeout_seconds bounds the rest.
@@ -102,6 +112,16 @@ def _load_config() -> dict[str, Any]:
     )
 
 
+def _endpoint(kind: str, url: str) -> str:
+    """The full route for *url*, which may name only the server or its /v1."""
+    url = url.rstrip("/")
+    if url.endswith(_ROUTE[kind]):
+        return url
+    if not url.endswith("/v1"):
+        url += "/v1"
+    return url + _ROUTE[kind]
+
+
 def remote_settings(
     kind: str, config: Mapping[str, Any] | None = None,
 ) -> RemoteVoice | None:
@@ -114,8 +134,15 @@ def remote_settings(
         config = _load_config()
     block = config.get(kind, {})
     if not isinstance(block, Mapping):
-        return None
+        block = {}
     url = str(block.get("url", "") or "").strip()
+    if not url and kind == "stt":
+        # whisper: is where local speech-to-text is configured, so whisper.url
+        # is the name an operator reaches for first. The stt: block keeps
+        # every other setting.
+        whisper = config.get("whisper", {})
+        if isinstance(whisper, Mapping):
+            url = str(whisper.get("url", "") or "").strip()
     if not url:
         return None
     if block.get("api_key"):
@@ -136,10 +163,11 @@ def remote_settings(
     default_model = "whisper-1" if kind == "stt" else "tts-1"
     return RemoteVoice(
         kind=kind,
-        url=url,
-        api_key_env=key_env,
+        url=_endpoint(kind, url),
+        api_key_env=key_env or DEFAULT_KEY_ENV[kind],
         model=str(block.get("model", default_model) or default_model),
-        voice=str(block.get("voice", "alloy") or "alloy"),
+        # Empty: no voice is sent and the server uses its own default.
+        voice=str(block.get("voice", "") or ""),
         timeout_seconds=float(block.get("timeout_seconds", 60) or 60),
     )
 
@@ -155,10 +183,17 @@ def _sync_client(timeout: httpx.Timeout) -> httpx.Client:
 def _log_failure(settings: RemoteVoice, detail: str, status: int | None = None) -> None:
     """The one line a failed remote call leaves behind."""
     if status in (401, 403):
-        key = f"${settings.api_key_env}" if settings.api_key_env else "no key (api_key_env unset)"
         logger.error(
-            "%s at %s refused the request (HTTP %s) — check %s; falling back "
-            "to the local engine", settings.label, settings.shown_url(), status, key,
+            "%s at %s refused the request (HTTP %s) — check $%s; falling back "
+            "to the local engine", settings.label, settings.shown_url(), status,
+            settings.api_key_env,
+        )
+        return
+    if status == 400:
+        logger.error(
+            "%s at %s rejected the request (%s) — check %s.model%s; falling "
+            "back to the local engine", settings.label, settings.shown_url(),
+            detail, settings.kind, " and tts.voice" if settings.kind == "tts" else "",
         )
         return
     logger.warning("%s at %s unavailable (%s); falling back to the local engine",
@@ -173,7 +208,11 @@ async def _post(settings: RemoteVoice, **kwargs: Any) -> httpx.Response | None:
         _log_failure(settings, f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__)
         return None
     if resp.status_code != 200:
-        _log_failure(settings, f"HTTP {resp.status_code}", resp.status_code)
+        detail = f"HTTP {resp.status_code}"
+        if resp.status_code == 400 and resp.text:
+            # The server's reason ("unknown voice") is the useful part.
+            detail += f": {resp.text.strip()[:200]}"
+        _log_failure(settings, detail, resp.status_code)
         return None
     return resp
 
@@ -206,11 +245,12 @@ async def transcribe_remote(
 
 
 async def synthesize_remote(
-    settings: RemoteVoice, text: str, out_path: str | Path, voice: str | None = None,
+    settings: RemoteVoice, text: str, out_path: str | Path,
 ) -> bool:
     """Write a WAV of *text* to *out_path* from the remote server. False means use local."""
-    payload = {"model": settings.model, "input": text,
-               "voice": voice or settings.voice, "response_format": "wav"}
+    payload = {"model": settings.model, "input": text, "response_format": "wav"}
+    if settings.voice:
+        payload["voice"] = settings.voice
     resp = await _post(settings, json=payload)
     if resp is None:
         return False
