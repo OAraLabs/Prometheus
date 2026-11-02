@@ -6,6 +6,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 - Models: `oara doctor`'s Inference row, the anatomy scan and the terminal chat now ask a llama.cpp server started with an API key with that key, so a keyed server no longer shows as not responding and the chat can read its model and chat template. The key is the model's own (`model.api_key_env`), read from the environment and then the env file. A named variable that is set in neither is reported by name instead of as "not responding".
 - The model is no longer told where your machines are. The Infrastructure section of its prompt and the `anatomy` tool's answers keep what the machines can do (CPU, RAM, GPU and VRAM, the model, its engine, context window and vision) and leave out hostnames, IP addresses, URLs, the tailnet peer list and the folder a model file sits in, on local and hosted models alike. Before, a reply could quote the model server's address or list your tailnet peers. `anatomy.include_addresses: true` restores the old text. The `/anatomy` command you run yourself is unchanged.
+- Each chat response names the model that answered: `served_by` on `POST /api/chat` and on the `chat_done` frame, and `prometheus.served_by` on `/v1/chat/completions` (on the final chunk when streamed). When a fallback answers instead of the configured model, `served_by` names the fallback. `/v1`'s `model` still echoes the key you asked for.
 
 ## 0.9.18 (2026-11-02)
 

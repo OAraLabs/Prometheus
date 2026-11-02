@@ -31,6 +31,10 @@ class AssistantTurnComplete:
     #: context pre-flight, the iteration cap, ...); None when the model chose
     #: to stop. A worker reports a non-None one as not finished.
     stop_reason: str | None = None
+    #: The model that ANSWERED this round: what the server reported, else the
+    #: fallback that served it, else the model the round asked for. None on an
+    #: ending the loop wrote itself, where no model answered.
+    served_model: str | None = None
 
 
 @dataclass(frozen=True)
