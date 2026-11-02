@@ -59,6 +59,13 @@ class McpHttpServer:
         return out
 
     def __enter__(self) -> "McpHttpServer":
+        # sse_starlette (the SDK server's event streams) keeps ONE process-wide shutdown flag, which it also sets
+        # when the process's SIGTERM handler is a uvicorn server told to stop: once set, every stream ends at once
+        # and the handshake never gets its answer. Cleared here so an earlier test's server cannot leave it set
+        # (tests/test_lan_tls.py restores the handlers it disturbs). A server-side flag; the client never reads it.
+        from sse_starlette.sse import AppStatus
+
+        AppStatus.should_exit = False
         self._thread.start()
         deadline = time.monotonic() + 10
         while not self._server.started:
