@@ -6827,6 +6827,12 @@ def create_app(
 
     register_model_routes(app, auth_on=lambda: bool(_api_token))
 
+    # ── Pieces: the services Prometheus connects out to (GET /api/pieces; docs/contracts/pieces.md) ────
+    # The owner's fleet view, read from the pieces table in devices.db. Operator only.
+    from prometheus.web.pieces_routes import register_pieces_routes
+
+    register_pieces_routes(app, devices=_devices_or_create, auth_on=lambda: bool(_api_token))
+
     # ── Static files (must be last — catch-all) ─────────────────────
 
     if static_dir:
