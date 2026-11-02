@@ -128,8 +128,11 @@ class AnatomyScanner:
         ssh_key: str | None = None,
         registry: Any | None = None,
         inference_url: str | None = None,
+        llama_cpp_headers: dict[str, str] | None = None,
     ) -> None:
         self._llama_url = llama_cpp_url.rstrip("/")
+        # The key a server started with --api-key needs (from_config: the model's own). Never logged.
+        self._llama_headers = dict(llama_cpp_headers or {})
         self._ollama_url = ollama_url.rstrip("/")
         self._engine = inference_engine
         # Where the configured engine is reached (from_config: model.base_url by the provider registry's rule). None:
@@ -152,12 +155,17 @@ class AnatomyScanner:
     def from_config(cls, config: dict[str, Any], *, registry: Any | None = None) -> "AnatomyScanner":
         """The scanner for a daemon's config: the boot check, the chat /doctor and ``oara doctor`` build it here, so
         the Inference row probes the address the config names (``model.base_url``), not ``model.fallback_url``."""
-        from prometheus.providers.registry import resolve_model_base_url
+        from prometheus.providers.registry import local_server_headers, resolve_model_base_url
 
         model_cfg = config.get("model", {}) or {}
         anatomy_cfg = config.get("anatomy", {}) or {}
         engine = str(model_cfg.get("provider", "llama_cpp"))
         url = resolve_model_base_url(model_cfg)
+        try:
+            headers = local_server_headers(model_cfg) if engine == "llama_cpp" else {}
+        except ValueError as exc:
+            log.debug("anatomy: %s; the server is asked without a key", exc)
+            headers = {}
         return cls(
             llama_cpp_url=url if engine == "llama_cpp" else "http://localhost:8080",
             ollama_url=url if engine == "ollama" else "http://localhost:11434",
@@ -166,6 +174,7 @@ class AnatomyScanner:
             ssh_key=anatomy_cfg.get("ssh_key"),
             registry=registry,
             inference_url=url,
+            llama_cpp_headers=headers,
         )
 
     async def scan(self) -> AnatomyState:
@@ -580,7 +589,7 @@ class AnatomyScanner:
 
     async def _detect_model_llama_cpp(self, state: AnatomyState) -> None:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=self._llama_headers) as client:
                 resp = await client.get(f"{self._llama_url}/v1/models")
                 resp.raise_for_status()
                 body = resp.json()
