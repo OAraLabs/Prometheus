@@ -255,6 +255,56 @@ def test_long_context_reads_real_files_and_never_an_eval_source(built: Any) -> N
         assert all(t not in r["prompt"] for t in g["terms"])
 
 
+def test_lc2_rows_list_where_their_reads_are_before_reading_them(built: Any, tmp_path: Path) -> None:
+    rep, out, (a, lc_eval, mpath) = built
+    rows = ts.load_taskset(out / "real-t-r2-longctx.jsonl")
+    assert rows and rep["long_context"]["style"] == "lc2"
+    assert rep["long_context"]["with_listings"] == len(rows)
+    for r in rows:
+        lc = r["r2"]["longctx"]
+        assert r["r2"]["variant"].startswith("lc2:")
+        pats = [x["pattern"] for x in lc["listings"]]
+        assert all(p.startswith("Prometheus/") and p.endswith("*") for p in pats)
+        # every listing is a directory a read came from (whole, or the read's name prefix in tests/)
+        dirs = {str(Path(x["path"]).parent) for x in lc["reads"]}
+        assert all(str(Path(p).parent) in dirs for p in pats)
+        assert ts.validate_task(r) == []
+    tasks = tg.tasks_from_taskset_rows(rows, Path("."))
+    assert all(t.context_listings for t in tasks)
+    # the first round-2 style still builds its own rows (variant lc:, no listings)
+    rep1 = _rebuild(a, tmp_path / "v1", lc_style="lc")
+    old = ts.load_taskset(tmp_path / "v1" / "real-t-r2-longctx.jsonl")
+    assert old and all(r["r2"]["variant"].startswith("lc:") and "listings" not in r["r2"]["longctx"] for r in old)
+    assert rep1["long_context"]["with_listings"] == 0
+    assert not {r["id"] for r in old} & {r["id"] for r in rows}
+
+
+def test_relevance_puts_the_files_a_request_is_about_first_and_listings_fit_their_budget() -> None:
+    def f(path: str, text: str) -> Any:
+        lines = text.split("\n")
+        return r2t.SrcFile(path, lines, 100, frozenset(),
+                           r2t.words_of(path.replace("/", " ").replace(".", " ") + "\n" + text))
+    pool = [f(f"tests/test_other_{i}.py", f"def test_{i}():\n    assert value == {i}") for i in range(20)]
+    pool.append(f("src/pkg/mcp_gate.py", "MCP servers ship off by default\nclass McpGate: ..."))
+    pool.append(f("tests/test_mcp_gate.py", "def test_mcp_off_by_default(): ..."))
+    relv = r2t.Relevance(pool)
+    assert "mcp" in relv.keywords("what else ships off by default? i think mcp is like that too")
+    scores = relv.scores("what else ships off by default? i think mcp is like that too")
+    top = sorted(scores, key=lambda p: -scores[p])[:2]
+    assert set(top) == {"src/pkg/mcp_gate.py", "tests/test_mcp_gate.py"}
+    row = {"id": "ts-x", "slots": []}
+    chosen, _t, _d = r2t.plan_reads(row, pool, 250, 7, "lc2:32k|ts-x", relevance=scores)
+    assert {c.path for c in chosen[:2]} == set(top)
+    children = {"tests": [f"tests/test_x_{i}.py" for i in range(200)] + ["tests/test_mcp_gate.py"],
+                "src/pkg": ["src/pkg/__init__.py", "src/pkg/mcp_gate.py"]}
+    listings, used = r2t.plan_listings(chosen[:2], children, lambda t: len(t.split()), 10_000)
+    pats = {x["pattern"]: x for x in listings}
+    assert pats["Prometheus/src/pkg/*"]["limit"] == 2               # a small directory, whole
+    assert pats["Prometheus/tests/test_mcp*"]["entries"] == 1       # tests/ (big): by the read's name prefix
+    none, used0 = r2t.plan_listings(chosen[:2], children, lambda t: 10_000, 50)
+    assert none == [] and used0 == 0
+
+
 def test_failure_patterns_come_from_the_harvest_and_never_carry_a_home_path(built: Any) -> None:
     rep, out, _ = built
     fams = rep["failures"]["families"]
@@ -363,11 +413,11 @@ def test_a_larger_build_minus_the_first_one_holds_only_new_variants(built: Any, 
     # long context: the other buckets (256k too) and another file mix in 32k, never an eval source
     lc = [r for r in new if r["r2"]["area"] == "long-context"]
     assert {r["r2"]["ctx_bucket"] for r in lc} >= {"256k"}
-    alt = [r for r in lc if r["r2"]["variant"] == "lc:32k:alt1"]
+    alt = [r for r in lc if r["r2"]["variant"] == "lc2:32k:alt1"]
     assert alt
     for r in alt:
         main = next((x for x in first + new if x["r2"]["base_id"] == r["r2"]["base_id"]
-                     and x["r2"]["variant"] == "lc:32k"), None)
+                     and x["r2"]["variant"] == "lc2:32k"), None)
         if main is not None:
             assert {x["path"] for x in r["r2"]["longctx"]["reads"]} != {x["path"] for x in main["r2"]["longctx"]["reads"]}
     assert all(r["r2"]["needs_ctx"] <= r2t.MAX_NEEDS_CTX for r in lc)

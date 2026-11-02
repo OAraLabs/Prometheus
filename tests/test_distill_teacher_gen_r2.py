@@ -327,6 +327,39 @@ def test_a_context_read_the_workspace_cannot_serve_rejects_the_task(tmp_path: Pa
     assert status == "rejected" and reasons == ["context_read_failed"]
 
 
+def test_an_lc2_row_lists_the_files_with_the_real_glob_before_the_reads(tmp_path: Path, no_outbound: Any) -> None:
+    files = {"docs/a.md": "# Alpha\n" + "alpha text\n" * 30, "docs/b.md": "# Bravo\ndef frobnicate_widgets():\n"}
+    t = _lc_task(tmp_path, files, {"path": "docs/b.md", "terms": ["frobnicate_widgets"]})
+    t.context_listings = [{"pattern": "docs/*", "limit": 50}]
+    t.validate()
+    with FakeTeacher(scripted({"Summarize": ["echo"]})) as fake:
+        status, _rows, reasons, extra = _process(t, _settings(tmp_path, fake.url))
+        first = fake.requests[0]
+    assert status == "kept", reasons
+    roles = [m["role"] for m in first["messages"]]
+    assert roles[:8] == ["system", "user", "assistant", "tool", "assistant", "tool", "assistant", "tool"]
+    call = first["messages"][2]["tool_calls"][0]["function"]
+    assert call["name"] == "glob" and json.loads(call["arguments"])["pattern"] == "docs/*"
+    listing = first["messages"][3]["content"]
+    assert "docs/a.md" in listing and "docs/b.md" in listing  # the fixture's own entries
+    rec = extra["verification"]
+    assert rec["r2"]["context"]["listings"] == 1 and rec["r2"]["context"]["reads"] == 2
+    assert rec["tool_calls"] == 0  # seeded calls are never the task's own tool events
+
+
+def test_a_listing_that_matches_nothing_rejects_the_task(tmp_path: Path, no_outbound: Any) -> None:
+    t = _lc_task(tmp_path, {"docs/a.md": "# A\n"}, None)
+    t.context_listings = [{"pattern": "nowhere/*", "limit": 10}]
+    with FakeTeacher(scripted({})) as fake:
+        status, _rows, reasons, _extra = _process(t, _settings(tmp_path, fake.url))
+        assert fake.kinds["agent"] == 0
+    assert status == "rejected" and reasons == ["context_read_failed"]
+    bad = _lc_task(tmp_path, {"docs/a.md": "# A\n"}, None)
+    bad.context_listings = [{"pattern": "/etc/*", "limit": 10}]
+    with pytest.raises(ValueError, match="workspace-relative pattern"):
+        bad.validate()
+
+
 # ── context cap, calibration, steering ───────────────────────────────────────
 
 

@@ -2402,6 +2402,12 @@ def validate_r2(r2: Any, row: dict[str, Any]) -> list[str]:
             p.append("r2.longctx.reads: relative paths with an offset and a limit (1..2000)")
         if r2.get("ctx_bucket") is None:
             p.append("r2: a long-context row names its ctx_bucket")
+        listings = lc.get("listings") if isinstance(lc, dict) else None
+        if listings is not None and not (isinstance(listings, list) and all(
+                isinstance(x, dict) and set(x) <= {"pattern", "limit"} and isinstance(x.get("pattern"), str)
+                and x["pattern"] and not Path(x["pattern"]).is_absolute() and ".." not in Path(x["pattern"]).parts
+                and isinstance(x.get("limit"), int) and 1 <= x["limit"] <= 5000 for x in listings)):
+            p.append("r2.longctx.listings: relative glob patterns with a limit (1..5000)")
     return p
 
 

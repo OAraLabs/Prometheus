@@ -439,8 +439,9 @@ real prompt and adds one execution condition, applied by the sandbox:
   ``injection_not_fired``.
 * long-context (``GenTask.context_reads``): the files are read by the sandbox's
   real ``read_file`` into the turn (seed call ids: never rows, never the task's
-  tool events) right after the prompt, then the teacher carries on. A read the
-  fixture cannot serve rejects the task (``context_read_failed``). With a
+  tool events) right after the prompt, then the teacher carries on; an lc2 row
+  first lists where they are with the real ``glob`` (``context_listings``). A
+  read or listing the fixture cannot serve rejects the task (``context_read_failed``). With a
   grounding block, the reply must name one of the asked file's identifiers
   (``not_grounded``).
 
@@ -1030,6 +1031,8 @@ class GenTask:
     failure: dict[str, Any] = field(default_factory=dict)
     #: r2 long-context: files read into the turn before the teacher answers ({path, offset, limit})
     context_reads: list[dict[str, Any]] = field(default_factory=list)
+    #: r2 long-context (lc2): ``glob`` listings run into the turn before those reads ({pattern, limit})
+    context_listings: list[dict[str, Any]] = field(default_factory=list)
     #: r2: salts ``task_hash`` (a round-2 variant of a prompt is a task of its own)
     variant: str = ""
 
@@ -1103,6 +1106,12 @@ class GenTask:
             p = Path(str(rd.get("path") or ""))
             if not rd.get("path") or p.is_absolute() or ".." in p.parts:
                 raise ValueError(f"task {self.id!r}: a context read must be a workspace-relative path")
+        for ls in self.context_listings:
+            p = Path(str(ls.get("pattern") or ""))
+            if not ls.get("pattern") or p.is_absolute() or ".." in p.parts:
+                raise ValueError(f"task {self.id!r}: a context listing must be a workspace-relative pattern")
+        if self.context_listings and not self.context_reads:
+            raise ValueError(f"task {self.id!r}: context listings come with context reads")
         if self.context_reads and self.mode != "agent":
             raise ValueError(f"task {self.id!r}: context reads are an agent turn's")
 
@@ -4978,11 +4987,13 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
 
 async def _context_reads(task: GenTask, registry: Any, env: "SandboxEnv", root: Path, messages: list[Any],
                          out: TaskOutcome) -> None:
-    """Round 2 long-context: each ``task.context_reads`` entry run through the sandbox's
-    real ``read_file`` (the repo fixture's own text, in the tool's own output format) and
-    appended to the turn as an assistant call plus its result, with seed call ids (never a
-    row, never one of the task's own tool events). Injections stay off while they run. A
-    read that fails (the fixture lacks the file) rejects the task (``context_read_failed``)."""
+    """Round 2 long-context: first each ``task.context_listings`` entry (lc2) through the sandbox's
+    real ``glob`` (where the files are: the fixture's own entries), then each ``task.context_reads``
+    entry through its real ``read_file`` (the repo fixture's own text, in the tool's own output
+    format); each appended to the turn as an assistant call plus its result, with seed call ids
+    (never a row, never one of the task's own tool events). Injections stay off while they run. A
+    listing that matches nothing or a read that fails (the fixture lacks the file) rejects the task
+    (``context_read_failed``)."""
     from prometheus.engine.messages import ConversationMessage, ToolResultBlock, ToolUseBlock
     from prometheus.tools.base import ToolExecutionContext
 
@@ -4993,6 +5004,23 @@ async def _context_reads(task: GenTask, registry: Any, env: "SandboxEnv", root: 
     token = _CURRENT_CALL.set(None)
     chars = 0
     try:
+        if task.context_listings:
+            glob_tool = registry.get("glob")
+            for k, ls in enumerate(task.context_listings, 1):
+                args = {"pattern": str(ls["pattern"]), "limit": int(ls.get("limit") or 200)}
+                result = await glob_tool.execute(glob_tool.input_model.model_validate(args), ctx)
+                text = str(result.output or "").strip()
+                if result.is_error or not text or text.startswith("(no matches)"):
+                    out.context_reasons.append("context_read_failed")
+                    out.context = {"reads": 0, "listings": k - 1, "chars": chars, "failed": args["pattern"]}
+                    return
+                cid = f"{SEED_CALL_PREFIX}ctx_ls_{k}"
+                messages.append(ConversationMessage(role="assistant", content=[
+                    ToolUseBlock(id=cid, name="glob", input=args)]))
+                messages.append(ConversationMessage(role="user", content=[ToolResultBlock(
+                    tool_use_id=cid, content=str(result.output), is_error=False)], provenance="user",
+                    is_trusted=True))
+                chars += len(str(result.output))
         for k, rd in enumerate(task.context_reads, 1):
             args = {"path": str(rd["path"]), "offset": int(rd.get("offset") or 0), "limit": int(rd["limit"])}
             result = await tool.execute(tool.input_model.model_validate(args), ctx)
@@ -5009,7 +5037,7 @@ async def _context_reads(task: GenTask, registry: Any, env: "SandboxEnv", root: 
     finally:
         env.injections_armed = armed
         _CURRENT_CALL.reset(token)
-    out.context = {"reads": len(task.context_reads), "chars": chars,
+    out.context = {"reads": len(task.context_reads), "listings": len(task.context_listings), "chars": chars,
                    "bucket": task.r2.get("ctx_bucket"), "needs_ctx": task.r2.get("needs_ctx")}
 
 
@@ -6558,6 +6586,8 @@ def task_from_taskset(row: dict[str, Any], sources: Sources, *, pool: list[dict[
         if lc:
             info.update(grounding=lc.get("grounding"), fixture_commit=lc.get("fixture_commit"))
             fields["context_reads"] = [dict(x) for x in lc["reads"]]
+            if lc.get("listings"):
+                fields["context_listings"] = [dict(x) for x in lc["listings"]]
         inj = r2.get("injection")
         if inj:
             fields["adversarial"] = {k: copy.deepcopy(inj.get(k)) for k in (

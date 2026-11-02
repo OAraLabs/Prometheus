@@ -140,6 +140,9 @@ LC_SKIP_PREFIXES = ("docs/sprints/",)
 LC_MAX_LINES = 800       # one read_file window per file (the tool allows 2000)
 LC_MIN_LINES = 20
 LC_MAX_FILE_BYTES = 400_000
+#: ``lc`` (round 2 as first built: a seeded file mix) | ``lc2`` (relevant reads after a real listing); the
+#: style is the variant's prefix, so an lc2 row is a new task beside the lc row of the same prompt
+LC_STYLES = ("lc", "lc2")
 FIXTURE_DIR = "Prometheus"  # teacher_gen.py's repo fixture, under the task's workspace
 SANDBOX_TOOLS = ("bash", "read_file", "write_file", "edit_file", "grep", "glob", "todo_write", "tool_search",
                  "memory", "wiki_query", "wiki_compile", "cron_create", "cron_list", "cron_delete",
@@ -571,6 +574,24 @@ class SrcFile:
     lines: list[str]
     tokens: int      # as read_file returns it (numbered), the first LC_MAX_LINES lines
     idents: frozenset[str]
+    #: lower-case words of the path and the read window (identifiers split at ``_``): the relevance index
+    words: frozenset[str] = frozenset()
+
+
+_WORD = re.compile(r"[a-z][a-z0-9]{2,}")
+#: words too common in requests to say what a request is about (relevance never counts them)
+_STOP = frozenset("""
+the and for are but not you all any can had her was one our out has have this that with what when where which
+who why how its it's from they them then than there their these those will would should could into onto about
+also just like some more most such only very much many make made need needs want wants does did done doing
+get got let lets yeah yes okay sure now here please thanks thank think know see look check tell said say
+again still well good right ok bit lot thing things way use used using work works working try trying able
+first next last before after while each other same new old sure going gonna wanna maybe really actually
+""".split())
+
+
+def words_of(text: str) -> frozenset[str]:
+    return frozenset(_WORD.findall(text.lower().replace("_", " ")))
 
 
 _IDENT = re.compile(r"^\s*(?:async\s+)?(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]{3,})|^#{1,3}\s+(.{6,80}?)\s*$", re.M)
@@ -617,15 +638,104 @@ def lc_pool(repo: Path, ref: str, exclude: set[str], counter: Any,
             continue
         window = lines[:LC_MAX_LINES]
         idents = frozenset(a or b for a, b in _IDENT.findall("\n".join(window)) if (a or b))
-        out.append(SrcFile(name, lines, counter(_numbered(window)), idents))
+        out.append(SrcFile(name, lines, counter(_numbered(window)), idents,
+                           words_of(name.replace("/", " ").replace(".", " ") + "\n" + "\n".join(window))))
     stats["lc_pool_files"] = len(out)
     return commit, out
 
 
-def plan_reads(row: dict[str, Any], pool: list[SrcFile], budget: int, seed: int, variant: str
+def lc_children(repo: Path, commit: str) -> dict[str, list[str]]:
+    """Every directory git tracks at *commit* -> its entries (files and subdirectories, repo-relative,
+    sorted): what the sandbox's ``glob`` lists for ``<FIXTURE_DIR>/<dir>/*`` on the repo fixture."""
+    names = [n for n in _git(repo, "ls-tree", "-r", "-t", "-z", "--name-only", commit).split("\0") if n]
+    out: dict[str, list[str]] = collections.defaultdict(list)
+    for n in names:
+        out[str(Path(n).parent)].append(n)
+    return {d: sorted(v) for d, v in out.items()}
+
+
+class Relevance:
+    """Which pool files a request is about: its content words (``_STOP`` and words in more than
+    ``max_df`` of the pool dropped) weighted by rarity, a hit in the file's path counted ``path_weight``
+    times. Read-only over the pool; an inverted index, so a row costs a few dict lookups."""
+
+    def __init__(self, pool: list[SrcFile], max_df: float = 0.15, path_weight: float = 2.0) -> None:
+        import math
+
+        self.index: dict[str, list[int]] = collections.defaultdict(list)
+        for i, f in enumerate(pool):
+            for w in f.words:
+                self.index[w].append(i)
+        n = max(len(pool), 1)
+        self.idf = {w: math.log(n / len(ix)) for w, ix in self.index.items() if len(ix) <= max_df * n}
+        self.path_words = [words_of(f.path.replace("/", " ").replace(".", " ")) for f in pool]
+        self.pool = pool
+        self.path_weight = path_weight
+
+    def keywords(self, prompt: str) -> list[str]:
+        return sorted(w for w in words_of(prompt) if w not in _STOP and w in self.idf)
+
+    def scores(self, prompt: str) -> dict[str, float]:
+        out: dict[str, float] = collections.defaultdict(float)
+        for w in self.keywords(prompt):
+            for i in self.index[w]:
+                out[self.pool[i].path] += self.idf[w] * (self.path_weight if w in self.path_words[i] else 1.0)
+        return dict(out)
+
+
+#: a directory listed whole up to this many entries; a bigger one (tests/) is listed by name prefix
+LC_LIST_DIR_MAX = 120
+#: the share of a long-context row's token budget its listings may take (at most LC_LIST_MAX_TOKENS)
+LC_LIST_SHARE = 0.12
+LC_LIST_MAX_TOKENS = 12_000
+
+
+def _name_prefix(path: str) -> str:
+    """``tests/test_telegram_typing.py`` -> ``test_telegram``; ``src/x/prompt_assembler.py`` -> ``prompt``."""
+    parts = Path(path).stem.split("_")
+    k = 2 if parts[0] == "test" and len(parts) > 1 else 1
+    return "_".join(parts[:k])
+
+
+def plan_listings(chosen: list[SrcFile], children: dict[str, list[str]], counter: Any, budget: int
+                  ) -> tuple[list[dict[str, Any]], int]:
+    """The ``glob`` calls that show where the reads came from, before them (what an agent runs first):
+    each read's directory whole (``<FIXTURE_DIR>/<dir>/*``) when it holds at most ``LC_LIST_DIR_MAX``
+    entries, else the entries sharing the read's name prefix (``<FIXTURE_DIR>/<dir>/<prefix>*``). In
+    the order the reads first need them, while they fit *budget* tokens. Returns (listings, tokens)."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    used = 0
+    for f in chosen:
+        d = str(Path(f.path).parent)
+        entries = children.get(d) or []
+        if not entries:
+            continue
+        if len(entries) <= LC_LIST_DIR_MAX:
+            key, pattern, hit = d, (f"{FIXTURE_DIR}/{d}/*" if d != "." else f"{FIXTURE_DIR}/*"), entries
+        else:
+            pre = _name_prefix(f.path)
+            key = f"{d}/{pre}"
+            pattern = f"{FIXTURE_DIR}/{d}/{pre}*"
+            hit = [e for e in entries if Path(e).name.startswith(pre)]
+        if key in seen or not hit:
+            continue
+        cost = counter("\n".join(f"{FIXTURE_DIR}/{e}" for e in hit)) + 30
+        if used + cost > budget:
+            continue
+        seen.add(key)
+        out.append({"pattern": pattern, "limit": min(max(len(hit), 1), 5000), "entries": len(hit)})
+        used += cost
+    return out, used
+
+
+def plan_reads(row: dict[str, Any], pool: list[SrcFile], budget: int, seed: int, variant: str,
+               relevance: dict[str, float] | None = None
                ) -> tuple[list[SrcFile], SrcFile | None, float | None]:
     """Files for one row: the ones its request names first (at a seeded depth), then files
-    from the same directories, then the rest in a seeded order, until *budget* tokens."""
+    from the same directories, then (*relevance*: path -> score, the ``lc2`` style) the files the
+    request is about, most relevant first, then the rest in a seeded order, until *budget* tokens."""
+    rel = relevance or {}
     by_path = {f.path: f for f in pool}
     named: list[SrcFile] = []
     for sl in row.get("slots") or []:
@@ -636,7 +746,8 @@ def plan_reads(row: dict[str, Any], pool: list[SrcFile], budget: int, seed: int,
                 named.append(hit)
     dirs = {str(Path(f.path).parent) for f in named}
     rest = sorted((f for f in pool if f not in named),
-                  key=lambda f: (str(Path(f.path).parent) not in dirs, rank(seed, f"lc|{variant}", f.path)))
+                  key=lambda f: (str(Path(f.path).parent) not in dirs, -rel.get(f.path, 0.0),
+                                 rank(seed, f"lc|{variant}", f.path)))
     chosen: list[SrcFile] = []
     used = 0
     for f in named[:1] + rest:
@@ -984,16 +1095,28 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
     buckets = [b for b in CTX_BUCKETS if b in a.ctx_buckets.split(",")]
     alt_buckets = {b for b in (getattr(a, "lc_alt_buckets", "") or "").split(",") if b in buckets}
     alt_n = int(getattr(a, "lc_alt_variants", 0) or 0)
+    # lc2 (default): the reads follow what the request is about (``Relevance``) and the turn first lists
+    # where they came from (``plan_listings``): with an unrelated file mix and no listing the teacher went
+    # on reading files it guessed the names of (2026-11-01: 142 of 178 rejected long-context tasks failed
+    # first on a read of a path that never existed)
+    lc_style = getattr(a, "lc_style", "lc2") or "lc2"
+    if lc_style not in LC_STYLES:
+        raise R2Error(f"--lc-style: one of {', '.join(LC_STYLES)}")
+    relv = Relevance(pool) if lc_style == "lc2" and "long-context" in want else None
+    children = lc_children(repo, commit) if relv is not None else {}
     for r in cond_rows:
         if r["mode"] != "agentic" or "long-context" not in want:
             continue
         order = sorted(buckets, key=lambda b: rank(seed, "lc-bucket|" + r["id"], b))
-        lc_plan = [(b, f"lc:{b}") for k, b in enumerate(order) if k < a.lc_variants]
-        lc_plan += [(b, f"lc:{b}:alt{j}") for b in order if b in alt_buckets for j in range(1, alt_n + 1)]
+        lc_plan = [(b, f"{lc_style}:{b}") for k, b in enumerate(order) if k < a.lc_variants]
+        lc_plan += [(b, f"{lc_style}:{b}:alt{j}") for b in order if b in alt_buckets for j in range(1, alt_n + 1)]
         seen_reads: set[tuple[str, ...]] = set()
+        scores = relv.scores(r["prompt"]) if relv is not None else None
         for bucket, variant in lc_plan:
             budget = CTX_BUCKETS[bucket] - prompt_tokens(r)
-            chosen, target, depth = plan_reads(r, pool, budget, seed, variant + "|" + r["id"])
+            list_budget = min(int(budget * LC_LIST_SHARE), LC_LIST_MAX_TOKENS) if relv is not None else 0
+            chosen, target, depth = plan_reads(r, pool, budget - list_budget, seed, variant + "|" + r["id"],
+                                               relevance=scores)
             if not chosen:
                 stats["lc_no_files"] += 1
                 continue
@@ -1002,7 +1125,17 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
                 stats["lc_same_reads_as_another_variant"] += 1
                 continue
             seen_reads.add(key)
-            reads_tokens = sum(f.tokens for f in chosen) + 40 * len(chosen)
+            listings: list[dict[str, Any]] = []
+            list_tokens = 0
+            if relv is not None:
+                listings, list_tokens = plan_listings(chosen, children, counter, list_budget)
+                if not listings:
+                    stats["lc_no_listing"] += 1
+                    continue
+                stats["lc_listings"] += len(listings)
+                stats["lc_relevant_reads"] += sum(1 for f in chosen if scores and scores.get(f.path))
+                stats["lc_reads"] += len(chosen)
+            reads_tokens = sum(f.tokens for f in chosen) + 40 * len(chosen) + list_tokens
             total = prompt_tokens(r) + reads_tokens
             if total < CTX_BUCKETS[bucket] * 0.8:
                 stats[f"lc_short_of_bucket:{bucket}"] += 1
@@ -1019,6 +1152,8 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
                             for f in chosen],
                   "bucket": bucket, "prompt_tokens": total, "token_count": counter.method,
                   "fixture_commit": commit, "grounding": grounding}
+            if listings:
+                lc["listings"] = [{"pattern": x["pattern"], "limit": x["limit"]} for x in listings]
             rows["long-context"].append(make_row(
                 r, taskset=f"{name}-longctx", area="long-context", variant=variant,
                 verifier=planned_verifier("long-context", r["category"], calibrated, grounding is not None),
@@ -1086,6 +1221,8 @@ def build(a: argparse.Namespace) -> dict[str, Any]:
         "error_recovery": {"variants": dict(collections.Counter(r["r2"]["variant"]
                                                                 for r in rows["error-recovery"]))},
         "long_context": {"buckets": dict(collections.Counter(r["r2"]["ctx_bucket"] for r in lc_rows)),
+                         "style": lc_style,
+                         "with_listings": sum(1 for r in lc_rows if r["r2"]["longctx"].get("listings")),
                          "grounded": sum(1 for r in lc_rows if r["r2"]["longctx"]["grounding"]),
                          "fixture_commit": commit, "repo_ref": a.repo_ref, "pool_files": len(pool),
                          "eval_longctx_source_paths": len(lc_eval), "pool_eval_overlap": pool_overlap,
@@ -1232,6 +1369,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     b.add_argument("--lc-variants", type=int, default=1, help="long-context rows per real row (buckets)")
     b.add_argument("--ctx-buckets", default="32k,64k,128k",
                    help="of " + ",".join(CTX_BUCKETS) + " (256k: the 4090 IQ3 teacher only)")
+    b.add_argument("--lc-style", choices=LC_STYLES, default="lc2",
+                   help="lc2 (default): reads the request is about, after a glob listing of where they are; "
+                        "lc: the first round-2 build's seeded file mix (reproduces its rows)")
     b.add_argument("--lc-alt-buckets", default="", help="buckets that get --lc-alt-variants other file mixes")
     b.add_argument("--lc-alt-variants", type=int, default=0)
     b.add_argument("--areas", default="", help="only these areas (comma-separated; default every area)")
