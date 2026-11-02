@@ -5,6 +5,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 ## Unreleased
 
 - MCP servers can be remote: a `url` connects over streamable HTTP (`transport: streamable-http`) or SSE (the default). Before, a `url` server was always marked failed as "not yet implemented". The server's stored `headers` are sent on every request to it and are never shown or logged. The server store now refuses a `url` that isn't `http://` or `https://`, and a header name or value that could break the request.
+- `POST /api/chat` and `/v1/chat/completions` accept `mcp_headers`: headers for a named HTTP MCP server, on that turn's calls only (for example, a user-bound token from the app in front of Prometheus). They are never shown to the model, kept in the conversation, logged or stored. A turn without them uses the server's stored headers. A header for an unknown server, or for one not reached over HTTP, is refused with a 400.
 
 ## 0.9.18 (2026-11-02)
 

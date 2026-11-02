@@ -155,7 +155,11 @@ async def test_the_header_is_kept_out_of_the_model_the_conversation_and_the_log(
         await _close(client, runtime)
 
     assert CANARY not in r.text
-    sent_to_model = json.dumps([req.model_dump(mode="json") for req in provider.requests])
+    sent_to_model = json.dumps([
+        {"system": req.system_prompt, "tools": req.tools,
+         "messages": [m.model_dump(mode="json") for m in req.messages]}
+        for req in provider.requests
+    ], default=str)
     assert CANARY not in sent_to_model, "the model's context carried the header"
     kept = json.dumps([m.model_dump(mode="json") for m in sessions.get_or_create("web:s1").get_messages()])
     assert CANARY not in kept, "the conversation kept the header"
