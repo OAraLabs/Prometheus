@@ -169,6 +169,28 @@ eval-tools / val:
                       them (per args_match)
   task_success        every case: name right AND (args valid if a call) AND the
                       success predicates pass
+  wrong_tool_rate     every case: the first call names an OFFERED tool other
+                      than expect.tool (a tool choice miss)
+  no_call_rate        every case: no call when expect.tool names one
+  extra_call_rate     every case: a call when expect.tool is null
+  other_miss_rate     every case: the rest of the misses (``tool_outcomes``
+                      splits them: unknown_tool = a name the case does not
+                      offer; failed_call = the right choice but the case still
+                      failed (invalid arguments or a success predicate); no_reply
+                      = context_exceeded / unparseable_emission). Each scored
+                      case has exactly one ``tool_outcome``, so task_success +
+                      these four rates = 100%.
+  arg_equivalence     the arg_exactness cases whose arguments are PROVEN
+                      equivalent (same effect/result) by ``arg_equiv.py``: exact,
+                      canonical form, or, with ``summarize --equiv-store``,
+                      execution in the gym sandbox. Undecidable cases count as
+                      not proven (a lower bound); the set's
+                      ``arg_equivalence_upper`` adds them, and
+                      ``arg_equivalence_tiers`` counts which tier decided each.
+  ``compare`` prints these as eval-tools headline rows with paired deltas
+  (wrong-tool rate and argument equivalence, Newcombe 95%); they are
+  information, never gated (the Phase 6 gate below is unchanged). The per-case
+  ``case_tool_outcome`` / ``case_arg_equiv`` they pair on are in the summary.
 eval-longctx: recall overall and recall_by_depth per bucket
 eval-injection: injection_resistance overall and by vector
 sanity: sanity_score
@@ -250,6 +272,7 @@ import argparse
 import asyncio
 import functools
 import hashlib
+import importlib.util
 import json
 import math
 import random
@@ -286,6 +309,13 @@ GATE_SCHEMA = "distill-gate/1"
 REQUEST_SHAPE = "2"
 
 TOOL_SETS = ("eval-tools", "val")
+#: Every scored tool-set case has exactly one (``tool_outcome``).
+TOOL_OUTCOMES = ("success", "wrong_tool", "no_call", "extra_call", "unknown_tool",
+                 "failed_call", "no_reply")
+#: The misses ``other_miss_rate`` counts: a tool not offered, the right tool
+#: but the case still failed, no readable reply.
+OTHER_MISS_OUTCOMES = ("unknown_tool", "failed_call", "no_reply")
+ARG_EQUIV_TIERS = ("exact", "canonical", "execution", "conservative", "undecidable")
 SETS = ("eval-tools", "eval-longctx", "eval-injection", "sanity", "val")
 GATED_SETS = ("eval-tools", "eval-longctx", "eval-injection", "sanity")
 DEPTH_BUCKETS = ("32k", "64k", "128k", "256k")
@@ -1161,10 +1191,14 @@ def _strip_markup(text: str) -> str:
 
 
 def score_tool_case(case: Case, message: dict[str, Any],
-                    read: tuple[list[dict[str, Any]], bool] | None = None) -> dict[str, Any]:
+                    read: tuple[list[dict[str, Any]], bool] | None = None,
+                    executor: Any = None) -> dict[str, Any]:
     """``read`` is the reply's (calls, from_text) when the caller already has
     them (``repair_gap.py`` passes the calls after the adapter's repair);
-    absent, they are read off the reply as the live loop reads them."""
+    absent, they are read off the reply as the live loop reads them.
+    ``executor`` (``arg_equiv.GymSandboxExecutor``) lets the argument
+    equivalence check run side-effect-free calls; without one it decides by
+    the static tiers only."""
     exp = case.expect
     want = exp.get("tool")
     calls, from_text = read if read is not None else reply_calls(case, message)
@@ -1210,6 +1244,11 @@ def score_tool_case(case: Case, message: dict[str, Any],
                 v["arg_exact"] = all(k in got and strict_eq(got[k], val) for k, val in expected.items())
             else:
                 v["arg_exact"] = strict_eq(_strip_keys(got, ignore), expected)
+            eq = _arg_equiv().check_call(
+                want, exp.get("args") or {}, first["arguments"], schemas[want],
+                _arg_equiv().case_env(case.messages), match=exp.get("args_match", "exact"),
+                ignore=tuple(ignore), exact=v["arg_exact"], executor=executor)
+            v["arg_equiv"] = eq.as_dict()
 
     predicates = dict(exp.get("success") or {})
     if want is not None:
@@ -1232,8 +1271,39 @@ def score_tool_case(case: Case, message: dict[str, Any],
     success = name_ok and passed and (want is None or bool(v.get("arg_valid")))
     if not name_ok:
         reasons = [f"first call {v['first_tool']!r}, expected {want!r}"] + reasons
-    v.update(task_success=success, reasons=reasons[:5])
+    v.update(task_success=success, reasons=reasons[:5],
+             tool_outcome=tool_outcome(want, first, set(schemas), success))
     return v
+
+
+def tool_outcome(want: str | None, first: dict[str, Any] | None, offered: set[str],
+                 success: bool) -> str:
+    """Exactly one of ``TOOL_OUTCOMES`` per scored case, so the misses add up
+    with the successes to every case (see the module doc's Metrics).
+    ``failed_call``: the right choice (the expected tool, or no call when none
+    was expected) and the case still failed."""
+    if success:
+        return "success"
+    if first is None:
+        return "no_call" if want is not None else "failed_call"
+    if want is None:
+        return "extra_call"
+    if first["name"] == want:
+        return "failed_call"
+    return "wrong_tool" if first["name"] in offered else "unknown_tool"
+
+
+def _arg_equiv() -> Any:
+    """scripts/distill/arg_equiv.py, loaded once beside this module."""
+    mod = sys.modules.get("distill_arg_equiv")
+    if mod is None:
+        spec = importlib.util.spec_from_file_location(
+            "distill_arg_equiv", Path(__file__).resolve().with_name("arg_equiv.py"))
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["distill_arg_equiv"] = mod
+        spec.loader.exec_module(mod)
+    return mod
 
 
 def answer_matches(text: str, expect: dict[str, Any], default_match: str) -> bool:
@@ -1311,12 +1381,14 @@ def score_injection_case(case: Case, message: dict[str, Any]) -> dict[str, Any]:
 
 
 def score_case(case: Case, row: dict[str, Any],
-               read: tuple[list[dict[str, Any]], bool] | None = None) -> dict[str, Any]:
+               read: tuple[list[dict[str, Any]], bool] | None = None,
+               executor: Any = None) -> dict[str, Any]:
     """The verdict for one ok row. ``passed`` is the set's headline outcome.
-    ``read`` (tool sets only) overrides the calls read off the reply."""
+    ``read`` (tool sets only) overrides the calls read off the reply;
+    ``executor`` is the argument-equivalence executor (tool sets only)."""
     message = row.get("message") or {}
     if case.set in TOOL_SETS:
-        v = score_tool_case(case, message, read)
+        v = score_tool_case(case, message, read, executor)
         v["passed"] = v["task_success"]
     elif case.set == "eval-injection":
         v = score_injection_case(case, message)
@@ -1331,8 +1403,9 @@ def score_case(case: Case, row: dict[str, Any],
         v["passed"] = False
         v["reasons"] = [why] + list(v.get("reasons") or [])
         if case.set in TOOL_SETS:
-            v.update(task_success=False, tool_name_correct=False, calls=0, from_text=False)
-            for k in ("arg_valid", "arg_exact", "arg_errors"):
+            v.update(task_success=False, tool_name_correct=False, calls=0, from_text=False,
+                     tool_outcome="no_reply")
+            for k in ("arg_valid", "arg_exact", "arg_errors", "arg_equiv"):
                 v.pop(k, None)
         if case.set == "eval-injection":
             v.update(resisted=False, calls=0, from_text=False)
@@ -1403,7 +1476,7 @@ def _distinct(values: list[Any]) -> list[Any]:
 
 
 def summarize(cases: list[Case], rows: dict[tuple[str, str], dict[str, Any]], *,
-              label: str) -> dict[str, Any]:
+              label: str, executor: Any = None) -> dict[str, Any]:
     by_set: dict[str, list[Case]] = {}
     for c in cases:
         by_set.setdefault(c.set, []).append(c)
@@ -1424,7 +1497,7 @@ def summarize(cases: list[Case], rows: dict[tuple[str, str], dict[str, Any]], *,
             if r.get("status") != "ok":
                 errors += 1
             else:
-                scored.append((c, r, score_case(c, r)))
+                scored.append((c, r, score_case(c, r, executor=executor)))
         lat = sorted(r.get("latency_s", 0.0) for _, r, _ in scored)
         with_calls = [v for _, _, v in scored if v.get("calls")]
         entry: dict[str, Any] = {
@@ -1446,6 +1519,25 @@ def summarize(cases: list[Case], rows: dict[tuple[str, str], dict[str, Any]], *,
             exact = [v for v in vs if "arg_exact" in v]
             m["arg_exactness"] = rate(sum(v["arg_exact"] for v in exact), len(exact))
             m["task_success"] = rate(sum(v["task_success"] for v in vs), len(vs))
+            outs = {o: sum(1 for v in vs if v["tool_outcome"] == o) for o in TOOL_OUTCOMES}
+            m["wrong_tool_rate"] = rate(outs["wrong_tool"], len(vs))
+            m["no_call_rate"] = rate(outs["no_call"], len(vs))
+            m["extra_call_rate"] = rate(outs["extra_call"], len(vs))
+            m["other_miss_rate"] = rate(sum(outs[o] for o in OTHER_MISS_OUTCOMES), len(vs))
+            eqs = [v["arg_equiv"] for v in vs if "arg_equiv" in v]
+            proven = sum(1 for e in eqs if e["equivalent"] is True)
+            undecided = sum(1 for e in eqs if e["equivalent"] is None)
+            m["arg_equivalence"] = rate(proven, len(eqs))
+            entry["tool_outcomes"] = outs
+            entry["arg_equivalence_upper"] = rate(proven + undecided, len(eqs))
+            entry["arg_equivalence_tiers"] = {t: sum(1 for e in eqs if e["tier"] == t)
+                                              for t in ARG_EQUIV_TIERS}
+            entry["arg_equivalence_method"] = (
+                "static+execution" if executor is not None else "static")
+            # per case, for compare's paired deltas (never under "metrics")
+            entry["case_tool_outcome"] = {c.id: v["tool_outcome"] for c, _, v in scored}
+            entry["case_arg_equiv"] = {c.id: v["arg_equiv"]["equivalent"]
+                                       for c, _, v in scored if "arg_equiv" in v}
         elif sname == "eval-longctx":
             m["recall"] = rate(sum(v["passed"] for v in vs), len(vs))
             m["recall_by_depth"] = {
@@ -1552,6 +1644,16 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
     ]
     for sname, mname, r in _metric_rows(summary):
         lines.append(f"| {sname} | {mname} | {r['k']}/{r['n']} | {_pct(r)} |")
+    for sname, e in summary.get("sets", {}).items():
+        outs, tiers = e.get("tool_outcomes"), e.get("arg_equivalence_tiers")
+        if outs:
+            lines += ["", f"{sname} outcomes (sum to {e['scored']} scored): "
+                      + ", ".join(f"{k} {v}" for k, v in outs.items())]
+        if tiers:
+            lines.append(f"{sname} argument equivalence by tier "
+                         f"({e.get('arg_equivalence_method', 'static')}): "
+                         + ", ".join(f"{k} {v}" for k, v in tiers.items())
+                         + f"; upper bound {_pct(e.get('arg_equivalence_upper'))}")
     lines += ["", "| Set | Cases | Scored | Errors | Missing | Context exceeded | Cut by context"
                   " | Unparseable | Calls from text | p50 latency (s) |",
               "|---|---|---|---|---|---|---|---|---|---|"]
@@ -2355,6 +2457,9 @@ def gate_json(summaries: list[dict[str, Any]], gate: GateResult) -> dict[str, An
         "longctx_underpowered": [c.name for c in gate.underpowered],
         "criteria": [c.as_dict() for c in gate.criteria],
         "diagnostics": gate.diagnostics,
+        "headline": {"gated": False, "eval_tools": {
+            s.get("label"): {key: _headline_value(s, key, where) for _, key, where in HEADLINE_ROWS}
+            for s in summaries}, "paired": headline_pairs(summaries[0], summaries[1])},
         "method": gate_method(),
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
@@ -2419,6 +2524,96 @@ _METHOD_LINE = (
     "docs/sprints/DISTILL-PHASE4-BASELINES.md.")
 
 
+#: The eval-tools headline rows of ``compare`` (information, never gated: the
+#: pre-registered gate is above). (row name, metric key, where it lives)
+HEADLINE_ROWS = (
+    ("task success", "task_success", "metrics"),
+    ("wrong-tool rate", "wrong_tool_rate", "metrics"),
+    ("no call when one was needed", "no_call_rate", "metrics"),
+    ("call when none was needed", "extra_call_rate", "metrics"),
+    ("other misses", "other_miss_rate", "metrics"),
+    ("exact arguments", "arg_exactness", "metrics"),
+    ("argument equivalence (proven)", "arg_equivalence", "metrics"),
+    ("argument equivalence (upper bound)", "arg_equivalence_upper", "entry"),
+)
+
+
+def _headline_value(summary: dict[str, Any], key: str, where: str) -> dict[str, Any] | None:
+    entry = (summary.get("sets") or {}).get("eval-tools") or {}
+    src = entry.get("metrics") if where == "metrics" else entry
+    val = (src or {}).get(key)
+    return val if isinstance(val, dict) and "k" in val else None
+
+
+def headline_pairs(base: dict[str, Any], cand: dict[str, Any]) -> dict[str, Any]:
+    """Paired candidate-minus-base deltas on eval-tools for the wrong-tool rate
+    (every case both scored) and proven argument equivalence (the cases where
+    both named the expected tool). Newcombe 95% intervals; never gated."""
+    be = (base.get("sets") or {}).get("eval-tools") or {}
+    ce = (cand.get("sets") or {}).get("eval-tools") or {}
+    out: dict[str, Any] = {}
+    for key, field_, pick in (("wrong_tool_rate", "case_tool_outcome", lambda x: x == "wrong_tool"),
+                              ("arg_equivalence", "case_arg_equiv", lambda x: x is True)):
+        bo, co = be.get(field_), ce.get(field_)
+        if not isinstance(bo, dict) or not isinstance(co, dict):
+            out[key] = None
+            continue
+        ids = sorted(set(bo) & set(co))
+        if not ids:
+            out[key] = None
+            continue
+        t = [0, 0, 0, 0]
+        for i in ids:
+            x, y = pick(bo[i]), pick(co[i])
+            t[0 if x and y else 1 if x else 2 if y else 3] += 1
+        rep = paired_report(PairedCounts(*t), f"headline/{key}", bootstrap=False)
+        out[key] = {**rep, "base_rate_pts": _round(100 * (t[0] + t[1]) / len(ids)),
+                    "candidate_rate_pts": _round(100 * (t[0] + t[2]) / len(ids))}
+    return out
+
+
+def _headline_lines(summaries: list[dict[str, Any]], *, markdown: bool) -> list[str]:
+    if not any(_headline_value(s, "task_success", "metrics") for s in summaries):
+        return []
+    labels = [s["label"] for s in summaries]
+    pairs = headline_pairs(summaries[0], summaries[1])
+    out: list[str] = []
+    if markdown:
+        out += ["Headline, eval-tools (information, not gated):", "",
+                "| Measure | " + " | ".join(labels) + " |", "|---|" + "---|" * len(labels)]
+        for name, key, where in HEADLINE_ROWS:
+            out.append(f"| {name} | " + " | ".join(
+                _pct(_headline_value(s, key, where)) for s in summaries) + " |")
+        out += ["", "| Paired, candidate - base | n | Base | Candidate | Delta (pts) "
+                "| Paired 95% CI (pts) |", "|---|---|---|---|---|---|"]
+        for key, name in (("wrong_tool_rate", "wrong-tool rate"),
+                          ("arg_equivalence", "argument equivalence (both named the tool)")):
+            p = pairs.get(key)
+            out.append(f"| {name} | n/a | | | | |" if not p else
+                       f"| {name} | {p['n']} | {_num(p['base_rate_pts'])} | {_num(p['candidate_rate_pts'])}"
+                       f" | {_diff_text(p)} | {_ci_text(p)} |")
+        out.append("")
+    else:
+        out.append("-- headline, eval-tools (not gated) --")
+        width = max(len(n) for n, _, _ in HEADLINE_ROWS)
+        out.append(" " * (width + 2) + "".join(f"{lab:<28}" for lab in labels))
+        for name, key, where in HEADLINE_ROWS:
+            out.append(f"{name:<{width}}  " + "".join(
+                f"{_pct(_headline_value(s, key, where)):<28}" for s in summaries))
+        for key, name in (("wrong_tool_rate", "wrong-tool rate"),
+                          ("arg_equivalence", "argument equivalence")):
+            p = pairs.get(key)
+            if p:
+                out.append(f"  paired {name}: n {p['n']}  delta {_diff_text(p)}  ci {_ci_text(p)}")
+        out.append("--")
+    methods = {((s.get("sets") or {}).get("eval-tools") or {}).get("arg_equivalence_method")
+               for s in summaries} - {None}
+    if len(methods) > 1:
+        out.append(("- note: " if markdown else "  note: ") + "argument equivalence was decided "
+                   f"by different methods ({', '.join(sorted(methods))}); the rates do not compare")
+    return out
+
+
 def render_compare(summaries: list[dict[str, Any]], gate: GateResult, *, markdown: bool) -> str:
     base, cand = summaries[0], summaries[1]
     labels = [s["label"] for s in summaries]
@@ -2438,7 +2633,8 @@ def render_compare(summaries: list[dict[str, Any]], gate: GateResult, *, markdow
     out: list[str] = []
     title = f"Phase 6 shadow gate: {cand['label']} vs {base['label']}"
     if markdown:
-        out += [f"## {title}", "", "| Set | Metric | " + " | ".join(labels) + " |",
+        out += [f"## {title}", "", *_headline_lines(summaries, markdown=True),
+                "| Set | Metric | " + " | ".join(labels) + " |",
                 "|---|---|" + "---|" * len(labels)]
         for sname, mname in keys:
             out.append(f"| {sname} | {mname} | "
@@ -2464,6 +2660,7 @@ def render_compare(summaries: list[dict[str, Any]], gate: GateResult, *, markdow
             out += ["", gate.underpowered_line()]
     else:
         out.append(f"== {title} ==")
+        out += _headline_lines(summaries, markdown=False)
         width = max(len(f"{s}/{m}") for s, m in keys) if keys else 10
         out.append(" " * (width + 2) + "".join(f"{lab:<28}" for lab in labels))
         for sname, mname in keys:
@@ -2799,6 +2996,10 @@ def main(argv: list[str] | None = None, *, transport: httpx.AsyncBaseTransport |
     s.add_argument("--label", help="defaults to the label in the results file")
     s.add_argument("--summary-out")
     s.add_argument("--markdown-out")
+    s.add_argument("--equiv-store", help="the gym's repo store (bare clone): argument equivalence "
+                                         "also runs side-effect-free calls in the gym sandbox")
+    s.add_argument("--equiv-work", help="scratch directory the equivalence executor owns")
+    s.add_argument("--equiv-jail", default="require", choices=("auto", "require", "off"))
 
     c = sub.add_parser("compare", help="evaluate the Phase 6 shadow gate")
     c.add_argument("--base", required=True, help="base model summary JSON")
@@ -2872,7 +3073,19 @@ def main(argv: list[str] | None = None, *, transport: httpx.AsyncBaseTransport |
             print(f"error: {results} mixes labels {sorted(labels)}", file=sys.stderr)
             return 2
         label = args.label or (next(iter(labels)) if labels else results.stem)
-        summary = summarize(cases, rows, label=label)
+        executor = None
+        if args.equiv_store:
+            if not args.equiv_work:
+                print("error: --equiv-store needs --equiv-work", file=sys.stderr)
+                return 2
+            executor = _arg_equiv().GymSandboxExecutor(
+                Path(args.equiv_store).expanduser(), Path(args.equiv_work).expanduser(),
+                jail=args.equiv_jail)
+        try:
+            summary = summarize(cases, rows, label=label, executor=executor)
+        finally:
+            if executor is not None:
+                executor.cleanup()
         _write_summary(summary, *_default_outputs(results, args.summary_out, args.markdown_out))
         return 0
 
