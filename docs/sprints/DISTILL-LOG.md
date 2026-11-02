@@ -243,3 +243,11 @@ Append-only, times in ET.
   - **Odd:** held-back perplexity is BF16 9.340 / Q4 8.574 / Q5 9.243 (Q4 below BF16 is unusual). A CPU BF16 cross-check is running; I'll recheck before trusting the BF16 reference.
 - 2026-11-01 13:20 EST — **First student scores (Q4_K_M, preliminary; the formal compare with CI gate comes at the end):** eval-tools task_success 80.5% [75.9, 84.5] (base-9B 72.3, Saluki 70.5, 27B 72.9), tool name 81.2%, arg validity 99.3%, arg exactness 9.0%. Sanity 95.7% [92.1, 97.7] (base-9B 96.7). Q5 scoring is running.
 - 2026-11-01 21:45 EST — **Controller lost reach to both hosts:** Tailscale is stopped on the Mac (internet fine). Not restarting it (a network/VPN setting on the operator's machine). Everything still runs on-host: post-train pipeline → round-2 chain (A/B + generation until Mon 05:18) → business restore 05:20 / dead-man 06:00, and the 09:00 heartbeat. Monitoring resumes when Tailscale is back.
+- 2026-11-01 22:19 EST — **Phase 7 scorecard written** (DISTILL-PHASE7-SCORECARD.md).
+  - **Verdict:** NOT PROMOTED.
+    - Tool-call success Q4 +8.2 vs the Unsloth base and +5.5 vs the same-recipe base (bar +10). Q5 +11.2 vs Unsloth but +8.5 like-for-like, with long-context and injection not run.
+    - Long-context, injection and sanity pass everywhere.
+  - **Q5−Q4:** +3.0 [−0.9, +7.0], not significant; BF16 doesn't beat Q4 on the subset.
+  - **Other findings:** exact arguments ~10% for all models; adapter-repair gap 0.0 for all; the CPU BF16 PPL check agrees with the GPU (9.339 vs 9.340).
+  - **Round 2 since Sunday:** 1,316 rows (daily 514, injection 498, coding 182, error-recovery 108, long-context 14).
+  - **Problem:** the 4090 run exhausted the taskset at 21:20 EST; an expansion agent is working on it.
