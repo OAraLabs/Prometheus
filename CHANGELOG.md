@@ -5,6 +5,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 ## Unreleased
 
 - Voice: when a remote voice server (`stt.url`, `tts.url`) stops answering, refuses its key or rejects a request, you are now told once, not just the log: "Your speech-to-text server isn't answering, so this computer's own speech-to-text is being used until it is back." You get one more line when it answers again, and nothing while it stays down. Telegram and Discord send the line to the chat that used voice, `oara --voice` prints it, and the `tts` tool adds it to its result. Each failed request still logs its own line, as before.
+- The model is no longer told where your machines are. The Infrastructure section of its prompt and the `anatomy` tool's answers keep what the machines can do (CPU, RAM, GPU and VRAM, the model, its engine, context window and vision) and leave out hostnames, IP addresses, URLs, the tailnet peer list and the folder a model file sits in, on local and hosted models alike. Before, a reply could quote the model server's address or list your tailnet peers. `anatomy.include_addresses: true` restores the old text. The `/anatomy` command you run yourself is unchanged.
 
 ## 0.9.18 (2026-11-02)
 

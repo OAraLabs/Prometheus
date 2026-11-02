@@ -2227,7 +2227,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             )
             anatomy_writer = AnatomyWriter()
             project_store = ProjectConfigStore()
-            set_anatomy_components(scanner, anatomy_writer, project_store)
+            set_anatomy_components(scanner, anatomy_writer, project_store, config)
 
             if anatomy_config.get("scan_on_startup", True):
                 state = await scanner.scan()
