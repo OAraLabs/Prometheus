@@ -1,4 +1,4 @@
 """Prometheus — sovereign AI agent harness."""
 
-__version__ = "0.9.18"
+__version__ = "0.9.19"
 __all__ = ["__version__"]
