@@ -573,6 +573,7 @@ import json
 import logging
 import math
 import os
+import posixpath
 import random
 import re
 import shutil
@@ -750,9 +751,28 @@ OPS_PROGRAMS = frozenset({"systemctl", "journalctl", "nvidia-smi", "df", "free",
                           "curl", "lsblk", "mount", "findmnt", "hostname", "uname", "whoami", "id",
                           "nproc", "lscpu", "sensors", "ss", "pgrep", "which", "command", "type", "sleep"})
 #: Host files a command or read_file may read, answered from the task's ops fixture
-#: (``SandboxEnv.virtual_file``); the host's own file is never opened.
+#: (``SandboxEnv.virtual_file``); the host's own file is never opened by those paths. Inside
+#: the hardened profile (``--hardened-exec on``) the refusal of these paths is only a
+#: consistency hint (``virtual_paths_in``): a script can build a path at run time, and the
+#: jail's own /proc then answers with the host's (non-secret) meminfo, cpuinfo, load and
+#: kernel version; the jail mounts no /etc/os-release or /etc/hostname. The jail is the guard.
 VIRTUAL_FILES = ("/proc/meminfo", "/proc/mounts", "/proc/cpuinfo", "/proc/loadavg", "/proc/uptime",
                  "/proc/version", "/etc/os-release", "/etc/hostname")
+_PATHLIKE = re.compile(r"/[^\s'\"`;&|<>()$]*")
+
+
+def virtual_paths_in(cmd: str) -> list[str]:
+    """``VIRTUAL_FILES`` a command names, each path-like word normalised first (``//``,
+    ``/./`` and ``..`` resolved, so ``/proc//meminfo`` and ``/proc/self/../loadavg`` count;
+    ``/proc/meminfo2`` does not). A consistency hint for the fixture, not a security check."""
+    found: set[str] = set()
+    for m in _PATHLIKE.finditer(cmd or ""):
+        norm = posixpath.normpath(m.group(0))
+        if norm in VIRTUAL_FILES:
+            found.add(norm)
+    return sorted(found)
+
+
 #: Programs that may read a virtual host file (its text is fed to them on stdin).
 _VIRTUAL_READERS = frozenset({"cat", "head", "tail", "grep", "egrep", "fgrep", "wc", "awk", "sed", "sort",
                               "uniq", "cut", "tr", "column", "nl"})
@@ -3361,7 +3381,7 @@ class SandboxEnv:
         if sim:
             raise SandboxRefusal(f"`{sim[0]}` runs only as a command of its own here, not inside a script or "
                                  "python")
-        virt = [v for v in VIRTUAL_FILES if v in cmd]
+        virt = virtual_paths_in(cmd)
         if virt:
             raise SandboxRefusal(f"{virt[0]!r} can only be read by a command of its own here")
         env = dict(_GIT_SANDBOX_ENV, GIT_CEILING_DIRECTORIES=str(self.root.parent))

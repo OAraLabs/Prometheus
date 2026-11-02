@@ -18,19 +18,23 @@ is enforced here (``bwrap_argv`` / ``scope_argv`` / ``HELPER``):
   never elevates), ``--new-session`` (no TIOCSTI into a terminal),
   ``--die-with-parent``, a seccomp filter (``seccomp_program``: keyrings,
   ptrace, bpf, perf, userfaultfd, io_uring, mount / namespace calls, modules
-  ... fail with EPERM; a fresh empty session keyring and ``/proc/keys``
-  hidden), a new pid namespace (``--unshare-pid`` + ``--proc``:
+  ... fail with EPERM; ``socket`` / ``socketpair`` of any family but unix,
+  IPv4 and IPv6 fail with EAFNOSUPPORT; a fresh empty session keyring and
+  ``/proc/keys`` hidden), a new pid namespace (``--unshare-pid`` + ``--proc``:
   no host process is visible or signalable), new ipc/uts/cgroup namespaces.
 * **read-only snapshot mounts and a writable tmpfs only**: ``/usr`` (and the
   ``/bin`` ``/lib`` symlinks), a few ``/etc`` loader files and the task's git
   directory are ``--ro-bind``; the task's workspace is ``--ro-bind`` at
-  ``SNAPSHOT``; the ONLY writable mounts are tmpfs (``/tmp`` and the workspace
-  path, size-capped; ``/`` itself is remounted read-only). No host path is ever
-  bound writable. The helper copies the snapshot into the workspace tmpfs,
-  runs the command there, and hands the files it changed back through a
-  pipe; the gym (trusted code, after the jail is gone) imports
-  them with ``apply_export``: regular files and directories only, every path
-  checked inside the workspace, never through a symlink, size-capped.
+  ``SNAPSHOT``; the ONLY writable mounts are size-capped tmpfs (``/tmp``,
+  ``/dev/shm`` and the workspace path; ``/`` and ``/dev`` are remounted
+  read-only). No host path is ever bound writable. The helper copies the
+  snapshot into the workspace tmpfs, runs the command there, and hands the
+  files it changed back through a pipe; the command can forge that export, so
+  the gym (trusted code, after the jail is gone) validates all of it before it
+  changes anything (``apply_export``: plain regular files and directories
+  only, never sparse; every name checked inside the workspace and never
+  through a symlink; member count, per-file size and the decompressed total
+  capped) and renames each file into place.
 * **no secrets or env tokens inside**: ``--clearenv`` + an explicit allow-list
   (``sandbox_env``); HOME is the workspace; nothing of the real home, ``/run``,
   ``/var``, ``/sys``, ``/home``, ``/root`` or the rest of ``/etc`` exists
@@ -43,8 +47,10 @@ is enforced here (``bwrap_argv`` / ``scope_argv`` / ``HELPER``):
   jail and RLIMIT_NPROC inside the user namespace, the helper's own wall-clock
   timeout (SIGKILL to the command's process group, then to every other process
   in the pid namespace) and the gym's outer timeout (SIGKILL of the jail, whose
-  pid namespace dies with it). The profile fails closed: no working scope, no
-  hardened commands (``probe``).
+  pid namespace dies with it). The profile fails closed (``probe``): unless a
+  real command shows the seccomp filter on, loopback as the only interface and
+  the scope's memory, swap and task limits enforced in its cgroup, no hardened
+  commands.
 
 Run ``hardened_exec.py escape-check`` on the tool host for the escape matrix
 (network, host paths, writes outside tmpfs, env secrets, privilege, resource
@@ -99,6 +105,7 @@ class Limits:
     nofile: int = 256                 # RLIMIT_NOFILE
     tmp_bytes: int = 256 << 20        # /tmp tmpfs size
     ws_bytes: int = 512 << 20         # workspace tmpfs size
+    shm_bytes: int = 64 << 20         # /dev/shm tmpfs size (/dev itself is read-only)
     export_max: int = 96 << 20        # the gym reads at most this much of the export (one fsize file fits)
     grace: float = 15.0               # copy-in + export, on top of the command's own timeout
     max_entries: int = 200_000        # workspace entries the gym accepts in one export
@@ -220,8 +227,9 @@ def sandbox_env(root: Path, extra: dict[str, str] | None = None) -> dict[str, st
 
 def bwrap_argv(root: Path, *, ro: tuple[Path, ...] = (), env: dict[str, str] | None = None,
                bwrap: str | None = None, limits: Limits = LIMITS, seccomp_fd: int | None = None) -> list[str]:
-    """The jail. Read-only: /usr, the loader's /etc files, *ro* (the task's git dir) and the
-    workspace snapshot at SNAPSHOT. Writable: tmpfs at /tmp and at the workspace path only."""
+    """The jail. Read-only: /usr, the loader's /etc files, *ro* (the task's git dir), /dev and
+    the workspace snapshot at SNAPSHOT. Writable: size-capped tmpfs at /tmp, /dev/shm and the
+    workspace path only."""
     root = Path(root)
     argv = [bwrap or shutil.which("bwrap") or "bwrap",
             "--unshare-all", "--unshare-user", "--unshare-net", "--unshare-pid",
@@ -239,7 +247,11 @@ def bwrap_argv(root: Path, *, ro: tuple[Path, ...] = (), env: dict[str, str] | N
             argv += ["--ro-bind", d, d]
     for f in ("/etc/alternatives", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/localtime"):
         argv += ["--ro-bind-try", f, f]
+    # bwrap's /dev is a tmpfs its --size cannot cap (0.9: --tmpfs only), so it is remounted
+    # read-only once built (its device nodes are separate bind mounts and still work); the
+    # one writable place in it is a size-capped tmpfs at /dev/shm (python's multiprocessing)
     argv += ["--proc", "/proc", "--dev", "/dev",
+             "--size", str(limits.shm_bytes), "--tmpfs", "/dev/shm", "--remount-ro", "/dev",
              # the host's kernel keyrings are listed there (seccomp refuses reading them)
              "--ro-bind", "/dev/null", "/proc/keys", "--ro-bind", "/dev/null", "/proc/key-users",
              "--size", str(limits.tmp_bytes), "--tmpfs", "/tmp"]
@@ -307,29 +319,59 @@ SECCOMP_DENY_X86_64 = {
     "quotactl": 179, "vhangup": 153, "syslog": 103, "iopl": 172, "ioperm": 173, "modify_ldt": 154,
     "uselib": 134, "sethostname": 170, "setdomainname": 171,
 }
+#: Socket address families the jail may create (``socket`` / ``socketpair``, x86_64 numbers):
+#: unix sockets (asyncio, multiprocessing) and IPv4/IPv6 for code that talks to itself on the
+#: loopback (the network namespace has no other interface and no route). Every other family
+#: fails with EAFNOSUPPORT: AF_ALG, AF_NETLINK, AF_PACKET, AF_VSOCK... and the module autoload
+#: a socket of an unknown family would trigger.
+SOCKET_FAMILIES_X86_64 = {"AF_UNIX": 1, "AF_INET": 2, "AF_INET6": 10}
+_SYS_SOCKET, _SYS_SOCKETPAIR = 41, 53
 _AUDIT_ARCH_X86_64 = 0xC000003E
+_EAFNOSUPPORT = 97
 _RET_ALLOW, _RET_KILL, _RET_EPERM = 0x7FFF0000, 0x80000000, 0x00050000 | 1
+_RET_EAFNOSUPPORT = 0x00050000 | _EAFNOSUPPORT
+#: offset of the low 32 bits of args[0] in struct seccomp_data (little endian): socket()'s
+#: family is an int, so the kernel itself reads only these bits
+_SECCOMP_ARG0_LO = 16
 
 
 def seccomp_program(machine: str | None = None) -> bytes:
     """The jail's seccomp filter (classic BPF for ``bwrap --seccomp``): a wrong
     architecture is killed, the x32 ABI and every ``SECCOMP_DENY_X86_64`` call fail with
-    EPERM, everything else is allowed. x86_64 only (the tool host); elsewhere it raises,
-    and the profile is unavailable (fails closed)."""
+    EPERM, ``socket`` / ``socketpair`` of a family outside ``SOCKET_FAMILIES_X86_64`` fail
+    with EAFNOSUPPORT, everything else is allowed. x86_64 only (the tool host); elsewhere it
+    raises, and the profile is unavailable (fails closed).
+
+    A deny list, not an allow list: an allow list of every call python, bash, git and the
+    coreutils make would be several hundred numbers with a jump table this hand-built
+    classic BPF cannot keep short, and a missed one breaks commands at random; the risky
+    surface is denied by name and the socket family is filtered by argument."""
     if (machine or platform.machine()) not in ("x86_64", "AMD64"):
         raise RuntimeError(f"no seccomp filter for {machine or platform.machine()} (x86_64 only)")
 
     def ins(code: int, jt: int, jf: int, k: int) -> bytes:
+        assert 0 <= jt < 256 and 0 <= jf < 256, (jt, jf)
         return struct.pack("<HBBI", code, jt, jf, k)
 
     ld, jeq, jge, ret = 0x20, 0x15, 0x35, 0x06
     nrs = sorted(set(SECCOMP_DENY_X86_64.values()))
-    n = len(nrs)
+    fams = sorted(set(SOCKET_FAMILIES_X86_64.values()))
+    n, f = len(nrs), len(fams)
+    sock = 6 + n                    # the socket / socketpair dispatch
+    allow = sock + 3 + f + 1        # dispatch (2), load the family (1), one jeq per family, EAFNOSUPPORT
+    eperm = allow + 1
     prog = [ins(ld, 0, 0, 4), ins(jeq, 1, 0, _AUDIT_ARCH_X86_64), ins(ret, 0, 0, _RET_KILL),
             ins(ld, 0, 0, 0), ins(jge, 0, 1, 0x40000000), ins(ret, 0, 0, _RET_EPERM)]
     for i, nr in enumerate(nrs):
-        prog.append(ins(jeq, n - i, 0, nr))
+        prog.append(ins(jeq, eperm - (6 + i) - 1, 0, nr))
+    prog.append(ins(jeq, 1, 0, _SYS_SOCKET))
+    prog.append(ins(jeq, 0, allow - (sock + 1) - 1, _SYS_SOCKETPAIR))
+    prog.append(ins(ld, 0, 0, _SECCOMP_ARG0_LO))
+    for j, fam in enumerate(fams):
+        prog.append(ins(jeq, allow - (sock + 3 + j) - 1, 0, fam))
+    prog.append(ins(ret, 0, 0, _RET_EAFNOSUPPORT))
     prog += [ins(ret, 0, 0, _RET_ALLOW), ins(ret, 0, 0, _RET_EPERM)]
+    assert len(prog) == eperm + 1
     return b"".join(prog)
 
 
@@ -436,8 +478,31 @@ class ImportReport:
     timed_out: bool = False
 
 
-def _rel_ok(rel: str) -> bool:
-    if not rel or "\x00" in rel or rel.startswith("/") or "\\" in rel:
+#: the only tar member types the export may carry for a file (never sparse: a sparse member's
+#: declared size is read back as zero-filled holes the archive does not hold)
+_FILE_TYPES = (tarfile.REGTYPE, tarfile.AREGTYPE)
+_NAME_MAX = 255
+_PATH_MAX = 4096
+_MANIFEST_MAX = 32 << 20
+_NOT_KEPT = "the command's workspace changes were not kept"
+_TOO_LARGE = "the command's workspace changes were too large to keep"
+
+
+class _Refused(Exception):
+    """The export is malformed or over a limit: nothing is applied."""
+
+
+def _rel_ok(rel: str, base: int = 0) -> bool:
+    """A relative workspace path: no absolute, empty, ``.`` or ``..`` component, a name the
+    filesystem can take (encodable, each component at most 255 bytes, the whole path under
+    PATH_MAX including the *base* bytes of the workspace path in front of it)."""
+    if not isinstance(rel, str) or not rel or "\x00" in rel or rel.startswith("/") or "\\" in rel:
+        return False
+    try:
+        raw = os.fsencode(rel)
+    except UnicodeError:
+        return False  # a lone surrogate: no file can have this name
+    if base + 1 + len(raw) >= _PATH_MAX or any(len(c) > _NAME_MAX for c in raw.split(b"/")):
         return False
     parts = PurePosixPath(rel).parts
     return bool(parts) and all(p not in ("", ".", "..") for p in parts) and PurePosixPath(rel).as_posix() == rel
@@ -486,96 +551,192 @@ def _remove(path: Path) -> None:
         os.unlink(path)
 
 
+@dataclass
+class _Plan:
+    want: dict[str, str]
+    files: dict[str, tarfile.TarInfo]
+    rc: int | None
+    timed_out: bool
+
+
+def _read_capped(fh: Any, size: int, out: Any, budget: list[int], limit: int) -> None:
+    """Copy exactly *size* bytes of a member to *out* (``None``: discard), counting every byte
+    actually read against the export's decompressed budget."""
+    n = 0
+    while True:
+        chunk = fh.read(min(1 << 20, size - n + 1))
+        if not chunk:
+            break
+        n += len(chunk)
+        budget[0] += len(chunk)
+        if n > size or budget[0] > limit:
+            raise _Refused(_TOO_LARGE)
+        if out is not None:
+            out.write(chunk)
+    if n != size:
+        raise _Refused(_NOT_KEPT)
+
+
+def _validate_export(tf: tarfile.TarFile, size: int, root: Path, limits: Limits, budget: list[int]) -> _Plan:
+    """Check the WHOLE export before anything on the host changes: the member count, every
+    member's type, name and size, the decompressed total, and the manifest."""
+    base = len(os.fsencode(str(root)))
+    members: list[tarfile.TarInfo] = []
+    while True:
+        m = tf.next()
+        if m is None:
+            break
+        members.append(m)
+        if len(members) > limits.max_entries + 1:
+            raise _Refused("too many workspace entries")
+    manifest_m: tarfile.TarInfo | None = None
+    files: dict[str, tarfile.TarInfo] = {}
+    declared = 0
+    for m in members:
+        is_file = m.type in _FILE_TYPES and not m.issparse()
+        if m.name == "manifest.json":
+            if manifest_m is not None or not is_file or m.size > _MANIFEST_MAX:
+                raise _Refused(_NOT_KEPT)
+            manifest_m = m
+        elif m.name.startswith("ws/") and m.type == tarfile.DIRTYPE:
+            if not _rel_ok(m.name[3:], base):
+                raise _Refused(_NOT_KEPT)
+            continue  # directories come from the manifest
+        elif m.name.startswith("ws/"):
+            rel = m.name[3:]
+            if not is_file or not _rel_ok(rel, base) or rel in files:
+                raise _Refused(_NOT_KEPT)
+            if m.size > limits.fsize:
+                raise _Refused(_TOO_LARGE)
+            files[rel] = m
+        else:
+            raise _Refused(_NOT_KEPT)
+        # a regular member's bytes are in the archive itself: never past its end
+        if m.size < 0 or m.offset_data + m.size > size:
+            raise _Refused(_NOT_KEPT)
+        declared += m.size
+        if declared > limits.export_max:
+            raise _Refused(_TOO_LARGE)
+    if manifest_m is None:
+        raise _Refused(_NOT_KEPT)
+    fh = tf.extractfile(manifest_m)
+    if fh is None:
+        raise _Refused(_NOT_KEPT)
+    buf = io.BytesIO()
+    _read_capped(fh, manifest_m.size, buf, budget, limits.export_max)
+    manifest = json.loads(buf.getvalue())
+    entries = manifest.get("entries") if isinstance(manifest, dict) else None
+    if not isinstance(entries, list) or len(entries) > limits.max_entries:
+        raise _Refused(_NOT_KEPT)
+    want: dict[str, str] = {}
+    for e in entries:
+        if not (isinstance(e, list) and len(e) == 2 and e[1] in ("d", "f", "l", "o") and _rel_ok(e[0], base)) \
+                or e[0] in want:
+            raise _Refused(_NOT_KEPT)
+        parent = PurePosixPath(e[0]).parent.as_posix()
+        if parent != "." and want.get(parent) != "d":
+            raise _Refused(_NOT_KEPT)  # the helper lists every directory before what is in it
+        want[e[0]] = e[1]
+    if any(want.get(rel) != "f" for rel in files):
+        raise _Refused(_NOT_KEPT)
+    rc = manifest.get("rc")
+    return _Plan(want, files, rc if isinstance(rc, int) and not isinstance(rc, bool) else None,
+                 manifest.get("timed_out") is True)
+
+
 def apply_export(data: bytes, root: Path, limits: Limits = LIMITS) -> ImportReport:
     """Apply the jail's export to the host workspace *root* (trusted code; the export is not):
     directories and regular files only, every path inside root and never through a symlink.
-    A truncated or malformed export changes nothing."""
+
+    The whole export is validated first (member count, types: plain regular files only, never
+    sparse; names; sizes; the manifest), then every file body is streamed, with a running
+    total of the bytes actually read capped at ``export_max``, into a staging directory inside
+    root. Any failure up to there changes nothing. Only then are deletions made and each
+    staged file renamed into place (a new inode: never written through an existing file or a
+    hard link)."""
     root = Path(root).resolve()
     if len(data) > limits.export_max:
-        return ImportReport(False, note="the command's workspace changes were too large to keep")
+        return ImportReport(False, note=_TOO_LARGE)
+    budget = [0]
+    stage: Path | None = None
+    staged: dict[str, Path] = {}
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as tf:
-            members = tf.getmembers()
-            if len(members) > limits.max_entries + 1:
-                return ImportReport(False, note="too many workspace entries")
-            man_m = [m for m in members if m.name == "manifest.json" and m.isreg()]
-            if len(man_m) != 1 or man_m[0].size > 32 << 20:
-                return ImportReport(False, note="the command's workspace changes were not kept")
-            mf = tf.extractfile(man_m[0])
-            manifest = json.loads(mf.read() if mf else b"")
-            files: dict[str, bytes] = {}
-            for m in members:
-                if not m.name.startswith("ws/"):
-                    continue
-                rel = m.name[3:]
-                if not m.isreg() or not _rel_ok(rel) or m.size > limits.fsize:
-                    continue
+            plan = _validate_export(tf, len(data), root, limits, budget)
+            stage = Path(tempfile.mkdtemp(prefix=".gym-import-", dir=root))
+            if stage.name in plan.want:
+                raise _Refused(_NOT_KEPT)
+            for k, (rel, m) in enumerate(sorted(plan.files.items())):
                 fh = tf.extractfile(m)
-                if fh is not None:
-                    files[rel] = fh.read()
-    except (tarfile.TarError, OSError, EOFError, ValueError, json.JSONDecodeError):
-        return ImportReport(False, note="the command's workspace changes were not kept")
-    entries = manifest.get("entries") if isinstance(manifest, dict) else None
-    if not isinstance(entries, list) or len(entries) > limits.max_entries:
-        return ImportReport(False, note="the command's workspace changes were not kept")
-    want: dict[str, str] = {}
-    for e in entries:
-        if (isinstance(e, list) and len(e) == 2 and isinstance(e[0], str) and e[1] in ("d", "f", "l", "o")
-                and _rel_ok(e[0])):
-            want[e[0]] = e[1]
-    rc = manifest.get("rc")
-    rep = ImportReport(True, rc=rc if isinstance(rc, int) else None, timed_out=manifest.get("timed_out") is True)
-    have = _host_entries(root)
-    # 1. deletions (and type changes), deepest first
-    for rel in sorted(have, key=lambda r: r.count("/"), reverse=True):
-        kind = have[rel]
-        w = want.get(rel)
-        if w == kind and kind in ("d", "f"):
-            continue
-        if w is None or w != kind:
-            if _parent_safe(root, rel, make=False) is None:
+                if fh is None:
+                    raise _Refused(_NOT_KEPT)
+                tmp = stage / str(k)
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "wb") as out:
+                    _read_capped(fh, m.size, out, budget, limits.export_max)
+                os.chmod(tmp, 0o755 if m.mode & 0o100 else 0o644)
+                staged[rel] = tmp
+    except _Refused as exc:
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
+        return ImportReport(False, note=str(exc))
+    except (tarfile.TarError, OSError, EOFError, ValueError, UnicodeError, RecursionError):
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
+        return ImportReport(False, note=_NOT_KEPT)
+    assert stage is not None
+    rep = ImportReport(True, rc=plan.rc, timed_out=plan.timed_out)
+    want = plan.want
+    try:
+        have = _host_entries(root)
+        have.pop(stage.name, None)
+        have = {r: k for r, k in have.items() if not r.startswith(stage.name + "/")}
+        # 1. deletions (and type changes), deepest first
+        for rel in sorted(have, key=lambda r: r.count("/"), reverse=True):
+            kind = have[rel]
+            w = want.get(rel)
+            if w == kind and kind in ("d", "f"):
                 continue
-            _remove(root / rel)
-            rep.deleted += 1
-    # 2. directories, shallowest first
-    for rel in sorted((r for r, k in want.items() if k == "d"), key=lambda r: r.count("/")):
-        parent = _parent_safe(root, rel, make=True)
-        if parent is None:
-            rep.skipped += 1
-            continue
-        target = parent / PurePosixPath(rel).name
-        try:
-            st = os.lstat(target)
-            if not stat.S_ISDIR(st.st_mode):
-                rep.skipped += 1
-            continue
-        except FileNotFoundError:
-            os.mkdir(target, 0o755)
-            rep.dirs += 1
-    # 3. regular files the command changed
-    for rel, body in sorted(files.items()):
-        if want.get(rel) != "f":
-            continue
-        parent = _parent_safe(root, rel, make=True)
-        if parent is None:
-            rep.skipped += 1
-            continue
-        target = parent / PurePosixPath(rel).name
-        try:
-            st = os.lstat(target)
-            if not stat.S_ISREG(st.st_mode):
+            if w is None or w != kind:
+                if _parent_safe(root, rel, make=False) is None:
+                    continue
+                _remove(root / rel)
+                rep.deleted += 1
+        # 2. directories, shallowest first
+        for rel in sorted((r for r, k in want.items() if k == "d"), key=lambda r: r.count("/")):
+            parent = _parent_safe(root, rel, make=True)
+            if parent is None:
                 rep.skipped += 1
                 continue
-        except FileNotFoundError:
-            pass
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
-        try:
-            view = memoryview(body)
-            while view:
-                view = view[os.write(fd, view):]
-        finally:
-            os.close(fd)
-        rep.written += 1
+            target = parent / PurePosixPath(rel).name
+            try:
+                st = os.lstat(target)
+                if not stat.S_ISDIR(st.st_mode):
+                    rep.skipped += 1
+                continue
+            except FileNotFoundError:
+                os.mkdir(target, 0o755)
+                rep.dirs += 1
+        # 3. regular files the command changed: each staged file renamed into place
+        for rel, tmp in sorted(staged.items()):
+            parent = _parent_safe(root, rel, make=True)
+            if parent is None:
+                rep.skipped += 1
+                continue
+            target = parent / PurePosixPath(rel).name
+            try:
+                if not stat.S_ISREG(os.lstat(target).st_mode):
+                    rep.skipped += 1
+                    continue
+            except FileNotFoundError:
+                pass
+            os.rename(tmp, target)
+            rep.written += 1
+    except OSError:
+        return ImportReport(False, rep.written, rep.deleted, rep.dirs, rep.skipped,
+                            "the command's workspace changes were only partly kept", plan.rc, plan.timed_out)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
     rep.skipped += sum(1 for k in want.values() if k in ("l", "o"))
     if rep.skipped:
         rep.note = "symbolic links and special files are not kept in this session"
@@ -604,11 +765,33 @@ def _kill_scope(unit: str) -> None:
         pass
 
 
+async def _watch_scope(pid: int, unit: str, out: dict[str, str]) -> None:
+    """The cgroup limits the kernel actually enforces on the command's scope, read from the
+    host while it runs (``memory.max`` etc. of the scope's cgroup; missing: not enforced)."""
+    for _ in range(500):
+        try:
+            cg = Path(f"/proc/{pid}/cgroup").read_text()
+        except OSError:
+            return
+        path = next((ln[3:] for ln in cg.splitlines() if ln.startswith("0::")), "")
+        if path.endswith(f"/{unit}.scope"):
+            out["cgroup"] = path
+            for k in ("memory.max", "memory.swap.max", "pids.max"):
+                try:
+                    out[k] = (Path("/sys/fs/cgroup") / path.lstrip("/") / k).read_text().strip()
+                except OSError:
+                    pass
+            return
+        await asyncio.sleep(0.01)
+
+
 async def run(cmd: str, root: Path, cwd: Path, *, timeout: float, ro: tuple[Path, ...] = (),
-              env: dict[str, str] | None = None, limits: Limits = LIMITS, apply: bool = True) -> HxResult:
+              env: dict[str, str] | None = None, limits: Limits = LIMITS, apply: bool = True,
+              watch_scope: bool = False) -> HxResult:
     """Run *cmd* (bash) in the hardened jail over a snapshot of *root*, then import the
     workspace changes into *root* (``apply``). The export comes back over a pipe (nothing
-    on disk), read at most ``limits.export_max`` bytes. Linux only."""
+    on disk), read at most ``limits.export_max`` bytes. ``watch_scope``: also read the
+    scope's enforced cgroup limits into ``extra["scope"]`` (the probe). Linux only."""
     root = Path(root).resolve()
     cwd = Path(cwd).resolve()
     unit = f"gym-hx-{os.getpid()}-{uuid.uuid4().hex[:12]}"
@@ -637,6 +820,8 @@ async def run(cmd: str, root: Path, cwd: Path, *, timeout: float, ro: tuple[Path
     transport, _proto = await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(export),
                                                      os.fdopen(rfd, "rb", 0))
     too_big = False
+    scope: dict[str, str] = {}
+    watcher = asyncio.create_task(_watch_scope(proc.pid, unit, scope)) if watch_scope else None
 
     def kill() -> None:
         try:
@@ -674,14 +859,17 @@ async def run(cmd: str, root: Path, cwd: Path, *, timeout: float, ro: tuple[Path
             await proc.wait()
             raise
     finally:
+        if watcher is not None:
+            watcher.cancel()
         transport.close()
         await asyncio.to_thread(_kill_scope, unit)
     text = "\n".join(p.decode("utf-8", "replace").rstrip() for p in (out, err) if p).strip()
     if len(text) > 20000:
         text = text[:20000] + "\n...[truncated]..."
     rc = proc.returncode
+    extra: dict[str, Any] = {"scope": scope} if watch_scope else {}
     if rc == 125 and not data:
-        return HxResult(text, rc, False, None, unit)
+        return HxResult(text, rc, False, None, unit, extra)
     imported: ImportReport | None = None
     if apply:
         if too_big:
@@ -693,7 +881,7 @@ async def run(cmd: str, root: Path, cwd: Path, *, timeout: float, ro: tuple[Path
         if imported.note:
             text = (text + "\n" if text else "") + f"({imported.note})"
     timed_out = bool(imported and imported.timed_out) or rc == 124
-    return HxResult(text, rc, timed_out, imported, unit)
+    return HxResult(text, rc, timed_out, imported, unit, extra)
 
 
 # -- probe ---------------------------------------------------------------------------------------
@@ -701,11 +889,53 @@ async def run(cmd: str, root: Path, cwd: Path, *, timeout: float, ro: tuple[Path
 
 _PROBE: dict[str, tuple[bool, str]] = {}
 
+#: The probe's command: a file in and out, python, then what the jail must be (no capabilities,
+#: no_new_privs, the seccomp filter on, loopback only, refused socket families), and a short
+#: sleep so the host can read the scope's cgroup limits while it runs.
+_PROBE_CMD = ("cat in.txt && echo ok > out.txt && python3 -c 'print(6*7)'\n"
+              "grep -c '^CapEff:\\s*0*$' /proc/self/status\n"
+              "grep -E '^(NoNewPrivs|Seccomp):' /proc/self/status\n"
+              "python3 - <<'EOF'\n"
+              "import socket\n"
+              "names = sorted(l.split(':')[0].strip() for l in open('/proc/net/dev').read().splitlines()[2:])\n"
+              "print('IFACES', ','.join(names))\n"
+              "for fam, kind in ((38, socket.SOCK_SEQPACKET), (16, socket.SOCK_RAW)):\n"
+              "    try:\n"
+              "        socket.socket(fam, kind).close()\n"
+              "        print('FAMILY', fam, 'open')\n"
+              "    except OSError as e:\n"
+              "        print('FAMILY', fam, e.errno)\n"
+              "EOF\n"
+              "sleep 0.3")
+_PROBE_WANT = ["in", "42", "1", "NoNewPrivs:", "1", "Seccomp:", "2", "IFACES", "lo",
+               "FAMILY", "38", str(_EAFNOSUPPORT), "FAMILY", "16", str(_EAFNOSUPPORT)]
+
+
+def probe_verdict(r: HxResult, root: Path, limits: Limits = LIMITS) -> str:
+    """Why the probe's run does NOT show a working profile ("" = it does)."""
+    if r.rc != 0:
+        return f"rc={r.rc} out={r.text[:200]!r}"
+    if r.text.split() != _PROBE_WANT:
+        return f"the jail is not as required: {r.text[:300]!r}"
+    if r.imported is None or not r.imported.ok:
+        return "the workspace import failed"
+    try:
+        if (root / "out.txt").read_text() != "ok\n":
+            return "the workspace import failed"
+    except OSError:
+        return "the workspace import failed"
+    sc = r.extra.get("scope") or {}
+    want = {"memory.max": str(limits.mem_bytes), "memory.swap.max": "0", "pids.max": str(limits.tasks)}
+    bad = {k: sc.get(k) for k, v in want.items() if sc.get(k) != v}
+    if bad:
+        return f"the scope's cgroup limits are not enforced: {bad} (want {want})"
+    return ""
+
 
 def probe() -> tuple[bool, str]:
     """Whether this host can run the hardened profile (bwrap with user namespaces and the
-    options used, a systemd user scope with the cgroup controllers, a python inside):
-    a real command, once. Fails closed."""
+    options used, a systemd user scope whose cgroup limits are really set, a python inside,
+    the seccomp filter on, loopback only): a real command, once. Fails closed."""
     if "r" in _PROBE:
         return _PROBE["r"]
     if not sys.platform.startswith("linux"):
@@ -716,12 +946,9 @@ def probe() -> tuple[bool, str]:
         tmp = Path(tempfile.mkdtemp(prefix="gym-hx-probe-")).resolve()
         try:
             (tmp / "in.txt").write_text("in\n")
-            r = asyncio.run(run("cat in.txt && echo ok > out.txt && python3 -c 'print(6*7)'\n"
-                                "cat /proc/self/status | grep -c '^CapEff:\\s*0*$'",
-                                tmp, tmp, timeout=20))
-            good = (r.rc == 0 and r.text.split() == ["in", "42", "1"] and r.imported is not None and r.imported.ok
-                    and (tmp / "out.txt").read_text() == "ok\n")
-            res = (True, "ok") if good else (False, f"probe failed: rc={r.rc} out={r.text[:200]!r}")
+            r = asyncio.run(run(_PROBE_CMD, tmp, tmp, timeout=20, watch_scope=True))
+            why = probe_verdict(r, tmp)
+            res = (False, f"probe failed: {why}") if why else (True, "ok")
         except Exception as exc:  # noqa: BLE001 - any failure means: not available
             res = (False, f"probe failed: {exc}")
         finally:
@@ -774,11 +1001,43 @@ def _py(code: str) -> str:
     return "python3 -c " + shlex.quote(code)
 
 
+#: secret-shaped files the escape check plants (with canary text) in its scratch HOME
+CANARY_HOME_FILES = (".ssh/id_ed25519", ".ssh/id_rsa", ".ssh/authorized_keys", ".ssh/known_hosts",
+                     ".config/prometheus/env", ".prometheus/config.yaml", "distill/secrets", ".bash_history",
+                     ".bashrc")
+#: env vars the escape check sets (to canary text) in its own environment for the run
+CANARY_ENV = ("GYM_HX_CANARY_TOKEN", "GYM_HX_CANARY_API_KEY", "GYM_HX_CANARY_SECRET")
+
+
+def _forge_export(tar_code: str) -> str:
+    """A command that writes its own export straight into the helper's pipe
+    (``/proc/<helper>/fd/<n>``), then kills the helper so only the forgery is read."""
+    return _py(
+        "import os,tarfile,io,json,signal\n"
+        "h=None\n"
+        "for pid in os.listdir('/proc'):\n"
+        "  if pid.isdigit():\n"
+        "    try: a=open(f'/proc/{pid}/cmdline','rb').read().split(b'\\0')\n"
+        "    except OSError: continue\n"
+        f"    if a[0]==b'{JAIL_PYTHON}' and b'{SNAPSHOT}' in a: h=(int(pid), a[-2].decode())\n"
+        "b=io.BytesIO(); tf=tarfile.open(fileobj=b,mode='w',format=tarfile.PAX_FORMAT)\n"
+        + tar_code +
+        "tf.close()\n"
+        "print('helper', h)\n"
+        "with open(f'/proc/{h[0]}/fd/{h[1]}','wb') as o: o.write(b.getvalue())\n"
+        "print('FORGED', len(b.getvalue())); os.kill(h[0], signal.SIGKILL)\n")
+
+
 def attempts(ctx: dict[str, Any]) -> list[Attempt]:
-    """Each attempt tries to escape; ``check`` returns why it ESCAPED ("" = contained)."""
+    """Each attempt tries to escape; ``check`` returns why it ESCAPED ("" = contained).
+    Secrets are canaries the check made itself (``home`` is its scratch HOME); real secret
+    paths are only tested for existence (``test -e`` / lstat), never opened."""
     home = ctx["home"]
+    real_home = ctx["real_home"]
     uid = ctx["uid"]
     canary = ctx["canary_name"]
+    secret = ctx["canary_secret"]
+    nonce = ctx["nonce"]
     sentinel = ctx["host_sentinel"]
     ports = ctx["ports"][:12]
     tail = ctx["tailnet"][:2]
@@ -792,16 +1051,17 @@ def attempts(ctx: dict[str, Any]) -> list[Attempt]:
                    "  try: s.connect((h,p)); print('CONNECTED',h,p)\n"
                    "  except Exception as e: print('blocked',h,p,type(e).__name__)\n" % (hosts,))
 
-    secrets_paths = [f"{home}/.ssh/id_ed25519", f"{home}/.ssh/id_rsa", f"{home}/.ssh/authorized_keys",
-                     f"{home}/.ssh/known_hosts", f"{home}/.config/prometheus/env", f"{home}/.prometheus/config.yaml",
-                     f"{home}/distill/secrets", f"{home}/.bash_history", "/etc/shadow", "/etc/passwd",
-                     "/etc/sudoers", f"/run/user/{uid}/bus", f"/run/user/{uid}/gnupg", "/var/run/docker.sock",
-                     "/run/docker.sock", f"/run/user/{uid}/keyring", "/root"]
+    canary_paths = [f"{home}/{f}" for f in CANARY_HOME_FILES]
+    #: real host paths: existence only, never opened
+    real_paths = [f"{real_home}/.ssh", f"{real_home}/.config/prometheus", f"{real_home}/distill",
+                  "/etc/shadow", "/etc/passwd", "/etc/sudoers", f"/run/user/{uid}/bus", f"/run/user/{uid}/gnupg",
+                  "/var/run/docker.sock", "/run/docker.sock", f"/run/user/{uid}/keyring", "/root"]
     read_code = ("import os\nfor p in %r:\n"
-                 "  try:\n"
-                 "    if os.path.isdir(p): print('LISTED', p, len(os.listdir(p)))\n"
-                 "    else: open(p,'rb').read(1); print('READ', p)\n"
-                 "  except Exception as e: print('absent', p, type(e).__name__)\n" % (secrets_paths,))
+                 "  try: print('READ', p, open(p).read()[:80].strip())\n"
+                 "  except Exception as e: print('absent', p, type(e).__name__)\n"
+                 "for p in %r:\n"
+                 "  try: os.lstat(p); print('EXISTS', p)\n"
+                 "  except OSError as e: print('absent', p, type(e).__name__)\n" % (canary_paths, real_paths))
     out: list[Attempt] = [
         # -- network
         Attempt("network", "tcp 1.1.1.1:443 (python)", connect_all([("1.1.1.1", 443), ("8.8.8.8", 53)]),
@@ -834,28 +1094,32 @@ def attempts(ctx: dict[str, Any]) -> list[Attempt]:
             "print('abstract', n)"),
                 no("CONNECTED")),
         # -- host paths
-        Attempt("host paths", "read ~/.ssh, ~/.config/prometheus, ~/distill/secrets, /etc/shadow, /run/user",
-                _py(read_code), lambda r, c: "a host secret path is readable" if re.search(r"^(READ|LISTED) ", r.text, re.M)
-                else ""),
+        Attempt("host paths", "read canary ~/.ssh, ~/.config/prometheus, ~/distill/secrets; /etc/shadow, /run/user exist?",
+                _py(read_code), lambda r, c: "a host secret path is visible" if secret in r.text or re.search(
+                    r"^(READ|EXISTS) ", r.text, re.M) else ""),
         Attempt("host paths", "shell reads of the same",
-                "for p in " + " ".join(shlex.quote(p) for p in secrets_paths) + " " + f"{home}/.ssh/*; do "
-                "cat \"$p\" >/dev/null 2>&1 && echo READ-OK \"$p\"; done; ls /home /root /var /run /etc 2>&1 | head -20",
-                lambda r, c: "a host secret path is readable" if "READ-OK" in r.text or re.search(
-                    r"^(shadow|sudoers|ssh|docker\.sock|user)$", r.text, re.M) else ""),
+                "for p in " + " ".join(shlex.quote(p) for p in canary_paths) + f" {home}/.ssh/*; do "
+                "cat \"$p\" 2>/dev/null && echo READ-OK \"$p\"; done; for p in "
+                + " ".join(shlex.quote(p) for p in real_paths) + "; do test -e \"$p\" && echo EXISTS \"$p\"; done; "
+                "ls /home /root /var /run /etc 2>&1 | head -20",
+                lambda r, c: "a host secret path is visible" if secret in r.text or "READ-OK" in r.text
+                or "EXISTS " in r.text or re.search(r"^(shadow|sudoers|ssh|docker\.sock|user)$", r.text, re.M) else ""),
         Attempt("host paths", "host sentinel file by path", f"cat {sentinel} 2>&1",
                 lambda r, c: "read the host sentinel" if c["sentinel_text"] in r.text else ""),
         Attempt("host paths", "/proc/1/environ and host pids", _py(
             "import os\nprint(sorted(int(x) for x in os.listdir('/proc') if x.isdigit()))\n"
             "try: print('ENV1', open('/proc/1/environ','rb').read()[:200])\nexcept Exception as e: print('blocked',type(e).__name__)"),
                 lambda r, c: ("host pid visible" if any(int(x) > 50 for x in re.findall(r"\b(\d+)\b", r.text.splitlines()[0] if r.text else ""))
-                              else "env secrets in /proc/1/environ" if re.search(r"TOKEN|KEY|SECRET|PASS|TELEGRAM|QWEN", r.text) else "")),
+                              else "env secrets in /proc/1/environ" if secret in r.text or re.search(
+                                  r"TOKEN|KEY|SECRET|PASS|TELEGRAM|QWEN", r.text) else "")),
         Attempt("host paths", "/sys and /dev", "ls /sys 2>&1 | head -3; ls /dev",
                 lambda r, c: "host devices exposed" if re.search(r"\b(sd[a-z]|nvme\d|nvidia\d|kvm|mem|vsock)\b", r.text) else ""),
         Attempt("host paths", "follow a symlink out of the workspace", f"ln -s {home}/.ssh sshlink && ls sshlink/ 2>&1; "
-                f"ln -s {sentinel} s2 && cat s2 2>&1",
-                lambda r, c: "symlink reached the host" if c["sentinel_text"] in r.text or "authorized_keys" in r.text else ""),
+                f"cat sshlink/id_ed25519 2>&1; ln -s {sentinel} s2 && cat s2 2>&1",
+                lambda r, c: "symlink reached the host" if c["sentinel_text"] in r.text or secret in r.text
+                or "authorized_keys" in r.text else ""),
         # -- writing outside tmpfs
-        Attempt("writes", "touch in /, /usr, /etc, the snapshot, the real home, /tmp-on-host",
+        Attempt("writes", "touch in /, /usr, /etc, the snapshot, the (scratch) home, /proc",
                 f"for p in /x /usr/x /etc/x {SNAPSHOT}/{canary} {home}/{canary} /proc/{canary}; do "
                 f"touch $p 2>/dev/null && echo WROTE $p || echo denied $p; done; touch {canary} && echo ws-ok",
                 lambda r, c: "a host file appeared" if c["host_canaries"]() else ""),
@@ -867,28 +1131,28 @@ def attempts(ctx: dict[str, Any]) -> list[Attempt]:
                 f"ln -s {home}/.bashrc d/{canary}; echo x > homelink/{canary} 2>&1; echo planted",
                 lambda r, c: "the import followed a symlink to the host" if c["host_canaries"]() or (
                     (c["root"] / "homelink").is_symlink()) else ""),
-        Attempt("writes", "forged export (path traversal) over the helper's pipe", _py(
-            "import os,tarfile,io,json,signal\n"
-            "h=None\n"
-            "for pid in os.listdir('/proc'):\n"
-            "  if pid.isdigit():\n"
-            "    try: a=open(f'/proc/{pid}/cmdline','rb').read().split(b'\\0')\n"
-            "    except OSError: continue\n"
-            f"    if a[0]==b'{JAIL_PYTHON}' and b'{SNAPSHOT}' in a: h=(int(pid), a[-2].decode())\n"
-            "b=io.BytesIO(); tf=tarfile.open(fileobj=b,mode='w')\n"
+        Attempt("writes", "forged export (path traversal) over the helper's pipe", _forge_export(
             f"for n in ['ws/../../{canary}', 'ws//{canary}abs', 'ws/../{canary}']:\n"
             "  ti=tarfile.TarInfo(n); ti.size=1; tf.addfile(ti, io.BytesIO(b'x'))\n"
             f"m=json.dumps({{'entries':[['../../{canary}','f'],['/{canary}abs','f'],['../{canary}','f']],'rc':0}}).encode()\n"
-            "ti=tarfile.TarInfo('manifest.json'); ti.size=len(m); tf.addfile(ti, io.BytesIO(m)); tf.close()\n"
-            "print('helper', h)\n"
-            "with open(f'/proc/{h[0]}/fd/{h[1]}','wb') as o: o.write(b.getvalue())\n"
-            "print('FORGED'); os.kill(h[0], signal.SIGKILL)\n"),
+            "ti=tarfile.TarInfo('manifest.json'); ti.size=len(m); tf.addfile(ti, io.BytesIO(m))\n"),
                 lambda r, c: "a forged export wrote outside the workspace" if c["host_canaries"]() else ""),
+        Attempt("writes", "forged sparse export (16 x 64 MiB of holes) against the importer", _forge_export(
+            "for i in range(16):\n"
+            "  ti=tarfile.TarInfo(f'ws/sparse{i}.bin'); ti.size=0\n"
+            "  ti.pax_headers={'GNU.sparse.map':'0,0','GNU.sparse.size':str(64<<20)}\n"
+            "  tf.addfile(ti)\n"
+            "m=json.dumps({'entries':[[f'sparse{i}.bin','f'] for i in range(16)],'rc':0}).encode()\n"
+            "ti=tarfile.TarInfo('manifest.json'); ti.size=len(m); tf.addfile(ti, io.BytesIO(m))\n"),
+                lambda r, c: ("the sparse forge was imported" if r.imported is not None and r.imported.ok else
+                              f"the importer wrote {c['ws_bytes']()} bytes" if c["ws_bytes"]() > (1 << 20) else
+                              f"the importer's RSS grew {c['rss_growth']() >> 20} MiB" if c["rss_growth"]() > (128 << 20)
+                              else "" if "FORGED" in r.text else "the forge did not run")),
         # -- env secrets
-        Attempt("env", "env has no token/key/secret/pass, QWEN, TELEGRAM",
-                "env | grep -i -E 'token|key|secret|pass|qwen|telegram|dbus|ssh_auth|xdg|display|wayland|http' "
+        Attempt("env", "env has no canary, token/key/secret/pass, QWEN, TELEGRAM",
+                "env | grep -i -E 'token|key|secret|pass|qwen|telegram|dbus|ssh_auth|xdg|display|wayland|http|canary' "
                 "&& echo LEAK || echo clean; env | cut -d= -f1 | sort | tr '\\n' ' '",
-                lambda r, c: "secret-like env var inside" if "LEAK" in r.text else ""),
+                lambda r, c: "secret-like env var inside" if "LEAK" in r.text or secret in r.text else ""),
         Attempt("env", "inherited fds", _py(
             "import os\nfor f in sorted(os.listdir('/proc/self/fd'), key=int):\n"
             "  try: print('FD', f, os.readlink('/proc/self/fd/'+f))\n  except OSError: pass"),
@@ -929,9 +1193,13 @@ def attempts(ctx: dict[str, Any]) -> list[Attempt]:
                 lambda r, c: "bomb processes outlived the jail" if c["scoped"]() else "", timeout=10),
         Attempt("limits", "memory hog (2 GiB)", _py("b=[]\nwhile True: b.append(bytearray(64<<20))"),
                 lambda r, c: "not killed" if r.rc == 0 else "", timeout=20),
-        Attempt("limits", "tmpfs fill (1 GiB)", "dd if=/dev/zero of=/tmp/fill bs=1M count=1024 2>&1 | tail -1; "
-                "dd if=/dev/zero of=fill bs=1M count=1024 2>&1 | tail -1",
-                lambda r, c: "a tmpfs took 1 GiB" if "1073741824 bytes" in r.text else "", timeout=20),
+        Attempt("limits", "tmpfs fill (1 GiB: /tmp, the workspace, /dev/shm, /dev)",
+                "dd if=/dev/zero of=/tmp/fill bs=1M count=1024 2>&1 | tail -1; "
+                "dd if=/dev/zero of=fill bs=1M count=1024 2>&1 | tail -1; "
+                "dd if=/dev/zero of=/dev/shm/fill bs=1M count=1024 2>&1 | tail -1; rm -f /dev/shm/fill; "
+                "touch /dev/hx-file 2>/dev/null && echo DEV-WRITABLE; mkdir /dev/hx-dir 2>/dev/null && echo DEV-WRITABLE",
+                lambda r, c: ("a tmpfs took 1 GiB" if "1073741824 bytes" in r.text else
+                              "/dev is writable" if "DEV-WRITABLE" in r.text else ""), timeout=20),
         Attempt("limits", "CPU spin (no wall-clock limit of its own)", _py("while True: pass"),
                 lambda r, c: "not killed" if r.rc == 0 else "", timeout=60),
         Attempt("limits", "wall clock (sleep 1000)", "sleep 1000; echo WOKE",
@@ -940,20 +1208,73 @@ def attempts(ctx: dict[str, Any]) -> list[Attempt]:
                 lambda r, c: "file over 64 MiB" if re.search(r"\b(\d{9,})\b", r.text) and int(
                     re.search(r"\b(\d{9,})\b", r.text).group(1)) > (64 << 20) else "", timeout=20),
         # -- process escape
+        # every would-be survivor carries this run's nonce in its command line: the host finds
+        # them by it and kills only the PIDs it recorded that way
         Attempt("process", "background / nohup / setsid / double fork survive?",
-                "nohup sleep 300 >/dev/null 2>&1 & setsid sleep 301 & (sleep 302 &) ; "
-                "python3 -c 'import os,time\nif os.fork()==0:\n  os.setsid()\n  if os.fork()==0: time.sleep(303)' ; "
-                "echo started",
-                lambda r, c: "a child survived the jail" if c["sleepers"]() or c["scoped"]() else "", timeout=10),
-        Attempt("namespaces", "host processes / hostname / mounts", "ps -e 2>/dev/null | wc -l; hostname; "
-                "cat /proc/self/mountinfo | awk '{print $5, $6}' | head -30",
-                lambda r, c: ("a writable mount other than the tmpfs ones" if [
-                    ln.split()[0] for ln in r.text.splitlines()[2:] if len(ln.split()) == 2
-                    and ln.split()[1].split(",")[0] == "rw" and ln.split()[0] not in ("/tmp", str(c["root"]))
-                    and not ln.split()[0].startswith(("/dev", "/proc"))] else
-                    "host processes visible" if r.text.split()[0].isdigit() and int(r.text.split()[0]) > 8 else "")),
+                f"nohup sleep 300.{nonce} >/dev/null 2>&1 & setsid sleep 301.{nonce} & (sleep 302.{nonce} &) ; "
+                "python3 -c 'import os,time\nif os.fork()==0:\n  os.setsid()\n  if os.fork()==0: time.sleep(303)' "
+                f"hx-{nonce} ; echo started",
+                lambda r, c: "a child survived the jail" if c["survivors"]() or c["scoped"]() else "", timeout=10),
+        Attempt("namespaces", "host processes / hostname / writable mounts", _py(
+            "import os,socket,stat\n"
+            "print(len([x for x in os.listdir('/proc') if x.isdigit()]))\n"
+            "print(socket.gethostname())\n"
+            "for ln in open('/proc/self/mountinfo'):\n"
+            "  pre, post = ln.split(' - ', 1)\n"
+            "  f = pre.split(); g = post.split()\n"
+            "  try: chr_ = stat.S_ISCHR(os.stat(f[4]).st_mode)\n"
+            "  except OSError: chr_ = False\n"
+            "  print('MNT', f[4], f[5].split(',')[0], g[0], 'chr' if chr_ else '-', g[2] if len(g) > 2 else '-')\n"),
+                lambda r, c: _mount_escape(r.text, str(c["root"]))),
     ]
     return out
+
+
+#: the writable mounts the jail may have: size-capped tmpfs, devpts (no files), procfs
+_RW_TMPFS = ("/tmp", "/dev/shm")
+
+
+def _mount_escape(text: str, root: str) -> str:
+    """Why the namespaces attempt's output shows an escape ("" = contained): host processes,
+    or a writable mount that is not a size-capped tmpfs (/tmp, /dev/shm, the workspace),
+    devpts, procfs or a device node (bwrap binds /dev/null etc. one by one); /dev itself
+    read-only."""
+    lines = text.splitlines()
+    if not lines or not lines[0].strip().isdigit():
+        return "the probe did not run"
+    if int(lines[0]) > 8:
+        return "host processes visible"
+    mounts = [ln.split()[1:] for ln in lines if ln.startswith("MNT ") and len(ln.split()) == 6]
+    if not mounts:
+        return "the probe did not run"
+    dev = [m for m in mounts if m[0] == "/dev"]
+    if not dev or dev[-1][1] != "ro":
+        return "/dev is writable"
+    for mp, mode, fstype, kind, sopts in mounts:
+        if mode != "rw":
+            continue
+        if mp in (*_RW_TMPFS, root):
+            if fstype != "tmpfs" or "size=" not in sopts:
+                return f"{mp} is writable without a size cap"
+        elif not ((mp == "/dev/pts" and fstype == "devpts") or (mp == "/proc" and fstype == "proc")
+                  or (mp.startswith("/dev/") and kind == "chr")):
+            return f"a writable mount other than the tmpfs ones: {mp} ({fstype})"
+    return ""
+
+
+def _nonce_pids(nonce: str) -> list[int]:
+    """This user's host processes whose command line carries *nonce* (a read of /proc only)."""
+    found: list[int] = []
+    tag = nonce.encode()
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            if d.stat().st_uid == os.getuid() and tag in (d / "cmdline").read_bytes():
+                found.append(int(d.name))
+        except OSError:
+            pass
+    return found
 
 
 def escape_check(json_out: bool = False) -> int:
@@ -963,47 +1284,64 @@ def escape_check(json_out: bool = False) -> int:
     if not ok:
         print(f"hardened profile unavailable: {detail}", file=sys.stderr)
         return 2
-    home = str(Path.home())
+    real_home = str(Path.home())
     scratch = Path(tempfile.mkdtemp(prefix="gym-hx-escape-")).resolve()
+    # a scratch HOME of canaries: the check never opens a real secret
+    home = scratch / "home"
+    secret = f"hx-canary-secret-{uuid.uuid4().hex}"
+    for rel in CANARY_HOME_FILES:
+        (home / rel).parent.mkdir(parents=True, exist_ok=True)
+        (home / rel).write_text(f"{secret}\n")
+    saved_env = {k: os.environ.get(k) for k in (*CANARY_ENV, "HOME")}
+    os.environ.update({k: secret for k in CANARY_ENV}, HOME=str(home))
     canary = f"hx-canary-{uuid.uuid4().hex[:10]}"
+    nonce = str(uuid.uuid4().int % 10**9).rjust(9, "1")
     sentinel = scratch / "host-sentinel.txt"
     sentinel_text = f"host-sentinel-{uuid.uuid4().hex}"
     sentinel.write_text(sentinel_text)
     root = scratch / "ws"
     victim = subprocess.Popen(["sleep", "600"], start_new_session=True)
-    canary_paths = [Path(home) / canary, Path(home) / f"{canary}.py", Path("/") / canary, scratch / canary,
+    canary_paths = [home / canary, home / f"{canary}.py", Path("/") / canary, scratch / canary,
                     Path(f"/{canary}abs")]
+    recorded: set[int] = set()
+    rss0 = [0]
 
     def host_canaries() -> list[str]:
         found = [str(p) for p in canary_paths if p.exists()]
-        found += [str(p) for p in Path(home).glob(f"{canary}*")]
+        found += [str(p) for p in home.glob(f"{canary}*")]
         found += [str(p) for p in scratch.glob(f"{canary}*")]
         return found
 
     def scoped() -> list[str]:
-        """Host processes still in a gym-hx scope (nothing may outlive its command)."""
+        """Host processes still in one of THIS check's scopes (nothing may outlive its command)."""
+        tag = f"/gym-hx-{os.getpid()}-"
         left = []
         for d in Path("/proc").iterdir():
             if d.name.isdigit():
                 try:
-                    if "/gym-hx-" in (d / "cgroup").read_text():
+                    if tag in (d / "cgroup").read_text():
                         left.append(d.name)
                 except OSError:
                     pass
         return left
 
-    def sleepers() -> list[str]:
-        try:
-            out = subprocess.run(["pgrep", "-u", str(os.getuid()), "-f", r"^sleep 30[0-3]$"],
-                                 capture_output=True, text=True, timeout=5).stdout
-        except (OSError, subprocess.SubprocessError):
-            return []
-        return out.split()
+    def survivors() -> list[int]:
+        found = _nonce_pids(nonce)
+        recorded.update(found)
+        return found
 
-    ctx: dict[str, Any] = {"home": home, "uid": os.getuid(), "canary_name": canary, "host_sentinel": str(sentinel),
+    def ws_bytes() -> int:
+        return sum(p.stat().st_size for p in root.rglob("*") if p.is_file() and not p.is_symlink())
+
+    def rss_growth() -> int:
+        return max(0, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - rss0[0]) * 1024  # KiB on Linux
+
+    ctx: dict[str, Any] = {"home": str(home), "real_home": real_home, "uid": os.getuid(), "canary_name": canary,
+                           "canary_secret": secret, "nonce": nonce, "host_sentinel": str(sentinel),
                            "sentinel_text": sentinel_text, "ports": _ports_listening(), "tailnet": _tailnet_ips(),
-                           "host_pid": victim.pid, "host_canaries": host_canaries, "sleepers": sleepers, "scoped": scoped,
-                           "root": root, "host_alive": lambda: victim.poll() is None}
+                           "host_pid": victim.pid, "host_canaries": host_canaries, "survivors": survivors,
+                           "scoped": scoped, "root": root, "host_alive": lambda: victim.poll() is None,
+                           "ws_bytes": ws_bytes, "rss_growth": rss_growth}
     results: list[dict[str, Any]] = []
     try:
         for att in attempts(ctx):
@@ -1011,6 +1349,7 @@ def escape_check(json_out: bool = False) -> int:
             shutil.rmtree(root, ignore_errors=True)  # every attempt starts from the same small workspace
             root.mkdir()
             (root / "notes.txt").write_text("hello\n")
+            rss0[0] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             try:
                 r = asyncio.run(run(att.cmd, root, root, timeout=att.timeout))
                 time.sleep(0.3)
@@ -1029,11 +1368,18 @@ def escape_check(json_out: bool = False) -> int:
     finally:
         victim.kill()
         victim.wait()
-        for pid in sleepers():
-            try:
-                os.kill(int(pid), 9)
-            except OSError:
-                pass
+        survivors()
+        for pid in sorted(recorded):  # only PIDs recorded above, each re-checked against the nonce
+            if pid in _nonce_pids(nonce):
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         shutil.rmtree(scratch, ignore_errors=True)
     escaped = [r for r in results if r["escaped"]]
     if json_out:
