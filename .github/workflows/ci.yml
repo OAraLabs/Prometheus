@@ -215,6 +215,23 @@ jobs:
           uv export --format requirements-txt --no-hashes --no-emit-project --all-extras > /tmp/requirements-audit.txt
           uv run pip-audit -r /tmp/requirements-audit.txt --no-deps --disable-pip --progress-spinner off
 
+      - name: A stock Mac installs from wheels (no compiler)
+        # `pip install oara-prometheus` on a Mac with no Apple command line tools must not compile anything, on the
+        # newest Python an installer may pick (uv picks 3.14 for a new user). Resolved for the Mac with wheels only,
+        # from pyproject (what a pip or uv install resolves), not the lock: a dependency that loses its macOS wheel for a
+        # new Python fails here before a user meets a compiler error. watchdog has no macOS cp314 wheel, hence its
+        # marker in pyproject.toml.
+        # - The base install: Apple Silicon and Intel, macOS 13 (the oldest the app supports).
+        # - `[full]`: Apple Silicon, macOS 14 (onnxruntime, through piper-tts, ships macOS wheels for 14 and up only).
+        run: |
+          set -euo pipefail
+          for platform in aarch64-apple-darwin x86_64-apple-darwin; do
+            MACOSX_DEPLOYMENT_TARGET=13.0 uv pip compile pyproject.toml --python-platform "$platform" \
+              --python-version 3.14 --only-binary :all: --no-header -o "/tmp/wheels-$platform-base.txt"
+          done
+          MACOSX_DEPLOYMENT_TARGET=14.0 uv pip compile pyproject.toml --extra full --python-platform aarch64-apple-darwin \
+            --python-version 3.14 --only-binary :all: --no-header -o /tmp/wheels-aarch64-apple-darwin-full.txt
+
   # The security floors, actually executed. Until now they SKIPPED on every CI
   # run and had been proven only on the operator's own machine — and the files
   # themselves say "SKIPPED IS NOT PASSED: these are live holes, not covered

@@ -52,7 +52,11 @@ dependencies = [
     "Pillow>=12.3.0",
     "openpyxl>=3.1.0",
     # piper-tts, sounddevice and scipy are NOT here — see the `voice` extra.
-    "watchdog>=4.0",
+    # watchdog 6.0.0 ships no macOS wheel for Python 3.14+, so pip and uv would compile it there and a Mac without
+    # Apple's command line tools could not install Prometheus. Skipped on exactly that platform: `file_watch` tasks
+    # fall back to polling (tasks/watchers.py). Drop the marker once watchdog publishes macOS cp314 wheels; the
+    # wheels-only resolve in CI (quality) goes red if a base dependency loses its wheel again.
+    "watchdog>=4.0; sys_platform != 'darwin' or python_version < '3.14'",
     # FOUNDATION Part 3.2: node identity is Ed25519, and identity must not
     # inherit the optional-extra fragility the push stack has (enabled-but-
     # missing-deps as a boot failure). Already in the lock via authlib; this
