@@ -2,6 +2,10 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## Unreleased
+
+- Each chat response names the model that answered: `served_by` on `POST /api/chat` and on the `chat_done` frame, and `prometheus.served_by` on `/v1/chat/completions` (on the final chunk when streamed). When a fallback answers instead of the configured model, `served_by` names the fallback. `/v1`'s `model` still echoes the key you asked for.
+
 ## 0.9.18 (2026-11-02)
 
 0.9.18 fixes two security issues: a model's shell and file tools could read this machine's private keys and change what the daemon starts at boot, and an agent profile's tool list hid tools from the model without stopping it calling them. It updates authlib, dnspython, joserfc, pyasn1 and graphql-core for published advisories. It also:
