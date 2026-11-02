@@ -167,5 +167,11 @@ none holds teacher data.
      - CPU, memory and time limits with a hard kill.
 
      Add tests proving escape attempts fail (network, host paths, writing outside tmpfs, reading ~/.ssh or env secrets), plus an adversarial review, before enabling. Report the keep-rate change.
+
+     **Build status (Mon 2026-11-02 ~09:15 ET):** `scripts/distill/hardened_exec.py` + `teacher_gen.py run --hardened-exec on`. It is OFF by default and NOT enabled in round2.conf, pending the separate adversarial review. All 32 escape attempts were contained on the 3090 Ti host (`hardened_exec.py escape-check`, run with the gym's own python). Two things were not done because they need root:
+     - **A dedicated host user for the jail.** Inside, the jail runs as uid/gid 65534 with no capabilities, no_new_privs and seccomp. The kernel still sees the gym's own host uid with its supplementary groups, though. The jail mounts no host path that those groups unlock, but a separate system user plus a root-owned launcher would remove that class of risk.
+     - **A size cap on bwrap's `/dev` tmpfs.** It is capped only by the scope's MemoryMax.
+
+     Neither one blocks the operator's conditions. **Keep-rate baseline:** across the 6,046 round-2 tasks, 351 of the refused calls were python or multi-line (201 python, 150 multi-line). Most refusals were paths outside the workspace (4,729 bash calls) and `$`/substitution (588). Only 23 tasks could be pinned to python/multi-line refusals alone, because concurrency makes most calls ambiguous. None of those 23 had sandbox_refusal as their only rejection reason. The A/B replay of 39 of these tasks (control vs flag on, same teacher, through the window's guard) is staged on the host but not armed.
   2. **Eval fix before round-2 training:** replace the single-reference wrong-tool metric with an acceptable-tool set per task, built from Max + 27B + judge agreement, plus an outcome check where the gym can run it. Report old vs new wrong-tool rates for all models.
   3. **Round-2 dataset caps:** injection ≤20%, daily-agent ≤30%, coding ≤30%. Long-context and tool-choice keep everything that passes. Keep the 40% v4b replay.

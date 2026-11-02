@@ -196,7 +196,13 @@ its path arguments confined:
   ``bwrap`` on Linux (only the workspace writable, no network, no home or
   runtime dirs visible) or ``sandbox-exec`` on macOS. The report and every
   row's verification record name the jail used (``none`` means the command
-  checks alone). Host commands (``OPS_PROGRAMS``: ``systemctl``,
+  checks alone). ``--hardened-exec on`` (OFF by default; OPEN-QUESTIONS #14)
+  runs a command that is multi-line or runs ``python`` / ``python3`` as written
+  in the hardened profile instead of refusing it (``hardened_exec.py``: no
+  network, uid nobody with no capabilities, read-only snapshot + tmpfs only,
+  a clean environment, cgroup / rlimit / wall-clock limits with a hard kill);
+  a simulated host command inside such a command is still refused, and the
+  rest of the gym is unchanged. Host commands (``OPS_PROGRAMS``: ``systemctl``,
   ``journalctl``, ``nvidia-smi``, ``df``, ``free``, ``uptime``, ``ps``,
   ``curl`` to loopback, ``lsblk``, ``mount``/``findmnt`` (listing),
   ``hostname``, ``uname``, ``ss``, ``pgrep``, ``which``/``command -v``/``type``,
@@ -990,6 +996,11 @@ def _load_sibling(name: str, file: str) -> Any:
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def _hx() -> Any:
+    """hardened_exec.py: the --hardened-exec profile (OPEN-QUESTIONS #14)."""
+    return _load_sibling("distill_hardened_exec", "hardened_exec.py")
 
 
 # ---------------------------------------------------------------------------
@@ -2246,6 +2257,28 @@ class SandboxRefusal(Exception):
     """A tool call the sandbox will not run."""
 
 
+def refusal_kind(detail: str) -> str:
+    """The category of a refusal's reason (for the verification record; never the command)."""
+    d = detail or ""
+    if "multi-line" in d:
+        return "multiline"
+    m = re.search(r"`([^`\s]+)[^`]*` is not available in this session|running `([^`]+)`", d)
+    prog = (m.group(1) or m.group(2)) if m else ""
+    if re.search(r"(?:^|/)python[0-9.]*$", prog):
+        return "python"
+    if "outside this session's working directory" in d:
+        return "outside_workdir"
+    if re.search(r"substitution|variables|heredoc|subshell|background|brace expansion|environment assignment", d):
+        return "shell_syntax"
+    if "network" in d:
+        return "network"
+    if "inside a script or python" in d or "by a command of its own" in d:
+        return "simulated_in_script"
+    if prog:
+        return "program"
+    return "other"
+
+
 @dataclass
 class ExecRecord:
     id: str | None
@@ -2661,10 +2694,13 @@ class _Segment:
 class SandboxEnv:
     """One task's world: fixtures, injections, the call log and the confinement."""
 
-    def __init__(self, root: Path, task: GenTask, jail: str = "none", git_dir: Path | None = None) -> None:
+    def __init__(self, root: Path, task: GenTask, jail: str = "none", git_dir: Path | None = None,
+                 hardened: bool = False) -> None:
         self.root = Path(root).resolve()
         self.task = task
         self.jail = jail
+        #: --hardened-exec on: multi-line / python commands run in hardened_exec.py's profile
+        self.hardened = hardened
         #: the repo fixture's git directory, OUTSIDE the writable workspace
         #: (``clone_repo_fixture``); every git command is pinned to it. ``None``: no
         #: repository in this task, and ``git`` is refused.
@@ -2900,7 +2936,7 @@ class SandboxEnv:
             return done("refused", ToolResult(output=f"Refused: {exc}", is_error=True), str(exc))
         meta = getattr(result, "metadata", None) or {}
         outcome = meta.get("sandbox_outcome") or ("error" if result.is_error else "ok")
-        return done(outcome, result)
+        return done(outcome, result, str(meta.get("sandbox_profile") or ""))
 
     # -- bash ------------------------------------------------------------------------
 
@@ -3285,6 +3321,8 @@ class SandboxEnv:
         if not cmd:
             raise SandboxRefusal("empty command")
         timeout = float(min(int(getattr(a, "timeout_seconds", 30) or 30), 30))
+        if self.hardened and _hx().wants_hardened(cmd):
+            return await self._bash_hardened(cmd, cwd, timeout)
         plan = self.plan_shell(cmd, cwd)
         steps = plan.chain if plan.chain is not None else [("", cmd, plan, cwd)]
         texts: list[str] = []
@@ -3310,6 +3348,31 @@ class SandboxEnv:
         if simulated:
             meta["sandbox_outcome"] = "simulated"
         return ToolResult(output="\n".join(texts) or "(no output)", is_error=rc != 0, metadata=meta)
+
+    async def _bash_hardened(self, cmd: str, cwd: Path, timeout: float) -> Any:
+        """A multi-line or python command, run as written in the hardened profile (never
+        unjailed: ``--hardened-exec on`` requires its probe to pass at the start). A
+        simulated host command or a virtual host file inside it is refused: the jail would
+        answer it with its own world, not the task's fixture."""
+        from prometheus.tools.base import ToolResult
+
+        hx = _hx()
+        sim = hx.simulated_words(cmd)
+        if sim:
+            raise SandboxRefusal(f"`{sim[0]}` runs only as a command of its own here, not inside a script or "
+                                 "python")
+        virt = [v for v in VIRTUAL_FILES if v in cmd]
+        if virt:
+            raise SandboxRefusal(f"{virt[0]!r} can only be read by a command of its own here")
+        env = dict(_GIT_SANDBOX_ENV, GIT_CEILING_DIRECTORIES=str(self.root.parent))
+        if self.git_dir is not None:
+            env.update(GIT_DIR=str(self.git_dir), GIT_WORK_TREE=str(self.root / REPO_FIXTURE_DIR))
+        res = await hx.run(cmd, self.root, cwd, timeout=timeout, env=env,
+                           ro=(self.git_dir,) if self.git_dir is not None else ())
+        meta: dict[str, Any] = {"returncode": res.rc, "sandbox_profile": hx.PROFILE_VERSION}
+        if res.rc is None or res.timed_out:
+            return ToolResult(output=f"Command timed out after {int(timeout)} seconds", is_error=True, metadata=meta)
+        return ToolResult(output=res.text or "(no output)", is_error=res.rc != 0, metadata=meta)
 
     async def _run_plan(self, plan: ShellPlan, cmd: str, cwd: Path, timeout: float) -> tuple[str, int | None, bool]:
         """(output, status (None: timed out), simulated) of one planned pipeline."""
@@ -4067,6 +4130,9 @@ class Settings:
     progress: bool = True
     #: OS jail for sandboxed shell commands: auto (use one when the host has it), require, off
     jail: str = "auto"
+    #: --hardened-exec on: multi-line and python commands run in the hardened profile
+    #: (hardened_exec.py) instead of being refused. OFF by default (OPEN-QUESTIONS #14).
+    hardened_exec: bool = False
     #: glob (case-insensitive) the teacher's /v1/models id must match; the judge's too
     #: unless judge_id is set. An id with the token "max" is always refused.
     teacher_id: str = DEFAULT_TEACHER_ID
@@ -4238,6 +4304,10 @@ class Settings:
             # only for a remote teacher, so every existing output's settings.json still matches: one
             # output never mixes two serving hosts or quant files
             fp["remote_teacher"] = {k: v for k, v in self.remote_meta().items() if k != "tool_host"}
+        if self.hardened_exec:
+            # only when on, so every existing output's settings.json still matches: one output
+            # never mixes rows made with and without the hardened profile
+            fp["hardened_exec"] = _hx().PROFILE_VERSION
         if self.round2:
             # only for a round-2 taskset (round-1 outputs keep matching): one output never mixes
             # two calibrations, and never round-1 with round-2 rows
@@ -4899,7 +4969,7 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-    env = SandboxEnv(root, task, jail=resolve_jail(settings.jail), git_dir=git_dir)
+    env = SandboxEnv(root, task, jail=resolve_jail(settings.jail), git_dir=git_dir, hardened=settings.hardened_exec)
     registry = build_sandbox_registry(env)
     provider = teacher_provider(settings)
     # The local route's adapter for the model name, whichever provider serves it: a Max
@@ -5616,6 +5686,13 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
     record["sandboxed"] = True
     record["side_effects"] = False
     record["jail"] = out.env.jail
+    own = out.env.log[out.pad_log:]
+    if out.env.hardened:
+        record["hardened_exec"] = sum(1 for r in own if r.detail.startswith("hx"))
+    kinds = collections.Counter(refusal_kind(r.detail) for r in own if r.outcome == "refused")
+    if kinds:
+        # categories only (never the command): what the sandbox refused in this task
+        record["refusal_kinds"] = dict(sorted(kinds.items()))
     record["mocked_effects"] = {"messages": len(out.env.outbox),
                                 "writes": sum(1 for r in out.env.log[out.pad_log:] if r.outcome == "ok" and r.name in (
                                     "memory", "cron_create", "cron_delete", "task_create", "task_stop"))}
@@ -7643,6 +7720,7 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
         date_sentinel=date_sentinel,
         repo=Path(a.repo).expanduser(), max_consecutive_errors=a.max_consecutive_errors,
         progress=not a.quiet, jail=jail, judge_id=a.judge_id,
+        hardened_exec=getattr(a, "hardened_exec", "off") == "on",
         repo_fixture=a.repo_fixture if a.tasks else "off", repo_fixture_ref=a.repo_fixture_ref,
         steer_path=getattr(a, "steer", R2_DEFAULT_STEER) or R2_DEFAULT_STEER,
         calibration_path=getattr(a, "judge_calibration", R2_DEFAULT_CALIBRATION) or R2_DEFAULT_CALIBRATION,
@@ -8014,6 +8092,15 @@ def cmd_run(a: argparse.Namespace, *, payg_opener: Any = None) -> int:
         return EXIT_USAGE
     if jail == "none":
         log.warning("no OS jail: sandboxed shell commands are confined by the command checks alone")
+    if settings.hardened_exec:
+        # fails closed: no working hardened profile, no run (never a fallback to running unjailed)
+        ok, detail = (_hx().probe() if jail == "bwrap" else (False, f"the OS jail here is {jail}, not bwrap"))
+        if not ok:
+            print(f"error: --hardened-exec on: the hardened profile does not work on this host ({detail})",
+                  file=sys.stderr)
+            return EXIT_USAGE
+        log.warning("--hardened-exec on: multi-line and python commands run in the hardened profile %s",
+                    _hx().PROFILE_VERSION)
     gen: Generator
     if a.tasks:
         # the only path to train-source rows: real-pattern tasks, validated by taskset_gen.py
@@ -8286,6 +8373,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     r.add_argument("--jail", choices=JAIL_MODES, default="auto",
                    help="OS jail for shell commands (bwrap / sandbox-exec): auto uses one when it works, "
                         "require refuses to run without one")
+    r.add_argument("--hardened-exec", choices=("off", "on"), default="off",
+                   help="on: multi-line and python commands run in the hardened profile (hardened_exec.py: no "
+                        "network, uid nobody, read-only snapshot + tmpfs, clean env, cgroup limits) instead of "
+                        "being refused; needs bwrap and a systemd user scope (Linux). OFF by default "
+                        "(OPEN-QUESTIONS #14: a reviewer passes it before production use)")
     r.add_argument("--teacher-id",
                    help=f"glob the local teacher's /v1/models id must match (default {DEFAULT_TEACHER_ID}; "
                         "case-insensitive; never a Max model)")
