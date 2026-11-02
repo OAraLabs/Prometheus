@@ -2,6 +2,10 @@
 
 Notable changes in each release, newest first. Releases before 0.9.7 are described on the [GitHub releases page](https://github.com/OAraLabs/Prometheus/releases).
 
+## Unreleased
+
+- MCP servers can be remote: a `url` connects over streamable HTTP (`transport: streamable-http`) or SSE (the default). Before, a `url` server was always marked failed as "not yet implemented". The server's stored `headers` are sent on every request to it and are never shown or logged. The server store now refuses a `url` that isn't `http://` or `https://`, and a header name or value that could break the request.
+
 ## 0.9.18 (2026-11-02)
 
 0.9.18 fixes two security issues: a model's shell and file tools could read this machine's private keys and change what the daemon starts at boot, and an agent profile's tool list hid tools from the model without stopping it calling them. It updates authlib, dnspython, joserfc, pyasn1 and graphql-core for published advisories. It also:
