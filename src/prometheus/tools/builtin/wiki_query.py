@@ -69,9 +69,19 @@ class WikiQueryTool(BaseTool):
     input_model = WikiQueryInput
     find_me = ("search the wiki", "answer a question from the wiki")
 
+    def __init__(self, *, files_back: bool = True) -> None:
+        # False under memory.extraction.enabled: false. Filing back writes the
+        # question asked into the wiki, which is learning from the chat.
+        self.files_back = files_back
+        if not files_back:
+            self.description = (
+                "Search the Prometheus wiki for answers to knowledge questions. "
+                "Returns relevant wiki page content."
+            )
+
     def is_read_only(self, arguments: WikiQueryInput) -> bool:
         del arguments
-        return False  # may write query result pages
+        return not self.files_back  # filing back writes query result pages
 
     async def execute(
         self, arguments: WikiQueryInput, context: ToolExecutionContext
@@ -164,7 +174,8 @@ class WikiQueryTool(BaseTool):
         # bounded page content (not the notice). The index.md write here is the
         # Phase-4 carve-out — left untouched.
         if (
-            pages_read >= _MIN_PAGES_FOR_FILEBACK
+            self.files_back
+            and pages_read >= _MIN_PAGES_FOR_FILEBACK
             and len(combined) >= _MIN_CONTENT_LEN_FOR_FILEBACK
         ):
             self._file_back(wiki_root, arguments.query, combined)

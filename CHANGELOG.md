@@ -4,6 +4,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- `memory.extraction.enabled: false` stops memory being learned from chats. The fact extractor, the wiki compile after it, the SENTINEL insight writer, the agent's `memory` tool and `wiki_query`'s saving of questions are not built or started. Recall, `/note` and the memory editor are unchanged. `prometheus doctor` reports the switch.
 - Devices: the operator can hold a device to a profile (`PUT /api/devices/{id}/profile`). Every run under that device's sessions is offered only the profile's tools and refused any other at the call, with no fallback that widens it, and the device cannot lift or change the hold. One instance can then serve its owner with every tool beside a server-to-server caller that stays read-only.
 
 ## 0.9.19 (2026-11-02)
