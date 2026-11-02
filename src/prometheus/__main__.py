@@ -25,6 +25,7 @@ from prometheus import __version__
 from prometheus.banner import show_banner, write_version
 from prometheus.config.paths import get_config_dir, get_data_dir, get_wiki_root
 from prometheus.engine.agent_loop import LoopContext, MaxTurnsExhausted, run_loop
+from prometheus.memory.learning_switch import extraction_enabled
 from prometheus.config.shipped_defaults import (
     resolve_max_tool_iterations,
     resolve_max_tool_iterations_cloud,
@@ -157,8 +158,14 @@ def create_provider(model_cfg: dict[str, Any]) -> tuple[ModelProvider, str]:
 # Tool registry factory
 # ---------------------------------------------------------------------------
 
-def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> Any:
-    """Build the default tool registry with all builtin tools."""
+def create_tool_registry(
+    security_cfg: dict[str, Any], security_gate=None, *, memory_extraction: bool = True,
+) -> Any:
+    """Build the default tool registry with all builtin tools.
+
+    ``memory_extraction`` is ``memory.extraction.enabled``: False leaves out the
+    ``memory`` tool and stops ``wiki_query`` filing questions into the wiki.
+    """
     from prometheus.tools.base import ToolRegistry
     from prometheus.tools.builtin import (
         AgentTool,
@@ -299,7 +306,7 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
         AskUserTool(),
         # Wiki + SENTINEL
         WikiCompileTool(),
-        WikiQueryTool(),
+        WikiQueryTool(files_back=memory_extraction),
         WikiLintTool(),
         SentinelStatusTool(),
     ]:
@@ -368,8 +375,9 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     # weeks per Phase 1 baseline. format_memory_for_prompt() reads these
     # files into every system prompt; without a tool, the agent had no way
     # to write them. See docs/audits/SILENT-FAILURE-AUDIT.md.
-    try_register(registry, "MemoryTool",
-                 "prometheus.memory.hermes_memory_tool", "MemoryTool")
+    if memory_extraction:
+        try_register(registry, "MemoryTool",
+                     "prometheus.memory.hermes_memory_tool", "MemoryTool")
     try_register(registry, "TodoWriteTool",
                  "prometheus.tools.builtin.todo_write", "TodoWriteTool")
 
@@ -2157,7 +2165,10 @@ def main() -> None:
         model_cfg["model"] = model_name
 
     security_gate = create_security_gate(security_cfg, getattr(args, "config", None))
-    registry = create_tool_registry(security_cfg, security_gate=security_gate)
+    registry = create_tool_registry(
+        security_cfg, security_gate=security_gate,
+        memory_extraction=extraction_enabled(config),
+    )
     # The served chat template decides the tier for a model the registry does
     # not list (WP-X.28); read the same way the daemon reads it at boot.
     adapter = create_adapter(

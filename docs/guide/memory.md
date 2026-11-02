@@ -53,9 +53,21 @@ You can also edit both files yourself, from anywhere the API reaches — `PUT /a
 
 ## Memory extractor
 
-**Default: on**
+**Default: on** (config: `memory.extraction.enabled`)
 
 Roughly every 30 minutes, a background pass mines recent conversations into structured facts, organized by entity (a person, a client, a project, a topic) and tagged with a confidence score. These facts land in `memory.db` and become the raw material for passive recall and the wiki. Machine-generated sessions (automated jobs, evals) are excluded so the fact store reflects real conversations, not the system talking to itself.
+
+### Turning learning off
+
+Set `memory.extraction.enabled: false` to run without learning anything from chats, for example when one instance answers for other people. Off means none of these is built or started:
+
+- the extractor, both its 30-minute pass and the pass just before a conversation is compacted;
+- the wiki compile that runs after each pass;
+- the SENTINEL insight writer, which works from extracted facts;
+- the agent's `memory` tool, so it cannot write `MEMORY.md` or `USER.md`;
+- `wiki_query` saving the question asked into `wiki/queries/`.
+
+Recall of facts already stored is a separate switch (`memory.recall.enabled`). `/note` and the memory editor still write, because a person is typing. `prometheus doctor` shows the switch in its **Memory extraction** row.
 
 ## Passive recall
 

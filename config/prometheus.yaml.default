@@ -1216,6 +1216,14 @@ sentinel:
 # to the chat surfaces (Telegram/Slack/Discord/web/CLI); coding mode, gym,
 # and evals never recall.
 memory:
+  # Learning memory from chats: the fact extractor (every 30 minutes and
+  # before a conversation is compacted), the wiki compile after it, the
+  # SENTINEL insight writer, the model's `memory` tool (MEMORY.md/USER.md)
+  # and wiki_query filing questions into wiki/queries/. false = none of it
+  # is built or started, for a deployment that must not keep what its users
+  # say. Recall below is separate; /note and the Beacon memory editor stay.
+  extraction:
+    enabled: true
   recall:
     enabled: true
     max_facts: 6          # hard cap on facts injected per turn
