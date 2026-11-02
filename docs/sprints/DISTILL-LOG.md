@@ -331,3 +331,10 @@ Append-only, times in ET.
   - **Findings 4–5:** LOW.
 - **Next:** a fix agent is working on findings 1, 2, 4 and 5. `--hardened-exec` stays OFF; there's no keep-rate A/B until the fixes land and pass a re-review.
 - 2026-11-02 09:25 EST — **Fri 11-06 is standard too (coordinator go):** the fallback judge night is now the 4th entry of the 4090 rotation (the 09:45 entry wrongly said 3rd, and its backup is round2.conf.bak-20261102T0921, not T0940); backup round2.conf.bak-20261102T0923; faked-clock check: Wed standard 4×32768, Thu long-context (IQ3 1×262144), Fri standard 4×32768, Sat long-context; the coordinator flips Fri back on Thu if Wednesday's judge pass succeeds.
+
+## 2026-11-02 late morning: operator answers
+- **Sandbox (OQ14/17):** parked. The fix agent is limited to committing the importer and copy-back hardening; `--hardened-exec` stays OFF, and there's no enablement re-review or dedicated account.
+- **Round-2 size (OQ16):** option (a). Round-2 SFT trains at the size reached (floor 3,500) once both triggers hold: the uncapped areas reach ≥600 train rows, and Wednesday's judge pass is done.
+  - Planning item: the 4090 is back on nightly 6 h windows, so the run must resume across windows. The round-1 run took ~14.5 h. Design this before the trigger (est. ~Nov 9).
+- **GRPO:** after Wednesday's acceptable-tool sets, a feasibility report on the 4090 plus a pilot proposal on the round-2 SFT adapter. Rewards: acceptable tool choice, task success, injection resistance.
+- **Round 3:** Max resumes after the Nov 16 reset; the weekly harvest feeds in real prompts.

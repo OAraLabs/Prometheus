@@ -194,3 +194,11 @@ none holds teacher data.
     - **Ask:** create that account (needs sudo), or accept the risk explicitly.
 
     Default if unanswered: keep python and multi-line bash disabled.
+
+**Operator answers (2026-11-02, late morning):**
+- **OQ14 / OQ17: PARKED.** Python and multi-line bash stay OFF. The importer fixes from the review (copy-back memory/disk bounds) are finished and committed because they harden the current sandbox too. The flag stays off and the dedicated account is not pursued. Revisit only if the larger refusal classes are addressed.
+- **OQ16: option (a).** Train the round-2 SFT at the size reached (floor 3,500) once the uncapped areas reach ≥600 train rows AND Wednesday's judge pass has run. It is a stepping stone, not the main lever.
+- **Next main lever: GRPO.** After Wednesday's acceptable-tool sets land, report GRPO feasibility on the 4090 (memory, speed, sequence length):
+  - rewards: acceptable tool choice + task success + injection resistance, on gym tasks;
+  - propose a small pilot on the round-2 SFT adapter.
+- **Round 3 data:** resume Max judging and generation after the Nov 16 reset. New real prompts from daily use come in via the weekly harvest.
