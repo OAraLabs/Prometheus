@@ -351,6 +351,24 @@ def may_start(now: float, stop_at: float, need_min: float) -> bool:
     return now + need_min * 60 <= stop_at
 
 
+HOLD_SCHEMA = "distill-train-nights-hold/1"  # tower/train_nights.py
+
+
+def hold_problem(hold: Any, night: str, t: float, *, min_left_s: float = 1800) -> Optional[str]:
+    """Why this pipeline may NOT take the GPU from the 4090 window's hold now (None: it may).
+    The same rule as tower/train_nights.py hold_problem."""
+    if not isinstance(hold, dict) or hold.get("schema") != HOLD_SCHEMA:
+        return "no hold file from the 4090 window"
+    if hold.get("state") != "holding":
+        return f"the 4090 window's hold is {hold.get('state')!r}, not holding"
+    if hold.get("night") != night:
+        return f"the hold is for the night of {hold.get('night')}, not {night}"
+    until = hold.get("until_epoch")
+    if not isinstance(until, (int, float)) or not _finite(until) or float(until) - t < min_left_s:
+        return f"the hold ends at {hold.get('until')}: less than {min_left_s / 60:.0f} min left"
+    return None
+
+
 def deadline_state(now: float, stop_at: float, hard_at: float) -> str:
     """'run' before stop-at; 'stop' (stop scoring, restore) until the hard deadline; 'hard' after."""
     if now < stop_at:
@@ -485,6 +503,8 @@ def reset_for_rerun(p7: Path, execute: bool, stamp: Optional[str] = None) -> Lis
             (p7 / f"state.{stamp}.json").write_text(json.dumps(st, indent=1) + "\n", encoding="utf-8")
         if st.pop("phase6_failures", None):
             did.append("phase6 failures reset")
+        if st.pop("starts", None):
+            did.append("start count reset")
         for k in ("outcome", "finished", "handoff"):
             st.pop(k, None)
         for k in ("abort", "report"):
@@ -556,6 +576,12 @@ class Cfg:
         self.handoff_state = Path(a.handoff_state).expanduser() if getattr(a, "handoff_state", "") else None
         self.handoff_until = parse_iso(a.handoff_until) if getattr(a, "handoff_until", "") else None
         self.handoff_wait_s = 60.0 * float(getattr(a, "handoff_wait_min", HANDOFF_WAIT_MIN) or HANDOFF_WAIT_MIN)
+        # --window-hold: the 4090 multi-night job's directory (relative to the 4090 home): its open
+        # nightly window holds the GPU for this pipeline (tower/train_nights.py)
+        hold = (getattr(a, "window_hold", "") or "").strip()
+        self.window_hold = re.sub(r"^~/", "", hold).rstrip("/")
+        if self.window_hold.startswith("/"):
+            raise ValueError("--window-hold is relative to the 4090 home (or ~/...), not an absolute path")
 
     @property
     def labels(self) -> Dict[str, str]:
@@ -919,6 +945,9 @@ class Pipeline:
 
     # -- steps ----------------------------------------------------------------------------------
     def step_wait_train(self) -> None:
+        if self.cfg.window_hold:
+            self.mark("wait-train", "done", "trained in earlier windows (the 4090 multi-night job)")
+            return
         tu, wu = self.cfg.trainer_unit, self.cfg.watcher_unit
         ended_at = self.state.get("trainer_ended_at")
         last_log = 0.0
@@ -996,6 +1025,9 @@ class Pipeline:
             self.notify("disk", f"Post-training pipeline NOT run: the 4090 host has {free:.1f} GiB free "
                                 f"(< {DISK_FLOOR_GIB:g}). Nothing was quantized or scored.")
             raise NotRun(f"the 4090 host has only {free:.1f} GiB free")
+        if self.cfg.window_hold:
+            self.take_gpu_from_window(kv)
+            return
         eta = self.clock() + 60 * (EST_MIN["phase6"] + sum(EST_MIN[k] for k in
                                                         ("a", "b", "c", "d", "move", "recipe", "e1", "e2")))
         down = "\n".join([
@@ -1044,6 +1076,68 @@ class Pipeline:
         self.state["gpu_taken"] = True
         self.save()
         self.mark("take-gpu", "done", f"{self.cfg.biz_unit} {biz or '?'} already; VRAM {used} MiB; GPU free")
+
+    # -- --window-hold: the 4090's nightly window holds the GPU for us ---------------------------
+    def hold_file(self, name: str) -> str:
+        return self.tp(f"{self.cfg.window_hold}/{name}")
+
+    def write_hold_marker(self, name: str, doc: Dict[str, Any]) -> None:
+        path = self.hold_file(name)
+        self.ops.tower(f"printf '%s\\n' {q(json.dumps(doc, sort_keys=True))} > {q(path + '.tmp')} && "
+                       f"mv {q(path + '.tmp')} {q(path)}", mut=True)
+
+    def take_gpu_from_window(self, kv: Dict[str, List[str]]) -> None:
+        """The GPU is the open 4090 window's: its multi-night job holds it for us (hold.json) until
+        its stop-at. Never stop or start business here; the window machinery restores it."""
+        night = datetime.fromtimestamp(self.clock(), ET).strftime("%Y-%m-%d")
+        rc, out = self.ops.tower(f"cat {q(self.hold_file('hold.json'))} 2>/dev/null")
+        hold = read_json_text(out) if rc == 0 else None
+        why = hold_problem(hold, night, self.clock())
+        if why is None and isinstance(hold, dict):
+            ust = self.unit_state(str(hold.get("unit") or "none.service"))
+            if ust not in ACTIVE:
+                why = f"the holding runner {hold.get('unit')} is {ust}"
+        biz = kv1(kv, "biz")
+        if why is None and biz in ACTIVE:
+            why = f"{self.cfg.biz_unit} is {biz}: the window is not open"
+        if not self.cfg.execute:
+            self.log(f"[take-gpu] window hold now: {why or 'ok'} ({self.hold_file('hold.json')}); a real run takes "
+                     f"the GPU from it (marker hold-taken-{night}.json) and never stops business itself")
+            self.mark("take-gpu", "planned", "from the 4090 window's hold")
+            return
+        if why:
+            raise NotRun(f"no 4090 window holds the GPU for this pipeline: {why}")
+        assert isinstance(hold, dict)  # hold_problem said so
+        until = float(hold["until_epoch"])
+        if self.cfg.stop_at > until - 600 or self.cfg.hard_at > until - 300:
+            self.cfg.stop_at, self.cfg.hard_at = min(self.cfg.stop_at, until - 600), min(self.cfg.hard_at, until - 300)
+            self.log(f"  stop-at moved inside the hold: stop {et(self.cfg.stop_at)}, hard {et(self.cfg.hard_at)}")
+        ok, used = self.wait_vram_free(300)
+        if not ok:
+            raise NotRun(f"the held GPU is not free ({used} MiB used)")
+        self.state["gpu_taken"] = True
+        self.state["biz_down_by_us"] = False
+        self.state["window_hold"] = {"night": night, "unit": hold.get("unit"), "until": hold.get("until")}
+        self.save()
+        self.write_hold_marker(f"hold-taken-{night}.json", {"night": night, "at": now_iso(), "run": self.cfg.run})
+        self.mark("take-gpu", "done", f"from the 4090 window's hold ({hold.get('unit')}, until {hold.get('until')}); "
+                  f"VRAM {used} MiB")
+
+    def release_to_window(self, why: str, completed: bool) -> None:
+        """--window-hold: stop our units and tell the holding window we are done for tonight (and, once
+        completed, for good). The window's watcher / window_end restores business."""
+        self.stop_own_units()
+        night = (self.state.get("window_hold") or {}).get("night") or \
+            datetime.fromtimestamp(self.clock(), ET).strftime("%Y-%m-%d")
+        self.write_hold_marker(f"hold-released-{night}.json", {"night": night, "at": now_iso(), "why": why[:200],
+                                                               "completed": completed})
+        if completed:
+            self.write_hold_marker("post-train.done.json", {"run": self.cfg.run, "at": now_iso(),
+                                                            "outcome": why[:200]})
+        self.state["released"] = True
+        self.state["restore"] = {"ok": True, "unit": None,
+                                 "train_end": "released to the 4090 window: its watcher / window_end restores business"}
+        self.mark("release", "window", f"released to the 4090 window ({why[:120]})")
 
     def run_child(self, argv: Sequence[str], log_path: Path, env: Dict[str, str],
                   on_stop: Callable[[], None]) -> int:
@@ -1673,6 +1767,9 @@ class Pipeline:
         if self.cfg.execute and (self.state.get("released") or not self.state.get("gpu_taken")):
             return
         self.log(f"[release] {why}")
+        if self.cfg.window_hold:
+            self.release_to_window(why, completed)
+            return
         self.stop_own_units()
         if completed and self.cfg.execute:
             ok, reason = self.handoff_ready()
@@ -2419,6 +2516,8 @@ def add_run_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--handoff-until", default="", help="the chain's latest start (ISO with offset)")
     p.add_argument("--handoff-wait-min", type=float, default=HANDOFF_WAIT_MIN,
                    help="minutes to wait for the chain's 4090 teacher before restoring here")
+    p.add_argument("--window-hold", default="", help="the 4090 multi-night job dir (relative to its home): take "
+                   "the GPU from its open window's hold, release to it, never stop or start business here")
     p.add_argument("--fake-root", default="", help="run against a fake 4090 tree on this host (fake-setup)")
     p.add_argument("--execute", action="store_true")
 

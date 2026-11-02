@@ -11,7 +11,9 @@ import importlib.util
 import json
 import random
 import re
+import shlex
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -908,3 +910,102 @@ def test_arm_rerun_dry_run_changes_nothing(tmp_path: Path, capsys: Any) -> None:
     assert rc == 0 and (tmp_path / "PIPELINE-DONE.json").exists()
     assert "rerun (dry run" in out and "--rerun" not in out.splitlines()[0]
     assert "--handoff-unit r2-x.service" in out.splitlines()[0]
+
+
+# ---------------------------------------------------------------------------
+# --window-hold: the 4090 multi-night job's open window holds the GPU (tower/train_nights.py)
+# ---------------------------------------------------------------------------
+
+HOLD_DIR = "distill/phase4/results/base-9b/train-nights-9b-run-max-derived"
+
+
+class HoldTower(FakeTower):
+    """The 4090 with its nightly window open: business down, the runner unit active, hold.json there."""
+
+    def __init__(self, tmp: Path, manifest: Dict[str, Any], hold: Any) -> None:
+        super().__init__(tmp, manifest)
+        self.units.update({"llama-server.service": "inactive", "distill-jobs-x.service": "active"})
+        self.hold = hold
+        self.markers: Dict[str, Any] = {}
+
+    def __call__(self, script: str) -> Tuple[int, str]:
+        if script.startswith("cat ") and "/hold.json" in script:
+            self.cmds.append(script)
+            return (0, json.dumps(self.hold)) if self.hold is not None else (1, "")
+        m = re.match(r"printf '%s\\n' (.+) > (\S+)\.tmp && mv ", script)
+        if m and HOLD_DIR in script:
+            self.cmds.append(script)
+            self.markers[m.group(2).strip("'").rsplit("/", 1)[-1]] = json.loads(shlex.split(m.group(1))[0])
+            return 0, ""
+        return super().__call__(script)
+
+
+def _hold_doc(t: float, until: float, state: str = "holding") -> Dict[str, Any]:
+    return {"schema": PT.HOLD_SCHEMA, "night": datetime.fromtimestamp(t, PT.ET).strftime("%Y-%m-%d"),
+            "state": state, "until_epoch": until, "until": "x", "unit": "distill-jobs-x.service"}
+
+
+def _held(tmp_path: Path, hold: Any, **over: Any) -> Tuple[Any, HoldTower, Clock, List[str]]:
+    pipe, _, clock, sent = make(tmp_path, done_manifest(), SUN_10, window_hold="~/" + HOLD_DIR, **over)
+    tower = HoldTower(tmp_path, done_manifest(), hold)
+    pipe.ops = FakeOps(pipe.cfg, tower)
+    return pipe, tower, clock, sent
+
+
+def test_window_hold_takes_the_gpu_from_the_window_and_never_touches_business(tmp_path: Path) -> None:
+    pipe, tower, clock, sent = _held(tmp_path, _hold_doc(SUN_10, SUN_10 + 5 * 3600))
+    assert pipe.cfg.window_hold == HOLD_DIR
+    pipe.step_wait_train()
+    assert pipe.state["steps"]["wait-train"]["status"] == "done" and not tower.cmds
+    pipe.step_verdict()
+    pipe.step_take_gpu()
+    assert pipe.state["gpu_taken"] and pipe.state["biz_down_by_us"] is False
+    night = datetime.fromtimestamp(SUN_10, PT.ET).strftime("%Y-%m-%d")
+    assert f"hold-taken-{night}.json" in tower.markers
+    assert not [c for c in tower.cmds if "flock" in c or "systemctl --user stop llama-server" in c]
+    assert not [m for m in sent if "going down" in m]
+    # the night ends: released to the window (its machinery restores business), never train_end.sh
+    pipe.release("finished", completed=True)
+    assert tower.markers[f"hold-released-{night}.json"]["completed"] is True
+    assert tower.markers["post-train.done.json"]["run"] == "9b-run-max-derived"
+    assert pipe.state["steps"]["release"]["status"] == "window" and pipe.state["released"]
+    assert not [c for c in tower.cmds if "flywheel-p7-restore-" in c or "train_end.sh" in c]
+
+
+def test_window_hold_moves_the_stop_time_inside_the_hold(tmp_path: Path) -> None:
+    until = SUN_10 + 3 * 3600  # before STOP_AT
+    pipe, tower, _, _ = _held(tmp_path, _hold_doc(SUN_10, until))
+    pipe.step_take_gpu()
+    assert pipe.cfg.stop_at == until - 600 and pipe.cfg.hard_at == until - 300
+
+
+@pytest.mark.parametrize("hold,units,why", [
+    (None, {}, "no hold file"),
+    ("ended", {}, "not holding"),
+    ("short", {}, "min left"),
+    ("ok", {"distill-jobs-x.service": "inactive"}, "is inactive"),
+    ("ok", {"llama-server.service": "active"}, "the window is not open"),
+])
+def test_window_hold_refuses_without_an_open_held_window(tmp_path: Path, hold: Any, units: Dict[str, str],
+                                                         why: str) -> None:
+    doc = {None: None, "ended": _hold_doc(SUN_10, SUN_10 + 7200, "ended"),
+           "short": _hold_doc(SUN_10, SUN_10 + 600), "ok": _hold_doc(SUN_10, SUN_10 + 7200)}[hold]
+    pipe, tower, _, sent = _held(tmp_path, doc)
+    tower.units.update(units)
+    with pytest.raises(PT.NotRun, match=why):
+        pipe.step_take_gpu()
+    assert not pipe.state.get("gpu_taken") and not tower.markers
+    assert not [c for c in tower.cmds if "flock" in c or "systemd-run" in c]
+    # a stopped night releases to the window too: markers, no done, no restore of its own
+    pipe.state["gpu_taken"] = True
+    pipe.release("stopped early (the stop time was reached)", completed=False)
+    assert "post-train.done.json" not in tower.markers and any(k.startswith("hold-released-") for k in tower.markers)
+
+
+def test_a_rerun_also_resets_the_start_count(tmp_path: Path) -> None:
+    p7 = tmp_path / "p7"
+    p7.mkdir()
+    (p7 / "state.json").write_text(json.dumps({"schema": PT.STATE_SCHEMA, "starts": 7, "steps": {},
+                                               "telegrams": {}, "items": {}, "notes": []}))
+    assert "start count reset" in PT.reset_for_rerun(p7, execute=True, stamp="S")
+    assert "starts" not in json.loads((p7 / "state.json").read_text())

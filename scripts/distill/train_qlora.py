@@ -98,7 +98,21 @@ is part of every checkpoint. ``run_state.json`` ``order`` records the evidence
   ``--resume`` takes the newest complete one; the plan, data hash and config
   hash must match the run's, and the restored weights must match the
   fingerprint (exit 1 otherwise: a restore that drops weights would train on
-  from fresh LoRA weights).
+  from fresh LoRA weights). ``--keep-epoch-checkpoints`` never prunes an
+  epoch-end checkpoint (``state.json`` ``epoch_end``), so retention is the
+  newest ``--keep-checkpoints`` plus one per epoch. A run trained across many
+  windows (``tower/train_nights.py``) is the same run resumed each night:
+  the plan, the position in it, the optimizer, the schedule and every RNG
+  come back, so it sees the rows in the order an uninterrupted run would.
+* **Held-out cadence.** ``--eval-every-minutes`` measures at an interval
+  checkpoint only that often (epoch and end checkpoints always measure), so
+  frequent light checkpoints (``--save-every-minutes 20``: a lost window
+  loses at most that) do not pay the held-out cost each time. A measurement
+  is RNG-neutral, an interval one is not started when it would run past
+  ``--stop-at`` and is abandoned (no point recorded) on a stop request.
+* **Length.** ``--max-seq`` must be on ``--ladder`` (default 16,384 ->
+  12,288 -> 8,192; round 2 on the 4090: 49,152 -> 32,768 -> 16,384, the
+  longest that trained with activation offload, DISTILL-CAPACITY.md).
 * **Stop.** SIGTERM (a ``setup apply business`` stops ``distill-*`` units),
   ``--stop-at`` or free disk under ``--min-free-gib`` abandons the
   accumulation group in progress and checkpoints at the last completed step,
@@ -239,6 +253,10 @@ class TrainConfig:
     save_every: int = 200
     save_every_minutes: float = 0.0  # also checkpoint when this long since the last one (0: off)
     keep_checkpoints: int = 3
+    # an interval checkpoint measures the held-out losses only when this long since the last
+    # measurement (0: every interval checkpoint, as before); epoch and end checkpoints always do
+    eval_every_minutes: float = 0.0
+    keep_epoch_checkpoints: bool = False  # never prune an epoch-end checkpoint
     seed: int = 3407
     log_every: int = 10
     max_steps: int | None = None  # smoke only
@@ -275,8 +293,8 @@ class TrainConfig:
             errs.append("grad_accum must be >= 1")
         if self.save_every < 1 or self.keep_checkpoints < 1:
             errs.append("save_every and keep_checkpoints must be >= 1")
-        if self.save_every_minutes < 0:
-            errs.append("save_every_minutes must be >= 0")
+        if self.save_every_minutes < 0 or self.eval_every_minutes < 0:
+            errs.append("save_every_minutes and eval_every_minutes must be >= 0")
         if self.optim not in ("adamw_8bit", "adamw_torch"):
             errs.append(f"optim must be adamw_8bit or adamw_torch, not {self.optim!r}")
         if self.max_steps is not None and self.max_steps < 1:
@@ -1188,12 +1206,23 @@ def find_latest_checkpoint(out_dir: Path) -> Path | None:
     return best[1] if best else None
 
 
-def prune_checkpoints(out_dir: Path, keep: int) -> list[Path]:
-    """Remove all but the newest *keep* complete checkpoints, and stale
-    ``.partial`` directories. Only this run's own output directory."""
+def is_epoch_end(ckpt: Path) -> bool:
+    """The checkpoint was saved at the step that finished an epoch (state.json ``epoch_end``)."""
+    try:
+        return bool(json.loads((ckpt / "state.json").read_text(encoding="utf-8")).get("epoch_end"))
+    except (OSError, ValueError):
+        return False
+
+
+def prune_checkpoints(out_dir: Path, keep: int, *, keep_epoch_ends: bool = False) -> list[Path]:
+    """Remove all but the newest *keep* complete checkpoints (and, with
+    *keep_epoch_ends*, every epoch-end one), and stale ``.partial``
+    directories. Only this run's own output directory."""
     complete = sorted((s, p) for p in Path(out_dir).iterdir()
                       if (s := ckpt_step(p)) is not None and (p / COMPLETE).is_file())
     removed = [p for _, p in complete[:-keep]] if keep > 0 else []
+    if keep_epoch_ends:
+        removed = [p for p in removed if not is_epoch_end(p)]
     removed += [p for p in Path(out_dir).iterdir() if p.name.endswith(PARTIAL)]
     for p in removed:
         shutil.rmtree(p, ignore_errors=True)
@@ -1412,6 +1441,10 @@ class Diverged(RuntimeError):
     """MAX_NONFINITE_RUN steps in a row had a non-finite loss or grad norm."""
 
 
+class EvalInterrupted(Exception):
+    """A stop request came in during an interval checkpoint's held-out measurement."""
+
+
 @dataclass
 class RunResult:
     status: str  # done | stopped | until_step
@@ -1471,6 +1504,8 @@ class Trainer:
         self.val_history: list[dict[str, Any]] = []
         self.epoch_len = 0  # plan entries per epoch
         self._last_save_t = 0.0  # clock() at the last checkpoint (time-based saves)
+        self._last_eval_t = 0.0  # clock() at the last held-out measurement (eval_every_minutes)
+        self._eval_s: float | None = None  # how long the last held-out measurement took
         self._rate: tuple[float, int] | None = None  # (clock, tokens_seen) at this process's first step
         self.nonfinite = 0  # steps skipped for a non-finite loss / grad norm
         self.nonfinite_run = 0
@@ -1527,12 +1562,16 @@ class Trainer:
         if "order" not in rs:
             rs["order"] = self.order_report()
         self.backend.load(self.max_seq, self.revision)
+        pending_why = None
         if resume and latest is not None:
             self.restore_check = self.restore_from(latest)
             if self.restore_check["ok"] is False:
                 raise RestoreError(
                     f"cannot resume: restoring {latest.name} gave weights with fingerprint "
                     f"{self.restore_check['after']!r}, it saved {self.restore_check['saved']!r}")
+            lst = json.loads((latest / "state.json").read_text(encoding="utf-8"))
+            if lst.get("held_out_pending"):
+                pending_why = str(lst.get("why") or "epoch")
         sched = rs.get("schedule")
         if not sched or sched.get("max_seq") != self.max_seq:
             total = self.step + remaining_steps(self.plan, self.pos, self.kept, self.cfg.grad_accum)
@@ -1549,7 +1588,13 @@ class Trainer:
         if self.val is not None and self.step == 0 and not any(
                 h.get("step") == 0 for h in self.val_history):
             self.record_held_out(self.measure_held_out(), "baseline")
-        self._last_save_t = self.clock()
+        if self.val is not None and pending_why and not self.held_out_at(self.step):
+            # the epoch / end checkpoint we resumed from yielded its measurement to a stop: take it now
+            self.record_held_out(self.measure_held_out(), pending_why)
+            done = self.epochs_completed()
+            if done and any(e.get("step") == self.step for e in self.run_state.get("epochs_done") or []):
+                self.record_epoch(done)
+        self._last_save_t = self._last_eval_t = self.clock()
 
     def held_out_setup(self) -> None:
         """The val subset and the fixed probe batch, from the val rows that fit
@@ -1761,24 +1806,38 @@ class Trainer:
                                    "holds the weights from before")
             else:
                 self.nonfinite_run = 0
-            if self.step % self.cfg.save_every == 0 or self.save_due():
-                self.save("interval")
             done = self.epochs_completed()
-            if done > epochs_before:
-                self.save("epoch")  # a no-op when this step just checkpointed (it measured then)
+            if done > epochs_before:  # first, so the checkpoint is marked as this epoch's end
+                self.save("epoch", epoch_end=True)
                 self.record_epoch(done)
+            elif self.step % self.cfg.save_every == 0 or self.save_due():
+                self.save("interval")
             if hook is not None:
                 hook_reason = hook(self, rec)
                 if hook_reason:
                     self.stop.reason = hook_reason
                     return self._stopped(hook_reason, start)
         path = self.save("end")
+        if self.val is not None and not self.held_out_at(self.step) and self.stop.reason:
+            # stopped during the final held-out measurement: not done until it is measured (next resume)
+            return self._stopped(self.stop.reason, start)
         return RunResult("done", self.step, checkpoint=path.name, records=self.records[start:])
 
     def save_due(self) -> bool:
         """``save_every_minutes`` have passed since the last checkpoint."""
         m = self.cfg.save_every_minutes
         return bool(m and m > 0 and self.clock() - self._last_save_t >= m * 60)
+
+    def eval_due(self) -> bool:
+        """An interval checkpoint measures the held-out losses: ``eval_every_minutes``
+        have passed since the last measurement (0: always), and, with a ``--stop-at``,
+        the measurement (as long as the last one took, plus a margin) ends before it."""
+        m = self.cfg.eval_every_minutes
+        if m and m > 0 and self.clock() - self._last_eval_t < m * 60:
+            return False
+        if self.stop.stop_at is not None and self._eval_s is not None:
+            return time.time() + 1.25 * self._eval_s + 30 < self.stop.stop_at
+        return True
 
     def epochs_completed(self) -> int:
         """Epochs of the plan the position has passed (a group can straddle
@@ -1847,12 +1906,16 @@ class Trainer:
 
     # ------------------------------------------------------- checkpoints
 
-    def _loss_over(self, ids: list[str]) -> tuple[float | None, list[float]]:
-        """Token-weighted mean loss over held-out *ids*, and each row's own."""
+    def _loss_over(self, ids: list[str], *, interruptible: bool = False
+                   ) -> tuple[float | None, list[float]]:
+        """Token-weighted mean loss over held-out *ids*, and each row's own.
+        *interruptible*: a stop request between rows abandons it (:class:`EvalInterrupted`)."""
         assert self.val is not None
         num = den = 0.0
         per: list[float] = []
         for x in ids:
+            if interruptible and self.stop.check():
+                raise EvalInterrupted(self.stop.reason or "stop")
             t, s = self.val.example(x)
             n = loss_tokens(s)
             lo = self.backend.eval_loss(t, s)
@@ -1861,20 +1924,35 @@ class Trainer:
             den += n
         return (num / den if den else None), per
 
-    def measure_held_out(self) -> dict[str, Any] | None:
-        """The val loss on the val subset and the loss on the fixed probe batch."""
+    def measure_held_out(self, *, interruptible: bool = False) -> dict[str, Any] | None:
+        """The val loss on the val subset and the loss on the fixed probe batch.
+        RNG-neutral: the training RNG after it is what it was before, so where the
+        held-out points fall (eval cadence, a resume) never changes the training."""
         if self.val is None:
             return None
-        vl, _ = self._loss_over(self.val_ids)
-        pl, per = self._loss_over(self.probe_ids)
+        rng = self.backend.rng_state()
+        t0 = self.clock()
+        try:
+            vl, _ = self._loss_over(self.val_ids, interruptible=interruptible)
+            pl, per = self._loss_over(self.probe_ids, interruptible=interruptible)
+        except EvalInterrupted as exc:
+            log.info("held-out measurement at step %d abandoned (%s): no point recorded", self.step, exc)
+            return None
+        finally:
+            self.backend.set_rng_state(rng)
+        self._eval_s = self.clock() - t0
+        self._last_eval_t = self.clock()
         return {"val_loss": vl, "probe_loss": pl, "probe_per_row": per}
 
     def val_loss(self) -> float | None:
         held = self.measure_held_out()
         return held["val_loss"] if held else None
 
-    def save(self, why: str) -> Path:
-        """Checkpoint at the current step (no-op when the newest one is it)."""
+    def save(self, why: str, *, epoch_end: bool = False) -> Path:
+        """Checkpoint at the current step (no-op when the newest one is it).
+        Epoch and end checkpoints measure the held-out losses; an interval one
+        when :meth:`eval_due` (and a stop request abandons that measurement); a
+        stop's never (it must be quick)."""
         final = self.out / f"{CKPT_PREFIX}{self.step:06d}"
         if final.is_dir() and (final / COMPLETE).is_file():
             return final
@@ -1883,12 +1961,18 @@ class Trainer:
         tmp.mkdir(parents=True)
         self.backend.save(tmp)
         self.backend.save_rng(tmp / "rng.pt", self.backend.rng_state())
-        held = self.measure_held_out() if why in ("interval", "end", "epoch") else None
+        held = None
+        # every measurement yields to a stop request (a window end must not wait minutes for it); an
+        # epoch or end one that yielded is measured right after the next resume (held_out_pending)
+        if why in ("end", "epoch") or (why == "interval" and self.eval_due()):
+            held = self.measure_held_out(interruptible=True)
+        pending = held is None and self.val is not None and why in ("end", "epoch")
         self.record_held_out(held, why)
         vl = held["val_loss"] if held else None
         write_json(tmp / "state.json", {
             "step": self.step, "pos": self.pos, "tokens_seen": self.tokens_seen,
             "max_seq": self.max_seq, "total_steps": self.total_steps, "why": why,
+            "epoch_end": epoch_end, "held_out_pending": pending,
             "losses": self.losses[-200:], "val_loss": vl,
             "probe_loss": held["probe_loss"] if held else None, "saved_at": now_iso(),
             "plan_sha": self.run_state["plan_sha"], "nonfinite_steps": self.nonfinite,
@@ -1899,7 +1983,11 @@ class Trainer:
                                              "step": self.step, "written_at": now_iso()})
         (tmp / COMPLETE).write_text(now_iso() + "\n", encoding="utf-8")
         tmp.replace(final)
-        prune_checkpoints(self.out, self.cfg.keep_checkpoints)
+        prune_checkpoints(self.out, self.cfg.keep_checkpoints,
+                          keep_epoch_ends=self.cfg.keep_epoch_checkpoints)
+        self.run_state["progress"] = self.progress()  # current at every checkpoint (a stop's too)
+        self.run_state["updated_at"] = now_iso()
+        write_json(self.out / RUN_STATE, self.run_state)
         self._last_save_t = self.clock()
         log.info("checkpoint %s (%s)%s", final.name, why,
                  f" val_loss {vl:.4f}" if vl is not None else "")
@@ -2093,7 +2181,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--alpha", type=int, default=32)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--epochs", type=int, default=2)
-    ap.add_argument("--max-seq", type=int, default=SEQ_LADDER[0], choices=SEQ_LADDER)
+    ap.add_argument("--max-seq", type=int, default=SEQ_LADDER[0],
+                    help="the starting length; must be on --ladder")
+    ap.add_argument("--ladder", type=parse_ladder, default=SEQ_LADDER,
+                    help="step-down lengths, longest first (default 16384,12288,8192; round 2 on the "
+                         "4090 with activation offload: 49152,32768,16384)")
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--warmup-ratio", type=float, default=0.03)
     ap.add_argument("--save-every", type=int, default=200, help="checkpoint every N optimizer steps")
@@ -2101,6 +2193,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also checkpoint when this many minutes passed since the last one (0: off); "
                          "every checkpoint but a stop's measures the held-out losses")
     ap.add_argument("--keep-checkpoints", type=int, default=3)
+    ap.add_argument("--keep-epoch-checkpoints", action="store_true",
+                    help="never prune an epoch-end checkpoint (retention: the newest "
+                         "--keep-checkpoints plus every epoch end)")
+    ap.add_argument("--eval-every-minutes", type=float, default=0.0,
+                    help="an interval checkpoint measures the held-out losses only when this long "
+                         "since the last measurement (0: every one); epoch and end checkpoints always")
     ap.add_argument("--optim", choices=("adamw_8bit", "adamw_torch"), default="adamw_8bit")
     ap.add_argument("--seed", type=int, default=3407)
     mode = ap.add_mutually_exclusive_group()
@@ -2133,7 +2231,19 @@ def config_from_args(a: argparse.Namespace) -> TrainConfig:
                        r=a.r, alpha=a.alpha, lr=a.lr, epochs=a.epochs, max_seq=a.max_seq,
                        grad_accum=a.grad_accum, warmup_ratio=a.warmup_ratio,
                        save_every=a.save_every, save_every_minutes=a.save_every_minutes,
-                       keep_checkpoints=a.keep_checkpoints, optim=a.optim, seed=a.seed)
+                       keep_checkpoints=a.keep_checkpoints, optim=a.optim, seed=a.seed,
+                       ladder=tuple(a.ladder), eval_every_minutes=a.eval_every_minutes,
+                       keep_epoch_checkpoints=a.keep_epoch_checkpoints)
+
+
+def parse_ladder(text: str) -> tuple[int, ...]:
+    try:
+        ladder = tuple(int(x) for x in str(text).split(",") if x.strip())
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--ladder wants comma-separated lengths, not {text!r}")
+    if not ladder or list(ladder) != sorted(set(ladder), reverse=True) or min(ladder) < 256:
+        raise argparse.ArgumentTypeError(f"--ladder must be strictly decreasing lengths >= 256: {text!r}")
+    return ladder
 
 
 def parse_stop_at(value: str | None) -> float | None:
@@ -2339,8 +2449,11 @@ def main(argv: list[str] | None = None, *, backend_factory: Callable[[TrainConfi
         hist = {"val_history": trainer.val_history, "nonfinite_steps": trainer.nonfinite}
         if res.status == "done":
             adapter = trainer.save_adapter(dest)
+            # the operator's held-out gate on the full run: val and fixed-probe loss fell from step 0
+            gate = {k: held_out_check(trainer.val_history, k) for k in ("val_loss", "probe_loss")}
+            gate["passed"] = all(v["ok"] for v in gate.values())
             write_manifest("done", {"adapter": str(adapter), "peak_gb": backend.peak_memory_gb(),
-                                    **hist})
+                                    "gate": gate, **hist})
             log.info("done: %d steps, adapter %s", trainer.step, adapter)
         else:
             write_manifest("stopped", {"reason": res.reason, **hist})

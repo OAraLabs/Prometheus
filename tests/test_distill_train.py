@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -2289,3 +2290,254 @@ def test_q6b_the_dataset_manifest_carries_the_approval_when_the_report_went_else
     # report.json beside the data is still read first
     approve_dataset(data, ref="from the report")
     assert T.dataset_record(data)["approval"] == "from the report"
+
+
+# ── round 2 across nightly windows: exact resume, retention, held-out cadence ──
+
+
+class RngEvalBackend(FakeBackend):
+    """An eval that draws from the RNG: the trainer must keep held-out measurements from moving
+    the training RNG, or where they fall (cadence, resumes) would change the run."""
+
+    def eval_loss(self, ids: Any, spans: Any) -> float:
+        self.rng.random()
+        if self.clock:
+            self.clock.t += len(ids) * self.sec_per_token * 0.5
+        return super().eval_loss(ids, spans)
+
+
+def _night_cfg(**kw: Any) -> Any:
+    return small_cfg(save_every=1000, save_every_minutes=1.0, eval_every_minutes=3.0, keep_checkpoints=2,
+                     keep_epoch_checkpoints=True, epochs=3, **kw)
+
+
+def test_many_nights_with_stops_kills_and_cadence_resume_exactly(tmp_path: Path,
+                                                                 caplog: pytest.LogCaptureFixture) -> None:
+    """One uninterrupted run against the same run cut into nights by every kind of window end: a
+    stop-at between steps, a SIGTERM inside an accumulation group, an eval interrupted by a stop and
+    a crash (SIGKILL) that loses the steps after the last checkpoint. Concatenated, the nights train
+    the same rows in the same order with the same learning rates and end on the same weights; the
+    epoch shuffle is per epoch (seeded) and the resumed epochs match it."""
+    rows = rows_n(15)
+    val = T.JsonlSource(tmp_path / "val.jsonl", ENC, rows=[make_row(5000 + i) for i in range(20)])
+    val.fit(80)
+    ref_clock = Clock()
+    ref_be = RngEvalBackend(clock=ref_clock, sec_per_token=1.0)
+    ref = trainer(tmp_path, rows, ref_be, out="ref", cfg=_night_cfg(), val=val, clock=ref_clock.now)
+    ref.setup(resume=False)
+    assert ref.run().status == "done" and ref.step == 23  # 45 planned rows, 2 per step (groups straddle epochs)
+
+    clock = Clock()
+    steps: list[Any] = []
+    lrs: list[float] = []
+
+    def night(stop: Any = None, hook: Any = None, on_call: Any = None, resume: bool = True) -> Any:
+        be = RngEvalBackend(clock=clock, sec_per_token=1.0, on_call=on_call)
+        t = trainer(tmp_path, rows, be, out="cut", cfg=_night_cfg(), val=val, clock=clock.now,
+                    stop=stop or T.StopFlag())
+        t.setup(resume=resume)
+        return t, be, t.run(hook=hook)
+
+    # night 1: the window's stop-at between steps
+    t1, be1, r1 = night(hook=lambda tr, rec: "stop-at" if tr.step == 5 else None, resume=False)
+    assert r1.status == "stopped" and t1.step == 5
+    steps += be1.steps
+    lrs += be1.lrs
+    # night 2: SIGTERM (window_end) inside an accumulation group: that group is dropped
+    sig = T.StopFlag()
+    t2, be2, r2 = night(stop=sig, on_call=lambda n: setattr(sig, "reason", "SIGTERM") if n == 6 else None)
+    assert r2.status == "stopped" and r2.reason == "SIGTERM" and be2.pending == []
+    steps += be2.steps
+    lrs += be2.lrs
+    # night 3: a stop request while an interval checkpoint measures the held-out losses
+    sig3 = T.StopFlag()
+    be3_holder: dict[str, Any] = {}
+
+    class StopInEval(RngEvalBackend):
+        evals = 0
+
+        def eval_loss(self, ids: Any, spans: Any) -> float:
+            StopInEval.evals += 1
+            if StopInEval.evals == 30:  # well past the baseline: inside an interval measurement
+                sig3.reason = "SIGTERM"
+            return super().eval_loss(ids, spans)
+
+    be3 = StopInEval(clock=clock, sec_per_token=1.0)
+    be3_holder["be"] = be3
+    t3 = trainer(tmp_path, rows, be3, out="cut", cfg=_night_cfg(), val=val, clock=clock.now, stop=sig3)
+    t3.setup(resume=True)
+    with caplog.at_level("INFO", logger="distill.train"):
+        r3 = t3.run()
+    assert r3.status == "stopped" and r3.reason == "SIGTERM"
+    assert any("abandoned (SIGTERM)" in r.getMessage() for r in caplog.records)  # an interval eval yielded
+    assert not any(h["step"] == t3.step for h in t3.val_history if h["why"] == "interval")
+    steps += be3.steps
+    lrs += be3.lrs
+    # night 4: a crash two steps after a checkpoint: those steps are lost and done again
+    t4, be4, r4 = night(hook=lambda tr, rec: "crash" if tr.step == t3.step + 3 else None)
+    crashed_at = t4.step
+    last = T.find_latest_checkpoint(tmp_path / "cut")
+    assert last is not None
+    kept_step = int(last.name.split("-")[1])
+    # a SIGKILL leaves no stop checkpoint: drop the one the hook's clean stop wrote, keep the older ones
+    shutil.rmtree(last)
+    survivor = T.find_latest_checkpoint(tmp_path / "cut")
+    assert survivor is not None and int(survivor.name.split("-")[1]) < crashed_at == kept_step
+    lost = crashed_at - int(survivor.name.split("-")[1])
+    steps += be4.steps[:len(be4.steps) - lost]
+    lrs += be4.lrs[:len(be4.lrs) - lost]
+    # night 5: to the end
+    t5, be5, r5 = night()
+    assert r5.status == "done" and t5.step == ref.step
+    steps += be5.steps
+    lrs += be5.lrs
+    assert steps == ref_be.steps and lrs == ref_be.lrs
+    assert be5.w == pytest.approx(ref_be.w, rel=0, abs=0)
+    # the epoch shuffle: each epoch a different seeded permutation, the same in both runs
+    plan = T.epoch_plan(sorted(r["id"] for r in rows), 3, 3407)
+    assert plan[:15] != plan[15:30] != plan[30:] and sorted(plan[:15]) == sorted(plan[15:30])
+    assert t5.plan == ref.plan == plan
+    # retention: the newest 2 plus every epoch end, nothing half-written
+    names = sorted(p.name for p in (tmp_path / "cut").iterdir() if p.name.startswith("checkpoint-"))
+    ends = [n for n in names if T.is_epoch_end(tmp_path / "cut" / n)]
+    assert len(ends) == 3 and len(names) <= 2 + 3 and not any(n.endswith(".partial") for n in names)
+    # the operator's gate on the full run: val and probe fell from step 0
+    rs = json.loads((tmp_path / "cut" / T.RUN_STATE).read_text())
+    hist = rs["val_history"]
+    assert hist[0]["step"] == 0 and hist[-1]["step"] == ref.step
+    assert T.held_out_check(hist, "val_loss")["ok"] and T.held_out_check(hist, "probe_loss")["ok"]
+    assert rs["progress"]["step"] == ref.step and rs["progress"]["tokens_left"] == 0
+
+
+def test_light_checkpoints_bound_the_loss_and_evals_follow_their_own_cadence(tmp_path: Path) -> None:
+    """--save-every-minutes 1 with ~30 s steps: never more than a minute between checkpoints (what a
+    crash loses); --eval-every-minutes 3: held-out points only that often plus the epoch ends."""
+    clock = Clock()
+    rows = rows_n(12)
+    val = T.JsonlSource(tmp_path / "val.jsonl", ENC, rows=[make_row(5000 + i) for i in range(20)])
+    val.fit(80)
+    be = FakeBackend(clock=clock, sec_per_token=1.0)
+    cfg = small_cfg(save_every=1000, save_every_minutes=1.0, eval_every_minutes=3.0, keep_checkpoints=50)
+    t = trainer(tmp_path, rows, be, cfg=cfg, val=val, clock=clock.now)
+    t.setup(resume=False)
+    saved_at: list[float] = []
+    t.on_save = lambda p: saved_at.append(clock.t)
+    assert t.run().status == "done"
+    gaps = [b - a for a, b in zip(saved_at, saved_at[1:])]
+    assert gaps and max(gaps) <= 60 + 40  # a minute, plus the step that crossed it
+    evals = [h["step"] for h in t.val_history]
+    ckpts = sorted(int(p.name.split("-")[1]) for p in (tmp_path / "run").iterdir()
+                   if p.name.startswith("checkpoint-"))
+    assert len(evals) < len(ckpts) and {0, 6, 12} <= set(evals)
+    whys = {h["step"]: h["why"] for h in t.val_history}
+    assert whys[6] == "epoch" and whys[12] == "epoch"
+
+
+def test_an_interval_eval_is_not_started_when_it_would_run_past_stop_at(tmp_path: Path) -> None:
+    rows = rows_n(8)
+    val = T.JsonlSource(tmp_path / "val.jsonl", ENC, rows=[make_row(5000 + i) for i in range(20)])
+    val.fit(80)
+    stop = T.StopFlag(stop_at=time.time() + 3600)
+    t = trainer(tmp_path, rows, FakeBackend(), cfg=small_cfg(save_every=1), val=val, stop=stop)
+    t.setup(resume=False)
+    t._eval_s = 7200.0  # the last measurement took two hours: one more would end after stop-at
+    assert t.eval_due() is False
+    t._eval_s = 60.0
+    assert t.eval_due() is True
+
+
+def test_prune_keeps_epoch_ends_only_when_asked(tmp_path: Path) -> None:
+    out = tmp_path / "run"
+    for s, end in ((100, False), (200, True), (300, False), (400, True), (500, False), (600, False)):
+        d = _ckpt(out, s)
+        (d / "state.json").write_text(json.dumps({"step": s, "epoch_end": end}))
+    T.prune_checkpoints(out, 2, keep_epoch_ends=True)
+    assert sorted(p.name for p in out.iterdir()) == [
+        "checkpoint-000200", "checkpoint-000400", "checkpoint-000500", "checkpoint-000600"]
+    T.prune_checkpoints(out, 2)
+    assert sorted(p.name for p in out.iterdir()) == ["checkpoint-000500", "checkpoint-000600"]
+
+
+def test_cli_takes_the_round2_ladder_and_the_night_options() -> None:
+    a = T.build_parser().parse_args([
+        "--data", "x.jsonl", "--out", "o", "--max-seq", "49152", "--ladder", "49152,32768,16384",
+        "--eval-every-minutes", "90", "--keep-epoch-checkpoints", "--save-every-minutes", "20"])
+    cfg = T.config_from_args(a)
+    assert cfg.ladder == (49152, 32768, 16384) and cfg.max_seq == 49152 and not cfg.validate()
+    assert cfg.eval_every_minutes == 90 and cfg.keep_epoch_checkpoints and cfg.save_every_minutes == 20
+    assert T.next_seq(49152, cfg.ladder) == 32768
+    # operational knobs never change the run's identity; the default ladder keeps round 1's hash
+    base = T.config_from_args(T.build_parser().parse_args(["--data", "x", "--out", "o"]))
+    assert T.TrainConfig().sha() == base.sha()
+    assert T.TrainConfig(eval_every_minutes=5, keep_epoch_checkpoints=True).sha() == base.sha()
+    with pytest.raises(SystemExit):
+        T.build_parser().parse_args(["--data", "x", "--out", "o", "--ladder", "16384,32768"])
+    bad = T.config_from_args(T.build_parser().parse_args(["--data", "x", "--out", "o", "--max-seq", "49152"]))
+    assert any("not on the ladder" in e for e in bad.validate())
+
+
+def test_a_stop_during_an_epoch_end_measurement_completes_the_checkpoint_and_measures_on_resume(
+        tmp_path: Path) -> None:
+    """window_end's SIGTERM must not wait minutes for an epoch-end evaluation: it yields, the checkpoint
+    completes (held_out_pending), and the next night measures it before training on."""
+    rows = rows_n(8)
+    val = T.JsonlSource(tmp_path / "val.jsonl", ENC, rows=[make_row(5000 + i) for i in range(20)])
+    val.fit(80)
+    cfg = small_cfg(save_every=1000, keep_checkpoints=2, keep_epoch_checkpoints=True)
+    ref_be = FakeBackend()
+    ref = trainer(tmp_path, rows, ref_be, out="ref", cfg=cfg, val=val)
+    ref.setup(resume=False)
+    ref.run()
+    stop = T.StopFlag()
+
+    class StopInEpochEval(FakeBackend):
+        n = 0
+
+        def eval_loss(self, ids: Any, spans: Any) -> float:
+            StopInEpochEval.n += 1
+            if StopInEpochEval.n == 23:  # 20 baseline rows, then inside the epoch-1 measurement
+                stop.reason = "SIGTERM"
+            return super().eval_loss(ids, spans)
+
+    be1 = StopInEpochEval()
+    t1 = trainer(tmp_path, rows, be1, out="cut", cfg=cfg, val=val, stop=stop)
+    t1.setup(resume=False)
+    r1 = t1.run()
+    assert r1.status == "stopped" and t1.step == 4 and StopInEpochEval.n == 23
+    ck = tmp_path / "cut" / "checkpoint-000004"
+    st = json.loads((ck / "state.json").read_text())
+    assert (ck / T.COMPLETE).is_file() and st["epoch_end"] and st["held_out_pending"] and st["why"] == "epoch"
+    assert not t1.held_out_at(4)
+    be2 = FakeBackend()
+    t2 = trainer(tmp_path, rows, be2, out="cut", cfg=cfg, val=val)
+    t2.setup(resume=True)
+    assert t2.held_out_at(4)["why"] == "epoch"
+    rs = json.loads((tmp_path / "cut" / T.RUN_STATE).read_text())
+    assert rs["epochs_done"][0]["val_loss"] is not None
+    assert t2.run().status == "done"
+    assert be1.steps + be2.steps == ref_be.steps and be2.w == ref_be.w
+    assert [h["step"] for h in t2.val_history] == [h["step"] for h in ref.val_history]
+
+
+def test_a_stop_during_the_final_measurement_is_not_done_until_it_is_measured(tmp_path: Path) -> None:
+    rows = rows_n(4)
+    val = T.JsonlSource(tmp_path / "val.jsonl", ENC, rows=[make_row(5000 + i) for i in range(20)])
+    val.fit(80)
+    cfg = small_cfg(save_every=1000, epochs=1)
+    stop = T.StopFlag()
+
+    class StopInFinal(FakeBackend):
+        n = 0
+
+        def eval_loss(self, ids: Any, spans: Any) -> float:
+            StopInFinal.n += 1
+            if StopInFinal.n == 25:
+                stop.reason = "SIGTERM"
+            return super().eval_loss(ids, spans)
+
+    t1 = trainer(tmp_path, rows, StopInFinal(), cfg=cfg, val=val, stop=stop)
+    t1.setup(resume=False)
+    assert t1.run().status == "stopped" and t1.step == 2
+    t2 = trainer(tmp_path, rows, FakeBackend(), cfg=cfg, val=val)
+    t2.setup(resume=True)
+    assert t2.run().status == "done" and t2.held_out_at(2)

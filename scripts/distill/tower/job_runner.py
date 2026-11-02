@@ -56,6 +56,15 @@ Queue, in order, one step at a time, each in its own resumable directory under
    (diverged), a refusal or any other exit fails the step. Not started with
    less than ``DJR_TRAIN_MIN_MIN`` before its stop-at, or with free disk under
    ``DJR_TRAIN_MIN_FREE_GIB`` + 1 GiB.
+01b. ``train-nights`` (only with ``DJR_NIGHTS=1``; replaces ``train-full``; usually alone with
+   ``DJR_ONLY=train-nights``): the round-2 multi-night job, state machine in ``train_nights.py`` beside
+   this file (phases train -> post-train -> done; see its docstring). Training nights run the same
+   trainer command as ``train-full`` (``DJR_TRAIN_*``, plus ``DJR_TRAIN_EVAL_EVERY_MIN``,
+   ``DJR_TRAIN_LADDER``, ``DJR_TRAIN_KEEP_EPOCHS``) with ``--resume``, a SIGTERM grace of
+   ``DJR_NIGHTS_GRACE_S`` (under the window's JOB_STOP_TIMEOUT_S) and a disk need of the checkpoints the
+   run still writes; one <= 5-line Telegram per night. Post-train nights hold the window for
+   ``post_train.py --window-hold`` (``DJR_NIGHTS_HOLD_MIN``). A done or parked job makes the dry run
+   fail when nothing else is queued, so window_start skips the swap until it is disarmed.
 0. ``teacher-ab`` (only with ``DJR_AB=1``; first in the queue): the teacher quant
    A/B (``scripts/distill/teacher_ab_run.sh --execute`` from the HEAD-staged
    ``DJR_AB_CODE``, never ``DJR_CODE``, so the scorer the baselines resume with
@@ -254,6 +263,18 @@ DEFAULTS: Dict[str, str] = {
     "DJR_TRAIN_MIN_MIN": "30",         # least time worth starting it with
     "DJR_TRAIN_GRACE_S": "600",        # SIGTERM -> the trainer checkpoints and exits -> SIGKILL
     "DJR_TRAIN_STOP_TIMEOUT_S": "900",  # its scope's TimeoutStopSec (a restore stopping distill-*)
+    "DJR_TRAIN_EVAL_EVERY_MIN": "0",   # held-out val + probe at most this often at interval checkpoints (0: each)
+    "DJR_TRAIN_LADDER": "",            # e.g. 49152,32768,16384 (empty: the trainer's default ladder)
+    "DJR_TRAIN_KEEP_EPOCHS": "0",      # 1: never prune an epoch-end checkpoint (--keep-epoch-checkpoints)
+    # the round-2 multi-night job (step train-nights; off unless DJR_NIGHTS=1; uses the DJR_TRAIN_* run
+    # settings and replaces train-full in the queue; its state machine is train_nights.py beside this file)
+    "DJR_NIGHTS": "0",
+    "DJR_NIGHTS_POST_TRAIN": "1",      # 1: once trained (gate passed), hold the next windows for post_train.py
+    "DJR_NIGHTS_HOLD_MIN": "45",       # a hold the post-train pipeline has not taken by then ends
+    "DJR_NIGHTS_HOLD_LEAST_MIN": "60", # no hold with less than this before the step deadline
+    "DJR_NIGHTS_HOLD_POLL_S": "15",
+    "DJR_NIGHTS_CKPT_GIB": "0.5",      # one checkpoint's size until the run has one (round 1: 0.46 GiB)
+    "DJR_NIGHTS_GRACE_S": "300",       # SIGTERM -> checkpoint -> exit; < window.conf JOB_STOP_TIMEOUT_S (420)
     # the teacher quant A/B (step 0; off unless DJR_AB=1)
     "DJR_AB": "0",
     "DJR_AB_CODE": "{home}/code-ab",   # HEAD-staged code for the A/B only (teacher_ab*.py, teacher_gen.py, src/)
@@ -281,7 +302,8 @@ BUCKET_CTX = (131072, 65536, 32768)  # step-down contexts: each still holds a wh
 # Stop reasons that end the runner's night (anything else is per step: "deadline", "server-died").
 # The shared 4090 disk preflight (disk_preflight.py): what each step kind writes, on top of the runner's own
 # floor (DJR_DISK_FLOOR_GIB + DJR_DISK_MARGIN_GIB). A step without that room does not start: logged, Telegrammed.
-STEP_DISK_GIB = {"baseline": 1.0, "feasibility": 1.0, "ab": 2.0, "train": 3.0, "train-full": 4.0}
+STEP_DISK_GIB = {"baseline": 1.0, "feasibility": 1.0, "ab": 2.0, "train": 3.0, "train-full": 4.0,
+                 "train-nights": 4.0}  # train-nights: its own need (checkpoints still to write), see steps()
 STOP_REASONS = ("sigterm", "no-swaps", "production-unit-active", "disk-floor", "stop-at", "external-stop")
 # A child that ended by one of these was stopped (a restore stops distill-* units and scopes with
 # SIGTERM), not crashed. llama-server exits 0 on SIGTERM once loaded (its handler), and dies by the
@@ -289,7 +311,7 @@ STOP_REASONS = ("sigterm", "no-swaps", "production-unit-active", "disk-floor", "
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 SET_RETRIES = 3     # score.py passes per set that may end with errors before it is left as is
 STEP_FAILURES = 2   # a step that failed this often is skipped until someone looks
-KNOWN_STEPS = ("train-smoke", "train-full", "teacher-ab", "base-9b-baseline", "qwen38-27b-feasibility",
+KNOWN_STEPS = ("train-smoke", "train-full", "train-nights", "teacher-ab", "base-9b-baseline", "qwen38-27b-feasibility",
                "qwen38-27b-baseline", "glimmer-30b-baseline")  # DJR_ONLY must name these
 
 # Rough speeds for the plan's time estimate only (RTX 4090; see DISTILL notes):
@@ -414,6 +436,16 @@ class Cfg:
         self.train_min_s = float(raw["DJR_TRAIN_MIN_MIN"]) * 60
         self.train_grace = float(raw["DJR_TRAIN_GRACE_S"])
         self.train_stop_timeout = int(float(raw["DJR_TRAIN_STOP_TIMEOUT_S"]))
+        self.train_eval_every_min = float(raw["DJR_TRAIN_EVAL_EVERY_MIN"])
+        self.train_ladder = raw["DJR_TRAIN_LADDER"].strip()
+        self.train_keep_epochs = raw["DJR_TRAIN_KEEP_EPOCHS"].strip() == "1"
+        self.nights = raw["DJR_NIGHTS"].strip() == "1"
+        self.nights_post_train = raw["DJR_NIGHTS_POST_TRAIN"].strip() == "1"
+        self.nights_hold_s = float(raw["DJR_NIGHTS_HOLD_MIN"]) * 60
+        self.nights_hold_least_s = float(raw["DJR_NIGHTS_HOLD_LEAST_MIN"]) * 60
+        self.nights_hold_poll_s = float(raw["DJR_NIGHTS_HOLD_POLL_S"])
+        self.nights_ckpt_gib = float(raw["DJR_NIGHTS_CKPT_GIB"])
+        self.nights_grace = float(raw["DJR_NIGHTS_GRACE_S"])
 
     @property
     def train_script(self) -> str:
@@ -565,6 +597,24 @@ def disk_mod() -> Any:
                 spec.loader.exec_module(mod)
             return sys.modules[name]
     return None
+
+
+def nights_mod() -> Any:
+    """train_nights.py (the multi-night job's state machine) beside this file, or None."""
+    name = "distill_train_nights"
+    if name in sys.modules:
+        return sys.modules[name]
+    cand = Path(__file__).resolve().with_name("train_nights.py")
+    if not cand.is_file():
+        return None
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, cand)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def disk_free(path: str) -> float:
@@ -914,7 +964,11 @@ class Runner:
         if dp is None:
             return True, "no disk_preflight.py"
         floor = (self.cfg.disk_floor + self.cfg.disk_margin) / 2**30
-        need, lines = dp.plan([], need_gib=STEP_DISK_GIB.get(step["kind"], 1.0), floor_gib=floor)
+        own = step["need"]() if callable(step.get("need")) else None
+        need_gib = own[0] if own else STEP_DISK_GIB.get(step["kind"], 1.0)
+        need, lines = dp.plan([], need_gib=need_gib, floor_gib=floor)
+        if own:
+            lines = list(own[1]) + list(lines)
         v = dp.verdict(f"4090 runner step {step['name']}", disk_free(self.cfg.home) / 2**30, need, lines)
         dp.log_line(os.path.join(self.cfg.home, "logs", "disk-preflight.log"), v)
         if v.ok:
@@ -1263,7 +1317,11 @@ class Runner:
         full: List[Dict[str, Any]] = [
             {"name": "train-full", "kind": "train-full", "out": "base-9b/train-full-max-derived",
              "min_s": self.cfg.train_min_s, "must": False},
-        ] if self.cfg.train else []
+        ] if self.cfg.train and not self.cfg.nights else []
+        if self.cfg.nights:  # the multi-night job: one job directory per run
+            full = [{"name": "train-nights", "kind": "train-nights",
+                     "out": f"base-9b/train-nights-{os.path.basename(self.cfg.train_out.rstrip('/'))}",
+                     "min_s": self.cfg.train_min_s, "must": False, "need": self.nights_disk_need}]
         queue = smoke + full + ab + [
             {"name": "base-9b-baseline", "kind": "baseline", "label": "base-9b", "out": "base-9b/baseline",
              "find": find_9b, "fixed_ctx": 262144, "ub": self.cfg.ub_9b, "min_s": self.cfg.min_9b_s,
@@ -1353,6 +1411,8 @@ class Runner:
                     status, detail = self.run_smoke(step, st, deadline, p)
                 elif step["kind"] == "train-full":
                     status, detail = self.run_train_full(step, st, deadline, p)
+                elif step["kind"] == "train-nights":
+                    status, detail = self.run_train_nights(step, st, deadline, p)
                 else:
                     status, detail = self.run_feasibility(step, st, deadline, p)
             except Exception as exc:  # noqa: BLE001 - one step's bug must not end the window
@@ -1889,11 +1949,44 @@ class Runner:
                 "--save-every-minutes", f"{c.train_save_every_min:g}",
                 "--keep-checkpoints", str(c.train_keep), "--min-free-gib", f"{c.train_min_free:g}",
                 "--stop-at", str(iso(until)) if until is not None else "<stop-at>"]
+        if c.train_keep_epochs:
+            cmd.append("--keep-epoch-checkpoints")
+        if c.train_eval_every_min > 0:
+            cmd += ["--eval-every-minutes", f"{c.train_eval_every_min:g}"]
+        if c.train_ladder:
+            cmd += ["--ladder", c.train_ladder]
         if os.path.isfile(os.path.join(c.train_out, "run_state.json")):
             cmd.append("--resume")
         if c.train_md_ok:
             cmd.append("--i-have-operator-approval-for-max-derived-data")
         return cmd
+
+    def spawn_trainer(self, step: Dict[str, Any], sdir: str, until: float, p: Dict[str, Any],
+                      grace: float) -> Tuple[Optional[int], Optional[str], str, float]:
+        """The trainer in its own ``distill-train-full-<stamp>`` scope (a restore stopping distill-*
+        gives it TimeoutStopSec to checkpoint), supervised until it ends or a stop reason (SIGTERM to
+        its group, SIGKILL after *grace*). (returncode, stop reason, log path, seconds it ran)."""
+        cfg = self.cfg
+        cmd = self.train_cmd(until)
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        unit = f"distill-train-full-{stamp}"
+        scope = self.scope_prefix(unit)
+        if scope:
+            scope = scope[:-1] + [f"--property=TimeoutStopSec={cfg.train_stop_timeout}", "--"]
+        log_path = os.path.join(self.run_dir, "train-full.log")
+        self.progress["current"] = {"step": step["name"], "set": "train_qlora.py", "since": iso(now()),
+                                    "unit": f"{unit}.scope" if scope else None}
+        p["until"] = iso(until)
+        p["unit"] = f"{unit}.scope" if scope else None
+        self.save()
+        self.log(f"train until {iso(until)} in {unit}: {' '.join(cmd)}")
+        t0 = now()
+        proc = self.spawn("child", scope + cmd, log_path, cwd=sdir, env=self.smoke_env(),
+                          signature=["train_qlora.py", cfg.train_out])
+        # the trainer checkpoints and exits before --stop-at; this deadline is only the backstop
+        rc, reason = self.supervise(proc, until + grace + 120, grace)
+        self.forget("child")
+        return rc, reason, log_path, now() - t0
 
     def train_until(self, deadline: float) -> float:
         c = self.cfg
@@ -1922,24 +2015,7 @@ class Runner:
         reason = self.fresh_check(until)
         if reason:
             return "partial", f"not started ({reason})"
-        cmd = self.train_cmd(until)
-        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-        unit = f"distill-train-full-{stamp}"
-        scope = self.scope_prefix(unit)
-        if scope:  # a restore stopping distill-* gives the trainer time to checkpoint
-            scope = scope[:-1] + [f"--property=TimeoutStopSec={cfg.train_stop_timeout}", "--"]
-        log_path = os.path.join(self.run_dir, "train-full.log")
-        self.progress["current"] = {"step": step["name"], "set": "train_qlora.py", "since": iso(now()),
-                                    "unit": f"{unit}.scope" if scope else None}
-        p["until"] = iso(until)
-        p["unit"] = f"{unit}.scope" if scope else None
-        self.save()
-        self.log(f"train full until {iso(until)} in {unit}: {' '.join(cmd)}")
-        proc = self.spawn("child", scope + cmd, log_path, cwd=sdir, env=self.smoke_env(),
-                          signature=["train_qlora.py", cfg.train_out])
-        # the trainer checkpoints and exits before --stop-at; this deadline is only the backstop
-        rc, reason = self.supervise(proc, until + cfg.train_grace + 120, cfg.train_grace)
-        self.forget("child")
+        rc, reason, log_path, _ = self.spawn_trainer(step, sdir, until, p, cfg.train_grace)
         man = read_json(os.path.join(cfg.train_out, "manifest.json"))
         status = str(man.get("status") or "") if isinstance(man, dict) else ""
         summary = ""
@@ -1965,6 +2041,155 @@ class Runner:
             return "failed", f"refused: Max-derived data without both approvals: {log_tail(log_path, 2)}"
         return "failed", (f"train_qlora.py exit {rc} (manifest status {status or 'none'}): "
                           f"{summary or log_tail(log_path, 3)}")
+
+    # -- the round-2 multi-night job (train_nights.py) --------------------------------
+
+    def nights_disk_need(self) -> Optional[Tuple[float, List[str]]]:
+        """The train-nights step's disk need: the checkpoints the run still writes (its retention:
+        the newest DJR_TRAIN_KEEP + one being written + every epoch end), adapter and logs. Nothing
+        once the job is past training (the post-train pipeline has its own preflight)."""
+        tn = nights_mod()
+        if tn is None:
+            return None
+        c = self.cfg
+        js = tn.load(Path(self.step_dir(self.steps_by_kind("train-nights")))) or {}
+        if js.get("phase", "train") != "train":
+            return 0.0, [f"train-nights in phase {js.get('phase')}: no checkpoints to write"]
+        rs = read_json(os.path.join(c.train_out, "run_state.json")) or {}
+        done = len(rs.get("epochs_done") or [])
+        return tn.disk_need_gib(tn.checkpoints(Path(c.train_out)), keep=c.train_keep,
+                                epochs=c.train_epochs if c.train_keep_epochs else 0, epochs_done=done
+                                if c.train_keep_epochs else 0, default_ckpt_gib=c.nights_ckpt_gib)
+
+    def steps_by_kind(self, kind: str) -> Dict[str, Any]:
+        return next(s for s in self.steps() if s["kind"] == kind)
+
+    def run_train_nights(self, step: Dict[str, Any], st: Dict[str, Any], deadline: float,
+                         p: Dict[str, Any]) -> Tuple[str, str]:
+        """One night of the multi-night job (train_nights.py): train (resume), or hold the window for
+        the post-train pipeline, by the job's phase."""
+        cfg = self.cfg
+        tn = nights_mod()
+        if tn is None:
+            return "failed", "train_nights.py is not installed beside job_runner.py"
+        jd = Path(self.step_dir(step))
+        jd.mkdir(parents=True, exist_ok=True)
+        run = os.path.basename(cfg.train_out.rstrip("/"))
+        js = tn.load(jd) or tn.new_state(run, cfg.train_out, now())
+        prob = tn.identity_problem(js, run, cfg.train_out)
+        if prob:
+            return "failed", prob
+        p["nights"] = {"phase": js["phase"], "job_dir": str(jd)}
+        if js["phase"] == "done":
+            return "done", f"done ({(js.get('post_train') or {}).get('done') or js.get('verdict')})"[:300]
+        if js["phase"] == "failed":
+            return "skipped", f"the job is parked (failed: {js.get('last_error')}); disarm or reset it"
+        if js["phase"] == "post-train":
+            return self.hold_for_post_train(tn, js, jd, deadline, p)
+        # -- train --
+        ok, why = self.train_inputs_ok()
+        if not ok:
+            return "skipped", why
+        until = self.train_until(deadline)
+        if until - now() < step["min_s"]:
+            return "skipped", (f"{max(0.0, until - now()) / 60:.0f} min left before its stop-at "
+                               f"(needs {step['min_s'] / 60:.0f})")
+        free = disk_free(cfg.train_out if os.path.isdir(cfg.train_out) else cfg.home)
+        if free < (cfg.train_min_free + 1) * 2**30:
+            return "skipped", (f"free disk {free / 2**30:.1f} GiB is under the run's floor "
+                               f"{cfg.train_min_free:g} + 1 GiB")
+        ok, info = self.wait_gpu_free(cfg.gpu_release_s)
+        if not ok:
+            return ("partial" if self.stop else "failed"), f"GPU not free: {info}"
+        reason = self.fresh_check(until)
+        if reason:
+            return "partial", f"not started ({reason})"
+        rs_path = os.path.join(cfg.train_out, "run_state.json")
+        rec = tn.begin_night(js, now(), read_json(rs_path), window_s=until - now())
+        tn.save(jd, js)
+        rc, reason, log_path, ran_s = self.spawn_trainer(step, str(jd), until, p, cfg.nights_grace)
+        if not reason and stopped_by_signal(rc):
+            reason = self.settle() or self.external_stop("the 9B training run", rc)
+        man = read_json(os.path.join(cfg.train_out, "manifest.json"))
+        rs = read_json(rs_path)
+        ad = (man or {}).get("adapter") if isinstance(man, dict) else None
+        present = bool(ad) and all(os.path.isfile(os.path.join(str(ad), f))
+                                   for f in ("adapter_config.json", "adapter_model.safetensors"))
+        status, detail = tn.end_train_night(js, rec, rc=rc, reason=reason, man=man, rs=rs, adapter_present=present,
+                                            t=now(), train_s=ran_s, chain=cfg.nights_post_train)
+        if status == "failed" and rc not in (0, None) and not isinstance(man, dict):
+            detail += f": {log_tail(log_path, 3)}"
+        ckpts = tn.checkpoints(Path(cfg.train_out))
+        done_ep = len((rs or {}).get("epochs_done") or []) if isinstance(rs, dict) else 0
+        bad = tn.retention_problem(ckpts, keep=cfg.train_keep, epochs_done=done_ep if cfg.train_keep_epochs else 0)
+        rec["retention"] = bad or "ok"
+        if bad:
+            self.note(f"train-nights retention: {bad}")
+        tn.save(jd, js)
+        lines = tn.night_message(js, rec, rs, ckpts=ckpts, free_gib=disk_free(cfg.home) / 2**30,
+                                 keep=cfg.train_keep, night_s=rec["window_s"] or tn.NIGHT_S)
+        self.notify(lines)
+        rec["telegram"] = lines
+        tn.save(jd, js)
+        p["nights"].update(phase=js["phase"], steps=f"{rec.get('step_to')}/{rec.get('total_steps')}",
+                           outcome=rec.get("outcome"))
+        p["train"] = {"status": (man or {}).get("status") if isinstance(man, dict) else None,
+                      "summary": lines[0][:160]}
+        st["nights"] = p["nights"]
+        return status, detail
+
+    def hold_for_post_train(self, tn: Any, js: Dict[str, Any], jd: Path, deadline: float,
+                            p: Dict[str, Any]) -> Tuple[str, str]:
+        """Keep tonight's window open for the post-train pipeline (post_train.py --window-hold on the
+        3090 Ti host): hold.json says until when; the pipeline's markers say when it took and when it
+        released the GPU. Business stays down while held and comes back by the window machinery."""
+        cfg = self.cfg
+        t0 = now()
+        ev = tn.hold_events(jd, tn.night_key(t0))
+        if isinstance(ev.get("done"), dict):
+            status, detail = tn.end_hold(js, tn.begin_night(js, t0, None, window_s=0), ev, why="already done",
+                                         t=t0)
+            tn.save(jd, js)
+            return status, detail
+        if deadline - t0 < cfg.nights_hold_least_s:
+            return "skipped", f"{max(0.0, deadline - t0) / 60:.0f} min left: too little for a post-train night"
+        night = tn.night_key(t0)
+        rec = tn.begin_night(js, t0, None, window_s=deadline - t0)
+        doc = tn.hold_doc(js, night=night, since=t0, until=deadline, unit=self.progress.get("unit"),
+                          pid=os.getpid())
+        tn.write_json(jd / tn.HOLD_FILE, doc)
+        tn.save(jd, js)
+        self.progress["current"] = {"step": "train-nights", "set": "post-train hold", "since": iso(t0)}
+        p["hold"] = {"night": night, "until": iso(deadline)}
+        self.save()
+        self.log(f"post-train hold until {iso(deadline)} ({jd / tn.HOLD_FILE})")
+        why = ""
+        try:
+            while True:
+                ev = tn.hold_events(jd, night)
+                if isinstance(ev.get("done"), dict):
+                    why = "the pipeline completed"
+                    break
+                if isinstance(ev.get("released"), dict):
+                    why = f"the pipeline released the 4090 ({str(ev['released'].get('why') or '')[:80]})"
+                    break
+                reason = self.check(deadline)
+                if reason:
+                    why = reason
+                    break
+                if not ev.get("taken") and now() - t0 >= cfg.nights_hold_s:
+                    why = f"no pipeline took the 4090 within {cfg.nights_hold_s / 60:.0f} min"
+                    break
+                self.sleep(cfg.nights_hold_poll_s)
+        finally:
+            doc.update(state="ended", ended=iso(now()), why=why or "runner stopping")
+            tn.write_json(jd / tn.HOLD_FILE, doc)
+        status, detail = tn.end_hold(js, rec, tn.hold_events(jd, night), why=why, t=now())
+        tn.save(jd, js)
+        if status == "done" or not rec.get("taken"):
+            self.notify(tn.hold_message(js, status, detail))
+        p["nights"].update(phase=js["phase"], outcome="hold", taken=rec.get("taken"))
+        return status, detail
 
     # -- feasibility step ---------------------------------------------------------
 
@@ -2405,6 +2630,31 @@ def dry_run(cfg: Cfg, stop_at: float) -> int:
         chk(cfg.train_md_ok or None, "full run: Max-derived approval flag passed (Q6b)",
             "yes: the trainer also needs the dataset's own recorded approval" if cfg.train_md_ok
             else "no (DJR_TRAIN_MAX_DERIVED_OK=0): Max-derived data would be refused", required=False)
+    if cfg.nights:
+        tn = nights_mod()
+        chk(tn is not None, "train_nights.py beside the runner (DJR_NIGHTS=1)",
+            str(Path(__file__).resolve().with_name("train_nights.py")))
+        if tn is not None:
+            nstep = runner.steps_by_kind("train-nights") if any(
+                s["kind"] == "train-nights" for s in runner.steps()) else None
+            js = tn.load(Path(runner.step_dir(nstep))) if nstep else None
+            phase = (js or {}).get("phase", "train")
+            if js:
+                prob = tn.identity_problem(js, os.path.basename(cfg.train_out.rstrip("/")), cfg.train_out)
+                chk(prob is None, "train-nights job state matches DJR_TRAIN_OUT", prob or str(runner.step_dir(nstep)))
+            only_nights = bool(nstep) and [s["name"] for s in runner.steps()] == ["train-nights"]
+            # a finished or parked job must not open the window every night: the dry run fails, so
+            # window_start skips the swap (and says so) until the operator disarms it
+            chk(phase not in tn.TERMINAL or not only_nights, "train-nights job has work left",
+                f"phase {phase}" + (f" ({js.get('last_error')})" if js and js.get("last_error") else "")
+                + ("; nothing else is queued: disarm it (DJR_NIGHTS=0)" if phase in tn.TERMINAL else ""))
+            if phase == "train":
+                tr_ok, tr_why = runner.train_inputs_ok()
+                chk(tr_ok or None, "train-nights trainer inputs (never required: execute skips the night)",
+                    (f"{cfg.train_script}; data {cfg.train_data} ({count_lines(cfg.train_data)} rows); base "
+                     f"{cfg.train_base} @{runner.train_base_rev()[:12]}" if tr_ok else tr_why), required=False)
+                chk(cfg.nights_grace + 60 <= 420 or None, "train-nights stop grace fits window.conf "
+                    "JOB_STOP_TIMEOUT_S (420 s)", f"DJR_NIGHTS_GRACE_S {cfg.nights_grace:g}", required=False)
     if cfg.ab:
         ab_ok, ab_why = runner.ab_inputs_ok()
         chk(ab_ok or None, "teacher A/B inputs (DJR_AB=1; never required: execute skips the step)",
@@ -2458,6 +2708,24 @@ def dry_run(cfg: Cfg, stop_at: float) -> int:
                 print(f"    result so far: {st['smoke']}")
             print("    then: the smoke adapter's eval (merge, quantize, score) is a later step, not this one")
             est_total += 60 * 60
+            continue
+        if step["kind"] == "train-nights":
+            tn = nights_mod()
+            js = tn.load(Path(sdir)) if tn else None
+            phase = (js or {}).get("phase", "train")
+            print(f"    multi-night job: phase {phase}; {len((js or {}).get('nights') or [])} nights so far; "
+                  f"state {Path(sdir) / 'nights.json'}")
+            if phase == "train":
+                print("    trainer (HF_HUB_OFFLINE=1, resumes; SIGTERM grace "
+                      f"{cfg.nights_grace:g}s): " + " ".join(runner.train_cmd(None)))
+                need = runner.nights_disk_need()
+                if need:
+                    print(f"    disk need {need[0]:.1f} GiB: " + "; ".join(need[1]))
+                est_total += max(0.0, runner.train_until(stop_at) - t)
+            elif phase == "post-train":
+                print(f"    hold the window for post_train.py --window-hold (hold.json; ends unless taken within "
+                      f"{cfg.nights_hold_s / 60:.0f} min)")
+                est_total += max(0.0, stop_at - t)
             continue
         if step["kind"] == "train-full":
             ok, why = runner.train_inputs_ok()
@@ -2566,12 +2834,13 @@ def summary_lines(progress: Any) -> List[str]:
         name = s.get("name", "?")
         short = {"base-9b-baseline": "9B base", "qwen38-27b-feasibility": "27B feas",
                  "qwen38-27b-baseline": "27B bake", "glimmer-30b-baseline": "Glimmer",
-                 "teacher-ab": "A/B", "train-smoke": "smoke", "train-full": "9B train"}.get(name, name)
+                 "teacher-ab": "A/B", "train-smoke": "smoke", "train-full": "9B train",
+                 "train-nights": "9B nights"}.get(name, name)
         status = s.get("status")
         if name == "train-smoke":
             sm = (s.get("smoke") or {}).get("summary")
             out.append(f"{short} {status}: " + (sm or str(s.get("detail", "")))[:110])
-        elif name == "train-full":
+        elif name in ("train-full", "train-nights"):
             tr = (s.get("train") or {}).get("summary")
             out.append(f"{short} {status}: " + (tr or str(s.get("detail", "")))[:110])
         elif name == "teacher-ab":
