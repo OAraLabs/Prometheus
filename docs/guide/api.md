@@ -166,6 +166,9 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8005/v1/chat/completi
 | DELETE | `/api/skills/{name}/pin` | Unpin a skill |
 | GET | `/api/profiles` | List agent profiles |
 | PUT | `/api/profiles/active` | Switch active profile |
+| PUT | `/api/devices/{device_id}/profile` | Hold a device to a profile, or lift its hold. Body `{"profile": "<name>"}`; null or blank lifts it. Operator only. Every run under one of that device's sessions is offered only the profile's tools and refused any other at the call, with no fallback that widens it (a held profile that matches no tool, or no longer exists, runs none). The device cannot lift or change its hold, its sessions' profile or the active one, and while the hold stands its sessions cannot be rebound (`PUT /api/sessions/{id}/profile` answers 409). An owner device cannot be held (400). `GET /api/devices` shows each device's `profile` |
+
+A held device suits a caller beside the owner's own assistant that must never run shell, file or web tools: give it an ordinary (scoped) device token, hold it to a profile listing only the tools it may use, and the owner's other devices and gateways keep the instance's default profile.
 
 ### Tools — deferred loading
 

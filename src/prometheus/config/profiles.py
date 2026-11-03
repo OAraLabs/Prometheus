@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 import contextvars
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import yaml
@@ -35,6 +35,10 @@ class AgentProfile:
     exclude_tools: list[str] = field(default_factory=list)
     subsystems: dict[str, bool] = field(default_factory=dict)
     max_tool_schemas: int | None = None
+    # Set on the copy ActiveProfileState.get returns for a run the operator HOLDS to this profile (a held
+    # device's session). A hold has no fallback that widens it: the loop's "matches no tool, so ignore it"
+    # rule, meant for a mistyped profile, does not apply, and a run that cannot resolve its hold gets none.
+    held: bool = False
 
 
 # ------------------------------------------------------------------
@@ -197,6 +201,9 @@ class ActiveProfileState:
         # lookup is attached late — the same shape as session_manager.lcm_engine.
         # Without it every session follows the global name: exactly the old behaviour.
         self.session_lookup = session_lookup
+        # The profile a session's runs are HELD to (its owner device's hold, web/launcher.py wires
+        # DeviceStore.session_hold), or None. Attached late for the same reason as session_lookup.
+        self.session_hold: Callable[[str], str | None] | None = None
         self._name = default_name if store.get(default_name) else "full"
         # Names already warned about, so a bound-but-deleted profile logs once, not per turn.
         self._warned_missing: set[str] = set()
@@ -232,6 +239,9 @@ class ActiveProfileState:
         would break the session silently; trusting the dangling name would filter
         the catalog against a profile that no longer exists.
         """
+        held = self.held(session_id)
+        if held is not None:
+            return held
         if session_id and self.session_lookup is not None:
             try:
                 bound = self.session_lookup(session_id)
@@ -249,6 +259,31 @@ class ActiveProfileState:
                         session_id, bound, self._name,
                     )
         return self._store.get(self._name)
+
+    def held(self, session_id: str | None) -> AgentProfile | None:
+        """The profile a run under *session_id* is held to, marked ``held``; None when it is not held.
+
+        A hold wins over the session's own binding and the daemon-wide name, and it never falls back to
+        either: a held profile that no longer exists, or a hold that cannot be read, gives the run NO tools.
+        Falling back would hand a device that must stay read-only the instance's full profile.
+        """
+        if not session_id or self.session_hold is None:
+            return None
+        try:
+            name = self.session_hold(session_id)
+        except Exception:
+            log.error("could not read whether session %s is held to a profile — no tools for this run",
+                      session_id, exc_info=True)
+            return AgentProfile(name="(unreadable hold)", tools=[], held=True)
+        if not name:
+            return None
+        profile = self._store.get(name)
+        if profile is None:
+            if name not in self._warned_missing:
+                self._warned_missing.add(name)
+                log.error("session %s is held to unknown profile %r — no tools until it exists", session_id, name)
+            return AgentProfile(name=name, tools=[], held=True)
+        return replace(profile, held=True)
 
 
 # The profile THIS run is held to, or None for no limit. A profile used to filter only what a run

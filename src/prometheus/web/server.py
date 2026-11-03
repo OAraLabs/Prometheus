@@ -397,6 +397,11 @@ def create_app(
             _device_store_holder[0] = DeviceStore()
         return _device_store_holder[0]
 
+    # A device the operator HOLDS to a profile holds every run under its sessions to that profile
+    # (PUT /api/devices/{id}/profile). The one profile state the loops resolve through reads the holds here.
+    if profile_state is not None and hasattr(profile_state, "session_hold"):
+        profile_state.session_hold = lambda session_id: _devices_or_create().session_hold(session_id)
+
     # ── Device scoping ───────────────────────────────────────────────
     # A device token sees and manages only the sessions that device owns; the
     # global token (and a daemon with auth off) is unrestricted. The rule lives
@@ -655,6 +660,7 @@ def create_app(
         _store = _devices_or_create()
         _marked = _store.computer_device_ids()
         _owners = _store.owner_sources(include_revoked=True)  # a tombstone keeps its history
+        _held = _store.device_profiles()
         # An operator (the global token or an owner device) sees every device. A SCOPED device sees itself:
         # a client still finds its own row (is_self, its id, its push state), and learns nothing about who
         # else is enrolled (names, platforms, last seen, the owner flag), which an approved device is
@@ -676,6 +682,8 @@ def create_app(
             # credential is visible and revocable rather than something nobody can see.
             "owner": d.id in _owners,
             "owner_source": _owners.get(d.id),
+            # The profile the operator holds this device to (every run under its sessions), or None.
+            "profile": _held.get(d.id),
         } for d in _store.list_devices() if _everyone or d.id == self_id]
 
     def _may_manage_push(request: Request, device_id: str):
@@ -766,6 +774,44 @@ def create_app(
         if not _devices_or_create().revoke(device_id):
             return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
         return {"ok": True, "id": device_id}
+
+    @app.put("/api/devices/{device_id}/profile")
+    async def hold_device_to_profile(device_id: str, request: Request):
+        """Hold a device to a profile, or lift its hold. Body: ``{"profile": str}``; null or blank lifts it.
+
+        Every run under one of the device's sessions is then held to that profile: offered only its tools,
+        refused any other at the call, with no fallback that widens it. For a caller beside the owner's own
+        assistant that must stay read-only. The operator's (the middleware refuses a scoped device, so a held
+        device cannot lift its own hold), and an owner device cannot be held: it is the operator, and could.
+        """
+        from prometheus.permissions import approver as _approver
+
+        if not _scope(request).unrestricted:
+            return JSONResponse(status_code=403, content={"error": "operator_only"})
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
+        raw = body.get("profile") if isinstance(body, dict) else None
+        if raw is not None and not isinstance(raw, str):
+            return JSONResponse(status_code=400, content={"error": "profile must be a string or null"})
+        name = (raw or "").strip()
+        store = _devices_or_create()
+        if not any(d.id == device_id and d.revoked_at is None for d in store.list_devices()):
+            return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
+        if name:
+            if store.is_owner(device_id):
+                return JSONResponse(status_code=400, content={
+                    "error": "an owner device cannot be held to a profile: it is the operator, and could lift "
+                             "the hold itself. Hold a scoped device instead."})
+            if profile_state is None:
+                return JSONResponse(status_code=503, content={"error": "profile store unavailable"})
+            if profile_state._store.get(name) is None:
+                return JSONResponse(status_code=400, content={
+                    "error": f"unknown profile {name!r}", "known": profile_state._store.names()})
+        if not store.set_profile(device_id, name or None, by=_approver.from_request(request).label):
+            return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
+        return {"id": device_id, "profile": name or None}
 
     # Store references for route handlers
     app.state.config = config
@@ -2179,16 +2225,26 @@ def create_app(
             "forks": store.list_session_forks(session_id),
         }
 
+    def _session_hold(session_id: str) -> str | None:
+        """The profile this session's device is held to, or None."""
+        return _devices_or_create().session_hold(session_id) if _devices() is not None else None
+
     @app.get("/api/sessions/{session_id}/profile")
     async def get_session_profile(session_id: str):
         """Which profile this session runs under, and WHY.
 
         `source` is the point: `session` means someone chose it for this conversation,
-        `global` means it follows the daemon-wide active profile. Returning only the
+        `global` means it follows the daemon-wide active profile, and `held` means its device is held to a
+        profile, which no binding can change (PUT /api/devices/{id}/profile). Returning only the
         effective name would make "chosen" and "inherited" indistinguishable — and a
         client cannot offer "reset to automatic" for a value it cannot tell apart from
         a default.
         """
+        held = _session_hold(session_id)
+        if held:
+            # Its device is held to a profile, which wins over any binding and cannot be changed here.
+            return {"session_id": session_id, "profile": held, "effective": held, "source": "held",
+                    "dangling": profile_state is None or profile_state._store.get(held) is None}
         lcm = getattr(app.state, "lcm_engine", None)
         store = lcm.conversation_store if lcm is not None else None
         bound = store.get_session_profile(session_id) if store is not None else None
@@ -2350,6 +2406,11 @@ def create_app(
         something that can never resolve, and the failure would surface later as
         "why is this conversation not using my profile" with nothing to point at.
         """
+        held = _session_hold(session_id)
+        if held:
+            return JSONResponse({"error": f"this conversation belongs to a device held to profile {held!r}; "
+                                          f"lift the hold first (PUT /api/devices/<id>/profile)",
+                                 "profile": held}, status_code=409)
         lcm = getattr(app.state, "lcm_engine", None)
         store = lcm.conversation_store if lcm is not None else None
         if store is None:
