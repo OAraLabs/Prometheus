@@ -214,6 +214,12 @@ class AnatomyWriter:
                 gpu_lines.append(
                     f"  - VRAM: {used}MB / {total}MB used ({free}MB free)"
                 )
+        elif state.gpu_is_remote and state.gpu_inference_host and state.gpu_probe_method == "not_configured":
+            # Not a failure: no SSH user is set, so the card was never asked.
+            gpu_lines.append(
+                f"- **Inference GPU (REMOTE — {state.gpu_inference_host}):** "
+                f"{state.gpu_probe_error or 'not configured'}"
+            )
         elif state.gpu_is_remote and state.gpu_inference_host:
             # Probe failed. Say so — an absent heading is indistinguishable
             # from "there is no GPU", which is a different fact.

@@ -188,7 +188,10 @@ class TestAnatomyScanner:
         assert state.gpu_name is None
         assert state.gpu_is_remote is True
         assert state.gpu_probe_error is not None
-        assert "SSH credentials" in state.gpu_probe_error
+        # Reported as a setting, not a failure (tests/test_anatomy_chat_surfaces.py).
+        assert state.gpu_probe_method == "not_configured"
+        assert state.gpu_probe_error.startswith("not configured")
+        assert "anatomy.ssh_user" in state.gpu_probe_error
         # Local card surfaces as the secondary field — properly attributed
         assert state.local_gpu_name == "NVIDIA RTX 3090 Ti"
 
