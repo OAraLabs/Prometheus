@@ -218,6 +218,8 @@ The local engines stay as the fallback:
 
 You are told too, not just the log. The first time a server stops answering (or refuses the key, or rejects the request), you get one line saying so, for example "Your speech-to-text server isn't answering, so this computer's own speech-to-text is being used until it is back." When it answers again you get one more line saying so. Nothing is said while it stays down. Telegram and Discord send the line to the chat that used voice, `oara --voice` prints it, and the `tts` tool adds it to its result. Restarting the daemon forgets the outage.
 
+**Without editing a file.** A voice box can also join by its address alone: the owner sends `POST /api/pieces/probe {"address": "<machine>[:<port>]"}` (Beacon does this when you type the address), Prometheus finds the speech-to-text and text-to-speech servers there and asks once, "Found a voice box… Use it?", and after `POST /api/pieces/{id}/approve` voice uses it from the next message, with no restart. For now this works for a box on this machine or a mesh VPN address over plain HTTP. Such a box can't prove who it is, so it is labelled "not verified" and is given no key. A `stt.url` or `tts.url` in `prometheus.yaml` still wins.
+
 `oara doctor` shows a **Remote STT** or **Remote TTS** row for each url you set. It reports whether the server answers and whether it refused the key. Doctor asks for the server's `/health` first, at the server root beside `/v1`. It then asks for the `/v1/models` list, if the server has one, to check the key. A server that serves only `/health` counts as reachable. The key is sent as you configured it, so use https or a private network for a server on another machine.
 
 ### Paperclip gateway — Default: off. Experimental

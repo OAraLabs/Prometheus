@@ -90,8 +90,11 @@ not cross it) or on another subnet.
 
 - With a port, only that port is asked.
 - Without one, a short fixed list on that one host: the card port of `oara piece announce`, the local model server
-  ports setup's probe already knows (`docs/contracts/setup-probe.md`), and the usual voice ports. Never a range, never
-  another host. There is no LAN scan.
+  ports setup's probe already knows (`docs/contracts/setup-probe.md`), and the usual voice ports (8000 to 8003 and
+  8880). Never a range, never another host. There is no LAN scan.
+- A box found on more than one port (speech-to-text on one, text-to-speech on another) is one piece, and its
+  `address` is the host without a port. Probing an address that names a piece already stored or pending answers that
+  piece, not a second one.
 
 ### 3.3 What a probe may do
 
@@ -225,7 +228,8 @@ above; unknown fields are dropped.
 ### 6.3 No card
 
 A piece with no card joins only by typed address (never from mDNS). Prometheus builds an unsigned card from what the
-probe found, names it after its address until the owner renames it, and it is **not verified**.
+probe found, names it after its address until the owner renames it, and it is **not verified**. Each offer's `url` in
+such a card is the server root (`http://<address>:<port>`); the route is added when it is used.
 
 ## 7. Approval
 
@@ -262,11 +266,11 @@ All routes are operator-only. JSON in and out; errors are `{"error": <code>, "de
 | `GET /api/pieces` | The fleet view (below). |
 | `POST /api/pieces/probe` | `{"address"}` → probe (section 3.2); found pieces become pending and are in the answer. |
 | `POST /api/pieces/{id}/approve` | `{"uses": [...], "secret"?: "<string>"}` → `approved`. `uses` defaults to every offered kind. |
-| `POST /api/pieces/{id}/deny` | "Not now": a pending piece is dropped. |
+| `POST /api/pieces/{id}/deny` | "Not now": a pending piece is dropped. Answers `{"id", "state": "denied"}`. |
 | `POST /api/pieces/{id}/ignore` | Stored as `ignored`. |
 | `POST /api/pieces/{id}/trust-new-key` | After `key_changed`: pins the key the piece now proves and resumes use. |
 | `PATCH /api/pieces/{id}` | `{"name"?, "uses"?}` |
-| `DELETE /api/pieces/{id}` | Forgets an approved or ignored piece; its env variable is removed. |
+| `DELETE /api/pieces/{id}` | Forgets an approved, ignored or pending piece; its env variable is removed. Answers `{"id", "state": "forgotten"}`. |
 
 `GET /api/pieces` answers:
 
@@ -297,6 +301,9 @@ All routes are operator-only. JSON in and out; errors are `{"error": <code>, "de
 - `health.state`: `unknown`, `online`, `offline`, `refused` (the piece rejected the key) or `key_changed`.
 - `created_at`, `updated_at`: when the row was first stored and last changed (UTC, ISO 8601); `last_seen`: the last
   good answer from the piece, or null. A pending piece has no row: its `created_at` is when it was noticed.
+- A `config_file` row has `created_at` and `updated_at` null, and `address_class` null when the file names the host
+  by name (only a literal address is classed; nothing is resolved to answer a read).
+- A probe's `found[]` entries carry one more field, `prompt`: the sentence of section 7.1.
 
 WebSocket frames, to operators only: `piece_found` (a piece became pending; the same object as one `pieces[]` entry,
 plus the prompt sentence), `piece_resolved` (`{id, state}` after approve, deny, ignore or expiry),
@@ -332,7 +339,9 @@ after a call to it fails.
 | `unknown_piece` | 404 | No piece with that id, or it expired. |
 | `config_file_entry` | 409 | A write to a `source: config_file` row. |
 | `no_adapter` | 409 | Approving an agent before the A2A adapter ships. |
+| `invalid_request` | 400 | A body that is not what the route takes (an approve's `uses` that the piece does not offer). |
 | `plaintext_not_allowed` | 422 | Plain HTTP to a `lan` or `public` address (section 5.2). |
+| `tls_not_supported` | 422 | An HTTPS address: this version does not pin a piece's certificate yet (section 5.2 rule 2). |
 | `secret_needs_proof` | 422 | A secret for an unverified piece over plain HTTP. |
 | `address_not_allowed` | 422 | An address that does not parse, resolves to nothing, or a card URL off its host. |
 | `card_invalid` | 422 | A card that is not version 1, or whose signature does not verify. |
@@ -376,7 +385,7 @@ Pending pieces and health are in memory. Rows are written only by the daemon's o
 | 1 | This contract. |
 | 2 | Voice fallback says so (section 9) for the YAML-configured remote voice servers. |
 | 3 | The `pieces` store and `GET /api/pieces` (`{"v": 1, "pieces": [], ...}` until something writes a row). |
-| 4 | A typed address joins a voice box: probe, prompt, approve, pin, live use, health and fallback. The gateways resolve voice per call (through the pieces registry) instead of at boot. |
+| 4 | A typed address joins a voice box: probe, prompt, approve, live use and fallback, with the gateways resolving voice per call through the registry. This step builds the cardless half: voice boxes on loopback or a mesh VPN over plain HTTP, not verified and given no secret. Pinning (cards, the challenge, TLS) comes with step 5; a health watch later. |
 | 5 | `oara piece announce`. |
 | 6 | The mDNS browser. |
 | 7–8 | Model servers as pieces: named backends at runtime, then "make it the main model". |

@@ -137,7 +137,7 @@ def _endpoint(kind: str, url: str) -> str:
 def remote_settings(
     kind: str, config: Mapping[str, Any] | None = None,
 ) -> RemoteVoice | None:
-    """The configured remote for *kind* (``"stt"``/``"tts"``), or None when unset.
+    """The remote for *kind* (``"stt"``/``"tts"``): prometheus.yaml's, else an approved piece's; None when neither.
 
     *config* is the loaded prometheus.yaml; None reads it from the usual search
     path (the ``tts`` tool and the STT tool are built without one).
@@ -147,7 +147,23 @@ def remote_settings(
     block = config.get(kind, {})
     if not isinstance(block, Mapping):
         block = {}
-    url = str(block.get("url", "") or "").strip()
+    if _yaml_url(kind, config):
+        # Set in the file: it decides, even when it is refused (a bad api_key_env means the local engine).
+        return configured_remote(kind, config)
+    # No url in prometheus.yaml: a piece the owner approved for this use (docs/contracts/pieces.md). The yaml
+    # entry, when there is one, wins (section 10). An approved piece that cannot prove who it is gets no key.
+    from prometheus.infra.pieces import approved_offer
+
+    root = approved_offer(kind)
+    if root is None:
+        return None
+    return _remote(kind, block, url=root, api_key_env="")
+
+
+def _yaml_url(kind: str, config: Mapping[str, Any]) -> str:
+    """The url prometheus.yaml gives *kind*, or ""."""
+    block = config.get(kind, {})
+    url = str(block.get("url", "") or "").strip() if isinstance(block, Mapping) else ""
     if not url and kind == "stt":
         # whisper: is where local speech-to-text is configured, so whisper.url
         # is the name an operator reaches for first. The stt: block keeps
@@ -155,6 +171,15 @@ def remote_settings(
         whisper = config.get("whisper", {})
         if isinstance(whisper, Mapping):
             url = str(whisper.get("url", "") or "").strip()
+    return url
+
+
+def configured_remote(kind: str, config: Mapping[str, Any]) -> RemoteVoice | None:
+    """The remote *kind* that prometheus.yaml itself names (``stt.url`` / ``tts.url`` / ``whisper.url``), or None."""
+    block = config.get(kind, {})
+    if not isinstance(block, Mapping):
+        block = {}
+    url = _yaml_url(kind, config)
     if not url:
         return None
     if block.get("api_key"):
@@ -172,11 +197,15 @@ def remote_settings(
             "Using the local engine.", kind,
         )
         return None
+    return _remote(kind, block, url=url, api_key_env=key_env or DEFAULT_KEY_ENV[kind])
+
+
+def _remote(kind: str, block: Mapping[str, Any], *, url: str, api_key_env: str) -> RemoteVoice:
     default_model = "whisper-1" if kind == "stt" else "tts-1"
     return RemoteVoice(
         kind=kind,
         url=_endpoint(kind, url),
-        api_key_env=key_env or DEFAULT_KEY_ENV[kind],
+        api_key_env=api_key_env,
         model=str(block.get("model", default_model) or default_model),
         # Empty: no voice is sent and the server uses its own default.
         voice=str(block.get("voice", "") or ""),
