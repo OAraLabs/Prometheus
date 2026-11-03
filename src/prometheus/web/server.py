@@ -28,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from prometheus.web import hello as hello_mod
 from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import is_loopback_host_header, is_same_machine
-from prometheus.web.route_access import SCOPED_APPROVE_SCOPES, is_scoped_allowed
+from prometheus.web.route_access import is_scoped_allowed
 from prometheus.web.public_routes import is_public_route
 from prometheus.web.serving import bound_port
 from prometheus.web.session_scope import (
@@ -5112,14 +5112,23 @@ def create_app(
             "ok": False, "remembered": False, "grant_id": None, "message": detail, "skipped": 0,
             "error": "no_longer_active", "resolution": resolution, "detail": detail})
 
-    def _scope_refusal(request: Request, scope: str) -> JSONResponse | None:
-        """The 403 for a scoped caller asking for a lasting or widened grant, else None."""
-        if _scope(request).unrestricted or scope in SCOPED_APPROVE_SCOPES:
+    def _scope_refusal(request: Request, action: Any) -> JSONResponse | None:
+        """The 403 for a scoped caller approving anything but a desktop prompt, else None.
+
+        A scoped device sees and denies its own sessions' requests and never approves one: only the owner does.
+        Whatever sits behind a device token (an upstream app, a relay, a client that read injected text) could
+        otherwise sanction the call the gate stopped for the owner to see, in the same breath as it asked for
+        it. A desktop prompt is the door's: a device a person marked for computer use answers it, and
+        :func:`_desktop_approve_refusal` holds every other credential to that.
+        """
+        if _scope(request).unrestricted:
+            return None
+        if action is not None and getattr(action, "task_id", None) is not None:
             return None
         return JSONResponse(status_code=403, content={
             "error": "operator_only",
-            "detail": f"a device may approve its own session's tool calls with {list(SCOPED_APPROVE_SCOPES)} "
-                      "only; a lasting or wider grant belongs to the owner"})
+            "detail": "only the owner approves a tool call; this device may deny its own session's requests, "
+                      "and the owner answers the rest from Telegram or their own device"})
 
     @app.get("/api/approvals")
     async def get_approvals(request: Request):
@@ -5201,16 +5210,15 @@ def create_app(
                 status_code=400,
                 content={"error": f"scope must be one of {list(approve_verbs())}"},
             )
-        # A persistent grant, or the directory-widened form, is the owner's: 403 like every other
-        # operator-only act, and nothing was approved.
-        if (refusal := _scope_refusal(request, scope)) is not None:
-            return refusal
         from prometheus.gateway import commands as _cmds
 
-        # A DESKTOP TASK'S PROMPT (computer-use v1.1): approve-once, only a
-        # person, and only a client that can SHOW what it approves.
         _pending = getattr(queue, "pending", {}) or {}
         _desk = _pending.get(request_id) if request_id != "all" else None
+        # Approving is the owner's: a scoped device is refused (403) whatever the scope, and nothing was approved.
+        if (refusal := _scope_refusal(request, _desk)) is not None:
+            return refusal
+        # A DESKTOP TASK'S PROMPT (computer-use v1.1): approve-once, only a
+        # person, and only a client that can SHOW what it approves.
         if _desk is not None and getattr(_desk, "task_id", None) is not None:
             refusal = _desktop_approve_refusal(request, _desk, scope)
             if refusal is not None:

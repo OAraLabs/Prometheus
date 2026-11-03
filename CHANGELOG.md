@@ -4,6 +4,8 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Devices: a scoped device (an approved phone, a server-to-server caller) can no longer approve the gated tool calls of its own sessions, once or until a restart. It still sees and may deny them; only the owner approves. A desktop prompt is unchanged: a device a person marked for computer use answers it.
+
 ## 0.9.20 (2026-11-02)
 
 0.9.20 fixes a security issue: a file tool could be redirected through a link to a file the permission gate protects. It also:
