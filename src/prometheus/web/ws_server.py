@@ -17,6 +17,7 @@ REST server: forcing uvicorn to loopback leaves this one on every interface.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import http
 import json
 import logging
@@ -856,7 +857,8 @@ class WebSocketBridge:
                 return
             if session_id and content_b64:
                 await self._handle_file_upload(
-                    session_id, filename, content_b64, mime_type, caption
+                    session_id, filename, content_b64, mime_type, caption,
+                    **({} if self._scope(websocket).unrestricted else {"operator": False}),
                 )
 
         elif cmd_type == "switch_session":
@@ -918,8 +920,13 @@ class WebSocketBridge:
         content_base64: str,
         mime_type: str,
         caption: str,
+        *,
+        operator: bool = True,
     ) -> None:
         """Handle a file upload from Beacon dashboard.
+
+        *operator* is False when a SCOPED device sent it: the message it becomes is then a scoped device's, for the
+        slash-command rule and for the turn's trust (see :meth:`_handle_send_message`).
 
         Routes by type:
           - Images → cache + vision analysis (same as Telegram photos)
@@ -970,7 +977,7 @@ class WebSocketBridge:
                 )
                 if caption:
                     note = f"{note}\n{caption}"
-                await self._handle_send_message(session_id, note)
+                await self._handle_send_message(session_id, note, **({} if operator else {"operator": False}))
                 return
 
             # THE GATE. Ask the provider this turn will actually use — see
@@ -999,7 +1006,8 @@ class WebSocketBridge:
                         "upload: %s carried as an image block (session=%s)",
                         filename, session_id,
                     )
-                    await self._handle_send_message(session_id, user_text, blocks=[block])
+                    await self._handle_send_message(session_id, user_text, blocks=[block],
+                                                   **({} if operator else {"operator": False}))
                     return
                 # prepare_image_block said no (unreadable / not an image) — fall
                 # through to the description path rather than dropping it.
@@ -1045,7 +1053,7 @@ class WebSocketBridge:
                 )
                 if caption:
                     note = f"{caption}\n\n{note}"
-                await self._handle_send_message(session_id, note)
+                await self._handle_send_message(session_id, note, **({} if operator else {"operator": False}))
                 return
             extracted = extract_text(cached_path)
             if extracted:
@@ -1056,7 +1064,7 @@ class WebSocketBridge:
                 user_text = caption or f"[The user sent a document: {filename}]"
 
         # Dispatch as a user message (same as _handle_send_message)
-        await self._handle_send_message(session_id, user_text)
+        await self._handle_send_message(session_id, user_text, **({} if operator else {"operator": False}))
 
     async def _describe_image(self, image_path: str) -> str | None:
         """Run vision analysis on a cached image file.
@@ -1491,7 +1499,8 @@ class WebSocketBridge:
 
         # If we have a loop context, run the agent
         if self.loop_context:
-            asyncio.create_task(self._run_agent(session_id, session, mode=mode, tool_choice=tool_choice))
+            asyncio.create_task(self._run_agent(session_id, session, mode=mode, tool_choice=tool_choice,
+                                                **({} if operator else {"operator": False})))
 
     async def _broadcast_command_reply(
         self,
@@ -1608,7 +1617,7 @@ class WebSocketBridge:
 
     async def _run_agent(
         self, session_id: str, session: Any, mode: str = "agent", tool_choice: object | None = None,
-        raise_on_error: bool = False,
+        raise_on_error: bool = False, operator: bool = True,
     ) -> tuple[str, Any]:
         """Run the agent loop and stream results over WebSocket. `mode` ('agent'|'chat')
         is threaded as a per-call run_loop arg — NEVER stored on the shared loop_context —
@@ -1690,7 +1699,7 @@ class WebSocketBridge:
                     return await self._run_agent_locked(
                         session_id, session, mode=mode, tool_choice=tool_choice,
                         raise_on_error=raise_on_error, msg_id=msg_id,
-                        progress=progress,
+                        progress=progress, operator=operator,
                     )
                 finally:
                     COMPACTION_REPORTER.reset(reporter)
@@ -1720,10 +1729,25 @@ class WebSocketBridge:
                 "payload": {"state": "idle", "session_id": session_id},
             })
 
+    def _turn_context(self, session_id: str, operator: bool) -> Any:
+        """The loop context a turn runs on.
+
+        The shared context's session id is the literal ``"web"``, which the permission gate reads as the owner at
+        the keyboard (origin ``user``): the exfiltration check and the network/install approval patterns are
+        relaxed for it. A SCOPED device's turn is not the owner's, so it runs on a copy whose session id is the
+        turn's own session. The gate then classes it ``system`` (untrusted), and the tools that read the session
+        (the message tool's destination check) see the device's conversation, not ``"web"``. A device cannot
+        claim an id the gate would read as a person present (web/session_scope.py), so the copy's id is never
+        that. Per turn and never stored: concurrent turns cannot cross.
+        """
+        if operator or self.loop_context is None:
+            return self.loop_context
+        return dataclasses.replace(self.loop_context, session_id=session_id)
+
     async def _run_agent_locked(
         self, session_id: str, session: Any, *, mode: str,
         tool_choice: object | None, raise_on_error: bool,
-        msg_id: str, progress: dict,
+        msg_id: str, progress: dict, operator: bool = True,
     ) -> tuple[str, Any]:
         """Serialized core of :meth:`_run_agent` (holds the session's turn
         lock — same split as the telegram gateway's ``_run_agent_turn`` /
@@ -1749,8 +1773,8 @@ class WebSocketBridge:
             messages = session.get_messages()
             original_len = len(messages)
             async for event, _usage in run_loop(
-                self.loop_context, messages, mode=mode, session_id=session_id, tool_choice=tool_choice,
-                surface="beacon",
+                self._turn_context(session_id, operator), messages, mode=mode, session_id=session_id,
+                tool_choice=tool_choice, surface="beacon",
             ):
                 if _usage is not None:
                     last_usage = _usage

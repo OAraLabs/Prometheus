@@ -165,6 +165,13 @@ class SessionAccess:
             return False  # somebody's — this device's was handled by owns()
         if gateway_of(session_id) in DAEMON_GATEWAYS or session_id in MACHINE_SESSION_IDS:
             return False
+        # Nor an id the permission gate reads as the owner at the keyboard (``web``, ``cli``, a ``matrix:`` or
+        # ``signal:`` chat): a device's turns run under their own session (WebSocketBridge._turn_context), so
+        # naming one of these would put them back in the trusted class.
+        from prometheus.permissions.checker import names_a_present_person
+
+        if names_a_present_person(session_id):
+            return False
         return not self._exists(session_id)
 
     def owned_ids(self, scope: Scope) -> set[str] | None:

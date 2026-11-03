@@ -4,6 +4,8 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Devices: a scoped device's turns (Beacon's WebSocket, `POST /api/chat/send`) run under their own session id instead of the shared `web` one, and so in the permission gate's untrusted class: the exfiltration check and the network/install approval patterns now apply to them. A scoped device can no longer claim a session id the gate reads as the owner at the keyboard (`web`, `cli`, a `matrix:`/`signal:` id). An uploaded file's caption from a scoped device is also a scoped device's message now, for slash commands as for trust.
+
 ## 0.9.20 (2026-11-02)
 
 0.9.20 fixes a security issue: a file tool could be redirected through a link to a file the permission gate protects. It also:
