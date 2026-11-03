@@ -397,3 +397,13 @@ Append-only, times in ET.
 - **Unchanged:** a trip while generation runs, a bad probe that landed before the pause, or a trip with no bad probe the runner can read in the journal still ends the run as before. No other stop condition changed, and `probe_guard.py` is untouched (the baseline guard shares it).
 - **Logging:** a NOTE line for each case, and one notify line for each forgiven trip.
 - **Tests:** six new Mac unit tests with a fake guard, clock and probe journal: OK resume, the look-back wait, bad probe after the pause, trip while running, bad probe before the pause, and no trip.
+- **Staged on the 3090 Ti host at 09:08 (no `distill-gen-*` unit running):**
+  - `stage-code --dest distill/round2/code` moved round-2 code from `6714a1f` to `eced49b`.
+  - The staged tree matched `git archive 6714a1f` file for file before the swap.
+  - Backups are `~/distill/round2/code.bak-6714a1f-20261103`, plus `code.prev`, and the older `code.prev-a47d919-20261103`.
+  - The swap also brings the commits staged code lacked. All of them are opt-in or not run here: `--hardened-exec` (off), the judge's tool-choice view, acceptable_tools, build/score/train/tower. Rows also gain a `refusal_kinds` field.
+  - The round-2 run names hash the code commit, so tonight's local and 4090-teacher runs write new run directories. They skip the tasks already done.
+- **Dry run:** `gen_local.sh run --until 06:35` on the host, without `--execute`.
+  - It printed the plan with code `eced49b` and passed the excluded-session checks on all four tasksets.
+  - It ended with SKIP exit 2: the port serves Saluki in the daytime, as expected.
+  - No guard was listening on 18593, and no teacher_gen or gen unit started.
