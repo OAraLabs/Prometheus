@@ -41,6 +41,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, Field
 
+from prometheus.security import safe_fs
 from prometheus.permissions.path_schema import PATH_FIELD_READ
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
@@ -235,8 +236,14 @@ class KlingVideoTool(BaseTool):
             "mode": "pro" if arguments.resolution == "1080p" else "std",
         }
         if arguments.image_path is not None:
-            image_file = Path(arguments.image_path).expanduser()
-            if not image_file.is_file():
+            # The path the gate checked, read through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q). Relative
+            # to the session's cwd, as the gate resolves it.
+            try:
+                image_file = safe_fs.resolve_tool_path(arguments.image_path, context.cwd, context.metadata)
+                image_bytes = safe_fs.read_bytes(image_file)
+            except safe_fs.PathChanged as exc:
+                return ToolResult(output=f"video_generate: {exc}", is_error=True)
+            except OSError:
                 return ToolResult(
                     output=(
                         f"video_generate: image_path {arguments.image_path!r} "
@@ -244,7 +251,7 @@ class KlingVideoTool(BaseTool):
                     ),
                     is_error=True,
                 )
-            payload["image"] = base64.b64encode(image_file.read_bytes()).decode("ascii")
+            payload["image"] = base64.b64encode(image_bytes).decode("ascii")
             kind = "image2video"
         else:
             kind = "text2video"

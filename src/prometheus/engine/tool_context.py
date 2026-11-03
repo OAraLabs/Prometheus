@@ -81,3 +81,10 @@ def tool_execution(tool_name: str) -> Iterator[None]:
         yield
     finally:
         TOOL_EXECUTION.reset(token)
+
+
+#: The path the gate ruled on for the tool call whose post-result hooks are running, resolved; None when it had none.
+#: The LSP diagnostics hook reads THIS rather than resolving the tool's argument again (security/safe_fs.py,
+#: GHSA-wgcv-xw9m-9q9q): a second resolution, against the daemon's cwd, could follow a link swapped in since.
+DECIDED_PATH: contextvars.ContextVar[str | None] = contextvars.ContextVar("prometheus_decided_path", default=None)
+
