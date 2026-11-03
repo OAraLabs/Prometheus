@@ -1216,6 +1216,14 @@ sentinel:
 # to the chat surfaces (Telegram/Slack/Discord/web/CLI); coding mode, gym,
 # and evals never recall.
 memory:
+  # Learning memory from chats: the fact extractor (every 30 minutes and
+  # before a conversation is compacted), the wiki compile after it, the
+  # SENTINEL insight writer, the model's `memory` tool (MEMORY.md/USER.md)
+  # and wiki_query filing questions into wiki/queries/. false = none of it
+  # is built or started, for a deployment that must not keep what its users
+  # say. Recall below is separate; /note and the Beacon memory editor stay.
+  extraction:
+    enabled: true
   recall:
     enabled: true
     max_facts: 6          # hard cap on facts injected per turn
@@ -1542,6 +1550,18 @@ anatomy:
   # pointer to the anatomy tool, which the model calls when a task needs it.
   # true sends the full layout to hosted models on every turn too.
   include_in_hosted_prompt: false
+  # What the model is told about the machines, on any route and from the
+  # anatomy tool: what they can do (CPU, RAM, GPU and VRAM, the model, its
+  # engine, context window and vision), not where they are. Hostnames,
+  # addresses, URLs, the tailnet peer list and a model file's directory are
+  # withheld. true (a literal true) lets them through.
+  include_addresses: false
+  # The /anatomy command, sent through a chat relay (Telegram, Discord, Slack,
+  # which keep every message on their servers), gets the same treatment: no
+  # hostnames, addresses or URLs, and tailnet peers as counts. In the terminal
+  # and in Beacon it shows everything. true (a literal true) shows everything
+  # on chat too.
+  include_addresses_in_chat: false
   # Local infrastructure identity. Values are machine-specific and MUST stay
   # in the live config only — the pre-commit hook blocks real hosts/IPs here.
   ssh_user: ""

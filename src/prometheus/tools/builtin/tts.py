@@ -16,6 +16,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from prometheus.permissions.path_schema import PATH_FIELD_WRITE
+from prometheus.security import safe_fs
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -51,16 +52,35 @@ class TTSTool(BaseTool):
     async def execute(
         self, arguments: TTSInput, context: ToolExecutionContext
     ) -> ToolResult:
-        text = arguments.text[:4000]  # cap at 4000 chars
-
         # A relative output_path resolves against the tool context's cwd (the
         # session workspace in a workspace session), like write_file. Handed
         # on as given, the engine subprocess resolved it against the daemon
         # PROCESS's directory instead.
-        if arguments.output_path:
-            out_path = str(_resolve_path(context.cwd, arguments.output_path))
-        else:
-            out_path = tempfile.mktemp(suffix=".wav")
+        #
+        # The engine (espeak, piper, a remote server) writes by name, following links, so it writes into a private
+        # temporary folder, and the result is moved to the path the gate checked through no link
+        # (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q).
+        if not arguments.output_path:
+            return await self._synthesize(arguments, tempfile.mktemp(suffix=".wav"))
+        try:
+            dest = safe_fs.resolve_tool_path(arguments.output_path, context.cwd, context.metadata)
+        except safe_fs.PathChanged as exc:
+            return ToolResult(output=str(exc), is_error=True)
+        with tempfile.TemporaryDirectory(prefix="prometheus-tts-") as tmp:
+            rendered = Path(tmp) / (dest.name or "speech.wav")
+            result = await self._synthesize(arguments, str(rendered))
+            if result.is_error:
+                return result
+            try:
+                safe_fs.place_file(rendered, dest)
+            except safe_fs.PathChanged as exc:
+                return ToolResult(output=str(exc), is_error=True)
+            except OSError as exc:
+                return ToolResult(output=f"Could not save the audio to {dest}: {exc}", is_error=True)
+        return ToolResult(output=f"Audio saved to {dest}")
+
+    async def _synthesize(self, arguments: TTSInput, out_path: str) -> ToolResult:
+        text = arguments.text[:4000]  # cap at 4000 chars
 
         # tts.url, when set, is tried first unless a local engine was asked
         # for by name. Any failure falls through to the local engines below.

@@ -948,6 +948,9 @@ class SecurityGate:
         for _p in _this_process_state(writes=False):
             if _p not in self._denied_paths:
                 self._denied_paths.append(_p)
+        # A file tool never reads another name (a hard link) for anything on this list (security/safe_fs.py).
+        from prometheus.security.safe_fs import register_read_floor
+        register_read_floor(self._denied_paths)
         self._write_denied_paths: list[str] = list(_ALWAYS_WRITE_DENIED_PATHS)
         for _p in _this_process_state(writes=True):
             if _p not in self._write_denied_paths:

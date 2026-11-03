@@ -21,6 +21,9 @@ from prometheus.config.paths import get_config_dir
 
 log = logging.getLogger(__name__)
 
+#: What every surface says about a remote inference GPU when no SSH user is set.
+GPU_NOT_CONFIGURED = "not configured (set anatomy.ssh_user and anatomy.ssh_key to read it)"
+
 
 @dataclass
 class GPUProcess:
@@ -128,8 +131,11 @@ class AnatomyScanner:
         ssh_key: str | None = None,
         registry: Any | None = None,
         inference_url: str | None = None,
+        llama_cpp_headers: dict[str, str] | None = None,
     ) -> None:
         self._llama_url = llama_cpp_url.rstrip("/")
+        # The key a server started with --api-key needs (from_config: the model's own). Never logged.
+        self._llama_headers = dict(llama_cpp_headers or {})
         self._ollama_url = ollama_url.rstrip("/")
         self._engine = inference_engine
         # Where the configured engine is reached (from_config: model.base_url by the provider registry's rule). None:
@@ -138,6 +144,9 @@ class AnatomyScanner:
             self._llama_url if inference_engine == "llama_cpp" else self._ollama_url)
         self._ssh_user = ssh_user
         self._ssh_key = str(Path(ssh_key).expanduser()) if ssh_key else None
+        # No SSH user is a setting, not a failure: it cannot change while this
+        # scanner lives (it is built once from the config), so it is said once.
+        self._said_not_configured = False
         # The backend registry, when the daemon built one. With it, model
         # detection is a READ of the registry's probe (one implementation of
         # "what is this box serving", shared with the catalog, the router and
@@ -152,12 +161,17 @@ class AnatomyScanner:
     def from_config(cls, config: dict[str, Any], *, registry: Any | None = None) -> "AnatomyScanner":
         """The scanner for a daemon's config: the boot check, the chat /doctor and ``oara doctor`` build it here, so
         the Inference row probes the address the config names (``model.base_url``), not ``model.fallback_url``."""
-        from prometheus.providers.registry import resolve_model_base_url
+        from prometheus.providers.registry import local_server_headers, resolve_model_base_url
 
         model_cfg = config.get("model", {}) or {}
         anatomy_cfg = config.get("anatomy", {}) or {}
         engine = str(model_cfg.get("provider", "llama_cpp"))
         url = resolve_model_base_url(model_cfg)
+        try:
+            headers = local_server_headers(model_cfg) if engine == "llama_cpp" else {}
+        except ValueError as exc:
+            log.debug("anatomy: %s; the server is asked without a key", exc)
+            headers = {}
         return cls(
             llama_cpp_url=url if engine == "llama_cpp" else "http://localhost:8080",
             ollama_url=url if engine == "ollama" else "http://localhost:11434",
@@ -166,6 +180,7 @@ class AnatomyScanner:
             ssh_key=anatomy_cfg.get("ssh_key"),
             registry=registry,
             inference_url=url,
+            llama_cpp_headers=headers,
         )
 
     async def scan(self) -> AnatomyState:
@@ -303,7 +318,18 @@ class AnatomyScanner:
         inference_is_remote = host not in local_host_aliases
         state.gpu_inference_host = host or None
 
-        if inference_is_remote:
+        if inference_is_remote and not self._ssh_user:
+            # Nothing to probe with. Not a failure to report on every scan: the
+            # GPU is "not configured" until anatomy.ssh_user is set and the
+            # daemon restarts. Said once, at INFO.
+            state.gpu_is_remote = True
+            state.gpu_probe_method = "not_configured"
+            state.gpu_probe_error = GPU_NOT_CONFIGURED
+            if not self._said_not_configured:
+                log.info("Inference GPU on another machine: %s", GPU_NOT_CONFIGURED)
+                self._said_not_configured = True
+            await self._probe_local_gpu_as_secondary(state)
+        elif inference_is_remote:
             # Probe the inference GPU first — that's the source of truth.
             state.gpu_is_remote = True
             remote_ok, remote_err = await self._probe_remote_gpu(state, host)
@@ -580,7 +606,7 @@ class AnatomyScanner:
 
     async def _detect_model_llama_cpp(self, state: AnatomyState) -> None:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=self._llama_headers) as client:
                 resp = await client.get(f"{self._llama_url}/v1/models")
                 resp.raise_for_status()
                 body = resp.json()

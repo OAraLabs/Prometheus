@@ -60,10 +60,16 @@ def resolve_denied(denied_paths: Iterable[str] | None) -> tuple[str, ...]:
     floored file: the root is not denied, and the prune saw only the config.
     """
     from prometheus.config.local_pairing import pairing_dir
+    from prometheus.config.paths import data_dir_path
     from prometheus.permissions.checker import _ALWAYS_DENIED_PATHS, _this_process_state
+    from prometheus.permissions.confinement import DATA_TRUSTED_FILES
 
+    # The device registry and the scheduled-jobs files of THIS process's data directory, wherever
+    # PROMETHEUS_DATA_DIR or PROMETHEUS_CONFIG_DIR moved it, as the gate denies them.
+    data = data_dir_path().expanduser().resolve()
+    moved = [str(data / "devices.db") + "*", *(str(data / name) + "*" for name in DATA_TRUSTED_FILES)]
     out: list[str] = []
-    for raw in (*_ALWAYS_DENIED_PATHS, str(pairing_dir().resolve()), *_this_process_state(writes=False),
+    for raw in (*_ALWAYS_DENIED_PATHS, str(pairing_dir().resolve()), *_this_process_state(writes=False), *moved,
                 *(denied_paths or ())):
         text = str(raw).strip()
         if not text:
