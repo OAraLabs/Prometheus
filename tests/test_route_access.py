@@ -55,7 +55,8 @@ EXPECTED_SCOPED_ALLOWED = {
     ("POST", "/api/search"),
     # the one desktop route open to every valid token: a stop can only end a task
     ("POST", "/api/computer/tasks/{task_id}/stop"),
-    # the tool calls of its own sessions: once or until-restart, enforced in the handlers
+    # the tool calls of its own sessions: seen and denied; approving is the owner's (or a marked device's, for a
+    # desktop prompt), enforced in the handler
     ("GET", "/api/approvals"),
     ("POST", "/api/approvals/{request_id}/approve"),
     ("POST", "/api/approvals/{request_id}/deny"),

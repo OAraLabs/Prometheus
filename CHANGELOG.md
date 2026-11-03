@@ -8,6 +8,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 - Coding runs: a run started through `POST /api/code` now uses the config file the daemon was started with (`--config`). Before, the run read the default config, so a daemon started with its own file could accept a run that then ran on other settings (#850, by @sepehrtaji-dev).
 - `POST /api/chat` and `/v1/chat/completions` accept `mcp_headers`: headers for a named HTTP MCP server, on that turn's calls only (for example, a user-bound token from the app in front of Prometheus). They are never shown to the model, kept in the conversation, logged or stored. A turn without them uses the server's stored headers. A header for an unknown server, or for one not reached over HTTP, is refused with a 400.
 - Devices: lifting or changing a device's hold now asks the owner. `PUT /api/devices/{id}/profile` answers 202 with a pending request on the approval surfaces (Telegram `/approve`, Beacon), and the hold stands until a person approves it; the API token, which a model with a shell can read, cannot. A held device is also refused computer use: no desktop task starts or binds for its sessions, and it cannot be marked for it.
+- Devices: a scoped device (an approved phone, a server-to-server caller) can no longer approve the gated tool calls of its own sessions, once or until a restart. It still sees and may deny them; only the owner approves. A desktop prompt is unchanged: a device a person marked for computer use answers it.
 
 ## 0.9.20 (2026-11-02)
 
