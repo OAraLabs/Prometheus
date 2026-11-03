@@ -367,3 +367,11 @@ Append-only, times in ET.
   - This was the first trip on any night. On earlier nights the probe never landed in the eval's heaviest load.
 - **Action:** at 03:21 I started a fresh `distill-gen-*` run with the window-start command. It moves the old abort switch aside, so a new guard with full protection is in front of the teacher.
 - **Follow-up idea, not done:** a probe that lands while generation is paused for an eval reflects the eval's load, not generation's. The guard could rearm after the pause ends and the next probe is OK, instead of ending the run.
+
+## 2026-11-03 06:50 EST: night of Nov 2→3 done, both hosts restored
+- **4090:** first long-context night. The IQ3 teacher served the mini's cross-host gym from 01:12 until the planned 06:18 stop. Business was restored and `tower_verify` passed at 06:40:01 (4 connector conns, model in VRAM).
+- **Mini:**
+  - Local generation ran 01:11–03:02, stopped on the probe trip, restarted at 03:21, then paused and resumed cleanly around the 06:00 eval.
+  - At 06:40 Saluki was back on 8092, the teacher was stopped, the eval crontab was untouched, and voice ran at 53 tok/s with no failed units.
+- **Pool:** the 27B gym pool grew from 3,223 to about 3,350 rows overnight, counting both branches. Per-category rates come in the 09:00 heartbeat.
+- **Tonight (Wed 11-04):** the standard 4090 night with the calibrated judge slot at 01:20.
