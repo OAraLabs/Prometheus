@@ -141,6 +141,8 @@ Sections 1 to 6 scoped what a device sees in the SESSION routes and left every o
 
 **Two things are wider on purpose**, both the computer-use door's: the desktop-task stop is open to every valid token (a stop can only end a task), and a device an operator MARKED for computer use is a person, so it additionally reaches the computer routes and may answer a desktop prompt (`MARKED_DEVICE_ALLOWED`). An unmarked device gets neither.
 
+**Turns.** A scoped device's turn (WebSocket `send_message` and `chat_upload`, `POST /api/chat/send`) runs on a copy of the shared web loop context whose session id is the turn's own session, not the literal `"web"`. The permission gate reads `"web"` as the owner at the keyboard (origin `user`); a scoped device's session reads as `system`, the untrusted class, so the exfiltration check denies and the network/install patterns (curl, wget, ssh, `pip install`, `git push`...) ask for approval. `POST /api/chat` already ran that way. A scoped device cannot claim a session id the gate would read as a person present (`web`, `cli`, a `matrix:` or `signal:` chat id), so it cannot name its way back. The owner's turns are unchanged.
+
 **Slash commands.** A scoped device's chat may run `SCOPED_SLASH_COMMANDS` (`/help` and the commands on its own session) and nothing else; any other known command is refused in the chat and does not run.
 
 **The ratchet.** `tests/test_route_access.py` classifies every route the app registers exactly once (public, scoped-allowed, marked-device or operator-only), pins the allowlists literally, and runs the table through the real middleware. A new route fails it until someone says which.
