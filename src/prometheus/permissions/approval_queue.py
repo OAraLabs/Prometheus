@@ -104,6 +104,9 @@ class PendingAction:
     #: grant here would grant nothing. Not ``task_id``: that means a DESKTOP
     #: prompt, with the desktop's own approval rules.
     worker_task_id: str | None = None
+    #: A request to LIFT A DEVICE'S HOLD (permissions/hold_lifts.py): which device. Approve-once, answered only
+    #: by a person, never by "approve all"; the hold stands until then.
+    hold_device_id: str | None = None
     #: The chat the prompt went to (Telegram), so a withdrawal is told where the request was asked. None: no chat.
     notify_chat: Any = None
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -1131,3 +1134,8 @@ def is_desktop_request(action: Any) -> bool:
 def is_worker_request(action: Any) -> bool:
     """A spawned worker's request — answered on its own, like a desktop prompt."""
     return getattr(action, "worker_task_id", None) is not None
+
+
+def is_hold_request(action: Any) -> bool:
+    """A request to lift a device's hold — answered on its own, by a person, like a desktop prompt."""
+    return getattr(action, "hold_device_id", None) is not None

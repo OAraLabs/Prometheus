@@ -649,6 +649,7 @@ class ComputerTaskRunner:
                    by: Approver, surface: str) -> Binding:
         """A person picked ``app`` for ``session_id``. That IS the consent."""
         self._guard(by)
+        self.people.refuse_held_session(session_id)
         if scope not in (SCOPE_SESSION, SCOPE_TASK):
             raise ValueError(f"scope must be {SCOPE_SESSION!r} or {SCOPE_TASK!r}")
         res = await self._resolve(app)
@@ -705,6 +706,7 @@ class ComputerTaskRunner:
     ) -> ComputerTask:
         """Start a task. Returns at once; the task runs in the background."""
         self._guard(by)
+        self.people.refuse_held_session(session_id)
         driver = await self._driver()
         target = inp.target or self._target()
         binding = self.binding_for(session_id)

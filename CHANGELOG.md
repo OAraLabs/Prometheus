@@ -5,6 +5,10 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 ## Unreleased
 
 - Voice: a voice box can join without editing a file. Give Prometheus its address (`POST /api/pieces/probe`, which Beacon calls when you type it); Prometheus finds the speech-to-text and text-to-speech servers there, asks once, and after you approve (`POST /api/pieces/{id}/approve`) voice uses it from the next message, with no restart. The local engines stay the fallback. For now this works for a box on this computer or a mesh VPN address over plain HTTP; such a box is labelled "not verified" and is given no key. A `stt.url` or `tts.url` in `prometheus.yaml` still wins. New routes: `POST /api/pieces/probe`, `POST /api/pieces/{id}/approve|deny|ignore` and `DELETE /api/pieces/{id}`, all operator only.
+- Dependencies: the lock moves msgpack to 1.2.4, which fixes CVE-2026-114613 (pip-audit).
+- Coding runs: a run started through `POST /api/code` now uses the config file the daemon was started with (`--config`). Before, the run read the default config, so a daemon started with its own file could accept a run that then ran on other settings (#850, by @sepehrtaji-dev).
+- `POST /api/chat` and `/v1/chat/completions` accept `mcp_headers`: headers for a named HTTP MCP server, on that turn's calls only (for example, a user-bound token from the app in front of Prometheus). They are never shown to the model, kept in the conversation, logged or stored. A turn without them uses the server's stored headers. A header for an unknown server, or for one not reached over HTTP, is refused with a 400.
+- Devices: lifting or changing a device's hold now asks the owner. `PUT /api/devices/{id}/profile` answers 202 with a pending request on the approval surfaces (Telegram `/approve`, Beacon), and the hold stands until a person approves it; the API token, which a model with a shell can read, cannot. A held device is also refused computer use: no desktop task starts or binds for its sessions, and it cannot be marked for it.
 
 ## 0.9.20 (2026-11-02)
 

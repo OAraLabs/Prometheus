@@ -10,6 +10,7 @@ License: MIT
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 from contextlib import AsyncExitStack
@@ -360,7 +361,17 @@ class McpRuntime:
             "MCP connecting (%s): %s -> %s",
             config.transport_type, server_name, config.description,
         )
+        stack, session = await self._open_http(config)
+        return _McpSession(
+            server_name=server_name,
+            session=session,
+            transport_type=config.transport_type,
+            _exit_stack=stack,
+        )
 
+    @staticmethod
+    async def _open_http(config: ResolvedHttpTransport) -> tuple[AsyncExitStack, ClientSession]:
+        """An initialized session over *config*'s transport, and the stack that closes it."""
         stack = AsyncExitStack()
         timeout_s = config.timeout_ms / 1000
         try:
@@ -384,13 +395,32 @@ class McpRuntime:
         except BaseException:
             await stack.aclose()
             raise
+        return stack, session
 
-        return _McpSession(
-            server_name=server_name,
-            session=session,
-            transport_type=config.transport_type,
-            _exit_stack=stack,
-        )
+    def check_turn_headers(self, raw: Any) -> dict[str, dict[str, str]]:
+        """Validate a chat request's ``mcp_headers``: ``{server: {Header: value}}``.
+
+        Raises ValueError with a client-facing message (never a header value)
+        for a malformed map, a server that is not configured, or one not reached
+        over HTTP (a stdio server has no request to put a header on). A header
+        that cannot be delivered is refused, never silently dropped.
+        """
+        from prometheus.mcp.store import McpStoreError, check_header_map
+
+        if not isinstance(raw, dict):
+            raise ValueError("mcp_headers must be an object: {server: {Header: value}}")
+        out: dict[str, dict[str, str]] = {}
+        for name, headers in raw.items():
+            if name not in self._server_configs:
+                raise ValueError(f"mcp_headers names {name!r}, which is not a configured MCP server")
+            if not isinstance(resolve_transport(name, self._server_configs[name]), ResolvedHttpTransport):
+                raise ValueError(
+                    f"mcp_headers names {name!r}, which is not reached over HTTP, so a header cannot reach it")
+            try:
+                out[name] = dict(check_header_map(headers, f"mcp_headers[{name!r}]"))
+            except McpStoreError as exc:
+                raise ValueError(str(exc)) from None
+        return out
 
     # ------------------------------------------------------------------
     # Public query interface
@@ -413,8 +443,16 @@ class McpRuntime:
         server_name: str,
         tool_name: str,
         arguments: dict[str, Any],
+        *,
+        turn_headers: dict[str, str] | None = None,
     ) -> str:
-        """Call an MCP tool and return stringified result."""
+        """Call an MCP tool and return stringified result.
+
+        ``turn_headers`` (a chat request's headers for this server, this turn)
+        are sent over a connection of the call's own, opened and closed around
+        it, on top of the stored headers. The shared connection never carries
+        them, so no other turn can.
+        """
         if server_name not in self._sessions:
             raise ValueError(f"MCP server not connected: {server_name}")
 
@@ -430,10 +468,17 @@ class McpRuntime:
                 f"server {server_name!r}"
             )
 
-        session = self._sessions[server_name]
         logger.debug("MCP call: %s/%s", server_name, tool_name)
-
-        result = await session.session.call_tool(tool_name, arguments)
+        if turn_headers:
+            resolved = resolve_transport(server_name, self._server_configs.get(server_name) or {})
+            if not isinstance(resolved, ResolvedHttpTransport):
+                raise ValueError(f"MCP server {server_name!r} is not reached over HTTP")
+            config = dataclasses.replace(resolved, headers={**(resolved.headers or {}), **turn_headers})
+            stack, own = await self._open_http(config)
+            async with stack:
+                result = await own.call_tool(tool_name, arguments)
+        else:
+            result = await self._sessions[server_name].session.call_tool(tool_name, arguments)
 
         # Stringify result (from OpenClaw pi-bundle-mcp-materialize.ts)
         parts: list[str] = []

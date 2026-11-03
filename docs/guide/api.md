@@ -116,7 +116,7 @@ The code lives only in the daemon's memory, as a digest; a restart ends it. Noth
 |---|---|---|
 | POST | `/api/chat/send` | Send a chat message. Body: `{"session_id": "my-session", "message": "..."}` (the field is `message`, not `content`); optional `mode` (`"agent"`/`"chat"`), `tool_choice`, and `references` (@-references, see below). Returns `{"run_id", "status": "sent"}`; the reply streams over the WebSocket and lands in `GET /api/sessions/{session_id}/messages` |
 | POST | `/api/chat/interrupt` | Stop the running agent turn in a session — the chat Stop button. `{"session_id": ...}`; idempotent (`stopped: false` when nothing is running). Completed rounds persist, a mid-generation partial is kept as an assistant turn, and every client sees the broadcast `chat_done{interrupted:true}`. HTTP twin of the WS `interrupt` frame |
-| POST | `/api/chat` | Send a chat message and wait for the reply. Body: `{"session_id": "my-session", "content": "..."}` (the field is `content`, not `message`). The turn runs in session `web:<session_id>`, starts from the same system prompt as `/api/chat/send` (memory files included), and returns `{"text", "turns", "usage", "served_by"}` when it ends. `served_by` names the model that answered (the fallback, when one took the turn) and is left out when no model answered. `503` when the daemon hasn't wired the WebSocket bridge |
+| POST | `/api/chat` | Send a chat message and wait for the reply. Body: `{"session_id": "my-session", "content": "..."}` (the field is `content`, not `message`). The turn runs in session `web:<session_id>`, starts from the same system prompt as `/api/chat/send` (memory files included), and returns `{"text", "turns", "usage", "served_by"}` when it ends. `served_by` names the model that answered (the fallback, when one took the turn) and is left out when no model answered. Optional `mcp_headers` (`{"<server>": {"Authorization": "Bearer ..."}}`) gives a named HTTP MCP server extra headers for this turn's calls only; see [Per-turn MCP headers](#per-turn-mcp-headers). `503` when the daemon hasn't wired the WebSocket bridge |
 
 ### OpenAI-compatible surface — `/v1`
 
@@ -125,7 +125,7 @@ Any client that speaks the OpenAI chat-completions wire (Open WebUI, LobeChat, C
 | Method | Path | Description |
 |---|---|---|
 | GET | `/v1/models` | The keys from `/api/models` that have a credential present, in OpenAI's list shape (`id` = the catalog key: `local`, `claude`, `qwen:qwen3.7-max`, …) |
-| POST | `/v1/chat/completions` | One agent turn. `messages` (system/user/assistant, string or text parts), optional `model` (a key from `/v1/models`, default `local`), optional `stream` (SSE chunks ending in `data: [DONE]`), optional Prometheus extension `mode` (`agent` default, `chat` = no tools). `model` in the reply echoes the key you asked for; `prometheus.served_by` names the model that answered (on the final chunk when streamed) |
+| POST | `/v1/chat/completions` | One agent turn. `messages` (system/user/assistant, string or text parts), optional `model` (a key from `/v1/models`, default `local`), optional `stream` (SSE chunks ending in `data: [DONE]`), optional Prometheus extensions `mode` (`agent` default, `chat` = no tools) and `mcp_headers` (as on `POST /api/chat`). `model` in the reply echoes the key you asked for; `prometheus.served_by` names the model that answered (on the final chunk when streamed) |
 
 What to expect, stated plainly:
 
@@ -171,9 +171,9 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8005/v1/chat/completi
 | DELETE | `/api/skills/{name}/pin` | Unpin a skill |
 | GET | `/api/profiles` | List agent profiles |
 | PUT | `/api/profiles/active` | Switch active profile |
-| PUT | `/api/devices/{device_id}/profile` | Hold a device to a profile, or lift its hold. Body `{"profile": "<name>"}`; null or blank lifts it. Operator only. Every run under one of that device's sessions is offered only the profile's tools and refused any other at the call, with no fallback that widens it (a held profile that matches no tool, or no longer exists, runs none). The device cannot lift or change its hold, its sessions' profile or the active one, and while the hold stands its sessions cannot be rebound (`PUT /api/sessions/{id}/profile` answers 409). An owner device cannot be held (400). `GET /api/devices` shows each device's `profile` |
+| PUT | `/api/devices/{device_id}/profile` | Hold a device to a profile, or ask to lift its hold. Body `{"profile": "<name>"}`; null or blank lifts it. Operator only. Setting a hold on a device with none applies at once; lifting or changing one answers **202** with a pending request (`pending.request_id`) and the hold stands until a person approves it: the Telegram owner with `/approve`, or a Beacon device a person marked. The API token, an owner device's token and the held device itself cannot approve it, and `/approve all` skips it. Every run under one of that device's sessions is offered only the profile's tools and refused any other at the call, with no fallback that widens it (a held profile that matches no tool, or no longer exists, runs none). The device cannot lift or change its hold, its sessions' profile or the active one, and while the hold stands its sessions cannot be rebound (`PUT /api/sessions/{id}/profile` answers 409). An owner device cannot be held (400). `GET /api/devices` shows each device's `profile` |
 
-A held device suits a caller beside the owner's own assistant that must never run shell, file or web tools: give it an ordinary (scoped) device token, hold it to a profile listing only the tools it may use, and the owner's other devices and gateways keep the instance's default profile.
+A held device suits a caller beside the owner's own assistant that must never run shell, file or web tools: give it an ordinary (scoped) device token, hold it to a profile listing only the tools it may use, and the owner's other devices and gateways keep the instance's default profile. A held device never reaches the desktop either: computer use refuses to start or bind a task for one of its sessions, whoever asks, it is never a person for computer use, and it cannot be marked for it (409).
 
 ### Tools — deferred loading
 
@@ -462,3 +462,17 @@ Highest wins, in that order. Setup mode has no config yet, so it honours the fla
 An address is an IPv4 literal, an IPv6 literal (`::1`), or `localhost` (which means `127.0.0.1`; spell `::1` for IPv6 loopback). Anything else — a host name, a port, a mask — makes the daemon **refuse to start** with a message naming the setting; it never falls back to a wider address.
 
 On a loopback address the daemon also refuses any request whose `Host` header is not `localhost`, `127.0.0.1` or `[::1]` (any port), on the REST API, on the WebSocket handshake and on the setup server. That closes DNS rebinding, where a web page in your own browser reaches a loopback-only service under an attacker's host name. Reach it as `http://localhost:8005`, not by the machine's name; a local reverse proxy in front of it must forward `Host: localhost`. A wide or specific-interface bind has no Host restriction.
+
+## Per-turn MCP headers
+
+An app in front of Prometheus can pass a short-lived token for its own tool server with each request, instead of leaving a standing credential on the machine. `POST /api/chat` and `/v1/chat/completions` accept:
+
+```json
+{"mcp_headers": {"<server>": {"Authorization": "Bearer <token>"}}}
+```
+
+- The headers go to the named MCP server only, on that turn's tool calls only. Each such call opens its own connection, with the server's stored headers plus these (these win). The server's shared connection never carries them, so another turn can't.
+- They are never shown to the model, written to the conversation, logged or stored.
+- A turn that sends none uses the server's stored headers.
+- The request is refused with a `400`, before the turn runs, when a server name isn't a configured MCP server, the server isn't reached over HTTP (a stdio server has no request to put a header on), or a header name or value is malformed. The error names the server or header, never a value.
+
