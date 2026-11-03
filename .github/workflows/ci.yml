@@ -219,8 +219,8 @@ jobs:
         # `pip install oara-prometheus` on a Mac with no Apple command line tools must not compile anything, on the
         # newest Python an installer may pick (uv picks 3.14 for a new user). Resolved for the Mac with wheels only,
         # from pyproject (what a pip or uv install resolves), not the lock: a dependency that loses its macOS wheel for a
-        # new Python fails here before a user meets a compiler error. watchdog has no macOS cp314 wheel, hence its
-        # marker in pyproject.toml.
+        # new Python fails here before a user meets a compiler error. (watchdog 6.0.0 had no macOS cp314 wheel, so
+        # 0.9.18 marked it off there; 7.0 has them, and the floor is 7.0.)
         # - The base install: Apple Silicon and Intel, macOS 13 (the oldest the app supports).
         # - `[full]`: Apple Silicon, macOS 14 (onnxruntime, through piper-tts, ships macOS wheels for 14 and up only).
         run: |

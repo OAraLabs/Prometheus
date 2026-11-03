@@ -293,13 +293,28 @@ def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[Diagn
     # httpx turns ``user:pass@`` into a Basic auth header. Only what is
     # DISPLAYED goes through redact_url below.
     from prometheus.providers.openai_compat import models_url
-    from prometheus.providers.registry import resolve_model_base_url
+    from prometheus.providers.registry import local_server_headers, resolve_model_base_url
 
     base_url = resolve_model_base_url(model_cfg)
+    try:
+        # A server started with a key (llama.cpp's --api-key) answers only with it.
+        headers = local_server_headers(model_cfg)
+    except ValueError as exc:
+        reach = DiagnosticCheck(
+            name="Inference", category="connectivity", status="error",
+            message=f"{provider} at {redact_url(base_url)}: {exc}",
+            fix=f"Add the key to {get_env_file_path()}, or clear model.api_key_env if the server takes none.",
+        )
+        model = DiagnosticCheck(
+            name="Model", category="model", status="error",
+            message="no model detected (the server's key is not set)",
+            fix=None,
+        )
+        return reach, model
     detected: list[str] = []
     error: str | None = None
     try:
-        resp = httpx.get(models_url(base_url), timeout=timeout)
+        resp = httpx.get(models_url(base_url), timeout=timeout, headers=headers)
         resp.raise_for_status()
         detected = [str(m.get("id", "")) for m in resp.json().get("data", [])]
     except Exception as exc:
@@ -791,7 +806,10 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
         # the process-wide shell floor (security/shell_floor.py), and a
         # registry built from an empty section would wire the shipped defaults
         # over the operator's in any process that later runs a model shell.
-        registry = create_tool_registry(config.get("security") or {})
+        from prometheus.memory.learning_switch import extraction_enabled
+
+        registry = create_tool_registry(
+            config.get("security") or {}, memory_extraction=extraction_enabled(config))
         loader = DynamicToolLoader(registry, deferred)
         # What a local (deferred) run offers: under local_catalog "stubs"
         # every tool, some as stubs; under "names" the always_loaded set.
@@ -1336,6 +1354,27 @@ def check_trajectory_export(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+def check_memory_extraction(config: dict[str, Any]) -> DiagnosticCheck:
+    """Is memory learned from chats? (``memory.extraction.enabled``)
+
+    Either answer is a choice, so both are ``ok``; the row exists so the choice
+    is visible without reading the config.
+    """
+    from prometheus.memory.learning_switch import extraction_enabled
+
+    if extraction_enabled(config):
+        return DiagnosticCheck(
+            name="Memory extraction", category="resources", status="ok",
+            message="on — facts are learned from chats into memory.db and the wiki, "
+                    "and the model has the memory tool",
+        )
+    return DiagnosticCheck(
+        name="Memory extraction", category="resources", status="ok",
+        message="off (memory.extraction.enabled: false) — nothing is learned from "
+                "chats; recall, /note and the memory editor still work",
+    )
+
+
 def check_whisper(config: dict[str, Any]) -> DiagnosticCheck:
     """Whisper available when voice is enabled?"""
     whisper_cfg = config.get("whisper", {}) or {}
@@ -1543,6 +1582,7 @@ def run_extended_checks(
         *check_operator_hooks(config),
         check_config_pins(),
         check_trajectory_export(config),
+        check_memory_extraction(config),
         check_whisper(config),
         *check_voice_remotes(config, timeout=timeout),
     ]
