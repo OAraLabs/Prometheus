@@ -168,8 +168,10 @@ allowed, and Prometheus connects to the address it checked (so a later answer ca
    typed address that asks for plain HTTP there is refused (`plaintext_not_allowed`).
 2. **HTTPS is pinned.** Prometheus does not rely on public certificate authorities for a piece. It pins the SPKI
    SHA-256 the piece presented at approval, and for a verified piece the challenge binds it.
-3. **No secret to an unverified piece over plain HTTP.** On `loopback` or `mesh` an unverified piece may be used over
-   plain HTTP, but a piece that wants a key must be verified or use HTTPS there too.
+3. **A key goes only to a piece the owner approved, on loopback or a mesh VPN address.** Never to a LAN or public
+   address over plain HTTP, never before approval, and never to a piece that is pending, denied or ignored. A piece
+   that cannot prove who it is may be given its key there (the owner approved that piece, at that address). Voice
+   checks both the stored address class and the url itself before it sends the key.
 4. **A card's URLs stay on its host.** Every offer's `url` must resolve to the address the card was fetched from (any
    port). A card cannot send Prometheus to another machine or to the internet.
 
@@ -257,6 +259,17 @@ uses, and the name of the env variable holding its secret. A secret is sent once
 env file (`~/.config/prometheus/env`, 0600, already under the floors) as `PROMETHEUS_PIECE_<ID>_KEY`. It is never
 echoed by any route, frame or log.
 
+- **Asked once.** A probe marks a piece `needs_key` when its audio routes answer 401/403. Approving such a piece
+  without a key is `422 key_required`; the owner sends it as `secret` on the approve route, the only place a key
+  enters (operator only; no tool reaches it).
+- **What a key may be.** 1 to 4096 characters, with no spaces, quotes, backslashes, `$` or backticks, so it is one
+  env-file line that no shell or service manager reads differently. Anything else is `400 invalid_request`, and the
+  value is not repeated.
+- **Who can read it.** The env file is under the gate's always-denied floor and the shell floors, and the variable's
+  `*_KEY` name is stripped from the agent shell's environment. The daemon reads it when it sends a request.
+- **Gone with the piece.** Forgetting or ignoring a piece removes its key from the env file and from the daemon's
+  environment.
+
 ## 8. Routes and frames
 
 All routes are operator-only. JSON in and out; errors are `{"error": <code>, "detail": <English>}` (section 11).
@@ -298,6 +311,7 @@ All routes are operator-only. JSON in and out; errors are `{"error": <code>, "de
 - `source`: `discovered`, `manual` or `config_file`. A `config_file` row is `editable: false`, and every write route
   answers it `409 config_file_entry`.
 - `verified`: false shows as the "not verified" label.
+- `needs_key`: the piece asked for a key when probed (section 7.3). Whether one is stored is never shown.
 - `health.state`: `unknown`, `online`, `offline`, `refused` (the piece rejected the key) or `key_changed`.
 - `created_at`, `updated_at`: when the row was first stored and last changed (UTC, ISO 8601); `last_seen`: the last
   good answer from the piece, or null. A pending piece has no row: its `created_at` is when it was noticed.
@@ -342,7 +356,8 @@ after a call to it fails.
 | `invalid_request` | 400 | A body that is not what the route takes (an approve's `uses` that the piece does not offer). |
 | `plaintext_not_allowed` | 422 | Plain HTTP to a `lan` or `public` address (section 5.2). |
 | `tls_not_supported` | 422 | An HTTPS address: this version does not pin a piece's certificate yet (section 5.2 rule 2). |
-| `secret_needs_proof` | 422 | A secret for an unverified piece over plain HTTP. |
+| `secret_needs_proof` | 422 | A key for a piece that is not on loopback or a mesh VPN address (section 5.2 rule 3). |
+| `key_required` | 422 | Approving a piece that asks for a key without one (section 7.3). |
 | `address_not_allowed` | 422 | An address that does not parse, resolves to nothing, or a card URL off its host. |
 | `card_invalid` | 422 | A card that is not version 1, or whose signature does not verify. |
 | `pending_full` | 429 | The pending limit (section 3.4). |
@@ -385,7 +400,7 @@ Pending pieces and health are in memory. Rows are written only by the daemon's o
 | 1 | This contract. |
 | 2 | Voice fallback says so (section 9) for the YAML-configured remote voice servers. |
 | 3 | The `pieces` store and `GET /api/pieces` (`{"v": 1, "pieces": [], ...}` until something writes a row). |
-| 4 | A typed address joins a voice box: probe, prompt, approve, live use and fallback, with the gateways resolving voice per call through the registry. This step builds the cardless half: voice boxes on loopback or a mesh VPN over plain HTTP, not verified and given no secret. Pinning (cards, the challenge, TLS) comes with step 5; a health watch later. |
+| 4 | A typed address joins a voice box: probe, prompt, approve, live use and fallback, with the gateways resolving voice per call through the registry. This step builds the cardless half: voice boxes on loopback or a mesh VPN over plain HTTP, not verified; one that asks for a key gets it from the owner with the approval. Pinning (cards, the challenge, TLS) comes with step 5; a health watch later. |
 | 5 | `oara piece announce`. |
 | 6 | The mDNS browser. |
 | 7–8 | Model servers as pieces: named backends at runtime, then "make it the main model". |

@@ -11,8 +11,11 @@ and again here. Beacon draws it; Prometheus owns it.
 * ``POST /api/pieces/{id}/approve|deny|ignore`` and ``DELETE /api/pieces/{id}``: the owner's answers.
 
 What is not built yet answers as the contract's "nothing yet": health ``unknown`` and ``last_seen`` null (nothing
-watches a piece yet). Never in an answer: a secret, or the name of the env variable that holds one. A piece found by
-a typed address cannot prove who it is, so it is given no secret (``secret_needs_proof``).
+watches a piece yet). Never in an answer or a log line: a key, or the name of the env variable that holds one.
+
+A piece whose audio routes asked for a key (``needs_key``) is approved WITH it, once: the owner sends ``secret`` on
+this route and nowhere else (no tool reaches it). It goes to the env file, and only for a piece on loopback or a mesh
+VPN address (contract 5.2 rule 3); forgetting or ignoring the piece removes it.
 
 Source: novel code for Prometheus, 2026-10-27; typed addresses 2026-11-02.
 """
@@ -82,6 +85,7 @@ def entry(piece: Piece) -> dict[str, Any]:
         "address_class": piece.address_class,
         "offers": _offers(piece.card),
         "uses": list(piece.uses),
+        "needs_key": joining.needs_key(piece),
         "health": {"state": "unknown", "since": None},
         "created_at": _iso(piece.created_at),
         "updated_at": _iso(piece.updated_at),
@@ -105,7 +109,7 @@ def _config_rows(config: Any) -> list[dict[str, Any]]:
             "id": _CONFIG_IDS[kind], "name": f"{kind}.url in prometheus.yaml", "kind": "piece", "state": "approved",
             "source": "config_file", "verified": False, "editable": False, "fp": None, "tls_spki_sha256": None,
             "address": f"{parts.scheme}://{parts.netloc}", "address_class": _literal_class(parts.hostname),
-            "offers": [{"kind": kind, "api": api, "url": remote.url}], "uses": [kind],
+            "offers": [{"kind": kind, "api": api, "url": remote.url}], "uses": [kind], "needs_key": False,
             "health": {"state": "unknown", "since": None}, "created_at": None, "updated_at": None, "last_seen": None,
         })
     return rows
@@ -121,6 +125,16 @@ def _literal_class(host: str | None) -> str | None:
         return joining.address_class(ipaddress.ip_address(host))
     except ValueError:
         return None
+
+
+def _drop_key(name: str) -> None:
+    """Remove a piece's key from the env file and from this process's environment (it was loaded at start)."""
+    import os
+
+    from prometheus.config.env_file import remove_env_value
+
+    remove_env_value(name)
+    os.environ.pop(name, None)
 
 
 def _error(status: int, code: str, detail: str) -> JSONResponse:
@@ -208,17 +222,35 @@ def register_pieces_routes(app: Any, *, devices: Callable[[], Any], auth_on: Cal
         body = await _body(request)
         if body is None:
             return _error(400, "invalid_request", "send a JSON object, or nothing")
-        if body.get("secret"):
-            # Contract 5.2 rule 3. The value is not repeated.
-            return _error(422, "secret_needs_proof",
-                          "this piece can't prove who it is and is reached over plain HTTP, so it is given no key")
+        # The key, when one is sent. Its value is never repeated in an answer or a log line.
+        secret = body.get("secret")
+        if secret is not None and secret != "" and not joining.valid_key(secret):
+            return _error(400, "invalid_request",
+                          "a key is 1 to 4096 characters with no spaces, quotes, backslashes, $ or backticks")
         offered = [offer["kind"] for offer in _offers(piece.card)]
         uses = body.get("uses", offered)
         if not isinstance(uses, list) or not uses or any(use not in offered for use in uses):
             return _error(400, "invalid_request", f"uses must be some of what it offers: {', '.join(offered)}")
+        if secret and piece.address_class not in joining.KEY_CLASSES:
+            # Contract 5.2 rule 3: never to a LAN or public address.
+            return _error(422, "secret_needs_proof",
+                          "a key goes only to a piece on this machine or a mesh VPN address")
+        if joining.needs_key(piece) and not secret and not piece.secret_env:
+            return _error(422, "key_required", "this piece asks for a key; send it with the approval")
+        secret_env = piece.secret_env
+        if secret:
+            from prometheus.config.env_file import set_env_value
+
+            secret_env = joining.key_env_name(piece.id)
+            await asyncio.to_thread(set_env_value, secret_env, str(secret))
         approved = dataclasses.replace(piece, state="approved", uses=tuple(dict.fromkeys(uses)),
-                                       updated_at=pending.clock())
-        store().save(approved)
+                                       secret_env=secret_env, updated_at=pending.clock())
+        try:
+            store().save(approved)
+        except Exception:
+            if secret and secret_env:
+                await asyncio.to_thread(_drop_key, secret_env)
+            raise
         pending.pop(piece_id)
         return JSONResponse(entry(approved), headers=_NO_STORE)
 
@@ -242,7 +274,9 @@ def register_pieces_routes(app: Any, *, devices: Callable[[], Any], auth_on: Cal
         if problem is not None:
             return problem
         assert piece is not None
-        ignored = dataclasses.replace(piece, state="ignored", updated_at=pending.clock())
+        if piece.secret_env:
+            await asyncio.to_thread(_drop_key, piece.secret_env)   # an ignored piece is never sent anything
+        ignored = dataclasses.replace(piece, state="ignored", secret_env=None, updated_at=pending.clock())
         store().save(ignored)
         pending.pop(piece_id)
         return JSONResponse(entry(ignored), headers=_NO_STORE)
@@ -254,6 +288,9 @@ def register_pieces_routes(app: Any, *, devices: Callable[[], Any], auth_on: Cal
             return refused
         if piece_id in config_ids(request):
             return _error(409, "config_file_entry", "this one is set in prometheus.yaml; change it there")
+        stored = store().get(piece_id)
         if pending.pop(piece_id) is None and not store().forget(piece_id):
             return _error(404, "unknown_piece", "no piece with that id")
+        if stored is not None and stored.secret_env:
+            await asyncio.to_thread(_drop_key, stored.secret_env)
         return JSONResponse({"id": piece_id, "state": "forgotten"}, headers=_NO_STORE)

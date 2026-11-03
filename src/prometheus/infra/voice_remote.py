@@ -151,13 +151,14 @@ def remote_settings(
         # Set in the file: it decides, even when it is refused (a bad api_key_env means the local engine).
         return configured_remote(kind, config)
     # No url in prometheus.yaml: a piece the owner approved for this use (docs/contracts/pieces.md). The yaml
-    # entry, when there is one, wins (section 10). An approved piece that cannot prove who it is gets no key.
+    # entry, when there is one, wins (section 10). Its key, if the owner gave one, comes with it only on loopback or
+    # a mesh VPN address; otherwise none is sent.
     from prometheus.infra.pieces import approved_offer
 
-    root = approved_offer(kind)
-    if root is None:
+    offer = approved_offer(kind)
+    if offer is None:
         return None
-    return _remote(kind, block, url=root, api_key_env="")
+    return _remote(kind, block, url=offer.url, api_key_env=offer.key_env or "")
 
 
 def _yaml_url(kind: str, config: Mapping[str, Any]) -> str:

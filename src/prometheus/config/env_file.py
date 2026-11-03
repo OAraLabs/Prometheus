@@ -120,3 +120,24 @@ def set_env_value(key: str, value: str, path: Path | None = None) -> Path:
         except OSError:  # pragma: no cover — exotic filesystems
             logger.warning("could not chmod 600 %s", path)
     return path
+
+
+def remove_env_value(key: str, path: Path | None = None) -> bool:
+    """Remove every uncommented ``key=`` line from the env file. True if one was there.
+
+    Comments, ordering and every other line survive; the file's mode is left as it is.
+    """
+    path = path or get_env_file_path()
+    if not path.is_file():
+        return False
+    kept: list[str] = []
+    removed = False
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        m = _LINE_RE.match(raw)
+        if m and m.group(1) == key and not raw.lstrip().startswith("#"):
+            removed = True
+            continue
+        kept.append(raw)
+    if removed:
+        path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+    return removed
