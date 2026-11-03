@@ -4,6 +4,8 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Coding runs: a run started through `POST /api/code` now uses the config file the daemon was started with (`--config`). Before, the run read the default config, so a daemon started with its own file could accept a run that then ran on other settings (#850, by @sepehrtaji-dev).
+
 ## 0.9.20 (2026-11-02)
 
 0.9.20 fixes a security issue: a file tool could be redirected through a link to a file the permission gate protects. It also:
