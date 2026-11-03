@@ -4,11 +4,28 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
-- `/anatomy` sent through Telegram, Discord or Slack no longer shows hostnames, IP addresses, URLs or the names and addresses of your tailnet peers. Those services keep every message on their servers. The reply keeps what the machines can do, and counts the peers. In the terminal and in Beacon `/anatomy` shows everything, as before. `anatomy.include_addresses_in_chat: true` shows everything on chat too.
-- When a model server runs on another machine and no SSH user is set to read its GPU, `/anatomy`, the model's Infrastructure section and doctor now say the GPU is "not configured". Before, every scan logged a warning that the probe failed, `/anatomy` called the GPU unreachable, and doctor reported no GPU and running on CPU.
-- `memory.extraction.enabled: false` stops memory being learned from chats. The fact extractor, the wiki compile after it, the SENTINEL insight writer, the agent's `memory` tool and `wiki_query`'s saving of questions are not built or started. Recall, `/note` and the memory editor are unchanged. `prometheus doctor` reports the switch.
-- MCP servers can be remote: a `url` connects over streamable HTTP (`transport: streamable-http`) or SSE (the default). Before, a `url` server was always marked failed as "not yet implemented". The server's stored `headers` are sent on every request to it and are never shown or logged. The server store now refuses a `url` that isn't `http://` or `https://`, and a header name or value that could break the request.
-- Devices: the operator can hold a device to a profile (`PUT /api/devices/{id}/profile`). Every run under that device's sessions is offered only the profile's tools and refused any other at the call, with no fallback that widens it, and the device cannot lift or change the hold. One instance can then serve its owner with every tool beside a server-to-server caller that stays read-only.
+## 0.9.20 (2026-11-02)
+
+0.9.20 fixes a security issue: a file tool could be redirected through a link to a file the permission gate protects. It also:
+- turns off memory learning from chats with one switch;
+- connects to MCP tool servers over HTTP;
+- lets the operator hold a device to a profile;
+- keeps addresses out of `/anatomy` sent through a chat service.
+
+### Security
+
+- **A file tool opens exactly the path the gate checked ([GHSA-wgcv-xw9m-9q9q](https://github.com/OAraLabs/Prometheus/security/advisories/GHSA-wgcv-xw9m-9q9q)).**
+  - **Before:** the file tools (`write_file`, `edit_file`, `read_file`, `notebook_edit`, `download_file`, `image_generate`, `tts`, `youtube_transcript`, `video_generate`, `grep`, `lsp`, and the coding run's view, edit and create tools) run inside the daemon, outside the shell floors. The permission gate checked a tool's path, resolved; the tool then opened the path again by name, following links. A folder in the workspace swapped for a link to a protected folder between the two, by a shell or task running at the same time, sent the write or read to the protected file. A hard link to a protected file inside the workspace passed the gate with no race at all.
+  - **Now:** the path the gate checked travels with the call, and the tool refuses, naming both paths, when its own resolution differs. The file is opened one folder at a time from `/` without following any link, so a link that appears after the check fails the open. Writes go to a temporary file in the same folder and replace the target atomically, keeping its read, write and execute bits; a reader never sees half a file. A file with more than one link is not read when it is one of the files the gate refuses to read. A tool called with no gate (a script, a test) still checks the floor itself.
+  - **Behaviour change:** a link that already exists when the gate checks still works, and a write to a symlinked file still writes its target. A write now replaces the file instead of rewriting it, so a file that has other hard links gets a new file under the name you wrote, and its other names keep the old contents; its owner, extended attributes and ACLs are those of a new file. A file this user may not write is refused as before. A single file bind-mounted into a container, which cannot be replaced, is rewritten in place.
+
+### Also
+
+- `/anatomy` sent through Telegram, Discord or Slack no longer shows hostnames, IP addresses, URLs or the names and addresses of your tailnet peers. Those services keep every message on their servers. The reply keeps what the machines can do, and counts the peers. In the terminal and in Beacon `/anatomy` shows everything, as before. `anatomy.include_addresses_in_chat: true` shows everything on chat too. (#885)
+- When a model server runs on another machine and no SSH user is set to read its GPU, `/anatomy`, the model's Infrastructure section and doctor now say the GPU is "not configured". Before, every scan logged a warning that the probe failed, `/anatomy` called the GPU unreachable, and doctor reported no GPU and running on CPU. (#885)
+- `memory.extraction.enabled: false` stops memory being learned from chats. The fact extractor, the wiki compile after it, the SENTINEL insight writer, the agent's `memory` tool and `wiki_query`'s saving of questions are not built or started. Recall, `/note` and the memory editor are unchanged. `prometheus doctor` reports the switch. (#889)
+- MCP servers can be remote: a `url` connects over streamable HTTP (`transport: streamable-http`) or SSE (the default). Before, a `url` server was always marked failed as "not yet implemented". The server's stored `headers` are sent on every request to it and are never shown or logged. The server store now refuses a `url` that isn't `http://` or `https://`, and a header name or value that could break the request. (#892)
+- Devices: the operator can hold a device to a profile (`PUT /api/devices/{id}/profile`). Every run under that device's sessions is offered only the profile's tools and refused any other at the call, with no fallback that widens it, and the device cannot lift or change the hold. One instance can then serve its owner with every tool beside a server-to-server caller that stays read-only. (#893)
 
 ## 0.9.19 (2026-11-02)
 

@@ -5838,6 +5838,9 @@ async def _execute_tool_call(
         except Exception:
             log.debug("tool_call_observer raised (ignored)", exc_info=True)
 
+    # The path the gate rules on, resolved: the file tool opens exactly this one, through no link
+    # (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q). None when there is no gate or no path.
+    _decided_path: str | None = None
     # Permission check (Sprint 4 + TRUST-CONTEXT)
     if context.permission_checker is not None:
         # THE DEFECT THIS REPLACES: `tool_input.get("file_path")` — a key NO
@@ -5880,6 +5883,9 @@ async def _execute_tool_call(
             tool_name, tool_input, schema=_gate_schema, base=_run_cwd,
             write_base=_run_cwd if _run_roots else None,
         )
+        # Exactly the string the gate is handed (gate_path_for resolves it): a second resolution here could
+        # land somewhere else, and that would be what the tool opened.
+        _decided_path = _file_path or None
         # Whether that path gets WRITTEN to, from the parameter's own
         # declaration. This is what the workspace boundary keys on; it used to
         # key on a list of two tool names, and four writing tools were not in
@@ -6077,6 +6083,19 @@ async def _execute_tool_call(
                     is_error=True,
                 )
 
+    if _decided_path is None and context.permission_checker is None:
+        # No gate (a bare loop, a test harness): the same resolution the gate would have been handed, so the tool
+        # still opens one path through no link and the post-result hooks still know which file it was.
+        try:
+            from prometheus.permissions.tool_paths import gate_path_for as _gate_path_for
+
+            _schema = tool.input_model.model_json_schema() if getattr(tool, "input_model", None) else None
+            _cwd, _roots = _run_paths(context)
+            _decided_path = _gate_path_for(tool_name, tool_input, schema=_schema, base=_cwd,
+                                           write_base=_cwd if _roots else None)[0] or None
+        except Exception:  # noqa: BLE001 — without it the tool resolves its own argument, as it always did
+            _decided_path = None
+
     from prometheus.tools.base import ToolExecutionContext
     # M5: bound tool execution so a hung tool can't freeze the turn/session.
     # The timeout wraps ONLY tool.execute() — not the permission prompt above,
@@ -6099,6 +6118,8 @@ async def _execute_tool_call(
                     metadata={
                         # Item W: the session's write boundary, when it has one.
                         "workspace_roots": _run_paths(context)[1],
+                        # The path the gate ruled on, resolved (security/safe_fs.py).
+                        **({"decided_path": _decided_path} if _decided_path else {}),
                         "tool_registry": context.tool_registry,
                         "ask_user_prompt": context.ask_user_prompt,
                         # Managed tasks: the creating session id, so task_create
@@ -6332,11 +6353,16 @@ async def _execute_tool_call(
 
     # Sprint 20: Post-result hooks (e.g., LSP diagnostics — can modify result)
     if context.post_result_hooks:
-        for hook in context.post_result_hooks:
-            try:
-                tool_result = await hook(tool_name, tool_input, tool_result)
-            except Exception:
-                log.debug("Post-result hook failed", exc_info=True)
+        from prometheus.engine.tool_context import DECIDED_PATH as _DECIDED_PATH
+        _decided_token = _DECIDED_PATH.set(_decided_path)
+        try:
+            for hook in context.post_result_hooks:
+                try:
+                    tool_result = await hook(tool_name, tool_input, tool_result)
+                except Exception:
+                    log.debug("Post-result hook failed", exc_info=True)
+        finally:
+            _DECIDED_PATH.reset(_decided_token)
 
     return tool_result
 

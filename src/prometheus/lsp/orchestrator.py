@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 
 from prometheus.lsp.client import (
+    as_given,
     Diagnostic,
     DocumentSymbol,
     HoverInfo,
@@ -48,7 +49,7 @@ class LSPOrchestrator:
 
         Returns ``None`` if the language is unsupported or the server is broken.
         """
-        filepath = Path(filepath).resolve()
+        filepath = as_given(filepath)   # never re-resolved: see lsp/client.as_given
         server_def = get_server_for_file(filepath, self._custom_servers)
         if server_def is None:
             return None

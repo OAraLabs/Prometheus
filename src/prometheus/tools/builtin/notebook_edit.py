@@ -8,12 +8,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from prometheus.permissions.path_schema import PATH_FIELD_WRITE
+from prometheus.security import safe_fs
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -55,16 +55,19 @@ class NotebookEditTool(BaseTool):
     async def execute(
         self, arguments: NotebookEditInput, context: ToolExecutionContext
     ) -> ToolResult:
-        path = Path(arguments.path)
-        if not path.is_absolute():
-            path = context.cwd / path
-
-        if path.exists():
-            try:
-                nb = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                return ToolResult(output=f"Cannot parse notebook: {exc}", is_error=True)
-        elif arguments.create_if_missing:
+        # The path the gate checked, opened through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q).
+        try:
+            path = safe_fs.resolve_tool_path(arguments.path, context.cwd, context.metadata)
+            present = safe_fs.exists(path)
+            if present:
+                nb = json.loads(safe_fs.read_text(path))
+        except safe_fs.PathChanged as exc:
+            return ToolResult(output=str(exc), is_error=True)
+        except OSError as exc:
+            return ToolResult(output=f"Cannot read notebook {arguments.path}: {exc.strerror or exc}", is_error=True)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            return ToolResult(output=f"Cannot parse notebook: {exc}", is_error=True)
+        if not present and arguments.create_if_missing:
             nb = {
                 "nbformat": 4,
                 "nbformat_minor": 5,
@@ -78,7 +81,7 @@ class NotebookEditTool(BaseTool):
                 },
                 "cells": [],
             }
-        else:
+        elif not present:
             return ToolResult(output=f"Notebook not found: {path}", is_error=True)
 
         cells = nb.setdefault("cells", [])
@@ -110,8 +113,12 @@ class NotebookEditTool(BaseTool):
             cells.insert(arguments.cell_index + 1, new_cell)
             action = "Appended after"
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(nb, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            safe_fs.write_text(path, json.dumps(nb, indent=2, ensure_ascii=False))
+        except safe_fs.PathChanged as exc:
+            return ToolResult(output=str(exc), is_error=True)
+        except OSError as exc:
+            return ToolResult(output=f"Could not write {arguments.path}: {exc.strerror or exc}", is_error=True)
 
         return ToolResult(
             output=f"{action} cell {arguments.cell_index} in {path} "

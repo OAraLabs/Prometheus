@@ -15,6 +15,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from prometheus.security import safe_fs
 from prometheus.permissions.path_schema import PATH_FIELD_WRITE
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
@@ -168,11 +169,11 @@ class YouTubeTranscriptTool(BaseTool):
         saved_note = ""
         if arguments.save_to:
             try:
-                dest = _resolve_save_path(context.cwd, arguments.save_to)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_text(transcript, encoding="utf-8")
+                # The path the gate checked, written through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q).
+                dest = safe_fs.resolve_tool_path(arguments.save_to, context.cwd, context.metadata)
+                safe_fs.write_text(dest, transcript)
                 saved_note = f"\n\n[Saved to {dest}]"
-            except OSError as exc:
+            except OSError as exc:  # safe_fs.PathChanged included
                 saved_note = f"\n\n[Warning: failed to save to {arguments.save_to}: {exc}]"
 
         return ToolResult(
