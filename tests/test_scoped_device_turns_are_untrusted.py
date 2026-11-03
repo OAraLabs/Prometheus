@@ -149,6 +149,40 @@ async def test_the_owners_turn_is_unchanged(w):
     assert w.gate.origins == [ORIGIN_USER]
 
 
+@pytest.mark.asyncio
+async def test_a_turn_a_scoped_device_starts_by_uploading_a_file_is_untrusted_too(w, tmp_path, monkeypatch):
+    import base64
+    import json
+
+    from prometheus.config.api_token import DeviceIdentity
+
+    monkeypatch.setenv("PROMETHEUS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / "config"))
+    sid = await _turn(w, w.a["token"], "echo hi")  # the device's own session
+    RAN.clear()
+    w.gate.origins.clear()
+
+    class _Sock:
+        async def send(self, raw: str) -> None:
+            pass
+
+    sock = _Sock()
+    w.bridge._clients.add(sock)
+    w.bridge._ws_identity[sock] = DeviceIdentity(id=w.a["id"], name="device-a", platform="ios")
+    await w.bridge._handle_client_message(sock, json.dumps({"type": "chat_upload", "payload": {
+        "session_id": sid, "filename": "notes.txt", "mime_type": "text/plain", "caption": "read this",
+        "content_base64": base64.b64encode(b"just some notes").decode()}}))
+    for _ in range(500):
+        task = w.bridge._turn_tasks.get(sid)
+        if task is not None and not task.done():
+            await asyncio.wait_for(task, 10)
+            break
+        if w.gate.origins:
+            break
+        await asyncio.sleep(0.01)
+    assert w.gate.origins == [ORIGIN_SYSTEM], "an upload's turn ran as the owner's"
+
+
 # ── the untrusted class: the exfiltration check ───────────────────────────
 
 
