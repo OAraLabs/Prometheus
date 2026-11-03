@@ -4,6 +4,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Coding runs: a run started through `POST /api/code` now uses the config file the daemon was started with (`--config`). Before, the run read the default config, so a daemon started with its own file could accept a run that then ran on other settings (#850, by @sepehrtaji-dev).
 - Devices: a scoped device's turns (Beacon's WebSocket, `POST /api/chat/send`) run under their own session id instead of the shared `web` one, and so in the permission gate's untrusted class: the exfiltration check and the network/install approval patterns now apply to them. A scoped device can no longer claim a session id the gate reads as the owner at the keyboard (`web`, `cli`, a `matrix:`/`signal:` id). A file a scoped device uploads starts its turn in the same class.
 
 ## 0.9.20 (2026-11-02)
