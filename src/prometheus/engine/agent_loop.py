@@ -1008,6 +1008,41 @@ class _ServingTier:
         self.tier = tier
 
 
+def _profiled_or_all(schemas: list[dict], profile: object) -> list[dict]:
+    """*schemas* cut to *profile*. A profile that matches none of them is a mistyped one and is ignored
+    (every schema), except a HELD profile (a held device's run), which has no fallback that widens it."""
+    from prometheus.config.profiles import filter_tools_by_profile
+
+    filtered = filter_tools_by_profile(schemas, profile)  # type: ignore[arg-type]
+    return filtered if filtered or getattr(profile, "held", False) else schemas
+
+
+def _run_hold(resolver: Callable[..., object], *session_ids: str | None) -> object | None:
+    """The profile the operator HOLDS this run to (``AgentProfile.held``), or None.
+
+    Asked under the run's own session and under the id it is recorded as: ``POST /api/chat`` passes its
+    conversation as ``record_session_id`` only, and a held device's turn there must be held as surely as one
+    on the WebSocket. The recorded id is RECORD-ONLY everywhere else; here it can only take tools away, never
+    add any or change the permission origin. A resolver that takes no session (written before per-session
+    binding) has no holds.
+    """
+    seen: set[str] = set()
+    for sid in session_ids:
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        try:
+            profile = resolver(sid)
+        except TypeError:
+            return None
+        except Exception:
+            log.warning("profile resolver failed while checking %s for a hold", sid, exc_info=True)
+            continue
+        if getattr(profile, "held", False):
+            return profile
+    return None
+
+
 def _catalog_for(context: "LoopContext", tier: str | None, active_profile: object
                  ) -> tuple[list[dict], frozenset[str]] | None:
     """The tools a run offers a model of *tier*, by the run-start rules (the
@@ -1023,9 +1058,7 @@ def _catalog_for(context: "LoopContext", tier: str | None, active_profile: objec
     def _profiled(schemas: list[dict]) -> list[dict]:
         if active_profile is None:
             return schemas
-        from prometheus.config.profiles import filter_tools_by_profile
-
-        return filter_tools_by_profile(schemas, active_profile) or schemas
+        return _profiled_or_all(schemas, active_profile)
 
     if deferred and getattr(loader, "catalog_mode", "names") == "stubs":
         from prometheus.context.tool_stubs import catalog
@@ -1611,6 +1644,7 @@ async def run_loop(
             div_task_id=div_task_id,
             effective_session_id=effective_session_id,
             recorded_session_id=recorded_session_id,
+            record_session_id=record_session_id,
             record_summary=record_summary,
             turn_record=turn_record,
         ):
@@ -1764,6 +1798,7 @@ async def _run_loop(
     div_task_id: str | None = None,
     effective_session_id: str | None = None,
     recorded_session_id: str | None = None,
+    record_session_id: str | None = None,
     record_summary: dict | None = None,
     turn_record: "_TurnRecord | None" = None,
 ) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
@@ -1779,7 +1814,8 @@ async def _run_loop(
     ``recorded_session_id`` is the id the TELEMETRY rows are filed under: the
     turn's own session, or the record-only one :func:`run_loop` resolved for
     a run with none. Behaviour — resolvers, checkpoints, the compactor — keeps
-    reading ``effective_session_id``. ``record_summary`` adds keys to this
+    reading ``effective_session_id``. ``record_session_id`` is the caller's record-only id as passed (an
+    ephemeral one included), read for one thing: whether the run is HELD to a profile. ``record_summary`` adds keys to this
     run's tool_advertisement row (a subagent names its parent there).
 
     ``turn_record`` is the turn's telemetry v2 record (None without
@@ -1867,7 +1903,18 @@ async def _run_loop(
     # so "advertised" states what the model actually saw. Resolved per run:
     # a /profile or Beacon switch affects the next run, not a restart.
     active_profile = None
-    if tools_enabled and tool_schema and context.profile_resolver is not None:
+    # A HELD run first (a device the operator holds to a profile): its profile limits what the run is offered
+    # AND what it may call, with no fallback that widens it, whether or not tools are advertised this run.
+    _hold = (_run_hold(context.profile_resolver, effective_session_id, record_session_id)
+             if context.profile_resolver is not None else None)
+    if _hold is not None:
+        from prometheus.config.profiles import RUN_PROFILE
+
+        active_profile = _hold
+        if tool_schema:
+            tool_schema = _profiled_or_all(tool_schema, _hold)
+        RUN_PROFILE.set(_hold)  # type: ignore[arg-type]
+    elif tools_enabled and tool_schema and context.profile_resolver is not None:
         try:
             # Pass the run's session so a session-bound profile wins over the global
             # one. BOTH ARITIES are supported deliberately: a resolver written before
@@ -1926,9 +1973,7 @@ async def _run_loop(
 
         _every = context.tool_loader.schemas_for_run(False)
         if active_profile is not None:
-            from prometheus.config.profiles import filter_tools_by_profile
-
-            _every = filter_tools_by_profile(_every, active_profile) or _every
+            _every = _profiled_or_all(_every, active_profile)
         tool_schema, _undescribed = _catalog(_every)
         _RUN_CATALOG.set(_CatalogState(_undescribed))
 
