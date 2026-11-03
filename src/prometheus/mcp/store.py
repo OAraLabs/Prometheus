@@ -35,6 +35,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from prometheus.config.paths import get_data_dir
 
@@ -104,6 +105,10 @@ _ENV_HIJACK_NAMES = frozenset({
 #: any normal launcher, so accepting one only stores something unusable.
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+#: HTTP header names (RFC 9110 tokens). Anything else is refused by the HTTP
+#: client at connect time; refusing it here says so when the server is saved.
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+
 
 def _has_control_chars(text: str) -> bool:
     """True if *text* carries a C0 control, DEL, or a NUL.
@@ -171,6 +176,30 @@ class McpServerStore:
             raise McpStoreError(
                 "definition needs a stdio `command` or an http/sse `url`"
             )
+        # ── url / headers ──────────────────────────────────────────────
+        # An http(s) URL with a host, nothing else: the runtime connects to it.
+        # Header values are sent on every request to that server, so a CR or LF
+        # in one would split the request; refused like control characters in
+        # an env value.
+        url = definition.get("url")
+        if url is not None:
+            if not isinstance(url, str) or _has_control_chars(url) or any(c.isspace() for c in url):
+                raise McpStoreError("url must be a string with no spaces or control characters")
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                raise McpStoreError("url must be an http:// or https:// address with a host")
+        headers = definition.get("headers")
+        if headers is not None:
+            if not isinstance(headers, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in headers.items()
+            ):
+                raise McpStoreError("headers must be a {Name: value} string map")
+            for k, v in headers.items():
+                if not _HEADER_NAME_RE.match(k):
+                    raise McpStoreError(f"header name {k!r} is not a valid HTTP header name")
+                if _has_control_chars(v):
+                    # The value is a secret: name the header, never echo the value.
+                    raise McpStoreError(f"header {k!r} contains control characters")
         # ── command / args / cwd ───────────────────────────────────────
         # Previously unchecked in full: presence of `command` was the ONLY
         # test, and args/cwd were never looked at on any path. These reach

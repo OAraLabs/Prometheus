@@ -203,7 +203,7 @@ class TestRoutes:
         assert HEADER_SECRET not in resp.text
         assert resp.json()["server"]["header_names"] == ["Authorization"]
         assert "headers" not in resp.json()["server"]
-        # HTTP is unimplemented: stored, and honestly not live.
+        # The .invalid host never resolves: stored, and honestly not live.
         assert resp.json()["applies"] != "live"
 
         listing = client.get("/api/mcp/servers")
@@ -211,7 +211,7 @@ class TestRoutes:
         card = {s["name"]: s for s in listing.json()["servers"]}["ha"]
         assert card["header_names"] == ["Authorization"]
         assert "headers" not in card
-        assert card["health"]["state"] == "failed"      # "not yet implemented"
+        assert card["health"]["state"] == "failed"      # unreachable
 
         # The yaml-managed side renders through the same projection.
         app = create_app({"mcp_servers": {"ha-yaml": {

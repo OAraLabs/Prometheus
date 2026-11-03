@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import hashlib
+import signal
 import ssl
 import stat
 from datetime import datetime, timedelta, timezone
@@ -186,8 +187,20 @@ async def _wait_started(app, attr):
     raise AssertionError(f"{attr} did not start")
 
 
+@pytest.fixture
+def _signal_handlers_restored():
+    # Two uvicorn servers run at once on the main thread below. Each saves the SIGINT/SIGTERM handler when it
+    # starts and puts it back when it stops, and when their stops overlap, the process is left with a STOPPED
+    # server's handle_exit as its SIGTERM handler. sse_starlette reads that handler to detect a shutdown, so every
+    # event stream served later in this process (the MCP HTTP tests) would end at once.
+    saved = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    yield
+    for sig, handler in saved.items():
+        signal.signal(sig, handler)
+
+
 @pytest.mark.asyncio
-async def test_the_tls_rest_listener_presents_the_instance_key_and_hello_says_tls(node):
+async def test_the_tls_rest_listener_presents_the_instance_key_and_hello_says_tls(node, _signal_handlers_restored):
     pytest.importorskip("fastapi")
     import httpx
 
