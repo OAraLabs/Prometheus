@@ -2724,6 +2724,7 @@ async def approve_detail(
             return ApproveOutcome("No pending approval requests.")
         from prometheus.permissions.approval_queue import (
             is_desktop_request,
+            is_hold_request,
             is_worker_request,
         )
 
@@ -2731,9 +2732,10 @@ async def approve_detail(
         # W2). Draining a backlog must not approve "Set the field to <text>"
         # or "Click 'Send'" sight unseen; each is answered on its own. Nor is a
         # spawned WORKER's request: it asks for the worker, whose arguments
-        # the operator has not seen (#720).
+        # the operator has not seen (#720). Nor is lifting a device's hold:
+        # it widens what that device may run, so it is read on its own.
         def _alone(a: Any) -> bool:
-            return is_desktop_request(a) or is_worker_request(a)
+            return is_desktop_request(a) or is_worker_request(a) or is_hold_request(a)
 
         skipped = [a for a in pending if _alone(a)]
         approved: list[str] = []
@@ -2743,7 +2745,7 @@ async def approve_detail(
             rid = getattr(act, "request_id", "")
             if rid and await queue.approve(rid, by=by):
                 approved.append(rid)
-        note = (f" — skipped {len(skipped)} desktop or worker request(s); answer "
+        note = (f" — skipped {len(skipped)} desktop, worker or hold request(s); answer "
                 f"each with {prefix}approve <id>" if skipped else "")
         if not approved:
             if skipped:
@@ -4739,7 +4741,11 @@ def _computer_devices(runner: Any, verb: str, device_id: str, by: Approver) -> s
     runner.people.require(by)
     if not device_id:
         return f"Name the device: /computer {verb} <device-id>."
-    if not store.set_computer(device_id, verb == "allow", by=by.label):
+    try:
+        marked = store.set_computer(device_id, verb == "allow", by=by.label)
+    except ValueError as exc:  # a held device is never marked
+        return f"Not marked: {exc}."
+    if not marked:
         return f"No live device {device_id}."
     return (f"Device {device_id} may now start desktop tasks." if verb == "allow"
             else f"Device {device_id} may no longer start desktop tasks.")

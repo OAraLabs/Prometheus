@@ -15,6 +15,7 @@ profile can be what stops a call):
 * the device cannot lift or change its hold, its sessions' profile or the instance's;
 * nobody can rebind one of its sessions to another profile while the hold stands;
 * an owner device cannot be held (it is the operator, and could lift the hold itself);
+* a hold a person lifted gives the device the instance default again;
 * a device that is not held keeps the instance default.
 """
 
@@ -121,7 +122,8 @@ class _Rig:
         self.registry = _registry()
         self.gate = SecurityGate(mode=PermissionMode.AUTONOMOUS, workspace_root=tmp_path)
         self.app = create_app(
-            {"web": {"api_token": GLOBAL}}, device_store=self.devices, session_mgr=SessionManager(),
+            {"web": {"api_token": GLOBAL}, "gateway": {"owner_user_ids": [456]}},
+            device_store=self.devices, session_mgr=SessionManager(),
             profile_store=self.profiles, profile_state=self.state,
             agent_loop=AgentLoop(provider=self.provider, model="stub", max_tokens=64,
                                  tool_registry=self.registry, permission_checker=self.gate,
@@ -270,8 +272,16 @@ async def test_the_hold_is_validated_and_listed(rig):
 
 
 @pytest.mark.asyncio
-async def test_the_operator_can_lift_a_hold(rig):
+async def test_a_hold_lifted_by_a_person_gives_the_device_the_default_again(rig):
+    # The API token only ASKS to lift a hold (tests/test_device_hold_needs_a_person.py); the person approves.
+    from prometheus.permissions.approver import Approver
+
     await rig.hold(rig.relay, "relay")
-    assert (await rig.hold(rig.relay, None)).status_code == 200
+    r = await rig.hold(rig.relay, None)
+    assert r.status_code == 202, r.text
+    rid = r.json()["pending"]["request_id"]
+    assert await rig.app.state.approval_queue.approve(rid, by=Approver("telegram", "456", "owner", owner=True))
+    for _ in range(20):
+        await asyncio.sleep(0)
     await rig.chat(rig.relay)
     assert sorted(RAN) == ["bash", "read_file", "write_file"]
