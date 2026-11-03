@@ -4,6 +4,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Coding runs: a run started through `POST /api/code` now uses the config file the daemon was started with (`--config`). Before, the run read the default config, so a daemon started with its own file could accept a run that then ran on other settings (#850, by @sepehrtaji-dev).
 - Devices: a scoped device (an approved phone, a server-to-server caller) can no longer approve the gated tool calls of its own sessions, once or until a restart. It still sees and may deny them; only the owner approves. A desktop prompt is unchanged: a device a person marked for computer use answers it.
 
 ## 0.9.20 (2026-11-02)
