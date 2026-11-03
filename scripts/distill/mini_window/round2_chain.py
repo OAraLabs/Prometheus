@@ -681,14 +681,16 @@ class Ctx:
         except ValueError:
             return None
 
-    def notify(self, lines: list[str], n: int = 5) -> None:
+    def notify(self, lines: list[str], n: int = 5) -> int | None:
+        """Send ``lines`` (at most ``n``); the notifier's exit code, or None on a dry run."""
         text = "\n".join(clip(lines, n))
         if not self.execute:
             self.log("[dry run] would notify:\n" + "\n".join("    | " + ln for ln in text.split("\n")))
-            return
+            return None
         cp = self.run([self.c["R2_NOTIFY"], str(n)], timeout=60, input=text + "\n")
         self.log(f"notify {'sent' if cp.returncode == 0 else 'FAILED (exit %d)' % cp.returncode}: "
                  + text.split("\n")[0][:120])
+        return int(cp.returncode)
 
     # the 4090
 
@@ -1600,6 +1602,28 @@ def problems_line(cx: Ctx, tw: dict[str, str]) -> str:
     return "Problems: " + ("; ".join(probs) if probs else "none")
 
 
+HEARTBEAT_KEEP = 30
+
+
+def save_heartbeat(cx: Ctx, now: float, lines: list[str], rc: int | None) -> None:
+    """Keep the exact text a sent heartbeat carried, so an agent can check what it said, not only that it
+    went: ``state/heartbeat-<date>.txt`` (the newest HEARTBEAT_KEEP kept) and ``state/heartbeat.last``.
+    The first line records when it was sent and the notifier's exit code. Never fails the heartbeat."""
+    head = f"# sent {iso(now)} notify_rc={'dry-run' if rc is None else rc}"
+    body = head + "\n" + "\n".join(lines) + "\n"
+    try:
+        cx.state_dir.mkdir(parents=True, exist_ok=True)
+        for name in (f"heartbeat-{et(now, '%F')}.txt", "heartbeat.last"):
+            tmp = cx.state_dir / f".{name}.{os.getpid()}"
+            tmp.write_text(body, encoding="utf-8")
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, cx.state_dir / name)
+        for old in sorted(cx.state_dir.glob("heartbeat-*.txt"))[:-HEARTBEAT_KEEP]:
+            old.unlink()
+    except OSError as e:
+        cx.log(f"heartbeat text not saved: {type(e).__name__}: {e}")
+
+
 def cmd_heartbeat(cx: Ctx, send: bool) -> int:
     now = cx.now()
     n = int(cx.c["R2_HEARTBEAT_LINES"])
@@ -1618,7 +1642,8 @@ def cmd_heartbeat(cx: Ctx, send: bool) -> int:
     lines = clip(lines, n)
     if send:
         cx.execute = True
-        cx.notify(lines, n)
+        rc = cx.notify(lines, n)
+        save_heartbeat(cx, now, lines, rc)
     else:
         for ln in lines:
             cx.out(ln)

@@ -819,3 +819,40 @@ def test_a_longctx_night_on_the_iq3_copy_generates_as_the_iq3_teacher(tmp_path: 
                           if f.now >= t("2026-11-03T06:22:00-05:00") else None)
     assert R.cmd_tower_night(cx2) == 0
     assert seen2 == ["UD-Q4_K_XL"]
+
+
+def test_a_sent_heartbeat_saves_the_exact_text_it_carried(tmp_path: Path) -> None:
+    fake = Fake("2026-11-03T09:00:00-05:00")
+    sent: list[str] = []
+
+    def run(argv: list[str], timeout: float = 0, input: str | None = None, env: Any = None) -> Any:
+        if input is not None:  # only the notifier gets stdin; the other calls are status reads
+            sent.append(input)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    fake.run = run  # type: ignore[method-assign]
+    cx = ctx(tmp_path, fake)
+    cx.notify = R.Ctx.notify.__get__(cx)  # type: ignore[method-assign]  # the real send, through fake.run
+    old = cx.state_dir / "heartbeat-2026-09-01.txt"
+    for i in range(R.HEARTBEAT_KEEP + 2):  # older days beyond the retention are pruned
+        (cx.state_dir / f"heartbeat-2026-09-{i + 1:02d}.txt").write_text("x\n")
+    assert R.cmd_heartbeat(cx, send=True) == 0
+    saved = (cx.state_dir / "heartbeat-2026-11-03.txt").read_text()
+    assert saved.startswith("# sent 2026-11-03T") and "notify_rc=0" in saved.split("\n")[0]
+    assert saved.split("\n", 1)[1] == sent[0]  # byte-for-byte what went to the notifier
+    assert (cx.state_dir / "heartbeat.last").read_text() == saved
+    assert not old.exists() and len(list(cx.state_dir.glob("heartbeat-*.txt"))) == R.HEARTBEAT_KEEP
+
+
+def test_a_failed_send_is_saved_with_its_exit_code_and_a_dry_heartbeat_saves_nothing(tmp_path: Path) -> None:
+    fake = Fake("2026-11-03T09:00:00-05:00")
+    fake.run = lambda argv, timeout=0, input=None, env=None: subprocess.CompletedProcess(  # type: ignore[method-assign]
+        argv, 3 if input is not None else 0, "", "")
+    cx = ctx(tmp_path, fake)
+    cx.notify = R.Ctx.notify.__get__(cx)  # type: ignore[method-assign]
+    R.cmd_heartbeat(cx, send=True)
+    assert "notify_rc=3" in (cx.state_dir / "heartbeat.last").read_text().split("\n")[0]
+    (tmp_path / "dry").mkdir()
+    cx2 = ctx(tmp_path / "dry", Fake("2026-11-03T09:00:00-05:00"))
+    R.cmd_heartbeat(cx2, send=False)
+    assert not (cx2.state_dir / "heartbeat.last").exists()
