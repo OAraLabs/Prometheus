@@ -1,0 +1,10 @@
+[Unit]
+Description=flywheel window: window_start (nightly)
+
+[Timer]
+OnCalendar=*-*-* 01:20:00 America/New_York
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

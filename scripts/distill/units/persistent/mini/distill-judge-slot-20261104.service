@@ -1,0 +1,8 @@
+[Unit]
+Description=distill: calibrated-judge slot on the standard 4090 night (round-2 judge_pending, then acceptable tools)
+
+[Service]
+Type=simple
+RuntimeMaxSec=4h
+WorkingDirectory=%h/distill
+ExecStart=/bin/bash -c "exec %h/distill/acceptable-tools/judge-slot.sh --execute >> %h/distill/acceptable-tools/judge-slot.log 2>&1"

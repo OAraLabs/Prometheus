@@ -375,3 +375,15 @@ Append-only, times in ET.
   - At 06:40 Saluki was back on 8092, the teacher was stopped, the eval crontab was untouched, and voice ran at 53 tok/s with no failed units.
 - **Pool:** the 27B gym pool grew from 3,223 to about 3,350 rows overnight, counting both branches. Per-category rates come in the 09:00 heartbeat.
 - **Tonight (Wed 11-04):** the standard 4090 night with the calibrated judge slot at 01:20.
+
+## 2026-11-03 08:40 EST: OQ18 done, standing timers are persistent unit files
+- **What changed (operator go):** the four standing timers that were transient (`systemd-run`) are now unit files in `~/.config/systemd/user`, enabled with `enable --now`:
+  - the 3090 Ti host's `distill-judge-slot-20261104` and `-20261106`;
+  - the 4090's `flywheel-window-start` (01:20 ET) and `flywheel-window-end` (06:40 ET).
+- **Same settings:** fire times, commands, KillMode, stop timeout and RuntimeMaxSec are unchanged, checked before and after. Copies are in the repo at `scripts/distill/units/persistent/`, with `%h` paths.
+- **Checks:**
+  - `systemd-analyze --user verify` is clean.
+  - `window_start.sh --dry-run` on the 4090 finds "window end scheduled: flywheel-window-end.timer fires 2026-11-04 06:40".
+  - The rehearsed bundle hash is unchanged (`2eed8974d4c76d2f`).
+- **Considered and backed out:** I briefly patched `rearm_nightly.sh` to start persistent timers instead of `systemd-run`. It is in `BUNDLE_FILES`, so the edit would have voided the rehearsal PASS and blocked tonight's window. I restored it from its backup byte for byte (sha checked). It only acts on timers that aren't armed, which persistent timers now always are. If it ever runs on a stopped persistent timer, its `systemd-run` will fail loudly rather than misbehave. Fix that alongside the next rehearsal.
+- **Still transient, by design:** the per-window units (dead-man restores, the round-2 end timer, the one-shot end). Each night's window machinery creates them.

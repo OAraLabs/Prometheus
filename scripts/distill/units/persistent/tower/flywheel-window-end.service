@@ -1,0 +1,9 @@
+[Unit]
+Description=flywheel window: window_end (nightly)
+
+[Service]
+Type=simple
+KillMode=mixed
+TimeoutStopSec=1800
+WorkingDirectory=%h
+ExecStart=:/bin/bash %h/distill/window/window_end.sh

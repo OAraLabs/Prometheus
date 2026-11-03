@@ -1,0 +1,10 @@
+[Unit]
+Description=distill: calibrated-judge slot on the standard 4090 night (round-2 judge_pending, then acceptable tools)
+
+[Timer]
+OnCalendar=2026-11-04 01:20:00
+Persistent=false
+RemainAfterElapse=no
+
+[Install]
+WantedBy=timers.target
