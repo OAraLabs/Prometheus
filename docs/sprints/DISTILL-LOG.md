@@ -360,3 +360,10 @@ Append-only, times in ET.
 - **Testing:** verified with fakes only (five ways of cutting the run all give the same data order and final weights). Nothing was staged or armed on the hosts.
 - **Estimate:** about 4.6–6.6 nights of training plus 1–2 nights of post-train, assuming roughly 3,750 new rows plus 40% replay. It will be re-estimated from the real build.
 - **Launch:** needs the 9-step procedure in DISTILL-PHASE5-TRAINING.md, including a new rehearsal and disarming the round-2 teacher nights. It runs when the OQ16 trigger holds.
+
+## 2026-11-03 03:21 EST: mini generation restarted after a voice-probe trip
+- **What happened:** at 03:01:58 the voice probe's `inference_gpu` check read 7.4 tok/s, under its 15 tok/s floor. The 03:00 nightly eval was loading the teacher at the time, and local generation was already paused for it. The probe guard tripped its abort switch as designed, so local generation did not resume and the 3090 Ti sat idle from 03:02.
+  - Voice was back at 50 tok/s by 03:06.
+  - This was the first trip on any night. On earlier nights the probe never landed in the eval's heaviest load.
+- **Action:** at 03:21 I started a fresh `distill-gen-*` run with the window-start command. It moves the old abort switch aside, so a new guard with full protection is in front of the teacher.
+- **Follow-up idea, not done:** a probe that lands while generation is paused for an eval reflects the eval's load, not generation's. The guard could rearm after the pause ends and the next probe is OK, instead of ending the run.
