@@ -126,6 +126,25 @@ class McpStoreError(ValueError):
     """A definition the store refuses; the message is client-facing."""
 
 
+def check_header_map(headers: Any, what: str = "headers") -> dict[str, str]:
+    """A ``{Name: value}`` map of HTTP headers, or McpStoreError.
+
+    Header values are sent on every request to the server, so a CR or LF in one
+    would split the request. Values are secrets: a refusal names the header,
+    never its value.
+    """
+    if not isinstance(headers, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in headers.items()
+    ):
+        raise McpStoreError(f"{what} must be a {{Name: value}} string map")
+    for k, v in headers.items():
+        if not _HEADER_NAME_RE.match(k):
+            raise McpStoreError(f"header name {k!r} is not a valid HTTP header name")
+        if _has_control_chars(v):
+            raise McpStoreError(f"header {k!r} contains control characters")
+    return headers
+
+
 class McpServerStore:
     """CRUD over the daemon-owned MCP server definition file."""
 
@@ -188,18 +207,8 @@ class McpServerStore:
             parsed = urlparse(url)
             if parsed.scheme not in ("http", "https") or not parsed.hostname:
                 raise McpStoreError("url must be an http:// or https:// address with a host")
-        headers = definition.get("headers")
-        if headers is not None:
-            if not isinstance(headers, dict) or not all(
-                isinstance(k, str) and isinstance(v, str) for k, v in headers.items()
-            ):
-                raise McpStoreError("headers must be a {Name: value} string map")
-            for k, v in headers.items():
-                if not _HEADER_NAME_RE.match(k):
-                    raise McpStoreError(f"header name {k!r} is not a valid HTTP header name")
-                if _has_control_chars(v):
-                    # The value is a secret: name the header, never echo the value.
-                    raise McpStoreError(f"header {k!r} contains control characters")
+        if definition.get("headers") is not None:
+            check_header_map(definition["headers"])
         # ── command / args / cwd ───────────────────────────────────────
         # Previously unchecked in full: presence of `command` was the ONLY
         # test, and args/cwd were never looked at on any path. These reach

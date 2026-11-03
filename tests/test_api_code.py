@@ -9,6 +9,7 @@ read including the output tail.
 from __future__ import annotations
 
 import json as _json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -118,6 +119,44 @@ def test_create_launches_managed_task(monkeypatch, tmp_path, repo):
     assert "'python3 -m pytest tests/ -q'" in cmd
     assert mgr.created_with["task_type"] == "local_agent"
     assert mgr.created_with["timeout_seconds"] == 1500  # wall cap + headroom
+
+
+def test_create_forwards_daemon_config_before_subcommand(monkeypatch, tmp_path, repo):
+    mgr = _StubManager(tmp_path)
+    mgr.child_config_path = str(tmp_path / "custom-prometheus.yaml")
+    c = _client_with(monkeypatch, mgr)
+
+    r = c.post("/api/code", json={
+        "repo": str(repo),
+        "description": "use daemon config",
+        "acceptance_command": "python3 -m pytest -q",
+        "task_id": "config-forward",
+    })
+
+    assert r.status_code == 200
+    # Compare argument positions, not substrings: the interpreter's path may
+    # itself contain "code". --config is a top-level option, so argparse
+    # refuses it after the `code` subcommand.
+    argv = shlex.split(mgr.created_with["command"])
+    at = argv.index("--config")
+    assert argv[at + 1] == str(tmp_path / "custom-prometheus.yaml")
+    assert at < argv.index("code")
+
+
+def test_create_without_daemon_config_passes_none(monkeypatch, tmp_path, repo):
+    mgr = _StubManager(tmp_path)
+    mgr.child_config_path = None
+    c = _client_with(monkeypatch, mgr)
+
+    r = c.post("/api/code", json={
+        "repo": str(repo),
+        "description": "default config",
+        "acceptance_command": "python3 -m pytest -q",
+        "task_id": "no-config",
+    })
+
+    assert r.status_code == 200
+    assert "--config" not in shlex.split(mgr.created_with["command"])
 
 
 def test_validation_rejects_missing_fields_and_non_repo(monkeypatch, tmp_path, repo):

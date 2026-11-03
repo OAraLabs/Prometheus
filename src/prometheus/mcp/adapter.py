@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from prometheus.engine.tool_context import TURN_MCP_HEADERS
 from prometheus.mcp.names import build_safe_tool_name
 from prometheus.mcp.runtime import McpRuntime
 from prometheus.mcp.types import McpCatalogTool
@@ -100,12 +101,17 @@ class McpToolAdapter(BaseTool):
         """Execute the MCP tool via the runtime."""
         # Extract all fields (including extra) as a plain dict
         kwargs = arguments.model_dump()
+        # Headers the chat request handed THIS server for this turn, if any;
+        # passed only when present, so an ordinary call is unchanged.
+        turn_headers = (TURN_MCP_HEADERS.get() or {}).get(self._tool_info.server_name)
+        extra = {"turn_headers": turn_headers} if turn_headers else {}
 
         try:
             result = await self._runtime.call_tool(
                 self._tool_info.server_name,
                 self._tool_info.tool_name,
                 kwargs,
+                **extra,
             )
             return ToolResult(output=result)
         except Exception as e:
