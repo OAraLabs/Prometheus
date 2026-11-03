@@ -382,12 +382,18 @@ class DeviceStore:
 
     def set_computer(self, device_id: str, on: bool, *, by: str) -> bool:
         """Mark (or unmark) a LIVE device for computer use. ``by`` names who
-        did it (an approver label). False for an unknown or revoked id."""
+        did it (an approver label). False for an unknown or revoked id;
+        ValueError for marking a device held to a profile."""
         live = self._conn.execute(
             "SELECT 1 FROM api_devices WHERE id = ? AND revoked_at IS NULL",
             (device_id,)).fetchone()
         if live is None:
             return False
+        if on and self.device_profile(device_id):
+            # A held device stays off the desktop: the hold limits what its runs may do, and the computer-use
+            # door is a runner of its own that no profile reaches.
+            raise ValueError(f"device {device_id} is held to profile {self.device_profile(device_id)!r}, and a "
+                             f"held device cannot be marked for computer use")
         if not on:
             if self._has_computer_table():
                 self._conn.execute(
@@ -426,6 +432,71 @@ class DeviceStore:
             "SELECT c.device_id FROM computer_devices c JOIN api_devices d "
             "ON d.id = c.device_id WHERE d.revoked_at IS NULL").fetchall()
         return {r["device_id"] for r in rows}
+
+    # ------------------------------------------------------------------
+    # A profile the operator HOLDS a device to
+    # ------------------------------------------------------------------
+    #
+    # A server-to-server caller beside the owner's own assistant: its device is held to a profile (read-only
+    # tools, say), and every run under one of its sessions is held to it (config/profiles.py,
+    # ActiveProfileState.get). Its own table, created on the FIRST hold, like computer_devices: a daemon
+    # that never holds a device never grows it, and the parity fixtures stay as they are.
+
+    def _has_profile_table(self) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='device_profiles'").fetchone() is not None
+
+    def set_profile(self, device_id: str, profile: str | None, *, by: str) -> bool:
+        """Hold a LIVE device to *profile*, or lift its hold (None or blank). ``by`` names who did it.
+        False for an unknown or revoked id. Whether the profile exists, and whether the device may be held,
+        is the caller's to check (web/server.py)."""
+        live = self._conn.execute(
+            "SELECT 1 FROM api_devices WHERE id = ? AND revoked_at IS NULL",
+            (device_id,)).fetchone()
+        if live is None:
+            return False
+        name = (profile or "").strip()
+        if not name:
+            if self._has_profile_table():
+                self._conn.execute("DELETE FROM device_profiles WHERE device_id = ?", (device_id,))
+                self._conn.commit()
+            return True
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS device_profiles (
+              device_id  TEXT PRIMARY KEY,
+              profile    TEXT NOT NULL,
+              held_at    REAL NOT NULL,
+              held_by    TEXT NOT NULL
+            );
+        """)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO device_profiles (device_id, profile, held_at, held_by)"
+            " VALUES (?, ?, ?, ?)", (device_id, name, time.time(), by))
+        self._conn.commit()
+        return True
+
+    def device_profile(self, device_id: str) -> str | None:
+        """The profile *device_id* is held to, or None. A revoked device's hold still answers: its sessions
+        stay held for whoever reads them later."""
+        if not device_id or not self._has_profile_table():
+            return None
+        row = self._conn.execute(
+            "SELECT profile FROM device_profiles WHERE device_id = ?", (device_id,)).fetchone()
+        return row["profile"] if row else None
+
+    def device_profiles(self) -> dict[str, str]:
+        """Every hold, device id -> profile."""
+        if not self._has_profile_table():
+            return {}
+        rows = self._conn.execute("SELECT device_id, profile FROM device_profiles").fetchall()
+        return {r["device_id"]: r["profile"] for r in rows}
+
+    def session_hold(self, session_id: str) -> str | None:
+        """The profile a run under *session_id* is held to: its owner device's hold, or None (not a device's
+        session, or a device that is not held). A lock or I/O error raises; it is not "not held"."""
+        owner = self.session_owner(session_id)
+        return self.device_profile(owner) if owner else None
 
     # ------------------------------------------------------------------
     # Session ownership: which device brought a session into existence

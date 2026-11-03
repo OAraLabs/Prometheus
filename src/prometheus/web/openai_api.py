@@ -96,6 +96,7 @@ def register_openai_routes(
     catch-all; the bearer middleware guards ``/v1/`` like ``/api/``."""
     from prometheus.api.tool_choice import resolve_mode_to_tool_choice
     from prometheus.api.turn_errors import classify_turn_error
+    from prometheus.engine.tool_context import turn_mcp_headers
     from prometheus.engine.messages import ConversationMessage, TextBlock
     from prometheus.engine.stream_events import (
         AssistantTextDelta,
@@ -183,6 +184,18 @@ def register_openai_routes(
         if key != LOCAL_MODEL_KEY and router_obj is None:
             return _error(503, "model overrides need the model router, which is not wired", "router_unavailable", "server_error")
 
+        # Prometheus extension: headers for named MCP servers, this turn only (see POST
+        # /api/chat). Refused before the turn when one cannot be delivered.
+        turn_headers = None
+        if body.get("mcp_headers") is not None:
+            mcp_runtime = getattr(app.state, "mcp_runtime", None)
+            if mcp_runtime is None:
+                return _error(400, "mcp_headers given, but no MCP servers are connected", "mcp_headers_rejected")
+            try:
+                turn_headers = mcp_runtime.check_turn_headers(body["mcp_headers"])
+            except ValueError as exc:
+                return _error(400, str(exc), "mcp_headers_rejected")
+
         mode = body.get("mode") or "agent"          # Prometheus extension: "chat" = no tools
         if mode not in ("agent", "chat"):
             return _error(400, "mode must be 'agent' or 'chat'", "invalid_mode")
@@ -212,6 +225,9 @@ def register_openai_routes(
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
         stream = bool(body.get("stream", False))
+        # The model that ANSWERED, in the `prometheus` object: `model` stays the key the client
+        # asked for, which an OpenAI client matches on. A fallback makes the two differ.
+        answered: dict[str, str] = {}
 
         async def events() -> AsyncIterator[tuple[str, dict[str, int]]]:
             """Yield ("delta", text) as the reply grows; the final item is
@@ -219,22 +235,25 @@ def register_openai_routes(
             usage = {"prompt_tokens": 0, "completion_tokens": 0}
             round_acc = ""
             try:
-                async for event, _u in run_loop(ctx, history, mode=mode, session_id=session_id,
-                                                tool_choice=tool_choice, surface="rest"):
-                    if isinstance(event, AssistantTextDelta):
-                        round_acc += event.text
-                        yield ("delta", {"text": event.text})
-                    elif isinstance(event, AssistantTurnComplete):
-                        # A provider that emits no deltas delivers the text only
-                        # here; a streaming one already did. Emit the remainder.
-                        full = _assistant_text(event.message)
-                        if full.startswith(round_acc) and len(full) > len(round_acc):
-                            yield ("delta", {"text": full[len(round_acc):]})
-                        round_acc = ""
-                        if event.usage is not None:
-                            usage["prompt_tokens"] += int(event.usage.input_tokens or 0)
-                            usage["completion_tokens"] += int(event.usage.output_tokens or 0)
-                    # ToolExecutionStarted / Completed / ProviderDegraded: server-side, not surfaced.
+                with turn_mcp_headers(turn_headers):
+                    async for event, _u in run_loop(ctx, history, mode=mode, session_id=session_id,
+                                                    tool_choice=tool_choice, surface="rest"):
+                        if isinstance(event, AssistantTextDelta):
+                            round_acc += event.text
+                            yield ("delta", {"text": event.text})
+                        elif isinstance(event, AssistantTurnComplete):
+                            # A provider that emits no deltas delivers the text only
+                            # here; a streaming one already did. Emit the remainder.
+                            full = _assistant_text(event.message)
+                            if full.startswith(round_acc) and len(full) > len(round_acc):
+                                yield ("delta", {"text": full[len(round_acc):]})
+                            round_acc = ""
+                            if event.served_model:
+                                answered["served_by"] = event.served_model
+                            if event.usage is not None:
+                                usage["prompt_tokens"] += int(event.usage.input_tokens or 0)
+                                usage["completion_tokens"] += int(event.usage.output_tokens or 0)
+                        # ToolExecutionStarted / Completed / ProviderDegraded: server-side, not surfaced.
             finally:
                 if key != LOCAL_MODEL_KEY and router_obj is not None:
                     router_obj.clear_override(session_id, persist=False)
@@ -265,7 +284,7 @@ def register_openai_routes(
                     "finish_reason": "stop",
                 }],
                 "usage": usage,
-                "prometheus": {"session_id": session_id, "mode": mode},
+                "prometheus": {"session_id": session_id, "mode": mode, **answered},
             }
 
         def chunk(delta: dict[str, Any], finish: str | None = None, usage: dict[str, int] | None = None) -> str:
@@ -278,6 +297,8 @@ def register_openai_routes(
             }
             if usage is not None:
                 obj["usage"] = usage
+                if answered:
+                    obj["prometheus"] = dict(answered)
             return f"data: {json.dumps(obj)}\n\n"
 
         async def sse() -> AsyncIterator[str]:

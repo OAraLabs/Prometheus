@@ -23,7 +23,9 @@ Loopback (``localhost``, ``127.x``, ``::1``) and ``0.0.0.0`` are left alone: the
 no machine on the network.
 
 ``anatomy.include_addresses: true`` (only a literal ``true``) turns the transform off.
-The owner's own ``/anatomy`` command is a separate renderer and always shows everything.
+The ``/anatomy`` command uses the same transform on a chat relay (Telegram, Discord,
+Slack keep every message on their servers), unless ``anatomy.include_addresses_in_chat``
+is a literal ``true``; on a local surface (the terminal, Beacon) it shows everything.
 """
 
 from __future__ import annotations
@@ -56,6 +58,13 @@ def include_addresses(config: Mapping | None) -> bool:
     """``anatomy.include_addresses``: only a literal ``true`` lets addresses through."""
     anatomy = (config or {}).get("anatomy") or {}
     return isinstance(anatomy, Mapping) and anatomy.get("include_addresses", False) is True
+
+
+def include_addresses_in_chat(config: Mapping | None) -> bool:
+    """``anatomy.include_addresses_in_chat``: only a literal ``true`` lets addresses into
+    ``/anatomy`` replies on a chat relay (Telegram, Discord, Slack), which keeps them."""
+    anatomy = (config or {}).get("anatomy") or {}
+    return isinstance(anatomy, Mapping) and anatomy.get("include_addresses_in_chat", False) is True
 
 
 def _is_loopback(host: str) -> bool:

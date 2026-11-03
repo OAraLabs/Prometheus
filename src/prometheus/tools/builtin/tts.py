@@ -16,6 +16,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from prometheus.permissions.path_schema import PATH_FIELD_WRITE
+from prometheus.security import safe_fs
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -51,57 +52,90 @@ class TTSTool(BaseTool):
     async def execute(
         self, arguments: TTSInput, context: ToolExecutionContext
     ) -> ToolResult:
-        text = arguments.text[:4000]  # cap at 4000 chars
-
         # A relative output_path resolves against the tool context's cwd (the
         # session workspace in a workspace session), like write_file. Handed
         # on as given, the engine subprocess resolved it against the daemon
         # PROCESS's directory instead.
-        if arguments.output_path:
-            out_path = str(_resolve_path(context.cwd, arguments.output_path))
-        else:
-            out_path = tempfile.mktemp(suffix=".wav")
+        #
+        # The engine (espeak, piper, a remote server) writes by name, following links, so it writes into a private
+        # temporary folder, and the result is moved to the path the gate checked through no link
+        # (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q).
+        if not arguments.output_path:
+            return await self._synthesize(arguments, tempfile.mktemp(suffix=".wav"))
+        try:
+            dest = safe_fs.resolve_tool_path(arguments.output_path, context.cwd, context.metadata)
+        except safe_fs.PathChanged as exc:
+            return ToolResult(output=str(exc), is_error=True)
+        with tempfile.TemporaryDirectory(prefix="prometheus-tts-") as tmp:
+            rendered = Path(tmp) / (dest.name or "speech.wav")
+            result = await self._synthesize(arguments, str(rendered))
+            if result.is_error:
+                return result
+            try:
+                safe_fs.place_file(rendered, dest)
+            except safe_fs.PathChanged as exc:
+                return ToolResult(output=str(exc), is_error=True)
+            except OSError as exc:
+                return ToolResult(output=f"Could not save the audio to {dest}: {exc}", is_error=True)
+        # The remote server's "down / back" sentence, when the render made one, rides on the final result too.
+        return _noted(ToolResult(output=f"Audio saved to {dest}"), result.metadata.get("voice_notes", []))
+
+    async def _synthesize(self, arguments: TTSInput, out_path: str) -> ToolResult:
+        text = arguments.text[:4000]  # cap at 4000 chars
 
         # tts.url, when set, is tried first unless a local engine was asked
         # for by name. Any failure falls through to the local engines below.
         # The voice argument is engine-specific (an espeak or piper voice), so
         # it stays with the local engines; the remote speaks with tts.voice.
+        notices: list[str] = []
         if arguments.engine is None:
             from prometheus.infra.voice_remote import remote_settings, synthesize_remote
 
             remote = remote_settings("tts")
-            if remote is not None and await synthesize_remote(remote, text, out_path):
-                return ToolResult(output=f"Audio saved to {out_path}")
+            if remote is not None and await synthesize_remote(remote, text, out_path, notices=notices):
+                return _noted(ToolResult(output=f"Audio saved to {out_path}"), notices)
+        return _noted(await _speak_locally(arguments, text, out_path), notices)
 
-        engine = arguments.engine or _detect_engine()
-        if engine is None:
-            return ToolResult(
-                output=(
-                    "No TTS engine found. Install espeak-ng, or piper with: "
-                    "pip install 'oara-prometheus[voice]'"
-                ),
-                is_error=True,
-            )
-        if engine == "piper" and not shutil.which("piper"):
-            # Asked for by name: without this the exec below raises
-            # FileNotFoundError instead of saying what to install.
-            return ToolResult(
-                output=(
-                    "piper is not installed. "
-                    "Fix: pip install 'oara-prometheus[voice]'"
-                ),
-                is_error=True,
-            )
 
-        if engine == "espeak":
-            return await _run_espeak(text, arguments.voice, out_path)
-        elif engine == "piper":
-            return await _run_piper(text, arguments.voice, out_path)
-        else:
-            return ToolResult(
-                output=f"Unknown TTS engine: {engine}. Use 'espeak' or 'piper'.",
-                is_error=True,
-            )
+def _noted(result: ToolResult, notices: list[str]) -> ToolResult:
+    """*result* with the "your voice server isn't answering / is back" sentence at its end, for the model to pass on."""
+    if not notices:
+        return result
+    return ToolResult(output=f"{result.output}\n\n[Note: {' '.join(notices)}]", is_error=result.is_error,
+                      metadata={**result.metadata, "voice_notes": list(notices)})
+
+
+async def _speak_locally(arguments: TTSInput, text: str, out_path: str) -> ToolResult:
+    """This computer's own engines: the one asked for by name, else whichever is installed."""
+    engine = arguments.engine or _detect_engine()
+    if engine is None:
+        return ToolResult(
+            output=(
+                "No TTS engine found. Install espeak-ng, or piper with: "
+                "pip install 'oara-prometheus[voice]'"
+            ),
+            is_error=True,
+        )
+    if engine == "piper" and not shutil.which("piper"):
+        # Asked for by name: without this the exec below raises
+        # FileNotFoundError instead of saying what to install.
+        return ToolResult(
+            output=(
+                "piper is not installed. "
+                "Fix: pip install 'oara-prometheus[voice]'"
+            ),
+            is_error=True,
+        )
+
+    if engine == "espeak":
+        return await _run_espeak(text, arguments.voice, out_path)
+    elif engine == "piper":
+        return await _run_piper(text, arguments.voice, out_path)
+    else:
+        return ToolResult(
+            output=f"Unknown TTS engine: {engine}. Use 'espeak' or 'piper'.",
+            is_error=True,
+        )
 
 
 def _resolve_path(base: Path, candidate: str) -> Path:

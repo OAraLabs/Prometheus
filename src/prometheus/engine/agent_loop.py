@@ -93,6 +93,8 @@ class RunResult:
     messages: list[ConversationMessage]
     usage: UsageSnapshot = field(default_factory=UsageSnapshot)
     turns: int = 0
+    # The model that answered the turn's last answered round (AssistantTurnComplete.served_model).
+    served_model: str | None = None
 
 
 class _IterationReason:
@@ -1006,6 +1008,41 @@ class _ServingTier:
         self.tier = tier
 
 
+def _profiled_or_all(schemas: list[dict], profile: object) -> list[dict]:
+    """*schemas* cut to *profile*. A profile that matches none of them is a mistyped one and is ignored
+    (every schema), except a HELD profile (a held device's run), which has no fallback that widens it."""
+    from prometheus.config.profiles import filter_tools_by_profile
+
+    filtered = filter_tools_by_profile(schemas, profile)  # type: ignore[arg-type]
+    return filtered if filtered or getattr(profile, "held", False) else schemas
+
+
+def _run_hold(resolver: Callable[..., object], *session_ids: str | None) -> object | None:
+    """The profile the operator HOLDS this run to (``AgentProfile.held``), or None.
+
+    Asked under the run's own session and under the id it is recorded as: ``POST /api/chat`` passes its
+    conversation as ``record_session_id`` only, and a held device's turn there must be held as surely as one
+    on the WebSocket. The recorded id is RECORD-ONLY everywhere else; here it can only take tools away, never
+    add any or change the permission origin. A resolver that takes no session (written before per-session
+    binding) has no holds.
+    """
+    seen: set[str] = set()
+    for sid in session_ids:
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        try:
+            profile = resolver(sid)
+        except TypeError:
+            return None
+        except Exception:
+            log.warning("profile resolver failed while checking %s for a hold", sid, exc_info=True)
+            continue
+        if getattr(profile, "held", False):
+            return profile
+    return None
+
+
 def _catalog_for(context: "LoopContext", tier: str | None, active_profile: object
                  ) -> tuple[list[dict], frozenset[str]] | None:
     """The tools a run offers a model of *tier*, by the run-start rules (the
@@ -1021,9 +1058,7 @@ def _catalog_for(context: "LoopContext", tier: str | None, active_profile: objec
     def _profiled(schemas: list[dict]) -> list[dict]:
         if active_profile is None:
             return schemas
-        from prometheus.config.profiles import filter_tools_by_profile
-
-        return filter_tools_by_profile(schemas, active_profile) or schemas
+        return _profiled_or_all(schemas, active_profile)
 
     if deferred and getattr(loader, "catalog_mode", "names") == "stubs":
         from prometheus.context.tool_stubs import catalog
@@ -1609,6 +1644,7 @@ async def run_loop(
             div_task_id=div_task_id,
             effective_session_id=effective_session_id,
             recorded_session_id=recorded_session_id,
+            record_session_id=record_session_id,
             record_summary=record_summary,
             turn_record=turn_record,
         ):
@@ -1762,6 +1798,7 @@ async def _run_loop(
     div_task_id: str | None = None,
     effective_session_id: str | None = None,
     recorded_session_id: str | None = None,
+    record_session_id: str | None = None,
     record_summary: dict | None = None,
     turn_record: "_TurnRecord | None" = None,
 ) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
@@ -1777,7 +1814,8 @@ async def _run_loop(
     ``recorded_session_id`` is the id the TELEMETRY rows are filed under: the
     turn's own session, or the record-only one :func:`run_loop` resolved for
     a run with none. Behaviour — resolvers, checkpoints, the compactor — keeps
-    reading ``effective_session_id``. ``record_summary`` adds keys to this
+    reading ``effective_session_id``. ``record_session_id`` is the caller's record-only id as passed (an
+    ephemeral one included), read for one thing: whether the run is HELD to a profile. ``record_summary`` adds keys to this
     run's tool_advertisement row (a subagent names its parent there).
 
     ``turn_record`` is the turn's telemetry v2 record (None without
@@ -1865,7 +1903,18 @@ async def _run_loop(
     # so "advertised" states what the model actually saw. Resolved per run:
     # a /profile or Beacon switch affects the next run, not a restart.
     active_profile = None
-    if tools_enabled and tool_schema and context.profile_resolver is not None:
+    # A HELD run first (a device the operator holds to a profile): its profile limits what the run is offered
+    # AND what it may call, with no fallback that widens it, whether or not tools are advertised this run.
+    _hold = (_run_hold(context.profile_resolver, effective_session_id, record_session_id)
+             if context.profile_resolver is not None else None)
+    if _hold is not None:
+        from prometheus.config.profiles import RUN_PROFILE
+
+        active_profile = _hold
+        if tool_schema:
+            tool_schema = _profiled_or_all(tool_schema, _hold)
+        RUN_PROFILE.set(_hold)  # type: ignore[arg-type]
+    elif tools_enabled and tool_schema and context.profile_resolver is not None:
         try:
             # Pass the run's session so a session-bound profile wins over the global
             # one. BOTH ARITIES are supported deliberately: a resolver written before
@@ -1924,9 +1973,7 @@ async def _run_loop(
 
         _every = context.tool_loader.schemas_for_run(False)
         if active_profile is not None:
-            from prometheus.config.profiles import filter_tools_by_profile
-
-            _every = filter_tools_by_profile(_every, active_profile) or _every
+            _every = _profiled_or_all(_every, active_profile)
         tool_schema, _undescribed = _catalog(_every)
         _RUN_CATALOG.set(_CatalogState(_undescribed))
 
@@ -3163,7 +3210,13 @@ async def _run_loop(
                     }
                 )
             messages.append(final_message)
-            yield AssistantTurnComplete(message=final_message, usage=usage), usage
+            # What the server said it ran, else the fallback that took the round, else the
+            # model the round asked for. A degrade with no name is unknown, never the primary.
+            _deg = degrade_notice_this_turn[0] if degrade_notice_this_turn else None
+            answered_by = served_model_this_turn or (
+                _deg.model if _deg is not None else context.model) or None
+            yield AssistantTurnComplete(
+                message=final_message, usage=usage, served_model=answered_by), usage
             # SUNRISE PeriodicNudge: one completed assistant round. Ask the
             # nudge whether this round is a multiple of its interval and, if
             # so, owe the text to the NEXT model call (below). A run that
@@ -5785,6 +5838,9 @@ async def _execute_tool_call(
         except Exception:
             log.debug("tool_call_observer raised (ignored)", exc_info=True)
 
+    # The path the gate rules on, resolved: the file tool opens exactly this one, through no link
+    # (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q). None when there is no gate or no path.
+    _decided_path: str | None = None
     # Permission check (Sprint 4 + TRUST-CONTEXT)
     if context.permission_checker is not None:
         # THE DEFECT THIS REPLACES: `tool_input.get("file_path")` — a key NO
@@ -5827,6 +5883,9 @@ async def _execute_tool_call(
             tool_name, tool_input, schema=_gate_schema, base=_run_cwd,
             write_base=_run_cwd if _run_roots else None,
         )
+        # Exactly the string the gate is handed (gate_path_for resolves it): a second resolution here could
+        # land somewhere else, and that would be what the tool opened.
+        _decided_path = _file_path or None
         # Whether that path gets WRITTEN to, from the parameter's own
         # declaration. This is what the workspace boundary keys on; it used to
         # key on a list of two tool names, and four writing tools were not in
@@ -6024,6 +6083,19 @@ async def _execute_tool_call(
                     is_error=True,
                 )
 
+    if _decided_path is None and context.permission_checker is None:
+        # No gate (a bare loop, a test harness): the same resolution the gate would have been handed, so the tool
+        # still opens one path through no link and the post-result hooks still know which file it was.
+        try:
+            from prometheus.permissions.tool_paths import gate_path_for as _gate_path_for
+
+            _schema = tool.input_model.model_json_schema() if getattr(tool, "input_model", None) else None
+            _cwd, _roots = _run_paths(context)
+            _decided_path = _gate_path_for(tool_name, tool_input, schema=_schema, base=_cwd,
+                                           write_base=_cwd if _roots else None)[0] or None
+        except Exception:  # noqa: BLE001 — without it the tool resolves its own argument, as it always did
+            _decided_path = None
+
     from prometheus.tools.base import ToolExecutionContext
     # M5: bound tool execution so a hung tool can't freeze the turn/session.
     # The timeout wraps ONLY tool.execute() — not the permission prompt above,
@@ -6046,6 +6118,8 @@ async def _execute_tool_call(
                     metadata={
                         # Item W: the session's write boundary, when it has one.
                         "workspace_roots": _run_paths(context)[1],
+                        # The path the gate ruled on, resolved (security/safe_fs.py).
+                        **({"decided_path": _decided_path} if _decided_path else {}),
                         "tool_registry": context.tool_registry,
                         "ask_user_prompt": context.ask_user_prompt,
                         # Managed tasks: the creating session id, so task_create
@@ -6279,11 +6353,16 @@ async def _execute_tool_call(
 
     # Sprint 20: Post-result hooks (e.g., LSP diagnostics — can modify result)
     if context.post_result_hooks:
-        for hook in context.post_result_hooks:
-            try:
-                tool_result = await hook(tool_name, tool_input, tool_result)
-            except Exception:
-                log.debug("Post-result hook failed", exc_info=True)
+        from prometheus.engine.tool_context import DECIDED_PATH as _DECIDED_PATH
+        _decided_token = _DECIDED_PATH.set(_decided_path)
+        try:
+            for hook in context.post_result_hooks:
+                try:
+                    tool_result = await hook(tool_name, tool_input, tool_result)
+                except Exception:
+                    log.debug("Post-result hook failed", exc_info=True)
+        finally:
+            _DECIDED_PATH.reset(_decided_token)
 
     return tool_result
 
@@ -6539,6 +6618,7 @@ class AgentLoop:
 
         last_text = ""
         last_usage = UsageSnapshot()
+        served_model: str | None = None
         turns = 0
         self._tool_trace = []
         # Each call's input, by tool_use id, so a trace entry can say WHAT was
@@ -6557,6 +6637,7 @@ class AgentLoop:
             if isinstance(event, AssistantTurnComplete):
                 last_text = event.message.text
                 last_usage = event.usage
+                served_model = event.served_model or served_model
                 turns += 1
             elif isinstance(event, ToolExecutionStarted):
                 started_inputs[event.tool_use_id] = dict(event.tool_input or {})
@@ -6575,6 +6656,7 @@ class AgentLoop:
             messages=messages,
             usage=last_usage,
             turns=turns,
+            served_model=served_model,
         )
 
         # Post-task learning hooks — fire each in registration order;

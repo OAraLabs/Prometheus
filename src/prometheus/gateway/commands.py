@@ -657,12 +657,22 @@ async def cmd_backends(args: str | list[str] | tuple[str, ...] | None = None) ->
     return registry.render_table()
 
 
-async def cmd_anatomy() -> str:
-    """Return infrastructure summary text."""
+async def cmd_anatomy(*, chat: bool = False) -> str:
+    """Return infrastructure summary text.
+
+    ``chat=True`` is for a chat relay (Telegram, Discord, Slack), which keeps the
+    reply on its own servers: hostnames, addresses, URLs and peer names are taken
+    out (infra/model_view.py) and the peer list is counted, unless
+    ``anatomy.include_addresses_in_chat`` is a literal true. A local surface (the
+    terminal, Beacon) calls it without ``chat`` and gets everything.
+    """
     try:
-        from prometheus.tools.builtin.anatomy import _scanner, _writer, _project_store
+        from prometheus.tools.builtin.anatomy import _config, _project_store, _scanner, _writer
     except ImportError:
         return "Anatomy module not available."
+    from prometheus.infra.model_view import include_addresses_in_chat
+
+    redact = chat and not include_addresses_in_chat(_config)
 
     if _scanner is None or _writer is None:
         return "Anatomy not initialized. Is the daemon running with anatomy enabled?"
@@ -726,6 +736,12 @@ async def cmd_anatomy() -> str:
                 f"VRAM: {used_gb:.1f} / {total_gb:.1f} GB ({free_gb:.1f} GB free)"
             )
         lines.extend(_format_gpu_processes(state.gpu_processes))
+    elif state.gpu_is_remote and state.gpu_probe_method == "not_configured":
+        # No SSH user set: the card was never asked, so it is not "unreachable".
+        lines.append(
+            f"\nGPU (inference, remote @ {inference_host_label}): "
+            f"{state.gpu_probe_error or 'not configured'}"
+        )
     elif state.gpu_is_remote:
         # Remote inference but probe failed — be loud about WHY rather
         # than substituting local stats (the old bug). The agent should
@@ -761,7 +777,9 @@ async def cmd_anatomy() -> str:
             if isinstance(p, dict) and p.get("online")
         )
         lines.append(f"\nTailscale: {len(state.tailscale_peers)} peers ({online_count} online)")
-        for peer in state.tailscale_peers:
+        # On a chat relay the counts are the answer; each peer's name and
+        # address would stay on the relay's servers.
+        for peer in [] if redact else state.tailscale_peers:
             if isinstance(peer, dict):
                 icon = "\u2705" if peer.get("online") else "\u274c"
                 lines.append(f"  {peer['name']}: {peer.get('ip', '?')} {icon}")
@@ -790,7 +808,14 @@ async def cmd_anatomy() -> str:
         if active:
             lines.append(f"Config: {active.name} ({active.description})")
 
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if not redact:
+        return text
+    from prometheus.infra.model_view import network_names, without_addresses
+
+    seen = {inf_host, state.gpu_inference_host or ""}
+    seen |= {str(p.get("name") or "") if isinstance(p, dict) else str(p) for p in state.tailscale_peers}
+    return without_addresses(text, set(network_names(_config)) | {n.lower() for n in seen if n})
 
 
 def _read_uptime() -> str | None:
@@ -2699,6 +2724,7 @@ async def approve_detail(
             return ApproveOutcome("No pending approval requests.")
         from prometheus.permissions.approval_queue import (
             is_desktop_request,
+            is_hold_request,
             is_worker_request,
         )
 
@@ -2706,9 +2732,10 @@ async def approve_detail(
         # W2). Draining a backlog must not approve "Set the field to <text>"
         # or "Click 'Send'" sight unseen; each is answered on its own. Nor is a
         # spawned WORKER's request: it asks for the worker, whose arguments
-        # the operator has not seen (#720).
+        # the operator has not seen (#720). Nor is lifting a device's hold:
+        # it widens what that device may run, so it is read on its own.
         def _alone(a: Any) -> bool:
-            return is_desktop_request(a) or is_worker_request(a)
+            return is_desktop_request(a) or is_worker_request(a) or is_hold_request(a)
 
         skipped = [a for a in pending if _alone(a)]
         approved: list[str] = []
@@ -2718,7 +2745,7 @@ async def approve_detail(
             rid = getattr(act, "request_id", "")
             if rid and await queue.approve(rid, by=by):
                 approved.append(rid)
-        note = (f" — skipped {len(skipped)} desktop or worker request(s); answer "
+        note = (f" — skipped {len(skipped)} desktop, worker or hold request(s); answer "
                 f"each with {prefix}approve <id>" if skipped else "")
         if not approved:
             if skipped:
@@ -4714,7 +4741,11 @@ def _computer_devices(runner: Any, verb: str, device_id: str, by: Approver) -> s
     runner.people.require(by)
     if not device_id:
         return f"Name the device: /computer {verb} <device-id>."
-    if not store.set_computer(device_id, verb == "allow", by=by.label):
+    try:
+        marked = store.set_computer(device_id, verb == "allow", by=by.label)
+    except ValueError as exc:  # a held device is never marked
+        return f"Not marked: {exc}."
+    if not marked:
         return f"No live device {device_id}."
     return (f"Device {device_id} may now start desktop tasks." if verb == "allow"
             else f"Device {device_id} may no longer start desktop tasks.")

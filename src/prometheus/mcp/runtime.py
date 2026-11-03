@@ -10,14 +10,19 @@ License: MIT
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from mcp import ClientSession, StdioServerParameters
+from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 from prometheus.mcp.names import sanitize_server_name
 from prometheus.mcp.transport import (
@@ -63,6 +68,14 @@ async def _connect_with_timeout(session: ClientSession, timeout_ms: int) -> None
         raise McpConnectionError(
             f"Connection timed out after {timeout_ms}ms"
         ) from None
+
+
+def _root_cause(exc: BaseException) -> BaseException:
+    """The first leaf of an exception group: the HTTP clients run in anyio task
+    groups, so a refused connection arrives as "unhandled errors in a TaskGroup"."""
+    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+        exc = exc.exceptions[0]
+    return exc
 
 
 async def _list_all_tools(session: ClientSession) -> list:
@@ -178,13 +191,7 @@ class McpRuntime:
             if isinstance(resolved, ResolvedStdioTransport):
                 mcp_session = await self._connect_stdio(server_name, resolved)
             elif isinstance(resolved, ResolvedHttpTransport):
-                self._statuses[server_name] = McpConnectionStatus(
-                    name=server_name,
-                    state="failed",
-                    transport=resolved.transport_type,
-                    detail="HTTP/SSE transport not yet implemented",
-                )
-                return None
+                mcp_session = await self._connect_http(server_name, resolved)
             else:
                 return None
 
@@ -242,12 +249,14 @@ class McpRuntime:
             return entry
 
         except Exception as e:
-            logger.warning("MCP connection failed: %s - %s", server_name, e)
+            cause = _root_cause(e)
+            reason = str(cause) or type(cause).__name__
+            logger.warning("MCP connection failed: %s - %s", server_name, reason)
             self._statuses[server_name] = McpConnectionStatus(
                 name=server_name,
                 state="failed",
                 transport=resolved.kind,
-                detail=str(e)[:200],
+                detail=reason[:200],
             )
             return None
 
@@ -337,6 +346,82 @@ class McpRuntime:
             _exit_stack=stack,
         )
 
+    async def _connect_http(
+        self,
+        server_name: str,
+        config: ResolvedHttpTransport,
+    ) -> _McpSession:
+        """Connect to an MCP server over streamable HTTP or SSE.
+
+        The stored ``headers`` (a bearer, usually) go on every request to the
+        server and nowhere else: the log line names the URL with any password
+        masked, never a header.
+        """
+        logger.info(
+            "MCP connecting (%s): %s -> %s",
+            config.transport_type, server_name, config.description,
+        )
+        stack, session = await self._open_http(config)
+        return _McpSession(
+            server_name=server_name,
+            session=session,
+            transport_type=config.transport_type,
+            _exit_stack=stack,
+        )
+
+    @staticmethod
+    async def _open_http(config: ResolvedHttpTransport) -> tuple[AsyncExitStack, ClientSession]:
+        """An initialized session over *config*'s transport, and the stack that closes it."""
+        stack = AsyncExitStack()
+        timeout_s = config.timeout_ms / 1000
+        try:
+            if config.transport_type == "streamable-http":
+                # The SDK's own client factory (redirect and origin handling), with
+                # the stored headers; the SDK's 300 s read timeout for the stream.
+                http_client = await stack.enter_async_context(create_mcp_http_client(
+                    headers=config.headers, timeout=httpx.Timeout(timeout_s, read=300.0),
+                ))
+                read_stream, write_stream, _session_id = await stack.enter_async_context(
+                    streamable_http_client(config.url, http_client=http_client)
+                )
+            else:
+                read_stream, write_stream = await stack.enter_async_context(
+                    sse_client(config.url, headers=config.headers, timeout=timeout_s)
+                )
+            session = await stack.enter_async_context(
+                ClientSession(read_stream, write_stream)
+            )
+            await _connect_with_timeout(session, config.timeout_ms)
+        except BaseException:
+            await stack.aclose()
+            raise
+        return stack, session
+
+    def check_turn_headers(self, raw: Any) -> dict[str, dict[str, str]]:
+        """Validate a chat request's ``mcp_headers``: ``{server: {Header: value}}``.
+
+        Raises ValueError with a client-facing message (never a header value)
+        for a malformed map, a server that is not configured, or one not reached
+        over HTTP (a stdio server has no request to put a header on). A header
+        that cannot be delivered is refused, never silently dropped.
+        """
+        from prometheus.mcp.store import McpStoreError, check_header_map
+
+        if not isinstance(raw, dict):
+            raise ValueError("mcp_headers must be an object: {server: {Header: value}}")
+        out: dict[str, dict[str, str]] = {}
+        for name, headers in raw.items():
+            if name not in self._server_configs:
+                raise ValueError(f"mcp_headers names {name!r}, which is not a configured MCP server")
+            if not isinstance(resolve_transport(name, self._server_configs[name]), ResolvedHttpTransport):
+                raise ValueError(
+                    f"mcp_headers names {name!r}, which is not reached over HTTP, so a header cannot reach it")
+            try:
+                out[name] = dict(check_header_map(headers, f"mcp_headers[{name!r}]"))
+            except McpStoreError as exc:
+                raise ValueError(str(exc)) from None
+        return out
+
     # ------------------------------------------------------------------
     # Public query interface
     # ------------------------------------------------------------------
@@ -358,8 +443,16 @@ class McpRuntime:
         server_name: str,
         tool_name: str,
         arguments: dict[str, Any],
+        *,
+        turn_headers: dict[str, str] | None = None,
     ) -> str:
-        """Call an MCP tool and return stringified result."""
+        """Call an MCP tool and return stringified result.
+
+        ``turn_headers`` (a chat request's headers for this server, this turn)
+        are sent over a connection of the call's own, opened and closed around
+        it, on top of the stored headers. The shared connection never carries
+        them, so no other turn can.
+        """
         if server_name not in self._sessions:
             raise ValueError(f"MCP server not connected: {server_name}")
 
@@ -375,10 +468,17 @@ class McpRuntime:
                 f"server {server_name!r}"
             )
 
-        session = self._sessions[server_name]
         logger.debug("MCP call: %s/%s", server_name, tool_name)
-
-        result = await session.session.call_tool(tool_name, arguments)
+        if turn_headers:
+            resolved = resolve_transport(server_name, self._server_configs.get(server_name) or {})
+            if not isinstance(resolved, ResolvedHttpTransport):
+                raise ValueError(f"MCP server {server_name!r} is not reached over HTTP")
+            config = dataclasses.replace(resolved, headers={**(resolved.headers or {}), **turn_headers})
+            stack, own = await self._open_http(config)
+            async with stack:
+                result = await own.call_tool(tool_name, arguments)
+        else:
+            result = await self._sessions[server_name].session.call_tool(tool_name, arguments)
 
         # Stringify result (from OpenClaw pi-bundle-mcp-materialize.ts)
         parts: list[str] = []

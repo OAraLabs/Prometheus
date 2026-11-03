@@ -8,8 +8,8 @@ state transitions and signal emission. Three detection modes:
 - process : ``await proc.wait()`` — lives in the manager (already event-driven).
 - file    : :func:`watch_for_file` — watchdog.Observer + PatternMatchingEventHandler
             (inotify on Linux, FSEvents/kqueue on macOS). Event-driven. Without
-            watchdog (not installed on macOS with Python 3.14+, where it has no
-            wheel: pyproject.toml), the directory is polled instead.
+            watchdog (an install that left it out; 0.9.18 skipped it on macOS
+            with Python 3.14+), the directory is polled instead.
 - poll    : :func:`poll_until` — exponential-backoff fallback ONLY, for
             conditions you can neither ``wait()`` on nor watch.
 """
@@ -17,7 +17,9 @@ state transitions and signal emission. Three detection modes:
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import logging
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -30,9 +32,9 @@ POLL_INTERVAL_SECONDS = 0.5
 def _observer_class():
     """watchdog's ``Observer``, or None when watchdog is not installed.
 
-    Imported here, not at module level: watchdog is not installed on macOS with Python 3.14+ (no wheel; see the
-    marker in pyproject.toml), and this module must still import there. Remove this indirection once watchdog
-    publishes macOS cp314 wheels and the marker goes.
+    Imported here, not at module level, so this module still imports, and ``file_watch`` still works by polling,
+    where watchdog is absent: 0.9.18 skipped it on macOS with Python 3.14+ (watchdog 6.0.0 had no wheel there), and
+    an install can still leave it out. watchdog 7.0 has those wheels, so it is a base dependency everywhere again.
     """
     try:
         from watchdog.observers import Observer
@@ -89,19 +91,25 @@ async def watch_for_file(
     observer_class = _observer_class()
     if observer_class is None:
         return await _poll_for_file(directory, pattern, timeout_seconds)
-    from watchdog.events import PatternMatchingEventHandler
+    from watchdog.events import FileSystemEventHandler
 
     loop = asyncio.get_running_loop()
     found: asyncio.Event = asyncio.Event()
     matched: list[str] = []
 
-    def _record(path: str | None) -> None:
+    def _record(path: str | bytes | None) -> None:
+        # The pattern names a file IN the watched folder, as the glob pre-check and the polling fallback read it, so
+        # it is matched against the file's name here. Not watchdog's PatternMatchingEventHandler: from watchdog 7 it
+        # matches the WHOLE path (PurePath.full_match), and `*.json` stopped matching `/dir/result.json`.
         if matched or not path:
+            return
+        path = os.fsdecode(path)
+        if not fnmatch.fnmatchcase(os.path.basename(path), pattern):
             return
         matched.append(path)
         loop.call_soon_threadsafe(found.set)
 
-    class _Handler(PatternMatchingEventHandler):
+    class _Handler(FileSystemEventHandler):
         def on_created(self, event):  # type: ignore[override]
             if not event.is_directory:
                 _record(event.src_path)
@@ -118,7 +126,7 @@ async def watch_for_file(
             if not event.is_directory:
                 _record(getattr(event, "dest_path", None) or event.src_path)
 
-    handler = _Handler(patterns=[pattern], ignore_directories=True)
+    handler = _Handler()
     observer = observer_class()
     try:
         observer.schedule(handler, directory, recursive=False)

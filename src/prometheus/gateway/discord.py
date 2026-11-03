@@ -862,9 +862,13 @@ class DiscordAdapter(BasePlatformAdapter):
                         f"not be stored for transcription]"
                     )
                     continue
+                voice_notices: list[str] = []
                 transcription = await media_services.transcribe_audio(
-                    cached, config=self._prometheus_config,
+                    cached, config=self._prometheus_config, notices=voice_notices,
                 )
+                # The remote speech-to-text server went down or came back: said once, in this channel.
+                for notice in voice_notices:
+                    await self.send(chat_id, notice)
                 parts.append(
                     transcription
                     or "[Voice message received but transcription unavailable]"
@@ -1398,7 +1402,7 @@ class DiscordAdapter(BasePlatformAdapter):
         from prometheus.gateway.commands import cmd_anatomy
 
         await self._defer(interaction)
-        await self._respond(interaction, await cmd_anatomy())
+        await self._respond(interaction, await cmd_anatomy(chat=True))
 
     async def _app_doctor(self, interaction: Any, args: str) -> None:
         from prometheus.gateway.commands import cmd_doctor

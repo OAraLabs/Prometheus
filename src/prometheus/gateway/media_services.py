@@ -89,16 +89,20 @@ def _record_media_failure(
 
 async def transcribe_audio(
     audio_path: str, config: dict[str, Any] | None = None,
+    notices: list[str] | None = None,
 ) -> str | None:
     """Run audio through WhisperSTT for transcription. Returns None on failure.
 
-    *config* is the gateway's loaded prometheus.yaml (for ``stt.url``).
+    *config* is the gateway's loaded prometheus.yaml (for ``stt.url``). A
+    sentence for the person ("your speech-to-text server isn't answering",
+    "... is answering again") is appended to *notices*, for the gateway to send
+    to the chat.
     """
     try:
         from prometheus.tools.builtin.whisper_stt import WhisperSTTTool, WhisperSTTInput
         from prometheus.tools.base import ToolExecutionContext
 
-        tool = WhisperSTTTool(config=config)
+        tool = WhisperSTTTool(config=config, notices=notices)
         result = await tool.execute(
             WhisperSTTInput(audio_path=audio_path),
             ToolExecutionContext(cwd=Path.cwd()),

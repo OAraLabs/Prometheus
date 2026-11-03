@@ -28,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from prometheus.web import hello as hello_mod
 from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import is_loopback_host_header, is_same_machine
-from prometheus.web.route_access import SCOPED_APPROVE_SCOPES, is_scoped_allowed
+from prometheus.web.route_access import is_scoped_allowed
 from prometheus.web.public_routes import is_public_route
 from prometheus.web.serving import bound_port
 from prometheus.web.session_scope import (
@@ -343,6 +343,7 @@ def create_app(
     backend_registry: Any | None = None,
     computer_integration: Any | None = None,
     computer_runner: Any | None = None,
+    hold_lifts: Any | None = None,
 ) -> FastAPI:
     """Create the FastAPI application with all routes.
 
@@ -396,6 +397,11 @@ def create_app(
 
             _device_store_holder[0] = DeviceStore()
         return _device_store_holder[0]
+
+    # A device the operator HOLDS to a profile holds every run under its sessions to that profile
+    # (PUT /api/devices/{id}/profile). The one profile state the loops resolve through reads the holds here.
+    if profile_state is not None and hasattr(profile_state, "session_hold"):
+        profile_state.session_hold = lambda session_id: _devices_or_create().session_hold(session_id)
 
     # ── Device scoping ───────────────────────────────────────────────
     # A device token sees and manages only the sessions that device owns; the
@@ -655,6 +661,7 @@ def create_app(
         _store = _devices_or_create()
         _marked = _store.computer_device_ids()
         _owners = _store.owner_sources(include_revoked=True)  # a tombstone keeps its history
+        _held = _store.device_profiles()
         # An operator (the global token or an owner device) sees every device. A SCOPED device sees itself:
         # a client still finds its own row (is_self, its id, its push state), and learns nothing about who
         # else is enrolled (names, platforms, last seen, the owner flag), which an approved device is
@@ -676,6 +683,8 @@ def create_app(
             # credential is visible and revocable rather than something nobody can see.
             "owner": d.id in _owners,
             "owner_source": _owners.get(d.id),
+            # The profile the operator holds this device to (every run under its sessions), or None.
+            "profile": _held.get(d.id),
         } for d in _store.list_devices() if _everyone or d.id == self_id]
 
     def _may_manage_push(request: Request, device_id: str):
@@ -767,6 +776,65 @@ def create_app(
             return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
         return {"ok": True, "id": device_id}
 
+    @app.put("/api/devices/{device_id}/profile")
+    async def hold_device_to_profile(device_id: str, request: Request):
+        """Hold a device to a profile, or lift its hold. Body: ``{"profile": str}``; null or blank lifts it.
+
+        Every run under one of the device's sessions is then held to that profile: offered only its tools,
+        refused any other at the call, with no fallback that widens it. For a caller beside the owner's own
+        assistant that must stay read-only. The operator's (the middleware refuses a scoped device), and an owner
+        device cannot be held: it is the operator, and could lift it.
+
+        Setting a hold on a device with none applies at once. Lifting or changing one answers 202 with a pending
+        request: a consent prompt only a person can approve (the Telegram owner, or a Beacon device a person
+        marked), never the API token. The hold stands until then.
+        """
+        from prometheus.permissions import approver as _approver
+
+        if not _scope(request).unrestricted:
+            return JSONResponse(status_code=403, content={"error": "operator_only"})
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
+        raw = body.get("profile") if isinstance(body, dict) else None
+        if raw is not None and not isinstance(raw, str):
+            return JSONResponse(status_code=400, content={"error": "profile must be a string or null"})
+        name = (raw or "").strip()
+        store = _devices_or_create()
+        device = next((d for d in store.list_devices() if d.id == device_id and d.revoked_at is None), None)
+        if device is None:
+            return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
+        if name:
+            if store.is_owner(device_id):
+                return JSONResponse(status_code=400, content={
+                    "error": "an owner device cannot be held to a profile: it is the operator, and could lift "
+                             "the hold itself. Hold a scoped device instead."})
+            if profile_state is None:
+                return JSONResponse(status_code=503, content={"error": "profile store unavailable"})
+            if profile_state._store.get(name) is None:
+                return JSONResponse(status_code=400, content={
+                    "error": f"unknown profile {name!r}", "known": profile_state._store.names()})
+        current = store.device_profile(device_id)
+        if current and (name or None) != current:
+            # LIFTING or CHANGING a hold widens what the device may run, and no credential this route can see
+            # proves a person: the API token sits where a model's shell can read it. So it asks the owner, on the
+            # approval surfaces, and the hold stands until a person approves (permissions/hold_lifts.py).
+            channel = app.state.hold_lifts
+            if getattr(channel.people, "devices", None) is None:
+                channel.people.bind_device_store(store)
+            request_id = channel.request_lift(device_id, device.name, current=current, to=name or None,
+                                              by=_approver.from_request(request))
+            return JSONResponse(status_code=202, content={
+                "id": device_id, "profile": current,
+                "pending": {"request_id": request_id, "to": name or None,
+                            "detail": "The hold stands until the owner approves this from Telegram or Beacon."}})
+        if current == (name or None):
+            return {"id": device_id, "profile": current}
+        if not store.set_profile(device_id, name or None, by=_approver.from_request(request).label):
+            return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
+        return {"id": device_id, "profile": name or None}
+
     # Store references for route handlers
     app.state.config = config
     app.state.signal_bus = signal_bus
@@ -830,6 +898,29 @@ def create_app(
             isinstance(_current, ApprovalQueues) and _channel in _current.queues
         ):
             app.state.approval_queue = ApprovalQueues(_current, _channel)
+
+    # Lifting a device's hold asks a person (permissions/hold_lifts.py): a consent prompt beside tool and desktop
+    # prompts, on the same approval surface. The daemon passes its channel (its gate, Telegram, signal bus); a
+    # bare app builds one, which still asks and still refuses every credential but a person's.
+    if hold_lifts is None:
+        from prometheus.computer.door import PersonCheck
+        from prometheus.config.shipped_defaults import resolve_owner_chat_id, resolve_telegram_owner_ids
+        from prometheus.permissions.hold_lifts import HoldLiftChannel
+
+        _gateway_cfg = (config or {}).get("gateway")
+        hold_lifts = HoldLiftChannel(
+            people=PersonCheck(device_store=_devices(),
+                               telegram_user_ids=resolve_telegram_owner_ids(_gateway_cfg)),
+            devices=_devices_or_create,
+            security_gate=getattr(app.state.approval_queue, "_security_gate", None),
+            owner_chat_id=resolve_owner_chat_id(_gateway_cfg),
+        )
+    app.state.hold_lifts = hold_lifts
+    from prometheus.permissions.approval_queue import ApprovalQueues as _Queues
+
+    _surface = app.state.approval_queue
+    if not (isinstance(_surface, _Queues) and hold_lifts in _surface.queues):
+        app.state.approval_queue = _Queues(_surface, hold_lifts)
 
     def _resolved_context_limit(
         model: str | None = None,
@@ -2179,16 +2270,26 @@ def create_app(
             "forks": store.list_session_forks(session_id),
         }
 
+    def _session_hold(session_id: str) -> str | None:
+        """The profile this session's device is held to, or None."""
+        return _devices_or_create().session_hold(session_id) if _devices() is not None else None
+
     @app.get("/api/sessions/{session_id}/profile")
     async def get_session_profile(session_id: str):
         """Which profile this session runs under, and WHY.
 
         `source` is the point: `session` means someone chose it for this conversation,
-        `global` means it follows the daemon-wide active profile. Returning only the
+        `global` means it follows the daemon-wide active profile, and `held` means its device is held to a
+        profile, which no binding can change (PUT /api/devices/{id}/profile). Returning only the
         effective name would make "chosen" and "inherited" indistinguishable — and a
         client cannot offer "reset to automatic" for a value it cannot tell apart from
         a default.
         """
+        held = _session_hold(session_id)
+        if held:
+            # Its device is held to a profile, which wins over any binding and cannot be changed here.
+            return {"session_id": session_id, "profile": held, "effective": held, "source": "held",
+                    "dangling": profile_state is None or profile_state._store.get(held) is None}
         lcm = getattr(app.state, "lcm_engine", None)
         store = lcm.conversation_store if lcm is not None else None
         bound = store.get_session_profile(session_id) if store is not None else None
@@ -2350,6 +2451,11 @@ def create_app(
         something that can never resolve, and the failure would surface later as
         "why is this conversation not using my profile" with nothing to point at.
         """
+        held = _session_hold(session_id)
+        if held:
+            return JSONResponse({"error": f"this conversation belongs to a device held to profile {held!r}; "
+                                          f"lift the hold first (PUT /api/devices/<id>/profile)",
+                                 "profile": held}, status_code=409)
         lcm = getattr(app.state, "lcm_engine", None)
         store = lcm.conversation_store if lcm is not None else None
         if store is None:
@@ -5051,14 +5157,23 @@ def create_app(
             "ok": False, "remembered": False, "grant_id": None, "message": detail, "skipped": 0,
             "error": "no_longer_active", "resolution": resolution, "detail": detail})
 
-    def _scope_refusal(request: Request, scope: str) -> JSONResponse | None:
-        """The 403 for a scoped caller asking for a lasting or widened grant, else None."""
-        if _scope(request).unrestricted or scope in SCOPED_APPROVE_SCOPES:
+    def _scope_refusal(request: Request, action: Any) -> JSONResponse | None:
+        """The 403 for a scoped caller approving anything but a desktop prompt, else None.
+
+        A scoped device sees and denies its own sessions' requests and never approves one: only the owner does.
+        Whatever sits behind a device token (an upstream app, a relay, a client that read injected text) could
+        otherwise sanction the call the gate stopped for the owner to see, in the same breath as it asked for
+        it. A desktop prompt is the door's: a device a person marked for computer use answers it, and
+        :func:`_desktop_approve_refusal` holds every other credential to that.
+        """
+        if _scope(request).unrestricted:
+            return None
+        if action is not None and getattr(action, "task_id", None) is not None:
             return None
         return JSONResponse(status_code=403, content={
             "error": "operator_only",
-            "detail": f"a device may approve its own session's tool calls with {list(SCOPED_APPROVE_SCOPES)} "
-                      "only; a lasting or wider grant belongs to the owner"})
+            "detail": "only the owner approves a tool call; this device may deny its own session's requests, "
+                      "and the owner answers the rest from Telegram or their own device"})
 
     @app.get("/api/approvals")
     async def get_approvals(request: Request):
@@ -5140,16 +5255,15 @@ def create_app(
                 status_code=400,
                 content={"error": f"scope must be one of {list(approve_verbs())}"},
             )
-        # A persistent grant, or the directory-widened form, is the owner's: 403 like every other
-        # operator-only act, and nothing was approved.
-        if (refusal := _scope_refusal(request, scope)) is not None:
-            return refusal
         from prometheus.gateway import commands as _cmds
 
-        # A DESKTOP TASK'S PROMPT (computer-use v1.1): approve-once, only a
-        # person, and only a client that can SHOW what it approves.
         _pending = getattr(queue, "pending", {}) or {}
         _desk = _pending.get(request_id) if request_id != "all" else None
+        # Approving is the owner's: a scoped device is refused (403) whatever the scope, and nothing was approved.
+        if (refusal := _scope_refusal(request, _desk)) is not None:
+            return refusal
+        # A DESKTOP TASK'S PROMPT (computer-use v1.1): approve-once, only a
+        # person, and only a client that can SHOW what it approves.
         if _desk is not None and getattr(_desk, "task_id", None) is not None:
             refusal = _desktop_approve_refusal(request, _desk, scope)
             if refusal is not None:
@@ -5159,9 +5273,9 @@ def create_app(
         if _desk is not None and getattr(_desk, "once_only", False) and scope != "once":
             return JSONResponse(status_code=409, content={
                 "error": "This request can only be approved once.", "code": "once_only"})
-        # A WORKER'S REQUEST is a person's to answer (#720): a device token, the
-        # owner's or that of the device whose conversation it is (the ownership
-        # filter above). Never the API token: a worker's model shell can reach it.
+        # A WORKER'S REQUEST is a person's to answer (#720): the owner's device
+        # (a scoped device was refused above, even the one whose conversation it
+        # is). Never the API token: a worker's model shell can reach it.
         if _desk is not None and getattr(_desk, "worker_task_id", None) is not None:
             refusal = _worker_approve_refusal(request)
             if refusal is not None:
@@ -5360,6 +5474,19 @@ def create_app(
         content = body.get("content", "")
         if not session_id or not content:
             return JSONResponse(status_code=400, content={"error": "session_id and content required"})
+        # Headers for named MCP servers, for THIS turn only (a caller's user-bound
+        # token for its own tool server). Checked before anything runs: one that
+        # cannot be delivered is refused, never dropped. Never stored or logged.
+        turn_headers = None
+        if body.get("mcp_headers") is not None:
+            _mcp = getattr(app.state, "mcp_runtime", None)
+            if _mcp is None:
+                return JSONResponse(status_code=400, content={
+                    "error": "mcp_headers given, but no MCP servers are connected"})
+            try:
+                turn_headers = _mcp.check_turn_headers(body["mcp_headers"])
+            except ValueError as exc:
+                return JSONResponse(status_code=400, content={"error": str(exc)})
         # Device scoping. This route keeps its conversation under web:<id> — that
         # is the session a device must own, whatever it called the id. Refused
         # before anything else is checked; claimed only where the session is used.
@@ -5411,6 +5538,7 @@ def create_app(
         pre_len = len(session.get_messages())
 
         from prometheus.engine.agent_loop import MaxTurnsExhausted
+        from prometheus.engine.tool_context import turn_mcp_headers
 
         try:
             # NO `tools=` ARGUMENT. This line used to read
@@ -5433,18 +5561,19 @@ def create_app(
             # every gateway adapter work. Passing the "right" registry here
             # would have been a no-op that read like a fix and taught the next
             # reader that this route selects its own tools. It does not.
-            result = await agent_loop.run_async(
-                system_prompt=system_prompt,
-                messages=session.get_messages(),
-                # RECORD-ONLY (WP-X.21 T4): the telemetry rows name the
-                # conversation this turn is persisted under. NOT session_id:
-                # that would change the permission origin and the router's
-                # override lookup for this route, which stays 'system'.
-                record_session_id=f"web:{session_id}",
-                surface="rest",
-            )
+            with turn_mcp_headers(turn_headers):
+                result = await agent_loop.run_async(
+                    system_prompt=system_prompt,
+                    messages=session.get_messages(),
+                    # RECORD-ONLY (WP-X.21 T4): the telemetry rows name the
+                    # conversation this turn is persisted under. NOT session_id:
+                    # that would change the permission origin and the router's
+                    # override lookup for this route, which stays 'system'.
+                    record_session_id=f"web:{session_id}",
+                    surface="rest",
+                )
             session.add_result_messages(result.messages, pre_len)
-            return {
+            reply = {
                 "text": result.text,
                 "turns": result.turns,
                 "usage": {
@@ -5452,6 +5581,12 @@ def create_app(
                     "output_tokens": result.usage.output_tokens,
                 },
             }
+            # The model that answered, which a fallback makes differ from the configured one.
+            # Omitted, not null, when no model answered (an ending the loop wrote itself).
+            served_by = getattr(result, "served_model", None)
+            if served_by:
+                reply["served_by"] = served_by
+            return reply
         except MaxTurnsExhausted as cap:
         # #774: a turn that hit its round cap kept its work — save it, never
         # roll it back. run_async handed the loop a COPY of the session list,
@@ -5896,7 +6031,11 @@ def create_app(
                     "error": "only_own_mark",
                     "detail": ("A device may remove only its own computer-use mark. Removing another device's "
                                "mark takes Telegram (/computer disallow <device id>) or the API token.")})
-        if not _devices_or_create().set_computer(device_id, on, by=by.label):
+        try:
+            marked = _devices_or_create().set_computer(device_id, on, by=by.label)
+        except ValueError as exc:  # a held device is never marked
+            return JSONResponse(status_code=409, content={"error": "held_device", "detail": str(exc)})
+        if not marked:
             return JSONResponse(status_code=404, content={"error": "no live device"})
         return {"id": device_id, "computer": on}
 

@@ -42,6 +42,29 @@ TURN_TRUST: contextvars.ContextVar[tuple[bool, str | None]] = contextvars.Contex
     "prometheus_turn_trust", default=(True, None))
 
 
+#: Headers a chat request handed named MCP servers for this turn only: {server: {Header: value}}. Set by the route
+#: around the turn (``turn_mcp_headers``), read by the MCP adapter at each call; None outside such a turn. A
+#: ContextVar so it follows the turn and its tool tasks and nothing else: a concurrent turn never sees it. The
+#: values are credentials: nothing logs, stores or shows them.
+TURN_MCP_HEADERS: contextvars.ContextVar[dict[str, dict[str, str]] | None] = contextvars.ContextVar(
+    "prometheus_turn_mcp_headers", default=None)
+
+
+@contextlib.contextmanager
+def turn_mcp_headers(headers: dict[str, dict[str, str]] | None) -> Iterator[None]:
+    """Make *headers* the current turn's MCP headers for the span of the block."""
+    token = TURN_MCP_HEADERS.set(headers or None)
+    try:
+        yield
+    finally:
+        try:
+            TURN_MCP_HEADERS.reset(token)
+        except ValueError:
+            # Closed from another context (a streamed reply's generator finalised
+            # elsewhere): clear it there rather than leave it set.
+            TURN_MCP_HEADERS.set(None)
+
+
 def turn_trust_of(messages: list) -> tuple[bool, str | None]:
     """(teaches, author) for a turn: from its request, the latest user message a person wrote (an owner's,
     provenance "user", or a group member's, "member"). Tool results and injected turns are skipped: they are not
@@ -81,3 +104,10 @@ def tool_execution(tool_name: str) -> Iterator[None]:
         yield
     finally:
         TOOL_EXECUTION.reset(token)
+
+
+#: The path the gate ruled on for the tool call whose post-result hooks are running, resolved; None when it had none.
+#: The LSP diagnostics hook reads THIS rather than resolving the tool's argument again (security/safe_fs.py,
+#: GHSA-wgcv-xw9m-9q9q): a second resolution, against the daemon's cwd, could follow a link swapped in since.
+DECIDED_PATH: contextvars.ContextVar[str | None] = contextvars.ContextVar("prometheus_decided_path", default=None)
+

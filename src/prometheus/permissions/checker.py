@@ -369,6 +369,17 @@ def origin_from_session_id(session_id: str | None) -> str:
     return ORIGIN_SYSTEM
 
 
+def names_a_present_person(session_id: str) -> bool:
+    """Whether *session_id* is a NAME :func:`origin_from_session_id` would read as a person present.
+
+    For refusing a name, never for classifying a turn: a scoped device may not claim such an id
+    (web/session_scope.py), because its turns run under their own session id and would otherwise be read as
+    the owner's. It can only take trust away. A turn's origin comes from :func:`origin_from_session_id` at the
+    reviewed call sites (tests/test_session_id_descriptive_only.py).
+    """
+    return session_id in _USER_SESSION_LITERALS or any(session_id.startswith(p) for p in _USER_SESSION_PREFIXES)
+
+
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
@@ -948,6 +959,9 @@ class SecurityGate:
         for _p in _this_process_state(writes=False):
             if _p not in self._denied_paths:
                 self._denied_paths.append(_p)
+        # A file tool never reads another name (a hard link) for anything on this list (security/safe_fs.py).
+        from prometheus.security.safe_fs import register_read_floor
+        register_read_floor(self._denied_paths)
         self._write_denied_paths: list[str] = list(_ALWAYS_WRITE_DENIED_PATHS)
         for _p in _this_process_state(writes=True):
             if _p not in self._write_denied_paths:

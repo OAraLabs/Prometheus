@@ -13,6 +13,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 from pydantic import BaseModel, Field
 
+from prometheus.security import safe_fs
 from prometheus.permissions.path_schema import PATH_FIELD_WRITE
 # #574's identity helpers, shared since WP-X.27 with every other path guard.
 from prometheus.security.path_guard import inside_by_identity
@@ -92,8 +93,17 @@ class DownloadFileTool(BaseTool):
             )
         except ValueError as exc:
             return ToolResult(output=f"Error: {exc}", is_error=True)
+        # The path the gate checked, written through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q). A
+        # destination derived from the URL was never a gate path, so there is nothing to compare it with.
+        decided = context.metadata.get("decided_path")
+        if decided is not None and arguments.destination is not None and Path(decided) != dest:
+            return ToolResult(
+                output=(f"Error: {arguments.destination} now resolves to {dest}, not {decided}, which is the path "
+                        f"that was checked: a link along it changed after the check, so nothing was written"),
+                is_error=True,
+            )
 
-        if dest.exists() and not arguments.overwrite:
+        if safe_fs.exists(dest) and not arguments.overwrite:
             return ToolResult(
                 output=(
                     f"Error: Destination already exists at {dest} — "
@@ -102,7 +112,6 @@ class DownloadFileTool(BaseTool):
                 is_error=True,
             )
 
-        dest.parent.mkdir(parents=True, exist_ok=True)
         bytes_written = 0
         content_type = ""
         try:
@@ -142,31 +151,30 @@ class DownloadFileTool(BaseTool):
                                 )
                         except ValueError:
                             pass
-                    with dest.open("wb") as fh:
+                    # Into a temporary file beside the destination, replaced in only when the whole body
+                    # arrived: an aborted download leaves the destination as it was, never half-written.
+                    with safe_fs.atomic_writer(dest) as fh:
                         async for chunk in response.aiter_bytes(chunk_size=65536):
                             bytes_written += len(chunk)
                             if bytes_written > self._max_bytes:
-                                fh.close()
-                                dest.unlink(missing_ok=True)
-                                return ToolResult(
-                                    output=(
-                                        f"Error: Download exceeded "
-                                        f"{self._max_mb}MB limit — aborted."
-                                    ),
-                                    is_error=True,
-                                )
+                                raise _TooLarge
                             fh.write(chunk)
+        except _TooLarge:
+            return ToolResult(
+                output=f"Error: Download exceeded {self._max_mb}MB limit — aborted.",
+                is_error=True,
+            )
+        except safe_fs.PathChanged as exc:
+            return ToolResult(output=f"Error: {exc}", is_error=True)
         except SsrfBlocked as exc:
-            # A redirect hop resolved to a non-public address. Remove the partial
-            # file so nothing half-written survives, and say we refused rather
-            # than reporting a transport failure the model would retry.
-            dest.unlink(missing_ok=True)
+            # A redirect hop resolved to a non-public address. Nothing half-written
+            # survives (the body goes to a temporary file first). Say we refused
+            # rather than reporting a transport failure the model would retry.
             return ToolResult(
                 output=f"Blocked: a redirect went to a non-public address ({exc}).",
                 is_error=True,
             )
         except httpx.HTTPError as exc:
-            dest.unlink(missing_ok=True)
             return ToolResult(output=f"Error: download failed: {exc}", is_error=True)
         except OSError as exc:
             return ToolResult(
@@ -215,6 +223,10 @@ def _protected_prefixes() -> list[Path]:
             if form not in prefixes:
                 prefixes.append(form)
     return prefixes
+
+
+class _TooLarge(Exception):
+    """The body went past the size limit; raised inside the writer so the temporary file is dropped."""
 
 
 def _resolve_destination(url: str, requested: str | None, *, base: Path) -> Path:
