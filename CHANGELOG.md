@@ -4,6 +4,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Dependencies: the lock moves msgpack to 1.2.4, which fixes CVE-2026-114613 (pip-audit).
 - Coding runs: a run started through `POST /api/code` now uses the config file the daemon was started with (`--config`). Before, the run read the default config, so a daemon started with its own file could accept a run that then ran on other settings (#850, by @sepehrtaji-dev).
 - `POST /api/chat` and `/v1/chat/completions` accept `mcp_headers`: headers for a named HTTP MCP server, on that turn's calls only (for example, a user-bound token from the app in front of Prometheus). They are never shown to the model, kept in the conversation, logged or stored. A turn without them uses the server's stored headers. A header for an unknown server, or for one not reached over HTTP, is refused with a 400.
 
