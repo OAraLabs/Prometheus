@@ -16,7 +16,7 @@ THE RULE
 --------
 Default-deny. The bearer middleware answers ``403 operator_only`` for a scoped token on any route that is not
 in ``web/route_access.SCOPED_ALLOWED``. That one allowlist is: hello, its own device, chat, its own sessions,
-and approving or denying the tool calls of ITS OWN sessions with the scope ``once`` or ``until-restart``.
+and seeing and denying the tool calls of ITS OWN sessions (only the owner approves one).
 
 This file is the behaviour: the exploits, and the allowed approvals, through the real app. The table
 (every registered route classified exactly once) is ``tests/test_route_access.py``.
@@ -231,16 +231,17 @@ def test_a_scoped_device_cannot_approve_everything_at_once(d):
 
 
 @pytest.mark.parametrize("scope", ["once", "until-restart"])
-def test_a_scoped_device_may_approve_its_own_sessions_tool_call_once_or_until_restart(d, scope):
+def test_a_scoped_device_cannot_approve_even_its_own_sessions_tool_call(d, scope):
+    # Only the owner approves (tests/test_scoped_device_cannot_approve.py has the real turn).
     action = d.pend("aaaa0001", session=ALICE_SESSION)
     response = d.as_("alice", "POST", "/api/approvals/aaaa0001/approve", json={"scope": scope})
-    assert response.status_code == 200 and response.json()["ok"] is True, response.text
-    assert action._result == ApprovalResult.APPROVED and action._event.is_set(), "it was answered"
+    assert operator_only(response), (scope, response.status_code, response.text[:100])
+    assert not action._event.is_set() and d.waiting() == {"aaaa0001"}, "it waits for the owner"
 
 
 def test_the_default_scope_is_once(d):
     d.pend("aaaa0001", session=ALICE_SESSION)
-    assert d.as_("alice", "POST", "/api/approvals/aaaa0001/approve").status_code == 200
+    assert d.as_("owner", "POST", "/api/approvals/aaaa0001/approve").status_code == 200
     assert d.gate.list_grants() == []
 
 

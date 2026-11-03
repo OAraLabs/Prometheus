@@ -183,10 +183,9 @@ class TestRestRecordsTheCredential:
         queue = _queue(tmp_path)
         _pending(queue)
         client, store = _app(queue, monkeypatch, tmp_path)
-        device = store.mint("Will's iPhone", "ios")
-        # A device answers the tool calls of ITS OWN sessions (web/route_access.py): this one raised the request.
-        store.claim_session("web:phone", device["id"])
-        queue.pending[RID].session_id = "web:phone"
+        # Only the owner approves (a scoped device is refused, tests/test_scoped_device_cannot_approve.py): the
+        # owner's own device answers, and is recorded as that device.
+        device = store.mint_owner("Will's iPhone", "ios", by="same-mac-pairing")
         res = client.post(f"/api/approvals/{RID}/approve", json={"scope": "once"},
                           headers={"Authorization": f"Bearer {device['token']}"})
         assert res.json()["ok"] is True, res.text

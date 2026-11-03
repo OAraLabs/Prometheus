@@ -146,8 +146,9 @@ class TestTranscribeAudioPins:
         out = await adapter._transcribe_audio("/tmp/audio_ab.ogg")
         assert out == "hello prometheus"
         assert rec["input"].audio_path == "/tmp/audio_ab.ogg"
-        # The adapter's own config reaches the tool, for stt.url.
-        assert rec["init"] == {"config": adapter._prometheus_config}
+        # The adapter's own config reaches the tool, for stt.url, and so does a list for the
+        # "speech-to-text server down / back" sentence (None when the caller did not ask for one).
+        assert rec["init"] == {"config": adapter._prometheus_config, "notices": None}
 
     @pytest.mark.asyncio
     async def test_transcribe_failure_pin(self, monkeypatch):

@@ -6,11 +6,12 @@ master token included. A worker's model shell can reach that token (its
 parent's environment, a plain file the bash tool can read), so the worker
 could approve its own request. Open mode is the same hole with no token at all.
 
-The rule here, Will's call (2026-10-11): a device token is a person's (the
-owner's device, or the scoped device whose conversation it is: the ownership
-filter already decides which). The API token and open mode get 401
-``not_a_person`` and the request stays pending. Unlike a desktop prompt, this
-needs no computer-use mark and works with computer use off.
+The rule here, Will's call (2026-10-11): a device token is a person's. The API
+token and open mode get 401 ``not_a_person`` and the request stays pending.
+Unlike a desktop prompt, this needs no computer-use mark and works with
+computer use off. Narrowed on 2026-11-02 (Will): only the owner approves, so a
+SCOPED device, even the one whose conversation it is, is refused (403) and may
+only deny; the owner's device approves.
 """
 
 from __future__ import annotations
@@ -104,13 +105,13 @@ def test_the_owners_device_approves_a_workers_request(d):
     assert action._result == ApprovalResult.APPROVED
 
 
-def test_the_device_whose_conversation_it_is_approves_a_workers_request(d):
-    """No computer-use mark needed: the mark is the desktop's grant, not a person test."""
+def test_the_device_whose_conversation_it_is_cannot_approve_a_workers_request(d):
+    """Only the owner approves: a scoped device sees its own session's request and may deny it, never approve it
+    (tests/test_scoped_device_cannot_approve.py)."""
     action = d.worker_request("f0f00004")
-    assert not d.devices.computer_allowed(d.alice["id"])
     r = d.approve("alice", "f0f00004")
-    assert r.status_code == 200 and r.json()["ok"] is True, r.text
-    assert action._result == ApprovalResult.APPROVED
+    assert r.status_code == 403, r.text
+    assert "f0f00004" in d.queue.pending and not action._event.is_set()
 
 
 def test_a_lasting_scope_is_still_refused_by_name_before_the_credential(d):

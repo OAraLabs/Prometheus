@@ -19,9 +19,9 @@ credential.
 
 What a scoped device is: a chat client for its own conversations. It may use hello; its own device (list itself,
 sign itself out, its push and live-activity registration); chat; its own sessions (``SessionAccess`` already
-answers 404 for anyone else's); and approve or deny the tool calls of ITS OWN sessions, with the scope
-``once`` or ``until-restart`` only (:data:`SCOPED_APPROVE_SCOPES`). Everything else is the operator's: the global
-token or an owner device.
+answers 404 for anyone else's); and see and DENY the tool calls of ITS OWN sessions. It never approves one: only
+the owner does (the handler answers 403), so whatever sits behind a device token cannot sanction a call the gate
+stopped for the owner to see. Everything else is the operator's: the global token or an owner device.
 
 Two things are deliberately wider, because the computer-use door already decided them (docs/design, W3):
 
@@ -56,12 +56,6 @@ from collections.abc import Callable
 
 from prometheus.web.public_routes import _matches
 
-#: The approval scopes a scoped device may answer with. ``until-restart`` is process-wide (there is one gate per
-#: process and its grants are never cleared), so the grant a device makes for its own call applies to every
-#: matching call until the daemon restarts: this is the one place that reaches beyond the device's own sessions,
-#: and the reason it is a named constant to narrow to ``("once",)`` rather than an inline literal.
-SCOPED_APPROVE_SCOPES: tuple[str, ...] = ("once", "until-restart")
-
 #: Open by design and not under the bearer prefixes at all (the dashboard page and the health probe).
 OUTSIDE_THE_GATE: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/"),
@@ -95,7 +89,8 @@ SCOPED_ALLOWED: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/api/search"),
     # the one desktop route open to every valid token: a stop can only end a task
     ("POST", "/api/computer/tasks/{task_id}/stop"),
-    # the tool calls of its own sessions (the handlers narrow to own sessions and to SCOPED_APPROVE_SCOPES)
+    # the tool calls of its own sessions: seen and denied. The approve route is listed for a desktop prompt, which
+    # a device a person marked answers (the door's rule); the handler refuses a scoped device any other approval.
     ("GET", "/api/approvals"),
     ("POST", "/api/approvals/{request_id}/approve"),
     ("POST", "/api/approvals/{request_id}/deny"),
