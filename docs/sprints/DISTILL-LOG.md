@@ -407,3 +407,14 @@ Append-only, times in ET.
   - It printed the plan with code `eced49b` and passed the excluded-session checks on all four tasksets.
   - It ended with SKIP exit 2: the port serves Saluki in the daytime, as expected.
   - No guard was listening on 18593, and no teacher_gen or gen unit started.
+
+## 2026-11-03 09:41 EST: the heartbeat keeps its text
+- **Change (be38779):** `round2_chain.py heartbeat --send` now saves the exact text it sent.
+  - **Where:** `~/distill/round2/state/heartbeat-<date>.txt` (the newest 30 are kept) and `heartbeat.last`.
+  - **Header line:** the send time and the notifier's exit code, so a failed send is saved with its code.
+  - **Safety:** saving never fails the heartbeat.
+- **Install:** only `~/distill/round2/bin/round2_chain.py` changed. The live copy matched the previous repo version (dc60f42) and is backed up as `round2_chain.py.bak-dc60f42`.
+- **Verification:**
+  - A host run against a temp config (notifier `/bin/true`, temp state dir) wrote both files. No Telegram was sent, and the temp dir was removed afterwards.
+  - Tests: 45/45 for the round-2 chain and 1,973 passed for the full distill suite.
+- **First real use:** tomorrow's 09:00 heartbeat. To check it, read `heartbeat.last` on the mini.
