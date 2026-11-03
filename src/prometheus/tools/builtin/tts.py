@@ -77,7 +77,8 @@ class TTSTool(BaseTool):
                 return ToolResult(output=str(exc), is_error=True)
             except OSError as exc:
                 return ToolResult(output=f"Could not save the audio to {dest}: {exc}", is_error=True)
-        return ToolResult(output=f"Audio saved to {dest}")
+        # The remote server's "down / back" sentence, when the render made one, rides on the final result too.
+        return _noted(ToolResult(output=f"Audio saved to {dest}"), result.metadata.get("voice_notes", []))
 
     async def _synthesize(self, arguments: TTSInput, out_path: str) -> ToolResult:
         text = arguments.text[:4000]  # cap at 4000 chars
@@ -101,7 +102,7 @@ def _noted(result: ToolResult, notices: list[str]) -> ToolResult:
     if not notices:
         return result
     return ToolResult(output=f"{result.output}\n\n[Note: {' '.join(notices)}]", is_error=result.is_error,
-                      metadata=result.metadata)
+                      metadata={**result.metadata, "voice_notes": list(notices)})
 
 
 async def _speak_locally(arguments: TTSInput, text: str, out_path: str) -> ToolResult:
