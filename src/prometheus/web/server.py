@@ -5459,7 +5459,7 @@ def create_app(
                     surface="rest",
                 )
             session.add_result_messages(result.messages, pre_len)
-            return {
+            reply = {
                 "text": result.text,
                 "turns": result.turns,
                 "usage": {
@@ -5467,6 +5467,12 @@ def create_app(
                     "output_tokens": result.usage.output_tokens,
                 },
             }
+            # The model that answered, which a fallback makes differ from the configured one.
+            # Omitted, not null, when no model answered (an ending the loop wrote itself).
+            served_by = getattr(result, "served_model", None)
+            if served_by:
+                reply["served_by"] = served_by
+            return reply
         except MaxTurnsExhausted as cap:
         # #774: a turn that hit its round cap kept its work — save it, never
         # roll it back. run_async handed the loop a COPY of the session list,

@@ -9,7 +9,8 @@ pinned is the wire.
 The stored ``headers`` (typically a bearer for that server) ride every request
 to it, and never come back out: not in the status, the catalog's launch summary,
 a failure's detail or the log. The store refuses a header value that could
-split a header, and a ``url`` that is not http(s).
+split a header, and a ``url`` that is not http(s). ``allowed_tools`` holds at
+the call, as it does for a stdio server.
 """
 
 from __future__ import annotations
@@ -59,6 +60,22 @@ async def test_an_http_server_connects_lists_and_answers(server, caplog):
     summary = runtime.get_catalog().servers.get("remote")
     assert summary is None or CANARY not in summary.launch_summary
     assert CANARY not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_tool_outside_allowed_tools_is_refused_at_the_call(server):
+    # Same rule as for a stdio server: the allowlist hides the tool from the
+    # catalog AND refuses it by name, before anything is sent to the server.
+    runtime = McpRuntime({"remote": {**_config(server), "allowed_tools": ["something_else"]}})
+    try:
+        await runtime.connect_all()
+        assert runtime.list_tools() == []
+        before = len(server.seen_auth)
+        with pytest.raises(PermissionError, match="allowed_tools"):
+            await runtime.call_tool("remote", "echo", {"text": "hi"})
+        assert len(server.seen_auth) == before, "the refused call still reached the server"
+    finally:
+        await runtime.disconnect_server("remote", forget=True)
 
 
 @pytest.mark.asyncio

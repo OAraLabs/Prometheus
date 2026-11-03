@@ -244,7 +244,9 @@ def _warn_absent_gating_keys(config: dict[str, Any]) -> None:
             )
 
 
-def build_tool_registry(security_cfg: dict[str, Any] | None = None) -> ToolRegistry:
+def build_tool_registry(
+    security_cfg: dict[str, Any] | None = None, *, memory_extraction: bool = True,
+) -> ToolRegistry:
     """Create the tool registry with all builtin tools (same as CLI).
 
     Reuses create_tool_registry() from __main__ so daemon and CLI
@@ -254,7 +256,7 @@ def build_tool_registry(security_cfg: dict[str, Any] | None = None) -> ToolRegis
     """
     if security_cfg is None:
         security_cfg = {}
-    return create_tool_registry(security_cfg)
+    return create_tool_registry(security_cfg, memory_extraction=memory_extraction)
 
 
 async def _detect_loaded_model_with_retry(
@@ -1085,7 +1087,10 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         )
 
     # Tool registry — same tools as CLI mode
-    registry = build_tool_registry(security_cfg=security_config)
+    from prometheus.memory.learning_switch import extraction_enabled
+
+    registry = build_tool_registry(
+        security_cfg=security_config, memory_extraction=extraction_enabled(config))
 
     # The read floor's state, said ONCE at boot. security.bash_confinement
     # ships "auto", so a host where the AppArmor profile did not verify runs
@@ -2131,7 +2136,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # Memory extractor (optional, from Sprint 5)
     memory_recall = None  # set below when the store comes up; web path reads it
     try:
-        from prometheus.memory.extractor import MemoryExtractor
+        from prometheus.memory.learning_switch import start_memory_extraction
         from prometheus.memory.recall import MemoryRecall, RecallConfig
         from prometheus.memory.store import MemoryStore
         from prometheus.memory.wiki_compiler import WikiCompiler
@@ -2163,26 +2168,23 @@ async def run_daemon(args: argparse.Namespace) -> bool:
         else:
             logger.info("Memory recall disabled (memory.recall.enabled=false)")
 
-        extractor = MemoryExtractor(
+        # memory.extraction.enabled: false builds no extractor at all, so neither
+        # the sweep, the pre-compaction flush nor the wiki compile after it runs.
+        # The store, the wiki compiler and recall above stay: /note, purge, recall
+        # and wiki_query read or write through them.
+        _extractor, extractor_task = start_memory_extraction(
+            config,
             store=memory_store,
+            wiki_compiler=wiki_compiler,
             provider=provider,
             model=model_name,
-            post_extract_callback=wiki_compiler.compile,
             telemetry=telemetry,
+            lcm_engine=lcm_engine,
         )
-
-        # Wire extractor into LCM for pre-compaction flush
-        if lcm_engine is not None:
-            lcm_engine.set_memory_extractor(extractor)
-            logger.info("Memory extractor wired to LCM pre-compaction flush")
-
-        # SUNRISE: name the task so it's visible in asyncio.all_tasks() and logs.
-        extractor_task = asyncio.create_task(
-            extractor.run_forever(),
-            name="memory_extractor",
-        )
-        tasks.append(extractor_task)
-        logger.info("Memory extractor started (task=memory_extractor)")
+        if _extractor is not None:
+            extractor = _extractor
+        if extractor_task is not None:
+            tasks.append(extractor_task)
     except Exception as exc:
         logger.warning("Memory extractor not available: %s", exc)
 
@@ -2227,7 +2229,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             )
             anatomy_writer = AnatomyWriter()
             project_store = ProjectConfigStore()
-            set_anatomy_components(scanner, anatomy_writer, project_store)
+            set_anatomy_components(scanner, anatomy_writer, project_store, config)
 
             if anatomy_config.get("scan_on_startup", True):
                 state = await scanner.scan()
@@ -2362,7 +2364,11 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                     logger.debug("SENTINEL: telemetry digest not available")
 
             knowledge_synth = None
-            if "memory_store" in dir() and sentinel_config.get("synthesis_enabled", True):
+            # Works from facts extracted from chats, so memory.extraction.enabled
+            # turns it off as well as its own key.
+            from prometheus.memory.learning_switch import insight_synthesis_enabled
+
+            if "memory_store" in dir() and insight_synthesis_enabled(config, sentinel_config):
                 knowledge_synth = KnowledgeSynthesizer(
                     store=memory_store,
                     provider=provider,

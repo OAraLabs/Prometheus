@@ -4,8 +4,28 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- `memory.extraction.enabled: false` stops memory being learned from chats. The fact extractor, the wiki compile after it, the SENTINEL insight writer, the agent's `memory` tool and `wiki_query`'s saving of questions are not built or started. Recall, `/note` and the memory editor are unchanged. `prometheus doctor` reports the switch.
 - MCP servers can be remote: a `url` connects over streamable HTTP (`transport: streamable-http`) or SSE (the default). Before, a `url` server was always marked failed as "not yet implemented". The server's stored `headers` are sent on every request to it and are never shown or logged. The server store now refuses a `url` that isn't `http://` or `https://`, and a header name or value that could break the request.
 - `POST /api/chat` and `/v1/chat/completions` accept `mcp_headers`: headers for a named HTTP MCP server, on that turn's calls only (for example, a user-bound token from the app in front of Prometheus). They are never shown to the model, kept in the conversation, logged or stored. A turn without them uses the server's stored headers. A header for an unknown server, or for one not reached over HTTP, is refused with a 400.
+
+## 0.9.19 (2026-11-02)
+
+0.9.19 is a small patch release. Its fix: file_watch tasks never fired with watchdog 7 (fresh pip and Homebrew installs of 0.9.18). It also:
+- installs watchdog from a wheel on a Mac with Python 3.14, so file_watch is event-driven there again;
+- names the model that answered on every chat response (`served_by`);
+- sends a keyed llama.cpp server its key from `oara doctor`, the anatomy scan and the terminal chat;
+- keeps hostnames and addresses out of what the model is told about your machines.
+
+### The fix
+
+- Tasks: a `file_watch` task fires again when watchdog 7 is installed. watchdog 7.0 (2026-10-31) matches a handler's patterns against the whole path, so `*.json` stopped matching `/dir/result.json` and the task waited until its timeout. 0.9.18 allows watchdog 7, so a fresh pip install on Linux or on a Mac with Python 3.13 or older, and the Homebrew formula, got it; installs from the lock (the Mac app, `scripts/deploy.sh`) kept 6.0.0. The file's name is now matched against the pattern the same way the check for a file that is already there does.
+
+### Also
+
+- Install: watchdog is a base dependency on every platform again, from 7.0, the first release with macOS wheels for Python 3.14. 0.9.18 skipped it on exactly that platform; a Mac on Python 3.14 now installs it from a wheel and gets event-driven `file_watch` instead of polling. Polling stays for an install without watchdog.
+- Models: `oara doctor`'s Inference row, the anatomy scan and the terminal chat now ask a llama.cpp server started with an API key with that key, so a keyed server no longer shows as not responding and the chat can read its model and chat template. The key is the model's own (`model.api_key_env`), read from the environment and then the env file. A named variable that is set in neither is reported by name instead of as "not responding".
+- The model is no longer told where your machines are. The Infrastructure section of its prompt and the `anatomy` tool's answers keep what the machines can do (CPU, RAM, GPU and VRAM, the model, its engine, context window and vision) and leave out hostnames, IP addresses, URLs, the tailnet peer list and the folder a model file sits in, on local and hosted models alike. Before, a reply could quote the model server's address or list your tailnet peers. `anatomy.include_addresses: true` restores the old text. The `/anatomy` command you run yourself is unchanged.
+- Each chat response names the model that answered: `served_by` on `POST /api/chat` and on the `chat_done` frame, and `prometheus.served_by` on `/v1/chat/completions` (on the final chunk when streamed). When a fallback answers instead of the configured model, `served_by` names the fallback. `/v1`'s `model` still echoes the key you asked for.
 
 ## 0.9.18 (2026-11-02)
 
