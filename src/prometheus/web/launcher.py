@@ -49,6 +49,7 @@ async def launch_web(
     backend_registry: Any | None = None,
     computer_integration: Any | None = None,
     computer_runner: Any | None = None,
+    hold_lifts: Any | None = None,
     origin_fetcher: Any | None = None,
     bind: str | None = None,
     bind_source: str | None = None,
@@ -135,6 +136,13 @@ async def launch_web(
         from prometheus.permissions.approval_queue import ApprovalQueues
 
         approval_queue = ApprovalQueues(approval_queue, computer_runner.channel)
+    # Lifting a device's hold asks a person (permissions/hold_lifts.py): the holds live in THIS store, and the
+    # request is answered through the same surfaces as every other approval, the WebSocket's included.
+    if hold_lifts is not None:
+        from prometheus.permissions.approval_queue import ApprovalQueues
+
+        hold_lifts.bind_device_store(device_store)
+        approval_queue = ApprovalQueues(approval_queue, hold_lifts)
 
     # Create FastAPI app
     app = create_app(
@@ -161,6 +169,7 @@ async def launch_web(
         backend_registry=backend_registry,
         computer_integration=computer_integration,
         computer_runner=computer_runner,
+        hold_lifts=hold_lifts,
     )
 
     # The facts store and the wiki built from it. A session purge reads and retracts both so that

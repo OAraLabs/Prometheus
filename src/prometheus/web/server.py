@@ -343,6 +343,7 @@ def create_app(
     backend_registry: Any | None = None,
     computer_integration: Any | None = None,
     computer_runner: Any | None = None,
+    hold_lifts: Any | None = None,
 ) -> FastAPI:
     """Create the FastAPI application with all routes.
 
@@ -781,8 +782,12 @@ def create_app(
 
         Every run under one of the device's sessions is then held to that profile: offered only its tools,
         refused any other at the call, with no fallback that widens it. For a caller beside the owner's own
-        assistant that must stay read-only. The operator's (the middleware refuses a scoped device, so a held
-        device cannot lift its own hold), and an owner device cannot be held: it is the operator, and could.
+        assistant that must stay read-only. The operator's (the middleware refuses a scoped device), and an owner
+        device cannot be held: it is the operator, and could lift it.
+
+        Setting a hold on a device with none applies at once. Lifting or changing one answers 202 with a pending
+        request: a consent prompt only a person can approve (the Telegram owner, or a Beacon device a person
+        marked), never the API token. The hold stands until then.
         """
         from prometheus.permissions import approver as _approver
 
@@ -797,7 +802,8 @@ def create_app(
             return JSONResponse(status_code=400, content={"error": "profile must be a string or null"})
         name = (raw or "").strip()
         store = _devices_or_create()
-        if not any(d.id == device_id and d.revoked_at is None for d in store.list_devices()):
+        device = next((d for d in store.list_devices() if d.id == device_id and d.revoked_at is None), None)
+        if device is None:
             return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
         if name:
             if store.is_owner(device_id):
@@ -809,6 +815,22 @@ def create_app(
             if profile_state._store.get(name) is None:
                 return JSONResponse(status_code=400, content={
                     "error": f"unknown profile {name!r}", "known": profile_state._store.names()})
+        current = store.device_profile(device_id)
+        if current and (name or None) != current:
+            # LIFTING or CHANGING a hold widens what the device may run, and no credential this route can see
+            # proves a person: the API token sits where a model's shell can read it. So it asks the owner, on the
+            # approval surfaces, and the hold stands until a person approves (permissions/hold_lifts.py).
+            channel = app.state.hold_lifts
+            if getattr(channel.people, "devices", None) is None:
+                channel.people.bind_device_store(store)
+            request_id = channel.request_lift(device_id, device.name, current=current, to=name or None,
+                                              by=_approver.from_request(request))
+            return JSONResponse(status_code=202, content={
+                "id": device_id, "profile": current,
+                "pending": {"request_id": request_id, "to": name or None,
+                            "detail": "The hold stands until the owner approves this from Telegram or Beacon."}})
+        if current == (name or None):
+            return {"id": device_id, "profile": current}
         if not store.set_profile(device_id, name or None, by=_approver.from_request(request).label):
             return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
         return {"id": device_id, "profile": name or None}
@@ -876,6 +898,29 @@ def create_app(
             isinstance(_current, ApprovalQueues) and _channel in _current.queues
         ):
             app.state.approval_queue = ApprovalQueues(_current, _channel)
+
+    # Lifting a device's hold asks a person (permissions/hold_lifts.py): a consent prompt beside tool and desktop
+    # prompts, on the same approval surface. The daemon passes its channel (its gate, Telegram, signal bus); a
+    # bare app builds one, which still asks and still refuses every credential but a person's.
+    if hold_lifts is None:
+        from prometheus.computer.door import PersonCheck
+        from prometheus.config.shipped_defaults import resolve_owner_chat_id, resolve_telegram_owner_ids
+        from prometheus.permissions.hold_lifts import HoldLiftChannel
+
+        _gateway_cfg = (config or {}).get("gateway")
+        hold_lifts = HoldLiftChannel(
+            people=PersonCheck(device_store=_devices(),
+                               telegram_user_ids=resolve_telegram_owner_ids(_gateway_cfg)),
+            devices=_devices_or_create,
+            security_gate=getattr(app.state.approval_queue, "_security_gate", None),
+            owner_chat_id=resolve_owner_chat_id(_gateway_cfg),
+        )
+    app.state.hold_lifts = hold_lifts
+    from prometheus.permissions.approval_queue import ApprovalQueues as _Queues
+
+    _surface = app.state.approval_queue
+    if not (isinstance(_surface, _Queues) and hold_lifts in _surface.queues):
+        app.state.approval_queue = _Queues(_surface, hold_lifts)
 
     def _resolved_context_limit(
         model: str | None = None,
@@ -5963,7 +6008,11 @@ def create_app(
                     "error": "only_own_mark",
                     "detail": ("A device may remove only its own computer-use mark. Removing another device's "
                                "mark takes Telegram (/computer disallow <device id>) or the API token.")})
-        if not _devices_or_create().set_computer(device_id, on, by=by.label):
+        try:
+            marked = _devices_or_create().set_computer(device_id, on, by=by.label)
+        except ValueError as exc:  # a held device is never marked
+            return JSONResponse(status_code=409, content={"error": "held_device", "detail": str(exc)})
+        if not marked:
             return JSONResponse(status_code=404, content={"error": "no live device"})
         return {"id": device_id, "computer": on}
 
