@@ -16,8 +16,12 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from mcp import ClientSession, StdioServerParameters
+from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 from prometheus.mcp.names import sanitize_server_name
 from prometheus.mcp.transport import (
@@ -63,6 +67,14 @@ async def _connect_with_timeout(session: ClientSession, timeout_ms: int) -> None
         raise McpConnectionError(
             f"Connection timed out after {timeout_ms}ms"
         ) from None
+
+
+def _root_cause(exc: BaseException) -> BaseException:
+    """The first leaf of an exception group: the HTTP clients run in anyio task
+    groups, so a refused connection arrives as "unhandled errors in a TaskGroup"."""
+    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+        exc = exc.exceptions[0]
+    return exc
 
 
 async def _list_all_tools(session: ClientSession) -> list:
@@ -178,13 +190,7 @@ class McpRuntime:
             if isinstance(resolved, ResolvedStdioTransport):
                 mcp_session = await self._connect_stdio(server_name, resolved)
             elif isinstance(resolved, ResolvedHttpTransport):
-                self._statuses[server_name] = McpConnectionStatus(
-                    name=server_name,
-                    state="failed",
-                    transport=resolved.transport_type,
-                    detail="HTTP/SSE transport not yet implemented",
-                )
-                return None
+                mcp_session = await self._connect_http(server_name, resolved)
             else:
                 return None
 
@@ -242,12 +248,14 @@ class McpRuntime:
             return entry
 
         except Exception as e:
-            logger.warning("MCP connection failed: %s - %s", server_name, e)
+            cause = _root_cause(e)
+            reason = str(cause) or type(cause).__name__
+            logger.warning("MCP connection failed: %s - %s", server_name, reason)
             self._statuses[server_name] = McpConnectionStatus(
                 name=server_name,
                 state="failed",
                 transport=resolved.kind,
-                detail=str(e)[:200],
+                detail=reason[:200],
             )
             return None
 
@@ -334,6 +342,53 @@ class McpRuntime:
             server_name=server_name,
             session=session,
             transport_type="stdio",
+            _exit_stack=stack,
+        )
+
+    async def _connect_http(
+        self,
+        server_name: str,
+        config: ResolvedHttpTransport,
+    ) -> _McpSession:
+        """Connect to an MCP server over streamable HTTP or SSE.
+
+        The stored ``headers`` (a bearer, usually) go on every request to the
+        server and nowhere else: the log line names the URL with any password
+        masked, never a header.
+        """
+        logger.info(
+            "MCP connecting (%s): %s -> %s",
+            config.transport_type, server_name, config.description,
+        )
+
+        stack = AsyncExitStack()
+        timeout_s = config.timeout_ms / 1000
+        try:
+            if config.transport_type == "streamable-http":
+                # The SDK's own client factory (redirect and origin handling), with
+                # the stored headers; the SDK's 300 s read timeout for the stream.
+                http_client = await stack.enter_async_context(create_mcp_http_client(
+                    headers=config.headers, timeout=httpx.Timeout(timeout_s, read=300.0),
+                ))
+                read_stream, write_stream, _session_id = await stack.enter_async_context(
+                    streamable_http_client(config.url, http_client=http_client)
+                )
+            else:
+                read_stream, write_stream = await stack.enter_async_context(
+                    sse_client(config.url, headers=config.headers, timeout=timeout_s)
+                )
+            session = await stack.enter_async_context(
+                ClientSession(read_stream, write_stream)
+            )
+            await _connect_with_timeout(session, config.timeout_ms)
+        except BaseException:
+            await stack.aclose()
+            raise
+
+        return _McpSession(
+            server_name=server_name,
+            session=session,
+            transport_type=config.transport_type,
             _exit_stack=stack,
         )
 
