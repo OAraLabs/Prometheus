@@ -14,6 +14,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from prometheus.permissions.path_schema import PATH_FIELD_READ
+from prometheus.security import safe_fs
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -63,8 +64,12 @@ class FileReadTool(BaseTool):
         arguments: FileReadToolInput,
         context: ToolExecutionContext,
     ) -> ToolResult:
-        path = _resolve_path(context.cwd, arguments.path)
-        if not path.exists():
+        # The path the gate checked, opened through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q).
+        try:
+            path = safe_fs.resolve_tool_path(arguments.path, context.cwd, context.metadata)
+        except safe_fs.PathChanged as exc:
+            return ToolResult(output=str(exc), is_error=True)
+        if not safe_fs.exists(path):
             # Check ~/.prometheus/files/ as a fallback for user-saved files
             # (user might say "read my research brief" without full path)
             alt = _check_user_files(arguments.path)
@@ -72,10 +77,14 @@ class FileReadTool(BaseTool):
                 path = alt
             else:
                 return ToolResult(output=f"File not found: {path}", is_error=True)
-        if path.is_dir():
+        try:
+            raw = safe_fs.read_bytes(path)
+        except IsADirectoryError:
             return ToolResult(output=f"Cannot read directory: {path}", is_error=True)
-
-        raw = path.read_bytes()
+        except safe_fs.PathChanged as exc:
+            return ToolResult(output=str(exc), is_error=True)
+        except FileNotFoundError:
+            return ToolResult(output=f"File not found: {path}", is_error=True)
         if b"\x00" in raw:
             return ToolResult(output=f"Binary file cannot be read as text: {path}", is_error=True)
 
@@ -102,7 +111,9 @@ def _check_user_files(filename: str) -> Path | None:
     """Check ~/.prometheus/files/ for a matching file (case-insensitive partial match)."""
     try:
         from prometheus.config.paths import get_config_dir
-        files_dir = get_config_dir() / "files"
+        # Resolved: the read opens it through no link, so a config directory reached through one
+        # (PROMETHEUS_CONFIG_DIR under /tmp on macOS, a linked ~/.prometheus) must be named by its real path.
+        files_dir = (get_config_dir() / "files").resolve()
         if not files_dir.is_dir():
             return None
 

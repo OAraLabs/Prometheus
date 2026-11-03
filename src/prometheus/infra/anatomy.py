@@ -21,6 +21,9 @@ from prometheus.config.paths import get_config_dir
 
 log = logging.getLogger(__name__)
 
+#: What every surface says about a remote inference GPU when no SSH user is set.
+GPU_NOT_CONFIGURED = "not configured (set anatomy.ssh_user and anatomy.ssh_key to read it)"
+
 
 @dataclass
 class GPUProcess:
@@ -141,6 +144,9 @@ class AnatomyScanner:
             self._llama_url if inference_engine == "llama_cpp" else self._ollama_url)
         self._ssh_user = ssh_user
         self._ssh_key = str(Path(ssh_key).expanduser()) if ssh_key else None
+        # No SSH user is a setting, not a failure: it cannot change while this
+        # scanner lives (it is built once from the config), so it is said once.
+        self._said_not_configured = False
         # The backend registry, when the daemon built one. With it, model
         # detection is a READ of the registry's probe (one implementation of
         # "what is this box serving", shared with the catalog, the router and
@@ -312,7 +318,18 @@ class AnatomyScanner:
         inference_is_remote = host not in local_host_aliases
         state.gpu_inference_host = host or None
 
-        if inference_is_remote:
+        if inference_is_remote and not self._ssh_user:
+            # Nothing to probe with. Not a failure to report on every scan: the
+            # GPU is "not configured" until anatomy.ssh_user is set and the
+            # daemon restarts. Said once, at INFO.
+            state.gpu_is_remote = True
+            state.gpu_probe_method = "not_configured"
+            state.gpu_probe_error = GPU_NOT_CONFIGURED
+            if not self._said_not_configured:
+                log.info("Inference GPU on another machine: %s", GPU_NOT_CONFIGURED)
+                self._said_not_configured = True
+            await self._probe_local_gpu_as_secondary(state)
+        elif inference_is_remote:
             # Probe the inference GPU first — that's the source of truth.
             state.gpu_is_remote = True
             remote_ok, remote_err = await self._probe_remote_gpu(state, host)

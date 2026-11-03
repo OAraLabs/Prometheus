@@ -78,7 +78,7 @@ log = logging.getLogger(__name__)
 # grant — the operator is asked about every relative read forever, with no
 # answer that stops it (measured on a live daemon, 2026-08-30: two pending
 # read_file approvals, both with zero extents, on every surface at once).
-READ_ONLY_FILE_TARGETS: frozenset[str] = frozenset({"read_file"})
+READ_ONLY_FILE_TARGETS: frozenset[str] = frozenset({"read_file", "lsp"})
 
 # WRITE tools whose relative path resolves against the tool context's cwd —
 # and so, in a workspace session, against the session's workspace.
@@ -126,6 +126,8 @@ TOOL_PATH_PARAM: dict[str, str] = {
     "video_generate": "image_path",
     "download_file": "destination",
     "youtube_transcript": "save_to",
+    # Registered only when lsp.enabled. It reads the file and hands its text to the language server.
+    "lsp": "file",
     # Directory roots. Read-only tools, so they never reach the
     # workspace prompt (_APPROVE_TOOLS is write_file/edit_file only)
     # — mapping them buys denied_paths enforcement and nothing else,

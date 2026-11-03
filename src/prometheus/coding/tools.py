@@ -30,6 +30,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from prometheus.security import safe_fs
 from prometheus.coding.sandbox import Sandbox, SandboxViolation
 from prometheus.security.shell_floor import ShellFloorRefused
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolRegistry, ToolResult
@@ -143,8 +144,10 @@ class CodeViewTool(BaseTool):
                 is_error=True,
             )
 
+        # The path the sandbox resolved, read through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q): a command
+        # still running from code_run could swap a folder for a link between the check and the read.
         try:
-            text = real.read_text(encoding="utf-8", errors="replace")
+            text = safe_fs.read_text(real, errors="replace")
         except OSError as exc:
             return ToolResult(output=f"READ FAILED: {exc}", is_error=True)
 
@@ -224,7 +227,10 @@ class CodeStrReplaceTool(BaseTool):
                 is_error=True,
             )
 
-        text = real.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = safe_fs.read_text(real, errors="replace")   # through no link, as code_view
+        except OSError as exc:
+            return ToolResult(output=f"READ FAILED: {exc}", is_error=True)
         count = text.count(arguments.old_str)
         if count == 0:
             return ToolResult(
@@ -247,7 +253,10 @@ class CodeStrReplaceTool(BaseTool):
             )
 
         new_text = text.replace(arguments.old_str, arguments.new_str, 1)
-        real.write_text(new_text, encoding="utf-8")
+        try:
+            safe_fs.write_text(real, new_text, create_parents=False)   # through no link
+        except OSError as exc:
+            return ToolResult(output=f"WRITE FAILED: {exc}", is_error=True)
 
         # Show the edited region so the model can verify without re-viewing.
         offset = new_text.index(arguments.new_str) if arguments.new_str else 0
@@ -292,7 +301,7 @@ class CodeCreateTool(BaseTool):
             real = self._sandbox.resolve(arguments.path)
         except SandboxViolation as exc:
             return _violation(exc)
-        if real.exists():
+        if safe_fs.exists(real):
             return ToolResult(
                 output=(
                     f"ALREADY EXISTS: {arguments.path!r}. Nothing was written. "
@@ -300,8 +309,10 @@ class CodeCreateTool(BaseTool):
                 ),
                 is_error=True,
             )
-        real.parent.mkdir(parents=True, exist_ok=True)
-        real.write_text(arguments.content, encoding="utf-8")
+        try:
+            safe_fs.write_text(real, arguments.content)   # through no link, folders made one level at a time
+        except OSError as exc:
+            return ToolResult(output=f"WRITE FAILED: {exc}", is_error=True)
         return ToolResult(
             output=f"OK — created {arguments.path} "
             f"({len(arguments.content)} chars, "
@@ -357,7 +368,11 @@ class CodeGrepTool(BaseTool):
             try:
                 if f.stat().st_size > _GREP_FILE_SIZE_CAP:
                     continue
-                text = f.read_text(encoding="utf-8")
+                # Read through no link, and only inside the jail: a name the walk listed may lead elsewhere by now.
+                real = f.resolve()
+                if not real.is_relative_to(root.resolve()):
+                    continue
+                text = safe_fs.read_text(real)
             except (OSError, UnicodeDecodeError):
                 continue
             for i, line in enumerate(text.splitlines(), 1):
