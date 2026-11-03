@@ -58,9 +58,13 @@ class WhisperSTTTool(BaseTool):
     )
     input_model = WhisperSTTInput
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(self, config: dict[str, Any] | None = None, *, notices: list[str] | None = None) -> None:
         # The loaded prometheus.yaml, for ``stt.url``. None reads the file.
         self._config = config
+        # Where a "your speech-to-text server isn't answering / is back" sentence goes. A gateway or the terminal
+        # passes a list and tells the person itself, so the transcription stays clean; without one (the model
+        # called the tool) the sentence rides at the end of the result.
+        self._notices = notices
 
     async def execute(self, arguments: WhisperSTTInput, context: ToolExecutionContext) -> ToolResult:
         audio_path = Path(arguments.audio_path)
@@ -69,14 +73,28 @@ class WhisperSTTTool(BaseTool):
 
         from prometheus.infra.voice_remote import remote_settings, transcribe_remote
 
+        notices: list[str] = []
         remote = remote_settings("stt", self._config)
         if remote is not None:
             # OpenAI-compatible servers take ogg/mp3/wav as sent, so the
             # original file goes up unconverted. None means fall back.
-            text = await transcribe_remote(remote, audio_path, arguments.language)
+            text = await transcribe_remote(remote, audio_path, arguments.language, notices=notices)
             if text is not None:
-                return ToolResult(output=text or "(empty transcription)")
+                return self._with_notices(ToolResult(output=text or "(empty transcription)"), notices)
+        return self._with_notices(await self._local(audio_path, arguments), notices)
 
+    def _with_notices(self, result: ToolResult, notices: list[str]) -> ToolResult:
+        if not notices:
+            return result
+        if self._notices is not None:
+            self._notices.extend(notices)
+            return result
+        note = " ".join(notices)
+        return ToolResult(output=f"{result.output}\n\n[Note: {note}]", is_error=result.is_error,
+                          metadata=result.metadata)
+
+    async def _local(self, audio_path: Path, arguments: WhisperSTTInput) -> ToolResult:
+        """This computer's own Whisper."""
         # Convert to WAV if not already WAV (Whisper prefers WAV)
         wav_path = audio_path
         tmp_wav = None

@@ -55,6 +55,15 @@ def _no_default_keys(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_outage_carried_over(monkeypatch):
+    """Which remotes are down is module state; each test starts with none (the down/back sentence is
+    tests/test_voice_remote_says_so.py's)."""
+    from prometheus.infra import voice_remote
+
+    monkeypatch.setattr(voice_remote, "_down", set())
+
+
 @pytest.fixture
 def env_key(tmp_path, monkeypatch):
     """The key lives in the env file only (conftest points it at tmp)."""
@@ -119,7 +128,8 @@ def _run_stt(config: dict[str, Any] | None, tmp_path: Path):
     audio.write_bytes(b"RIFF" + b"\x00" * 64)
     local = AsyncMock(return_value=ToolResult(output="local words"))
     with patch.object(WhisperSTTTool, "_transcribe", local):
-        result = asyncio.run(WhisperSTTTool(config=config).execute(
+        # A list for the down/back sentence, as every gateway and the terminal pass: the output is the text.
+        result = asyncio.run(WhisperSTTTool(config=config, notices=[]).execute(
             WhisperSTTInput(audio_path=str(audio)),
             ToolExecutionContext(cwd=tmp_path),
         ))

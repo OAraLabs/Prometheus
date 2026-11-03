@@ -753,7 +753,7 @@ class TestMediaRouting:
             [att], caption="", chat_id=1,
         )
         transcribe.assert_awaited_once_with(
-            str(cached), config=adapter._prometheus_config,
+            str(cached), config=adapter._prometheus_config, notices=[],
         )
         assert text == "hello prometheus"
         assert mtype == MessageType.VOICE
