@@ -387,3 +387,13 @@ Append-only, times in ET.
   - The rehearsed bundle hash is unchanged (`2eed8974d4c76d2f`).
 - **Considered and backed out:** I briefly patched `rearm_nightly.sh` to start persistent timers instead of `systemd-run`. It is in `BUNDLE_FILES`, so the edit would have voided the rehearsal PASS and blocked tonight's window. I restored it from its backup byte for byte (sha checked). It only acts on timers that aren't armed, which persistent timers now always are. If it ever runs on a stopped persistent timer, its `systemd-run` will fail loudly rather than misbehave. Fix that alongside the next rehearsal.
 - **Still transient, by design:** the per-window units (dead-man restores, the round-2 end timer, the one-shot end). Each night's window machinery creates them.
+
+## 2026-11-03 EST: mini gen forgives a probe trip during an eval pause (operator ruling)
+- **Change (`gen_runner.py`):** a probe-guard trip while local generation, and the Max teacher whose judge is local, are already paused for a nightly eval no longer ends the run. This was the 03:01:58 case.
+  - The tripped guard is stopped, and its switch is kept as `guard.abort.forgiven`.
+  - After the pause, the first voice probe must be OK. Then a fresh guard re-arms and generation resumes.
+  - The re-arm waits until at least 305 s after the last bad probe, because a new guard's abort switch also reads the probes from the 300 s before it starts.
+  - If that first probe after the pause is bad too, the switch is written again and the run ends as it does today.
+- **Unchanged:** a trip while generation runs, a bad probe that landed before the pause, or a trip with no bad probe the runner can read in the journal still ends the run as before. No other stop condition changed, and `probe_guard.py` is untouched (the baseline guard shares it).
+- **Logging:** a NOTE line for each case, and one notify line for each forgiven trip.
+- **Tests:** six new Mac unit tests with a fake guard, clock and probe journal: OK resume, the look-back wait, bad probe after the pause, trip while running, bad probe before the pause, and no trip.

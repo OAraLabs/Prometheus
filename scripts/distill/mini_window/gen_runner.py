@@ -62,7 +62,15 @@ Stops (children by process group, SIGTERM then SIGKILL after ``GEN_CHILD_GRACE_S
   reservation: its ``GEN_MAX_BUDGET_USD`` phase budget, a total across runs, or the cap) ends the branch as
   done, noted, never a failure; its exit 5 (the key, host, account or billing refused) stops it, noted;
 * the guard's abort switch or the guard gone: the local branch (and the Max run's local judge) stop for
-  this run;
+  this run. Except a trip while that generation is ALREADY paused for a nightly eval (operator 2026-11-03;
+  the probe then measured the eval's load, not generation's): the run goes on. The tripped guard is
+  stopped (its switch kept as ``guard.abort.forgiven``); once the pause is over the first voice-probe
+  result after it must be OK (``PROBE_MIN_TPS`` / ``GEN_GUARD_MIN_TPS``, read from the probe journal),
+  then a fresh guard re-arms (no sooner than ``GEN_REARM_LOOKBACK_S`` after the last bad probe, so its own
+  look-back at start never sees the eval-time one) and generation resumes. That probe bad too: the
+  switch is written again and the run ends as for any trip. A trip with a bad probe before the pause,
+  or none the runner can read in the journal, is not forgiven. A NOTE each case, one notify per
+  forgiven trip;
 * a nightly eval running, one due within ``GEN_EVAL_PAUSE_BEFORE_MIN``, or one whose start time passed
   less than ``GEN_EVAL_PAUSE_AFTER_MIN`` ago (cron starts late): the local branch pauses (teacher_gen
   cancels the task in flight; it reruns later) and resumes once the eval is done; so does the Max
@@ -174,6 +182,9 @@ GEN_DEFAULTS: dict[str, str] = {
     "GEN_GUARD_LISTEN": "127.0.0.1:18593",            # the baseline's guard is on 18592
     "GEN_GUARD_MIN_TPS": "",                          # empty: PROBE_MIN_TPS
     "GEN_GUARD_WAIT_S": "20",
+    # a guard re-armed after a forgiven eval-time trip starts no sooner than this after the last bad probe:
+    # probe_guard.py's abort switch also judges the probes of its --period (300 s) before its own start
+    "GEN_REARM_LOOKBACK_S": "305",
     "GEN_LOCAL_CONCURRENCY": "1",
     "GEN_STOP_HHMM": "0635",                          # a nightly window's generation ends here
     "GEN_END_MARGIN_MIN": "10",                       # before CONTINUOUS_UNTIL in the continuous window
@@ -388,6 +399,8 @@ class Branch:
     child: Child | None = None
     restarts: int = 0
     resume_at: float = 0.0
+    #: when the branch last paused for a nightly eval (the clock's time, its child already stopped)
+    paused_at: float = 0.0
     runs: int = 0
     rcs: list[int | None] = field(default_factory=list)
 
@@ -421,6 +434,11 @@ class Gen:
         self.local = Branch()
         self.paid = Branch()
         self.guard: Child | None = None
+        #: a guard trip forgiven because generation was paused for a nightly eval (tick_guard): its
+        #: reason, when the pause ended, and why generation still waits ("hold"); None: no trip pending
+        self.rearm: dict[str, Any] | None = None
+        #: a trip judged NOT forgivable: the abort switch stands for the rest of the run, as before
+        self.trip_kept = False
         self.alias: str | None = None
         self.help_text = ""
         self.harvested: dict[str, int] = {}
@@ -478,7 +496,7 @@ class Gen:
                  paid={"state": self.paid.state, "detail": self.paid.detail, "exits": self.paid.rcs,
                        "route": self.paid.mode or None},
                  guard={"listen": self.c["GEN_GUARD_LISTEN"], "running": bool(self.guard and self.guard.running),
-                        "aborted": self.abort_file.exists()})
+                        "aborted": self.abort_file.exists(), "rearming": self.rearm is not None})
         tmp = self.state_dir / f".progress.{os.getpid()}"
         tmp.write_text(json.dumps(p, indent=1) + "\n")
         os.replace(tmp, self.state_dir / "progress.json")
@@ -953,18 +971,126 @@ class Gen:
         raise Fail(f"the probe guard did not answer with {self.alias} within {self.c['GEN_GUARD_WAIT_S']} s")
 
     def guard_down(self) -> str | None:
+        if self.rearm is not None:
+            return None  # a forgiven eval-time trip: stopped on purpose, generation holds (gen_pause)
         if self.abort_file.exists():
             return "the probe guard's abort switch tripped: " + self.abort_file.read_text().strip()[:160]
         if self.guard is None or not self.guard.running:
             return f"the probe guard is gone (exit {self.guard.poll() if self.guard else '?'})"
         return None
 
+    # a guard trip while generation is paused for a nightly eval (operator ruling 2026-11-03)
+
+    def gen_pause(self) -> str | None:
+        """Why generation through the guard may not (re)start now: a nightly eval near, or a forgiven
+        eval-time trip whose re-arm is still pending."""
+        return self.eval_pause() or (self.rearm or {}).get("hold")
+
+    def probe_min_tps(self) -> float:
+        return float(self.c["GEN_GUARD_MIN_TPS"] or self.c["PROBE_MIN_TPS"])
+
+    def probes_since(self, t: float) -> list[MW.Probe]:
+        """The voice probe's result lines from *t* on (the probe journal; MW.Fail when unreadable)."""
+        try:
+            return [p for p in self.w.probes(max(60, int(self.now() - t) + 120)) if p.t >= t]
+        except (OSError, subprocess.SubprocessError) as e:
+            raise MW.Fail(f"cannot read the probe journal: {type(e).__name__}") from e
+
+    def paused_trip(self) -> tuple[bool, str]:
+        """Whether the guard's trip came while every generation going through it was paused for a nightly
+        eval (and what the bad probe read), or why not. Fails closed: a branch running or restarting, a
+        bad probe before the pause, or none in the journal (an error line only the guard reads) is not
+        forgiven."""
+        # what goes through the guard: the local teacher_gen, and the Max teacher whose judge is local (its
+        # judge_run.sh and a quota wait call only the paid API)
+        running = self.local.state not in (*FINAL, "paused") or (self.local_judge() and self.paid.state == "teacher")
+        paused = [b for b in (self.local, self.paid) if b.state == "paused" and (b is self.local or self.local_judge())]
+        if running or not paused:
+            return False, "generation was not paused for a nightly eval"
+        since = max(b.paused_at for b in paused)
+        lookback = float(self.c["GEN_REARM_LOOKBACK_S"])
+        try:
+            probes = self.probes_since(since - lookback)
+        except MW.Fail as e:
+            return False, str(e)
+        bad = [p for p in probes if not p.ok(self.probe_min_tps())]
+        if not bad:
+            return False, "no bad voice-probe result in the journal since the pause"
+        if bad[0].t < since:
+            return False, f"a bad voice probe at {self.iso(bad[0].t)} came before the pause"
+        return True, f"voice probe {bad[-1].describe()} at {self.iso(bad[-1].t)[11:19]}"
+
+    def tick_guard(self, until: float) -> None:
+        """A guard trip while generation is paused for a nightly eval does not end the run: the guard
+        re-arms after the pause once the first probe after it is OK; that probe bad too ends it as before.
+        A trip while generation runs is left to tick_local / tick_paid, exactly as before."""
+        r = self.rearm
+        if r is None:
+            if self.trip_kept or not self.abort_file.exists():
+                return
+            reason = self.abort_file.read_text().strip()[:160]
+            ok, why = self.paused_trip()
+            if not ok:
+                self.trip_kept = True
+                self.note(f"probe guard tripped ({reason}); not forgiven ({why}): the trip stands")
+                return
+            self.stop_child(self.guard, "tripped during a nightly-eval pause")
+            os.replace(self.abort_file, self.abort_file.with_name("guard.abort.forgiven"))
+            self.rearm = {"reason": reason, "pause_end": None, "hold": "the probe guard re-arms after the nightly eval"}
+            self.note(f"probe guard tripped while generation was paused for a nightly eval ({why}): the run goes "
+                      "on; the guard re-arms after the eval and the first voice probe after it must be OK")
+            self.notify([f"mini gen: an eval-time probe trip ({why}) was forgiven; generation resumes after the eval "
+                         "if the next voice probe is OK"])
+            self.save()
+            return
+        if self.eval_pause():
+            r["pause_end"], r["hold"] = None, "the probe guard re-arms after the nightly eval"
+            return
+        if r["pause_end"] is None:
+            r["pause_end"] = self.now()
+            r["hold"] = "waiting for the first voice-probe result after the nightly eval"
+            self.note("nightly eval over: the first voice probe after it must be OK before the guard re-arms")
+        try:
+            probes = self.probes_since(r["pause_end"] - float(self.c["GEN_REARM_LOOKBACK_S"]))
+        except MW.Fail as e:
+            if not r.get("unreadable"):
+                self.log(f"re-arm waits: {e}")
+            r["unreadable"] = True
+            return
+        r["unreadable"] = False
+        fresh = [p for p in probes if p.t > r["pause_end"]]
+        if not fresh:
+            return
+        p = fresh[0]
+        if not p.ok(self.probe_min_tps()):
+            self.abort_file.write_text(f"{self.iso(self.now())} probe at {self.iso(p.t)} after the nightly eval: "
+                                       f"{p.describe()} (the guard had tripped during it: {r['reason']})\n")
+            self.rearm, self.trip_kept = None, True
+            self.note(f"the first voice probe after the nightly eval is bad too ({p.describe()}): the trip stands, "
+                      "local generation ends for this run")
+            self.save()
+            return
+        last_bad = max((q.t for q in probes if q.t < p.t and not q.ok(self.probe_min_tps())), default=0.0)
+        ready = last_bad + float(self.c["GEN_REARM_LOOKBACK_S"])
+        if self.now() < ready:
+            r["hold"] = f"the probe guard re-arms at {self.iso(ready)} (after its look-back)"
+            return
+        self.rearm = None
+        try:
+            self.start_guard(until)
+        except Fail as e:
+            self.stop_child(self.guard, "did not re-arm")
+            self.note(f"the probe guard did not re-arm ({e}): local generation ends for this run")
+            return
+        self.note(f"voice probe after the nightly eval OK ({p.describe()}): probe guard re-armed, generation resumes")
+        self.save()
+
     def tick_local(self, until: float) -> None:
         b = self.local
         if b.state in FINAL:
             return
         down = self.guard_down()
-        pause = self.eval_pause()
+        pause = self.gen_pause()
         if b.state == "running" and b.child is not None:
             rc = b.child.poll()
             if rc is None:
@@ -974,7 +1100,7 @@ class Gen:
                     self.note(f"local generation stopped for this run: {down}")
                 elif pause:
                     self.stop_child(b.child, pause)
-                    b.state, b.detail = "paused", pause
+                    b.state, b.detail, b.paused_at = "paused", pause, self.now()
                     self.note(f"local generation paused: {pause}")
                 return
             b.rcs.append(rc)
@@ -1016,7 +1142,7 @@ class Gen:
             return
         if pause:
             if b.state != "paused":
-                b.state, b.detail = "paused", pause
+                b.state, b.detail, b.paused_at = "paused", pause, self.now()
                 self.note(f"local generation waits: {pause}")
             return
         if b.state == "waiting" and time.monotonic() < b.resume_at:
@@ -1090,12 +1216,12 @@ class Gen:
                 self.note(f"Max teacher stopped: {down}")
                 self.save()
                 return
-            pause = self.eval_pause()
+            pause = self.gen_pause()
             if pause:
                 # its judge requests go to the teacher's server the nightly eval scores: stopped like the
                 # local branch (the calls in flight settle first; the tasks in flight rerun from the ledger)
                 self.stop_child(b.child, pause)
-                b.state, b.detail = "paused", pause
+                b.state, b.detail, b.paused_at = "paused", pause, self.now()
                 self.note(f"Max teacher paused (its local judge shares the evaluated server): {pause}")
                 self.save()
             return
@@ -1126,9 +1252,9 @@ class Gen:
             if until - self.now() < float(self.c["GEN_MIN_START_S"]):
                 b.state, b.detail = "done", f"judge exit {rc}; too close to --until for the Max teacher"
                 return
-            pause = self.eval_pause() if self.local_judge() else None
+            pause = self.gen_pause() if self.local_judge() else None
             if pause:
-                b.state, b.detail = "paused", f"judge exit {rc}; the Max teacher waits: {pause}"
+                b.state, b.detail, b.paused_at = "paused", f"judge exit {rc}; the Max teacher waits: {pause}", self.now()
                 self.note(f"Max teacher waits (its local judge shares the evaluated server): {pause}")
                 self.save()
                 return
@@ -1187,7 +1313,7 @@ class Gen:
             self.note(f"Max teacher not resumed: {down}")
             self.save()
             return
-        if self.eval_pause():
+        if self.gen_pause():
             return
         if until - self.now() < float(self.c["GEN_MIN_START_S"]):
             b.state, b.detail = "done", "too close to --until to resume the Max teacher"
@@ -1241,6 +1367,7 @@ class Gen:
                 reason = self.stop_reason(until)
                 if reason:
                     break
+                self.tick_guard(until)
                 self.tick_local(until)
                 self.tick_paid(until)
                 if time.monotonic() >= next_harvest:

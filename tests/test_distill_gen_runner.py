@@ -788,3 +788,200 @@ def test_eval_minutes_and_until_across_dst(tmp_path: Path) -> None:
     rg = G.RemoteGen(G.load(tmp_path / "w.conf"), False, out=lambda s: None, clock=lambda: _utc("2026-11-01T05:30:00"),
                      env={})
     assert rg.resolve_until("05:30") == _utc("2026-11-01T10:30:00")
+
+
+# ── a probe trip while generation is paused for a nightly eval (operator ruling 2026-11-03) ──────────
+
+
+class _FakeProc:
+    pid = 4321
+
+
+class _FakeChild:
+    """A child of the runner (the guard, a teacher_gen): running until stopped; nothing is spawned."""
+
+    def __init__(self, name: str) -> None:
+        self.name, self.proc, self.log_path, self._rc = name, _FakeProc(), Path("/dev/null"), None
+
+    @property
+    def running(self) -> bool:
+        return self._rc is None
+
+    def poll(self) -> int | None:
+        return self._rc
+
+    def stop(self, grace: float, pid_dir: Path | None) -> int | None:
+        if self._rc is None:
+            self._rc = 0
+        return self._rc
+
+
+class _Night:
+    """A Gen driven tick by tick with a fake clock, a fake guard, a fake probe journal and a switchable
+    nightly-eval pause; the local branch only (the paid branch is off)."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        conf = tmp_path / "w.conf"
+        conf.write_text("LOCAL_MODEL_UNIT=m.service\nPROBE_UNIT=p.service\nOLLAMA_MODEL=j:7b\nPROBE_MIN_TPS=15\n"
+                        f"GEN_RUNS={tmp_path / 'runs'}\nGEN_POOL={tmp_path / 'pool'}\n")
+        self.t = self.at("02:40:00")
+        self.g = g = G.Gen(G.load(conf), False, out=lambda s: None, clock=lambda: self.t, env={})
+        g.state_dir.mkdir(parents=True)
+        g.alias = IQ3
+        g.paid.state = "off"
+        self.until = self.at("06:35:00")
+        self.eval: str | None = None
+        self.journal: list[G.MW.Probe] = []
+        self.journal_reads = 0
+        self.notified: list[list[str]] = []
+        self.guards_started = 0
+        self.local_starts = 0
+        g.eval_pause = lambda: self.eval  # type: ignore[method-assign]
+        g.w.probes = self._probes  # type: ignore[method-assign]
+        g.notify = self.notified.append  # type: ignore[method-assign]
+        g.start_guard = self._start_guard  # type: ignore[method-assign]
+        g.start_child = self._start_child  # type: ignore[method-assign]
+        g.guard = _FakeChild("guard")
+
+    @staticmethod
+    def at(hms: str) -> float:
+        return datetime.fromisoformat(f"2026-11-03T{hms}").replace(tzinfo=ET).timestamp()
+
+    def _probes(self, since_s: int = 900) -> list:
+        self.journal_reads += 1
+        return [p for p in self.journal if self.t - since_s <= p.t <= self.t]
+
+    def _start_guard(self, until: float) -> None:
+        self.guards_started += 1
+        self.g.guard = _FakeChild("guard")
+
+    def _start_child(self, name: str, argv: list[str], env: dict[str, str]) -> _FakeChild:
+        assert name == "local"
+        self.local_starts += 1
+        return _FakeChild(name)
+
+    def probe(self, hms: str, tps: float, verdict: str = "OK") -> None:
+        self.journal.append(G.MW.Probe(self.at(hms), verdict, tps, 15.0))
+
+    def trip(self, hms: str, tps: float) -> None:
+        """A bad probe, and the guard's abort switch as the real guard writes it (the guard stays up)."""
+        self.probe(hms, tps, "SLOW")
+        self.g.abort_file.write_text(f"2026-11-03T{hms}-05:00 probe at 2026-11-03T{hms}-05:00: {tps:g} tok/s < 15\n")
+
+    def tick(self, hms: str) -> None:
+        self.t = self.at(hms)
+        self.g.tick_guard(self.until)
+        self.g.tick_local(self.until)
+
+    def notes(self, words: str) -> list[str]:
+        return [n for n in self.g.notes if words in n]
+
+    def paused_for_the_eval(self) -> None:
+        self.tick("02:50:00")
+        assert self.g.local.state == "running" and self.local_starts == 1
+        self.eval = "a nightly eval is running"
+        self.tick("03:00:30")
+        assert self.g.local.state == "paused" and not self.g.local.child.running
+
+
+def test_a_trip_during_the_eval_pause_rearms_and_resumes_after_an_ok_probe(tmp_path: Path) -> None:
+    n = _Night(tmp_path)
+    n.paused_for_the_eval()
+    old_guard = n.g.guard
+    n.trip("03:01:58", 7.4)
+    n.tick("03:02:20")
+    assert n.g.local.state == "paused" and n.g.rearm is not None      # the run goes on
+    assert not old_guard.running and not n.g.abort_file.exists()
+    assert n.g.abort_file.with_name("guard.abort.forgiven").exists()
+    assert len(n.notified) == 1 and "forgiven" in n.notified[0][0] and len(n.notified[0]) == 1
+    assert n.notes("tripped while generation was paused for a nightly eval")
+    n.tick("03:15:00")                                                  # the eval still runs
+    assert n.local_starts == 1 and n.guards_started == 0
+    n.eval = None
+    n.tick("03:20:00")                                                  # eval over: no probe after it yet
+    assert n.g.local.state == "paused" and n.local_starts == 1 and n.guards_started == 0
+    assert "first voice-probe result after the nightly eval" in (n.g.gen_pause() or "")
+    n.probe("03:21:40", 50.0)
+    n.tick("03:21:50")
+    assert n.guards_started == 1 and n.g.rearm is None                 # re-armed, then generation resumes
+    assert n.g.local.state == "running" and n.local_starts == 2
+    assert n.notes("voice probe after the nightly eval OK") and n.notes("local generation resumes")
+    assert len(n.notified) == 1
+
+
+def test_a_rearm_waits_until_the_eval_time_probe_is_out_of_the_new_guards_look_back(tmp_path: Path) -> None:
+    n = _Night(tmp_path)
+    n.paused_for_the_eval()
+    n.trip("03:01:58", 7.4)
+    n.tick("03:02:10")
+    n.eval = None
+    n.tick("03:04:00")                     # a short eval
+    n.probe("03:06:30", 48.0)
+    n.tick("03:06:40")                     # OK, but 03:01:58 is still inside a fresh guard's 300 s look-back
+    assert n.guards_started == 0 and n.g.local.state == "paused" and "re-arms at" in n.g.gen_pause()
+    n.tick("03:07:10")
+    assert n.guards_started == 1 and n.g.local.state == "running"
+
+
+def test_a_trip_during_the_eval_pause_then_a_bad_probe_after_it_ends_the_run(tmp_path: Path) -> None:
+    n = _Night(tmp_path)
+    n.paused_for_the_eval()
+    n.trip("03:01:58", 7.4)
+    n.tick("03:02:20")
+    assert n.g.rearm is not None and len(n.notified) == 1
+    n.eval = None
+    n.tick("03:20:00")
+    n.probe("03:21:40", 9.0, "SLOW")
+    n.tick("03:21:50")
+    assert n.g.rearm is None and n.g.abort_file.exists()               # the switch stands again
+    assert n.g.local.state == "stopped" and "abort switch tripped" in n.g.local.detail
+    assert n.guards_started == 0 and n.local_starts == 1
+    assert n.notes("the first voice probe after the nightly eval is bad too")
+    n.probe("03:26:40", 50.0)
+    n.tick("03:26:50")                                                  # never restarted this run
+    assert n.g.local.state == "stopped" and n.local_starts == 1 and n.guards_started == 0
+
+
+def test_a_trip_while_generation_runs_ends_the_run_as_before(tmp_path: Path) -> None:
+    n = _Night(tmp_path)
+    n.tick("02:50:00")
+    child, guard = n.g.local.child, n.g.guard
+    n.trip("02:52:00", 7.4)
+    n.tick("02:52:20")
+    assert n.g.local.state == "stopped" and "abort switch tripped" in n.g.local.detail
+    assert not child.running and guard.running                         # the guard goes at shutdown, as before
+    assert n.g.abort_file.exists() and n.g.rearm is None and not n.notified
+    assert n.notes("not forgiven (generation was not paused for a nightly eval)")
+    n.eval = "a nightly eval is running"
+    n.tick("03:00:30")
+    n.eval = None
+    n.probe("03:21:40", 50.0)
+    n.tick("03:21:50")                                                  # an eval later changes nothing
+    assert n.g.local.state == "stopped" and n.local_starts == 1 and n.guards_started == 0
+
+
+def test_a_bad_probe_before_the_pause_is_not_forgiven(tmp_path: Path) -> None:
+    n = _Night(tmp_path)
+    n.tick("02:50:00")
+    n.probe("02:54:50", 7.4, "SLOW")       # landed while generation ran; the guard saw it only after the pause
+    n.eval = "a nightly eval starts in 5 min"
+    n.tick("02:55:00")
+    assert n.g.local.state == "paused"
+    n.g.abort_file.write_text("probe at 02:54:50: 7.4 tok/s < 15\n")
+    n.tick("02:55:20")
+    assert n.g.local.state == "stopped" and n.g.rearm is None and not n.notified
+    assert n.notes("came before the pause")
+
+
+def test_no_trip_the_eval_pause_and_resume_are_unchanged(tmp_path: Path) -> None:
+    n = _Night(tmp_path)
+    n.paused_for_the_eval()
+    n.probe("03:01:58", 49.0)
+    n.tick("03:10:00")
+    n.eval = None
+    n.tick("03:20:00")                                                  # resumes at once, no probe wait
+    assert n.g.local.state == "running" and n.local_starts == 2
+    assert n.guards_started == 0 and n.g.rearm is None and n.journal_reads == 0 and not n.notified
+    assert n.notes("local generation paused: a nightly eval is running")
+    assert n.notes("local generation resumes (the nightly eval is over)")
+    assert not n.notes("probe guard")
