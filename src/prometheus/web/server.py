@@ -5228,9 +5228,9 @@ def create_app(
         if _desk is not None and getattr(_desk, "once_only", False) and scope != "once":
             return JSONResponse(status_code=409, content={
                 "error": "This request can only be approved once.", "code": "once_only"})
-        # A WORKER'S REQUEST is a person's to answer (#720): a device token, the
-        # owner's or that of the device whose conversation it is (the ownership
-        # filter above). Never the API token: a worker's model shell can reach it.
+        # A WORKER'S REQUEST is a person's to answer (#720): the owner's device
+        # (a scoped device was refused above, even the one whose conversation it
+        # is). Never the API token: a worker's model shell can reach it.
         if _desk is not None and getattr(_desk, "worker_task_id", None) is not None:
             refusal = _worker_approve_refusal(request)
             if refusal is not None:
