@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 131 paths
+## Daemon app — 132 paths
 
 | Path | Methods |
 |---|---|
@@ -47,6 +47,7 @@ one is the explanation.
 | `/api/devices/{device_id}` | DELETE |
 | `/api/devices/{device_id}/activity` | DELETE, POST |
 | `/api/devices/{device_id}/computer` | PUT |
+| `/api/devices/{device_id}/profile` | PUT |
 | `/api/devices/{device_id}/push` | DELETE, PUT |
 | `/api/documents` | GET |
 | `/api/documents/content` | GET, PUT |

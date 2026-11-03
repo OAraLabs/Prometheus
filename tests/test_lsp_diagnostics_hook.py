@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from prometheus.hooks.lsp_diagnostics import LSPDiagnosticsHook
+
+_ORIGINAL_CALL = LSPDiagnosticsHook.__call__
 from prometheus.lsp.client import Diagnostic
 
 
@@ -38,6 +40,49 @@ def mock_orch():
 @pytest.fixture
 def hook(mock_orch):
     return LSPDiagnosticsHook(orchestrator=mock_orch, delay_ms=0)
+
+
+@pytest.fixture(autouse=True)
+def decided_from_input(monkeypatch):
+    """The loop sets DECIDED_PATH (the path the gate ruled on) while post-result hooks run. These tests call the
+    hook directly, so the path in the tool input stands in for it."""
+    from prometheus.engine import tool_context
+    from prometheus.hooks import lsp_diagnostics
+
+    real = lsp_diagnostics.LSPDiagnosticsHook.__call__
+
+    async def call(self, tool_name, tool_input, tool_result):
+        token = tool_context.DECIDED_PATH.set(tool_input.get("path"))
+        try:
+            return await real(self, tool_name, tool_input, tool_result)
+        finally:
+            tool_context.DECIDED_PATH.reset(token)
+
+    monkeypatch.setattr(lsp_diagnostics.LSPDiagnosticsHook, "__call__", call)
+
+
+@pytest.mark.asyncio
+async def test_the_hook_reads_the_path_the_gate_ruled_on_not_the_argument(mock_orch, tmp_path):
+    """With no decided path the argument is not resolved on its own: against the daemon's cwd, and through any link
+    swapped in since, it could name another file (GHSA-wgcv-xw9m-9q9q). With one, that path is the one used."""
+    from prometheus.engine import tool_context
+
+    f = tmp_path / "test.py"
+    f.write_text("x = 1\n")
+    other = tmp_path / "other.py"
+    other.write_text("y = 2\n")
+    hook = LSPDiagnosticsHook(orchestrator=mock_orch, delay_ms=0)
+    for decided, expect in ((None, None), (str(other), str(other))):
+        mock_orch.notify_file_changed.reset_mock()
+        token = tool_context.DECIDED_PATH.set(decided)
+        try:
+            await _ORIGINAL_CALL(hook, "write_file", {"path": str(f)}, FakeToolResult(content=f"Wrote {f}"))
+        finally:
+            tool_context.DECIDED_PATH.reset(token)
+        if expect is None:
+            mock_orch.notify_file_changed.assert_not_called()
+        else:
+            mock_orch.notify_file_changed.assert_called_once_with(expect)
 
 
 # ------------------------------------------------------------------

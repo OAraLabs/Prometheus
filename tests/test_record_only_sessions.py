@@ -134,7 +134,10 @@ class _RecordingRouter:
 def test_the_record_id_reaches_telemetry_and_nothing_else(tmp_path):
     """Record-only: the gate still sees origin 'system', and the router, the
     profile resolver and the workspace resolver see the no-session they saw
-    before."""
+    before. One exception, which can only take tools away: the profile
+    resolver is ASKED under the record id whether the run is held to a
+    profile (a held device's POST /api/chat turn); an answer that is not a
+    hold is never used, pinned by the next test."""
     gate, router = _RecordingGate(), _RecordingRouter()
     profiles: list = []
     workspaces: list = []
@@ -156,8 +159,37 @@ def test_the_record_id_reaches_telemetry_and_nothing_else(tmp_path):
 
     assert gate.origins and set(gate.origins) == {ORIGIN_SYSTEM}
     assert router.sessions == [None]
-    assert profiles == [None]
+    assert profiles == ["web:s1", None], "asked under the record id for a hold, then resolved as before"
     assert workspaces == [], "no session of its own, so no workspace lookup — as before"
+
+
+def test_a_profile_found_under_the_record_id_is_used_only_when_it_is_a_hold(tmp_path):
+    """A session's ordinary binding must not reach a record-only run (that would make the run behave as the
+    session, a separate decision); a HOLD must, or a held device's POST /api/chat turn would run the instance
+    default."""
+    from prometheus.config.profiles import AgentProfile
+
+    def offered(bound: AgentProfile) -> list[str]:
+        seen: list[list[str]] = []
+
+        class _Records(_OneCallProvider):
+            async def stream_message(self, request):  # noqa: ANN001
+                seen.append(sorted(t.get("name") for t in (request.tools or [])))
+                async for event in super().stream_message(request):
+                    yield event
+
+        def profile_resolver(session_id=None):  # noqa: ANN001
+            return bound if session_id == "web:s1" else None
+
+        loop = AgentLoop(provider=_Records(), model="stub-model", tool_registry=_registry(),
+                         profile_resolver=profile_resolver)
+        asyncio.run(loop.run_async("sys", "go", record_session_id="web:s1"))
+        return seen[0]
+
+    everything = sorted(t.name for t in _registry().list_tools())
+    assert len(everything) >= 1
+    assert offered(AgentProfile(name="bound", tools=[])) == everything, "an ordinary binding reached the run"
+    assert offered(AgentProfile(name="held", tools=[], held=True)) == [], "a hold did not reach the run"
 
 
 def test_an_ephemeral_record_id_is_not_used(tmp_path):

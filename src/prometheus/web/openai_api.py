@@ -212,6 +212,9 @@ def register_openai_routes(
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
         stream = bool(body.get("stream", False))
+        # The model that ANSWERED, in the `prometheus` object: `model` stays the key the client
+        # asked for, which an OpenAI client matches on. A fallback makes the two differ.
+        answered: dict[str, str] = {}
 
         async def events() -> AsyncIterator[tuple[str, dict[str, int]]]:
             """Yield ("delta", text) as the reply grows; the final item is
@@ -231,6 +234,8 @@ def register_openai_routes(
                         if full.startswith(round_acc) and len(full) > len(round_acc):
                             yield ("delta", {"text": full[len(round_acc):]})
                         round_acc = ""
+                        if event.served_model:
+                            answered["served_by"] = event.served_model
                         if event.usage is not None:
                             usage["prompt_tokens"] += int(event.usage.input_tokens or 0)
                             usage["completion_tokens"] += int(event.usage.output_tokens or 0)
@@ -265,7 +270,7 @@ def register_openai_routes(
                     "finish_reason": "stop",
                 }],
                 "usage": usage,
-                "prometheus": {"session_id": session_id, "mode": mode},
+                "prometheus": {"session_id": session_id, "mode": mode, **answered},
             }
 
         def chunk(delta: dict[str, Any], finish: str | None = None, usage: dict[str, int] | None = None) -> str:
@@ -278,6 +283,8 @@ def register_openai_routes(
             }
             if usage is not None:
                 obj["usage"] = usage
+                if answered:
+                    obj["prometheus"] = dict(answered)
             return f"data: {json.dumps(obj)}\n\n"
 
         async def sse() -> AsyncIterator[str]:

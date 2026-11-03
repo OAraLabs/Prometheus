@@ -235,6 +235,7 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     # /api/profiles
     ("GET", "/api/profiles"),
     ("PUT", "/api/profiles/active"),
+    ("PUT", "/api/devices/{device_id}/profile"),     # holds a device to a profile; never the held device
     # /api/project-file
     ("GET", "/api/project-file"),
     ("PUT", "/api/project-file"),
