@@ -1402,7 +1402,7 @@ class DiscordAdapter(BasePlatformAdapter):
         from prometheus.gateway.commands import cmd_anatomy
 
         await self._defer(interaction)
-        await self._respond(interaction, await cmd_anatomy())
+        await self._respond(interaction, await cmd_anatomy(chat=True))
 
     async def _app_doctor(self, interaction: Any, args: str) -> None:
         from prometheus.gateway.commands import cmd_doctor

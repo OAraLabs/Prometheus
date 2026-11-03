@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **457** of
+Every key in `config/prometheus.yaml.default` — **460** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -330,6 +330,8 @@ none either — the key is documented so its absence is visible.
 | `sentinel.digest_lookback_hours` | `24` |
 | `sentinel.nudge_cooldown_minutes` | `60` |
 | `memory` | *(section)* |
+| `memory.extraction` | *(section)* |
+| `memory.extraction.enabled` | `True` |
 | `memory.recall` | *(section)* |
 | `memory.recall.enabled` | `True` |
 | `memory.recall.max_facts` | `6` |
@@ -431,6 +433,7 @@ none either — the key is documented so its absence is visible.
 | `anatomy.include_in_system_prompt` | `True` |
 | `anatomy.include_in_hosted_prompt` | `False` |
 | `anatomy.include_addresses` | `False` |
+| `anatomy.include_addresses_in_chat` | `False` |
 | `anatomy.ssh_user` | `` |
 | `anatomy.ssh_key` | `` |
 | `mcp_servers` | `{}` *(open map)* |

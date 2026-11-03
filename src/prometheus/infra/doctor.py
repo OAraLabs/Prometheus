@@ -488,8 +488,18 @@ class Doctor:
                 fix="Set model.base_url in prometheus.yaml.",
             )
         from prometheus.providers.openai_compat import models_url
+        from prometheus.providers.registry import local_server_headers
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            # A server started with a key (llama.cpp's --api-key) answers only with it.
+            headers = local_server_headers(self.config.get("model") or {})
+        except ValueError as exc:
+            return DiagnosticCheck(
+                name="Inference", category="connectivity", status="error",
+                message=f"{engine} at {redact_url(url)}: {exc}",
+                fix="Add the key to the env file, or clear model.api_key_env if the server takes none.",
+            )
+        try:
+            async with httpx.AsyncClient(timeout=5.0, headers=headers) as client:
                 # By the exact engine: Ollama's own list, the OpenAI-shaped one for llama.cpp, LM Studio, vLLM and the
                 # rest (a base ending in /v1 is already the API root). "llama" in "ollama" used to send Ollama to
                 # llama.cpp's path, and everything else to Ollama's.
@@ -677,6 +687,14 @@ class Doctor:
                 name="GPU", category="resources", status="info",
                 message=f"{state.gpu_name} detected but VRAM stats unavailable",
                 fix="Ensure nvidia-smi is accessible (locally or via SSH).",
+            )
+        if state.gpu_is_remote and state.gpu_probe_method == "not_configured":
+            # Inference runs on another machine and no SSH user is set to read
+            # its card. That is not "no GPU", and it is not running on CPU.
+            return DiagnosticCheck(
+                name="GPU", category="resources", status="info",
+                message="Inference GPU on another machine: not configured",
+                fix="Set anatomy.ssh_user and anatomy.ssh_key to read its VRAM.",
             )
         return DiagnosticCheck(
             name="GPU", category="resources", status="warning",

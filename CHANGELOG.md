@@ -5,7 +5,48 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 ## Unreleased
 
 - Voice: when a remote voice server (`stt.url`, `tts.url`) stops answering, refuses its key or rejects a request, you are now told once, not just the log: "Your speech-to-text server isn't answering, so this computer's own speech-to-text is being used until it is back." You get one more line when it answers again, and nothing while it stays down. Telegram and Discord send the line to the chat that used voice, `oara --voice` prints it, and the `tts` tool adds it to its result. Each failed request still logs its own line, as before.
+
+## 0.9.20 (2026-11-02)
+
+0.9.20 fixes a security issue: a file tool could be redirected through a link to a file the permission gate protects. It also:
+- turns off memory learning from chats with one switch;
+- connects to MCP tool servers over HTTP;
+- lets the operator hold a device to a profile;
+- keeps addresses out of `/anatomy` sent through a chat service.
+
+### Security
+
+- **A file tool opens exactly the path the gate checked ([GHSA-wgcv-xw9m-9q9q](https://github.com/OAraLabs/Prometheus/security/advisories/GHSA-wgcv-xw9m-9q9q)).**
+  - **Before:** the file tools (`write_file`, `edit_file`, `read_file`, `notebook_edit`, `download_file`, `image_generate`, `tts`, `youtube_transcript`, `video_generate`, `grep`, `lsp`, and the coding run's view, edit and create tools) run inside the daemon, outside the shell floors. The permission gate checked a tool's path, resolved; the tool then opened the path again by name, following links. A folder in the workspace swapped for a link to a protected folder between the two, by a shell or task running at the same time, sent the write or read to the protected file. A hard link to a protected file inside the workspace passed the gate with no race at all.
+  - **Now:** the path the gate checked travels with the call, and the tool refuses, naming both paths, when its own resolution differs. The file is opened one folder at a time from `/` without following any link, so a link that appears after the check fails the open. Writes go to a temporary file in the same folder and replace the target atomically, keeping its read, write and execute bits; a reader never sees half a file. A file with more than one link is not read when it is one of the files the gate refuses to read. A tool called with no gate (a script, a test) still checks the floor itself.
+  - **Behaviour change:** a link that already exists when the gate checks still works, and a write to a symlinked file still writes its target. A write now replaces the file instead of rewriting it, so a file that has other hard links gets a new file under the name you wrote, and its other names keep the old contents; its owner, extended attributes and ACLs are those of a new file. A file this user may not write is refused as before. A single file bind-mounted into a container, which cannot be replaced, is rewritten in place.
+
+### Also
+
+- `/anatomy` sent through Telegram, Discord or Slack no longer shows hostnames, IP addresses, URLs or the names and addresses of your tailnet peers. Those services keep every message on their servers. The reply keeps what the machines can do, and counts the peers. In the terminal and in Beacon `/anatomy` shows everything, as before. `anatomy.include_addresses_in_chat: true` shows everything on chat too. (#885)
+- When a model server runs on another machine and no SSH user is set to read its GPU, `/anatomy`, the model's Infrastructure section and doctor now say the GPU is "not configured". Before, every scan logged a warning that the probe failed, `/anatomy` called the GPU unreachable, and doctor reported no GPU and running on CPU. (#885)
+- `memory.extraction.enabled: false` stops memory being learned from chats. The fact extractor, the wiki compile after it, the SENTINEL insight writer, the agent's `memory` tool and `wiki_query`'s saving of questions are not built or started. Recall, `/note` and the memory editor are unchanged. `prometheus doctor` reports the switch. (#889)
+- MCP servers can be remote: a `url` connects over streamable HTTP (`transport: streamable-http`) or SSE (the default). Before, a `url` server was always marked failed as "not yet implemented". The server's stored `headers` are sent on every request to it and are never shown or logged. The server store now refuses a `url` that isn't `http://` or `https://`, and a header name or value that could break the request. (#892)
+- Devices: the operator can hold a device to a profile (`PUT /api/devices/{id}/profile`). Every run under that device's sessions is offered only the profile's tools and refused any other at the call, with no fallback that widens it, and the device cannot lift or change the hold. One instance can then serve its owner with every tool beside a server-to-server caller that stays read-only. (#893)
+
+## 0.9.19 (2026-11-02)
+
+0.9.19 is a small patch release. Its fix: file_watch tasks never fired with watchdog 7 (fresh pip and Homebrew installs of 0.9.18). It also:
+- installs watchdog from a wheel on a Mac with Python 3.14, so file_watch is event-driven there again;
+- names the model that answered on every chat response (`served_by`);
+- sends a keyed llama.cpp server its key from `oara doctor`, the anatomy scan and the terminal chat;
+- keeps hostnames and addresses out of what the model is told about your machines.
+
+### The fix
+
+- Tasks: a `file_watch` task fires again when watchdog 7 is installed. watchdog 7.0 (2026-10-31) matches a handler's patterns against the whole path, so `*.json` stopped matching `/dir/result.json` and the task waited until its timeout. 0.9.18 allows watchdog 7, so a fresh pip install on Linux or on a Mac with Python 3.13 or older, and the Homebrew formula, got it; installs from the lock (the Mac app, `scripts/deploy.sh`) kept 6.0.0. The file's name is now matched against the pattern the same way the check for a file that is already there does.
+
+### Also
+
+- Install: watchdog is a base dependency on every platform again, from 7.0, the first release with macOS wheels for Python 3.14. 0.9.18 skipped it on exactly that platform; a Mac on Python 3.14 now installs it from a wheel and gets event-driven `file_watch` instead of polling. Polling stays for an install without watchdog.
+- Models: `oara doctor`'s Inference row, the anatomy scan and the terminal chat now ask a llama.cpp server started with an API key with that key, so a keyed server no longer shows as not responding and the chat can read its model and chat template. The key is the model's own (`model.api_key_env`), read from the environment and then the env file. A named variable that is set in neither is reported by name instead of as "not responding".
 - The model is no longer told where your machines are. The Infrastructure section of its prompt and the `anatomy` tool's answers keep what the machines can do (CPU, RAM, GPU and VRAM, the model, its engine, context window and vision) and leave out hostnames, IP addresses, URLs, the tailnet peer list and the folder a model file sits in, on local and hosted models alike. Before, a reply could quote the model server's address or list your tailnet peers. `anatomy.include_addresses: true` restores the old text. The `/anatomy` command you run yourself is unchanged.
+- Each chat response names the model that answered: `served_by` on `POST /api/chat` and on the `chat_done` frame, and `prometheus.served_by` on `/v1/chat/completions` (on the final chunk when streamed). When a fallback answers instead of the configured model, `served_by` names the fallback. `/v1`'s `model` still echoes the key you asked for.
 
 ## 0.9.18 (2026-11-02)
 

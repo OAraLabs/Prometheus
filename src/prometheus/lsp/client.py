@@ -14,11 +14,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from prometheus.lsp.languages import EXTENSION_TO_LANGUAGE, LSPServerDef
+from prometheus.security import safe_fs
 
 log = logging.getLogger(__name__)
 
@@ -110,8 +112,20 @@ class LSPError(Exception):
 # URI helpers
 # ------------------------------------------------------------------
 
+def as_given(path: Path | str) -> Path:
+    """An absolute path exactly as handed over (normalised, NOT resolved), a relative one resolved.
+
+    The lsp tool hands over the path the gate checked, already resolved. Resolving it again here would follow a
+    link swapped in after the check (the server spawn alone takes seconds), and the file's text, or the file the
+    server opens by URI, would be another one (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q). A link along the path
+    as given makes the read below fail instead.
+    """
+    p = Path(path)
+    return Path(os.path.normpath(p)) if p.is_absolute() else p.resolve()
+
+
 def _path_to_uri(path: Path | str) -> str:
-    p = Path(path).resolve()
+    p = as_given(path)
     return f"file://{p}"
 
 
@@ -255,8 +269,9 @@ class LSPClient:
 
     async def did_open(self, filepath: str | Path) -> None:
         """Notify the server a document was opened (full content sync)."""
-        path = str(Path(filepath).resolve())
-        content = Path(path).read_text(encoding="utf-8", errors="replace")
+        path = str(as_given(filepath))
+        # Read through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q): the text goes to the language server.
+        content = safe_fs.read_text(Path(path), errors="replace")
         uri = _path_to_uri(path)
         ext = Path(path).suffix.lower()
         lang_id = EXTENSION_TO_LANGUAGE.get(ext, "plaintext")
@@ -281,11 +296,12 @@ class LSPClient:
 
     async def did_change(self, filepath: str | Path) -> None:
         """Notify the server a document changed on disk."""
-        path = str(Path(filepath).resolve())
+        path = str(as_given(filepath))
         if path not in self._open_files:
             await self.did_open(filepath)
             return
-        content = Path(path).read_text(encoding="utf-8", errors="replace")
+        # Read through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q): the text goes to the language server.
+        content = safe_fs.read_text(Path(path), errors="replace")
         self._open_files[path] += 1
         self._send_notification("textDocument/didChange", {
             "textDocument": {
@@ -297,7 +313,7 @@ class LSPClient:
 
     async def did_close(self, filepath: str | Path) -> None:
         """Notify the server a document was closed."""
-        path = str(Path(filepath).resolve())
+        path = str(as_given(filepath))
         self._open_files.pop(path, None)
         self._send_notification("textDocument/didClose", {
             "textDocument": {"uri": _path_to_uri(path)},
@@ -356,7 +372,7 @@ class LSPClient:
 
     async def get_diagnostics(self, filepath: str) -> list[Diagnostic]:
         """Return cached diagnostics for a file (from publishDiagnostics)."""
-        path = str(Path(filepath).resolve())
+        path = str(as_given(filepath))
         return list(self._diagnostics.get(path, []))
 
     async def get_document_symbols(self, filepath: str) -> list[DocumentSymbol]:

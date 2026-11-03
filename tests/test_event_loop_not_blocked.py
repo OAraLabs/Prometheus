@@ -100,7 +100,10 @@ async def test_glob_does_not_freeze_the_loop(tree, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_file_read_does_not_freeze_the_loop(tree, monkeypatch):
-    _slow(monkeypatch, Path, "read_bytes")
+    # read_file reads through safe_fs (it opens the checked path through no link), so that is the call to slow down.
+    from prometheus.security import safe_fs
+
+    _slow(monkeypatch, safe_fs, "read_bytes")
     ctx = ToolExecutionContext(cwd=tree)
     result, ticks = await _run_while_ticking(
         FileReadTool().execute(FileReadToolInput(path=str(tree / "a.py")), ctx)
