@@ -382,12 +382,18 @@ class DeviceStore:
 
     def set_computer(self, device_id: str, on: bool, *, by: str) -> bool:
         """Mark (or unmark) a LIVE device for computer use. ``by`` names who
-        did it (an approver label). False for an unknown or revoked id."""
+        did it (an approver label). False for an unknown or revoked id;
+        ValueError for marking a device held to a profile."""
         live = self._conn.execute(
             "SELECT 1 FROM api_devices WHERE id = ? AND revoked_at IS NULL",
             (device_id,)).fetchone()
         if live is None:
             return False
+        if on and self.device_profile(device_id):
+            # A held device stays off the desktop: the hold limits what its runs may do, and the computer-use
+            # door is a runner of its own that no profile reaches.
+            raise ValueError(f"device {device_id} is held to profile {self.device_profile(device_id)!r}, and a "
+                             f"held device cannot be marked for computer use")
         if not on:
             if self._has_computer_table():
                 self._conn.execute(

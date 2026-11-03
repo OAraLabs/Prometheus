@@ -83,6 +83,14 @@ class OnceOnly(DoorRefused):
     code = "once_only"
 
 
+class HeldDevice(DoorRefused):
+    """A device the operator holds to a profile, or one of its sessions: never on the desktop. Also what an
+    unreadable hold answers (deny by default)."""
+
+    status = 403
+    code = "held_device"
+
+
 class NeedsConsent(DoorRefused):
     """No binding covers this session and app: the person must pick the app,
     and the pick IS the consent. Carries what to ask with."""
@@ -140,6 +148,13 @@ class PersonCheck:
         if kind == _approver.DEVICE:
             store = self._devices
             try:
+                held = store.device_profile(by.id) if store is not None else None
+            except Exception:  # noqa: BLE001 - an unreadable hold refuses
+                held = "(unreadable)"
+            if held:
+                return False, (f"this device is held to profile {held!r}, and a held device is never a person "
+                               f"here")
+            try:
                 marked = bool(store is not None
                               and store.computer_allowed(by.id))
             except Exception:  # noqa: BLE001 - an unreadable store refuses
@@ -161,6 +176,22 @@ class PersonCheck:
             return False, ("computer use answers only on Telegram and Beacon "
                            "in v1.1")
         return False, f"{kind!r} is not a person's credential"
+
+    def refuse_held_session(self, session_id: str) -> None:
+        """Raise :class:`HeldDevice` when *session_id* belongs to a device held to a profile, or when that cannot
+        be read. A held device's runs keep to its profile, and the desktop is a runner of its own that no
+        profile reaches, so it is refused here whoever asks."""
+        store = self._devices
+        if store is None:
+            return  # no device registry: no session can be a device's
+        try:
+            held = store.session_hold(session_id)
+        except Exception as exc:  # noqa: BLE001 - deny by default
+            raise HeldDevice("Could not read whether this conversation's device is held to a profile, so the "
+                             "desktop is refused.") from exc
+        if held:
+            raise HeldDevice(f"This conversation belongs to a device held to profile {held!r}. A held device "
+                             f"never runs desktop tasks.")
 
     def require(self, by: _approver.Approver | None) -> None:
         ok, why = self.check(by)
