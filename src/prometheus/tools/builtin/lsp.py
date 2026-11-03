@@ -14,6 +14,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from prometheus.permissions.path_schema import PATH_FIELD_READ
+from prometheus.security import safe_fs
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 # Module-level orchestrator — set by daemon at startup
@@ -36,7 +38,7 @@ class LSPToolInput(BaseModel):
             "references + type info in one call)"
         ),
     )
-    file: str = Field(description="Path to the source file")
+    file: str = Field(json_schema_extra=PATH_FIELD_READ, description="Path to the source file")
     line: int | None = Field(
         default=None,
         description="Line number (1-indexed). Not needed for diagnostics/symbols.",
@@ -81,8 +83,13 @@ class LSPTool(BaseTool):
                 is_error=True,
             )
 
-        filepath = _resolve_path(context.cwd, arguments.file)
-        if not Path(filepath).exists():
+        # The path the gate checked (it reads the file, so the gate sees `file`), read through no link
+        # (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q).
+        try:
+            filepath = str(safe_fs.resolve_tool_path(arguments.file, context.cwd, context.metadata))
+        except safe_fs.PathChanged as exc:
+            return ToolResult(output=str(exc), is_error=True)
+        if not safe_fs.exists(Path(filepath)):
             return ToolResult(output=f"File not found: {filepath}", is_error=True)
 
         action = arguments.action.lower()
@@ -165,7 +172,7 @@ def _resolve_path(base: Path, candidate: str) -> str:
 def _find_symbol_in_file(filepath: str, symbol: str) -> tuple[int, int] | None:
     """Search a file for a symbol name, return (line, col) or None."""
     try:
-        text = Path(filepath).read_text(encoding="utf-8", errors="replace")
+        text = safe_fs.read_text(Path(filepath), errors="replace")
     except OSError:
         return None
     pattern = re.compile(r"\b" + re.escape(symbol) + r"\b")

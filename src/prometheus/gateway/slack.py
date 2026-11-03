@@ -1378,7 +1378,7 @@ class SlackAdapter(BasePlatformAdapter):
         await ack()
         from prometheus.gateway.commands import cmd_anatomy
 
-        await respond(text=await cmd_anatomy())
+        await respond(text=await cmd_anatomy(chat=True))
 
     async def _slash_doctor(self, ack: Any, respond: Any) -> None:
         await ack()

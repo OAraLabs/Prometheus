@@ -1554,9 +1554,14 @@ anatomy:
   # anatomy tool: what they can do (CPU, RAM, GPU and VRAM, the model, its
   # engine, context window and vision), not where they are. Hostnames,
   # addresses, URLs, the tailnet peer list and a model file's directory are
-  # withheld. true (a literal true) lets them through. The /anatomy command
-  # you run yourself always shows everything.
+  # withheld. true (a literal true) lets them through.
   include_addresses: false
+  # The /anatomy command, sent through a chat relay (Telegram, Discord, Slack,
+  # which keep every message on their servers), gets the same treatment: no
+  # hostnames, addresses or URLs, and tailnet peers as counts. In the terminal
+  # and in Beacon it shows everything. true (a literal true) shows everything
+  # on chat too.
+  include_addresses_in_chat: false
   # Local infrastructure identity. Values are machine-specific and MUST stay
   # in the live config only — the pre-commit hook blocks real hosts/IPs here.
   ssh_user: ""
