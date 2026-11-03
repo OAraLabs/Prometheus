@@ -5421,6 +5421,19 @@ def create_app(
         content = body.get("content", "")
         if not session_id or not content:
             return JSONResponse(status_code=400, content={"error": "session_id and content required"})
+        # Headers for named MCP servers, for THIS turn only (a caller's user-bound
+        # token for its own tool server). Checked before anything runs: one that
+        # cannot be delivered is refused, never dropped. Never stored or logged.
+        turn_headers = None
+        if body.get("mcp_headers") is not None:
+            _mcp = getattr(app.state, "mcp_runtime", None)
+            if _mcp is None:
+                return JSONResponse(status_code=400, content={
+                    "error": "mcp_headers given, but no MCP servers are connected"})
+            try:
+                turn_headers = _mcp.check_turn_headers(body["mcp_headers"])
+            except ValueError as exc:
+                return JSONResponse(status_code=400, content={"error": str(exc)})
         # Device scoping. This route keeps its conversation under web:<id> — that
         # is the session a device must own, whatever it called the id. Refused
         # before anything else is checked; claimed only where the session is used.
@@ -5472,6 +5485,7 @@ def create_app(
         pre_len = len(session.get_messages())
 
         from prometheus.engine.agent_loop import MaxTurnsExhausted
+        from prometheus.engine.tool_context import turn_mcp_headers
 
         try:
             # NO `tools=` ARGUMENT. This line used to read
@@ -5494,16 +5508,17 @@ def create_app(
             # every gateway adapter work. Passing the "right" registry here
             # would have been a no-op that read like a fix and taught the next
             # reader that this route selects its own tools. It does not.
-            result = await agent_loop.run_async(
-                system_prompt=system_prompt,
-                messages=session.get_messages(),
-                # RECORD-ONLY (WP-X.21 T4): the telemetry rows name the
-                # conversation this turn is persisted under. NOT session_id:
-                # that would change the permission origin and the router's
-                # override lookup for this route, which stays 'system'.
-                record_session_id=f"web:{session_id}",
-                surface="rest",
-            )
+            with turn_mcp_headers(turn_headers):
+                result = await agent_loop.run_async(
+                    system_prompt=system_prompt,
+                    messages=session.get_messages(),
+                    # RECORD-ONLY (WP-X.21 T4): the telemetry rows name the
+                    # conversation this turn is persisted under. NOT session_id:
+                    # that would change the permission origin and the router's
+                    # override lookup for this route, which stays 'system'.
+                    record_session_id=f"web:{session_id}",
+                    surface="rest",
+                )
             session.add_result_messages(result.messages, pre_len)
             reply = {
                 "text": result.text,
