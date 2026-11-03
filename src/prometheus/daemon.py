@@ -1795,6 +1795,22 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             computer.approvals_for(approval_queue if "approval_queue" in dir() else None))
         logger.info("Computer use: /computer wired to the gateways")
 
+    # Lifting a device's hold asks a person (permissions/hold_lifts.py): a prompt in the owner's chat, answered
+    # with /approve on any gateway or from Beacon, beside tool and desktop prompts. Always built: a hold can be
+    # set whatever else is on, and the way out of one must always need a person.
+    from prometheus.computer.door import PersonCheck as _HoldPeople
+    from prometheus.permissions.approval_queue import ApprovalQueues as _HoldSurface
+    from prometheus.permissions.hold_lifts import HoldLiftChannel
+
+    hold_lifts = HoldLiftChannel(
+        people=_HoldPeople(telegram_user_ids=_computer_people(gateway_config)),
+        security_gate=security_gate, telegram_adapter=telegram, owner_chat_id=_owner_chat,
+    )
+    _base_surface = approval_queue if "approval_queue" in dir() else None
+    if computer.runner is not None:
+        _base_surface = computer.approvals_for(_base_surface)
+    gateway_registry.attach("_approval_queue", _HoldSurface(_base_surface, hold_lifts))
+
     # WEAVE-PRESS: Printing Press CLI registry
     press_cfg = config.get("printing_press", {}) or {}
     if press_cfg.get("enabled", False):
@@ -2413,6 +2429,8 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                 approval_queue.signal_bus = signal_bus
             # Desktop prompts reach Beacon the same way (computer-use v1.1).
             computer.attach_signal_bus(signal_bus)
+            # And a request to lift a device's hold.
+            hold_lifts.signal_bus = signal_bus
             if "skill_refiner" in dir() and skill_refiner is not None:
                 skill_refiner.signal_bus = signal_bus
             # SPRINT-TEACHER-ESCALATION: golden traces + escalation events
@@ -3146,6 +3164,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
                     backend_registry=backend_registry,
                     computer_integration=computer_integration,
                     computer_runner=computer.runner,
+                    hold_lifts=hold_lifts,
                     bind=web_bind.address,
                     bind_source=web_bind.source,
                     # PUT /api/network edits the file THIS daemon read, --config included.
@@ -3200,7 +3219,7 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     from prometheus.permissions.approval_queue import withdraw_pending_for_shutdown
 
     await withdraw_pending_for_shutdown([approval_queue if "approval_queue" in dir() else None,
-                                         getattr(computer, "channel", None)])
+                                         getattr(computer, "channel", None), hold_lifts])
 
     if lsp_orchestrator:
         await lsp_orchestrator.shutdown_all()
