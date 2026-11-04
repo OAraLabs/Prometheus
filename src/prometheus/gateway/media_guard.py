@@ -178,6 +178,24 @@ class MediaPolicy:
         }.get(kind, ())
 
 
+def policy_from_config(config: dict | None) -> MediaPolicy:
+    """The policy ``gateway.media`` sets, read the way the daemon reads it for Telegram.
+
+    The allowlists go through ``resolve_media_allowlist``: an absent key is the shipped list, an explicit ``[]`` is
+    the operator's "no restriction". ``max_file_size_mb`` defaults to 20.
+    """
+    from prometheus.config.shipped_defaults import resolve_media_allowlist
+
+    gateway = (config or {}).get("gateway") or {}
+    media = (gateway.get("media") or {}) if isinstance(gateway, dict) else {}
+    return MediaPolicy(
+        allowed_image_types=tuple(resolve_media_allowlist(media, "allowed_image_types")),
+        allowed_audio_types=tuple(resolve_media_allowlist(media, "allowed_audio_types")),
+        allowed_document_types=tuple(resolve_media_allowlist(media, "allowed_document_types")),
+        max_file_size_mb=int(media.get("max_file_size_mb", 20)),
+    )
+
+
 def check_size_precheck(file_size: object, policy: MediaPolicy) -> None:
     """Refuse before any transfer. ``file_size`` is peer-supplied — see below.
 
