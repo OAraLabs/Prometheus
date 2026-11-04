@@ -218,4 +218,7 @@ none holds teacher data.
     - (c) make read-only alternatives runnable in the gym, such as `read_file`, `grep`/`glob` vs `bash`;
     - (d) accept the old metric as the headline.
 
-    Default if unanswered: (d) for now, plus (b) after Nov 16. The Fri 11-06 fallback judge night was cancelled and returned to long-context generation, because a rerun can't pass the gate.
+    Default if unanswered: (d) for now, plus (b) after Nov 16. Fri 11-06 stays a standard judge night: a rerun can't pass the tool-choice gate, but the night still rules the round-2 `judge_pending` backlog.
+20. **Judge nights vs. long-context nights.** Round-2 coding, error-recovery and injection rows only train after the calibrated 4×32K Q4 judge rules on them, which needs a standard 4090 night. The rotation has one standard night (Fri 11-06) and then 24 longctx nights.
+    - **Proposal:** one standard judge night a week; or two while the backlog is large.
+    - **Default if unanswered:** add a standard night every Tue and Fri and arm the judge slot for each.

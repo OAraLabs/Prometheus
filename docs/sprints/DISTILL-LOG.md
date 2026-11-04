@@ -429,3 +429,26 @@ Append-only, times in ET.
   - The acceptable-tools pass ruled 480/495, but the tool-choice view failed its gate (positive controls 88.6% against a 90% minimum), and the outcome check decided nothing. The new metric is therefore undecided; see the scorecard and OQ19.
 - **Friday:** the rerun can't pass, so I flipped Fri 11-06 back to longctx (rotation entry 4, `round2.conf` backed up) and disabled `distill-judge-slot-20261106.timer`.
 - **Cadence change (operator):** check-ins every 3 h, and hourly during 01:00–07:00.
+
+## 2026-11-04 10:37 EST: check-in, round-2 recount, Friday restored as a judge night
+- **Hosts:** no reboots. Saluki returns 200, and `tower_verify` passes (4 conns).
+- **Heartbeat:** the 09:00 heartbeat text was saved to `heartbeat.last` (`notify_rc=0`), the first real use.
+  - 24 h: 549 rows at 22.9/h, keep 0.146, with injection at 18.7/h because the 4090 ran out of its other tasksets. Wrong-tool rate 60% of 143 (single reference).
+- **Recount:** `build.py round2 --dry-run` (system python3, not `-I`, because `tokenizers` lives in user site; the deploy venv lacks jinja2).
+
+  | Area | Train rows | Note |
+  |---|---|---|
+  | Injection | 226 | capped: 1,013 rows dropped |
+  | Error-recovery | 228 | |
+  | Long-context | 130 | |
+  | Daily | 339 | capped: 611 rows dropped |
+  | Coding | 182 | |
+  | Tool-choice | not shown | output cut off; see the round2-plan |
+
+  - **Final set:** 1,885 train (1,131 new + 754 replay) and 49 val. That fails the 3,500 size gate.
+  - **Backlog:** 790 rows `judge_pending` (injection 316, coding 217, error-recovery 179, long-context 46, daily 23).
+  - **OQ16 trigger** (uncapped areas ≥600): not met.
+- **Correction to the 09:00 entry:** Fri 11-06 is back to standard (rotation entry 4) and `distill-judge-slot-20261106` is re-enabled.
+  - **Why:** the judge slot first refreshes the queue and rules the round-2 `judge_pending` backlog. Without a standard night, the next 24 rotation nights are all longctx and those rows would never be ruled.
+  - **Note:** the acceptable-tools pass will fail its gate again, which is harmless.
+- **New problem (OQ20):** after Friday, no standard judge night is scheduled. The backlog keeps growing on longctx nights.

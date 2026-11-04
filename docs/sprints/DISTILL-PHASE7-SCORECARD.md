@@ -221,7 +221,7 @@ Neither route could admit an alternative tool:
   | Positive | 70/79, 88.6% [79.7, 93.9] | 90% |
   | Negative | 59/59, 100% | 95% |
 
-  A rerun with the same judge can't pass: even if every leftover item agreed, the best possible score is 71/80 = 88.75%. So the Fri 11-06 fallback judge night was cancelled and returned to long-context generation.
+  A rerun with the same judge can't pass: even if every leftover item agreed, the best possible score is 71/80 = 88.75%. Fri 11-06 stays a standard judge night anyway: its first pass rules the round-2 `judge_pending` backlog, and that pass is what matters there.
 - **Outcome check:** of the 198 alternative-tool entries, most were `not_run`, because one of the two tools isn't executable in the gym. 34 were `reference_not_ok`, meaning the reference call itself failed in the sandbox. That left no case where both calls ran.
 
 **What this means:** every wrong-tool case is "undecided". So the true wrong-tool rate lies between 0% and the old single-reference rate. The tool-generated table printed the 0% lower bound in bold, which reads as a result; it isn't one.
