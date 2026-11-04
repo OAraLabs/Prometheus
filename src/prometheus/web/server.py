@@ -58,6 +58,9 @@ logger = logging.getLogger(__name__)
 # Cap on the coding diff payload (matches the files-preview 256 KB cap).
 _CODING_DIFF_CAP = 256 * 1024
 
+# Cap on GET /api/soul. A generated SOUL.md is a few KB; one past this is refused unread.
+SOUL_MAX_BYTES = 256 * 1024
+
 
 def _yaml_block(lines: list[str], lo: int, hi: int, key: str
                 ) -> tuple[int, int, int] | None:
@@ -3910,6 +3913,40 @@ def create_app(
         # and the daemon-level ones.
         who = _scope(request)
         return [r for r in rows if _access.frame_visible(who, {"payload": r.get("payload")})]
+
+    # ── Persona ────────────────────────────────────────────────────
+
+    @app.get("/api/soul")
+    async def get_soul():
+        """The persona (``<config dir>/SOUL.md``) the daemon puts into every prompt, for the owner to read.
+
+        Operator only (route_access.OPERATOR_ONLY): a scoped device is refused by the middleware. The file is opened
+        without following a link, so a SOUL.md pointed at a key or another floored file answers 409, never its
+        contents; a file over ``SOUL_MAX_BYTES`` answers 413 unread.
+        """
+        import stat as _stat
+
+        from prometheus.config.paths import config_dir_path
+
+        path = config_dir_path() / "SOUL.md"
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        except FileNotFoundError:
+            return JSONResponse(status_code=404, content={"error": "not_found"})
+        except OSError:
+            if path.is_symlink():
+                return JSONResponse(status_code=409, content={"error": "not_a_regular_file"})
+            return JSONResponse(status_code=503, content={"error": "unreadable"})
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if not _stat.S_ISREG(st.st_mode):
+                return JSONResponse(status_code=409, content={"error": "not_a_regular_file"})
+            if st.st_size > SOUL_MAX_BYTES:
+                return JSONResponse(status_code=413, content={"error": "too_large", "limit": SOUL_MAX_BYTES})
+            raw = fh.read(SOUL_MAX_BYTES + 1)
+        if len(raw) > SOUL_MAX_BYTES:
+            return JSONResponse(status_code=413, content={"error": "too_large", "limit": SOUL_MAX_BYTES})
+        return {"content": raw.decode("utf-8", errors="replace"), "bytes": len(raw), "modified_at": st.st_mtime}
 
     # ── Memory (Polish sprint WS2) ─────────────────────────────────
 

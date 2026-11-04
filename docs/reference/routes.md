@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 132 paths
+## Daemon app — 133 paths
 
 | Path | Methods |
 |---|---|
@@ -123,6 +123,7 @@ one is the explanation.
 | `/api/skills/list` | GET |
 | `/api/skills/{name}` | GET |
 | `/api/skills/{name}/pin` | DELETE, POST |
+| `/api/soul` | GET |
 | `/api/status` | GET |
 | `/api/stories` | GET, POST |
 | `/api/stories/reorder` | POST |
