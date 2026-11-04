@@ -117,7 +117,7 @@ none either — the key is documented so its absence is visible.
 | `gateway.media.max_file_size_mb` | `20` |
 | `gateway.media.cache_dir` | `~/.prometheus/cache/media` |
 | `gateway.media.allowed_image_types` | `['image/jpeg', 'image/png', 'image/gif', 'image/webp']` |
-| `gateway.media.allowed_audio_types` | `['audio/ogg', 'audio/mpeg', 'audio/wav']` |
+| `gateway.media.allowed_audio_types` | `['audio/ogg', 'audio/mpeg', 'audio/wav', 'audio/mp4', 'audio/webm']` |
 | `gateway.media.allowed_document_types` | `['application/pdf', 'text/plain', 'text/markdown', 'text/csv', 'text/html', 'text/javascript', 'text/x-python', 'text/x-shellscript', 'text/typescript', 'application/json', 'application/sql', 'application/toml', 'application/xml', 'application/x-yaml']` |
 | `gateway.media.cache_max_mb` | `512` |
 | `gateway.media.free_disk_floor_mb` | `1024` |

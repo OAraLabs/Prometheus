@@ -150,7 +150,7 @@ SHIPPED_ALLOWED_IMAGE_TYPES: tuple[str, ...] = (
     "image/jpeg", "image/png", "image/gif", "image/webp",
 )
 SHIPPED_ALLOWED_AUDIO_TYPES: tuple[str, ...] = (
-    "audio/ogg", "audio/mpeg", "audio/wav",
+    "audio/ogg", "audio/mpeg", "audio/wav", "audio/mp4", "audio/webm",
 )
 SHIPPED_ALLOWED_DOCUMENT_TYPES: tuple[str, ...] = (
     "application/pdf", "text/plain", "text/markdown", "text/csv",

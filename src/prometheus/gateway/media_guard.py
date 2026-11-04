@@ -118,6 +118,26 @@ _SIGNATURES: tuple[tuple[bytes, str], ...] = (
 )
 # Container formats needing a second probe at a fixed offset.
 _RIFF_KINDS = {b"WEBP": "image/webp", b"WAVE": "audio/wav"}
+# ISO media (MP4): bytes 4-8 are ``ftyp`` and 8-12 the major brand. Only an audio brand (an iPhone's ``M4A ``) or a
+# generic MP4 one (a browser's ``iso5`` / ``mp42``) is claimed as audio/mp4. HEIC, AVIF and QuickTime use the same
+# box and are NOT claimed: they stay "no signature", the path they were on before this table knew ftyp at all.
+_FTYP_AUDIO_BRANDS = frozenset({
+    b"M4A ", b"M4B ", b"M4P ", b"F4A ", b"mp41", b"mp42", b"dash",
+    b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6",
+})
+# WebM is Matroska with the EBML DocType "webm" (element 0x4282, in the first few dozen bytes). Other Matroska is
+# not claimed.
+_EBML_MAGIC = b"\x1a\x45\xdf\xa3"
+
+
+def _ebml_doctype(header: bytes) -> bytes | None:
+    """The DocType value in an EBML header (element 0x4282, a one-byte size), or None."""
+    at = header.find(b"\x42\x82")
+    if at < 0 or at + 3 > len(header) or not header[at + 2] & 0x80:
+        return None
+    size = header[at + 2] & 0x7F
+    value = header[at + 3:at + 3 + size]
+    return value if len(value) == size else None
 
 
 def sniff_mime(data: bytes) -> str | None:
@@ -133,6 +153,10 @@ def sniff_mime(data: bytes) -> str | None:
             return mime
     if data[:4] == b"RIFF" and len(data) >= 12:
         return _RIFF_KINDS.get(data[8:12])
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return "audio/mp4" if data[8:12] in _FTYP_AUDIO_BRANDS else None
+    if data.startswith(_EBML_MAGIC):
+        return "audio/webm" if _ebml_doctype(data[:64]) == b"webm" else None
     return None
 
 
@@ -144,6 +168,8 @@ def sniff_mime(data: bytes) -> str | None:
 # names onto each other, it does not admit anything the allowlist excludes.
 _MIME_ALIASES: dict[str, str] = {
     "audio/mp3": "audio/mpeg",
+    "audio/x-m4a": "audio/mp4",
+    "audio/m4a": "audio/mp4",
     "audio/x-wav": "audio/wav",
     "audio/wave": "audio/wav",
     "image/jpg": "image/jpeg",
@@ -154,7 +180,9 @@ def canonical_mime(mime: str | None) -> str | None:
     """Fold known spelling variants onto the name the sniffer emits."""
     if mime is None:
         return None
-    return _MIME_ALIASES.get(mime.strip().lower(), mime.strip().lower())
+    # Parameters are not the type: a browser declares "audio/webm;codecs=opus" for a WebM recording.
+    base = mime.split(";", 1)[0].strip().lower()
+    return _MIME_ALIASES.get(base, base)
 
 
 @dataclass(frozen=True)

@@ -62,6 +62,8 @@ SAMPLES: dict[str, bytes] = {
     "audio/ogg": b"OggS\x00\x02\x00\x00" + b"\x00" * 32,
     "audio/mpeg": b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 32,
     "audio/wav": b"RIFF\x24\x08\x00\x00WAVEfmt " + b"\x00" * 32,
+    "audio/mp4": b"\x00\x00\x00\x20ftypM4A \x00\x00\x00\x00M4A isommp42" + b"\x00" * 32,
+    "audio/webm": b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\x82\x84webm" + b"\x00" * 32,
     "application/pdf": b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n",
 }
 # Signature-less formats: real content, no magic bytes. These are exactly the
