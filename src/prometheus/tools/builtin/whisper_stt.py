@@ -260,6 +260,19 @@ class WhisperSTTTool(BaseTool):
         return True
 
 
+def whisper_engine_installed() -> bool:
+    """Whether :func:`_detect_whisper_engine` would find an engine, without importing the python one.
+
+    Importing ``faster_whisper`` loads its native runtime, which is seconds on a first import; this is asked on every
+    WebSocket ``subscribe`` (the ``voice_input`` capability), so it only looks.
+    """
+    import importlib.util
+
+    if any(shutil.which(name) for name in ("faster-whisper-xxl", "faster-whisper", "whisper")):
+        return True
+    return importlib.util.find_spec("faster_whisper") is not None
+
+
 def _detect_whisper_engine() -> str | None:
     """Detect which Whisper engine is available.
 
