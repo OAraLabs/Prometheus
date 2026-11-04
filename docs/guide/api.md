@@ -347,7 +347,7 @@ On success the server replies with a `connected` frame.
 | `auth` | First-frame token auth (required) |
 | `subscribe` | Subscribe to event fan-out (server acks with `subscribed`) |
 | `send_message` | Send a chat turn; accepts optional `tool_choice` (validated against the live tool registry), a `client_msg_id` for echo correlation, and `references` (@-references, resolved server-side before the turn is queued; an unresolvable one is an `error` frame with `kind`) |
-| `chat_upload` | Upload an attachment (base64); images get vision captions, documents get text extraction |
+| `chat_upload` | Upload an attachment (base64); images get vision captions, documents get text extraction, audio (`audio/*`) is transcribed by the configured speech-to-text and the transcript is the user's message. Audio passes the same checks as Telegram's voice memos under `gateway.media`: the declared type must be in `allowed_audio_types`, the size within `max_file_size_mb`, and the bytes' signature must agree with the declared type. A refusal is a `system` chat message and no turn. Offer voice only when the `subscribed` ack lists `voice_input` |
 | `switch_session` | Point this socket at a different session |
 | `interrupt` | Stop the running turn: `{"type": "interrupt", "payload": {"session_id": ...}}`. The requesting socket gets an `interrupt_ack`; every client learns the outcome from the broadcast `chat_done{interrupted:true}` |
 
@@ -398,7 +398,7 @@ Chat lifecycle:
 | Type | Purpose |
 |---|---|
 | `connected` | Auth accepted; connection metadata |
-| `subscribed` | Subscription ack |
+| `subscribed` | Subscription ack. `server_capabilities` lists what this daemon can do for the client: `voice_input` when an audio `chat_upload` can be transcribed here (`stt.url`, `whisper.url` or an approved voice box is set, or a local Whisper engine and ffmpeg are installed) |
 | `chat_message` | A complete message (user echo, assistant reply, or slash-command result) |
 | `chat_delta` | Streaming token delta |
 | `agent_state` | Agent thinking/idle state changes (carries `session_id`) |

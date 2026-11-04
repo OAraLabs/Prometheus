@@ -12,6 +12,7 @@ against the pre-refactor tree).
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +113,22 @@ async def transcribe_audio(
     except Exception as exc:
         logger.debug("Whisper STT unavailable: %s", exc)
     return None
+
+
+def voice_input_available(config: dict[str, Any] | None = None) -> bool:
+    """Whether :func:`transcribe_audio` can work on this computer: a client offers voice input only when it can.
+
+    True when a remote speech-to-text server is set (``stt.url`` / ``whisper.url``, or a voice box the owner
+    approved), or when a local Whisper engine and ffmpeg are both installed (an upload is rarely WAV, and the
+    local engines are fed WAV). It says what is installed and configured, not that a remote server answers right
+    now: one that is down is said in the chat when it is used, as it is on every other surface.
+    """
+    from prometheus.infra.voice_remote import remote_settings
+    from prometheus.tools.builtin import whisper_stt
+
+    if remote_settings("stt", config or {}) is not None:
+        return True
+    return whisper_stt.whisper_engine_installed() and shutil.which("ffmpeg") is not None
 
 
 def truncate_for_context(

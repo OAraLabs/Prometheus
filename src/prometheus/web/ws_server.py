@@ -755,6 +755,9 @@ class WebSocketBridge:
                 "payload": {
                     "sessions": sorted(sessions),
                     "capabilities": sorted(caps),
+                    # What THIS daemon can do for the client, so it offers only what works. `voice_input`: an
+                    # audio chat_upload is transcribed (a speech-to-text server, or Whisper and ffmpeg here).
+                    "server_capabilities": self._server_capabilities(),
                     # Legacy echo — the old ack-only shape some clients read.
                     "channels": payload.get("channels", []),
                 },
@@ -930,6 +933,7 @@ class WebSocketBridge:
 
         Routes by type:
           - Images → cache + vision analysis (same as Telegram photos)
+          - Audio → media checks + cache + speech-to-text (same as Telegram voice memos)
           - Documents → cache + text extraction (same as Telegram documents)
         """
         import base64
@@ -952,6 +956,10 @@ class WebSocketBridge:
                     "message_id": f"sys-{int(time.time() * 1000)}",
                 },
             })
+            return
+
+        if mime_type.startswith("audio/"):
+            await self._handle_audio_upload(session_id, filename, data, mime_type, caption, operator=operator)
             return
 
         from pathlib import Path as _Path
@@ -1065,6 +1073,75 @@ class WebSocketBridge:
 
         # Dispatch as a user message (same as _handle_send_message)
         await self._handle_send_message(session_id, user_text, **({} if operator else {"operator": False}))
+
+    def _server_capabilities(self) -> list[str]:
+        """What the ``subscribed`` ack tells a client this daemon can do (see the ack)."""
+        from prometheus.gateway import media_services
+
+        return ["voice_input"] if media_services.voice_input_available(self.config) else []
+
+    async def _system_note(self, session_id: str, content: str) -> None:
+        await self.broadcast({
+            "type": "chat_message",
+            "timestamp": time.time(),
+            "payload": {
+                "session_id": session_id,
+                "role": "system",
+                "content": content,
+                "message_id": f"sys-{int(time.time() * 1000)}",
+            },
+        })
+
+    async def _handle_audio_upload(
+        self, session_id: str, filename: str, data: bytes, mime_type: str, caption: str, *, operator: bool,
+    ) -> None:
+        """A voice message: checked like any inbound media, transcribed, and sent as the user's message.
+
+        The checks are Telegram's (``gateway/media_guard``) under ``gateway.media``: the declared type against the
+        audio allowlist, the size against ``max_file_size_mb``, and the bytes' own signature against the declared
+        type. A refusal is said in the chat and nothing else happens. The text leads with a marker, so neither the
+        transcript nor the caption is ever read as a slash command.
+        """
+        from prometheus.gateway import media_services
+        from prometheus.gateway.media_cache import cache_audio_from_bytes
+        from prometheus.gateway.media_guard import (
+            MediaRejected,
+            check_declared_mime,
+            policy_from_config,
+            validate_inbound,
+        )
+
+        if not media_services.voice_input_available(self.config):
+            await self._system_note(session_id, "Voice input isn't available on this computer: no speech-to-text "
+                                                "server is set and no local Whisper engine is installed.")
+            return
+        policy = policy_from_config(self.config)
+        try:
+            check_declared_mime(mime_type, "audio", policy)
+            sniffed = validate_inbound(data=data, declared_mime=mime_type, kind="audio", policy=policy)
+        except MediaRejected as exc:
+            logger.info("upload: %s refused (%s)", filename, exc)
+            await self._system_note(session_id, exc.message)
+            return
+
+        ext = {"audio/ogg": ".ogg", "audio/mpeg": ".mp3", "audio/wav": ".wav"}.get(sniffed, ".ogg")
+        cached_path = cache_audio_from_bytes(data, ext=ext)
+        if cached_path is None:
+            logger.warning("upload: %s was not cached — carrying it as a note only", filename)
+            text = f"[The user sent a voice message, {filename}; it could not be stored, so it was not transcribed]"
+        else:
+            notices: list[str] = []
+            transcript = await media_services.transcribe_audio(cached_path, config=self.config, notices=notices)
+            # The remote speech-to-text server went down or came back: said once, in this chat.
+            for notice in notices:
+                await self._system_note(session_id, notice)
+            if transcript:
+                text = f"[Voice message, transcribed]\n{transcript}"
+            else:
+                text = f"[The user sent a voice message, {filename}; it could not be transcribed]"
+        if caption:
+            text = f"{text}\n{caption}"
+        await self._handle_send_message(session_id, text, **({} if operator else {"operator": False}))
 
     async def _describe_image(self, image_path: str) -> str | None:
         """Run vision analysis on a cached image file.
