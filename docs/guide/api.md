@@ -154,6 +154,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8005/v1/chat/completi
 
 | Method | Path | Purpose |
 |---|---|---|
+| GET | `/api/soul` | The persona every prompt carries (`SOUL.md` in the config directory): `{content, bytes, modified_at}`. **Operator only**: the global token or an owner device; a scoped device is `403 operator_only`. No file is `404`; a `SOUL.md` that is a link is `409` and is not followed; one over 256 KB is `413`, unread |
 | GET | `/api/memory/current` | Current MEMORY.md / USER.md contents with char budgets |
 | PUT | `/api/memory/current` | Replace MEMORY.md / USER.md content (Beacon's Memory editor). Body `{"memory": ..., "user": ...}` — null/absent leaves a file untouched. The previous content is **snapshotted to `~/.prometheus/memory-history/` before every write**; over-budget content is a 400 with nothing written. Optional `base_memory`/`base_user` enable optimistic concurrency: if the file changed since the client loaded it, the write is refused with **409 + the current truth**, so the editor can rebase its draft |
 | GET | `/api/wiki/stats` | Wiki page/link stats |

@@ -267,6 +267,8 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/skills/{name}"),
     ("DELETE", "/api/skills/{name}/pin"),
     ("POST", "/api/skills/{name}/pin"),
+    # /api/soul — the persona every prompt carries (SOUL.md); the owner's to read
+    ("GET", "/api/soul"),
     # /api/status
     ("GET", "/api/status"),
     # /api/stories
