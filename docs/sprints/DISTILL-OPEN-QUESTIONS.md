@@ -207,3 +207,15 @@ none holds teacher data.
     - or add a boot-time user unit that runs the existing re-arm scripts.
 
     Default if unanswered: re-check timers after any reboot I see (boot time vs state); no unit changes.
+19. **The acceptable-tool metric didn't decide anything (2026-11-04).**
+    - **Judge:** the tool-choice view agreed with 88.6% of the positive controls, below its 90% minimum, so the gate set its rulings aside.
+    - **Outcome check:** it can't run most alternative tools, so it decided nothing either.
+    - **Result:** the new wrong-tool rate is only bounded, between 0% and the old single-reference rate, for every model. Details are in the scorecard section.
+
+    Options:
+    - (a) revise the tool-choice judge prompt and re-calibrate on the next standard night;
+    - (b) wait for Max references after Nov 16, which was the original "Max + 27B + judge" recipe;
+    - (c) make read-only alternatives runnable in the gym, such as `read_file`, `grep`/`glob` vs `bash`;
+    - (d) accept the old metric as the headline.
+
+    Default if unanswered: (d) for now, plus (b) after Nov 16. The Fri 11-06 fallback judge night was cancelled and returned to long-context generation, because a rerun can't pass the gate.

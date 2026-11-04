@@ -206,30 +206,40 @@ Results:
 Sources: `~/scratch-arg-equiv/out/` on the 3090 Ti host (`full.json`, `bf16.json`, `validate.json`, `labels.json`, ids and verdicts only).
 
 <!-- acceptable-tools:begin -->
-## Acceptable-tool wrong-tool rate (added 2026-11-02, pending)
+## Acceptable-tool wrong-tool rate (ran 2026-11-04: UNDECIDED)
 
-**Pending: the judge pass hasn't run yet.** It runs on the next standard 4090 night, Wed 2026-11-04, beside that night's generation (fallback: Fri 2026-11-06). The round-2 judge_pending pass goes first, 01:20 until done or 03:15 EST; this pass follows, until done or 04:50. `acceptable_tools.py night` then writes this section on the 3090 Ti host (`~/distill/acceptable-tools/scorecard-section.md`), and `acceptable_tools.py section --report report.json --scorecard <this file>` replaces this placeholder with it.
+**Result: the new metric couldn't decide anything on this run, so the old single-reference rate stays the headline.** The judge pass ran on the standard 4090 night (01:20–04:36 EST):
+- the round-2 `judge_pending` pass ruled 705 of 705 items;
+- the tool-choice pass ruled 480 of 495 items (15 replies couldn't be parsed).
 
-Operator ask (Mon ~08:00): replace the single-reference wrong-tool metric with an acceptable-tool set per case, built from Max + 27B + judge agreement, plus an outcome check where the gym can run it.
+Neither route could admit an alternative tool:
 
-**The rule** (`scripts/distill/acceptable_tools.py`). Per case, the set is Max's expected tool plus every offered tool for which at least one model's first call was ruled acceptable:
-- **outcome:** the gym ran both that call and Max's reference (`bash` / `read_file`, arg_equiv's execution tier), both exited 0 with no workspace effect, and the call's output contains the reference's in both snapshots;
-- **judge:** the calibrated judge (4090 Qwen3.8-27B UD-Q4_K_XL) in a new tool-choice view scored right_tool 2 and neither sensible_order nor task_progress 0. The view shows the case's full context and offered tools, plus one candidate call, and asks "is this an acceptable next step here?".
+- **Calibrated judge (tool-choice view):** it failed its agreement gate against the control items, so its rulings were not applied, by design.
 
-A tool is rejected when every one of its calls was ruled not acceptable. Candidates are every distinct first call any scored model made to an offered tool other than Max's, the 27B's included. The view isn't covered by the 85.4% calibration, so the same queue holds controls:
-- Max's own reference call on 80 cases, where ≥90% must be accepted;
-- an obviously wrong tool on 60 cases, where ≥95% must be rejected.
+  | Controls | Agreement | Minimum |
+  |---|---|---|
+  | Positive | 70/79, 88.6% [79.7, 93.9] | 90% |
+  | Negative | 59/59, 100% | 95% |
 
-If the view fails that check, judge-only tools stay undecided. Nothing here changes task success or the Phase 6 gate.
+  A rerun with the same judge can't pass: even if every leftover item agreed, the best possible score is 71/80 = 88.75%. So the Fri 11-06 fallback judge night was cancelled and returned to long-context generation.
+- **Outcome check:** of the 198 alternative-tool entries, most were `not_run`, because one of the two tools isn't executable in the gym. 34 were `reference_not_ok`, meaning the reference call itself failed in the sandbox. That left no case where both calls ran.
 
-**Already done (no judge needed):**
-- **The eval set:** the Phase 4 and Phase 7 runs scored `phase3/build-v2/eval-tools.jsonl` (329 cases, cases sha256 `234028b0e65f5e15`). They did not score `build-v4b-max-derived/eval-tools.jsonl`: that file has 402 cases and shares 305 ids, but no case is identical by sha. The annotation goes beside build-v2.
-- **Old metric, reproduced case by case from the stored replies:** Q4 17.6%, Q5 14.6%, BF16 subset 18.0%, same-recipe base 13.4%, Unsloth base 15.2%, 27B 19.8%, Saluki 24.3%. These match the table above.
-- **Candidates:** 355 distinct first calls (198 case-tool pairs in 149 cases), from the 363 old wrong-tool replies.
-- **Outcome check: it admits nothing on this set.** 51 candidates are runnable pairs (bash ↔ read_file):
-  - in 44, Max's reference doesn't run cleanly in the gym (36 missing path, 7 refused, 1 nondeterministic);
-  - in 7, both run, but the candidate's `read_file` doesn't contain the reference's output.
+**What this means:** every wrong-tool case is "undecided". So the true wrong-tool rate lies between 0% and the old single-reference rate. The tool-generated table printed the 0% lower bound in bold, which reads as a result; it isn't one.
 
-  The judge decides every candidate.
-- **Judge queue:** 495 items: 355 candidates, plus 80 positive and 60 negative controls. That's about 40K characters per prompt, judged at concurrency 2 beside that night's generation.
+| Model | Old rate (single reference) | Bounds under the new metric |
+|---|---|---|
+| Student Q4 | 17.6% (58/329) | 0–17.6% |
+| Student Q5 | 14.6% (48/329) | 0–14.6% |
+| Student BF16 (100-case subset) | 18.0% (18/100) | 0–18.0% |
+| Base (same recipe) | 13.4% (44/329) | 0–13.4% |
+| Base (Unsloth) | 15.2% (50/329) | 0–15.2% |
+| 27B | 19.8% (65/329) | 0–19.8% |
+| Saluki | 24.3% (80/329) | 0–24.3% |
+
+**Ways to make it decide** (operator's call; see OQ19):
+- fix the tool-choice judge prompt and re-calibrate;
+- use Max references after the Nov 16 reset, as the original ask ("Max + 27B + judge agreement") intended;
+- widen the gym's executable tools, so the outcome check can run read-only alternatives such as `read_file` vs `bash cat`.
+
+Raw outputs are on the 3090 Ti host at `~/distill/acceptable-tools/` (`report.md`, `agreement.json`, `acceptable-tools.json`).
 <!-- acceptable-tools:end -->

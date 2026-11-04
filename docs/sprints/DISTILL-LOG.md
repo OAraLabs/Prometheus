@@ -418,3 +418,14 @@ Append-only, times in ET.
   - A host run against a temp config (notifier `/bin/true`, temp state dir) wrote both files. No Telegram was sent, and the temp dir was removed afterwards.
   - Tests: 45/45 for the round-2 chain and 1,973 passed for the full distill suite.
 - **First real use:** tomorrow's 09:00 heartbeat. To check it, read `heartbeat.last` on the mini.
+
+## 2026-11-04 ~09:00 EST: back online after the Mac's Tailscale outage (22:39 → ~08:40)
+- **Unseen from here but fine:** the night ran on host timers.
+  - **Mini:** local generation paused and resumed cleanly around both evals, with no probe trip.
+  - **4090:** generation on the standard night used up `real-r2c`, `real-r2d-tc` and `real-r2c-reserve` (no tasks left at 04:49).
+  - **Restores:** Saluki was restored, and `tower_verify` passed at 06:40:01.
+- **Judge slot (01:20–04:36):**
+  - The round-2 `judge_pending` pass ruled 705/705 items.
+  - The acceptable-tools pass ruled 480/495, but the tool-choice view failed its gate (positive controls 88.6% against a 90% minimum), and the outcome check decided nothing. The new metric is therefore undecided; see the scorecard and OQ19.
+- **Friday:** the rerun can't pass, so I flipped Fri 11-06 back to longctx (rotation entry 4, `round2.conf` backed up) and disabled `distill-judge-slot-20261106.timer`.
+- **Cadence change (operator):** check-ins every 3 h, and hourly during 01:00–07:00.
