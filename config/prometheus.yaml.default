@@ -654,6 +654,8 @@ gateway:
       - audio/ogg
       - audio/mpeg   # NOT audio/mp3 — that is what the signature table emits
       - audio/wav
+      - audio/mp4    # m4a: an iPhone's voice memo, Safari's recorder (audio/x-m4a is the same type)
+      - audio/webm   # a browser's recorder (WebM/Opus)
     allowed_document_types:
       - application/pdf
       - text/plain

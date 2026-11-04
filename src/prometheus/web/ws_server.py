@@ -1124,7 +1124,8 @@ class WebSocketBridge:
             await self._system_note(session_id, exc.message)
             return
 
-        ext = {"audio/ogg": ".ogg", "audio/mpeg": ".mp3", "audio/wav": ".wav"}.get(sniffed, ".ogg")
+        ext = {"audio/ogg": ".ogg", "audio/mpeg": ".mp3", "audio/wav": ".wav", "audio/mp4": ".m4a",
+               "audio/webm": ".webm"}.get(sniffed, ".ogg")
         cached_path = cache_audio_from_bytes(data, ext=ext)
         if cached_path is None:
             logger.warning("upload: %s was not cached — carrying it as a note only", filename)
