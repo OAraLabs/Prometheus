@@ -59,6 +59,7 @@ from prometheus.config.shipped_defaults import (
     SHIPPED_WORKSPACE_ROOT,
     always_loaded_origin,
     denied_paths_is_earlier_default,
+    media_allowlist_is_earlier_default,
     resolve_always_loaded,
     resolve_denied_paths,
     resolve_max_tool_iterations,
@@ -228,6 +229,7 @@ GOVERNED: tuple[_Governed, ...] = (
         "allowed_audio_types", SHIPPED_ALLOWED_AUDIO_TYPES,
         lambda cfg: resolve_media_allowlist(cfg, "allowed_audio_types"),
         _admits_list,
+        was_shipped=lambda cfg: media_allowlist_is_earlier_default(cfg, "allowed_audio_types"),
     ),
     _Governed(
         "gateway.media.allowed_document_types", ("gateway", "media"),
