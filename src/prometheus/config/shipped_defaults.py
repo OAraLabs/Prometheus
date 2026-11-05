@@ -149,9 +149,18 @@ SHIPPED_MAX_TURNS: int = 200
 SHIPPED_ALLOWED_IMAGE_TYPES: tuple[str, ...] = (
     "image/jpeg", "image/png", "image/gif", "image/webp",
 )
-SHIPPED_ALLOWED_AUDIO_TYPES: tuple[str, ...] = (
-    "audio/ogg", "audio/mpeg", "audio/wav", "audio/mp4", "audio/webm",
+# EVERY audio list Prometheus has shipped as the default, oldest first; the NEWEST is
+# the default. As with DENIED_PATHS_DEFAULTS_SHIPPED: to change it, APPEND a list
+# and leave the old ones. Setup copies the template, so an install holds the list
+# of its day written out, and ``resolve_media_allowlist`` gives a config holding an
+# earlier one exactly the newest. The image and document lists have never changed.
+ALLOWED_AUDIO_TYPES_DEFAULTS_SHIPPED: tuple[tuple[str, ...], ...] = (
+    # v0.9.0 to 0.9.20 (0584fa7, #141).
+    ("audio/ogg", "audio/mpeg", "audio/wav"),
+    # + m4a and WebM, the two formats phones and browsers record in (#902).
+    ("audio/ogg", "audio/mpeg", "audio/wav", "audio/mp4", "audio/webm"),
 )
+SHIPPED_ALLOWED_AUDIO_TYPES: tuple[str, ...] = ALLOWED_AUDIO_TYPES_DEFAULTS_SHIPPED[-1]
 SHIPPED_ALLOWED_DOCUMENT_TYPES: tuple[str, ...] = (
     "application/pdf", "text/plain", "text/markdown", "text/csv",
     "text/html", "text/javascript", "text/x-python", "text/x-shellscript",
@@ -163,6 +172,11 @@ _SHIPPED_MEDIA_ALLOWLISTS: dict[str, tuple[str, ...]] = {
     "allowed_image_types": SHIPPED_ALLOWED_IMAGE_TYPES,
     "allowed_audio_types": SHIPPED_ALLOWED_AUDIO_TYPES,
     "allowed_document_types": SHIPPED_ALLOWED_DOCUMENT_TYPES,
+}
+
+#: Each allowlist's earlier shipped defaults (not the newest, which is simply in force).
+_EARLIER_MEDIA_ALLOWLISTS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "allowed_audio_types": ALLOWED_AUDIO_TYPES_DEFAULTS_SHIPPED[:-1],
 }
 
 # gateway.telegram_enabled — whether the Telegram gateway starts at all.
@@ -557,7 +571,11 @@ def resolve_media_allowlist(media_cfg: dict | None, key: str) -> list[str]:
     """One inbound MIME allowlist for the gateway media section.
 
     * key ABSENT (or null/blank) -> the shipped allowlist.
-    * key present as a LIST -> that list verbatim, **including ``[]``**.
+    * a list EQUAL, item for item and in order, to an earlier shipped default
+      (:data:`ALLOWED_AUDIO_TYPES_DEFAULTS_SHIPPED`) -> the shipped allowlist.
+      Setup wrote the list of its day; pinning it kept every pre-#902 install
+      refusing m4a and WebM.
+    * any other LIST -> that list verbatim, **including ``[]``**.
 
     The empty-list case is load-bearing and deliberate: the template documents
     ``[]`` as "no restriction for that kind", and an operator who wrote it
@@ -572,6 +590,14 @@ def resolve_media_allowlist(media_cfg: dict | None, key: str) -> list[str]:
     """
     shipped = _SHIPPED_MEDIA_ALLOWLISTS[key]
     value = (media_cfg or {}).get(key)
-    if isinstance(value, list):
+    if isinstance(value, list) and not media_allowlist_is_earlier_default(media_cfg, key):
         return list(value)
     return list(shipped)
+
+
+def media_allowlist_is_earlier_default(media_cfg: dict | None, key: str) -> bool:
+    """The media section holds, exactly and in order, an allowlist an EARLIER
+    version shipped as the default for ``key`` (not the newest one)."""
+    value = (media_cfg or {}).get(key)
+    return (isinstance(value, list)
+            and tuple(str(v) for v in value) in _EARLIER_MEDIA_ALLOWLISTS.get(key, ()))
