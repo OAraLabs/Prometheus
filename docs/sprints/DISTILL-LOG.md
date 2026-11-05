@@ -452,3 +452,9 @@ Append-only, times in ET.
   - **Why:** the judge slot first refreshes the queue and rules the round-2 `judge_pending` backlog. Without a standard night, the next 24 rotation nights are all longctx and those rows would never be ruled.
   - **Note:** the acceptable-tools pass will fail its gate again, which is harmless.
 - **New problem (OQ20):** after Friday, no standard judge night is scheduled. The backlog keeps growing on longctx nights.
+
+## 2026-11-05 07:37 EST: night of Nov 4→5 done, both hosts restored
+- **4090:** a longctx night. The teacher was busy all night at 97–100% GPU. At 06:40 business was restored and `tower_verify` passed (4 conns).
+- **Mini:** local generation paused and resumed cleanly around both evals, with no probe trip. At 06:40 Saluki was back on 8092 at 52.6 tok/s, with no failed units.
+- **Pool:** the 27B gym pool grew from 3,899 to 3,996 overnight.
+- **Friday:** Fri 11-06 is the standard judge night. The slot at 01:20 rules the round-2 `judge_pending` backlog of about 790 rows.
