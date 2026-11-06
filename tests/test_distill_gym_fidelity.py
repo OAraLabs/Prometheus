@@ -168,6 +168,8 @@ def test_path_targets_and_first_blocker() -> None:
 
     assert tgt("~/Prometheus/src/a.py") == ("repo", "src/a.py")
     assert tgt("~/projects/Prometheus-wt/docs") == ("repo", "docs")
+    assert tgt("~/Prometheus/.claude/worktrees/wt1/src/x.py") == ("repo", "src/x.py")
+    assert tgt("~/Prometheus/.claude/worktrees/wt1") == ("repo", "")
     assert tgt("~/projects/elsewhere/x") == ("other_project", None)
     assert tgt("~/notes.txt") == ("home_misc", None)
     assert tgt("~/proj/src") == ("cwd", "src")

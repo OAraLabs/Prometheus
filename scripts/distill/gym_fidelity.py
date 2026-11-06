@@ -210,17 +210,23 @@ REPO_DIR = "Prometheus"
 def home_target(norm: str, env: Any) -> tuple[str, str | None]:
     """For a path under the case's home: ``(target, path inside the repo or None)``.
     ``repo``: a checkout or worktree of this repository (``~/Prometheus*``,
-    ``~/projects/Prometheus*``); ``other_project``: another directory under
+    ``~/projects/Prometheus*``, or a worktree under its ``.claude/worktrees``: the path
+    inside is relative to the worktree); ``other_project``: another directory under
     ``~/projects``; ``home_misc``: anything else under the home. No directory
     name is reported."""
     rest = norm[len(env.home) + 1:].split("/") if env.home and norm.startswith(env.home + "/") else []
+    inner: list[str] | None = None
     if rest and rest[0].startswith(REPO_DIR):
-        return "repo", "/".join(rest[1:])
-    if len(rest) > 1 and rest[0] == "projects":
-        if rest[1].startswith(REPO_DIR):
-            return "repo", "/".join(rest[2:])
-        return "other_project", None
-    return "home_misc", None
+        inner = rest[1:]
+    elif len(rest) > 1 and rest[0] == "projects":
+        if not rest[1].startswith(REPO_DIR):
+            return "other_project", None
+        inner = rest[2:]
+    if inner is None:
+        return "home_misc", None
+    if inner[:2] == [".claude", "worktrees"] and len(inner) > 2:
+        inner = inner[3:]  # a worktree of the repository: the repository at another branch
+    return "repo", "/".join(inner)
 
 
 def path_target(raw: str, env: Any, eq: Any, tg: Any) -> tuple[str, str | None]:
