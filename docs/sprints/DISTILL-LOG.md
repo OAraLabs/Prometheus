@@ -616,3 +616,26 @@ Append-only, times in ET.
   | Saluki | 24.3% | 4.0% |
 
 - **Caveats:** the judge is lenient (83% of candidate tools admitted; it agrees with the 27B judge on 85.4% of calls), and the gate doesn't test plausible-but-wrong tools. Full caveats are in the scorecard section; see OQ19.
+
+## 2026-11-06 ~13:45 EST: Max generation narrowed to three areas; long-context paused (operator)
+- **Order:** no Max on long-context until the sandbox tool-error fix lands. Max generation stops by itself once coding, error-recovery and tool-choice are exhausted.
+- **Taskset `real-r2-max3.jsonl`:** 1,687 rows (coding 524, error-recovery 1,080, tool-choice 83), copied from `real-r2-max4.jsonl` in its order. It matches that file minus long-context byte for byte, and the excluded-session check is clean.
+- **Steer file `steer-max3.json`** (a copy): long-context, injection and daily-agent are 0. Coding 0.30, error-recovery 0.50, tool-choice 0.20.
+  - The first copy failed the dry run: zeroing long-context renormalised coding to 0.40, above its 0.30 cap.
+- **Dry run** (teacher_gen loader + steer): only coding, error-recovery and tool-choice are present and schedulable; long-context's share is 0.
+- **Switch:**
+  - `systemctl --user stop max-r2-gen-20261106` at 13:32: exit 143, the documented signal exit. No paid call was in flight; failed state reset.
+  - **Restart:** `max-r2-gen3-20261106` on the same out dir with the same flags, only `--tasks` and `--steer` changed. The taskset isn't part of `settings.json`, so the resume was accepted. 307 tasks done before and none rerun.
+- **Self-ending:** with a fixed taskset, a worker that finds no schedulable task sets stop `no_tasks` and exits (teacher_gen's worker loop). The unit ends then rather than idling until `--until`, so no watcher was added. Tasks that error at the tail aren't retried in this run.
+- **Totals so far (both units, 13:33):**
+
+  | Area | Tasks | Kept | Keep rate | Rows |
+  |---|---:|---:|---:|---:|
+  | coding | 56 | 24 | 0.43 | 60 |
+  | error-recovery | 82 | 16 | 0.20 | 61 |
+  | tool-choice | 29 | 17 | 0.59 | 34 |
+  | long-context (stopped) | 140 | 15 | 0.11 | 32 |
+
+  - Left at the restart: coding 468, error-recovery 998, tool-choice 54.
+- **Rate after the restart** (0.14 h, 13:40): about 940 tasks/h. Rows/h: error-recovery ~360, tool-choice ~180, coding ~86. All Token Plan calls are OK, with one timeout earlier.
+  - **Expected end:** about 15:15–15:45 ET.
