@@ -222,3 +222,16 @@ none holds teacher data.
 20. **Judge nights vs. long-context nights.** Round-2 coding, error-recovery and injection rows only train after the calibrated 4×32K Q4 judge rules on them, which needs a standard 4090 night. The rotation has one standard night (Fri 11-06) and then 24 longctx nights.
     - **Proposal:** one standard judge night a week; or two while the backlog is large.
     - **Default if unanswered:** add a standard night every Tue and Fri and arm the judge slot for each.
+
+**Operator answers (2026-11-06 ~11:00):**
+- **Qwen quota:** back on an upgraded subscription. The Token Plan batch override still applies.
+- **Max:**
+  - rebuild the acceptable-tool sets with Max as the tool-choice judge (OQ19 → option b, now);
+  - judge the 5,542 never-judged Max traces;
+  - generate only in coding, error-recovery, tool-choice and long-context.
+- **Flash:** calibrate it as a judge on 200 already-Max-judged traces (stratified, same rubric and context, no new Max calls).
+  - At ≥90% agreement Flash does the bulk judging; otherwise Max only.
+  - Report agreement, kappa and tokens per item.
+- **No Qwen spend** on injection or daily-agent.
+- **Judge-night bug:** fix it so the teacher stays up until the judge slot finishes, and confirm Wednesday's verdicts reach build.py. The verdict join was already confirmed 2026-11-06 10:37: 810 verdicts read, 161 `judge_fail`, 2 pending.
+- **After the Max pass:** re-project the round-2 train size and a training start date.
