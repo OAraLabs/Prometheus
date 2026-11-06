@@ -510,3 +510,30 @@ Append-only, times in ET.
   - **Isolation:** its own out dir (`runs/max-tokenplan-r2-max-derived`), sandbox root and teacher_gen root lock. It makes no GPU or 8092 calls, so it can run through the 01:05–06:40 window, niced.
   - **Context:** `--max-task-ctx 131072`, the gym's largest bucket and the 4090 long-context cap. A paid teacher has no cap by default. QLoRA trains to 49,152.
 - **Before `build.py round2` can see the rows:** harvest puts them in `pool/max-derived/max-tokenplan-gym.*`, which the recipe's default `--pool` (local 27B glob) doesn't read. Max coding rows also need the judge-pending export to include that glob. A round-2 Max row hasn't yet been run through `payg_gym_refusal`'s strict check.
+
+## 2026-11-06 13:10 EST: tower-night keeps the teacher for a pending judge slot
+- **Fix for the 01:17 early end (operator order: the teacher stays up until the judge slot finishes).** Before tower-night ends the 4090 teacher, it checks the mini's judge slots (`R2_JUDGE_SLOT_GLOB`, default `distill-judge-slot-*`). A slot holds the teacher if its service is running, or if its timer is due before the night's end.
+- **While held:** it logs and notifies one line, then polls every `R2_POLL_S` until the slot finishes (then ends the teacher at once) or until 06:22 (then the normal end). No slot means no change. The dead-man, the end timers and the other stop conditions are untouched. `judge-slot.sh` is unchanged.
+- **Tests:** 5 new round2_chain tests: no slot, slot held then released, slot past the night's end, slot already finished, glob/tomorrow. 55 round2_chain tests pass.
+- **Staged on the mini at 13:08:** `round2_chain.py` 8272148e → e8eeca60, backup `round2_chain.py.prev-20261106T1308`. No conf change; the default applies. `config` shows the key. Read-only detection on the host finds no slot armed (both slot timers have elapsed). The daytime tower-night dry run stops at its own "less than an hour" gate.
+
+## 2026-11-06 13:10 EST: Flash calibrated against Max; Max re-judges the last 5,542
+- **Quota:** the Token Plan is back on an upgraded subscription. The coordinator lifted the Oct 31 quota pause
+  (`token-plan.PAUSE.lifted-20261106`).
+  - There is no STOP file. The key is present and matches its recorded fingerprint, and there is no PAYG key.
+- **Code (728ada3):** judge.py can run `--judge-model qwen3.8-flash` on the Token Plan with the Max judge's exact
+  prompt. Its rows say `flash-token-plan`.
+  - It judges only a calibration queue or a `pending` queue in its own workdir.
+  - New options: `subset --sample` (stratified by category and Max verdict), `subset --which pending
+    --exclude-area`, and `calibrate --judge-provider` (also reports tokens per item for both judges).
+  - Staged at `~/distill/flash-judge/code`; no other staged code was touched.
+- **Calibration:** 200 items Max had already judged, with no Max call.
+  - Agreement 78.5% [72.3, 83.6], kappa 0.38 [0.22, 0.54].
+  - Flash passes 25 of 48 Max fails.
+  - Tokens per item: Flash 3,331 in / 152 out, Max 3,331 / 125.
+  - Below the 90% bar, so **Max does the bulk**. Details are in DISTILL-PHASE2-JUDGE.md.
+- **Bulk:** the 5,542 are coding 4,467, sentinel/daemon 667 and other 408. 12 of them had an unparseable Max reply.
+  - No row is in injection-resistance or daily-agent: 0 excluded.
+  - Started 13:06 as `distill-max-bulk-20261106`, resuming `phase2-rejudge` (phase `2-judge-all`).
+  - About 60/min at the starting concurrency of 4, so roughly 1–1.5 h.
+  - The first 60 verdicts all parsed and all join `build.py --verdicts`.
