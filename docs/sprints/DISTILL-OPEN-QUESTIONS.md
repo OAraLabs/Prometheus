@@ -236,3 +236,12 @@ none holds teacher data.
 - **No Qwen spend** on injection or daily-agent.
 - **Judge-night bug:** fix it so the teacher stays up until the judge slot finishes, and confirm Wednesday's verdicts reach build.py. The verdict join was already confirmed 2026-11-06 10:37: 810 verdicts read, 161 `judge_fail`, 2 pending.
 - **After the Max pass:** re-project the round-2 train size and a training start date.
+
+**Operator answers (2026-11-06 ~17:15):**
+- **Q6b covers round-2 Max rows.** Lift the build.py train-source guard for tagged, private, max-derived round-2 rows, with a test, and re-run projection (a).
+- **Projection (b):** first explain the ~1,080 unmatched verdicts beyond the 497 on excluded sessions. Then include the judged Max traces with a per-task cap (e.g. ≤8 rows per distinct task) plus the area caps, and report train size, distinct tasks and per-area mix. If train ≥3,500 and the gates pass, schedule the round-2 training nights.
+- **Long-context:**
+  - Adopt option (a): keep a row when a failed guessed read is recovered (a list or glob, then the correct read) within the next 2 calls. No prompt nudge.
+  - Test it on tonight's local 27B run first. Resume long-context Max only if the keep rate reaches ≥15%.
+- **Gym fidelity:** phase 0 only, meaning the four read-only measurements. The MVP and the §6 questions wait for those numbers.
+- **Endorsed:** stopping long-context Max. The 24-call cap stays.
