@@ -1699,7 +1699,9 @@ TP_STOP_MARK = "token-plan"
 TOKEN_PLAN_DEFAULT_HOST = "token-plan.ap-southeast-1.maas.aliyuncs.com"
 _TOKEN_PLAN_HOST = re.compile(r"^token-plan\.(?P<region>[a-z0-9-]+)\.maas\.aliyuncs\.com$")
 #: The models batch work may ask the Token Plan for.
-TOKEN_PLAN_MODELS = frozenset({"qwen3.8-max"})
+#: qwen3.8-flash: judge.py only, calibrated against Max's verdicts before it judges anything for a build
+#: (operator, 2026-11-06).
+TOKEN_PLAN_MODELS = frozenset({"qwen3.8-max", "qwen3.8-flash"})
 TP_STATE_NAME = "token-plan-state.json"
 TP_PAUSE_NAME = "token-plan.PAUSE"
 #: Guardrail 1 (adaptive concurrency, per process). The operator set 4 to start and 8 at most.
