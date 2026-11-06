@@ -658,3 +658,19 @@ Append-only, times in ET.
   - the zero-natural-error rule: tolerating a recovered guessed read would keep another 91 / 41 / 40 tasks;
   - the 24-call long-context cap: 323 rejections, 37 for that reason alone;
   - python / multi-line, parked.
+
+## 2026-11-06 14:50 EST: Max judging done; round-2 re-projection
+- **5,542 Max traces judged by Max:**
+
+  | Category | Pass | Fail | Unparseable |
+  |---|---:|---:|---:|
+  | Coding | 3,497 | 954 | 16 |
+  | Sentinel/daemon | 504 | 161 | 2 |
+  | Other | 331 | 76 | 1 |
+
+  The unit was still finishing retries at 14:23.
+- **Projections** (`build.py round2 --dry-run`, HEAD b672016 scratch copy):
+  - **(a) Current recipe: 2,435 train / 57 val.** Fails the 3,500 size gate. Round-2 Max rows add nothing: the recipe trains only on `qwen38-27b-gym`.
+  - **(a′) Adding `max-tokenplan-gym` as a train source:** refused by build.py: "`--train-sources may not name Max: Max-derived rows never train`" (an OQ6-era guard). Q6b lets Max-derived rows train, tagged and private. Golden Max traces pass that way through `--allow-max-derived`, but round-2 Max rows have no such path. **Needs the operator: approve round-2 Max rows training under Q6b.**
+  - **(b) Recipe + Max-judged golden traces** (no `--no-golden`, plus the phase2 and phase2-rejudge verdicts): **9,656 train / 283 val** (5,904 max-golden + 3,067 27B-gym + replay). It passes the size gate but fails the verdict gate: 1,577 verdicts are unmatched (497 are on excluded sessions; the rest still to explain). The mix would be dominated by Max coding traces. **Needs the operator** before the recipe changes.
+- **Floor date for (a):** it grew about 275 rows/day this week (1,885 on Wed → 2,435 on Fri). At that rate, 3,500 lands around Nov 10, but local supply is thinning. Training is **not** scheduled.
