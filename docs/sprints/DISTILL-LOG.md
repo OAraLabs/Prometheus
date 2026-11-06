@@ -477,3 +477,11 @@ Append-only, times in ET.
 - **07:37:**
   - **Mini:** local generation ran through both eval pauses. The pool reached 4,061. At 06:40 Saluki was back (53 tok/s).
   - **4090:** `tower_verify` passed at 06:40. I reset `flywheel-window-start.service`'s failed state, left over from the 01:20 abort (rc 1, business restored). The timer is still armed.
+
+## 2026-11-06 10:37 EST: check-in, verdict join confirmed, round-2 recount
+- **Hosts:** no reboots and no failed units. Saluki returns 200, `tower_verify` passes, and the 09:00 heartbeat was sent (rc 0).
+- **Verdict join:** OK. `build.py round2` reads all 810 calibrated verdicts.
+  - 639 pool rows are labelled `r2-calibrated-judge`, 161 were dropped as `judge_fail`, and only 2 are still pending (long-context).
+  - The summary's `judge_pending_backlog 812` counts rows that ever needed the judge, not unresolved ones, so Wednesday's "790" was not a backlog either.
+- **Recount:** 2,435 train (1,461 new + 974 replay) and 57 val, up from 1,885. That still fails the 3,500 size gate, so the OQ16 trigger isn't met.
+- **Still to do:** stop tower-night's early end from killing the teacher on a judge night. Needed before the next standard night (OQ20 default: Tue).
