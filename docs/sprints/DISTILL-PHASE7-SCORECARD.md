@@ -206,40 +206,84 @@ Results:
 Sources: `~/scratch-arg-equiv/out/` on the 3090 Ti host (`full.json`, `bf16.json`, `validate.json`, `labels.json`, ids and verdicts only).
 
 <!-- acceptable-tools:begin -->
-## Acceptable-tool wrong-tool rate (ran 2026-11-04: UNDECIDED)
+## Acceptable-tool wrong-tool rate (rebuilt 2026-11-06 with Max as the judge)
 
-**Result: the new metric couldn't decide anything on this run, so the old single-reference rate stays the headline.** The judge pass ran on the standard 4090 night (01:20–04:36 EST):
-- the round-2 `judge_pending` pass ruled 705 of 705 items;
-- the tool-choice pass ruled 480 of 495 items (15 replies couldn't be parsed).
+**Result: with Max as the tool-choice judge, most old "wrong tool" picks are acceptable alternatives, and no case is left undecided.** Read the caveats below before quoting the new rates: the judge passed its gate, but the gate only tests the easy ends.
 
-Neither route could admit an alternative tool:
+Operator ask: replace the single-reference wrong-tool metric with an acceptable-tool set per case, built from Max + 27B + judge agreement, plus an outcome check where the gym can run it. Same stored eval-tools replies as above (329 cases; Student BF16 on the 100-case subset), and the same candidate calls, queue and control items as the 2026-11-04 run. No new model requests.
 
-- **Calibrated judge (tool-choice view):** it failed its agreement gate against the control items, so its rulings were not applied, by design.
+**The rule.** Per case, the acceptable set is Max's expected tool plus every offered tool for which at least one model's first call was ruled acceptable:
+- **outcome:** the gym ran both that call and Max's reference (`bash` / `read_file`), both exited 0 with no workspace effect, and the call's output contains the reference's in both snapshots;
+- **judge:** Qwen Max (`qwen3.8-max`, Token Plan, temperature 0, thinking off) in the tool-choice view scored right_tool 2 and neither sensible_order nor task_progress 0. The view's prompt and rubric are byte-identical to the 27B run's. Argument scores are recorded but don't decide tool choice.
 
-  | Controls | Agreement | Minimum |
-  |---|---|---|
-  | Positive | 70/79, 88.6% [79.7, 93.9] | 90% |
-  | Negative | 59/59, 100% | 95% |
+A tool is rejected when every one of its calls was ruled not acceptable. Nothing here changes task success or the Phase 6 gate.
 
-  A rerun with the same judge can't pass: even if every leftover item agreed, the best possible score is 71/80 = 88.75%. Fri 11-06 stays a standard judge night anyway: its first pass rules the round-2 `judge_pending` backlog, and that pass is what matters there.
-- **Outcome check:** of the 198 alternative-tool entries, most were `not_run`, because one of the two tools isn't executable in the gym. 34 were `reference_not_ok`, meaning the reference call itself failed in the sandbox. That left no case where both calls ran.
+**The judge's agreement gate** (same 140 control items as the 27B run; bar: ≥90% of Max's own reference calls accepted, ≥95% of obviously wrong tools rejected, on the point estimate):
 
-**What this means:** every wrong-tool case is "undecided". So the true wrong-tool rate lies between 0% and the old single-reference rate. The tool-generated table printed the 0% lower bound in bold, which reads as a result; it isn't one.
+| Judge | Positive controls accepted | Negative controls rejected | Gate |
+|---|---|---|---|
+| Max (2026-11-06) | 74/80 = 92.5% [84.6, 96.5] | 60/60 = 100% [94.0, 100] | pass |
+| 27B UD-Q4_K_XL (2026-11-04) | 70/79 = 88.6% [79.7, 93.9] | 59/59 = 100% [93.9, 100] | fail |
 
-| Model | Old rate (single reference) | Bounds under the new metric |
-|---|---|---|
-| Student Q4 | 17.6% (58/329) | 0–17.6% |
-| Student Q5 | 14.6% (48/329) | 0–14.6% |
-| Student BF16 (100-case subset) | 18.0% (18/100) | 0–18.0% |
-| Base (same recipe) | 13.4% (44/329) | 0–13.4% |
-| Base (Unsloth) | 15.2% (50/329) | 0–15.2% |
-| 27B | 19.8% (65/329) | 0–19.8% |
-| Saluki | 24.3% (80/329) | 0–24.3% |
+Max's rulings are applied. The 27B run's are not; its files are unchanged.
 
-**Ways to make it decide** (operator's call; see OQ19):
-- fix the tool-choice judge prompt and re-calibrate;
-- use Max references after the Nov 16 reset, as the original ask ("Max + 27B + judge agreement") intended;
-- widen the gym's executable tools, so the outcome check can run read-only alternatives such as `read_file` vs `bash cat`.
+**The sets.** 355 candidate calls (198 case-tool pairs in 149 cases): 164 tools acceptable, 34 rejected, 0 undecided. The judge admitted all 164. The outcome check admitted none: 304 calls `not_run` (a tool the gym can't execute), 44 `reference_not_ok`, 7 `differs`.
 
-Raw outputs are on the 3090 Ti host at `~/distill/acceptable-tools/` (`report.md`, `agreement.json`, `acceptable-tools.json`).
+### Old vs new, per model
+
+| Model | n | Wrong tool, old (single reference) | Wrong tool, new (acceptable set) | Old wrong tools now acceptable | Still wrong | Undecided |
+|---|---|---|---|---|---|---|
+| Student Q4 | 329 | 17.6% (58) [13.9, 22.1] | 2.1% (7) [1.0, 4.3] | 51 | 7 | 0 |
+| Student Q5 | 329 | 14.6% (48) [11.2, 18.8] | 1.8% (6) [0.8, 3.9] | 42 | 6 | 0 |
+| Student BF16 (100-case subset) | 100 | 18.0% (18) [11.7, 26.7] | 3.0% (3) [1.0, 8.5] | 15 | 3 | 0 |
+| Base (same recipe) | 329 | 13.4% (44) [10.1, 17.5] | 1.5% (5) [0.7, 3.5] | 39 | 5 | 0 |
+| Base (Unsloth) | 329 | 15.2% (50) [11.7, 19.5] | 1.5% (5) [0.7, 3.5] | 45 | 5 | 0 |
+| 27B | 329 | 19.8% (65) [15.8, 24.4] | 0.6% (2) [0.2, 2.2] | 63 | 2 | 0 |
+| Saluki | 329 | 24.3% (80) [20.0, 29.2] | 4.0% (13) [2.3, 6.6] | 67 | 13 | 0 |
+
+Rates are of all scored cases, with Wilson 95% intervals.
+
+| Comparison | Wrong tool, old: Δ | Paired 95% CI | Wrong tool, new: Δ | Paired 95% CI |
+|---|---|---|---|---|
+| Student Q4 vs Base (same recipe) | +4.3 (13.4 → 17.6) | [-0.2, +8.7] | +0.6 (1.5 → 2.1) | [-1.7, +3.0] |
+| Student Q4 vs Base (Unsloth) | +2.4 (15.2 → 17.6) | [-2.2, +7.1] | +0.6 (1.5 → 2.1) | [-1.7, +3.0] |
+| Student Q5 vs Base (same recipe) | +1.2 (13.4 → 14.6) | [-2.8, +5.3] | +0.3 (1.5 → 1.8) | [-1.7, +2.4] |
+| Student Q5 vs Base (Unsloth) | -0.6 (15.2 → 14.6) | [-5.0, +3.8] | +0.3 (1.5 → 1.8) | [-1.7, +2.4] |
+
+Paired Δ is the student minus the base (Newcombe 95%). On either metric, no student-vs-base difference is significant.
+
+### Caveats
+
+- **The gate tests only the easy ends.** The negative controls are unrelated tools (text-to-speech, image or video generation, a YouTube transcript). Nothing checks whether the judge can tell a plausible-but-wrong tool from an acceptable one, which is the call that decides this metric.
+- **The judge is lenient.** It admitted 164 of the 198 candidate tools (83%), including `bash` → `edit_file` (18 case-tool pairs), `web_fetch` (10), `ask_user` (6) and `memory` (6). The 27B judge was about as lenient: on the 350 candidate calls both ruled, they agreed on 299 (85.4%), and each accepted about 78%. So the new rates are best read as "picks a judge calls defensible", not as a verified right-tool rate.
+- **The positive gate is narrow.** The 92.5% point estimate clears the 90% bar, but its 95% interval reaches down to 84.6%.
+- **Max judges alternatives to its own references.** The expected tool is Max's own choice, so a self-consistency bias would push toward rejecting alternatives. That is the opposite of what happened here, but it was not measured.
+- **The outcome check decided nothing.** Every admission rests on the judge alone.
+- **Max-derived.** The annotation, agreement and report are tagged `max-derived` and stay private.
+
+### Most common expected → called pairs
+
+| Max's tool | Called | Decision | Case-tool pairs |
+|---|---|---|---|
+| bash | read_file | acceptable | 37 |
+| bash | edit_file | acceptable | 18 |
+| bash | web_fetch | acceptable | 10 |
+| bash | task_output | acceptable | 7 |
+| edit_file | bash | acceptable | 7 |
+| bash | ask_user | acceptable | 6 |
+| bash | lcm_grep | acceptable | 6 |
+| bash | memory | acceptable | 6 |
+| bash | task_create | acceptable | 6 |
+| bash | task_get | acceptable | 6 |
+| task_create | bash | acceptable | 6 |
+| bash | write_file | acceptable | 5 |
+
+**Judge cost.** 497 requests to Max on the Token Plan ($0 per call; 495 rulings, plus 2 unparseable replies that were re-asked), 18:08–18:20 UTC. Tokens: 5,354,691 prompt (4,382,592 cached) and 61,630 output, so a mean of 10,774 in and 124 out per item.
+
+Sources are on the 3090 Ti host:
+- `~/distill/acceptable-tools-max/` (`report.json`, `agreement.json`, `acceptable-tools.json`: ids, tool names and verdicts only; the judge queue stays there). They are tagged max-derived and private.
+- The annotation is also beside the eval set as `phase3/build-v2/eval-tools.acceptable-tools.max-derived.json`. The 27B run's `eval-tools.acceptable-tools.json` is untouched.
+- The 27B run is in `~/distill/acceptable-tools/`.
+
+Cases sha256 `234028b0e65f5e15`.
 <!-- acceptable-tools:end -->

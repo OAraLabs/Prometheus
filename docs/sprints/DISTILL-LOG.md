@@ -585,3 +585,34 @@ Append-only, times in ET.
   - 14 Max rows were accepted and 5 dropped as duplicates.
   - Every gate passes except train size: 2,478 = 1,487 new + 991 replay.
 - **To stage:** the build.py change reaches the host's round-2 code at the next `stage-code`. Don't restage while `max-r2-gen-20261106` runs from that tree. Until then, run `build.py round2` from a scratch copy, or pass both `--pool` globs.
+
+## 2026-11-06 13:25 EST: acceptable-tool sets rebuilt with Max as the judge (operator order)
+- **Code (d169539):** `judge.py run --provider token-plan --view tool-choice` now judges a tool-choice queue. The system prompt, user message and rubric are byte-identical to the local judge's (a test checks this). `acceptable_tools.py finish` now:
+  - tags a Max-judged work dir `max-derived`;
+  - refuses a work dir that mixes judges;
+  - copies the annotation beside the eval set only to a `max-derived` name;
+  - reports mean tokens per item;
+  - no longer prints a lower bound in bold.
+
+  Tests: 38 acceptable-tools, 1,981 passed across the distill suite.
+- **Spend checks:** no STOP file. The Oct 31 quota PAUSE was lifted by the coordinator before any call. The key was present and matched its recorded fingerprint.
+- **Run:**
+  - New work dir `~/distill/acceptable-tools-max/` on the 3090 Ti host. It holds copies of the 27B run's `prepare.json`, `candidates.json` and queue (same queue sha), with the annotation out-name changed to `...max-derived.json`. Code is at `acceptable-tools-max/code` (d169539).
+  - Unit `distill-acceptable-tools-max-20261106` ran 18:08–18:20 UTC. It left 2 unparseable replies, and the `...b` unit re-asked them.
+  - 497 Token Plan calls, all `token-plan ok`. Mean 10,774 in and 124 out tokens per item.
+  - The 27B run's files are untouched.
+- **Gate:** pass, so the rulings are applied. Positives 74/80 = 92.5% [84.6, 96.5]; negatives 60/60.
+- **Sets:** 164 tools acceptable, 34 rejected, 0 undecided, all admitted by the judge; the outcome check decided nothing again.
+- **New wrong-tool rates (old → new):**
+
+  | Model | Old | New |
+  |---|---|---|
+  | Student Q4 | 17.6% | 2.1% |
+  | Student Q5 | 14.6% | 1.8% |
+  | Student BF16 | 18.0% | 3.0% |
+  | Base (same recipe) | 13.4% | 1.5% |
+  | Base (Unsloth) | 15.2% | 1.5% |
+  | 27B | 19.8% | 0.6% |
+  | Saluki | 24.3% | 4.0% |
+
+- **Caveats:** the judge is lenient (83% of candidate tools admitted; it agrees with the 27B judge on 85.4% of calls), and the gate doesn't test plausible-but-wrong tools. Full caveats are in the scorecard section; see OQ19.

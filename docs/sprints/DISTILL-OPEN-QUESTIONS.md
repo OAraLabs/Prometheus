@@ -219,6 +219,7 @@ none holds teacher data.
     - (d) accept the old metric as the headline.
 
     Default if unanswered: (d) for now, plus (b) after Nov 16. Fri 11-06 stays a standard judge night: a rerun can't pass the tool-choice gate, but the night still rules the round-2 `judge_pending` backlog.
+    - **Update 2026-11-06 (operator: Max as the judge now, Token Plan quota back):** done, so (b) came early. Max passed the same gate (positives 74/80 = 92.5% [84.6, 96.5], negatives 60/60), and its rulings are applied, with 0 undecided. Student Q4's wrong-tool rate goes from 17.6% to 2.1%; the scorecard section has every model and the caveats. The gate only tests unrelated wrong tools, so judge leniency is untested. A plausible-but-wrong negative control set would close that.
 20. **Judge nights vs. long-context nights.** Round-2 coding, error-recovery and injection rows only train after the calibrated 4×32K Q4 judge rules on them, which needs a standard 4090 night. The rotation has one standard night (Fri 11-06) and then 24 longctx nights.
     - **Proposal:** one standard judge night a week; or two while the backlog is large.
     - **Default if unanswered:** add a standard night every Tue and Fri and arm the judge slot for each.
