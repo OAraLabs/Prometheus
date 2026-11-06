@@ -704,3 +704,7 @@ Append-only, times in ET.
   - Strict tool success (`--max-natural-errors 0`) rejects any task with one natural error.
 - **Cost:** 804 Token Plan calls in about 10 min, all OK. 25.2M input tokens (77% cached) and 76K output, for 1 kept row. At this rate the 5,248 tasks would take about 21 h of Max and yield on the order of 130 rows, and they share the quota with the Max judging pass.
 - **Caveat (coordinator):** build.py currently refuses `max-tokenplan-gym` as a train source until the operator lifts that under Q6b. The rows are generated anyway, as ordered.
+- **~17:00:** stopped `max-r2-genlc-20261106` by unit name after the keep-rate report. The run is reversible: same out dir, it resumes.
+  - **Why:** long-context Max on the fixed gym kept 1/40 (2.5%, against 10.7% before), at about 150M input tokens/h for ~6 rows/h.
+  - **Cause:** 143/145 failed `read_file`s were guessed test files that don't exist (Max's behaviour; the strict all-tools-succeed rule rejects the row). The rows also can't train until the round-2 Max train-source guard is lifted.
+  - **To resume:** the operator chooses (a) a "recovered guessed read" tolerance, (b) a long-context prompt nudge to list before reading, or (c) resume as is.
