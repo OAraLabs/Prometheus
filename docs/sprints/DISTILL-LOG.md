@@ -683,3 +683,24 @@ Append-only, times in ET.
   - The `gen_local.sh run` dry run is clean.
   - Tonight's 01:05 local run is the live test of the gym fix; the baseline is local long-context keep 10.2%, and the replay estimate is 13.4%.
 - **Long-context Max resuming** on the fixed gym, as ordered: unit `max-r2-genlc-20261106`. Its rows can't train until the round-2 Max train-source guard is lifted (operator decision pending).
+
+## 2026-11-06 ~16:50 EST: Max long-context resumed on the gym fix; keep rate is worse, not better
+- **gen3:** `max-r2-gen3-20261106` ended `no_tasks` (exit 0), so coding, error-recovery and tool-choice are exhausted.
+- **Order (operator):** resume Max long-context now that the gym long-context fix (4e0add4) is staged at 3e9e9cc.
+- **Taskset `real-r2-max-lc.jsonl`:** 5,388 rows, the long-context rows of `real-r2-max4.jsonl` copied verbatim with no-kept-row tasks first. The excluded-session check is clean.
+- **Steer file `steer-max-lc.json`:** only long-context is non-zero. The dry run with the new code selects only long-context: 5,248 tasks left, none over 131,072.
+- **Unit `max-r2-genlc-20261106`** (16:39), from code 3e9e9cc:
+  - It writes to the same Max out dir (resume accepted; done tasks are skipped).
+  - It has its own sandbox root, `/tmp/prometheus-teacher-gen-max-r2lc`, and its own lock.
+  - Flags, nice and the `--until 2026-11-10T09:00-05:00` end are the same as before; it also ends on `no_tasks`.
+  - It isn't a `distill-*` unit, so the 01:05 window doesn't touch it.
+- **First 40 tasks (0.16 h):**
+  - Keep rate: 1/40 = **2.5%**, against 15/140 = 10.7% before the fix. That is 1 row, about 6 rows/h, at about 250 tasks/h.
+  - Rejection reasons: tool_error 36, iteration_cap 18, sandbox_refusal 11, empty_tool_args 2, output_limit 2, breaker_tripped 1.
+- **What the tool errors are**, from the run's own gym telemetry DB in its work dir (not a live DB):
+  - 143 of 145 failed `read_file` calls are "File not found" for test files the fixture doesn't have. Max guesses plausible names (`tests/test_heartbeat.py`, `tests/test_agent_loop.py`) instead of listing first.
+  - `tests/` is present (728 files), so this is teacher behaviour, not the path mapping the fix addressed.
+  - The rest: `python`/`python3` refusals (12; parked by OQ14), non-zero bash exits (6) and empty web search (4).
+  - Strict tool success (`--max-natural-errors 0`) rejects any task with one natural error.
+- **Cost:** 804 Token Plan calls in about 10 min, all OK. 25.2M input tokens (77% cached) and 76K output, for 1 kept row. At this rate the 5,248 tasks would take about 21 h of Max and yield on the order of 130 rows, and they share the quota with the Max judging pass.
+- **Caveat (coordinator):** build.py currently refuses `max-tokenplan-gym` as a train source until the operator lifts that under Q6b. The rows are generated anyway, as ordered.
