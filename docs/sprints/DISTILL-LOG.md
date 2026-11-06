@@ -458,3 +458,15 @@ Append-only, times in ET.
 - **Mini:** local generation paused and resumed cleanly around both evals, with no probe trip. At 06:40 Saluki was back on 8092 at 52.6 tok/s, with no failed units.
 - **Pool:** the 27B gym pool grew from 3,899 to 3,996 overnight.
 - **Friday:** Fri 11-06 is the standard judge night. The slot at 01:20 rules the round-2 `judge_pending` backlog of about 790 rows.
+
+## 2026-11-06 02:20 EST: the judge night lost its teacher; teacher restarted by hand
+- **01:12–01:17:** tower-night started the standard 4×32K teacher, but remote generation had no tasks left. Every standard-night taskset ran out on Wed. So at 01:17 tower-night ended the teacher early and restored business.
+- **01:20:** the 4090's nightly `window_start` found the GPU free and swapped in its job runner. The runner had nothing to do and exited, and business was restored and verified. It left `state/jobs.unit` behind, which blocks later starts.
+- **01:20–02:05:** the mini's judge slot waited for the judge server, which was gone, then failed. The round-2 backlog went unjudged.
+- **Fix at 02:18:**
+  - ran `window_end.sh` (business verified, marker cleared);
+  - restarted the standard teacher with tonight's original end time (`round2_tower.sh start --mode night --profiles 4x32768 --end-utc 11:22 UTC`; its end timer and dead-man are armed);
+  - started `distill-judge-rerun-20261106`, the same steps as the judge slot with the backlog deadline moved to 05:50.
+  - The queue is 810 items, 705 of them ruled Wed, so 105 remain, plus the 15 acceptable-tools leftovers.
+- **Design bug, to fix:** the early end ("remote generation has nothing left") ignores a judge slot that needs the teacher until 04:50. The fix: on a judge night, keep the teacher until the judge slot finishes.
+- **To check:** Wednesday's 705 verdicts may not be reaching `build.py round2`, which reported `judge_pending_backlog 790` on Wed. Check `judge_pending_uncalibrated_verdict_ignored` and the verdict join by daylight.
