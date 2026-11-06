@@ -202,6 +202,42 @@ def path_class(raw: str, env: Any, eq: Any, tg: Any) -> tuple[str, str | None]:
     return "abs_other", norm
 
 
+#: The repository the gym's fixture is a clone of, as a directory under the home
+#: (a checkout) or under ``~/projects`` (a checkout or worktree).
+REPO_DIR = "Prometheus"
+
+
+def home_target(norm: str, env: Any) -> tuple[str, str | None]:
+    """For a path under the case's home: ``(target, path inside the repo or None)``.
+    ``repo``: a checkout or worktree of this repository (``~/Prometheus*``,
+    ``~/projects/Prometheus*``); ``other_project``: another directory under
+    ``~/projects``; ``home_misc``: anything else under the home. No directory
+    name is reported."""
+    rest = norm[len(env.home) + 1:].split("/") if env.home and norm.startswith(env.home + "/") else []
+    if rest and rest[0].startswith(REPO_DIR):
+        return "repo", "/".join(rest[1:])
+    if len(rest) > 1 and rest[0] == "projects":
+        if rest[1].startswith(REPO_DIR):
+            return "repo", "/".join(rest[2:])
+        return "other_project", None
+    return "home_misc", None
+
+
+def path_target(raw: str, env: Any, eq: Any, tg: Any) -> tuple[str, str | None]:
+    """A path's class with ``home_other`` and ``cwd`` split by ``home_target``."""
+    cls, norm = path_class(raw, env, eq, tg)
+    if cls == "cwd" and norm and env.cwd:
+        return "cwd", norm[len(env.cwd):].strip("/")  # the executor maps the cwd to the fixture
+    if cls == "home_other" and norm:
+        return home_target(norm, env)
+    return cls, None
+
+
+#: Worst first: a reference whose paths fall in several targets reports the first.
+TARGET_ORDER = ("unmapped", "other_project", "abs_other", "dot_prometheus", "home_misc", "tmp", "virtual", "repo",
+                "cwd")
+
+
 def history_text(messages: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     for m in messages:
@@ -294,10 +330,12 @@ def m1(cases: list[Any], *, store: str | None = None) -> dict[str, Any]:
             classes.add(cls)
             C["path_class"][cls] += 1
             C["path_class_seen"][f"{cls}|{'seen' if seen else 'unseen'}"] += 1
-            if cls == "cwd" and files is not None and norm and env.cwd:
-                rel = norm[len(env.cwd):].strip("/")
-                C["cwd_path_in_fixture"]["root" if not rel else ("yes" if rel in files else "no")] += 1
+            tgt, rel = path_target(raw, env, eq, tg)
+            C["path_target"][tgt] += 1
+            if tgt in ("cwd", "repo") and files is not None and rel is not None:
+                C[f"{tgt}_path_in_fixture"]["root" if not rel else ("yes" if rel in files else "no")] += 1
         C["ref_path_classes"]["|".join(sorted(classes)) or "(no absolute path)"] += 1
+        C["ref_target"][ref_target(tool, args, env, eq, tg)] += 1
         if tool == "bash":
             cls, detail = classify_bash(str(args.get("command") or ""), tg)
             C["bash_class"][cls] += 1
@@ -315,12 +353,39 @@ def m1(cases: list[Any], *, store: str | None = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def ref_target(tool: str, args: dict[str, Any], env: Any, eq: Any, tg: Any) -> str:
+    """The worst ``path_target`` of the paths a reference names (``TARGET_ORDER``)."""
+    targets = {path_target(r, env, eq, tg)[0] for r in reference_paths(tool, args, tg)}
+    return min(targets, key=TARGET_ORDER.index) if targets else "(no absolute path)"
+
+
+def first_blocker(cls: str, detail: str, status: str, a: Any, target: str) -> str:
+    """Why a runnable-tool reference does not run cleanly, the static grammar first
+    (the executor checks paths before the grammar, so a refused command with a
+    missing path reports ``missing_path``): ``grammar:<kind>``, ``simulated``,
+    ``missing_path:<target>``, ``clean`` / ``clean_empty``, or the run's status."""
+    if cls == "refused":
+        return f"grammar:{detail}"
+    if cls == "unavailable_program":
+        return "grammar:python" if detail == "python" else "grammar:program"
+    if cls == "git_refused":
+        return "grammar:git_write"
+    if cls == "simulated_host" or status.endswith(":simulated"):
+        return "simulated"
+    if status == "clean":
+        return "clean_empty" if a is not None and a.empty and not a.effect else "clean"
+    if status.endswith(":missing_path"):
+        return f"missing_path:{target}"
+    return status
+
+
 def m2(cases: list[Any], ex: Any) -> dict[str, Any]:
     eq, tg = EQ(), TG()
     per_tool: dict[str, Counter[str]] = defaultdict(Counter)
     bash_x: Counter[str] = Counter()
     path_x: Counter[str] = Counter()
     totals: Counter[str] = Counter()
+    blockers: Counter[str] = Counter()
     t0 = time.monotonic()
     for case in cases:
         tool, args = _ref(case)
@@ -330,11 +395,13 @@ def m2(cases: list[Any], ex: Any) -> dict[str, Any]:
         c = per_tool[tool]
         c["refs"] += 1
         totals["refs_with_args"] += 1
+        env = eq.case_env(case.messages)
         if tool not in eq.EXECUTABLE_TOOLS:
             c["not_executable"] += 1
             totals["not_executable"] += 1
+            side = eq.has_side_effects(tool, args)
+            blockers[f"not_routed:{'side_effect' if side else 'read_only'}"] += 1
             continue
-        env = eq.case_env(case.messages)
         res = ex.run(tool, args, env)
         a, b = res.get("A"), res.get("B")
         sa = a.status if a else "-"
@@ -352,14 +419,16 @@ def m2(cases: list[Any], ex: Any) -> dict[str, Any]:
                 totals["clean_empty_no_effect"] += 1
         status = "clean" if clean else (f"A:{sa}" if sa != "ok" else f"B:{sb}")
         totals[f"exec:{status}"] += 1
+        cls, detail = classify_bash(str(args.get("command") or ""), tg) if tool == "bash" else ("allowed", "")
         if tool == "bash":
-            cls, _ = classify_bash(str(args.get("command") or ""), tg)
             bash_x[f"{cls}|{status}"] += 1
+        blockers[first_blocker(cls, detail, status, a, ref_target(tool, args, env, eq, tg))] += 1
         classes = {path_class(r, env, eq, tg)[0] for r in reference_paths(tool, args, tg)}
         path_x[f"{'|'.join(sorted(classes)) or '(no absolute path)'}|{status}"] += 1
     return {"per_tool": {k: dict(v.most_common()) for k, v in sorted(per_tool.items())},
             "totals": dict(totals.most_common()), "bash_class_x_status": dict(bash_x.most_common()),
             "path_classes_x_status": dict(path_x.most_common()),
+            "first_blocker": dict(blockers.most_common()),
             "executor": ex.describe(), "seconds": round(time.monotonic() - t0, 1)}
 
 

@@ -160,3 +160,23 @@ def test_avail_joins_trace_index(tmp_path: Path) -> None:
     assert res["trace_index_join"] == {"golden|joined": 1, "golden|not_joined": 1}
     assert res["telemetry_rowid"] == {True: 1}
     assert res["lcm_snapshot"]["exists"] is True and res["lcm_snapshot"]["bytes"] == 1
+
+
+def test_path_targets_and_first_blocker() -> None:
+    def tgt(raw: str) -> tuple[str, str | None]:
+        return gf.path_target(raw, ENV, eq, tg)
+
+    assert tgt("~/Prometheus/src/a.py") == ("repo", "src/a.py")
+    assert tgt("~/projects/Prometheus-wt/docs") == ("repo", "docs")
+    assert tgt("~/projects/elsewhere/x") == ("other_project", None)
+    assert tgt("~/notes.txt") == ("home_misc", None)
+    assert tgt("~/proj/src") == ("cwd", "src")
+    assert gf.ref_target("bash", {"command": "ls ~/Prometheus /tmp/x"}, ENV, eq, tg) == "tmp"
+    assert gf.ref_target("bash", {"command": "ls"}, ENV, eq, tg) == "(no absolute path)"
+    ok = eq.RunResult("ok", "d", "", empty=False)
+    assert gf.first_blocker("refused", "multiline", "A:missing_path", None, "repo") == "grammar:multiline"
+    assert gf.first_blocker("unavailable_program", "gh", "A:refused", None, "tmp") == "grammar:program"
+    assert gf.first_blocker("git_refused", "push", "A:missing_path", None, "repo") == "grammar:git_write"
+    assert gf.first_blocker("allowed", "ls", "A:missing_path", None, "other_project") == "missing_path:other_project"
+    assert gf.first_blocker("allowed", "ls", "clean", ok, "repo") == "clean"
+    assert gf.first_blocker("simulated_host", "ss", "A:refused", None, "-") == "simulated"
