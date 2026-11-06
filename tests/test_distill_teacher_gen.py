@@ -445,6 +445,154 @@ def test_file_tools_are_confined(tmp_path):
     assert [r.outcome for r in env.log] == ["refused", "refused", "refused", "refused", "ok", "error"]
 
 
+# ── host paths the runtime's system prompt names ───────────────────────────────
+
+#: a host home as a captured runtime prompt spells it (built here, never a real one)
+HOST_HOME = "/" + "home" + "/gym-owner"
+PACK_PROMPT = (
+    "<!-- Bootstrap: ~/.prometheus/SOUL.md -->\n# Identity\n\nWork in **`~/Prometheus`**. "
+    "**`~/prometheus-deploy` is the running daemon's tree.\n\n# Environment\n"
+    f"- Shell: bash\n- Working directory: {HOST_HOME}/prometheus-deploy\n- Date: today\n\n"
+    f"# Documents library\n- The confined documents root is: {HOST_HOME}/distill/pack/documents\n"
+    f"- Loaded: {HOST_HOME}/.prometheus/models/m.gguf\n")
+
+
+def _host_env(tmp_path: Path, prompt: str = PACK_PROMPT, fixture: bool = True) -> tuple[Any, Any]:
+    root = tmp_path / "ws"
+    (root / tg.REPO_FIXTURE_DIR / "src").mkdir(parents=True)
+    (root / tg.REPO_FIXTURE_DIR / "src" / "app.py").write_text("print('hi')\n")
+    (root / "notes").mkdir()
+    (root / "notes" / "a.md").write_text("alpha\nbeta\n")
+    git_dir = tmp_path / "ws.repo-git"
+    git_dir.mkdir()
+    env = tg.SandboxEnv(root, task(), git_dir=git_dir if fixture else None, host=tg.host_paths(prompt))
+    env.prepare_host_dirs()
+    return env, tg.build_sandbox_registry(env)
+
+
+def test_host_paths_come_from_the_runtime_prompt_only():
+    hp = tg.host_paths(PACK_PROMPT)
+    assert hp.homes == (HOST_HOME,)
+    assert hp.runtime_cwd == f"{HOST_HOME}/prometheus-deploy"
+    assert hp.documents_root == f"{HOST_HOME}/distill/pack/documents"
+    # the built-in prompt names no host path: nothing is mapped
+    assert tg.host_paths(tg.DEFAULT_SYSTEM_PROMPT.format(date="2026-11-06")) == tg.HostPaths()
+    assert tg.host_paths(None) == tg.HostPaths()
+    # a home is a whole path segment, never part of a longer word
+    assert tg.host_paths("see /x/home/a/b and xhome/b/c").homes == ()
+
+
+@pytest.mark.parametrize("cmd, out, n", [
+    ("echo $HOME", "echo /h", 1), ('echo "${HOME}/x"', 'echo "/h/x"', 1), ("echo '$HOME'", "echo '$HOME'", 0),
+    ("echo \\$HOME", "echo \\$HOME", 0), ("echo $HOMEDIR", "echo $HOMEDIR", 0), ("echo $PATH:$PWD", "echo /u:/p", 2),
+    ("echo $(id) $HOME", "echo $(id) /h", 1), ("echo $USER", "echo $USER", 0),
+])
+def test_known_variables_expand_like_the_shell_reads_them(cmd, out, n):
+    assert tg.expand_known_vars(cmd, {"HOME": "/h", "PWD": "/p", "PATH": "/u"}) == (out, n)
+
+
+def test_a_host_home_path_runs_at_its_place_in_the_sandbox(tmp_path, no_outbound):
+    env, reg = _host_env(tmp_path)
+    res = _call(env, reg, "read_file", {"path": f"{HOST_HOME}/notes/a.md"})
+    assert not res.is_error and "alpha" in res.output
+    res = _call(env, reg, "bash", {"command": f"ls {HOST_HOME}/notes && cat {HOST_HOME}/notes/a.md"})
+    assert not res.is_error and res.output.split() == ["a.md", "alpha", "beta"]
+    # the bash tool's cwd, and a missing file reads back in the call's own spelling
+    res = _call(env, reg, "bash", {"command": "pwd", "cwd": f"{HOST_HOME}/notes"})
+    assert not res.is_error and res.output == f"{HOST_HOME}/notes"
+    res = _call(env, reg, "read_file", {"path": f"{HOST_HOME}/notes/missing.md"})
+    assert res.is_error and res.output == f"File not found: {HOST_HOME}/notes/missing.md"
+    assert _call(env, reg, "glob", {"pattern": "*.md", "root": f"{HOST_HOME}/notes"}).output.strip().endswith("a.md")
+    assert env.alias_calls == 5
+    assert [r.outcome for r in env.log] == ["ok", "ok", "ok", "error", "ok"]
+
+
+def test_the_runtime_working_directory_is_the_repo_fixture(tmp_path, no_outbound):
+    env, reg = _host_env(tmp_path)
+    cwd = f"{HOST_HOME}/prometheus-deploy"
+    res = _call(env, reg, "bash", {"command": f"cd {cwd} && ls src"})
+    assert not res.is_error and res.output == "app.py"
+    res = _call(env, reg, "bash", {"command": "cat ~/prometheus-deploy/src/app.py"})
+    assert not res.is_error and "print('hi')" in res.output
+    assert "hi" in _call(env, reg, "read_file", {"path": f"{cwd}/src/app.py"}).output
+    # ~/Prometheus is the fixture already; a longer name is not the runtime's directory
+    assert not _call(env, reg, "read_file", {"path": f"{HOST_HOME}/Prometheus/src/app.py"}).is_error
+    res = _call(env, reg, "read_file", {"path": f"{HOST_HOME}/prometheus-deploy2/src/app.py"})
+    assert res.is_error and res.output.startswith("File not found")
+    # without a repo fixture the runtime directory maps to nothing of its own
+    bare, breg = _host_env(tmp_path / "bare", fixture=False)
+    assert _call(bare, breg, "read_file", {"path": f"{cwd}/src/app.py"}).output.startswith("File not found")
+
+
+def test_host_paths_stay_confined(tmp_path, no_outbound):
+    env, reg = _host_env(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret")
+    for args in ({"path": f"{HOST_HOME}/../../etc/hosts"}, {"path": f"{HOST_HOME}/../outside.txt"}):
+        res = _call(env, reg, "read_file", args)
+        assert res.is_error and res.output.startswith("Refused:"), args
+    for cmd in (f"cat {HOST_HOME}/../outside.txt", "cat /home/someone-else/x", f"cat {HOST_HOME}x/y",
+                "echo $HOME/../outside.txt > /etc/x", "ls $HOME/.. && echo $(id)", "cd notes && echo $PWD"):
+        res = _call(env, reg, "bash", {"command": cmd})
+        assert res.is_error and res.output.startswith("Refused:"), (cmd, res.output)
+    assert outside.read_text() == "secret"
+    # the refusal names the path as the call spelled it
+    res = _call(env, reg, "bash", {"command": f"cat {HOST_HOME}/../outside.txt"})
+    assert HOST_HOME in res.output and str(env.root) not in res.output
+
+
+def test_known_variables_run_and_others_are_still_refused(tmp_path, no_outbound):
+    env, reg = _host_env(tmp_path)
+    res = _call(env, reg, "bash", {"command": 'echo "$HOME" && echo $PATH && ls $HOME/notes'})
+    assert not res.is_error and res.output.split("\n") == [HOST_HOME, tg.SANDBOX_PATH, "a.md"]
+    res = _call(env, reg, "bash", {"command": "echo $PWD", "cwd": "notes"})
+    assert not res.is_error and res.output == str(env.root / "notes")
+    # without a host home in the prompt, $HOME is the sandbox root (the jail's HOME)
+    (tmp_path / "plain").mkdir()
+    plain, preg = _env(tmp_path / "plain")
+    assert _call(plain, preg, "bash", {"command": "echo $HOME"}).output == str(plain.root)
+    assert plain.var_calls == 1 and plain.alias_calls == 0
+    for cmd in ("echo $USER", "echo $(pwd)", "for f in a b; do echo $f; done", "echo $?"):
+        res = _call(plain, preg, "bash", {"command": cmd})
+        assert res.output.startswith("Refused:"), cmd
+
+
+def test_documents_root_exists_and_the_gate_rules_on_the_sandbox_path(tmp_path):
+    env, _reg = _host_env(tmp_path)
+    docs = env.root / "distill" / "pack" / "documents"
+    assert docs.is_dir()
+    gate = tg._gym_gate_cls()(env, workspace_root=env.root, mode="default")
+    ok = gate.evaluate("write_file", file_path=f"{HOST_HOME}/distill/pack/documents/loops/plan.md",
+                       is_read_only=False, path_is_write=True)
+    assert ok.allowed
+    denied = gate.evaluate("write_file", file_path=str(tmp_path / "elsewhere.md"), is_read_only=False,
+                           path_is_write=True)
+    assert not denied.allowed
+
+
+def test_no_runtime_prompt_and_a_sandbox_under_the_home_map_nothing(tmp_path):
+    env, reg = _env(tmp_path)   # the built-in prompt: no host paths
+    assert _call(env, reg, "read_file", {"path": f"{HOST_HOME}/notes/a.md"}).output.startswith("Refused:")
+    # a host home that holds the sandbox itself is never rewritten (its real paths must keep working)
+    root = tmp_path / "ws2"
+    root.mkdir()
+    (root / "f.txt").write_text("x")
+    home = str(tmp_path.resolve())
+    held = tg.SandboxEnv(root, task(), host=tg.HostPaths(homes=(home,)))
+    assert held.unalias(f"{home}/ws2/f.txt") == (f"{home}/ws2/f.txt", [])
+
+
+def test_end_to_end_a_call_that_follows_the_runtime_prompt_is_kept(tmp_path, no_outbound):
+    t = task(prompt="What does notes/a.md start with?", setup_files={"notes/a.md": "alpha\nbeta\n"})
+    with FakeTeacher(scripted({"notes/a.md": [("call", "bash", {"command": "head -n 1 a.md",
+                                                                 "cwd": f"{HOST_HOME}/notes"}), "echo"]})) as fake:
+        s = settings_for(tmp_path, fake.url, base_system_prompt=PACK_PROMPT)
+        out, ok, reasons, record = run_and_verify(t, s)
+    assert ok, reasons
+    assert record["host_path_calls"] == 1 and record["sandbox_refusals"] == 0 and record["tool_errors"] == 0
+    assert "alpha" in tg.final_text(out)
+
+
 def test_simulated_host_commands_read_options_redirects_and_pipes_like_a_shell(tmp_path):
     svcs = [tg.svc_record(__import__("random").Random(1), "cobalt-intake", ["amber-ledger"]),
             tg.svc_record(__import__("random").Random(3), "pylon-metrics", ["cobalt-intake"])]

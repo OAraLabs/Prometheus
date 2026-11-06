@@ -2711,14 +2711,104 @@ class _Segment:
     redirs: list[tuple[int, int, str]] = field(default_factory=list)   # (start, end, operator)
 
 
+#: A sandboxed command's PATH (``run_sh``), which is also what ``$PATH`` reads as.
+SANDBOX_PATH = "/usr/bin:/bin"
+#: A host home named in the runtime's own system prompt (the request pack, captured from a
+#: live daemon): ``/home/<user>`` or ``/Users/<user>``, followed by a path under it.
+_HOST_HOME_RE = re.compile(r"(?<![\w.~/-])(/(?:home|Users)/[A-Za-z0-9._-]+)(?=/)")
+#: The runtime's working directory, as the pack's environment block states it.
+_RUNTIME_CWD_RE = re.compile(r"(?m)^[ \t]*(?:[-*][ \t]*)?Working directory:[ \t]*`?([^\s`]+?)`?[ \t]*$")
+#: The runtime's confined documents root (the pack's "Documents library" block).
+_DOCS_ROOT_RE = re.compile(r"(?m)documents root is:[ \t]*`?([^\s`]+?)`?[.,;:]?[ \t]*$")
+#: The environment variables a command may name: their values are constants of the sandbox.
+_KNOWN_VARS = ("HOME", "PWD", "PATH")
+_VAR_REF = re.compile(r"\$(?:\{(" + "|".join(_KNOWN_VARS) + r")\}|(" + "|".join(_KNOWN_VARS) + r")(?![A-Za-z0-9_]))")
+_CD_WORD = re.compile(r"(?:^|[\s;&|(])(?:cd|pushd|popd)(?=\s|$|[;&|)])")
+
+
+@dataclass(frozen=True)
+class HostPaths:
+    """The host paths the system prompt tells the teacher about (``host_paths``). The request
+    pack is the live runtime's own prompt, so it names the host's home (``~/.prometheus``, the
+    documents root), the repository clone the runtime runs in (its working directory) and
+    ``~/Prometheus``. In the gym, ``~`` is the sandbox root and the repo fixture is
+    ``<root>/Prometheus``; ``SandboxEnv`` maps these absolute host spellings onto the same places
+    (``SandboxEnv.unalias``), so a call that follows the prompt runs, inside the sandbox, instead of
+    being refused as outside it. Nothing on the host becomes reachable: every rewritten path goes
+    through the same confinement."""
+    homes: tuple[str, ...] = ()
+    runtime_cwd: str | None = None
+    documents_root: str | None = None
+
+
+def host_paths(system_prompt: str | None) -> HostPaths:
+    """The host homes, runtime working directory and documents root *system_prompt* names
+    (the pack's; the built-in prompt names none)."""
+    text = system_prompt or ""
+    homes = tuple(dict.fromkeys(m.group(1) for m in _HOST_HOME_RE.finditer(text)))
+    cwd = _RUNTIME_CWD_RE.search(text)
+    docs = _DOCS_ROOT_RE.search(text)
+    return HostPaths(homes=homes, runtime_cwd=cwd.group(1).rstrip("/") if cwd else None,
+                     documents_root=docs.group(1).rstrip("/") if docs else None)
+
+
+def _under(path: str, home: str) -> str | None:
+    """*path* relative to *home* ("" for the home itself), or None when it is not under it."""
+    if path == home:
+        return ""
+    return path[len(home) + 1:] if path.startswith(home + "/") else None
+
+
+def expand_known_vars(cmd: str, values: dict[str, str]) -> tuple[str, int]:
+    """*cmd* with ``$HOME`` / ``${HOME}`` (and the other ``values``) replaced by their values,
+    outside single quotes and never after a backslash, as the shell would read them; and how many.
+    Every other ``$`` stays, for ``_prescan`` to refuse."""
+    out: list[str] = []
+    n = 0
+    state: str | None = None
+    i = 0
+    while i < len(cmd):
+        c = cmd[i]
+        if state == "'":
+            out.append(c)
+            if c == "'":
+                state = None
+            i += 1
+            continue
+        if c == "\\":
+            out.append(cmd[i:i + 2])
+            i += 2
+            continue
+        if c == "$":
+            m = _VAR_REF.match(cmd, i)
+            name = (m.group(1) or m.group(2)) if m else None
+            if m and name in values:
+                out.append(values[name])
+                n += 1
+                i = m.end()
+                continue
+        if state == '"':
+            if c == '"':
+                state = None
+        elif c in "'\"":
+            state = c
+        out.append(c)
+        i += 1
+    return "".join(out), n
+
+
 class SandboxEnv:
     """One task's world: fixtures, injections, the call log and the confinement."""
 
     def __init__(self, root: Path, task: GenTask, jail: str = "none", git_dir: Path | None = None,
-                 hardened: bool = False) -> None:
+                 hardened: bool = False, host: HostPaths | None = None) -> None:
         self.root = Path(root).resolve()
         self.task = task
         self.jail = jail
+        self.host = host or HostPaths()
+        #: calls that named a host path (``unalias``) or a known variable (``expand_known_vars``)
+        self.alias_calls = 0
+        self.var_calls = 0
         #: --hardened-exec on: multi-line / python commands run in hardened_exec.py's profile
         self.hardened = hardened
         #: the repo fixture's git directory, OUTSIDE the writable workspace
@@ -2745,6 +2835,103 @@ class SandboxEnv:
         self.failure_families = {str(f["tool"]): f for f in (task.failure.get("families") or [])}
         self.failure_fired: list[dict[str, Any]] = []
         self._failure_sticky: set[str] = set()
+        self._aliases = self._build_aliases()
+        self._alias_re = (re.compile(r"(?<![\w.~/-])(?:" + "|".join(re.escape(p) for p, _t in self._aliases)
+                                     + r")(?![\w.-])") if self._aliases else None)
+
+    # -- host paths ------------------------------------------------------------------
+
+    def _build_aliases(self) -> list[tuple[str, str]]:
+        """(host spelling, sandbox path), longest spelling first: the runtime's working directory
+        (``~/<rel>`` and its absolute form) is the repo fixture when this task has one, and each
+        host home is the sandbox root (what ``~`` already is). A home that holds the sandbox
+        itself is never an alias (its real paths into the sandbox must keep working)."""
+        root = str(self.root)
+        homes = [h for h in self.host.homes if _under(root, h) is None]
+        out: list[tuple[str, str]] = []
+        cwd = self.host.runtime_cwd
+        if cwd and self.git_dir is not None:
+            for h in homes:
+                rel = _under(cwd, h)
+                if rel and rel != REPO_FIXTURE_DIR:
+                    fixture = str(self.root / REPO_FIXTURE_DIR)
+                    out += [(cwd, fixture), (f"~/{rel}", fixture)]
+                    break
+        out += [(h, root) for h in homes]
+        return sorted(dict(out).items(), key=lambda pt: -len(pt[0]))
+
+    def prepare_host_dirs(self) -> None:
+        """The documents root the prompt names (under a host home) exists in the sandbox, as it
+        does on the host: listing it or writing under it, as the prompt says to, works."""
+        docs = self.host.documents_root
+        if not docs:
+            return
+        mapped, used = self.unalias(docs)
+        if used:
+            path = Path(mapped)
+            if path == self.root or self.root in path.parents:
+                path.mkdir(parents=True, exist_ok=True)
+
+    def unalias(self, text: str) -> tuple[str, list[tuple[str, str]]]:
+        """*text* with each host spelling (``_build_aliases``) replaced by its sandbox path, and
+        the (spelling, path) pairs it used. The result is still checked like any other path."""
+        if self._alias_re is None or not text:
+            return text, []
+        table = dict(self._aliases)
+        used: list[tuple[str, str]] = []
+
+        def sub(m: re.Match[str]) -> str:
+            used.append((m.group(0), table[m.group(0)]))
+            return table[m.group(0)]
+
+        return self._alias_re.sub(sub, text), used
+
+    @staticmethod
+    def realias(text: str, used: list[tuple[str, str]]) -> str:
+        """*text* (a result) with the sandbox paths of *used* written back as the call spelled
+        them, so a call that named a host path reads a result in its own terms."""
+        seen: dict[str, str] = {}
+        for spelling, path in used:
+            seen.setdefault(path, spelling)
+        for path, spelling in sorted(seen.items(), key=lambda ps: -len(ps[0])):
+            text = re.sub(re.escape(path) + r"(?![\w.-])", lambda _m, s=spelling: s, text)
+        return text
+
+    def _rewrite_args(self, name: str, args: dict[str, Any]) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+        """The call's path arguments (and a bash command) with host spellings mapped into the
+        sandbox and, in a command, ``$HOME`` / ``$PWD`` / ``$PATH`` replaced by their values:
+        (the changed arguments, the aliases used). ``args`` is updated in place."""
+        keys = list(PATH_ARGS.get(name, ()))
+        if name == "glob":
+            keys.append("pattern")
+        changed: dict[str, Any] = {}
+        used: list[tuple[str, str]] = []
+        for key in keys:
+            v = args.get(key)
+            if isinstance(v, str) and v:
+                new, u = self.unalias(v)
+                if u:
+                    changed[key], used = new, used + u
+        if name == "bash" and isinstance(args.get("command"), str):
+            cmd = args["command"]
+            # $HOME reads as the home the prompt names when that home maps here (then the
+            # alias brings it back to the sandbox root), else as the sandbox root itself
+            home = next((p for p, t in self._aliases if t == str(self.root)), str(self.root))
+            values = {"HOME": home, "PATH": SANDBOX_PATH}
+            if not _CD_WORD.search(cmd):
+                try:
+                    cwd = changed.get("cwd") or args.get("cwd")
+                    values["PWD"] = str(self.confine(cwd) if cwd else self.root)
+                except SandboxRefusal:
+                    pass
+            cmd, nvars = expand_known_vars(cmd, values)
+            self.var_calls += bool(nvars)
+            cmd, u = self.unalias(cmd)
+            if nvars or u:
+                changed["command"], used = cmd, used + u
+        args.update(changed)
+        self.alias_calls += bool(used)
+        return changed, used
 
     # -- confinement -----------------------------------------------------------------
 
@@ -2933,7 +3120,13 @@ class SandboxEnv:
             out = "\n".join(f"{off + k + 1:>6}\t{ln}" for k, ln in enumerate(lines))
             return done("simulated", ToolResult(output=out or f"(no content in selected range for {args['path']})",
                                                 metadata={"sandbox_outcome": "simulated"}))
+        used: list[tuple[str, str]] = []
         try:
+            # a host path the system prompt names (its home, the runtime's working directory) is the
+            # same place here; $HOME / $PWD / $PATH are constants. Rewritten, then confined as usual.
+            changed, used = self._rewrite_args(name, args)
+            if changed and hasattr(arguments, "model_copy"):
+                arguments = arguments.model_copy(update=changed)
             self._confine_args(name, args)
             # ``~`` is the sandbox root here: hand the real tool the confined path, never
             # a ``~`` it would expand to the host's home
@@ -2953,9 +3146,11 @@ class SandboxEnv:
             else:
                 result = await tool.inner.execute(arguments, context)
         except SandboxRefusal as exc:
-            return done("refused", ToolResult(output=f"Refused: {exc}", is_error=True), str(exc))
+            return done("refused", ToolResult(output=self.realias(f"Refused: {exc}", used), is_error=True), str(exc))
         meta = getattr(result, "metadata", None) or {}
         outcome = meta.get("sandbox_outcome") or ("error" if result.is_error else "ok")
+        if used and isinstance(getattr(result, "output", None), str):
+            result = dataclasses.replace(result, output=self.realias(result.output, used))
         return done(outcome, result, str(meta.get("sandbox_profile") or ""))
 
     # -- bash ------------------------------------------------------------------------
@@ -3269,7 +3464,7 @@ class SandboxEnv:
         timeout."""
         tmp = self.root / ".tmp"
         tmp.mkdir(exist_ok=True)
-        env = {"PATH": "/usr/bin:/bin", "HOME": str(self.root), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+        env = {"PATH": SANDBOX_PATH, "HOME": str(self.root), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
                "TMPDIR": str(tmp), "TERM": "dumb", **_GIT_SANDBOX_ENV,
                # git never looks for a repository above the sandbox (a checkout around --sandbox-root)
                "GIT_CEILING_DIRECTORIES": str(self.root.parent)}
@@ -4957,6 +5152,10 @@ def _gym_gate_cls() -> type:
             self._gym_env = env
 
         def evaluate(self, tool_name: str, **kw: Any) -> Any:  # type: ignore[override]
+            # the gate rules on the path the call will reach: a host path the system prompt
+            # names is that place in the sandbox (``SandboxEnv.unalias``), as the tool will run it
+            if isinstance(kw.get("file_path"), str):
+                kw["file_path"] = self._gym_env.unalias(kw["file_path"])[0]
             decision = super().evaluate(tool_name, **kw)
             if not decision.allowed and not (decision.requires_confirmation and tool_name == "bash"):
                 tid = _CURRENT_CALL.get()
@@ -4989,7 +5188,9 @@ async def run_task(task: GenTask, settings: Settings, worker: int = 0) -> TaskOu
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-    env = SandboxEnv(root, task, jail=resolve_jail(settings.jail), git_dir=git_dir, hardened=settings.hardened_exec)
+    env = SandboxEnv(root, task, jail=resolve_jail(settings.jail), git_dir=git_dir, hardened=settings.hardened_exec,
+                     host=host_paths(settings.base_system_prompt))
+    env.prepare_host_dirs()
     registry = build_sandbox_registry(env)
     provider = teacher_provider(settings)
     # The local route's adapter for the model name, whichever provider serves it: a Max
@@ -5598,6 +5799,11 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
     }
     if out.pad is not None:
         record["compaction_pad"] = out.pad
+    if out.env.alias_calls:
+        # calls that named a host path from the system prompt, run at its place in the sandbox
+        record["host_path_calls"] = out.env.alias_calls
+    if out.env.var_calls:
+        record["known_var_calls"] = out.env.var_calls
     if out.pad_reasons:
         reasons += out.pad_reasons
     if out.error:

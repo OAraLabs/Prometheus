@@ -628,7 +628,8 @@ def test_hardened_env_routes_and_still_refuses_simulated_commands(tmp_path, monk
         assert res.is_error and res.output.startswith("Refused:"), cmd
     assert len(seen) == n
     # a single-line command without python still goes through the old checks (and their simulation)
-    res = _bash(env, "echo $HOME")
+    # ($HOME / $PWD / $PATH are constants of the sandbox and expand; any other variable is refused)
+    res = _bash(env, "echo $USER")
     assert res.is_error and "variables" in res.output and len(seen) == n
     assert not _bash(env, "hostname").is_error and len(seen) == n
 
