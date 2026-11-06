@@ -2502,6 +2502,11 @@ class Builder:
             return "max_payg_gym_not_max_derived"
         strict = verification_of(meta, strict=True, judge_models=self.judge_models, payg_judge=True,
                                  unjudged_verifiers=self.s.unjudged_verifiers)
+        if strict.basis == "judge_pending" and trace.kind == "extra":
+            # round 2: a Max call in a calibrated category waits for the calibrated judge like a local
+            # one; add() reads that verdict and runs the same strict check with it (no verdict, or a
+            # fail: excluded there), so it is not refused here before its verdict is looked up
+            return ""
         if strict.decision is not True:
             return "max_payg_gym_unverified:" + ("no_record" if strict.decision is None else strict.basis)
         return ""
@@ -2693,7 +2698,7 @@ class Builder:
                 self.exclude(trace, "unverified")
                 return
             label = record.basis
-        elif verdict == "pass":
+        elif verdict == "pass" and not pending:
             label = "judge-pass"
         elif record.decision:
             label = record.basis
@@ -3815,7 +3820,7 @@ def cmd_judge_pending(a: argparse.Namespace) -> int:
                     h_ex = (r.get("source") or {}).get("h_exact")
                     if r.get("status") == "ok" and h_ex:
                         done.add(str(h_ex))
-    paths = sorted(expand(a.traces), key=lambda x: x.name)
+    paths = sorted(expand(a.traces or R2_RECIPE["pool"]), key=lambda x: x.name)
     if len({x.name for x in paths}) != len(paths):
         print("error: trace file names must be unique (verdict keys are <file name>:<line>)", file=sys.stderr)
         return 2
@@ -3888,8 +3893,12 @@ def cmd_judge_pending(a: argparse.Namespace) -> int:
 #: The round-2 dataset recipe (operator Mon 2026-11-02 ~08:00 ET, DISTILL-OPEN-QUESTIONS):
 #: paths on the host that holds the generation pool. Every value can be overridden.
 R2_RECIPE: dict[str, Any] = {
-    # every round-2 run's traces, harvested into the pool (local and cross-host runs alike)
-    "pool": ["~/distill/phase2b/pool/qwen38-27b-gym.*r2*.traces.jsonl"],
+    # every round-2 run's traces, harvested into the pool (local and cross-host runs alike), and the
+    # round-2 Max teacher's (operator 2026-11-06: Token Plan Max in coding, error-recovery, tool-choice and
+    # long-context): gen_runner's harvest puts Max-derived rows under max-derived/, and their run directory
+    # names carry r2, so the round-1 Max runs there stay out
+    "pool": ["~/distill/phase2b/pool/qwen38-27b-gym.*r2*.traces.jsonl",
+             "~/distill/phase2b/pool/max-derived/max-tokenplan-gym.*r2*.traces.jsonl"],
     "pack": "~/distill/phase3/request_pack.json",
     "tokenizer_dir": "~/distill/models/qwen3.5-9b-tokenizer",
     "replay_from": "~/distill/phase3/build-v4b-r6-c70-max-derived",
@@ -4450,7 +4459,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                                                  "the v4b replay is Max-derived)")
     r2.add_argument("--dry-run", action="store_true", help="report only (report.json + round2-plan.json)")
     r2.add_argument("--print", action="store_true", help="print the build command line and run nothing")
-    r2.add_argument("--pool", action="append", help=f"round-2 trace globs (default {R2_RECIPE['pool'][0]})")
+    r2.add_argument("--pool", action="append",
+                    help=f"round-2 trace globs, in place of the defaults ({' and '.join(R2_RECIPE['pool'])})")
     r2.add_argument("--pack")
     r2.add_argument("--tokenizer-dir")
     r2.add_argument("--replay-from", help=f"default {R2_RECIPE['replay_from']}")
@@ -4465,8 +4475,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     r2.add_argument("build_args", nargs=argparse.REMAINDER, help="-- then more build options")
 
     jp = sub.add_parser("judge-pending", help="round 2: judge_pending rows -> a judge.py local-judge queue")
-    jp.add_argument("--traces", action="append", required=True,
-                    help="teacher_gen trace files (glob, repeatable): the SAME files build reads (--extra-traces)")
+    jp.add_argument("--traces", action="append",
+                    help="teacher_gen trace files (glob, repeatable): the SAME files build reads (--extra-traces); "
+                         f"default the round-2 recipe's pool ({' and '.join(R2_RECIPE['pool'])})")
     jp.add_argument("--calibration", required=True, help="the judge calibration report (calibration-report.json)")
     jp.add_argument("--workdir", required=True, help="judge.py's --workdir for the pass (queue + verdicts)")
     jp.add_argument("--done", action="append", default=[],

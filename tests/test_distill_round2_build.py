@@ -355,3 +355,83 @@ def test_outside_the_calibrated_domain_a_call_trains_on_its_deterministic_verifi
     a = build.parse_args(["judge-pending", "--traces", str(tmp_path / "o.jsonl"), "--calibration", str(cal),
                           "--workdir", str(tmp_path / "jp")])
     assert build.cmd_judge_pending(a) == 8
+
+
+# ── round-2 Max teacher rows (Token Plan, operator 2026-11-06) ────────────────
+
+
+def _max_r2(task: str, *, pending: bool, category: str = "coding") -> dict[str, Any]:
+    """A teacher_gen --teacher max-token-plan round-2 row: Max-derived, its self-judge info only."""
+    rec = r2_record("tool-success" if pending else "deterministic", checks=None if pending else ["recovery"])
+    rec["judge"].update(info_only={"verdict": "pass", "kind": "self-judge", "provider": "max-token-plan",
+                                   "served_model": "qwen3.8-max"})
+    meta: dict[str, Any] = dict(source="max-tokenplan-gym", max_derived=True,
+                                tags=["max-derived"], teacher="max-token-plan", round=2, run_id=f"run-{task}",
+                                target_area="coding" if pending else "error-recovery",
+                                call_result={"status": "success", "text": f"built {task}", "injected": False})
+    if pending:
+        rec["judge"].update(pending=True)
+        rec["judge_pending"] = True
+        meta.update(judge_scope="calibrated-pending", judge_pending=True)
+    else:
+        meta.update(judge_scope="uncalibrated-category")
+    return gym(task, "bash", {"command": f"make {task}"}, model="qwen3.8-max", category=category,
+               verification=rec, **meta)
+
+
+def _max_builder(tmp_path: Path, verdict_files: list[Path], cal: Path) -> Any:
+    b = _builder(tmp_path, verdict_files, cal)
+    b.s.allow_max_derived, b.s.max_derived_approval = True, "operator Q6b 2026-10-30"
+    b.s.unjudged_verifiers = build.UNJUDGED_VERIFIERS
+    return b
+
+
+def test_round2_max_rows_reach_the_recipe_and_wait_for_the_calibrated_judge(
+        tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    cal = _calibration(tmp_path)
+    pool = tmp_path / "pool"
+    (pool / "max-derived").mkdir(parents=True)
+    rows = [_max_r2("max" + word(t), pending=True) for t in range(3)] \
+        + [_max_r2("maxrec", pending=False, category="other")]
+    traces = write_jsonl(pool / "max-derived" / "max-tokenplan-gym.max-tokenplan-r2-x-max-derived.traces.jsonl", rows)
+    # a round-1 Max run's pool file (no r2 in its run name) stays out of the recipe
+    write_jsonl(pool / "max-derived" / "max-tokenplan-gym.max-tokenplan-max-derived.traces.jsonl", rows[:1])
+    local = write_jsonl(pool / "qwen38-27b-gym.local-r2-x.traces.jsonl", [_pending("loc" + word(0))])
+    globs = [str(pool / Path(p).relative_to("~/distill/phase2b/pool")) for p in build.R2_RECIPE["pool"]]
+    monkeypatch.setitem(build.R2_RECIPE, "pool", globs)
+    # the recipe reads both pools
+    a = build.parse_args(["round2", "--out", str(tmp_path / "r2-max-derived"), "--print"])
+    argv, _notes = build.round2_argv(a)
+    extra = [argv[i + 1] for i, x in enumerate(argv) if x == "--extra-traces"]
+    assert {Path(p).name for p in build.expand(extra)} == {traces.name, local.name}
+    # judge-pending's default is the recipe's pool: the Max coding calls are queued with the local one
+    work = tmp_path / "jp"
+    jp = build.parse_args(["judge-pending", "--calibration", str(cal), "--workdir", str(work)])
+    assert build.cmd_judge_pending(jp) == 0
+    items = read_jsonl(work / "judge-queue.jsonl")
+    assert sorted(it["meta"]["source"] for it in items) == ["max-tokenplan-gym"] * 3 + [GYM]
+    capsys.readouterr()
+    # no calibrated verdict yet: the Max calls wait (not refused as unverified), the recovery row trains
+    (tmp_path / "a").mkdir()
+    b = _max_builder(tmp_path / "a", [], cal)
+    feed(b, traces, "extra")
+    assert b.stats["excluded:judge_pending"] == 3
+    assert not any(k.startswith("excluded:max_payg_gym") for k in b.stats)
+    assert [(e.label, e.max_derived) for e in b.examples] == [("r2-deterministic", True)]
+    # the calibrated judge rules: 2 pass, 1 fail
+    mx = [it for it in items if it["meta"]["source"] == "max-tokenplan-gym"]
+    vfile = write_jsonl(work / "judge-sample.jsonl",
+                        [_verdict(mx[0], "pass"), _verdict(mx[1], "pass"), _verdict(mx[2], "fail")])
+    (tmp_path / "b").mkdir()
+    b = _max_builder(tmp_path / "b", [vfile], cal)
+    feed(b, traces, "extra")
+    assert sorted(e.label for e in b.examples) == ["r2-calibrated-judge"] * 2 + ["r2-deterministic"]
+    assert all(e.max_derived and e.source == "max-tokenplan-gym" for e in b.examples)
+    assert b.stats["excluded:judge_fail"] == 1
+    # a self-judge verdict alone never decides a pending Max call
+    (tmp_path / "c").mkdir()
+    selfv = write_jsonl(tmp_path / "self.jsonl", [_verdict(mx[0], "pass", judge_quant="IQ3_XXS",
+                                                           judge_host="mini-host", judge_sha256="c" * 64)])
+    b = _max_builder(tmp_path / "c", [selfv], cal)
+    feed(b, traces, "extra")
+    assert b.stats["excluded:judge_pending"] == 3 and b.stats["judge_pending_uncalibrated_verdict_ignored"] == 1

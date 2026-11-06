@@ -547,3 +547,41 @@ Append-only, times in ET.
   - Tue 11-10 is now a standard night (rotation entry 8; `round2.conf` backed up).
   - `distill-judge-slot-20261110` is armed as a persistent unit at 01:20.
   - Fri 11-13 comes next.
+
+## 2026-11-06 ~13:15 EST: round-2 Max generation started (four areas), Max rows wired into round 2
+- **Pause:** the coordinator moved it aside (`token-plan.PAUSE.lifted-20261106`, with a `.why` file). `tokenplan-preflight` returns rc 0 and there is no STOP file.
+- **Unit `max-r2-gen-20261106`** (`systemd-run --user`, started 12:59):
+  - Command: `teacher_gen.py run --teacher max-token-plan --concurrency 8 --tp-start-concurrency 4`, run from the staged round-2 code (eced49b).
+  - Out: `runs/max-tokenplan-r2-max4-max-derived`. Sandbox root: `/tmp/prometheus-teacher-gen-max-r2`.
+  - Limits: `--max-task-ctx 131072` and `--until 2026-11-10T09:00-05:00`. Nice 15, idle I/O.
+  - The name isn't `distill-*`, so the morning business restore and slot-enter leave it alone. It needs no GPU or port 8092 and runs through the night windows, with its own root and lock.
+- **Taskset `real-r2-max4.jsonl`:** 7,075 rows copied verbatim from the 14 round-2 tasksets, deduped by task hash.
+  - Areas: coding 524, error-recovery 1,080, tool-choice 83, long-context 5,388 (≤ 128K).
+  - Order: tasks with no kept row first (long-context untried, then tried without a keep), then re-attempts.
+  - The excluded-session check is clean.
+  - The steer file `steer-max4.json` sets injection and daily-agent to 0. The dry run through teacher_gen's loader shows only the four buckets.
+  - No `--skip-done-in` (see the 13:00 entry).
+- **First 127 tasks (0.26 h):** 1,299 Token Plan calls, all ok; no 429 and no error rows.
+
+  | Area | Tasks | Kept | Keep rate | Rows/h |
+  |---|---:|---:|---:|---:|
+  | coding | 26 | 12 | 0.46 | ~96 |
+  | error-recovery | 48 | 7 | 0.15 | ~100 |
+  | long-context | 41 | 1 | 0.02 | ~12 |
+  | tool-choice | 12 | 7 | 0.58 | ~60 |
+
+  - Long-context rejections are mostly `tool_error` (the known sandbox issue), then `iteration_cap`.
+  - Many kept rows are `reported_blocked` (the prompt lacks earlier context). The 15% class cap applies.
+  - Every row is `max-tokenplan-gym`, `max_derived: true`, `tags: ["max-derived"]`, `sandboxed`, bwrap.
+  - Calls in coding and sentinel/daemon are `judge_pending`. The Max self-judge is info only.
+- **Wiring (build.py):**
+  - `R2_RECIPE` `pool` adds `pool/max-derived/max-tokenplan-gym.*r2*.traces.jsonl`. Round-1 Max runs have no `r2` in their names, so they stay out.
+  - `judge-pending --traces` now defaults to the recipe's pool.
+  - **Bug fixed:** `payg_gym_refusal` refused every round-2 Max `judge_pending` row (`max_payg_gym_unverified:judge_pending`) before its calibrated verdict was looked up. It now defers those rows to the same strict check that runs with the verdict, so a pass trains as `r2-calibrated-judge`, and a fail or a missing verdict excludes the row.
+  - The host's `judge-slot.sh` gets the second `--traces` glob (backup `judge-slot.sh.bak-20261106-max`).
+  - gen_runner's nightly harvest already copies the run's rows to `pool/max-derived/`.
+- **Strict-check dry run on the host** (scratch copy of the code; the Max run's first 66 rows passed as a second `--pool`; scratch removed):
+  - 19 Max rows pass strict verification and 47 wait as `judge_pending`. None was refused as unverified.
+  - 14 Max rows were accepted and 5 dropped as duplicates.
+  - Every gate passes except train size: 2,478 = 1,487 new + 991 replay.
+- **To stage:** the build.py change reaches the host's round-2 code at the next `stage-code`. Don't restage while `max-r2-gen-20261106` runs from that tree. Until then, run `build.py round2` from a scratch copy, or pass both `--pool` globs.
