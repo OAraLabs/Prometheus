@@ -537,3 +537,13 @@ Append-only, times in ET.
   - Started 13:06 as `distill-max-bulk-20261106`, resuming `phase2-rejudge` (phase `2-judge-all`).
   - About 60/min at the starting concurrency of 4, so roughly 1–1.5 h.
   - The first 60 verdicts all parsed and all join `build.py --verdicts`.
+
+## 2026-11-06 ~13:20 EST: Max/Flash work under way; judge-night fix staged; next judge night armed
+- **Quota pause lifted:** the Oct 31 Token Plan pause (`insufficient_quota`, until 11-16) was lifted on the operator's word that the quota is back. It is kept as `token-plan.PAUSE.lifted-20261106` with a `.why` file. `spend.py tokenplan-preflight` returns rc 0 with no STOP, so the key is unchanged.
+- **Flash as judge:** 78.5% agreement with Max [72.3, 83.6], kappa 0.38, below the 90% bar. Max judges alone. Commits 728ada3 and dab4f0c; details in DISTILL-PHASE2-JUDGE.md.
+- **Max bulk judging:** `distill-max-bulk-20261106` is judging the 5,542 never-judged Max traces (coding 4,467, sentinel/daemon 667, other 408). None are injection or daily rows. Expected ~1–1.5 h.
+- **Judge-night fix (d544edb):** staged in `round2/bin`. tower-night now holds the 4090 teacher while a `distill-judge-slot-*` slot is due tonight or running.
+- **OQ20 default applied:**
+  - Tue 11-10 is now a standard night (rotation entry 8; `round2.conf` backed up).
+  - `distill-judge-slot-20261110` is armed as a persistent unit at 01:20.
+  - Fri 11-13 comes next.
