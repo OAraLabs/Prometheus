@@ -273,3 +273,74 @@ At 40% replay, 5,000 final train rows means 3,000 new train rows: injection ≤ 
   1. `build.py judge-pending --traces '<pool glob>' --calibration ~/distill/phase2-local-cal/calibration-report.json --workdir ~/distill/phase2-local-r2`;
   2. `judge.py --workdir ~/distill/phase2-local-r2 run --provider local` against the calibrated 4090 judge;
   3. rerun the recipe, which picks up `judge-sample.jsonl` by itself.
+
+## Long-context tool errors (round 2, added 2026-11-06)
+
+Every round-2 long-context attempt with a log on the 3090 Ti host: the local 27B runs (`local-r2-*`, 5 runs), the 4090 cross-host long-context nights (`r2-tower-*-iq3_xxs-*`, 2 runs; the UD-Q4 standard runs had no long-context tasks) and the Max run (`max-tokenplan-r2-max4-max-derived`, before long-context left it).
+
+**Method.** Status and reasons come from each run's `*.tasks.jsonl`. Per-call detail comes from the run's own gym telemetry (`work/telemetry.db`, never the live one): each task is matched to its turn by time window and call count (`turns` + `tool_calls`). 846 of 907 tasks matched, including 601 of the 634 `tool_error` tasks. Only error shapes and short paths/commands left the host.
+
+### Status
+
+| Teacher | Tasks | Kept | Keep rate | Rejected | Error |
+|---|---:|---:|---:|---:|---:|
+| local 27B (3090 Ti) | 560 | 57 | 10.2% | 479 | 24 (transport) |
+| 4090 IQ3 (cross-host) | 206 | 8 | 3.9% | 198 | 0 |
+| Max (Token Plan) | 141 | 15 | 10.6% | 125 | 1 |
+| **All** | **907** | **80** | **8.8%** | **802** | **25** |
+
+### Verification reasons (rejected tasks; one task can have several)
+
+| Reason | local 27B | 4090 | Max |
+|---|---:|---:|---:|
+| tool_error | 337 (70%) | 182 (92%) | 115 (92%) |
+| sandbox_refusal | 285 (59%) | 66 (33%) | 27 (22%) |
+| iteration_cap (24 calls) | 136 | 121 | 66 |
+| breaker_tripped | 21 | 8 | 2 |
+| output_limit | 10 | 7 | 3 |
+| empty_tool_args | 6 | 5 | 3 |
+| iteration_cap and nothing else | 25 | 8 | 4 |
+
+### Failed calls by tool and class
+
+2,965 failed calls in rejected tasks (local 1,712, 4090 843, Max 410). "Tasks" counts rejected tasks with at least one such call. Verdict: **model** = the teacher's mistake, correctly a failure; **fix** = the gym wrongly refuses a reasonable call; **parked** = python / multi-line, operator-parked (`--hardened-exec` stays off); **correct** = the sandbox's security boundary; **faithful** = the shipped runtime reports the same error.
+
+| Tool: class | Reason | local | 4090 | Max | Calls | Share | Tasks | Verdict | Examples (shape) |
+|---|---|---:|---:|---:|---:|---:|---:|---|---|
+| read_file: file not found, a path that never existed at any commit | tool_error | 552 | 664 | 274 | 1,490 | 50.3% | 541 | model | `Prometheus/tests/test_loop_manager.py`, `Prometheus/tests/test_wiki_query.py`, `Prometheus/prometheus/web/server.py` |
+| bash refused: python / uv / pytest | sandbox_refusal | 284 | 40 | 33 | 357 | 12.0% | 146 | parked | `cd ~/Prometheus && python -m pytest tests/…`, `python3 -c "import pytest; …"`, `uv run pytest …` |
+| bash refused: host-home path to the repo (`<host-home>/prometheus-deploy`, `<host-home>/Prometheus`) | sandbox_refusal | 151 | 27 | 0 | 178 | 6.0% | 137 | **fix** | `cd <host-home>/prometheus-deploy && git status --short`, `… && git log --oneline -8`, `cd <host-home>/Prometheus && grep …` |
+| web_search / web_fetch: offline (no results, 404) | tool_error | 88 | 2 | 16 | 106 | 3.6% | 32 | correct (no network) | `web_search(query)`, `web_fetch(url)` |
+| bash: exit ≠ 0 with no output (grep / which found nothing) | tool_error | 67 | 14 | 16 | 97 | 3.3% | 70 | faithful | `grep -i "<word>" Prometheus/tests/<file>.py`, `which python3` |
+| bash refused: host interpreter paths (python probing) | sandbox_refusal | 75 | 7 | 15 | 97 | 3.3% | 69 | parked | `ls /usr/bin/python*`, `ls <host-home>/.local/bin` |
+| bash refused: program not in the gym | sandbox_refusal | 64 | 9 | 16 | 89 | 3.0% | 67 | correct | `git check-ignore -v …`, `git checkout …`, `sqlite3 ~/.prometheus/…/*.db …` |
+| bash refused: multi-line command | sandbox_refusal | 58 | 9 | 3 | 70 | 2.4% | 61 | parked | `python3 -c "<multi-line script>"`, `cd <dir>⏎grep …` |
+| bash refused: the sandbox's parent (git dir, other workers) | sandbox_refusal | 51 | 9 | 5 | 65 | 2.2% | 53 | correct | `ls <sandbox-root>/w0`, `find <sandbox-root> -name …` |
+| bash: exit ≠ 0, missing path (ls / cd / head on a guess) | tool_error | 44 | 16 | 3 | 63 | 2.1% | 51 | model | `ls Prometheus/tests/test_<guess>.py`, `ls -la ~/.prometheus/AGENTS.md` |
+| bash refused: other host paths (`/`, `/etc`, `/proc`, `/mnt`) | sandbox_refusal | 47 | 9 | 6 | 62 | 2.1% | 47 | correct | `find / -name prometheus.yaml`, `ls -d /media/* /mnt/*` |
+| bash / write_file refused: host-home path to runtime files (the pack's documents root, `~/.prometheus`) | sandbox_refusal | 39 | 10 | 0 | 49 | 1.7% | 44 | **fix** (documents root) / model | `ls -la <host-home>/distill/…/documents/`, `cd <host-home> && grep -rn … Prometheus/` |
+| bash refused: network (gh, git fetch, off-host curl) | sandbox_refusal | 32 | 6 | 4 | 42 | 1.4% | 32 | correct | `gh pr list`, `git fetch origin --prune`, `curl` to a LAN address |
+| bash: exit ≠ 0, other | tool_error | 32 | 4 | 3 | 39 | 1.3% | 33 | model | `curl -s -m 5 http://127.0.0.1:<port>/api/…`, `git log -2 <missing path>` |
+| bash refused: other shell variables, `$( )`, for-loops | sandbox_refusal | 29 | 5 | 4 | 38 | 1.3% | 37 | grammar (left) | `for f in …; do …; done`, `$(command -v …)`, `$?` |
+| bash refused: only `$HOME` / `$PWD` / `$PATH` | sandbox_refusal | 27 | 4 | 4 | 35 | 1.2% | 31 | **fix** | `echo "$HOME"`, `ls -ld $HOME/.prometheus`, `echo $PATH && …` |
+| bash refused: other grammar (env assignment, subshell, `find -exec`) | sandbox_refusal | 18 | 3 | 6 | 27 | 0.9% | 24 | grammar (left) | `PYTHONPATH=src python3 -m pytest …`, `find tests -name … -exec grep …` |
+| edit_file: old_str not found / ambiguous | tool_error | 13 | 1 | 1 | 15 | 0.5% | 10 | model | `edit_file(path, old_str, new_str)` |
+| write_file: gate denied (outside the workspace) | tool_error | 10 | 2 | 1 | 13 | 0.4% | 10 | model / **fix** (4 calls to the documents root) | `write_file(<sandbox-root>/w0/out/…)`, `write_file(<host-home>/distill/…/documents/loops/…)` |
+| tool_search: no such tool | tool_error | 11 | 2 | 0 | 13 | 0.4% | 10 | model | `tool_search(query="run tests")` |
+| other (task_get / task_output / memory validation) | tool_error | 13 | 0 | 0 | 13 | 0.4% | 9 | model | `task_get(id)`, `memory(content, operation)` |
+| read_file: path is a directory | tool_error | 7 | 0 | 0 | 7 | 0.2% | 5 | model | `Prometheus/scripts/parity` |
+
+### What this says
+
+- **The top cause is the teacher's, not the gym's.**
+  - Half of all failed calls (1,490) are `read_file` on a file that does not exist in the fixture (27055dbf), on `main`, or anywhere in the history. 85% are under `tests/`.
+  - They are guesses at sibling test files next to the tests the turn has already read. 1,065 of them appear nowhere in the prompt, the context reads or the repo's text. A guessed read is in 258 / 174 / 109 of the local / 4090 / Max rejections.
+  - The gym is right to fail them, and the policy (`--max-natural-errors 0`) rejects a row even when the teacher recovers with a glob on its next call.
+- **The real gym-fidelity bug is the host home.** The request pack's system prompt was captured from the live runtime. It says the working directory is `<host-home>/prometheus-deploy` and names `~/Prometheus`, `~/.prometheus` and a documents root under `<host-home>`. The gym maps only `~` to the sandbox's HOME, so an absolute host-home path is refused as outside the workspace, and so is a `write_file` there.
+  - This affects 178 + 49 calls in 137 + 44 tasks, almost all from the local and 4090 27B (Max followed the gym's own working-directory line).
+  - `$HOME` / `$PWD` / `$PATH` in a command are refused outright, although their values are known constants.
+- **Upper bound for the fixes.** Count the rejected tasks whose every failed call is in a **fix** class and that have no other reason: local 20, 4090 1, Max 0. That takes the keep rate from 80 / 907 (8.8%) to at most 101 / 907 (11.1%). The local 27B goes from 10.2% to 13.8%. Max's long-context keep rate is not moved by any gym fix.
+- **Not fixed here, for the operator** (not gym fidelity):
+  - **Python and multi-line** (parked): 357 + 97 + 70 calls in 146 + 69 + 61 tasks.
+  - **The zero-natural-error policy:** tolerating a guessed-path `read_file` that the teacher recovered from would keep another 91 / 41 / 40 tasks (local / 4090 / Max), before the judge or any other check.
+  - **The 24-call long-context cap:** 136 / 121 / 66 rejections hit it, and 25 / 8 / 4 for that reason alone.
