@@ -153,12 +153,13 @@ def test_m4_pool(tmp_path: Path) -> None:
 def test_avail_joins_trace_index(tmp_path: Path) -> None:
     p = _write_cases(tmp_path, [_case("c1", "bash", {"command": "ls"}), _case("c2", "bash", {"command": "ls"})])
     ti = tmp_path / "ti.jsonl"
-    ti.write_text(json.dumps({"file": "golden_traces_1_2.jsonl", "ts": 1_700_000_000.0, "rowid": 7}) + "\n")
+    ti.write_text(json.dumps({"file": "golden_traces_1_2.jsonl", "ts": 1_700_000_000.0, "rowid": 7, "tool": "bash"}) + "\n")
     snap = tmp_path / "lcm.db"
     snap.write_bytes(b"x")
     res = gf.avail(gf.S().load_cases([p]), str(ti), None, str(snap))
     assert res["trace_index_join"] == {"golden|joined": 1, "golden|not_joined": 1}
     assert res["telemetry_rowid"] == {True: 1}
+    assert res["join_tool_matches"] == {True: 1}
     assert res["lcm_snapshot"]["exists"] is True and res["lcm_snapshot"]["bytes"] == 1
 
 

@@ -569,7 +569,7 @@ def avail(cases: list[Any], trace_index: str | None, store: str | None,
             for line in fh:
                 if line.strip():
                     r = json.loads(line)
-                    by_file[r["file"]].append({"ts": r.get("ts"), "rowid": r.get("rowid")})
+                    by_file[r["file"]].append({"ts": r.get("ts"), "rowid": r.get("rowid"), "tool": r.get("tool")})
     rng = store_range(store) if store else None
     if rng:
         out["store"] = {k: (time.strftime("%Y-%m-%d", time.gmtime(v)) if k != "commits" else v)
@@ -587,6 +587,8 @@ def avail(cases: list[Any], trace_index: str | None, store: str | None,
         C["trace_index_join"][f"{src}|{'joined' if row else 'not_joined'}"] += 1
         if row is None:
             continue
+        # the index is in file and line order: the joined row must be the case's own call
+        C["join_tool_matches"][row.get("tool") == (case.expect or {}).get("tool")] += 1
         C["telemetry_rowid"][row.get("rowid") is not None] += 1
         ts = row.get("ts")
         if ts is None:
