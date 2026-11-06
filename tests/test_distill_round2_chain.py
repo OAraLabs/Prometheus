@@ -264,6 +264,7 @@ class Fake:
         self.iq3 = True
         self.ab_jobs: list[dict[str, list[str]]] = []
         self.notes: list[list[str]] = []
+        self.slot: tuple[float, float] | None = None  # a judge slot here: (its timer fires, its service ends)
 
     def clock(self) -> float:
         return self.now
@@ -274,7 +275,19 @@ class Fake:
             f(self)
 
     def run(self, argv: list[str], timeout: float = 0, input: str | None = None, env: Any = None) -> Any:
-        return subprocess.CompletedProcess(argv, 0, "", "")
+        out = ""
+        if self.slot is not None:  # systemctl / date as the judge-slot units answer them
+            at, done = self.slot
+            timer = "active" if self.now < at else "inactive"
+            if argv[:3] == ["systemctl", "--user", "list-units"]:
+                svc = "active" if at <= self.now < done else "inactive"
+                out = (f"distill-judge-slot-x.service loaded {svc} running d\n"
+                       f"distill-judge-slot-x.timer loaded {timer} waiting d\n")
+            elif argv[:4] == ["systemctl", "--user", "show", "distill-judge-slot-x.timer"]:
+                out = f"ActiveState={timer}\nNextElapseUSecRealtime=" + ("at" if timer == "active" else "") + "\n"
+            elif argv[:2] == ["date", "-d"]:
+                out = f"{int(at)}\n"
+        return subprocess.CompletedProcess(argv, 0, out, "")
 
 
 def ctx(tmp_path: Path, fake: Fake, extra: str = "") -> R.Ctx:
@@ -470,6 +483,90 @@ def test_tower_night_waits_for_the_continuous_window_and_the_sunday_chain(tmp_pa
 def dict_ctx(cx: R.Ctx, **kw: str) -> R.Ctx:
     cx.c = dict(cx.c, **kw)
     return cx
+
+
+# ── a judge slot holds the 4090 teacher (2026-11-06: an early end at 01:17 left the 01:20 slot no judge) ──
+
+
+def dry_night(tmp_path: Path, dry_at: str, slot: tuple[str, str] | None,
+              extra: str = "") -> tuple[Fake, R.Ctx, list[float]]:
+    """A standard night (Fri 2026-11-06) whose remote generation runs dry at ``dry_at``; ``slot``: a judge slot's
+    timer and service end. Returns the fake, the context and when the 4090 end was run from here."""
+    fake = Fake("2026-11-06T01:12:00-05:00")
+    fake.slot = (t(slot[0]), t(slot[1])) if slot else None
+    cx = ctx(tmp_path, fake, extra)
+    cx.cmd = "tower-night"
+    ends: list[float] = []
+    real = cx.tower_run
+
+    def tower_run(what: str, args: list[str], wait_s: float) -> tuple[int, dict[str, Any]]:
+        if what == "end":
+            ends.append(fake.now)
+        return real(what, args, wait_s)
+
+    cx.tower_run = tower_run  # type: ignore[method-assign]
+
+    def runs_dry(f: Fake) -> None:
+        if f.now >= t(dry_at) and f.gen_starts:
+            f.units["r2-gen-tower-night-standard-1"] = "inactive"
+            f.progress = {"stop_reason": "nothing left to do"}
+
+    fake.on_sleep.append(runs_dry)
+    return fake, cx, ends
+
+
+def holds(fake: Fake) -> list[list[str]]:
+    return [n for n in fake.notes if "holding the teacher for the judge slot" in n[0]]
+
+
+def test_an_early_end_without_a_judge_slot_ends_the_teacher_at_once(tmp_path: Path) -> None:
+    fake, cx, ends = dry_night(tmp_path, "2026-11-06T01:17:00-05:00", None)
+    assert R.cmd_tower_night(cx) == 0
+    assert [w for w, _ in fake.tower_calls] == ["start", "end"]
+    assert ends == [t("2026-11-06T01:17:00-05:00")] and holds(fake) == []
+    st = cx.load_state("night.json")
+    assert st["phase"] == "done" and "nothing left" in st["why"] and "judge_hold" not in st
+
+
+def test_an_early_end_holds_the_teacher_for_tonights_judge_slot_then_releases_it(tmp_path: Path) -> None:
+    fake, cx, ends = dry_night(tmp_path, "2026-11-06T01:17:00-05:00",
+                               ("2026-11-06T01:20:00-05:00", "2026-11-06T03:40:00-05:00"))
+    assert R.cmd_tower_night(cx) == 0
+    assert [w for w, _ in fake.tower_calls] == ["start", "end"]
+    (end_at,) = ends
+    assert t("2026-11-06T03:40:00-05:00") <= end_at <= t("2026-11-06T03:41:00-05:00"), \
+        "held through the slot, released within a poll of its end (not at 06:22)"
+    (note,) = holds(fake)
+    assert len(note) == 1 and "distill-judge-slot-x.timer due 01:20" in note[0] and "06:22" in note[0]
+    hold = cx.load_state("night.json")["judge_hold"]
+    assert hold["outcome"] == "the judge slot finished" and hold["since"].startswith("2026-11-06T01:17")
+
+
+def test_a_judge_slot_still_running_at_the_nights_end_ends_with_the_night(tmp_path: Path) -> None:
+    fake, cx, ends = dry_night(tmp_path, "2026-11-06T01:17:00-05:00",
+                               ("2026-11-06T01:20:00-05:00", "2026-11-06T07:30:00-05:00"))
+    assert R.cmd_tower_night(cx) == 0
+    assert ends == [t("2026-11-06T06:22:00-05:00")], "the normal end, not the slot's"
+    assert cx.load_state("night.json")["judge_hold"]["outcome"].startswith("still running at 06:22")
+
+
+def test_a_judge_slot_that_already_finished_holds_nothing(tmp_path: Path) -> None:
+    fake, cx, ends = dry_night(tmp_path, "2026-11-06T04:00:00-05:00",
+                               ("2026-11-06T01:20:00-05:00", "2026-11-06T03:00:00-05:00"))
+    assert R.cmd_tower_night(cx) == 0
+    assert len(ends) == 1 and t("2026-11-06T04:00:00-05:00") <= ends[0] < t("2026-11-06T04:06:00-05:00")
+    assert holds(fake) == [] and "judge_hold" not in cx.load_state("night.json")
+
+
+def test_judge_slots_due_after_the_night_or_with_no_glob_hold_nothing(tmp_path: Path) -> None:
+    fake = Fake("2026-11-06T01:17:00-05:00")
+    fake.slot = (t("2026-11-07T01:20:00-05:00"), t("2026-11-07T03:00:00-05:00"))
+    cx = ctx(tmp_path, fake)
+    assert cx.judge_slots(t("2026-11-06T06:22:00-05:00")) == [], "tomorrow night's slot"
+    assert cx.judge_slots(t("2026-11-07T06:22:00-05:00")) == ["distill-judge-slot-x.timer due 01:20 EST"]
+    fake.now = t("2026-11-07T01:30:00-05:00")
+    assert cx.judge_slots(t("2026-11-07T06:22:00-05:00")) == ["distill-judge-slot-x.service running"]
+    assert dict_ctx(cx, R2_JUDGE_SLOT_GLOB="").judge_slots(t("2026-11-07T06:22:00-05:00")) == []
 
 
 def test_the_tower_script_parses() -> None:

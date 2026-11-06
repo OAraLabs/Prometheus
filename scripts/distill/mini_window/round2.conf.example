@@ -68,6 +68,11 @@ R2_TOWER_URL=http://tower-host:18094    # the teacher on the 4090's tailnet addr
 # R2_TOWER_TASKS_LONGCTX=~/distill/phase2b/tasksets/real-v4-r2-longctx.jsonl
 # R2_TOWER_TASKS_LONGCTX_FALLBACK=       # e.g. the standard taskset: one long slot still beats an idle GPU
 # R2_MINI_NIGHTLY=on
+# Judge slots on this host that need the 4090 teacher (a systemd unit glob, no suffix): before a night ends the
+# teacher (generation over early, or the night's end), one whose service runs or whose timer is due before
+# R2_TOWER_NIGHT_END holds it until the slot finishes (polled every R2_POLL_S), at the latest the night's end.
+# Empty: no hold.
+# R2_JUDGE_SLOT_GLOB=distill-judge-slot-*
 
 # ---- Heartbeat -------------------------------------------------------------------------------------
 # R2_START=2026-11-01T01:30:00-04:00

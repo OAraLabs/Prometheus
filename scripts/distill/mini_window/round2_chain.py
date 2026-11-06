@@ -34,7 +34,8 @@ The 4090 (``tower/round2_tower.sh`` there; this host may ssh to it, never the ot
   entry of ``R2_TOWER_NIGHT_ROTATION`` (default ``longctx standard``: Tue 2026-11-03 longctx, Wed standard, ...):
   ``longctx`` = one slot at the measured max with ``R2_TOWER_TASKS_LONGCTX``, ``standard`` = 4x32768 with
   ``R2_TOWER_TASKS``, ``split`` = longctx for the first half of the night, then a swap (business stays down) to
-  standard.
+  standard. Before it ends the teacher, a judge slot here (``R2_JUDGE_SLOT_GLOB``: its service running, or its
+  timer due before the night's end) holds it until the slot finishes or the night's end (operator 2026-11-06).
 * The serve profile (``R2_TOWER_PROFILE``): ``standard`` (``R2_STANDARD_PROFILE``, 4x32768), ``longctx``
   (one slot at the capacity block's measured max stable context for this host, from ``R2_TEACHER_CTX_JSON``,
   capped at ``R2_LONGCTX_CAP``; the standard profile when the file is missing or holds no such value) or an
@@ -154,6 +155,9 @@ R2_DEFAULTS: dict[str, str] = {
     "R2_TOWER_ROTATION_START": "2026-11-03",
     "R2_TOWER_TASKS_LONGCTX": "~/distill/phase2b/tasksets/real-v4-r2-longctx.jsonl",
     "R2_TOWER_TASKS_LONGCTX_FALLBACK": "",          # a longctx part's fallbacks (one slot: still better than idle)
+    # judge slots on this host that need the 4090 teacher (systemd unit glob, no suffix): a night that ends
+    # early holds the teacher while one runs or one's timer is due before the night's end; empty: no hold
+    "R2_JUDGE_SLOT_GLOB": "distill-judge-slot-*",
     "R2_MINI_NIGHTLY": "on",
     "R2_MINI_NIGHTLY_FROM": "2026-11-01T18:00:00-05:00",
     # the 3090 Ti teacher's GGUF: no nightly window start while it is missing (a re-download, say)
@@ -680,6 +684,28 @@ class Ctx:
             return float(cp.stdout.strip())
         except ValueError:
             return None
+
+    def judge_slots(self, until: float) -> list[str]:
+        """The judge slots (``R2_JUDGE_SLOT_GLOB`` units here) that need the 4090 teacher before ``until``: a
+        service running now, or a timer due by then. Read-only; empty when none (or the glob is empty)."""
+        pat = self.c.get("R2_JUDGE_SLOT_GLOB", "").strip()
+        if not pat:
+            return []
+        cp = self.run(["systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "--no-pager",
+                       f"{pat}.service", f"{pat}.timer"], timeout=30)
+        busy: list[str] = []
+        for line in (cp.stdout or "").split("\n"):
+            parts = [p for p in line.split() if p not in ("●", "*")]
+            if len(parts) < 3:
+                continue
+            unit, active = parts[0], parts[2]
+            if unit.endswith(".service") and active in ACTIVE:
+                busy.append(f"{unit} running")
+            elif unit.endswith(".timer"):
+                nxt = self.timer_next(unit[: -len(".timer")])
+                if nxt is not None and nxt <= until:
+                    busy.append(f"{unit} due {et(nxt, '%H:%M %Z')}")
+        return busy
 
     def notify(self, lines: list[str], n: int = 5) -> int | None:
         """Send ``lines`` (at most ``n``); the notifier's exit code, or None on a dry run."""
@@ -1225,6 +1251,31 @@ def gen_close(cx: Ctx, st: dict[str, Any], why: str) -> None:
     st["tower_end"] = tw.get("end_last", "")
 
 
+def hold_for_judge(cx: Ctx, st: dict[str, Any], name: str, end: float, why: str) -> None:
+    """Operator 2026-11-06: the 4090 teacher stays up until the judge slot finishes. Before a night ends the
+    teacher (early, or at its end), wait while a judge slot runs here or its timer is due before ``end``;
+    polling every R2_POLL_S, until the slot is over or ``end``, whichever comes first. No slot: no wait."""
+    busy = cx.judge_slots(end)
+    if not busy or cx.now() >= end:
+        return
+    line = (f"4090 night: holding the teacher for the judge slot ({', '.join(busy)}) until it finishes, at the "
+            f"latest {et(end, '%H:%M %Z')} (generation: {why})")
+    cx.log(line)
+    cx.notify([line], 1)
+    st["judge_hold"] = {"since": iso(cx.now()), "slots": busy}
+    cx.save_state(name, st)
+    poll = float(cx.c["R2_POLL_S"])
+    while cx.now() < end:
+        cx.sleep(min(poll, max(5.0, end - cx.now())))
+        busy = cx.judge_slots(end)
+        if not busy:
+            break
+    outcome = f"still running at {et(end, '%H:%M %Z')}" if busy else "the judge slot finished"
+    cx.log(f"judge hold over: {outcome}; ending the teacher now")
+    st["judge_hold"].update(ended=iso(cx.now()), outcome=outcome)
+    cx.save_state(name, st)
+
+
 def sunday_generate(cx: Ctx, st: dict[str, Any], name: str, gen_until: float, end: float) -> int:
     cx.c = served(cx.c, (st.get("tower") or {}).get("model"))
     if not st.get("gen_unit") or cx.unit_state(st["gen_unit"]) not in ACTIVE:
@@ -1343,7 +1394,13 @@ def cmd_tower_night(cx: Ctx) -> int:
         finally:
             cx.c = c
         if not cx.execute:
+            busy = cx.judge_slots(end)
+            cx.log("[dry run] judge slot: " + (
+                f"{', '.join(busy)}: an early end holds the teacher until it finishes (at the latest {et(end)})"
+                if busy else f"none due by {et(end)} ({c['R2_JUDGE_SLOT_GLOB'] or 'R2_JUDGE_SLOT_GLOB empty'}): "
+                "an early end ends the teacher at once"))
             return 0
+        hold_for_judge(cx, st, "night.json", end, why)
         gen_close(cx, st, why)
         st.update(phase="done", why=why, ended_at=iso(cx.now()))
         cx.save_state("night.json", st)
