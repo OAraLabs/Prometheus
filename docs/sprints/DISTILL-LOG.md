@@ -474,3 +474,6 @@ Append-only, times in ET.
   - **Round-2 backlog:** 105/105 ruled. The calibrated judge has now ruled all 810 items in the queue.
   - **Acceptable-tools leftovers:** 489/495 ruled; the gate still fails, as expected.
   - **4090:** the teacher was idle (0% GPU, no gen tasks), so I ended it with `round2_tower.sh end`. Business was restored and `tower_verify` passed at 03:17 (4 conns).
+- **07:37:**
+  - **Mini:** local generation ran through both eval pauses. The pool reached 4,061. At 06:40 Saluki was back (53 tok/s).
+  - **4090:** `tower_verify` passed at 06:40. I reset `flywheel-window-start.service`'s failed state, left over from the 01:20 abort (rc 1, business restored). The timer is still armed.
