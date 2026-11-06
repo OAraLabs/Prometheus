@@ -470,3 +470,7 @@ Append-only, times in ET.
   - The queue is 810 items, 705 of them ruled Wed, so 105 remain, plus the 15 acceptable-tools leftovers.
 - **Design bug, to fix:** the early end ("remote generation has nothing left") ignores a judge slot that needs the teacher until 04:50. The fix: on a judge night, keep the teacher until the judge slot finishes.
 - **To check:** Wednesday's 705 verdicts may not be reaching `build.py round2`, which reported `judge_pending_backlog 790` on Wed. Check `judge_pending_uncalibrated_verdict_ignored` and the verdict join by daylight.
+- **03:17:** the judge rerun finished at 02:28.
+  - **Round-2 backlog:** 105/105 ruled. The calibrated judge has now ruled all 810 items in the queue.
+  - **Acceptable-tools leftovers:** 489/495 ruled; the gate still fails, as expected.
+  - **4090:** the teacher was idle (0% GPU, no gen tasks), so I ended it with `round2_tower.sh end`. Business was restored and `tower_verify` passed at 03:17 (4 conns).
