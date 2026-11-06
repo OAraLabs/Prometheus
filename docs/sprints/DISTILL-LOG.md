@@ -485,3 +485,28 @@ Append-only, times in ET.
   - The summary's `judge_pending_backlog 812` counts rows that ever needed the judge, not unresolved ones, so Wednesday's "790" was not a backlog either.
 - **Recount:** 2,435 train (1,461 new + 974 replay) and 57 val, up from 1,885. That still fails the 3,500 size gate, so the OQ16 trigger isn't met.
 - **Still to do:** stop tower-night's early end from killing the teacher on a judge night. Needed before the next standard night (OQ20 default: Tue).
+
+## 2026-11-06 ~13:00 EST: round-2 Max generation (4 areas) NOT started: the Token Plan quota pause stands
+- **Operator order (today):** Max generation on the Token Plan in coding, error-recovery, tool-choice and long-context only; no Qwen spend on injection-resistance or daily-agent.
+- **Blocker:** `~/distill/token-plan.PAUSE` (written 2026-10-31 12:04 UTC on `429 insufficient_quota`) holds every Token Plan call until **2026-11-16 16:00 UTC**. `spend.py tokenplan-preflight` refuses while it stands, and so would teacher_gen's first call (exit 7). I did not clear it. No Max call was made.
+- **Checks (no call made):**
+  - No `spend-ledger.STOP`, no runs `STOP`. The last Token Plan ledger row is 2026-10-31 12:04 UTC.
+  - `spend.py which-key` = `token-plan` (presence only; `QWEN_PAYG_KEY` absent). The env file changed on 2026-11-04. If the upgraded plan issued a new key, the first preflight or call writes a key-change STOP by design; `tokenplan-accept-key` is the operator's step.
+  - The nightly units can't start a Max branch: `GEN_TOKEN_PLAN=off` in every gen conf on the host.
+- **Supply in the four areas** (all round-2 tasksets, deduped by task hash, against every round-2 ledger):
+
+  | Area | Tasks | With a kept row | Tried, none kept | Untried |
+  |---|---:|---:|---:|---:|
+  | coding | 524 | 118 | 406 | 0 |
+  | error-recovery | 1,080 | 88 | 992 | 0 |
+  | tool-choice | 83 | 5 | 78 | 0 |
+  | long-context | 6,748 | 65 | 676 | 6,007 |
+
+  Long-context tasks without a kept row: 3,214 need ≤ 64K and 2,111 need 64–128K.
+- **Plan once the pause is lifted:**
+  - **Runner:** a standalone `teacher_gen.py run --teacher max-token-plan` as a `systemd-run --user` unit. gen_runner's Max branch can't serve here: it runs only inside a local window, after a Max Phase 2 judge, on the window's taskset.
+  - **Areas:** a Max-only taskset holding only the four areas, ordered with no-kept-row tasks first, plus its own steer file with injection and daily-agent at 0. R2Scheduler never picks a bucket whose share is 0.
+  - **Dedup:** no `--skip-done-in` on the local ledgers. It skips rejected tasks too, which would leave Max no coding, error-recovery or tool-choice tasks. Max's own ledger resumes itself, and build.py's prompt + call dedupe handles any identical rows.
+  - **Isolation:** its own out dir (`runs/max-tokenplan-r2-max-derived`), sandbox root and teacher_gen root lock. It makes no GPU or 8092 calls, so it can run through the 01:05–06:40 window, niced.
+  - **Context:** `--max-task-ctx 131072`, the gym's largest bucket and the 4090 long-context cap. A paid teacher has no cap by default. QLoRA trains to 49,152.
+- **Before `build.py round2` can see the rows:** harvest puts them in `pool/max-derived/max-tokenplan-gym.*`, which the recipe's default `--pool` (local 27B glob) doesn't read. Max coding rows also need the judge-pending export to include that glob. A round-2 Max row hasn't yet been run through `payg_gym_refusal`'s strict check.
