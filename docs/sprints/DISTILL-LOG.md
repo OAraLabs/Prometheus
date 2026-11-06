@@ -674,3 +674,12 @@ Append-only, times in ET.
   - **(a′) Adding `max-tokenplan-gym` as a train source:** refused by build.py: "`--train-sources may not name Max: Max-derived rows never train`" (an OQ6-era guard). Q6b lets Max-derived rows train, tagged and private. Golden Max traces pass that way through `--allow-max-derived`, but round-2 Max rows have no such path. **Needs the operator: approve round-2 Max rows training under Q6b.**
   - **(b) Recipe + Max-judged golden traces** (no `--no-golden`, plus the phase2 and phase2-rejudge verdicts): **9,656 train / 283 val** (5,904 max-golden + 3,067 27B-gym + replay). It passes the size gate but fails the verdict gate: 1,577 verdicts are unmatched (497 are on excluded sessions; the rest still to explain). The mix would be dominated by Max coding traces. **Needs the operator** before the recipe changes.
 - **Floor date for (a):** it grew about 275 rows/day this week (1,885 on Wed → 2,435 on Fri). At that rate, 3,500 lands around Nov 10, but local supply is thinning. Training is **not** scheduled.
+
+## 2026-11-06 16:37 EST: check-in, round-2 code restaged with the long-context gym fix
+- **Hosts:** OK (Saluki 200, `tower_verify` PASS).
+- **Max judging unit:** marked failed only because 19 replies stayed unparseable after retries; the rest landed. Failed state reset.
+- **`max-r2-gen3`** ended with `no_tasks` (exit 0): coding, error-recovery and tool-choice are exhausted.
+- **Restage:** `~/distill/round2/code` restaged at 3e9e9cc, bringing the long-context gym fix 4e0add4 and build.py 19373a4. The backup is `code.bak-eced49b-20261106` (and `code.prev`).
+  - The `gen_local.sh run` dry run is clean.
+  - Tonight's 01:05 local run is the live test of the gym fix; the baseline is local long-context keep 10.2%, and the replay estimate is 13.4%.
+- **Long-context Max resuming** on the fixed gym, as ordered: unit `max-r2-genlc-20261106`. Its rows can't train until the round-2 Max train-source guard is lifted (operator decision pending).
