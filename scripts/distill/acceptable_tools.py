@@ -8,6 +8,8 @@
         [--annotation-out <evalsets>/eval-tools.acceptable-tools.json]
     PYTHONPATH=src python scripts/distill/judge.py --workdir <dir>/judge run --provider local \\
         --judge-url http://<tailnet host>:<port> --judge-key-file <0600 file> --view tool-choice --concurrency 1
+    PYTHONPATH=src python scripts/distill/judge.py --workdir <dir>/judge run --provider token-plan \
+        --view tool-choice        # or Max as the judge (Token Plan): everything built is then max-derived
     PYTHONPATH=src python scripts/distill/acceptable_tools.py finish --work <dir>
     PYTHONPATH=src python scripts/distill/acceptable_tools.py night --work <dir> --judge-url ... \\
         --judge-key-file ... --until 04:55 [--execute]
@@ -46,6 +48,10 @@ The rule (decided per case, from the stored first calls of every scored model)
   counts.
 * The judge route is used only after the view passes its agreement check (below); a view that fails it
   leaves every judge-only tool ``undecided`` (``--accept-view-anyway`` overrides, recorded).
+* The judge is the local 27B or Max on the Token Plan (``judge.py run --provider token-plan``), never both in
+  one work dir (``finish`` refuses a mix: one work dir per judge). With Max as the judge the annotation, the
+  agreement and the report are tagged ``max_derived`` / ``tags: ["max-derived"]`` and stay private; the copy
+  beside the eval set (``--annotation-out``) is written only to a name that carries ``max-derived``.
 
 The judge view's agreement check
 --------------------------------
@@ -126,6 +132,8 @@ SECTION_BEGIN = "<!-- acceptable-tools:begin -->"
 SECTION_END = "<!-- acceptable-tools:end -->"
 
 ACCEPTABLE, REJECTED, UNDECIDED, REFERENCE = "acceptable", "rejected", "undecided", "reference"
+#: Built from Max's rulings: private, never published or trained on without the operator's recorded approval.
+MAX_DERIVED_TAG = "max-derived"
 OUTCOME_SUPPORTS = "supports"
 
 
@@ -469,8 +477,8 @@ def judge_rulings(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             continue
         out[r["id"]] = {"tool_acceptable": tool_acceptable(r["rubric"]),
                         "call_acceptable": r.get("verdict") == "pass", "rubric": r["rubric"],
-                        "model": r.get("model"), "judge_quant": r.get("judge_quant"),
-                        "judge_sha256": r.get("judge_sha256")}
+                        "model": r.get("model"), "provider": r.get("provider"),
+                        "judge_quant": r.get("judge_quant"), "judge_sha256": r.get("judge_sha256")}
     return out
 
 
@@ -478,9 +486,14 @@ def judge_load(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """What the judge pass took from the server it shared with that night's generation: calls (every row,
     errors included), tokens, the sum of request times (slot-seconds at most) and the first/last row time."""
     ts = sorted(str(r["ts"]) for r in rows if r.get("ts"))
+    tin = sum(int(r.get("input_tokens") or 0) for r in rows)
+    tout = sum(int(r.get("output_tokens") or 0) for r in rows)
+    answered = sum(1 for r in rows if r.get("status") in ("ok", "unparseable"))  # replies that carry usage
     return {"rows": len(rows), "ok": sum(1 for r in rows if r.get("status") == "ok"),
-            "input_tokens": sum(int(r.get("input_tokens") or 0) for r in rows),
-            "output_tokens": sum(int(r.get("output_tokens") or 0) for r in rows),
+            "input_tokens": tin, "output_tokens": tout,
+            "cached_input_tokens": sum(int(r.get("cached_input_tokens") or 0) for r in rows),
+            "mean_input_tokens": round(tin / answered) if answered else None,
+            "mean_output_tokens": round(tout / answered) if answered else None,
             "request_seconds": round(sum(float(r.get("elapsed_s") or 0.0) for r in rows), 1),
             "first": ts[0] if ts else None, "last": ts[-1] if ts else None}
 
@@ -715,8 +728,9 @@ def render_report(rep: dict[str, Any]) -> str:
              "| Wrong but acceptable | Truly wrong | Undecided | New, upper bound |",
              "|---|---|---|---|---|---|---|---|"]
     for label, m in rep["models"].items():
+        new = _pct(m["new_wrong_tool"]) if partial else f"**{_pct(m['new_wrong_tool'])}**"  # a bound is no result
         lines.append(f"| {rep['display'].get(label, label)} | {m['scored']} | {_pct(m['old_wrong_tool'])} "
-                     f"| **{_pct(m['new_wrong_tool'])}** | {m['wrong_but_acceptable']} | {m['truly_wrong']} "
+                     f"| {new} | {m['wrong_but_acceptable']} | {m['truly_wrong']} "
                      f"| {m['undecided']} | {_pct(m['new_wrong_tool_upper'], counts=False)} |")
     lines += ["", "| Model | Admitted by outcome | by judge | by both | Own call acceptable |", "|---|---|---|---|---|"]
     for label, m in rep["models"].items():
@@ -730,10 +744,11 @@ def render_report(rep: dict[str, Any]) -> str:
             od, oci = _delta(p["old"])
             nd, nci = _delta(p["new"])
             o, n = p["old"] or {}, p["new"] or {}
+            nd = nd if partial else f"**{nd}**"
             lines.append(f"| {rep['display'].get(p['candidate'], p['candidate'])} vs "
                          f"{rep['display'].get(p['base'], p['base'])} "
                          f"| {od} ({o.get('base_rate', 0):.1f} → {o.get('candidate_rate', 0):.1f}) | {oci} "
-                         f"| **{nd}** ({n.get('base_rate', 0):.1f} → {n.get('candidate_rate', 0):.1f}) | {nci} |")
+                         f"| {nd} ({n.get('base_rate', 0):.1f} → {n.get('candidate_rate', 0):.1f}) | {nci} |")
     return "\n".join(lines) + "\n"
 
 
@@ -742,6 +757,32 @@ def _agree_line(a: dict[str, Any], key: str) -> str:
     if not r.get("n"):
         return "not judged yet"
     return f"{r['k']}/{r['n']} = {_pct(r, counts=False)}"
+
+
+LOCAL_JUDGE_TEXT = "the calibrated judge (4090 Qwen3.8-27B UD-Q4_K_XL, temperature 0, thinking off)"
+
+
+def judge_text(rep: dict[str, Any]) -> str:
+    """Who judged, for the section: Max on the Token Plan or the local 27B (a report from before the judge was
+    recorded is the local 27B, the only judge then)."""
+    if not rep.get("max_derived"):
+        return LOCAL_JUDGE_TEXT
+    models = sorted({str(j.get("model")) for j in rep.get("judge") or [] if j.get("model")}) or ["Max"]
+    return f"Qwen Max (`{'`, `'.join(models)}`, Token Plan; temperature 0, thinking off)"
+
+
+def load_text(rep: dict[str, Any]) -> str:
+    jl = rep.get("judge_load", {})
+    span = f"({jl.get('first') or '?'} to {jl.get('last') or '?'})"
+    if rep.get("max_derived"):
+        return (f"**Judge cost.** {jl.get('rows', 0)} requests to Max on the Token Plan ($0 per call), "
+                f"{jl.get('input_tokens', 0):,} prompt ({jl.get('cached_input_tokens', 0):,} cached) and "
+                f"{jl.get('output_tokens', 0):,} output tokens: a mean of {jl.get('mean_input_tokens') or 0:,} in "
+                f"and {jl.get('mean_output_tokens') or 0:,} out per item {span}.")
+    return ("**Load on the shared server.** The judge pass ran beside that night's generation on the same 4x32768 "
+            f"server: {jl.get('rows', 0)} requests, {jl.get('input_tokens', 0):,} prompt and "
+            f"{jl.get('output_tokens', 0):,} output tokens, {jl.get('request_seconds', 0) / 3600:.2f} slot-hours "
+            f"of request time {span}.")
 
 
 def render_section(rep: dict[str, Any], *, date: str) -> str:
@@ -769,7 +810,7 @@ def render_section(rep: dict[str, Any], *, date: str) -> str:
         "- **outcome:** the gym ran both that call and Max's reference (`bash` / `read_file`, arg_equiv's "
         "execution tier, both snapshots, the fixture run twice), both exited 0 with no workspace effect, and the "
         "call's output contains the reference's in both snapshots;",
-        "- **judge:** the calibrated judge (4090 Qwen3.8-27B UD-Q4_K_XL, temperature 0, thinking off) in a new "
+        f"- **judge:** {judge_text(rep)} in a new "
         "tool-choice view (the case's full context and offered tools, one candidate call: \"is this an "
         "acceptable next step here?\") scored right_tool 2 and neither sensible_order nor task_progress 0. "
         "Argument scores are recorded but don't decide tool choice.",
@@ -812,17 +853,15 @@ def render_section(rep: dict[str, Any], *, date: str) -> str:
         "|---|---|---|---|",
         *[f"| {p['expected']} | {p['tool']} | {p['decision']} | {p['n']} |" for p in s["pairs"][:12]],
         "",
-        "**Load on the shared server.** The judge pass ran beside that night's generation on the same 4x32768 "
-        f"server: {rep.get('judge_load', {}).get('rows', 0)} requests, "
-        f"{rep.get('judge_load', {}).get('input_tokens', 0):,} prompt and "
-        f"{rep.get('judge_load', {}).get('output_tokens', 0):,} output tokens, "
-        f"{rep.get('judge_load', {}).get('request_seconds', 0) / 3600:.2f} slot-hours of request time "
-        f"({rep.get('judge_load', {}).get('first') or '?'} to {rep.get('judge_load', {}).get('last') or '?'}).",
+        load_text(rep),
         "",
-        f"Sources: `~/distill/acceptable-tools/` on the 3090 Ti host (`report.json`, `agreement.json`, "
-        f"`acceptable-tools.json`: ids, tool names and verdicts only; the judge queue stays there). The annotation "
-        f"is also beside the eval set the runs used (`phase3/build-v2/eval-tools.acceptable-tools.json`). "
-        f"Cases sha256 `{rep['cases_sha256'][:16]}`.",
+        f"Sources: `~/distill/{rep.get('work_name') or 'acceptable-tools'}/` on the 3090 Ti host (`report.json`, "
+        f"`agreement.json`, `acceptable-tools.json`: ids, tool names and verdicts only; the judge queue stays "
+        f"there)"
+        + ("; tagged max-derived, private" if rep.get("max_derived") else "") + ". "
+        + (f"The annotation is also beside the eval set the runs used (`phase3/build-v2/{rep['annotation_copy']}`). "
+           if rep.get("annotation_copy") else "")
+        + f"Cases sha256 `{rep['cases_sha256'][:16]}`.",
     ]
     return "\n".join(head + body) + "\n"
 
@@ -938,6 +977,19 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     return 0
 
 
+def annotation_copy(path: str | None, *, max_derived: bool) -> Path | None:
+    """Where the annotation is copied beside the eval set, if anywhere: a max-derived one only to a name that
+    says so (it never replaces the local judge's copy)."""
+    if not path:
+        return None
+    out = Path(path).expanduser()
+    if max_derived and MAX_DERIVED_TAG not in out.name:
+        print(f"warning: not copying a max-derived annotation to {out.name} (its name lacks {MAX_DERIVED_TAG!r})",
+              file=sys.stderr)
+        return None
+    return out
+
+
 def finish(work: Path, *, accept_view_anyway: bool = False, date: str | None = None) -> dict[str, Any]:
     """build + report + section from what is in *work* now (resumable: run again after more verdicts)."""
     j = J()
@@ -955,27 +1007,40 @@ def finish(work: Path, *, accept_view_anyway: bool = False, date: str | None = N
     categories = {c.id: (c.raw.get("meta") or {}).get("category") or "?" for c in cases}
     agree = agreement(queue, rulings, categories)
     judge_ok = agree["check"] == "pass" or accept_view_anyway
-    judges = sorted({(r.get("model"), r.get("judge_quant"), r.get("judge_sha256")) for r in rulings.values()},
-                    key=str)
+    judges = sorted({(r.get("model"), r.get("judge_quant"), r.get("judge_sha256"), r.get("provider"))
+                     for r in rulings.values()}, key=str)
+    providers = {r.get("provider") for r in judge_rows  # every ok row, not only the latest per item
+                 if r.get("status") == "ok" and r.get("view") == j.TOOL_CHOICE_VIEW}
+    max_derived = bool(providers & j.MAX_PROVIDERS)
+    if max_derived and len(providers) > 1:
+        raise SystemExit(f"{work}: rulings from more than one judge ({', '.join(sorted(map(str, providers)))}): "
+                         "one work dir per judge (copy prepare.json, candidates.json and the queue to a new one)")
     provenance = {"cases_file": Path(prep["cases"]).name, "cases_file_sha256": prep["cases_file_sha256"],
                   "cases_sha256": prep["cases_sha256"],
                   "models": {k: {"sha256": v["sha256"], "scored": v["scored"]} for k, v in prep["models"].items()},
-                  "judge": [{"model": m, "quant": q, "sha256": s} for m, q, s in judges],
+                  "judge": [{"model": m, "quant": q, "sha256": s, "provider": pv} for m, q, s, pv in judges],
+                  "max_derived": max_derived, **({"tags": [MAX_DERIVED_TAG]} if max_derived else {}),
                   "judge_view": j.TOOL_CHOICE_VIEW, "view_check": agree["check"],
                   "accept_view_anyway": bool(accept_view_anyway),
                   "built": datetime.now(ET).isoformat(timespec="seconds")}
     ann, per_call = build_annotation(cases, candidates, outcomes, rulings, judge_ok=judge_ok, provenance=provenance)
     write_json(work / ANNOTATION_FILE, ann)
+    if max_derived:
+        agree = {**agree, "max_derived": True, "tags": [MAX_DERIVED_TAG]}
     write_json(work / AGREEMENT_FILE, agree)
-    if prep.get("annotation_out") and agree["check"] != "incomplete":
+    copy = annotation_copy(prep.get("annotation_out"), max_derived=max_derived)
+    if copy and agree["check"] != "incomplete":
         # beside the eval set only once the judge has ruled (an all-undecided set would read as "no wrong tools")
-        write_json(Path(prep["annotation_out"]).expanduser(), ann)
+        write_json(copy, ann)
     models = {label: model_report(cases, firsts, ann, per_call) for label, firsts in per_model.items()}
     pairs = [{"candidate": a, "base": b, "old": paired_delta(models[a], models[b], "old"),
               "new": paired_delta(models[a], models[b], "new")} for a, b in prep["pairs"]]
     rep = {"schema": REPORT_SCHEMA, "cases_sha256": prep["cases_sha256"], "display": prep.get("display") or {},
            "annotation_complete": ann["complete"], "view_check": agree["check"], "judge_route": ann["judge_route"],
            "agreement": agree, "annotation": annotation_summary(ann, per_call),
+           "judge": provenance["judge"], "max_derived": max_derived,
+           **({"tags": [MAX_DERIVED_TAG]} if max_derived else {}), "work_name": work.resolve().name,
+           "annotation_copy": copy.name if copy and agree["check"] != "incomplete" else None,
            "models": {k: {kk: vv for kk, vv in v.items() if kk != "per_case"} for k, v in models.items()},
            "pairs": pairs, "judge_load": judge_load(judge_rows),
            "created": datetime.now(ET).isoformat(timespec="seconds")}

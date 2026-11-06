@@ -324,20 +324,24 @@ at the highest regional price.
 
 The tool-choice view
 --------------------
-``run --provider local --judge-url ... --view tool-choice`` on a queue that
-``acceptable_tools.py queue`` wrote (``meta.mode`` tool-choice; the view and the
+``run --provider local --judge-url ... --view tool-choice`` (or ``run --provider
+token-plan --view tool-choice``: Max as the tool-choice judge, the same system
+prompt, user message and rubric byte for byte, temperature 0, thinking off) on a
+queue that ``acceptable_tools.py queue`` wrote (``meta.mode`` tool-choice; the view and the
 mode go together, either alone is refused). Each item is an eval-tools case's
 full context (system prompt, conversation, earlier calls and results), the
 tools it offers, and one ``candidate`` call; the judge answers "is making this
 call here an acceptable next step?" with the same JSON shape and rubric keys
 as rubric v2 (``parse_verdict``), each criterion re-worded for a next step
-that need not be the one the judge would take (``TOOL_CHOICE_PROMPT``). Same
-model, temperature 0, thinking off and transport as the calibrated judge, but
-this view is NOT covered by the 85.4% calibration (that measured the trace
-view against Max): ``acceptable_tools.py`` checks it against Max's own
-reference calls and against obviously wrong ones. Ledger phase
-``2-judge-tool-choice``; the rows carry no ``source.file``, so build.py never
-reads them as trace verdicts.
+that need not be the one the judge would take (``TOOL_CHOICE_PROMPT``). On the
+local route: same model, temperature 0, thinking off and transport as the
+calibrated judge. Either way this view is NOT covered by the 85.4% calibration
+(that measured the trace view against Max): ``acceptable_tools.py`` checks
+each judge against Max's own reference calls and against obviously wrong ones.
+Ledger phase ``2-judge-tool-choice`` (Token Plan rows say ``token-plan``); the
+rows carry no ``source.file``, so build.py never reads them as trace verdicts.
+Rows from Max make everything built from them max-derived (acceptable_tools.py
+tags it).
 """
 
 from __future__ import annotations
@@ -415,10 +419,14 @@ RUBRIC_KEYS = ("right_tool", "valid_args", "sensible_order", "task_progress", "n
 VIEWS = ("outcome", "blind")
 LABELS = ("pass", "fail")
 #: The tool-choice view (acceptable_tools.py): "is this call an acceptable next step here?" over an eval case's
-#: full context and offered tools. Its queue (``meta.mode`` tool-choice) is judged by the local judge only, under
-#: its own ledger phase; its rows have no ``source.file``, so build.py never applies them. Not one of the trace
-#: ``VIEWS`` (report and calibrate never read it): ``run`` / ``estimate`` take it.
+#: full context and offered tools. Its queue (``meta.mode`` tool-choice) is judged by the local judge or by Max on
+#: the Token Plan (``TOOL_CHOICE_PROVIDERS``; same prompt and rubric), under its own ledger phase; its rows have no
+#: ``source.file``, so build.py never applies them. Not one of the trace ``VIEWS`` (report and calibrate never
+#: read it): ``run`` / ``estimate`` take it.
 TOOL_CHOICE_VIEW = "tool-choice"
+#: Who may judge a tool-choice queue: the local 27B, or Max on the Token Plan (operator 2026-11-06; never the
+#: pay-per-token key, which has no budget for it).
+TOOL_CHOICE_PROVIDERS = ("local", "token-plan")
 RUN_VIEWS = (*VIEWS, TOOL_CHOICE_VIEW)
 MODE_TOOL_CHOICE = "tool-choice"
 PHASE_TOOL_CHOICE = "2-judge-tool-choice"
@@ -3281,9 +3289,9 @@ def _queue_and_phase(args: argparse.Namespace, p: dict[str, Path]) -> tuple[list
         raise JudgeSetupError(f"{p['queue']} is a {mode or 'trace'} queue: the {TOOL_CHOICE_VIEW} view judges "
                               f"{MODE_TOOL_CHOICE} queues (acceptable_tools.py queue) and only those")
     if mode == MODE_TOOL_CHOICE:
-        if getattr(args, "provider", "local") != "local":
-            raise JudgeSetupError(f"{p['queue']} is a {mode} queue: the calibrated local judge judges it "
-                                  "(--provider local)")
+        if getattr(args, "provider", "local") not in TOOL_CHOICE_PROVIDERS:
+            raise JudgeSetupError(f"{p['queue']} is a {mode} queue: the local judge (--provider local) or Max on "
+                                  "the Token Plan (--provider token-plan) judges it")
         return items, PHASE_TOOL_CHOICE
     if mode == MODE_CALIBRATION and _flash(args):
         return items, PHASE_FLASH_CAL

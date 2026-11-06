@@ -183,9 +183,9 @@ def test_a_tool_choice_queue_runs_only_in_its_view_on_the_local_judge(
     # the default (outcome) view on a tool-choice queue
     assert judge.main(base, client_factory=lambda: fake) == judge.EXIT_FATAL
     assert "the tool-choice view judges tool-choice queues" in capsys.readouterr().err
-    assert judge.main(["--workdir", str(work), "run", "--provider", "token-plan", "--view", "tool-choice"],
-                      client_factory=lambda: fake) == judge.EXIT_FATAL
-    assert "the calibrated local judge" in capsys.readouterr().err
+    assert judge.main(["--workdir", str(work), "run", "--provider", "max-payg", "--budget-usd", "1",
+                       "--view", "tool-choice"], client_factory=lambda: fake) == judge.EXIT_FATAL
+    assert "--provider token-plan" in capsys.readouterr().err  # never the pay-per-token key
     assert not fake.calls
     assert judge.main(base + ["--view", "tool-choice"], client_factory=lambda: fake) == judge.EXIT_DONE
     rows = judge.read_jsonl(work / judge.RESULTS_FILE)
@@ -198,6 +198,39 @@ def test_a_tool_choice_queue_runs_only_in_its_view_on_the_local_judge(
     assert judge.main(["--workdir", str(other), "run", "--provider", "local", "--no-live-probe",
                        "--view", "tool-choice"], client_factory=lambda: fake) == judge.EXIT_FATAL
     assert "is a trace queue" in capsys.readouterr().err
+
+
+class _FakeMax(_FakeJudge):
+    provider = judge.TOKEN_PLAN_PROVIDER
+    judge_key = judge.TOKEN_PLAN_JUDGE_KEY
+    model = judge.JUDGE_MODEL
+
+    def budget_describe(self) -> str:
+        return "Token Plan ($0 per call)"
+
+
+def test_max_on_the_token_plan_judges_a_tool_choice_queue_with_the_same_prompt_byte_for_byte(
+        tmp_path: Path) -> None:
+    items = [_tc_item(), _tc_item(id="neg-1", label="fail", category="control-negative",
+                                  candidate={"name": "tts", "arguments": {"text": "hi"}})]
+    reply = json.dumps({"verdict": "pass", "reasons": ["fine"], "rubric": _rubric()})
+    local, maxj = _FakeJudge(reply), _FakeMax(reply)
+    _write_queue(tmp_path / "local", items, judge.MODE_TOOL_CHOICE)
+    _write_queue(tmp_path / "max", items, judge.MODE_TOOL_CHOICE)
+    assert judge.main(["--workdir", str(tmp_path / "local"), "run", "--provider", "local", "--no-live-probe",
+                       "--view", "tool-choice"], client_factory=lambda: local) == judge.EXIT_DONE
+    notify = tmp_path / "distill" / "notify.sh"  # HOME is tmp_path: a Token Plan STOP must reach the operator
+    notify.parent.mkdir(exist_ok=True)
+    notify.write_text("#!/bin/sh\n")
+    notify.chmod(0o700)
+    assert judge.main(["--workdir", str(tmp_path / "max"), "run", "--provider", "token-plan",
+                       "--view", "tool-choice"], client_factory=lambda: maxj) == judge.EXIT_DONE
+    assert sorted(maxj.calls) == sorted(local.calls) and len(maxj.calls) == 2  # system + user, byte for byte
+    assert all(sysp == judge.TOOL_CHOICE_PROMPT for sysp, _ in maxj.calls)
+    rows = judge.read_jsonl(tmp_path / "max" / judge.RESULTS_FILE)
+    assert {(r["provider"], r["judge_key"], r["view"], r["phase"]) for r in rows} == {
+        (judge.TOKEN_PLAN_PROVIDER, "token-plan", "tool-choice", judge.PHASE_TOOL_CHOICE)}
+    assert all("file" not in (r["source"] or {}) for r in rows)
 
 
 # ── score.py: the acceptable-set wrong-tool rate ───────────────────────────
@@ -547,6 +580,72 @@ def test_prepare_finish_and_section_end_to_end(tmp_path: Path) -> None:
     paths["cand"].write_text(paths["cand"].read_text() + "\n")
     with pytest.raises(SystemExit, match="changed since prepare"):
         at.finish(work)
+
+
+def _judge_all(work: Path, provider: str, model: str) -> list[dict[str, Any]]:
+    """Rows for every queued item: controls right, every candidate acceptable except tts."""
+    rows = []
+    for it in judge.read_jsonl(work / "judge" / judge.QUEUE_FILE):
+        ok = it["category"] == "control-positive" or (it["category"] == "candidate"
+                                                       and it["candidate"]["name"] != "tts")
+        rows.append({**_verdict_row(it["id"], _rubric() if ok else _rubric(rt=0), "pass" if ok else "fail"),
+                     "provider": provider, "model": model, "judge_quant": None, "judge_sha256": None,
+                     "input_tokens": 1000, "cached_input_tokens": 400, "output_tokens": 50, "elapsed_s": 2.0,
+                     "ts": "2026-11-06T16:00:00Z"})
+    return rows
+
+
+def test_a_max_judged_work_dir_is_tagged_max_derived_and_never_replaces_the_local_copy(tmp_path: Path) -> None:
+    cf, paths, _ = _write_inputs(tmp_path)
+    work = tmp_path / "w-max"
+    evalsets = tmp_path / "evalsets"
+    evalsets.mkdir()
+    local_copy = evalsets / "eval-tools.acceptable-tools.json"
+    local_copy.write_text("{}\n")  # the local judge's copy: never replaced by a max-derived one
+    base = ["prepare", "--work", str(work), "--cases", str(cf), "--reference-label", "base",
+            "--results", f"base={paths['base']}", "--results", f"cand={paths['cand']}", "--pair", "cand:base",
+            "--display", "cand=Student", "--positives", "2", "--negatives", "2"]
+    assert at.main(base + ["--annotation-out", str(local_copy)]) == 0
+    rows = _judge_all(work, judge.TOKEN_PLAN_PROVIDER, judge.JUDGE_MODEL)
+    (work / "judge" / judge.RESULTS_FILE).write_text("".join(json.dumps(r) + "\n" for r in rows))
+    rep = at.finish(work, date="2026-11-06")
+    assert rep["view_check"] == "pass" and rep["max_derived"] and rep["tags"] == ["max-derived"]
+    assert local_copy.read_text() == "{}\n" and rep["annotation_copy"] is None
+    for name in (at.ANNOTATION_FILE, at.AGREEMENT_FILE, at.REPORT_FILE):
+        doc = json.loads((work / name).read_text())
+        assert doc["tags"] == ["max-derived"] and doc["max_derived"] is True, name
+    assert rep["judge"] == [{"model": judge.JUDGE_MODEL, "quant": None, "sha256": None,
+                             "provider": judge.TOKEN_PLAN_PROVIDER}]
+    assert (rep["judge_load"]["mean_input_tokens"], rep["judge_load"]["mean_output_tokens"]) == (1000, 50)
+    md = (work / at.SECTION_FILE).read_text()
+    assert f"Qwen Max (`{judge.JUDGE_MODEL}`, Token Plan" in md and "4090 Qwen3.8-27B" not in md
+    assert "a mean of 1,000 in and 50 out per item" in md and "Load on the shared server" not in md
+    assert "`~/distill/w-max/`" in md and "tagged max-derived, private" in md
+    # a copy beside the eval set only to a name that says max-derived
+    prep = json.loads((work / at.PREPARE_FILE).read_text())
+    prep["annotation_out"] = str(evalsets / "eval-tools.acceptable-tools.max-derived.json")
+    (work / at.PREPARE_FILE).write_text(json.dumps(prep))
+    rep = at.finish(work, date="2026-11-06")
+    assert rep["annotation_copy"] == "eval-tools.acceptable-tools.max-derived.json"
+    assert score.load_acceptable_tools(evalsets / rep["annotation_copy"])["max_derived"] is True
+    # one judge per work dir: a local row among Max's is refused
+    extra = {**rows[0], "provider": "local", "model": "judge-27b"}
+    with open(work / "judge" / judge.RESULTS_FILE, "a") as fh:
+        fh.write(json.dumps(extra) + "\n")
+    with pytest.raises(SystemExit, match="more than one judge"):
+        at.finish(work)
+
+
+def test_a_partial_report_prints_no_bound_in_bold(tmp_path: Path) -> None:
+    cf, paths, _ = _write_inputs(tmp_path)
+    work = tmp_path / "w"
+    assert at.main(["prepare", "--work", str(work), "--cases", str(cf), "--results", f"base={paths['base']}",
+                    "--results", f"cand={paths['cand']}", "--pair", "cand:base", "--positives", "2",
+                    "--negatives", "2"]) == 0
+    rep = at.finish(work, date="2026-11-06")  # nothing judged: every candidate tool undecided
+    assert not rep["annotation_complete"]
+    md = (work / at.REPORT_MD).read_text()
+    assert "LOWER bound" in md and "**" not in md
 
 
 def test_prepare_refuses_a_different_case_set(tmp_path: Path) -> None:
