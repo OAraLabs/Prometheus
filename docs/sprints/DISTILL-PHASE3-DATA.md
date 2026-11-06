@@ -344,3 +344,40 @@ Every round-2 long-context attempt with a log on the 3090 Ti host: the local 27B
   - **Python and multi-line** (parked): 357 + 97 + 70 calls in 146 + 69 + 61 tasks.
   - **The zero-natural-error policy:** tolerating a guessed-path `read_file` that the teacher recovered from would keep another 91 / 41 / 40 tasks (local / 4090 / Max), before the judge or any other check.
   - **The 24-call long-context cap:** 136 / 121 / 66 rejections hit it, and 25 / 8 / 4 for that reason alone.
+
+### Fix and measured effect (4e0add4)
+
+- **What changed in the gym.** `teacher_gen.host_paths()` reads the system prompt for the host home, the runtime's working directory and the documents root.
+  - `SandboxEnv` maps each home onto the sandbox root, which is what `~` already was.
+  - It maps the runtime directory (absolute and `~/` forms) onto the repo fixture.
+  - The rewritten path is then confined exactly as before, and the permission gate rules on the same mapped path. A result reads back in the call's own spelling.
+  - The documents root exists in the sandbox.
+  - `$HOME` / `$PWD` / `$PATH` expand to their sandbox constants. Every other `$`, python, multi-line commands, the network and host paths outside the home stay refused.
+  - Rows record `host_path_calls` / `known_var_calls`. 15 new test cases.
+- **How it was measured, without a teacher call.** Every failed call of the 736 rejected, matched tasks was replayed through the gym on the 3090 Ti host. Each task ran in a fresh fixture clone, under bwrap, with the request pack's prompt: once with the staged code before the fix (eced49b) and once with 4e0add4.
+  - **Replay fidelity:** the old code reproduces 2,900 of 2,965 failures (97.8%).
+  - **Rescued task:** every logged failure reproduces under the old code, every failed call now succeeds, and the task had no other reason (iteration cap, breaker, …).
+  - **Caveat:** the teacher is not re-run, so what it would do after a now-successful call is not measured either way.
+
+| | local 27B | 4090 | Max |
+|---|---:|---:|---:|
+| Refused calls (old → new replay) | 874 → 711 | 138 → 99 | 96 → 94 |
+| Previously failed calls that now run | 204 | 35 | 9 |
+| Tasks whose refusals all clear | 52 | 15 | 0 |
+| Tasks rescued | 18 | 2 | 0 |
+| Keep rate before → after | 57 / 560 = 10.2% → 75 / 560 = 13.4% | 8 / 206 = 3.9% → 10 / 206 = 4.9% | 15 / 141 = 10.6% (unchanged) |
+
+- **Overall:** 80 / 907 (8.8%) → 100 / 907 (11.0%).
+  - 167 refused calls now run. 37 more become honest errors: a mapped path that does not exist, such as `~/.prometheus/...`, which the gym does not hold.
+  - 5 more tasks have every call fixed but still hit the 24-call cap.
+- **Still the teacher's fault, left as failures:**
+  - guessed file paths (1,490 calls);
+  - `ls` / `cd` on guessed paths;
+  - wrong `edit_file` strings;
+  - nonexistent tools;
+  - writes outside the workspace;
+  - probing `/`, `/proc` and the sandbox's parent.
+- **Policy questions for the operator:**
+  - the zero-natural-error rule (a recovered guess still rejects the row);
+  - the 24-call cap;
+  - python / multi-line (parked).

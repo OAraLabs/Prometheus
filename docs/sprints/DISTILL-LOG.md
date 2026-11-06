@@ -639,3 +639,22 @@ Append-only, times in ET.
   - Left at the restart: coding 468, error-recovery 998, tool-choice 54.
 - **Rate after the restart** (0.14 h, 13:40): about 940 tasks/h. Rows/h: error-recovery ~360, tool-choice ~180, coding ~86. All Token Plan calls are OK, with one timeout earlier.
   - **Expected end:** about 15:15–15:45 ET.
+
+## 2026-11-06 ~14:20 EST: long-context tool errors: causes, gym fix (host paths), replayed keep rate
+- **Causes** (79baeaf, table in DISTILL-PHASE3-DATA.md "Long-context tool errors"; 907 round-2 long-context attempts: local 27B 560, 4090 206, Max 141; keep 8.8%):
+  - `tool_error` is in 70% / 92% / 92% of the local / 4090 / Max rejections.
+  - Half of all 2,965 failed calls are `read_file` on a test file that never existed at any commit (guesses next to the tests already read): the teacher's fault, left as failures.
+  - Next: python (parked), then **host-home paths the request pack's own prompt names** (the runtime's working directory, `~/Prometheus`, the documents root), refused because the gym mapped only `~`.
+  - Then offline web, grep finding nothing (the runtime reports that too), and `$HOME` / `$PWD` / `$PATH` refused.
+- **Fix (4e0add4):** the gym maps the prompt's host home onto the sandbox root and the runtime's working directory onto the repo fixture, then confines as before (the gate too). The documents root exists, and `$HOME` / `$PWD` / `$PATH` expand. No security change: no network, no host path outside the mapped home, and python / multi-line stay refused.
+  - Tests: 15 new cases; teacher_gen / r2 / hardened suites 267 passed. The full distill suite (2,138) passed except one hardened test, which now uses `$USER` for its refusal. Ruff clean.
+- **Measured without Qwen spend:** every failed call of 736 rejected tasks was replayed through the old (eced49b) and new (4e0add4) gym on the host, in bwrap. The old code reproduces 97.8% of the logged failures.
+  - Keep rate (attempts): local 10.2% → 13.4% (+18), 4090 3.9% → 4.9% (+2), Max 10.6% unchanged; overall 8.8% → 11.0%.
+  - It is an estimate: the teacher is not re-run after a now-successful call.
+- **Staged:** `~/distill/round2/code-lcfix` (4e0add4, `gen_runner.py stage-code --dest`).
+  - **Not** in `~/distill/round2/code`: `max-r2-gen3-20261106` still runs from it. Tonight's 01:05 window will therefore run the old gym unless that tree is restaged after the Max unit ends.
+  - The replay worked in `~/distill/scratch-lc-errors` (stays on the host) and `/tmp/lc-replay-*` (removed).
+- **Left for the operator:**
+  - the zero-natural-error rule: tolerating a recovered guessed read would keep another 91 / 41 / 40 tasks;
+  - the 24-call long-context cap: 323 rejections, 37 for that reason alone;
+  - python / multi-line, parked.
