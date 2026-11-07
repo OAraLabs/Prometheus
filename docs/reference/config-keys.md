@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **460** of
+Every key in `config/prometheus.yaml.default` — **461** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -98,6 +98,7 @@ none either — the key is documented so its absence is visible.
 | `security.approval_queue` | *(section)* |
 | `security.approval_queue.enabled` | `False` |
 | `security.approval_queue.timeout_seconds` | `1800` |
+| `security.grants` | `[]` |
 | `security.allowed_commands` | `[]` |
 | `infrastructure` | *(section)* |
 | `infrastructure.archive_enabled` | `True` |
