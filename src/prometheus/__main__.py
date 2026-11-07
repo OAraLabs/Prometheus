@@ -893,7 +893,7 @@ def create_divergence_detector(config: dict[str, Any]):
 def create_security_gate(security_cfg: dict[str, Any], config_path: str | None = None):
     """Create the permission checker (Sprint 4 + Sprint 11 audit/exfil)."""
     from prometheus.permissions.audit import AuditLogger
-    from prometheus.permissions.checker import SecurityGate
+    from prometheus.permissions.checker import SecurityGate, load_configured_grants
     from prometheus.permissions.exfiltration import ExfiltrationDetector
 
     # Sprint 11: audit logger
@@ -920,6 +920,9 @@ def create_security_gate(security_cfg: dict[str, Any], config_path: str | None =
         audit_logger=audit_logger,
         exfiltration_detector=exfil_detector,
         config_path=config_path,
+        # Remembered approvals and hand-written rows. Left out, they were written to the file and ignored at every
+        # boot (tests/test_configured_grants_survive_a_restart.py).
+        grants=load_configured_grants(security_cfg),
     )
 
 

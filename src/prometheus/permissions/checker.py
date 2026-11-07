@@ -787,6 +787,33 @@ def _rm_would_remove(target: Path, root: Path, *, follow: bool) -> bool:
     return operand in (file_identity(root), file_identity(root, follow_symlinks=False))
 
 
+def load_configured_grants(security_cfg: dict | None) -> list[Grant]:
+    """The ``security.grants`` rows of a security config section, as :class:`Grant` objects.
+
+    The ONE reader of that key. ``SecurityGate.from_config`` and the daemon's own factory
+    (``__main__.create_security_gate``) both call it; until they did, the daemon built its gate without any grants,
+    so a remembered approval (``/approve always``) and a hand-written row were written to the file and then ignored
+    at every boot. A row that is not a mapping, or names no kind this gate knows, is skipped.
+
+    Said at boot, because a grant changes what the gate allows and one written months ago comes back with it. The
+    line carries each grant's id, kind and tool, never its value: a ``command_prefix`` value is a command, and
+    commands can carry secrets. ``/grants`` shows the rest, and ``/revoke`` removes one.
+    """
+    rows = (security_cfg or {}).get("grants") or []
+    grants = [
+        g for g in (Grant.from_config_dict(d) for d in rows if isinstance(d, dict))
+        if g is not None
+    ]
+    if grants:
+        log.info(
+            "Loaded %d approval grant(s) from security.grants; each silences the prompt for what it names "
+            "(/grants lists them, /revoke removes one): %s",
+            len(grants),
+            "; ".join(f"{g.grant_id} {g.kind} {g.tool_name or '-'}" for g in grants),
+        )
+    return grants
+
+
 def _splice_grants(original: str, grants: list) -> str:
     """Return ``original`` with only the ``security.grants`` block replaced.
 
@@ -997,8 +1024,9 @@ class SecurityGate:
 
         # Approval grants: remembered approvals. Session grants live in memory
         # only; persistent grants are also written to prometheus.yaml by
-        # persist_grant() and re-loaded at construction (from_config reads
-        # security.grants). Evaluated after every DENY-tier check, so they can
+        # persist_grant() and re-loaded at construction (load_configured_grants
+        # reads security.grants, for from_config and the daemon alike). Evaluated
+        # after every DENY-tier check, so they can
         # only suppress APPROVE-tier prompts, never resurrect a blocked call.
         self._grants: list[Grant] = list(grants or [])
 
@@ -1068,12 +1096,7 @@ class SecurityGate:
             mode=sec.get("permission_mode", "default"),
             audit_logger=audit_logger,
             exfiltration_detector=exfil_detector,
-            grants=[
-                g for g in (
-                    Grant.from_config_dict(d) for d in (sec.get("grants") or [])
-                    if isinstance(d, dict)
-                ) if g is not None
-            ],
+            grants=load_configured_grants(sec),
         )
 
     # ------------------------------------------------------------------
