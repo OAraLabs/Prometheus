@@ -227,6 +227,17 @@ def announce(floor: ShellFloor | None = None) -> dict[str, object]:
         else:
             log.info("security.bash_allow_ssh: model-written shells may read ~/.ssh; ~/.gnupg and "
                      "~/.config/*/*env stay denied")
+    reachable, where = _CONFINE.docker_socket_reachable()
+    if reachable:
+        log.warning(
+            "a model-written shell can reach the Docker control socket (%s): the Prometheus user is in the "
+            "docker group (or can otherwise write the socket), which is passwordless ROOT on the host and "
+            "OUTSIDE the bash floor — `docker run -v /:/host` reads and writes every path the floor denies "
+            "(the env file, the MCP store, the node keys). The floor confines the shell it starts; it cannot "
+            "confine a separate root daemon. Fix: keep the Prometheus user out of the docker group, or run "
+            "dockerd rootless. See docs/guide/docker.md (Security inside the container).",
+            where,
+        )
     read = rep["bash_read_floor"]
     assert isinstance(read, dict)
     state, detail = read["state"], read["detail"]

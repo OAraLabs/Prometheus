@@ -111,6 +111,10 @@ docker inspect --format '{{.State.Health.Status}}' prometheus
 - So the container is the boundary. A model-written shell can read and change anything uid 10001 can (the two volumes, including the env file with the API token and your keys), read the rest of the image, and use the network. Don't mount host directories you wouldn't hand to the agent, and never mount the Docker socket.
 - Coding runs with `coding.sandbox_type: docker` need a Docker engine the daemon can reach, which this image does not have. Use `process` inside the container.
 
+### On a host install: keep the Prometheus user out of the `docker` group
+
+The bash floors confine the process tree a model-written shell starts; they cannot confine a separate daemon the shell hands work to. The Docker daemon is the sharpest case. If the user the daemon runs as is in the `docker` group — or can otherwise write `/run/docker.sock` — a model-written shell can run `docker run -v /:/host …`, which mounts the host root into a container it controls as **root**. That reads and writes every path the floor denies (the env file with your keys, the MCP store, the node keys): the floor is bypassed entirely, not degraded. AppArmor cannot close this, because membership in the group is root-equivalent by Docker's own design. So this is a deployment rule, not a profile setting: **do not put the Prometheus user in the `docker` group**; run [rootless Docker](https://docs.docker.com/engine/security/rootless/) if the agent genuinely needs a Docker engine. The daemon warns at boot when it can reach the socket. (The same shape, without the jump to root, is any user-session service a shell can drive, such as `systemd-run --user`.)
+
 ## Upgrading
 
 ```bash
