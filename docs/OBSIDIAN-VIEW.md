@@ -6,23 +6,27 @@ without ever writing to it by hand.
 
 ## The one rule: it is READ-ONLY
 
-The wiki is **compiled, not authored.** `WikiCompiler.regenerate_all()` rebuilds
-every entity page from `memory.db` on each dream cycle — it wipes and rewrites
-`*.md` under `people/`, `clients/`, `projects/`, `topics/`. Anything you type
-into one of those pages in Obsidian is **gone on the next compile.**
+The wiki is **compiled, not authored.** After each scheduled memory-extraction
+pass (about every 30 minutes) that finds new facts, `WikiCompiler.compile()`
+rebuilds from `memory.db` the page of every entity those facts are about,
+under `people/`, `clients/`, `projects/`, `topics/`, and rewrites `index.md`.
+Anything you type into one of those pages in Obsidian is **gone as soon as a
+compile touches that entity.** (`WikiCompiler.regenerate_all()` wipes and
+rewrites every page at once, but nothing in the daemon calls it.)
 
 So:
 
 - **Capture goes through `/note`**, never the editor. `/note [@entity] <text>`
   (Telegram today; the Beacon web chat once that build is deployed) writes a
-  durable, max-trust fact to `memory.db` — and `compile` projects it to a page.
-  That is the *only* writer of your notes.
+  durable, max-trust fact to `memory.db` — and a later compile that touches
+  that entity projects it to a page. That is the *only* writer of your notes.
 - **Never hand-edit a page.** A hand-edit makes the page a two-writer artifact
   that compile then fights and overwrites — the same drift class the wiki team
   has fixed twice (query-time index appends, lint-vs-compile link churn). Don't
   reintroduce it from the Obsidian side.
-- `queries/` is preserved across compiles (filed-back synthesized answers), but
-  it is still compile-owned. Treat the whole vault as output.
+- `queries/` is preserved across compiles (filed-back `wiki_query` answers and
+  SENTINEL's `insight-*.md` pages), but it is still machine-written. Treat the
+  whole vault as output.
 
 If you want something in the wiki, say it to Prometheus. `/note` it.
 
@@ -36,8 +40,9 @@ deliberately-pinned knowledge stands out from the ambient, auto-extracted mass.
 - Config: [`config/obsidian/graph.json`](../config/obsidian/graph.json) — a
   graph **color group** with the search query `["manual":true]`.
 - This is config-as-code: the repo is the source of truth; the installer copies
-  it into the live vault. Because `regenerate_all()` never touches `.obsidian/`
-  (it is not in `_SUBDIRS`), the config survives every recompile — install once.
+  it into the live vault. Because neither `compile()` nor `regenerate_all()`
+  touches `.obsidian/` (it is not in `_SUBDIRS`), the config survives every
+  recompile — install once.
 
 ## Install (mini side)
 
