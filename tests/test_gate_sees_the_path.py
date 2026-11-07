@@ -402,6 +402,15 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
         "the owner's answer as the prompt, and asserts a refused write landed nothing and an approved one landed. "
         "Registered, not exempted: if that file stops calling evaluate directly this entry fails as stale."
     ),
+    "test_configured_grants_survive_a_restart.py": (
+        "A remembered approval or a hand-written security.grants row must be in force after the daemon restarts "
+        "(the daemon's factory never passed grants=). Direct evaluate(file_path=…) calls read the gate's DECISION "
+        "for one target before and after a restart, with the workspace roots the agent loop supplies, so the "
+        "subject is what the rebuilt gate remembers, not whether a caller delivers a path. The delivery half is "
+        "covered in the same file through _execute_tool_call: a write into a granted folder asks before the grant "
+        "is loaded and does not after. Registered, not exempted: if that file stops calling evaluate directly "
+        "this entry fails as stale."
+    ),
     "test_denied_prune.py": (
         "P4.1 matcher-drift fix: THREE readers share one deny list — the gate, "
         "the grep/glob prune layer, and the /workspace validator — and they used "

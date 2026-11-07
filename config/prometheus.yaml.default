@@ -591,6 +591,13 @@ security:
     enabled: false
     timeout_seconds: 1800            # 30 min — a phone notification is not answered in 5
 
+  # Remembered approvals: what `/approve always` writes here, and rows you can write by hand. Each one silences
+  # the prompt for exactly what it names (the files under a folder, a command prefix, or one tool, such as a
+  # single third-party MCP tool) and never lifts a denial. They are loaded at every start, and the startup log
+  # lists them by id. `/grants` shows each in full; `/revoke <id>` removes one. Prometheus writes this key;
+  # edit it by hand only when you know the row you want.
+  grants: []
+
   allowed_commands: []
 infrastructure:
   archive_enabled: true

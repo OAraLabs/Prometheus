@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 import pytest
 import yaml
@@ -126,6 +127,61 @@ def test_a_malformed_row_is_skipped_and_the_rest_still_load(config):
     tool = "mcp__capline__search_candidates"
     _write_grants(config, ["not a mapping", {"kind": "nonsense"}, {"kind": "tool", "tool": tool, "value": ""}])
     assert _restart(config).evaluate(tool).allowed
+
+
+# ── through the agent loop, and through the shipped template ─────────────────
+
+TEMPLATE = Path(__file__).resolve().parents[1] / "config" / "prometheus.yaml.default"
+
+
+def _loop_write(tmp_path, gate, target, prompted):
+    """A write_file call through the agent loop, as a turn runs it. The owner's answer to any prompt is no."""
+    from prometheus.__main__ import create_tool_registry
+    from prometheus.engine.agent_loop import LoopContext, _execute_tool_call
+
+    async def prompt(tool_name, reason):
+        prompted.append(tool_name)
+        return False
+
+    ctx = LoopContext(provider=None, model="t", system_prompt="", max_tokens=512,
+                      tool_registry=create_tool_registry({}, gate), permission_checker=gate,
+                      permission_prompt=prompt, cwd=tmp_path / "workspace", session_id="telegram:12345")
+    return asyncio.run(_execute_tool_call(ctx, "write_file", "t1", {"path": str(target), "content": "x\n"}))
+
+
+def test_a_turn_writes_into_a_granted_folder_without_asking_after_a_restart(config, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    granted = tmp_path / "granted"
+    granted.mkdir()
+    data = yaml.safe_load(config.read_text())
+    data["security"]["workspace_root"] = str(workspace)
+    config.write_text(yaml.dump(data))
+
+    asked: list = []
+    _loop_write(tmp_path, _restart(config), granted / "a.txt", asked)
+    assert asked == ["write_file"] and not (granted / "a.txt").exists(), "control: outside the workspace it asks"
+
+    _write_grants(config, [{"kind": "path_prefix", "tool": "write_file", "value": str(granted)}])
+    asked.clear()
+    _loop_write(tmp_path, _restart(config), granted / "b.txt", asked)
+    assert asked == [] and (granted / "b.txt").read_text() == "x\n", "the granted write still asked, or did not land"
+
+
+@pytest.mark.asyncio
+async def test_a_config_copied_from_the_shipped_template_keeps_its_comments_and_its_grant(tmp_path):
+    """Setup copies the template, and persist_grant splices into that file: the `grants: []` it ships must take a row."""
+    config = tmp_path / "prometheus.yaml"
+    config.write_text(TEMPLATE.read_text())
+    target = tmp_path / "outside" / "notes.txt"
+    target.parent.mkdir()
+
+    await _approve_always(config, target)
+
+    text = config.read_text()
+    assert "Remembered approvals" in text, "the template's own comments were lost"
+    assert len(yaml.safe_load(text)["security"]["grants"]) == 1
+    assert _write(_restart(config), target, tmp_path).allowed
 
 
 # ── one reading of the file, not two ─────────────────────────────────────────
