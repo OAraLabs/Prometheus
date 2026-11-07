@@ -525,6 +525,7 @@ def m4(paths: Iterable[str]) -> dict[str, Any]:
                 C["teacher"][str(meta.get("teacher") or meta.get("model"))] += 1
                 if st == "success" and not comp:
                     C["ok_uncompacted_area"][area] += 1
+                    C["ok_uncompacted_teacher"][str(meta.get("teacher") or meta.get("model"))] += 1
                     C["ok_uncompacted_tool"][str(meta.get("tool_name"))] += 1
                     C["ok_uncompacted_executable_today"][meta.get("tool_name") in EQ().EXECUTABLE_TOOLS] += 1
         per_file[Path(p).name] = n
