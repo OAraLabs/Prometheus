@@ -452,10 +452,11 @@ real prompt and adds one execution condition, applied by the sandbox:
   (``not_grounded``). A failed guessed read the teacher recovered from does not
   count as a tool error here (``recovered_guesses``; operator 2026-11-06): a
   ``read_file`` "File not found" or a bash ``cat`` / ``head`` / ``tail`` /
-  ``sed -n`` on a missing file, followed within the next
-  ``RECOVERED_GUESS_WINDOW`` (2) calls by a successful listing (``glob``, bash
-  ``ls`` / ``find`` / ``grep -l``) that covers the guessed file's directory, and
-  then a successful read of a file in a directory that listing covered. The
+  ``sed -n`` on a missing file, recovered within the next 2 calls: the very next
+  call a successful listing (``glob``, bash ``ls`` / ``find`` / ``grep -l``) that
+  covers the guessed file's directory, and the call after it a successful read of
+  a file in a directory that listing covered (``RECOVERED_GUESS_WINDOW`` /
+  ``RECOVERED_GUESS_READ_WINDOW``, 1 each). The
   record lists each forgiven call (``recovered_guess``); every other failure,
   and a guess with no such recovery, still rejects the task (``tool_error``).
   The failed call is never a target row (its step had a failed call), but the
@@ -5795,10 +5796,11 @@ def r2_checks(out: TaskOutcome, events: list[dict[str, Any]], text: str, reasons
 
 #: round-2 areas where ``recovered_guesses`` applies
 RECOVERED_GUESS_AREAS = frozenset({"long-context"})
-#: the listing must be one of the next this-many tool calls after the failed read
-RECOVERED_GUESS_WINDOW = 2
-#: the read must be one of the next this-many calls after the listing (None: any later call)
-RECOVERED_GUESS_READ_WINDOW: int | None = None
+#: the listing must be one of the next this-many tool calls after the failed read, and the read one
+#: of the next this-many calls after the listing (None: any later call). The operator's wording (the
+#: whole recovery, the listing then the correct read, within the next 2 calls): 1 and 1
+RECOVERED_GUESS_WINDOW = 1
+RECOVERED_GUESS_READ_WINDOW: int | None = 1
 #: bash programs that read the files they name (``sed`` only with ``-n``)
 _SH_READ_PROGS = frozenset({"cat", "head", "tail", "sed"})
 _SH_GREP_PROGS = frozenset({"grep", "egrep", "fgrep"})
@@ -6090,14 +6092,15 @@ def recovered_guesses(events: list[dict[str, Any]], resolve: Resolver, window: i
     * it read a file that does not exist: ``read_file`` answered "File not found", or a bash
       command made only of ``cd`` and ``cat`` / ``head`` / ``tail`` / ``sed -n`` failed with "No
       such file or directory" for a file it named;
-    * one of the next *window* calls listed the place: a successful ``glob`` whose pattern's
+    * one of the next *window* calls (by default the very next one) listed the place: a successful ``glob`` whose pattern's
       directory part matches the guessed file's directory (``**``: any depth), or a successful bash
       ``ls`` of that directory or an ancestor with ``-R``, ``find`` from that directory or an
       ancestor (within ``-maxdepth``), or ``grep -l`` / ``-L`` on files in that directory (``-r``: or
       an ancestor). "The relevant directory" is exactly this: the listing shows the entries of the
       directory the guessed file would be in;
     * a later successful read (``read_file``, or such a bash read) opened a file in a directory
-      that same listing covered (within *read_window* calls of the listing, when set).
+      that same listing covered, within *read_window* calls of the listing (by default the call
+      right after it; None: any later call). By default the whole recovery is the next 2 calls.
 
     Paths are compared after *resolve* (relative to the call's working directory, ``cd`` followed,
     host spellings mapped). The caller decides what else must hold (no other failure)."""

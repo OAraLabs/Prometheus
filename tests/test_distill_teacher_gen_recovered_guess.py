@@ -1,6 +1,6 @@
-"""teacher_gen.py round 2 long-context: a failed guessed read the teacher recovered from (a listing of
-the guessed file's directory within the next two calls, then a successful read there) is not a tool
-error (operator 2026-11-06, option a). Everything else still rejects. Synthetic fixtures; a fake
+"""teacher_gen.py round 2 long-context: a failed guessed read the teacher recovered from within the next
+two calls (the next call lists the guessed file's directory, the one after reads a file there) is not a
+tool error (operator 2026-11-06, option a). Everything else still rejects. Synthetic fixtures; a fake
 loopback teacher; no network."""
 
 from __future__ import annotations
@@ -76,16 +76,22 @@ def test_a_recovery_that_lists_another_directory_is_rejected(tmp_path: Path, no_
     assert "recovered_guess" not in extra["verification"]
 
 
-def test_a_listing_three_calls_after_the_guess_is_too_late(tmp_path: Path, no_outbound: Any) -> None:
-    plan = SEEDED + [GUESS, READ_A, ("call", "read_file", {"path": "docs/a.md", "offset": 5}), GLOB, READ_B, ANSWER]
+def test_the_whole_recovery_must_be_the_next_two_calls(tmp_path: Path, no_outbound: Any) -> None:
+    # the listing at +2 (one call between the guess and the listing): too late
+    plan = SEEDED + [GUESS, READ_A, GLOB, READ_B, ANSWER]
     status, _rows, reasons, extra = _run(tmp_path, plan)
     assert status == "rejected" and "tool_error" in reasons
     assert "recovered_guess" not in extra["verification"]
-    # the same listing as the second call after the guess is in time
-    plan = SEEDED + [GUESS, READ_A, GLOB, READ_B, ANSWER]
+    # the listing at +3: too late
+    plan = SEEDED + [GUESS, READ_A, ("call", "read_file", {"path": "docs/a.md", "offset": 5}), GLOB, READ_B, ANSWER]
     status, _rows, reasons, extra = _run(tmp_path / "b", plan)
-    assert status == "kept", reasons
-    assert extra["verification"]["recovered_guess"][0]["listing_index"] == 2
+    assert status == "rejected" and "tool_error" in reasons
+    assert "recovered_guess" not in extra["verification"]
+    # the listing at +1 but the read at +3 (another call between them): too late
+    plan = SEEDED + [GUESS, GLOB, ("call", "bash", {"command": "echo looking"}), READ_B, ANSWER]
+    status, _rows, reasons, extra = _run(tmp_path / "c", plan)
+    assert status == "rejected" and "tool_error" in reasons
+    assert "recovered_guess" not in extra["verification"]
 
 
 def test_a_non_read_tool_error_still_rejects_even_beside_a_recovered_guess(tmp_path: Path,
@@ -202,14 +208,19 @@ def test_a_listing_that_does_not_cover_the_guessed_files_directory_does_not(list
     assert _forgiven([_miss(GUESSED), listing, _read(REAL)]) == []
 
 
-def test_the_window_is_the_next_two_calls() -> None:
+def test_the_window_is_the_next_two_calls_listing_then_read() -> None:
+    assert (tg.RECOVERED_GUESS_WINDOW, tg.RECOVERED_GUESS_READ_WINDOW) == (1, 1)
     lst = _sh("ls P/tests")
     assert _forgiven([_miss(GUESSED), lst, _read(REAL)]) == [0]
-    assert _forgiven([_miss(GUESSED), _read("P/a.py"), lst, _read(REAL)]) == [0]
+    assert _forgiven([_miss(GUESSED), _read("P/a.py"), lst, _read(REAL)]) == []              # listing at +2
     assert _forgiven([_miss(GUESSED), _read("P/a.py"), _read("P/b.py"), lst, _read(REAL)]) == []
-    # two guesses before one listing: the first one's window is the second guess and the listing
-    assert _forgiven([_miss(GUESSED), _miss("P/tests/test_other.py"), lst, _read(REAL)]) == [0, 1]
-    assert _forgiven([_miss(GUESSED), _miss("P/tests/x.py"), _miss("P/tests/y.py"), lst, _read(REAL)]) == [1, 2]
+    assert _forgiven([_miss(GUESSED), lst, _read("P/a.py"), _read(REAL)]) == []              # read at +3
+    assert _forgiven([_miss(GUESSED), lst, _read("P/tests/a.py"), _read(REAL)]) == [0]       # read at +2
+    # two guesses before one listing: only the one right before it is recovered (the row still fails)
+    assert _forgiven([_miss(GUESSED), _miss("P/tests/test_other.py"), lst, _read(REAL)]) == [1]
+    # the windows are parameters: the wider reading would forgive these
+    wide = [_miss(GUESSED), _read("P/a.py"), lst, _read("P/b.py"), _read(REAL)]
+    assert [g["call_index"] for g in tg.recovered_guesses(wide, _resolve, window=2, read_window=None)] == [0]
 
 
 def test_the_read_must_come_after_the_listing_and_be_where_it_looked() -> None:
@@ -218,14 +229,9 @@ def test_the_read_must_come_after_the_listing_and_be_where_it_looked() -> None:
     assert _forgiven([_read(REAL), _miss(GUESSED), lst]) == []                      # the read was before
     assert _forgiven([_miss(GUESSED), lst, _read("P/src/real.py")]) == []           # elsewhere
     assert _forgiven([_miss(GUESSED), lst, _miss("P/tests/again.py")]) == []        # another guess
-    assert _forgiven([_miss(GUESSED), lst, _read("P/src/a.py"), _read(REAL)]) == [0]  # any later read
+    assert _forgiven([_miss(GUESSED), lst, _read("P/src/a.py"), _read(REAL)]) == []  # the next read is elsewhere
     assert _forgiven([_miss(GUESSED), lst, _sh(f"sed -n '1,40p' {REAL}")]) == [0]
     assert _forgiven([_miss(GUESSED), lst, _sh(f"grep -n frob {REAL}")]) == []      # a search is not a read
-    # the read may come any time after the listing; RECOVERED_GUESS_READ_WINDOW can bound it
-    late = [_miss(GUESSED), lst, _read("P/a.py"), _read("P/b.py"), _read(REAL)]
-    assert tg.RECOVERED_GUESS_READ_WINDOW is None and _forgiven(late) == [0]
-    assert [g["call_index"] for g in tg.recovered_guesses(late, _resolve, read_window=2)] == []
-    assert [g["call_index"] for g in tg.recovered_guesses(late[:2] + late[4:], _resolve, read_window=1)] == [0]
 
 
 @pytest.mark.parametrize("guess", [
@@ -257,8 +263,8 @@ def test_other_failures_are_never_forgiven(call: dict[str, Any]) -> None:
 
 def test_the_record_names_the_call_as_spelled() -> None:
     got = tg.recovered_guesses([_sh("echo hi"), _miss(GUESSED), _ev("glob", {"pattern": "P/tests/*"}),
-                                _ev("todo_write", {}), _read(REAL)], _resolve)
-    assert got == [{"call_index": 1, "tool": "read_file", "path": GUESSED, "listing_index": 2, "read_index": 4}]
+                                _read(REAL), _ev("todo_write", {})], _resolve)
+    assert got == [{"call_index": 1, "tool": "read_file", "path": GUESSED, "listing_index": 2, "read_index": 3}]
 
 
 def test_the_sandbox_resolver_maps_host_spellings_and_confines(tmp_path: Path) -> None:
