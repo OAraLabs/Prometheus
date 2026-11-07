@@ -757,3 +757,18 @@ Append-only, times in ET.
   - 104 traces predate the depth-200 store's oldest commit.
 - **Estimate:** MVP 9.5 (9–11) → 9 (8.5–10) agent-days, ~3 h host CPU.
 - **For the operator:** phase 4 scope. Options: (a) shrink it to path mapping and routing, ~2–3 days, coverage-limited; (b) widen the grammar for scoring only; (c) drop it. Details in plan §1.4.
+
+## 2026-11-06 ~20:25 EST: recovered-guess rule tightened to the operator's wording; restaged
+- **Order (coordinator):** the whole recovery fits in the next 2 calls. The listing is the call right after the failed guessed read, and the successful read is the call right after the listing (17b5933: `RECOVERED_GUESS_WINDOW = 1`, `RECOVERED_GUESS_READ_WINDOW = 1`). A listing at +2 or a read at +3 rejects the row. The rest of the rule (what counts as a guess, a covering listing and a read) is unchanged from 3c1e55b.
+- **Tests:** the recovered-guess cases (49) now cover a listing at +2, a listing at +3 and a read at +3, all rejected. teacher_gen suites: 386 passed, 6 skipped. Ruff is clean.
+- **Replay estimate, strict rule** (same method as the 20:20 entry):
+
+  | Teacher | Before (4e0add4 estimate) | Rescued | After |
+  |---|---:|---:|---:|
+  | local 27B | 75 / 560 = 13.4% | +11 | 86 / 560 = 15.4% |
+  | 4090 IQ3 | 10 / 206 = 4.9% | +8 | 18 / 206 = 8.7% |
+  | Max (round-2 log) | 15 / 141 = 10.6% | +9 | 24 / 141 = 17.0% |
+  | Max on the fixed gym (stopped genlc run, native) | 3 / 48 = 6.3% | +2 | 5 / 48 = 10.4% |
+
+  - The teacher is not re-run, so this is an estimate. Local is a lower bound (28 tasks have a post-fix error whose text the replay did not keep).
+- **Staged:** `~/distill/round2/code` at 17b5933. The backup is `code.bak-3c1e55b-20261106T2022` (and `code.prev`). No generation unit was running. The `gen_local.sh run` dry run ends SKIP (outside the window). Tonight's 01:05 local run is the live test of the strict rule.
