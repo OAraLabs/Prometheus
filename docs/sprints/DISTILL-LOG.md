@@ -708,3 +708,33 @@ Append-only, times in ET.
   - **Why:** long-context Max on the fixed gym kept 1/40 (2.5%, against 10.7% before), at about 150M input tokens/h for ~6 rows/h.
   - **Cause:** 143/145 failed `read_file`s were guessed test files that don't exist (Max's behaviour; the strict all-tools-succeed rule rejects the row). The rows also can't train until the round-2 Max train-source guard is lifted.
   - **To resume:** the operator chooses (a) a "recovered guessed read" tolerance, (b) a long-context prompt nudge to list before reading, or (c) resume as is.
+
+## 2026-11-06 ~20:20 EST: long-context recovered-guess rule (operator option a) built, replayed, staged for tonight
+- **Order (operator ~17:15):** adopt (a): keep a long-context row when a failed guessed read is recovered (list/glob, then the correct read) within the next 2 calls. No prompt nudge. Test on tonight's local 27B run; resume long-context Max only if keep ≥15%. The 24-call cap stays.
+- **Rule (3c1e55b, `teacher_gen.recovered_guesses`, long-context area only).** A failed call is forgiven only when all of these hold:
+  - it read a missing file: `read_file` "File not found", or a bash command made only of `cd` and `cat` / `head` / `tail` / `sed -n` that failed with "No such file or directory" for a file it named;
+  - one of the next 2 calls is a successful listing that shows the guessed file's directory: `glob` (its pattern's directory part matches; `**` = any depth), bash `ls` of that directory (an ancestor only with `-R`), `find` from it or an ancestor (within `-maxdepth`), or `grep -l`/`-L` on files there (an ancestor with `-r`). The grep tool and `grep` without `-l` are searches, not listings;
+  - a later successful read (`read_file` or such a bash read) opens a file in a directory that listing covered;
+  - nothing else in the row fails (other natural errors, refusals and every other reason still reject).
+  - Paths are compared in the sandbox: relative to the call's directory, `cd` followed, `~` and the prompt's host spellings mapped.
+- **Recorded:** `verification.recovered_guess: [{call_index, tool, path, listing_index, read_index}]` (in the ledger and every row's `_meta.verification`); `tool_errors` keeps the raw count; `tool_success` is true when only forgiven calls failed, so the rows are strict (`qwen38-27b-gym`), not relaxed. The round-2 report has `recovered_guess` counts. `GENERATOR_VERSION` is now `teacher-gen/6`.
+  - **Resume:** a new generator changes the settings fingerprint. Round-2 run names hash the code commit, so tonight's local run gets a new directory (`local-r2-{alias}-75363011`, with `--skip-done-in` over the earlier runs). Resuming the Max out dir `max-tokenplan-r2-max4-max-derived` with this code would be refused (SettingsMismatch: generator); a Max long-context resume needs a new `--name`/`--out` plus `--skip-done-in` that ledger.
+- **Training content:** the failed guessed call is never a target row (a step with a failed call is skipped, as before). Later rows (the listing, the correct read, the final reply) keep the failed call and its error in their context, with `_meta.error_recovery` true. The student learns the recovery, not the guess.
+- **Tests:** a new file with 49 cases: recovered guess kept, no recovery, wrong directory, listing 3 calls later, a non-read error beside a recovered guess, a directory read, a bash guess + bash recovery, a non-long-context area, plus the listing / read / window shapes. The teacher_gen suites passed (386 passed, 6 skipped). Ruff is clean. The full distill suite: 2,063 passed, 4 failed, all four in the other agent's uncommitted build.py per-task-cap work (`test_distill_round2_build.py` ×3, `test_distill_round2_caps.py` ×1), none in teacher_gen.
+- **build.py:** no change needed. It reads `verification.tool_success` (true for these rows) and never re-checks `tool_errors` or failed calls in the context (`error_recovery` is a flag, not a gate).
+- **Replay estimate** (no teacher call; the logged round-2 long-context calls in host scratch, with the 4e0add4 gym replay applied; the rule run over each matched task's calls in telemetry order):
+
+  | Teacher | Before (4e0add4 estimate) | Rescued by the rule | After |
+  |---|---:|---:|---:|
+  | local 27B | 75 / 560 = 13.4% | +37 | 112 / 560 = 20.0% |
+  | 4090 IQ3 | 10 / 206 = 4.9% | +19 | 29 / 206 = 14.1% |
+  | Max (round-2 log) | 15 / 141 = 10.6% | +28 | 43 / 141 = 30.5% |
+  | Max on the fixed gym (stopped genlc run, native) | 3 / 48 = 6.3% | +8 | 11 / 48 = 22.9% |
+
+  - Forgiven-call tasks still rejected: mostly the 24-call cap and other natural errors or refusals (local 124 tasks have a forgiven call, 37 are rescued).
+  - Listings used: glob 423, find 63, ls 56, cd+ls 24. The listing is the next call in 470 of 566 forgiven calls.
+  - Local is a lower bound: 28 tasks have a call that was refused before the fix and errors now, whose new text the replay did not keep (treated as not forgivable).
+  - **Wording check for the operator:** "within the next 2 calls" was built as *the listing* within 2 calls and the read any time after it. If the operator meant the whole recovery within 2 calls, rescued tasks drop to local 11 / 4090 8 / Max 9 (read within 2 of the listing: 30 / 16 / 22). That is one constant: `RECOVERED_GUESS_READ_WINDOW`.
+  - The teacher is not re-run: an estimate either way.
+- **Staged:** `~/distill/round2/code` at 3c1e55b (HEAD; it also carries the gym_fidelity commits from another agent; build.py is unchanged at HEAD). The backup is `code.bak-3e9e9cc-20261106T2018` (and `code.prev`). No `distill-gen*` / `r2-gen*` / `max-r2-gen*` unit was running. The `gen_local.sh run` dry run ends SKIP (outside the window).
+- **Tonight's 01:05 local run is the live test.** Baseline: local long-context keep 10.2% logged, 13.4% replay estimate with the gym fix. Max long-context resumes only if keep ≥15%.
