@@ -449,7 +449,17 @@ real prompt and adds one execution condition, applied by the sandbox:
   first lists where they are with the real ``glob`` (``context_listings``). A
   read or listing the fixture cannot serve rejects the task (``context_read_failed``). With a
   grounding block, the reply must name one of the asked file's identifiers
-  (``not_grounded``).
+  (``not_grounded``). A failed guessed read the teacher recovered from does not
+  count as a tool error here (``recovered_guesses``; operator 2026-11-06): a
+  ``read_file`` "File not found" or a bash ``cat`` / ``head`` / ``tail`` /
+  ``sed -n`` on a missing file, followed within the next
+  ``RECOVERED_GUESS_WINDOW`` (2) calls by a successful listing (``glob``, bash
+  ``ls`` / ``find`` / ``grep -l``) that covers the guessed file's directory, and
+  then a successful read of a file in a directory that listing covered. The
+  record lists each forgiven call (``recovered_guess``); every other failure,
+  and a guess with no such recovery, still rejects the task (``tool_error``).
+  The failed call is never a target row (its step had a failed call), but the
+  later rows keep it in their context: the recovery is what they teach.
 
 Judging (``--judge-calibration``, default ``R2_DEFAULT_CALIBRATION``, required):
 no verdict of this run's judge ever keeps or drops a round-2 row. The calibration
@@ -576,6 +586,7 @@ import os
 import posixpath
 import random
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -588,7 +599,7 @@ import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
@@ -609,7 +620,7 @@ ORIGIN_TASKSET = "taskset"
 ORIGIN_BUILTIN = "builtin"
 #: Request sampling fields ``--temperature`` / ``--top-k`` / ``--top-p`` / ``--min-p`` set.
 SAMPLING_KEYS = ("temperature", "top_k", "top_p", "min_p")
-GENERATOR_VERSION = "teacher-gen/5"
+GENERATOR_VERSION = "teacher-gen/6"
 #: Round 2 (``round2_tasks.py`` rows, an ``r2`` block): steering, the judge calibration that
 #: decides where the local judge may gate, and the teacher's measured context
 R2_DEFAULT_STEER = "~/distill/round2/steer.json"
@@ -5777,6 +5788,354 @@ def r2_checks(out: TaskOutcome, events: list[dict[str, Any]], text: str, reasons
     return rec
 
 
+# -- round 2 long-context: a recovered guessed read ------------------------------------------
+# Operator 2026-11-06, option (a): on a long-context task, a failed guessed read that the teacher
+# recovered from (it listed where the file should be, then read a file that exists) is not a tool
+# error. Every other failure, and a guess with no such recovery, still rejects the task.
+
+#: round-2 areas where ``recovered_guesses`` applies
+RECOVERED_GUESS_AREAS = frozenset({"long-context"})
+#: the listing must be one of the next this-many tool calls after the failed read
+RECOVERED_GUESS_WINDOW = 2
+#: the read must be one of the next this-many calls after the listing (None: any later call)
+RECOVERED_GUESS_READ_WINDOW: int | None = None
+#: bash programs that read the files they name (``sed`` only with ``-n``)
+_SH_READ_PROGS = frozenset({"cat", "head", "tail", "sed"})
+_SH_GREP_PROGS = frozenset({"grep", "egrep", "fgrep"})
+#: what cat / head / tail / sed print for a missing file
+_SH_NOT_FOUND = "No such file or directory"
+_GLOB_CHARS = re.compile(r"[*?\[]")
+_SH_SEPARATORS = frozenset({"&&", "||", ";", "&", "(", ")"})
+#: head / tail options that take the next word as their value
+_HEAD_ARG_OPTS = frozenset({"-n", "-c", "--lines", "--bytes"})
+#: grep options that take the next word as their value (a pattern, a file, a count, a context)
+_GREP_ARG_OPTS = frozenset({"-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D", "--regexp", "--file",
+                            "--max-count", "--after-context", "--before-context", "--context"})
+
+#: path, cwd -> the sandbox path it names (absolute, ``PurePosixPath``), or None (outside, unreadable)
+Resolver = Callable[[str, "PurePosixPath | None"], "PurePosixPath | None"]
+
+
+def _sh_commands(cmd: str) -> list[list[list[str]]] | None:
+    """A one-line command as its simple commands in order: each a pipeline (a list of argv lists,
+    the first stage reading files, the later ones stdin), split on ``&&`` / ``||`` / ``;`` / ``&`` /
+    parentheses, with redirections and their targets left out. None when it does not parse."""
+    try:
+        lx = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lx.whitespace_split = True
+        toks = list(lx)
+    except ValueError:
+        return None
+    commands: list[list[list[str]]] = []
+    pipeline: list[list[str]] = []
+    argv: list[str] = []
+    skip = False
+    for tok in toks:
+        if skip:
+            skip = False
+            continue
+        if tok in _SH_SEPARATORS or tok == "|":
+            if argv:
+                pipeline.append(argv)
+            argv = []
+            if tok != "|" and pipeline:
+                commands.append(pipeline)
+                pipeline = []
+            continue
+        if tok and set(tok) <= set("<>&|"):  # a redirection: drop it, its target and a leading fd
+            if argv and argv[-1].isdigit():
+                argv.pop()
+            skip = True
+            continue
+        argv.append(tok)
+    if argv:
+        pipeline.append(argv)
+    if pipeline:
+        commands.append(pipeline)
+    return commands
+
+
+def _sh_steps(command: str, cwd: PurePosixPath | None,
+              resolve: Resolver) -> list[tuple[str, list[str], PurePosixPath | None]] | None:
+    """(program, its arguments, the directory it runs in) for the FIRST stage of each pipeline in
+    *command* (the later stages read stdin, never a file), following ``cd``. ``cd`` itself is a step.
+    None when the command does not parse."""
+    commands = _sh_commands(command)
+    if commands is None:
+        return None
+    steps: list[tuple[str, list[str], PurePosixPath | None]] = []
+    for pipeline in commands:
+        argv = pipeline[0]
+        prog = posixpath.basename(argv[0])
+        steps.append((prog, argv[1:], cwd))
+        if prog == "cd" and len(pipeline) == 1:
+            target = argv[1] if len(argv) > 1 else "~"
+            cwd = resolve(target, cwd) if target != "-" else None
+            if cwd is None:
+                return None  # what follows runs somewhere this cannot place
+    return steps
+
+
+def _pattern_parts(pattern: str, cwd: PurePosixPath | None, resolve: Resolver) -> tuple[str, ...] | None:
+    """A path or glob pattern as absolute sandbox path parts: its literal leading part resolved
+    like any path, the rest (from the first part with a wildcard) kept as written."""
+    parts = PurePosixPath(pattern).parts
+    k = next((i for i, part in enumerate(parts) if _GLOB_CHARS.search(part)), len(parts))
+    static = str(PurePosixPath(*parts[:k])) if k else "."
+    base = resolve(static, cwd)
+    if base is None:
+        return None
+    return base.parts + tuple(parts[k:])
+
+
+def _covers(scope: tuple[str, ...], directory: tuple[str, ...]) -> bool:
+    """Does the listing scope *scope* (absolute directory pattern parts; ``**`` = any depth) show
+    the entries of *directory*?"""
+    if not scope:
+        return not directory
+    head, rest = scope[0], scope[1:]
+    if head == "**":
+        return any(_covers(rest, directory[i:]) for i in range(len(directory) + 1))
+    return bool(directory) and fnmatch.fnmatchcase(directory[0], head) and _covers(rest, directory[1:])
+
+
+def _short_flags(opts: list[str]) -> set[str]:
+    return {c for o in opts if o.startswith("-") and not o.startswith("--") for c in o[1:]}
+
+
+def _sh_read_operands(prog: str, args: list[str]) -> list[str] | None:
+    """The files a ``cat`` / ``head`` / ``tail`` / ``sed -n`` reads (None: not such a read)."""
+    files: list[str] = []
+    if prog == "cat":
+        return [a for a in args if not a.startswith("-") or a == "-"] or None
+    if prog in ("head", "tail"):
+        it = iter(args)
+        for a in it:
+            if a in _HEAD_ARG_OPTS:
+                next(it, None)
+            elif not a.startswith("-") or a == "-":
+                files.append(a)
+        return files or None
+    if prog == "sed":
+        quiet = False
+        script_given = False
+        it = iter(args)
+        operands: list[str] = []
+        for a in it:
+            if a in ("-e", "--expression", "-f", "--file"):
+                next(it, None)
+                script_given = True
+            elif a in ("--quiet", "--silent"):
+                quiet = True
+            elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
+                quiet |= "n" in a[1:]
+                if a[-1] in "ef":
+                    next(it, None)
+                    script_given = True
+            elif not a.startswith("-"):
+                operands.append(a)
+        if not quiet:
+            return None
+        files = operands if script_given else operands[1:]
+        return files or None
+    return None
+
+
+def _sh_listing_scopes(prog: str, args: list[str], cwd: PurePosixPath | None,
+                       resolve: Resolver) -> list[tuple[str, ...]]:
+    """The directories an ``ls`` / ``find`` / ``grep -l`` shows the entries of, as scopes
+    (``_covers``): ``ls`` its operands (``-R``: and below), ``find`` its start points (to
+    ``-maxdepth``), ``grep -l`` / ``-L`` the directories of the files it names (``-r``: and below)."""
+    scopes: list[tuple[str, ...]] = []
+
+    def add(operand: str, recursive: bool, own_dir: bool) -> None:
+        parts = _pattern_parts(operand, cwd, resolve)
+        if parts is None:
+            return
+        if own_dir or _GLOB_CHARS.search(PurePosixPath(operand).name or ""):
+            parts = parts[:-1]  # a file or a file pattern: the directory it is in
+        scopes.append(parts + (("**",) if recursive else ()))
+
+    if prog == "ls":
+        opts = [a for a in args if a.startswith("-") and a != "-"]
+        recursive = "R" in _short_flags(opts) or "--recursive" in opts
+        for operand in [a for a in args if not a.startswith("-")] or ["."]:
+            add(operand, recursive, own_dir=False)
+    elif prog == "find":
+        k = next((i for i, a in enumerate(args) if a.startswith(("-", "(", "!"))), len(args))
+        starts, expr = args[:k] or ["."], args[k:]
+        depth: int | None = None
+        if "-maxdepth" in expr:
+            i = expr.index("-maxdepth")
+            try:
+                depth = int(expr[i + 1])
+            except (IndexError, ValueError):
+                return []
+        for start in starts:
+            parts = _pattern_parts(start, cwd, resolve)
+            if parts is None:
+                continue
+            if depth is None:
+                scopes.append(parts + ("**",))
+            else:
+                scopes += [parts + ("*",) * d for d in range(max(depth, 0))]
+    elif prog in _SH_GREP_PROGS:
+        flags: set[str] = set()
+        longs: set[str] = set()
+        operands: list[str] = []
+        pattern_given = False
+        it = iter(args)
+        for a in it:
+            if a == "--":
+                operands += list(it)
+                break
+            if a.startswith("--"):
+                name = a.split("=", 1)[0]
+                longs.add(name)
+                if name in _GREP_ARG_OPTS and "=" not in a:
+                    next(it, None)
+                pattern_given |= name in ("--regexp", "--file")
+            elif a.startswith("-") and len(a) > 1:
+                for j, c in enumerate(a[1:]):
+                    flags.add(c)
+                    if "-" + c in _GREP_ARG_OPTS:
+                        pattern_given |= c in "ef"
+                        if j == len(a) - 2:
+                            next(it, None)
+                        break
+            else:
+                operands.append(a)
+        if not ({"l", "L"} & flags or {"--files-with-matches", "--files-without-match"} & longs):
+            return []
+        recursive = bool({"r", "R"} & flags or {"--recursive", "--dereference-recursive"} & longs)
+        files = operands if pattern_given else operands[1:]
+        if not files and recursive:
+            files = ["."]
+        for f in files:
+            add(f, recursive, own_dir=not recursive)
+    return scopes
+
+
+@dataclass
+class _CallShape:
+    """What ``recovered_guesses`` needs of one tool call: the files a failed read guessed (as
+    spelled, and resolved), the listing scopes a successful call showed, the files it read."""
+    guessed: list[tuple[str, PurePosixPath]] = field(default_factory=list)
+    scopes: list[tuple[str, ...]] = field(default_factory=list)
+    reads: list[PurePosixPath] = field(default_factory=list)
+
+
+def _call_shape(ev: dict[str, Any], resolve: Resolver) -> _CallShape:
+    shape = _CallShape()
+    name, args = ev.get("name"), ev.get("input") or {}
+    outcome = ev.get("outcome")
+    ok = outcome in ("ok", "simulated")
+    result = str(ev.get("result") or "")
+    if name == "read_file":
+        path = str(args.get("path") or "")
+        p = resolve(path, None) if path else None
+        if p is None:
+            return shape
+        if ok:
+            shape.reads.append(p)
+        elif outcome == "error" and result.startswith("File not found"):
+            shape.guessed.append((path, p))
+        return shape
+    if name == "glob":
+        root = resolve(str(args.get("root") or "."), None)
+        pattern = str(args.get("pattern") or "")
+        parts = _pattern_parts(pattern, root, resolve) if ok and root is not None and pattern else None
+        if parts is not None:
+            shape.scopes.append(parts if parts[-1] == "**" else parts[:-1])
+        return shape
+    if name != "bash" or outcome not in ("ok", "simulated", "error"):
+        return shape
+    cwd = resolve(str(args.get("cwd") or "."), None)
+    steps = _sh_steps(str(args.get("command") or ""), cwd, resolve)
+    if not steps:
+        return shape
+    if outcome == "error":
+        # every step a cd or a read, and at least one file the output says is missing
+        lines = result.splitlines()
+        for prog, sargs, scwd in steps:
+            if prog == "cd":
+                continue
+            files = _sh_read_operands(prog, sargs) if prog in _SH_READ_PROGS else None
+            if files is None:
+                return _CallShape()
+            for f in files:
+                if any(f in ln and _SH_NOT_FOUND in ln for ln in lines):
+                    p = resolve(f, scwd)
+                    if p is not None:
+                        shape.guessed.append((f, p))
+        return shape
+    for prog, sargs, scwd in steps:
+        files = _sh_read_operands(prog, sargs) if prog in _SH_READ_PROGS else None
+        for f in files or ():
+            p = resolve(f, scwd)
+            if p is not None:
+                shape.reads.append(p)
+        if prog in ("ls", "find") or prog in _SH_GREP_PROGS:
+            shape.scopes += _sh_listing_scopes(prog, sargs, scwd, resolve)
+    return shape
+
+
+def recovered_guesses(events: list[dict[str, Any]], resolve: Resolver, window: int = RECOVERED_GUESS_WINDOW,
+                      read_window: int | None = RECOVERED_GUESS_READ_WINDOW) -> list[dict[str, Any]]:
+    """The failed guessed reads among *events* (a task's own tool calls in the order the teacher
+    made them, ``tool_events``' fields) that the teacher recovered from, as
+    ``{call_index, tool, path, listing_index, read_index}`` (indexes into *events*). A call
+    counts only when ALL of these hold:
+
+    * it read a file that does not exist: ``read_file`` answered "File not found", or a bash
+      command made only of ``cd`` and ``cat`` / ``head`` / ``tail`` / ``sed -n`` failed with "No
+      such file or directory" for a file it named;
+    * one of the next *window* calls listed the place: a successful ``glob`` whose pattern's
+      directory part matches the guessed file's directory (``**``: any depth), or a successful bash
+      ``ls`` of that directory or an ancestor with ``-R``, ``find`` from that directory or an
+      ancestor (within ``-maxdepth``), or ``grep -l`` / ``-L`` on files in that directory (``-r``: or
+      an ancestor). "The relevant directory" is exactly this: the listing shows the entries of the
+      directory the guessed file would be in;
+    * a later successful read (``read_file``, or such a bash read) opened a file in a directory
+      that same listing covered (within *read_window* calls of the listing, when set).
+
+    Paths are compared after *resolve* (relative to the call's working directory, ``cd`` followed,
+    host spellings mapped). The caller decides what else must hold (no other failure)."""
+    shapes = [_call_shape(ev, resolve) for ev in events]
+    found: list[dict[str, Any]] = []
+    for i, shape in enumerate(shapes):
+        if not shape.guessed:
+            continue
+        for j in range(i + 1, min(i + 1 + window, len(shapes))):
+            scopes = [s for s in shapes[j].scopes
+                      if all(_covers(s, p.parent.parts) for _spelled, p in shape.guessed)]
+            if not scopes:
+                continue
+            last = len(shapes) if read_window is None else min(len(shapes), j + 1 + read_window)
+            k = next((k for k in range(j + 1, last)
+                      if any(_covers(s, r.parent.parts) for s in scopes for r in shapes[k].reads)), None)
+            if k is not None:
+                found.append({"call_index": i, "tool": events[i].get("name"), "path": shape.guessed[0][0],
+                              "listing_index": j, "read_index": k})
+                break
+    return found
+
+
+def sandbox_resolver(env: SandboxEnv) -> Resolver:
+    """``recovered_guesses``' resolver for a task's sandbox: a host spelling the prompt names is
+    mapped (``SandboxEnv.unalias``), then confined like the call itself (``~`` is the sandbox root,
+    a relative path is under *cwd* or the root); a path outside the sandbox resolves to None."""
+
+    def resolve(path: str, cwd: PurePosixPath | None) -> PurePosixPath | None:
+        try:
+            mapped, _used = env.unalias(path)
+            return PurePosixPath(env.confine(mapped, Path(cwd) if cwd is not None else None))
+        except (SandboxRefusal, ValueError, OSError):
+            return None
+
+    return resolve
+
+
 def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, list[str], dict[str, Any]]:
     from prometheus.gym.scoring import EXECUTION, RunTranscript, score
 
@@ -5804,6 +6163,14 @@ def deterministic_checks(out: TaskOutcome, settings: Settings) -> tuple[bool, li
         record["host_path_calls"] = out.env.alias_calls
     if out.env.var_calls:
         record["known_var_calls"] = out.env.var_calls
+    # round 2 long-context: a failed guessed read the teacher recovered from is not a tool error
+    # (operator 2026-11-06); it stays in the record, and every other failure still counts
+    forgiven: list[dict[str, Any]] = []
+    if task.area in RECOVERED_GUESS_AREAS and counts["error"]:
+        forgiven = recovered_guesses(events, sandbox_resolver(out.env))
+        if forgiven:
+            record["recovered_guess"] = forgiven
+    natural -= len(forgiven)
     if out.pad_reasons:
         reasons += out.pad_reasons
     if out.error:
@@ -6698,10 +7065,16 @@ class Store:
         """Round 2: rows and outcomes per area / bucket, rows per verifier, the judge's reach."""
         by_area: dict[str, collections.Counter] = {}
         reasons: dict[str, collections.Counter] = {}
+        guesses: collections.Counter = collections.Counter()
         for ev in self.status.values():
             if not ev.get("area"):
                 continue
             by_area.setdefault(ev["area"], collections.Counter())[ev["status"]] += 1
+            forgiven = (ev.get("verification") or {}).get("recovered_guess") or []
+            if forgiven:
+                # tasks with a forgiven guessed read (recovered_guesses), by outcome, and the calls
+                guesses[f"tasks_{ev['status']}"] += 1
+                guesses["calls"] += len(forgiven)
             for r in ev.get("reasons") or []:
                 reasons.setdefault(ev["area"], collections.Counter())[r] += 1
         total = self.total_rows
@@ -6712,6 +7085,7 @@ class Store:
                 if total else {},
                 "tasks_by_area": {a: dict(c) for a, c in sorted(by_area.items())},
                 "rejections_by_area": {a: dict(c.most_common(12)) for a, c in sorted(reasons.items())},
+                "recovered_guess": dict(sorted(guesses.items())),
                 "judge_gates_in": sorted(settings.calibrated), "calibration": settings.calibration_info or None,
                 "steer": settings.steer_path, "ctx_cap": settings.ctx_cap, "ctx_cap_basis": settings.ctx_cap_basis}
 
