@@ -62,6 +62,17 @@ what it denies (below).
   (`launchctl submit`), AppleEvents and `open`; on Linux, `systemd-run --user` over D-Bus, which the AppArmor
   profile allows. This isn't measured here. Neither option closes it for the other secrets. Option 1 would
   close it for the master key only.
+- **Against, the sharpest case of the same gap — the Docker socket (measured, Linux, 2026-11-06).** If the
+  Prometheus user is in the `docker` group it can write `/run/docker.sock`, and `docker run -v /:/host …`
+  mounts the host root into a container the shell controls as uid 0. That is passwordless **root**, so it
+  reads and writes every path the floor denies — not just the other same-user secrets `systemd-run` reaches.
+  Measured: under `prometheus-bash`, a confined `docker version` reached dockerd on a box whose user is in the
+  group. AppArmor cannot close it (the profile is broad by design; denying the socket would break legitimate
+  docker use and would not remove the group member's other roads to the daemon; and a root process in a
+  container is not bound by a per-exec user profile). It is a **deployment rule**: keep the Prometheus user out
+  of the `docker` group, or run dockerd rootless. The boot probe warns when the socket is reachable
+  (`security/shell_floor.announce`), and the operator guide says so ([Docker](../guide/docker.md), Security
+  inside the container).
 
 ## Recommendation: option 2, now
 

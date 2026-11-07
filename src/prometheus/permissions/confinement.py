@@ -130,6 +130,57 @@ def normalise_mode(value: object) -> str:
     return MODE_OFF
 
 
+# --------------------------------------------------------------------------- #
+# DELEGATION TO A ROOT DAEMON: THE DOCKER SOCKET
+# --------------------------------------------------------------------------- #
+#
+# A floor confines the process TREE it starts. A command that hands the work to
+# a separate, unconfined service is not inside that tree — the same gap
+# docs/design/master-key-out-of-agent-shell.md records for `systemd-run --user`
+# over D-Bus, which the AppArmor profile allows. The Docker control socket is
+# that pattern with a sharper edge: a daemon user in the `docker` group can
+# write /run/docker.sock, and `docker run -v /:/host …` mounts the host root
+# into a container it controls as uid 0 — passwordless ROOT, which reads and
+# writes every path the floor denies (the env file, the MCP store, node keys).
+#
+# This is NOT closable in the profile: the profile is broad by design, denying
+# the socket would break legitimate docker use AND would not remove the group
+# member's other roads to dockerd, and once the shell is root in a container no
+# per-exec user profile binds it. So it is a DEPLOYMENT RULE (keep the
+# Prometheus user out of the docker group, or run dockerd rootless), and the
+# floor's doctrine — verify by outcome, fail loud — makes it a boot warning.
+#
+# The probe is by outcome and from THIS process, whose uid/gids a model-written
+# shell inherits through aa-exec: os.access() here is exactly what that shell
+# can do. Linux only — on a Mac, Docker Desktop's socket reaches a VM, not the
+# host, so `-v /:/host` does not mount the Mac's filesystem.
+DOCKER_SOCKETS: Final[tuple[str, ...]] = (
+    "/run/docker.sock",
+    "/var/run/docker.sock",
+)
+
+
+def docker_socket_reachable(
+    sockets: Sequence[str] | None = None,
+) -> tuple[bool, str]:
+    """Whether a model-written shell can reach a Docker control socket.
+
+    Returns ``(True, path)`` for the first socket this process can read and
+    write (connecting to a stream socket needs both), else ``(False, reason)``.
+    Writing the socket is root on the host by Docker's own model, and it is
+    outside every bash floor. Linux only.
+    """
+    if not apparmor_possible():
+        return (False, "not Linux")
+    for path in (DOCKER_SOCKETS if sockets is None else sockets):
+        try:
+            if os.path.exists(path) and os.access(path, os.R_OK | os.W_OK):
+                return (True, path)
+        except OSError:
+            continue
+    return (False, "no reachable Docker socket")
+
+
 def apparmor_possible() -> bool:
     """Can AppArmor exist on this platform at all? Linux only.
 
