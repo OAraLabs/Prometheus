@@ -379,10 +379,13 @@ def _max_r2(task: str, *, pending: bool, category: str = "coding") -> dict[str, 
                verification=rec, **meta)
 
 
-def _max_builder(tmp_path: Path, verdict_files: list[Path], cal: Path) -> Any:
+def _max_builder(tmp_path: Path, verdict_files: list[Path], cal: Path, *, listed: bool = True) -> Any:
     b = _builder(tmp_path, verdict_files, cal)
     b.s.allow_max_derived, b.s.max_derived_approval = True, "operator Q6b 2026-10-30"
     b.s.unjudged_verifiers = build.UNJUDGED_VERIFIERS
+    if listed:  # the round-2 recipe lists the round-2 Max source and model (operator 2026-11-06)
+        b.s.train_sources = (GYM, *build.R2_RECIPE["max_train_sources"])
+        b.s.train_models = (*build.DEFAULT_TRAIN_MODELS, *build.R2_RECIPE["max_train_models"])
     return b
 
 
@@ -435,3 +438,272 @@ def test_round2_max_rows_reach_the_recipe_and_wait_for_the_calibrated_judge(
     b = _max_builder(tmp_path / "c", [selfv], cal)
     feed(b, traces, "extra")
     assert b.stats["excluded:judge_pending"] == 3 and b.stats["judge_pending_uncalibrated_verdict_ignored"] == 1
+
+
+# ── Q6b for round-2 Max rows (operator 2026-11-06): the train-source guard ──
+
+
+def test_round2_max_rows_train_only_when_listed_and_round1_max_rows_are_unchanged(tmp_path: Path) -> None:
+    cal = _calibration(tmp_path)
+    r2 = [_max_r2("maxrec" + word(t), pending=False, category="other") for t in range(3)]
+    r1 = gym("maxround1", "bash", {"command": "make maxround1"}, model="qwen3.8-max", source="max-tokenplan-gym",
+             max_derived=True, tags=["max-derived"],
+             verification={**VERIFIED, "judge": {"verdict": "pass", "provider": "max-token-plan",
+                                                 "judge_key": "token-plan", "model": "qwen3.8-max"}})
+    traces = write_jsonl(tmp_path / "max.jsonl", [*r2, r1])
+    # the allow alone: round-2 Max rows are refused (no split at all), a round-1 Max gym row still trains
+    (tmp_path / "a").mkdir()
+    b = _max_builder(tmp_path / "a", [], cal, listed=False)
+    feed(b, traces, "extra")
+    assert b.stats["excluded:max_r2_not_listed"] == 3
+    assert [(e.source, e.max_derived, e.train_ok) for e in b.examples] == [("max-tokenplan-gym", True, True)]
+    # listed source but not the model (or the other way round): still refused
+    for sources, models in (((GYM, "max-tokenplan-gym"), build.DEFAULT_TRAIN_MODELS),
+                            ((GYM,), (*build.DEFAULT_TRAIN_MODELS, "qwen3.8-max*"))):
+        (tmp_path / "x").mkdir(exist_ok=True)
+        b = _max_builder(tmp_path / "x", [], cal, listed=False)
+        b.s.train_sources, b.s.train_models = sources, models
+        feed(b, traces, "extra")
+        assert b.stats["excluded:max_r2_not_listed"] == 3
+    # listed (the round-2 recipe): they train, Max-derived under the approval, and are covered
+    (tmp_path / "b").mkdir()
+    b = _max_builder(tmp_path / "b", [], cal)
+    feed(b, traces, "extra")
+    assert len(b.examples) == 4 and all(e.max_derived and e.train_ok and e.approval == "operator Q6b 2026-10-30"
+                                        for e in b.examples)
+    b.split()
+    g = b.gates()
+    assert g["data_policy"]["pass"] and g["data_policy"]["max_derived_uncovered_in_train_val"] == 0
+    assert b.train_val_max_derived()
+    # without the allow, listing changes nothing: a Max gym row needs the allow first
+    (tmp_path / "c").mkdir()
+    b = _max_builder(tmp_path / "c", [], cal)
+    b.s.allow_max_derived, b.s.max_derived_approval = False, None
+    feed(b, traces, "extra")
+    assert b.stats["excluded:max_payg_gym_needs_allow"] == 4 and not b.examples
+
+
+def test_cli_lists_round2_max_sources_only_under_the_allow_and_tags_the_output(
+        tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    from tests.test_distill_build import R, make_pack, make_student
+    monkeypatch.setattr(R.Student, "load", classmethod(lambda cls, d: make_student()))
+    pack = tmp_path / "pack.json"
+    pack.write_text(json.dumps(make_pack()))
+    rows = [_max_r2("maxrec" + word(t), pending=False, category="other") for t in range(6)] \
+        + [gym("loc" + word(t), "bash", {"command": f"make loc{t}"}) for t in range(6)]
+    traces = write_jsonl(tmp_path / "pool.jsonl", rows)
+    sessions = tmp_path / "exclude-sessions.txt"
+    sessions.write_text("incident:s9\n")
+    ref = "operator Q6b 2026-10-30; round-2 Max rows operator 2026-11-06"
+    listed = ["--train-sources", GYM, "max-tokenplan-gym", "--train-models", "qwen3.8-27b*", "qwen3.8-max*"]
+    allow = ["--allow-max-derived", "--max-derived-approval", ref, "--exclude-sessions", str(sessions)]
+
+    def run(out: Path, *extra: str) -> int:
+        return build.main(["build", "--no-golden", "--extra-traces", str(traces), "--pack", str(pack),
+                           "--tokenizer-dir", "unused", "--out", str(out), "--dry-run", "--eval-min", "0",
+                           "--train-range", "1", "1000", "--val-share-range", "0", "1", "--eval-task-frac", "0",
+                           "--val-frac", "0", "--min-presence", "0", "--category-cap", "1", *extra])
+
+    tagged, plain = tmp_path / "r2-max-derived", tmp_path / "r2"
+    # refused without the allow: the guard stands, and says how it may be lifted
+    for flag_args in (listed, ["--train-sources", GYM, "max-tokenplan-gym"],
+                      ["--train-models", "qwen3.8-27b*", "qwen3.8-max*"]):
+        assert run(tagged, *flag_args) == 2
+        err = capsys.readouterr().err
+        assert "may not name Max" in err and "--allow-max-derived" in err
+    # the allow with an untagged output is refused before anything is read
+    assert run(plain, *listed, *allow) == 2
+    assert "max-derived" in capsys.readouterr().err and not plain.exists()
+    # the Max key never judges, allow or not
+    assert run(tagged, *listed, *allow, "--judge-models", "qwen3.8-max") == 2
+    assert "--judge-models may not name Max" in capsys.readouterr().err
+    # accepted with the allow: logged, Max rows train, every output tagged and private
+    assert run(tagged, *listed, *allow) == 1  # INCOMPLETE: no spot check
+    err = capsys.readouterr().err
+    assert "ALLOW (Q6b): --train-sources lists Max-derived max-tokenplan-gym" in err
+    report = json.loads((tagged / "report.json").read_text())
+    assert report["max_derived"] is True and report["tags"] == ["max-derived"] and report["private"] is True
+    assert report["splits"]["train"]["source"] == {"max-tokenplan-gym": 6, GYM: 6}
+    assert report["settings"]["train_sources"] == [GYM, "max-tokenplan-gym"]
+    dp = report["data_policy"]
+    assert dp["sources"]["max-tokenplan-gym"]["listed"] is True
+    assert dp["max_derived_allow"]["approval"] == ref and dp["max_derived_allow"]["covered_in_train_val"] == 6
+    assert report["gates"]["data_policy"]["pass"]
+    assert report["settings"]["teacher_model"] == build.TEACHER_MODEL  # the guards fail closed
+    # the allow without listing: the round-2 Max rows are refused, the local rows train
+    assert run(tagged, *allow) == 1
+    capsys.readouterr()
+    report = json.loads((tagged / "report.json").read_text())
+    assert report["splits"]["train"]["source"] == {GYM: 6}
+    assert report["counts"]["excluded:max_r2_not_listed"] == 6
+    # the round-2 recipe lists them, under the extended approval
+    a = build.parse_args(["round2", "--out", str(tagged), "--print"])
+    argv, _ = build.round2_argv(a)
+    src = argv[argv.index("--train-sources") + 1:argv.index("--train-models")]
+    assert src == [GYM, "max-tokenplan-gym"]
+    assert "qwen3.8-max*" in argv[argv.index("--train-models") + 1:argv.index("--unjudged-verifiers")]
+    assert argv[argv.index("--max-derived-approval") + 1] == ref and "--allow-max-derived" in argv
+
+
+def test_round2_max_coding_calls_stay_judge_pending_when_listed(tmp_path: Path) -> None:
+    """Listing the round-2 Max source changes nothing for a calibrated-category call: it waits
+    for the calibrated judge; a self-judge or a Max judge verdict never decides it."""
+    cal = _calibration(tmp_path)
+    rows = [_max_r2("max" + word(t), pending=True) for t in range(2)] \
+        + [_max_r2("maxd", pending=True, category="sentinel/daemon")]
+    traces = write_jsonl(tmp_path / "m.jsonl", rows)
+    maxv = write_jsonl(tmp_path / "maxv.jsonl", [
+        {"id": "x", "source": {"file": traces.name, "line": i}, "status": "ok", "verdict": "pass",
+         "provider": "max-token-plan", "judge_key": "token-plan", "model": "qwen3.8-max"} for i in range(3)])
+    b = _max_builder(tmp_path, [maxv], cal)
+    feed(b, traces, "extra")
+    assert b.stats["excluded:judge_pending"] == 3 and not b.examples
+    assert b.stats["judge_pending_uncalibrated_verdict_ignored"] == 3
+
+
+# ── verdicts on rows excluded before their verdict applied ──────────────────
+
+
+def test_verdicts_on_excluded_rows_are_accounted_and_only_unread_traces_are_unmatched(tmp_path: Path) -> None:
+    from tests.test_distill_build import corpus, make_builder, trace
+    golden = corpus(tmp_path)  # 40 tasks x 3 git calls, 36 others, 1 duplicate (last-but-one), 1 other model
+    lines = golden.read_text().splitlines()
+    n = len(lines)
+    verdicts = {f"{golden.name}:1": "pass",          # applied
+                f"{golden.name}:{n - 1}": "fail",    # the duplicate row: excluded before its verdict
+                f"{golden.name}:{n}": "pass",        # another model's row: non_teacher_model
+                f"{golden.name}:{n + 5}": "pass",    # no such line in a file that was read
+                "golden_traces_9_9.jsonl:3": "pass",  # a trace file that is not an input
+                "0123456789abcdef": "fail"}          # a hash no row has
+    b = make_builder(tmp_path, verdicts=verdicts, eval_task_frac=0.0, val_frac=0.0, category_cap=1.0)
+    feed(b, golden)
+    b.split()
+    g = b.gates()["verdicts"]
+    assert g["on_excluded_rows_by_reason"] == {"duplicate": 1, "non_teacher_model": 1}
+    assert g["on_excluded_rows"] == 2
+    assert g["unmatched"] == 3 and not g["pass"]
+    assert g["unmatched_by_cause"] == {"hash_not_found": 1, "line_not_in_trace_file": 1,
+                                       "trace_file_not_an_input": 1}
+    # only verdicts that find a read row (applied or on an excluded row): the gate passes
+    ok = {k: v for k, v in verdicts.items() if k.startswith(golden.name) and not k.endswith(f":{n + 5}")}
+    (tmp_path / "b").mkdir()
+    b = make_builder(tmp_path / "b", verdicts=ok, eval_task_frac=0.0, val_frac=0.0, category_cap=1.0)
+    feed(b, golden)
+    b.split()
+    g = b.gates()["verdicts"]
+    assert g["pass"] and g["unmatched"] == 0 and g["on_excluded_rows"] == 2
+    # a verdict keyed by the row's hash is found on an excluded row too
+    dup = build.Trace("x:1", "golden", "x", 1, trace("solo", "bash", {"command": "ls"}, model="other-model"))
+    hx = build.trace_keys(dup.raw).h_exact
+    (tmp_path / "c").mkdir()
+    b = make_builder(tmp_path / "c", verdicts={hx: "fail"}, eval_task_frac=0.0, val_frac=0.0)
+    b.add(dup)
+    assert b.stats["verdicts_on_excluded:non_teacher_model"] == 1 and b.verdicts_used == {hx}
+
+
+# ── --per-task-cap ───────────────────────────────────────────────────────────
+
+
+def _many_calls(tmp_path: Path, tasks: int, calls: int) -> Path:
+    from tests.test_distill_build import trace
+    rows = [trace(f"req{word(t)}", "bash", {"command": f"step {word(c)} of {word(t)}"}, ts=1_790_000_000 + t * 100 + c)
+            for t in range(tasks) for c in range(calls)]
+    return write_jsonl(tmp_path / "golden_traces_7_7.jsonl", rows)
+
+
+def test_per_task_cap_holds_golden_rows_per_request_and_leaves_gym_rows(tmp_path: Path) -> None:
+    from tests.test_distill_build import allow_builder
+    golden = _many_calls(tmp_path, 6, 12)
+    gyms = write_jsonl(tmp_path / "gym.jsonl", [gym("g" + word(t), "bash", {"command": f"step {word(c)}"})
+                                                 for t in range(3) for c in range(5)])
+    b = allow_builder(tmp_path / "a", eval_task_frac=0.0, val_frac=0.0, category_cap=1.0, per_task_cap=4,
+                      per_task_cap_reason="test")
+    feed(b, golden)
+    feed(b, gyms, "extra")
+    info = b.split()
+    per = collections_counter(e.task_id for e in b.final["train"] if e.kind == "golden")
+    assert len(per) == 6 and set(per.values()) == {4}
+    assert sum(1 for e in b.final["train"] if e.source == GYM) == 15  # scope golden: gym rows untouched
+    ptc = info["per_task_cap"]["pool"]
+    assert ptc["rows_in_scope"] == 72 and ptc["dropped"] == 48 and ptc["tasks_over_cap"] == 6
+    assert ptc["rows_per_task_before"] == {"p50": 12, "p90": 12, "max": 12}
+    assert sum(1 for e in b.examples if e.split == "per_task_cap") == 48
+    g = b.gates()["per_task_cap"]
+    assert g["pass"] and g["max_rows_per_task"] == 4 and g["tasks_in_scope"] == 6
+    # the choice within a task is seeded: the same rows every time
+    b2 = allow_builder(tmp_path / "b", eval_task_frac=0.0, val_frac=0.0, category_cap=1.0, per_task_cap=4,
+                       per_task_cap_reason="test")
+    feed(b2, golden)
+    feed(b2, gyms, "extra")
+    b2.split()
+    assert sorted(e.id for e in b2.final["train"]) == sorted(e.id for e in b.final["train"])
+    # the cap runs before the split: val's quota is taken from capped rows, so a request with many
+    # calls cannot fill val and then be cut down to a sliver
+    b4 = allow_builder(tmp_path / "d", eval_task_frac=0.0, val_frac=0.25, category_cap=1.0, per_task_cap=4,
+                       per_task_cap_reason="test")
+    feed(b4, _many_calls(tmp_path / "d", 12, 12))
+    b4.split()
+    tr, va = len(b4.final["train"]), len(b4.final["val"])
+    assert tr + va == 48 and 0.15 <= va / 48 <= 0.35
+    assert max(collections_counter(e.task_id for e in b4.final["val"]).values()) == 4
+    # scope all caps the gym rows too, but never a row of an uncapped round-2 area
+    rows = [gym("g" + word(t), "bash", {"command": f"step {word(c)}"}, target_area=area)
+            for t, area in enumerate(["coding", "long-context"]) for c in range(5)]
+    b3 = make_builder_r2(tmp_path / "c", per_task_cap=2, per_task_cap_scope="all", per_task_cap_reason="test",
+                         area_caps={"coding": 0.9})
+    feed(b3, write_jsonl(tmp_path / "gym2.jsonl", rows), "extra")
+    b3.split()
+    assert collections_counter(e.area for e in b3.final["train"]) == {"coding": 2, "long-context": 5}
+
+
+def test_per_task_cap_holds_across_replay(tmp_path: Path) -> None:
+    from tests.test_distill_build import allow_builder
+    golden = _many_calls(tmp_path, 4, 6)
+    # a previous dataset whose train holds 6 more rows of the same requests (max-golden), and 4 of others
+    prev_rows = []
+    for t in range(4):
+        for c in range(6, 12):
+            prev_rows.append({"task": f"req{word(t)}", "cmd": f"step {word(c)} of {word(t)}", "source": "max-golden"})
+    for t in range(4):
+        prev_rows.append({"task": f"other{word(t)}", "cmd": f"other {word(t)}", "source": "max-golden"})
+    src = _replay_source(tmp_path, prev_rows)
+    b = allow_builder(tmp_path / "a", eval_task_frac=0.0, val_frac=0.0, category_cap=1.0, per_task_cap=5,
+                      per_task_cap_reason="test", replay_from=str(src), replay_share=0.5)
+    feed(b, golden)
+    b.split()
+    b.add_replay()
+    per = collections_counter(e.task_id for e in b.final["train"])
+    assert max(per.values()) <= 5
+    assert b.replay_info["dropped"]["dropped:per_task_cap"] == 24  # 4 requests already at 5: all 6 each
+    assert b.gates()["per_task_cap"]["pass"]
+
+
+def test_cli_per_task_cap_needs_a_reason(tmp_path: Path, capsys: Any) -> None:
+    for extra in (["--per-task-cap", "8"], ["--per-task-cap", "0", "--per-task-cap-reason", "x"]):
+        assert build.main(["build", "--no-golden", "--out", str(tmp_path / "o"), "--pack", "p.json",
+                           "--tokenizer-dir", "unused", "--dry-run", *extra]) == 2
+        assert "--per-task-cap" in capsys.readouterr().err
+    assert not (tmp_path / "o").exists()
+
+
+def collections_counter(it: Any) -> dict[str, int]:
+    import collections
+    return dict(collections.Counter(it))
+
+
+def make_builder_r2(root: Path, **kw: Any) -> Any:
+    from tests.test_distill_build import make_builder
+    root.mkdir(parents=True, exist_ok=True)
+    return make_builder(root, train_sources=(GYM,), eval_task_frac=0.0, val_frac=0.0, category_cap=1.0, **kw)
+
+
+def _replay_source(tmp_path: Path, rows: list[dict[str, Any]]) -> Path:
+    """A previous dataset whose train rows read like golden Max rows (source max-golden, Q6b)."""
+    prev = _dataset(tmp_path, "prev", [gym(r["task"], "bash", {"command": r["cmd"]}) for r in rows])
+    train = read_jsonl(prev / "train.jsonl")
+    assert len(train) == len(rows)
+    for r in train:
+        r.update(max_derived=True, model="qwen3.8-max", source="max-golden",
+                 max_derived_approval="operator Q6b 2026-10-30")
+    write_jsonl(prev / "train.jsonl", train)
+    return prev

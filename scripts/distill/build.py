@@ -249,8 +249,31 @@ Round 2
   as it is read (``eval_set_overlap``), a replay row dropped (``leak_eval_set``);
   gate ``eval_disjoint``. ``--no-golden``: no golden traces (round 2: the harvested Max
   rows return only through the replay).
+* Round-2 Max rows (Q6b, operator 2026-11-06): ``--train-sources`` / ``--train-models`` may
+  name Max (e.g. ``max-tokenplan-gym``, ``qwen3.8-max*``) only under ``--allow-max-derived``
+  with its approval, which already holds the output to a ``max-derived`` name (tagged,
+  private); without the allow such a pattern is refused (exit 2), and ``--judge-models``
+  naming Max always is. A round-2 Max gym row (``round: 2`` or a target area) is admitted
+  only when its source and model are listed (``max_r2_not_listed`` otherwise; no split);
+  it is still Max-derived, verified strictly (a calibrated-category call waits as
+  ``judge_pending`` for the calibrated judge) and covered by the approval. Round-1 Max rows
+  need no listing.
+* Verdicts on excluded rows: a verdict whose row was read but excluded before its verdict
+  applied (a duplicate, an eval-set overlap, a listed session, another model's row, ...) is
+  accounted for under that reason (``gates.verdicts.on_excluded_rows_by_reason``); the
+  gate's ``unmatched`` counts only verdicts whose trace was never read, by cause
+  (``unmatched_by_cause``: trace file not an input, line not in a file that was read, hash
+  no row has).
+* ``--per-task-cap N`` (+ ``--per-task-cap-reason``, ``--per-task-cap-scope golden|all``): at
+  most N train and N val rows per task (``task_id``: the hash of the normalized last user
+  message before the call, i.e. the request the call answers), seeded, before the area,
+  class and category caps; replay rows count toward it (a replayed row of a task already
+  at the cap is not drawn). Scope ``golden`` (default) caps the harvested Max traces
+  (golden rows, ``max-golden`` replay rows); ``all`` every row but an uncapped round-2
+  area's. ``caps.per_task`` and the ``per_task_cap`` gate report it.
 * ``round2``: the operator's round-2 recipe (``R2_RECIPE``) as one build: every round-2
-  pool file, ``--no-golden``, the local 27B train source, ``--unjudged-verifiers
+  pool file, ``--no-golden``, the local 27B train source and the round-2 Max one
+  (``max-tokenplan-gym`` / ``qwen3.8-max*``, under the Q6b approval), ``--unjudged-verifiers
   deterministic,tool-success``, the calibration report (judge_pending rows wait for its
   verdicts: the judge-pending workdir's ``judge-sample.jsonl`` joins ``--verdicts`` once
   it exists), area caps injection 0.2 / daily-agent 0.3 / coding 0.3, category cap off
@@ -1871,6 +1894,15 @@ def r2_area(meta: Any) -> str:
     return area.strip() if isinstance(area, str) and area.strip() else ""
 
 
+def is_round2(meta: Any) -> bool:
+    """A round-2 teacher_gen row: ``round: 2`` in its ``_meta`` or its record, or a target area
+    (any one of them; fail closed: a row that says it is round 2 anywhere is)."""
+    if not isinstance(meta, dict):
+        return False
+    rec = meta.get("verification") if isinstance(meta.get("verification"), dict) else {}
+    return meta.get("round") == 2 or rec.get("round") == 2 or bool(r2_area(meta))
+
+
 def area_protected(area_caps: dict[str, float] | None) -> Any:
     """With area caps on: a row of a round-2 area the caps do not name (an uncapped
     area: it keeps everything that passes) is never dropped by any cap. None without."""
@@ -2015,6 +2047,48 @@ def sample_per_task(examples: list[Example], k: int, seed: str) -> list[Example]
     return out
 
 
+#: --per-task-cap scopes: ``golden`` caps the harvested Max traces (golden rows, and replay rows
+#: whose source is ``max-golden``), where one real request yields dozens of calls; ``all`` caps
+#: every row except those of an uncapped round-2 area (never down-sampled: area_protected).
+PER_TASK_SCOPES = ("golden", "all")
+
+
+def per_task_in_scope(scope: str, area_caps: dict[str, float] | None = None) -> Any:
+    """The predicate on (kind, source, area) a --per-task-cap counts and caps. With area caps
+    on, a row of a round-2 area they do not name is never capped (``area_protected``)."""
+    def check(kind: str, source: str, area: str) -> bool:
+        if scope == "golden":
+            return kind == "golden" or (kind == "replay" and source == "max-golden")
+        return not (area_caps and area and area not in area_caps)
+    return check
+
+
+def cap_per_task(examples: list[Example], k: int, seed: str, in_scope: Any
+                 ) -> tuple[list[Example], dict[str, Any]]:
+    """--per-task-cap: at most *k* in-scope rows per task (``Example.task_id``: the hash of the
+    normalized last user message before the call, i.e. the request the call answers), chosen
+    within a task by a seeded hash. Rows out of scope are kept and not counted. Order kept."""
+    by_task: dict[str, list[Example]] = collections.defaultdict(list)
+    for e in examples:
+        if in_scope(e.kind, e.source, e.area):
+            by_task[e.task_id].append(e)
+    keep: set[int] = {id(e) for e in examples if not in_scope(e.kind, e.source, e.area)}
+    dropped: collections.Counter = collections.Counter()
+    for _t, rows in sorted(by_task.items()):
+        rows.sort(key=lambda e: seeded(seed, "per-task\x1f" + e.id))
+        keep |= {id(e) for e in rows[:k]}
+        for e in rows[k:]:
+            dropped[e.source] += 1
+    sizes = sorted(len(v) for v in by_task.values())
+    kept = [e for e in examples if id(e) in keep]
+    return kept, {"rows_in_scope": sum(sizes), "tasks_in_scope": len(sizes),
+                  "kept_in_scope": sum(min(n, k) for n in sizes), "dropped": sum(dropped.values()),
+                  "dropped_by_source": dict(dropped.most_common()),
+                  "tasks_over_cap": sum(1 for n in sizes if n > k),
+                  "rows_per_task_before": {"p50": pct(sizes, 50), "p90": pct(sizes, 90),
+                                           "max": max(sizes, default=0)}}
+
+
 def leakage(splits: dict[str, list[Example]]) -> dict[str, Any]:
     """Overlaps between every two splits, over the rows of every source (a
     Max-derived eval case and a train-source train row are compared like any
@@ -2114,6 +2188,11 @@ class Settings:
     val_frac: float = 0.03
     eval_task_frac: float = 0.10
     eval_max_per_task: int = 20
+    # --per-task-cap: at most this many rows per task (prompt hash) in train and val, replay
+    # included, within --per-task-cap-scope (PER_TASK_SCOPES), with the recorded reason
+    per_task_cap: int | None = None
+    per_task_cap_scope: str = "golden"
+    per_task_cap_reason: str | None = None
     holdout_max_group_share: float = 0.02
     prefix_n: int = 4
     seed: str = "phase3-v1"
@@ -2375,6 +2454,8 @@ class Builder:
         self.verdicts = verdicts
         self.verdict_checks = verdict_checks or {}
         self.verdicts_used: set[str] = set()
+        # rows read per input file: an unmatched verdict's trace file was read or never was
+        self.lines_read: collections.Counter = collections.Counter()
         self.stats: collections.Counter = collections.Counter()
         self.excluded: list[tuple[str, str]] = []  # (trace_id, reason)
         self.seen_prompt_call: set[str] = set()
@@ -2429,6 +2510,28 @@ class Builder:
         if area:
             self.by_area[area][f"excluded:{reason}"] += 1
         self.excluded.append((trace.trace_id, reason))
+        self.account_verdicts(trace, reason)
+
+    def account_verdicts(self, trace: Trace, reason: str) -> None:
+        """A verdict on a row excluded before (or instead of) its verdict being applied is
+        accounted for, under the exclusion's reason: the row was read and deliberately left
+        out (a duplicate, an eval-set overlap, a listed session, ...), so the verdict is not
+        "unmatched". The verdicts gate fails only on verdicts whose trace was never read."""
+        if not self.verdicts:
+            return
+        keys: list[str] = [trace.trace_id]
+        try:
+            hx = trace_keys(trace.raw).h_exact
+        except Exception:  # a malformed row: its id is the only key it has
+            hx = ""
+        if hx:
+            keys += [hx, self.verdict_aliases.get(hx, "")]
+        for k in keys:
+            if k and k in self.verdicts and k not in self.verdicts_used:
+                self.verdicts_used.add(k)
+                self.stats[f"verdicts_on_excluded:{reason}"] += 1
+                if reason == "excluded_session":
+                    self.stats["verdicts_on_excluded_sessions"] += 1
 
     @property
     def judge_models(self) -> tuple[str, ...]:
@@ -2500,6 +2603,12 @@ class Builder:
             return "max_payg_gym_relaxed"
         if meta.get("max_derived") is not True:
             return "max_payg_gym_not_max_derived"
+        if is_round2(meta) and not (matches_source(source_tag(meta), self.s.train_sources)
+                                    and matches_model(meta.get("model"), self.s.train_models)):
+            # round 2 (operator 2026-11-06, Q6b): a round-2 Max gym row trains only when the build
+            # lists its source and model (--train-sources / --train-models, under the allow); the
+            # round-1 rows the original approval covered need no listing
+            return "max_r2_not_listed"
         strict = verification_of(meta, strict=True, judge_models=self.judge_models, payg_judge=True,
                                  unjudged_verifiers=self.s.unjudged_verifiers)
         if strict.basis == "judge_pending" and trace.kind == "extra":
@@ -2533,6 +2642,7 @@ class Builder:
 
     def add(self, trace: Trace) -> None:
         self.stats[f"input_{trace.kind}"] += 1
+        self.lines_read[trace.file] += 1
         if trace.kind == "golden":
             self._file_ordinal[trace.file] += 1
         if not isinstance(trace.raw.get("_meta"), dict):
@@ -2554,16 +2664,8 @@ class Builder:
         if self.s.exclude_sessions and session_id is not None \
                 and str(session_id).strip() in self.s.exclude_sessions:
             # a listed session (the Token-Plan incident session): no split at all.
-            # A verdict on its row is accounted for (not "unmatched": the row is
-            # known, and deliberately left out).
-            try:
-                vkeys: tuple[str, ...] = (trace.trace_id, trace_keys(trace.raw).h_exact)
-            except Exception:  # a malformed row: its id is the only key it has
-                vkeys = (trace.trace_id,)
-            for k in vkeys:
-                if k in self.verdicts:
-                    self.verdicts_used.add(k)
-                    self.stats["verdicts_on_excluded_sessions"] += 1
+            # A verdict on its row is accounted for (exclude: not "unmatched", the row
+            # is known and deliberately left out).
             self.exclude(trace, "excluded_session")
             return
         if self.excluded_prompts and row_task_prompts(meta) & self.excluded_prompts:
@@ -2869,10 +2971,29 @@ class Builder:
 
     # ----------------------------------------------------------------- split
 
+    def per_task_scope(self) -> Any:
+        """--per-task-cap's predicate on (kind, source, area) (``per_task_in_scope``)."""
+        return per_task_in_scope(self.s.per_task_cap_scope, self.s.area_caps or None)
+
     def split(self) -> dict[str, Any]:
         s = self.s
         pool = self.examples
         assign_groups(pool + self.fails + self.unfittable)
+        per_task = None
+        if s.per_task_cap:
+            # before the split (so the val and eval quotas are taken from what the cap leaves) and
+            # before the area, class and category caps, which then share out the rest; a row over
+            # its task's cap leaves every split
+            scope = self.per_task_scope()
+            capped, ptc = cap_per_task([e for e in pool if e.train_ok], s.per_task_cap, s.seed, scope)
+            keep = {id(e) for e in capped}
+            for e in pool:
+                if e.train_ok and id(e) not in keep:
+                    e.split = "per_task_cap"
+            pool = [e for e in pool if not e.train_ok or id(e) in keep]
+            per_task = {"cap": s.per_task_cap, "scope": s.per_task_cap_scope, "reason": s.per_task_cap_reason,
+                        "task": "Example.task_id: hash of the normalized last user message before the call",
+                        "pool": ptc}
         # Tasks an earlier eval set holds (--eval-holdout) stay eval-tools, whole groups.
         listed = {e.group for e in pool if e.task_id in self.eval_holdout_tasks}
         hold: set[str] = set()
@@ -2925,9 +3046,9 @@ class Builder:
         for ex in self.unfittable:
             ex.split = plan.groups.get(ex.group, "unassigned")
         self.final = {"train": train, "val": val, "eval-tools": eval_rows + fail_used}
-        self.split_info = {"train_class_caps": train_class_caps}
+        self.split_info = {"train_class_caps": train_class_caps, "per_task_cap": per_task}
         return {
-            "plan": plan, "train_caps": train_caps, "val_caps": val_caps,
+            "plan": plan, "train_caps": train_caps, "val_caps": val_caps, "per_task_cap": per_task,
             "train_class_caps": train_class_caps, "val_class_caps": val_class_caps,
             "held_rows": len(held), "eval_sampled": len(eval_rows),
             "fail_used": len(fail_used), "fail_dropped_task_in_train_or_val": fail_dropped,
@@ -2996,6 +3117,21 @@ class Builder:
                 stats["dropped:already_in_new_train"] += 1
                 continue
             eligible.append((r, k))
+        if s.per_task_cap:
+            # --per-task-cap holds across replay: a replayed row of a task the new train already
+            # holds at the cap (in scope) is not drawn, so the cap is a cap on the final train set
+            scope = self.per_task_scope()
+            have = collections.Counter(e.task_id for e in new_train if scope(e.kind, e.source, e.area))
+            capped: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            for r, k in sorted(eligible, key=lambda rk: h(f"{s.replay_seed}\x1fper-task\x1f{rk[0]['id']}")):
+                task = str(r["task_id"])
+                if scope("replay", str(r["source"]), ""):
+                    if have[task] >= s.per_task_cap:
+                        stats["dropped:per_task_cap"] += 1
+                        continue
+                    have[task] += 1
+                capped.append((r, k))
+            eligible = capped
         share = s.replay_share
         want = round(share * len(new_train) / (1.0 - share)) if share < 1 else len(eligible)
         by_cat: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = collections.defaultdict(list)
@@ -3108,6 +3244,14 @@ class Builder:
               "unmatched": len(set(self.verdicts) - self.verdicts_used),
               "index_mismatch": self.stats["verdict_index_mismatch"]}
         g["verdicts"] = {"loaded": len(self.verdicts), **vg,
+                         # verdicts whose row was read and excluded before its verdict applied,
+                         # by the exclusion's reason (accounted for; never a failure)
+                         "on_excluded_rows": sum(v for k, v in self.stats.items()
+                                                 if k.startswith("verdicts_on_excluded:")),
+                         "on_excluded_rows_by_reason": {
+                             k.split(":", 1)[1]: v for k, v in sorted(self.stats.items())
+                             if k.startswith("verdicts_on_excluded:")},
+                         "unmatched_by_cause": self.unmatched_causes(),
                          # the pay-per-token Max judge's verdicts (applied; never a failure)
                          "payg_max_judge": self.stats["verdict_rows_payg_max_judge"],
                          # the Token Plan Max judge's (operator override 2026-10-31; applied likewise)
@@ -3141,6 +3285,14 @@ class Builder:
                            "pass": all(shares[c] <= s.class_caps[c] + 1e-9 for c in shares)}
         if s.area_caps:
             g["area_caps"] = self.area_gate(tr)
+        if s.per_task_cap:
+            scope = self.per_task_scope()
+            per = collections.Counter(e.task_id for e in tr + va if scope(e.kind, e.source, e.area))
+            g["per_task_cap"] = {"cap": s.per_task_cap, "scope": s.per_task_cap_scope,
+                                 "tasks_in_scope": len(per), "rows_in_scope": sum(per.values()),
+                                 "max_rows_per_task": max(per.values(), default=0),
+                                 "over": sum(1 for n in per.values() if n > s.per_task_cap),
+                                 "pass": all(n <= s.per_task_cap for n in per.values())}
         if self.eval_disjoint_info is not None:
             ed = self.eval_disjoint_info
             g["eval_disjoint"] = {
@@ -3158,6 +3310,21 @@ class Builder:
                                   "llama-server serving the student GGUF"}
         g["overall"] = overall_verdict(g)
         return g
+
+    def unmatched_causes(self) -> dict[str, int]:
+        """Why each unmatched verdict found no row: its trace file was never an input, or the
+        file was read but holds no such line, or (a key that is no ``file:line``) no row has
+        that hash. Counts only."""
+        out: collections.Counter = collections.Counter()
+        for k in set(self.verdicts) - self.verdicts_used:
+            file, sep, line = k.rpartition(":")
+            if not sep or not line.isdigit():
+                out["hash_not_found"] += 1
+            elif file not in self.lines_read:
+                out["trace_file_not_an_input"] += 1
+            else:
+                out["line_not_in_trace_file"] += 1
+        return dict(sorted(out.items()))
 
     def area_gate(self, tr: list[Example]) -> dict[str, Any]:
         """--area-cap-for: every capped area within its share of the NEW train rows (replay
@@ -3355,6 +3522,7 @@ class Builder:
             "replay": self.replay_info,
             **({"cap_scan": self.cap_scan} if self.cap_scan else {}),
             "caps": {"train": split_info["train_caps"], "val": split_info["val_caps"],
+                     **({"per_task": split_info["per_task_cap"]} if split_info.get("per_task_cap") else {}),
                      "class_caps": {"train": split_info["train_class_caps"],
                                     "val": split_info["val_class_caps"]},
                      # --area-cap-for (round 2): shares of the NEW train rows; uncapped areas protected
@@ -3462,7 +3630,8 @@ class Builder:
 
             excluded = part("excluded:")
             sources[src] = {
-                "listed": matches_source(src, s.train_sources) and not names_max(src),
+                # a Max source is listed only under the allow (round-2 Max rows, Q6b)
+                "listed": matches_source(src, s.train_sources) and (not names_max(src) or self.max_allowed),
                 "input": c["input"], "accepted": c["accepted"],
                 "excluded": sum(excluded.values()), "excluded_by_reason": excluded,
                 "verification": part("verification:"),
@@ -3580,6 +3749,10 @@ def cmd_build(a: argparse.Namespace) -> int:
     try:
         category_caps, scan, train_range = cap_and_size_args(a)
         area_caps = area_cap_args(a)
+        if a.per_task_cap is not None and a.per_task_cap < 1:
+            raise ValueError(f"--per-task-cap is a row count of at least 1, not {a.per_task_cap}")
+        if a.per_task_cap is not None and not (a.per_task_cap_reason or "").strip():
+            raise ValueError("--per-task-cap needs --per-task-cap-reason (recorded in the report)")
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -3624,9 +3797,20 @@ def cmd_build(a: argparse.Namespace) -> int:
             print(f"error: {flag} needs at least one pattern", file=sys.stderr)
             return 2
         refused = [p for p in patterns if names_max(p) or p.lower() == a.max_model.lower()]
-        if refused:
+        if refused and flag != "--judge-models" and a.allow_max_derived:
+            # Q6b (operator 2026-11-06: round-2 Max rows): under the recorded allow, whose output
+            # max_allow_problem has already held to a max-derived name (tagged, private), a Max
+            # source or model may be listed. Listing is what lets a round-2 Max gym row train
+            # (payg_gym_refusal); the row is still Max-derived, verified strictly and covered by
+            # the approval. The Max key never judges: --judge-models naming Max stays refused.
+            print(f"ALLOW (Q6b): {flag} lists Max-derived {', '.join(refused)} under the approval "
+                  f"{a.max_derived_approval!r}; its rows stay {AP.TAG} and private", file=sys.stderr)
+        elif refused:
+            hint = "" if flag == "--judge-models" else (
+                f"; a Max source or model may be listed only under {AP.BUILD_ALLOW_FLAG} "
+                f"{AP.BUILD_APPROVAL_FLAG} (Q6b: a {AP.TAG}, private output)")
             print(f"error: {flag} may not name Max: Max-derived rows never train and the Max "
-                  f"key never judges (DISTILL-OPEN-QUESTIONS #6); refused: {', '.join(refused)}",
+                  f"key never judges (DISTILL-OPEN-QUESTIONS #6); refused: {', '.join(refused)}{hint}",
                   file=sys.stderr)
             return 2
         policy[flag] = patterns
@@ -3668,6 +3852,8 @@ def cmd_build(a: argparse.Namespace) -> int:
         max_tokens=a.max_tokens, category_cap=a.category_cap, val_frac=a.val_frac,
         class_caps={"reported_blocked": a.reported_blocked_cap, "no_tool_answer": a.no_tool_answer_cap},
         eval_task_frac=a.eval_task_frac, eval_max_per_task=a.eval_max_per_task,
+        per_task_cap=a.per_task_cap, per_task_cap_scope=a.per_task_cap_scope,
+        per_task_cap_reason=(a.per_task_cap_reason or "").strip() or None,
         holdout_max_group_share=a.holdout_max_group_share, prefix_n=a.prefix_n, seed=a.seed,
         eval_success=a.eval_success, max_model=a.max_model,
         train_sources=policy["--train-sources"], train_models=policy["--train-models"],
@@ -3916,7 +4102,11 @@ R2_RECIPE: dict[str, Any] = {
                         "error-recovery, not named) keep every row that passes"),
     # the area caps replace the round-1 category caps for the new rows; replay keeps v4b's capped mix
     "category_cap": 1.0,
-    "approval": "operator Q6b 2026-10-30",
+    # Q6b (operator 2026-10-30), extended to the round-2 Max rows (operator 2026-11-06): those rows train
+    # only when listed as a train source and model, under the allow (payg_gym_refusal: max_r2_not_listed)
+    "approval": "operator Q6b 2026-10-30; round-2 Max rows operator 2026-11-06",
+    "max_train_sources": [TOKEN_PLAN_GYM_SOURCE],
+    "max_train_models": ["qwen3.8-max*"],
     "exclude_sessions": "~/distill/policy/exclude-sessions.txt",
     # earlier eval sets: their tasks stay eval-tools (whole groups) ...
     "eval_holdout": ["~/distill/phase3/build-v4b-r6-c70-max-derived/eval-tools.jsonl",
@@ -3942,7 +4132,8 @@ def round2_argv(a: argparse.Namespace) -> tuple[list[str], list[str]]:
             "--pack", a.pack or r["pack"], "--tokenizer-dir", a.tokenizer_dir or r["tokenizer_dir"]]
     for pat in a.pool or r["pool"]:
         argv += ["--extra-traces", pat]
-    argv += ["--train-sources", GYM_SOURCE, "--train-models", *DEFAULT_TRAIN_MODELS,
+    argv += ["--train-sources", GYM_SOURCE, *r["max_train_sources"],
+             "--train-models", *DEFAULT_TRAIN_MODELS, *r["max_train_models"],
              "--unjudged-verifiers", r["unjudged_verifiers"],
              "--judge-calibration", a.judge_calibration or r["judge_calibration"]]
     verdicts = [Path(v).expanduser() for v in a.verdicts] if a.verdicts else \
@@ -4391,6 +4582,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bd.add_argument("--val-frac", type=float, default=0.03)
     bd.add_argument("--eval-task-frac", type=float, default=0.10)
     bd.add_argument("--eval-max-per-task", type=int, default=20)
+    bd.add_argument("--per-task-cap", type=int, metavar="N",
+                    help="at most N train (and val) rows per task: the hash of the normalized last user "
+                         "message before the call (the request it answers); replay included; needs "
+                         "--per-task-cap-reason")
+    bd.add_argument("--per-task-cap-scope", choices=PER_TASK_SCOPES, default="golden",
+                    help="golden: the harvested Max traces (golden rows, max-golden replay rows); all: "
+                         "every row but an uncapped round-2 area's")
+    bd.add_argument("--per-task-cap-reason", metavar="TEXT", help="why the per-task cap (recorded in the report)")
     bd.add_argument("--holdout-max-group-share", type=float, default=0.02)
     bd.add_argument("--prefix-n", type=int, default=4)
     bd.add_argument("--seed", default="phase3-v1")

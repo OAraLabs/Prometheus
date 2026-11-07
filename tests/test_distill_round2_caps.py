@@ -219,8 +219,9 @@ def test_round2_recipe_command_carries_every_rule(tmp_path: Path, capsys: Any) -
     for part in ("--no-golden", "--area-cap-for injection-resistance=0.2", "--area-cap-for daily-agent=0.3",
                  "--area-cap-for coding=0.3", "--category-cap 1", "--replay-share 0.4",
                  "--unjudged-verifiers deterministic,tool-success", "--judge-calibration",
-                 "--allow-max-derived", "--max-derived-approval 'operator Q6b 2026-10-30'", "--exclude-sessions",
-                 "--eval-holdout", "--eval-disjoint", "--dry-run", "--train-sources qwen38-27b-gym"):
+                 "--allow-max-derived", "--max-derived-approval 'operator Q6b 2026-10-30; round-2 Max rows operator 2026-11-06'", "--exclude-sessions",
+                 "--eval-holdout", "--eval-disjoint", "--dry-run",
+                 "--train-sources qwen38-27b-gym max-tokenplan-gym --train-models 'qwen3.8-27b*' 'qwen3.8-max*'"):
         assert part in cmd, part
     assert "--verdicts" not in cmd and "judge_pending row is excluded" in cap.err
     # calibrated verdicts join once the judge-pending pass wrote them; extra build args pass through
