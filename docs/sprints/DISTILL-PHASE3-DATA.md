@@ -274,6 +274,70 @@ At 40% replay, 5,000 final train rows means 3,000 new train rows: injection ≤ 
   2. `judge.py --workdir ~/distill/phase2-local-r2 run --provider local` against the calibrated 4090 judge;
   3. rerun the recipe, which picks up `judge-sample.jsonl` by itself.
 
+### Re-projection with round-2 Max rows and the judged Max traces (2026-11-06 evening)
+
+Dry runs on the 3090 Ti host from a scratch copy of build.py (this commit), out dirs under `~/distill/scratch-r2proj/`.
+Both use `--min-train-rows 3500` (the operator's training trigger) in place of the recipe's 5,000 default.
+The round-2 Max rows were read from the Max run's own traces file through a scratch link with the harvest name: the pool glob `pool/max-derived/max-tokenplan-gym.*r2*` matches no file, because nothing harvested the standalone Max units' rows.
+
+**What changed in build.py.**
+- **Guard:** `--train-sources` / `--train-models` may name Max only under `--allow-max-derived` with its approval (the output is already forced to a `max-derived` name). Without the allow it is refused as before, and `--judge-models` naming Max is always refused.
+- **Listing is the switch:** a round-2 Max gym row trains only when its source and model are listed (`max_r2_not_listed` otherwise). The recipe now lists `max-tokenplan-gym` / `qwen3.8-max*` under the approval `operator Q6b 2026-10-30; round-2 Max rows operator 2026-11-06`. Round-1 Max rows need no listing.
+- **Verdicts on excluded rows:** a verdict whose row was read and excluded before its verdict applied is counted under that exclusion's reason. `unmatched` now counts only verdicts whose trace was never read, by cause.
+- **`--per-task-cap N`:** at most N rows per task in the pool that may train, before the split and every other cap. Replay rows count toward it.
+  - Task = the hash of the normalized last user message before the call: one real request, which in the golden traces yields many calls.
+  - Scope `golden` (default) caps the golden traces and `max-golden` replay rows. Scope `all` caps every row except an uncapped round-2 area's.
+
+**Why 1,577 verdicts were unmatched in the earlier (b).** All 1,577 are Max verdicts on golden rows excluded as `eval_set_overlap`. Those rows hold a user message of an eval set (v4b eval-tools / val-cases, v2 eval-tools, ...), so they are correctly left out.
+- The 497 on the excluded session were already accounted for and were never part of the 1,577. So there was no separate ~1,080.
+- The build read the rows but excluded them before looking up their verdict, so the gate saw the verdicts as unused.
+- No verdict points at a file that wasn't read, a missing line or an unknown hash (`unmatched_by_cause` is empty). Nothing needed fixing in the verdict files. The gate now passes with `on_excluded_rows` 2,074 (eval_set_overlap 1,577, excluded_session 497).
+
+| | (a) recipe + round-2 Max rows | (b) (a) + judged golden Max traces, per-task cap 8 |
+|---|---:|---:|
+| Train (new + replay) | **3,758** (2,255 + 1,503) | **4,845** (4,016 + 829) |
+| Val / eval-tools | 81 (2.1%) / 417 | 153 (3.1%) / 595 |
+| Distinct tasks in train | 1,475 | 1,837 |
+| Train by source | 27B 1,897, Max golden (replay) 1,259, Max gym 602 | 27B 2,580, Max golden 1,221 (1,089 new + 132 replay), Max gym 1,044 |
+| Max-derived share of train | 49.5% | 46.7% |
+| Replay share (target 40%) | 40.0% | **17.1%** (829 of 2,677 wanted) |
+| Gates (spot check not run in a dry run) | all pass | all pass |
+
+**New train rows by round-2 area** (shares of new rows; golden rows have no area):
+
+| Area (cap) | (a) | (b) |
+|---|---:|---:|
+| injection-resistance (≤ 20%) | 451 (20.0%) | 803 (20.0%) |
+| daily-agent (≤ 30%) | 676 (30.0%) | 976 (24.3%) |
+| coding (≤ 30%) | 207 (9.2%) | 208 (5.2%) |
+| error-recovery | 505 (22.4%) | 521 (13.0%) |
+| long-context | 346 (15.3%) | 349 (8.7%) |
+| tool-choice | 70 (3.1%) | 70 (1.7%) |
+| none (golden Max traces) | 0 | 1,089 (27.1%) |
+
+**Final train by category:** (a) coding 47.6%, other 30.8%, chat-mode 13.0%, sentinel/daemon 5.8%, memory/wiki 2.8%. (b) coding 39.1%, other 37.0%, chat-mode 14.8%, sentinel/daemon 6.5%, memory/wiki 2.6%.
+- **Presence in (b):** chat-mode 719, error-recovery 330, compacted 659.
+- **Class shares in (b):** no-tool 4.0%, reported_blocked 0.0%.
+
+**Round-2 Max rows** (1,461 in the run). In both projections:
+- 648 pass their own record; 473 are accepted after 175 prompt+call duplicates.
+- 813 coding and sentinel/daemon calls stay `judge_pending`, with no calibrated verdict yet. The Max self-judge and Max judge verdicts are ignored for them.
+- New train: 371 in (a). In (b), 378 new; the remaining 666 of its 1,044 Max gym rows come through replay.
+- They can't be judged until their traces are in the pool: `judge-pending` and the judge slot read the pool glob.
+
+**Per-task cap, golden traces.**
+- **Pool:** 6,378 trainable golden rows from 228 tasks; rows per task p50 12, p90 72, max 273.
+- **Cap at 8:** keeps 1,385 rows. 131 tasks were over the cap, and 4,993 rows were dropped.
+- **Train + val:** 1,339 golden rows on 218 tasks, at most 8 each (gate passes).
+- **Replay:** v4b's replay is mostly golden rows of those same requests. The cap therefore refuses 2,054 replay rows, and replay reaches only 829 of the 2,677 wanted.
+- **Scope:** for round-2 rows, the cap stays at the golden-only default. A round-2 task yields a few rows of one trajectory, and the uncapped areas must not be down-sampled. Scope `all` exists if wanted.
+
+**Caveats on (b).**
+- **Golden rows dilute the area caps:** they count in the base of the new-row caps without an area. Daily-agent is no longer cut (976 kept, against 676 in (a)), and the Max golden coding rows sit outside the coding cap.
+- **Val is mostly golden coding:** 118 of 153 rows.
+- **No LCM snapshot:** (b) used none, as the earlier (b) did. v4b rebuilt golden contexts from one, so a real build with golden traces should pass `--lcm-snapshot`.
+- **Recipe:** the round-2 recipe still has `--no-golden`. (b) was run as a hand-edited `build` command (`b3.cmd` on the host).
+
 ## Long-context tool errors (round 2, added 2026-11-06)
 
 Every round-2 long-context attempt with a log on the 3090 Ti host: the local 27B runs (`local-r2-*`, 5 runs), the 4090 cross-host long-context nights (`r2-tower-*-iq3_xxs-*`, 2 runs; the UD-Q4 standard runs had no long-context tasks) and the Max run (`max-tokenplan-r2-max4-max-derived`, before long-context left it).

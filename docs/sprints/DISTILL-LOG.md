@@ -772,3 +772,33 @@ Append-only, times in ET.
 
   - The teacher is not re-run, so this is an estimate. Local is a lower bound (28 tasks have a post-fix error whose text the replay did not keep).
 - **Staged:** `~/distill/round2/code` at 17b5933. The backup is `code.bak-3c1e55b-20261106T2022` (and `code.prev`). No generation unit was running. The `gen_local.sh run` dry run ends SKIP (outside the window). Tonight's 01:05 local run is the live test of the strict rule.
+
+## 2026-11-06 ~20:40 EST: round-2 Max rows may train (Q6b guard lifted under the allow); projections (a) and (b)
+- **Operator order:** Q6b covers round-2 Max rows. Lift build.py's train-source guard for tagged, private Max-derived round-2 rows, then re-run projection (a). For (b): explain the unmatched verdicts first, then add the judged Max traces under a per-task cap.
+- **Guard (build.py):** `--train-sources` / `--train-models` may name Max only under `--allow-max-derived` with its approval, whose output is already forced to a `max-derived` name.
+  - Otherwise the old refusal stands, and the message now says how to lift it.
+  - `--judge-models` naming Max is always refused, so the Max key still never judges.
+  - Listing is the switch: a round-2 Max gym row trains only when its source and model are listed (`max_r2_not_listed` otherwise). Round-1 Max rows are unchanged.
+  - The recipe lists `max-tokenplan-gym` / `qwen3.8-max*` under the approval "operator Q6b 2026-10-30; round-2 Max rows operator 2026-11-06".
+  - Round-2 Max coding and daemon calls still wait as `judge_pending` for the calibrated judge; a Max verdict is ignored for them. There is a test for this.
+- **Correction to the 14:50 entry:** round-2 Max rows added nothing to (a) because their pool glob matched no file, not because of the guard.
+  - The standalone Max units (`max-r2-gen*`) were never harvested into `pool/max-derived/`. The projections read the run's traces file through a scratch link instead.
+  - Until the rows are harvested, `judge-pending` and the judge slot can't queue their 813 pending calls. The harvest is a staging step; I did not touch the pool.
+- **Unmatched verdicts:** all 1,577 were Max verdicts on golden rows excluded as `eval_set_overlap` (rows holding a user message of an eval set), which were dropped before their verdict was looked up.
+  - The 497 on the excluded session were already accounted for and were separate from the 1,577. There was no unexplained ~1,080.
+  - No verdict points at an unread file, a missing line or an unknown hash.
+  - **Fix:** the gate now counts verdicts on excluded rows under the exclusion's reason (`on_excluded_rows_by_reason`), and `unmatched` means "trace never read" (`unmatched_by_cause`). No verdict file was changed.
+- **Per-task cap:** `--per-task-cap N` (+ reason, scope `golden` by default) applies to the trainable pool before the split, so val's quota is taken from capped rows. Replay rows count toward it.
+  - A task is the hash of the normalized last user message before the call: one real request.
+  - Round-2 rows stay out of it: the uncapped areas must not be down-sampled.
+  - In the first try the cap ran after the split; val became 32 rows of 4 golden tasks (0.6%), and that was fixed.
+- **Projections** (dry runs, `--min-train-rows 3500`, scratch copy of this commit; tables in DISTILL-PHASE3-DATA.md):
+  - **(a) recipe + round-2 Max rows:** 3,758 train (2,255 new + 1,503 replay), 81 val, 417 eval-tools. All gates pass (the spot check is not run in a dry run).
+  - **(b) (a) + judged golden traces, cap 8:** 4,845 train (4,016 new + 829 replay), 153 val, 595 eval-tools, 1,837 distinct tasks. All gates pass.
+  - **Caveats for (b):**
+    - Replay is 17.1%, not 40%: the cap refuses 2,054 v4b replay rows of the same requests.
+    - Golden rows (27% of new rows, no area) dilute the area-cap base, so daily-agent is no longer cut.
+    - Val is mostly golden coding.
+    - It used no LCM snapshot, whereas v4b did.
+- **Both are ≥ 3,500 with every gate passing.** Training is not scheduled; that is the operator's call.
+- **Code:** 2f5b5dd (build.py and tests). **Tests:** build and round-2 files 198 passed; the full distill suite 2,067 passed, 19 skipped. Ruff clean.
