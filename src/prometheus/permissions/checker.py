@@ -793,17 +793,29 @@ def load_configured_grants(security_cfg: dict | None) -> list[Grant]:
     The ONE reader of that key. ``SecurityGate.from_config`` and the daemon's own factory
     (``__main__.create_security_gate``) both call it; until they did, the daemon built its gate without any grants,
     so a remembered approval (``/approve always``) and a hand-written row were written to the file and then ignored
-    at every boot. A row that is not a mapping, or names no kind this gate knows, is skipped.
+    at every boot. A row that is not a mapping, names no kind this gate knows, or cannot be read (a bad timestamp) is skipped.
 
     Said at boot, because a grant changes what the gate allows and one written months ago comes back with it. The
     line carries each grant's id, kind and tool, never its value: a ``command_prefix`` value is a command, and
     commands can carry secrets. ``/grants`` shows the rest, and ``/revoke`` removes one.
     """
     rows = (security_cfg or {}).get("grants") or []
-    grants = [
-        g for g in (Grant.from_config_dict(d) for d in rows if isinstance(d, dict))
-        if g is not None
-    ]
+    grants: list[Grant] = []
+    for position, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        try:
+            grant = Grant.from_config_dict(row)
+        except (TypeError, ValueError) as exc:
+            # A hand-edited timestamp (`created_at: yesterday`, or an unquoted date YAML turns into a date object)
+            # raises here. A grant that cannot be read is a prompt that comes back, never a daemon that will not
+            # start. The warning names the row, not its values.
+            log.warning(
+                "Skipped security.grants row %d%s: it could not be read (%s), so the call it was meant to silence "
+                "will ask again", position, f" (id {row['id']})" if row.get("id") else "", type(exc).__name__)
+            continue
+        if grant is not None:
+            grants.append(grant)
     if grants:
         log.info(
             "Loaded %d approval grant(s) from security.grants; each silences the prompt for what it names "

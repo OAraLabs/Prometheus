@@ -129,6 +129,27 @@ def test_a_malformed_row_is_skipped_and_the_rest_still_load(config):
     assert _restart(config).evaluate(tool).allowed
 
 
+def test_a_row_the_gate_cannot_read_is_skipped_and_never_stops_the_daemon_starting(config, caplog):
+    """Grant.from_config_dict raises on a created_at that is not a number, and YAML turns an unquoted date into a date
+    object. Nothing parsed these rows at boot before; now a hand-edited timestamp must cost one prompt, not an outage."""
+    import datetime
+
+    tool = "mcp__capline__search_candidates"
+    _write_grants(config, [
+        {"kind": "tool", "tool": "mcp__capline__bad_text", "value": "", "created_at": "yesterday"},
+        {"kind": "tool", "tool": "mcp__capline__bad_date", "value": "", "created_at": datetime.date(2026, 11, 7)},
+        {"kind": "tool", "tool": tool, "value": ""},
+    ])
+    with caplog.at_level(logging.WARNING):
+        gate = _restart(config)  # must not raise
+    assert gate.evaluate(tool).allowed, "one unreadable row took the readable ones with it"
+    assert gate.evaluate("mcp__capline__bad_text").requires_confirmation, "an unreadable row must fail closed"
+    assert gate.evaluate("mcp__capline__bad_date").requires_confirmation
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "grant" in r.getMessage().lower()]
+    assert len(warned) == 2, warned
+    assert "yesterday" not in " ".join(warned), "the warning must not echo a row's values"
+
+
 # ── through the agent loop, and through the shipped template ─────────────────
 
 TEMPLATE = Path(__file__).resolve().parents[1] / "config" / "prometheus.yaml.default"
