@@ -738,3 +738,22 @@ Append-only, times in ET.
   - The teacher is not re-run: an estimate either way.
 - **Staged:** `~/distill/round2/code` at 3c1e55b (HEAD; it also carries the gym_fidelity commits from another agent; build.py is unchanged at HEAD). The backup is `code.bak-3e9e9cc-20261106T2018` (and `code.prev`). No `distill-gen*` / `r2-gen*` / `max-r2-gen*` unit was running. The `gen_local.sh run` dry run ends SKIP (outside the window).
 - **Tonight's 01:05 local run is the live test.** Baseline: local long-context keep 10.2% logged, 13.4% replay estimate with the gym fix. Max long-context resumes only if keep ≥15%.
+
+## 2026-11-06 20:20 EST: gym fidelity phase 0 measured (read-only)
+- **Order:** phase 0 only of DISTILL-GYM-FIDELITY-PLAN: the four read-only measurements, then nothing more. The MVP and the §6 questions wait for the operator.
+- **Built:** `scripts/distill/gym_fidelity.py measure {m1,m2,m3,m4,avail}`, with 8 tests (af6c68f–9c51c53).
+  - Run on the 3090 Ti host from `~/distill/scratch-gymfid/code`, niced, with a copy of the gym's repo store (27055dbf). The Phase 7 store path under `/tmp` is gone.
+  - M2 ran 297 bwrap runs in 5 s. The store copy and the work dir have been removed; the aggregates stay in `~/distill/scratch-gymfid/out`.
+  - No live DB, unit, timer, Saluki or Qwen was touched.
+- **eval-tools:** 302 of the 329 references have arguments. **14 run cleanly today.**
+  - First blockers for the rest: the grammar 183 (multi-line 77, `$`/syntax 55, programs 32, git writes 15, python 4), missing paths 64 (41 in another project's repository), tools not routed 32, simulated 7, refused at run time 2.
+  - Ceiling under today's grammar: ~23%, so V5 (50%) is out of reach.
+  - Every case's cwd is the packing host's deploy directory, never where the trace ran.
+- **GRPO pool:** 5,287 round-2 rows (local 3,826, Max 1,461), none compacted, one fixture commit and one generator version.
+  - **3,090 have an ok reference call and are not compacted** (local 2,075). 1,483 run in today's executor, and all 3,090 use gym registry tools.
+- **44 vs 34:** 44 is the count of reference_not_ok calls, which cover 34 distinct cases. The judge's 34 rejected case-tool pairs are a different count; the match is a coincidence.
+- **LCM snapshot:** present, 7.1 days old (2026-10-30 17:31), and not opened.
+  - All 303 golden cases join the phase-1 trace index (298 tool-matched).
+  - 104 traces predate the depth-200 store's oldest commit.
+- **Estimate:** MVP 9.5 (9–11) → 9 (8.5–10) agent-days, ~3 h host CPU.
+- **For the operator:** phase 4 scope. Options: (a) shrink it to path mapping and routing, ~2–3 days, coverage-limited; (b) widen the grammar for scoring only; (c) drop it. Details in plan §1.4.

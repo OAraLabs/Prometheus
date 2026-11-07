@@ -5,7 +5,7 @@ Operator order, 2026-11-06:
 - Next priority is gym fidelity: expand the gym snapshot so reference calls can actually run. Argument and outcome correctness can then be measured on eval-tools and used as a reward.
 - Propose a plan with an effort estimate before building.
 
-Nothing here has been built or run. Each number is labelled: **recorded** (in the scorecard or code today), **derived** (arithmetic on recorded numbers) or **needs host run** (§1.3).
+Only phase 0 (the read-only measurements, §1.3) has been built and run; its numbers are in §1.4. Nothing else has been built. Each number is labelled: **recorded** (in the scorecard or code today), **derived** (arithmetic on recorded numbers) or **measured** (phase 0, §1.4).
 
 ## Summary
 
@@ -17,11 +17,12 @@ Nothing here has been built or run. Each number is labelled: **recorded** (in th
   - `arg_equiv.EXECUTABLE_TOOLS = {"bash", "read_file"}` (arg_equiv.py:119);
   - `GymSandboxExecutor._run_once` re-implements those two tools itself (arg_equiv.py:663-713).
   - Routing every call through `SandboxEnv.execute` (teacher_gen.py:2902-2959) makes 20 of the 26 tools in the registry snapshot (`eval_tool_schemas.json`) runnable, without loosening any security rule.
-- **Most eval-tools references fail for lack of state, not for lack of a tool.** The arg-equivalence run found that ~77% of undecidable pairs name paths the one-commit fixture can't have: other repos, worktrees, `/tmp`, `~/.prometheus` (scorecard:199-203).
-- **There is a hard ceiling.** About 20% of those pairs use constructs the gym refuses on purpose: `gh`, docker, interpreters, the network, `$`, multi-line. With python and multi-line bash parked, those stay unrunnable and are counted as such. They are never worked around.
+- **Most eval-tools references fail on the gym's grammar, not on state** (measured, §1.4). Of the 302 references with arguments, 14 run cleanly today. 183 (61%) are bash the grammar refuses on purpose: 77 multi-line, 55 `$` or other shell syntax, 32 programs such as `gh`, `timeout` and docker, 15 git writes, 4 python. Then 64 lack state (41 of them name another project's repository), and 32 use a tool the executor doesn't route. The arg-equivalence run had put ~77% of undecidable pairs down to missing paths (scorecard:199-203). That was an artefact of order: the executor checks paths before the grammar.
+- **There is a hard ceiling.** With python and multi-line bash parked, those 183 references stay unrunnable and are counted as such; they are never worked around. Under today's grammar, eval-tools outcome coverage can reach at most ~23% (70 of 302), against the 50% bar of V5 (§1.4).
 - **Reward.** Outcome correctness is tool-agnostic. A call earns credit for obtaining the reference's information (read calls) or making the reference's change (calls with side effects), whichever tool it uses. It replaces the "right tool +1.0" and "arguments +0.5/+0.25" rows of DISTILL-GRPO-PLAN §2.
 - **Effort.**
-  - **MVP for a first GRPO pilot:** ~9–11 agent-days and ~3–4 h of 3090 Ti CPU, no GPU.
+  - **MVP for a first GRPO pilot:** ~8.5–10 agent-days (phase 0 done) and ~3 h of 3090 Ti CPU, no GPU. Phase 0 trimmed it: the round-2 pool has no compacted rows, and every run used one fixture commit (§1.4).
+  - **eval-tools (phase 4) can't meet V5** under today's grammar. Its scope is now an operator call (§1.4).
   - **Everything** (eval-tools rebuild, side-effect diffs, validation): ~23–27 agent-days and ~8–10 h of host CPU. GPU: 0, or ~1 h of the 4090 if the local 27B judges instead of Max.
 
 ## 1. Measurements
@@ -42,16 +43,17 @@ Nothing here has been built or run. Each number is labelled: **recorded** (in th
 | 10 | Gym rows record the reference call's own gym result in `_meta.call_result` (first 6,000 chars; teacher_gen.py:6099-6106). This is a fidelity check for replay. | teacher_gen.py | recorded |
 | 11 | `grep`, `glob`, `read_file`, `write_file` and `edit_file` run in the Python process, not inside bwrap. `confine()` keeps them in bounds (teacher_gen.py:2751-2768, 2945-2954). Any rebuilt snapshot must therefore contain no symlink that leaves the root. Also, `FileReadTool` falls back to the host's `~/.prometheus/files` (file_read.py:67-72); the gym avoids that only through the exists check at teacher_gen.py:2947-2950, which the new executor must keep. | code | recorded |
 
-### 1.2 What these imply before any host run
+### 1.2 What these imply (estimates before phase 0, corrected by §1.4)
 
-- **Which tools the 329 references use:** not computable here (the eval set is on the 3090 Ti host). The pair table (scorecard:266-279) and the Phase 3 mix (79% coding) say `bash` dominates, with `edit_file` and `task_create` next. M1 gives the exact counts.
-- **What runs today:** at most `bash`/`read_file` references, and of the ones the check reached, ~14% ran cleanly (#4).
-- **Why the rest fail, ranked by the recorded evidence:**
-  1. missing state: paths outside the fixture, the wrong commit or worktree, an unknown cwd;
-  2. constructs the gym refuses (≤ ~17% of cases, a ceiling);
-  3. a tool the executor doesn't route (fixable now);
-  4. no reference arguments (26 hard cases);
-  5. no history to rebuild from (`stored` cases: count unknown).
+- **Which tools the 329 references use** (measured): `bash` 292 (269 with arguments), `edit_file` 10, `task_create` 6, `write_file` 4, `task_get` 3, `memory` 3, then `task_output`, `task_stop`, `web_fetch`, `web_search` (2 each), and `cron_delete`, `task_list`, `read_file` (1 each).
+- **What runs today** (measured): 14 of the 302 references with arguments (4.6%) run cleanly in A and B. All 14 are bash, and one of them prints nothing.
+- **Why the rest fail, ranked by measured count** (first blocker, §1.4). The pre-phase-0 ranking put missing state first and refused constructs at ≤ ~17%. Phase 0 reverses that:
+  1. constructs the gym refuses: **183** (61% of 302). This is the ceiling.
+  2. missing state: 64 (41 another project, 18 a repo checkout or worktree, 5 other);
+  3. a tool the executor doesn't route: 32 (26 with side effects, 6 read-only);
+  4. no reference arguments: 27 (the 26 hard cases and one `task_list`);
+  5. simulated host commands, which decide nothing: 7.
+  6. no history to rebuild from: **0**. Every case is `lcm`; 17 cases hold no tool results.
 
 ### 1.3 Host runs (3090 Ti host, read-only, aggregates only)
 
@@ -66,11 +68,79 @@ Four read-only measurement scripts, M1–M4, run from a checkout of `feat/distil
 - **M3: tally of reasons already stored.** Seconds. Reads the arg-equivalence `full.json` and the Max acceptable-tools `candidates.json`.
 - **M4: the GRPO pool's reference calls.** Seconds. Counts round-2 trace rows by area, tool and `call_result` status.
 
-The full script text is in the 2026-11-06 planning report. It becomes `gym_fidelity.py measure` in phase 0.
+Built as `scripts/distill/gym_fidelity.py measure {m1,m2,m3,m4,avail}` (tests: `tests/test_distill_gym_fidelity.py`). Results are in §1.4.
 
-**Still needed after M1–M4, from the Phase 0 tool:**
-- per-case live-result availability: can `meta.trace_id` reach a row in the read-only LCM snapshot? (§4, V6);
-- the trace dates against the repo store's oldest commit.
+**Still needed after M1–M4, from the Phase 0 tool** (`avail`, §1.4):
+- per-case live-result availability: can `meta.trace_id` reach a row in the read-only LCM snapshot? (§4, V6). Phase 0 measured only the parts that open no database: the snapshot's age, and the join of each `trace_id` to the phase-1 trace index.
+- the trace dates against the repo store's oldest commit (measured).
+
+### 1.4 Phase 0 results (2026-11-06, measured)
+
+Run on the 3090 Ti host from scratch copies of HEAD (af6c68f–9c51c53 on `feat/distill-flywheel`; `PYTHONPATH=src`, system python, niced). Everything was read-only except M2, which wrote only to its own scratch work dir and removed it. Cases: `~/distill/phase3/build-v2/eval-tools.jsonl` (329, cases sha `234028b0e65f5e15`). Store: a copy of the gym's repo store `27055dbfea33f7a2.git` (HEAD 27055dbf, 200 commits from 2026-09-26 to 2026-10-17). The Phase 7 store path under `/tmp` is gone, but the same store survives in every gym root. Aggregates only.
+
+**M1, reference census (static).**
+
+| | Count |
+|---|---|
+| Cases / references with arguments | 329 / **302** (no arguments: 26 hard cases, plus one `task_list`) |
+| Context source | `lcm` 329, `stored` 0 |
+| History holds tool results | 312 (17 don't) |
+| Environment maps (cwd under home) | 329. But every case has the **same** cwd: the packing host's deploy directory (`env_now`, #7). It is not where the trace ran. |
+| Paths named (all references) | abs_other 228, another project 159, repo checkout or worktree 124, `/tmp` 82, other home 37, the case cwd 16, `~/.prometheus` 10 |
+| Paths seen in the history | home paths 250/320, abs 121/228, `/tmp` 45/82, `~/.prometheus` 6/10 |
+| Reference by worst path target | another project **124**, repo **65**, abs_other 51, no absolute path 35, `/tmp` 16, cwd 7, `~/.prometheus` 2, home 2 |
+| Repo paths against the fixture commit | 105 are a checkout or worktree root (mostly `cd <worktree> && …`); 11 files exist in the fixture; 8 are `.venv` (untracked) |
+| Bash (269 with arguments), static grammar class | **refused 132** (multi-line 77, `$`/syntax 55); allowed 67; unavailable program 36 (`gh` 11, `timeout` 7, docker 7, python 4, 7 others with 1 each); git write 15 (`fetch` 4, `add` 3, `worktree` 3, …); git read 12; simulated host 7 |
+
+Another project's repository: 12 distinct directories under `~/projects`. They are not named here.
+
+**M2, what runs today** (`GymSandboxExecutor`, bwrap, `jail=require`; 297 sandbox runs, 5.4 s).
+
+| First blocker (grammar first; the executor itself checks paths first) | References |
+|---|---|
+| clean in A and B | **14** (1 with empty output) |
+| grammar: multi-line / shell syntax / program / git write / python | 77 / 55 / 32 / 15 / 4 = **183** |
+| missing path: another project / repo or worktree / abs / `~/.prometheus` / home | 41 / 18 / 3 / 1 / 1 = **64** |
+| tool not routed: side effects (`edit_file` 10, `task_create` 6, `write_file` 4, `memory` 3, `task_stop` 2, `cron_delete` 1) / read-only (`task_get` 3, `task_output` 2, `web_fetch` 1) | 26 / 6 = **32** |
+| simulated host command | 7 |
+| refused at run time (confinement or options) | 2 |
+
+The executor's raw status was `missing_path` for 202 references, 100 of them grammar-refused. That ordering is why the arg-equivalence reasons read as "missing state".
+
+**The eval-tools coverage ceiling under today's grammar:** 302 − 183 (grammar) − 7 (simulated) − 41 (another project) − 1 (`web_fetch`, network) = **70 (23%)**. That would need repo and worktree path mapping (the 18), registry routing (31) and a few fixtures (5). Even if other projects' repositories were rebuilt, the ceiling is 111 (37%). **V5's 50% bar is unreachable without widening the grammar** (multi-line, `$`), which is operator-parked.
+
+**M3, stored reasons.**
+- **Arg equivalence** (`~/scratch-arg-equiv/out/full.json`, 6 models): 1,499 verdicts. undecidable 1,275, exact 145, execution 50 (all "differ in A"), conservative 28, canonical 1. In the 1,275 undecidable verdicts, the reference side was: `missing_path` 978, `refused` 252, `ok` 20, `simulated` 8, `nondeterministic` 7, not executable 6, and 4 edit-context cases.
+- **Outcome check** (Max acceptable-tools `candidates.json`): 355 candidate calls. not_run 304, reference_not_ok **44**, differs 7.
+  - The 44 span **34 distinct cases**, and their candidates are `read_file` 43 and `bash` 1.
+  - Reasons: reference `missing_path` 36, `refused` 7, `nondeterministic` 1.
+- **Judge:** 164 case-tool pairs acceptable, **34 rejected**.
+- **§6 Q1 answered:** 44 is correct as the baseline count of candidate *calls* whose reference failed. Those calls cover 34 cases. The scorecard's other 34 is the judge's rejected *case-tool pairs*. It is a different quantity, and the match is a coincidence. Baseline: 44 calls / 34 cases.
+
+**M4, the GRPO pool's reference calls.** 5,287 round-2 rows: 3,826 local (10 files) and 1,461 Max. The Max r2 rows are not under `pool/max-derived` (nothing matches `*r2*` there). They are in the Max run's own out dir, `~/distill/phase2b/runs/max-tokenplan-r2-max4-max-derived/`.
+- Every row: `round 2`, generator `teacher-gen/5`, fixture commit 27055dbf (all r2 runs' `repo_fixture`). **None compacted**, none padded.
+- `call_result`: success **3,090**, no_call 1,514, planted 413, injected 260, error 10.
+- **ok and not compacted: 3,090** (local 2,075, Max 1,015). By area: injection-resistance 853, error-recovery 783, coding 527, daily-agent 442, long-context 363, tool-choice 122.
+- By tool: `bash` 1,149, `lcm_grep` 761, `read_file` 334, `glob` 155, `task_list` 143, `memory` 136, `grep` 118, `task_create` 74, `wiki_query` 58, `task_get` 57, `tool_search` 48, `todo_write` 16, `task_output` 14, `write_file` 10, `cron_list` 9, `wiki_compile` 5, `message` / `cron_create` / `cron_delete` 1 each.
+- Today's executor runs 1,483 of them (48%, `bash`/`read_file`). **All 3,090 use gym registry tools**, so routing through `SandboxEnv.execute` (§2.1) reaches every one.
+
+**Avail: live results and trace dates** (no database opened).
+- **LCM snapshot:** `~/distill/snapshot/lcm.db` exists: 305.6 MB, written 2026-10-30 17:31 ET (7.1 days old), no WAL. Not opened. Whether a `trace_id` reaches its LCM row is untested until the operator answers §6 Q3.
+- **Trace index:** the 303 golden cases all join the phase-1 trace index (`~/distill/phase1/trace_index.jsonl`, matched by file and line), and all 303 have a telemetry-snapshot rowid. The joined row's tool matches the case's reference tool for 298 (5 don't). The 26 hard cases come from `fail_traces.jsonl`, which isn't in that index.
+- **Trace dates:** Aug 11, Sep 93, Oct 199. **104 (34%) predate the store's oldest commit** (the depth-200 store, 2026-09-26). 199 fall within it, and none postdate the fixture head. Pinning each case to its commit (§6 Q2) needs the full-depth store for those 104.
+
+**What changes in the plan:**
+- **MVP (phases 0–3, track A):** better than assumed.
+  - The pool is 3,090 ok reference calls with nothing compacted, so risk 6 doesn't bite round 2.
+  - One fixture commit and one generator version, so replay needs one store.
+  - The new executor reaches every row.
+  - Estimate: **8.5–10 agent-days** in all, with phase 0 at ~0.5 and done; **~3 h host CPU**. V2 is still the gate.
+  - The trainable share depends on the round-2 Max train-source decision: local rows alone are 2,075.
+- **Phase 4 (eval-tools rebuild, 6–7 days):** can't reach V5 (≤ 23% under today's grammar). Options for the operator:
+  - (a) Shrink it to the cheap part: repo/worktree path mapping, registry routing and the `~/.prometheus` skeleton, ~2–3 days. Report the outcome metric as coverage-limited (V5's fallback).
+  - (b) Revisit the grammar (multi-line, `$`) for scoring only.
+  - (c) Drop it.
+  - Until then, the full-plan total stays as written.
 
 ## 2. Design
 
@@ -277,11 +347,11 @@ V1–V4 and V8 gate the GRPO pilot. V5–V7 gate using the eval-tools outcome me
 
 | Phase | Scope | Agent-days | Host (3090 Ti CPU) | GPU |
 |---|---|---|---|---|
-| 0. Measure | M1–M4 now; `gym_fidelity.py measure` (static census, dynamic runs, refusal kinds, live-result availability); a short scorecard note | 1 | 0.5 h | 0 |
+| 0. Measure | **Done 2026-11-06** (§1.4): `gym_fidelity.py measure` m1–m4 + avail. A scorecard note is still to write. | ~0.5 (done) | < 5 min | 0 |
 | 1. Executor | `gym_exec.py`: registry dispatch, normalizers, `fs_delta`/`fx_delta`, read comparators, stand-in state diffs with prose fields unscored, string-program rule; port arg_equiv and acceptable_tools; tests | 3 | — | 0 |
 | 2. Gym replay | `gym_snapshot.replay`: rebuild the task, replay earlier calls, check them, templates A/A′/B, pool manifest; V1–V3 | 3 | 2–3 h (all round-2 rows) | 0 |
 | 3. Reward | `grpo_rewards.py` outcome term, masking, anti-hacking tests (V8); reward server and client; latency smoke test from the 4090 | 2.5 | 0.5 h | 0 (client only) |
-| **MVP = 0–3** | **unblocks a stage-1 pilot on gym rows** (read-only and stand-in effects scored; workspace edits masked unless canonical-equal) | **9.5 (9–11)** | **~3–4 h** | **0** |
+| **MVP = 0–3** | **unblocks a stage-1 pilot on gym rows** (read-only and stand-in effects scored; workspace edits masked unless canonical-equal) | **9 (8.5–10)**; was 9.5 (9–11) before phase 0 | **~3 h** | **0** |
 | 4. eval-tools rebuild | L0 store and commit pinning, cwd inference, L1 history evidence and replay, L2 fixtures, path mapping, taint, redaction scan; V5 | 6–7 | 1 h | 0 |
 | 5. Workspace effects | `write_file`/`edit_file`/bash-write diffs, AST normalizer, collateral, snapshot C | 3 | — | 0 |
 | 6. Validation and reporting | V4 suite, V6 live fidelity, V7 judge view and run, rescore 7 models (outcome success, coverage), scorecard section, GRPO plan edits (§3.3, §3.4) | 3.5 | 2–3 h | 0 with Max; else ~1 h of 4090 judge slot |
@@ -290,18 +360,18 @@ V1–V4 and V8 gate the GRPO pilot. V5–V7 gate using the eval-tools outcome me
 Calendar: the MVP takes ~2 weeks, with host runs at night. The full plan takes ~5 weeks. The GRPO dry run (GRPO plan §4) can overlap phase 3. Its 20-step check needs the reward server.
 
 **Risks:**
-1. **The eval-tools coverage ceiling.** The refused constructs (~17% of right-tool cases), the 26 hard cases, unscorable tools and history gaps may leave V5 under 50%. In that case the outcome metric supports but doesn't decide promotion. Phase 0 says early.
+1. **The eval-tools coverage ceiling.** It is confirmed by phase 0: refused constructs are 61% of references with arguments, and the reachable ceiling is ~23% (§1.4). V5 stays under 50% unless the grammar widens, so the outcome metric supports but doesn't decide promotion.
 2. **Snapshots fitted to the reference.** Guarded by the leak rule and V6; the risk is still subtle.
 3. **Training the gym's style:** the policy learns gym-runnable commands (single-line, no python) that production doesn't need. Guarded by masking and the mask-rate stop.
 4. **Containment hacks** beyond the tested ones. Guarded by the B excess cap, snapshot C, and the audit of 20 high-reward samples every 50 steps (GRPO plan §1).
 5. **Replay drift:** teacher_gen's grammar changed after a row was generated. Pin the replay to the row's `generator` version, or accept the drift and let V1 measure it.
-6. **Compacted rows can't be replayed** until `state_at_cut` exists, which shrinks the pool for compaction and long-context.
+6. **Compacted rows can't be replayed** until `state_at_cut` exists. Phase 0 found that the round-2 pool has none (§1.4), so this applies only to future compaction rows.
 7. **The 3090 Ti host is shared** with the live model and generation nights. The reward server is CPU-only and niced, and has to be scheduled.
 8. **Max-derived.** References are Max's, so the reward and the resulting adapter are max-derived and private (as with SFT).
 
 ## 6. Open questions for the operator
 
-1. The scorecard records **44** `reference_not_ok` (scorecard:230); 34 is the rejected-tool count. Confirm 44 is the baseline.
+1. The scorecard records **44** `reference_not_ok` (scorecard:230); 34 is the rejected-tool count. Confirm 44 is the baseline. *Phase 0: 44 is the call count, and those calls cover 34 distinct cases. The judge's 34 rejected case-tool pairs are a different quantity; the numbers match by coincidence (§1.4, M3).*
 2. May the gym's repo store hold **all published refs at full depth** (not one ref at depth 200), to pin each case to the commit and branch of its trace?
 3. May validation read the **read-only LCM snapshot** to get each reference's live result (redacted, hashes only, never stored as text)? Is that snapshot still on the 3090 Ti host?
 4. Is a **synthetic `~/.prometheus` skeleton** acceptable in the gym (placeholder `config.yaml` keys, empty `logs/`, `memory/`, `wiki/`, `files/`)? Or should it stay out, with those references counted as missing?
