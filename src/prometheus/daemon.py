@@ -1785,6 +1785,14 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             gateway_registry.attach("_approval_queue", approval_queue)
             logger.info("Approval queue wired to gateway adapters")
 
+    # Nothing to answer an approval prompt means every call that needs one is refused in seconds. Say so once, here,
+    # where the queue either exists or does not (oara doctor reads the same answer from the config).
+    from prometheus.permissions.approval_channel import approval_channel_gap
+    _approval_gap = approval_channel_gap(
+        config, queue_built=getattr(security_gate, "_approval_queue", None) is not None)
+    if _approval_gap is not None:
+        logger.warning("Approval queue: %s. %s", _approval_gap.message, _approval_gap.fix)
+
     if computer.runner is not None:
         # Desktop prompts go to the chat that started the task, and /approve
         # on every gateway sees them alongside the gate-wide queue (which may
