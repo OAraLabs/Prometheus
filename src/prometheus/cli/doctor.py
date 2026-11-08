@@ -765,6 +765,20 @@ def check_gateways(config: dict[str, Any]) -> list[DiagnosticCheck]:
     return [telegram, slack, discord]
 
 
+def check_approval_channel(config: dict[str, Any]) -> DiagnosticCheck:
+    """Can anything answer an approval prompt? The same answer as the daemon's startup warning
+    (permissions/approval_channel.py): ``approval_queue.enabled`` ships false, and without a queue every call that
+    needs an approval is refused in seconds."""
+    from prometheus.permissions.approval_channel import approval_channel_gap
+
+    name = "Approval prompts"
+    gap = approval_channel_gap(config)
+    if gap is None:
+        return DiagnosticCheck(name=name, category="connectivity", status="ok",
+                               message="an approval can be answered (or this mode asks nothing)")
+    return DiagnosticCheck(name=name, category="connectivity", status="warning", message=gap.message, fix=gap.fix)
+
+
 def check_gateway_owners(config: dict[str, Any]) -> list[DiagnosticCheck]:
     """One row per enabled chat gateway with no owner named, saying what that means and which key to set.
 
@@ -1576,6 +1590,7 @@ def run_extended_checks(
         check_token_location(config),
         *check_gateways(config),
         *check_gateway_owners(config),
+        check_approval_channel(config),
         check_advertised_tools(config),
         check_coding_sandbox(config),
         *check_bash_floors(config),
