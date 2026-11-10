@@ -12,16 +12,21 @@ import re
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
-from prometheus.config import owner_codes as OC
-from prometheus.config import pair_requests as PR
-from prometheus.config import pair_seal
-from prometheus.config.device_store import registry_platform
-from prometheus.web import pairing_routes as PRT
-from prometheus.web.public_routes import PUBLIC_ROUTES
-from prometheus.web.route_access import OPERATOR_ONLY
-from tests.support.pairing_world import GLOBAL, World
+# The daemon's web layer needs the `web` extra; without it this module skips instead of aborting the whole run
+# (tests/test_suite_collects_without_the_web_extra.py).
+pytest.importorskip("fastapi")
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+from prometheus.config import owner_codes as OC  # noqa: E402
+from prometheus.config import pair_requests as PR  # noqa: E402
+from prometheus.config import pair_seal  # noqa: E402
+from prometheus.config.device_store import registry_platform  # noqa: E402
+from prometheus.web import pairing_routes as PRT  # noqa: E402
+from prometheus.web.public_routes import PUBLIC_ROUTES  # noqa: E402
+from prometheus.web.route_access import OPERATOR_ONLY  # noqa: E402
+from tests.support.pairing_world import GLOBAL, World  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 DOC = REPO / "docs" / "reference" / "pairing-join-requests.md"
