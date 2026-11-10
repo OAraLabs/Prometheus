@@ -68,6 +68,10 @@
 #      prints OK; any difference stops the deploy with a list (session id and
 #      model names only). --reapply-model-choices re-applies instead.
 #   If B5 fails the script stops with the rollback commands below.
+#   B5b put `oara` on PATH (scripts/install_oara_command.sh): this deploy builds its venv without installing the
+#      package, so the venv has no `oara` console script, and `oara pair --owner` / `oara doctor` were "command not
+#      found" on the box that runs the daemon. The launcher follows $ROOT/current, so a deploy or a rollback needs no
+#      second step. A failure here is a warning, never a failed deploy.
 #
 # ROLLBACK
 #   R1 runtime only (back to system python + user site):
@@ -308,6 +312,10 @@ EOF
 [ "$(printf 'Authorization: Bearer %s\n' "$TOKEN" | code -H @- "$API/api/status")" = "200" ] \
     || fail "/api/status with the token did not answer 200"
 say "  running from $VENV, 401 bare, 401 crafted Host, 200 with token"
+
+say "B5b the oara command"
+bash "$CLONE/scripts/install_oara_command.sh" --unit "$UNIT" "$ROOT/current" "$CLONE/src" \
+    || say "  B5b WARNING: could not put 'oara' on PATH (the deploy itself is fine). By hand: bash $CLONE/scripts/install_oara_command.sh --unit $UNIT $ROOT/current $CLONE/src"
 
 if [ ! -f "$CHOICES" ]; then
     say "B6 skipped — B0 recorded nothing, so there is nothing to compare"

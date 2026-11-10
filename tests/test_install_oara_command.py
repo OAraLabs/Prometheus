@@ -91,7 +91,7 @@ def test_arguments_pass_through_exactly(world):
     tmp, venv, src = world
     _, command = _install(tmp, venv, src)
     out = _run(command, "say", "two words", "it's", '"quoted"', "$HOME", "").stdout
-    assert [l for l in out.splitlines() if l.startswith("ARG=")][2:] == [
+    assert [line for line in out.splitlines() if line.startswith("ARG=")][2:] == [
         "ARG=[say]", "ARG=[two words]", "ARG=[it's]", 'ARG=["quoted"]', "ARG=[$HOME]", "ARG=[]"]
 
 
@@ -227,8 +227,13 @@ def test_deploy_sh_installs_the_command_after_it_has_verified_and_never_fails_th
     text = DEPLOY.read_text()
     assert "install_oara_command.sh" in text
     assert text.index("B5 verify") < text.index("install_oara_command.sh"), "the command is installed before the deploy is verified"
-    line = next(l for l in text.splitlines() if "install_oara_command.sh" in l and "bash" in l)
-    assert "||" in line, "a failure to install the command must be a warning, not a failed deploy"
+    lines = text.splitlines()
+    i = next(n for n, line in enumerate(lines) if "install_oara_command.sh" in line and line.lstrip().startswith("bash"))
+    statement = [lines[i]]
+    while statement[-1].endswith("\\"):                  # the command and its continuation lines
+        i += 1
+        statement.append(lines[i])
+    assert "||" in " ".join(statement), "a failure to install the command must be a warning, not a failed deploy"
 
 
 def test_the_installer_never_asks_for_root():
