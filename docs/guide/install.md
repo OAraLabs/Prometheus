@@ -60,6 +60,8 @@ uv tool install 'oara-prometheus[full] @ git+https://github.com/OAraLabs/Prometh
 # or: pipx install 'oara-prometheus[full] @ git+https://github.com/OAraLabs/Prometheus'
 ```
 
+Both put `oara` in `~/.local/bin`. If a new terminal says `oara: command not found`, that folder is not on your `PATH` yet: run `uv tool update-shell` (or `pipx ensurepath`) and open a new terminal.
+
 **From source** — best if you want to read or change the code, or run the test suite:
 
 ```bash
@@ -297,6 +299,8 @@ oara pair --owner
 
 It prints a one-time code — 8 digits, shown as `1234-5678` — good for **5 minutes** and one use, then waits and tells you who used it and from which address. Type the code into **Settings** in the Beacon you want as your own, on this computer or another. That Beacon gets its own owner device token, the terminal says whether it was on this Mac or another computer (and from which address), and it warns as soon as anyone types a wrong code. Ctrl-C cancels.
 
+If a terminal says `oara: command not found`, see [`oara` is not found](#oara-is-not-found) below.
+
 Worth knowing:
 
 - The code prints **only to a terminal**. Piped, or run by the agent's own shell, it asks for no code at all — so it can't end up in a transcript or a log. Over ssh, use `ssh -t`.
@@ -306,6 +310,12 @@ Worth knowing:
 - Re-pairing the daemon's own Mac never revokes this device, and neither does another computer redeeming its own code. Each computer keeps its own owner device; you revoke one from the device list in Beacon.
 
 Full behavior, including every route and its error codes, is in the [API guide](api.md#ports--remote-access) and `docs/contracts/device-scoping.md`.
+
+### `oara` is not found
+
+- **Installed with `uv tool` or `pipx`:** the folder they install into, `~/.local/bin`, is not on your `PATH`. Run `uv tool update-shell` or `pipx ensurepath`, then open a new terminal.
+- **A server deployed with `scripts/deploy.sh`:** that deploy runs the code from a checkout and installs no package, so there is no `oara` entry point. `deploy.sh` now writes a small launcher, `~/.local/bin/oara`, that runs the deployed venv on the deployed code with the service's settings (and follows every later deploy and rollback). On a machine deployed before that, write it once: `bash ~/prometheus-deploy/scripts/install_oara_command.sh --unit prometheus.service ~/prometheus-venvs/current ~/prometheus-deploy/src`. It never replaces an `oara` it did not write, and writes no secret.
+- **The Mac app:** the app does not put an `oara` command on your `PATH`. Its own Python runs the same program: `/Applications/Prometheus.app/Contents/Resources/python/bin/python3.12 -I -B -m prometheus pair --owner`.
 
 ## Known issues
 
