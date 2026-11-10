@@ -71,7 +71,7 @@ Session semantics worth knowing:
 
 ### Pairing a new device
 
-A device with no token asks to join, and the owner approves it on a device they already use. Contract: `docs/PAIRING-APPROVAL-API.md`. The three requester routes are public (see Authentication) and take no bearer token; the three operator routes need `identity.is_operator` (the global token or an **owner device**), and answer a scoped device **403** `operator_only`, not 401: a 401 tells a client its token is dead.
+A device with no token asks to join, and the owner approves it on a device they already use. Reference, as built (routes, fields, statuses, expiry, the owner grant): [`docs/reference/pairing-join-requests.md`](../reference/pairing-join-requests.md). Design contract: `docs/PAIRING-APPROVAL-API.md`. The three requester routes are public (see Authentication) and take no bearer token; the three operator routes need `identity.is_operator` (the global token or an **owner device**), and answer a scoped device **403** `operator_only`, not 401: a 401 tells a client its token is dead.
 
 | Method | Path | Purpose |
 |---|---|---|
