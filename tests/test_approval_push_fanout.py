@@ -38,7 +38,10 @@ from prometheus.permissions.approval_queue import ApprovalQueue, PendingAction
 from prometheus.permissions.checker import SecurityGate
 
 #: What the APNs body is allowed to carry, top level. Reviewed 2026-09-19.
-ALLOWED_TOP_LEVEL = {"aps", "request_id", "tool_name", "expires_at"}
+#: `instance_fp` (reviewed 2026-11-10): the instance's own PUBLIC fingerprint, the `fp` that GET /api/hello serves
+#: to anyone, so a phone paired with several Prometheus instances knows which one is asking. It comes from the
+#: instance key, not from the approval payload, so ALLOWED_PAYLOAD_READS below is unchanged.
+ALLOWED_TOP_LEVEL = {"aps", "request_id", "tool_name", "expires_at", "instance_fp"}
 
 #: Which keys of the serialized approval the push path may READ. `arguments`
 #: and `extents` are deliberately absent: the first is the text a tool was
