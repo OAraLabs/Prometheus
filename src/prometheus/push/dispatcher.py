@@ -28,7 +28,9 @@ Apple rate-limits liveactivity pushes; the 3s cadence is for a live socket.
 from __future__ import annotations
 
 import logging
+import re
 import time
+from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,17 @@ _QUIET_KINDS = {
 }
 
 
+#: The shape of ``config/instance_key.py``'s fingerprint, which ``GET /api/hello`` advertises as ``fp``: 16 lowercase
+#: hex characters. Anything else is not pushed under ``instance_fp``.
+_FINGERPRINT_SHAPE = re.compile(r"[0-9a-f]{16}")
+
+
+def _instance_fingerprint() -> str:
+    from prometheus.config.instance_key import instance_fingerprint
+
+    return instance_fingerprint()
+
+
 def first_line(text: str, cap: int = 120) -> str:
     line = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
     return line[:cap]
@@ -54,11 +67,14 @@ class PushDispatcher:
     """Decides who gets pushed what. The sender sends; the store remembers."""
 
     def __init__(self, store: Any, sender: Any, bridge: Any,
-                 now: Any = time.time) -> None:
+                 now: Any = time.time,
+                 instance_fp: Callable[[], str] | None = None) -> None:
         self._store = store
         self._sender = sender
         self._bridge = bridge
         self._now = now
+        # Which Prometheus is asking (see ``_who_is_asking``). Injectable so a test need not own a key.
+        self._instance_fp = instance_fp or _instance_fingerprint
         # session_id -> wall time of the last liveactivity push.
         self._activity_pushed_at: dict[str, float] = {}
         # Devices whose 410 has been logged — "logs once", per the spec.
@@ -81,6 +97,26 @@ class PushDispatcher:
             # down with it.
             logger.warning("push dispatch failed", exc_info=True)
 
+    def _who_is_asking(self) -> dict:
+        """``{"instance_fp": <fingerprint>}``, or ``{}`` when there is no usable fingerprint.
+
+        A phone paired with several Prometheus instances gets an approval push from each, and nothing else in the
+        body says which sent it. The fingerprint is the instance's PUBLIC identity (the first 16 hex characters of
+        SHA-256 over the public half of its key, served to anyone by ``GET /api/hello`` as ``fp``), so it is
+        safe to put in front of Apple. It is checked for shape and left out, never guessed at, when it is not one:
+        an empty string would be something a phone could try to match. Nothing here may stop an approval from
+        being delivered.
+        """
+        try:
+            fp = self._instance_fp()
+        except Exception:
+            logger.warning("push: the instance fingerprint could not be read; sending the approval without it",
+                           exc_info=True)
+            return {}
+        if isinstance(fp, str) and _FINGERPRINT_SHAPE.fullmatch(fp):
+            return {"instance_fp": fp}
+        return {}
+
     async def _push_approval(self, payload: dict) -> None:
         """Fan one pending approval out to EVERY registered device.
 
@@ -96,6 +132,10 @@ class PushDispatcher:
         and ``extents``; neither is read here and neither should be.
         ``test_approval_push_body_stays_narrow`` fails the build if this set
         changes, so widening it is a decision someone makes on purpose.
+
+        ``instance_fp`` (added on purpose; ``tests/test_approval_push_instance_fp.py``) is not read from
+        ``payload`` at all: it is the instance's own public fingerprint, so a phone paired with several
+        Prometheus instances knows which one is asking.
         """
         if payload.get("task_id") is not None:
             # A DESKTOP TASK'S PROMPT (computer-use v1.1 §5.2.2): no content
@@ -112,6 +152,7 @@ class PushDispatcher:
                 },
                 "request_id": payload.get("request_id"),
                 "expires_at": payload.get("expires_at"),
+                **self._who_is_asking(),
             }
             for target in self._store.push_targets():
                 await self._deliver(target, desk)
@@ -133,6 +174,7 @@ class PushDispatcher:
             "request_id": payload.get("request_id"),
             "tool_name": payload.get("tool_name"),
             "expires_at": payload.get("expires_at"),
+            **self._who_is_asking(),
         }
         for target in self._store.push_targets():
             await self._deliver(target, body)
