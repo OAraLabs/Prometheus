@@ -54,17 +54,24 @@ DEFAULT_CRITICAL_COMMANDS: tuple[str, ...] = (
     # deletes
     "rm", "rmdir", "unlink", "shred", "truncate", "trash",
     "git rm", "git clean", "git branch -d", "git branch -D", "git branch --delete", "git reset --hard",
-    "git checkout --", "git restore", "git stash drop", "git stash clear",
+    "git checkout --", "git checkout .", "git restore", "git stash drop", "git stash clear",
+    "git worktree remove", "git tag -d", "git tag --delete", "dd", ":",
+    "docker rm", "docker rmi", "docker system prune", "docker image prune", "docker volume rm", "npm unpublish",
     # git push, in every form
     "git push",
     # sends
     "curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "socat", "telnet", "ftp", "openssl",
     "mail", "sendmail", "mutt", "osascript", "git send-email",
-    "gh", "npm publish", "twine upload", "uv publish", "docker push",
+    "gh", "npm publish", "pnpm publish", "yarn publish", "cargo publish", "poetry publish", "gem push",
+    "twine upload", "uv publish", "docker push", "git subtree push", "rclone", "gsutil", "http", "https", "xh",
+    "shortcuts",
     # spends
-    "aws", "gcloud", "az", "stripe",
+    "aws", "gcloud", "gsutil", "az", "stripe", "kubectl delete", "kubectl apply", "kubectl create",
+    "kubectl replace", "kubectl patch", "kubectl scale", "kubectl exec", "terraform apply", "terraform destroy",
+    "pulumi up", "pulumi destroy", "wrangler", "vercel", "netlify",
+    "flyctl", "fly", "heroku",
     # devices, permissions, the agent's own configuration and services
-    "oara", "prometheus", "sudo", "chmod", "chown", "crontab", "launchctl", "systemctl", "security",
+    "oara", "prometheus", "sudo", "chmod", "chown", "chgrp", "crontab", "launchctl", "systemctl", "security",
 )
 
 #: Paths whose writes are critical by default: the agent's own configuration and state.
@@ -90,7 +97,7 @@ _WRAPPERS = frozenset({"sudo", "doas", "env", "nohup", "time", "command", "exec"
                        "nohup", "taskpolicy", "sandbox-exec"})
 #: Run a program that cannot be read here (a script, stdin, a string): always critical as a command word.
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "busybox", "su", "script",
-                     "source", ".", "eval", "trap"})
+                     "source", ".", "eval", "trap", "pwsh", "powershell"})
 #: Interpreters: critical with an inline program (``-c``, ``-e`` and friends, also inside a group such as
 #: ``-lc``), with ``-`` or fed on stdin; ``-m module`` is matched like a wrapper. Running a named file is not.
 _INTERPRETERS = {"python": "c", "python2": "c", "python3": "c", "pypy": "c", "pypy3": "c", "perl": "eE",
@@ -179,19 +186,32 @@ def _words(segment: str) -> list[str]:
     return words
 
 
+_VERSIONED = re.compile(r"^(python|pypy|perl|ruby|node|lua|php|bash|zsh|tclsh)[0-9][0-9.]*$")
+
+
+def _base(name: str) -> str:
+    match = _VERSIONED.match(name)
+    return match.group(1) if match else name
+
+
 def _name(word: str) -> str:
     """A command word as the shell finds it: the last path part, case folded (the default macOS disk ignores
-    case, so ``RM`` runs ``rm``)."""
-    return os.path.basename(word).lower()
+    case, so ``RM`` runs ``rm``), a version suffix dropped (``python3.12`` is ``python``)."""
+    return _base(os.path.basename(word).lower())
 
 
 def _leads(words: list[str], pattern: list[str]) -> bool:
-    if not words or _name(words[0]) != pattern[0].lower():
+    """Does the command *words* match *pattern*? The command name, then the verb as the first word after the
+    command's own options (``git -C dir push``), then every further pattern word ANYWHERE after the verb
+    (``git reset -q --hard``, ``git reset HEAD~3 --hard``)."""
+    if not words or _name(words[0]) != _base(pattern[0].lower()):
         return False
+    if len(pattern) == 1:
+        return True
     if words[1:len(pattern)] == pattern[1:]:
         return True
-    # ``git -C dir push``: git's global options between the command and its verb.
-    return len(pattern) > 1 and _drop_option_values(words[1:])[:len(pattern) - 1] == pattern[1:]
+    rest = _drop_option_values(words[1:])
+    return bool(rest) and rest[0] == pattern[1] and all(w in rest[1:] for w in pattern[2:])
 
 
 def _inline_flag(words: list[str], letters: str) -> bool:
@@ -205,8 +225,11 @@ def _inline_flag(words: list[str], letters: str) -> bool:
     return False
 
 
-def _one(words: list[str], patterns: list[list[str]], fed: bool) -> str | None:
-    """Why the command *words* is critical, or None. *fed*: something is piped or here-doc'd into it."""
+def _one(words: list[str], patterns: list[list[str]], fed: bool, nested: bool = False) -> str | None:
+    """Why the command *words* is critical, or None. *fed*: something is piped or here-doc'd into it.
+
+    *nested*: called from a wrapper's scan, which already tries every later word, so a wrapper met here is not
+    scanned again (that recursion was exponential in stacked wrappers: ``env env env ... ls``)."""
     if not words:
         return None
     first = words[0]
@@ -223,7 +246,7 @@ def _one(words: list[str], patterns: list[list[str]], fed: bool) -> str | None:
             return f"{name} inline"
         if "-m" in words:                     # python3 -m twine upload: the module and its words
             k = words.index("-m")
-            return _scan(words[k + 1:], patterns)
+            return None if nested else _scan(words[k + 1:], patterns)
         return None
     if name in _AWKS:
         program = " ".join(words[1:])
@@ -240,7 +263,7 @@ def _one(words: list[str], patterns: list[list[str]], fed: bool) -> str | None:
                     return hit
         return None
     if name in _WRAPPERS:
-        return _scan(words[1:], patterns)
+        return None if nested else _scan(words[1:], patterns)
     return None
 
 
@@ -249,7 +272,7 @@ def _scan(words: list[str], patterns: list[list[str]]) -> str | None:
     for k in range(len(words)):
         if words[k].startswith("-") and _name(words[k]) not in _SHELLS:
             continue
-        hit = _one(words[k:], patterns, False)
+        hit = _one(words[k:], patterns, False, nested=True)
         if hit:
             return hit
         if any(c.isspace() for c in words[k]):
@@ -326,7 +349,8 @@ def _mentions_path(command: str, roots: Iterable[str]) -> bool:
     for statement in _STATEMENTS.split(command):
         words = _path_words(statement)
         if words and words[0] == "cd":
-            target = words[1] if len(words) > 1 else "~"
+            args = [w for w in words[1:] if w != "--" and not (w.startswith("-") and len(w) == 2)]
+            target = args[0] if args else "~"
             if target.startswith(("~", "/")):
                 cwd = os.path.expanduser(target)
             elif cwd is not None:
