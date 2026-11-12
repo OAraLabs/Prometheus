@@ -155,6 +155,12 @@ def test_the_grants_list_is_still_the_grants_list(d):
     assert r.json() == []
 
 
+@pytest.mark.parametrize("who", ["alice", "bob"])
+def test_a_scoped_device_still_cannot_read_the_grants_list(d, who):
+    r = d.get(who, "/api/approvals/grants")
+    assert r.status_code == 403, r.text
+
+
 def test_the_route_is_classified_for_scoped_devices():
     from prometheus.web import route_access
 
@@ -293,3 +299,48 @@ def test_the_cleared_push_carries_only_reviewed_keys():
         "approved_by": {"label": "owner on telegram"}})))
     (cleared,) = _cleared(sender)
     assert set(cleared["payload"]) == {"aps", "approval_resolved", "resolution", "node_pub"}
+
+
+def test_a_device_reached_after_the_request_ended_is_cleared_at_once():
+    """The fan-out and the answer run in different tasks: an answer while the fan-out is still sending (review,
+    2026-11-12) must not leave the devices reached after it with a live Approve."""
+    store = _Store(["d1", "d2"])
+
+    class _Slow(_Sender):
+        def __init__(self) -> None:
+            super().__init__()
+            self.disp = None
+
+        async def send(self, **kwargs):
+            self.sent.append(kwargs)
+            if kwargs["apns_token"] == "tok-d1" and kwargs["push_type"] == "alert":
+                # the request is answered on another surface while d2 has still to be sent to
+                await self.disp.on_signal(_sig("approval_resolved", {"request_id": "c0c0a001",
+                                                                     "resolution": "approved"}))
+            return SendResult(outcome="ok", status=200)
+
+    sender = _Slow()
+    disp = PushDispatcher(store, sender, bridge=None, node_pub=lambda: PUB)
+    sender.disp = disp
+    asyncio.run(disp.on_signal(_sig("approval_pending", _pending())))
+    assert sorted(s["apns_token"] for s in _cleared(sender)) == ["tok-d1", "tok-d2"]
+    assert "c0c0a001" not in disp._pushed_to
+
+
+def test_refused_background_pushes_never_mute_the_approval_alerts():
+    store = _Store(["d1"])
+    counted: list[str] = []
+    store.record_push_failure = lambda device_id: counted.append(device_id) or len(counted)
+
+    class _Throttled(_Sender):
+        async def send(self, **kwargs):
+            self.sent.append(kwargs)
+            ok = kwargs["push_type"] == "alert"
+            return SendResult(outcome="ok" if ok else "failed", status=200 if ok else 429)
+
+    sender = _Throttled()
+    disp = PushDispatcher(store, sender, bridge=None, node_pub=lambda: PUB)
+    for i in range(12):
+        asyncio.run(disp.on_signal(_sig("approval_pending", _pending(f"m{i}"))))
+        asyncio.run(disp.on_signal(_sig("approval_resolved", {"request_id": f"m{i}", "resolution": "denied"})))
+    assert counted == []
