@@ -285,8 +285,8 @@ def _scan(words: list[str], patterns: list[list[str]]) -> str | None:
 
 
 def _match_line(command: str, patterns: list[list[str]]) -> str | None:
-    if re.search(r"(?<![>|])>\|", command):
-        return "overwrite"                    # ``>|`` (clobber), which the statement split below would cut
+    if re.search(r"(?<![>|])>\|", command) or _dups_to_file(command):
+        return "overwrite"                    # ``>|`` and ``>&file``, which the statement split below would cut
     for statement in _STATEMENTS.split(command):
         head = statement.lstrip(" \t\"'({!")
         if head.startswith("$") or head.startswith("`"):
@@ -310,6 +310,7 @@ def _match_line(command: str, patterns: list[list[str]]) -> str | None:
 
 #: ``>``, ``1>``, ``>|`` to a target: an overwrite. Not ``>>`` (append), not ``>&2`` / ``2>&1`` (a descriptor).
 _OVERWRITE = re.compile(r"(?<![>&<])(?:[0-9]?)>\|?(?![>&])\s*([^\s;|&<>]+)")
+_DUP_TO_FILE = re.compile(r"(?<![>&<])>&\s*(?![0-9]+(?:\s|$|[;|&])|-(?:\s|$))([^\s;|&<>]+)")
 _DISCARD = frozenset({"/dev/null", "/dev/stderr", "/dev/stdout", "/dev/tty"})
 
 
@@ -317,6 +318,16 @@ def _overwrites(statement: str) -> bool:
     """Does *statement* redirect output over a file? Quotes are not parsed: a ``>`` inside quotes also counts,
     the narrower answer."""
     for match in _OVERWRITE.finditer(statement):
+        target = match.group(1).strip("'\"")
+        if target and target not in _DISCARD:
+            return True
+    return False
+
+
+def _dups_to_file(command: str) -> bool:
+    """``>&word`` over the whole line (the statement split cuts at ``&``): a descriptor when the word is a
+    number or ``-``, otherwise a file it overwrites."""
+    for match in _DUP_TO_FILE.finditer(command):
         target = match.group(1).strip("'\"")
         if target and target not in _DISCARD:
             return True
