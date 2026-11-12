@@ -331,3 +331,17 @@ def test_hostile_shapes_stay_fast_and_a_very_long_command_is_critical():
                                      "brew uninstall x"])
 def test_round_four_misses_are_critical(command):
     assert CriticalRules().matches("bash", {"command": command}), command
+
+
+# ── review round 5 (2026-11-12): an overwrite anywhere ──────────────────────
+
+@pytest.mark.parametrize("command", ["cat /dev/null > f", "echo x > ~/.zshrc", "cat f > out.txt", "ls >out",
+                                     "sort a 1> b", "echo x >| f"])
+def test_an_overwriting_redirect_is_critical(command):
+    assert CriticalRules().matches("bash", {"command": command}), command
+
+
+@pytest.mark.parametrize("command", ["echo x >> log.txt", "make 2>&1", "ls > /dev/null", "cmd 2>/dev/null",
+                                     "echo x >&2", "cmd > /dev/stderr"])
+def test_appends_and_discards_are_not(command):
+    assert CriticalRules().matches("bash", {"command": command}) == (), command
