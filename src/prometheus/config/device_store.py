@@ -335,7 +335,7 @@ class DeviceStore:
         prompt, so a push naming another session's tool and action must not reach it."""
         allowed = set(self.owner_device_ids())
         if desktop:
-            allowed |= {t.id for t in self.push_targets() if self.computer_allowed(t.id)}
+            allowed |= self.computer_device_ids()
         return [t for t in self.push_targets() if t.id in allowed]
 
     # ------------------------------------------------------------------
