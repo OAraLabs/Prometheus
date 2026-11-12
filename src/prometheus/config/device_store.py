@@ -328,6 +328,16 @@ class DeviceStore:
                            push_failures=int(r["push_failures"] or 0))
                 for r in rows]
 
+    def approval_push_targets(self, *, desktop: bool) -> list[PushTarget]:
+        """The push targets an APPROVAL push may reach: live owner devices, and, for a desktop prompt (whose push
+        carries no content at all), also the live devices marked for computer use, which are the ones that may
+        answer it. A scoped device sees only its own sessions everywhere else and approves nothing but a desktop
+        prompt, so a push naming another session's tool and action must not reach it."""
+        allowed = set(self.owner_device_ids())
+        if desktop:
+            allowed |= {t.id for t in self.push_targets() if self.computer_allowed(t.id)}
+        return [t for t in self.push_targets() if t.id in allowed]
+
     # ------------------------------------------------------------------
     # Live Activity tokens (GRAFT Piece 2)
     # ------------------------------------------------------------------

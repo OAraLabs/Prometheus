@@ -422,6 +422,9 @@ async def test_a_desktop_prompt_push_carries_no_content(tmp_path):
         def push_targets(self):
             return ["d1"]
 
+        def approval_push_targets(self, *, desktop):       # owner and marked devices (test_approval_push_owner_only)
+            return self.push_targets()
+
     d = PushDispatcher(_Store(), object(), bridge=None)
 
     async def _deliver(target, body):

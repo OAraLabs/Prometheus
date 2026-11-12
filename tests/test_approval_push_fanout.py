@@ -58,6 +58,9 @@ class _Store:
     def push_targets(self):
         return ["device-1", "device-2"]
 
+    def approval_push_targets(self, *, desktop):           # owner devices only (test_approval_push_owner_only.py)
+        return self.push_targets()
+
 
 class _Sender:
     pass
