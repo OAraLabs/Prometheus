@@ -145,6 +145,9 @@ WEB_DEFERRED: frozenset[str] = frozenset({
     # because #183-#186 added the command without listing it here.
     "claude", "gpt", "gemini", "xai", "grok", "local",
     "deepseek", "kimi", "glm", "mimo", "qwen",
+    # /person (which devices may resume a pause): the owner's Telegram only, by design. A web chat is a device,
+    # and a device must never mark one.
+    "person",
 })
 
 _SAME = object()  # sentinel: web uses the same command name as Telegram
@@ -325,6 +328,13 @@ MANIFEST: tuple[Family, ...] = (
     # is the recorded parity gap. On the web chat path it answers status and
     # stop and refuses to start: that path carries no person credential yet.
     Family("computer", ("cmd_computer",), _cmds("computer", "prometheus-computer", "computer")),
+    # The person mark (who may resume a pause). Set only by the OWNER in their own Telegram, so it is not offered
+    # on Slack or Discord (their owner checks are a chat's, not the daemon owner's) or the web (a device).
+    Family(
+        "person", ("cmd_person",), _cmds("person", None, None),
+        gap_reason=("owner-only by design: the mark lets a device resume a pause, so it is set from the owner's "
+                    "Telegram and nowhere else"),
+    ),
 )
 
 

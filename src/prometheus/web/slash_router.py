@@ -67,6 +67,9 @@ WEB_NATIVE_ONLY: frozenset[str] = frozenset({
     # alone would have split one class across two behaviours.
     "qwen",
     "escalations",
+    # /person marks which devices may resume a pause. The OWNER's Telegram only, by design and not a deferral:
+    # a web chat is a device, and a device must never mark one (gateway/commands.py cmd_person).
+    "person",
 })
 
 _NAME_RE = re.compile(r"[a-z0-9_-]+")

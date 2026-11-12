@@ -4,12 +4,11 @@ The state is :mod:`prometheus.engine.pause`. These routes add who may do what, a
 
   * **Pausing only takes away**, so the operator may: the API token or an owner device (``route_access``:
     operator only; a scoped device gets ``403 operator_only``).
-  * **Resuming gives everything back**, so only a person may, by the repo's one definition of a person
-    (``computer/door.py PersonCheck``, the bar hold lifts use): a device a person MARKED (``/computer allow`` from
-    Telegram, or a marked device; never the API token) and not held, or the owner in Telegram (``/resume``).
-    NOT "any owner device": the API token sits in a file a model with a shell can read, and with it a model can
-    mint itself an owner device from this machine. An agent that could lift its own emergency stop has not been
-    stopped. ``403 person_required`` otherwise.
+  * **Resuming gives everything back**, so only a person may: a device carrying the PERSON mark (set only from the
+    owner's Telegram, ``/person allow <device id>``; it does nothing but allow resume) and not held, or the owner
+    in Telegram (``/resume``). NOT "any owner device": the API token sits in a file a model with a shell could
+    read where a floor is down, and with it a process on this machine can mint an owner device. Not the
+    computer-use mark either, which gives desktop control. ``403 person_required`` otherwise.
 
 Pausing, in this order: the state is written to disk (nothing new starts from here); every pending approval is
 withdrawn, so nothing approved later runs a tool; every turn running in this process is stopped, the bridge's
@@ -51,15 +50,25 @@ def _who(identity: Any) -> str:
 
 
 def person_check(identity: Any, devices: Any) -> tuple[bool, str]:
-    """``PersonCheck`` over the request's credential: a marked, unheld device; never the token or an open daemon."""
-    from prometheus.computer.door import PersonCheck
-    from prometheus.permissions.approver import from_device_identity
-
+    """Is this credential a person's? A live device carrying the PERSON mark (``/person allow`` from the owner's
+    Telegram) and not held. Never the API token, an open daemon, or a device without the mark, an owner device
+    included (the token can mint one on this machine). Not the computer-use mark: that one is for the desktop."""
+    if identity is None:
+        return False, "No API token is configured here, so only the owner's Telegram can resume."
+    if getattr(identity, "is_global", False):
+        return False, "The API token cannot resume: a model with a shell could read it."
+    device_id = str(getattr(identity, "id", "") or "")
     try:
-        return PersonCheck(device_store=devices).check(from_device_identity(identity))
+        held = devices.device_profile(device_id) if devices is not None else None
+        marked = bool(devices is not None and devices.person_allowed(device_id))
     except Exception:                                          # noqa: BLE001 - any doubt is not a person
         logger.warning("pause: the person check failed", exc_info=True)
-        return False, "the person check could not be completed"
+        return False, "The person check could not be completed."
+    if held:
+        return False, "A device held to a profile is never a person here."
+    if not marked:
+        return False, f"Mark this device from the owner's Telegram first: /person allow {device_id}"
+    return True, ""
 
 
 def paused_response() -> JSONResponse | None:
@@ -195,8 +204,8 @@ def register_pause_routes(app: Any, *, devices: Any = None) -> None:
         if not ok:
             return JSONResponse(status_code=403, content={
                 "error": "person_required",
-                "detail": "only a person resumes Prometheus: a device you marked (/computer allow <device id> from "
-                          "Telegram), or the owner in Telegram (/resume). " + why})
+                "detail": "only a person resumes Prometheus: a device marked from the owner's Telegram "
+                          "(/person allow <device id>), or the owner in Telegram (/resume). " + why})
         cleared = _state().resume(by=_who(identity))
         logger.warning("Prometheus RESUMED by %s", _who(identity))
         await _broadcast(app, {"paused": False, "since": None})

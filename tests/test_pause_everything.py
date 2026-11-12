@@ -122,10 +122,11 @@ def test_the_api_token_pauses_and_cannot_resume(w):
 
 
 def test_a_device_a_person_marked_resumes(w):
-    """A person = the repo's PersonCheck: a device marked (from Telegram or a marked device; never the API token)
-    and not held. Review 2026-11-12 (HIGH-1): an owner device alone is not, because the global token mints one."""
+    """A person = a device carrying the PERSON mark (set only from the owner's Telegram; tests/test_person_mark.py)
+    and not held. Review 2026-11-12 (HIGH-1): an owner device alone is not, because the global token mints one.
+    Changed on purpose (Will, 2026-11-12): it was the computer-use mark, which also gives desktop control."""
     assert w.client.put("/api/pause", headers=_owner(w), json={}).status_code == 200
-    assert w.devices.set_computer(w.owner["id"], True, by="telegram:owner")
+    assert w.devices.set_person(w.owner["id"], True, by="telegram:owner")
     r = w.client.delete("/api/pause", headers=_owner(w))
     assert r.status_code == 200 and r.json()["paused"] is False
     assert pause.current() is None
@@ -154,7 +155,7 @@ def test_an_owner_device_that_is_not_marked_cannot_resume(w):
 
 def test_a_marked_device_that_is_held_cannot_resume(w):
     w.call("op", "PUT", "/api/pause", json={})
-    assert w.devices.set_computer(w.a["id"], True, by="telegram:owner")
+    assert w.devices.set_person(w.a["id"], True, by="telegram:owner")
     assert w.devices.set_profile(w.a["id"], "read-only", by="test")
     r = w.call("a", "DELETE", "/api/pause")
     assert r.status_code == 403

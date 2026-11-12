@@ -434,6 +434,65 @@ class DeviceStore:
         return {r["device_id"] for r in rows}
 
     # ------------------------------------------------------------------
+    # The PERSON mark: the one thing that lets a device resume a pause
+    # ------------------------------------------------------------------
+    #
+    # It does nothing else (engine/pause.py, web/pause_routes.py): not computer use, not approvals. Set and cleared
+    # only from the owner's Telegram (/person allow|disallow, gateway/commands.py cmd_person); no REST route sets
+    # it, so neither the API token nor a device can. Its own table, created on the FIRST mark like
+    # computer_devices, so a daemon that never marks one never grows it and the parity fixtures stay as they are.
+
+    def _has_person_table(self) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='person_devices'").fetchone() is not None
+
+    def set_person(self, device_id: str, on: bool, *, by: str) -> bool:
+        """Mark (or unmark) a LIVE device as a person's. False for an unknown or revoked id; ValueError for
+        marking a device held to a profile (a held device is a caller with limited reach, never a person)."""
+        live = self._conn.execute(
+            "SELECT 1 FROM api_devices WHERE id = ? AND revoked_at IS NULL", (device_id,)).fetchone()
+        if live is None:
+            return False
+        if on and self.device_profile(device_id):
+            raise ValueError(f"device {device_id} is held to profile {self.device_profile(device_id)!r}, and a "
+                             f"held device cannot be marked as a person's")
+        if not on:
+            if self._has_person_table():
+                self._conn.execute("DELETE FROM person_devices WHERE device_id = ?", (device_id,))
+                self._conn.commit()
+            return True
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS person_devices (
+              device_id  TEXT PRIMARY KEY,
+              marked_at  REAL NOT NULL,
+              marked_by  TEXT NOT NULL
+            );
+        """)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO person_devices (device_id, marked_at, marked_by) VALUES (?, ?, ?)",
+            (device_id, time.time(), by))
+        self._conn.commit()
+        return True
+
+    def person_allowed(self, device_id: str) -> bool:
+        """Is this LIVE device marked as a person's? A revoked device never is, whatever its mark says."""
+        if not self._has_person_table():
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM person_devices p JOIN api_devices d ON d.id = p.device_id "
+            "WHERE p.device_id = ? AND d.revoked_at IS NULL", (device_id,)).fetchone()
+        return row is not None
+
+    def person_device_ids(self) -> set[str]:
+        if not self._has_person_table():
+            return set()
+        rows = self._conn.execute(
+            "SELECT p.device_id FROM person_devices p JOIN api_devices d "
+            "ON d.id = p.device_id WHERE d.revoked_at IS NULL").fetchall()
+        return {r["device_id"] for r in rows}
+
+    # ------------------------------------------------------------------
     # A profile the operator HOLDS a device to
     # ------------------------------------------------------------------
     #
