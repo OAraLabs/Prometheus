@@ -492,11 +492,6 @@ class DeviceStore:
                             bundle_id=r["apns_bundle_id"] or "", push_failures=int(r["push_failures"] or 0)),
                  r["activity_token"]) for r in rows]
 
-    def clear_all_job_activity_tokens(self) -> None:
-        if self._has_table("job_activity_tokens"):
-            self._conn.execute("DELETE FROM job_activity_tokens")
-            self._conn.commit()
-
     def job_activity_targets(self, kind: str, job_id: str) -> list[tuple[PushTarget, str]]:
         """(push target, activity token) for one job's live activities, on LIVE devices (a revoked device's token
         drops out). Unlike a turn's, not joined on an alert registration: see :meth:`activity_start_targets`."""

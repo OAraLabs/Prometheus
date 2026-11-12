@@ -39,6 +39,7 @@ from prometheus.push.job_activity import (
     STALE_AFTER_SECONDS,
     content_state,
     tool_detail,
+    turn_end_aps,
     turn_end_phase,
 )
 
@@ -117,8 +118,9 @@ class PushDispatcher:
         # Whether a name is a registered tool (set by the launcher from the tool registry). A turn's ``detail`` is
         # a tool name only when it is one; None means nothing is: the generic word (push/job_activity.py).
         self.known_tool: Callable[[str], bool] | None = None
-        # session_id -> how its last turn ended, for the job watcher's tombstones (Piece 18 review M1).
-        self._turn_outcomes: OrderedDict[str, str] = OrderedDict()
+        # Told the moment a turn ends: (session_id, the turn's start, how it ended). The job watcher sets it
+        # (push/job_activity.py), so a token registered just after the end still gets the end.
+        self.turn_end_listener: Callable[[str, float | None, str], None] | None = None
 
     # ------------------------------------------------------------------
     # Bus signals
@@ -351,32 +353,24 @@ class PushDispatcher:
         except Exception:
             logger.warning("liveactivity push failed", exc_info=True)
 
-    def turn_outcome(self, session_id: str) -> str | None:
-        """How *session_id*'s last turn ended (done, stopped, paused, failed), if this process saw it end."""
-        return self._turn_outcomes.get(session_id)
-
     async def on_chat_done(self, session_id: str, payload: dict) -> None:
         try:
             outcome = turn_end_phase(payload)
-            self._turn_outcomes[session_id] = outcome
-            self._turn_outcomes.move_to_end(session_id)
-            while len(self._turn_outcomes) > PUSHED_REQUESTS_REMEMBERED:
-                self._turn_outcomes.popitem(last=False)
+            listener = self.turn_end_listener
+            if listener is not None:
+                started = payload.get("turn_started_at")
+                try:
+                    listener(session_id, float(started) if isinstance(started, (int, float)) else None, outcome)
+                except Exception:
+                    logger.warning("turn end listener failed", exc_info=True)
             targets = self._store.activity_targets(session_id)
             if not targets:
                 return
             now = self._now()
-            body = {"aps": {
-                "timestamp": int(now),
-                "event": "end",
-                "dismissal-date": int(now),
-                # ``phase`` stays exactly "done", as it always was: the shipped phone decodes it. How the turn
-                # ended (done, stopped for a user stop, paused for the round cap, failed) is ``outcome``.
-                "content-state": {**content_state(phase="done", detail="",
-                                                  elapsed_s=int(payload.get("elapsed_s") or 0), steps=0),
-                                  "outcome": outcome,
-                                  "round": payload.get("round", 0), "toolCalls": 0, "chars": 0},
-            }}
+            # ``phase`` stays exactly "done", as it always was: the shipped phone decodes it. How the turn ended
+            # (done, stopped for a user stop, paused for the round cap, failed) is ``outcome``.
+            body = {"aps": turn_end_aps(now, outcome, elapsed_s=int(payload.get("elapsed_s") or 0),
+                                        round_=payload.get("round", 0))}
             await self._deliver_activity(targets, self._named(body), session_id)
             self._activity_pushed_at.pop(session_id, None)
             for target, _token in targets:

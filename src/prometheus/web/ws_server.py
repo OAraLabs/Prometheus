@@ -2302,7 +2302,11 @@ class WebSocketBridge:
         if dispatcher is None:
             return
         try:
-            await dispatcher.on_chat_done(session_id, done_payload)
+            # Which turn ended: its start, so the job watcher remembers THIS turn (push/job_activity.py). A copy:
+            # the broadcast frame is unchanged.
+            started = (self._turn_progress.get(session_id) or (None, None))[0]
+            payload = {**done_payload, "turn_started_at": started} if started is not None else done_payload
+            await dispatcher.on_chat_done(session_id, payload)
         except Exception:
             logger.debug("live activity end push failed", exc_info=True)
 

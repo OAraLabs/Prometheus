@@ -99,6 +99,8 @@ GENERIC_TOOL_DETAIL = "tool"
 #: How long an ended job is remembered, so a token registered after its end is answered with the end (M1).
 TOMBSTONE_SECONDS = 600.0
 TOMBSTONES_REMEMBERED = 512
+#: The most ends the boot sweep sends; rows past it wait for the next boot.
+SWEEP_CAP = 200
 _START_ALERT = {
     "turn": "A reply is still being written",
     "task": "A background task is still running",
@@ -231,6 +233,18 @@ def end_aps(job: Job, now: float, phase: str) -> dict[str, Any]:
     }
 
 
+def turn_end_aps(now: float, outcome: str, *, elapsed_s: int = 0, round_: int = 0) -> dict[str, Any]:
+    """A turn's end, the one shape for the bridge's ``chat_done`` end and a late one: ``phase`` stays exactly
+    ``"done"`` (the shipped per-turn decode reads it) and how the turn ended is ``outcome``."""
+    return {
+        "timestamp": int(now),
+        "event": "end",
+        "dismissal-date": int(now),
+        "content-state": {**content_state(phase="done", detail="", elapsed_s=elapsed_s, steps=0),
+                          "outcome": outcome, "round": round_, "toolCalls": 0, "chars": 0},
+    }
+
+
 def _fit(body: dict[str, Any]) -> dict[str, Any]:
     """The last guard on size: a body still over :data:`BODY_LIMIT` (titles full of characters JSON escapes six
     bytes wide) has its strings cut short. Never seen with the caps above; kept so APNs never refuses one."""
@@ -323,6 +337,12 @@ class TaskSource:
                           started_at=started, session_id=record.session_id or None,
                           detail=_TASK_TYPE_WORDS.get(str(record.type), ""))
 
+    def alive(self, job_id: str) -> bool:
+        """Whether the task still runs, or will again (a file_watch or poll task resumed at boot keeps its id).
+        Reads the durable store too, so it answers the same before and after ``resume_running``."""
+        record = self._manager.get_task(job_id)
+        return record is not None and str(record.status) in ("running", "pending")
+
     def outcome(self, job_id: str) -> str | None:
         record = self._manager.get_task(job_id)
         if record is None:
@@ -365,6 +385,10 @@ class DesktopSource:
             yield Job(kind="desktop", id=task.task_id, title=DESKTOP_TITLE, started_at=float(task.started_at),
                       session_id=task.session_id or None, steps=int(task.steps or 0))
 
+    def alive(self, job_id: str) -> bool:
+        task = self._runner.get(job_id)
+        return task is not None and task.status == "running"
+
     def outcome(self, job_id: str) -> str | None:
         task = self._runner.get(job_id)
         if task is None:
@@ -393,6 +417,7 @@ class _Tombstone:
     phase: str
     ended_at: float
     started_on: set[str]
+    ended_for: set[str] = field(default_factory=set)    # devices already sent a late end (once each)
 
 
 def _key(job: Job) -> tuple[str, str, float]:
@@ -415,6 +440,11 @@ class JobActivityWatcher:
         # (kind, id) -> how it ended. A turn's id is its session id.
         self._tombstones: OrderedDict[tuple[str, str], _Tombstone] = OrderedDict()
         self._task: asyncio.Task | None = None
+        self._sweep_task: asyncio.Task | None = None
+        # A turn's end is told at the moment it ends (PushDispatcher.on_chat_done), not found at the next tick:
+        # a token registered between the two would otherwise miss its end.
+        if hasattr(dispatcher, "turn_end_listener"):
+            dispatcher.turn_end_listener = self.turn_ended
 
     # ── the loop ──
 
@@ -423,15 +453,13 @@ class JobActivityWatcher:
             self._task = asyncio.create_task(self.run(), name="job-activity-watcher")
 
     def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            self._task = None
+        for task in (self._task, self._sweep_task):
+            if task is not None:
+                task.cancel()
+        self._task = self._sweep_task = None
 
     async def run(self) -> None:
-        try:
-            await self.sweep()
-        except Exception:
-            logger.warning("job activity boot sweep failed", exc_info=True)
+        first = True
         while True:
             await asyncio.sleep(self._tick_seconds)
             try:
@@ -440,20 +468,50 @@ class JobActivityWatcher:
                 raise
             except Exception:
                 logger.warning("job activity tick failed", exc_info=True)
+            if first:
+                # After the first tick and beside the ticks, never in front of them; by then the daemon has
+                # resumed its tasks, and sweep() asks each source besides.
+                first = False
+                self._sweep_task = asyncio.create_task(self._sweep_quietly(), name="job-activity-sweep")
+
+    async def _sweep_quietly(self) -> None:
+        try:
+            await self.sweep()
+        except Exception:
+            logger.warning("job activity boot sweep failed", exc_info=True)
+
+    def _alive(self, kind: str, job_id: str) -> bool:
+        if any(key[0] == kind and key[1] == job_id for key in self._tracked):
+            return True
+        source = self._sources.get(kind)
+        alive = getattr(source, "alive", None)
+        try:
+            return bool(alive(job_id)) if callable(alive) else False
+        except Exception:
+            return True  # unknown: leave the row for a later boot rather than end a live activity
 
     async def sweep(self) -> None:
-        """At boot: every job token left from an earlier run belongs to a job this process does not know, so each
-        gets an ``end`` (phase ``stopped``) and every row is dropped (review L1). A turn's tokens are not jobs'."""
+        """At boot: a job token left from an earlier run whose job is not running (or coming back, as a resumed
+        file_watch or poll task does) gets an ``end`` (phase ``stopped``), and that row, only that row, is dropped
+        once the end was sent. At most :data:`SWEEP_CAP` ends. A turn's tokens are not jobs' (review L1)."""
         now = self._now()
+        sent = 0
         for kind, job_id, target, token in self._store.all_job_activity_tokens():
+            if sent >= SWEEP_CAP:
+                break
             try:
+                if self._alive(kind, job_id):
+                    continue
                 job = Job(kind=kind, id=job_id, title=_TITLES.get(kind, ""), started_at=now)
                 body = _fit(self._dispatcher._named({"aps": end_aps(job, now, "stopped")}))
-                await self._dispatcher.send_liveactivity(target, token, body, priority=UPDATE_PRIORITY,
-                                                         kind="liveactivity end")
+                outcome = await self._dispatcher.send_liveactivity(target, token, body, priority=UPDATE_PRIORITY,
+                                                                   kind="liveactivity end")
+                if outcome is None:
+                    continue  # muted: not sent, the row stays
+                sent += 1
+                self._store.clear_job_activity_token(target.id, kind, job_id)
             except Exception:
                 logger.warning("job activity: the boot end for %s %s failed", kind, job_id, exc_info=True)
-        self._store.clear_all_job_activity_tokens()
 
     async def tick(self) -> None:
         now = self._now()
@@ -550,9 +608,10 @@ class JobActivityWatcher:
         if job.kind == "turn":
             # The turn's own end rode chat_done. Remembered only when a start was sent: a phone registering a
             # token for that session later is then answered with the end (review M1).
+            # Normally turn_ended already did this, the moment the turn ended. A turn that vanished without a
+            # chat_done (the daemon cancelled it) is remembered here, as stopped.
             if tracked.started_on:
-                phase = self._turn_outcome(job.id) or "done"
-                self._remember(job, phase, now, tracked.started_on)
+                self._remember(job, "stopped", now, tracked.started_on)
             return
         phase = self._outcome(job) or "stopped"
         self._remember(job, phase, now, tracked.started_on)
@@ -564,12 +623,19 @@ class JobActivityWatcher:
                                                          kind="liveactivity end")
         self._store.clear_job_activity_tokens(job.kind, job.id)
 
-    def _turn_outcome(self, session_id: str) -> str | None:
-        fn = getattr(self._dispatcher, "turn_outcome", None)
+    def turn_ended(self, session_id: str, started_at: float | None, outcome: str) -> None:
+        """A turn ended (``chat_done``): remember it now, with how it ended, if a start was sent for it. Keyed by
+        the turn (its session and its start), so a later turn in the session neither races nor overwrites it.
+        Without a start time (an older caller), the session's one tracked turn. Never raises."""
         try:
-            return fn(session_id) if callable(fn) else None
+            keys = [k for k in self._tracked if k[0] == "turn" and k[1] == session_id
+                    and (started_at is None or k[2] == float(started_at))]
+            for key in keys:
+                tracked = self._tracked.pop(key)
+                if tracked.started_on:
+                    self._remember(tracked.job, outcome, self._now(), tracked.started_on)
         except Exception:
-            return None
+            logger.warning("job activity: remembering the end of a turn in %s failed", session_id, exc_info=True)
 
     def _outcome(self, job: Job) -> str | None:
         source = self._sources.get(job.kind)
@@ -611,7 +677,7 @@ class JobActivityWatcher:
             now = self._now()
             self._forget_old_tombstones(now)
             stone = self._tombstones.get((kind, job_id))
-            if stone is None:
+            if stone is None or device_id in stone.ended_for:
                 return False
             if kind == "turn":
                 if device_id not in stone.started_on or self._turn_running(job_id):
@@ -621,9 +687,13 @@ class JobActivityWatcher:
             target = self._store.push_target(device_id)
             if target is None:
                 return False
-            body = _fit(self._dispatcher._named({"aps": end_aps(stone.job, now, stone.phase)}))
-            await self._dispatcher.send_liveactivity(target, token, body, priority=UPDATE_PRIORITY,
-                                                     kind="liveactivity end")
+            if kind == "turn":
+                aps = turn_end_aps(now, stone.phase, elapsed_s=_elapsed(stone.job, stone.ended_at))
+            else:
+                aps = end_aps(stone.job, now, stone.phase)
+            stone.ended_for.add(device_id)  # once per device and job
+            await self._dispatcher.send_liveactivity(target, token, _fit(self._dispatcher._named(
+                {"aps": aps})), priority=UPDATE_PRIORITY, kind="liveactivity end")
             return True
         except Exception:
             logger.warning("job activity: the late end for %s %s failed", kind, job_id, exc_info=True)
