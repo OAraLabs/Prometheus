@@ -207,3 +207,48 @@ def test_server_capabilities_lists_approval_critical():
     bridge = WebSocketBridge.__new__(WebSocketBridge)
     bridge.config = {}
     assert "approval_critical" in bridge._server_capabilities()
+
+
+# ── review round 1 (2026-11-12): what the matcher missed ────────────────────
+
+@pytest.mark.parametrize("command", [
+    "sudo ls", "sudo -u root ls",
+    "command -p rm x", "env -i rm x", "nice -n 5 rm x", "time -p rm x", "exec -a f rm x",
+    'bash -c "rm x"', "sh -c 'rm -rf /'", "eval rm x", "xargs rm < f", "find . -delete",
+    "find . -name '*.o' -exec rm {} +", 'python3 -c "import shutil; shutil.rmtree(\'x\')"', "perl -e unlink",
+    "(rm x)", "{ rm x; }", "if true; then rm x; fi", "! rm x", "cat <(rm x)",
+    "echo x > ~/.prometheus/prometheus.yaml", "cp a ~/.prometheus/b", "tee $HOME/.config/prometheus/x",
+    "sed -i s/a/b/ ~/.prometheus/prometheus.yaml", "dd if=a of=${HOME}/.prometheus/x",
+    "git branch --delete x", "git checkout -- .", "git restore x", "git stash drop", "git stash clear",
+])
+def test_round_one_misses_are_critical(command):
+    assert CriticalRules().matches("bash", {"command": command}), command
+
+
+@pytest.mark.parametrize("command", ["python3 -m pytest -q", "time pytest", "env | sort", "find . -name x",
+                                     "xargs echo < f", "if true; then ls; fi", "nice make"])
+def test_wrappers_and_interpreters_alone_are_not(command):
+    assert CriticalRules().matches("bash", {"command": command}) == (), command
+
+
+def test_downloads_into_config_are_critical_but_the_downloads_folder_is_not():
+    rules = CriticalRules()
+    assert rules.matches("download_file", {"url": "https://example.invalid/x",
+                                           "destination": "~/.prometheus/prometheus.yaml"})
+    assert rules.matches("download_file", {"url": "https://example.invalid/x",
+                                           "destination": "~/.prometheus/downloads/../config.yaml"})
+    assert rules.matches("download_file", {"url": "https://example.invalid/x",
+                                           "destination": "~/.prometheus/downloads/file.pdf"}) == ()
+
+
+def test_a_relative_path_into_a_config_folder_is_critical():
+    assert CriticalRules().matches("write_file", {"path": ".prometheus/prometheus.yaml"})
+    assert CriticalRules().matches("edit_file", {"path": "x/../.config/prometheus/a.yaml"})
+
+
+def test_a_matcher_that_raises_makes_the_request_critical():
+    class _Odd(dict):
+        def get(self, *_a, **_k):
+            raise TypeError("odd arguments")
+
+    assert CriticalRules().matches("bash", _Odd())
