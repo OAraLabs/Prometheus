@@ -345,3 +345,9 @@ def test_an_overwriting_redirect_is_critical(command):
                                      "echo x >&2", "cmd > /dev/stderr"])
 def test_appends_and_discards_are_not(command):
     assert CriticalRules().matches("bash", {"command": command}) == (), command
+
+
+@pytest.mark.parametrize("command", ["echo x >& f", "echo x >&out.log"])
+def test_redirect_to_a_file_by_and_word_is_critical(command):
+    """``>&word`` with a word that is not a descriptor writes that file (review round 6, 2026-11-12)."""
+    assert CriticalRules().matches("bash", {"command": command}), command
