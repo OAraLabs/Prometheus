@@ -1515,6 +1515,12 @@ async def run_loop(
     an episode belongs to (ruling 5). Both are DESCRIPTIVE: recorded, never
     read for behaviour.
     """
+    # PAUSE EVERYTHING (engine/pause.py): no turn starts while the agent is paused, whatever front door it came
+    # through (the doors refuse first, with a reason; this is the backstop, and in a child process the only
+    # check). Raised at the first ``__anext__``, before anything is copied or recorded.
+    from prometheus.engine import pause as _pause
+
+    _pause.check()
     # THE PER-RUN COPY. Everything below — and everything `_run_loop` does —
     # works on a context private to this turn, so the router swap, the
     # provider fallback, the identity-line rewrite and the pair stash cannot
@@ -1632,6 +1638,8 @@ async def run_loop(
         )
     _turn_token = _RUN_TURN.set(turn_record)
     _turn_exit: BaseException | None = None
+    # Counted as a running turn of this process, so a pause can cancel it whoever started it.
+    _pause_task = _pause.turn_started()
     try:
         async for item in _run_loop(
             context,
@@ -1654,6 +1662,7 @@ async def run_loop(
         _turn_exit = exc
         raise
     finally:
+        _pause.turn_ended(_pause_task)
         if turn_record is not None:
             # The turn_end seam: one upsert, whatever the exit (audit Q4: every
             # exit but SIGKILL or a restart reaches this). Queued, never awaited.
@@ -2315,6 +2324,12 @@ async def _run_loop(
             log.debug("degenerate-output telemetry write failed", exc_info=True)
 
     for turn in range(context.max_turns):
+        if turn > 0:
+            # A pause between rounds ends the turn here (in this process the pause also cancels it; a child
+            # process, a worker or a coding run, has only this and the file).
+            from prometheus.engine import pause as _pause_mod
+
+            _pause_mod.check()
         if turn_record is not None:
             turn_record.round_index = turn
         # MicroCompaction: compact old tool results (free, no LLM calls)

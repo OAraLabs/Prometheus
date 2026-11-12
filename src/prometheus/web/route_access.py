@@ -126,6 +126,9 @@ SCOPED_SLASH_COMMANDS: frozenset[str] = frozenset({
 #: listed. Includes the operator halves of the pairing routes, which also check ``is_operator`` themselves.
 OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     # /api/activity
+    # /api/pause: pausing is the operator's; resuming is a person's (an owner device), which the handler checks
+    ("PUT", "/api/pause"),
+    ("DELETE", "/api/pause"),
     # /api/approvals
     ("GET", "/api/approvals/grants"),
     ("DELETE", "/api/approvals/grants/{grant_id}"),

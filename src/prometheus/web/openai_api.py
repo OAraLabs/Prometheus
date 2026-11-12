@@ -125,6 +125,11 @@ def register_openai_routes(
 
     @router.post("/chat/completions")
     async def chat_completions(request: Request):
+        # Paused (engine/pause.py): nothing new runs. OpenAI's error shape, with our code.
+        from prometheus.engine import pause as _pause
+
+        if (_paused := _pause.current()) is not None:
+            return _error(423, "Prometheus is paused; nothing new runs until a person resumes it.", "paused")
         try:
             body = await request.json()
         except Exception:

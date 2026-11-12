@@ -1078,7 +1078,9 @@ class WebSocketBridge:
         """What the ``subscribed`` ack tells a client this daemon can do (see the ack)."""
         from prometheus.gateway import media_services
 
-        return ["voice_input"] if media_services.voice_input_available(self.config) else []
+        capabilities = ["voice_input"] if media_services.voice_input_available(self.config) else []
+        capabilities.append("pause")          # PUT/DELETE /api/pause, `paused` on /api/status (engine/pause.py)
+        return capabilities
 
     async def _system_note(self, session_id: str, content: str) -> None:
         await self.broadcast({
@@ -1465,6 +1467,15 @@ class WebSocketBridge:
                 session_id, content, outcome.reply or "", client_msg_id,
                 name=(parse_slash(content) or ("", ""))[0],
             )
+            return
+        # Paused (engine/pause.py): a message starts no turn and is not kept to run on resume.
+        from prometheus.engine import pause as _pause
+
+        if (_paused := _pause.current()) is not None:
+            await self.broadcast({"type": "error", "timestamp": time.time(), "payload": {
+                "session_id": session_id, "client_msg_id": client_msg_id, "kind": "paused",
+                "message": "Prometheus is paused; nothing new runs until a person resumes it.",
+                **_paused.to_dict()}})
             return
 
         if not self.session_mgr:

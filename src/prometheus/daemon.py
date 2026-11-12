@@ -684,6 +684,19 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     gateway_config = config.get("gateway", {})
     security_config = config.get("security", {})
 
+    # ── Pause everything (engine/pause.py), read FIRST ──────────────────
+    # Before any gateway, scheduler, timer or turn exists: a daemon that was paused comes back paused, and an
+    # unreadable pause file means paused. Only a person resumes it.
+    from prometheus.engine import pause as _pause_mod
+
+    _pause_mod.install(_pause_mod.PauseState())
+    if (_paused_at_boot := _pause_mod.current()) is not None:
+        from datetime import datetime as _dt
+
+        logger.warning("Prometheus is PAUSED (since %s, by %s%s): nothing will run until a person resumes it",
+                       _dt.fromtimestamp(_paused_at_boot.since).strftime("%Y-%m-%d %H:%M"), _paused_at_boot.by,
+                       f", {_paused_at_boot.reason}" if _paused_at_boot.reason else "")
+
     # ── Env file (Onboarding Phase 0) ───────────────────────────────────
     # Under systemd the unit's EnvironmentFile= already populated these;
     # run bare, `oara daemon` loads the same file so tokens/keys
