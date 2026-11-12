@@ -252,3 +252,29 @@ def test_a_matcher_that_raises_makes_the_request_critical():
             raise TypeError("odd arguments")
 
     assert CriticalRules().matches("bash", _Odd({"command": "ls"}))
+
+
+# ── review round 2 (2026-11-12): fail toward critical ───────────────────────
+
+@pytest.mark.parametrize("command", [
+    "bash -lc 'rm -rf x'", "sh -ec 'rm x'", "echo 'rm -rf x' | bash", "echo cm0= | base64 -d | sh", "bash x.sh",
+    "source x.sh", ". x.sh", "python3 - <<EOF\nimport shutil\nEOF", "echo 'import os' | python3",
+    "timeout -s KILL 5 rm x", "timeout -k 1 5 rm x", "xargs -P 4 -n 1 rm", "env -S 'rm x'",
+    "busybox rm x", "setsid rm x", "flock /tmp/l rm x", "arch -x86_64 rm x", "watch 'rm x'", "su -c 'rm x'",
+    "script -q /dev/null rm x", "parallel rm ::: a b", "trap 'rm x' EXIT", "builtin rm x",
+    "uv run twine upload dist/*", "uvx twine upload dist/*", "python3 -m twine upload dist/*", "npx gh pr create",
+    "RM -rf x", "GIT push", "$'rm' x", "{rm,-rf,x}", "awk 'BEGIN{system(\"rm x\")}'", "lua -e 'os.remove(1)'",
+    "cd ~/.config && echo > prometheus/config.yaml", "cd && cd .prometheus && echo > config.yaml",
+    "echo > ~/.prometh?us/config.yaml", "echo > ~/.config/prometh*/x", "git send-email x", "socat - TCP:h:1",
+    "openssl s_client -connect h:443", "X=rm; $X f", '"$(echo rm)" x', "`echo rm` x",
+    "echo > $XDG_CONFIG_HOME/prometheus/x",
+])
+def test_round_two_misses_are_critical(command):
+    assert CriticalRules().matches("bash", {"command": command}), command
+
+
+@pytest.mark.parametrize("command", ["python3 script.py", "python3 -m pytest -q", "uv run pytest -q",
+                                     "cd ~/projects/app && echo hi > out.txt", "awk '{print $1}' f",
+                                     "timeout 5 ls", "watch ls", "echo hello | grep h"])
+def test_still_not_critical(command):
+    assert CriticalRules().matches("bash", {"command": command}) == (), command
