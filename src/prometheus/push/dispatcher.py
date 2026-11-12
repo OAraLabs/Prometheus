@@ -35,6 +35,13 @@ from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any
 
+from prometheus.push.job_activity import (
+    DETAIL_CAP,
+    STALE_AFTER_SECONDS,
+    content_state,
+    turn_end_phase,
+)
+
 logger = logging.getLogger(__name__)
 
 FAILURE_MUTE_THRESHOLD = 8
@@ -316,16 +323,24 @@ class PushDispatcher:
             if not targets:
                 return
             self._activity_pushed_at[session_id] = now
+            phase = str(payload.get("phase") or "")
             body = {"aps": {
                 "timestamp": int(now),
                 "event": "update",
+                # The job keys (push/job_activity.py, Piece 18) first, so an activity the daemon started for this
+                # turn (JobActivityAttributes) decodes the same push as one the app started; then the turn's own.
                 "content-state": {
-                    "phase": payload.get("phase", ""),
+                    **content_state(
+                        phase=phase,
+                        detail=str(payload.get("tool_name") or "")[:DETAIL_CAP] if phase == "tool" else "",
+                        elapsed_s=int(payload.get("elapsed_s") or 0),
+                        steps=int(payload.get("tool_calls") or 0)),
                     "round": payload.get("round", 0),
-                    "elapsedS": payload.get("elapsed_s", 0),
                     "toolCalls": payload.get("tool_calls", 0),
                     "chars": payload.get("chars", 0),
                 },
+                # A daemon that dies mid-turn stops updating; the lock screen then shows the activity as stale.
+                "stale-date": int(now) + STALE_AFTER_SECONDS,
             }}
             await self._deliver_activity(targets, self._named(body))
         except Exception:
@@ -341,9 +356,10 @@ class PushDispatcher:
                 "timestamp": int(now),
                 "event": "end",
                 "dismissal-date": int(now),
-                "content-state": {"phase": "done", "round": payload.get("round", 0),
-                                  "elapsedS": payload.get("elapsed_s", 0),
-                                  "toolCalls": 0, "chars": 0},
+                # How the turn ended: done, stopped (a user stop), paused (the round cap) or failed.
+                "content-state": {**content_state(phase=turn_end_phase(payload), detail="",
+                                                  elapsed_s=int(payload.get("elapsed_s") or 0), steps=0),
+                                  "round": payload.get("round", 0), "toolCalls": 0, "chars": 0},
             }}
             await self._deliver_activity(targets, self._named(body))
             self._activity_pushed_at.pop(session_id, None)
@@ -351,6 +367,32 @@ class PushDispatcher:
                 self._store.clear_activity_token(target.id, session_id)
         except Exception:
             logger.warning("liveactivity end push failed", exc_info=True)
+
+    async def send_liveactivity(self, target: Any, activity_token: str, body: dict, *, priority: int,
+                                kind: str = "liveactivity") -> str | None:
+        """Send one job Live Activity push (push/job_activity.py) to *activity_token*; the outcome, or None when
+        the device is muted.
+
+        A 410 here is about the ACTIVITY token (or the push-to-start token), not the device's alert registration,
+        so it is recorded and left to the caller, who drops that one token; the alert registration stays. Other
+        outcomes are accounted like every push (a success resets the failure count, a failure counts toward the
+        mute)."""
+        if target.push_failures >= FAILURE_MUTE_THRESHOLD:
+            return None
+        result = await self._sender.send(
+            apns_token=activity_token, environment=target.environment,
+            payload=body, push_type="liveactivity", priority=priority,
+            topic=f"{target.bundle_id or self._sender.config.topic}.push-type.liveactivity",
+        )
+        outcome = getattr(result, "outcome", None)
+        if outcome == "unregistered":
+            status = getattr(result, "status", None)
+            logger.info("push %s → device %s: unregistered%s", kind, target.id,
+                        f" (status {status})" if status is not None else "")
+            self._record("record_push_attempt", target.id, status, "unregistered")
+        else:
+            self._account(target, result, kind)
+        return outcome
 
     async def _deliver_activity(self, targets: list, body: dict) -> None:
         for target, activity_token in targets:

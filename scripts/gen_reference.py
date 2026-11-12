@@ -300,10 +300,19 @@ def _render_config_keys() -> str:
 
 # ── driver ─────────────────────────────────────────────────────────────
 
+
+def _render_job_activity() -> str:
+    """The phone's Live Activity contract (push/job_activity.py, Piece 18): attributes, content-state keys,
+    kinds and phases, with an example of each push. The phone's decoding fixture is this file."""
+    from prometheus.push.job_activity import render_fixture
+
+    return render_fixture()
+
 FILES: dict[str, Any] = {
     "routes.md": _render_routes,
     "commands.md": _render_commands,
     "config-keys.md": _render_config_keys,
+    "job-activity.json": _render_job_activity,
 }
 
 

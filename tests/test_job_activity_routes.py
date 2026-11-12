@@ -135,7 +135,7 @@ def test_an_owner_device_registers_a_job_token_apart_from_turns(d, kind):
               json={"kind": kind, "id": "c1", "activity_token": "job-tok"})
     assert r.status_code == 200
     assert [tok for _, tok in d.devices.job_activity_targets(kind, "c1")] == ["job-tok"]
-    assert d.devices.activity_targets("c1") == [] and d.devices.activity_targets(f"coding:c1") == []
+    assert d.devices.activity_targets("c1") == [] and d.devices.activity_targets("coding:c1") == []
     assert d.as_("owner", "DELETE", f"/api/devices/{d.owner['id']}/activity",
                  json={"kind": kind, "id": "c1"}).status_code == 200
     assert d.devices.job_activity_targets(kind, "c1") == []
