@@ -351,3 +351,14 @@ def test_appends_and_discards_are_not(command):
 def test_redirect_to_a_file_by_and_word_is_critical(command):
     """``>&word`` with a word that is not a descriptor writes that file (review round 6, 2026-11-12)."""
     assert CriticalRules().matches("bash", {"command": command}), command
+
+
+def test_a_cut_check_that_raises_counts_as_cut_and_the_request_is_still_created():
+    """Review 2026-11-12 (#917 LOW): any error fails toward critical, and request creation never raises for it."""
+    from prometheus.permissions import argument_view
+
+    class _Odd(dict):
+        def __iter__(self):
+            raise TypeError("odd arguments")
+
+    assert argument_view.arguments_were_cut(_Odd({"a": 1})) is True
