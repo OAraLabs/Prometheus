@@ -2727,7 +2727,11 @@ class TelegramAdapter(BasePlatformAdapter):
             store = DeviceStore()                  # the daemon's registry, the one the REST middleware reads
         except Exception:  # noqa: BLE001 - say so rather than fail silently
             store = None
-        reply = _cmds.cmd_person(store, parts[1] if len(parts) > 1 else "", by=by)
+        try:
+            reply = _cmds.cmd_person(store, parts[1] if len(parts) > 1 else "", by=by)
+        finally:
+            if store is not None:
+                store.close()                      # one connection per command, closed with it
         await self.send(update.effective_chat.id, reply, parse_mode=None)
 
     def _registered_commands(self) -> list[str]:
