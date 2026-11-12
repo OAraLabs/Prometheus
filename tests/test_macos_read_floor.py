@@ -71,7 +71,8 @@ def test_a_home_path_cannot_break_out_of_the_profile():
     assert regexes and set(regexes) <= {
         r'#"/\.config/[^/]+/[^/]*env$"',
         r'#"/devices\.db[^/]*$"',
-        r'#"/cron_(jobs\.json|history\.jsonl|undelivered\.jsonl|scheduler\.pid)[^/]*$"',
+        # + pause.json (the pause-everything state, read at boot), in the same rule as the scheduled-jobs files
+        r'#"/(cron_(jobs\.json|history\.jsonl|undelivered\.jsonl|scheduler\.pid)|pause\.json)[^/]*$"',
         r'#"/mcp_servers\.json[^/]*$"',
         r'#"/xai_oauth\.json[^/]*$"',
         r'#"/lcm\.db[^/]*$"',
