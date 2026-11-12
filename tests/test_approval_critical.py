@@ -274,7 +274,7 @@ def test_round_two_misses_are_critical(command):
 
 
 @pytest.mark.parametrize("command", ["python3 script.py", "python3 -m pytest -q", "uv run pytest -q",
-                                     "cd ~/projects/app && echo hi > out.txt", "awk '{print $1}' f",
+                                     "cd ~/projects/app && echo hi >> out.txt", "awk '{print $1}' f",
                                      "timeout 5 ls", "watch ls", "echo hello | grep h"])
 def test_still_not_critical(command):
     assert CriticalRules().matches("bash", {"command": command}) == (), command

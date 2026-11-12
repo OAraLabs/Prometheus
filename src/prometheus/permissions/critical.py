@@ -168,7 +168,7 @@ class CriticalRules:
             hit = _command_match(command, self.commands)
             if hit:
                 reasons.append(f"command:{hit}")
-            if self.paths and _mentions_path(command, self.paths):
+            if self.paths and len(command) <= MAX_COMMAND_CHARS and _mentions_path(command, self.paths):
                 reasons.append("path")
         if tool_name in _WRITE_TOOLS:
             path = grant_file_path or next((args.get(k) for k in _WRITE_TOOLS[tool_name]
@@ -285,12 +285,14 @@ def _scan(words: list[str], patterns: list[list[str]]) -> str | None:
 
 
 def _match_line(command: str, patterns: list[list[str]]) -> str | None:
+    if re.search(r"(?<![>|])>\|", command):
+        return "overwrite"                    # ``>|`` (clobber), which the statement split below would cut
     for statement in _STATEMENTS.split(command):
         head = statement.lstrip(" \t\"'({!")
         if head.startswith("$") or head.startswith("`"):
             return "dynamic command"
-        if head.startswith(">") and not head.startswith(">>"):
-            return "truncate"                 # ``> f`` empties a file
+        if _overwrites(statement):
+            return "overwrite"                # ``> f`` empties or replaces a file
         # awk's program holds braces, which the finer split below cuts apart: judge it whole, here.
         words = _words(statement)
         if words and _name(words[0]) in _AWKS:
@@ -304,6 +306,21 @@ def _match_line(command: str, patterns: list[list[str]]) -> str | None:
         if hit:
             return hit
     return None
+
+
+#: ``>``, ``1>``, ``>|`` to a target: an overwrite. Not ``>>`` (append), not ``>&2`` / ``2>&1`` (a descriptor).
+_OVERWRITE = re.compile(r"(?<![>&<])(?:[0-9]?)>\|?(?![>&])\s*([^\s;|&<>]+)")
+_DISCARD = frozenset({"/dev/null", "/dev/stderr", "/dev/stdout", "/dev/tty"})
+
+
+def _overwrites(statement: str) -> bool:
+    """Does *statement* redirect output over a file? Quotes are not parsed: a ``>`` inside quotes also counts,
+    the narrower answer."""
+    for match in _OVERWRITE.finditer(statement):
+        target = match.group(1).strip("'\"")
+        if target and target not in _DISCARD:
+            return True
+    return False
 
 
 def _piped_into(command: str, segment: str) -> bool:
