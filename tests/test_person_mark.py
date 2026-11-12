@@ -99,7 +99,7 @@ def test_the_owner_marks_and_unmarks_from_telegram(tmp_path):
     assert not store.person_allowed(d["id"])
 
 
-@pytest.mark.parametrize("who", ["not-the-owner", "api-token", "device", "open"])
+@pytest.mark.parametrize("who", ["not-the-owner", "api-token", "a-device", "open"])
 def test_nobody_else_can_mark(tmp_path, who):
     from prometheus.gateway.commands import cmd_person
 
@@ -107,7 +107,7 @@ def test_nobody_else_can_mark(tmp_path, who):
     d = store.mint("phone", "ios")
     by = {"not-the-owner": _tg("7"),
           "api-token": _approver.Approver(_approver.GLOBAL_TOKEN, "global", "API token"),
-          "device": _approver.Approver(_approver.DEVICE, d["id"], "phone"),
+          "a-device": _approver.Approver(_approver.DEVICE, d["id"], "phone"),
           "open": _approver.Approver(_approver.OPEN, "none", "")}[who]
     reply = cmd_person(store, f"allow {d['id']}", by=by)
     assert not store.person_allowed(d["id"]), reply
