@@ -104,6 +104,9 @@ class PushDispatcher:
         # request_id -> the devices its approval push reached (APNs said ok). Memory only, bounded, popped when the
         # request ends: what ``_push_resolved`` tells, and the only devices it tells.
         self._pushed_to: OrderedDict[str, set[str]] = OrderedDict()
+        # request_id -> how it ended, for requests that ended while (or before) their approval push was still going
+        # out: a device the fan-out reaches after the end is cleared at once instead of being left with a live Approve.
+        self._ended: OrderedDict[str, str] = OrderedDict()
 
     # ------------------------------------------------------------------
     # Bus signals
@@ -209,11 +212,16 @@ class PushDispatcher:
 
     async def _deliver_approval(self, target: Any, body: dict, request_id: Any) -> None:
         """Deliver one approval push and, when APNs took it, remember that this device holds its notification."""
-        if await self._deliver(target, body) and isinstance(request_id, str) and request_id:
-            self._pushed_to.setdefault(request_id, set()).add(target.id)
-            self._pushed_to.move_to_end(request_id)
-            while len(self._pushed_to) > PUSHED_REQUESTS_REMEMBERED:
-                self._pushed_to.popitem(last=False)
+        if not (await self._deliver(target, body) and isinstance(request_id, str) and request_id):
+            return
+        if request_id in self._ended:
+            # Answered elsewhere while the fan-out was still sending (the two run in different tasks).
+            await self._send_resolved(target, request_id, self._ended[request_id])
+            return
+        self._pushed_to.setdefault(request_id, set()).add(target.id)
+        self._pushed_to.move_to_end(request_id)
+        while len(self._pushed_to) > PUSHED_REQUESTS_REMEMBERED:
+            self._pushed_to.popitem(last=False)
 
     async def _push_resolved(self, payload: dict) -> None:
         """Take an approval notification back once the request has ended (Beacon iOS "Piece 16c").
@@ -229,23 +237,46 @@ class PushDispatcher:
         request_id = payload.get("request_id")
         if not isinstance(request_id, str):
             return
+        resolution = str(payload.get("resolution") or "")
+        self._ended[request_id] = resolution
+        while len(self._ended) > PUSHED_REQUESTS_REMEMBERED:
+            self._ended.popitem(last=False)
         devices = self._pushed_to.pop(request_id, None)
         if not devices:
+            return
+        for target in self._store.push_targets():
+            if target.id in devices:
+                await self._send_resolved(target, request_id, resolution)
+
+    async def _send_resolved(self, target: Any, request_id: str, resolution: str) -> None:
+        """One background push taking *request_id*'s notification back from *target*.
+
+        Not counted toward muting: Apple throttles background pushes as it likes, and a run of them refused must
+        not silence the device's approval alerts. A 410 still clears the registration (that is a fact about the
+        token), and every send is logged and recorded like any other.
+        """
+        if target.push_failures >= FAILURE_MUTE_THRESHOLD:
             return
         body = self._named({
             "aps": {"content-available": 1},
             "approval_resolved": request_id,
-            "resolution": str(payload.get("resolution") or ""),
+            "resolution": resolution,
         })
-        for target in self._store.push_targets():
-            if target.id not in devices or target.push_failures >= FAILURE_MUTE_THRESHOLD:
-                continue
-            result = await self._sender.send(
-                apns_token=target.apns_token, environment=target.environment,
-                payload=body, push_type="background", priority=5,
-                topic=target.bundle_id or None,
-            )
+        result = await self._sender.send(
+            apns_token=target.apns_token, environment=target.environment,
+            payload=body, push_type="background", priority=5,
+            topic=target.bundle_id or None,
+        )
+        outcome = getattr(result, "outcome", None)
+        status = getattr(result, "status", None)
+        logger.info("push approval_resolved → device %s: %s%s", target.id, outcome,
+                    f" (status {status})" if status is not None else "")
+        if outcome == "unregistered":
             self._account(target, result, "approval_resolved")
+        elif outcome == "ok":
+            self._record("record_push_success", target.id, status)
+        else:
+            self._record("record_push_attempt", target.id, status, "failed")
 
     async def _push_quiet(self, kind: str, payload: dict) -> None:
         live = self._live_device_ids()
