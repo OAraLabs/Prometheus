@@ -251,4 +251,4 @@ def test_a_matcher_that_raises_makes_the_request_critical():
         def get(self, *_a, **_k):
             raise TypeError("odd arguments")
 
-    assert CriticalRules().matches("bash", _Odd())
+    assert CriticalRules().matches("bash", _Odd({"command": "ls"}))
