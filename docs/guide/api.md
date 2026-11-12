@@ -238,6 +238,7 @@ Artifacts are **content-addressed**: ids are a sha256 prefix of the file bytes, 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/approvals` | Poll pending approval requests |
+| GET | `/api/approvals/{request_id}` | One request: `200` with the list's entry while pending, `410` with `resolution` and `detail` once it has ended, `404` when it is not yours or was never raised here |
 | POST | `/api/approvals/{request_id}/approve` | Approve a request |
 | POST | `/api/approvals/{request_id}/deny` | Deny a request |
 

@@ -92,6 +92,7 @@ SCOPED_ALLOWED: frozenset[tuple[str, str]] = frozenset({
     # the tool calls of its own sessions: seen and denied. The approve route is listed for a desktop prompt, which
     # a device a person marked answers (the door's rule); the handler refuses a scoped device any other approval.
     ("GET", "/api/approvals"),
+    ("GET", "/api/approvals/{request_id}"),               # one of them, by id; not its own is the 404 of none
     ("POST", "/api/approvals/{request_id}/approve"),
     ("POST", "/api/approvals/{request_id}/deny"),
 })

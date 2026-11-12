@@ -31,6 +31,7 @@ import base64
 import binascii
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any
 
@@ -38,6 +39,9 @@ logger = logging.getLogger(__name__)
 
 FAILURE_MUTE_THRESHOLD = 8
 ACTIVITY_THROTTLE_SECONDS = 10.0
+#: How many approval requests the dispatcher remembers it pushed, and to which devices, so that the end of one can
+#: take its notification back (``_push_resolved``). Requests expire in minutes; this is far more than are ever open.
+PUSHED_REQUESTS_REMEMBERED = 512
 
 # Signal kinds → notification category. approval_pending is handled apart.
 _QUIET_KINDS = {
@@ -97,6 +101,9 @@ class PushDispatcher:
         self._activity_pushed_at: dict[str, float] = {}
         # Devices whose 410 has been logged — "logs once", per the spec.
         self._unregistered_logged: set[str] = set()
+        # request_id -> the devices its approval push reached (APNs said ok). Memory only, bounded, popped when the
+        # request ends: what ``_push_resolved`` tells, and the only devices it tells.
+        self._pushed_to: OrderedDict[str, set[str]] = OrderedDict()
 
     # ------------------------------------------------------------------
     # Bus signals
@@ -108,6 +115,8 @@ class PushDispatcher:
             payload = getattr(signal, "payload", None) or {}
             if kind == "approval_pending":
                 await self._push_approval(payload)
+            elif kind == "approval_resolved":
+                await self._push_resolved(payload)
             elif kind in _QUIET_KINDS:
                 await self._push_quiet(kind, payload)
         except Exception:
@@ -174,7 +183,7 @@ class PushDispatcher:
             }
             desk = self._named(desk)
             for target in self._store.push_targets():
-                await self._deliver(target, desk)
+                await self._deliver_approval(target, desk, payload.get("request_id"))
             return
         body = {
             "aps": {
@@ -196,7 +205,47 @@ class PushDispatcher:
         }
         body = self._named(body)
         for target in self._store.push_targets():
-            await self._deliver(target, body)
+            await self._deliver_approval(target, body, payload.get("request_id"))
+
+    async def _deliver_approval(self, target: Any, body: dict, request_id: Any) -> None:
+        """Deliver one approval push and, when APNs took it, remember that this device holds its notification."""
+        if await self._deliver(target, body) and isinstance(request_id, str) and request_id:
+            self._pushed_to.setdefault(request_id, set()).add(target.id)
+            self._pushed_to.move_to_end(request_id)
+            while len(self._pushed_to) > PUSHED_REQUESTS_REMEMBERED:
+                self._pushed_to.popitem(last=False)
+
+    async def _push_resolved(self, payload: dict) -> None:
+        """Take an approval notification back once the request has ended (Beacon iOS "Piece 16c").
+
+        A request answered on the desktop or in Telegram, withdrawn, or expired, left a notification with a live
+        Approve on every phone it reached until it expired. Tapping it got a 410: safe, and confusing. So the end
+        of a request that was pushed sends one BACKGROUND push (no alert, ``content-available``, priority 5) to each
+        device it reached and is still registered, and to no other; the phone removes the delivered notification.
+        Best effort: Apple throttles background pushes, and nothing depends on this one arriving.
+
+        Carries the request id and how it ended, nothing more: not who answered, not the scope.
+        """
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, str):
+            return
+        devices = self._pushed_to.pop(request_id, None)
+        if not devices:
+            return
+        body = self._named({
+            "aps": {"content-available": 1},
+            "approval_resolved": request_id,
+            "resolution": str(payload.get("resolution") or ""),
+        })
+        for target in self._store.push_targets():
+            if target.id not in devices or target.push_failures >= FAILURE_MUTE_THRESHOLD:
+                continue
+            result = await self._sender.send(
+                apns_token=target.apns_token, environment=target.environment,
+                payload=body, push_type="background", priority=5,
+                topic=target.bundle_id or None,
+            )
+            self._account(target, result, "approval_resolved")
 
     async def _push_quiet(self, kind: str, payload: dict) -> None:
         live = self._live_device_ids()
@@ -305,9 +354,10 @@ class PushDispatcher:
         except Exception:
             logger.warning("push accounting failed for device %s", device_id, exc_info=True)
 
-    async def _deliver(self, target: Any, body: dict) -> None:
+    async def _deliver(self, target: Any, body: dict) -> bool:
+        """Send one alert push; True when APNs accepted it."""
         if target.push_failures >= FAILURE_MUTE_THRESHOLD:
-            return  # muted until a success resets the count — no storm
+            return False  # muted until a success resets the count — no storm
         result = await self._sender.send(
             apns_token=target.apns_token, environment=target.environment,
             payload=body, push_type="alert", priority=10,
@@ -315,6 +365,7 @@ class PushDispatcher:
         )
         # The category, so the log reads "push APPROVAL → device …" rather than "push push → …".
         self._account(target, result, str(((body.get("aps") or {}).get("category")) or "alert"))
+        return getattr(result, "outcome", None) == "ok"
 
     def _account(self, target: Any, result: Any, kind: str = "push") -> None:
         # ONE line per send, whatever happens (#348). Before this, apns.py logged nothing at all

@@ -5529,6 +5529,33 @@ def create_app(
             )
         return {"ok": True, "id": grant_id, "revoked": described}
 
+    # Registered AFTER ``/api/approvals/grants``: routes match in order, so "grants" keeps its own handler.
+    @app.get("/api/approvals/{request_id}")
+    async def get_approval(request_id: str, request: Request):
+        """One request by id (Beacon iOS "Piece 16b"): a notification opened later can tell whether it is live.
+
+        ``200`` with the ``serialize_pending`` dict while pending (the list's entry, byte for byte); ``410`` with
+        ``resolution`` and ``detail`` once it has ended (``_no_longer_active``, the approve route's own answer);
+        ``404`` when it is not the caller's or this daemon has no record of it. Not the approve route's "no record
+        is a 410": a read has nothing to act on, and "never raised here" is what a phone paired with several
+        daemons needs to hear. Same ownership rule and order as approve: a scoped device hears only about its own
+        sessions' requests, and anything else is the same 404 as "never existed".
+        """
+        queue = app.state.approval_queue
+        if not queue or request_id == "all":
+            return JSONResponse(status_code=404, content={"error": "unknown request"})
+        pending = (getattr(queue, "pending", {}) or {}).get(request_id)
+        ended = getattr(queue, "finished", lambda _rid: None)(request_id)
+        if ended is not None:
+            if (refusal := _no_longer_active(request, request_id)) is not None:
+                return refusal
+            return JSONResponse(status_code=404, content={"error": "unknown request"})
+        if pending is None:
+            return JSONResponse(status_code=404, content={"error": "unknown request"})
+        if (refusal := _not_mine(request, request_id)) is not None:
+            return refusal
+        return queue.serialize_pending(pending)
+
     @app.post("/api/approvals/{request_id}/deny")
     async def deny_action(request_id: str, request: Request):
         queue = app.state.approval_queue
