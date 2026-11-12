@@ -318,8 +318,9 @@ def test_hostile_shapes_stay_fast_and_a_very_long_command_is_critical():
     import time
 
     start = time.monotonic()
-    for line in ("find . " + "-exec find " * 40, "env " + "git " * 30000, "python -m " * 20000 + "ls",
-                 "xargs " + "git -C d " * 20000):
+    CriticalRules().matches("bash", {"command": "find . " + "-exec find " * 40})    # short and harmless: fast
+    assert CriticalRules().matches("bash", {"command": "find . " + "-exec find " * 40 + "-exec rm {} +"})
+    for line in ("env " + "git " * 30000, "python -m " * 20000 + "ls", "xargs " + "git -C d " * 20000):
         assert CriticalRules().matches("bash", {"command": line}), line[:40]
     assert time.monotonic() - start < 1.0
     assert CriticalRules().matches("bash", {"command": "echo " + "a " * 3000})

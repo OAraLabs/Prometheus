@@ -56,7 +56,9 @@ DEFAULT_CRITICAL_COMMANDS: tuple[str, ...] = (
     "git rm", "git clean", "git branch -d", "git branch -D", "git branch --delete", "git reset --hard",
     "git checkout --", "git checkout .", "git restore", "git stash drop", "git stash clear",
     "git worktree remove", "git tag -d", "git tag --delete", "dd", ":",
-    "docker rm", "docker rmi", "docker system prune", "docker image prune", "docker volume rm", "npm unpublish",
+    "docker rm", "docker rmi", "docker system prune", "docker image prune", "docker volume rm", "docker volume prune",
+    "docker compose down", "npm unpublish", "git switch --discard-changes", "git checkout -f", "pip uninstall",
+    "uv pip uninstall", "brew uninstall", "npm uninstall",
     # git push, in every form
     "git push",
     # sends
@@ -256,11 +258,11 @@ def _one(words: list[str], patterns: list[list[str]], fed: bool, nested: bool = 
     if name == "find":
         if "-delete" in words:
             return "find -delete"
+        # The first -exec only, and through the scan's guard: each later -exec is a later word of that same
+        # command, and recursing at every one was exponential (``find . -exec find -exec find ...``).
         for k, w in enumerate(words):
-            if w in ("-exec", "-execdir", "-ok", "-okdir") and k + 1 < len(words):
-                hit = _one(words[k + 1:], patterns, False)
-                if hit:
-                    return hit
+            if w in ("-exec", "-execdir", "-ok", "-okdir"):
+                return None if nested else _scan(words[k + 1:], patterns)
         return None
     if name in _WRAPPERS:
         return None if nested else _scan(words[1:], patterns)
@@ -287,6 +289,8 @@ def _match_line(command: str, patterns: list[list[str]]) -> str | None:
         head = statement.lstrip(" \t\"'({!")
         if head.startswith("$") or head.startswith("`"):
             return "dynamic command"
+        if head.startswith(">") and not head.startswith(">>"):
+            return "truncate"                 # ``> f`` empties a file
         # awk's program holds braces, which the finer split below cuts apart: judge it whole, here.
         words = _words(statement)
         if words and _name(words[0]) in _AWKS:
@@ -308,8 +312,16 @@ def _piped_into(command: str, segment: str) -> bool:
     return before.endswith("|") and not before.endswith("||")
 
 
+#: A shell line longer than this is critical without being read: no lock screen shows it, and it bounds the
+#: matcher's cost on hostile input.
+MAX_COMMAND_CHARS = 4096
+MAX_COMMAND_WORDS = 400
+
+
 def _command_match(command: str, patterns: Iterable[str]) -> str | None:
     """The first reason any command in *command* is critical, or None."""
+    if len(command) > MAX_COMMAND_CHARS or len(command.split()) > MAX_COMMAND_WORDS:
+        return "long command"
     return _match_line(command, [p.split() for p in patterns if p.split()])
 
 
