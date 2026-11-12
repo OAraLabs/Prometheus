@@ -1078,7 +1078,11 @@ class WebSocketBridge:
         """What the ``subscribed`` ack tells a client this daemon can do (see the ack)."""
         from prometheus.gateway import media_services
 
-        return ["voice_input"] if media_services.voice_input_available(self.config) else []
+        capabilities = ["voice_input"] if media_services.voice_input_available(self.config) else []
+        # Every serialized approval request says whether it must be answered in the app (permissions/critical.py),
+        # so a client can tell a missing ``critical`` (an older daemon) from ``false``.
+        capabilities.append("approval_critical")
+        return capabilities
 
     async def _system_note(self, session_id: str, content: str) -> None:
         await self.broadcast({
