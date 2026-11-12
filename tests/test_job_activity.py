@@ -595,12 +595,14 @@ def test_m1_a_running_job_is_not_ended(w):
 def test_m1_a_turn_whose_start_was_sent_and_which_ended_is_ended_at_once(w):
     w.add("turn", "web:mine", session_id="web:mine")
     w.at(1060)
-    asyncio.run(w.dispatcher.on_chat_done("web:mine", {"session_id": "web:mine", "interrupted": True}))
+    asyncio.run(w.dispatcher.on_chat_done("web:mine", {"session_id": "web:mine", "interrupted": True,
+                                                        "turn_started_at": 1000.0}))
     w.sources["turn"].jobs = []
     w.at(1070)
     assert asyncio.run(w.watcher.end_if_ended(w.scoped["id"], "turn", "web:mine", "late-tok")) is True
     [end] = w.sender.events("end")
-    assert end["payload"]["aps"]["content-state"]["phase"] == "stopped"
+    state = end["payload"]["aps"]["content-state"]
+    assert (state["phase"], state["outcome"]) == ("done", "stopped"), "the same shape as the chat_done end"
 
 
 def test_m1_a_turn_tombstone_is_only_for_a_device_sent_its_start_and_not_while_a_new_turn_runs(w):
@@ -695,3 +697,119 @@ def test_l4_one_bad_job_does_not_stop_the_rest(w, monkeypatch):
     w.end("task", "good", "done")
     w.at(1070)
     assert _tokens(w.sender.events("end")) == ["upd-good"]
+
+
+# ── round-2 review ────────────────────────────────────────────────────────────
+
+def test_a_turn_that_ends_between_ticks_is_tombstoned_when_it_ends(w):
+    """Start at 60 s, end at 61 s, token at 63 s: no tick in between, and the end is still sent."""
+    w.add("turn", "web:mine", session_id="web:mine", started_at=1000.0)
+    w.at(1060)
+    w.clock["t"] = 1061
+    asyncio.run(w.dispatcher.on_chat_done("web:mine", {"session_id": "web:mine", "turn_started_at": 1000.0,
+                                                        "stop_reason": "max_turns_exhausted"}))
+    w.sources["turn"].jobs = []
+    w.clock["t"] = 1063
+    assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "turn", "web:mine", "late-tok")) is True
+    [end] = [e for e in w.sender.events("end") if e["apns_token"] == "late-tok"]
+    state = end["payload"]["aps"]["content-state"]
+    assert (state["phase"], state["outcome"]) == ("done", "paused")
+    w.at(1070)
+    assert len([e for e in w.sender.events("end") if e["apns_token"] == "late-tok"]) == 1
+
+
+def test_a_later_turn_that_was_never_started_does_not_overwrite_the_tombstone(w):
+    w.add("turn", "web:mine", session_id="web:mine", started_at=1000.0)
+    w.at(1060)
+    asyncio.run(w.dispatcher.on_chat_done("web:mine", {"session_id": "web:mine", "turn_started_at": 1000.0,
+                                                        "interrupted": True}))
+    w.sources["turn"].jobs = []
+    w.at(1061)
+    w.add("turn", "web:mine", session_id="web:mine", started_at=1062.0)
+    w.at(1063)
+    asyncio.run(w.dispatcher.on_chat_done("web:mine", {"session_id": "web:mine", "turn_started_at": 1062.0}))
+    w.sources["turn"].jobs = []
+    w.at(1064)
+    assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "turn", "web:mine", "late-tok")) is True
+    [end] = w.sender.events("end")
+    assert end["payload"]["aps"]["content-state"]["outcome"] == "stopped"
+
+
+def test_a_tombstone_answers_each_device_once(w):
+    _started_then_ended(w)
+    assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "task", "t1", "late-1")) is True
+    assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "task", "t1", "late-2")) is False
+    assert _tokens(w.sender.events("end")) == ["late-1"]
+
+
+class _AliveSource(_Source):
+    def __init__(self, kind: str, alive: set[str]) -> None:
+        super().__init__(kind)
+        self._alive = alive
+
+    def alive(self, job_id: str) -> bool:
+        return job_id in self._alive
+
+
+def test_the_sweep_skips_a_job_that_is_running_again_after_resume(w):
+    w.sources["task"] = _AliveSource("task", {"resumed"})
+    w.watcher = JobActivityWatcher(w.dispatcher, w.store, sources=list(w.sources.values()),
+                                   now=lambda: w.clock["t"])
+    w.store.set_job_activity_token(w.owner["id"], "task", "resumed", "keep")
+    w.store.set_job_activity_token(w.owner["id"], "task", "gone", "end-me")
+    asyncio.run(w.watcher.sweep())
+    assert _tokens(w.sender.events("end")) == ["end-me"]
+    assert [tok for _, tok in w.store.job_activity_targets("task", "resumed")] == ["keep"]
+    assert w.store.job_activity_targets("task", "gone") == []
+
+
+def test_the_sweep_deletes_only_the_rows_it_sent_to(w):
+    from prometheus.push.dispatcher import FAILURE_MUTE_THRESHOLD
+
+    for _ in range(FAILURE_MUTE_THRESHOLD):
+        w.store.record_push_failure(w.scoped["id"])
+    w.store.set_job_activity_token(w.owner["id"], "task", "a", "sent")
+    w.store.set_job_activity_token(w.scoped["id"], "task", "b", "muted")
+    asyncio.run(w.watcher.sweep())
+    assert _tokens(w.sender.events("end")) == ["sent"]
+    assert w.store.job_activity_targets("task", "a") == []
+    assert [tok for _, tok in w.store.job_activity_targets("task", "b")] == ["muted"]
+
+
+def test_the_sweep_is_capped(w):
+    for i in range(job_activity.SWEEP_CAP + 5):
+        w.store.set_job_activity_token(w.owner["id"], "task", f"j{i}", f"tok{i}")
+    asyncio.run(w.watcher.sweep())
+    assert len(w.sender.events("end")) == job_activity.SWEEP_CAP
+    assert len(w.store.all_job_activity_tokens()) == 5
+
+
+def test_the_task_source_says_a_resumable_task_is_alive():
+    records = {"r": _task("r", status="running", task_type="file_watch"), "d": _task("d", status="completed")}
+    manager = types.SimpleNamespace(running_tasks=lambda: [], get_task=lambda i: records.get(i))
+    source = TaskSource(manager, kind="task")
+    assert source.alive("r") is True and source.alive("d") is False and source.alive("nope") is False
+
+
+def test_the_first_tick_does_not_wait_for_the_sweep(w, monkeypatch):
+    order: list[str] = []
+
+    async def slow_sweep():
+        await asyncio.sleep(0.2)
+        order.append("sweep")
+
+    async def tick():
+        order.append("tick")
+        raise asyncio.CancelledError
+
+    w.watcher._tick_seconds = 0.01
+    monkeypatch.setattr(w.watcher, "sweep", slow_sweep)
+    monkeypatch.setattr(w.watcher, "tick", tick)
+
+    async def go():
+        with pytest.raises(asyncio.CancelledError):
+            await w.watcher.run()
+        await asyncio.sleep(0.3)
+
+    asyncio.run(go())
+    assert order[0] == "tick"

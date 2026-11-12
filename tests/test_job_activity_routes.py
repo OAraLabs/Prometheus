@@ -267,3 +267,29 @@ async def test_a_failed_turn_ends_its_live_activity_as_failed(monkeypatch):
     bridge.push_dispatcher = _Dispatcher()
     await bridge._run_agent("desktop:t", _FakeSession())
     assert [(s, p.get("failed")) for s, p in bridge.push_dispatcher.ended] == [("desktop:t", True)]
+
+
+@pytest.mark.asyncio
+async def test_the_bridge_tells_the_dispatcher_which_turn_ended(monkeypatch):
+    import prometheus.engine.agent_loop as agent_loop_mod
+    from prometheus.web.ws_server import WebSocketBridge
+
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None, surface=None):
+        raise RuntimeError("the backend fell over")
+        yield None, None  # pragma: no cover
+
+    seen: list[dict] = []
+
+    class _Dispatcher:
+        async def on_agent_progress(self, session_id, payload):
+            pass
+
+        async def on_chat_done(self, session_id, payload):
+            seen.append(payload)
+
+    monkeypatch.setattr(agent_loop_mod, "run_loop", run_loop)
+    bridge = WebSocketBridge(loop_context=object())
+    bridge.push_dispatcher = _Dispatcher()
+    await bridge._run_agent("desktop:t", _FakeSession())
+    [payload] = seen
+    assert isinstance(payload.get("turn_started_at"), float) and payload["turn_started_at"] > 0
