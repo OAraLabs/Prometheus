@@ -133,8 +133,7 @@ def _tokens(sent: list[dict]) -> list[str]:
 # ── start ─────────────────────────────────────────────────────────────────────
 
 def test_a_job_that_has_run_60_seconds_starts_one_activity_per_owner_device(w):
-    w.add("coding", "c1", session_id="coding:c1", title="coding task c1: fix the parser", detail="edit_file",
-          steps=3)
+    w.add("coding", "c1", session_id="coding:c1", title="Coding run", detail="edit_file", steps=3)
     w.at(1000 + START_AFTER_SECONDS - 1)
     assert w.sender.sent == [], "59 s is not a minute"
     w.at(1000 + START_AFTER_SECONDS)
@@ -145,7 +144,7 @@ def test_a_job_that_has_run_60_seconds_starts_one_activity_per_owner_device(w):
     assert start["priority"] == 10
     aps = start["payload"]["aps"]
     assert aps["attributes-type"] == ATTRIBUTES_TYPE == "JobActivityAttributes"
-    assert aps["attributes"] == {"kind": "coding", "id": "c1", "title": "coding task c1: fix the parser",
+    assert aps["attributes"] == {"kind": "coding", "id": "c1", "title": "Coding run",
                                  "session_id": "coding:c1", "node_pub": PUB}
     assert list(aps["content-state"]) == list(CONTENT_STATE_KEYS)
     assert aps["content-state"] == {"phase": "running", "detail": "edit_file", "elapsedS": 60, "steps": 3}
@@ -389,7 +388,7 @@ def test_the_turn_source_shows_the_tool_name_and_never_its_arguments():
     progress = {"phase": "tool", "tool_name": "bash", "round": 2, "chars": 10, "tool_calls": 4,
                 "inputs": {"command": "cat secrets"}}
     bridge = types.SimpleNamespace(running_turns=lambda: [("web:a", 900.0, progress)])
-    [job] = list(TurnSource(bridge).running())
+    [job] = list(TurnSource(bridge, known_tool=lambda name: name == "bash").running())
     assert (job.kind, job.id, job.session_id, job.started_at) == ("turn", "web:a", "web:a", 900.0)
     assert (job.phase, job.detail, job.steps) == ("tool", "bash", 4)
     assert "secrets" not in repr(job)
@@ -410,9 +409,11 @@ def test_the_task_source_separates_tasks_from_coding_runs():
     tasks = list(TaskSource(manager, kind="task").running())
     coding = list(TaskSource(manager, kind="coding").running())
     assert [j.id for j in tasks] == ["t1"] and [j.id for j in coding] == ["c1"]
-    assert tasks[0].title == "run the tests"
+    assert tasks[0].title == "Background task: shell command"
+    assert coding[0].title == "Coding run"
     assert coding[0].session_id == "coding:c1"
     assert "secret" not in repr(tasks + coding), "never the command or the prompt"
+    assert "run the tests" not in repr(tasks + coding) and "fix it" not in repr(coding), "never the description"
 
 
 @pytest.mark.parametrize("status, phase", [("completed", "done"), ("failed", "failed"),
@@ -435,7 +436,7 @@ def test_a_paused_coding_run_shows_paused():
 def test_the_coding_source_shows_the_last_tool_and_counts_rounds():
     rec = _task("c1", session_id="coding:c1", task_type="local_agent")
     manager = types.SimpleNamespace(running_tasks=lambda: [rec], get_task=lambda i: rec)
-    source = TaskSource(manager, kind="coding")
+    source = TaskSource(manager, kind="coding", known_tool=lambda name: name in ("edit_file", "bash"))
     sig = lambda kind, payload: types.SimpleNamespace(kind=kind, payload=payload)  # noqa: E731
     asyncio.run(source.on_signal(sig("coding_round", {"session_id": "coding:c1", "round_index": 0})))
     asyncio.run(source.on_signal(sig("coding_round", {"session_id": "coding:c1", "round_index": 1})))
@@ -482,6 +483,7 @@ class _TurnStore:
 def test_a_turn_update_carries_the_job_keys_and_a_stale_date():
     sender = _Sender()
     d = PushDispatcher(_TurnStore(), sender, bridge=None, now=lambda: 5000.0, node_pub=lambda: PUB)
+    d.known_tool = lambda name: name == "bash"
     asyncio.run(d.on_agent_progress("web:a", {"phase": "tool", "tool_name": "bash", "round": 2,
                                               "elapsed_s": 70.4, "tool_calls": 3, "chars": 9}))
     aps = sender.sent[0]["payload"]["aps"]
@@ -503,7 +505,8 @@ def test_a_turns_end_says_how_it_ended(payload, phase):
     asyncio.run(d.on_chat_done("web:a", {"session_id": "web:a", **payload}))
     state = sender.sent[0]["payload"]["aps"]["content-state"]
     assert set(CONTENT_STATE_KEYS) <= set(state)
-    assert state["phase"] == phase
+    assert state["phase"] == "done", "the shipped per-turn decode reads phase; it stays exactly done"
+    assert state["outcome"] == phase
 
 
 # ── the phone's fixture ───────────────────────────────────────────────────────
@@ -516,8 +519,179 @@ def test_the_phones_fixture_is_generated_from_the_constants():
     assert on_disk["attributes_type"] == ATTRIBUTES_TYPE
     assert on_disk["kinds"] == list(JOB_KINDS)
     assert on_disk["end_phases"] == list(END_PHASES)
+    assert on_disk["turn_end_outcome_key"] == "outcome"
 
 
 def test_the_fixture_follows_a_changed_constant(monkeypatch):
     monkeypatch.setattr(job_activity, "CONTENT_STATE_KEYS", (*CONTENT_STATE_KEYS, "extra"))
     assert job_activity.fixture()["content_state_keys"][-1] == "extra"
+
+
+# ── review fixes ──────────────────────────────────────────────────────────────
+
+DISTINCT = "ZQX-distinctive-goal-7781"
+
+
+def test_h1_a_description_never_reaches_any_body(tmp_path):
+    """A task's description and a coding goal are user or model text: no push carries them."""
+    w = _World(tmp_path)
+    records = {
+        "t1": _task("t1", description=f"{DISTINCT} task", started_at=1000.0),
+        "c1": _task("c1", session_id="coding:c1", description=f"coding task c1: {DISTINCT}",
+                    task_type="local_agent", started_at=1000.0),
+    }
+    manager = types.SimpleNamespace(running_tasks=lambda: [r for r in records.values() if r.status == "running"],
+                                    get_task=lambda i: records.get(i))
+    w.watcher = JobActivityWatcher(w.dispatcher, w.store, sources=[
+        TaskSource(manager, kind="task"), TaskSource(manager, kind="coding", is_paused=lambda r: False)],
+        now=lambda: w.clock["t"])
+    w.at(1060)
+    for kind, job_id in (("task", "t1"), ("coding", "c1")):
+        w.store.set_job_activity_token(w.owner["id"], kind, job_id, f"upd-{job_id}")
+    w.at(1070)
+    for r in records.values():
+        r.status = "completed"
+    w.at(1080)
+    sig = lambda kind, payload: types.SimpleNamespace(kind=kind, payload=payload)  # noqa: E731
+    asyncio.run(w.dispatcher.on_signal(sig("task_completed", {"task_id": "t1", "status": "completed",
+                                                              "description": f"{DISTINCT} task",
+                                                              "session_id": "web:mine"})))
+    assert {s["payload"]["aps"].get("event") for s in w.sender.sent} >= {"start", "update", "end"}
+    for sent in w.sender.sent:
+        assert DISTINCT not in json.dumps(sent["payload"]), sent["payload"]
+
+
+def _started_then_ended(w, kind="task", job_id="t1", phase="done"):
+    w.add(kind, job_id, session_id=job_id if kind == "turn" else None)
+    w.at(1060)
+    w.end(kind, job_id, phase)
+    w.at(1070)
+
+
+def test_m1_a_job_that_ended_before_the_phone_registered_is_ended_at_once(w):
+    _started_then_ended(w, phase="failed")
+    assert w.sender.events("end") == []
+    assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "task", "t1", "late-tok")) is True
+    [end] = w.sender.events("end")
+    assert end["apns_token"] == "late-tok"
+    assert end["payload"]["aps"]["content-state"]["phase"] == "failed"
+    assert end["payload"]["node_pub"] == PUB
+    assert w.store.job_activity_targets("task", "t1") == []
+
+
+def test_m1_the_tombstone_lasts_about_ten_minutes(w):
+    _started_then_ended(w)
+    w.clock["t"] = 1070 + job_activity.TOMBSTONE_SECONDS + 1
+    assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "task", "t1", "late-tok")) is False
+    assert w.sender.events("end") == []
+
+
+def test_m1_a_running_job_is_not_ended(w):
+    w.add("task", "t1")
+    w.at(1060)
+    assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "task", "t1", "tok")) is False
+
+
+def test_m1_a_turn_whose_start_was_sent_and_which_ended_is_ended_at_once(w):
+    w.add("turn", "web:mine", session_id="web:mine")
+    w.at(1060)
+    asyncio.run(w.dispatcher.on_chat_done("web:mine", {"session_id": "web:mine", "interrupted": True}))
+    w.sources["turn"].jobs = []
+    w.at(1070)
+    assert asyncio.run(w.watcher.end_if_ended(w.scoped["id"], "turn", "web:mine", "late-tok")) is True
+    [end] = w.sender.events("end")
+    assert end["payload"]["aps"]["content-state"]["phase"] == "stopped"
+
+
+def test_m1_a_turn_tombstone_is_only_for_a_device_sent_its_start_and_not_while_a_new_turn_runs(w):
+    w.add("turn", "web:theirs", session_id="web:theirs")
+    w.at(1060)
+    w.sources["turn"].jobs = []
+    w.at(1070)
+    assert asyncio.run(w.watcher.end_if_ended(w.scoped["id"], "turn", "web:theirs", "x")) is False, \
+        "the scoped device was never sent that start"
+    w.add("turn", "web:theirs", session_id="web:theirs", started_at=1072)
+    assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "turn", "web:theirs", "x")) is False, \
+        "a new turn runs in that session: the token is for it"
+
+
+def test_m2_a_turn_activity_on_a_device_without_alert_push_is_reached(tmp_path):
+    store = DeviceStore(tmp_path / "devices.db")
+    d = store.mint("phone", "ios")
+    store.set_activity_token(d["id"], "web:a", "act")
+    assert [tok for _, tok in store.activity_targets("web:a")] == ["act"]
+    sender = _Sender()
+    disp = PushDispatcher(store, sender, bridge=None, now=lambda: 5000.0, node_pub=lambda: PUB)
+    asyncio.run(disp.on_agent_progress("web:a", {"phase": "thinking"}))
+    asyncio.run(disp.on_chat_done("web:a", {"session_id": "web:a"}))
+    assert [s["payload"]["aps"]["event"] for s in sender.sent] == ["update", "end"]
+    assert all(s["topic"] == f"{BUNDLE}.push-type.liveactivity" for s in sender.sent)
+
+
+def test_m2_a_410_on_a_turn_activity_token_drops_that_token_not_the_alert_registration(tmp_path):
+    store = DeviceStore(tmp_path / "devices.db")
+    d = store.mint("phone", "ios")
+    store.set_push(d["id"], "alert", "sandbox", BUNDLE)
+    store.set_activity_token(d["id"], "web:a", "act")
+    sender = _Sender()
+    sender.outcomes["act"] = "unregistered"
+    disp = PushDispatcher(store, sender, bridge=None, now=lambda: 5000.0, node_pub=lambda: PUB)
+    asyncio.run(disp.on_agent_progress("web:a", {"phase": "thinking"}))
+    assert store.activity_targets("web:a") == []
+    assert [t.id for t in store.push_targets()] == [d["id"]]
+
+
+def test_l1_the_boot_sweep_ends_every_leftover_job_activity(w):
+    w.store.set_job_activity_token(w.owner["id"], "coding", "old-1", "left-1")
+    w.store.set_job_activity_token(w.scoped["id"], "task", "old-2", "left-2")
+    w.store.set_activity_token(w.owner["id"], "web:mine", "turn-tok")
+    asyncio.run(w.watcher.sweep())
+    ends = w.sender.events("end")
+    assert sorted(_tokens(ends)) == ["left-1", "left-2"]
+    assert all(e["payload"]["aps"]["content-state"]["phase"] == "stopped" for e in ends)
+    assert w.store.job_activity_targets("coding", "old-1") == [] and w.store.job_activity_targets("task", "old-2") == []
+    assert [tok for _, tok in w.store.activity_targets("web:mine")] == ["turn-tok"], "a turn's token is not a job's"
+
+
+def test_l2_back_to_back_turns_in_one_session_are_separate_jobs(w):
+    w.add("turn", "web:mine", session_id="web:mine", started_at=1000)
+    w.at(1060)
+    w.sources["turn"].jobs = []
+    w.add("turn", "web:mine", session_id="web:mine", started_at=1062)
+    w.at(1065)
+    w.at(1125)
+    starts = [s for s in w.sender.events("start") if s["apns_token"] == "start-o"]
+    assert len(starts) == 2
+
+
+def test_l3_detail_is_a_tool_name_only_when_the_tool_is_registered():
+    progress = {"phase": "tool", "tool_name": "rm -rf / please", "tool_calls": 1}
+    bridge = types.SimpleNamespace(running_turns=lambda: [("web:a", 900.0, progress)])
+    [job] = list(TurnSource(bridge, known_tool=lambda name: name == "bash").running())
+    assert job.detail == job_activity.GENERIC_TOOL_DETAIL
+    [job] = list(TurnSource(bridge).running())
+    assert job.detail == job_activity.GENERIC_TOOL_DETAIL, "no registry to ask: never the raw name"
+    sender = _Sender()
+    d = PushDispatcher(_TurnStore(), sender, bridge=None, now=lambda: 5000.0, node_pub=lambda: PUB)
+    asyncio.run(d.on_agent_progress("web:a", {"phase": "tool", "tool_name": "rm -rf / please"}))
+    assert sender.sent[0]["payload"]["aps"]["content-state"]["detail"] == job_activity.GENERIC_TOOL_DETAIL
+
+
+def test_l4_one_bad_job_does_not_stop_the_rest(w, monkeypatch):
+    real = w.store.job_activity_targets
+
+    def flaky(kind, job_id):
+        if job_id == "bad":
+            raise RuntimeError("boom")
+        return real(kind, job_id)
+
+    monkeypatch.setattr(w.store, "job_activity_targets", flaky)
+    w.add("task", "bad")
+    w.add("task", "good")
+    w.at(1060)
+    assert [s["payload"]["aps"]["attributes"]["id"] for s in w.sender.events("start")] == ["good"]
+    w.store.set_job_activity_token(w.owner["id"], "task", "good", "upd-good")
+    w.end("task", "bad", "done")
+    w.end("task", "good", "done")
+    w.at(1070)
+    assert _tokens(w.sender.events("end")) == ["upd-good"]

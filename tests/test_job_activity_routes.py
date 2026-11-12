@@ -98,9 +98,8 @@ def test_the_session_id_form_still_means_a_turn(d):
     r = d.as_("alice", "POST", f"/api/devices/{d.alice['id']}/activity",
               json={"session_id": ALICE_SESSION, "activity_token": "tok"})
     assert r.status_code == 200
-    assert [tok for _, tok in d.devices.activity_targets(ALICE_SESSION)] == []  # no alert registration yet
-    d.devices.set_push(d.alice["id"], "alert", "sandbox", "ai.example.app")
-    assert [tok for _, tok in d.devices.activity_targets(ALICE_SESSION)] == ["tok"]
+    assert [tok for _, tok in d.devices.activity_targets(ALICE_SESSION)] == ["tok"], \
+        "an activity token is its own address: no alert registration needed"
 
 
 def test_kind_turn_is_the_same_as_the_session_id_form(d):
@@ -156,6 +155,46 @@ def test_a_device_still_cannot_register_a_job_for_another_device(d):
     r = d.as_("alice", "POST", f"/api/devices/{d.bob['id']}/activity",
               json={"kind": "turn", "id": ALICE_SESSION, "activity_token": "tok"})
     assert r.status_code == 401
+
+
+# ── a job that already ended (M1) ──────────────────────────────────────────────
+
+class _Watcher:
+    def __init__(self, ended: bool) -> None:
+        self.ended = ended
+        self.calls: list[tuple] = []
+
+    async def end_if_ended(self, device_id, kind, job_id, token):
+        self.calls.append((device_id, kind, job_id, token))
+        return self.ended
+
+
+def test_a_token_for_a_job_that_already_ended_is_answered_with_the_end_and_not_stored(d):
+    d.app.state.job_activity_watcher = watcher = _Watcher(ended=True)
+    r = d.as_("owner", "POST", f"/api/devices/{d.owner['id']}/activity",
+              json={"kind": "coding", "id": "c1", "activity_token": "late"})
+    assert r.status_code == 200 and r.json() == {"ok": True, "ended": True}
+    assert watcher.calls == [(d.owner["id"], "coding", "c1", "late")]
+    assert d.devices.job_activity_targets("coding", "c1") == []
+    r = d.as_("alice", "POST", f"/api/devices/{d.alice['id']}/activity",
+              json={"session_id": ALICE_SESSION, "activity_token": "late-turn"})
+    assert r.json() == {"ok": True, "ended": True}
+    assert d.devices.activity_targets(ALICE_SESSION) == []
+
+
+def test_a_token_for_a_running_job_is_stored(d):
+    d.app.state.job_activity_watcher = _Watcher(ended=False)
+    r = d.as_("owner", "POST", f"/api/devices/{d.owner['id']}/activity",
+              json={"kind": "coding", "id": "c1", "activity_token": "tok"})
+    assert r.json() == {"ok": True}
+    assert [tok for _, tok in d.devices.job_activity_targets("coding", "c1")] == ["tok"]
+
+
+def test_the_ended_check_comes_after_the_ownership_check(d):
+    d.app.state.job_activity_watcher = watcher = _Watcher(ended=True)
+    r = d.as_("alice", "POST", f"/api/devices/{d.alice['id']}/activity",
+              json={"session_id": BOB_SESSION, "activity_token": "x"})
+    assert r.status_code == 404 and watcher.calls == []
 
 
 # ── the bridge half ───────────────────────────────────────────────────────────
