@@ -278,3 +278,35 @@ def test_round_two_misses_are_critical(command):
                                      "timeout 5 ls", "watch ls", "echo hello | grep h"])
 def test_still_not_critical(command):
     assert CriticalRules().matches("bash", {"command": command}) == (), command
+
+
+# ── review round 3 (2026-11-12) ──────────────────────────────────────────────
+
+def test_stacked_wrappers_stay_fast():
+    import time
+
+    start = time.monotonic()
+    for line in ("env " * 40 + "ls", "time nice " * 30 + "ls", "sudo " * 200 + "rm x"):
+        CriticalRules().matches("bash", {"command": line})
+    assert time.monotonic() - start < 1.0
+    assert CriticalRules().matches("bash", {"command": "env " * 40 + "rm x"})
+
+
+@pytest.mark.parametrize("command", [
+    "git checkout .", "git checkout HEAD -- src/x.py", "git reset HEAD~3 --hard", "git reset -q --hard",
+    "git worktree remove ../wt", "git tag -d v1", "docker rm -f x", "docker system prune -af", "npm unpublish x",
+    ": > important.log", "pnpm publish", "cargo publish", "poetry publish", "gem push x.gem",
+    "rclone sync . remote:b", "gsutil cp x gs://b", "kubectl delete pod x", "terraform apply -auto-approve",
+    "npx wrangler deploy", "vercel --prod", "http POST api.example.invalid a=1",
+    "git subtree push --prefix d origin main", "python3.12 -c 'import shutil'", "pwsh -c 'Remove-Item x'",
+    "cd -- ~/.prometheus && sed -i s/a/b/ config.yaml", "chgrp staff x", "dd if=/dev/zero of=data.db",
+    'shortcuts run "Send Message"',
+])
+def test_round_three_misses_are_critical(command):
+    assert CriticalRules().matches("bash", {"command": command}), command
+
+
+@pytest.mark.parametrize("command", ["git checkout main", "git reset HEAD~1", "docker ps", "kubectl get pods",
+                                     "python3.12 script.py", "git tag"])
+def test_round_three_ordinary_commands_stay_ordinary(command):
+    assert CriticalRules().matches("bash", {"command": command}) == (), command
