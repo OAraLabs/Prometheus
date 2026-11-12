@@ -1447,6 +1447,21 @@ class LCMConversationStore:
         )
         self._conn.commit()
 
+    def has_message_client_id(self, session_id: str, client_msg_id: str | None) -> bool:
+        """Whether a message the client named ``client_msg_id`` is already stored in ``session_id``.
+
+        What lets ``POST /api/chat/send`` treat a retry as the same message after a restart, when its in-memory
+        record of ids it has accepted is gone. A blank id is never "seen".
+        """
+        cid = (client_msg_id or "").strip()
+        if not cid:
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM message_client_ids WHERE session_id = ? AND client_msg_id = ? LIMIT 1",
+            (session_id, cid),
+        ).fetchone()
+        return row is not None
+
     def get_message_client_ids(self, session_id: str) -> dict[int, str]:
         """``row_id -> client_msg_id`` for a session, so a history read can return them.
 
