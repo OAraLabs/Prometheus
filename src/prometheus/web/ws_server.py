@@ -1078,7 +1078,14 @@ class WebSocketBridge:
         """What the ``subscribed`` ack tells a client this daemon can do (see the ack)."""
         from prometheus.gateway import media_services
 
-        return ["voice_input"] if media_services.voice_input_available(self.config) else []
+        capabilities = ["voice_input"] if media_services.voice_input_available(self.config) else []
+        # Pushes carry this node's public key (push/dispatcher.py), so a client paired with several Prometheus
+        # instances knows which sent one. Listed only when true: push is on and the node has a key. A daemon
+        # without it does not send the field, and a client must not wait for it.
+        dispatcher = getattr(self, "push_dispatcher", None)
+        if dispatcher is not None and dispatcher.node_pub():
+            capabilities.append("push_node_pub")
+        return capabilities
 
     async def _system_note(self, session_id: str, content: str) -> None:
         await self.broadcast({

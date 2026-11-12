@@ -1632,6 +1632,22 @@ def create_app(
             session_mgr.get_or_create(sid)
         return {"session_id": sid, "gateway": gateway.lower()}
 
+    # client_msg_ids this daemon has accepted on /api/chat/send, newest last: (session, id) -> the run it answered
+    # with. In memory so a retry that arrives while the first is still in flight is caught, and bounded; the
+    # stored rows (message_client_ids) answer for anything older or from before a restart.
+    from collections import OrderedDict as _OrderedDict
+
+    _sent_client_ids: "_OrderedDict[tuple[str, str], str]" = _OrderedDict()
+    _SENT_CLIENT_IDS_MAX = 4096
+
+    def _client_id_stored(session_id: str, client_msg_id: str) -> bool:
+        store = _conversation_store()
+        try:
+            return bool(store is not None and store.has_message_client_id(session_id, client_msg_id))
+        except Exception:                        # noqa: BLE001 - a store that cannot say counts as "not seen"
+            logger.debug("client_msg_id lookup failed", exc_info=True)
+            return False
+
     @app.post("/api/chat/send")
     async def send_chat(request: Request):
         """Dispatch a user message into a Prometheus session.
@@ -1741,13 +1757,35 @@ def create_app(
                     blocks = await bridge.resolve_references(session_id, refs)
                 except ReferenceRefused as exc:
                     return JSONResponse(status_code=exc.status, content={"error": str(exc), "kind": exc.kind})
-        await bridge.dispatch_user_message(
-            session_id, message, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice,
-            **({"blocks": blocks} if blocks else {}),
-            # A scoped device's commands are default-deny (web/route_access.SCOPED_SLASH_COMMANDS). The keyword
-            # rides only when it is False, so a duck-typed bridge that predates it still works.
-            **({} if _scope(request).unrestricted else {"operator": False}),
-        )
+        # A repeat of a client_msg_id in the same session is the SAME message: the client sent it, did not hear
+        # back, and sent it again. Answer with the first one's run and dispatch nothing. Checked here, after every
+        # refusal above (a refused request claims nothing, and a session that is not the caller's has already
+        # been turned away, so this cannot say anything about another device's ids), and claimed BEFORE the
+        # first await so two requests in flight at once cannot both pass.
+        claim = None
+        if client_msg_id:
+            claim = (session_id, client_msg_id)
+            seen = _sent_client_ids.get(claim)
+            if seen is None and _client_id_stored(session_id, client_msg_id):
+                seen = idempotency_key
+            if seen is not None:
+                return {"run_id": seen, "status": "sent", "duplicate": True}
+            _sent_client_ids[claim] = idempotency_key
+            while len(_sent_client_ids) > _SENT_CLIENT_IDS_MAX:
+                _sent_client_ids.popitem(last=False)
+        try:
+            await bridge.dispatch_user_message(
+                session_id, message, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice,
+                **({"blocks": blocks} if blocks else {}),
+                # A scoped device's commands are default-deny (web/route_access.SCOPED_SLASH_COMMANDS). The keyword
+                # rides only when it is False, so a duck-typed bridge that predates it still works.
+                **({} if _scope(request).unrestricted else {"operator": False}),
+            )
+        except BaseException:
+            # Not sent: a retry must be able to send it.
+            if claim is not None:
+                _sent_client_ids.pop(claim, None)
+            raise
         return {"run_id": idempotency_key, "status": "sent"}
 
     @app.post("/api/chat/interrupt")
