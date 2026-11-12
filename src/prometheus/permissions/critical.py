@@ -7,6 +7,14 @@ and the push agree by construction, and the push carries no ``category``: no App
 
 The daemon decides; a client never classifies a request itself.
 
+**This is a nudge about WHERE to answer, not a security boundary.** Every request here has already been stopped
+by the permission checker and needs a person's answer either way. A request wrongly judged ordinary is still read
+by the owner on the lock screen and approved there behind Face ID, which the owner could equally do in the app.
+So the lists below are best effort and are not a guard: do not rely on them to stop anything, and do not grow
+them into a second permission checker. What IS a hard rule here: classifying a request must never hang or crash
+request creation, and any error fails toward ``critical`` (``CriticalRules.matches`` answers ``unreadable``; a
+shell line over ``MAX_COMMAND_CHARS`` / ``MAX_COMMAND_WORDS`` is critical unread).
+
 Built in, not configurable (the facts are already on the request):
 
   * a desktop prompt (``task_id``): its push carries no content at all;
