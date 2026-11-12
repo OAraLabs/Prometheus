@@ -162,3 +162,18 @@ def test_the_ack_does_not_list_it_without_push():
 def test_the_ack_does_not_list_it_without_a_node_key():
     assert node_identity.get_node_pubkey() is None
     assert "push_node_pub" not in _capabilities(dispatcher=True)
+
+
+def test_every_body_stays_under_the_apns_limit_with_long_strings():
+    """APNs refuses a body over 4096 bytes, and an approval that never arrives blocks a turn (review, 2026-11-11)."""
+    d, sender = _dispatcher(node_pub=lambda: PUB)
+    long = "x" * 5000
+    run, sig = asyncio.run, (lambda kind, payload: SimpleNamespace(kind=kind, payload=payload))
+    approval = {"request_id": long, "tool_name": long, "description": long, "expires_at": 1.0}
+    run(d.on_signal(sig("approval_pending", approval)))
+    run(d.on_signal(sig("approval_pending", {**approval, "task_id": long})))
+    run(d.on_signal(sig("turn_completed", {"session_id": long, "task_id": long, "summary": long})))
+    assert len(sender.sent) == 3
+    for body in sender.sent:
+        assert len(json.dumps(body, ensure_ascii=False).encode()) < 4096, body
+        assert body["node_pub"] == PUB

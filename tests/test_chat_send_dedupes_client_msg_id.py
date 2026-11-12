@@ -131,28 +131,62 @@ def test_a_send_whose_dispatch_failed_can_be_retried():
 
 # ── two at once ──────────────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
-async def test_two_requests_in_flight_at_once_dispatch_once():
+async def _first_then_repeat(bridge: _Bridge, *, first_fails: bool):
+    """A first send held at the gate, then a repeat while it is still dispatching; the gate opens. Returns both."""
     app = create_app({})
-    bridge = _Bridge()
-    bridge.gate = asyncio.Event()
     app.state.ws_bridge = bridge
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+    bridge.gate = asyncio.Event()
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         body = {"session_id": "s1", "message": "hi", "client_msg_id": "c1"}
         first = asyncio.create_task(c.post("/api/chat/send", json=body))
         for _ in range(20):
             await asyncio.sleep(0)
-        # arrives while the first is still dispatching. Bounded: a daemon that dispatches it waits on the gate.
-        try:
-            second = await asyncio.wait_for(c.post("/api/chat/send", json=body), timeout=2)
-        except asyncio.TimeoutError:
-            bridge.gate.set()
-            await first
-            pytest.fail("the second request was dispatched and waited behind the first instead of being answered")
-        assert second.json().get("duplicate") is True
+        bridge.fail = first_fails
+        second = asyncio.create_task(c.post("/api/chat/send", json=body))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        # Reviewed 2026-11-11: the repeat WAITS for the first rather than being told "sent" at once, because the
+        # first can still fail, and a client told "sent" never retries.
+        assert not second.done(), "the repeat was answered before the first send had finished"
+        bridge.fail = False if not first_fails else True
         bridge.gate.set()
-        assert (await first).status_code == 200
+        if first_fails:
+            # Only the first sees the failure; the repeat's own dispatch then succeeds.
+            r1 = await asyncio.wait_for(first, timeout=2)
+            bridge.fail = False
+            r2 = await asyncio.wait_for(second, timeout=2)
+        else:
+            r1, r2 = await asyncio.wait_for(asyncio.gather(first, second), timeout=2)
+    return r1, r2
+
+
+@pytest.mark.asyncio
+async def test_two_requests_in_flight_at_once_dispatch_once():
+    bridge = _Bridge()
+    first, second = await _first_then_repeat(bridge, first_fails=False)
+    assert first.status_code == 200 and "duplicate" not in first.json()
+    assert second.json() == {"run_id": first.json()["run_id"], "status": "sent", "duplicate": True}
     assert len(bridge.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_of_a_send_that_then_fails_is_sent_not_called_a_duplicate():
+    class _FailOnce(_Bridge):
+        async def dispatch_user_message(self, session_id, content, client_msg_id=None, mode="agent",
+                                        tool_choice=None, **kwargs):
+            if self.gate is not None:
+                await self.gate.wait()
+            if not getattr(self, "failed_once", False):
+                self.failed_once = True
+                raise RuntimeError("dispatch failed")
+            self.calls.append((session_id, content, client_msg_id))
+
+    bridge = _FailOnce()
+    first, second = await _first_then_repeat(bridge, first_fails=True)
+    assert first.status_code == 500
+    assert second.status_code == 200 and "duplicate" not in second.json(), second.text
+    assert bridge.calls == [("s1", "hi", "c1")]
 
 
 # ── across a restart ─────────────────────────────────────────────────────────
