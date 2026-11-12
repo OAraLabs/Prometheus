@@ -41,6 +41,7 @@
   "start_after_seconds": 60,
   "update_every_seconds": 10,
   "stale_after_seconds": 45,
+  "turn_end_outcome_key": "outcome",
   "examples": {
     "start": {
       "aps": {
@@ -57,7 +58,7 @@
         "attributes": {
           "kind": "coding",
           "id": "c1a2b3c4",
-          "title": "coding task c1a2b3c4: fix the parser",
+          "title": "Coding run",
           "session_id": "coding:c1a2b3c4",
           "node_pub": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
         },

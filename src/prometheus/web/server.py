@@ -781,6 +781,11 @@ def create_app(
             return JSONResponse(status_code=400, content={"error": "need activity_token"})
         if (err := _may_follow(request, kind, job_id)) is not None:
             return err
+        # A token for a job that ended before the phone registered it (the end went to nobody) is answered with the
+        # end at once and not stored (push/job_activity.py, end_if_ended).
+        watcher = getattr(app.state, "job_activity_watcher", None)
+        if watcher is not None and await watcher.end_if_ended(device_id, kind, job_id, activity_token):
+            return {"ok": True, "ended": True}
         if kind == "turn":
             _devices_or_create().set_activity_token(device_id, job_id, activity_token)
         else:

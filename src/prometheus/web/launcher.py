@@ -356,9 +356,15 @@ async def launch_web(
             TurnSource,
         )
 
-        coding_source = TaskSource(get_task_manager(), kind="coding")
-        job_sources: list[JobSource] = [TurnSource(bridge), TaskSource(get_task_manager(), kind="task"),
-                                        coding_source]
+        def _known_tool(name: str) -> bool:
+            # Read at each call: tools are registered and dropped after boot (MCP servers, packs).
+            registry = getattr(loop_context, "tool_registry", None)
+            return registry is not None and registry.get(name) is not None
+
+        dispatcher.known_tool = _known_tool
+        coding_source = TaskSource(get_task_manager(), kind="coding", known_tool=_known_tool)
+        job_sources: list[JobSource] = [TurnSource(bridge, known_tool=_known_tool),
+                                        TaskSource(get_task_manager(), kind="task"), coding_source]
         if computer_runner is not None:
             job_sources.append(DesktopSource(computer_runner))
         if signal_bus:

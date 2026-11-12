@@ -24,8 +24,9 @@ the daemon already keeps, in memory:
 * ``desktop`` the computer-use runner's running tasks. No content at all, like a desktop task's approval push:
               not the goal, not the app. ``steps`` is the count.
 
-``detail`` is one short line the daemon already shows for the job (a tool name, a task kind), never a tool's
-arguments or any message text.
+``title`` is the daemon's own words for the kind ("Coding run", "Background task: shell command"), never a
+description or a goal, which are user or model text. ``detail`` is one short line the daemon already shows for
+the job (a registered tool's name, a task kind), never a tool's arguments or any message text.
 
 WHO GETS ONE
 ------------
@@ -51,6 +52,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -86,8 +88,17 @@ ID_CAP = 200
 #: APNs refuses a body over 4096 bytes. Bodies are capped field by field; this is the last guard.
 BODY_LIMIT = 4000
 
+#: Titles are the daemon's own words, one per kind (a task adds its kind in words). Never a description: a
+#: coding goal and a task description are user or model text.
 TURN_TITLE = "Reply in progress"
+TASK_TITLE = "Background task"
+CODING_TITLE = "Coding run"
 DESKTOP_TITLE = "Desktop task"
+#: ``detail`` when a tool's name is not a registered tool (or there is no registry to ask).
+GENERIC_TOOL_DETAIL = "tool"
+#: How long an ended job is remembered, so a token registered after its end is answered with the end (M1).
+TOMBSTONE_SECONDS = 600.0
+TOMBSTONES_REMEMBERED = 512
 _START_ALERT = {
     "turn": "A reply is still being written",
     "task": "A background task is still running",
@@ -116,6 +127,26 @@ def content_state(*, phase: str, detail: str, elapsed_s: int, steps: int) -> dic
     values = {"phase": phase, "detail": one_line(detail, DETAIL_CAP), "elapsedS": int(elapsed_s),
               "steps": int(steps)}
     return {key: values.get(key) for key in CONTENT_STATE_KEYS}
+
+
+def tool_detail(name: Any, known_tool: Callable[[str], bool] | None) -> str:
+    """A tool's name as ``detail`` only when it is a registered tool; otherwise :data:`GENERIC_TOOL_DETAIL`.
+
+    A name in a progress frame or a telemetry row is whatever the model asked for, and a model can ask for a
+    "tool" whose name is a sentence."""
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    try:
+        known = known_tool is not None and bool(known_tool(text))
+    except Exception:
+        known = False
+    return one_line(text, DETAIL_CAP) if known else GENERIC_TOOL_DETAIL
+
+
+def task_title(task_type: Any) -> str:
+    word = _TASK_TYPE_WORDS.get(str(task_type), "")
+    return f"{TASK_TITLE}: {word}" if word else TASK_TITLE
 
 
 def turn_end_phase(payload: dict) -> str:
@@ -225,15 +256,16 @@ class TurnSource:
 
     kind = "turn"
 
-    def __init__(self, bridge: Any) -> None:
+    def __init__(self, bridge: Any, *, known_tool: Callable[[str], bool] | None = None) -> None:
         self._bridge = bridge
+        self._known_tool = known_tool
 
     def running(self) -> Iterable[Job]:
         for session_id, started_at, progress in self._bridge.running_turns():
             phase = str(progress.get("phase") or "thinking")
             yield Job(kind="turn", id=session_id, title=TURN_TITLE, started_at=float(started_at),
                       session_id=session_id, phase=phase,
-                      detail=str(progress.get("tool_name") or "") if phase == "tool" else "",
+                      detail=tool_detail(progress.get("tool_name"), self._known_tool) if phase == "tool" else "",
                       steps=int(progress.get("tool_calls") or 0))
 
     def outcome(self, job_id: str) -> str | None:
@@ -256,12 +288,14 @@ class TaskSource:
     REMEMBERED = 256
 
     def __init__(self, manager: Any, *, kind: str,
-                 is_paused: Callable[[Any], bool] | None = None) -> None:
+                 is_paused: Callable[[Any], bool] | None = None,
+                 known_tool: Callable[[str], bool] | None = None) -> None:
         if kind not in ("task", "coding"):
             raise ValueError(f"TaskSource kind must be task or coding, not {kind!r}")
         self.kind = kind
         self._manager = manager
         self._is_paused = is_paused or _coding_paused
+        self._known_tool = known_tool
         # coding session -> rounds seen / the last tool's name (signals from the coding live stream).
         self._rounds: dict[str, int] = {}
         self._last_tool: dict[str, str] = {}
@@ -281,11 +315,11 @@ class TaskSource:
                     paused = bool(self._is_paused(record))
                 except Exception:
                     paused = False
-                yield Job(kind="coding", id=record.id, title=one_line(record.description, TITLE_CAP),
+                yield Job(kind="coding", id=record.id, title=CODING_TITLE,
                           started_at=started, session_id=session, phase="paused" if paused else "running",
                           detail=self._last_tool.get(session, ""), steps=self._rounds.get(session, 0))
             else:
-                yield Job(kind="task", id=record.id, title=one_line(record.description, TITLE_CAP),
+                yield Job(kind="task", id=record.id, title=task_title(record.type),
                           started_at=started, session_id=record.session_id or None,
                           detail=_TASK_TYPE_WORDS.get(str(record.type), ""))
 
@@ -301,7 +335,7 @@ class TaskSource:
 
     async def on_signal(self, signal: Any) -> None:
         """``coding_round`` / ``coding_tool`` from the coding live stream: count rounds, keep the last tool's name
-        (its name only: the frame's other fields are not read)."""
+        when it is a registered tool (its name only: the frame's other fields are not read)."""
         if self.kind != "coding":
             return
         payload = getattr(signal, "payload", None) or {}
@@ -312,7 +346,7 @@ class TaskSource:
         if kind == "coding_round":
             self._rounds[session] = self._rounds.get(session, 0) + 1
         elif kind == "coding_tool" and payload.get("tool_name"):
-            self._last_tool[session] = one_line(payload["tool_name"], DETAIL_CAP)
+            self._last_tool[session] = tool_detail(payload["tool_name"], self._known_tool)
         for memory in (self._rounds, self._last_tool):
             while len(memory) > self.REMEMBERED:
                 memory.pop(next(iter(memory)))
@@ -339,6 +373,9 @@ class DesktopSource:
                 "failed": "failed", "limit": "failed"}.get(str(task.outcome or ""), "failed")
 
 
+_TITLES = {"turn": TURN_TITLE, "task": TASK_TITLE, "coding": CODING_TITLE, "desktop": DESKTOP_TITLE}
+
+
 # ── the watcher ───────────────────────────────────────────────────────────────
 
 @dataclass
@@ -346,6 +383,22 @@ class _Tracked:
     job: Job
     started_on: set[str] = field(default_factory=set)   # devices sent a start (once each, ever)
     pushed_at: float = float("-inf")                     # the last start or update, for the throttle
+
+
+@dataclass
+class _Tombstone:
+    """An ended job, remembered for :data:`TOMBSTONE_SECONDS` (review M1)."""
+
+    job: Job
+    phase: str
+    ended_at: float
+    started_on: set[str]
+
+
+def _key(job: Job) -> tuple[str, str, float]:
+    # A turn is keyed by its own start too (review L2): back-to-back turns in one session are separate jobs, each
+    # with its own start. Every other kind keeps one id for its whole life.
+    return (job.kind, job.id, job.started_at if job.kind == "turn" else 0.0)
 
 
 class JobActivityWatcher:
@@ -358,7 +411,9 @@ class JobActivityWatcher:
         self._sources = {source.kind: source for source in sources}
         self._now = now
         self._tick_seconds = tick_seconds
-        self._tracked: dict[tuple[str, str], _Tracked] = {}
+        self._tracked: dict[tuple[str, str, float], _Tracked] = {}
+        # (kind, id) -> how it ended. A turn's id is its session id.
+        self._tombstones: OrderedDict[tuple[str, str], _Tombstone] = OrderedDict()
         self._task: asyncio.Task | None = None
 
     # ── the loop ──
@@ -373,6 +428,10 @@ class JobActivityWatcher:
             self._task = None
 
     async def run(self) -> None:
+        try:
+            await self.sweep()
+        except Exception:
+            logger.warning("job activity boot sweep failed", exc_info=True)
         while True:
             await asyncio.sleep(self._tick_seconds)
             try:
@@ -382,9 +441,24 @@ class JobActivityWatcher:
             except Exception:
                 logger.warning("job activity tick failed", exc_info=True)
 
+    async def sweep(self) -> None:
+        """At boot: every job token left from an earlier run belongs to a job this process does not know, so each
+        gets an ``end`` (phase ``stopped``) and every row is dropped (review L1). A turn's tokens are not jobs'."""
+        now = self._now()
+        for kind, job_id, target, token in self._store.all_job_activity_tokens():
+            try:
+                job = Job(kind=kind, id=job_id, title=_TITLES.get(kind, ""), started_at=now)
+                body = _fit(self._dispatcher._named({"aps": end_aps(job, now, "stopped")}))
+                await self._dispatcher.send_liveactivity(target, token, body, priority=UPDATE_PRIORITY,
+                                                         kind="liveactivity end")
+            except Exception:
+                logger.warning("job activity: the boot end for %s %s failed", kind, job_id, exc_info=True)
+        self._store.clear_all_job_activity_tokens()
+
     async def tick(self) -> None:
         now = self._now()
-        seen: set[tuple[str, str]] = set()
+        self._forget_old_tombstones(now)
+        seen: set[tuple[str, str, float]] = set()
         unreadable: set[str] = set()
         owners: set[str] | None = None
         for kind, source in self._sources.items():
@@ -396,22 +470,27 @@ class JobActivityWatcher:
                 unreadable.add(kind)
                 continue
             for job in jobs:
-                key = (job.kind, job.id)
+                key = _key(job)
                 seen.add(key)
                 tracked = self._tracked.get(key)
                 if tracked is None:
                     tracked = self._tracked[key] = _Tracked(job)
                 tracked.job = job
-                if now - job.started_at >= START_AFTER_SECONDS:
-                    if owners is None:
-                        owners = self._owner_ids()
-                    await self._start(tracked, now, owners)
-                if job.kind != "turn":
-                    await self._update(tracked, now)
+                try:  # one bad job must not stop the rest (review L4)
+                    if now - job.started_at >= START_AFTER_SECONDS:
+                        if owners is None:
+                            owners = self._owner_ids()
+                        await self._start(tracked, now, owners)
+                    if job.kind != "turn":
+                        await self._update(tracked, now)
+                except Exception:
+                    logger.warning("job activity: %s %s failed this tick", job.kind, job.id, exc_info=True)
         for key in [k for k in self._tracked if k not in seen and k[0] not in unreadable]:
             tracked = self._tracked.pop(key)
-            if key[0] != "turn":
-                await self._end(tracked.job, now)
+            try:
+                await self._ended(tracked, now)
+            except Exception:
+                logger.warning("job activity: ending %s %s failed", key[0], key[1], exc_info=True)
 
     # ── the three pushes ──
 
@@ -466,20 +545,89 @@ class JobActivityWatcher:
             if outcome == "unregistered":
                 self._store.clear_job_activity_token(target.id, job.kind, job.id)
 
-    async def _end(self, job: Job, now: float) -> None:
+    async def _ended(self, tracked: _Tracked, now: float) -> None:
+        job = tracked.job
+        if job.kind == "turn":
+            # The turn's own end rode chat_done. Remembered only when a start was sent: a phone registering a
+            # token for that session later is then answered with the end (review M1).
+            if tracked.started_on:
+                phase = self._turn_outcome(job.id) or "done"
+                self._remember(job, phase, now, tracked.started_on)
+            return
+        phase = self._outcome(job) or "stopped"
+        self._remember(job, phase, now, tracked.started_on)
         targets = self._store.job_activity_targets(job.kind, job.id)
         if targets:
-            source = self._sources.get(job.kind)
-            try:
-                phase = source.outcome(job.id) if source is not None else None
-            except Exception:
-                logger.warning("job activity: how %s %s ended is unreadable", job.kind, job.id, exc_info=True)
-                phase = None
-            body = _fit(self._dispatcher._named({"aps": end_aps(job, now, phase or "stopped")}))
+            body = _fit(self._dispatcher._named({"aps": end_aps(job, now, phase)}))
             for target, token in targets:
                 await self._dispatcher.send_liveactivity(target, token, body, priority=UPDATE_PRIORITY,
                                                          kind="liveactivity end")
         self._store.clear_job_activity_tokens(job.kind, job.id)
+
+    def _turn_outcome(self, session_id: str) -> str | None:
+        fn = getattr(self._dispatcher, "turn_outcome", None)
+        try:
+            return fn(session_id) if callable(fn) else None
+        except Exception:
+            return None
+
+    def _outcome(self, job: Job) -> str | None:
+        source = self._sources.get(job.kind)
+        try:
+            return source.outcome(job.id) if source is not None else None
+        except Exception:
+            logger.warning("job activity: how %s %s ended is unreadable", job.kind, job.id, exc_info=True)
+            return None
+
+    # ── tombstones (review M1) ──
+
+    def _remember(self, job: Job, phase: str, now: float, started_on: set[str]) -> None:
+        key = (job.kind, job.id)
+        self._tombstones[key] = _Tombstone(job=job, phase=phase, ended_at=now, started_on=set(started_on))
+        self._tombstones.move_to_end(key)
+        while len(self._tombstones) > TOMBSTONES_REMEMBERED:
+            self._tombstones.popitem(last=False)
+
+    def _forget_old_tombstones(self, now: float) -> None:
+        for key in [k for k, t in self._tombstones.items() if now - t.ended_at > TOMBSTONE_SECONDS]:
+            del self._tombstones[key]
+
+    def _turn_running(self, session_id: str) -> bool:
+        source = self._sources.get("turn")
+        if source is None:
+            return False
+        try:
+            return any(job.session_id == session_id or job.id == session_id for job in source.running())
+        except Exception:
+            return True  # unknown: do not end what may be a live activity
+
+    async def end_if_ended(self, device_id: str, kind: str, job_id: str, token: str) -> bool:
+        """For a token registered after its job ended: send the ``end`` to *token* now and say so (the caller then
+        does not store it). False when the job is running, unknown, or ended over :data:`TOMBSTONE_SECONDS` ago.
+
+        A turn's token counts only from a device that was sent that turn's start, and never while a turn runs in
+        that session: a token registered then is for the new turn. Never raises."""
+        try:
+            now = self._now()
+            self._forget_old_tombstones(now)
+            stone = self._tombstones.get((kind, job_id))
+            if stone is None:
+                return False
+            if kind == "turn":
+                if device_id not in stone.started_on or self._turn_running(job_id):
+                    return False
+            elif any(key[0] == kind and key[1] == job_id for key in self._tracked):
+                return False
+            target = self._store.push_target(device_id)
+            if target is None:
+                return False
+            body = _fit(self._dispatcher._named({"aps": end_aps(stone.job, now, stone.phase)}))
+            await self._dispatcher.send_liveactivity(target, token, body, priority=UPDATE_PRIORITY,
+                                                     kind="liveactivity end")
+            return True
+        except Exception:
+            logger.warning("job activity: the late end for %s %s failed", kind, job_id, exc_info=True)
+            return False
 
 
 # ── the phone's fixture ───────────────────────────────────────────────────────
@@ -489,7 +637,7 @@ _EXAMPLE_PUB = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
 
 def fixture() -> dict[str, Any]:
     """``docs/reference/job-activity.json``: the contract the phone decodes, generated from this module."""
-    job = Job(kind="coding", id="c1a2b3c4", title="coding task c1a2b3c4: fix the parser", started_at=1_800_000_000.0,
+    job = Job(kind="coding", id="c1a2b3c4", title=CODING_TITLE, started_at=1_800_000_000.0,
               session_id="coding:c1a2b3c4", detail="edit_file", steps=4)
     now = job.started_at + 75.0
     return {
@@ -505,6 +653,8 @@ def fixture() -> dict[str, Any]:
         "start_after_seconds": int(START_AFTER_SECONDS),
         "update_every_seconds": int(UPDATE_EVERY_SECONDS),
         "stale_after_seconds": STALE_AFTER_SECONDS,
+        # A turn's own end (the bridge path) keeps ``phase: "done"`` for the shipped decode; how it ended is here.
+        "turn_end_outcome_key": "outcome",
         "examples": {
             "start": {"aps": start_aps(job, now, _EXAMPLE_PUB), "node_pub": _EXAMPLE_PUB},
             "update": {"aps": update_aps(job, now + 10), "node_pub": _EXAMPLE_PUB},

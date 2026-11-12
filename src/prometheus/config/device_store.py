@@ -348,17 +348,19 @@ class DeviceStore:
         self._conn.commit()
 
     def activity_targets(self, session_id: str) -> list[tuple[PushTarget, str]]:
-        """(push target, activity_token) pairs for a session's live activities.
-        Joined on live push-registered devices: a revoked or push-cleared
-        device's activity token is unreachable and simply drops out."""
+        """(push target, activity_token) pairs for a session's live activities, on LIVE devices: a revoked
+        device's activity token drops out. NOT joined on an alert registration (Piece 18 review): the activity token
+        is its own APNs address, and Live Activities need no notification permission, so a phone that declined
+        notifications still gets its activity's updates and end. The environment is then ``production`` and the
+        topic the sender's own."""
         rows = self._conn.execute(
             "SELECT d.id, d.apns_token, d.apns_environment, d.apns_bundle_id,"
             "       d.push_failures, a.activity_token"
             "  FROM activity_tokens a JOIN api_devices d ON d.id = a.device_id"
-            " WHERE a.session_id = ? AND d.revoked_at IS NULL AND d.apns_token IS NOT NULL",
+            " WHERE a.session_id = ? AND d.revoked_at IS NULL",
             (session_id,),
         ).fetchall()
-        return [(PushTarget(id=r["id"], apns_token=r["apns_token"],
+        return [(PushTarget(id=r["id"], apns_token=r["apns_token"] or "",
                             environment=r["apns_environment"] or "production",
                             bundle_id=r["apns_bundle_id"] or "",
                             push_failures=int(r["push_failures"] or 0)),
@@ -463,6 +465,37 @@ class DeviceStore:
             return
         self._conn.execute("DELETE FROM job_activity_tokens WHERE kind = ? AND job_id = ?", (kind, job_id))
         self._conn.commit()
+
+    def push_target(self, device_id: str) -> PushTarget | None:
+        """One LIVE device as a push target (its alert token may be empty), or None."""
+        r = self._conn.execute(
+            "SELECT id, apns_token, apns_environment, apns_bundle_id, push_failures FROM api_devices"
+            " WHERE id = ? AND revoked_at IS NULL", (device_id,)).fetchone()
+        if r is None:
+            return None
+        return PushTarget(id=r["id"], apns_token=r["apns_token"] or "",
+                          environment=r["apns_environment"] or "production",
+                          bundle_id=r["apns_bundle_id"] or "", push_failures=int(r["push_failures"] or 0))
+
+    def all_job_activity_tokens(self) -> list[tuple[str, str, PushTarget, str]]:
+        """Every job token row on a live device, as (kind, job id, target, token): what the boot sweep ends."""
+        if not self._has_table("job_activity_tokens"):
+            return []
+        rows = self._conn.execute(
+            "SELECT j.kind, j.job_id, d.id, d.apns_token, d.apns_environment, d.apns_bundle_id, d.push_failures,"
+            "       j.activity_token"
+            "  FROM job_activity_tokens j JOIN api_devices d ON d.id = j.device_id"
+            " WHERE d.revoked_at IS NULL").fetchall()
+        return [(r["kind"], r["job_id"],
+                 PushTarget(id=r["id"], apns_token=r["apns_token"] or "",
+                            environment=r["apns_environment"] or "production",
+                            bundle_id=r["apns_bundle_id"] or "", push_failures=int(r["push_failures"] or 0)),
+                 r["activity_token"]) for r in rows]
+
+    def clear_all_job_activity_tokens(self) -> None:
+        if self._has_table("job_activity_tokens"):
+            self._conn.execute("DELETE FROM job_activity_tokens")
+            self._conn.commit()
 
     def job_activity_targets(self, kind: str, job_id: str) -> list[tuple[PushTarget, str]]:
         """(push target, activity token) for one job's live activities, on LIVE devices (a revoked device's token

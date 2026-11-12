@@ -36,9 +36,9 @@ from collections.abc import Callable
 from typing import Any
 
 from prometheus.push.job_activity import (
-    DETAIL_CAP,
     STALE_AFTER_SECONDS,
     content_state,
+    tool_detail,
     turn_end_phase,
 )
 
@@ -114,6 +114,11 @@ class PushDispatcher:
         # request_id -> how it ended, for requests that ended while (or before) their approval push was still going
         # out: a device the fan-out reaches after the end is cleared at once instead of being left with a live Approve.
         self._ended: OrderedDict[str, str] = OrderedDict()
+        # Whether a name is a registered tool (set by the launcher from the tool registry). A turn's ``detail`` is
+        # a tool name only when it is one; None means nothing is: the generic word (push/job_activity.py).
+        self.known_tool: Callable[[str], bool] | None = None
+        # session_id -> how its last turn ended, for the job watcher's tombstones (Piece 18 review M1).
+        self._turn_outcomes: OrderedDict[str, str] = OrderedDict()
 
     # ------------------------------------------------------------------
     # Bus signals
@@ -332,7 +337,7 @@ class PushDispatcher:
                 "content-state": {
                     **content_state(
                         phase=phase,
-                        detail=str(payload.get("tool_name") or "")[:DETAIL_CAP] if phase == "tool" else "",
+                        detail=tool_detail(payload.get("tool_name"), self.known_tool) if phase == "tool" else "",
                         elapsed_s=int(payload.get("elapsed_s") or 0),
                         steps=int(payload.get("tool_calls") or 0)),
                     "round": payload.get("round", 0),
@@ -342,12 +347,21 @@ class PushDispatcher:
                 # A daemon that dies mid-turn stops updating; the lock screen then shows the activity as stale.
                 "stale-date": int(now) + STALE_AFTER_SECONDS,
             }}
-            await self._deliver_activity(targets, self._named(body))
+            await self._deliver_activity(targets, self._named(body), session_id)
         except Exception:
             logger.warning("liveactivity push failed", exc_info=True)
 
+    def turn_outcome(self, session_id: str) -> str | None:
+        """How *session_id*'s last turn ended (done, stopped, paused, failed), if this process saw it end."""
+        return self._turn_outcomes.get(session_id)
+
     async def on_chat_done(self, session_id: str, payload: dict) -> None:
         try:
+            outcome = turn_end_phase(payload)
+            self._turn_outcomes[session_id] = outcome
+            self._turn_outcomes.move_to_end(session_id)
+            while len(self._turn_outcomes) > PUSHED_REQUESTS_REMEMBERED:
+                self._turn_outcomes.popitem(last=False)
             targets = self._store.activity_targets(session_id)
             if not targets:
                 return
@@ -356,12 +370,14 @@ class PushDispatcher:
                 "timestamp": int(now),
                 "event": "end",
                 "dismissal-date": int(now),
-                # How the turn ended: done, stopped (a user stop), paused (the round cap) or failed.
-                "content-state": {**content_state(phase=turn_end_phase(payload), detail="",
+                # ``phase`` stays exactly "done", as it always was: the shipped phone decodes it. How the turn
+                # ended (done, stopped for a user stop, paused for the round cap, failed) is ``outcome``.
+                "content-state": {**content_state(phase="done", detail="",
                                                   elapsed_s=int(payload.get("elapsed_s") or 0), steps=0),
+                                  "outcome": outcome,
                                   "round": payload.get("round", 0), "toolCalls": 0, "chars": 0},
             }}
-            await self._deliver_activity(targets, self._named(body))
+            await self._deliver_activity(targets, self._named(body), session_id)
             self._activity_pushed_at.pop(session_id, None)
             for target, _token in targets:
                 self._store.clear_activity_token(target.id, session_id)
@@ -394,16 +410,13 @@ class PushDispatcher:
             self._account(target, result, kind)
         return outcome
 
-    async def _deliver_activity(self, targets: list, body: dict) -> None:
+    async def _deliver_activity(self, targets: list, body: dict, session_id: str) -> None:
+        """A turn's activity pushes. A 410 is about the activity token, so it drops that token's row and leaves the
+        device's alert registration alone (it used to clear the alert registration)."""
         for target, activity_token in targets:
-            if target.push_failures >= FAILURE_MUTE_THRESHOLD:
-                continue
-            result = await self._sender.send(
-                apns_token=activity_token, environment=target.environment,
-                payload=body, push_type="liveactivity", priority=5,
-                topic=f"{target.bundle_id or self._sender.config.topic}.push-type.liveactivity",
-            )
-            self._account(target, result, "liveactivity")
+            outcome = await self.send_liveactivity(target, activity_token, body, priority=5)
+            if outcome == "unregistered":
+                self._store.clear_activity_token(target.id, session_id)
 
     # ------------------------------------------------------------------
 
