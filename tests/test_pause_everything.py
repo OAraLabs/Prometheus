@@ -121,11 +121,39 @@ def test_the_api_token_pauses_and_cannot_resume(w):
     assert pause.current() is not None
 
 
-def test_an_owner_device_pauses_and_resumes(w):
+def test_a_device_a_person_marked_resumes(w):
+    """A person = the repo's PersonCheck: a device marked (from Telegram or a marked device; never the API token)
+    and not held. Review 2026-11-12 (HIGH-1): an owner device alone is not, because the global token mints one."""
     assert w.client.put("/api/pause", headers=_owner(w), json={}).status_code == 200
+    assert w.devices.set_computer(w.owner["id"], True, by="telegram:owner")
     r = w.client.delete("/api/pause", headers=_owner(w))
     assert r.status_code == 200 and r.json()["paused"] is False
     assert pause.current() is None
+
+
+def test_an_owner_device_the_api_token_minted_cannot_resume(w):
+    """Read the token, mint an owner device from loopback, resume: the shape a model with a shell would try."""
+    w.call("op", "PUT", "/api/pause", json={})
+    minted = w.call("op", "POST", "/api/devices", json={"name": "model-made", "platform": "ios", "owner": True})
+    assert minted.status_code in (200, 201), minted.text
+    token = minted.json()["token"]
+    r = w.client.delete("/api/pause", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 403 and r.json()["error"] == "person_required"
+    assert pause.current() is not None
+
+
+def test_an_owner_device_that_is_not_marked_cannot_resume(w):
+    w.call("op", "PUT", "/api/pause", json={})
+    r = w.client.delete("/api/pause", headers=_owner(w))
+    assert r.status_code == 403 and r.json()["error"] == "person_required"
+
+
+def test_a_marked_device_that_is_held_cannot_resume(w):
+    w.call("op", "PUT", "/api/pause", json={})
+    assert w.devices.set_computer(w.a["id"], True, by="telegram:owner")
+    assert w.devices.set_profile(w.a["id"], "read-only", by="test")
+    r = w.call("a", "DELETE", "/api/pause")
+    assert r.status_code == 403
 
 
 @pytest.mark.parametrize("method", ["PUT", "DELETE"])
@@ -260,23 +288,98 @@ def test_pausing_stops_everything_and_keeps_coding_work(w, tmp_path, monkeypatch
     assert any(f.get("type") == "paused_changed" and f["payload"]["paused"] for f in frames)
 
 
-def test_pausing_cancels_every_running_turn_in_the_process(state):
+def test_pausing_cancels_turn_tasks_and_their_caller_hears_paused(state):
     from prometheus.web import pause_routes
 
     async def go():
         async def turn():
-            token = pause.turn_started()
-            try:
-                await asyncio.sleep(60)
-            finally:
-                pause.turn_ended(token)
+            await asyncio.sleep(60)
 
-        t = asyncio.create_task(turn())
+        caller = asyncio.create_task(pause.run_as_turn(turn()))
         await asyncio.sleep(0)
         app = SimpleNamespace(state=SimpleNamespace())
         result = await pause_routes.pause_everything(app, by="test", reason="")
-        await asyncio.sleep(0)
-        return t, result
+        try:
+            await caller
+        except pause.Paused:
+            return "paused", result
+        return "no", result
 
-    t, result = asyncio.run(go())
-    assert t.cancelled() and result["stopped"]["turns"] >= 1
+    heard, result = asyncio.run(go())
+    assert heard == "paused" and result["stopped"]["turns"] == 1
+
+
+def test_a_long_lived_task_that_ran_a_turn_inline_is_not_cancelled(state):
+    """Review 2026-11-12 (LOW-2): a chat poller runs some handlers inline; cancelling it would kill the poller
+    that /resume needs. Only tasks created for a turn are cancelled; the rest stop at run_loop's round check."""
+    from prometheus.web import pause_routes
+
+    async def go():
+        stop = asyncio.Event()
+
+        async def poller():
+            await stop.wait()
+            return "alive"
+
+        p = asyncio.create_task(poller())
+        await asyncio.sleep(0)
+        await pause_routes.pause_everything(SimpleNamespace(state=SimpleNamespace()), by="test", reason="")
+        stop.set()
+        return await p
+
+    assert asyncio.run(go()) == "alive"
+
+
+def test_a_pause_that_cannot_be_written_still_holds_and_still_sweeps(tmp_path):
+    """Review 2026-11-12 (MEDIUM-1): an emergency stop must not depend on the disk."""
+    from prometheus.web import pause_routes
+
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    state = pause.PauseState(ro / "pause.json")
+    pause.install(state)
+    os.chmod(ro, 0o500)
+    try:
+        queue = ApprovalQueue(security_gate=_Gate(), telegram_adapter=None)
+        queue._register(PendingAction(request_id="p9", tool_name="bash", description="run", session_id="web:x"))
+        app = SimpleNamespace(state=SimpleNamespace(approval_queue=queue))
+        result = asyncio.run(pause_routes.pause_everything(app, by="test", reason=""))
+        assert result["paused"] is True and result["persisted"] is False
+        assert pause.current() is not None and result["stopped"]["approvals_withdrawn"] == 1
+    finally:
+        os.chmod(ro, 0o700)
+        pause.install(None)
+
+
+@pytest.mark.parametrize("content", [b"\xff\xfe\x00garbage", ("[" * 100000).encode()],
+                         ids=["not-utf8", "deep-nesting"])
+def test_odd_bytes_and_deep_nesting_mean_paused_not_a_crash(tmp_path, content):
+    path = tmp_path / "pause.json"
+    path.write_bytes(content)
+    info = pause.PauseState(path).current
+    assert info is not None and info.by == "unreadable"
+
+
+def test_the_paused_changed_frame_carries_no_name_or_reason(w):
+    frames: list[dict] = []
+
+    async def _broadcast(frame):
+        frames.append(frame)
+
+    w.bridge.broadcast = _broadcast
+    w.call("op", "PUT", "/api/pause", json={"reason": "private words"})
+    (frame,) = [f for f in frames if f.get("type") == "paused_changed"]
+    assert set(frame["payload"]) == {"paused", "since"}
+
+
+def test_a_slash_command_is_refused_while_paused_too(w):
+    """Review 2026-11-12 (LOW-5): some slash commands start model work (/compact); while paused, none runs."""
+    frames: list[dict] = []
+
+    async def _broadcast(frame):
+        frames.append(frame)
+
+    w.bridge.broadcast = _broadcast
+    w.call("op", "PUT", "/api/pause", json={})
+    asyncio.run(w.bridge._handle_send_message("web:s1", "/compact"))
+    assert any(f.get("type") == "error" and f["payload"]["kind"] == "paused" for f in frames)
