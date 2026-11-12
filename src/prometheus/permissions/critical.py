@@ -25,6 +25,7 @@ Source: novel code for Prometheus, 2026-11-12.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 import re
@@ -57,7 +58,8 @@ DEFAULT_CRITICAL_COMMANDS: tuple[str, ...] = (
     # git push, in every form
     "git push",
     # sends
-    "curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "mail", "sendmail", "mutt", "osascript",
+    "curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "socat", "telnet", "ftp", "openssl",
+    "mail", "sendmail", "mutt", "osascript", "git send-email",
     "gh", "npm publish", "twine upload", "uv publish", "docker push",
     # spends
     "aws", "gcloud", "az", "stripe",
@@ -79,21 +81,33 @@ _WRITE_TOOLS: dict[str, tuple[str, ...]] = {
     "download_file": ("destination", "path"),
 }
 
-#: Words that run the rest of their line as a command: the command after them (and after their own options) is
-#: matched as well. ``sudo`` and ``doas`` are in the default list themselves.
+#: Words that run the rest of their line as a command. After one, EVERY later word is tried as the start of a
+#: command (option parsing differs per wrapper, so it is not attempted), and an argument holding a whole command
+#: line (``watch 'rm x'``, ``env -S 'rm x'``) is matched as one.
 _WRAPPERS = frozenset({"sudo", "doas", "env", "nohup", "time", "command", "exec", "nice", "timeout", "stdbuf",
-                       "xargs", "caffeinate", "ionice", "chroot", "unbuffer"})
-#: Interpreters whose inline program cannot be read here: ``-c`` / ``-e`` makes the call critical.
-_INLINE_FLAGS = {"bash": ("-c",), "sh": ("-c",), "zsh": ("-c",), "dash": ("-c",), "ksh": ("-c",),
-                 "fish": ("-c",), "python": ("-c",), "python3": ("-c",), "perl": ("-e", "-E"),
-                 "ruby": ("-e",), "node": ("-e", "--eval", "-p"), "deno": ("eval",), "php": ("-r",),
-                 "osascript": ("-e",)}
+                       "xargs", "caffeinate", "ionice", "chroot", "unbuffer", "setsid", "flock", "arch", "watch",
+                       "parallel", "builtin", "uv", "uvx", "npx", "pipx", "poetry", "pnpm", "yarn", "bunx",
+                       "nohup", "taskpolicy", "sandbox-exec"})
+#: Run a program that cannot be read here (a script, stdin, a string): always critical as a command word.
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "busybox", "su", "script",
+                     "source", ".", "eval", "trap"})
+#: Interpreters: critical with an inline program (``-c``, ``-e`` and friends, also inside a group such as
+#: ``-lc``), with ``-`` or fed on stdin; ``-m module`` is matched like a wrapper. Running a named file is not.
+_INTERPRETERS = {"python": "c", "python2": "c", "python3": "c", "pypy": "c", "pypy3": "c", "perl": "eE",
+                 "ruby": "e", "node": "ep", "bun": "e", "deno": "", "php": "r", "lua": "e", "luajit": "e",
+                 "tclsh": "", "rscript": "e", "osascript": "e"}
+_AWKS = frozenset({"awk", "gawk", "nawk", "mawk"})
 #: Shell words that open a command without being one.
 _KEYWORDS = frozenset({"!", "if", "then", "else", "elif", "do", "while", "until", "{", "}", "(", ")", "fi",
-                       "done"})
+                       "done", "case", "esac", "in"})
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+#: Statements: what runs one after another or side by side.
+_STATEMENTS = re.compile(r"\|\||&&|[;|&\n]")
+#: Finer: every place a command can start, including subshells, groups and substitutions.
 _SEPARATORS = re.compile(r"\|\||&&|[;|&\n(){}]|\$\(|`|<\(|>\(")
-_HOME_VARS = re.compile(r"\$\{HOME\}|\$HOME\b")
+_HOME_VARS = re.compile(r"\$\{HOME\}|\$HOME\b|\$\{XDG_CONFIG_HOME\}|\$XDG_CONFIG_HOME\b")
+_GLOB = re.compile(r"[*?\[\]{}]")
+
 
 
 def _strings(value: Any, default: tuple[str, ...], key: str) -> tuple[str, ...]:
@@ -162,57 +176,118 @@ def _words(segment: str) -> list[str]:
         words = segment.split()
     while words and (words[0] in _KEYWORDS or _ASSIGNMENT.match(words[0])):
         words = words[1:]
-    return [os.path.basename(w) if i == 0 else w for i, w in enumerate(words)]
+    return words
+
+
+def _name(word: str) -> str:
+    """A command word as the shell finds it: the last path part, case folded (the default macOS disk ignores
+    case, so ``RM`` runs ``rm``)."""
+    return os.path.basename(word).lower()
 
 
 def _leads(words: list[str], pattern: list[str]) -> bool:
-    if words[:len(pattern)] == pattern:
+    if not words or _name(words[0]) != pattern[0].lower():
+        return False
+    if words[1:len(pattern)] == pattern[1:]:
         return True
     # ``git -C dir push``: git's global options between the command and its verb.
-    if len(pattern) > 1 and pattern[0] == "git" and words and words[0] == "git":
-        return _drop_option_values(words[1:])[:len(pattern) - 1] == pattern[1:]
+    return len(pattern) > 1 and _drop_option_values(words[1:])[:len(pattern) - 1] == pattern[1:]
+
+
+def _inline_flag(words: list[str], letters: str) -> bool:
+    for w in words[1:]:
+        if w == "-":
+            return True
+        if w in ("--eval", "--command", "eval"):
+            return True
+        if letters and w.startswith("-") and not w.startswith("--") and any(ch in w[1:] for ch in letters):
+            return True
     return False
 
 
-def _commands_in(words: list[str]) -> list[list[str]]:
-    """*words* and every command it runs on the rest of its line: after a wrapper (and its options), and after a
-    ``find -exec``."""
-    found = [words]
-    if words and words[0] in _WRAPPERS:
-        rest = words[1:]
-        for k, w in enumerate(rest):
-            if not w.startswith("-") and not _ASSIGNMENT.match(w):
-                inner = [os.path.basename(rest[k])] + rest[k + 1:]
-                found.extend(_commands_in(inner))
-                # an option's value may have been taken for the command (``nice -n 5 rm``): try the next too
-                if k + 1 < len(rest):
-                    found.extend(_commands_in([os.path.basename(rest[k + 1])] + rest[k + 2:]))
-                break
-    if words and words[0] == "find":
+def _one(words: list[str], patterns: list[list[str]], fed: bool) -> str | None:
+    """Why the command *words* is critical, or None. *fed*: something is piped or here-doc'd into it."""
+    if not words:
+        return None
+    first = words[0]
+    if first.startswith("$") or first.startswith("`") or _GLOB.search(first) or "," in first:
+        return "dynamic command"              # its name exists only when the shell runs the line
+    name = _name(first)
+    for pattern in patterns:
+        if _leads(words, pattern):
+            return " ".join(pattern)
+    if name in _SHELLS:
+        return name
+    if name in _INTERPRETERS:
+        if fed or _inline_flag(words, _INTERPRETERS[name]):
+            return f"{name} inline"
+        if "-m" in words:                     # python3 -m twine upload: the module and its words
+            k = words.index("-m")
+            return _scan(words[k + 1:], patterns)
+        return None
+    if name in _AWKS:
+        program = " ".join(words[1:])
+        if any(t in program for t in ("system", "|", ">", "getline")):
+            return "awk program"
+        return None
+    if name == "find":
+        if "-delete" in words:
+            return "find -delete"
         for k, w in enumerate(words):
             if w in ("-exec", "-execdir", "-ok", "-okdir") and k + 1 < len(words):
-                found.extend(_commands_in([os.path.basename(words[k + 1])] + words[k + 2:]))
-    return found
+                hit = _one(words[k + 1:], patterns, False)
+                if hit:
+                    return hit
+        return None
+    if name in _WRAPPERS:
+        return _scan(words[1:], patterns)
+    return None
+
+
+def _scan(words: list[str], patterns: list[list[str]]) -> str | None:
+    """After a wrapper: every later word tried as a command, and any word holding a command line matched."""
+    for k in range(len(words)):
+        if words[k].startswith("-") and _name(words[k]) not in _SHELLS:
+            continue
+        hit = _one(words[k:], patterns, False)
+        if hit:
+            return hit
+        if any(c.isspace() for c in words[k]):
+            hit = _match_line(words[k], patterns)
+            if hit:
+                return hit
+    return None
+
+
+def _match_line(command: str, patterns: list[list[str]]) -> str | None:
+    for statement in _STATEMENTS.split(command):
+        head = statement.lstrip(" \t\"'({!")
+        if head.startswith("$") or head.startswith("`"):
+            return "dynamic command"
+        # awk's program holds braces, which the finer split below cuts apart: judge it whole, here.
+        words = _words(statement)
+        if words and _name(words[0]) in _AWKS:
+            hit = _one(words, patterns, False)
+            if hit:
+                return hit
+    pieces = _SEPARATORS.split(command)
+    for i, segment in enumerate(pieces):
+        fed = "<<" in segment or (i > 0 and _piped_into(command, segment))
+        hit = _one(_words(segment), patterns, fed)
+        if hit:
+            return hit
+    return None
+
+
+def _piped_into(command: str, segment: str) -> bool:
+    at = command.find(segment)
+    before = command[:at].rstrip()
+    return before.endswith("|") and not before.endswith("||")
 
 
 def _command_match(command: str, patterns: Iterable[str]) -> str | None:
-    """The first reason any command in *command* is critical, or None. Words compare exactly."""
-    split = [p.split() for p in patterns if p.split()]
-    for segment in _SEPARATORS.split(command):
-        for words in _commands_in(_words(segment)):
-            if not words:
-                continue
-            for pattern in split:
-                if _leads(words, pattern):
-                    return " ".join(pattern)
-            flags = _INLINE_FLAGS.get(words[0])
-            if flags and any(w in flags for w in words[1:]):
-                return f"{words[0]} {next(w for w in words[1:] if w in flags)}"
-            if words[0] == "eval":
-                return "eval"
-            if words[0] == "find" and "-delete" in words:
-                return "find -delete"
-    return None
+    """The first reason any command in *command* is critical, or None."""
+    return _match_line(command, [p.split() for p in patterns if p.split()])
 
 
 def _drop_option_values(words: list[str]) -> list[str]:
@@ -231,17 +306,41 @@ def _drop_option_values(words: list[str]) -> list[str]:
     return []
 
 
-def _mentions_path(command: str, roots: Iterable[str]) -> bool:
-    """Does any word of a shell line name a path under *roots*? A read counts too: the narrower answer."""
-    text = _HOME_VARS.sub("~", command)
+def _home_vars(text: str) -> str:
+    return _HOME_VARS.sub(lambda m: "~/.config" if "XDG" in m.group(0) else "~", text)
+
+
+def _path_words(statement: str) -> list[str]:
     try:
-        words = shlex.split(text, posix=True)
+        words = shlex.split(_home_vars(statement), posix=True)
     except ValueError:
-        words = text.split()
-    for word in words:
-        for part in re.split(r"[<>=]+", word):
-            if part and ("/" in part or part.startswith("~")) and _under_any(part, roots, relative_too=True):
-                return True
+        words = _home_vars(statement).split()
+    return [part for w in words for part in re.split(r"[<>=]+", w) if part]
+
+
+def _mentions_path(command: str, roots: Iterable[str]) -> bool:
+    """Does the line name a path under *roots*, directly, through a glob, or relative to a ``cd`` it made? A
+    read counts too: the narrower answer."""
+    roots = tuple(roots)
+    cwd: str | None = None
+    for statement in _STATEMENTS.split(command):
+        words = _path_words(statement)
+        if words and words[0] == "cd":
+            target = words[1] if len(words) > 1 else "~"
+            if target.startswith(("~", "/")):
+                cwd = os.path.expanduser(target)
+            elif cwd is not None:
+                cwd = os.path.normpath(os.path.join(cwd, target))
+            continue
+        for part in words:
+            if part.startswith("-"):
+                continue
+            if part.startswith(("~", "/")) or "/" in part:
+                if _under_any(part, roots, relative_too=True):
+                    return True
+            if cwd is not None and not part.startswith(("~", "/")):
+                if _under_any(os.path.join(cwd, part), roots):
+                    return True
     return False
 
 
@@ -264,6 +363,8 @@ def _under_any(path: str, roots: Iterable[str], *, relative_too: bool = False) -
             for i in range(len(parts)):
                 if tail and parts[i:i + len(tail)] == tail:
                     return True
+    if _GLOB.search(path):
+        return _glob_could_reach(path, roots)
     try:
         target = os.path.realpath(os.path.expanduser(path))
     except (OSError, ValueError):
@@ -274,6 +375,17 @@ def _under_any(path: str, roots: Iterable[str], *, relative_too: bool = False) -
         except (OSError, ValueError):
             continue
         if target == base or target.startswith(base.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
+def _glob_could_reach(pattern: str, roots: Iterable[str]) -> bool:
+    """Could the glob *pattern* name something under one of *roots*? Compared part by part over the root's
+    length, so ``~/.prometh?us/x`` and ``~/.config/prometh*/x`` do."""
+    parts = os.path.expanduser(pattern).split(os.sep)
+    for root in roots:
+        base = os.path.expanduser(root).rstrip(os.sep).split(os.sep)
+        if len(parts) >= len(base) and all(fnmatch.fnmatchcase(b, p) for b, p in zip(base, parts)):
             return True
     return False
 
