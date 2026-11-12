@@ -89,7 +89,8 @@ def read_file(path: Path) -> PauseInfo | None:
 def _write_file(path: Path, data: dict[str, Any]) -> None:
     """Atomic and durable: a temp file in the same folder, fsync'd, renamed over, the folder fsync'd."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.urandom(4).hex()}.tmp")
+    # Named with the file's own name as a PREFIX, so the trusted-state floor that covers ``pause.json*`` covers it.
+    tmp = path.with_name(f"{path.name}.{os.urandom(4).hex()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
