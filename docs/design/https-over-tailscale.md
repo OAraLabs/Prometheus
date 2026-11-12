@@ -1,8 +1,12 @@
 # HTTPS over Tailscale: design note
 
-**Status:** proposal v0.1, 2026-11-10. Nothing is built. For the release after 0.9.21.
-**Written from:** the code at v0.9.20 (unchanged on `main`), Tailscale's documentation, and the CLI help of Tailscale 1.102.
-**Marked throughout:** *measured* (run against the real code), *documented* (Tailscale says so), *UNVERIFIED* (not shown by either).
+**Status:** proposal v0.2, 2026-11-12. Nothing is built. For the release after 0.9.21.
+**Written from:** the code at v0.9.20 and `main` `2ce3ae4`, Tailscale's documentation, the CLI help of Tailscale 1.102, and
+Tailscale's source for Serve (`ipn/ipnlocal/serve.go`, read 2026-11-11).
+**Marked throughout:** *measured* (run against the real code), *documented* (Tailscale says so), *source* (read in Tailscale's
+code, not yet observed on a machine), *UNVERIFIED* (none of these).
+**v0.2:** the owner chose option A (section 5). v0.1 recommended B because Serve's behaviour was unknown; Tailscale's source
+answers most of it (section 2a). B stays written down as the fallback.
 
 ## The question
 
@@ -87,32 +91,74 @@ on loopback. The URL carries a port (`https://<name>.<tailnet>.ts.net:8006`), wh
 - **The instance certificate with client-side pinning** (what exists): it works for the desktop Beacon. Whether iOS code can accept
   a pinned self-signed certificate without it counting as an exception is the iOS session's call, not this note's.
 
-## 5. Recommendation
+## 2a. What Tailscale's source says Serve sends (v0.2)
 
-**B, in three small steps**, each its own PR: (1) certificate source, boot validation, the doctor row and the renewal
-documentation; (2) the `tls.trust` field in the pairing answers and the reference; (3) a renewal helper (a script and a
-systemd timer) if the documentation alone proves too fiddly. **A stays possible later** as a documented recipe, once
-experiments E1 to E3 below have shown what Serve really sends and the four prerequisites in section 2 exist.
+| Question | Source says | Effect |
+|---|---|---|
+| `Host` | kept: `r.Out.Host = r.In.Host` | the daemon sees the `.ts.net` name; A1 stands until the guard allows it (D2) |
+| `X-Forwarded-For` | set from the source address, overwriting a client's value | the real client address is available, and the request is not "this machine": `is_same_machine` already treats the header as a relay (A4, A5 resolved, pending E1) |
+| `X-Forwarded-Host`, `X-Forwarded-Proto` | Host always; Proto `https` when the leg was TLS | both already relay headers; a second check on the name |
+| `Tailscale-User-*` | cleared, then set only for non-tagged, non-Funnel callers | not used for any decision |
+| WebSocket upgrade | Go's `httputil.ReverseProxy` | **UNVERIFIED** (E2) |
+| Certificate renewal for Serve | provisioned automatically; renewal not stated | **UNVERIFIED** (E4); the doctor row is the net |
 
-## 6. Experiments (run before anyone relies on A; they need the owner's say-so)
+## 5. Decision: A, `tailscale serve` in front of a loopback daemon
 
-**E1: what the backend sees through Serve** (plain HTTP, so no certificate and nothing in the public log). On a machine with
-Tailscale, run a 20-line echo server on `127.0.0.1:18090` that prints the TCP peer and every header; then
-`tailscale serve --bg --http=18088 http://127.0.0.1:18090`. From *another* tailnet device:
-`curl -i http://<name>:18088/ -H 'X-Forwarded-For: 1.2.3.4' -H 'Host: x.example'`. Record: the peer address, `Host`, every
-`X-Forwarded-*`, `Forwarded`, `Via`, `Tailscale-*`, and whether the forged `X-Forwarded-For` survives. Repeat from a *tagged*
-node. Finish with `tailscale serve --http=18088 off`. This answers A1, A4 and A5.
-**E2: WebSockets** through the same entry (`websockets` client against `ws://<name>:18088/`). This answers A6.
-**E3: the certificate path on a throwaway machine name** you do not mind seeing in the public log: `tailscale cert --cert-file
-c.crt --key-file k.key <name>.<tailnet>.ts.net`, then the daemon's TLS listener with `web.tls_cert_file`/`web.tls_key_file`
-(after step 1 exists), checked with `curl` and from a phone.
+```
+phone ──HTTPS 443──▶ tailscaled (Serve, Tailscale's certificate) ──HTTP──▶ 127.0.0.1:8005   REST
+      ──HTTPS 8443─▶ tailscaled (Serve)                          ──HTTP──▶ 127.0.0.1:8010   WebSocket
+```
 
-## 7. For the owner to decide
+The daemon stays on `127.0.0.1`; plain HTTP never leaves the machine. Tailscale holds the certificate's private key, so
+Prometheus never does. Never `tailscale funnel`: that is the public internet.
 
-1. Is B the supported path, with A parked behind E1 to E3?
-2. Machine names: the certificate publishes them. Rename before enabling HTTPS if the current ones say more than you want public.
-3. May Prometheus change the `tls` object in the pairing answers (a documented, additive field), given that the iOS and desktop
-   sessions build to `docs/reference/pairing-join-requests.md`?
+**Trust.** Clients use the normal certificate chain for the name they dialled, and **never pin** the certificate, its key or
+an intermediate (the leaf changes at every renewal, about every 90 days). Before sending the token, they prove the daemon is
+the one they paired with by the node-key identity challenge, checked against the `node_pub` stored at pairing. TLS says "this
+is the machine with that name"; the challenge says "that machine is the Prometheus I paired with".
+
+**Daemon changes**, each with a red test first:
+
+- **D1, one settings block**, written only by `oara tailscale setup`: `web.tailscale: {enabled, name, rest_port: 443,
+  ws_port: 8443}`, with `web.bind` required to stay loopback. A bad block is dropped out loud.
+- **D2, the Host guard accepts the name only when relayed**: both guards (REST and the WebSocket bridge) accept
+  `Host: <name>` only from a loopback peer whose `X-Forwarded-Host` is the same name. A DNS-rebinding page cannot produce that.
+- **D3, the client address, believed narrowly.** Not `web.trusted_proxies = [127.0.0.1]`, which would let any local process
+  choose its own source with one header. A small middleware takes `X-Forwarded-For` as the client only when: loopback peer,
+  the feature on, exactly one value, a tailnet address (100.64.0.0/10 or fd7a:115c:a1e0::/48), and `X-Forwarded-Host` is the
+  name. `is_same_machine` is unchanged and stays false for a relayed request. Of the unauthenticated limits, join requests and
+  owner-code redemption already have a global cap; hello and the identity challenge (60 a minute per source) do not, so this
+  change adds a global ceiling there, so that a local process rotating forged tailnet addresses gains no budget (A2, A3).
+- **D4, where to connect.** For a relayed request at the name, the pairing answers give `https://<name>` and
+  `wss://<name>:8443`, and `tls: {"trust": "ca", "host": "<name>"}` with no `spki_sha256`. Additive: `trust: "pin"` keeps
+  meaning the instance certificate. `docs/reference/pairing-join-requests.md` and its contract test change with it.
+- **D5, `oara tailscale check | setup | off`.** `setup` prints the plan (the two Serve commands and the settings block) and
+  changes nothing without `--apply`. It never runs `sudo`, `tailscale cert`, `funnel`, `up`, `login` or `set`; when Serve
+  needs an operator it prints the one line for the owner to run.
+- **D6, `oara doctor`, "Tailscale HTTPS"** (no rows when off): CLI found and running, the MagicDNS name matches; Serve maps
+  443 and 8443 to the loopback ports; **Funnel off** (error); `web.bind` loopback (error otherwise); a live handshake to
+  `<name>:443` that verifies against the default trust store, with days left (warning under 14); and an end-to-end identity
+  challenge through `https://<name>` that verifies with the node key. A check that could not run says "not checked".
+- **D7, docs** (install guide, pairing reference) and **D8**, Mission Control's CSP lists `wss://<name>:8443`.
+
+**The owner's switch.** In the tailnet's admin console, **DNS** page: MagicDNS on, then **HTTPS Certificates > Enable HTTPS**.
+**Every machine name a certificate is issued for goes into the public Certificate Transparency logs, permanently.** Rename a
+machine before its first certificate if its name says too much.
+
+## 6. Experiments (need the owner's say-so; none run)
+
+- **E1** (plain HTTP, nothing in the public log): an echo server on `127.0.0.1:18090`, `tailscale serve --bg --http=18088
+  http://127.0.0.1:18090`, and from another tailnet device `curl -i http://<name>:18088/ -H 'X-Forwarded-For: 1.2.3.4'
+  -H 'Host: x.example'`. Record the peer, `Host`, every `X-Forwarded-*`, `Forwarded`, `Via`, `Tailscale-*`, and whether the
+  forged header survives. Repeat from a tagged node. Then `--http=18088 off`.
+- **E2**, WebSockets through the same entry.
+- **E3** (puts the name in the public log): the two real entries to an echo server; check the chain a phone sees.
+- **E4**, renewal: record `notAfter`, look again at day 60 and 90.
+
+## 7. Build plan
+
+Three PRs, red tests first, an independent review each: (1) daemon D1 to D4 and D8; (2) `oara tailscale` and the doctor
+rows, against a fake `tailscale` on `PATH`; (3) docs and the pairing reference.
 
 ## Sources
 
