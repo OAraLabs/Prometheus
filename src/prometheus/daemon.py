@@ -1782,6 +1782,9 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             # is the safe direction. Its counterpart moved into the
             # constructor above, where absence cannot be silent.
             security_gate._approval_queue = approval_queue
+            # Which requests are answered in the app only (push.critical_*; permissions/critical.py).
+            from prometheus.permissions.critical import CriticalRules
+            approval_queue.critical_rules = CriticalRules.from_config(config)
             gateway_registry.attach("_approval_queue", approval_queue)
             logger.info("Approval queue wired to gateway adapters")
 

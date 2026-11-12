@@ -1395,6 +1395,14 @@ push:
     key_id:             # the 10-char key id from the Apple developer portal
     team_id:            # e.g. 53JM8W47RL
     topic:              # the app's bundle id, e.g. com.oaralabs.beacon
+  # Approval requests answered in the app only: their push has no Approve button. Built in, always: desktop
+  # prompts, lifting a device's hold, arguments cut or masked for display, a description too long to read on a
+  # lock screen. These three lists add to that. Leave a key out for the default list (deletes, git push,
+  # anything that sends or spends, changes to devices, permissions or this agent's configuration); write []
+  # for none. Commands match the leading words of any command in a shell line.
+  critical_tools:       # default: message, sessions_send, image_generate, video_generate, cron_create, cron_delete, symbiote_graft
+  critical_commands:    # default: rm, git push, curl, ssh, gh, oara, sudo, chmod, ... (permissions/critical.py)
+  critical_paths:       # default: ~/.prometheus, ~/.config/prometheus (writes there)
 image_generation:
   default_backend: auto              # auto | pollinations | comfyui | dashscope
   comfyui:

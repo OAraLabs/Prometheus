@@ -237,7 +237,7 @@ Artifacts are **content-addressed**: ids are a sha256 prefix of the file bytes, 
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/approvals` | Poll pending approval requests |
+| GET | `/api/approvals` | Poll pending approval requests. Each carries `critical`: `true` means answer it in the app, never from a notification (its push has no Approve). Rules: `permissions/critical.py`, owner lists `push.critical_*` |
 | POST | `/api/approvals/{request_id}/approve` | Approve a request |
 | POST | `/api/approvals/{request_id}/deny` | Deny a request |
 
