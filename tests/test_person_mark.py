@@ -185,3 +185,60 @@ def test_cmd_person_is_synchronous_and_needs_no_runner():
     from prometheus.gateway.commands import cmd_person
 
     assert not asyncio.iscoroutinefunction(cmd_person)
+
+
+# ── review lows (2026-11-12) ─────────────────────────────────────────────────
+
+def test_resume_is_refused_when_the_store_cannot_answer():
+    from prometheus.web.pause_routes import person_check
+
+    class _Broken:
+        def device_profile(self, _id):
+            return None
+
+        def person_allowed(self, _id):
+            raise RuntimeError("database is locked")
+
+    identity = types.SimpleNamespace(is_global=False, id="d1", owner=True, name="phone")
+    ok, _why = person_check(identity, _Broken())
+    assert ok is False
+
+
+def test_the_telegram_handler_marks_for_the_owner_only_and_closes_its_store(tmp_path, monkeypatch):
+    from prometheus.config import device_store as ds_mod
+    from prometheus.gateway.telegram import TelegramAdapter
+
+    db = tmp_path / "devices.db"
+    seed = DeviceStore(db)
+    d = seed.mint("phone", "ios")
+    closed: list[bool] = []
+
+    class _Store(DeviceStore):
+        def __init__(self, *a, **kw):
+            super().__init__(db)
+
+        def close(self):
+            closed.append(True)
+            super().close()
+
+    monkeypatch.setattr(ds_mod, "DeviceStore", _Store)
+    sent: list[str] = []
+    adapter = TelegramAdapter.__new__(TelegramAdapter)
+    adapter.config = types.SimpleNamespace(owner_ids=lambda: frozenset({"42"}))
+
+    async def _send(chat_id, text, **kw):
+        sent.append(text)
+
+    adapter.send = _send
+
+    def update(user_id: int):
+        return types.SimpleNamespace(
+            message=types.SimpleNamespace(text=f"/person allow {d['id']}"),
+            effective_chat=types.SimpleNamespace(id=1),
+            effective_user=types.SimpleNamespace(id=user_id, username="u"))
+
+    asyncio.run(adapter._cmd_person(update(7), None))
+    assert not seed.person_allowed(d["id"]) and "Only the owner" in sent[-1]
+    asyncio.run(adapter._cmd_person(update(42), None))
+    assert seed.person_allowed(d["id"])
+    assert closed == [True, True]
