@@ -58,6 +58,7 @@ from prometheus.context.system_prompt import (
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
     rewrite_model_identity,
 )
+from prometheus.engine import pause as _pause  # pause everything (engine/pause.py)
 from prometheus.engine.fallback import stream_round_with_fallback
 from prometheus.engine.stages.routing import route_turn
 
@@ -1515,12 +1516,6 @@ async def run_loop(
     an episode belongs to (ruling 5). Both are DESCRIPTIVE: recorded, never
     read for behaviour.
     """
-    # PAUSE EVERYTHING (engine/pause.py): no turn starts while the agent is paused, whatever front door it came
-    # through (the doors refuse first, with a reason; this is the backstop, and in a child process the only
-    # check). Raised at the first ``__anext__``, before anything is copied or recorded.
-    from prometheus.engine import pause as _pause
-
-    _pause.check()
     # THE PER-RUN COPY. Everything below — and everything `_run_loop` does —
     # works on a context private to this turn, so the router swap, the
     # provider fallback, the identity-line rewrite and the pair stash cannot
@@ -1533,6 +1528,10 @@ async def run_loop(
     # after it must read the copy, or a later refactor that moves a read
     # above this line silently reintroduces the shared read.
     context = context.for_run()
+    # PAUSE EVERYTHING (engine/pause.py): no turn starts while the agent is paused, whatever front door it came
+    # through (the doors refuse first, with a reason; this is the backstop, and in a child process the only
+    # check). Raised at the first ``__anext__``, right after the copy and before anything is recorded.
+    _pause.check()
     # A duck-typed verifier without ``new_turn_key`` predates turn scoping;
     # it keeps its single accumulator and we never pass it a key it can't
     # accept. Capability is resolved ONCE here so the call sites below don't

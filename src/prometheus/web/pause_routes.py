@@ -42,7 +42,7 @@ def _who(identity: Any) -> str:
         return "open daemon"
     if getattr(identity, "is_global", False):
         return "API token"
-    kind = "owner device" if getattr(identity, "owner", False) else "device"
+    kind = "owner device" if getattr(identity, "owner", False) else "scoped device"
     name = str(getattr(identity, "name", "") or getattr(identity, "id", ""))
     return f"{kind} {name}".strip()
 

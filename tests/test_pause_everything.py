@@ -90,7 +90,7 @@ def test_run_loop_refuses_to_start_while_paused(state):
     state.pause(by="owner device")
 
     async def go():
-        async for _ in run_loop(SimpleNamespace(), []):
+        async for _ in run_loop(SimpleNamespace(for_run=lambda: SimpleNamespace()), []):
             pass
 
     with pytest.raises(pause.Paused):
