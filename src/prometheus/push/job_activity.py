@@ -439,6 +439,10 @@ class JobActivityWatcher:
         self._tracked: dict[tuple[str, str, float], _Tracked] = {}
         # (kind, id) -> how it ended. A turn's id is its session id.
         self._tombstones: OrderedDict[tuple[str, str], _Tombstone] = OrderedDict()
+        # Turns that ended (chat_done) -> when, kept like the tombstones. The bridge still lists a turn until its
+        # _run_agent finally runs, a moment after chat_done; a tick in that gap must not track it again (it would
+        # send a second start and then record the turn as stopped over its real outcome).
+        self._ended_turns: OrderedDict[tuple[str, str, float], float] = OrderedDict()
         self._task: asyncio.Task | None = None
         self._sweep_task: asyncio.Task | None = None
         # A turn's end is told at the moment it ends (PushDispatcher.on_chat_done), not found at the next tick:
@@ -529,6 +533,8 @@ class JobActivityWatcher:
                 continue
             for job in jobs:
                 key = _key(job)
+                if key in self._ended_turns:
+                    continue  # ended at chat_done; the bridge has not dropped it yet
                 seen.add(key)
                 tracked = self._tracked.get(key)
                 if tracked is None:
@@ -630,6 +636,15 @@ class JobActivityWatcher:
         try:
             keys = [k for k in self._tracked if k[0] == "turn" and k[1] == session_id
                     and (started_at is None or k[2] == float(started_at))]
+            now = self._now()
+            marks = list(keys)
+            if started_at is not None:
+                marks.append(("turn", session_id, float(started_at)))
+            for mark in marks:
+                self._ended_turns[mark] = now
+                self._ended_turns.move_to_end(mark)
+            while len(self._ended_turns) > TOMBSTONES_REMEMBERED:
+                self._ended_turns.popitem(last=False)
             for key in keys:
                 tracked = self._tracked.pop(key)
                 if tracked.started_on:
@@ -657,6 +672,8 @@ class JobActivityWatcher:
     def _forget_old_tombstones(self, now: float) -> None:
         for key in [k for k, t in self._tombstones.items() if now - t.ended_at > TOMBSTONE_SECONDS]:
             del self._tombstones[key]
+        for turn in [k for k, at in self._ended_turns.items() if now - at > TOMBSTONE_SECONDS]:
+            del self._ended_turns[turn]
 
     def _turn_running(self, session_id: str) -> bool:
         source = self._sources.get("turn")
@@ -691,9 +708,11 @@ class JobActivityWatcher:
                 aps = turn_end_aps(now, stone.phase, elapsed_s=_elapsed(stone.job, stone.ended_at))
             else:
                 aps = end_aps(stone.job, now, stone.phase)
-            stone.ended_for.add(device_id)  # once per device and job
-            await self._dispatcher.send_liveactivity(target, token, _fit(self._dispatcher._named(
+            outcome = await self._dispatcher.send_liveactivity(target, token, _fit(self._dispatcher._named(
                 {"aps": aps})), priority=UPDATE_PRIORITY, kind="liveactivity end")
+            if outcome != "ok":
+                return False  # not delivered: the token is kept, and a later registration may try again
+            stone.ended_for.add(device_id)  # once per device and job, counted only when it was delivered
             return True
         except Exception:
             logger.warning("job activity: the late end for %s %s failed", kind, job_id, exc_info=True)
