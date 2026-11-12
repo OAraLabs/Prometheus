@@ -813,3 +813,40 @@ def test_the_first_tick_does_not_wait_for_the_sweep(w, monkeypatch):
 
     asyncio.run(go())
     assert order[0] == "tick"
+
+
+# ── round-3 review ────────────────────────────────────────────────────────────
+
+def test_a_tick_between_chat_done_and_the_bridges_cleanup_does_not_restart_the_turn(w):
+    """chat_done fires while the bridge still lists the turn (its finally has not run yet)."""
+    w.add("turn", "web:mine", session_id="web:mine", started_at=1000.0)
+    w.at(1060)
+    starts = len(w.sender.events("start"))
+    asyncio.run(w.dispatcher.on_chat_done("web:mine", {"session_id": "web:mine", "turn_started_at": 1000.0,
+                                                        "stop_reason": "max_turns_exhausted"}))
+    w.at(1061)  # a tick in that window
+    assert len(w.sender.events("start")) == starts, "no second push-to-start for a turn that ended"
+    w.sources["turn"].jobs.clear()
+    w.at(1070)
+    assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "turn", "web:mine", "late")) is True
+    [end] = [e for e in w.sender.events("end") if e["apns_token"] == "late"]
+    assert end["payload"]["aps"]["content-state"]["outcome"] == "paused", "the real outcome, not stopped"
+
+
+def test_the_ended_marker_does_not_block_the_next_turn(w):
+    w.add("turn", "web:mine", session_id="web:mine", started_at=1000.0)
+    w.at(1060)
+    asyncio.run(w.dispatcher.on_chat_done("web:mine", {"session_id": "web:mine", "turn_started_at": 1000.0}))
+    w.sources["turn"].jobs.clear()
+    w.add("turn", "web:mine", session_id="web:mine", started_at=1062.0)
+    w.at(1125)
+    assert len([s for s in w.sender.events("start") if s["apns_token"] == "start-o"]) == 2
+
+
+def test_a_failed_late_end_can_be_retried(w):
+    _started_then_ended(w)
+    w.sender.outcomes["late"] = "failed"
+    assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "task", "t1", "late")) is False
+    w.sender.outcomes.pop("late")
+    assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "task", "t1", "late")) is True
+    assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "task", "t1", "late")) is False
