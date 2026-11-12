@@ -5613,7 +5613,8 @@ def create_app(
             # would have been a no-op that read like a fix and taught the next
             # reader that this route selects its own tools. It does not.
             with turn_mcp_headers(turn_headers):
-                result = await agent_loop.run_async(
+                # A task of its own, so a pause can cancel this turn (and only it): engine/pause.py.
+                result = await pause_state.run_as_turn(agent_loop.run_async(
                     system_prompt=system_prompt,
                     messages=session.get_messages(),
                     # RECORD-ONLY (WP-X.21 T4): the telemetry rows name the
@@ -5622,7 +5623,7 @@ def create_app(
                     # override lookup for this route, which stays 'system'.
                     record_session_id=f"web:{session_id}",
                     surface="rest",
-                )
+                ))
             session.add_result_messages(result.messages, pre_len)
             reply = {
                 "text": result.text,
@@ -5638,6 +5639,8 @@ def create_app(
             if served_by:
                 reply["served_by"] = served_by
             return reply
+        except pause_state.Paused:
+            return paused_response() or JSONResponse(status_code=423, content={"error": "paused"})
         except MaxTurnsExhausted as cap:
         # #774: a turn that hit its round cap kept its work — save it, never
         # roll it back. run_async handed the loop a COPY of the session list,
@@ -6992,7 +6995,7 @@ def create_app(
         return {"ok": True, "story": updated}
 
     # ── Pause everything (Beacon iOS Piece 17; web/pause_routes.py) ─────────
-    register_pause_routes(app)
+    register_pause_routes(app, devices=_devices_or_create)
 
     # ── OpenAI-compatible surface (item 2, 2026-09-01) ─────────────────────
     # Registered BEFORE the static catch-all below, like every route.

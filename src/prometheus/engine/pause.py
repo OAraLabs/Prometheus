@@ -11,9 +11,8 @@ stopped until a person says". This module is the state and the two checks every 
     its mtime) in a child process (a worker, a coding run) that has none.
   * A file that cannot be read or parsed means PAUSED (fail closed), with the reason saying so: an emergency stop
     that an unreadable file quietly undoes is not one.
-  * :func:`turn_started` / :func:`turn_ended` keep a count of the asyncio tasks running a turn in this process,
-    whatever started them (the bridge, ``/v1``, ``POST /api/chat``, a chat gateway, a subagent), so a pause can
-    cancel every one.
+  * :func:`run_as_turn` (and :func:`track_current_task_as_turn` for a per-request handler) list the tasks that
+    exist for one turn, so a pause can cancel them; every other turn stops at ``run_loop``'s round check.
 
 Resuming is not decided here: who may resume (a person, never the bare API token) is the route's rule.
 
@@ -27,7 +26,6 @@ import json
 import logging
 import os
 import time
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -72,11 +70,11 @@ def read_file(path: Path) -> PauseInfo | None:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError as exc:
+    except (OSError, ValueError) as exc:                  # ValueError: bytes that are not UTF-8
         return _unreadable(type(exc).__name__)
     try:
         data = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):                  # RecursionError: JSON nested deeper than Python goes
         return _unreadable("not JSON")
     if not isinstance(data, dict) or not isinstance(data.get("paused"), bool):
         return _unreadable("no paused flag")
@@ -128,21 +126,40 @@ class PauseState:
     def current(self) -> PauseInfo | None:
         return self._info
 
+    #: Whether the pause in force is on disk (so it survives a restart). False when the write failed.
+    persisted: bool = True
+
     def pause(self, *, by: str, reason: str = "") -> tuple[PauseInfo, bool]:
-        """Pause, or return the pause already in force. ``(info, new)``. Written to disk BEFORE it takes effect
-        here, so a crash between the two leaves the daemon paused, never the other way round."""
+        """Pause, or return the pause already in force. ``(info, new)``.
+
+        In force HERE first, then written: an emergency stop must not depend on the disk. A write that fails (a
+        full or read-only data folder) is logged and leaves ``persisted`` False; the pause still holds in this
+        process, and a later pause call tries the write again.
+        """
         if self._info is not None:
+            if not self.persisted:
+                self._persist(self._info)
             return self._info, False
         info = PauseInfo(since=time.time(), by=by, reason=(reason or "")[:500])
-        _write_file(self.path, {"paused": True, **info.to_dict()})
         self._info = info
+        self._persist(info)
         return info, True
+
+    def _persist(self, info: PauseInfo) -> None:
+        try:
+            _write_file(self.path, {"paused": True, **info.to_dict()})
+            self.persisted = True
+        except OSError:
+            self.persisted = False
+            logger.error("pause: could not write %s; the pause holds in this process but will NOT survive a "
+                         "restart", self.path, exc_info=True)
 
     def resume(self, *, by: str) -> PauseInfo | None:
         """Clear the pause; returns the one cleared, or None if there was none. Starts nothing."""
         cleared = self._info
         _write_file(self.path, {"paused": False, "resumed_at": time.time(), "resumed_by": by})
         self._info = None
+        self.persisted = True
         return cleared
 
 
@@ -192,27 +209,46 @@ def check() -> None:
 
 
 # ── the turns running in this process ────────────────────────────────────────
+#
+# Only tasks created FOR a turn are listed, never "whatever task is running a turn": a chat poller can run a
+# handler, and so a turn, inline in its own long-lived task, and cancelling that would kill the poller (the one
+# a person resumes through). A turn not started through one of these is stopped at run_loop's round check.
 
-_running: Counter[asyncio.Task[Any]] = Counter()
+_turn_tasks: set[asyncio.Task[Any]] = set()
 
 
-def turn_started() -> asyncio.Task[Any] | None:
+def _track(task: asyncio.Task[Any]) -> None:
+    _turn_tasks.add(task)
+    task.add_done_callback(_turn_tasks.discard)
+
+
+async def run_as_turn(coro: Any) -> Any:
+    """Run *coro* (one turn) in a task of its own that a pause may cancel. A pause surfaces to the caller as
+    :class:`Paused`; the caller's own cancellation still cancels the turn and propagates as itself."""
+    task: asyncio.Task[Any] = asyncio.ensure_future(coro)
+    _track(task)
     try:
-        task = asyncio.current_task()
-    except RuntimeError:
-        return None
+        return await task
+    except asyncio.CancelledError:
+        outer = asyncio.current_task()
+        if task.cancelled() and (outer is None or outer.cancelling() == 0):
+            raise Paused(current() or PauseInfo(since=time.time(), by="unknown")) from None
+        raise
+
+
+def track_current_task_as_turn() -> Any:
+    """Mark the CURRENT task as one created for a single turn (a per-request handler, never a long-lived
+    poller). Returns a token for :func:`untrack`."""
+    task = asyncio.current_task()
     if task is not None:
-        _running[task] += 1
+        _turn_tasks.add(task)
     return task
 
 
-def turn_ended(task: asyncio.Task[Any] | None) -> None:
-    if task is None:
-        return
-    _running[task] -= 1
-    if _running[task] <= 0:
-        del _running[task]
+def untrack(task: Any) -> None:
+    if task is not None:
+        _turn_tasks.discard(task)
 
 
 def running_turn_tasks() -> list[asyncio.Task[Any]]:
-    return [t for t in _running if not t.done()]
+    return [t for t in _turn_tasks if not t.done()]

@@ -4,9 +4,12 @@ The state is :mod:`prometheus.engine.pause`. These routes add who may do what, a
 
   * **Pausing only takes away**, so the operator may: the API token or an owner device (``route_access``:
     operator only; a scoped device gets ``403 operator_only``).
-  * **Resuming gives everything back**, so only a person may: an owner device. Never the bare API token, which
-    sits in a file a model with a shell can read; an agent that could lift its own emergency stop has not been
-    stopped. ``403 person_required`` otherwise. (The owner in Telegram resumes through ``/resume``.)
+  * **Resuming gives everything back**, so only a person may, by the repo's one definition of a person
+    (``computer/door.py PersonCheck``, the bar hold lifts use): a device a person MARKED (``/computer allow`` from
+    Telegram, or a marked device; never the API token) and not held, or the owner in Telegram (``/resume``).
+    NOT "any owner device": the API token sits in a file a model with a shell can read, and with it a model can
+    mint itself an owner device from this machine. An agent that could lift its own emergency stop has not been
+    stopped. ``403 person_required`` otherwise.
 
 Pausing, in this order: the state is written to disk (nothing new starts from here); every pending approval is
 withdrawn, so nothing approved later runs a tool; every turn running in this process is stopped, the bridge's
@@ -47,9 +50,16 @@ def _who(identity: Any) -> str:
     return f"{kind} {name}".strip()
 
 
-def is_person(identity: Any) -> bool:
-    """An owner device. Not the global token, not an open daemon, not a scoped device."""
-    return identity is not None and not getattr(identity, "is_global", False) and bool(getattr(identity, "owner", False))
+def person_check(identity: Any, devices: Any) -> tuple[bool, str]:
+    """``PersonCheck`` over the request's credential: a marked, unheld device; never the token or an open daemon."""
+    from prometheus.computer.door import PersonCheck
+    from prometheus.permissions.approver import from_device_identity
+
+    try:
+        return PersonCheck(device_store=devices).check(from_device_identity(identity))
+    except Exception:                                          # noqa: BLE001 - any doubt is not a person
+        logger.warning("pause: the person check failed", exc_info=True)
+        return False, "the person check could not be completed"
 
 
 def paused_response() -> JSONResponse | None:
@@ -94,7 +104,8 @@ def _pause_coding_run(record: Any) -> bool:
 
 async def pause_everything(app: Any, *, by: str, reason: str) -> dict:
     """Pause (or confirm the pause), then stop everything that runs. Returns the answer's body."""
-    info, _new = _state().pause(by=by, reason=reason)
+    state = _state()
+    info, _new = state.pause(by=by, reason=reason)
     stopped = {"turns": 0, "desktop_tasks": 0, "tasks": 0, "coding_runs": 0, "approvals_withdrawn": 0}
 
     queue = getattr(app.state, "approval_queue", None)
@@ -154,13 +165,18 @@ async def pause_everything(app: Any, *, by: str, reason: str) -> dict:
             except Exception:                                  # noqa: BLE001
                 logger.warning("pause: stopping task %s failed", getattr(record, "id", "?"), exc_info=True)
 
-    logger.warning("Prometheus PAUSED by %s%s; stopped %s", info.by, f" ({info.reason})" if info.reason else "",
-                   stopped)
-    await _broadcast(app, {"paused": True, **info.to_dict()})
-    return {"paused": True, **info.to_dict(), "stopped": stopped}
+    persisted = state.persisted
+    logger.warning("Prometheus PAUSED by %s%s; stopped %s%s", info.by, f" ({info.reason})" if info.reason else "",
+                   stopped, "" if persisted else "; NOT written to disk, so it will not survive a restart")
+    # Every client hears THAT it is paused; who paused and why are the operator's (GET /api/status).
+    await _broadcast(app, {"paused": True, "since": info.since})
+    return {"paused": True, **info.to_dict(), "persisted": persisted, "stopped": stopped}
 
 
-def register_pause_routes(app: Any) -> None:
+def register_pause_routes(app: Any, *, devices: Any = None) -> None:
+    """*devices*: a callable returning the daemon's device store (the one the marks live in)."""
+    devices_of = devices if callable(devices) else (lambda: devices)
+
     @app.put("/api/pause")
     async def put_pause(request: Request):
         try:
@@ -175,12 +191,13 @@ def register_pause_routes(app: Any) -> None:
     @app.delete("/api/pause")
     async def delete_pause(request: Request):
         identity = _identity(request)
-        if not is_person(identity):
+        ok, why = person_check(identity, devices_of())
+        if not ok:
             return JSONResponse(status_code=403, content={
                 "error": "person_required",
-                "detail": "only a person resumes Prometheus: an owner device, or the owner in Telegram (/resume). "
-                          "The API token cannot, because a model with a shell can read it."})
+                "detail": "only a person resumes Prometheus: a device you marked (/computer allow <device id> from "
+                          "Telegram), or the owner in Telegram (/resume). " + why})
         cleared = _state().resume(by=_who(identity))
         logger.warning("Prometheus RESUMED by %s", _who(identity))
-        await _broadcast(app, {"paused": False})
+        await _broadcast(app, {"paused": False, "since": None})
         return {"paused": False, "was": cleared.to_dict() if cleared else None}

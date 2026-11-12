@@ -1637,8 +1637,6 @@ async def run_loop(
         )
     _turn_token = _RUN_TURN.set(turn_record)
     _turn_exit: BaseException | None = None
-    # Counted as a running turn of this process, so a pause can cancel it whoever started it.
-    _pause_task = _pause.turn_started()
     try:
         async for item in _run_loop(
             context,
@@ -1661,7 +1659,6 @@ async def run_loop(
         _turn_exit = exc
         raise
     finally:
-        _pause.turn_ended(_pause_task)
         if turn_record is not None:
             # The turn_end seam: one upsert, whatever the exit (audit Q4: every
             # exit but SIGKILL or a restart reaches this). Queued, never awaited.

@@ -1424,6 +1424,16 @@ class WebSocketBridge:
         dashboard uploads), run vision analysis to describe the image before
         passing to the agent — matching the Telegram gateway's flow.
         """
+        # Paused (engine/pause.py): a message starts no turn and is not kept to run on resume, and no slash command
+        # runs either (some start model work, such as /compact). Reads go through REST.
+        from prometheus.engine import pause as _pause
+
+        if (_paused := _pause.current()) is not None:
+            await self.broadcast({"type": "error", "timestamp": time.time(), "payload": {
+                "session_id": session_id, "client_msg_id": client_msg_id, "kind": "paused",
+                "message": "Prometheus is paused; nothing new runs until a person resumes it.",
+                "since": _paused.since}})
+            return
         # Slash commands first — they never become conversation turns. Resolve
         # the active session (non-creating) for /steer & friends, and pass a
         # get_or_create factory for /queue (which fires on a quiet chat).
@@ -1467,15 +1477,6 @@ class WebSocketBridge:
                 session_id, content, outcome.reply or "", client_msg_id,
                 name=(parse_slash(content) or ("", ""))[0],
             )
-            return
-        # Paused (engine/pause.py): a message starts no turn and is not kept to run on resume.
-        from prometheus.engine import pause as _pause
-
-        if (_paused := _pause.current()) is not None:
-            await self.broadcast({"type": "error", "timestamp": time.time(), "payload": {
-                "session_id": session_id, "client_msg_id": client_msg_id, "kind": "paused",
-                "message": "Prometheus is paused; nothing new runs until a person resumes it.",
-                **_paused.to_dict()}})
             return
 
         if not self.session_mgr:

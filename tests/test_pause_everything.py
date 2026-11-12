@@ -133,11 +133,15 @@ def test_a_device_a_person_marked_resumes(w):
 
 def test_an_owner_device_the_api_token_minted_cannot_resume(w):
     """Read the token, mint an owner device from loopback, resume: the shape a model with a shell would try."""
+    from fastapi.testclient import TestClient
+
     w.call("op", "PUT", "/api/pause", json={})
-    minted = w.call("op", "POST", "/api/devices", json={"name": "model-made", "platform": "ios", "owner": True})
+    local = TestClient(w.app, client=("127.0.0.1", 50123))            # on this machine, as a model's shell is
+    minted = local.post("/api/devices", headers=w.hdr("op"),
+                        json={"name": "model-made", "platform": "ios", "owner": True})
     assert minted.status_code in (200, 201), minted.text
     token = minted.json()["token"]
-    r = w.client.delete("/api/pause", headers={"Authorization": f"Bearer {token}"})
+    r = local.delete("/api/pause", headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 403 and r.json()["error"] == "person_required"
     assert pause.current() is not None
 
