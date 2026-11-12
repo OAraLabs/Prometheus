@@ -1639,6 +1639,10 @@ def create_app(
 
     _sent_client_ids: "_OrderedDict[tuple[str, str], str]" = _OrderedDict()
     _SENT_CLIENT_IDS_MAX = 4096
+    # The claims whose first send is still being dispatched: a repeat that arrives meanwhile WAITS for it, and is
+    # then answered by how it went (sent: a duplicate; failed: the repeat sends it itself). Answering "sent" at
+    # once would tell a client that a message whose dispatch then failed had arrived, and it would never retry.
+    _sending_client_ids: dict[tuple[str, str], asyncio.Future] = {}
 
     def _client_id_stored(session_id: str, client_msg_id: str) -> bool:
         store = _conversation_store()
@@ -1763,8 +1767,11 @@ def create_app(
         # been turned away, so this cannot say anything about another device's ids), and claimed BEFORE the
         # first await so two requests in flight at once cannot both pass.
         claim = None
+        sending: asyncio.Future | None = None
         if client_msg_id:
             claim = (session_id, client_msg_id)
+            while (first := _sending_client_ids.get(claim)) is not None:
+                await asyncio.shield(first)          # never raises: it is only ever given a result
             seen = _sent_client_ids.get(claim)
             if seen is None and _client_id_stored(session_id, client_msg_id):
                 seen = idempotency_key
@@ -1773,6 +1780,8 @@ def create_app(
             _sent_client_ids[claim] = idempotency_key
             while len(_sent_client_ids) > _SENT_CLIENT_IDS_MAX:
                 _sent_client_ids.popitem(last=False)
+            sending = asyncio.get_running_loop().create_future()
+            _sending_client_ids[claim] = sending
         try:
             await bridge.dispatch_user_message(
                 session_id, message, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice,
@@ -1786,6 +1795,12 @@ def create_app(
             if claim is not None:
                 _sent_client_ids.pop(claim, None)
             raise
+        finally:
+            if claim is not None and sending is not None:
+                if _sending_client_ids.get(claim) is sending:
+                    del _sending_client_ids[claim]
+                if not sending.done():
+                    sending.set_result(None)
         return {"run_id": idempotency_key, "status": "sent"}
 
     @app.post("/api/chat/interrupt")

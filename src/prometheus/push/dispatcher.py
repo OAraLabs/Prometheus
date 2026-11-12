@@ -66,6 +66,16 @@ def _is_node_pub(value: Any) -> bool:
     return len(raw) == 32 and base64.b64encode(raw).decode("ascii") == value
 
 
+#: APNs refuses a body over 4096 bytes (PayloadTooLarge), and an approval that never arrives blocks a turn. Every
+#: caller-sized string a body carries is capped; ``test_push_carries_node_pub`` builds every body with long ones.
+TOOL_NAME_CAP = 100
+ID_CAP = 200
+
+
+def _capped(value: Any, cap: int) -> Any:
+    return value[:cap] if isinstance(value, str) else value
+
+
 def first_line(text: str, cap: int = 120) -> str:
     line = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
     return line[:cap]
@@ -159,7 +169,7 @@ class PushDispatcher:
                     "sound": "default",
                     "interruption-level": "time-sensitive",
                 },
-                "request_id": payload.get("request_id"),
+                "request_id": _capped(payload.get("request_id"), ID_CAP),
                 "expires_at": payload.get("expires_at"),
             }
             desk = self._named(desk)
@@ -170,7 +180,7 @@ class PushDispatcher:
             "aps": {
                 "alert": {
                     "title": "Approval required",
-                    "body": f"{payload.get('tool_name', 'a tool')} — "
+                    "body": f"{_capped(payload.get('tool_name', 'a tool'), TOOL_NAME_CAP)} — "
                             f"{first_line(str(payload.get('description') or ''))}",
                 },
                 "category": "APPROVAL",
@@ -180,8 +190,8 @@ class PushDispatcher:
                 "interruption-level": "time-sensitive",
                 "mutable-content": 1,
             },
-            "request_id": payload.get("request_id"),
-            "tool_name": payload.get("tool_name"),
+            "request_id": _capped(payload.get("request_id"), ID_CAP),
+            "tool_name": _capped(payload.get("tool_name"), TOOL_NAME_CAP),
             "expires_at": payload.get("expires_at"),
         }
         body = self._named(body)
@@ -202,8 +212,8 @@ class PushDispatcher:
                 "category": category,
                 "sound": "default",
             },
-            **({"session_id": payload["session_id"]} if payload.get("session_id") else {}),
-            **({"task_id": payload["task_id"]} if payload.get("task_id") else {}),
+            **({"session_id": _capped(payload["session_id"], ID_CAP)} if payload.get("session_id") else {}),
+            **({"task_id": _capped(payload["task_id"], ID_CAP)} if payload.get("task_id") else {}),
         }
         body = self._named(body)
         for target in self._store.push_targets():
