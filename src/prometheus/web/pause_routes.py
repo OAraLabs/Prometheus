@@ -215,6 +215,13 @@ def register_pause_routes(app: Any, *, devices: Any = None) -> None:
     _app = app
     devices_of = devices if callable(devices) else (lambda: devices)
 
+    @app.get("/api/pause")
+    async def get_pause():
+        """Is the agent paused? For any valid credential, scoped devices included (a chat-only phone cannot read
+        ``/api/status``): ``{paused, since}`` only, never who paused or why (those are the operator's)."""
+        info = pause.current()
+        return {"paused": info is not None, "since": info.since if info is not None else None}
+
     @app.put("/api/pause")
     async def put_pause(request: Request):
         try:

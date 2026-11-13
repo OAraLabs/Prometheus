@@ -60,6 +60,7 @@ EXPECTED_SCOPED_ALLOWED = {
     ("GET", "/api/approvals"),
     ("POST", "/api/approvals/{request_id}/approve"),
     ("POST", "/api/approvals/{request_id}/deny"),
+    ("GET", "/api/pause"),                     # paused + since only (2026-11-13, phone item 4b)
 }
 
 

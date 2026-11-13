@@ -86,7 +86,7 @@ one is the explanation.
 | `/api/pair/requests/{request_id}/deny` | POST |
 | `/api/pairs` | GET |
 | `/api/paperclip/wake` | POST |
-| `/api/pause` | DELETE, PUT |
+| `/api/pause` | DELETE, GET, PUT |
 | `/api/pieces` | GET |
 | `/api/pieces/probe` | POST |
 | `/api/pieces/{piece_id}` | DELETE |

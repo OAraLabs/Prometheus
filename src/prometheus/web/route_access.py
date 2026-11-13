@@ -94,6 +94,8 @@ SCOPED_ALLOWED: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/approvals"),
     ("POST", "/api/approvals/{request_id}/approve"),
     ("POST", "/api/approvals/{request_id}/deny"),
+    # whether everything is paused, and since when: never who or why (GET /api/status, operator-only, has those)
+    ("GET", "/api/pause"),
 })
 
 #: What a device an operator MARKED for computer use may additionally do over REST (the door's W3 ruling: a marked
