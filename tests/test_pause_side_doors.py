@@ -152,6 +152,51 @@ def test_a_pause_in_a_rounds_stream_is_not_considered_for_the_fallback(caplog):
     assert "classified" not in caplog.text and "DECLINED" not in caplog.text
 
 
+def test_a_pause_meeting_the_cascade_is_not_a_compaction_failure(tmp_path):
+    """Round 2 of #919's review: a pause landing while the last batch's summary was in flight let the batches finish
+    and then met the cascade, which caught only the circuit breaker: compact() raised and the session logged
+    "LCM compaction FAILED" with a silent-failure row."""
+    from prometheus.memory.lcm_compaction import LCMCompactor
+    from prometheus.memory.lcm_conversation_store import LCMConversationStore
+    from prometheus.memory.lcm_summary_store import LCMSummaryStore
+    from prometheus.memory.lcm_types import CompactionConfig, MessagePart
+
+    class _Summarizer:
+        async def summarize_messages(self, messages, *, session_id=None):
+            return f"summary of {len(messages)} messages"
+
+        async def summarize_summaries(self, nodes, *, session_id=None):
+            raise pause.Paused(pause.PauseInfo(since=1.0, by="owner"))
+
+    db = tmp_path / "lcm.db"
+    conv, sums = LCMConversationStore(db_path=db), LCMSummaryStore(db_path=db)
+    for i in range(20):
+        conv.insert_message(MessagePart(role="user", content=f"message {i}", session_id="s1", turn_index=i,
+                                        token_count=5))
+    compactor = LCMCompactor(conv, sums, _Summarizer(), CompactionConfig(fresh_tail_count=2, compaction_batch_size=3))
+    result = asyncio.run(compactor.compact("s1"))                  # must not raise
+    assert result.summaries_created == 6 and len(sums.get_leaf_summaries("s1")) == 6
+
+
+def test_a_prompt_hook_that_lets_calls_through_on_failure_blocks_while_paused(paused, tmp_path):
+    """Round 2 of #919's review: a hook's model call met the pause as an ordinary failure, so a hook with
+    block_on_failure: false let a pre_tool_use call run without its verdict (a worker child finishes its round
+    with hooks loaded). While paused no verdict can be asked: the call is blocked (fail closed)."""
+    from prometheus.hooks.events import HookEvent
+    from prometheus.hooks.executor import HookExecutionContext, HookExecutor
+    from prometheus.hooks.registry import HookRegistry
+    from prometheus.hooks.schemas import PromptHookDefinition
+
+    provider = _Provider()
+    registry = HookRegistry()
+    registry.add(HookEvent.PRE_TOOL_USE, PromptHookDefinition(prompt="Safe? $ARGUMENTS", block_on_failure=False))
+    executor = HookExecutor(registry, HookExecutionContext(cwd=tmp_path, provider=provider, default_model="stub"))
+    result = asyncio.run(executor.execute(HookEvent.PRE_TOOL_USE, {"tool_name": "bash"}))
+    [one] = result.results
+    assert one.success is False and one.blocked is True and "paused" in one.reason
+    assert "private words" not in one.reason and provider.called == []
+
+
 # ── the curator ──────────────────────────────────────────────────────────────
 
 def test_a_curator_tick_while_everything_is_paused_is_skipped_not_failed(paused, tmp_path, monkeypatch):
