@@ -344,3 +344,12 @@ def test_refused_background_pushes_never_mute_the_approval_alerts():
         asyncio.run(disp.on_signal(_sig("approval_pending", _pending(f"m{i}"))))
         asyncio.run(disp.on_signal(_sig("approval_resolved", {"request_id": f"m{i}", "resolution": "denied"})))
     assert counted == []
+
+
+def test_server_capabilities_lists_approval_by_id():
+    """The phone turns on its one-request fetch only when the daemon says it has the route (2026-11-13)."""
+    from prometheus.web.ws_server import WebSocketBridge
+
+    bridge = WebSocketBridge.__new__(WebSocketBridge)
+    bridge.config = {}
+    assert "approval_by_id" in bridge._server_capabilities()
