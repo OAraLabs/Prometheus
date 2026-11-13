@@ -75,8 +75,9 @@ def paused_response(request: Request | None = None) -> JSONResponse | None:
     """The 423 a front door answers while paused, else None. The message is not kept to run on resume.
 
     Who paused and why go to an OPERATOR only (the API token, an owner device, an open daemon); a scoped device
-    hears THAT it is paused and since when, as ``GET /api/pause`` and the ``paused_changed`` frame tell it. A caller
-    that cannot be identified gets the scoped answer (fail closed)."""
+    hears THAT it is paused and since when, as ``GET /api/pause`` and the ``paused_changed`` frame tell it. An open
+    daemon (no API token) is the operator, as everywhere else; a call made without a request gets the scoped answer
+    (fail closed)."""
     info = pause.current()
     if info is None:
         return None
