@@ -514,6 +514,28 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
     cwd = Path(resolved_cwd)
     started_at = datetime.now(timezone.utc)
 
+    # PAUSE EVERYTHING (engine/pause.py): a job due while paused is skipped and recorded, never saved up. Its next
+    # run moves on to the next time on its schedule; nothing failed, so nothing is notified.
+    from prometheus.engine import pause as _pause
+
+    if (_paused := _pause.current()) is not None:
+        logger.info("Cron job %r skipped: Prometheus is paused", name)
+        entry = {
+            "name": name, "command": command, "cwd": resolved_cwd,
+            "started_at": started_at.isoformat(), "ended_at": datetime.now(timezone.utc).isoformat(),
+            "returncode": None, "status": "skipped", "stdout": "",
+            "stderr": f"Skipped: Prometheus is paused (since {_paused.since:.0f}); not run, and not saved up.",
+        }
+        try:
+            mark_job_run(name, success=False, status="skipped")
+        except Exception:
+            logger.exception("Job %r: could not record the skip", name)
+        try:
+            append_history(entry)
+        except Exception:
+            logger.exception("Job %r: could not append the history row", name)
+        return entry
+
     # SECURITY: vet the command at system (restricted) trust BEFORE spawning a
     # shell. Cron is unattended, so a non-ALLOW decision refuses execution — cron
     # is not a SecurityGate bypass. Covers the scheduler loop, run-now, and any
