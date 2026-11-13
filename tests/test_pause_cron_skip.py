@@ -60,3 +60,35 @@ def test_a_job_runs_as_before_when_not_paused(world, monkeypatch):
     monkeypatch.setattr(cs, "vet_cron_command", lambda command, cwd=None: (False, "test stops here"))
     entry = asyncio.run(cs.execute_job({"name": "nightly", "command": "echo hi", "schedule": "0 3 * * *"}))
     assert entry["status"] == "blocked"                               # it reached the gate: not skipped
+
+
+# ── side model calls (compaction, titles, extraction, curator, synthesis) ────
+
+@pytest.mark.parametrize("mode", ["raise", "return_none", "log_only"])
+def test_a_side_call_while_paused_reaches_no_model_and_fails_by_its_policy(tmp_path, mode):
+    from prometheus.learning.llm_envelope import LLMCallEnvelope
+
+    state = pause.PauseState(tmp_path / "pause.json")
+    pause.install(state)
+    state.pause(by="owner", reason="")
+    called: list[str] = []
+
+    class _Provider:
+        async def stream_message(self, request):
+            called.append("model")
+            if False:
+                yield None
+
+    env = LLMCallEnvelope("curator", telemetry=None, on_failure=mode)
+    try:
+        if mode == "raise":
+            with pytest.raises(pause.Paused):
+                asyncio.run(env.call(provider=_Provider(), model="m", prompt="p"))
+        elif mode == "return_none":
+            assert asyncio.run(env.call(provider=_Provider(), model="m", prompt="p")) is None
+        else:
+            result = asyncio.run(env.call(provider=_Provider(), model="m", prompt="p"))
+            assert isinstance(result.error, pause.Paused) and result.text == ""
+    finally:
+        pause.install(None)
+    assert called == []
