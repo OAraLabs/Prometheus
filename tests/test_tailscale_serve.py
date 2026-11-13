@@ -280,14 +280,39 @@ def test_a_forger_rotating_addresses_is_held_to_the_ceiling_and_a_quiet_source_k
 
     now = [0.0]
     limiter = SourceLimiter(60, 60.0, clock=lambda: now[0], ceiling=600)
-    quiet = [limiter.check(_tail(64, 0, 1)).allowed for _ in range(60)]
-    assert all(quiet) and not limiter.check(_tail(64, 0, 1)).allowed          # its own 60, as before
-    admitted = sum(limiter.check(_tail(64, i // 250, i % 250 + 2)).allowed for i in range(2000))
+    quiet = [limiter.check(_tail(64, 0, 1), relayed=True).allowed for _ in range(60)]
+    assert all(quiet) and not limiter.check(_tail(64, 0, 1), relayed=True).allowed   # its own 60, as before
+    admitted = sum(limiter.check(_tail(64, i // 250, i % 250 + 2), relayed=True).allowed for i in range(2000))
     assert admitted == 600 - 60                                            # every new address, held to the ceiling
-    refused = limiter.check(_tail(65, 0, 1))
+    refused = limiter.check(_tail(65, 0, 1), relayed=True)
     assert not refused.allowed and refused.retry_after >= 1
     now[0] = 61.0
-    assert limiter.check(_tail(64, 0, 1)).allowed                             # the window passes for everyone
+    assert limiter.check(_tail(64, 0, 1), relayed=True).allowed               # the window passes for everyone
+
+
+def test_the_ceiling_never_refuses_a_request_that_was_not_relayed():
+    """Both reviews of #921: an unconditional ceiling let anyone with ten addresses (a LAN host with privacy
+    addresses, five tailnet nodes) make hello and the identity challenge answer 429 to everyone, on every install."""
+    from prometheus.web.source_limits import SourceLimiter
+
+    limiter = SourceLimiter(60, 60.0, clock=lambda: 0.0, ceiling=600)
+    for i in range(700):
+        assert limiter.check(_tail(64, i // 250, i % 250 + 2), relayed=True).allowed is (i < 600)
+    assert all(limiter.check(f"192.0.2.{i % 250}" if i < 250 else f"198.51.100.{i % 250}").allowed
+               for i in range(500))                                        # direct callers: their own 60 each, no ceiling
+
+
+def test_hello_counts_only_relayed_requests_toward_the_ceiling(monkeypatch):
+    from prometheus.web import hello
+
+    monkeypatch.setattr(hello, "HELLO_CEILING_PER_MINUTE", 3)
+    limiter = hello.new_limiter()
+    answer = lambda: (200, {"ok": True})  # noqa: E731
+    relayed = [hello.guarded_response(_request({ts.SCOPE_KEY: SETTINGS}, client=_tail(64, 1, i)), limiter, answer)
+               for i in range(5)]
+    assert [r.status_code for r in relayed] == [200, 200, 200, 429, 429]
+    direct = [hello.guarded_response(_request({}, client=f"192.0.2.{i}"), limiter, answer) for i in range(5)]
+    assert all(r.status_code == 200 for r in direct)
 
 
 def test_hello_uses_the_ceiling():
@@ -299,14 +324,14 @@ def test_hello_uses_the_ceiling():
 
 # ── D4: the pairing answers ──────────────────────────────────────────────────
 
-def _request(scope_extra):
+def _request(scope_extra, client=TAILNET_CALLER):
     pytest.importorskip("starlette")
     from starlette.requests import Request
 
     from types import SimpleNamespace
 
     scope = {"type": "http", "method": "GET", "path": "/api/pair/requests/x", "scheme": "http",
-             "headers": [(b"host", f"{NAME}:8443".encode())], "client": (TAILNET_CALLER, 0),
+             "headers": [(b"host", f"{NAME}:8443".encode())], "client": (client, 0),
              "server": ("127.0.0.1", 8005), "query_string": b"",
              "app": SimpleNamespace(state=SimpleNamespace(lan_tls=None)), **scope_extra}
     return Request(scope)
@@ -351,3 +376,92 @@ def test_the_page_not_through_serve_keeps_its_policy():
     scope = {"headers": [(b"host", b"localhost:8005")]}
     csp = dict(_static_security_headers({"web": {"ws_port": 8010}}, scope))[b"content-security-policy"].decode()
     assert "ws://localhost:8010" in csp
+
+
+# ── review fixes (#921) ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("proxies", [["127.0.0.1"], ["127.0.0.0/8"], ["::1"], ["10.0.0.0/8", "127.0.0.1/32"]])
+def test_trusted_proxies_covering_loopback_turn_the_block_off_out_loud(token, proxies, caplog):
+    """Review of #921: uvicorn rewrites the client from X-Forwarded-For before the guard runs when trusted_proxies
+    covers loopback, so the guard saw no loopback peer and refused every REST request through Serve while the
+    bridge worked. The combination is refused at boot, with the reason."""
+    cfg = _config()
+    cfg["web"]["trusted_proxies"] = proxies
+    assert ts.serve_settings(cfg) is None
+    assert "trusted_proxies" in caplog.text
+
+
+def test_trusted_proxies_elsewhere_leave_the_block_on(token):
+    cfg = _config()
+    cfg["web"]["trusted_proxies"] = ["10.0.0.0/8"]
+    assert ts.serve_settings(cfg) == SETTINGS
+
+
+def test_the_no_token_warning_says_a_later_token_needs_a_restart(monkeypatch, caplog):
+    monkeypatch.delenv("PROMETHEUS_API_TOKEN", raising=False)
+    assert ts.serve_settings(_config()) is None
+    assert "restart" in caplog.text
+
+
+def test_a_zone_id_is_not_a_tailnet_address():
+    assert ts.tailnet_address("fd7a:115c:a1e0::1%eth0") is None
+    assert ts.tailnet_address("fd7a:115c:a1e0::1% any text") is None
+    inner, status, _ = _run_guard(_scope(xff="fd7a:115c:a1e0::1%eth0"), SETTINGS)
+    assert inner is None and status == 403
+
+
+def test_a_funnel_request_is_refused_on_both_listeners():
+    """Funnel (the public internet) relays through the same Serve config; a request it marks is never admitted."""
+    inner, status, _ = _run_guard(_scope(extra=[(b"tailscale-funnel-request", b"?1")]), SETTINGS)
+    assert inner is None and status == 403
+    assert _ws(_ws_pairs() + [("Tailscale-Funnel-Request", "?1")], SETTINGS) == ("refused", 403)
+
+
+def test_a_relayed_pairing_source_says_so():
+    """Review of #921: a local process can name any tailnet address, so the owner must not read a relayed source as
+    a bare address; it is shown as relayed."""
+    from prometheus.web.pairing_routes import _peer
+
+    assert _peer(_request({ts.SCOPE_KEY: SETTINGS})) == f"{TAILNET_CALLER} via tailscale serve"
+    assert _peer(_request({}, client="192.0.2.7")) == "192.0.2.7"
+
+
+def test_relayed_pairing_requests_share_a_ceiling(tmp_path):
+    """A forger naming a new tailnet address per request got a fresh per-source budget each time; relayed sources
+    together hold at most max_pending - 1 pending requests and max_requests_per_source_per_hour an hour."""
+    pytest.importorskip("cryptography")
+    from prometheus.config import pair_requests as pr
+    from prometheus.config.device_store import DeviceStore
+    from tests.test_pair_requests_store import INSTANCE_DER, Clock, Requester
+
+    clock = Clock()
+    store = pr.PairRequestStore(DeviceStore(tmp_path / "devices.db"), settings=pr.PairingSettings(), clock=clock)
+
+    def create(source):
+        return store.create(device_name="phone", platform="ios", public_key=Requester().public_b64, source=source,
+                            instance_public_key_der=INSTANCE_DER)
+
+    create(f"{_tail(64, 0, 1)}{pr.RELAY_SUFFIX}")
+    create(f"{_tail(64, 0, 2)}{pr.RELAY_SUFFIX}")
+    with pytest.raises(pr.LimitExceeded) as full:
+        create(f"{_tail(64, 0, 3)}{pr.RELAY_SUFFIX}")
+    assert full.value.reason == "pending_full"
+    create("192.0.2.10")                                                    # a direct source keeps the last slot
+
+
+def test_relayed_pairing_requests_share_an_hourly_ceiling(tmp_path):
+    pytest.importorskip("cryptography")
+    from prometheus.config import pair_requests as pr
+    from prometheus.config.device_store import DeviceStore
+    from tests.test_pair_requests_store import INSTANCE_DER, Clock, Requester
+
+    clock = Clock()
+    store = pr.PairRequestStore(DeviceStore(tmp_path / "devices.db"),
+                                settings=pr.PairingSettings(max_pending=50, max_pending_per_source=50), clock=clock)
+    for i in range(10):
+        store.create(device_name="phone", platform="ios", public_key=Requester().public_b64,
+                     source=f"{_tail(64, 1, i)}{pr.RELAY_SUFFIX}", instance_public_key_der=INSTANCE_DER)
+    with pytest.raises(pr.LimitExceeded) as hourly:
+        store.create(device_name="phone", platform="ios", public_key=Requester().public_b64,
+                     source=f"{_tail(64, 2, 1)}{pr.RELAY_SUFFIX}", instance_public_key_der=INSTANCE_DER)
+    assert hourly.value.reason == "hourly"
