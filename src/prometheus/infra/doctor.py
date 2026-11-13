@@ -252,15 +252,24 @@ def check_pause() -> DiagnosticCheck:
 
     resume = ("Resume from the owner's Telegram (/resume), or DELETE /api/pause from a device carrying the "
               "person mark (/person allow <device id>).")
-    info = pause.current()
+    # The file this process reads: the daemon's own, or (a CLI run) the one it was told, else this machine's default.
+    where = pause.child_env_entry()[pause.CHILD_ENV]
+    try:
+        info = pause.current()
+    except Exception as exc:                               # noqa: BLE001 - a doctor row must not take the report down
+        return DiagnosticCheck("Pause", "platform", "error",
+                               f"the pause state could not be read ({type(exc).__name__}) from {where}", fix=resume)
     if info is None:
-        return DiagnosticCheck("Pause", "platform", "ok", "not paused")
+        return DiagnosticCheck("Pause", "platform", "ok", f"not paused ({where})")
     if info.by == "unreadable" and info.reason.startswith("pause state unreadable"):
         return DiagnosticCheck(
             "Pause", "platform", "error",
             f"the pause file is unreadable ({info.reason.split(': ', 1)[-1]}), so everything counts as paused",
             fix=f"{resume} Resuming rewrites the file; check its owner and permissions if it stays unreadable.")
-    since = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(info.since))
+    try:
+        since = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(info.since))
+    except (OverflowError, ValueError, OSError):
+        since = f"{info.since:.0f}"
     return DiagnosticCheck("Pause", "platform", "warning", f"everything is PAUSED (since {since})", fix=resume)
 
 

@@ -545,6 +545,13 @@ class Curator:
                 log.exception("Curator: LLM review failed")
                 run.errors.append(f"LLM review failed: {exc!s}")
 
+        # Paused while the model reviewed (engine/pause.py): nothing is moved. The suggestions come again next run.
+        from prometheus.engine import pause as _pause
+
+        if run.prunings and _pause.current() is not None:
+            log.info("Curator: Prometheus was paused during the review; archiving nothing")
+            run.prunings = []
+
         # Apply prunings (move to .archive/, never delete).
         if run.prunings and not dry_run:
             never_loaded = {s["name"] for s in skills if s["days_ago"] is None}
