@@ -399,3 +399,21 @@ def test_reason_and_who_are_one_short_line(state):
     assert "\n" not in info.by and len(info.by) <= 80
     stored = pause.PauseState(state.path).current
     assert stored is not None and stored.reason == info.reason and stored.by == info.by
+
+
+def test_a_scoped_device_can_ask_whether_it_is_paused_but_not_who_or_why(w):
+    """Phone item 4b (2026-11-13): /api/status is operator-only, so a chat-only phone could not ask."""
+    r = w.call("a", "GET", "/api/pause")
+    assert r.status_code == 200 and r.json() == {"paused": False, "since": None}
+    w.call("op", "PUT", "/api/pause", json={"reason": "private words"})
+    r = w.call("a", "GET", "/api/pause")
+    assert r.status_code == 200 and r.json()["paused"] is True and r.json()["since"]
+    assert set(r.json()) == {"paused", "since"}
+
+
+def test_the_read_route_is_classified_for_scoped_devices():
+    from prometheus.web import route_access
+
+    assert route_access.is_scoped_allowed("GET", "/api/pause")
+    assert not route_access.is_scoped_allowed("PUT", "/api/pause")
+    assert not route_access.is_scoped_allowed("DELETE", "/api/pause")
