@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import http
 import json
 import logging
@@ -29,6 +30,7 @@ from prometheus.engine import loop_watchdog as _loop_watchdog
 from prometheus.version import package_version
 from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import is_loopback_address, is_loopback_host_header
+from prometheus.web.tailscale_serve import serve_settings
 from prometheus.web.session_scope import Scope, SessionAccess, event_session_id, scope_for, session_exists
 
 logger = logging.getLogger(__name__)
@@ -160,8 +162,12 @@ def _client_label(ws: Any) -> str:
     return f"id={id(ws):x}"
 
 
-def _loopback_process_request(connection: Any, request: Any) -> Any:
+def _loopback_process_request(connection: Any, request: Any, *, serve: Any = None) -> Any:
     """Refuse a WebSocket handshake whose Host header is not a loopback name.
+
+    With *serve* (``web.tailscale``, web/tailscale_serve.py) the node's tailnet name on the bridge's Serve port is
+    admitted too, on a handshake relayed exactly the way ``tailscale serve`` relays it (the same rule as the REST
+    guard). The peer is read from the connection; the legacy hook has none, so there it is never admitted.
 
     Installed only when the bridge is bound to a loopback address (DNS-rebinding
     defence, see web/loopback.py). Runs before the upgrade, so a refused client
@@ -181,6 +187,8 @@ def _loopback_process_request(connection: Any, request: Any) -> Any:
         hosts = []
     if len(hosts) == 1 and is_loopback_host_header(hosts[0]):
         return None
+    if serve is not None and _relayed_by_serve(connection, headers, serve):
+        return None
     shown = hosts[0] if len(hosts) == 1 else f"{len(hosts)} Host headers"
     logger.warning(
         "refused a WebSocket handshake: its Host header %r is not a loopback "
@@ -191,6 +199,21 @@ def _loopback_process_request(connection: Any, request: Any) -> Any:
     if hasattr(connection, "respond"):
         return connection.respond(http.HTTPStatus.FORBIDDEN, message)
     return http.HTTPStatus.FORBIDDEN, [("Content-Type", "text/plain")], message.encode()
+
+
+def _relayed_by_serve(connection: Any, headers: Any, serve: Any) -> bool:
+    from prometheus.web.tailscale_serve import relayed_by_serve
+
+    try:
+        peer = getattr(connection, "remote_address", None)
+        peer_host = peer[0] if isinstance(peer, (tuple, list)) and peer else None
+        return relayed_by_serve(
+            list(headers.get_all("Host")), list(headers.get_all("X-Forwarded-Host")),
+            list(headers.get_all("X-Forwarded-For")),
+            peer_is_loopback=isinstance(peer_host, str) and is_loopback_address(peer_host),
+            settings=serve, port=serve.ws_port) is not None
+    except Exception:  # unreadable: refuse, never guess
+        return False
 
 
 #: The frames that carry a tool call awaiting approval (``serialize_pending`` / its resolution).
@@ -524,7 +547,8 @@ class WebSocketBridge:
             host,
             port,
             max_size=WS_MAX_FRAME_BYTES,
-            process_request=_loopback_process_request if is_loopback_address(host) else None,
+            process_request=(functools.partial(_loopback_process_request, serve=serve_settings(self.config))
+                             if is_loopback_address(host) else None),
             ssl=ssl,
         )
         if ssl is None:

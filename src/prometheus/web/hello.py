@@ -43,14 +43,17 @@ HELLO_FIELDS = ("v", "name", "agent", "fp", "pair", "tls")
 
 #: Requests per minute per TCP peer.
 HELLO_PER_MINUTE = 60
+#: Requests per minute from all peers together: what still bounds a caller who can name a new peer per request
+#: (a local process forging tailnet addresses through the ``tailscale serve`` path, web/tailscale_serve.py).
+HELLO_CEILING_PER_MINUTE = 600
 _WINDOW_SECONDS = 60.0
 
 _NO_STORE = {"Cache-Control": "no-store"}
 
 
 def new_limiter() -> SourceLimiter:
-    """A limiter at the CURRENT ``HELLO_PER_MINUTE`` (read here, so a test can change it)."""
-    return SourceLimiter(HELLO_PER_MINUTE, _WINDOW_SECONDS)
+    """A limiter at the CURRENT ``HELLO_PER_MINUTE`` and ceiling (read here, so a test can change them)."""
+    return SourceLimiter(HELLO_PER_MINUTE, _WINDOW_SECONDS, ceiling=HELLO_CEILING_PER_MINUTE)
 
 
 def pair_mode(*, setup_mode: bool, auth_on: bool, approval: bool = False, code: bool = False) -> str:

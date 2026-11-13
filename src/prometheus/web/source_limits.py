@@ -42,6 +42,7 @@ class SourceLimiter:
         *,
         clock: Callable[[], float] = time.monotonic,
         max_sources: int = 4096,
+        ceiling: int | None = None,
     ) -> None:
         self._limit = int(limit)
         self._window = float(window)
@@ -49,6 +50,11 @@ class SourceLimiter:
         self._max_sources = int(max_sources)
         # Ordered by when each source was last seen, oldest first.
         self._hits: OrderedDict[str, deque[float]] = OrderedDict()
+        #: At most this many admitted events per window from ALL sources together (None: no ceiling). A caller who
+        #: can name a new source per request (a local process forging tailnet addresses for a relayed route) gets a
+        #: fresh bucket each time; this is what still bounds it. A refusal here spends nothing either.
+        self._ceiling = None if ceiling is None else int(ceiling)
+        self._all: deque[float] = deque()
 
     def __len__(self) -> int:
         return len(self._hits)
@@ -71,6 +77,12 @@ class SourceLimiter:
             self._hits.move_to_end(source)
             oldest = hits[0] if hits else now
             return Decision(False, max(1, math.ceil(oldest + self._window - now)))
+        if self._ceiling is not None:
+            while self._all and self._all[0] <= cutoff:
+                self._all.popleft()
+            if len(self._all) >= self._ceiling:
+                return Decision(False, max(1, math.ceil(self._all[0] + self._window - now)))
+            self._all.append(now)
         hits.append(now)
         self._hits[source] = hits
         self._hits.move_to_end(source)

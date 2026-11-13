@@ -303,9 +303,12 @@ def _request(scope_extra):
     pytest.importorskip("starlette")
     from starlette.requests import Request
 
+    from types import SimpleNamespace
+
     scope = {"type": "http", "method": "GET", "path": "/api/pair/requests/x", "scheme": "http",
              "headers": [(b"host", f"{NAME}:8443".encode())], "client": (TAILNET_CALLER, 0),
-             "server": ("127.0.0.1", 8005), "query_string": b"", **scope_extra}
+             "server": ("127.0.0.1", 8005), "query_string": b"",
+             "app": SimpleNamespace(state=SimpleNamespace(lan_tls=None)), **scope_extra}
     return Request(scope)
 
 

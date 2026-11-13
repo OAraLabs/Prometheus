@@ -74,7 +74,9 @@ DECISIONS, so the next reader does not have to re-derive them
   name or address, and Starlette's TestClient sends ``Host: testserver``.
 * A local reverse proxy in front of a loopback bind must send
   ``Host: localhost`` (or 127.0.0.1) to the daemon; forwarding the public name
-  is refused.
+  is refused. The one exception is ``tailscale serve`` when ``web.tailscale``
+  names it (web/tailscale_serve.py): the guard then also accepts the node's
+  tailnet name, and only on a request relayed exactly the way Serve relays it.
 
 This module is stdlib-only (see bind.py for why).
 """
@@ -275,6 +277,10 @@ def _single_host_header(scope: Scope) -> str | None:
     return values[0].decode("latin-1")
 
 
+def _header_values(scope: Scope, name: bytes) -> list[str]:
+    return [value.decode("latin-1") for key, value in (scope.get("headers") or ()) if key.lower() == name]
+
+
 class LoopbackHostGuard:
     """ASGI middleware: answer only requests whose Host names this machine.
 
@@ -283,10 +289,26 @@ class LoopbackHostGuard:
     routing, before the request body is read): HTTP gets a 403, and a WebSocket
     handshake is closed (uvicorn turns that into a 403 as well). Lifespan scopes
     pass through untouched.
+
+    With *serve* (``web.tailscale``, web/tailscale_serve.py) it also admits the
+    node's tailnet name on a request relayed exactly the way ``tailscale serve``
+    relays it, and passes that request on with the tailnet caller as its client
+    and the settings under ``tailscale_serve.SCOPE_KEY``.
     """
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, serve: Any = None) -> None:
         self.app = app
+        self.serve = serve
+
+    def _serve_caller(self, scope: Scope) -> str | None:
+        if self.serve is None:
+            return None
+        from prometheus.web import tailscale_serve
+
+        return tailscale_serve.relayed_by_serve(
+            _header_values(scope, b"host"), _header_values(scope, b"x-forwarded-host"),
+            _header_values(scope, b"x-forwarded-for"), peer_is_loopback=is_loopback_peer(scope),
+            settings=self.serve, port=self.serve.rest_port)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         kind = scope["type"]
@@ -294,6 +316,14 @@ class LoopbackHostGuard:
             _single_host_header(scope)
         ):
             await self.app(scope, receive, send)
+            return
+        caller = self._serve_caller(scope)
+        if caller is not None:
+            from prometheus.web.tailscale_serve import SCOPE_KEY
+
+            # The tailnet caller is the client from here on (per-source limits key on it); the request stays
+            # relayed (its X-Forwarded-* headers are kept), so it is never "this machine".
+            await self.app({**scope, "client": (caller, 0), SCOPE_KEY: self.serve}, receive, send)
             return
 
         shown = _single_host_header(scope)
@@ -321,7 +351,8 @@ class LoopbackHostGuard:
         await send({"type": "http.response.body", "body": body})
 
 
-def guard_if_loopback(app: ASGIApp, host: str) -> ASGIApp:
+def guard_if_loopback(app: ASGIApp, host: str, *, serve: Any = None) -> ASGIApp:
     """*app* wrapped in :class:`LoopbackHostGuard` when *host* is a loopback
-    address; otherwise *app* itself, unrestricted."""
-    return LoopbackHostGuard(app) if is_loopback_address(host) else app
+    address; otherwise *app* itself, unrestricted. *serve*: the validated
+    ``web.tailscale`` settings, or None."""
+    return LoopbackHostGuard(app, serve=serve) if is_loopback_address(host) else app
