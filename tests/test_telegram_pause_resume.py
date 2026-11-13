@@ -142,3 +142,22 @@ def test_telegram_registers_both_and_the_handlers_check_the_sender(state, app):
     assert pause.current() is not None
     asyncio.run(adapter._cmd_resume(update(42, "/resume"), None))
     assert pause.current() is None
+
+
+def test_registering_the_routes_gives_chat_pause_the_web_app(tmp_path):
+    """Review low 2 (2026-11-13): if this wiring were dropped, /pause would quietly stop sweeping."""
+    from prometheus.web import pause_routes
+    from prometheus.web.server import create_app
+
+    app = create_app({})
+    assert pause_routes._app is app
+
+
+def test_a_pause_without_the_web_app_says_nothing_was_swept(state, monkeypatch):
+    """Review low 1: without the web app only the state is set; the reply must not claim nothing was running."""
+    from prometheus.gateway.commands import cmd_pause
+    from prometheus.web import pause_routes
+
+    monkeypatch.setattr(pause_routes, "_app", None)
+    reply = asyncio.run(cmd_pause("", by=_tg("42")))
+    assert "nothing was running" not in reply and "not swept" in reply
