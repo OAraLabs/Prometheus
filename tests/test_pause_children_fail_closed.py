@@ -111,40 +111,46 @@ def test_a_process_that_was_not_told_keeps_the_default_path(tmp_path, monkeypatc
 
 # ── chat-gateway turns run as tasks a pause can cancel ──────────────────────
 
-def test_a_gateway_turn_is_cancelled_by_a_pause_and_its_poller_survives(tmp_path, monkeypatch):
+def test_a_gateway_turn_runs_as_a_task_a_pause_can_cancel(monkeypatch):
     """Telegram, Slack and Discord run turns through AgentLoop.run_async, some inline in a long-lived poller task.
-    run_async now runs the turn as a task of its own: a pause cancels the turn (the caller hears Paused) and never
-    the poller."""
+    run_async hands its turn to pause.run_as_turn (a task of its own that a pause cancels, and only it); inside that
+    task it runs the body. run_as_turn's own cancellation and Paused are tested in tests/test_pause_everything.py."""
     import asyncio
-    from types import SimpleNamespace
 
-    from prometheus.engine.agent_loop import AgentLoop
-    from prometheus.web import pause_routes
+    from prometheus.engine import agent_loop as al
 
-    loop = AgentLoop.__new__(AgentLoop)
+    handed: list[object] = []
 
-    async def slow_body(*a, **kw):
-        await asyncio.sleep(60)
+    async def spy(coro):
+        handed.append(coro)
+        coro.close()
+        return "ran as a turn task"
 
-    monkeypatch.setattr(loop, "_run_async_body", slow_body)
-    pause.install(pause.PauseState(tmp_path / "pause.json"))
+    monkeypatch.setattr(al._pause, "run_as_turn", spy)
+    loop = al.AgentLoop.__new__(al.AgentLoop)
+    assert asyncio.run(loop.run_async("system", "hi")) == "ran as a turn task"
+    assert len(handed) == 1
+
+
+def test_inside_a_turn_task_run_async_runs_its_body(monkeypatch):
+    import asyncio
+
+    from prometheus.engine import agent_loop as al
+
+    async def never(coro):
+        raise AssertionError("a turn already inside its task must not be wrapped again")
+
+    monkeypatch.setattr(al._pause, "run_as_turn", never)
+    loop = al.AgentLoop.__new__(al.AgentLoop)
 
     async def go():
-        heard: list[str] = []
+        al._IN_TURN_TASK.set(True)
+        try:
+            await loop.run_async("system", "hi")
+        except AssertionError:
+            raise
+        except Exception:
+            return "body ran"                    # an empty instance fails inside the body: that is the point
+        return "body ran"
 
-        async def poller():
-            try:
-                await loop.run_async("system", "hi")
-            except pause.Paused:
-                heard.append("paused")
-            await asyncio.sleep(0)
-            return "poller alive"
-
-        p = asyncio.create_task(poller())
-        await asyncio.sleep(0.01)
-        result = await pause_routes.pause_everything(SimpleNamespace(state=SimpleNamespace()), by="test", reason="")
-        out = await asyncio.wait_for(p, 5)
-        return heard, out, result
-
-    heard, out, result = asyncio.run(go())
-    assert heard == ["paused"] and out == "poller alive" and result["stopped"]["turns"] == 1
+    assert asyncio.run(go()) == "body ran"

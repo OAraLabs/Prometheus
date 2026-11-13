@@ -70,6 +70,9 @@ if TYPE_CHECKING:
     # (coordinator.__init__ → subagent → engine.agent_loop)
     pass
 
+#: Set inside the task AgentLoop.run_async runs its turn in (engine/pause.py run_as_turn).
+_IN_TURN_TASK: contextvars.ContextVar[bool] = contextvars.ContextVar("prometheus_in_turn_task", default=False)
+
 log = logging.getLogger(__name__)
 
 # SPRINT-4 audit HIGH-RISK #13 — one-shot WARN guard for legacy
@@ -6568,6 +6571,19 @@ class AgentLoop:
         ``surface`` (telemetry v2) names the caller's front door for the
         turn's ``turns``/``responses`` rows; record-only, like the two above.
         """
+        # PAUSE EVERYTHING (engine/pause.py): the turn runs as a task of its own, so a pause cancels THIS turn and
+        # nothing else. Telegram, Slack, Discord and the benchmark commands call here, some inline in a long-lived
+        # poller task a pause must never cancel. Re-entered once inside the new task (the flag marks it); called
+        # through the class, so the body below stays this method's own. A pause reaches the caller as Paused.
+        if not _IN_TURN_TASK.get():
+            async def _as_turn() -> RunResult:
+                _IN_TURN_TASK.set(True)
+                return await AgentLoop.run_async(
+                    self, system_prompt, user_message, messages=messages, session_id=session_id,
+                    session_state=session_state, tool_choice=tool_choice, record_session_id=record_session_id,
+                    record_summary=record_summary, surface=surface)
+
+            return await _pause.run_as_turn(_as_turn())
         if messages is not None:
             messages = list(messages)  # shallow copy — run_loop mutates in place
             if not user_message:
