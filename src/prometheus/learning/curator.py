@@ -376,7 +376,10 @@ class Curator:
             return
         while self._running:
             try:
-                if self._state_store.curator().paused:
+                from prometheus.engine import pause as _pause
+
+                # The curator's own pause, or everything paused (engine/pause.py): skipped, not failed.
+                if self._state_store.curator().paused or _pause.current() is not None:
                     log.debug("Curator: paused, skipping tick")
                     # A pause is intentional — don't count as a failure or
                     # back off; just record a skipped row for liveness.

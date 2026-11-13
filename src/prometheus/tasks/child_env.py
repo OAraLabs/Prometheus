@@ -108,6 +108,10 @@ def task_child_env(
         dict(base) if base is not None else None,
         extra_keep=tuple(sorted(provider_key_names(config_path))),
     )
+    # Which pause file this daemon reads (engine/pause.py): a child that cannot reach it treats the agent as paused.
+    from prometheus.engine import pause as _pause
+
+    env.update(_pause.child_env_entry())
     if overlay:
         env.update(overlay)
     return env
