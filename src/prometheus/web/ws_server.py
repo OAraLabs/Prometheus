@@ -1090,6 +1090,10 @@ class WebSocketBridge:
             capabilities.append("push_node_pub")
         # GET /api/approvals/{request_id} exists (server.py): a client may fetch one request instead of the list.
         capabilities.append("approval_by_id")
+        # Push is on, so the job watcher runs (launcher.py): the daemon takes a push-to-start token and starts
+        # JobActivityAttributes Live Activities for long jobs (push/job_activity.py).
+        if dispatcher is not None:
+            capabilities.append("job_activities")
         return capabilities
 
     async def _system_note(self, session_id: str, content: str) -> None:
