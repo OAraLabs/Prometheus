@@ -274,6 +274,11 @@ def _request(row: sqlite3.Row, now: float) -> PairRequest:
     )
 
 
+#: The suffix a source relayed by ``tailscale serve`` carries (web/pairing_routes._peer). A local process can name any
+#: tailnet address there, so relayed sources also share a ceiling (:meth:`PairRequestStore._check_limits`).
+RELAY_SUFFIX = " via tailscale serve"
+
+
 class PairRequestStore:
     """Pairing requests in ``devices.db``, on the registry's own connection."""
 
@@ -386,6 +391,21 @@ class PairRequestStore:
             (source, now - _HOUR)).fetchone()
         if count >= s.max_requests_per_source_per_hour:
             raise LimitExceeded("hourly", math.ceil(oldest + _HOUR - now))
+        if source.endswith(RELAY_SUFFIX):
+            # Relayed sources together: a forger naming a new address per request still holds at most all but one
+            # pending slot, and gets the per-source hourly budget once, not once per address.
+            relayed = "substr(source, -?) = ?"
+            args = (len(RELAY_SUFFIX), RELAY_SUFFIX)
+            count, soonest = conn.execute(
+                f"SELECT COUNT(*), MIN(expires_at) FROM pair_requests WHERE {live} AND {relayed}",
+                (now, *args)).fetchone()
+            if count >= max(1, s.max_pending - 1):
+                raise LimitExceeded("pending_full", math.ceil(soonest - now))
+            count, oldest = conn.execute(
+                f"SELECT COUNT(*), MIN(created_at) FROM pair_requests WHERE created_at > ? AND {relayed}",
+                (now - _HOUR, *args)).fetchone()
+            if count >= s.max_requests_per_source_per_hour:
+                raise LimitExceeded("hourly", math.ceil(oldest + _HOUR - now))
 
     # -- reading ----------------------------------------------------------
 

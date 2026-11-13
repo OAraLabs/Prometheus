@@ -43,8 +43,8 @@ HELLO_FIELDS = ("v", "name", "agent", "fp", "pair", "tls")
 
 #: Requests per minute per TCP peer.
 HELLO_PER_MINUTE = 60
-#: Requests per minute from all peers together: what still bounds a caller who can name a new peer per request
-#: (a local process forging tailnet addresses through the ``tailscale serve`` path, web/tailscale_serve.py).
+#: Requests per minute from all RELAYED peers together (``tailscale serve``, web/tailscale_serve.py): what still
+#: bounds a local process forging a new tailnet address per request. A direct caller never counts toward it.
 HELLO_CEILING_PER_MINUTE = 600
 _WINDOW_SECONDS = 60.0
 
@@ -139,8 +139,10 @@ def guarded_response(
                      "detail": "this route is for apps, not for a web page"},
             headers=_NO_STORE,
         )
+    from prometheus.web.tailscale_serve import came_through_serve
+
     peer = request.client.host if request.client else "unknown"
-    decision = limiter.check(peer)
+    decision = limiter.check(peer, relayed=came_through_serve(request) is not None)
     if not decision.allowed:
         return JSONResponse(
             status_code=429,

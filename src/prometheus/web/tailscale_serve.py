@@ -15,8 +15,11 @@ and ``X-Forwarded-Host`` each present once and naming the configured name, on th
 loopback Host guards accept the name (DNS rebinding needs a name the attacker controls; a page cannot use this one,
 and cannot set ``X-Forwarded-*`` across origins), and the REST guard makes the tailnet address the request's client,
 so per-source limits key on the real caller. A local process can forge all of that; it is on this machine already,
-gains no route (a relayed request is never "this machine", ``web/loopback.is_same_machine``), and hello's ceiling
-bounds what it can make the daemon sign.
+is never "this machine" (``web/loopback.is_same_machine``), so it reaches no same-machine route. What it can do is
+name a new tailnet address per request, which would give it a fresh per-source budget each time: so hello's limiter
+has a ceiling for relayed requests, pairing requests from relayed sources share a ceiling, and a relayed source is
+shown to the owner as relayed ("<address> via tailscale serve"), never as a bare address. A request Funnel marks
+(``Tailscale-Funnel-Request``: the public internet through the same Serve config) is never admitted.
 
 Off unless ``web.tailscale`` is a valid, enabled block AND the daemon has an API token: an open daemon answering
 relayed requests would answer the whole tailnet.
@@ -98,9 +101,32 @@ def serve_settings(config: Mapping[str, Any] | None) -> ServeSettings | None:
         return None
     if not (web.get("api_token") or os.environ.get("PROMETHEUS_API_TOKEN")):
         logger.warning("web.tailscale: this daemon has no API token, and an open daemon must not answer requests "
-                       "relayed from the tailnet: ignoring the block (HTTPS over Tailscale is off)")
+                       "relayed from the tailnet: ignoring the block (HTTPS over Tailscale is off). A token made "
+                       "after the daemon started takes effect at the next restart.")
+        return None
+    if _trusts_loopback_proxy(web.get("trusted_proxies")):
+        logger.warning("web.tailscale: web.trusted_proxies covers this machine (127.0.0.1 or ::1), so the server "
+                       "would rewrite every relayed request's client before the Host check sees it, and refuse them "
+                       "all. Remove the loopback entry: the tailscale block replaces it. Ignoring the block (HTTPS "
+                       "over Tailscale is off).")
         return None
     return ServeSettings(name=str(name), rest_port=int(rest_port), ws_port=int(ws_port))
+
+
+def _trusts_loopback_proxy(entries: Any) -> bool:
+    """Does a ``web.trusted_proxies`` list cover 127.0.0.1 or ::1? (Entries are parsed the lenient way; an entry that
+    does not parse is ignored here, as web/serving.py drops it.)"""
+    if not isinstance(entries, (list, tuple)):
+        return False
+    loopbacks = (ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1"))
+    for entry in entries:
+        try:
+            network = ipaddress.ip_network(str(entry).strip(), strict=False)
+        except ValueError:
+            continue
+        if any(ip.version == network.version and ip in network for ip in loopbacks):
+            return True
+    return False
 
 
 def _host_and_port(value: str | None) -> tuple[str, int | None] | None:
@@ -133,6 +159,8 @@ def tailnet_address(value: str | None) -> str | None:
         ip = ipaddress.ip_address(value.strip())
     except ValueError:
         return None
+    if isinstance(ip, ipaddress.IPv6Address) and ip.scope_id is not None:
+        return None  # a zone id carries arbitrary text; Serve never sends one
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
     in_range = ip in TAILNET_V4 if isinstance(ip, ipaddress.IPv4Address) else ip in TAILNET_V6
@@ -140,11 +168,14 @@ def tailnet_address(value: str | None) -> str | None:
 
 
 def relayed_by_serve(hosts: list[str], forwarded_hosts: list[str], forwarded_fors: list[str], *,
-                     peer_is_loopback: bool, settings: ServeSettings | None, port: int) -> str | None:
+                     peer_is_loopback: bool, settings: ServeSettings | None, port: int,
+                     funnel: bool = False) -> str | None:
     """The tailnet caller's address when a request is relayed the way Serve relays it to *port*, else None.
 
-    Each list is every value of that header (one entry per header line). See the module docstring for the rule."""
-    if settings is None or not peer_is_loopback:
+    Each list is every value of that header (one entry per header line). *funnel*: the request carries
+    ``Tailscale-Funnel-Request`` (Funnel relays the public internet through the same config), never admitted.
+    See the module docstring for the rule."""
+    if settings is None or not peer_is_loopback or funnel:
         return None
     if len(hosts) != 1 or len(forwarded_hosts) != 1 or len(forwarded_fors) != 1:
         return None

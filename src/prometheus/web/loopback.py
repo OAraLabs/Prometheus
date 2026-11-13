@@ -308,7 +308,8 @@ class LoopbackHostGuard:
         return tailscale_serve.relayed_by_serve(
             _header_values(scope, b"host"), _header_values(scope, b"x-forwarded-host"),
             _header_values(scope, b"x-forwarded-for"), peer_is_loopback=is_loopback_peer(scope),
-            settings=self.serve, port=self.serve.rest_port)
+            settings=self.serve, port=self.serve.rest_port,
+            funnel=bool(_header_values(scope, b"tailscale-funnel-request")))
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         kind = scope["type"]

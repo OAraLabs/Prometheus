@@ -50,9 +50,11 @@ class SourceLimiter:
         self._max_sources = int(max_sources)
         # Ordered by when each source was last seen, oldest first.
         self._hits: OrderedDict[str, deque[float]] = OrderedDict()
-        #: At most this many admitted events per window from ALL sources together (None: no ceiling). A caller who
-        #: can name a new source per request (a local process forging tailnet addresses for a relayed route) gets a
-        #: fresh bucket each time; this is what still bounds it. A refusal here spends nothing either.
+        #: At most this many admitted RELAYED events per window, from all relayed sources together (None: no
+        #: ceiling). A caller who can name a new source per request (a local process forging tailnet addresses on
+        #: the ``tailscale serve`` path) gets a fresh bucket each time; this is what still bounds it. Only checks
+        #: made with ``relayed=True`` count toward it or are refused by it, so it can never lock out a direct caller.
+        #: A refusal here spends nothing either.
         self._ceiling = None if ceiling is None else int(ceiling)
         self._all: deque[float] = deque()
 
@@ -62,8 +64,9 @@ class SourceLimiter:
     def __contains__(self, source: object) -> bool:
         return source in self._hits
 
-    def check(self, source: str) -> Decision:
-        """Admit or refuse one event from *source*. Records the spend only when admitted."""
+    def check(self, source: str, *, relayed: bool = False) -> Decision:
+        """Admit or refuse one event from *source*. Records the spend only when admitted. *relayed*: the source was
+        named by a relay (``tailscale serve``), so the ceiling applies too."""
         now = self._clock()
         cutoff = now - self._window
         self._forget_idle(cutoff)
@@ -77,7 +80,7 @@ class SourceLimiter:
             self._hits.move_to_end(source)
             oldest = hits[0] if hits else now
             return Decision(False, max(1, math.ceil(oldest + self._window - now)))
-        if self._ceiling is not None:
+        if relayed and self._ceiling is not None:
             while self._all and self._all[0] <= cutoff:
                 self._all.popleft()
             if len(self._all) >= self._ceiling:

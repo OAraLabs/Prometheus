@@ -20,8 +20,10 @@ uvicorn configuration through :func:`serve_config`:
   to believe, so an entry that would believe EVERYONE (``*``, ``0.0.0.0/0``, ``::/0``) or is not an address
   is dropped, out loud, and never widens trust.
 
-The cost of the default, stated: behind a reverse proxy on this machine (a tunnel, ``tailscale serve``,
-nginx) that is NOT named, every request now looks like it comes from 127.0.0.1. Name it.
+The cost of the default, stated: behind a reverse proxy on this machine (a tunnel, nginx) that is NOT named,
+every request now looks like it comes from 127.0.0.1. Name it. ``tailscale serve`` is the exception: do NOT name
+loopback for it; ``web.tailscale`` (web/tailscale_serve.py) believes exactly what Serve sends, and refuses to start
+alongside a ``trusted_proxies`` entry that covers loopback.
 
 Source: novel code for Prometheus, 2026-10-08.
 """

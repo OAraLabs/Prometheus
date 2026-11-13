@@ -211,7 +211,8 @@ def _relayed_by_serve(connection: Any, headers: Any, serve: Any) -> bool:
             list(headers.get_all("Host")), list(headers.get_all("X-Forwarded-Host")),
             list(headers.get_all("X-Forwarded-For")),
             peer_is_loopback=isinstance(peer_host, str) and is_loopback_address(peer_host),
-            settings=serve, port=serve.ws_port) is not None
+            settings=serve, port=serve.ws_port,
+            funnel=bool(list(headers.get_all("Tailscale-Funnel-Request")))) is not None
     except Exception:  # unreadable: refuse, never guess
         return False
 
