@@ -933,9 +933,9 @@ def test_rest_approve_all_skips_desktop_prompts(rest):
     # "all" is the operator's: a scoped device (even a marked one) answers a request by its own id, and "all"
     # across every session is refused it (tests/test_scoped_devices_default_deny.py). The queue's own rule, that
     # "all" leaves desktop prompts alone, is exercised with the master token.
+    # Changed on purpose (2026-11-13): the approve and deny routes take one request id, so REST "all" is a 404 and answers nothing (tests/test_approve_deny_take_one_id.py). "Approve all" stays a chat command; its skipping rules are tested at the command layer.
     res = rest.client.post("/api/approvals/all/approve", json={"scope": "once"}, headers=_h(TOKEN))
-    assert res.status_code == 200, res.text
-    assert res.json().get("skipped") == 1
+    assert res.status_code == 404, res.text
     assert action._result is not ApprovalResult.APPROVED
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -25,6 +26,21 @@ from prometheus.permissions.argument_view import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+#: The one shape of a request id, minted by :func:`new_request_id` for every queue (the approval queue, the
+#: computer-use channel, hold lifts). The REST approve and deny routes take nothing else (web/server.py).
+_REQUEST_ID = re.compile(r"[0-9a-f]{8}")
+
+
+def new_request_id() -> str:
+    """A fresh request id: 8 lowercase hex characters."""
+    return uuid4().hex[:8]
+
+
+def is_request_id(value: Any) -> bool:
+    """Is *value* a request id as :func:`new_request_id` makes them? Not ``all``, not a scope word, nothing else."""
+    return isinstance(value, str) and _REQUEST_ID.fullmatch(value) is not None
 
 
 #: SPRINT-CONSENT Phase 4. Was 300 (5 minutes), and the field incident is the
@@ -660,7 +676,7 @@ class ApprovalQueue:
         is identical to ``/approve`` and is pure noise carrying a multi-request
         verb, so it is omitted rather than described.
         """
-        request_id = uuid4().hex[:8]
+        request_id = new_request_id()
         action = PendingAction(
             request_id=request_id,
             tool_name=tool_name,

@@ -218,10 +218,13 @@ class TestRestRecordsTheCredential:
         _pending(queue)
         _pending(queue, rid="def67890")
         client, _ = _app(queue, monkeypatch, tmp_path)
+        """Changed on purpose (2026-11-13): the approve and deny routes take one request id, so REST "all" is a 404 and
+    answers nothing (tests/test_approve_deny_take_one_id.py). "Approve all" stays a chat command; its skipping rules
+    are tested at the command layer."""
         res = client.post("/api/approvals/all/approve", json={"scope": "once"},
                           headers={"Authorization": f"Bearer {TOKEN}"})
-        assert res.status_code == 200, res.text
-        assert _answered_by(queue) == ["global-token", "global-token"]
+        assert res.status_code == 404, res.text
+        assert _answered_by(queue) == []
 
 
 # --------------------------------------------------------------------------- #

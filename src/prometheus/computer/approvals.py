@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from uuid import uuid4
 
 from prometheus.computer.door import OnceOnly, PersonCheck
 from prometheus.permissions.approval_queue import (
@@ -41,6 +40,7 @@ from prometheus.permissions.approval_queue import (
     ApprovalResult,
     PendingAction,
     _humanise_window,
+    new_request_id,
 )
 from prometheus.permissions.approver import Approver
 from prometheus.permissions.argument_view import format_arguments, redact_arguments
@@ -84,7 +84,7 @@ class ComputerApprovalChannel(ApprovalQueue):
         ``on_pending(action)`` runs once the request exists — the action log
         uses it to say the step is waiting, with the request's id.
         """
-        request_id = uuid4().hex[:8]
+        request_id = new_request_id()
         raw_text = (arguments or {}).get("text")
         action = PendingAction(
             request_id=request_id,

@@ -122,9 +122,12 @@ def test_a_lasting_scope_is_still_refused_by_name_before_the_credential(d):
 
 
 def test_approve_all_with_the_api_token_leaves_a_workers_request_pending(d):
+    """Changed on purpose (2026-11-13): the approve and deny routes take one request id, so REST "all" is a 404 and
+    answers nothing (tests/test_approve_deny_take_one_id.py). "Approve all" stays a chat command; its skipping rules
+    are tested at the command layer."""
     d.worker_request("f0f00006")
     r = d.approve("global", "all")
-    assert r.status_code == 200, r.text
+    assert r.status_code == 404, r.text
     assert "f0f00006" in d.queue.pending
 
 

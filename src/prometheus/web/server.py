@@ -5270,6 +5270,13 @@ def create_app(
         queue = app.state.approval_queue
         if not queue:
             return JSONResponse(status_code=404, content={"error": "approval queue not enabled"})
+        # ONE request id, and nothing else (2026-11-13): the approve path used to build chat-command text from this
+        # segment, so "all" answered every pending request, and a notification carrying it would turn one tap into
+        # approving everything. Anything that is not an id the queues mint is a 404, before anything reads it.
+        from prometheus.permissions.approval_queue import is_request_id as _is_request_id
+
+        if not _is_request_id(request_id):
+            return JSONResponse(status_code=404, content={"error": "unknown request"})
         # A request that has ended (a worker that asked is gone, it was answered, it expired) is a 410 that acts on
         # nothing. Before ownership: _no_longer_active keeps the 404 for a request that is not the caller's own.
         if (refusal := _no_longer_active(request, request_id)) is not None:
@@ -5481,6 +5488,13 @@ def create_app(
         queue = app.state.approval_queue
         if not queue:
             return JSONResponse(status_code=404, content={"error": "approval queue not enabled"})
+        # ONE request id, and nothing else (2026-11-13): the approve path used to build chat-command text from this
+        # segment, so "all" answered every pending request, and a notification carrying it would turn one tap into
+        # approving everything. Anything that is not an id the queues mint is a 404, before anything reads it.
+        from prometheus.permissions.approval_queue import is_request_id as _is_request_id
+
+        if not _is_request_id(request_id):
+            return JSONResponse(status_code=404, content={"error": "unknown request"})
         if (refusal := _no_longer_active(request, request_id)) is not None:
             return refusal
         if (refusal := _not_mine(request, request_id)) is not None:
