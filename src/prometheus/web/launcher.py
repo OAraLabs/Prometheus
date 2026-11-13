@@ -346,6 +346,33 @@ async def launch_web(
         bridge.push_dispatcher = dispatcher
         if signal_bus:
             signal_bus.subscribe("*", dispatcher.on_signal)
+        # Piece 18: a Live Activity for a job the phone did not start. One 10 s tick over what is running; the
+        # sources are the bridge's turns, the TaskManager's tasks and coding runs, and the desktop tasks.
+        from prometheus.push.job_activity import (
+            DesktopSource,
+            JobActivityWatcher,
+            JobSource,
+            TaskSource,
+            TurnSource,
+        )
+
+        def _known_tool(name: str) -> bool:
+            # Read at each call: tools are registered and dropped after boot (MCP servers, packs).
+            registry = getattr(loop_context, "tool_registry", None)
+            return registry is not None and registry.get(name) is not None
+
+        dispatcher.known_tool = _known_tool
+        coding_source = TaskSource(get_task_manager(), kind="coding", known_tool=_known_tool)
+        job_sources: list[JobSource] = [TurnSource(bridge, known_tool=_known_tool),
+                                        TaskSource(get_task_manager(), kind="task"), coding_source]
+        if computer_runner is not None:
+            job_sources.append(DesktopSource(computer_runner))
+        if signal_bus:
+            signal_bus.subscribe("coding_round", coding_source.on_signal)
+            signal_bus.subscribe("coding_tool", coding_source.on_signal)
+        job_watcher = JobActivityWatcher(dispatcher, device_store, sources=job_sources)
+        job_watcher.start()
+        app.state.job_activity_watcher = job_watcher
         logger.info("APNs push enabled — topic %s, key %s",
                     apns_config.topic, apns_config.key_id)
 

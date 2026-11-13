@@ -652,6 +652,14 @@ class BackgroundTaskManager:
             tasks = [t for t in tasks if t.status == status]
         return sorted(tasks, key=lambda t: t.created_at, reverse=True)
 
+    def running_tasks(self) -> list[TaskRecord]:
+        """The tasks THIS process is running now, from memory only (no store read).
+
+        For a caller that asks often (the Live Activity watcher, every 10 s): a running task is always in memory,
+        because this process launched it or :meth:`resume_running` re-read it at startup.
+        """
+        return [t for t in list(self._tasks.values()) if t.status == "running"]
+
     def update_task(
         self,
         task_id: str,

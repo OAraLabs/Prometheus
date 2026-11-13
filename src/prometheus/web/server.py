@@ -727,6 +727,41 @@ def create_app(
             return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
         return {"ok": True}
 
+    #: A push-to-start or activity token is a short hex string; anything far longer is not one.
+    _ACTIVITY_TOKEN_CAP = 512
+
+    def _activity_key(body: dict):
+        """``(kind, id)`` from an activity body, or an error response.
+
+        ``{kind, id}`` with kind ``turn | task | coding | desktop`` (Piece 18), or the older ``{session_id}``, which
+        keeps meaning ``kind: turn``. A turn is keyed by its session id and stored apart from every other kind, so
+        session ``coding:c1`` and coding run ``c1`` never share a token."""
+        from prometheus.push.job_activity import ID_CAP, JOB_KINDS
+
+        if "kind" in body or "id" in body:
+            kind = str(body.get("kind") or "").strip()
+            job_id = str(body.get("id") or "").strip()
+            if kind not in JOB_KINDS or not job_id:
+                return JSONResponse(status_code=400, content={
+                    "error": f"need kind ({' | '.join(JOB_KINDS)}) and id"})
+        else:
+            kind, job_id = "turn", str(body.get("session_id") or "").strip()
+            if not job_id:
+                return JSONResponse(status_code=400, content={"error": "need session_id, or kind and id"})
+        if len(job_id) > ID_CAP:
+            return JSONResponse(status_code=400, content={"error": f"id longer than {ID_CAP} characters"})
+        return kind, job_id
+
+    def _may_follow(request: Request, kind: str, job_id: str):
+        """A live activity streams a job's progress to the phone. A turn: for a session the device owns (an
+        operator, any; not-yours is the 404 a missing session gets). Every other kind is the operator's: a scoped
+        device sees no task, coding run or desktop task anywhere else either."""
+        if kind == "turn":
+            return None if _access.owns(_scope(request), job_id) else _unknown_session()
+        if not _scope(request).unrestricted:
+            return JSONResponse(status_code=403, content={"error": "operator_only"})
+        return None
+
     @app.post("/api/devices/{device_id}/activity")
     async def register_activity(device_id: str, request: Request):
         if (err := _may_manage_push(request, device_id)) is not None:
@@ -735,16 +770,26 @@ def create_app(
             body = await request.json()
         except Exception:
             return JSONResponse(status_code=400, content={"error": "body must be JSON"})
-        session_id = str(body.get("session_id") or "").strip()
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=400, content={"error": "body must be a JSON object"})
+        key = _activity_key(body)
+        if isinstance(key, JSONResponse):
+            return key
+        kind, job_id = key
         activity_token = str(body.get("activity_token") or "").strip()
-        if not session_id or not activity_token:
-            return JSONResponse(status_code=400, content={
-                "error": "need session_id and activity_token"})
-        # A live activity streams a session's progress to the phone, so a device may register one only for a
-        # session it owns (an operator, for any). Not-yours is the 404 a missing session gets.
-        if not _access.owns(_scope(request), session_id):
-            return _unknown_session()
-        _devices_or_create().set_activity_token(device_id, session_id, activity_token)
+        if not activity_token or len(activity_token) > _ACTIVITY_TOKEN_CAP:
+            return JSONResponse(status_code=400, content={"error": "need activity_token"})
+        if (err := _may_follow(request, kind, job_id)) is not None:
+            return err
+        # A token for a job that ended before the phone registered it (the end went to nobody) is answered with the
+        # end at once and not stored (push/job_activity.py, end_if_ended).
+        watcher = getattr(app.state, "job_activity_watcher", None)
+        if watcher is not None and await watcher.end_if_ended(device_id, kind, job_id, activity_token):
+            return {"ok": True, "ended": True}
+        if kind == "turn":
+            _devices_or_create().set_activity_token(device_id, job_id, activity_token)
+        else:
+            _devices_or_create().set_job_activity_token(device_id, kind, job_id, activity_token)
         return {"ok": True}
 
     @app.delete("/api/devices/{device_id}/activity")
@@ -755,10 +800,40 @@ def create_app(
             body = await request.json()
         except Exception:
             body = {}
-        session_id = str(body.get("session_id") or "").strip()
-        if not session_id:
-            return JSONResponse(status_code=400, content={"error": "need session_id"})
-        _devices_or_create().clear_activity_token(device_id, session_id)
+        key = _activity_key(body if isinstance(body, dict) else {})
+        if isinstance(key, JSONResponse):
+            return key
+        kind, job_id = key
+        if kind == "turn":
+            _devices_or_create().clear_activity_token(device_id, job_id)
+        else:
+            _devices_or_create().clear_job_activity_token(device_id, kind, job_id)
+        return {"ok": True}
+
+    @app.put("/api/devices/{device_id}/activity-start")
+    async def register_activity_start(device_id: str, request: Request):
+        """A phone's push-to-start token (iOS 17.2), so the daemon can start a Live Activity on it for a job it did
+        not start (push/job_activity.py). Body ``{"token": str}``. The device's own registration, like ``/push``.
+        Never listed by ``GET /api/devices``."""
+        if (err := _may_manage_push(request, device_id)) is not None:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "body must be JSON"})
+        token = str((body if isinstance(body, dict) else {}).get("token") or "").strip()
+        if not token or len(token) > _ACTIVITY_TOKEN_CAP:
+            return JSONResponse(status_code=400, content={"error": "need token"})
+        if not _devices_or_create().set_activity_start_token(device_id, token):
+            return JSONResponse(status_code=404, content={"error": f"unknown or revoked device {device_id}"})
+        return {"ok": True}
+
+    @app.delete("/api/devices/{device_id}/activity-start")
+    async def unregister_activity_start(device_id: str, request: Request):
+        if (err := _may_manage_push(request, device_id)) is not None:
+            return err
+        if not _devices_or_create().clear_activity_start_token(device_id):
+            return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
         return {"ok": True}
 
     @app.delete("/api/devices/{device_id}")

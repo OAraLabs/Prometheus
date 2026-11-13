@@ -35,6 +35,14 @@ from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any
 
+from prometheus.push.job_activity import (
+    STALE_AFTER_SECONDS,
+    content_state,
+    tool_detail,
+    turn_end_aps,
+    turn_end_phase,
+)
+
 logger = logging.getLogger(__name__)
 
 FAILURE_MUTE_THRESHOLD = 8
@@ -99,6 +107,8 @@ class PushDispatcher:
         self._node_pub = node_pub or _node_pub_now
         # session_id -> wall time of the last liveactivity push.
         self._activity_pushed_at: dict[str, float] = {}
+        # session_id -> the turn's latest progress numbers (bounded, popped at its end).
+        self._turn_last: OrderedDict[str, dict] = OrderedDict()
         # Devices whose 410 has been logged — "logs once", per the spec.
         self._unregistered_logged: set[str] = set()
         # request_id -> the devices its approval push reached (APNs said ok). Memory only, bounded, popped when the
@@ -107,6 +117,12 @@ class PushDispatcher:
         # request_id -> how it ended, for requests that ended while (or before) their approval push was still going
         # out: a device the fan-out reaches after the end is cleared at once instead of being left with a live Approve.
         self._ended: OrderedDict[str, str] = OrderedDict()
+        # Whether a name is a registered tool (set by the launcher from the tool registry). A turn's ``detail`` is
+        # a tool name only when it is one; None means nothing is: the generic word (push/job_activity.py).
+        self.known_tool: Callable[[str], bool] | None = None
+        # Told the moment a turn ends: (session_id, the turn's start, how it ended). The job watcher sets it
+        # (push/job_activity.py), so a token registered just after the end still gets the end.
+        self.turn_end_listener: Callable[[str, float | None, str], None] | None = None
 
     # ------------------------------------------------------------------
     # Bus signals
@@ -309,6 +325,11 @@ class PushDispatcher:
 
     async def on_agent_progress(self, session_id: str, payload: dict) -> None:
         try:
+            # The turn's latest numbers, kept (bounded) so its end can say them even between throttled pushes.
+            self._turn_last[session_id] = dict(payload)
+            self._turn_last.move_to_end(session_id)
+            while len(self._turn_last) > PUSHED_REQUESTS_REMEMBERED:
+                self._turn_last.popitem(last=False)
             now = self._now()
             if now - self._activity_pushed_at.get(session_id, 0.0) < ACTIVITY_THROTTLE_SECONDS:
                 return
@@ -316,52 +337,107 @@ class PushDispatcher:
             if not targets:
                 return
             self._activity_pushed_at[session_id] = now
+            phase = str(payload.get("phase") or "")
+            detail = tool_detail(payload.get("tool_name"), self.known_tool) if phase == "tool" else ""
             body = {"aps": {
                 "timestamp": int(now),
                 "event": "update",
+                # The job keys (push/job_activity.py, Piece 18) first, so an activity the daemon started for this
+                # turn (JobActivityAttributes) decodes the same push as one the app started; then the turn's own.
                 "content-state": {
-                    "phase": payload.get("phase", ""),
+                    **content_state(
+                        phase=phase,
+                        detail=detail,
+                        elapsed_s=int(payload.get("elapsed_s") or 0),
+                        steps=int(payload.get("tool_calls") or 0)),
                     "round": payload.get("round", 0),
-                    "elapsedS": payload.get("elapsed_s", 0),
                     "toolCalls": payload.get("tool_calls", 0),
                     "chars": payload.get("chars", 0),
+                    # The app-started per-turn activity names the tool (a registered tool only, as for detail).
+                    **({"toolName": detail} if self._registered_tool(payload.get("tool_name")) else {}),
                 },
+                # A daemon that dies mid-turn stops updating; the lock screen then shows the activity as stale.
+                "stale-date": int(now) + STALE_AFTER_SECONDS,
             }}
-            await self._deliver_activity(targets, self._named(body))
+            await self._deliver_activity(targets, self._named(body), session_id)
         except Exception:
             logger.warning("liveactivity push failed", exc_info=True)
 
+    def _registered_tool(self, name: Any) -> bool:
+        """Is *name* a tool this daemon registered? Never a model-written string: only then is it named in a push."""
+        check = getattr(self, "known_tool", None)
+        try:
+            return isinstance(name, str) and bool(name) and check is not None and bool(check(name))
+        except Exception:                               # noqa: BLE001 - doubt means not named
+            return False
+
     async def on_chat_done(self, session_id: str, payload: dict) -> None:
         try:
+            outcome = turn_end_phase(payload)
+            listener = self.turn_end_listener
+            if listener is not None:
+                started = payload.get("turn_started_at")
+                try:
+                    listener(session_id, float(started) if isinstance(started, (int, float)) else None, outcome)
+                except Exception:
+                    logger.warning("turn end listener failed", exc_info=True)
             targets = self._store.activity_targets(session_id)
             if not targets:
                 return
             now = self._now()
-            body = {"aps": {
-                "timestamp": int(now),
-                "event": "end",
-                "dismissal-date": int(now),
-                "content-state": {"phase": "done", "round": payload.get("round", 0),
-                                  "elapsedS": payload.get("elapsed_s", 0),
-                                  "toolCalls": 0, "chars": 0},
-            }}
-            await self._deliver_activity(targets, self._named(body))
+            # ``phase`` stays exactly "done", as it always was: the shipped phone decodes it. How the turn ended
+            # (done, stopped for a user stop, paused for the round cap, failed) is ``outcome``.
+            last = self._turn_last.pop(session_id, {})
+            started = payload.get("turn_started_at")
+            elapsed = payload.get("elapsed_s")
+            if not elapsed and isinstance(started, (int, float)) and not isinstance(started, bool):
+                elapsed = max(0.0, now - float(started))
+            elapsed = elapsed or last.get("elapsed_s") or 0
+            body = {"aps": turn_end_aps(
+                now, outcome, elapsed_s=int(elapsed),
+                round_=int(payload.get("round") or last.get("round") or 0),
+                tool_calls=int(payload.get("tool_calls") or last.get("tool_calls") or 0),
+                chars=int(payload.get("chars") or last.get("chars") or 0))}
+            await self._deliver_activity(targets, self._named(body), session_id)
             self._activity_pushed_at.pop(session_id, None)
             for target, _token in targets:
                 self._store.clear_activity_token(target.id, session_id)
         except Exception:
             logger.warning("liveactivity end push failed", exc_info=True)
 
-    async def _deliver_activity(self, targets: list, body: dict) -> None:
+    async def send_liveactivity(self, target: Any, activity_token: str, body: dict, *, priority: int,
+                                kind: str = "liveactivity") -> str | None:
+        """Send one job Live Activity push (push/job_activity.py) to *activity_token*; the outcome, or None when
+        the device is muted.
+
+        A 410 here is about the ACTIVITY token (or the push-to-start token), not the device's alert registration,
+        so it is recorded and left to the caller, who drops that one token; the alert registration stays. Other
+        outcomes are accounted like every push (a success resets the failure count, a failure counts toward the
+        mute)."""
+        if target.push_failures >= FAILURE_MUTE_THRESHOLD:
+            return None
+        result = await self._sender.send(
+            apns_token=activity_token, environment=target.environment,
+            payload=body, push_type="liveactivity", priority=priority,
+            topic=f"{target.bundle_id or self._sender.config.topic}.push-type.liveactivity",
+        )
+        outcome = getattr(result, "outcome", None)
+        if outcome == "unregistered":
+            status = getattr(result, "status", None)
+            logger.info("push %s → device %s: unregistered%s", kind, target.id,
+                        f" (status {status})" if status is not None else "")
+            self._record("record_push_attempt", target.id, status, "unregistered")
+        else:
+            self._account(target, result, kind)
+        return outcome
+
+    async def _deliver_activity(self, targets: list, body: dict, session_id: str) -> None:
+        """A turn's activity pushes. A 410 is about the activity token, so it drops that token's row and leaves the
+        device's alert registration alone (it used to clear the alert registration)."""
         for target, activity_token in targets:
-            if target.push_failures >= FAILURE_MUTE_THRESHOLD:
-                continue
-            result = await self._sender.send(
-                apns_token=activity_token, environment=target.environment,
-                payload=body, push_type="liveactivity", priority=5,
-                topic=f"{target.bundle_id or self._sender.config.topic}.push-type.liveactivity",
-            )
-            self._account(target, result, "liveactivity")
+            outcome = await self.send_liveactivity(target, activity_token, body, priority=5)
+            if outcome == "unregistered":
+                self._store.clear_activity_token(target.id, session_id)
 
     # ------------------------------------------------------------------
 

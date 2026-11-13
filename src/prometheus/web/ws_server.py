@@ -304,6 +304,9 @@ class WebSocketBridge:
         # stoppable. _interrupted marks a cancel as a DELIBERATE user stop —
         # any unflagged CancelledError (daemon shutdown) keeps propagating.
         self._turn_tasks: dict[str, asyncio.Task] = {}
+        # The running turn per session as the job watcher reads it (push/job_activity.py, Piece 18): when it
+        # started and its live progress dict. Registered and dropped beside _turn_tasks.
+        self._turn_progress: dict[str, tuple[float, dict[str, Any]]] = {}
         self._interrupted: set[str] = set()
         # Per-session turn serialization (fix: duplicate LCM rows, 2026-08-11
         # survey). The REAL lock lives on the shared SessionManager
@@ -1087,6 +1090,10 @@ class WebSocketBridge:
             capabilities.append("push_node_pub")
         # GET /api/approvals/{request_id} exists (server.py): a client may fetch one request instead of the list.
         capabilities.append("approval_by_id")
+        # Push is on, so the job watcher runs (launcher.py): the daemon takes a push-to-start token and starts
+        # JobActivityAttributes Live Activities for long jobs (push/job_activity.py).
+        if dispatcher is not None:
+            capabilities.append("job_activities")
         return capabilities
 
     async def _system_note(self, session_id: str, content: str) -> None:
@@ -1342,6 +1349,13 @@ class WebSocketBridge:
         })
         text, _usage = await self._run_agent(session_id, session, raise_on_error=True)
         return text
+
+    def running_turns(self) -> list[tuple[str, float, dict[str, Any]]]:
+        """``(session_id, started_at, progress)`` for every turn running now: what the job watcher reads
+        (push/job_activity.py). ``progress`` is a copy of the turn's live shape (phase, tool name, round, chars,
+        tool calls); the tool's inputs are never in it."""
+        return [(session_id, started_at, dict(progress))
+                for session_id, (started_at, progress) in list(self._turn_progress.items())]
 
     def interrupt_turn(self, session_id: str) -> bool:
         """Stop the running agent turn in ``session_id`` (the chat Stop button).
@@ -1753,8 +1767,9 @@ class WebSocketBridge:
         # finally below so an idle stall reports "idle" rather than the last
         # turn's phase, which would be a stale annotation on a fresh spike.
         _loop_watchdog.publish_progress(progress)
+        turn_started_at = time.time()
         heartbeat = asyncio.create_task(
-            self._emit_progress(session_id, msg_id, progress, time.time())
+            self._emit_progress(session_id, msg_id, progress, turn_started_at)
         )
 
         _task = asyncio.current_task()
@@ -1776,6 +1791,7 @@ class WebSocketBridge:
                 # is not stoppable until it starts (stop it again then).
                 if _task is not None:
                     self._turn_tasks[session_id] = _task
+                self._turn_progress[session_id] = (turn_started_at, progress)
                 # Beacon #283: a compaction pass inside THIS turn reports here,
                 # and only here (a ContextVar: it follows this turn and no other).
                 from prometheus.context.compactor import COMPACTION_REPORTER
@@ -1807,6 +1823,8 @@ class WebSocketBridge:
             # with normal completion.
             if self._turn_tasks.get(session_id) is asyncio.current_task():
                 self._turn_tasks.pop(session_id, None)
+            if (self._turn_progress.get(session_id) or (None, None))[1] is progress:
+                self._turn_progress.pop(session_id, None)
             self._interrupted.discard(session_id)
             if self.agent_state_ref:
                 self.agent_state_ref["state"] = "idle"
@@ -2182,6 +2200,10 @@ class WebSocketBridge:
                     "hint": detail["hint"],
                 },
             })
+            # A failed turn ends its Live Activity too (Piece 18: the final state says how it ended). It used to be
+            # left showing its last update until it went stale.
+            await self._end_live_activity(session_id, {"session_id": session_id, "message_id": msg_id,
+                                                       "failed": True})
             if raise_on_error:
                 raise
             return accumulated, last_usage
@@ -2286,7 +2308,11 @@ class WebSocketBridge:
         if dispatcher is None:
             return
         try:
-            await dispatcher.on_chat_done(session_id, done_payload)
+            # Which turn ended: its start, so the job watcher remembers THIS turn (push/job_activity.py). A copy:
+            # the broadcast frame is unchanged.
+            started = (self._turn_progress.get(session_id) or (None, None))[0]
+            payload = {**done_payload, "turn_started_at": started} if started is not None else done_payload
+            await dispatcher.on_chat_done(session_id, payload)
         except Exception:
             logger.debug("live activity end push failed", exc_info=True)
 
