@@ -139,6 +139,8 @@ class LCMCompactor:
                 result.summaries_created += cascade_count
         except LCMCircuitBreakerOpen:
             logger.warning("Circuit breaker open during cascade -- skipping")
+        except Paused:
+            logger.info("Prometheus is paused -- skipping the cascade for session %s", session_id)
 
         # Compute tokens saved.
         tokens_after = sum(

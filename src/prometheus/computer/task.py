@@ -545,6 +545,13 @@ class SessionConsent:
         return True
 
 
+def _refuse_while_paused() -> None:
+    from prometheus.engine import pause as _pause
+
+    if _pause.current() is not None:
+        raise AgentPaused("Prometheus is paused. Nothing new starts until it is resumed.")
+
+
 class ComputerTaskRunner:
     """Every surface's door into a desktop task. See the module docstring."""
 
@@ -709,10 +716,7 @@ class ComputerTaskRunner:
         self._guard(by)
         self.people.refuse_held_session(session_id)
         # Pause everything (engine/pause.py): no new desktop task from any door (Telegram's /computer yes included).
-        from prometheus.engine import pause as _pause
-
-        if _pause.current() is not None:
-            raise AgentPaused("Prometheus is paused. Nothing new starts until it is resumed.")
+        _refuse_while_paused()
         driver = await self._driver()
         target = inp.target or self._target()
         binding = self.binding_for(session_id)
@@ -739,6 +743,9 @@ class ComputerTaskRunner:
         if res.status != RESOLVED or res.app is None:
             raise NeedsConsent(res.question or f"{binding.app} is not on screen.",
                                options=res.options)
+        # Again after the last await: a pause that landed during the awaits above found nothing to stop, and
+        # nothing yields between here and the task being listed, where the pause's sweep will find it.
+        _refuse_while_paused()
         task = ComputerTask(
             task_id=uuid.uuid4().hex[:8], session_id=session_id,
             goal=inp.goal, app=binding.app, target=binding.target,
