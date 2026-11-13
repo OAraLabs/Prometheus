@@ -50,20 +50,27 @@ REASON_MAX_CHARS = 140
 BY_MAX_CHARS = 80
 
 
+#: Letters that render as nothing (Hangul fillers, the braille blank): a reason made of them looks blank.
+_INVISIBLE = frozenset("\u115f\u1160\u3164\uffa0\u2800")
+
+
 def _one_line(text: str, cap: int) -> str:
-    """*text* as one printable line: control and format characters dropped, whitespace runs collapsed, capped."""
+    """*text* as one printable line: control, format and combining characters dropped (stacked marks spill over the
+    lines around it on a phone), invisible letters dropped, whitespace runs collapsed, capped, no trailing space."""
     import unicodedata
 
-    kept = "".join(" " if ch.isspace() else ch for ch in str(text or "")
-                   if ch.isspace() or unicodedata.category(ch)[0] != "C")
-    return " ".join(kept.split())[:cap]
+    # NFC first, so an accent typed as letter + combining mark becomes one letter and survives.
+    kept = "".join(" " if ch.isspace() else ch for ch in unicodedata.normalize("NFC", str(text or ""))
+                   if ch.isspace() or (unicodedata.category(ch)[0] not in ("C", "M") and ch not in _INVISIBLE))
+    return " ".join(kept.split())[:cap].rstrip()
 
 
 class Paused(RuntimeError):
     """Raised where a turn would start (or go on) while the agent is paused."""
 
     def __init__(self, info: PauseInfo) -> None:
-        super().__init__(f"Prometheus is paused (since {info.since:.0f}, by {info.by})")
+        # Not who paused or why: this text can reach any client in a turn's error frame.
+        super().__init__(f"Prometheus is paused (since {info.since:.0f})")
         self.info = info
 
 

@@ -437,7 +437,7 @@ def test_one_line_drops_marks_and_invisible_letters_and_trims(state):
     invisible letters can make a reason look blank."""
     info, _ = state.pause(by="owner", reason="a" + "́" * 139 + " ok ㅤ⠀ᅟᅠﾠ end")
     assert "́" not in info.reason and "ㅤ" not in info.reason and "⠀" not in info.reason
-    assert info.reason == "a ok end"
+    assert info.reason == "\u00e1 ok end"           # NFC composes the first mark into the letter; the rest go
     state.resume(by="owner")
     info, _ = state.pause(by="owner", reason="x" * 139 + " yz")
     assert not info.reason.endswith(" ") and len(info.reason) <= 140
@@ -446,3 +446,8 @@ def test_one_line_drops_marks_and_invisible_letters_and_trims(state):
 def test_the_paused_error_does_not_name_who_paused():
     err = pause.Paused(pause.PauseInfo(since=1.0, by="owner device Will's phone", reason="secret"))
     assert "Will" not in str(err) and "secret" not in str(err) and "paused" in str(err).lower()
+
+
+def test_a_decomposed_accent_survives_as_one_letter(state):
+    info, _ = state.pause(by="owner", reason="cafe\u0301 closed")
+    assert info.reason == "caf\u00e9 closed"
