@@ -380,7 +380,8 @@ def test_the_page_not_through_serve_keeps_its_policy():
 
 # ── review fixes (#921) ──────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("proxies", [["127.0.0.1"], ["127.0.0.0/8"], ["::1"], ["10.0.0.0/8", "127.0.0.1/32"]])
+@pytest.mark.parametrize("proxies", [["127.0.0.1"], ["127.0.0.0/8"], ["::1"], ["10.0.0.0/8", "127.0.0.1/32"],
+                                     "127.0.0.1", "10.0.0.0/8, 127.0.0.1"])   # a string is split, as serving.py does
 def test_trusted_proxies_covering_loopback_turn_the_block_off_out_loud(token, proxies, caplog):
     """Review of #921: uvicorn rewrites the client from X-Forwarded-For before the guard runs when trusted_proxies
     covers loopback, so the guard saw no loopback peer and refused every REST request through Serve while the
