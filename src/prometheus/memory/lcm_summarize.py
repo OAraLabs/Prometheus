@@ -152,6 +152,8 @@ class LCMSummarizer:
             LCMCircuitBreakerOpen: If the breaker is already open.
             RuntimeError: If all retries are exhausted (also trips the breaker).
         """
+        from prometheus.engine.pause import Paused  # a pause is not a failure: never retried, never counted
+
         prompt = redact_secrets(prompt)
         if self.circuit_open:
             raise LCMCircuitBreakerOpen(
@@ -223,7 +225,7 @@ class LCMSummarizer:
                 self._consecutive_failures = 0
                 return full_text.strip()
 
-            except LCMCircuitBreakerOpen:
+            except (LCMCircuitBreakerOpen, Paused):
                 raise
             except Exception as exc:
                 last_error = exc

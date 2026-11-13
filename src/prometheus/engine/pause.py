@@ -210,17 +210,22 @@ CHILD_ENV = "PROMETHEUS_PAUSE_FILE"
 
 
 def child_env_entry() -> dict[str, str]:
-    """``{PROMETHEUS_PAUSE_FILE: <this daemon's pause file>}`` for a child's environment."""
+    """``{PROMETHEUS_PAUSE_FILE: <the pause file>}`` for a child's environment: the daemon's own file, or (in a
+    child) the file it was told, so a grandchild reads the same file as its parent."""
     state = installed()
-    return {CHILD_ENV: str(state.path if state is not None else pause_path())}
+    if state is not None:
+        return {CHILD_ENV: str(state.path)}
+    return {CHILD_ENV: os.environ.get(CHILD_ENV) or str(pause_path())}
 
 
 def current() -> PauseInfo | None:
     """Is the agent paused? The installed state, or (a child process) the file, re-read when it changes.
 
     A child the daemon built is told the exact file (:data:`CHILD_ENV`). If it cannot reach that file's FOLDER
-    (missing, unreadable, not mounted), it is paused: fail closed. A readable folder with no file means never
-    paused. A process that was not told (a CLI run) reads the default place, where a missing folder is not a pause.
+    (missing or unreadable), it is paused: fail closed. A readable folder with no file means never paused. A folder
+    hidden behind an empty mount looks readable and empty, so it reads as not paused: this check cannot tell, which
+    is why the daemon's own state (and its cancelling the turns it runs) is the authority, not the file. A process
+    that was not told (a CLI run) reads the default place, where a missing folder is not a pause.
     """
     global _file_cache
     if _installed is not None:

@@ -72,6 +72,8 @@ class LCMCompactor:
         Returns:
             A :class:`CompactionResult` with statistics about the pass.
         """
+        from prometheus.engine.pause import Paused
+
         result = CompactionResult()
 
         # 1. Get compactable messages (everything except the fresh tail).
@@ -116,6 +118,10 @@ class LCMCompactor:
                     session_id,
                 )
                 break
+            except Paused:
+                # Pause everything (engine/pause.py): stop here; the batches stay uncompacted for the next pass.
+                logger.info("Prometheus is paused -- stopping compaction for session %s", session_id)
+                return result
             except Exception:
                 logger.exception(
                     "Failed to summarize batch of %d messages in session %s",

@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+import weakref
 from pathlib import Path
 
 import pytest
@@ -144,7 +145,7 @@ def test_inside_a_turn_task_run_async_runs_its_body(monkeypatch):
     loop = al.AgentLoop.__new__(al.AgentLoop)
 
     async def go():
-        al._IN_TURN_TASK.set(asyncio.current_task())
+        al._IN_TURN_TASK.set(weakref.ref(asyncio.current_task()))
         try:
             await loop.run_async("system", "hi")
         except AssertionError:
@@ -175,7 +176,7 @@ def test_a_task_a_turn_spawns_runs_its_own_turns_as_turn_tasks(monkeypatch):
     loop = al.AgentLoop.__new__(al.AgentLoop)
 
     async def turn():
-        al._IN_TURN_TASK.set(asyncio.current_task())
+        al._IN_TURN_TASK.set(weakref.ref(asyncio.current_task()))
         spawned = asyncio.create_task(loop.run_async("system", "re-engage"))   # copies this task's context
         return await spawned
 

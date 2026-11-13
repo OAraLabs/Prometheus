@@ -91,6 +91,7 @@ from prometheus.computer.discovery import (
     resolve_window,
 )
 from prometheus.computer.door import (
+    AgentPaused,
     ComputerUseOff,
     InToolContext,
     IntegrationDown,
@@ -707,6 +708,11 @@ class ComputerTaskRunner:
         """Start a task. Returns at once; the task runs in the background."""
         self._guard(by)
         self.people.refuse_held_session(session_id)
+        # Pause everything (engine/pause.py): no new desktop task from any door (Telegram's /computer yes included).
+        from prometheus.engine import pause as _pause
+
+        if _pause.current() is not None:
+            raise AgentPaused("Prometheus is paused. Nothing new starts until it is resumed.")
         driver = await self._driver()
         target = inp.target or self._target()
         binding = self.binding_for(session_id)

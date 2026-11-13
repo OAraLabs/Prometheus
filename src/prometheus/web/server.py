@@ -4452,10 +4452,13 @@ def create_app(
         return {"ok": True, "name": name}
 
     @app.post("/api/cron/{name}/run")
-    async def run_cron_job_now(name: str):
+    async def run_cron_job_now(name: str, request: Request):
         """Trigger a job immediately. Fire-and-forget: a job may run up to 300s, so
         the executor is dispatched as a background task and the call returns at once;
         the outcome surfaces via the job's last_run/last_status (re-GET /api/cron)."""
+        # Paused (engine/pause.py): nothing new runs. Said here, not as a 'skipped' run after a 200.
+        if (refusal := paused_response(request)) is not None:
+            return refusal
         import asyncio
 
         from prometheus.gateway.cron_scheduler import execute_job
@@ -6527,9 +6530,9 @@ def create_app(
         return {"logged_out": xai_oauth.logout()}
 
     @app.post("/api/code")
-    async def create_coding_run(body: dict):
+    async def create_coding_run(body: dict, request: Request):
         # Paused (engine/pause.py): no new coding run starts.
-        if (refusal := paused_response()) is not None:
+        if (refusal := paused_response(request)) is not None:
             return refusal
         from uuid import uuid4 as _uuid4
 
