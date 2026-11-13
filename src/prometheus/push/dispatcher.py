@@ -8,6 +8,9 @@ The decision table, verbatim from the spec:
   turn_completed               → only to devices with NO live WS client. TURN.
   task_completed / task_failed → only when no live WS client. TASK.
   coding_complete              → only when no live WS client. TASK.
+  a NEW pause (engine/pause.py)  → owner devices with no live WS client, one
+                                 alert "Prometheus paused", no category
+                                 (``push_paused``, called by the pause itself).
 
 "Has a live WS client" is PER DEVICE (the bridge's websocket→identity map,
 which is why Piece 1 gates this piece): a desktop being open must not
@@ -27,7 +30,9 @@ Apple rate-limits liveactivity pushes; the 3s cadence is for a live socket.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -43,6 +48,10 @@ _QUIET_KINDS = {
     "task_failed": "TASK",
     "coding_complete": "TASK",
 }
+
+
+#: "owner in Telegram (telegram:<id>)": the chat account's id stays on the daemon (``/api/status``), out of a push.
+_CHAT_ACCOUNT = re.compile(r"\s*\((?:telegram|slack|discord):[^)]*\)\s*$")
 
 
 def first_line(text: str, cap: int = 120) -> str:
@@ -136,6 +145,38 @@ class PushDispatcher:
         }
         for target in self._store.push_targets():
             await self._deliver(target, body)
+
+    async def push_paused(self, info: Any) -> None:
+        """One alert for a NEW pause (Piece 17): "Prometheus paused", who paused, to every live OWNER device with
+        no live socket. A pause nobody knows about looks like a broken agent.
+
+        No category: a lock screen offers nothing to act on (resuming is a person's, in the app). Never the reason,
+        which stays on ``/api/status``, and never a chat account's id. A store that cannot name its owners sends
+        nothing (fail closed).
+
+        OWNER devices on purpose, not the approval or quiet-push target rules: the alert is the owner's, whatever
+        else a device may see. Sent to every target at once, so one device that never answers does not keep it
+        from the others (the pause caps the whole push)."""
+        try:
+            owners = self._store.owner_device_ids()
+        except Exception:
+            logger.warning("pause alert not sent: the device store could not name its owner devices", exc_info=True)
+            return
+        live = self._live_device_ids()
+        who = _CHAT_ACCOUNT.sub("", first_line(str(getattr(info, "by", "") or ""), cap=80)) or "someone"
+        body = {
+            "aps": {
+                "alert": {"title": "Prometheus paused",
+                          "body": f"Paused by {who}. Nothing runs until a person resumes it."},
+                "sound": "default",
+            },
+            "paused_since": getattr(info, "since", None),
+        }
+        targets = [t for t in self._store.push_targets() if t.id in owners and t.id not in live]
+        results = await asyncio.gather(*(self._deliver(t, body) for t in targets), return_exceptions=True)
+        for target, result in zip(targets, results):
+            if isinstance(result, Exception):
+                logger.warning("pause alert to device %s failed: %s", target.id, type(result).__name__)
 
     async def _push_quiet(self, kind: str, payload: dict) -> None:
         live = self._live_device_ids()

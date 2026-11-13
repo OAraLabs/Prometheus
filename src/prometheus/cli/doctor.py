@@ -47,6 +47,7 @@ from prometheus.infra.doctor import (
     ADVERTISED_TOOLS_ROW,
     DiagnosticCheck,
     always_loaded_case,
+    check_pause,
     check_router,
     yaml_error_summary,
 )
@@ -1600,6 +1601,7 @@ def run_extended_checks(
         check_memory_extraction(config),
         check_whisper(config),
         *check_voice_remotes(config, timeout=timeout),
+        check_pause(),
     ]
 
 
@@ -1629,9 +1631,11 @@ def run_anatomy_checks(config: dict[str, Any]) -> list[DiagnosticCheck]:
             # per-gateway checks (SPRINT G3). "Router" is the same
             # check_router row the extended checks already carry, and
             # "Advertised tools" is check_advertised_tools' row, which adds
-            # the count of tools actually offered to the same case.
+            # the count of tools actually offered to the same case. "Pause" is
+            # check_pause, which the extended checks carry so it shows without
+            # the scan.
             if check.name in ("Config", "Inference", "Model", "Whisper STT",
-                              "Telegram", "Router", ADVERTISED_TOOLS_ROW):
+                              "Telegram", "Router", "Pause", ADVERTISED_TOOLS_ROW):
                 continue
             # Missing SOUL.md/AGENTS.md doesn't break the loop — the fast
             # setup path deliberately skips identity. Warn, don't fail.

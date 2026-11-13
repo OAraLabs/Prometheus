@@ -7,6 +7,7 @@ be available (from model registry) and produces actionable diagnostics.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -244,6 +245,34 @@ def check_always_loaded(config: dict | None) -> DiagnosticCheck:
 # Doctor
 # ---------------------------------------------------------------------------
 
+def check_pause() -> DiagnosticCheck:
+    """Is everything paused (engine/pause.py)? Since when, never who or why (those are on ``/api/status``). An
+    unreadable pause file counts as paused, so it is an error with what to do."""
+    from prometheus.engine import pause
+
+    resume = ("Resume from the owner's Telegram (/resume), or DELETE /api/pause from a device carrying the "
+              "person mark (/person allow <device id>).")
+    # The file this process reads: the daemon's own, or (a CLI run) the one it was told, else this machine's default.
+    where = pause.child_env_entry()[pause.CHILD_ENV]
+    try:
+        info = pause.current()
+    except Exception as exc:                               # noqa: BLE001 - a doctor row must not take the report down
+        return DiagnosticCheck("Pause", "platform", "error",
+                               f"the pause state could not be read ({type(exc).__name__}) from {where}", fix=resume)
+    if info is None:
+        return DiagnosticCheck("Pause", "platform", "ok", f"not paused ({where})")
+    if info.by == "unreadable" and info.reason.startswith("pause state unreadable"):
+        return DiagnosticCheck(
+            "Pause", "platform", "error",
+            f"the pause file is unreadable ({info.reason.split(': ', 1)[-1]}), so everything counts as paused",
+            fix=f"{resume} Resuming rewrites the file; check its owner and permissions if it stays unreadable.")
+    try:
+        since = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(info.since))
+    except (OverflowError, ValueError, OSError):
+        since = f"{info.since:.0f}"
+    return DiagnosticCheck("Pause", "platform", "warning", f"everything is PAUSED (since {since})", fix=resume)
+
+
 class Doctor:
     """Diagnoses Prometheus configuration against model capabilities."""
 
@@ -296,6 +325,7 @@ class Doctor:
         checks.append(self._check_config_valid())
         checks.append(check_router(self.config))
         checks.append(check_always_loaded(self.config))
+        checks.append(check_pause())
         checks.append(self._check_data_dir())
         checks.append(self._check_bootstrap_files())
         checks.append(self._check_dependencies())

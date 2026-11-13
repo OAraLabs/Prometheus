@@ -216,7 +216,25 @@ async def pause_everything(app: Any, *, by: str, reason: str) -> dict:
                    stopped, "" if persisted else "; NOT written to disk, so it will not survive a restart")
     # Every client hears THAT it is paused; who paused and why are the operator's (GET /api/status).
     await _broadcast(app, {"paused": True, "since": info.since})
+    if _new:
+        await _push_alert(bridge, info)
     return {"paused": True, **info.to_dict(), "persisted": persisted, "stopped": stopped}
+
+
+#: The pause has taken effect before the alert goes; a slow APNs must not hold the answer long.
+PUSH_ALERT_TIMEOUT_S = 5.0
+
+
+async def _push_alert(bridge: Any, info: pause.PauseInfo) -> None:
+    """The "Prometheus paused" push (PR 3), once per pause. A failure is logged and never fails the pause."""
+    dispatcher = getattr(bridge, "push_dispatcher", None)
+    if dispatcher is None or not hasattr(dispatcher, "push_paused"):
+        return
+    try:
+        async with asyncio.timeout(PUSH_ALERT_TIMEOUT_S):
+            await dispatcher.push_paused(info)
+    except Exception:                                          # noqa: BLE001 - the pause stands regardless
+        logger.warning("pause: the push alert failed", exc_info=True)
 
 
 def register_pause_routes(app: Any, *, devices: Any = None) -> None:
