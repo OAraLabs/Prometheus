@@ -233,15 +233,17 @@ def end_aps(job: Job, now: float, phase: str) -> dict[str, Any]:
     }
 
 
-def turn_end_aps(now: float, outcome: str, *, elapsed_s: int = 0, round_: int = 0) -> dict[str, Any]:
+def turn_end_aps(now: float, outcome: str, *, elapsed_s: int = 0, round_: int = 0, tool_calls: int = 0,
+                 chars: int = 0) -> dict[str, Any]:
     """A turn's end, the one shape for the bridge's ``chat_done`` end and a late one: ``phase`` stays exactly
-    ``"done"`` (the shipped per-turn decode reads it) and how the turn ended is ``outcome``."""
+    ``"done"`` (the shipped per-turn decode reads it), how the turn ended is ``outcome``, the numbers are the turn's
+    own, and it lingers (``dismissal-date`` :data:`END_LINGER_SECONDS` out) so a locked phone shows how it ended."""
     return {
         "timestamp": int(now),
         "event": "end",
-        "dismissal-date": int(now),
-        "content-state": {**content_state(phase="done", detail="", elapsed_s=elapsed_s, steps=0),
-                          "outcome": outcome, "round": round_, "toolCalls": 0, "chars": 0},
+        "dismissal-date": int(now) + END_LINGER_SECONDS,
+        "content-state": {**content_state(phase="done", detail="", elapsed_s=elapsed_s, steps=tool_calls),
+                          "outcome": outcome, "round": round_, "toolCalls": tool_calls, "chars": chars},
     }
 
 

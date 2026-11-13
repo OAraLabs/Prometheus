@@ -107,6 +107,8 @@ class PushDispatcher:
         self._node_pub = node_pub or _node_pub_now
         # session_id -> wall time of the last liveactivity push.
         self._activity_pushed_at: dict[str, float] = {}
+        # session_id -> the turn's latest progress numbers (bounded, popped at its end).
+        self._turn_last: OrderedDict[str, dict] = OrderedDict()
         # Devices whose 410 has been logged — "logs once", per the spec.
         self._unregistered_logged: set[str] = set()
         # request_id -> the devices its approval push reached (APNs said ok). Memory only, bounded, popped when the
@@ -323,6 +325,11 @@ class PushDispatcher:
 
     async def on_agent_progress(self, session_id: str, payload: dict) -> None:
         try:
+            # The turn's latest numbers, kept (bounded) so its end can say them even between throttled pushes.
+            self._turn_last[session_id] = dict(payload)
+            self._turn_last.move_to_end(session_id)
+            while len(self._turn_last) > PUSHED_REQUESTS_REMEMBERED:
+                self._turn_last.popitem(last=False)
             now = self._now()
             if now - self._activity_pushed_at.get(session_id, 0.0) < ACTIVITY_THROTTLE_SECONDS:
                 return
@@ -331,6 +338,7 @@ class PushDispatcher:
                 return
             self._activity_pushed_at[session_id] = now
             phase = str(payload.get("phase") or "")
+            detail = tool_detail(payload.get("tool_name"), self.known_tool) if phase == "tool" else ""
             body = {"aps": {
                 "timestamp": int(now),
                 "event": "update",
@@ -339,12 +347,14 @@ class PushDispatcher:
                 "content-state": {
                     **content_state(
                         phase=phase,
-                        detail=tool_detail(payload.get("tool_name"), self.known_tool) if phase == "tool" else "",
+                        detail=detail,
                         elapsed_s=int(payload.get("elapsed_s") or 0),
                         steps=int(payload.get("tool_calls") or 0)),
                     "round": payload.get("round", 0),
                     "toolCalls": payload.get("tool_calls", 0),
                     "chars": payload.get("chars", 0),
+                    # The app-started per-turn activity names the tool (a registered tool only, as for detail).
+                    **({"toolName": detail} if self._registered_tool(payload.get("tool_name")) else {}),
                 },
                 # A daemon that dies mid-turn stops updating; the lock screen then shows the activity as stale.
                 "stale-date": int(now) + STALE_AFTER_SECONDS,
@@ -352,6 +362,14 @@ class PushDispatcher:
             await self._deliver_activity(targets, self._named(body), session_id)
         except Exception:
             logger.warning("liveactivity push failed", exc_info=True)
+
+    def _registered_tool(self, name: Any) -> bool:
+        """Is *name* a tool this daemon registered? Never a model-written string: only then is it named in a push."""
+        check = getattr(self, "known_tool", None)
+        try:
+            return isinstance(name, str) and bool(name) and check is not None and bool(check(name))
+        except Exception:                               # noqa: BLE001 - doubt means not named
+            return False
 
     async def on_chat_done(self, session_id: str, payload: dict) -> None:
         try:
@@ -369,8 +387,17 @@ class PushDispatcher:
             now = self._now()
             # ``phase`` stays exactly "done", as it always was: the shipped phone decodes it. How the turn ended
             # (done, stopped for a user stop, paused for the round cap, failed) is ``outcome``.
-            body = {"aps": turn_end_aps(now, outcome, elapsed_s=int(payload.get("elapsed_s") or 0),
-                                        round_=payload.get("round", 0))}
+            last = self._turn_last.pop(session_id, {})
+            started = payload.get("turn_started_at")
+            elapsed = payload.get("elapsed_s")
+            if not elapsed and isinstance(started, (int, float)) and not isinstance(started, bool):
+                elapsed = max(0.0, now - float(started))
+            elapsed = elapsed or last.get("elapsed_s") or 0
+            body = {"aps": turn_end_aps(
+                now, outcome, elapsed_s=int(elapsed),
+                round_=int(payload.get("round") or last.get("round") or 0),
+                tool_calls=int(payload.get("tool_calls") or last.get("tool_calls") or 0),
+                chars=int(payload.get("chars") or last.get("chars") or 0))}
             await self._deliver_activity(targets, self._named(body), session_id)
             self._activity_pushed_at.pop(session_id, None)
             for target, _token in targets:
