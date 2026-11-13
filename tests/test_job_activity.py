@@ -865,3 +865,36 @@ def test_server_capabilities_lists_job_activities_only_with_push_on():
     assert "job_activities" not in bridge._server_capabilities()
     bridge.push_dispatcher = SimpleNamespace(node_pub=lambda: None)
     assert "job_activities" in bridge._server_capabilities()
+
+
+# ── the per-turn end shows how the turn ended (phone item 4c, 2026-11-13) ────
+
+def test_a_turns_end_lingers_and_carries_the_real_counts():
+    """The pushed end dismissed at once with zero elapsed and zero counts, so in the background the activity vanished
+    before anyone saw how the turn ended. It now lingers and carries the turn's own numbers."""
+    from prometheus.push.job_activity import END_LINGER_SECONDS
+
+    clock = [5000.0]
+    sender = _Sender()
+    d = PushDispatcher(_TurnStore(), sender, bridge=None, now=lambda: clock[0], node_pub=lambda: PUB)
+    asyncio.run(d.on_agent_progress("web:a", {"phase": "tool", "tool_name": "bash", "round": 3,
+                                              "elapsed_s": 80, "tool_calls": 4, "chars": 120}))
+    clock[0] = 5090.0
+    asyncio.run(d.on_chat_done("web:a", {"session_id": "web:a", "turn_started_at": 4990.0}))
+    end = [s for s in sender.sent if s["payload"]["aps"].get("event") == "end"][-1]["payload"]["aps"]
+    assert end["dismissal-date"] == 5090 + END_LINGER_SECONDS
+    state = end["content-state"]
+    assert state["elapsedS"] == 100                       # from the turn's own start, not 0
+    assert (state["toolCalls"], state["chars"], state["round"]) == (4, 120, 3)
+    assert state["phase"] == "done" and state["outcome"] == "done"
+
+
+def test_a_turn_update_names_the_tool_for_the_per_turn_activity():
+    """The review session's ask: the app-started per-turn activity reads ``toolName``."""
+    sender = _Sender()
+    d = PushDispatcher(_TurnStore(), sender, bridge=None, now=lambda: 5000.0, node_pub=lambda: PUB)
+    d.known_tool = lambda name: name == "bash"
+    asyncio.run(d.on_agent_progress("web:a", {"phase": "tool", "tool_name": "bash", "round": 1}))
+    assert sender.sent[-1]["payload"]["aps"]["content-state"]["toolName"] == "bash"
+    asyncio.run(d.on_agent_progress("web:b", {"phase": "tool", "tool_name": "made-up tool; rm -rf"}))
+    assert "toolName" not in sender.sent[-1]["payload"]["aps"]["content-state"]
