@@ -842,6 +842,8 @@ cannot (all measured):
 5. **`/approve all` and `POST /api/approvals/all/approve` skip computer
    entries**, including the binding prompt, and report how many they skipped.
    Today both drain them (probed; `commands.py:2618-2635`; `server.py:4452,4465`).
+   (2026-11-13: the REST route no longer takes `all`; approve and deny take one request id. `/approve all` remains
+   as a chat command, with this skipping.)
 6. **The prompt shows what will be acted on (D16).** That is the capped,
    app-text-marked element description, plus the typed text for `type_text`.
    Today a click prompt names only the app and the machine.
