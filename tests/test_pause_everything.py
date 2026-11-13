@@ -417,3 +417,16 @@ def test_the_read_route_is_classified_for_scoped_devices():
     assert route_access.is_scoped_allowed("GET", "/api/pause")
     assert not route_access.is_scoped_allowed("PUT", "/api/pause")
     assert not route_access.is_scoped_allowed("DELETE", "/api/pause")
+
+
+def test_a_scoped_devices_423_says_since_but_not_who_or_why(w):
+    """Review of 4b (2026-11-13): the 423 the chat routes answer carried who paused and why to every caller. A scoped
+    device now gets {error, since, detail} only; the operator still gets who and why."""
+    sid = w.call("a", "POST", "/api/sessions").json()["session_id"]
+    w.call("op", "PUT", "/api/pause", json={"reason": "private words"})
+    r = w.call("a", "POST", "/api/chat/send", json={"session_id": sid, "message": "hi"})
+    assert r.status_code == 423 and r.json()["error"] == "paused" and r.json()["since"]
+    assert "by" not in r.json() and "reason" not in r.json() and "private words" not in r.text
+    op_sid = w.call("op", "POST", "/api/sessions").json()["session_id"]
+    r = w.call("op", "POST", "/api/chat/send", json={"session_id": op_sid, "message": "hi"})
+    assert r.status_code == 423 and r.json()["reason"] == "private words" and r.json()["by"]
