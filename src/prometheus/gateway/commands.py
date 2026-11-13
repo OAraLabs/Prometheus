@@ -4724,6 +4724,41 @@ def _computer_stop(runner: Any, task_id: str, session_id: str) -> str:
     return "No desktop task is running here."
 
 
+def _is_owner_in_telegram(by: Approver) -> bool:
+    from prometheus.permissions import approver as _ap
+
+    return by.kind == _ap.TELEGRAM and by.owner is True
+
+
+async def cmd_pause(arg_text: str, *, by: Approver) -> str:
+    """/pause [reason]: pause everything (engine/pause.py), the same as ``PUT /api/pause``. The OWNER only, in their
+    own Telegram."""
+    if not _is_owner_in_telegram(by):
+        return "Only the owner, in their own Telegram, can pause Prometheus."
+    from prometheus.web.pause_routes import pause_from_chat
+
+    result = await pause_from_chat(by=f"owner in Telegram ({by.label})", reason=(arg_text or "").strip())
+    stopped = result.get("stopped") or {}
+    counts = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stopped.items() if v) or "nothing was running"
+    tail = "" if result.get("persisted", True) else (" It could NOT be written to disk, so a restart would "
+                                                      "undo it.")
+    return f"Prometheus is paused. Stopped: {counts}. Nothing new runs until you /resume.{tail}"
+
+
+async def cmd_resume(*, by: Approver) -> str:
+    """/resume: lift a pause. The OWNER only, in their own Telegram. Starts nothing: interrupted turns stay
+    interrupted, coding runs stay paused until each is resumed."""
+    if not _is_owner_in_telegram(by):
+        return "Only the owner, in their own Telegram, can resume Prometheus."
+    from prometheus.web.pause_routes import resume_from_chat
+
+    cleared = await resume_from_chat(by=f"owner in Telegram ({by.label})")
+    if cleared is None:
+        return "Prometheus is not paused."
+    return ("Prometheus resumed. Nothing was restarted: interrupted turns stay interrupted, and paused coding runs "
+            "stay paused until you resume each one.")
+
+
 def cmd_person(store: Any, arg_text: str, *, by: Approver, prefix: str = "/") -> str:
     """/person: which devices may RESUME a pause (engine/pause.py), and nothing else.
 

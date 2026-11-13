@@ -70,6 +70,9 @@ WEB_NATIVE_ONLY: frozenset[str] = frozenset({
     # /person marks which devices may resume a pause. The OWNER's Telegram only, by design and not a deferral:
     # a web chat is a device, and a device must never mark one (gateway/commands.py cmd_person).
     "person",
+    # /pause and /resume are the owner's in Telegram; a device pauses with PUT /api/pause and resumes only with the
+    # person mark (DELETE /api/pause).
+    "pause", "resume",
 })
 
 _NAME_RE = re.compile(r"[a-z0-9_-]+")

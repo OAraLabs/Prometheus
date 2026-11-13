@@ -148,6 +148,8 @@ WEB_DEFERRED: frozenset[str] = frozenset({
     # /person (which devices may resume a pause): the owner's Telegram only, by design. A web chat is a device,
     # and a device must never mark one.
     "person",
+    # /pause and /resume: the owner's in Telegram only. A device uses PUT/DELETE /api/pause.
+    "pause", "resume",
 })
 
 _SAME = object()  # sentinel: web uses the same command name as Telegram
@@ -335,6 +337,12 @@ MANIFEST: tuple[Family, ...] = (
         gap_reason=("owner-only by design: the mark lets a device resume a pause, so it is set from the owner's "
                     "Telegram and nowhere else"),
     ),
+    # Pause everything from the owner's Telegram. Owner-only for the same reason as /person; a device uses the REST
+    # routes (pausing needs the operator, resuming the person mark).
+    Family("pause", ("cmd_pause",), _cmds("pause", None, None),
+           gap_reason="owner-only by design: the owner's Telegram; devices use PUT /api/pause"),
+    Family("resume", ("cmd_resume",), _cmds("resume", None, None),
+           gap_reason="owner-only by design: the owner's Telegram; a device needs the person mark (DELETE /api/pause)"),
 )
 
 

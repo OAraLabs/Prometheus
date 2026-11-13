@@ -81,6 +81,33 @@ def paused_response() -> JSONResponse | None:
         "detail": "Prometheus is paused; nothing new runs until a person resumes it. This message was not kept."})
 
 
+#: The daemon's web app, once :func:`register_pause_routes` has run, so the owner's ``/pause`` in Telegram runs the
+#: same sweep as ``PUT /api/pause`` (the approval queue, the bridge's turns, desktop tasks, tasks, coding runs).
+_app: Any = None
+
+
+async def pause_from_chat(*, by: str, reason: str) -> dict:
+    """The owner's ``/pause``: the same pause as ``PUT /api/pause`` when the web app is up; the state alone (which
+    every gate reads) when it is not."""
+    if _app is not None:
+        return await pause_everything(_app, by=by, reason=reason)
+    state = _state()
+    info, _new = state.pause(by=by, reason=reason)
+    return {"paused": True, **info.to_dict(), "persisted": state.persisted, "stopped": None}
+
+
+async def resume_from_chat(*, by: str) -> pause.PauseInfo | None:
+    """The owner's ``/resume``: clears the pause (None if there was none), tells every client, starts nothing."""
+    state = _state()
+    if state.current is None:
+        return None
+    cleared = state.resume(by=by)
+    logger.warning("Prometheus RESUMED by %s", by)
+    if _app is not None:
+        await _broadcast(_app, {"paused": False, "since": None})
+    return cleared
+
+
 def _state() -> pause.PauseState:
     state = pause.installed()
     if state is None:
@@ -184,6 +211,8 @@ async def pause_everything(app: Any, *, by: str, reason: str) -> dict:
 
 def register_pause_routes(app: Any, *, devices: Any = None) -> None:
     """*devices*: a callable returning the daemon's device store (the one the marks live in)."""
+    global _app
+    _app = app
     devices_of = devices if callable(devices) else (lambda: devices)
 
     @app.put("/api/pause")
