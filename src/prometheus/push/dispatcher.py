@@ -113,7 +113,7 @@ class PushDispatcher:
                 "request_id": payload.get("request_id"),
                 "expires_at": payload.get("expires_at"),
             }
-            for target in self._store.push_targets():
+            for target in self._approval_targets(desktop=True):
                 await self._deliver(target, desk)
             return
         body = {
@@ -134,8 +134,18 @@ class PushDispatcher:
             "tool_name": payload.get("tool_name"),
             "expires_at": payload.get("expires_at"),
         }
-        for target in self._store.push_targets():
+        for target in self._approval_targets(desktop=False):
             await self._deliver(target, body)
+
+    def _approval_targets(self, *, desktop: bool) -> list:
+        """Owner devices (plus, for a content-free desktop prompt, devices marked for computer use): see
+        ``DeviceStore.approval_push_targets``. A store that cannot say which devices are owners gets no approval
+        push at all, rather than one to every device."""
+        pick = getattr(self._store, "approval_push_targets", None)
+        if pick is None:
+            logger.warning("push: this device store cannot name owner devices; no approval push sent")
+            return []
+        return list(pick(desktop=desktop))
 
     async def _push_quiet(self, kind: str, payload: dict) -> None:
         live = self._live_device_ids()

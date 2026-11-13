@@ -61,8 +61,8 @@ def _store(tmp_path) -> DeviceStore:
     return DeviceStore(tmp_path / "devices.db")
 
 
-def _device(store, name="phone", push_token=None):
-    minted = store.mint(name, "ios")
+def _device(store, name="phone", push_token=None, owner=False):
+    minted = store.mint_owner(name, "ios", by="test") if owner else store.mint(name, "ios")
     if push_token:
         assert store.set_push(minted["id"], push_token, "sandbox", "com.oaralabs.beacon")
     return minted
@@ -113,7 +113,7 @@ def test_revoked_device_cannot_register_push_and_drops_from_targets(tmp_path):
 
 def test_approval_pushes_even_with_a_live_socket(tmp_path):
     store = _store(tmp_path)
-    d = _device(store, push_token="tok-a")
+    d = _device(store, push_token="tok-a", owner=True)       # approval pushes reach owner devices only
     sender = _FakeSender()
     dispatcher = PushDispatcher(store, sender, _FakeBridge(live_ids=[d["id"]]))
 
