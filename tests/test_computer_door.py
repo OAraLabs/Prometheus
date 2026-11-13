@@ -695,6 +695,45 @@ async def test_telegram_stop_stops_a_running_task(tmp_path):
     assert rig.driver.dispatched == []
 
 
+async def test_telegram_yes_while_everything_is_paused_starts_nothing(tmp_path):
+    """Pause everything (engine/pause.py; second review of #919): the 423 sat on the web route only, so Telegram's
+    /computer yes still started a desktop task. The runner itself refuses now, for every door."""
+    from prometheus.engine import pause
+    from prometheus.gateway.commands import cmd_computer
+
+    rig = _rig(tmp_path, ["click-0"], telegram=_Telegram())
+    kw = dict(by=PERSON, surface="telegram", session_id=SESSION, chat_id=456, notify=None)
+    assert "/computer yes" in await cmd_computer(rig.runner, "save the document", **kw)
+    state = pause.PauseState(tmp_path / "pause.json")
+    pause.install(state)
+    try:
+        state.pause(by="owner", reason="")
+        reply = await cmd_computer(rig.runner, "yes", **kw)
+    finally:
+        pause.install(None)
+    assert "paused" in reply.lower()
+    assert rig.runner.tasks(SESSION) == [] and rig.driver.dispatched == []
+
+
+async def test_the_runner_refuses_to_start_while_paused(tmp_path):
+    from prometheus.computer.door import DoorRefused
+    from prometheus.engine import pause
+
+    rig = _rig(tmp_path, ["click-0"])
+    await _bind(rig)
+    state = pause.PauseState(tmp_path / "pause.json")
+    pause.install(state)
+    try:
+        state.pause(by="owner", reason="private words")
+        with pytest.raises(DoorRefused) as refused:
+            await _start(rig)
+    finally:
+        pause.install(None)
+    assert refused.value.status == 423 and refused.value.code == "paused"
+    assert "private words" not in str(refused.value) and "owner" not in str(refused.value)
+    assert rig.runner.tasks(SESSION) == [] and rig.driver.dispatched == []
+
+
 async def test_telegram_stranger_cannot_start(tmp_path):
     from prometheus.gateway.commands import cmd_computer
 

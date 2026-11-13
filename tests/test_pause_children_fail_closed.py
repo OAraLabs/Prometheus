@@ -144,7 +144,7 @@ def test_inside_a_turn_task_run_async_runs_its_body(monkeypatch):
     loop = al.AgentLoop.__new__(al.AgentLoop)
 
     async def go():
-        al._IN_TURN_TASK.set(True)
+        al._IN_TURN_TASK.set(asyncio.current_task())
         try:
             await loop.run_async("system", "hi")
         except AssertionError:
@@ -154,3 +154,30 @@ def test_inside_a_turn_task_run_async_runs_its_body(monkeypatch):
         return "body ran"
 
     assert asyncio.run(go()) == "body ran"
+
+
+def test_a_task_a_turn_spawns_runs_its_own_turns_as_turn_tasks(monkeypatch):
+    """Second review of #919: the in-turn mark was a flag every task the turn spawned inherited, so a later turn run
+    from one (a worker's re-engage from its watcher task: telegram.inject_turn -> run_async) ran inline, untracked,
+    and a pause could not cancel it. The mark is now the turn's OWN task: any other task is wrapped."""
+    import asyncio
+
+    from prometheus.engine import agent_loop as al
+
+    handed: list[object] = []
+
+    async def spy(coro):
+        handed.append(coro)
+        coro.close()
+        return "ran as a turn task"
+
+    monkeypatch.setattr(al._pause, "run_as_turn", spy)
+    loop = al.AgentLoop.__new__(al.AgentLoop)
+
+    async def turn():
+        al._IN_TURN_TASK.set(asyncio.current_task())
+        spawned = asyncio.create_task(loop.run_async("system", "re-engage"))   # copies this task's context
+        return await spawned
+
+    assert asyncio.run(turn()) == "ran as a turn task"
+    assert len(handed) == 1
