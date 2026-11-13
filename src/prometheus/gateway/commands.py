@@ -4738,10 +4738,13 @@ async def cmd_pause(arg_text: str, *, by: Approver) -> str:
     from prometheus.web.pause_routes import pause_from_chat
 
     result = await pause_from_chat(by=f"owner in Telegram ({by.label})", reason=(arg_text or "").strip())
-    stopped = result.get("stopped") or {}
-    counts = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stopped.items() if v) or "nothing was running"
     tail = "" if result.get("persisted", True) else (" It could NOT be written to disk, so a restart would "
                                                       "undo it.")
+    stopped = result.get("stopped")
+    if stopped is None:                            # the web app is not up: only the state was set
+        return ("Prometheus is paused: nothing new starts until you /resume. Running work was NOT swept (the web "
+                f"app is not up), so pending approvals stand and a turn already running ends at its next round.{tail}")
+    counts = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stopped.items() if v) or "nothing was running"
     return f"Prometheus is paused. Stopped: {counts}. Nothing new runs until you /resume.{tail}"
 
 
