@@ -422,8 +422,22 @@ def test_a_relayed_pairing_source_says_so():
     a bare address; it is shown as relayed."""
     from prometheus.web.pairing_routes import _peer
 
-    assert _peer(_request({ts.SCOPE_KEY: SETTINGS})) == f"{TAILNET_CALLER} via tailscale serve"
+    assert _peer(_request({ts.SCOPE_KEY: SETTINGS})) == f"via-tailscale-serve:{TAILNET_CALLER}"
     assert _peer(_request({}, client="192.0.2.7")) == "192.0.2.7"
+
+
+def test_a_relayed_source_passes_the_desktop_owners_check():
+    """Beacon desktop's owner list (src/shared/join-owner.ts) drops a request whose source_ip has whitespace or a
+    control character or is longer than 64 characters, so a relayed source must fit that, for the longest tailnet
+    address there is (eight full IPv6 groups)."""
+    import re
+
+    from prometheus.web.pairing_routes import _peer
+
+    longest = "fd7a:115c:a1e0:ab12:4843:cd96:6258:b240"
+    source = _peer(_request({ts.SCOPE_KEY: SETTINGS}, client=longest))
+    assert source.endswith(longest) and len(source) <= 64
+    assert not re.search(r"[\s\x00-\x1f\x7f-\x9f]", source)
 
 
 def test_relayed_pairing_requests_share_a_ceiling(tmp_path):
@@ -441,10 +455,10 @@ def test_relayed_pairing_requests_share_a_ceiling(tmp_path):
         return store.create(device_name="phone", platform="ios", public_key=Requester().public_b64, source=source,
                             instance_public_key_der=INSTANCE_DER)
 
-    create(f"{_tail(64, 0, 1)}{pr.RELAY_SUFFIX}")
-    create(f"{_tail(64, 0, 2)}{pr.RELAY_SUFFIX}")
+    create(f"{pr.RELAY_PREFIX}{_tail(64, 0, 1)}")
+    create(f"{pr.RELAY_PREFIX}{_tail(64, 0, 2)}")
     with pytest.raises(pr.LimitExceeded) as full:
-        create(f"{_tail(64, 0, 3)}{pr.RELAY_SUFFIX}")
+        create(f"{pr.RELAY_PREFIX}{_tail(64, 0, 3)}")
     assert full.value.reason == "pending_full"
     create("192.0.2.10")                                                    # a direct source keeps the last slot
 
@@ -460,8 +474,8 @@ def test_relayed_pairing_requests_share_an_hourly_ceiling(tmp_path):
                                 settings=pr.PairingSettings(max_pending=50, max_pending_per_source=50), clock=clock)
     for i in range(10):
         store.create(device_name="phone", platform="ios", public_key=Requester().public_b64,
-                     source=f"{_tail(64, 1, i)}{pr.RELAY_SUFFIX}", instance_public_key_der=INSTANCE_DER)
+                     source=f"{pr.RELAY_PREFIX}{_tail(64, 1, i)}", instance_public_key_der=INSTANCE_DER)
     with pytest.raises(pr.LimitExceeded) as hourly:
         store.create(device_name="phone", platform="ios", public_key=Requester().public_b64,
-                     source=f"{_tail(64, 2, 1)}{pr.RELAY_SUFFIX}", instance_public_key_der=INSTANCE_DER)
+                     source=f"{pr.RELAY_PREFIX}{_tail(64, 2, 1)}", instance_public_key_der=INSTANCE_DER)
     assert hourly.value.reason == "hourly"
