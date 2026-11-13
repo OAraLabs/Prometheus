@@ -92,3 +92,29 @@ def test_a_side_call_while_paused_reaches_no_model_and_fails_by_its_policy(tmp_p
     finally:
         pause.install(None)
     assert called == []
+
+
+# ── no new coding run or desktop task while paused ───────────────────────────
+
+@pytest.mark.parametrize(("path", "body"), [
+    ("/api/code", {"description": "fix it", "repo": "/tmp/x"}),
+    ("/api/computer/tasks", {"goal": "open notes", "app": "Notes", "session_id": "web:s1"}),
+])
+def test_starting_new_work_while_paused_is_423_and_starts_nothing(tmp_path, monkeypatch, path, body):
+    pytest.importorskip("fastapi")
+    from tests.support.device_world import World
+
+    state = pause.PauseState(tmp_path / "pause.json")
+    pause.install(state)
+    try:
+        w = World(tmp_path)
+        from prometheus.coding import managed
+
+        monkeypatch.setattr(managed, "create_coding_managed_task",
+                            lambda *a, **kw: (_ for _ in ()).throw(AssertionError("started a coding run")))
+        state.pause(by="owner", reason="")
+        r = w.call("op", "POST", path, json=body)
+        assert r.status_code == 423, (path, r.status_code, r.text)
+        assert r.json()["error"] == "paused"
+    finally:
+        pause.install(None)
