@@ -1,7 +1,7 @@
 """An approval push goes to owner devices only.
 
 An approval push carries the tool name and the first line of the request's description, and it used to go to
-every registered device. A scoped device sees only its own sessions everywhere else (``GET /api/approvals``, the
+every registered device. A scoped device sees only its own sessions' requests (``GET /api/approvals``, the
 ``approval_pending`` frame), and it cannot approve anything but a desktop prompt, so a push to it about another
 session's request told it something no other surface would, and offered it a button it could not use.
 
@@ -99,3 +99,26 @@ def test_the_store_query_answers_owner_and_marked_devices(tmp_path):
     assert names == {"tok-owner"}
     names = {t.apns_token for t in store.approval_push_targets(desktop=True)}
     assert names == {"tok-owner", "tok-marked"}
+
+
+def test_a_revoked_marked_device_gets_no_desktop_push(tmp_path):
+    store = _world(tmp_path)
+    marked = [d for d in store.list_devices() if d.name == "marked tablet"][0]
+    store.revoke(marked.id)
+    sender = _Sender()
+    asyncio.run(PushDispatcher(store, sender, bridge=None).on_signal(
+        _signal("approval_pending", _approval(task_id="t1"))))
+    assert _tokens(sender) == ["tok-owner"]
+
+
+def test_a_store_that_raises_sends_no_approval_push_and_the_bus_survives():
+    class _Raising:
+        def push_targets(self):
+            return []
+
+        def approval_push_targets(self, *, desktop):
+            raise RuntimeError("database is locked")
+
+    sender = _Sender()
+    asyncio.run(PushDispatcher(_Raising(), sender, bridge=None).on_signal(_signal("approval_pending", _approval())))
+    assert sender.sent == []
