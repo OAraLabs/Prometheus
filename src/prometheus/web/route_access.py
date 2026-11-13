@@ -92,6 +92,7 @@ SCOPED_ALLOWED: frozenset[tuple[str, str]] = frozenset({
     # the tool calls of its own sessions: seen and denied. The approve route is listed for a desktop prompt, which
     # a device a person marked answers (the door's rule); the handler refuses a scoped device any other approval.
     ("GET", "/api/approvals"),
+    ("GET", "/api/approvals/{request_id}"),               # one of them, by id; not its own is the 404 of none
     ("POST", "/api/approvals/{request_id}/approve"),
     ("POST", "/api/approvals/{request_id}/deny"),
 })
@@ -308,12 +309,22 @@ def _listed(table: frozenset[tuple[str, str]], method: str, path: str) -> bool:
     return any(m == verb and _matches(pattern, path) for m, pattern in table)
 
 
+_OPERATOR_ONLY_LITERALS: frozenset[tuple[str, str]] = frozenset(
+    (m, p) for m, p in OPERATOR_ONLY if "{" not in p)
+
+
 def is_scoped_allowed(method: str, path: str, *, marked: Callable[[], bool] | None = None) -> bool:
     """May a scoped device call *method* *path*? *path* is the ROUTED path (``scope["path"]``), never the URL.
 
     *marked* answers "has an operator marked THIS device for computer use?"; it is called only for a route in
     :data:`MARKED_DEVICE_ALLOWED`, so the common request never touches the registry for it. A failing answer is no.
     """
+    # A route NAMED operator-only wins over a placeholder pattern that also matches its path: ``{request_id}`` is
+    # any one segment, so ``GET /api/approvals/{request_id}`` also matches ``GET /api/approvals/grants``, and the
+    # handler that runs is not what decides this. Only literal paths are checked here (a pattern in both tables is
+    # the classification test's to refuse).
+    if _listed(_OPERATOR_ONLY_LITERALS, method, path):
+        return False
     if _listed(SCOPED_ALLOWED, method, path):
         return True
     if marked is not None and _listed(MARKED_DEVICE_ALLOWED, method, path):
