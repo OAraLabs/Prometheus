@@ -107,3 +107,44 @@ def test_a_process_that_was_not_told_keeps_the_default_path(tmp_path, monkeypatc
     monkeypatch.delenv("PROMETHEUS_PAUSE_FILE", raising=False)
     monkeypatch.setattr(pause, "pause_path", lambda: tmp_path / "nothing" / "pause.json")
     assert pause.current() is None
+
+
+# ── chat-gateway turns run as tasks a pause can cancel ──────────────────────
+
+def test_a_gateway_turn_is_cancelled_by_a_pause_and_its_poller_survives(tmp_path, monkeypatch):
+    """Telegram, Slack and Discord run turns through AgentLoop.run_async, some inline in a long-lived poller task.
+    run_async now runs the turn as a task of its own: a pause cancels the turn (the caller hears Paused) and never
+    the poller."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from prometheus.engine.agent_loop import AgentLoop
+    from prometheus.web import pause_routes
+
+    loop = AgentLoop.__new__(AgentLoop)
+
+    async def slow_body(*a, **kw):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(loop, "_run_async_body", slow_body)
+    pause.install(pause.PauseState(tmp_path / "pause.json"))
+
+    async def go():
+        heard: list[str] = []
+
+        async def poller():
+            try:
+                await loop.run_async("system", "hi")
+            except pause.Paused:
+                heard.append("paused")
+            await asyncio.sleep(0)
+            return "poller alive"
+
+        p = asyncio.create_task(poller())
+        await asyncio.sleep(0.01)
+        result = await pause_routes.pause_everything(SimpleNamespace(state=SimpleNamespace()), by="test", reason="")
+        out = await asyncio.wait_for(p, 5)
+        return heard, out, result
+
+    heard, out, result = asyncio.run(go())
+    assert heard == ["paused"] and out == "poller alive" and result["stopped"]["turns"] == 1
