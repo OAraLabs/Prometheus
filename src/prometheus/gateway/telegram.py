@@ -460,6 +460,9 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("backends", self._cmd_backends))
         # Computer use v1.1 — the door. A person starts a desktop task here.
         self._app.add_handler(CommandHandler("computer", self._cmd_computer))
+        self._app.add_handler(CommandHandler("person", self._cmd_person))
+        self._app.add_handler(CommandHandler("pause", self._cmd_pause))
+        self._app.add_handler(CommandHandler("resume", self._cmd_resume))
         # One command per configured local backend (`/4090`, `/mini`) — the
         # names come from the registry, so the command set follows the config.
         from prometheus.router.model_router import backend_command_names
@@ -2708,6 +2711,57 @@ class TelegramAdapter(BasePlatformAdapter):
             session_id=f"{Platform.TELEGRAM.value}:{chat_id}", chat_id=chat_id,
             notify=notify)
         await self.send(chat_id, reply, parse_mode=None)
+
+    async def _cmd_pause(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/pause [reason] — pause everything (gateway/commands.py cmd_pause). The SENDER must be the owner."""
+        if not update.message or not update.effective_chat:
+            return
+        from prometheus.gateway import commands as _cmds
+        from prometheus.permissions import approver as _approver
+
+        parts = (update.message.text or "").split(maxsplit=1)
+        by = _approver.telegram(update.effective_user, owners=self.config.owner_ids())
+        reply = await _cmds.cmd_pause(parts[1] if len(parts) > 1 else "", by=by)
+        await self.send(update.effective_chat.id, reply, parse_mode=None)
+
+    async def _cmd_resume(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/resume — lift a pause (gateway/commands.py cmd_resume). The SENDER must be the owner."""
+        if not update.message or not update.effective_chat:
+            return
+        from prometheus.gateway import commands as _cmds
+        from prometheus.permissions import approver as _approver
+
+        by = _approver.telegram(update.effective_user, owners=self.config.owner_ids())
+        reply = await _cmds.cmd_resume(by=by)
+        await self.send(update.effective_chat.id, reply, parse_mode=None)
+
+    async def _cmd_person(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/person — which devices may resume a pause, and nothing else (gateway/commands.py cmd_person). The
+        SENDER must be the owner."""
+        if not update.message or not update.effective_chat:
+            return
+        from prometheus.config.device_store import DeviceStore
+        from prometheus.gateway import commands as _cmds
+        from prometheus.permissions import approver as _approver
+
+        parts = (update.message.text or "").split(maxsplit=1)
+        by = _approver.telegram(update.effective_user, owners=self.config.owner_ids())
+        try:
+            store = DeviceStore()                  # the daemon's registry, the one the REST middleware reads
+        except Exception:  # noqa: BLE001 - say so rather than fail silently
+            store = None
+        try:
+            reply = _cmds.cmd_person(store, parts[1] if len(parts) > 1 else "", by=by)
+        finally:
+            if store is not None:
+                store.close()                      # one connection per command, closed with it
+        await self.send(update.effective_chat.id, reply, parse_mode=None)
 
     def _registered_commands(self) -> list[str]:
         """Every command name PTB actually has a handler for.

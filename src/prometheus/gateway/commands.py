@@ -4724,6 +4724,82 @@ def _computer_stop(runner: Any, task_id: str, session_id: str) -> str:
     return "No desktop task is running here."
 
 
+def _is_owner_in_telegram(by: Approver) -> bool:
+    from prometheus.permissions import approver as _ap
+
+    return by.kind == _ap.TELEGRAM and by.owner is True
+
+
+async def cmd_pause(arg_text: str, *, by: Approver) -> str:
+    """/pause [reason]: pause everything (engine/pause.py), the same as ``PUT /api/pause``. The OWNER only, in their
+    own Telegram."""
+    if not _is_owner_in_telegram(by):
+        return "Only the owner, in their own Telegram, can pause Prometheus."
+    from prometheus.web.pause_routes import pause_from_chat
+
+    result = await pause_from_chat(by=f"owner in Telegram ({by.label})", reason=(arg_text or "").strip())
+    tail = "" if result.get("persisted", True) else (" It could NOT be written to disk, so a restart would "
+                                                      "undo it.")
+    stopped = result.get("stopped")
+    if stopped is None:                            # the web app is not up: only the state was set
+        return ("Prometheus is paused: nothing new starts until you /resume. Running work was not swept (the web "
+                f"app is not up), so pending approvals stand and a turn already running ends at its next round.{tail}")
+    counts = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stopped.items() if v) or "nothing was running"
+    return f"Prometheus is paused. Stopped: {counts}. Nothing new runs until you /resume.{tail}"
+
+
+async def cmd_resume(*, by: Approver) -> str:
+    """/resume: lift a pause. The OWNER only, in their own Telegram. Starts nothing: interrupted turns stay
+    interrupted, coding runs stay paused until each is resumed."""
+    if not _is_owner_in_telegram(by):
+        return "Only the owner, in their own Telegram, can resume Prometheus."
+    from prometheus.web.pause_routes import resume_from_chat
+
+    cleared = await resume_from_chat(by=f"owner in Telegram ({by.label})")
+    if cleared is None:
+        return "Prometheus is not paused."
+    return ("Prometheus resumed. Nothing was restarted: interrupted turns stay interrupted, and paused coding runs "
+            "stay paused until you resume each one.")
+
+
+def cmd_person(store: Any, arg_text: str, *, by: Approver, prefix: str = "/") -> str:
+    """/person: which devices may RESUME a pause (engine/pause.py), and nothing else.
+
+    ``/person`` lists the devices, ``/person allow <device id>`` marks one, ``/person disallow <device id>`` removes
+    the mark. The OWNER only, in their own Telegram: not another chat member, not the API token, not a device (no
+    REST route sets the mark). The mark is not computer use: it lets a device resume a pause and does nothing else.
+    """
+    from prometheus.permissions import approver as _ap
+
+    if by.kind != _ap.TELEGRAM or by.owner is not True:
+        return "Only the owner, in their own Telegram, can mark a device as a person's."
+    if store is None:
+        return "No device store on this daemon."
+    verb, _, device_id = (arg_text or "").strip().partition(" ")
+    verb, device_id = verb.lower(), device_id.strip()
+    if verb in ("", "devices", "list"):
+        live = [d for d in store.list_devices() if d.revoked_at is None]
+        if not live:
+            return "No Beacon device is enrolled."
+        marked = store.person_device_ids()
+        return "\n".join(
+            ["Beacon devices (✓ = may resume Prometheus after a pause; nothing else):"]
+            + [f"  {'✓' if d.id in marked else '·'} {d.id}  {d.name} ({d.platform})" for d in live]
+            + [f"Mark one: {prefix}person allow <device id>. Remove: {prefix}person disallow <device id>."])
+    if verb not in ("allow", "disallow"):
+        return f"Usage: {prefix}person | {prefix}person allow <device id> | {prefix}person disallow <device id>"
+    if not device_id:
+        return f"Name the device: {prefix}person {verb} <device id>."
+    try:
+        ok = store.set_person(device_id, verb == "allow", by=by.label)
+    except ValueError as exc:                     # a held device is never marked
+        return f"Not marked: {exc}."
+    if not ok:
+        return f"No live device {device_id}."
+    return (f"Device {device_id} may now resume Prometheus after a pause. It gains nothing else."
+            if verb == "allow" else f"Device {device_id} may no longer resume Prometheus after a pause.")
+
+
 def _computer_devices(runner: Any, verb: str, device_id: str, by: Approver) -> str:
     store = getattr(runner.people, "devices", None)
     if store is None:

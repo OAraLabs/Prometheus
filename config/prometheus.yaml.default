@@ -448,6 +448,8 @@ security:
     - "/*/.prometheus/node"
     - "/*/.prometheus/data/mcp_servers.json*"
     - "/*/.prometheus/xai_oauth.json*"   # the xAI OAuth tokens
+    # The pause-everything state (read at boot; removing it would undo an emergency stop at the next restart).
+    - "/*/.prometheus/data/pause.json*"
   # THE ABOVE DOES NOT COVER bash. denied_paths is only consulted when a call
   # passes a file_path, and bash is handed a command string — so at BOTH
   # origins `cat ~/.ssh/id_*` is ALLOW. Measured, not inferred. Any check on

@@ -125,6 +125,11 @@ def register_openai_routes(
 
     @router.post("/chat/completions")
     async def chat_completions(request: Request):
+        # Paused (engine/pause.py): nothing new runs. OpenAI's error shape, with our code.
+        from prometheus.engine import pause as _pause
+
+        if (_paused := _pause.current()) is not None:
+            return _error(423, "Prometheus is paused; nothing new runs until a person resumes it.", "paused")
         try:
             body = await request.json()
         except Exception:
@@ -234,6 +239,10 @@ def register_openai_routes(
             ("done", usage). Tool events are consumed here and never leave."""
             usage = {"prompt_tokens": 0, "completion_tokens": 0}
             round_acc = ""
+            # This request's task exists for this one turn, so a pause may cancel it (engine/pause.py).
+            from prometheus.engine import pause as _pause
+
+            _turn_task = _pause.track_current_task_as_turn()
             try:
                 with turn_mcp_headers(turn_headers):
                     async for event, _u in run_loop(ctx, history, mode=mode, session_id=session_id,
@@ -255,6 +264,7 @@ def register_openai_routes(
                                 usage["completion_tokens"] += int(event.usage.output_tokens or 0)
                         # ToolExecutionStarted / Completed / ProviderDegraded: server-side, not surfaced.
             finally:
+                _pause.untrack(_turn_task)
                 if key != LOCAL_MODEL_KEY and router_obj is not None:
                     router_obj.clear_override(session_id, persist=False)
             usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]

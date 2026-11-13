@@ -96,6 +96,9 @@ profile prometheus-bash flags=(attach_disconnected) {
   # a shell must not. The trailing * covers the schedule's .tmp and .corrupt side files: the daemon's
   # open(tmp, "w") follows a symlink, so a planted one would redirect its write. `l` refuses the link itself.
   deny @{HOME}/.prometheus/data/cron_{jobs.json,history.jsonl,undelivered.jsonl,scheduler.pid}* wl,
+  # The pause-everything state (engine/pause.py), read at boot: a shell that deleted or rewrote it would undo an
+  # emergency stop at the next restart. By prefix, so the daemon's pause.json.*.tmp files are covered too.
+  deny @{HOME}/.prometheus/data/pause.json* wl,
   deny @{HOME}/.prometheus/data/  w,
   deny @{HOME}/.prometheus/       w,
 

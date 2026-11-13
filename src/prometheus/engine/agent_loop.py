@@ -58,6 +58,7 @@ from prometheus.context.system_prompt import (
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
     rewrite_model_identity,
 )
+from prometheus.engine import pause as _pause  # pause everything (engine/pause.py)
 from prometheus.engine.fallback import stream_round_with_fallback
 from prometheus.engine.stages.routing import route_turn
 
@@ -1527,6 +1528,10 @@ async def run_loop(
     # after it must read the copy, or a later refactor that moves a read
     # above this line silently reintroduces the shared read.
     context = context.for_run()
+    # PAUSE EVERYTHING (engine/pause.py): no turn starts while the agent is paused, whatever front door it came
+    # through (the doors refuse first, with a reason; this is the backstop, and in a child process the only
+    # check). Raised at the first ``__anext__``, right after the copy and before anything is recorded.
+    _pause.check()
     # A duck-typed verifier without ``new_turn_key`` predates turn scoping;
     # it keeps its single accumulator and we never pass it a key it can't
     # accept. Capability is resolved ONCE here so the call sites below don't
@@ -2315,6 +2320,12 @@ async def _run_loop(
             log.debug("degenerate-output telemetry write failed", exc_info=True)
 
     for turn in range(context.max_turns):
+        if turn > 0:
+            # A pause between rounds ends the turn here (in this process the pause also cancels it; a child
+            # process, a worker or a coding run, has only this and the file).
+            from prometheus.engine import pause as _pause_mod
+
+            _pause_mod.check()
         if turn_record is not None:
             turn_record.round_index = turn
         # MicroCompaction: compact old tool results (free, no LLM calls)

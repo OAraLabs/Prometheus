@@ -746,10 +746,13 @@ _REGISTRY_REGEX: Final[str] = '(regex #"/devices\\.db[^/]*$")'
 #: daemon write job JSON through it.
 DATA_TRUSTED_FILES: Final[tuple[str, ...]] = (
     "cron_jobs.json", "cron_history.jsonl", "cron_undelivered.jsonl", "cron_scheduler.pid",
+    # The pause-everything state (engine/pause.py), read at boot: a shell that deleted or rewrote it would undo an
+    # emergency stop at the next restart. The daemon writes ``pause.json.<hex>.tmp`` and renames it over.
+    "pause.json",
 )
 #: The Seatbelt match for :data:`DATA_TRUSTED_FILES` and anything they are a prefix of (``.tmp``, ``.corrupt``).
 _CRON_REGEX: Final[str] = (
-    '(regex #"/cron_(jobs\\.json|history\\.jsonl|undelivered\\.jsonl|scheduler\\.pid)[^/]*$")'
+    '(regex #"/(cron_(jobs\\.json|history\\.jsonl|undelivered\\.jsonl|scheduler\\.pid)|pause\\.json)[^/]*$")'
 )
 
 

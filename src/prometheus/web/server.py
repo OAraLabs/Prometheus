@@ -30,6 +30,7 @@ from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import is_loopback_host_header, is_same_machine
 from prometheus.web.route_access import is_scoped_allowed
 from prometheus.web.public_routes import is_public_route
+from prometheus.web.pause_routes import paused_response, register_pause_routes
 from prometheus.web.serving import bound_port
 from prometheus.web.session_scope import (
     Scope,
@@ -44,6 +45,7 @@ from prometheus.config import local_pairing
 from prometheus.config.device_store import registry_platform
 from prometheus.config.node_identity import get_instance_id, get_node_pubkey, identity_fields
 from prometheus.config.paths import get_wiki_root
+from prometheus.engine import pause as pause_state
 from prometheus.context.environment import (
     booted_from as _booted_from,
     deployment_freshness,
@@ -1372,8 +1374,11 @@ def create_app(
         ) or getattr(app.state, "agent_state", "idle")
         security_state = await _floor_state()
         hello_now = _hello_payload()
+        _paused = pause_state.current()
         return {
             "state": _live_state,
+            # Pause everything (engine/pause.py): null, or {since, by, reason}.
+            "paused": _paused.to_dict() if _paused is not None else None,
             "model": app.state.current_model,
             # WHAT NEEDS THE OPERATOR, as a list a client can show as-is: {code, level, message, fix}. Each item
             # comes from a probe or a check, never from config read back. The bash floors' own `dark` stays in
@@ -1652,6 +1657,9 @@ def create_app(
             disabled but route still mounted) — explicit so the caller
             doesn't think a queued message succeeded
         """
+        # Paused (engine/pause.py): nothing new runs, and the message is not kept to run on resume.
+        if (refusal := paused_response()) is not None:
+            return refusal
         try:
             body = await request.json()
         except Exception:
@@ -1807,6 +1815,9 @@ def create_app(
           * 503 when ``gateway.paperclip.enabled`` is false / gateway unwired
           * 400 on malformed JSON or a body missing ``runId``/``agentId``
         """
+        # Paused (engine/pause.py): nothing new runs, and the message is not kept to run on resume.
+        if (refusal := paused_response()) is not None:
+            return refusal
         gateway = getattr(app.state, "paperclip_gateway", None)
         if gateway is None or not hasattr(gateway, "start_heartbeat"):
             return JSONResponse(
@@ -5507,6 +5518,9 @@ def create_app(
         name resolved to whichever came last. Renamed while wiring the lint
         gate (ruff F811).
         """
+        # Paused (engine/pause.py): nothing new runs, and the message is not kept to run on resume.
+        if (refusal := paused_response()) is not None:
+            return refusal
         session_id = body.get("session_id", "")
         content = body.get("content", "")
         if not session_id or not content:
@@ -5599,7 +5613,8 @@ def create_app(
             # would have been a no-op that read like a fix and taught the next
             # reader that this route selects its own tools. It does not.
             with turn_mcp_headers(turn_headers):
-                result = await agent_loop.run_async(
+                # A task of its own, so a pause can cancel this turn (and only it): engine/pause.py.
+                result = await pause_state.run_as_turn(agent_loop.run_async(
                     system_prompt=system_prompt,
                     messages=session.get_messages(),
                     # RECORD-ONLY (WP-X.21 T4): the telemetry rows name the
@@ -5608,7 +5623,7 @@ def create_app(
                     # override lookup for this route, which stays 'system'.
                     record_session_id=f"web:{session_id}",
                     surface="rest",
-                )
+                ))
             session.add_result_messages(result.messages, pre_len)
             reply = {
                 "text": result.text,
@@ -5624,6 +5639,8 @@ def create_app(
             if served_by:
                 reply["served_by"] = served_by
             return reply
+        except pause_state.Paused:
+            return paused_response() or JSONResponse(status_code=423, content={"error": "paused"})
         except MaxTurnsExhausted as cap:
         # #774: a turn that hit its round cap kept its work — save it, never
         # roll it back. run_async handed the loop a COPY of the session list,
@@ -6935,6 +6952,9 @@ def create_app(
         Reuses the same ws_bridge path as POST /api/chat/send. Matches the web
         semantics: if no bridge is wired, 503 WITHOUT stamping (the task did not
         actually go out)."""
+        # Paused (engine/pause.py): nothing new runs, and the message is not kept to run on resume.
+        if (refusal := paused_response()) is not None:
+            return refusal
         from prometheus.kanban import get_kanban_store
 
         store = get_kanban_store()
@@ -6973,6 +6993,9 @@ def create_app(
         if updated is None:
             return JSONResponse(status_code=404, content={"error": "story not found"})
         return {"ok": True, "story": updated}
+
+    # ── Pause everything (Beacon iOS Piece 17; web/pause_routes.py) ─────────
+    register_pause_routes(app, devices=_devices_or_create)
 
     # ── OpenAI-compatible surface (item 2, 2026-09-01) ─────────────────────
     # Registered BEFORE the static catch-all below, like every route.
