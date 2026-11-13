@@ -1085,6 +1085,8 @@ class WebSocketBridge:
         dispatcher = getattr(self, "push_dispatcher", None)
         if dispatcher is not None and dispatcher.node_pub():
             capabilities.append("push_node_pub")
+        # GET /api/approvals/{request_id} exists (server.py): a client may fetch one request instead of the list.
+        capabilities.append("approval_by_id")
         return capabilities
 
     async def _system_note(self, session_id: str, content: str) -> None:
