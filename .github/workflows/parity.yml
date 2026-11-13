@@ -65,7 +65,12 @@ concurrency:
 
 jobs:
   replay:
-    runs-on: ubuntu-latest
+    # PINNED, not ubuntu-latest. The recorded traces carry the recording host's OS line; the replay normalizes it
+    # out of the request diff, but its LENGTH still enters the compactor's 4-characters-per-token estimate, so a
+    # runner image with a longer kernel string moves `tokens_before` by one and fails the compaction scenario with
+    # every model request matching. ubuntu-latest moved to 26.04 between 2026-11-08 and 2026-11-12 and did exactly
+    # that. Move this line on purpose, together with a rebaseline of the expected files.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       # Same stance as ci.yml: never let uv download an interpreter.
