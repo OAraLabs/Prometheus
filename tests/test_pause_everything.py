@@ -430,3 +430,19 @@ def test_a_scoped_devices_423_says_since_but_not_who_or_why(w):
     op_sid = w.call("op", "POST", "/api/sessions").json()["session_id"]
     r = w.call("op", "POST", "/api/chat/send", json={"session_id": op_sid, "message": "hi"})
     assert r.status_code == 423 and r.json()["reason"] == "private words" and r.json()["by"]
+
+
+def test_one_line_drops_marks_and_invisible_letters_and_trims(state):
+    """Second review of 4a (2026-11-13): stacked combining marks spill over neighbouring lines on a phone, and
+    invisible letters can make a reason look blank."""
+    info, _ = state.pause(by="owner", reason="a" + "́" * 139 + " ok ㅤ⠀ᅟᅠﾠ end")
+    assert "́" not in info.reason and "ㅤ" not in info.reason and "⠀" not in info.reason
+    assert info.reason == "a ok end"
+    state.resume(by="owner")
+    info, _ = state.pause(by="owner", reason="x" * 139 + " yz")
+    assert not info.reason.endswith(" ") and len(info.reason) <= 140
+
+
+def test_the_paused_error_does_not_name_who_paused():
+    err = pause.Paused(pause.PauseInfo(since=1.0, by="owner device Will's phone", reason="secret"))
+    assert "Will" not in str(err) and "secret" not in str(err) and "paused" in str(err).lower()
