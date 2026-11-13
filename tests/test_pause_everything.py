@@ -388,3 +388,14 @@ def test_a_slash_command_is_refused_while_paused_too(w):
     w.call("op", "PUT", "/api/pause", json={})
     asyncio.run(w.bridge._handle_send_message("web:s1", "/compact"))
     assert any(f.get("type") == "error" and f["payload"]["kind"] == "paused" for f in frames)
+
+
+def test_reason_and_who_are_one_short_line(state):
+    """The phone shows them on every screen (item 4a, 2026-11-13): one line, no control characters, capped."""
+    long_reason = "line one\nline two\t" + "x" * 500 + "\x1b[31m"
+    info, _ = state.pause(by="owner device " + "n" * 200 + "\nsecond", reason=long_reason)
+    assert "\n" not in info.reason and "\t" not in info.reason and "\x1b" not in info.reason
+    assert len(info.reason) <= 140 and info.reason.startswith("line one line two")
+    assert "\n" not in info.by and len(info.by) <= 80
+    stored = pause.PauseState(state.path).current
+    assert stored is not None and stored.reason == info.reason and stored.by == info.by
