@@ -261,6 +261,19 @@ class LLMCallEnvelope:
             max_tokens=max_tokens,
         )
 
+        # PAUSE EVERYTHING (engine/pause.py): no side model call while paused (titles, compaction, extraction, the
+        # curator, synthesis). Not a failure of the call, so no silent_failures row; the caller's own policy decides
+        # what it gets back.
+        from prometheus.engine import pause as _pause
+
+        if (_paused := _pause.current()) is not None:
+            log.info("%s.%s: not called, Prometheus is paused", self._subsystem, operation)
+            if self._on_failure == "raise":
+                raise _pause.Paused(_paused)
+            if self._on_failure == "return_none":
+                return None
+            return LLMCallResult(text="", error=_pause.Paused(_paused), duration_ms=0.0)
+
         started = time.time()
         text_parts: list[str] = []
         usage = None
