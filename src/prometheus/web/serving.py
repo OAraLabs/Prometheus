@@ -20,8 +20,10 @@ uvicorn configuration through :func:`serve_config`:
   to believe, so an entry that would believe EVERYONE (``*``, ``0.0.0.0/0``, ``::/0``) or is not an address
   is dropped, out loud, and never widens trust.
 
-The cost of the default, stated: behind a reverse proxy on this machine (a tunnel, ``tailscale serve``,
-nginx) that is NOT named, every request now looks like it comes from 127.0.0.1. Name it.
+The cost of the default, stated: behind a reverse proxy on this machine (a tunnel, nginx) that is NOT named,
+every request now looks like it comes from 127.0.0.1. Name it. ``tailscale serve`` is the exception: do NOT name
+loopback for it; ``web.tailscale`` (web/tailscale_serve.py) believes exactly what Serve sends, and refuses to start
+alongside a ``trusted_proxies`` entry that covers loopback.
 
 Source: novel code for Prometheus, 2026-10-08.
 """
@@ -34,6 +36,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from prometheus.web.loopback import guard_if_loopback
+from prometheus.web.tailscale_serve import serve_settings
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +105,8 @@ def serve_config(app: Any, host: str, port: int, config: Mapping[str, Any] | Non
 
         tls_options = {"ssl_certfile": str(tls.certfile), "ssl_keyfile": str(tls.keyfile), "ssl_ciphers": AEAD_CIPHERS}
     server_config = uvicorn.Config(
-        guard_if_loopback(app, host), host=host, port=port, log_level="info", log_config=None,
+        guard_if_loopback(app, host, serve=serve_settings(config)), host=host, port=port, log_level="info",
+        log_config=None,
         # Bounded: an open stream must not hold a shutdown forever (the daemon exits within 15 s, FL-1).
         timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
         **uvicorn_proxy_options(config), **tls_options,

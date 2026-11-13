@@ -58,6 +58,7 @@ from prometheus.config.pair_requests import (
     DENIED,
     EXPIRED,
     PENDING,
+    RELAY_PREFIX,
     UNCOLLECTED,
     Approved,
     CodeMismatch,
@@ -70,6 +71,7 @@ from prometheus.config.pair_requests import (
     UnknownRequest,
 )
 from prometheus.web.source_limits import SourceLimiter
+from prometheus.web.tailscale_serve import came_through_serve
 from prometheus.web.tls import request_tls_plan, spki_sha256
 
 logger = logging.getLogger("prometheus.pairing")
@@ -277,7 +279,11 @@ def _json(status: int, content: dict[str, Any], **headers: str) -> JSONResponse:
 
 
 def _peer(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    """The requester's source as recorded, limited and shown: the TCP peer, or for a request relayed by
+    ``tailscale serve`` its tailnet caller marked as relayed, ``via-tailscale-serve:<address>`` (a local process
+    can name any tailnet address)."""
+    host = request.client.host if request.client else "unknown"
+    return f"{RELAY_PREFIX}{host}" if came_through_serve(request) is not None else host
 
 
 def operator_refusal(request: Request, auth_on: bool) -> JSONResponse | None:
@@ -359,6 +365,10 @@ def _endpoints(request: Request, web_config: dict[str, Any]) -> dict[str, str | 
     WebSocket port listens on this machine only in home-network mode and cannot be reached from another computer
     (§7.2, §7.3). Every other request keeps the plain answer.
     """
+    serve = came_through_serve(request)
+    if serve is not None:
+        # Relayed by ``tailscale serve`` (web/tailscale_serve.py): TLS on the tailnet name, at the Serve ports.
+        return {"rest": f"https://{serve.origin(serve.rest_port)}", "ws": f"wss://{serve.name}:{serve.ws_port}"}
     host = request.headers.get("host", "")
     match = _HOST_RE.fullmatch(host)
     if match is None or (match["port"] is not None and int(match["port"]) > 65535):
@@ -375,7 +385,14 @@ def _endpoints(request: Request, web_config: dict[str, Any]) -> dict[str, str | 
 
 
 def _tls_pin(request: Request) -> dict[str, str] | None:
-    """The poll's ``tls`` block: the full SPKI pin when the requester came in over TLS, else ``None`` (§7.2)."""
+    """The poll's ``tls`` block: the full SPKI pin when the requester came in over TLS, else ``None`` (§7.2).
+
+    Through ``tailscale serve`` the certificate is Tailscale's (a public CA's, renewed about every 90 days), not
+    the daemon's: ``{"trust": "ca", "host": <name>}`` says to verify it against the system trust store for that
+    name and never to pin it."""
+    serve = came_through_serve(request)
+    if serve is not None:
+        return {"trust": "ca", "host": serve.name}
     if request_tls_plan(request) is None:
         return None
     pin = spki_sha256()

@@ -7094,6 +7094,13 @@ def _static_security_headers(config: dict[str, Any], scope=None) -> list[tuple[b
     ws_sources = (
         f"ws://{host}:{ws_port} wss://{host}:{ws_port}" if host else "'none'"
     )
+    # Relayed by `tailscale serve` (web/tailscale_serve.py): the page is on the tailnet name over TLS, and its
+    # socket is the bridge's Serve port there, nothing plain.
+    from prometheus.web.tailscale_serve import came_through_serve
+
+    serve = came_through_serve(scope) if scope is not None else None
+    if serve is not None:
+        ws_sources = f"wss://{serve.name}:{serve.ws_port}"
     policy = "; ".join((
         "default-src 'self'",
         "script-src 'self'",

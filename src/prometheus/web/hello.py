@@ -43,14 +43,17 @@ HELLO_FIELDS = ("v", "name", "agent", "fp", "pair", "tls")
 
 #: Requests per minute per TCP peer.
 HELLO_PER_MINUTE = 60
+#: Requests per minute from all RELAYED peers together (``tailscale serve``, web/tailscale_serve.py): what still
+#: bounds a local process forging a new tailnet address per request. A direct caller never counts toward it.
+HELLO_CEILING_PER_MINUTE = 600
 _WINDOW_SECONDS = 60.0
 
 _NO_STORE = {"Cache-Control": "no-store"}
 
 
 def new_limiter() -> SourceLimiter:
-    """A limiter at the CURRENT ``HELLO_PER_MINUTE`` (read here, so a test can change it)."""
-    return SourceLimiter(HELLO_PER_MINUTE, _WINDOW_SECONDS)
+    """A limiter at the CURRENT ``HELLO_PER_MINUTE`` and ceiling (read here, so a test can change them)."""
+    return SourceLimiter(HELLO_PER_MINUTE, _WINDOW_SECONDS, ceiling=HELLO_CEILING_PER_MINUTE)
 
 
 def pair_mode(*, setup_mode: bool, auth_on: bool, approval: bool = False, code: bool = False) -> str:
@@ -136,8 +139,10 @@ def guarded_response(
                      "detail": "this route is for apps, not for a web page"},
             headers=_NO_STORE,
         )
+    from prometheus.web.tailscale_serve import came_through_serve
+
     peer = request.client.host if request.client else "unknown"
-    decision = limiter.check(peer)
+    decision = limiter.check(peer, relayed=came_through_serve(request) is not None)
     if not decision.allowed:
         return JSONResponse(
             status_code=429,
