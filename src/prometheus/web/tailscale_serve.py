@@ -18,13 +18,13 @@ so per-source limits key on the real caller. A local process can forge all of th
 is never "this machine" (``web/loopback.is_same_machine``), so it reaches no same-machine route. What it can do is
 name a new tailnet address per request, which would give it a fresh per-source budget each time: so hello's limiter
 has a ceiling for relayed requests, pairing requests from relayed sources share a ceiling, and a relayed source is
-shown to the owner as relayed ("<address> via tailscale serve"), never as a bare address. A request Funnel marks
+shown to the owner as relayed (``via-tailscale-serve:<address>``), never as a bare address. A request Funnel marks
 (``Tailscale-Funnel-Request``: the public internet through the same Serve config) is never admitted.
 
 Off unless ``web.tailscale`` is a valid, enabled block AND the daemon has an API token: an open daemon answering
 relayed requests would answer the whole tailnet.
 
-This module is stdlib-only, like loopback.py.
+Stdlib-only apart from one lazy import of web/serving.py's parser for ``trusted_proxies``.
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ def serve_settings(config: Mapping[str, Any] | None) -> ServeSettings | None:
                        "relayed from the tailnet: ignoring the block (HTTPS over Tailscale is off). A token made "
                        "after the daemon started takes effect at the next restart.")
         return None
-    if _trusts_loopback_proxy(web.get("trusted_proxies")):
+    if _trusts_loopback_proxy(config):
         logger.warning("web.tailscale: web.trusted_proxies covers this machine (127.0.0.1 or ::1), so the server "
                        "would rewrite every relayed request's client before the Host check sees it, and refuse them "
                        "all. Remove the loopback entry: the tailscale block replaces it. Ignoring the block (HTTPS "
@@ -113,15 +113,15 @@ def serve_settings(config: Mapping[str, Any] | None) -> ServeSettings | None:
     return ServeSettings(name=str(name), rest_port=int(rest_port), ws_port=int(ws_port))
 
 
-def _trusts_loopback_proxy(entries: Any) -> bool:
-    """Does a ``web.trusted_proxies`` list cover 127.0.0.1 or ::1? (Entries are parsed the lenient way; an entry that
-    does not parse is ignored here, as web/serving.py drops it.)"""
-    if not isinstance(entries, (list, tuple)):
-        return False
+def _trusts_loopback_proxy(config: Mapping[str, Any] | None) -> bool:
+    """Does ``web.trusted_proxies`` cover 127.0.0.1 or ::1? Read by web/serving.py's own parser (a string is split
+    on commas there), so this sees exactly the entries the server will believe."""
+    from prometheus.web.serving import trusted_proxies  # here, not at the top: serving imports this module
+
     loopbacks = (ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1"))
-    for entry in entries:
+    for entry in trusted_proxies(config):
         try:
-            network = ipaddress.ip_network(str(entry).strip(), strict=False)
+            network = ipaddress.ip_network(entry, strict=False)
         except ValueError:
             continue
         if any(ip.version == network.version and ip in network for ip in loopbacks):

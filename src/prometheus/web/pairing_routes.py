@@ -58,7 +58,7 @@ from prometheus.config.pair_requests import (
     DENIED,
     EXPIRED,
     PENDING,
-    RELAY_SUFFIX,
+    RELAY_PREFIX,
     UNCOLLECTED,
     Approved,
     CodeMismatch,
@@ -280,9 +280,10 @@ def _json(status: int, content: dict[str, Any], **headers: str) -> JSONResponse:
 
 def _peer(request: Request) -> str:
     """The requester's source as recorded, limited and shown: the TCP peer, or for a request relayed by
-    ``tailscale serve`` its tailnet caller marked as relayed (a local process can name any tailnet address)."""
+    ``tailscale serve`` its tailnet caller marked as relayed, ``via-tailscale-serve:<address>`` (a local process
+    can name any tailnet address)."""
     host = request.client.host if request.client else "unknown"
-    return f"{host}{RELAY_SUFFIX}" if came_through_serve(request) is not None else host
+    return f"{RELAY_PREFIX}{host}" if came_through_serve(request) is not None else host
 
 
 def operator_refusal(request: Request, auth_on: bool) -> JSONResponse | None:

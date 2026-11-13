@@ -274,9 +274,11 @@ def _request(row: sqlite3.Row, now: float) -> PairRequest:
     )
 
 
-#: The suffix a source relayed by ``tailscale serve`` carries (web/pairing_routes._peer). A local process can name any
-#: tailnet address there, so relayed sources also share a ceiling (:meth:`PairRequestStore._check_limits`).
-RELAY_SUFFIX = " via tailscale serve"
+#: The prefix a source relayed by ``tailscale serve`` carries (web/pairing_routes._peer). A local process can name any
+#: tailnet address there, so relayed sources also share a ceiling (:meth:`PairRequestStore._check_limits`). No
+#: whitespace, and with the longest tailnet address 59 characters: Beacon desktop's owner list drops a ``source_ip``
+#: with whitespace or longer than 64.
+RELAY_PREFIX = "via-tailscale-serve:"
 
 
 class PairRequestStore:
@@ -391,11 +393,11 @@ class PairRequestStore:
             (source, now - _HOUR)).fetchone()
         if count >= s.max_requests_per_source_per_hour:
             raise LimitExceeded("hourly", math.ceil(oldest + _HOUR - now))
-        if source.endswith(RELAY_SUFFIX):
+        if source.startswith(RELAY_PREFIX):
             # Relayed sources together: a forger naming a new address per request still holds at most all but one
             # pending slot, and gets the per-source hourly budget once, not once per address.
-            relayed = "substr(source, -?) = ?"
-            args = (len(RELAY_SUFFIX), RELAY_SUFFIX)
+            relayed = "substr(source, 1, ?) = ?"
+            args = (len(RELAY_PREFIX), RELAY_PREFIX)
             count, soonest = conn.execute(
                 f"SELECT COUNT(*), MIN(expires_at) FROM pair_requests WHERE {live} AND {relayed}",
                 (now, *args)).fetchone()
