@@ -850,3 +850,18 @@ def test_a_failed_late_end_can_be_retried(w):
     w.sender.outcomes.pop("late")
     assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "task", "t1", "late")) is True
     assert asyncio.run(w.watcher.end_if_ended(w.owner["id"], "task", "t1", "late")) is False
+
+
+def test_server_capabilities_lists_job_activities_only_with_push_on():
+    """The phone sends a push-to-start token only when the daemon says it starts job activities (2026-11-13). The
+    watcher runs only with push on, so the name is listed only then."""
+    from types import SimpleNamespace
+
+    from prometheus.web.ws_server import WebSocketBridge
+
+    bridge = WebSocketBridge.__new__(WebSocketBridge)
+    bridge.config = {}
+    bridge.push_dispatcher = None
+    assert "job_activities" not in bridge._server_capabilities()
+    bridge.push_dispatcher = SimpleNamespace(node_pub=lambda: None)
+    assert "job_activities" in bridge._server_capabilities()
