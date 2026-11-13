@@ -1658,7 +1658,7 @@ def create_app(
             doesn't think a queued message succeeded
         """
         # Paused (engine/pause.py): nothing new runs, and the message is not kept to run on resume.
-        if (refusal := paused_response()) is not None:
+        if (refusal := paused_response(request)) is not None:
             return refusal
         try:
             body = await request.json()
@@ -1816,7 +1816,7 @@ def create_app(
           * 400 on malformed JSON or a body missing ``runId``/``agentId``
         """
         # Paused (engine/pause.py): nothing new runs, and the message is not kept to run on resume.
-        if (refusal := paused_response()) is not None:
+        if (refusal := paused_response(request)) is not None:
             return refusal
         gateway = getattr(app.state, "paperclip_gateway", None)
         if gateway is None or not hasattr(gateway, "start_heartbeat"):
@@ -5519,7 +5519,7 @@ def create_app(
         gate (ruff F811).
         """
         # Paused (engine/pause.py): nothing new runs, and the message is not kept to run on resume.
-        if (refusal := paused_response()) is not None:
+        if (refusal := paused_response(request)) is not None:
             return refusal
         session_id = body.get("session_id", "")
         content = body.get("content", "")
@@ -5640,7 +5640,7 @@ def create_app(
                 reply["served_by"] = served_by
             return reply
         except pause_state.Paused:
-            return paused_response() or JSONResponse(status_code=423, content={"error": "paused"})
+            return paused_response(request) or JSONResponse(status_code=423, content={"error": "paused"})
         except MaxTurnsExhausted as cap:
         # #774: a turn that hit its round cap kept its work — save it, never
         # roll it back. run_async handed the loop a COPY of the session list,
@@ -6953,7 +6953,7 @@ def create_app(
         semantics: if no bridge is wired, 503 WITHOUT stamping (the task did not
         actually go out)."""
         # Paused (engine/pause.py): nothing new runs, and the message is not kept to run on resume.
-        if (refusal := paused_response()) is not None:
+        if (refusal := paused_response(request)) is not None:
             return refusal
         from prometheus.kanban import get_kanban_store
 

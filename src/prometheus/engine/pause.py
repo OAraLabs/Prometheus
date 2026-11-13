@@ -79,6 +79,8 @@ def _unreadable(why: str) -> PauseInfo:
 
 
 def read_file(path: Path) -> PauseInfo | None:
+    # Not re-sanitized here: only ``PauseState.pause`` writes the file, and it stores who and why as one short line
+    # already (``_one_line``); the floor keeps the agent's shell from writing it.
     """The state *path* holds: None when not paused (no file, or ``paused: false``); paused when unreadable."""
     try:
         raw = path.read_text(encoding="utf-8")

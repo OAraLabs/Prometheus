@@ -71,14 +71,23 @@ def person_check(identity: Any, devices: Any) -> tuple[bool, str]:
     return True, ""
 
 
-def paused_response() -> JSONResponse | None:
-    """The 423 a front door answers while paused, else None. The message is not kept to run on resume."""
+def paused_response(request: Request | None = None) -> JSONResponse | None:
+    """The 423 a front door answers while paused, else None. The message is not kept to run on resume.
+
+    Who paused and why go to an OPERATOR only (the API token, an owner device, an open daemon); a scoped device
+    hears THAT it is paused and since when, as ``GET /api/pause`` and the ``paused_changed`` frame tell it. A caller
+    that cannot be identified gets the scoped answer (fail closed)."""
     info = pause.current()
     if info is None:
         return None
-    return JSONResponse(status_code=423, content={
-        "error": "paused", **info.to_dict(),
-        "detail": "Prometheus is paused; nothing new runs until a person resumes it. This message was not kept."})
+    identity = _identity(request) if request is not None else None
+    operator = request is not None and (identity is None or bool(getattr(identity, "is_operator", False)))
+    body: dict = {"error": "paused", "since": info.since,
+                  "detail": "Prometheus is paused; nothing new runs until a person resumes it. This message was "
+                            "not kept."}
+    if operator:
+        body.update(by=info.by, reason=info.reason)
+    return JSONResponse(status_code=423, content=body)
 
 
 #: The daemon's web app, once :func:`register_pause_routes` has run, so the owner's ``/pause`` in Telegram runs the
