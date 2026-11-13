@@ -6000,6 +6000,9 @@ def create_app(
 
     @app.post("/api/computer/tasks", status_code=202)
     async def computer_task_start(request: Request):
+        # Paused (engine/pause.py): no new desktop task starts.
+        if (refusal := paused_response(request)) is not None:
+            return refusal
         runner, err = _door_runner()
         if err is not None:
             return err
@@ -6525,6 +6528,9 @@ def create_app(
 
     @app.post("/api/code")
     async def create_coding_run(body: dict):
+        # Paused (engine/pause.py): no new coding run starts.
+        if (refusal := paused_response()) is not None:
+            return refusal
         from uuid import uuid4 as _uuid4
 
         from prometheus.coding.managed import create_coding_managed_task
