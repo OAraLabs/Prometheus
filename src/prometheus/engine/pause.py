@@ -45,6 +45,20 @@ class PauseInfo:
         return {"since": self.since, "by": self.by, "reason": self.reason}
 
 
+#: Who paused and why are shown to the owner on every screen of the phone: one line, no control characters, short.
+REASON_MAX_CHARS = 140
+BY_MAX_CHARS = 80
+
+
+def _one_line(text: str, cap: int) -> str:
+    """*text* as one printable line: control and format characters dropped, whitespace runs collapsed, capped."""
+    import unicodedata
+
+    kept = "".join(" " if ch.isspace() else ch for ch in str(text or "")
+                   if ch.isspace() or unicodedata.category(ch)[0] != "C")
+    return " ".join(kept.split())[:cap]
+
+
 class Paused(RuntimeError):
     """Raised where a turn would start (or go on) while the agent is paused."""
 
@@ -141,7 +155,8 @@ class PauseState:
             if not self.persisted:
                 self._persist(self._info)
             return self._info, False
-        info = PauseInfo(since=time.time(), by=by, reason=(reason or "")[:500])
+        info = PauseInfo(since=time.time(), by=_one_line(by, BY_MAX_CHARS) or "unknown",
+                         reason=_one_line(reason, REASON_MAX_CHARS))
         self._info = info
         self._persist(info)
         return info, True
