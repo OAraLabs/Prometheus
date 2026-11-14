@@ -51,9 +51,12 @@ All four are under `/api/`, behind the bearer middleware. None is public.
 }
 ```
 
-- `state` is `ok`, `down` or `unknown` (configured, not yet checked). `reason` is present when `down`: `unreachable`,
-  `refused` (the box refused its key), `rejected` (the box rejected the request: a bad model or voice name),
-  `failed` (the box answered with something that could not be used, such as audio that is not WAV).
+- `state` is `ok`, `down` or `unknown` (configured, not yet checked). `reason` is present when `down`: `unreachable`
+  or `refused` (the box refused its key). Only these, which are about the box or its key, change a half for everyone
+  (section 6.2).
+- One request can also fail as `rejected` (the box refused that request: a phrase it will not take, audio it cannot
+  decode, a bad model or voice name) or `failed` (that answer could not be used, such as audio that is not WAV). Those
+  appear in that request's answer only.
 - Answering it may check the box (section 6.2). It never says the box's address, its key, or the key's variable name.
 
 ### 2.2 `POST /api/speech/transcribe`: audio in, text out
@@ -247,8 +250,13 @@ what the stream carries.
   check, not per request. One check runs at a time per half; callers who arrive meanwhile share its answer.
 - **When:** only when asked. `GET /api/speech` checks a half whose last result is older than 30 s. Every real call
   also counts: a failure marks the half down at once, a success marks it up.
-- **What a check cannot see.** It cannot tell that the box would reject a request (`rejected`: a bad model or voice
-  name), so a good check never clears `rejected`; only a good call does.
+- **What changes a half for everyone.** Only `unreachable` and `refused`, which are about the box or its key. A
+  `rejected` or `failed` ends that one request and is logged; nothing else changes. Otherwise any paired device could
+  switch a half off for every device by sending audio or text the box refuses. A bad model or voice name therefore
+  costs one failed request per stream, each telling the app why.
+- **What a check cannot see.** A key refused only on the audio routes: a `refused` seen by a call is not cleared by a
+  check; it refuses new streams for 30 s and then lets a call try. A check that began before a call answered never
+  overwrites the call's answer. The record is per box, model, voice and key, so changing any of them starts afresh.
 - **Kept apart from the chat notices.** The speech route has its own request code and its own record of which half is
   down. It never calls `transcribe_remote` / `synthesize_remote`, whose failures log "falling back to the local
   engine" and move the "isn't answering" lines Telegram and the `tts` tool send (`voice_remote._down`). It reuses only
@@ -269,10 +277,10 @@ own voice surfaces; here the device asking has a better fallback than the daemon
 | When | What the app gets |
 |---|---|
 | No box is configured for the half | 503 `{"error": "speech_unavailable", "voice": "not_configured", "message": "No voice server is set up."}` |
-| The half is down and a check made less than 30 s ago failed | 503 with `voice` `unreachable` / `refused` / `rejected` and its sentence |
-| The half is down from a failed call only | a check first (at most 3 s); refused only if it fails |
+| The half is down and a check made less than 30 s ago failed, or a call's `refused` is under 30 s old | 503 with `voice` `unreachable` / `refused` and its sentence |
+| The half is down only because a call could not reach the box | a check first (at most 3 s); refused only if it fails |
 | A phrase fails mid-stream | `done` / `unavailable`, with `voice`, `message` and `resume_at` |
-| A transcription fails | 503 as above |
+| A transcription fails | 503 with its `voice` (`rejected` / `failed` too: about that request only) |
 
 The sentences: "The voice server isn't answering.", "The voice server refused its key.", "The voice server rejected
 the request.", "The voice server sent an answer that could not be used." The app finishes the job on the device (it has the reply's text from its `chat_delta` frames, and the
