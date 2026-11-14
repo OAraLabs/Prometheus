@@ -158,3 +158,21 @@ def test_a_project_folder_outside_home_is_still_found():
     assert hint is not None and hint.key == outside.id
     assert projects_in_tool_input(json.dumps({"path": "/srv/projects/garden/x"}), root="/srv/projects") == [
         ("garden", "garden")]
+
+
+# --------------------------------------------------------------------------- review of #934
+
+
+def test_a_known_folder_matches_only_at_a_path_boundary():
+    app = KnownFolder(id="cp_dddddddddddd", name="App", folder="/srv/app")
+    assert projects_in_tool_input(json.dumps({"path": "/srv/application/x"}), known=[app]) == []
+    assert projects_in_tool_input(json.dumps({"path": "/data/srv/app/x"}), known=[app]) == []
+    beacon = KnownFolder(id="cp_eeeeeeeeeeee", name="Beacon", folder=f"{ROOT}/beacon")
+    hits = projects_in_tool_input(json.dumps({"path": f"{ROOT}/beacon-2/x.py"}), known=[beacon], root=ROOT)
+    assert hits == [("beacon-2", "beacon-2")]
+
+
+def test_a_case_tie_picks_the_spelling_the_desktop_picks():
+    hint = suggest(tally([call("/home/op/Beacon/a"), call("/home/op/Beacon/b"),
+                          call("/home/op/beacon/c"), call("/home/op/beacon/d")]))
+    assert hint is not None and hint.label == "beacon"  # JS localeCompare puts lower case first

@@ -114,3 +114,26 @@ def test_garbage_content_json_is_skipped(world):
         world.conv.add_message(sid, MessagePart(role="assistant", content="", content_json=raw, session_id=sid,
                                                 turn_index=i + 1))
     assert world.call("op", "GET", URL).status_code == 200
+
+
+def test_filing_does_not_empty_the_cache(world, monkeypatch):
+    sids = [world.session() for _ in range(3)]
+    repo = str(world.home / "projects" / "pilot")
+    for sid in sids:
+        _tool_calls(world, sid, [f"{repo}/a", f"{repo}/b", f"{repo}/c"])
+    p = world.project("Elsewhere")
+    world.call("op", "GET", URL)
+    reads = []
+    real = world.conv.tool_use_json
+    monkeypatch.setattr(world.conv, "tool_use_json", lambda sid: reads.append(sid) or real(sid))
+    world.call("op", "PUT", f"/api/sessions/{sids[0]}/project", json={"chat_project_id": p["id"], "keep_workspace": True})
+    world.call("op", "GET", URL)
+    assert reads == []  # filing changed no folder: nothing was read again
+
+
+def test_a_checkout_folder_maps_to_its_project(world):
+    p = world.project("Beacon", folder=world.folder("projects/beacon-deploy"))
+    sid = world.session()
+    other = str(world.home / "projects" / "beacon-wt-2")
+    _tool_calls(world, sid, [f"{other}/a", f"{other}/b", f"{other}/c"])
+    assert world.call("op", "GET", URL).json()["suggestions"][sid]["project"]["id"] == p["id"]
