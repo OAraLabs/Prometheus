@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from prometheus.memory.session_kind import is_machine_session
 from prometheus.projects.content import instructions_info, reference_names
@@ -432,6 +432,136 @@ def register_chat_projects_routes(
             if v.id == project_id:
                 return {"id": v.id, "name": v.name, "session_ids": v.own_session_ids}
         return _err(404, "unknown_project", "no such project")
+
+    # ── instructions (design 3.4) ────────────────────────────────────────────────────────────────────────────────
+    def _project_or_refusal(request: Request, project_id: str) -> JSONResponse | Project:
+        refusal = _refuse(request)
+        if refusal is not None:
+            return refusal
+        p = service.store().get(project_id)
+        if p is None:
+            return _err(404, "unknown_project", "no such project")
+        return p
+
+    @app.get("/api/chat-projects/{project_id}/instructions", response_model=None)
+    async def get_instructions(project_id: str, request: Request) -> Any:
+        from prometheus.projects import content
+
+        p = _project_or_refusal(request, project_id)
+        if isinstance(p, JSONResponse):
+            return p
+        try:
+            text, rev = await asyncio.to_thread(content.read_instructions, p.folder)
+        except content.NotAFile as exc:
+            return _err(409, "not_a_file", str(exc))
+        effective = await asyncio.to_thread(content.effective_files, p.folder)
+        return {"content": text, "rev": rev, "max_chars": content.MAX_INSTRUCTIONS_CHARS, "effective": effective}
+
+    @app.put("/api/chat-projects/{project_id}/instructions", response_model=None)
+    async def put_instructions(project_id: str, request: Request) -> Any:
+        from prometheus.projects import content
+
+        p = _project_or_refusal(request, project_id)
+        if isinstance(p, JSONResponse):
+            return p
+        body = await _read_json(request)
+        if not isinstance(body, dict) or not isinstance(body.get("content"), str) \
+                or not isinstance(body.get("base_rev"), str) or not isinstance(body.get("shadow_ok", False), bool):
+            return _err(400, "bad_request", 'send {"content": "...", "base_rev": "..."}')
+        text = body["content"]
+        if len(text) > content.MAX_INSTRUCTIONS_CHARS:
+            return _err(400, "too_long", f"at most {content.MAX_INSTRUCTIONS_CHARS} characters")
+        if not body.get("shadow_ok", False):
+            shadowed = content.shadowed_by_save(p.folder)
+            if shadowed:
+                return _err(409, "would_shadow", "a PROMETHEUS.md here would stop the loader reading "
+                            + ", ".join(shadowed), files=shadowed)
+        try:
+            rev = await asyncio.to_thread(content.write_instructions, p.folder, text, body["base_rev"])
+        except content.NotAFile as exc:
+            return _err(409, "not_a_file", str(exc))
+        except content.Conflict as exc:
+            return _err(409, "conflict", str(exc), content=exc.content, rev=exc.rev)
+        logger.info("chat project %s: instructions saved by the owner (%d characters)", project_id, len(text))
+        await service.notify("instructions", project_id)
+        return {"ok": True, "rev": rev}
+
+    # ── reference files (design 3.5) ─────────────────────────────────────────────────────────────────────────────
+    @app.get("/api/chat-projects/{project_id}/files", response_model=None)
+    async def list_files(project_id: str, request: Request) -> Any:
+        from prometheus.projects import content
+
+        p = _project_or_refusal(request, project_id)
+        if isinstance(p, JSONResponse):
+            return p
+        try:
+            return {"files": await asyncio.to_thread(content.list_reference, p.folder)}
+        except content.NotAFile as exc:
+            return _err(409, "not_a_file", str(exc))
+
+    @app.get("/api/chat-projects/{project_id}/files/{name}", response_model=None)
+    async def get_file(project_id: str, name: str, request: Request) -> Any:
+        import mimetypes
+
+        from prometheus.projects import content
+
+        p = _project_or_refusal(request, project_id)
+        if isinstance(p, JSONResponse):
+            return p
+        try:
+            data = await asyncio.to_thread(content.read_reference, p.folder, name)
+        except content.NotAFile as exc:
+            return _err(409, "not_a_file", str(exc))
+        except OSError:
+            return _err(404, "unknown_file", "no such reference file")
+        mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        return Response(content=data, media_type=mime, headers={
+            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": "attachment"})
+
+    @app.put("/api/chat-projects/{project_id}/files/{name}", response_model=None)
+    async def put_file(project_id: str, name: str, request: Request, replace: str | None = None) -> Any:
+        from prometheus.projects import content
+
+        p = _project_or_refusal(request, project_id)
+        if isinstance(p, JSONResponse):
+            return p
+        if not content.valid_reference_name(name):
+            return _err(400, "bad_name", "a file name is one segment: no slash, no leading dot, at most 120 characters")
+        if replace not in (None, "true", "false"):
+            return _err(400, "bad_request", "replace is true or false")
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > content.MAX_FILE_BYTES:
+                return _err(413, "too_large", f"at most {content.MAX_FILE_BYTES} bytes")
+        try:
+            info = await asyncio.to_thread(content.write_reference, p.folder, name, bytes(body),
+                                           replace=replace == "true")
+        except content.Exists:
+            return _err(409, "exists", "a reference file has that name; send ?replace=true to overwrite it")
+        except content.TooMany:
+            return _err(409, "too_many", f"at most {content.MAX_FILES} reference files")
+        except content.NotAFile as exc:
+            return _err(409, "not_a_file", str(exc))
+        await service.notify("files", project_id)
+        return {"ok": True, "file": info}
+
+    @app.delete("/api/chat-projects/{project_id}/files/{name}", response_model=None)
+    async def delete_file(project_id: str, name: str, request: Request) -> Any:
+        from prometheus.projects import content
+
+        p = _project_or_refusal(request, project_id)
+        if isinstance(p, JSONResponse):
+            return p
+        try:
+            await asyncio.to_thread(content.delete_reference, p.folder, name)
+        except content.NotAFile as exc:
+            return _err(409, "not_a_file", str(exc))
+        except OSError:
+            return _err(404, "unknown_file", "no such reference file")
+        await service.notify("files", project_id)
+        return {"ok": True}
 
     @app.get("/api/chat-project-suggestions", response_model=None)
     async def chat_project_suggestions(request: Request) -> Any:
