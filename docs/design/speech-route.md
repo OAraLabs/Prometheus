@@ -73,7 +73,9 @@ All four are under `/api/`, behind the bearer middleware. None is public.
 - **200:** `{"text": "..."}`. An empty transcript is `""`, not an error. Leading whitespace and `/` are removed, repeatedly,
   until neither leads (section 10, D4).
 - **Refusals:** 400 `bad_audio` (signature does not match, or empty), 413 `too_large`, 415 `type_not_allowed`, 400
-  `bad_language`, 503 `speech_unavailable` (section 7).
+  `bad_language`, 503 `speech_unavailable` (section 7). An upload whose `Content-Length` already says it is over 2 MB
+  is refused by the daemon-wide body check first, as `413 {"error": "request body too large"}`: match on the status.
+- A transcription holds one of the caller's slots while it runs (section 8).
 
 Prometheus does not send the transcript anywhere. The app sends it as the person's message with `POST /api/chat/send`,
 so a spoken turn lands in the chat the person is in, by the same path as a typed one.
@@ -135,7 +137,8 @@ one piece and sends no frames, so its replies are not.
 
 ### 2.4 `POST /api/speech/speak`: any text, spoken
 
-- **Body:** `{"text": "..."}`, 1 to 20,000 characters. Over: 413 `too_long`. Empty: 400 `text_required`.
+- **Body:** `{"text": "..."}`, 1 to 20,000 characters. Over: 413 `too_long` (the body is read with a cap, like an
+  upload). Empty or only whitespace: 400 `text_required`.
 - **Response:** the same stream as 2.3, cut by the same rules, with no `reply`, `discard` or turn endings.
 
 This is what lets an app use the voice box as its text-to-speech source for anything on screen, such as reading an
@@ -169,7 +172,9 @@ earlier reply aloud.
 Offsets count Unicode code points, the same unit as `chat_discard`'s `keep_chars`. (In Swift: `unicodeScalars`.)
 
 Before the stream starts, a request can still be refused with a normal JSON answer: 404 for a session that is not the
-caller's, 503 `speech_unavailable` (section 7), 429 `speech_busy` (section 8), 400 for a bad query.
+caller's, 503 `speech_unavailable` (section 7), 429 `speech_busy` (section 8), 400 `{"error": "bad_query", "detail"}`
+for a bad `wait` or `message_id`. An unknown query parameter is refused by the daemon-wide check with its own shape,
+`400 {"error": "unknown query parameter: …", "unknown", "accepted"}`.
 
 ## 3. Who may call
 
@@ -293,9 +298,9 @@ quietly. The next stream tries the box again once its 30 s are up.
 - Upload: the `/api` body cap (2 MB) and `gateway.media`, whichever is smaller. Compressed audio (m4a, ogg/opus) fits
   minutes of speech.
 - `speak` text: 20,000 characters. Spoken per reply or text: 5,000 characters. Phrase: 200 characters.
-- A caller is a device (by its id) or the global token. A newer reply stream from the same caller for the same session
-  replaces the older one (`replaced`).
-- At most 2 streams at once per caller, and 4 at once from devices that are not the owner's; past either, 429
+- A caller is a device (by its id) or the global token. With auth off, every caller is the same caller. A newer reply
+  stream from the same caller for the same session replaces the older one (`replaced`).
+- At most 2 streams or transcriptions at once per caller, and 4 at once from devices that are not the owner's; past either, 429
   `speech_busy`. The owner (the global token or an owner device) is never refused because of other devices' streams.
   The voice box is one GPU model, and four listeners is already more than one household.
 - A reply that sends no new text for 10 minutes ends the stream (`timeout`). Long tool calls are fine; a lost turn is
