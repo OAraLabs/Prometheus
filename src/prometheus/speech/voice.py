@@ -79,6 +79,10 @@ class _TooLarge(Exception):
     pass
 
 
+class _Encoded(Exception):
+    pass
+
+
 class VoiceUnavailable(Exception):
     """The voice box cannot do this now. ``reason`` is a key of :data:`SENTENCES`; ``message`` its sentence."""
 
@@ -113,11 +117,22 @@ def _reason_for(status: int) -> str:
 
 
 def _headers(settings: RemoteVoice) -> dict[str, str]:
-    """The bearer header; UnicodeError for a key a header cannot carry (a curly quote pasted in, say)."""
+    """The bearer header, and no compression (a size cap must count the bytes that arrive, not what they unzip to).
+
+    UnicodeError for a key a header cannot carry (a curly quote or a line break pasted in, say).
+    """
     headers = settings.headers()
     for value in headers.values():
         value.encode("ascii")
+        if any(ord(ch) < 32 or ch == "\x7f" for ch in value):
+            raise UnicodeError("a control character in a header")
+    headers["Accept-Encoding"] = "identity"
     return headers
+
+
+def _encoded(resp: httpx.Response) -> bool:
+    """True when the answer is compressed anyway: it is refused rather than unzipped past the cap."""
+    return resp.headers.get("content-encoding", "identity").strip().lower() not in ("", "identity")
 
 
 def _is_wav(audio: bytes) -> bool:
@@ -225,6 +240,8 @@ class Voice:
     async def _get_status(client: httpx.AsyncClient, url: str, headers: dict[str, str]) -> int:
         """The status of a GET, reading at most :data:`MAX_PROBE_BYTES` of its body."""
         async with client.stream("GET", url, headers=headers) as resp:
+            if _encoded(resp):
+                return resp.status_code  # only the status matters; a compressed body is never unzipped
             read = 0
             async for chunk in resp.aiter_bytes():
                 read += len(chunk)
@@ -305,12 +322,14 @@ class Voice:
         except UnicodeError:
             self._failed(settings, "refused", "the key has characters a header cannot carry")
         try:
-            async with asyncio.timeout(settings.timeout_seconds):
+            async with asyncio.timeout(max(settings.timeout_seconds, 1.0)):
                 async with _client(settings.timeout()) as client:
                     async with client.stream("POST", settings.url, headers=headers, **kwargs) as resp:
+                        if _encoded(resp):
+                            raise _Encoded
                         chunks: list[bytes] = []
                         read = 0
-                        async for chunk in resp.aiter_bytes():
+                        async for chunk in resp.aiter_bytes():  # identity only, checked above
                             read += len(chunk)
                             if read > limit:
                                 raise _TooLarge
@@ -320,6 +339,8 @@ class Voice:
             self._failed(settings, "unreachable", f"no full answer within {settings.timeout_seconds:g} s")
         except _TooLarge:
             self._failed(settings, "failed", f"the answer is over {limit} bytes")
+        except _Encoded:
+            self._failed(settings, "failed", "the answer is compressed, though it was asked not to be")
         except (httpx.HTTPError, httpx.InvalidURL, UnicodeError) as exc:
             self._failed(settings, "unreachable", type(exc).__name__)
         body = b"".join(chunks)
