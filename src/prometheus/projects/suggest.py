@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -80,6 +81,11 @@ def _expand(path: str) -> str:
     return os.path.expanduser(path) if path.startswith("~") else path
 
 
+def _norm(path: str) -> str:
+    """For comparing folders: case folded where the disk ignores case (macOS)."""
+    return path.casefold() if sys.platform == "darwin" else path
+
+
 def project_of_path(
     path: str, *, known: Sequence[KnownFolder] = (), root: str | None = None,
 ) -> tuple[str, str] | None:
@@ -88,16 +94,17 @@ def project_of_path(
         return None
     if known or root:
         full = _expand(path).rstrip("/")
+        cmp = _norm(full)
         for k in known:
-            folder = k.folder.rstrip("/")
-            if full == folder or full.startswith(folder + "/"):
+            folder = _norm(k.folder.rstrip("/"))
+            if cmp == folder or cmp.startswith(folder + "/"):
                 return k.id, k.name
         if root:
             base = _expand(root).rstrip("/")
-            if full.startswith(base + "/"):
+            if cmp.startswith(_norm(base) + "/"):
                 rest = [p for p in full[len(base) + 1:].split("/") if p]
                 return _project_of_parts(rest, containers_skipped=True)
-            if full == base:
+            if cmp == _norm(base):
                 return None
     parts = _home_relative(path)
     if parts is None:
@@ -126,33 +133,44 @@ def _project_of_parts(parts: list[str], *, containers_skipped: bool = False) -> 
 
 def projects_in_tool_input(
     text: str, *, known: Sequence[KnownFolder] = (), root: str | None = None,
+    _pattern: re.Pattern[str] | None = None,
 ) -> list[tuple[str, str]]:
     """The distinct projects one tool call's input touches, each once."""
     seen: dict[str, tuple[str, str]] = {}
-    for found in _paths_in(text or "", known, root):
+    pattern = _pattern if _pattern is not None else _folder_pattern(known, root)
+    for found in _paths_in(text or "", pattern):
         hit = project_of_path(found, known=known, root=root)
         if hit and hit[0] not in seen:
             seen[hit[0]] = hit
     return list(seen.values())
 
 
-def _paths_in(text: str, known: Sequence[KnownFolder], root: str | None) -> list[str]:
-    """Paths in *text*: the desktop's home-directory pattern, plus any path inside a known project folder or the
-    projects root, wherever on the disk they are (a projects root need not be under home)."""
-    found = [m.group(0) for m in _PATH_IN_TEXT.finditer(text)]
+def _folder_pattern(known: Sequence[KnownFolder], root: str | None) -> re.Pattern[str] | None:
+    """One pattern for paths inside a known project folder or the projects root, wherever they are on the disk (a
+    projects root need not be under home). A match starts and ends on a path boundary: ``/srv/app`` matches neither
+    ``/srv/application`` nor ``/data/srv/app``."""
     bases = [k.folder.rstrip("/") for k in known] + ([_expand(root).rstrip("/")] if root else [])
-    bases = [b for b in bases if b]
-    if bases:
-        pattern = re.compile("(?:" + "|".join(re.escape(b) for b in sorted(set(bases), key=len, reverse=True))
-                             + r")(?:/[\w.@+=-]+)*", re.ASCII)
+    bases = sorted({b for b in bases if b}, key=len, reverse=True)
+    if not bases:
+        return None
+    flags = re.ASCII | (re.IGNORECASE if sys.platform == "darwin" else 0)
+    return re.compile(r"(?<![\w.@+=/-])(?:" + "|".join(re.escape(b) for b in bases)
+                      + r")(?![\w.@+=-])(?:/[\w.@+=-]+)*", flags)
+
+
+def _paths_in(text: str, pattern: re.Pattern[str] | None) -> list[str]:
+    """Paths in *text*: the desktop's home-directory pattern, plus *pattern*'s."""
+    found = [m.group(0) for m in _PATH_IN_TEXT.finditer(text)]
+    if pattern is not None:
         found += [m.group(0) for m in pattern.finditer(text)]
     return found
 
 
 def tally(inputs: Iterable[str], *, known: Sequence[KnownFolder] = (), root: str | None = None) -> Tally:
     t = Tally()
+    pattern = _folder_pattern(known, root)  # built once per tally, not once per input
     for text in inputs:
-        hits = projects_in_tool_input(text, known=known, root=root)
+        hits = projects_in_tool_input(text, known=known, root=root, _pattern=pattern)
         if not hits:
             continue
         t.calls += 1
@@ -174,5 +192,12 @@ def suggest(t: Tally) -> Hint | None:
     share = n / t.calls
     if share < HINT_MIN_SHARE:
         return None
-    spellings = sorted(t.labels.get(key, {}).items(), key=lambda kv: (-kv[1], kv[0]))
+    # Ties by spelling as JS localeCompare orders them (lower case first), so the desktop and the daemon agree.
+    spellings = sorted(t.labels.get(key, {}).items(), key=lambda kv: (-kv[1], kv[0].swapcase()))
     return Hint(key=key, label=spellings[0][0] if spellings else key, share=share, calls=t.calls)
+
+
+def project_key_of_folder(folder: str) -> str:
+    """The key the folder rule gives a folder's own name, checkout suffix folded (``beacon-deploy`` is ``beacon``)."""
+    name = os.path.basename(folder.rstrip("/"))
+    return (_CHECKOUT.sub("", name) or name).lower()

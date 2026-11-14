@@ -112,7 +112,7 @@ class ChatProjectsService:
         self._session_exists = session_exists
         # (session_id, its newest rowid, the projects rev) -> the suggestion, or None. An unchanged conversation is
         # not read again; a new message or any project change makes a new key.
-        self._suggest_cache: dict[tuple[str, int, int], dict[str, Any] | None] = {}
+        self._suggest_cache: dict[tuple[str, int, int], dict[str, Any] | None] = {}  # (sid, rowid, folders hash)
 
     def store(self) -> Any:
         conv = self._conversation_store()
@@ -288,6 +288,9 @@ class ChatProjectsService:
         known = [KnownFolder(p.id, p.name, p.folder) for p in projects]
         root = str(projects_root(self._config))
         rev = store.rev()
+        # The cache key moves with what changes a suggestion (the projects' ids, names and folders), not with rev:
+        # filing a session raises rev and changes no suggestion of another session.
+        folders_key = hash(tuple((p.id, p.name, p.folder) for p in projects))
         devices = self._devices()
         owners = devices.owner_device_ids() if devices is not None else set()
         rows = sorted(conv.list_sessions(), key=lambda r: r.get("last_timestamp") or 0.0, reverse=True)
@@ -298,13 +301,16 @@ class ChatProjectsService:
             sid = row["session_id"]
             if sid in filed or is_machine_session(sid):
                 continue
-            owner = devices.session_owner(sid) if devices is not None else None
+            try:
+                owner = devices.session_owner(sid) if devices is not None else None
+            except Exception:  # noqa: BLE001 - an owner that cannot be read: fail closed, offer nothing for it
+                continue
             if owner and owner not in owners:
                 continue  # a chat-only device's conversation: filing it takes the owner's explicit flag
             considered += 1
             if considered > SUGGEST_SESSIONS:
                 break
-            key = (sid, int(row.get("watermark") or 0), rev)
+            key = (sid, int(row.get("watermark") or 0), folders_key)
             if key not in self._suggest_cache:
                 if len(self._suggest_cache) >= _SUGGEST_CACHE_MAX:
                     self._suggest_cache.clear()
@@ -327,10 +333,11 @@ class ChatProjectsService:
         else:
             from prometheus.projects.store import fold_name
 
+            from prometheus.projects.suggest import project_key_of_folder
+
             wanted = fold_name(hint.label)
             for p in projects:
-                folder_key = Path(p.folder).name.lower()
-                if folder_key == hint.key or fold_name(p.name) == wanted:
+                if project_key_of_folder(p.folder) == hint.key or fold_name(p.name) == wanted:
                     project = p
                     break
         return {"key": hint.key, "label": hint.label, "share": hint.share, "calls": hint.calls,
@@ -354,11 +361,9 @@ def _tool_inputs(conv: Any, session_id: str) -> list[str]:
     """Each tool call's input in *session_id*, as JSON text (the desktop's evidence: ``tool_use`` blocks on assistant
     rows). A row whose ``content_json`` is not usable is skipped."""
     out: list[str] = []
-    for msg in conv.get_all_messages(session_id):
-        if getattr(msg, "role", None) != "assistant" or not getattr(msg, "content_json", None):
-            continue
+    for raw in conv.tool_use_json(session_id):
         try:
-            blocks = json.loads(msg.content_json)
+            blocks = json.loads(raw)
         except (ValueError, RecursionError, TypeError):
             continue
         if isinstance(blocks, dict):
