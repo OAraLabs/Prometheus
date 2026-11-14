@@ -107,7 +107,7 @@ class TestRevAndOrder:
         a = store.insert("Alpha", _folder(tmp_path, "a"), managed=False)
         store.file("s1", a.id)
         store.file("s2", a.id)
-        listed = store.list()
+        listed = store.all()
         assert [p.id for p in listed] == [b.id, a.id]
         assert {p.id: p.sessions for p in listed} == {b.id: 0, a.id: 2}
 
@@ -208,7 +208,7 @@ def test_forgetting_a_session_removes_its_membership(conv, store, tmp_path):
 
 class TestManagedFolder:
     @pytest.mark.parametrize(("name", "expected"), [
-        ("Kitchen remodel", "kitchen-remodel"), ("  Ünïcode & stuff!! ", "nicode-stuff"),
+        ("Kitchen remodel", "kitchen-remodel"), ("  Ünïcode & stuff!! ", "unicode-stuff"),
         ("---", "project"), ("a" * 80, "a" * 48), ("Beacon / iOS", "beacon-ios"),
     ])
     def test_slug(self, name, expected):
@@ -232,3 +232,27 @@ class TestManagedFolder:
         root.mkdir()
         (root / "notes").write_text("a file, not a folder")
         assert make_managed_folder(root, "Notes") == root / "notes-2"
+
+
+class TestLabelOnly:
+    """keep_workspace: a migration files as a label only, and never changes where a conversation writes."""
+
+    def test_label_only_leaves_no_workspace_alone(self, store, conv, tmp_path):
+        p = store.insert("A", _folder(tmp_path, "a"), managed=False)
+        result = store.file("s1", p.id, keep_workspace=True)
+        assert store.project_of("s1") == p.id
+        assert result.workspace is None and conv.get_session_workspace("s1") is None
+
+    def test_label_only_leaves_a_hand_set_workspace_alone(self, store, conv, tmp_path):
+        p = store.insert("A", _folder(tmp_path, "a"), managed=False)
+        conv.set_session_workspace("s1", "/by/hand", set_by="rest")
+        result = store.file("s1", p.id, keep_workspace=True)
+        assert result.workspace == "/by/hand" and conv.get_session_workspace("s1") == "/by/hand"
+        store.file("s1", None)
+        assert conv.get_session_workspace("s1") == "/by/hand"
+
+    def test_label_only_after_a_bind_keeps_the_projects_binding(self, store, conv, tmp_path):
+        p = store.insert("A", _folder(tmp_path, "a"), managed=False)
+        store.file("s1", p.id)
+        store.file("s1", p.id, keep_workspace=True)
+        assert conv.get_session_workspace("s1") == p.folder
