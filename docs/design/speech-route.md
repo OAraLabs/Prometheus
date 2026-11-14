@@ -66,8 +66,8 @@ All four are under `/api/`, behind the bearer middleware. None is public.
   and the bytes' own signature against the declared type when that type has a known signature (every shipped audio
   type does). The body is read as a stream with a running count and refused the moment it passes the cap: the
   middleware's cap reads only `Content-Length`, which a chunked upload does not send.
-- **200:** `{"text": "..."}`. An empty transcript is `""`, not an error. Leading whitespace and every leading `/` are
-  removed (section 10, D4).
+- **200:** `{"text": "..."}`. An empty transcript is `""`, not an error. Leading whitespace and `/` are removed, repeatedly,
+  until neither leads (section 10, D4).
 - **Refusals:** 400 `bad_audio` (signature does not match, or empty), 413 `too_large`, 415 `type_not_allowed`, 400
   `bad_language`, 503 `speech_unavailable` (section 7).
 
@@ -79,12 +79,19 @@ so a spoken turn lands in the chat the person is in, by the same path as a typed
 The response is a stream (section 2.5). A reply is one turn in the session. Prometheus learns of it from the frames
 the bridge already broadcasts for that session:
 
-- it **starts** with `agent_state` `thinking`, before any text, so a turn that runs tools first is still the reply
-  the stream is waiting for;
-- its `message_id` is the one on its first `chat_delta` (or on its `chat_done`, for a turn that never said a word);
+- turns in a session **run one at a time** (the bridge holds a per-session lock), so every `chat_delta`, `chat_discard`
+  and `error` for the session belongs to the turn that holds it. A queued turn sends `agent_state` `thinking` and
+  `agent_progress` pulses while it waits, but no text;
+- a turn's `message_id` is the one on its first `chat_delta`, or on its `chat_done` for a turn that never said a word.
+  The stream binds to a reply by that id, never by `agent_state` (which carries none) and never by `agent_progress`
+  (a queued turn pulses too);
 - its text is exactly what its `chat_delta` frames carry;
-- it **ends** with the first of `chat_done`, an `error` for the session, or `agent_state` `idle` (which the bridge
-  sends in a `finally`, so even a turn cancelled by a shutdown ends).
+- it **ends** with its own `chat_done` (matching `message_id`), an `error` for the session while it is the running
+  turn, or the session's last open turn closing: `agent_state` `thinking` counts a turn in and `idle` (sent in a
+  `finally`, so even a turn cancelled by a shutdown sends it) counts one out, and only the count reaching zero ends a
+  reply this way. So a queued turn's frames never end the running one.
+- `agent_state` `thinking` still matters to a waiting stream: once a turn has started, `wait` no longer applies, so a
+  turn that runs tools for minutes before its first word is still the reply.
 
 Replies are held by `(session_id, message_id)`, never by `message_id` alone: ids are `asst-<milliseconds>`, easy to
 guess and able to repeat across sessions.
@@ -93,7 +100,8 @@ Which reply the stream speaks:
 
 1. **`message_id` given** (from a `chat_delta` frame): that reply in this session, if it is still running or ended
    less than 120 s ago. Otherwise the stream ends at once with `done` / `no_reply`.
-2. **A turn running in the session:** that one, from its first word.
+2. **A turn running in the session** (at least one open by the count): the running one, from its first word. If it
+   has sent nothing yet, the stream binds to the first `message_id` that arrives, which is the running turn's.
 3. **Otherwise:** the next turn to start in the session, waiting up to `wait` seconds (query, default 30, 1 to 120)
    for it to start. None starts: `done` / `no_reply`.
 
@@ -287,7 +295,7 @@ New module `src/prometheus/speech/`:
 
 - `phrases.py`: the cutter (section 5).
 - `voice.py`: the voice box client for the route (WAV bytes in and out, a `VoiceUnavailable` with its reason) and the
-  health record (section 6.2). It reuses `voice_remote`'s settings, key handling and probe.
+  health record (section 6.2). It reuses `voice_remote`'s settings, key handling and `probe_urls`, with request and check code of its own.
 - `replies.py`: holds each session's running reply from the frames the bridge broadcasts, and the last finished one
   for 120 s; a stream follows one reply's events in order.
 - `stream.py`: cutter plus one synthesis worker per stream, giving the NDJSON lines.
@@ -322,7 +330,7 @@ Settled with the charter's principles (safer option, capability gating, smallest
   dependency. Base64 costs a third more bytes on phrases that are a few seconds long.
 - **D3. The voice box only, never the daemon's own engines.** Falling back is the app's job, said plainly (section 7).
 - **D4. Transcription returns text; the app sends it.** A spoken turn then goes through `/api/chat/send` like a typed
-  one. Leading whitespace and every leading `/` are removed, so a transcript the app sends as it is never reads as a
+  one. Leading whitespace and `/` are removed until neither leads (so `"/ /reset"` cannot become `/reset`), so a transcript the app sends as it is never reads as a
   slash command (the WebSocket voice upload gets the same result from its `[Voice message, transcribed]` marker). This
   is a convenience, not a control: the app can send anything, and a scoped device's commands are limited by
   `SCOPED_SLASH_COMMANDS` whatever it sends.
@@ -338,9 +346,10 @@ Settled with the charter's principles (safer option, capability gating, smallest
   and the owner never waits on them.
 - **D12. Offsets in code points**, matching `chat_discard`.
 - **D13. The reply's text comes only from frames the bridge already sends** for that session.
-- **D14. A reply is a turn**, from `agent_state` `thinking` to `chat_done` / `error` / `agent_state` `idle`, held by
-  `(session_id, message_id)`. Waiting on the first word instead would time out on a turn that runs tools first and
-  never end on a turn cancelled without `chat_done`.
+- **D14. A reply is a turn**, bound by the first `message_id` its text or `chat_done` carries and held by
+  `(session_id, message_id)`; it ends on its own `chat_done`, an `error` while it runs, or the session's open-turn
+  count reaching zero. `agent_state` frames carry no id, so they only count turns and lift the `wait` limit; ending
+  on the first `idle` would let a queued turn's frames end the wrong reply.
 
 ## 11. Not in this version
 
