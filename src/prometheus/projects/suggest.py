@@ -154,7 +154,7 @@ def _folder_pattern(known: Sequence[KnownFolder], root: str | None) -> re.Patter
     if not bases:
         return None
     flags = re.ASCII | (re.IGNORECASE if sys.platform == "darwin" else 0)
-    return re.compile(r"(?<![\w.@+=/-])(?:" + "|".join(re.escape(b) for b in bases)
+    return re.compile(r"(?<![\w.@+/-])(?:" + "|".join(re.escape(b) for b in bases)
                       + r")(?![\w.@+=-])(?:/[\w.@+=-]+)*", flags)
 
 

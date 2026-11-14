@@ -176,3 +176,8 @@ def test_a_case_tie_picks_the_spelling_the_desktop_picks():
     hint = suggest(tally([call("/home/op/Beacon/a"), call("/home/op/Beacon/b"),
                           call("/home/op/beacon/c"), call("/home/op/beacon/d")]))
     assert hint is not None and hint.label == "beacon"  # JS localeCompare puts lower case first
+
+
+def test_a_flag_value_path_is_found():
+    app = KnownFolder(id="cp_ffffffffffff", name="App", folder="/srv/app")
+    assert projects_in_tool_input(json.dumps({"command": "tool --dir=/srv/app/x"}), known=[app]) == [(app.id, "App")]
