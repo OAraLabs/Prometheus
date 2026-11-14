@@ -423,3 +423,120 @@ def test_the_change_frame_goes_to_owner_sockets_only(world):
     assert frames and frames[-1]["payload"]["project_id"] == p["id"] and frames[-1]["payload"]["change"] == "created"
     assert "Framed" not in json.dumps(frames) and p["folder"] not in json.dumps(frames)
     assert not [f for f in device_sock.frames if f["type"] == "chat_project_changed"]
+
+
+# ------------------------------------------------------------------------- reviews of #933
+
+
+@pytest.mark.parametrize("spelling", ["home_upper", "agent_upper", "around_home"])
+def test_folder_checks_go_by_identity_not_spelling(world, spelling):
+    (world.home / ".prometheus" / "state").mkdir(parents=True, exist_ok=True)
+    folder = {
+        "home_upper": str(world.home).upper() if os.path.exists(str(world.home).upper()) else None,
+        "agent_upper": str(world.home / ".PROMETHEUS" / "state")
+        if os.path.exists(world.home / ".PROMETHEUS") else None,
+        "around_home": str(world.home.parent),
+    }[spelling]
+    if folder is None:
+        pytest.skip("a case-sensitive filesystem")
+    r = world.call("op", "POST", "/api/chat-projects", json={"name": "Sneaky", "folder": folder})
+    assert r.status_code == 400 and r.json()["kind"] == "bad_folder"
+
+
+def test_the_same_folder_in_another_case_is_in_use(world):
+    f = world.folder("work/a")
+    world.project("A", folder=f)
+    other = f.replace("work/a", "WORK/A")
+    if not os.path.exists(other):
+        pytest.skip("a case-sensitive filesystem")
+    r = world.call("op", "POST", "/api/chat-projects", json={"name": "B", "folder": other})
+    assert r.status_code in (400, 409)
+    assert len(world.call("op", "GET", "/api/chat-projects").json()["projects"]) == 1
+
+
+def test_a_symlinked_agent_home_is_followed_for_the_check(world, tmp_path):
+    real = tmp_path / "real-agent-home"
+    (real / "skills").mkdir(parents=True)
+    os.symlink(real, world.home / ".prometheus")
+    r = world.call("op", "POST", "/api/chat-projects", json={"name": "Skills", "folder": str(real / "skills")})
+    assert r.status_code == 400 and r.json()["kind"] == "bad_folder"
+
+
+@pytest.mark.parametrize("root", [None, "", "relative/root"])
+def test_a_null_empty_or_relative_root(world, root):
+    world.app.state.chat_projects._config["projects"] = {"root": root}
+    r = world.call("op", "POST", "/api/chat-projects", json={"name": "Rooted"})
+    if root == "relative/root":
+        assert r.status_code == 400 and r.json()["kind"] == "bad_folder"
+    else:
+        assert r.status_code == 201
+        assert Path(r.json()["project"]["folder"]).parent == (world.home / "prometheus-projects").resolve()
+
+
+def test_a_root_inside_a_denied_path_makes_nothing(world, tmp_path):
+    world.app.state.chat_projects._config["projects"] = {"root": str(tmp_path / "secret" / "deep" / "root")}
+    r = world.call("op", "POST", "/api/chat-projects", json={"name": "Nope"})
+    assert r.status_code == 400 and r.json()["kind"] == "bad_folder"
+    assert not (tmp_path / "secret" / "deep").exists()
+
+
+def test_a_forgotten_session_no_longer_counts(world):
+    p = world.project()
+    a, b = world.session(), world.session()
+    for sid in (a, b):
+        world.call("op", "PUT", f"/api/sessions/{sid}/project", json={"chat_project_id": p["id"]})
+    world.call("op", "DELETE", f"/api/sessions/{b}")
+    one = world.call("op", "GET", f"/api/chat-projects/{p['id']}").json()
+    assert one["sessions"] == 1 and one["session_ids"] == [a]
+
+
+def test_a_large_instructions_file_has_the_true_rev(world):
+    import hashlib
+
+    p = world.project()
+    data = ("x" * 1023 + "\n").encode() * 2048  # 2 MB
+    (Path(p["folder"]) / "PROMETHEUS.md").write_bytes(data)
+    got = world.call("op", "GET", f"/api/chat-projects/{p['id']}").json()
+    assert got["instructions_rev"] == hashlib.sha256(data).hexdigest()[:16]
+    assert got["instructions_chars"] == len(data)
+
+
+def test_a_managed_create_never_collides_with_a_stored_folder(world):
+    p = world.project("garden")
+    os.rmdir(p["folder"])
+    r = world.call("op", "POST", "/api/chat-projects", json={"name": "garden!"})
+    assert r.status_code == 409 and r.json()["kind"] == "name_taken" or r.status_code in (200, 201)
+    r = world.call("op", "POST", "/api/chat-projects", json={"name": "garden two"})
+    assert r.status_code == 201
+
+
+def test_an_existing_name_with_a_bad_folder_is_name_taken(world):
+    world.project("Beacon")
+    r = world.call("op", "POST", "/api/chat-projects", json={"name": "beacon", "folder": "/no/such/folder"})
+    assert r.status_code == 409 and r.json()["kind"] == "name_taken"
+
+
+def test_a_machine_gateway_in_a_project_creates_nothing(world):
+    p = world.project()
+    before = set(world.mgr._sessions)
+    r = world.call("op", "POST", "/api/sessions", json={"gateway": "smoke", "chat_project_id": p["id"]})
+    assert r.status_code == 400 and r.json()["kind"] == "machine_session"
+    assert set(world.mgr._sessions) == before
+
+
+def test_every_error_has_a_kind(world):
+    p = world.project()
+    r = world.call("op", "PUT", "/api/sessions/desktop:nobody/project", json={"chat_project_id": p["id"]})
+    assert r.status_code == 404 and r.json()["kind"] == "unknown_session"
+    r = world.call("op", "POST", "/api/sessions", json={"chat_project_id": 5})
+    assert r.status_code == 400 and r.json()["kind"] == "bad_request"
+
+
+def test_a_session_with_a_project_binding_is_not_claimable(world):
+    from prometheus.web.session_scope import session_exists
+
+    p = world.project()
+    sid = world.call("op", "POST", "/api/sessions", json={"chat_project_id": p["id"]}).json()["session_id"]
+    world.mgr._sessions.pop(sid, None)  # as after a restart, with no message yet
+    assert session_exists(world.mgr, world.conv, sid)
+    assert world.call("a", "PUT", f"/api/sessions/{sid}/title", json={"title": "mine now"}).status_code == 404
