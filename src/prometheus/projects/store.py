@@ -33,6 +33,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 NAME_MAX = 60
+# A membership row ``s`` whose session is not forgotten: no tombstone, or activity newer than it (the session list's
+# own rule: a tombstoned session stays hidden until newer activity). The membership itself is kept, so a session
+# that comes back is still filed.
+_SHOWN = ("NOT EXISTS (SELECT 1 FROM session_tombstones t WHERE t.session_id = s.session_id AND t.deleted_at >= "
+          "COALESCE((SELECT MAX(m.timestamp) FROM lcm_messages m WHERE m.session_id = s.session_id), 0))")
 #: A binding a project set is ``set_by = "project:<id>"``: the id says which, so only that project clears it.
 SET_BY_PREFIX = "project:"
 
@@ -181,7 +186,7 @@ class ChatProjectStore:
     def _rows(self, where: str = "", args: tuple = ()) -> list[Project]:
         sql = (
             "SELECT p.id, p.name, p.folder, p.folder_managed, p.import_key, p.created_at, p.updated_at,"
-            " (SELECT COUNT(*) FROM session_chat_projects s WHERE s.project_id = p.id)"
+            f" (SELECT COUNT(*) FROM session_chat_projects s WHERE s.project_id = p.id AND {_SHOWN})"
             f" FROM chat_projects p {where} ORDER BY p.position, p.created_at"
         )
         return [Project(r[0], r[1], r[2], bool(r[3]), r[4], r[5], r[6], int(r[7]))
@@ -213,27 +218,29 @@ class ChatProjectStore:
             "SELECT project_id FROM session_chat_projects WHERE session_id = ?", (session_id,)).fetchone()
         return row[0] if row else None
 
-    def projects_of(self, session_ids: Iterable[str]) -> dict[str, str]:
+    def projects_of(self, session_ids: Iterable[str], *, shown_only: bool = False) -> dict[str, str]:
+        """``{session_id: project_id}`` for those filed; *shown_only* leaves out forgotten (tombstoned) sessions."""
         ids = list(session_ids)
         out: dict[str, str] = {}
+        extra = f" AND {_SHOWN}" if shown_only else ""
         for i in range(0, len(ids), 500):
             chunk = ids[i:i + 500]
             marks = ",".join("?" * len(chunk))
             out.update(self._conn.execute(
-                f"SELECT session_id, project_id FROM session_chat_projects WHERE session_id IN ({marks})",
+                f"SELECT session_id, project_id FROM session_chat_projects s WHERE session_id IN ({marks}){extra}",
                 chunk).fetchall())
         return out
 
     def session_ids(self, project_id: str) -> list[str]:
         return [r[0] for r in self._conn.execute(
-            "SELECT session_id FROM session_chat_projects WHERE project_id = ? ORDER BY filed_at, session_id",
-            (project_id,)).fetchall()]
+            f"SELECT session_id FROM session_chat_projects s WHERE project_id = ? AND {_SHOWN}"
+            " ORDER BY filed_at, session_id", (project_id,)).fetchall()]
 
     def visible_to(self, own_session_ids: set[str]) -> list[VisibleProject]:
         """The projects a chat-only device may see: those with at least one of *own_session_ids*, in display order."""
         if not own_session_ids:
             return []
-        filed = self.projects_of(own_session_ids)
+        filed = self.projects_of(own_session_ids, shown_only=True)
         by_project: dict[str, list[str]] = {}
         for sid, pid in filed.items():
             by_project.setdefault(pid, []).append(sid)

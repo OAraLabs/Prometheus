@@ -10,6 +10,7 @@ Source: novel code for Prometheus, 2026-11-13.
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import os
 import stat
@@ -21,25 +22,33 @@ REFERENCE_DIR = "reference"
 #: The instruction loader's per-file cap (context/prometheusmd.py), so what is saved is what the model sees.
 MAX_INSTRUCTIONS_CHARS = 12_000
 NAME_MAX = 120
-_READ_CAP = 1024 * 1024
+_CHUNK = 256 * 1024
 
 
 def instructions_info(folder: str | Path) -> tuple[int, str]:
     """``(characters, rev)`` of the folder's ``PROMETHEUS.md``; ``(0, "")`` when there is no regular file there.
 
-    ``rev`` is the first 16 hex of the SHA-256 of the file's bytes.
+    ``rev`` is the first 16 hex of the SHA-256 of the whole file's bytes, read in chunks.
     """
     path = Path(folder) / INSTRUCTIONS_FILE
     try:
-        info = os.lstat(path)
-        if not stat.S_ISREG(info.st_mode):
+        if not stat.S_ISREG(os.lstat(path).st_mode):
             return 0, ""
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        # O_NONBLOCK so a FIFO swapped in after the lstat cannot hang the read; fstat confirms what was opened.
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(fd, "rb") as fh:
-            data = fh.read(_READ_CAP + 1)
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return 0, ""
+            digest = hashlib.sha256()
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
+            chars = 0
+            while chunk := fh.read(_CHUNK):
+                digest.update(chunk)
+                chars += len(decoder.decode(chunk))
+            chars += len(decoder.decode(b"", final=True))
     except OSError:
         return 0, ""
-    return len(data.decode("utf-8", "replace")), hashlib.sha256(data).hexdigest()[:16]
+    return chars, digest.hexdigest()[:16]
 
 
 def valid_reference_name(name: str) -> bool:

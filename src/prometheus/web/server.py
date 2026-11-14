@@ -1623,13 +1623,19 @@ def create_app(
         # minted, so a refusal creates nothing.
         if chat_project_id is not None:
             if not isinstance(chat_project_id, str):
-                return JSONResponse(status_code=400, content={"error": "chat_project_id must be a string"})
+                return JSONResponse(status_code=400, content={"error": "chat_project_id must be a string",
+                                                              "kind": "bad_request"})
             if not _scope(request).unrestricted:
                 return JSONResponse(status_code=403, content={"error": "only the owner may start a conversation "
                                                               "in a project", "kind": "operator_only"})
             _checked = app.state.chat_projects.precheck(chat_project_id)
             if isinstance(_checked, JSONResponse):
                 return _checked
+            from prometheus.memory.session_kind import is_machine_session as _is_machine
+
+            if _is_machine(f"{str(gateway).strip().lower()}:x"):
+                return JSONResponse(status_code=400, content={
+                    "error": "a machine session cannot be started in a project", "kind": "machine_session"})
 
         # The id is parsed by splitting on the FIRST colon, so a colon in the
         # gateway would silently truncate it. Keep the charset boring.
@@ -7049,7 +7055,7 @@ def create_app(
     from prometheus.web.chat_projects_routes import register_chat_projects_routes
 
     register_chat_projects_routes(
-        app, config=config, conversation_store=_conversation_store, devices=_devices,
+        app, config=config, conversation_store=_conversation_store, devices=_devices_or_create,
         is_owner=lambda request: _scope(request).unrestricted,
         owned_ids=lambda request: _access.owned_ids(_scope(request)),
         session_exists=lambda sid: session_exists(session_mgr, _conversation_store(), sid),

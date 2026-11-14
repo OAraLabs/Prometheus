@@ -21,6 +21,7 @@ Source: novel code for Prometheus, 2026-11-13.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -70,8 +71,29 @@ async def _read_json(request: Request) -> Any:
         return None
 
 
-def _inside(child: Path, parent: Path) -> bool:
-    return child == parent or parent in child.parents
+def _ident(path: Path) -> tuple[int, int] | None:
+    """The file's identity (device, inode), or None. Case and spelling do not matter to it (macOS is
+    case-insensitive), nor does a symlink in the path."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_dev, st.st_ino
+
+
+def _chain(path: Path) -> list[tuple[int, int]]:
+    """The identities of *path* and every directory above it."""
+    out = []
+    for p in (path, *path.parents):
+        ident = _ident(p)
+        if ident is not None:
+            out.append(ident)
+    return out
+
+
+def _no_store() -> JSONResponse:
+    # 404, not 503: the design tells a client that 404 here means "this daemon has no projects".
+    return _err(404, "unavailable", "this daemon has no projects (no durable store)")
 
 
 class ChatProjectsService:
@@ -103,25 +125,52 @@ class ChatProjectsService:
                 "updated_at": p.updated_at}
 
     # ---------------------------------------------------------------- folders
-    def validate(self, raw: str) -> tuple[Path | None, str | None]:
-        """A folder a project may use, resolved, or why not (design 3.1 rule 3)."""
+    @staticmethod
+    def _agent_homes() -> list[Path]:
+        from prometheus.config.paths import config_dir_path, data_dir_path
+
+        homes = [Path(os.path.expanduser("~/.prometheus"))]
+        for get in (config_dir_path, data_dir_path):
+            try:
+                homes.append(get())
+            except Exception:  # noqa: BLE001 - a path that cannot be computed is simply not compared
+                continue
+        return homes
+
+    def validate(self, raw: str, *, exclude: str | None = None) -> tuple[Path | None, str | None]:
+        """A folder a project may use, resolved, or why not (design 3.1 rule 3). Compared by file identity, never by
+        spelling: macOS is case-insensitive, and a symlinked agent home must not hide what it points at."""
         from prometheus.context.workspace import validate_workspace_path
 
         resolved, why = validate_workspace_path(raw, self._security())
         if resolved is None:
             return None, why
-        home = Path(os.path.expanduser("~")).resolve()
+        chain = _chain(resolved)
+        here = chain[0] if chain else None
+        home = _ident(Path(os.path.expanduser("~")))
+        if home is not None and (here == home or here in _chain(Path(os.path.expanduser("~")))[1:]):
+            return None, "the home directory, or a folder that contains it, cannot be a project folder"
+        for agent_home in self._agent_homes():
+            ident = _ident(agent_home)
+            if ident is None:
+                continue
+            if ident in chain or (here is not None and here in _chain(agent_home)):
+                return None, "a folder inside or around the agent's own home cannot be a project folder"
         root = projects_root(self._config)
-        if resolved == home:
-            return None, "the home directory itself cannot be a project folder"
-        if root.exists() and resolved == root.resolve():
-            return None, "the projects root itself cannot be a project folder"
-        if _inside(resolved, home / ".prometheus"):
-            return None, "a folder inside the agent's own home cannot be a project folder"
+        root_ident = _ident(root)
+        if root_ident is not None and (here == root_ident or (here is not None and here in _chain(root)[1:])):
+            return None, "the projects root, or a folder that contains it, cannot be a project folder"
         store = self.store()
         for other in (store.all() if store is not None else []):
+            if other.folder == exclude:
+                continue
             o = Path(other.folder)
-            if resolved != o and (_inside(resolved, o) or _inside(o, resolved)):
+            oid = _ident(o)
+            if oid is None:
+                continue
+            if oid == here:
+                return None, f"the project {other.name!r} already uses that folder"
+            if oid in chain or (here is not None and here in _chain(o)):
                 return None, f"it is inside or around the folder of the project {other.name!r}"
         return resolved, None
 
@@ -139,14 +188,34 @@ class ChatProjectsService:
         return None
 
     def make_managed(self, name: str) -> tuple[Path | None, str | None]:
+        from prometheus.config.shipped_defaults import resolve_denied_paths
+        from prometheus.context.workspace import validate_workspace_path
+        from prometheus.security.path_guard import denying_entry
+
         root = projects_root(self._config)
+        if not root.is_absolute():
+            return None, "projects.root must be an absolute path (or start with ~)"
+        # Checked BEFORE anything is made: the nearest folder that exists must be one a project could use, and no
+        # denied entry may cover the root's own path, so a refused root leaves nothing behind.
+        existing = next((p for p in (root, *root.parents) if p.exists()), None)
+        if existing is None:
+            return None, "the projects root has no existing parent"
+        _ok, why = validate_workspace_path(str(existing), self._security())
+        if _ok is None:
+            return None, why
+        entries = [os.path.expanduser(e) for e in resolve_denied_paths(self._security())]
+        if denying_entry(str(existing.resolve() / root.relative_to(existing)), entries) is not None:
+            return None, "the projects root is under security.denied_paths"
         store = self.store()
-        root_abs = Path(os.path.abspath(root))
-        for other in (store.all() if store is not None else []):
-            if _inside(root_abs, Path(other.folder)):
+        projects = store.all() if store is not None else []
+        root_chain_existing = _chain(existing)
+        for other in projects:
+            oid = _ident(Path(other.folder))
+            if oid is not None and oid in root_chain_existing:
                 return None, f"the projects root is inside the folder of the project {other.name!r}"
+        stored = {other.folder for other in projects}
         try:
-            made = make_managed_folder(root, name)
+            made = make_managed_folder(root, name, skip=lambda c: str(c.resolve()) in stored or str(c) in stored)
         except (OSError, ValueError) as exc:
             return None, str(exc)
         resolved, why = self.validate(str(made))
@@ -159,7 +228,7 @@ class ChatProjectsService:
     def precheck(self, project_id: str) -> JSONResponse | Project:
         store = self.store()
         if store is None:
-            return _err(503, "unavailable", "no durable store: projects unavailable")
+            return _no_store()
         p = store.get(project_id)
         if p is None:
             return _err(404, "unknown_project", "no such project")
@@ -172,11 +241,11 @@ class ChatProjectsService:
                    keep_workspace: bool = False, device_session: bool = False) -> JSONResponse | dict[str, Any]:
         store = self.store()
         if store is None:
-            return _err(503, "unavailable", "no durable store: projects unavailable")
+            return _no_store()
         if is_machine_session(session_id):
             return _err(400, "machine_session", "a machine session cannot be filed in a project")
         if not self._session_exists(session_id):
-            return JSONResponse(status_code=404, content={"error": "unknown session"})
+            return _err(404, "unknown_session", "unknown session")
         if project_id is not None:
             p = store.get(project_id)
             if p is None:
@@ -237,16 +306,19 @@ def register_chat_projects_routes(
         if not is_owner(request):
             return _err(403, "operator_only", "only the owner may do this")
         if service.store() is None:
-            return _err(503, "unavailable", "no durable store: projects unavailable")
+            return _no_store()
         return None
 
     @app.get("/api/chat-projects")
     async def list_chat_projects(request: Request) -> Any:
         store = service.store()
         if store is None:
-            return _err(503, "unavailable", "no durable store: projects unavailable")
+            return _no_store()
         if is_owner(request):
-            return {"role": "owner", "rev": store.rev(), "projects": [service.full(p) for p in store.all()]}
+            projects = store.all()
+            # Off the event loop: each project's folder is read (instructions, reference listing).
+            full = await asyncio.to_thread(lambda: [service.full(p) for p in projects])
+            return {"role": "owner", "rev": store.rev(), "projects": full}
         own = owned_ids(request) or set()
         return {"role": "chat_only", "projects": [
             {"id": v.id, "name": v.name, "sessions": len(v.own_session_ids)} for v in store.visible_to(own)]}
@@ -255,12 +327,13 @@ def register_chat_projects_routes(
     async def get_chat_project(project_id: str, request: Request) -> Any:
         store = service.store()
         if store is None:
-            return _err(503, "unavailable", "no durable store: projects unavailable")
+            return _no_store()
         if is_owner(request):
             p = store.get(project_id)
             if p is None:
                 return _err(404, "unknown_project", "no such project")
-            return {**service.full(p), "session_ids": store.session_ids(project_id)}
+            full = await asyncio.to_thread(service.full, p)
+            return {**full, "session_ids": store.session_ids(project_id)}
         own = owned_ids(request) or set()
         for v in store.visible_to(own):
             if v.id == project_id:
@@ -296,13 +369,18 @@ def register_chat_projects_routes(
                 return _err(400, "bad_folder", why or "the managed folder could not be made")
             folder, managed = made, True
         else:
-            resolved, why = service.validate(folder_raw)
-            if resolved is None:
-                return _err(400, "bad_folder", why or "that folder cannot be used")
             if existing is not None:
-                if existing.folder == str(resolved):
+                # The name first (design 3.1 rule 2): the same folder by identity is the same project; anything
+                # else, even a folder that would not validate, is a name clash.
+                same = _ident(Path(os.path.expanduser(folder_raw)))
+                if same is not None and same == _ident(Path(existing.folder)):
                     return JSONResponse({"ok": True, "project": service.full(existing), "created": False})
                 return _err(409, "name_taken", f"a project is already called {existing.name!r}")
+            resolved, why = service.validate(folder_raw)
+            if resolved is None:
+                if why and "already uses that folder" in why:
+                    return _err(409, "folder_in_use", why)
+                return _err(400, "bad_folder", why or "that folder cannot be used")
             if store.by_folder(str(resolved)) is not None:
                 return _err(409, "folder_in_use", "another project already uses that folder")
             folder, managed = resolved, False
