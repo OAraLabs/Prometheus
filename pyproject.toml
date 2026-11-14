@@ -128,7 +128,7 @@ browser = ["playwright>=1.40"]
 # was the only guard, and `pip install 'oara-prometheus[computer]'` ignores
 # it. Upgrading is a deliberate change: bump this, re-run the real-SDK half of
 # tests/test_cua_adapter.py against the new wheel, and run the on-box check.
-computer = ["cua-driver==0.28.2"]
+computer = ["cua-driver==0.28.3"]
 # Onboarding Phase 0 papercut: whisper STT was used for voice input but
 # never declared anywhere. The faster-whisper python API is the pip-
 # installable engine; the whisper/faster-whisper-xxl CLIs also work.
