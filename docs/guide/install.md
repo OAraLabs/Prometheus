@@ -371,7 +371,7 @@ entries, Funnel (it must be off), the bind, and a live check that the certificat
 REST port you chose, if not 443). A device paired this way trusts the certificate the normal way and proves it is
 talking to your Prometheus with the node-key challenge before it sends its token.
 
-**Turning it off:** `oara tailscale off --apply` removes the two Serve entries that relay to this daemon (nothing else)
+**Turning it off:** `oara tailscale off --apply` removes only the Serve entries that relay exactly to this daemon's own ports
 and sets `web.tailscale.enabled: false`; restart the daemon.
 
 **Worth knowing:**
@@ -381,7 +381,7 @@ and sets `web.tailscale.enabled: false`; restart the daemon.
   subnet router that rewrites addresses, devices on that LAN arrive as the router's tailnet address.
 - **Funnel stays off.** Funnel serves the public internet through the same Serve config; `oara tailscale` never turns
   it on, setup refuses a port with Funnel on, the daemon refuses any request Funnel marks, and doctor reports it.
-- **Use HTTPS Serve, not Serve's TCP modes,** for the daemon: those pass the caller's headers through unchanged.
+- **Use HTTPS Serve, not Serve's TCP modes,** for the daemon: in a TCP mode the caller's own headers reach the daemon unchanged, so any tailnet device could forge the relay headers the daemon trusts.
 - **One app per port.** The dashboard keeps its token in the browser, so anything else served on the same Serve port
   shares its origin. Give the daemon its own ports. A program that was already listening on the port you hand to Serve
   stops being reachable from the tailnet on it.
