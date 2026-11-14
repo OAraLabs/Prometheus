@@ -118,6 +118,24 @@ The code lives only in the daemon's memory, as a digest; a restart ends it. Noth
 | POST | `/api/chat/interrupt` | Stop the running agent turn in a session — the chat Stop button. `{"session_id": ...}`; idempotent (`stopped: false` when nothing is running). Completed rounds persist, a mid-generation partial is kept as an assistant turn, and every client sees the broadcast `chat_done{interrupted:true}`. HTTP twin of the WS `interrupt` frame |
 | POST | `/api/chat` | Send a chat message and wait for the reply. Body: `{"session_id": "my-session", "content": "..."}` (the field is `content`, not `message`). The turn runs in session `web:<session_id>`, starts from the same system prompt as `/api/chat/send` (memory files included), and returns `{"text", "turns", "usage", "served_by"}` when it ends. `served_by` names the model that answered (the fallback, when one took the turn) and is left out when no model answered. Optional `mcp_headers` (`{"<server>": {"Authorization": "Bearer ..."}}`) gives a named HTTP MCP server extra headers for this turn's calls only; see [Per-turn MCP headers](#per-turn-mcp-headers). `503` when the daemon hasn't wired the WebSocket bridge |
 
+### Chat projects
+
+A chat project is a named folder on this Prometheus's computer with standing instructions (`PROMETHEUS.md`) and reference files; a conversation filed in it works in that folder. Projects belong to one instance. The `subscribed` ack lists `projects` in `server_capabilities`; `404` from `GET /api/chat-projects` means this daemon has none. Design: [docs/design/chat-projects.md](../design/chat-projects.md). Errors are `{"error", "kind"}`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/chat-projects` | The owner: `{"role": "owner", "rev", "projects": [...]}`. A chat-only device: `{"role": "chat_only", "projects": [{"id", "name", "sessions"}]}`, only projects its own conversations are in |
+| POST | `/api/chat-projects` | Owner. `{"name", "folder"?, "import_key"?}`: `201` created, or `200` with `created: false` (same import key, or same name with no different folder). No `folder` makes one under `projects.root`. `400 bad_folder`, `409 name_taken` / `folder_in_use` |
+| GET, PUT, DELETE | `/api/chat-projects/{id}` | Owner (a chat-only device may GET a project its conversations are in). Rename with `{"name"}`; delete unfiles and deletes no file |
+| PUT | `/api/sessions/{session_id}/project` | Owner. `{"chat_project_id": "<id>" \| null, "keep_workspace"?, "replace_workspace"?, "device_session"?}`. Binds the conversation to the folder unless `keep_workspace` (a label only). `409 workspace_set`, `409 device_session`, `400 machine_session`, `404 unknown_session` / `unknown_project` |
+| GET | `/api/chat-project-suggestions` | Owner. `{"suggestions": {"<session_id>": {"key", "label", "share", "calls", "project"}}, "rev"}` for recent unfiled conversations |
+| GET, PUT | `/api/chat-projects/{id}/instructions` | Owner. GET: `{"content", "rev", "max_chars", "effective"}` (`effective`: what the loader reads, with `truncated`, `omitted`, `shadowed_by`, `symlink`). PUT `{"content", "base_rev", "shadow_ok"?}` → `{"ok", "rev"}`. `409 conflict` (with the current `content` and `rev`), `409 would_shadow` (with `files`), `409 not_a_file`, `409 folder_missing`, `409 too_large` (file over 1 MB), `400 too_long`. Bytes that are not UTF-8 read as U+FFFD, so saving back what was read rewrites them |
+| GET | `/api/chat-projects/{id}/files` | Owner. `{"files": [{"name", "size", "mtime", "mime"}]}` |
+| PUT | `/api/chat-projects/{id}/files/{name}` | Owner. **The raw file bytes as the body** (not base64, not multipart), up to 20 MB; `?replace=true` overwrites. `409 exists`, `409 too_many` (200), `413 too_large`, `400 bad_name` |
+| GET, DELETE | `/api/chat-projects/{id}/files/{name}` | Owner. The bytes (`attachment`, `no-store`; markup is served as `application/octet-stream`) / `{"ok": true}`. `404 unknown_file`, `400 bad_name` |
+
+`GET /api/sessions` rows carry `chat_project_id`; `POST /api/sessions` accepts it (owner only). Owner sockets get `chat_project_changed` (`rev`, `project_id`, `change`, `session_id`) on every change made through these routes; an edit the agent makes with its file tools sends none.
+
 ### OpenAI-compatible surface — `/v1`
 
 Any client that speaks the OpenAI chat-completions wire (Open WebUI, LobeChat, Continue, Zed, the `openai` SDKs) can point at the daemon with the same bearer token. Beacon stays the surface; this is the second door.

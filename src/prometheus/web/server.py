@@ -494,7 +494,8 @@ def create_app(
             )
             try:
                 if int(cl) > body_cap:
-                    return JSONResponse(status_code=413, content={"error": "request body too large"})
+                    return JSONResponse(status_code=413, content={"error": "request body too large",
+                                                                  "kind": "too_large"})
             except ValueError:
                 return JSONResponse(status_code=400, content={"error": "invalid Content-Length"})
         # The EXACT list of routes that answer without a token (web/public_routes.py); each does its own

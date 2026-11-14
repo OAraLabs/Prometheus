@@ -240,3 +240,150 @@ def test_the_reference_list_is_capped(world):
         (ref / f"file-{i:03}.txt").write_bytes(b"x")
     section = reference_section(p["folder"])
     assert section.count('"file-') == 50 and "and 30 more" in section
+
+
+# ------------------------------------------------------------------------- reviews of #935
+
+
+def test_two_saves_with_the_same_base_rev_cannot_both_win(world):
+    import threading
+
+    from prometheus.projects import content
+
+    p = world.project()
+    results = []
+
+    def save(text):
+        try:
+            content.write_instructions(p["folder"], text, "")
+            results.append("ok")
+        except content.Conflict:
+            results.append("conflict")
+
+    threads = [threading.Thread(target=save, args=(f"writer {i}",)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results.count("ok") == 1 and results.count("conflict") == 7
+
+
+def test_instruction_and_file_changes_move_rev(world):
+    p = world.project()
+    rev0 = world.call("op", "GET", "/api/chat-projects").json()["rev"]
+    world.call("op", "PUT", f"/api/chat-projects/{p['id']}/instructions", json={"content": "x", "base_rev": ""})
+    rev1 = world.call("op", "GET", "/api/chat-projects").json()["rev"]
+    world.call("op", "PUT", f"/api/chat-projects/{p['id']}/files/a.txt", content=b"x")
+    rev2 = world.call("op", "GET", "/api/chat-projects").json()["rev"]
+    assert rev0 < rev1 < rev2
+
+
+def test_a_declared_upload_over_20_mb_has_a_kind(world):
+    p = world.project()
+    r = world.call("op", "PUT", f"/api/chat-projects/{p['id']}/files/huge.bin", content=b"z" * (21 * 1024 * 1024))
+    assert r.status_code == 413 and r.json()["kind"] == "too_large"
+
+
+def test_effective_shows_truncation_and_shadowing(world):
+    f = world.folder("repo2")
+    (Path(f) / "PROMETHEUS.md").write_text("p" * 20000)
+    (Path(f) / "AGENTS.md").write_text("agents")
+    p = world.project("Repo2", folder=f)
+    eff = world.call("op", "GET", f"/api/chat-projects/{p['id']}/instructions").json()["effective"]
+    mine = next(e for e in eff if e["path"].endswith("repo2/PROMETHEUS.md"))
+    assert mine["chars"] == 20000 and mine["truncated"] is True
+    assert any(e["path"].endswith("repo2/AGENTS.md") and e["shadowed_by"] == "PROMETHEUS.md" for e in eff)
+
+
+def test_the_cap_follows_the_loaders_config(world):
+    p = world.project()
+    world.app.state.chat_projects._config.setdefault("context", {})["project_file_max_chars"] = 100
+    assert world.call("op", "GET", f"/api/chat-projects/{p['id']}/instructions").json()["max_chars"] == 100
+    r = world.call("op", "PUT", f"/api/chat-projects/{p['id']}/instructions", json={"content": "x" * 101, "base_rev": ""})
+    assert r.status_code == 400 and r.json()["kind"] == "too_long"
+
+
+def test_a_lone_surrogate_is_a_400(world):
+    p = world.project()
+    r = world.client.request("PUT", f"/api/chat-projects/{p['id']}/instructions",
+                             content=b'{"content": "x\\ud800", "base_rev": ""}',
+                             headers={**world.hdr("op"), "Content-Type": "application/json"})
+    assert r.status_code == 400
+
+
+def test_a_missing_folder_says_so(world):
+    import shutil
+
+    p = world.project()
+    shutil.rmtree(p["folder"])
+    for method, suffix in (("GET", "/instructions"), ("GET", "/files")):
+        r = world.call("op", method, f"/api/chat-projects/{p['id']}{suffix}")
+        assert r.status_code == 409 and r.json()["kind"] == "folder_missing"
+
+
+def test_a_hard_link_to_a_file_outside_is_not_served(world, tmp_path):
+    p = world.project()
+    ref = Path(p["folder"]) / "reference"
+    ref.mkdir(exist_ok=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside")
+    os.link(outside, ref / "linked.txt")
+    assert world.call("op", "GET", f"/api/chat-projects/{p['id']}/files/linked.txt").status_code == 404
+
+
+def test_markup_is_never_served_as_markup(world):
+    p = world.project()
+    world.call("op", "PUT", f"/api/chat-projects/{p['id']}/files/page.html", content=b"<script>x</script>")
+    r = world.call("op", "GET", f"/api/chat-projects/{p['id']}/files/page.html")
+    assert r.headers["content-type"].startswith("application/octet-stream")
+    assert "sandbox" in r.headers["content-security-policy"]
+
+
+def test_saving_keeps_the_files_mode(world):
+    p = world.project()
+    f = Path(p["folder"]) / "PROMETHEUS.md"
+    f.write_text("old")
+    os.chmod(f, 0o600)
+    rev = world.call("op", "GET", f"/api/chat-projects/{p['id']}/instructions").json()["rev"]
+    world.call("op", "PUT", f"/api/chat-projects/{p['id']}/instructions", json={"content": "new", "base_rev": rev})
+    assert (os.stat(f).st_mode & 0o777) == 0o600
+
+
+@pytest.mark.parametrize("name", ["trailing.", "trailing ", "   ", "line sep", "nbsp x", "Café.txt"])
+def test_names_a_person_would_not_type_are_refused(world, name):
+    from prometheus.projects.content import valid_reference_name
+
+    assert not valid_reference_name(name)
+
+
+def test_the_cap_counts_only_files(world):
+    p = world.project()
+    ref = Path(p["folder"]) / "reference"
+    ref.mkdir(exist_ok=True)
+    for i in range(250):
+        (ref / f"d{i}").mkdir()
+    r = world.call("op", "PUT", f"/api/chat-projects/{p['id']}/files/real.txt", content=b"x")
+    assert r.status_code == 200
+
+
+def test_a_bad_name_on_read_and_delete_is_400(world):
+    p = world.project()
+    assert world.call("op", "GET", f"/api/chat-projects/{p['id']}/files/.secret").status_code == 400
+    assert world.call("op", "DELETE", f"/api/chat-projects/{p['id']}/files/.secret").status_code == 400
+
+
+def test_the_list_carries_mime(world):
+    p = world.project()
+    world.call("op", "PUT", f"/api/chat-projects/{p['id']}/files/quote.pdf", content=b"%PDF")
+    assert world.call("op", "GET", f"/api/chat-projects/{p['id']}/files").json()["files"][0]["mime"] == "application/pdf"
+
+
+def test_the_prompt_note_keeps_non_ascii_names_readable(world):
+    from prometheus.projects.content import reference_section
+
+    p = world.project()
+    ref = Path(p["folder"]) / "reference"
+    ref.mkdir(exist_ok=True)
+    (ref / "café.pdf").write_bytes(b"x")
+    section = reference_section(p["folder"])
+    assert '"café.pdf"' in section and section.startswith("# Reference files")

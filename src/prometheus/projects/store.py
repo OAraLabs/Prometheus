@@ -250,6 +250,11 @@ class ChatProjectStore:
     def _bump(self) -> None:
         bump_rev(self._conn)
 
+    def touch(self) -> None:
+        """Raise rev for a change outside the tables (a project's instructions or reference files)."""
+        with self._write():
+            self._bump()
+
     def insert(self, name: str, folder: str, *, managed: bool, import_key: str | None = None) -> Project:
         """A new project. :class:`NameTaken` / :class:`FolderInUse` when another project has the name or folder."""
         clean = clean_name(name)
