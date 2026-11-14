@@ -960,3 +960,64 @@ def test_an_unverifiable_error_says_it_may_have_landed(adapter):
     with pytest.raises(DriverUnavailable) as exc:
         a.act("click", _args())
     assert "may have partly landed" in str(exc.value)
+
+
+# ── after a failed action the model must observe again (Will, 2026-11-14) ─────────
+
+
+@pytest.mark.parametrize("make_result", [
+    lambda: _action_result(_Effect.SUSPECTED_NOOP),
+    lambda: _action_result(_Effect.REFUSED, error=_rec(code="policy_denied", hint=None)),
+    lambda: _action_result(_Effect.CONFIRMED, error=_rec(code="focus_lost", hint=None)),
+])
+def test_a_failed_action_drops_the_snapshot(adapter, make_result):
+    a, fake = adapter(_window_state())
+    a.observe("mini", "scratch", 1, 2)
+    fake.result = make_result()
+    with pytest.raises(DriverUnavailable):
+        a.act("click", _args())
+    fake.result = _action_result(_Effect.CONFIRMED)
+    with pytest.raises(StaleSnapshot) as exc:
+        a.act("click", _args())  # the same snapshot: refused until a fresh observation
+    assert "observe" in str(exc.value)
+    assert sum(name == "click" for name, _ in fake.calls) == 1
+    a.observe("mini", "scratch", 1, 2)
+    assert a.act("click", _args())["landed"] is True
+
+
+def test_a_stale_error_from_the_driver_drops_the_snapshot(adapter):
+    a, fake = adapter(_window_state())
+    a.observe("mini", "scratch", 1, 2)
+    fake.result = _action_result(_Effect.REFUSED, error=_rec(code="stale_element_token", hint=None))
+    with pytest.raises(StaleSnapshot):
+        a.act("click", _args())
+    fake.result = _action_result(_Effect.CONFIRMED)
+    with pytest.raises(StaleSnapshot):
+        a.act("click", _args())
+
+
+def test_a_driver_exception_drops_the_snapshot(adapter):
+    a, fake = adapter(_window_state())
+    a.observe("mini", "scratch", 1, 2)
+    fake.effect = RuntimeError("the driver fell over")
+    with pytest.raises(DriverUnavailable):
+        a.act("click", _args())
+    fake.effect = _Effect.CONFIRMED
+    with pytest.raises(StaleSnapshot):
+        a.act("click", _args())
+
+
+def test_a_successful_action_keeps_the_snapshot(adapter):
+    a, fake = adapter(_window_state())
+    a.observe("mini", "scratch", 1, 2)
+    a.act("click", _args())
+    assert a.act("click", _args())["landed"] is True
+
+
+@pytest.mark.parametrize("snapshot", ["", None])
+def test_an_action_must_name_its_observation(adapter, snapshot):
+    a, fake = adapter(_window_state())
+    a.observe("mini", "scratch", 1, 2)
+    with pytest.raises(StaleSnapshot):
+        a.act("click", _args(snapshot_id=snapshot))
+    assert not any(name == "click" for name, _ in fake.calls)
