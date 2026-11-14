@@ -195,6 +195,8 @@ class CuaDriverAdapter:
         #:    failure is loud rather than silent — which is why this is a gap
         #:    and not a defect.
         self._snapshots: dict[tuple[int, int], str] = {}
+        #: Why a window's snapshot was dropped after an action failed, so the next refusal can say so.
+        self._dropped: dict[tuple[int, int], str] = {}
         #: Windows whose CURRENT snapshot was unusable (empty or degraded),
         #: and why. ``act`` refuses them: the wrapped-tool path reaches
         #: ``act`` without a candidate table, so the refusal cannot live only
@@ -395,6 +397,7 @@ class CuaDriverAdapter:
         # The NEW snapshot is current whether or not it is usable: the driver
         # has invalidated every earlier token for this window either way.
         self._snapshots[key] = snapshot_id
+        self._dropped.pop(key, None)
         if unusable:
             self._unusable[key] = unusable
         else:
@@ -495,12 +498,26 @@ class CuaDriverAdapter:
         #
         # ⚠ AND BEFORE start(), so a call that was always going to be refused
         # does not spin up the Cua runtime on its way to being refused.
+        builder = _BUILDERS.get(verb)
+        if builder is None:
+            # Not a generic dispatch: a verb with no builder is one this
+            # adapter deliberately does not implement. Checked first, so an
+            # observe or verify sent here hears that, not "observe first".
+            raise DriverUnavailable(
+                f"{verb!r} is not implemented by this adapter (implemented: "
+                f"{', '.join(sorted(_BUILDERS))})"
+            )
         snapshot = arguments.get("snapshot_id")
         current = self._snapshots.get(key)
         if not snapshot:
             # Every action names the observation it was built from; an empty one would skip both checks below.
             raise StaleSnapshot(
                 f"{verb} names no observation (snapshot_id is empty) — observe before acting")
+        if current is None and key in self._dropped:
+            raise StaleSnapshot(
+                f"{self._dropped[key]}, so its observation of pid {pid} window "
+                f"{window_id} was dropped — observe again before acting on this window"
+            )
         if current is None:
             # NO RECORD IS "CANNOT DETERMINE", NOT "FRESH". This read
             # `if snapshot and current and ...`, so a missing record made the
@@ -534,19 +551,15 @@ class CuaDriverAdapter:
             )
         self.start()
 
-        builder = _BUILDERS.get(verb)
-        if builder is None:
-            # Not a generic dispatch: a verb with no builder is one this
-            # adapter deliberately does not implement.
-            raise DriverUnavailable(
-                f"{verb!r} is not implemented by this adapter (implemented: "
-                f"{', '.join(sorted(_BUILDERS))})"
-            )
         method_name, make_input = builder
         try:
-            result = self._await(_dispatch(
-                self._driver, method_name,
-                make_input(self._sdk, arguments, self._session)))
+            action_input = make_input(self._sdk, arguments, self._session)
+        except (KeyError, AttributeError, TypeError, ValueError) as exc:
+            # Nothing was sent: a malformed request, refused as such (the snapshot stays).
+            raise DriverUnavailable(
+                f"{verb} was not sent: its arguments are malformed ({exc.__class__.__name__}: {exc})") from exc
+        try:
+            result = self._await(_dispatch(self._driver, method_name, action_input))
         except TimeoutError as exc:
             # ⚠ NOT "FAILED" (D13). The wait gave up; the action did not.
             # Forget the snapshot so nothing can act on this window again
@@ -562,29 +575,40 @@ class CuaDriverAdapter:
             raise  # DriverBusy: refused before anything was sent
         except Exception as exc:  # noqa: BLE001
             # The action was sent and failed: what the window looks like now is unknown (Will, 2026-11-14).
-            self._forget(key)
+            self._forget(key, f"the last {verb} on this window failed")
             text = f"{exc}".lower()
             if any(m in text for m in _STALE_MARKERS):
-                raise StaleSnapshot(str(exc)) from exc
+                raise StaleSnapshot(f"{exc} — observe again before acting on this window") from exc
             raise DriverUnavailable(
-                f"{verb} failed: {exc.__class__.__name__}: {exc}") from exc
+                f"{verb} failed: {exc.__class__.__name__}: {exc} — observe again before acting on this "
+                f"window") from exc
 
         try:
             return _verdict(verb, result, arguments)
-        except (DriverUnavailable, StaleSnapshot):
-            # A FAILED ACTION DROPS THE SNAPSHOT (Will, 2026-11-14). The driver ran it and it did not land, or landed
-            # in part, so the window may have changed: the model must observe again before it can act on this window,
-            # rather than retrying the same action on an observation nobody can vouch for any more.
-            self._forget(key)
+        except DriverUnavailable as exc:
+            # A FAILED ACTION DROPS THE SNAPSHOT (Will, 2026-11-14). The driver ran it and it did not land (or said
+            # it failed), so the window may have changed: the model must observe again before it can act on this
+            # window, rather than retrying on an observation nobody can vouch for any more. (A PARTIAL success is
+            # not a failure and keeps it; the loop verifies against fresh state.)
+            self._forget(key, f"the last {verb} on this window failed")
+            raise type(exc)(f"{exc} — observe again before acting on this window") from exc
+        except StaleSnapshot as exc:
+            self._forget(key, f"the last {verb} on this window was refused as stale")
+            raise StaleSnapshot(f"{exc} — observe again before acting on this window") from exc
+        except Exception:
+            self._forget(key, f"the last {verb} on this window failed")
             raise
 
     # ── internals ──────────────────────────────────────────────────────
 
-    def _forget(self, key: tuple[int, int]) -> None:
+    def _forget(self, key: tuple[int, int], why: str | None = None) -> None:
         """Drop what we know about a window's snapshot: it cannot be vouched
-        for, so ``act`` refuses until the next ``observe``."""
+        for, so ``act`` refuses until the next ``observe``. *why* is what the
+        next refusal tells the model."""
         self._snapshots.pop(key, None)
         self._unusable.pop(key, None)
+        if why:
+            self._dropped[key] = why
 
     def _assert_target(self, target: str) -> None:
         """Refuse an action labelled for another machine.

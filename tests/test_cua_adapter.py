@@ -1021,3 +1021,34 @@ def test_an_action_must_name_its_observation(adapter, snapshot):
     with pytest.raises(StaleSnapshot):
         a.act("click", _args(snapshot_id=snapshot))
     assert not any(name == "click" for name, _ in fake.calls)
+
+
+def test_the_refusal_after_a_failure_says_why(adapter):
+    a, fake = adapter(_window_state())
+    a.observe("mini", "scratch", 1, 2)
+    fake.result = _action_result(_Effect.SUSPECTED_NOOP)
+    with pytest.raises(DriverUnavailable) as first:
+        a.act("click", _args())
+    assert "observe again" in str(first.value)
+    with pytest.raises(StaleSnapshot) as second:
+        a.act("click", _args())
+    assert "the last click on this window failed" in str(second.value)
+
+
+def test_refusals_before_sending_keep_the_snapshot(adapter):
+    a, fake = adapter(_window_state())
+    a.observe("mini", "scratch", 1, 2)
+    with pytest.raises(StaleSnapshot):
+        a.act("click", _args(snapshot_id="old"))           # our own stale check
+    with pytest.raises(DriverUnavailable):
+        a.act("frobnicate", _args())                        # not implemented
+    with pytest.raises(DriverUnavailable):
+        a.act("press_key", _args())                         # malformed: press_key with no key
+    assert a.act("click", _args())["landed"] is True       # the snapshot survived all three
+
+
+def test_an_unimplemented_verb_is_named_before_the_snapshot_check(adapter):
+    a, _fake = adapter(_window_state())
+    with pytest.raises(DriverUnavailable) as exc:
+        a.act("observe", {k: v for k, v in _args().items() if k != "snapshot_id"})
+    assert "not implemented" in str(exc.value)
