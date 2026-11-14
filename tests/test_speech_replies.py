@@ -142,7 +142,7 @@ async def test_a_queued_turn_never_ends_the_running_one(monkeypatch, tap):
     a = b.start(S, [text("Answer A. "), HOLD, text("More A.")])
     await settle(lambda: any(f["type"] == "chat_delta" for f in b.frames))
     reply_a = await tap.find(S, wait=0.01)
-    second = b.start(S, [text("Answer B.")])
+    second = b.start(S, [HOLD, text("Answer B.")])
     await settle(lambda: sum(f["type"] == "agent_state" and f["payload"]["state"] == "thinking"
                              for f in b.frames) == 2)
     assert reply_a.ended is None
@@ -151,6 +151,7 @@ async def test_a_queued_turn_never_ends_the_running_one(monkeypatch, tap):
     assert reply_a.ended == "complete" and _texts(reply_a) == "Answer A. More A."
     # After A ended and before B speaks, the running turn is B.
     reply_b = await tap.find(S, wait=0.01)
+    second.release()
     await second.task
     assert reply_b is not None and reply_b is not reply_a
     assert _texts(reply_b) == "Answer B." and reply_b.ended == "complete"
