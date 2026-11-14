@@ -58,12 +58,16 @@ All four are under `/api/`, behind the bearer middleware. None is public.
 ### 2.2 `POST /api/speech/transcribe`: audio in, text out
 
 - **Body:** the audio bytes as they are. `Content-Type` names the type: one in `gateway.media`'s audio allowlist
-  (shipped: ogg, mpeg, wav, mp4 for m4a, webm).
+  (shipped: ogg, mpeg, wav, mp4 for m4a, webm). A missing `Content-Type`, `application/octet-stream` or any type not
+  on the list is 415.
 - **Query:** `language` (optional; 2 to 8 characters of letters and `-`, passed to the box as is).
 - **Checks:** the same as a voice message on any other surface (`gateway/media_guard.py`): the declared type against
   the allowlist, the size against `gateway.media.max_file_size_mb` and the 2 MB `/api` body cap, whichever is smaller,
-  and the bytes' own signature against the declared type.
-- **200:** `{"text": "..."}`. An empty transcript is `""`, not an error. A leading `/` is removed (section 10, D4).
+  and the bytes' own signature against the declared type when that type has a known signature (every shipped audio
+  type does). The body is read as a stream with a running count and refused the moment it passes the cap: the
+  middleware's cap reads only `Content-Length`, which a chunked upload does not send.
+- **200:** `{"text": "..."}`. An empty transcript is `""`, not an error. Leading whitespace and every leading `/` are
+  removed (section 10, D4).
 - **Refusals:** 400 `bad_audio` (signature does not match, or empty), 413 `too_large`, 415 `type_not_allowed`, 400
   `bad_language`, 503 `speech_unavailable` (section 7).
 
@@ -72,25 +76,47 @@ so a spoken turn lands in the chat the person is in, by the same path as a typed
 
 ### 2.3 `GET /api/sessions/{session_id}/speech`: a reply, spoken
 
-The response is a stream (section 2.5). Which reply it speaks:
+The response is a stream (section 2.5). A reply is one turn in the session. Prometheus learns of it from the frames
+the bridge already broadcasts for that session:
 
-1. **`message_id` given** (the `message_id` of a `chat_delta` frame): that reply, if it is still running or ended less
-   than 120 s ago. Otherwise the stream ends at once with `done` / `no_reply`.
-2. **A reply running in the session:** that one, from its first word.
-3. **Otherwise:** the next reply to start in the session, waiting up to `wait` seconds (query, default 30, 1 to 120).
-   None starts: `done` / `no_reply`.
+- it **starts** with `agent_state` `thinking`, before any text, so a turn that runs tools first is still the reply
+  the stream is waiting for;
+- its `message_id` is the one on its first `chat_delta` (or on its `chat_done`, for a turn that never said a word);
+- its text is exactly what its `chat_delta` frames carry;
+- it **ends** with the first of `chat_done`, an `error` for the session, or `agent_state` `idle` (which the bridge
+  sends in a `finally`, so even a turn cancelled by a shutdown ends).
 
-The race-free order for an app is: open the stream, then send the message. An app that opens it later passes the
-`message_id` from the first `chat_delta` it saw; nothing of the reply is lost either way, because Prometheus holds a
-running reply's text from its start.
+Replies are held by `(session_id, message_id)`, never by `message_id` alone: ids are `asst-<milliseconds>`, easy to
+guess and able to repeat across sessions.
 
-The reply's text is exactly what the session's `chat_delta` frames carry. When the turn stops (`chat_done` with
-`interrupted`), the stream stops speaking at once and ends with `done` / `interrupted`. When the turn fails (an `error`
-frame for the session), it ends with `done` / `failed`. A discarded round (`chat_discard`) drops what was not yet
-spoken past `keep_chars` and is passed on as a `discard` line.
+Which reply the stream speaks:
+
+1. **`message_id` given** (from a `chat_delta` frame): that reply in this session, if it is still running or ended
+   less than 120 s ago. Otherwise the stream ends at once with `done` / `no_reply`.
+2. **A turn running in the session:** that one, from its first word.
+3. **Otherwise:** the next turn to start in the session, waiting up to `wait` seconds (query, default 30, 1 to 120)
+   for it to start. None starts: `done` / `no_reply`.
+
+The race-free order for an app is: open the stream, then send the message. Nothing of the reply is lost, because
+Prometheus holds a running reply's text from its start. Two cautions:
+
+- **The session must already be the device's.** A stream only reads, so it never claims an id: a chat-only device that
+  opens a stream on an id it has not created gets 404. Create the session first (`POST /api/sessions`), or open the
+  stream after the first send.
+- **A turn already running is the one spoken.** If something else is answering in that chat (a background task's
+  result), the stream speaks that. An app that must speak exactly its own reply opens the stream after the first
+  `chat_delta` of it and passes that `message_id`.
+
+When the turn is stopped (`chat_done` with `interrupted`), the stream stops at once and ends with `done` /
+`interrupted`. A failed turn (an `error` frame) ends it with `done` / `failed`; a turn that ends any other way (only
+`agent_state` `idle`) ends it with `done` / `ended`. A discarded round (`chat_discard`) drops what was not yet spoken
+past `keep_chars` and is passed on as a `discard` line.
 
 Closing the connection is how an app stops the speech without stopping the turn (the person started talking over it):
 Prometheus stops synthesising for that stream.
+
+Only turns that stream frames can be spoken: Beacon's WebSocket and `POST /api/chat/send`. `POST /api/chat` answers in
+one piece and sends no frames, so its replies are not.
 
 ### 2.4 `POST /api/speech/speak`: any text, spoken
 
@@ -109,16 +135,18 @@ earlier reply aloud.
 | `start` | `version`, `mime` | The stream is open. Always first. |
 | `reply` | `message_id` | Which reply is being spoken (2.3 only). Comes before its first phrase. |
 | `phrase` | `index`, `start`, `end`, `text`, `audio` | One phrase. `audio` is the base64 WAV. `text` is what was spoken. `start`/`end` are offsets into the reply's text (or the given text). |
-| `discard` | `keep_chars` | A round was dropped: don't play queued phrases whose `start` is at or past `keep_chars`. |
+| `discard` | `keep_chars` | A round was dropped: of the phrases received before this line, don't play any not yet played whose `end` is past `keep_chars`. Prometheus sends none of them after it. |
 | `keepalive` | | Nothing else was sent for 15 s. |
 | `done` | `reason`, and see below | The last line. Exactly one per stream, unless the connection drops. |
 
 `done.reason`:
 
 - `complete`: everything was spoken. `truncated: true` when the 5,000-character cap stopped it (section 5).
-- `interrupted`: the turn was stopped. `failed`: the turn failed.
+- `interrupted`: the turn was stopped. The app should also drop phrases it has received and not yet played.
+- `failed`: the turn failed. `ended`: the turn ended without finishing (only `agent_state` `idle`, as in a shutdown).
 - `no_reply`: there was no reply to speak (2.3).
-- `replaced`: a newer stream for the same session (or, for `speak`, the same caller) took over.
+- `replaced`: a newer stream from the same caller for the same session took over.
+- `revoked`: the device's token was revoked while the stream was open.
 - `timeout`: the reply sent no new text for 10 minutes.
 - `unavailable`: the voice box failed. Also `voice` (`unreachable`, `refused`, `rejected`), `message` (a sentence
   for the person) and `resume_at` (where the unspoken text starts).
@@ -146,6 +174,9 @@ The limits are chat's:
   nothing a scoped device could not already see in its own chat.
 - Transcription and `speak` belong to no session. Like sending a chat message, any paired device may use them, within
   the limits in section 8.
+- **A revoked token's streams end at once** (`done` / `revoked`). Authentication happens when a stream opens, so
+  without this a revoked owner device would keep hearing a reply; the speech route registers with the device store's
+  revoke listener, as the bridge does for its sockets.
 
 ## 4. The `speech` capability
 
@@ -200,11 +231,16 @@ what the stream carries.
 ### 6.2 Health
 
 - **Check:** `GET /health` at the box's root, then `GET /v1/models` to tell a refused key from a healthy box: the
-  same check as `oara doctor`'s Remote STT/TTS row (`voice_remote.probe`), with a 3 s limit, off the event loop.
+  same order as `oara doctor`'s Remote STT/TTS row (`voice_remote.probe_urls`), but async and with 3 s for the whole
+  check, not per request. One check runs at a time per half; callers who arrive meanwhile share its answer.
 - **When:** only when asked. `GET /api/speech` checks a half whose last result is older than 30 s. Every real call
   also counts: a failure marks the half down at once, a success marks it up.
-- **Kept apart from the chat notices.** The speech route keeps its own record of which half is down, so its failures
-  never change the "isn't answering" lines Telegram and the `tts` tool send (`voice_remote._down`).
+- **What a check cannot see.** It cannot tell that the box would reject a request (`rejected`: a bad model or voice
+  name), so a good check never clears `rejected`; only a good call does.
+- **Kept apart from the chat notices.** The speech route has its own request code and its own record of which half is
+  down. It never calls `transcribe_remote` / `synthesize_remote`, whose failures log "falling back to the local
+  engine" and move the "isn't answering" lines Telegram and the `tts` tool send (`voice_remote._down`). It reuses only
+  the settings: URL, key, model, voice and timeout.
 - Every failure leaves one log line: WARNING for unreachable, ERROR for refused or rejected, naming the box's
   redacted URL and never its key.
 
@@ -215,11 +251,14 @@ speech route reads its state instead.
 
 Prometheus says so plainly and stops. It never falls back to this computer's own piper, espeak or Whisper for the
 speech route: the phone's own voice and recognition are better and closer, and a quiet swap would hide the outage.
+This is a deliberate exception to the pieces contract's fallback order (its section 9), which is about Prometheus's
+own voice surfaces; here the device asking has a better fallback than the daemon.
 
 | When | What the app gets |
 |---|---|
 | No box is configured for the half | 503 `{"error": "speech_unavailable", "voice": "not_configured", "message": "No voice server is set up."}` |
-| The half failed less than 30 s ago | 503 with `voice` `unreachable` / `refused` / `rejected` and its sentence |
+| The half is down and a check made less than 30 s ago failed | 503 with `voice` `unreachable` / `refused` / `rejected` and its sentence |
+| The half is down from a failed call only | a check first (at most 3 s); refused only if it fails |
 | A phrase fails mid-stream | `done` / `unavailable`, with `voice`, `message` and `resume_at` |
 | A transcription fails | 503 as above |
 
@@ -234,9 +273,11 @@ quietly. The next stream tries the box again once its 30 s are up.
 - Upload: the `/api` body cap (2 MB) and `gateway.media`, whichever is smaller. Compressed audio (m4a, ogg/opus) fits
   minutes of speech.
 - `speak` text: 20,000 characters. Spoken per reply or text: 5,000 characters. Phrase: 200 characters.
-- One reply stream per session and one `speak` stream per caller: a newer one replaces the older (`replaced`).
-- At most 4 streams at once in all; the fifth is 429 `speech_busy`. The voice box is one GPU model, and four
-  listeners is already more than one household.
+- A caller is a device (by its id) or the global token. A newer reply stream from the same caller for the same session
+  replaces the older one (`replaced`).
+- At most 2 streams at once per caller, and 4 at once from devices that are not the owner's; past either, 429
+  `speech_busy`. The owner (the global token or an owner device) is never refused because of other devices' streams.
+  The voice box is one GPU model, and four listeners is already more than one household.
 - A reply that sends no new text for 10 minutes ends the stream (`timeout`). Long tool calls are fine; a lost turn is
   not.
 
@@ -253,10 +294,14 @@ New module `src/prometheus/speech/`:
 
 `src/prometheus/web/speech_routes.py` has the four routes. Outside the new module, the changes are small:
 
-- `web/ws_server.py`, two one-line hooks (other work is going on in that file, so nothing more): `broadcast()` hands
-  each frame to the observers the launcher registers, before fan-out; and `_server_capabilities()` adds `speech`.
-- `web/launcher.py` registers the reply holder on the bridge; `web/server.py` registers the routes;
-  `web/route_access.py` lists them.
+- `web/ws_server.py`, two small hooks (other work is going on in that file, so nothing more):
+  - `broadcast()` hands each frame to the observers the launcher registers. It is the first thing `broadcast()` does,
+    before its early return when no WebSocket client is connected, so an app on REST alone is still heard. An
+    observer is synchronous and never blocks; the hook still catches and logs anything one raises, because a raise
+    there would roll the turn back.
+  - `_server_capabilities()` adds `speech`.
+- `web/launcher.py` registers the reply holder on the bridge and the revoke listener on the device store;
+  `web/server.py` registers the routes; `web/route_access.py` lists them.
 
 PRs, red tests first, each with an independent review (two for the routes, which touch auth and networking):
 
@@ -277,22 +322,29 @@ Settled with the charter's principles (safer option, capability gating, smallest
   dependency. Base64 costs a third more bytes on phrases that are a few seconds long.
 - **D3. The voice box only, never the daemon's own engines.** Falling back is the app's job, said plainly (section 7).
 - **D4. Transcription returns text; the app sends it.** A spoken turn then goes through `/api/chat/send` like a typed
-  one. A leading `/` is removed, so spoken words are never read as a slash command (the WebSocket voice upload has
-  the same rule, by its `[Voice message, transcribed]` marker).
+  one. Leading whitespace and every leading `/` are removed, so a transcript the app sends as it is never reads as a
+  slash command (the WebSocket voice upload gets the same result from its `[Voice message, transcribed]` marker). This
+  is a convenience, not a control: the app can send anything, and a scoped device's commands are limited by
+  `SCOPED_SLASH_COMMANDS` whatever it sends.
 - **D5. `speech` means configured, not answering**, like `voice_input`. Answering is `GET /api/speech`, and in the
   stream itself.
-- **D6. No background health watcher.** A check on demand, kept 30 s, plus every real call.
-- **D7. One failure ends synthesis for the stream.** No silent retries; `resume_at` lets the app carry on.
+- **D6. No background health watcher.** A check on demand, kept 30 s, plus every real call. One check at a time.
+- **D7. One failure ends synthesis for the stream.** No silent retries; `resume_at` lets the app carry on. One failed
+  call does not refuse later streams for 30 s on its own: a new stream checks the box first.
 - **D8. WAV only**, because that is what the voice box serves.
 - **D9. Code blocks are announced, not silently dropped**, so a listener knows something was left out.
 - **D10. `speak` exists** so an app's swappable voice source can read anything aloud, not only a reply as it streams.
-- **D11. The newest stream wins** per session or caller; four in all.
+- **D11. The newest stream wins** per caller and session; two per caller; four from devices other than the owner's,
+  and the owner never waits on them.
 - **D12. Offsets in code points**, matching `chat_discard`.
 - **D13. The reply's text comes only from frames the bridge already sends** for that session.
+- **D14. A reply is a turn**, from `agent_state` `thinking` to `chat_done` / `error` / `agent_state` `idle`, held by
+  `(session_id, message_id)`. Waiting on the first word instead would time out on a turn that runs tools first and
+  never end on a turn cancelled without `chat_done`.
 
 ## 11. Not in this version
 
-- Speech for other gateways (Telegram keeps its own voice replies).
+- Speech for other gateways (Telegram keeps its own voice replies), and for `POST /api/chat`, which sends no frames.
 - Reading a stored reply by its row id (an app can use `speak`).
 - Audio formats other than WAV; a voice chosen per device.
 - Start/stop detection on the daemon: it stays on the device with the microphone, by the agreed design.
