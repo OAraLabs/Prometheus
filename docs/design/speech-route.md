@@ -52,7 +52,8 @@ All four are under `/api/`, behind the bearer middleware. None is public.
 ```
 
 - `state` is `ok`, `down` or `unknown` (configured, not yet checked). `reason` is present when `down`: `unreachable`,
-  `refused` (the box refused its key), `rejected` (the box rejected the request: a bad model or voice name).
+  `refused` (the box refused its key), `rejected` (the box rejected the request: a bad model or voice name),
+  `failed` (the box answered with something that could not be used, such as audio that is not WAV).
 - Answering it may check the box (section 6.2). It never says the box's address, its key, or the key's variable name.
 
 ### 2.2 `POST /api/speech/transcribe`: audio in, text out
@@ -89,7 +90,10 @@ the bridge already broadcasts for that session:
 - it **ends** with its own `chat_done` (matching `message_id`), an `error` for the session while it is the running
   turn, or the session's last open turn closing: `agent_state` `thinking` counts a turn in and `idle` (sent in a
   `finally`, so even a turn cancelled by a shutdown sends it) counts one out, and only the count reaching zero ends a
-  reply this way. So a queued turn's frames never end the running one.
+  reply this way. So a queued turn's frames never end the running one. The count never goes below zero (a turn that
+  started before Prometheus was listening sends an `idle` with no `thinking`).
+- a `chat_done` while no turn is open is not a reply (a finished desktop task sends one, with a `computer:` id) and
+  binds nothing.
 - `agent_state` `thinking` still matters to a waiting stream: once a turn has started, `wait` no longer applies, so a
   turn that runs tools for minutes before its first word is still the reply.
 
@@ -156,7 +160,7 @@ earlier reply aloud.
 - `replaced`: a newer stream from the same caller for the same session took over.
 - `revoked`: the device's token was revoked while the stream was open.
 - `timeout`: the reply sent no new text for 10 minutes.
-- `unavailable`: the voice box failed. Also `voice` (`unreachable`, `refused`, `rejected`), `message` (a sentence
+- `unavailable`: the voice box failed. Also `voice` (`unreachable`, `refused`, `rejected`, `failed`), `message` (a sentence
   for the person) and `resume_at` (where the unspoken text starts).
 
 Offsets count Unicode code points, the same unit as `chat_discard`'s `keep_chars`. (In Swift: `unicodeScalars`.)
@@ -271,7 +275,7 @@ own voice surfaces; here the device asking has a better fallback than the daemon
 | A transcription fails | 503 as above |
 
 The sentences: "The voice server isn't answering.", "The voice server refused its key.", "The voice server rejected
-the request." The app finishes the job on the device (it has the reply's text from its `chat_delta` frames, and the
+the request.", "The voice server sent an answer that could not be used." The app finishes the job on the device (it has the reply's text from its `chat_delta` frames, and the
 recording it just sent) and tells the person once, in its own words, for example: "The voice server isn't answering,
 so this phone's voice is reading the rest." One failed phrase ends synthesis for that stream; nothing is retried
 quietly. The next stream tries the box again once its 30 s are up.
