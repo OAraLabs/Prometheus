@@ -106,7 +106,12 @@ is `429` with reason `poll_too_fast`. Answers, all `200` with a `status`:
 `endpoints` has two fields, `rest` and `ws`, built from the `Host` you used so the address is reachable from your side. A
 request that came in on the TLS listener is answered with `https://` and `wss://` (the TLS WebSocket port, default `8011`),
 and `tls` is an object with one field, `spki_sha256` (hex), the pin to hold the connection to. Over plain HTTP, `tls` is `null` and `ws` is
-`ws://<host>:<web.ws_port>` (default `8010`).
+`ws://<host>:<web.ws_port>` (default `8010`). A request relayed by `tailscale serve` (`web.tailscale`) is answered
+`https://<name>[:<rest_port>]` and `wss://<name>:<ws_port>`, and `tls` is `{"trust": "ca", "host": "<name>"}` with
+no `spki_sha256`: verify the certificate against the system trust store for that name and never pin it (it is a
+public CA's, renewed about every 90 days); run the node-key challenge before sending the token. A client that knows
+no `trust` field sees a `tls` object without `spki_sha256` and must not pin. Such a request's `source_ip` is
+`via-tailscale-serve:<address>`: display text, never parsed.
 
 Errors: an unknown id, a wrong secret and another request's secret are **one identical** `404 {"error": "unknown_request"}`,
 so a stranger learns nothing. Wrong secrets from one source are limited: after five a minute, further wrong guesses get
