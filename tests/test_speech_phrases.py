@@ -246,3 +246,82 @@ class TestDiscard:
         cutter.feed("Hello")
         cutter.discard(100)
         assert _texts(cutter.finish()) == ["Hello"]
+
+
+class TestHostileAndLargeInput:
+    """Review of #923: a single large feed (``speak`` takes 20,000 characters) must keep every rule and stay fast."""
+
+    def _fast(self, fn, limit: float = 1.0):
+        import time
+
+        t0 = time.perf_counter()
+        out = fn()
+        assert time.perf_counter() - t0 < limit
+        return out
+
+    @pytest.mark.parametrize("text", [
+        "word " * 300 + "end. Next.",
+        "word " * 300 + "end, next",
+        "word " * 300 + "```x```",
+    ])
+    def test_one_large_feed_never_makes_a_long_phrase(self, text):
+        assert all(len(p.text) <= 200 for p in _all(text, spoken_cap=100_000))
+
+    @pytest.mark.parametrize("text", ["." * 20_000, "e.g. " * 4_000, "a, " * 6_000, "x" * 20_000,
+                                      "`" * 20_000, "\n" * 20_000])
+    def test_hostile_input_is_fast(self, text):
+        phrases = self._fast(lambda: _all(text, spoken_cap=100_000))
+        assert all(len(p.text) <= 200 for p in phrases)
+
+    def test_a_huge_open_fence_streamed_is_fast_and_skipped(self):
+        def run():
+            cutter = PhraseCutter()
+            out = cutter.feed("Here:\n```\n")
+            chunk = "abcd"
+            for _ in range(100_000):
+                out += cutter.feed(chunk)
+            return out + cutter.feed("\n```\nDone. ")
+        assert _texts(self._fast(run, 3.0)) == ["Here:", CODE_SKIPPED, "Done."]
+
+    def test_released_inside_a_fence_is_the_fence_start(self):
+        cutter = PhraseCutter()
+        cutter.feed("Hi.\n```\n" + "x" * 500)
+        assert cutter.released == len("Hi.\n")
+
+    def test_a_long_url_is_one_phrase(self):
+        url = "https://bucket.example/obj?sig=" + "4a1b2c3d" * 45
+        assert _texts(_all(f"Get it at {url} today.")) == ["Get it at", "link", "today."]
+
+
+class TestReviewFixes:
+    def test_a_shorter_run_inside_a_longer_fence_does_not_close_it(self):
+        text = "Example:\n````md\n```py\nsecret_code(1)\n```\nmore\n````\nDone. "
+        assert _texts(_all(text)) == ["Example:", CODE_SKIPPED, "Done."]
+
+    def test_a_tool_call_keeps_a_half_arrived_fence(self):
+        cutter = PhraseCutter()
+        out = cutter.feed("Let me run this:\n``")
+        out += cutter.boundary()
+        out += cutter.feed("`sh\nrm -rf build\n```\nDone. ")
+        assert _texts(out) == ["Let me run this:", CODE_SKIPPED, "Done."]
+
+    def test_a_discard_before_a_code_phrase_lets_the_next_block_be_said(self):
+        cutter = PhraseCutter()
+        assert _texts(cutter.feed("Hi.\n```\nx\n```\n")) == ["Hi.", CODE_SKIPPED]
+        cutter.discard(4)
+        assert _texts(cutter.feed("```\ny\n```\nOk. ")) == [CODE_SKIPPED, "Ok."]
+
+    def test_a_discard_before_the_cap_lifts_it(self):
+        cutter = PhraseCutter(spoken_cap=20)
+        out = cutter.feed("Hello there. More words here. ")
+        assert _texts(out) == ["Hello there.", TOO_LONG]
+        cutter.discard(5)
+        assert not cutter.truncated
+        assert _texts(cutter.feed("Ok now. ")) == ["Ok now."]
+
+    def test_a_year_at_line_start_is_spoken(self):
+        assert _texts(_all("1999. It was a year.")) == ["1999.", "It was a year."]
+
+    def test_a_lone_star_and_dunder_names(self):
+        assert speakable("5 * 3 = 15") == "5 * 3 = 15"
+        assert speakable("a *very* good") == "a very good"
