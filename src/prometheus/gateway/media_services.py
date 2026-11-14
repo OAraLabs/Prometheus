@@ -126,8 +126,13 @@ def voice_input_available(config: dict[str, Any] | None = None) -> bool:
     from prometheus.infra.voice_remote import remote_settings
     from prometheus.tools.builtin import whisper_stt
 
-    if remote_settings("stt", config or {}) is not None:
-        return True
+    try:
+        if remote_settings("stt", config or {}) is not None:
+            return True
+    except (ValueError, TypeError):
+        # A bad stt.timeout_seconds: transcription would fail the same way, so voice is not offered, and the
+        # subscribe ack that asks this never fails because of it.
+        return False
     return whisper_stt.whisper_engine_installed() and shutil.which("ffmpeg") is not None
 
 

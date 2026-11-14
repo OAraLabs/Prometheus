@@ -137,7 +137,12 @@ def _error(status: int, error: str, detail: str) -> JSONResponse:
 
 
 class _ReleasingResponse(StreamingResponse):
-    """Releases the stream's slot however the response ends, even if its body never started."""
+    """Releases the stream's slot however the response ends, even if its body never started.
+
+    Under a server that speaks ASGI 2.4 or later, Starlette notices a client that left only at its next write, so a
+    stream that is waiting for a turn keeps its slot until the next keepalive (at most 15 s). uvicorn today speaks 2.3,
+    where the disconnect is noticed at once.
+    """
 
     def __init__(self, *args: Any, release: Callable[[], None], **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

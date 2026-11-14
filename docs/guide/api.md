@@ -125,11 +125,11 @@ Through the voice box Prometheus already uses (`stt.url` / `tts.url`, or one app
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/speech` | What works now: `{"version": 1, "stt": {"configured", "state", "reason"?}, "tts": {...}, "audio": {"mime": "audio/wav"}, "limits": {...}}`. `state` is `ok`, `down` or `unknown`. Never the box's address or key |
-| POST | `/api/speech/transcribe` | Audio in (the body, with an audio `Content-Type` from `gateway.media`), `{"text"}` out; optional `language`. The app sends the text with `/api/chat/send`. `415`, `413`, `400 bad_audio`, `503 speech_unavailable` |
+| POST | `/api/speech/transcribe` | Audio in (the body, with an audio `Content-Type` from `gateway.media`), `{"text"}` out; optional `language`. The app sends the text with `/api/chat/send`. `415`, `413` (`too_large`, or the daemon-wide `request body too large` when `Content-Length` says over 2 MB: match on the status), `400 bad_audio`, `503 speech_unavailable` |
 | GET | `/api/sessions/{session_id}/speech` | The session's reply as an NDJSON stream (`application/x-ndjson`): `start`, `reply`, `phrase` (with base64 WAV), `discard`, `keepalive`, then one `done` with its `reason`. Optional `message_id` (a reply that is running or ended in the last 120 s) and `wait` (seconds to wait for the next turn, 1 to 120, default 30). Open it before sending, or pass the `message_id` from the first `chat_delta` |
 | POST | `/api/speech/speak` | `{"text"}` (up to 20,000 characters) as the same stream |
 
-When the voice box is down the answer is `503 {"error": "speech_unavailable", "voice", "message"}`, or a final `done` with `reason: "unavailable"`, `voice`, `message` and `resume_at` (where the unspoken text starts): the app reads the rest with its own voice and says so. At most two streams per caller and four from devices other than the owner's (`429 speech_busy`).
+When the voice box is down the answer is `503 {"error": "speech_unavailable", "voice", "message"}`, or a final `done` with `reason: "unavailable"`, `voice`, `message` and `resume_at` (where the unspoken text starts): the app reads the rest with its own voice and says so. At most two streams or transcriptions at once per caller and four from devices other than the owner's (`429 speech_busy`); with auth off every caller is the same caller. A bad query value is `400 {"error": "bad_query", "detail"}`; an unknown query parameter is the daemon-wide `400 {"error": "unknown query parameter: …", "unknown", "accepted"}`.
 
 ### OpenAI-compatible surface — `/v1`
 

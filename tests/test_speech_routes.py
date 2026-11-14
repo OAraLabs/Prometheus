@@ -532,3 +532,24 @@ async def test_auth_off_is_open_like_every_route(tmp_path, monkeypatch, box):
         r = await c.post("/api/speech/speak", json={"text": "Open daemon."})
     assert r.status_code == 200 and _lines(r)[-1]["reason"] == "complete"
     assert app.state.speech._streams == []
+
+
+# --------------------------------------------------------------------------- review 2 of #927
+
+
+@pytest.mark.asyncio
+async def test_a_declared_upload_over_the_cap_is_a_413(world, box):
+    async with world.client("a") as c:
+        r = await c.post("/api/speech/transcribe", content=OGG + b"\x00" * (3 * 1024 * 1024),
+                         headers={"Content-Type": "audio/ogg"})
+    assert r.status_code == 413  # the middleware's body ("request body too large"); match on the status
+    assert not box.requests
+
+
+def test_a_bad_stt_timeout_never_breaks_the_subscribe_ack():
+    from prometheus.web.ws_server import WebSocketBridge
+
+    cfg = _config("stt")
+    cfg["stt"]["timeout_seconds"] = "30s"
+    caps = WebSocketBridge(loop_context=object(), config=cfg)._server_capabilities()
+    assert "voice_input" not in caps and "speech" not in caps
