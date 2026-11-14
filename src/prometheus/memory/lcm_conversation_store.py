@@ -1175,6 +1175,23 @@ class LCMConversationStore:
         self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return counts
 
+    def has_session_rows(self, session_id: str) -> bool:
+        """True when *session_id* has messages, or a workspace binding or chat-project filing made before its first
+        message: either way it exists, and no device may claim it (web/session_scope.session_exists)."""
+        if self.max_rowid(session_id) > 0:
+            return True
+        for table in ("session_workspaces", "session_chat_projects"):
+            if self._table_exists(table) and self._conn.execute(
+                    f"SELECT 1 FROM {table} WHERE session_id = ?", (session_id,)).fetchone():
+                return True
+        return False
+
+    def tool_use_json(self, session_id: str) -> list[str]:
+        """The ``content_json`` of each assistant row that holds a tool call, in order (chat-project suggestions)."""
+        return [r[0] for r in self._conn.execute(
+            "SELECT content_json FROM lcm_messages WHERE session_id = ? AND role = 'assistant'"
+            " AND content_json LIKE '%tool_use%' ORDER BY rowid", (session_id,)).fetchall()]
+
     def chat_projects(self) -> ChatProjectStore:
         """The chat projects store, on this connection (``projects/store.py``): filing a session changes its
         membership and its workspace binding in one transaction. Made once, then kept."""

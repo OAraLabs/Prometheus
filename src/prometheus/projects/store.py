@@ -307,8 +307,10 @@ class ChatProjectStore:
         if self._conn.execute("SELECT 1 FROM chat_projects WHERE id = ?", (project_id,)).fetchone() is None:
             raise UnknownProject("no such project")
         with self._write():
+            # The count a client sees: forgotten sessions are not shown, so they are not counted as unfiled.
             sessions = [r[0] for r in self._conn.execute(
-                "SELECT session_id FROM session_chat_projects WHERE project_id = ?", (project_id,)).fetchall()]
+                f"SELECT session_id FROM session_chat_projects s WHERE project_id = ? AND {_SHOWN}",
+                (project_id,)).fetchall()]
             # Every binding this project set, on members and on sessions since moved elsewhere as a label.
             self._conn.execute("DELETE FROM session_workspaces WHERE set_by = ?", (_set_by(project_id),))
             self._conn.execute("DELETE FROM session_chat_projects WHERE project_id = ?", (project_id,))
