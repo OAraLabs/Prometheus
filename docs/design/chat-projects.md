@@ -271,7 +271,7 @@ instructions are an `AGENTS.md` shows that, and the editor never pretends the fo
 
 | Route | Owner | Chat-only device |
 |---|---|---|
-| `GET /api/chat-projects` | all, full; `"role": "owner"` | only projects with at least one of its sessions; each as `{"id", "name", "sessions"}` where `sessions` counts its own; no `rev`; `"role": "device"` |
+| `GET /api/chat-projects` | all, full; `"role": "owner"` | only projects with at least one of its sessions; each as `{"id", "name", "sessions"}` where `sessions` counts its own; no `rev`; `"role": "chat_only"` |
 | `GET /api/chat-projects/{id}` | full | `404` unless one of its sessions is in it; then `{"id", "name", "session_ids"}` with its own sessions only |
 | everything else in section 3 | yes | `403 operator_only` (default-deny in `route_access`) |
 | `chat_project_id` on its session rows | yes | yes, for its own sessions |
