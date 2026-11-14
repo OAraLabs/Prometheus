@@ -331,3 +331,125 @@ def test_the_daemon_settings_take_the_token_answer_from_the_cli(monkeypatch):
     assert serve_settings(_cfg()) is None
     assert serve_settings(_cfg(), has_token=True) is not None
     assert serve_settings(_cfg(), has_token=False) is None
+
+
+# ── #928 review ──────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("args", [
+    ("serve", "reset"),
+    ("serve", "--bg", "--https=443", "http://evil.example:80"),
+    ("serve", "--bg", "--set-path=/x", "--https=443", "http://127.0.0.1:8005"),
+    ("serve", "--bg", "--https=0", "http://127.0.0.1:8005"),
+    ("serve", "--bg", "--https=70000", "http://127.0.0.1:8005"),
+    ("serve", "--https=443", "on"),
+    ("serve", "--tcp=443", "off"),
+    ("status", "--peers"),
+    ("status",),
+    ("serve", "status"),
+])
+def test_only_the_four_exact_command_shapes_run(args):
+    """Both reviews of #928: the guard was 'first word status or serve, no forbidden word', which let `serve reset`
+    or a proxy to another host through. Now only the four documented shapes, ports checked as integers."""
+    from prometheus.cli.tailscale import TailscaleCommandRefused, run_tailscale
+
+    with pytest.raises(TailscaleCommandRefused):
+        run_tailscale("/nonexistent/tailscale", *args)
+
+
+def test_the_four_shapes_are_accepted(monkeypatch):
+    import subprocess
+
+    from prometheus.cli import tailscale as t
+
+    seen: list = []
+
+    def fake_run(argv, **kw):
+        seen.append((argv, kw))
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+    monkeypatch.setattr(t.subprocess, "run", fake_run)
+    for args in (("status", "--json"), ("serve", "status", "--json"),
+                 ("serve", "--bg", "--https=8443", "http://127.0.0.1:8005"),
+                 ("serve", "--bg", "--https=8444", "http://[::1]:8010"),
+                 ("serve", "--https=8443", "off")):
+        assert t.run_tailscale("/x/tailscale", *args)[0] == 0
+    for _argv, kw in seen:                                          # no prompt can wait on the terminal; UTF-8 always
+        assert kw.get("stdin") is subprocess.DEVNULL and kw.get("encoding") == "utf-8" and kw.get("errors") == "replace"
+
+
+@pytest.mark.parametrize(("why", "edit", "env"), [
+    ("an unset bind is every interface", lambda t: t.replace("  bind: 127.0.0.1  # loopback\n", ""), {}),
+    ("the environment overrides the file", lambda t: t, {"PROMETHEUS_WEB_BIND": "0.0.0.0"}),
+])
+def test_the_bind_is_the_one_the_daemon_will_use(ts, monkeypatch, why, edit, env, capsys):
+    ts.config_path.write_text(edit(ts.config_path.read_text()))
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("PROMETHEUS_INSTALL_KIND", raising=False)        # a terminal install: no app LAN guard
+    assert ts.run("setup", apply=True) == 1, why
+    assert "not loopback" in capsys.readouterr().out
+    assert _writes(ts.calls()) == []
+
+
+def test_a_config_it_cannot_write_runs_no_serve_command(ts, capsys):
+    """Review M2: Serve ran first and the write failed after, leaving live relays. The edit is checked first."""
+    ts.config_path.write_text("web: {bind: 127.0.0.1, api_port: 8005, ws_port: 8010}\n")   # flow style: not editable
+    assert ts.run("setup", apply=True) == 1
+    assert _writes(ts.calls()) == []
+    assert "Could not write" in capsys.readouterr().out
+
+
+def test_a_plain_http_serve_entry_is_not_ours(ts):
+    ts.serve({"TCP": {"443": {"HTTP": True}},
+              "Web": {f"{NAME}:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8005"}}}}})
+    assert ts.run("setup", apply=True) == 1                          # taken, not kept
+    assert _writes(ts.calls()) == []
+
+
+def test_a_port_in_two_layers_is_not_ours():
+    from prometheus.cli.tailscale import _parse_serve, classify
+
+    entries = _parse_serve({
+        "TCP": {"443": {"HTTPS": True}},
+        "Web": {f"{NAME}:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3000"}}}},
+        "Foreground": {"s1": {"TCP": {"443": {"HTTPS": True}},
+                              "Web": {f"{NAME}:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8005"}}}}}},
+    }, NAME)
+    assert classify(entries[443], 8005) == "taken"
+
+
+def test_the_relay_follows_an_ipv6_loopback_bind(ts):
+    ts.config_path.write_text(ts.config_path.read_text().replace("bind: 127.0.0.1", "bind: '::1'"))
+    assert ts.run("setup", apply=True) == 0
+    assert _writes(ts.calls())[0] == ["serve", "--bg", "--https=443", "http://[::1]:8005"]
+
+
+@pytest.mark.parametrize("bad", ["abc", True, 0, 70000, [443]])
+def test_a_bad_port_in_the_config_is_said_not_a_traceback(ts, bad, capsys):
+    text = ts.config_path.read_text() + f"  tailscale:\n    rest_port: {json.dumps(bad)}\n"
+    ts.config_path.write_text(text)
+    assert ts.run("setup", apply=True) == 1
+    assert "port" in capsys.readouterr().out.lower()
+    assert _writes(ts.calls()) == []
+
+
+def test_off_warns_when_it_cannot_read_serve(ts, capsys):
+    (ts.dir / "status.json").write_text("not json")
+    assert ts.run("off") == 0
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_when_tailscale_is_not_running_the_other_rows_are_not_checked(monkeypatch):
+    from prometheus.cli.tailscale import doctor_rows
+
+    monkeypatch.setenv("PROMETHEUS_API_TOKEN", "x-not-real")
+    shaken: list = []
+    rows = doctor_rows(_cfg(), state=_state(running=False), handshake=lambda n, p: shaken.append(n) or 60.0)
+    assert [r.name for r in rows] == ["Tailscale"] and rows[0].status == "error"
+    assert "not checked" in (rows[0].fix or "") and shaken == []
+
+
+def test_the_literal_writer_never_writes_a_raw_line_separator():
+    from prometheus.web.network import _literal
+
+    assert _literal("a b") == '"a\\u2028b"'
