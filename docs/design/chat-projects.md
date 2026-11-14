@@ -148,8 +148,9 @@ Every answer that changes something carries `"ok": true`, as in the desktop cont
 **Rename** onto another project's name is `409 name_taken`; renaming to the same project's name in another case is
 allowed. The folder never changes.
 
-**Delete** removes the project and its memberships, clears the workspace of every session whose binding the project
-set (`set_by: "project"`), and **never deletes the folder or any file**. No route removes a folder.
+**Delete** removes the project and its memberships, clears every workspace binding the project set (`set_by:
+"project:<this id>"`, on members and on sessions since moved elsewhere as a label), and **never deletes the folder or
+any file**. No route removes a folder.
 
 ### 3.2 Membership
 
@@ -166,7 +167,7 @@ set (`set_by: "project"`), and **never deletes the folder or any file**. No rout
 - **`keep_workspace: true` files as a label only**: the membership is recorded and the workspace is left exactly as
   it is (none, or one set by hand). This is what a migration sends (section 9), so moving local projects in never
   changes where an old conversation writes.
-- A session whose workspace was set another way (`set_by` not `project`) is `409 workspace_set` with the current
+- A session whose workspace was set another way (a `set_by` that does not start with `project:`) is `409 workspace_set` with the current
   `workspace`, unless `replace_workspace: true` or `keep_workspace: true`. A folder chosen by hand is never lost
   silently. After `replace_workspace`, unfiling leaves no workspace; it does not restore the old one.
 - `null` unfiles, and clears the workspace only if this project set it. Deleting a project clears every binding it
