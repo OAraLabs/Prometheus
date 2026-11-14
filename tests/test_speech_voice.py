@@ -286,3 +286,131 @@ class TestHealth:
         _unavailable(v.synthesize("Hi."))
         cfg["tts"]["url"] = "http://127.0.0.1:8004"
         assert v.state("tts") == {"configured": True, "state": "unknown"}
+
+
+class TestReviewFixes:
+    """Review 1 of #924."""
+
+    def _socket_box(self, monkeypatch, handler):
+        real = httpx.AsyncClient
+        monkeypatch.setattr(voice_mod, "_client",
+                            lambda timeout: real(transport=httpx.MockTransport(handler), timeout=timeout))
+
+    def test_a_call_has_a_total_time_limit(self, clock, monkeypatch):
+        class Dribble(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"RIFF\x00\x00\x00\x00WAVE"
+                while True:
+                    await asyncio.sleep(0.05)
+                    yield b"\x00"
+
+        self._socket_box(monkeypatch, lambda request: httpx.Response(200, stream=Dribble()))
+        cfg = _cfg("tts")
+        cfg["tts"]["timeout_seconds"] = 0.3
+
+        async def timed():
+            loop = asyncio.get_running_loop()
+            t0 = loop.time()
+            with pytest.raises(VoiceUnavailable) as info:
+                await _voice(cfg, clock).synthesize("Hi.")
+            return info.value, loop.time() - t0
+
+        err, took = _run(timed())
+        assert err.reason == "unreachable" and took < 2
+
+    def test_an_oversized_answer_is_failed_without_reading_it_all(self, clock, monkeypatch):
+        read = {"n": 0}
+
+        class Flood(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"RIFF\x00\x00\x00\x00WAVE"
+                for _ in range(10_000):
+                    read["n"] += 1
+                    yield b"\x00" * 65536
+
+        self._socket_box(monkeypatch, lambda request: httpx.Response(200, stream=Flood()))
+        assert _unavailable(_voice(_cfg("tts"), clock).synthesize("Hi.")).reason == "failed"
+        assert read["n"] * 65536 <= voice_mod.MAX_AUDIO_BYTES + 2 * 65536
+
+    def test_a_bad_url_is_a_failure_not_an_exception(self, box, clock):
+        v = _voice(_cfg("tts", "stt", url="http://[::1"), clock)
+        assert _unavailable(v.synthesize("Hi.")).reason == "unreachable"
+        assert _run(v.status())["stt"]["state"] == "down"
+
+    def test_a_key_a_header_cannot_carry_is_refused(self, box, clock, tmp_path):
+        Path(tmp_path / "prom-env").write_text(f"{KEY_ENV}=pasted“key”\n")
+        v = _voice(_cfg("tts"), clock)
+        assert _unavailable(v.synthesize("Hi.")).reason == "refused"
+        assert _run(v.status())["tts"]["state"] == "down"
+
+    def test_a_deeply_nested_transcript_answer_is_failed(self, box, clock):
+        box.status["/v1/audio/transcriptions"] = (200, b"[" * 100_000)
+        assert _unavailable(_voice(_cfg("stt"), clock).transcribe(b"x", "audio/ogg")).reason == "failed"
+
+    def test_a_refused_key_seen_by_a_call_is_not_cleared_by_a_check(self, box, clock):
+        box.status["/v1/audio/speech"] = (401, b"no")  # /v1/models still answers: a check sees nothing wrong
+        v = _voice(_cfg("tts"), clock)
+        _unavailable(v.synthesize("Hi."))
+        box.requests.clear()
+        assert _unavailable(v.ready("tts")).reason == "refused"
+        assert box.requests == []  # refused for 30 s with no check
+        clock.now += 31
+        assert _run(v.status())["tts"] == {"configured": True, "state": "down", "reason": "refused"}
+        _run(v.ready("tts"))  # after 30 s a call may try again
+
+    def test_a_check_that_began_before_a_call_failed_does_not_overwrite_it(self, box, clock):
+        v = _voice(_cfg("tts"), clock)
+
+        async def race():
+            gate = asyncio.Event()
+            real = voice_mod.Voice._probe
+
+            async def slow_probe(settings):
+                await gate.wait()
+                return await real(settings)
+
+            v._probe = slow_probe  # type: ignore[method-assign]
+            checking = asyncio.ensure_future(v.status())
+            await asyncio.sleep(0)
+            clock.now += 1
+            box.key = "another-key"
+            with pytest.raises(VoiceUnavailable):
+                await v.synthesize("Hi.")  # refused, after the check began
+            box.key = KEY
+            gate.set()
+            await checking
+
+        _run(race())
+        assert v.state("tts") == {"configured": True, "state": "down", "reason": "refused"}
+
+    def test_a_failed_check_keeps_what_a_call_saw(self, box, clock):
+        v = _voice(_cfg("tts"), clock)
+        box.status["/v1/audio/speech"] = (400, b"unknown voice")
+        _unavailable(v.synthesize("Hi."))
+        clock.now += 31
+        box.down = True
+        _run(v.status())
+        box.down = False
+        clock.now += 31
+        assert _run(v.status())["tts"]["reason"] == "rejected"
+
+    def test_the_boxes_text_is_one_log_line(self, box, clock, caplog):
+        box.status["/v1/audio/speech"] = (400, b"bad voice\nERROR forged line")
+        with caplog.at_level(logging.ERROR, logger="prometheus.speech.voice"):
+            _unavailable(_voice(_cfg("tts"), clock).synthesize("Hi."))
+        assert "\n" not in caplog.records[-1].getMessage()
+
+    def test_status_checks_both_halves_at_once(self, clock, monkeypatch):
+        async def slow(request):
+            await asyncio.sleep(0.3)
+            return httpx.Response(200, json={})
+
+        self._socket_box(monkeypatch, slow)
+
+        async def timed():
+            loop = asyncio.get_running_loop()
+            t0 = loop.time()
+            await _voice(_cfg("tts", "stt"), clock).status()
+            return loop.time() - t0
+
+        assert _run(timed()) < 1.0  # two requests per check, both halves at once: ~0.6 s, not ~1.2 s
