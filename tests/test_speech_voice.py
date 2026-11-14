@@ -517,3 +517,8 @@ class TestReviewTwo:
         with caplog.at_level(logging.WARNING, logger="prometheus.speech.voice"):
             _unavailable(_voice(_cfg("tts", url="http://127.0.0.1:8003/x\nERROR forged"), clock).synthesize("Hi."))
         assert all("\n" not in r.getMessage() for r in caplog.records)
+
+
+def test_a_mime_with_parameters_keeps_its_type(box, clock):
+    _run(_voice(_cfg("stt"), clock).transcribe(b"OggS", "Audio/Ogg; codecs=opus"))
+    assert b'filename="speech.ogg"' in box.requests[-1].content
