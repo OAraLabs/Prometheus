@@ -244,9 +244,9 @@ class Voice:
         started = h.check_started
         result = await asyncio.shield(h.inflight)
         now = self._clock()
+        h.checked_at = now  # kept 30 s even when a call's newer answer wins below
         if h.call_at is not None and started is not None and h.call_at > started:
             return  # a call answered after this check began: the call is newer
-        h.checked_at = now
         sticky = h.state == "down" and h.by_call and h.reason == "refused"
         if result == "ok":
             h.check_ok = True
@@ -337,6 +337,7 @@ class Voice:
         data = {"model": settings.model, "response_format": "json"}
         if language:
             data["language"] = language
+        mime = mime.split(";", 1)[0].strip().lower()  # "audio/ogg; codecs=opus" is audio/ogg
         if mime not in _EXT:
             mime = "application/octet-stream"  # never a caller's string in the multipart headers
         files = {"file": (f"speech.{_EXT.get(mime, 'bin')}", audio, mime)}
