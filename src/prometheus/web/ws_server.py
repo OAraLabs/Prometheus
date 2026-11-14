@@ -1078,7 +1078,8 @@ class WebSocketBridge:
         """What the ``subscribed`` ack tells a client this daemon can do (see the ack)."""
         from prometheus.gateway import media_services
 
-        return ["voice_input"] if media_services.voice_input_available(self.config) else []
+        caps = ["voice_input"] if media_services.voice_input_available(self.config) else []
+        return [*caps, "projects"]  # chat projects (web/chat_projects_routes.py): always served
 
     async def _system_note(self, session_id: str, content: str) -> None:
         await self.broadcast({

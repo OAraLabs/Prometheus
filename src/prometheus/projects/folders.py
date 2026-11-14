@@ -28,9 +28,9 @@ _MAX_SUFFIX = 1000
 
 def projects_root(config: Mapping[str, Any] | None) -> Path:
     """The projects root from ``projects.root`` (``~`` expanded), or the default."""
-    block = (config or {}).get("projects")
-    raw = block.get("root") if isinstance(block, Mapping) else None
-    return Path(os.path.expanduser(str(raw or DEFAULT_ROOT)))
+    block = (config or {}).get("projects", {})
+    raw = block.get("root", "~/prometheus-projects") if isinstance(block, Mapping) else DEFAULT_ROOT
+    return Path(os.path.expanduser(str(raw).strip() or DEFAULT_ROOT))
 
 
 def slug(name: str) -> str:

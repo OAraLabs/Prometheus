@@ -26,8 +26,8 @@ from prometheus.web.server import create_app  # noqa: E402
 from tests.support.device_world import engine_over  # noqa: E402
 
 GLOBAL = "projects-global-" + secrets.token_hex(8)
-SCOPED = {("GET", "/api/chat-projects"), ("GET", "/api/chat-projects/{id}")}
-OWNER = {("POST", "/api/chat-projects"), ("PUT", "/api/chat-projects/{id}"), ("DELETE", "/api/chat-projects/{id}"),
+SCOPED = {("GET", "/api/chat-projects"), ("GET", "/api/chat-projects/{project_id}")}
+OWNER = {("POST", "/api/chat-projects"), ("PUT", "/api/chat-projects/{project_id}"), ("DELETE", "/api/chat-projects/{project_id}"),
          ("PUT", "/api/sessions/{session_id}/project")}
 
 
@@ -270,7 +270,7 @@ def test_unfiling(world):
     assert world.conv.get_session_workspace(sid) is None
 
 
-@pytest.mark.parametrize(("sid", "status", "kind"), [("cron:nightly", 400, "machine_session"),
+@pytest.mark.parametrize(("sid", "status", "kind"), [("coding:run-1", 400, "machine_session"),
                                                      ("desktop:never-seen", 404, None)])
 def test_machine_and_unknown_sessions(world, sid, status, kind):
     p = world.project()
@@ -381,7 +381,7 @@ def test_a_chat_only_device_sees_only_projects_with_its_sessions(world):
         world.call("op", "PUT", f"/api/sessions/{sid}/project",
                    json={"chat_project_id": pid, "keep_workspace": True})
     body = world.call("a", "GET", "/api/chat-projects").json()
-    assert body == {"role": "device", "projects": [{"id": mine["id"], "name": "Mine", "sessions": 1}]}
+    assert body == {"role": "chat_only", "projects": [{"id": mine["id"], "name": "Mine", "sessions": 1}]}
     one = world.call("a", "GET", f"/api/chat-projects/{mine['id']}").json()
     assert one == {"id": mine["id"], "name": "Mine", "session_ids": [own]}
     assert world.call("a", "GET", f"/api/chat-projects/{theirs['id']}").status_code == 404
@@ -391,7 +391,7 @@ def test_a_chat_only_device_sees_only_projects_with_its_sessions(world):
 
 def test_a_device_with_no_filed_sessions_sees_nothing(world):
     world.project()
-    assert world.call("a", "GET", "/api/chat-projects").json() == {"role": "device", "projects": []}
+    assert world.call("a", "GET", "/api/chat-projects").json() == {"role": "chat_only", "projects": []}
 
 
 def test_the_owner_gets_one_project_with_its_sessions(world):

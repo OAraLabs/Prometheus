@@ -86,9 +86,11 @@ def test_shape_is_consistent_and_keeps_count_and_created_at(tmp_path):
     # first exchange or set via PUT /api/sessions/{id}/title.
     # "pinned" joined with feat/session-pinning: a bool, false unless someone
     # pinned the session — daemon-side so every client agrees (tests/test_session_pins.py).
-    assert set(row.keys()) == {"session_id", "gateway", "created_at", "last_active", "message_count", "watermark", "live", "title", "pinned"}
+    assert set(row.keys()) == {"session_id", "gateway", "created_at", "last_active", "message_count", "watermark", "live", "title", "pinned", "chat_project_id"}
     assert row["live"] is True
     assert row["pinned"] is False
+    # chat_project_id joined with chat projects: null unless the owner filed it (docs/design/chat-projects.md 3.3)
+    assert row["chat_project_id"] is None
     assert isinstance(row["watermark"], int)
     assert isinstance(row["last_active"], (int, float))
     assert row["message_count"] == 1  # kept
