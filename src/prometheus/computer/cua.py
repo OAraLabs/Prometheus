@@ -497,7 +497,11 @@ class CuaDriverAdapter:
         # does not spin up the Cua runtime on its way to being refused.
         snapshot = arguments.get("snapshot_id")
         current = self._snapshots.get(key)
-        if snapshot and current is None:
+        if not snapshot:
+            # Every action names the observation it was built from; an empty one would skip both checks below.
+            raise StaleSnapshot(
+                f"{verb} names no observation (snapshot_id is empty) — observe before acting")
+        if current is None:
             # NO RECORD IS "CANNOT DETERMINE", NOT "FRESH". This read
             # `if snapshot and current and ...`, so a missing record made the
             # whole check evaporate and the action went to the driver
@@ -557,13 +561,22 @@ class CuaDriverAdapter:
         except DriverUnavailable:
             raise  # DriverBusy: refused before anything was sent
         except Exception as exc:  # noqa: BLE001
+            # The action was sent and failed: what the window looks like now is unknown (Will, 2026-11-14).
+            self._forget(key)
             text = f"{exc}".lower()
             if any(m in text for m in _STALE_MARKERS):
                 raise StaleSnapshot(str(exc)) from exc
             raise DriverUnavailable(
                 f"{verb} failed: {exc.__class__.__name__}: {exc}") from exc
 
-        return _verdict(verb, result, arguments)
+        try:
+            return _verdict(verb, result, arguments)
+        except (DriverUnavailable, StaleSnapshot):
+            # A FAILED ACTION DROPS THE SNAPSHOT (Will, 2026-11-14). The driver ran it and it did not land, or landed
+            # in part, so the window may have changed: the model must observe again before it can act on this window,
+            # rather than retrying the same action on an observation nobody can vouch for any more.
+            self._forget(key)
+            raise
 
     # ── internals ──────────────────────────────────────────────────────
 
