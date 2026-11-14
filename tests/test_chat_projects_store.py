@@ -256,3 +256,30 @@ class TestLabelOnly:
         store.file("s1", p.id)
         store.file("s1", p.id, keep_workspace=True)
         assert conv.get_session_workspace("s1") == p.folder
+
+
+class TestBindingsNameTheirProject:
+    """Design re-check: a binding records which project set it; only that project clears it."""
+
+    def test_a_label_move_then_deleting_the_old_project_clears_its_binding(self, store, conv, tmp_path):
+        a = store.insert("A", _folder(tmp_path, "a"), managed=False)
+        b = store.insert("B", _folder(tmp_path, "b"), managed=False)
+        store.file("s1", a.id)                       # bound to A's folder
+        store.file("s1", b.id, keep_workspace=True)  # now a member of B, still bound to A's folder
+        store.delete(a.id)
+        assert conv.get_session_workspace("s1") is None  # A's binding went with A
+        assert store.project_of("s1") == b.id
+
+    def test_unfiling_from_a_label_project_leaves_another_projects_binding(self, store, conv, tmp_path):
+        a = store.insert("A", _folder(tmp_path, "a"), managed=False)
+        b = store.insert("B", _folder(tmp_path, "b"), managed=False)
+        store.file("s1", a.id)
+        store.file("s1", b.id, keep_workspace=True)
+        store.file("s1", None)
+        assert conv.get_session_workspace("s1") == a.folder  # B never set it, so B's unfile leaves it
+
+    def test_the_binding_records_the_project(self, store, conv, tmp_path):
+        a = store.insert("A", _folder(tmp_path, "a"), managed=False)
+        store.file("s1", a.id)
+        row = conv._conn.execute("SELECT set_by FROM session_workspaces WHERE session_id = 's1'").fetchone()
+        assert row[0] == f"project:{a.id}"
