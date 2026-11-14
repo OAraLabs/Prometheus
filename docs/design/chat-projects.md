@@ -25,8 +25,10 @@ devices. Section 12 lists where the two contracts disagreed and what was settled
   instructions, or touch files. Fail closed.
 - **`projects`** appears in the `subscribed` ack's `server_capabilities`. An app that does not see it keeps whatever it
   does today.
-- **Suggestions** are computed on the daemon, over the full history, with the desktop's rules ported case for case.
-  Owner only.
+- **Suggestions** are computed on the daemon, over the full history, with the desktop's rules ported (plus one rule
+  for the daemon's own project folders). Owner only, on a path of their own.
+- **Filing binds the folder by default; a migration files as a label only** (`keep_workspace`), so moving a client's
+  local projects in never changes where an old conversation writes.
 
 ## 1. The model
 
@@ -40,6 +42,7 @@ devices. Section 12 lists where the two contracts disagreed and what was settled
   "instructions_rev": "a41f09c2d77e10b5",
   "files": 6,
   "sessions": 14,
+  "import_key": null,
   "created_at": 1794571270.1,
   "updated_at": 1794571270.1
 }
@@ -52,7 +55,8 @@ devices. Section 12 lists where the two contracts disagreed and what was settled
 - Instructions are the content of `PROMETHEUS.md` at the folder's top level. The file is the store: there is no second
   copy, so the agent reads exactly what the owner wrote. `instructions_rev` is the first 16 hex of the SHA-256 of its
   bytes, `""` when there is no file.
-- `files`: how many reference files there are. `sessions`: how many conversations are filed in it.
+- `files`: how many reference files are listed (3.5). `sessions`: how many conversations are filed in it, not counting
+  deleted ones. `import_key`: the key a client migrated it under, or null.
 - A conversation is in at most one project.
 
 ### 1.1 The projects root
@@ -61,7 +65,9 @@ Config `projects.root`, default `~/prometheus-projects`: a visible folder in the
 2026-11-13), not inside the agent's workspace directory. No spaces, so the agent's shell commands need no quoting.
 It is created on first use, mode 0700. It must pass `validate_workspace_path` like any folder a project uses
 (absolute, an existing directory once made, not the filesystem root, not under `security.denied_paths`); if it does
-not, creating a managed project is `400 bad_folder` with the validator's reason, and nothing is created.
+not, creating a managed project is `400 bad_folder` with the validator's reason, and nothing is created. An existing
+root is checked with `lstat`: a symlink, or a directory owned by another user, is refused the same way; one the daemon
+did not make keeps its mode.
 
 A managed folder is named from the project name: lowercase ASCII letters, digits and `-`, runs collapsed, at most 48
 characters, `project` if nothing is left; `-2`, `-3`, … when the name is taken on disk. Renaming a project never
@@ -120,15 +126,22 @@ device). Errors are `{"error": "<sentence>", "kind": "<slug>"}`.
 **Create** (both contracts' rules, reconciled):
 
 1. `import_key` given and already stored: `200` with that project, `created: false`. A migration that is interrupted
-   and run again creates nothing twice.
+   and run again creates nothing twice. Keys are per instance.
 2. The cleaned name matches an existing project (any case):
    - `folder` absent, or the same resolved folder as that project's: `200` with it, `created: false`. Two devices
      that both make "Beacon" converge.
    - a different `folder`: `409 name_taken`.
-3. `folder` given: it must pass `validate_workspace_path` (`400 bad_folder` with its reason), and no other project may
-   use it (`409 folder_in_use`). The project is `folder_managed: false`; the folder is not created.
+3. `folder` given: it must pass `validate_workspace_path` (`400 bad_folder` with its reason). It may not be the home
+   directory itself, the projects root itself, inside the agent's home (`~/.prometheus`), or inside or around another
+   project's folder (`400 bad_folder`), so one project's conversations can never write into another's. No other
+   project may use it (`409 folder_in_use`). The project is `folder_managed: false`; the folder is not created.
 4. `folder` absent: a managed folder is made under the projects root (section 1.1).
 5. An empty name after cleaning: `400 name_required`.
+6. Two creates at once: the database's uniqueness decides. The loser gets the winner's project (`200`, `created:
+   false`) when rule 2 would have returned it, else `409`; a managed folder it made a moment ago, still empty, is
+   removed, so no orphan is left behind.
+
+Every answer that changes something carries `"ok": true`, as in the desktop contract.
 
 **Rename** onto another project's name is `409 name_taken`; renaming to the same project's name in another case is
 allowed. The folder never changes.
@@ -138,17 +151,31 @@ set (`set_by: "project"`), and **never deletes the folder or any file**. No rout
 
 ### 3.2 Membership
 
-`PUT /api/sessions/{session_id}/project`, owner only, `{"chat_project_id": "cp_…" | null, "replace_workspace"?: bool}`
-→ `{"ok": true, "session_id", "chat_project_id", "workspace": "<folder or null>"}`.
+`PUT /api/sessions/{session_id}/project`, owner only, `{"chat_project_id": "cp_…" | null, "replace_workspace"?: bool,
+"keep_workspace"?: bool, "device_session"?: bool}` → `{"ok": true, "session_id", "chat_project_id", "workspace":
+"<the session's workspace now, or null>"}`.
 
-- Filing binds the session's workspace to the project's folder with `set_by: "project"`. The folder is validated
-  again first (a folder that has since fallen under `denied_paths` is `400 bad_folder`). The change is logged at the
-  level the workspace route logs it: it moves that conversation's write boundary.
+- **By default filing binds** the session's workspace to the project's folder with `set_by: "project"`: the
+  conversation works in the folder and reads its instructions. The folder is validated again first, and its resolved
+  path must still equal the stored one (a folder since swapped for a symlink, or fallen under `denied_paths`, is
+  `400 bad_folder`). The change is logged at the level the workspace route logs it: it moves that conversation's write
+  boundary.
+- **`keep_workspace: true` files as a label only**: the membership is recorded and the workspace is left exactly as
+  it is (none, or one set by hand). This is what a migration sends (section 9), so moving local projects in never
+  changes where an old conversation writes.
 - A session whose workspace was set another way (`set_by` not `project`) is `409 workspace_set` with the current
-  `workspace`, unless `replace_workspace: true`. A folder chosen by hand is never lost silently.
+  `workspace`, unless `replace_workspace: true` or `keep_workspace: true`. A folder chosen by hand is never lost
+  silently. After `replace_workspace`, unfiling leaves no workspace; it does not restore the old one.
 - `null` unfiles, and clears the workspace only if the project set it.
-- Filing is idempotent. An unknown project is `404 unknown_project`. A session id the store has never seen may be
-  filed, as the pin route allows (it may be a session about to start).
+- **Whose session.** A session that a chat-only device owns (`device_store.session_owner` names a device that is not
+  an owner device) is `409 device_session` unless `device_session: true`: filing it would give that device's turns
+  the project's folder, instructions and reference names. A machine session (`memory/session_kind.is_machine_session`:
+  cron, workers, coding runs) is `400 machine_session`, always.
+- The session must exist, live or durable: an unknown id is `404 unknown session` (a binding written for an id
+  nobody has used yet could be inherited by whoever claims it first). To start a conversation already in a project,
+  use `POST /api/sessions` with `chat_project_id`.
+- Filing is idempotent. An unknown project is `404 unknown_project`. Membership, binding and `rev` change in one
+  transaction. A forked session starts unfiled.
 
 `POST /api/sessions` accepts an optional `chat_project_id`: owner only (a chat-only device sending it is `403
 operator_only`, and no session is made). The new session is created filed and bound. An unknown project is `404`, and
@@ -162,8 +189,11 @@ device sees only its own sessions there already.
 
 ### 3.4 Instructions (owner only)
 
-`GET /api/chat-projects/{id}/instructions` → `{"content", "rev", "max_chars": 12000}`. No file: `content: ""`,
-`rev: ""`.
+`GET /api/chat-projects/{id}/instructions` → `{"content", "rev", "max_chars": 12000, "effective": [...]}`. No file:
+`content: ""`, `rev: ""`. `effective` lists the instruction files the loader would actually read for a conversation in
+this folder, deepest first, each as `{"path", "chars", "shadowed_by"?}`: the folder's own convention file (one per
+folder level, `PROMETHEUS.md` first), its `.prometheus/rules/*.md`, and the parents' files. So an unmanaged repo whose
+instructions are an `AGENTS.md` shows that, and the editor never pretends the folder has none.
 
 `PUT /api/chat-projects/{id}/instructions` with `{"content", "base_rev"}` → `{"ok": true, "rev"}`.
 
@@ -171,7 +201,10 @@ device sees only its own sessions there already.
   written (the memory editor's rule).
 - Over `max_chars` (the loader's per-file cap, so what is saved is what the model sees): `400 too_long`.
 - Written atomically (a temp file in the folder, then a rename). A `PROMETHEUS.md` that is a symlink is neither read
-  nor written: `409 not_a_file`.
+  nor written: `409 not_a_file`. The loader is changed to match: it skips a symlinked instruction file instead of
+  following it.
+- Saving a `PROMETHEUS.md` where another convention file exists at the same level (which it would then shadow, since
+  the loader takes one per level) is `409 would_shadow` with the file names, unless `"shadow_ok": true`.
 - The owner's write over an owner-only route does not go through the tool gate. The agent editing the same file
   still asks, as today.
 
@@ -190,13 +223,18 @@ device sees only its own sessions there already.
   not deleted, and `reference/` itself being a symlink makes every file route `409 not_a_file`.
 - At most 20 MB a file (`413 too_large`), read with a running count, so a chunked body is cut off at the cap. At most
   200 files (`409 too_many`). An existing name without `replace=true` is `409 exists`.
-- Nothing in `reference/` is ever loaded as instructions. The daemon adds one generated line after the project's
+- The routes list and serve only regular files whose names pass the `bad_name` rule; anything else in `reference/`
+  (made by the agent, a shell, git) is not listed.
+- Nothing in `reference/` is ever loaded as instructions. The daemon adds one generated section after the project's
   instructions in the prompt, listing the file names, so the agent knows they are there and reads them with its file
-  tools. Names only, never contents.
+  tools: names only, never contents, each quoted, under a label that says they are reference data and not
+  instructions, at most 50 names and 2,000 characters (then "and N more").
+- Opened through the folder's directory handle with `O_NOFOLLOW`, never by a path checked first and opened later.
 
 ### 3.6 Suggestions (owner only)
 
-`GET /api/chat-projects/suggestions` →
+`GET /api/chat-project-suggestions` (its own path: under `/api/chat-projects/` it would match the chat-only
+`{id}` route shape) →
 
 ```json
 {"suggestions": {"<session_id>": {"key": "beacon", "label": "beacon", "share": 0.82, "calls": 11,
@@ -204,11 +242,16 @@ device sees only its own sessions there already.
  "rev": 41}
 ```
 
-- For **unfiled** sessions only, the 200 most recently active.
+- For **unfiled** sessions only, the 200 most recently active, leaving out machine sessions and sessions a chat-only
+  device owns (filing those needs the explicit flag of 3.2).
 - The desktop's rules, ported to Python and held to the desktop's own smoke cases (`session-projects-smoke.ts`
-  sections 2 and 3, the same cases the phone's tests run), so all three implementations answer alike: the project
-  folder of each path in each tool call's input; a suggestion when at least 3 calls touched a project folder and one
-  folder has at least 60% of them, with no tie at the top.
+  sections 2 and 3, the same cases the phone's tests run), so the implementations answer alike: the project folder of
+  each path in each tool call's input; a suggestion when at least 3 calls touched a project folder and one folder has
+  at least 60% of them, with no tie at the top.
+- **One deliberate addition:** a path inside a chat project's stored folder belongs to that project first (key: the
+  project's id), and the projects root is a container like `~/projects`. Without it every managed folder would read as
+  the project "prometheus-projects". The desktop has no daemon folders to know about, so its rules lack this; the
+  smoke cases still pass, and the additions have their own cases.
 - `project` is the existing project that suggestion would file into: one whose folder's own name, folded the same way,
   is the suggestion's `key`, or else one whose name matches the `label` in any case. `null` means accepting it creates
   a project.
@@ -221,7 +264,7 @@ device sees only its own sessions there already.
 
 | Route | Owner | Chat-only device |
 |---|---|---|
-| `GET /api/chat-projects` | all, full | only projects with at least one of its sessions; each as `{"id", "name", "sessions"}` where `sessions` counts its own; no `rev` |
+| `GET /api/chat-projects` | all, full; `"role": "owner"` | only projects with at least one of its sessions; each as `{"id", "name", "sessions"}` where `sessions` counts its own; no `rev`; `"role": "device"` |
 | `GET /api/chat-projects/{id}` | full | `404` unless one of its sessions is in it; then `{"id", "name", "session_ids"}` with its own sessions only |
 | everything else in section 3 | yes | `403 operator_only` (default-deny in `route_access`) |
 | `chat_project_id` on its session rows | yes | yes, for its own sessions |
@@ -232,13 +275,20 @@ Why this much and no more:
 
 - **Filing moves a write boundary.** A filed session works in the project's folder. A chat-only device filing its own
   session would point its turns at the owner's project folder, so filing is the owner's act, always.
-- **A chat-only device learns nothing it did not already have.** It already sees its own sessions; seeing the name and
-  id of the project one of them is in adds only that name. Not the folder path (the owner's filesystem), not the
-  instructions, not other projects, not other sessions, not how busy projects are (`rev`).
+- **Through these routes, a chat-only device learns only the name.** It already sees its own sessions; the routes add
+  the name and id of the project one of them is in. Not the folder path (the owner's filesystem), not the
+  instructions, not other projects, not other sessions, not how busy projects are (`rev`). **But a filed session works
+  in the project's folder:** its turns read the folder's instructions and the reference names, and can write files
+  other conversations in that project will read. That is why filing a chat-only device's session takes an explicit
+  `device_session: true` from the owner (3.2), and why suggestions never offer one.
+- **Every owner-only handler also checks** `is_operator` itself, besides the route table: a path shape that happens to
+  match a chat-only entry must not open an owner route. A test asserts no owner-only route matches any chat-only
+  pattern.
 - **"Not yours" is "not there".** A project with none of its sessions answers `404`, the same as an unknown id.
 
 `web/route_access.py` lists `GET /api/chat-projects` and `GET /api/chat-projects/{id}` in `SCOPED_ALLOWED`; every other
-new route goes in `OPERATOR_ONLY`; `tests/test_route_access.py` pins both.
+new route goes in `OPERATOR_ONLY`; `tests/test_route_access.py` pins both. `role` lets a phone know up front whether to
+offer "Move to project…".
 
 ## 5. The `projects` capability
 
@@ -252,7 +302,8 @@ it keeps its local projects as they are, offers no instructions or files, and ne
 "files" | "membership", "session_id": "<for membership, else null>"}`. Sent **only to owner sockets**, through the
 bridge's existing `send_to_operators` (the path pairing frames take). It carries ids and a change kind, never a name,
 a path, instruction text or a file name. A client that sees a `rev` it does not have re-reads the list. A chat-only
-device gets no frame and refreshes the way it refreshes pins.
+device gets no frame and refreshes the way it refreshes pins. On a daemon with auth off no socket has a recorded
+identity, so no socket gets the frame; clients refetch on refresh there too.
 
 The SignalBus is not used for this: its events reach every socket as `sentinel_signal` frames, chat-only ones
 included.
@@ -273,15 +324,23 @@ Unfiled-as-one-list toggle, and which groups are collapsed.
 The desktop keeps projects locally today (`{id, name}` and a session→project map, one computer only). On first run
 against a daemon that advertises `projects`:
 
+Nothing is dropped, and nothing changes where a conversation writes.
+
 1. **Per instance.** Each local project's sessions are grouped by the Prometheus they belong to. A local project whose
-   sessions are on several instances becomes one project on each of those instances, with the same name. Nothing is
-   dropped: a session is filed on the instance it lives on.
-2. For each (instance, local project): `POST /api/chat-projects` with the name and an `import_key` derived from the
-   local id. The same key on two instances is fine: keys are per instance.
-3. `PUT /api/sessions/{id}/project` for each session, without `replace_workspace`. A `409 workspace_set` leaves that
-   session unfiled on the daemon, and the client says which ones.
-4. Only after the daemon has returned every migrated project from `GET /api/chat-projects`, and every filing has
-   answered, does the client stop reading and writing its local projects and assignments. It keeps its dismissals.
+   sessions are on several instances becomes one project on each of those instances, with the same name. A session is
+   filed on the instance it lives on.
+2. **A local project with no sessions** is created on the instance the client is connected to when it migrates.
+3. For each (instance, local project): `POST /api/chat-projects` with the name and an `import_key` derived from the
+   local id (keys are per instance). With no `folder`, so the daemon makes a managed one, or returns the instance's
+   existing project of that name.
+4. `PUT /api/sessions/{id}/project` for each session **with `keep_workspace: true`**: a label only, so an old
+   conversation keeps the workspace it had (none, or one chosen by hand), and `409 workspace_set` cannot happen. A
+   `409 device_session` (a chat-only device's session) is left unfiled on the daemon and kept in the client's local
+   map, and the client says which ones.
+5. **Per instance, the client retires its local data for that instance only** after the daemon has returned every
+   migrated project from `GET /api/chat-projects` and every filing has answered. An instance that is offline, or that
+   does not advertise `projects`, keeps its part locally until it does; the client migrates it then. Dismissals stay
+   local.
 
 ## 10. Build order
 
@@ -328,3 +387,10 @@ Settled with the charter's principles (fail closed, capability gating, smallest 
 - **P8. One file for instructions**, `PROMETHEUS.md`, capped at the loader's per-file limit (12,000 characters).
 - **P9. The projects root** is `~/prometheus-projects` by default: visible, in the home directory (Will's decision),
   without a space.
+- **P10. Filing binds by default; migration files as a label.** The phone's contract treated filing as a label; the
+  desktop's as a folder bind. A project that carries context only works if its conversations work in its folder, so an
+  owner's "Move to project…" binds. But a migration must not move old conversations into folders (perhaps a real
+  repository, if the name converges onto an unmanaged project), so it sends `keep_workspace: true`.
+- **P11. A chat-only device's session needs an explicit flag to be filed**, and a machine session cannot be: filing
+  gives a session the folder, its instructions and its reference names.
+- **P12. Suggestions know the daemon's own folders** (3.6), a deliberate difference from the desktop's rules.
