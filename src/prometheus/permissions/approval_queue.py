@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import hmac
 import json
 import logging
+import secrets
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -394,6 +396,10 @@ def _humanise_window(seconds) -> str:
     return f"{int(seconds)} s"
 
 
+#: The key :meth:`ApprovalQueue.digest` is keyed with: one per daemon process, never stored, never sent.
+_DIGEST_KEY = secrets.token_bytes(32)
+
+
 class ApprovalQueue:
     """Manages pending LEVEL 1 approval requests via Telegram.
 
@@ -617,8 +623,10 @@ class ApprovalQueue:
         """sha256 over exactly what a client is shown of *action*: its id, tool, description, arguments view,
         created and expiry times and critical flag (Beacon iOS item 3).
 
-        Served with the request wherever it is served (``serialize_pending``) and never in a push, so a client holds
-        it only by fetching the request. Approving a CRITICAL request needs it (the REST approve route): that proves
+        An HMAC under a key minted per daemon process (requests do not outlive the process either), so it cannot be
+        rebuilt from a push and a guess: served with the request wherever it is served (``serialize_pending``),
+        never in a push, and left out of the stored copy of the frame, so a client holds it only by fetching the
+        request. Never raises (an odd character or key in the arguments still digests). Approving a CRITICAL request needs it (the REST approve route): that proves
         the client fetched this exact request, not that a person read it in the app. The derived ``extents`` are
         left out on purpose: they can change with the grants while the request waits, and nothing approved depends
         on the client having seen them.
@@ -632,8 +640,11 @@ class ApprovalQueue:
             "expires_at": self.expires_at(action),
             "critical": is_critical(action),
         }
-        canonical = json.dumps(shown, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        try:
+            canonical = json.dumps(shown, sort_keys=True, separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            canonical = repr(shown)                       # keys sort_keys cannot order: still fixed per request
+        return hmac.new(_DIGEST_KEY, canonical.encode("utf-8", "backslashreplace"), hashlib.sha256).hexdigest()
 
     def expires_at(self, action: PendingAction) -> float:
         """Epoch seconds at which this request's window closes.

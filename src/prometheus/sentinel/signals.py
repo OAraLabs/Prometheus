@@ -115,15 +115,20 @@ class SignalBus:
         return them.
         """
         payload = signal.payload
-        if (signal.kind == "approval_pending" and isinstance(payload, dict)
-                and payload.get("task_id") is not None
-                and payload.get("arguments") is not None):
-            stored = dict(payload)
+        if signal.kind != "approval_pending" or not isinstance(payload, dict):
+            return signal
+        blank_arguments = payload.get("task_id") is not None and payload.get("arguments") is not None
+        # The digest a critical approve must echo (approval_queue.digest) is held only by a client that fetched
+        # the request: the stored copy never carries it.
+        if not blank_arguments and "digest" not in payload:
+            return signal
+        stored = dict(payload)
+        stored.pop("digest", None)
+        if blank_arguments:
             stored["arguments"] = None
-            return ActivitySignal(kind=signal.kind, payload=stored,
-                                  source=signal.source,
-                                  timestamp=signal.timestamp)
-        return signal
+        return ActivitySignal(kind=signal.kind, payload=stored,
+                              source=signal.source,
+                              timestamp=signal.timestamp)
 
     async def emit(self, signal: ActivitySignal) -> None:
         """Broadcast *signal* to matching subscribers and wildcards.

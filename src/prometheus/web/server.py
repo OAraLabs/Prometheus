@@ -5319,8 +5319,9 @@ def create_app(
                 return refusal
 
         # A CRITICAL request is approved only with its digest (Beacon iOS item 3), which is served with the request
-        # and never in a push: the client fetched exactly this request. Last, so every refusal about WHO may answer
-        # is said first; never through "all".
+        # and never in a push: the client fetched exactly this request. After the route's own refusals about who
+        # may answer (a hold lift's person check runs later, inside its queue); never through "all". REST only:
+        # the chat gateways' /approve is the owner typing in chat, where a critical request may be answered.
         if (refusal := _digest_refusal(queue, request_id, _desk, body)) is not None:
             return refusal
 
@@ -5356,10 +5357,11 @@ def create_app(
     def _digest_refusal(queue: Any, request_id: str, action: Any, body: dict | None) -> JSONResponse | None:
         """409 when approving a critical request without its digest (or with another), else None.
 
-        ``digest_required``: no digest, or approving ``all`` while a critical request it would approve is pending
-        (``all`` already leaves desktop, worker and hold requests alone; any other critical request is approved on
-        its own, with its digest). ``digest_mismatch``: a digest that is not this request's. Compared in constant
-        time. A request that is not critical needs none; denying never does.
+        The body has the route's 409 shape: prose in ``error``, the machine word in ``code``. ``digest_required``: no
+        digest. ``digest_mismatch``: a digest that is not this request's (fetch it again). ``critical_pending``:
+        approving ``all`` while a critical request it would approve is pending (``all`` already leaves desktop,
+        worker and hold requests alone; no digest can satisfy ``all``, so each critical request is approved on its
+        own). Compared in constant time. A request that is not critical needs none; denying never does.
         """
         import hmac
 
@@ -5371,20 +5373,20 @@ def create_app(
             left_alone = (is_desktop_request, is_worker_request, is_hold_request)
             if any(is_critical(a) and not any(f(a) for f in left_alone) for a in pending):
                 return JSONResponse(status_code=409, content={
-                    "error": "digest_required",
-                    "detail": "a critical request is pending: approve each critical request on its own, with the "
-                              "digest served with it"})
+                    "error": "A critical request is pending: approve each critical request on its own, in the app.",
+                    "code": "critical_pending"})
             return None
         if action is None or not is_critical(action):
             return None
         given = (body or {}).get("digest")
         if not isinstance(given, str) or not given:
             return JSONResponse(status_code=409, content={
-                "error": "digest_required",
-                "detail": "this request is critical: approve it with the digest served with it (GET /api/approvals)"})
+                "error": "This request is critical: approve it in the app, with the digest served with it.",
+                "code": "digest_required"})
         if not hmac.compare_digest(given.encode("utf-8", "replace"), queue.digest(action).encode("ascii")):
             return JSONResponse(status_code=409, content={
-                "error": "digest_mismatch", "detail": "that digest is not this request's: fetch it again"})
+                "error": "That digest is not this request's: fetch the request again.",
+                "code": "digest_mismatch"})
         return None
 
     def _worker_approve_refusal(request: Request):
