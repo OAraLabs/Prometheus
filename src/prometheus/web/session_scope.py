@@ -83,7 +83,22 @@ def session_exists(session_mgr: Any, conversation_store: Any, session_id: str) -
     still has its rows, so it still exists; a PURGED one does not."""
     if session_mgr is not None and session_mgr.get(session_id) is not None:
         return True
-    return conversation_store is not None and conversation_store.max_rowid(session_id) > 0
+    if conversation_store is None:
+        return False
+    if conversation_store.max_rowid(session_id) > 0:
+        return True
+    # A session the owner bound to a folder or filed in a chat project before its first message: it exists, so
+    # no device can claim it (and inherit that binding) after a restart empties the in-memory sessions.
+    conn = getattr(conversation_store, "_conn", None)
+    if conn is None:
+        return False
+    for table in ("session_workspaces", "session_chat_projects"):
+        try:
+            if conn.execute(f"SELECT 1 FROM {table} WHERE session_id = ?", (session_id,)).fetchone():
+                return True
+        except Exception:  # noqa: BLE001 - a store without the table simply has no such row
+            continue
+    return False
 
 
 def event_session_id(event: dict[str, Any]) -> str | None:
