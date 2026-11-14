@@ -1574,6 +1574,11 @@ def create_app(
         _mine = _access.owned_ids(_scope(request))
         if _mine is not None:
             by_id = {sid: row for sid, row in by_id.items() if sid in _mine}
+        # Chat projects (docs/design/chat-projects.md 3.3): one lookup AFTER both branches, so the live overlay,
+        # which replaces the durable dict, cannot drop it.
+        _filed = store.chat_projects().projects_of(by_id.keys()) if store is not None and by_id else {}
+        for _sid, _row in by_id.items():
+            _row["chat_project_id"] = _filed.get(_sid)
         return sorted(
             by_id.values(), key=lambda s: s["last_active"] or 0.0, reverse=True
         )
@@ -1602,6 +1607,7 @@ def create_app(
         import uuid
 
         gateway = "desktop"
+        chat_project_id: Any = None
         try:
             body = await request.json()
             # PRESENT-but-empty is a caller bug, not "unspecified" — it falls
@@ -1609,8 +1615,27 @@ def create_app(
             # becoming "desktop". Absent key / no body → the default.
             if isinstance(body, dict) and "gateway" in body:
                 gateway = str(body["gateway"] or "").strip()
+            if isinstance(body, dict):
+                chat_project_id = body.get("chat_project_id")
         except Exception:
             pass  # no/invalid body → the default; this route has no required input
+        # Starting in a chat project (docs/design/chat-projects.md 3.2): the owner's only, checked before an id is
+        # minted, so a refusal creates nothing.
+        if chat_project_id is not None:
+            if not isinstance(chat_project_id, str):
+                return JSONResponse(status_code=400, content={"error": "chat_project_id must be a string",
+                                                              "kind": "bad_request"})
+            if not _scope(request).unrestricted:
+                return JSONResponse(status_code=403, content={"error": "only the owner may start a conversation "
+                                                              "in a project", "kind": "operator_only"})
+            _checked = app.state.chat_projects.precheck(chat_project_id)
+            if isinstance(_checked, JSONResponse):
+                return _checked
+            from prometheus.memory.session_kind import is_machine_session as _is_machine
+
+            if _is_machine(f"{str(gateway).strip().lower()}:x"):
+                return JSONResponse(status_code=400, content={
+                    "error": "a machine session cannot be started in a project", "kind": "machine_session"})
 
         # The id is parsed by splitting on the FIRST colon, so a colon in the
         # gateway would silently truncate it. Keep the charset boring.
@@ -1630,6 +1655,12 @@ def create_app(
             return _unknown_session()
         if session_mgr:
             session_mgr.get_or_create(sid)
+        if chat_project_id is not None:
+            _filed = await app.state.chat_projects.file(sid, chat_project_id)
+            if isinstance(_filed, JSONResponse):
+                return _filed
+            return {"session_id": sid, "gateway": gateway.lower(), "chat_project_id": chat_project_id,
+                    "workspace": _filed["workspace"]}
         return {"session_id": sid, "gateway": gateway.lower()}
 
     @app.post("/api/chat/send")
@@ -7018,6 +7049,17 @@ def create_app(
     from prometheus.web.pieces_routes import register_pieces_routes
 
     register_pieces_routes(app, devices=_devices_or_create, auth_on=lambda: bool(_api_token))
+
+    # ── Chat projects: a named folder with instructions, conversations filed in it (docs/design/chat-projects.md) ──
+    # Owner for everything; a chat-only device sees only the projects its own sessions are in.
+    from prometheus.web.chat_projects_routes import register_chat_projects_routes
+
+    register_chat_projects_routes(
+        app, config=config, conversation_store=_conversation_store, devices=_devices_or_create,
+        is_owner=lambda request: _scope(request).unrestricted,
+        owned_ids=lambda request: _access.owned_ids(_scope(request)),
+        session_exists=lambda sid: session_exists(session_mgr, _conversation_store(), sid),
+    )
 
     # ── Static files (must be last — catch-all) ─────────────────────
 

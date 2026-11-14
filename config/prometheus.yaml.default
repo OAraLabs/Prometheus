@@ -1698,6 +1698,14 @@ doctor:
   startup_check: true
   registry_file: config/model_registry.yaml
 
+# ── Chat projects ─────────────────────────────────────────────────────────
+# A chat project is a named folder with standing instructions (PROMETHEUS.md) and reference files; conversations
+# filed in it work in that folder (docs/design/chat-projects.md). Projects created without a folder get one here.
+projects:
+  # Where managed project folders are made. A visible folder in your home directory, not inside the agent's
+  # workspace. Created on first use with mode 0700. Must not be under security.denied_paths.
+  root: "~/prometheus-projects"
+
 # ── Managed tasks ─────────────────────────────────────────────────────────
 tasks:
   enabled: true

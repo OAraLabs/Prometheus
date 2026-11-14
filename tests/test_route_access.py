@@ -53,6 +53,9 @@ EXPECTED_SCOPED_ALLOWED = {
     ("GET", "/api/events/recent"),
     ("GET", "/api/activity/recent"),
     ("POST", "/api/search"),
+    # chat projects: only those its own sessions are in, as id and name (the handlers filter)
+    ("GET", "/api/chat-projects"),
+    ("GET", "/api/chat-projects/{project_id}"),
     # the one desktop route open to every valid token: a stop can only end a task
     ("POST", "/api/computer/tasks/{task_id}/stop"),
     # the tool calls of its own sessions: seen and denied; approving is the owner's (or a marked device's, for a
