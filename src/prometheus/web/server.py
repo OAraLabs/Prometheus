@@ -464,6 +464,11 @@ def create_app(
     # extension, which has no WS client. Capped separately.
     _MAX_RECORDING_BODY_BYTES = 32 * 1024 * 1024
     _RECORDING_UPLOAD_PATH = "/api/learning/live-upload"
+    # A chat project's reference file (PUT /api/chat-projects/{id}/files/{name}): up to 20 MB, read by the route with a
+    # running count, so a chunked body is cut off too. Exactly that route shape, PUT only.
+    _MAX_PROJECT_FILE_BYTES = 20 * 1024 * 1024
+    import re as _re
+    _PROJECT_FILE_PATH = _re.compile(r"^/api/chat-projects/[^/]+/files/[^/]+$")
 
     @app.middleware("http")
     async def _check_bearer_token(request: Request, call_next):
@@ -483,11 +488,14 @@ def create_app(
             body_cap = (
                 _MAX_RECORDING_BODY_BYTES
                 if path == _RECORDING_UPLOAD_PATH
+                else _MAX_PROJECT_FILE_BYTES
+                if request.method == "PUT" and _PROJECT_FILE_PATH.match(path)
                 else _MAX_BODY_BYTES
             )
             try:
                 if int(cl) > body_cap:
-                    return JSONResponse(status_code=413, content={"error": "request body too large"})
+                    return JSONResponse(status_code=413, content={"error": "request body too large",
+                                                                  "kind": "too_large"})
             except ValueError:
                 return JSONResponse(status_code=400, content={"error": "invalid Content-Length"})
         # The EXACT list of routes that answer without a token (web/public_routes.py); each does its own
