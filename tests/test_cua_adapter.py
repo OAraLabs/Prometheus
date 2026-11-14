@@ -950,3 +950,13 @@ def test_a_real_stale_token_error_is_a_stale_snapshot(real_sdk):
     action = _real_action(real_sdk, "REFUSED", error=ActionError(code="stale_element_token", hint=None))
     with pytest.raises(StaleSnapshot):
         cua._verdict("click", action, _args())
+
+
+def test_an_unverifiable_error_says_it_may_have_landed(adapter):
+    """UNVERIFIABLE means the driver does not know; with an error it is still a failure, said as uncertain."""
+    a, fake = adapter(_window_state())
+    fake.result = _action_result(_Effect.UNVERIFIABLE, error=_rec(code="readback_failed", hint=None))
+    a.observe("mini", "scratch", 1, 2)
+    with pytest.raises(DriverUnavailable) as exc:
+        a.act("click", _args())
+    assert "may have partly landed" in str(exc.value)

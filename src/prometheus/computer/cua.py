@@ -725,7 +725,7 @@ def _verdict(verb: str, result: Any, arguments: dict[str, Any]) -> dict[str, Any
             # The same rule as an is_error result: a stale element token is a stale snapshot, refused as such.
             raise StaleSnapshot(f"{verb}: {detail}")
         effect = _effect_name(action)
-        if effect in ("REFUSED", "UNVERIFIABLE", "SUSPECTED_NOOP"):
+        if effect in ("REFUSED", "SUSPECTED_NOOP"):
             raise DriverUnavailable(f"{verb} did not land: the driver reported an error ({detail})")
         raise DriverUnavailable(
             f"{verb} failed: the driver reported {effect} with an error ({detail}); it may have partly "
