@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import logging
 import time
 from collections import OrderedDict
@@ -556,6 +558,9 @@ class ApprovalQueue:
             # Answer in the app, never from a notification (permissions/critical.py). Computed HERE, once, so the
             # REST list, the approval_pending frame and the push cannot disagree.
             "critical": is_critical(action),
+            # What approving a critical request must echo back (``digest``). The push builds its own narrow body
+            # and never carries it.
+            "digest": self.digest(action),
             # Already redacted and truncated (see PendingAction.arguments).
             # None means "this call had no arguments worth showing", which is
             # different from {} and Beacon may render the difference.
@@ -607,6 +612,28 @@ class ApprovalQueue:
         constant-reading surface confidently wrong.
         """
         return self._timeout
+
+    def digest(self, action: PendingAction) -> str:
+        """sha256 over exactly what a client is shown of *action*: its id, tool, description, arguments view,
+        created and expiry times and critical flag (Beacon iOS item 3).
+
+        Served with the request wherever it is served (``serialize_pending``) and never in a push, so a client holds
+        it only by fetching the request. Approving a CRITICAL request needs it (the REST approve route): that proves
+        the client fetched this exact request, not that a person read it in the app. The derived ``extents`` are
+        left out on purpose: they can change with the grants while the request waits, and nothing approved depends
+        on the client having seen them.
+        """
+        shown = {
+            "request_id": action.request_id,
+            "tool_name": action.tool_name,
+            "description": action.description,
+            "arguments": action.arguments,
+            "created_at": action.created_at,
+            "expires_at": self.expires_at(action),
+            "critical": is_critical(action),
+        }
+        canonical = json.dumps(shown, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def expires_at(self, action: PendingAction) -> float:
         """Epoch seconds at which this request's window closes.
@@ -1113,6 +1140,9 @@ class ApprovalQueues:
 
     def expires_at(self, action: PendingAction) -> float:
         return self._for(action).expires_at(action)
+
+    def digest(self, action: PendingAction) -> str:
+        return self._for(action).digest(action)
 
     async def approve(self, request_id: str, *, by: Approver,
                       scope: str | None = None, grant=None) -> bool:
