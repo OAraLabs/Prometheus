@@ -200,6 +200,7 @@ async def test_a_chunked_upload_over_the_cap_is_refused_while_reading(world, box
         r = await c.post("/api/speech/transcribe", content=chunks(), headers={"Content-Type": "audio/ogg"})
     assert r.status_code == 413 and r.json()["error"] == "too_large"
     assert not box.requests
+    assert sent["bytes"] < 4 * 1024 * 1024  # reading stopped at the cap, not at the end
 
 
 @pytest.mark.asyncio
@@ -449,3 +450,85 @@ def test_attach_registers_the_reply_holder_on_the_bridge(tmp_path, monkeypatch, 
     bridge = WebSocketBridge(loop_context=object())
     attach_bridge(w.app, bridge)
     assert w.speech.tap.observe in bridge.frame_observers
+
+
+# --------------------------------------------------------------------------- review 1 of #927
+
+
+@pytest.mark.asyncio
+async def test_a_chunked_speak_body_is_capped(world, box):
+    async def chunks():
+        yield b'{"text": "'
+        for _ in range(64):
+            yield b"a" * (64 * 1024)
+        yield b'"}'
+
+    async with world.client("a") as c:
+        r = await c.post("/api/speech/speak", content=chunks(), headers={"Content-Type": "application/json"})
+    assert r.status_code == 413 and r.json()["error"] == "too_long"
+    assert not box.spoken
+
+
+@pytest.mark.asyncio
+async def test_deeply_nested_json_is_a_400(world):
+    async with world.client("a") as c:
+        r = await c.post("/api/speech/speak", content=b"[" * 50_000, headers={"Content-Type": "application/json"})
+    assert r.status_code == 400 and r.json()["error"] == "text_required"
+
+
+@pytest.mark.asyncio
+async def test_transcriptions_count_against_the_callers_slots(world, box, monkeypatch):
+    gate = asyncio.Event()
+    original = box.handler
+
+    async def slow(request):
+        if request.url.path == "/v1/audio/transcriptions":
+            await gate.wait()
+        return original(request)
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(voice_mod, "_client",
+                        lambda timeout: real(transport=httpx.MockTransport(slow), timeout=timeout))
+    async with world.client("a") as c:
+        held = [asyncio.ensure_future(c.post("/api/speech/transcribe", content=OGG,
+                                             headers={"Content-Type": "audio/ogg"})) for _ in range(2)]
+        await asyncio.sleep(0.1)
+        third = await c.post("/api/speech/transcribe", content=OGG, headers={"Content-Type": "audio/ogg"})
+        gate.set()
+        done = await asyncio.gather(*held)
+    assert third.status_code == 429
+    assert all(r.status_code == 200 for r in done)
+    assert world.speech._streams == []  # every slot released
+
+
+def test_a_bad_timeout_never_breaks_the_capability(tmp_path):
+    from prometheus.web.ws_server import WebSocketBridge
+
+    cfg = _config("tts")
+    cfg["tts"]["timeout_seconds"] = "zz"
+    assert "speech" not in WebSocketBridge(loop_context=object(), config=cfg)._server_capabilities()
+
+
+@pytest.mark.asyncio
+async def test_a_revocation_from_another_thread_ends_an_owner_stream(world):
+    import threading
+
+    owner_sid = await world.session("owner")
+    async with world.client("owner") as c:
+        req = asyncio.ensure_future(c.get(f"/api/sessions/{owner_sid}/speech", params={"wait": 5}))
+        await asyncio.sleep(0.1)
+        t = threading.Thread(target=world.devices.revoke, args=(world.owner["id"],))
+        t.start()
+        t.join()
+        r = await asyncio.wait_for(req, 3)
+    assert _lines(r)[-1] == {"type": "done", "reason": "revoked"}
+
+
+@pytest.mark.asyncio
+async def test_auth_off_is_open_like_every_route(tmp_path, monkeypatch, box):
+    app = create_app({"tts": {"url": BOX, "api_key_env": KEY_ENV}}, session_mgr=SessionManager(),
+                     device_store=DeviceStore(tmp_path / "devices.db"))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post("/api/speech/speak", json={"text": "Open daemon."})
+    assert r.status_code == 200 and _lines(r)[-1]["reason"] == "complete"
+    assert app.state.speech._streams == []

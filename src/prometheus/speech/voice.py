@@ -93,7 +93,10 @@ class _Encoded(Exception):
 
 def speech_configured(config: Mapping[str, Any] | None) -> bool:
     """Whether a voice box is set for either half: the ``speech`` capability (configured, not answering)."""
-    return any(remote_settings(kind, config or {}) is not None for kind in KINDS)
+    try:
+        return any(remote_settings(kind, config or {}) is not None for kind in KINDS)
+    except (ValueError, TypeError):  # a bad timeout_seconds: no capability, and never a failed subscribe
+        return False
 
 
 class VoiceUnavailable(Exception):

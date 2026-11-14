@@ -7024,7 +7024,7 @@ def create_app(
     # the bridge's frames (speech_routes.attach_bridge).
     from prometheus.web.speech_routes import register_speech_routes
 
-    register_speech_routes(app, config=config, devices=_devices)
+    register_speech_routes(app, config=config, devices=_devices, auth_on=lambda: bool(_api_token))
 
     # ── Static files (must be last — catch-all) ─────────────────────
 

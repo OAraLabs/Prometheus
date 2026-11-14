@@ -46,6 +46,8 @@ VERSION = 1
 #: The ``/api`` body cap (``web/server.py``); an upload is also held to ``gateway.media.max_file_size_mb``.
 BODY_CAP = 2 * 1024 * 1024
 SPEAK_MAX = 20_000
+#: The most a ``speak`` body may be: 20,000 characters, each up to 4 bytes, and the JSON around them.
+SPEAK_BODY_CAP = 4 * SPEAK_MAX + 1024
 PER_CALLER = 2
 DEVICE_STREAMS = 4
 WAIT_DEFAULT = 30.0
@@ -134,20 +136,64 @@ def _error(status: int, error: str, detail: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": error, "detail": detail})
 
 
-def register_speech_routes(app: Any, *, config: dict[str, Any], devices: Callable[[], Any]) -> SpeechService:
+class _ReleasingResponse(StreamingResponse):
+    """Releases the stream's slot however the response ends, even if its body never started."""
+
+    def __init__(self, *args: Any, release: Callable[[], None], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._release = release
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._release()
+
+
+async def _read_capped(request: Request, cap: int) -> bytes | None:
+    """The body, read as it arrives; None the moment it passes *cap* (a chunked body has no Content-Length)."""
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > cap:
+            return None
+    return bytes(body)
+
+
+def register_speech_routes(
+    app: Any, *, config: dict[str, Any], devices: Callable[[], Any], auth_on: Callable[[], bool] = lambda: False,
+) -> SpeechService:
     """Register the four routes on *app* and return the service (also on ``app.state.speech``)."""
     service = SpeechService(config)
     app.state.speech = service
-    store = devices()
-    add_listener = getattr(store, "add_revoke_listener", None)
-    if callable(add_listener):
-        add_listener(service.on_revoked)
+    listening: set[int] = set()
 
-    def _caller(request: Request) -> tuple[str, bool]:
+    def _listen() -> None:
+        """Hear revocations from the device store in use, whenever it came to exist."""
+        store = devices()
+        add_listener = getattr(store, "add_revoke_listener", None)
+        if callable(add_listener) and id(store) not in listening:
+            listening.add(id(store))
+            add_listener(service.on_revoked)
+
+    _listen()
+
+    def _caller(request: Request) -> tuple[str, bool] | None:
+        """(caller, is the owner); None when auth is on and the caller resolved to nobody (fail closed)."""
+        _listen()
         identity = getattr(request.state, "device_identity", None)
         if identity is None:
-            return "global", True  # auth off: open, like every other route
+            return None if auth_on() else ("global", True)  # auth off: open, like every other route
         return str(identity.id), bool(identity.is_operator)
+
+    def _admit(request: Request, session_id: str | None) -> _Stream | JSONResponse:
+        caller = _caller(request)
+        if caller is None:
+            return _error(401, "unauthorized", "no identity")
+        stream = service.admit(*caller, session_id)
+        if stream is None:
+            return _error(429, "speech_busy", "too many speech streams are open")
+        return stream
 
     def _upload_cap() -> int:
         from prometheus.gateway.media_guard import policy_from_config
@@ -162,7 +208,8 @@ def register_speech_routes(app: Any, *, config: dict[str, Any], devices: Callabl
             finally:
                 service.release(stream)
                 await lines.aclose()  # type: ignore[attr-defined]
-        return StreamingResponse(body(), media_type="application/x-ndjson", headers=_NO_STORE)
+        return _ReleasingResponse(body(), media_type="application/x-ndjson", headers=_NO_STORE,
+                                  release=lambda: service.release(stream))
 
     @app.get("/api/speech")
     async def speech_status() -> dict[str, Any]:
@@ -181,12 +228,9 @@ def register_speech_routes(app: Any, *, config: dict[str, Any], devices: Callabl
         # Query parameters are declared (strict_query refuses any other) and validated here, as strings.
         from prometheus.gateway.media_guard import (
             MediaRejected,
-            MediaTooLarge,
             canonical_mime,
             check_declared_mime,
             policy_from_config,
-            sniff_mime,
-            validate_inbound,
         )
 
         policy = policy_from_config(config)
@@ -199,15 +243,23 @@ def register_speech_routes(app: Any, *, config: dict[str, Any], devices: Callabl
             return _error(415, "type_not_allowed", "send audio of a type on gateway.media's audio list")
         if language is not None and not _LANGUAGE.fullmatch(language):
             return _error(400, "bad_language", "language is 2 to 8 letters or '-'")
+        # A transcription holds a slot like a stream: one paired device must not queue hundreds on the voice box.
+        slot = _admit(request, None)
+        if isinstance(slot, JSONResponse):
+            return slot
+        try:
+            return await _transcribe(request, declared, language, policy, slot)
+        finally:
+            service.release(slot)
+
+    async def _transcribe(request: Request, declared: str, language: str | None, policy: Any,
+                          slot: _Stream) -> JSONResponse:
+        from prometheus.gateway.media_guard import MediaRejected, MediaTooLarge, sniff_mime, validate_inbound
+
         cap = _upload_cap()
-        chunks: list[bytes] = []
-        size = 0
-        async for chunk in request.stream():
-            size += len(chunk)
-            if size > cap:
-                return _error(413, "too_large", f"at most {cap} bytes")
-            chunks.append(chunk)
-        data = b"".join(chunks)
+        data = await _read_capped(request, cap)
+        if data is None:
+            return _error(413, "too_large", f"at most {cap} bytes")
         if not data:
             return _error(400, "bad_audio", "the body is empty")
         try:
@@ -227,9 +279,12 @@ def register_speech_routes(app: Any, *, config: dict[str, Any], devices: Callabl
 
     @app.post("/api/speech/speak", response_model=None)
     async def speech_speak(request: Request) -> JSONResponse | StreamingResponse:
+        raw = await _read_capped(request, SPEAK_BODY_CAP)
+        if raw is None:
+            return _error(413, "too_long", f"at most {SPEAK_MAX} characters")
         try:
-            body = await request.json()
-        except ValueError:
+            body = json.loads(raw)
+        except (ValueError, RecursionError):
             body = None
         text = body.get("text") if isinstance(body, dict) else None
         if not isinstance(text, str) or not text.strip():
@@ -240,9 +295,9 @@ def register_speech_routes(app: Any, *, config: dict[str, Any], devices: Callabl
             await service.voice.ready("tts")
         except VoiceUnavailable as exc:
             return _unavailable(exc)
-        stream = service.admit(*_caller(request), None)
-        if stream is None:
-            return _error(429, "speech_busy", "too many speech streams are open")
+        stream = _admit(request, None)
+        if isinstance(stream, JSONResponse):
+            return stream
         return _ndjson(speak(text_source(text), service.voice, stop=stream.stop), stream)
 
     @app.get("/api/sessions/{session_id}/speech", response_model=None)
@@ -261,9 +316,9 @@ def register_speech_routes(app: Any, *, config: dict[str, Any], devices: Callabl
             await service.voice.ready("tts")
         except VoiceUnavailable as exc:
             return _unavailable(exc)
-        stream = service.admit(*_caller(request), session_id)
-        if stream is None:
-            return _error(429, "speech_busy", "too many speech streams are open")
+        stream = _admit(request, session_id)
+        if isinstance(stream, JSONResponse):
+            return stream
 
         async def source() -> AsyncIterator[tuple[str, Any]]:
             reply = await service.tap.find(session_id, message_id=message_id, wait=seconds)
