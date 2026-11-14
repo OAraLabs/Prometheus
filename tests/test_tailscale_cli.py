@@ -453,3 +453,17 @@ def test_the_literal_writer_never_writes_a_raw_line_separator():
     from prometheus.web.network import _literal
 
     assert _literal("a b") == '"a\\u2028b"'
+
+
+def test_an_ipv4_mapped_loopback_bind_relays_to_127_0_0_1(ts):
+    """#928 confirm round: '::ffff:127.0.0.1' counted as loopback but made a relay target the allowlist refuses."""
+    ts.config_path.write_text(ts.config_path.read_text().replace("bind: 127.0.0.1", "bind: '::ffff:127.0.0.1'"))
+    assert ts.run("setup", apply=True) == 0
+    assert _writes(ts.calls())[0] == ["serve", "--bg", "--https=443", "http://127.0.0.1:8005"]
+
+
+def test_a_blocked_plan_lists_no_commands(ts, capsys):
+    ts.status(BackendState="Stopped")
+    ts.run("check")
+    out = capsys.readouterr().out
+    assert "BLOCKED" in out and "will run" not in out
