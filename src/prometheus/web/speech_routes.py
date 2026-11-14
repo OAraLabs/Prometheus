@@ -291,7 +291,7 @@ def register_speech_routes(
     async def speech_speak(request: Request) -> JSONResponse | StreamingResponse:
         raw = await _read_capped(request, SPEAK_BODY_CAP)
         if raw is None:
-            return _error(413, "too_long", f"at most {SPEAK_MAX} characters")
+            return _error(413, "too_long", f"the body is over {SPEAK_BODY_CAP} bytes")
         try:
             body = json.loads(raw)
         except (ValueError, RecursionError):
