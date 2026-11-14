@@ -313,11 +313,83 @@ Full behavior, including every route and its error codes, is in the [API guide](
 
 ## Remote access over Tailscale
 
-The daemon doesn't have to be on the same machine as Beacon. If both are on your tailnet, pair Beacon to `<tailnet-hostname>` (or the Tailscale IP) instead of `localhost` — the ports are fixed at `:8005` for REST and `:8010` for WebSocket, so the address is all you type. The same works over a LAN, WireGuard, or anything else that routes.
+The daemon doesn't have to be on the same machine as Beacon. For HTTPS with a real certificate, see [HTTPS over Tailscale](#https-over-tailscale-tailscale-serve). Otherwise, if both are on your tailnet, pair Beacon to `<tailnet-hostname>` (or the Tailscale IP) instead of `localhost` — the ports are fixed at `:8005` for REST and `:8010` for WebSocket, so the address is all you type. The same works over a LAN, WireGuard, or anything else that routes.
 
 Nothing but the daemon's address and the token leave your machine, and the token is stored in the OS keychain — it never reaches Beacon's renderer process again after you save it.
 
 A new install listens on **this machine only** (`web.bind: 127.0.0.1`), so for remote access you set the bind on purpose: `web.bind: 0.0.0.0` (every interface) or a tailnet address, in `prometheus.yaml`, or `oara daemon --bind …`, or `PROMETHEUS_WEB_BIND` in the environment (highest first). An install that predates that default, with no `web.bind` at all, still listens on **every interface** and keeps working. Either way it is plain HTTP with no TLS, so the bearer token is the only access control between the API and whoever can route to the machine, unless home-network mode is on: `network.home_network: true` serves the LAN over TLS on 8006 and 8011 and keeps plain HTTP on 127.0.0.1 (see [the API guide](api.md#ports--remote-access)). `oara doctor` warns while `web.bind` is unset and the daemon would listen on every interface. A headless box you set up from another machine (Beacon driving setup mode) ends up loopback-only afterwards unless you started it with `--bind`: set `web.bind` on the box to reach it again. The flag also covers setup mode, whose pairing endpoint is reachable for up to 15 minutes. The full rules are in [the API guide](api.md#listening-on-this-machine-only).
+
+## HTTPS over Tailscale (`tailscale serve`)
+
+**Before anything else: your machine's name becomes public.** Turning on HTTPS certificates for a tailnet puts each
+machine's tailnet name (`<machine>.<tailnet>.ts.net`) into the public certificate-transparency logs, permanently. If a
+machine's name says something you don't want public, rename it in the Tailscale admin console first.
+
+With this, the daemon stays bound to this machine (`web.bind: 127.0.0.1`), and Tailscale's own `tailscale serve`
+answers the tailnet over HTTPS with a real certificate for the machine's name, relaying to the daemon. Clients connect
+to `https://<machine>.<tailnet>.ts.net` and check the certificate the normal way: no pinning, no self-signed warning.
+Tailscale renews the certificate (about every 90 days); nothing on the client changes when it does.
+
+**1. Turn HTTPS certificates on for the tailnet** (once, in the Tailscale admin console): the **DNS** page, turn on
+**MagicDNS** if it is off, then **HTTPS Certificates → Enable HTTPS**.
+
+**2. Check what setup would do.** Nothing changes:
+
+```bash
+oara tailscale check
+```
+
+It needs: Tailscale running on this machine; the daemon listening on this machine only (`web.bind: 127.0.0.1`; an
+unset `web.bind` means every interface, and `PROMETHEUS_WEB_BIND` counts too); an API token (an open daemon must not
+answer the tailnet); and no loopback entry in `web.trusted_proxies` (the tailscale block replaces it). If a device
+still pairs to the machine's plain-HTTP address, keep the old bind until it has re-paired to the new name.
+
+**3. Set it up.** `oara tailscale setup` prints the plan; `--apply` does it: it checks it can edit `prometheus.yaml`,
+runs `tailscale serve --bg --https=<port> http://127.0.0.1:<port>` for the REST port and the WebSocket port, and writes
+the `web.tailscale` block. If port 443 already serves something else on this machine, it leaves that alone and says
+so: pick other ports.
+
+```bash
+oara tailscale setup --apply
+```
+
+```bash
+oara tailscale setup --apply --rest-port 8443 --ws-port 8444
+```
+
+If Tailscale answers that this user may not change Serve, run this once yourself (`oara` never runs `sudo`), then try
+again:
+
+```bash
+sudo tailscale set --operator=$USER
+```
+
+**4. Restart the daemon, then check it.** `oara doctor` gains Tailscale rows: the machine and its name, the Serve
+entries, Funnel (it must be off), the bind, and a live check that the certificate verifies, with the days left.
+
+**5. Pair a device to the new name.** In Beacon, pair to `https://<machine>.<tailnet>.ts.net` (with `:8443` or whatever
+REST port you chose, if not 443). A device paired this way trusts the certificate the normal way and proves it is
+talking to your Prometheus with the node-key challenge before it sends its token.
+
+**Turning it off:** `oara tailscale off --apply` removes only the Serve entries that relay exactly to this daemon's own ports
+and sets `web.tailscale.enabled: false`; restart the daemon.
+
+**Worth knowing:**
+
+- **Who can reach it:** any device the tailnet's access controls let reach those ports, including devices shared into
+  your tailnet. Use the access controls to narrow it (a tag restriction on the two ports is two lines). Behind a
+  subnet router that rewrites addresses, devices on that LAN arrive as the router's tailnet address.
+- **Funnel stays off.** Funnel serves the public internet through the same Serve config; `oara tailscale` never turns
+  it on, setup refuses a port with Funnel on, the daemon refuses any request Funnel marks, and doctor reports it.
+- **Use HTTPS Serve, not Serve's TCP modes,** for the daemon: in a TCP mode the caller's own headers reach the daemon unchanged, so any tailnet device could forge the relay headers the daemon trusts.
+- **One app per port.** The dashboard keeps its token in the browser, so anything else served on the same Serve port
+  shares its origin. Give the daemon its own ports. A program that was already listening on the port you hand to Serve
+  stops being reachable from the tailnet on it.
+- **The dashboard's live feed** expects the WebSocket on port 8010, so behind Serve it works only if you choose
+  `--ws-port 8010`. The rest of the dashboard works on any port.
+- **Changing ports later:** `oara tailscale off --apply` first, then `setup` with the new ports; running `setup` with
+  new ports leaves the old relays in place.
+- **A token made after the daemon started** takes effect at its next restart.
 
 ## Troubleshooting
 
