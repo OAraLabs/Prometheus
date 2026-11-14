@@ -60,15 +60,16 @@ class FakeVoiceBox:
             return httpx.Response(code, content=body)
         if path == "/health":
             return httpx.Response(200, json={"status": "healthy"})
+        routes = {("GET", "/v1/models"), ("POST", "/v1/audio/speech"), ("POST", "/v1/audio/transcriptions")}
+        if (request.method, path) not in routes:
+            return httpx.Response(404, json={"detail": "not found"})  # routing comes before auth
         if self.key and request.headers.get("authorization") != f"Bearer {self.key}":
             return httpx.Response(401, json={"detail": "unauthorized"})
         if path == "/v1/models":
             return httpx.Response(200, json={"data": [{"id": "whisper-1"}, {"id": "tts-1"}]})
-        if path == "/v1/audio/speech" and request.method == "POST":
+        if path == "/v1/audio/speech":
             return self._speech(request)
-        if path == "/v1/audio/transcriptions" and request.method == "POST":
-            return self._transcription(request)
-        return httpx.Response(404, json={"detail": "not found"})
+        return self._transcription(request)
 
     def _speech(self, request: httpx.Request) -> httpx.Response:
         try:
@@ -81,11 +82,13 @@ class FakeVoiceBox:
         if body.get("response_format", "wav") not in ("wav", "pcm"):
             return httpx.Response(400, json={"detail": "response_format must be wav or pcm"})
         self.spoken.append(text)
+        if body.get("response_format") == "pcm":
+            return httpx.Response(200, content=wav_of(text)[44:], headers={"content-type": "audio/pcm"})
         return httpx.Response(200, content=wav_of(text), headers={"content-type": "audio/wav"})
 
     def _transcription(self, request: httpx.Request) -> httpx.Response:
         if len(request.content) > MAX_UPLOAD:
             return httpx.Response(413, json={"detail": "file too large"})
         if b'name="file"' not in request.content:
-            return httpx.Response(400, json={"detail": "file is required"})
+            return httpx.Response(422, json={"detail": "file is required"})
         return httpx.Response(200, json={"text": self.transcript})
