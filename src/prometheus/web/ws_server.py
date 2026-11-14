@@ -280,6 +280,9 @@ class WebSocketBridge:
         # feeds it agent_progress pulses and chat_done (Live Activity source);
         # bus signals reach it via its own subscription.
         self.push_dispatcher: Any | None = None
+        # Each is handed every frame broadcast() is given, first thing (the speech route's reply holder; the launcher
+        # registers it). An observer is synchronous and must not block.
+        self.frame_observers: list[Any] = []
         # GRAFT Piece 4: per-socket session filter. Absent / empty set = the
         # firehose (today's behaviour); a set = turn frames for those sessions
         # only. Replaced whole on every subscribe, cleaned up with the socket.
@@ -1078,7 +1081,10 @@ class WebSocketBridge:
         """What the ``subscribed`` ack tells a client this daemon can do (see the ack)."""
         from prometheus.gateway import media_services
 
-        return ["voice_input"] if media_services.voice_input_available(self.config) else []
+        from prometheus.speech.voice import speech_configured
+
+        caps = ["voice_input"] if media_services.voice_input_available(self.config) else []
+        return caps + (["speech"] if speech_configured(self.config) else [])
 
     async def _system_note(self, session_id: str, content: str) -> None:
         await self.broadcast({
@@ -2527,6 +2533,11 @@ class WebSocketBridge:
         undetected frames at the 3s progress cadence — not unbounded, but not
         zero either. See the PR body for what detecting it sooner would cost.
         """
+        for observe in getattr(self, "frame_observers", ()):
+            try:
+                observe(event)
+            except Exception:  # a raise here would roll the turn back
+                logger.warning("frame observer failed on %s", event.get("type", "?"), exc_info=True)
         if not self._clients:
             return
         raw = json.dumps(event)

@@ -259,6 +259,10 @@ async def launch_web(
     # POST /api/chat/send) can dispatch user messages through the same flow
     # the WebSocket uses, without duplicating the session+agent plumbing.
     app.state.ws_bridge = bridge
+    # The speech route's reply holder hears every frame the bridge broadcasts (web/speech_routes.py).
+    from prometheus.web.speech_routes import attach_bridge
+
+    attach_bridge(app, bridge)
     # POST /api/restart: the daemon's own restart, when it was started as the daemon.
     if request_restart is not None:
         app.state.request_restart = request_restart
