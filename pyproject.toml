@@ -122,13 +122,16 @@ browser = ["playwright>=1.40"]
 # and would imply coverage that does not exist. See
 # computer/cua.py's module docstring.
 #
-# ⚠ AN EXACT PIN, ON PURPOSE (computer-use v1.1, D12). `>=0.28,<1` admitted
-# 0.28.3, where `GetWindowStateInput` gained a REQUIRED keyword our observe
-# call does not pass — every observation on such an install raises. The lock
-# was the only guard, and `pip install 'oara-prometheus[computer]'` ignores
-# it. Upgrading is a deliberate change: bump this, re-run the real-SDK half of
-# tests/test_cua_adapter.py against the new wheel, and run the on-box check.
-computer = ["cua-driver==0.28.2"]
+# ⚠ AN EXACT PIN, ON PURPOSE (computer-use v1.1, D12). A minor-line release
+# can change the SDK's types: 0.28.3 made `GetWindowStateInput` take a REQUIRED
+# `max_image_dimension` and gave `ActionResult` `summary` and `error`, and an
+# adapter built for 0.28.2 raised on every observation there. The lock is not
+# a guard, since `pip install 'oara-prometheus[computer]'` ignores it. Moved
+# 0.28.2 -> 0.28.3 on 2026-11-13 (0.28.2 was removed from PyPI) with the
+# adapter adapted. Upgrading is a deliberate change: bump this, re-run the
+# real-SDK half of tests/test_cua_adapter.py against the new wheel, and run
+# the on-box check (observe, click, type) before the next deploy.
+computer = ["cua-driver==0.28.3"]
 # Onboarding Phase 0 papercut: whisper STT was used for voice input but
 # never declared anywhere. The faster-whisper python API is the pip-
 # installable engine; the whisper/faster-whisper-xxl CLIs also work.
