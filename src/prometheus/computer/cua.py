@@ -592,8 +592,8 @@ def _window_state_input(
     include_screenshot: bool = False, max_dimension: int | None = None,
 ) -> Any:
     """The observe call's input. A function so the real-SDK tests can build it
-    with the PINNED types — from 0.28.3 it gains a required keyword this
-    call does not pass, which is what the exact pin exists to keep out.
+    with the PINNED types. 0.28.3 added a required ``max_image_dimension``;
+    it is passed empty, which leaves the driver's own default.
 
     ``include_screenshot``/``max_dimension`` are keyword-only and default to
     observe's values (no picture), so every existing call site and the pin
@@ -615,6 +615,7 @@ def _window_state_input(
         max_elements=MAX_ELEMENTS,
         max_depth=None,
         max_dimension=max_dimension,
+        max_image_dimension=None,  # 0.28.3: required; None is the driver's default
     )
 
 
@@ -711,6 +712,24 @@ def _verdict(verb: str, result: Any, arguments: dict[str, Any]) -> dict[str, Any
             f"{verb} did not land: the driver reported an error ({detail})"
         )
     action = _action_of(result)
+    error = getattr(action, "error", None)
+    if error is not None:
+        # 0.28.3: the driver says why the action failed, as a code and an optional hint (both machine tokens).
+        # That is a failed action whatever the effect says, and the failure carries those words. ``summary`` is
+        # left out: it can read back window content (an element's value), which stays out of reasons and logs.
+        # The adapter never tries again; what happens next is the loop's or the model's decision.
+        code = str(getattr(error, "code", "") or "unspecified").strip()
+        hint = str(getattr(error, "hint", "") or "").strip()
+        detail = code + (f": {hint}" if hint else "")
+        if any(m in code.lower() for m in _STALE_MARKERS):
+            # The same rule as an is_error result: a stale element token is a stale snapshot, refused as such.
+            raise StaleSnapshot(f"{verb}: {detail}")
+        effect = _effect_name(action)
+        if effect in ("REFUSED", "SUSPECTED_NOOP"):
+            raise DriverUnavailable(f"{verb} did not land: the driver reported an error ({detail})")
+        raise DriverUnavailable(
+            f"{verb} failed: the driver reported {effect} with an error ({detail}); it may have partly "
+            f"landed, so observe before acting again")
     effect = _effect_name(action)
     if effect in _EFFECT_BAD:
         raise DriverUnavailable(
