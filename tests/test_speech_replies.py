@@ -224,3 +224,57 @@ async def test_following_a_reply_yields_events_as_they_come(monkeypatch, tap):
     await asyncio.wait_for(task, 1)
     assert seen[-1] == ("end", "complete")
     assert [v for k, v in seen if k == "text"] == ["One. ", "Two."]
+
+
+# --------------------------------------------------------------------------- review of #926
+
+
+@pytest.mark.asyncio
+async def test_a_stream_opened_between_done_and_idle_waits_for_the_next_turn(tap):
+    """M1: after chat_done the bridge still pushes and titles before idle; that turn is not open any more."""
+    tap.observe({"type": "agent_state", "payload": {"state": "thinking", "session_id": S}})
+    tap.observe({"type": "chat_delta", "payload": {"session_id": S, "message_id": "asst-1", "content": "Done. "}})
+    tap.observe({"type": "chat_done", "payload": {"session_id": S, "message_id": "asst-1"}})
+    finding = asyncio.ensure_future(tap.find(S, wait=2.0))
+    await asyncio.sleep(0.01)
+    tap.observe({"type": "agent_state", "payload": {"state": "idle", "session_id": S}})
+    await asyncio.sleep(0.01)
+    assert not finding.done()  # still waiting: no phantom no_reply
+    tap.observe({"type": "agent_state", "payload": {"state": "thinking", "session_id": S}})
+    tap.observe({"type": "chat_delta", "payload": {"session_id": S, "message_id": "asst-2", "content": "Next. "}})
+    reply = await finding
+    assert reply.message_id == "asst-2" and _texts(reply) == "Next. "
+
+
+@pytest.mark.asyncio
+async def test_a_desktop_task_step_is_not_a_boundary(tap):
+    tap.observe({"type": "agent_state", "payload": {"state": "thinking", "session_id": S}})
+    tap.observe({"type": "chat_delta", "payload": {"session_id": S, "message_id": "asst-1", "content": "Half a "}})
+    tap.observe({"type": "tool_call_start", "payload": {"session_id": S, "call_id": "computer_click",
+                                                        "tool_name": "computer_click",
+                                                        "inputs": {"origin": "user_task"}}})
+    reply = await tap.find(S, message_id="asst-1")
+    assert "boundary" not in _kinds(reply)
+
+
+@pytest.mark.asyncio
+async def test_a_huge_reply_keeps_only_its_cap(tap):
+    from prometheus.speech.replies import TEXT_KEEP
+
+    tap.observe({"type": "agent_state", "payload": {"state": "thinking", "session_id": S}})
+    for _ in range(200):
+        tap.observe({"type": "chat_delta", "payload": {"session_id": S, "message_id": "asst-1",
+                                                       "content": "x" * 1000}})
+    reply = await tap.find(S, message_id="asst-1")
+    assert len(_texts(reply)) == TEXT_KEEP
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_message_id_keeps_the_first_reply(tap):
+    for text_ in ("First. ", "Second. "):
+        tap.observe({"type": "agent_state", "payload": {"state": "thinking", "session_id": S}})
+        tap.observe({"type": "chat_delta", "payload": {"session_id": S, "message_id": "asst-7", "content": text_}})
+        tap.observe({"type": "chat_done", "payload": {"session_id": S, "message_id": "asst-7"}})
+        tap.observe({"type": "agent_state", "payload": {"state": "idle", "session_id": S}})
+    reply = await tap.find(S, message_id="asst-7")
+    assert _texts(reply) == "First. "
