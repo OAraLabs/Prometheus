@@ -21,6 +21,7 @@ Source: novel code for Prometheus, 2026-11-13.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import secrets
 import sqlite3
@@ -43,7 +44,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS chat_projects (
     id             TEXT PRIMARY KEY,
     name           TEXT NOT NULL,
-    name_folded    TEXT NOT NULL UNIQUE,
+    name_folded    TEXT NOT NULL UNIQUE,     -- fold_name(): a hash, so the uniqueness carries no text
     folder         TEXT NOT NULL UNIQUE,
     folder_managed INTEGER NOT NULL,
     import_key     TEXT UNIQUE,
@@ -75,8 +76,13 @@ def clean_name(raw: str) -> str:
 
 
 def fold_name(name: str) -> str:
-    """The identity of a name: two names that read the same are one project."""
-    return clean_name(name).casefold()
+    """The identity of a name: two names that read the same are one project.
+
+    Stored as a SHA-256 of the cleaned, casefolded name, not the folded text itself: the scrub that rewrites a secret
+    pasted into a name (``security/scrub_capture_stores``) matches patterns that a casefolded copy would no longer
+    match, and a hash carries nothing to scrub.
+    """
+    return hashlib.sha256(clean_name(name).casefold().encode("utf-8")).hexdigest()
 
 
 class ProjectError(Exception):

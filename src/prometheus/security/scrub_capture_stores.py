@@ -95,6 +95,7 @@ LCM_TARGETS = (
     ("lcm_summaries", "id", ("summary_text",)),
     ("checkpoints", "id", ("goal_description", "messages_json", "tool_calls_json")),
     ("session_titles", "session_id", ("title",)),
+    ("chat_projects", "id", ("name",)),
 )
 # table -> the external-content FTS5 index over it, rebuilt when the table was rewritten
 LCM_FTS = {"lcm_messages": "lcm_messages_fts", "lcm_summaries": "lcm_summaries_fts"}
