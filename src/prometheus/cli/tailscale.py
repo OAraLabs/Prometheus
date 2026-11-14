@@ -266,10 +266,19 @@ def effective_bind(config: Mapping[str, Any]) -> tuple[str | None, str | None]:
 
 
 def _relay_host(bind: str | None) -> str:
-    """The host the relay target names: the daemon's own loopback address (``[::1]`` for IPv6)."""
+    """The host the relay target names: the daemon's own loopback address (``[::1]`` for IPv6; an IPv4-mapped
+    address as its IPv4 form)."""
+    import ipaddress
+
     if bind is None or bind == "localhost":
         return "127.0.0.1"
-    return f"[{bind}]" if ":" in bind else bind
+    try:
+        ip = ipaddress.ip_address(bind)
+    except ValueError:
+        return "127.0.0.1"
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return str(ip.ipv4_mapped)
+    return f"[{ip}]" if ip.version == 6 else str(ip)
 
 
 # ── the plan ─────────────────────────────────────────────────────────────────
@@ -353,9 +362,10 @@ def _print_plan(plan: Plan, out: Any) -> None:
     print(f"  WebSocket wss://{plan.name}:{plan.ws_port}", file=out)
     for note in plan.notes:
         print(f"  - {note}", file=out)
-    for command in plan.commands:
-        print(f"  will run: tailscale {' '.join(command)}", file=out)
-    print("  will write: web.tailscale {enabled: true, name, rest_port, ws_port}", file=out)
+    if not plan.blockers:
+        for command in plan.commands:
+            print(f"  will run: tailscale {' '.join(command)}", file=out)
+        print("  will write: web.tailscale {enabled: true, name, rest_port, ws_port}", file=out)
     print("  will NOT: run sudo, cert, funnel, up or set; replace another app's Serve entry; turn Funnel on", file=out)
     for blocker in plan.blockers:
         print(f"  BLOCKED: {blocker}", file=out)
@@ -409,8 +419,8 @@ def run_tailscale_command(args: argparse.Namespace, config: dict[str, Any]) -> i
                 print("Serve needs this user to be Tailscale's operator. Run this yourself, once, then try again:\n"
                       "  sudo tailscale set --operator=$USER", file=out)
             for done in added:
-                print(f"already added: tailscale {' '.join(done)} (`oara tailscale off --apply` removes it)",
-                      file=out)
+                print(f"already added: tailscale {' '.join(done)} (`oara tailscale off --apply`, with the same "
+                      "--rest-port and --ws-port, removes it)", file=out)
             print("Stopped. The config was not changed.", file=out)
             return 1
         added.append(command)
