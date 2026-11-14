@@ -235,11 +235,11 @@ class TestDiscard:
 
     def test_a_discard_before_the_pending_text_drops_it_and_new_text_follows(self):
         cutter = PhraseCutter()
-        assert _texts(cutter.feed("Kept. garbage garbage")) == ["Kept."]
-        cutter.discard(3)
+        assert _texts(cutter.feed("One. Two. garbage garbage")) == ["One.", "Two."]
+        cutter.discard(5)
         phrases = cutter.feed("New text. ")
         assert _texts(phrases) == ["New text."]
-        assert phrases[0].start == 3
+        assert phrases[0].start == 5
 
     def test_a_discard_past_the_end_changes_nothing(self):
         cutter = PhraseCutter()
@@ -315,7 +315,7 @@ class TestReviewFixes:
         cutter = PhraseCutter(spoken_cap=20)
         out = cutter.feed("Hello there. More words here. ")
         assert _texts(out) == ["Hello there.", TOO_LONG]
-        cutter.discard(5)
+        cutter.discard(0)
         assert not cutter.truncated
         assert _texts(cutter.feed("Ok now. ")) == ["Ok now."]
 
@@ -325,3 +325,32 @@ class TestReviewFixes:
     def test_a_lone_star_and_dunder_names(self):
         assert speakable("5 * 3 = 15") == "5 * 3 = 15"
         assert speakable("a *very* good") == "a very good"
+
+
+class TestReviewRoundTwo:
+    def test_a_growing_backtick_run_stays_fast(self):
+        import time
+
+        for ch in "`~":
+            cutter = PhraseCutter()
+            t0 = time.perf_counter()
+            for _ in range(25_000):
+                cutter.feed(ch * 4)
+            cutter.finish()
+            assert time.perf_counter() - t0 < 2.0
+
+    def test_text_after_a_long_closer_split_across_deltas_is_spoken(self):
+        text = "```\ncode\n``````\nImportant words here. More."
+        assert _texts(_trickle(text)) == _texts(_all(text)) == [CODE_SKIPPED, "Important words here.", "More."]
+
+    def test_code_offsets_match_when_trickled(self):
+        text = "Before.\n````\nx ``` y\n````\nAfter."
+        assert [(p.start, p.end) for p in _trickle(text)] == [(p.start, p.end) for p in _all(text)]
+
+    def test_a_discard_through_a_phrase_gives_back_its_kept_part(self):
+        cutter = PhraseCutter()
+        first = cutter.feed("Alpha beta gamma. ")
+        assert [(p.start, p.end) for p in first] == [(0, 17)]
+        cutter.discard(6)
+        phrases = cutter.finish()
+        assert [(p.start, p.text) for p in phrases] == [(0, "Alpha")]
