@@ -6,15 +6,16 @@ the two Serve entries and the ``web.tailscale`` block, or checks them, or remove
 * ``check`` (the default): read-only. What is there, what setup would do, and what stops it.
 * ``setup``: prints the plan and changes nothing without ``--apply``. With it, runs the two Serve commands it needs
   and writes ``web.tailscale`` (comment-preserving, atomic, like the network settings).
-* ``off``: removes only the two Serve entries this set up (that relay to this daemon's own ports) and sets
-  ``web.tailscale.enabled: false``. Needs ``--apply`` too.
+* ``off``: removes only the Serve entries that relay exactly to this daemon's own ports (``/`` on this node's
+  name, over HTTPS, to its loopback port) and sets ``web.tailscale.enabled: false``. Needs ``--apply`` too.
 
 What it never does: run ``sudo``, or ``tailscale cert``, ``funnel``, ``up``, ``login``, ``logout``, ``down`` or
 ``set``; replace a Serve entry it did not create (a port another app serves is reported, not touched); or turn
 Funnel on. When Serve refuses for permission, it stops and prints the one command to run as the right user.
 
-The only Tailscale commands it runs: ``status --json``, ``serve status --json``,
-``serve --bg --https=<port> http://127.0.0.1:<port>`` and ``serve --https=<port> off``.
+The only Tailscale commands it runs, checked shape by shape (:func:`run_tailscale`): ``status --json``,
+``serve status --json``, ``serve --bg --https=<port> http://<loopback>:<port>`` and ``serve --https=<port> off``.
+The ``tailscale`` it runs is the one on PATH (or the macOS app's), the same one typing ``tailscale`` would run.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,10 +32,9 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-#: The only first words of a Tailscale command this module runs.
-_ALLOWED_VERBS = frozenset({"status", "serve"})
-#: Words that never appear anywhere in a command this module runs.
-_FORBIDDEN = frozenset({"sudo", "cert", "funnel", "--funnel", "up", "login", "logout", "down", "set"})
+_PORT = re.compile(r"[1-9][0-9]{0,4}")
+#: The relay target ``setup`` writes: plain HTTP to a loopback literal (or localhost) on a port.
+_TARGET = re.compile(r"http://(?:127(?:\.[0-9]{1,3}){3}|localhost|\[::1\]):([1-9][0-9]{0,4})")
 #: Where the macOS app keeps its command-line tool when it is not on PATH.
 _MAC_APP_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 TIMEOUT_S = 15.0
@@ -52,14 +53,40 @@ def tailscale_binary() -> str | None:
     return None
 
 
+def _port_text_ok(text: str) -> bool:
+    return bool(_PORT.fullmatch(text)) and int(text) <= 65535
+
+
+def allowed_command(args: tuple[str, ...]) -> bool:
+    """Is *args* exactly one of the four commands this module runs? Every word and every port is checked."""
+    if args in (("status", "--json"), ("serve", "status", "--json")):
+        return True
+    if len(args) == 4 and args[:2] == ("serve", "--bg") and args[2].startswith("--https="):
+        target = _TARGET.fullmatch(args[3])
+        return _port_text_ok(args[2][len("--https="):]) and target is not None and _port_text_ok(target.group(1))
+    if len(args) == 3 and args[0] == "serve" and args[1].startswith("--https=") and args[2] == "off":
+        return _port_text_ok(args[1][len("--https="):])
+    return False
+
+
+def _text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value or ""
+
+
 def run_tailscale(binary: str, *args: str, timeout: float = TIMEOUT_S) -> tuple[int, str, str]:
-    """Run ``tailscale <args>`` (only the commands listed in the module docstring). Never through a shell."""
-    if not args or args[0] not in _ALLOWED_VERBS or any(a.lower() in _FORBIDDEN for a in args):
+    """Run ``tailscale <args>``: only the four commands in the module docstring (:func:`allowed_command`), never
+    through a shell, with no terminal input (a prompt cannot wait unseen) and UTF-8 whatever the locale."""
+    if not allowed_command(tuple(args)):
         raise TailscaleCommandRefused(f"refusing to run tailscale {' '.join(args)}")
     try:
-        done = subprocess.run([binary, *args], capture_output=True, text=True, timeout=timeout, check=False)
-    except subprocess.TimeoutExpired:
-        return 124, "", f"tailscale {' '.join(args)} did not answer within {timeout:.0f} s"
+        done = subprocess.run([binary, *args], capture_output=True, stdin=subprocess.DEVNULL, encoding="utf-8",
+                              errors="replace", timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as exc:
+        said = (_text(exc.stderr) or _text(exc.stdout)).strip()
+        return 124, "", f"tailscale {' '.join(args)} did not answer within {timeout:.0f} s" + (
+            f" (it said: {said[:300]})" if said else "")
     except OSError as exc:
         return 127, "", f"could not run {binary}: {exc}"
     return done.returncode, done.stdout or "", done.stderr or ""
@@ -75,6 +102,9 @@ class ServeEntry:
     proxies: dict[str, str] = field(default_factory=dict)   # mount path -> target
     other: bool = False                                     # a TCP forward, a file, a text handler: not ours to judge
     funnel: bool = False
+    #: Serve terminates TLS on this port (``TCP[port].HTTPS``). Parsing sets it from the config; a plain-HTTP
+    #: entry is never ours.
+    https: bool = True
 
 
 @dataclass
@@ -98,25 +128,31 @@ def _parse_serve(config: Any, name: str) -> dict[int, ServeEntry]:
     if isinstance(foreground, Mapping):
         layers.extend(v for v in foreground.values() if isinstance(v, Mapping))
 
-    def entry(port: int) -> ServeEntry:
-        return entries.setdefault(port, ServeEntry(port=port))
+    seen_in: dict[int, set[int]] = {}
+    https_on: set[int] = set()
 
-    for layer in layers:
+    def entry(port: int, layer_index: int) -> ServeEntry:
+        seen_in.setdefault(port, set()).add(layer_index)
+        return entries.setdefault(port, ServeEntry(port=port, https=False))
+
+    for index, layer in enumerate(layers):
         tcp = layer.get("TCP")
         if isinstance(tcp, Mapping):
             for port_text, handler in tcp.items():
                 if not str(port_text).isdigit():
                     continue
-                e = entry(int(port_text))
+                e = entry(int(port_text), index)
                 if isinstance(handler, Mapping) and (handler.get("TCPForward") or handler.get("TerminateTLS")):
                     e.other = True
+                if isinstance(handler, Mapping) and handler.get("HTTPS") is True:
+                    https_on.add(e.port)
         web = layer.get("Web")
         if isinstance(web, Mapping):
             for host_port, site in web.items():
                 host, _, port_text = str(host_port).rpartition(":")
                 if not port_text.isdigit():
                     continue
-                e = entry(int(port_text))
+                e = entry(int(port_text), index)
                 if name and host.lower().rstrip(".") != name:
                     e.other = True
                 handlers = site.get("Handlers") if isinstance(site, Mapping) else None
@@ -131,17 +167,21 @@ def _parse_serve(config: Any, name: str) -> dict[int, ServeEntry]:
             for host_port, on in funnel.items():
                 _, _, port_text = str(host_port).rpartition(":")
                 if port_text.isdigit() and on:
-                    entry(int(port_text)).funnel = True
+                    entry(int(port_text), index).funnel = True
+    for port, e in entries.items():
+        e.https = port in https_on
+        if len(seen_in.get(port, ())) > 1:
+            e.other = True                                # one port in two layers: which one answers is not ours
     return entries
 
 
-def read_state(binary: str | None = None) -> TailscaleState:
+def read_state(binary: str | None = None, *, timeout: float = TIMEOUT_S) -> TailscaleState:
     """Ask Tailscale what is there. Read-only."""
     state = TailscaleState(binary=binary or tailscale_binary())
     if state.binary is None:
         state.problems.append("the tailscale command was not found (install Tailscale, or put its CLI on PATH)")
         return state
-    rc, out, err = run_tailscale(state.binary, "status", "--json")
+    rc, out, err = run_tailscale(state.binary, "status", "--json", timeout=timeout)
     if rc != 0:
         state.problems.append(f"tailscale status failed: {(err or out).strip()[:200] or f'exit {rc}'}")
         return state
@@ -156,7 +196,7 @@ def read_state(binary: str | None = None) -> TailscaleState:
     state.name = str((me or {}).get("DNSName") or "").rstrip(".").lower() if isinstance(me, Mapping) else ""
     domains = status.get("CertDomains") if isinstance(status, Mapping) else None
     state.cert_domains = [str(d).rstrip(".").lower() for d in domains] if isinstance(domains, list) else []
-    rc, out, err = run_tailscale(state.binary, "serve", "status", "--json")
+    rc, out, err = run_tailscale(state.binary, "serve", "status", "--json", timeout=timeout)
     if rc != 0:
         state.problems.append(f"tailscale serve status failed: {(err or out).strip()[:200] or f'exit {rc}'}")
         return state
@@ -188,22 +228,48 @@ def _local_ports(config: Mapping[str, Any]) -> tuple[int, int]:
 
 
 def _relays_to(target: str, local_port: int) -> bool:
+    from prometheus.web.loopback import is_loopback_address
+
     text = target if "://" in target else f"http://{target}"
     try:
         parts = urlsplit(text)
         port = parts.port
     except ValueError:
         return False
-    return parts.scheme == "http" and (parts.hostname or "") in ("127.0.0.1", "localhost") and port == local_port
+    return parts.scheme == "http" and is_loopback_address(parts.hostname or "") and port == local_port
 
 
 def classify(entry: ServeEntry | None, local_port: int) -> str:
-    """``free``, ``ours`` (exactly ``/`` relayed to this daemon's local port) or ``taken``."""
+    """``free``, ``ours`` (exactly ``/``, over HTTPS, relayed to this daemon's loopback port, in one layer) or
+    ``taken``."""
     if entry is None or (not entry.proxies and not entry.other):
         return "free"
-    if not entry.other and set(entry.proxies) == {"/"} and _relays_to(entry.proxies["/"], local_port):
+    if (not entry.other and entry.https and set(entry.proxies) == {"/"}
+            and _relays_to(entry.proxies["/"], local_port)):
         return "ours"
     return "taken"
+
+
+def effective_bind(config: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """``(address, None)``: the address the daemon will listen on, resolved the way it does (the environment and the
+    env file over ``web.bind``, an unset bind meaning every interface, the Mac app's LAN guard); or
+    ``(None, why)`` when it cannot be resolved."""
+    from prometheus.config.api_token import parse_env_file
+    from prometheus.web.bind import BindError, app_install_lan_guard, resolve_bind
+
+    env = {**parse_env_file(), **os.environ}
+    try:
+        resolved = resolve_bind(dict(config), env=env)
+    except BindError as exc:
+        return None, str(exc)
+    return app_install_lan_guard(resolved, dict(config), env=env, quiet=True).address, None
+
+
+def _relay_host(bind: str | None) -> str:
+    """The host the relay target names: the daemon's own loopback address (``[::1]`` for IPv6)."""
+    if bind is None or bind == "localhost":
+        return "127.0.0.1"
+    return f"[{bind}]" if ":" in bind else bind
 
 
 # ── the plan ─────────────────────────────────────────────────────────────────
@@ -229,7 +295,6 @@ def _has_token(config: Mapping[str, Any]) -> bool:
 
 
 def plan_setup(config: Mapping[str, Any], state: TailscaleState, *, rest_port: int, ws_port: int) -> Plan:
-    from prometheus.web.bind import BindError, parse_bind
     from prometheus.web.loopback import is_loopback_address
     from prometheus.web.tailscale_serve import _trusts_loopback_proxy, _valid_name, _valid_port
 
@@ -246,15 +311,13 @@ def plan_setup(config: Mapping[str, Any], state: TailscaleState, *, rest_port: i
                              "HTTPS Certificates. The machine name then goes into public certificate logs.")
     if not (_valid_port(rest_port) and _valid_port(ws_port)) or rest_port == ws_port:
         plan.blockers.append("--rest-port and --ws-port must be two different ports from 1 to 65535")
-    web = _web(config)
-    try:
-        bind = parse_bind(web.get("bind", "127.0.0.1"), "web.bind")
-    except BindError as exc:
-        bind = None
-        plan.blockers.append(str(exc))
-    if bind is not None and not is_loopback_address(bind):
-        plan.blockers.append(f"web.bind is {bind}, not loopback: Serve in front of a wide bind exposes the daemon "
-                             "both ways. Set web.bind to 127.0.0.1 first (keep it only once your devices re-pair).")
+    bind, why = effective_bind(config)
+    if bind is None:
+        plan.blockers.append(f"the daemon's bind cannot be resolved: {why}")
+    elif not is_loopback_address(bind):
+        plan.blockers.append(f"the daemon will listen on {bind}, not loopback (web.bind, PROMETHEUS_WEB_BIND, or "
+                             "unset, which is every interface): Serve in front of a wide bind exposes the daemon both "
+                             "ways. Set web.bind: 127.0.0.1 first, once your devices can re-pair.")
     if not _has_token(config):
         plan.blockers.append("this daemon has no API token, and an open daemon must not answer the tailnet "
                              "(run `oara token rotate`)")
@@ -274,7 +337,7 @@ def plan_setup(config: Mapping[str, Any], state: TailscaleState, *, rest_port: i
         elif kind == "ours":
             plan.notes.append(f"port {port} already relays to the daemon's {what} port {local}: kept")
         else:
-            plan.commands.append(["serve", "--bg", f"--https={port}", f"http://127.0.0.1:{local}"])
+            plan.commands.append(["serve", "--bg", f"--https={port}", f"http://{_relay_host(bind)}:{local}"])
     return plan
 
 
@@ -307,11 +370,15 @@ def run_tailscale_command(args: argparse.Namespace, config: dict[str, Any]) -> i
 
     out = sys.stdout
     action = getattr(args, "tailscale_action", None) or "check"
-    state = read_state()
     block = _web(config).get("tailscale")
     current: Mapping[str, Any] = block if isinstance(block, Mapping) else {}
-    rest_port = int(getattr(args, "rest_port", None) or current.get("rest_port") or 443)
-    ws_port = int(getattr(args, "ws_port", None) or current.get("ws_port") or 8443)
+    try:
+        rest_port = _pick_port(getattr(args, "rest_port", None), current.get("rest_port"), 443, "rest-port")
+        ws_port = _pick_port(getattr(args, "ws_port", None), current.get("ws_port"), 8443, "ws-port")
+    except ValueError as exc:
+        print(f"{exc}. Nothing was changed.", file=out)
+        return 1
+    state = read_state()
 
     if action == "off":
         return _off(args, config, state, rest_port, ws_port, out)
@@ -328,6 +395,11 @@ def run_tailscale_command(args: argparse.Namespace, config: dict[str, Any]) -> i
     if not getattr(args, "apply", False):
         print("Dry run: nothing was changed. Run again with --apply to do it.", file=out)
         return 0
+    # The config edit is checked BEFORE anything runs: a file this cannot edit must not be left behind live relays.
+    if _write(args, _block_values(plan), out, check_only=True) != 0:
+        print("Nothing was changed.", file=out)
+        return 1
+    added: list[list[str]] = []
     for command in plan.commands:
         rc, so, se = run_tailscale(state.binary or "tailscale", *command)
         if rc != 0:
@@ -336,21 +408,42 @@ def run_tailscale_command(args: argparse.Namespace, config: dict[str, Any]) -> i
             if any(h in said.lower() for h in _PERMISSION_HINTS):
                 print("Serve needs this user to be Tailscale's operator. Run this yourself, once, then try again:\n"
                       "  sudo tailscale set --operator=$USER", file=out)
+            for done in added:
+                print(f"already added: tailscale {' '.join(done)} (`oara tailscale off --apply` removes it)",
+                      file=out)
             print("Stopped. The config was not changed.", file=out)
             return 1
+        added.append(command)
         print(f"ran: tailscale {' '.join(command)}", file=out)
     return _write(args, _block_values(plan), out)
 
 
-def _write(args: argparse.Namespace, values: dict[tuple[str, ...], Any], out: Any) -> int:
+def _pick_port(flag: Any, configured: Any, default: int, label: str) -> int:
+    """The port a flag, else the config, else the default names; ValueError (said plainly) for anything that is not
+    a port from 1 to 65535 (0, true, a word, a list)."""
+    from prometheus.web.tailscale_serve import _valid_port
+
+    for value, source in ((flag, f"--{label}"), (configured, f"web.tailscale.{label.replace('-', '_')}")):
+        if value is None:
+            continue
+        if not _valid_port(value):
+            raise ValueError(f"{source} must be a port from 1 to 65535, not {value!r}")
+        return int(value)
+    return default
+
+
+def _write(args: argparse.Namespace, values: dict[tuple[str, ...], Any], out: Any, *, check_only: bool = False) -> int:
     from prometheus.config.defaults import resolve_config_path
     from prometheus.web.network import PersistError, persist_values
 
     try:
-        wrote = persist_values(resolve_config_path(getattr(args, "config", None)), values, "web.tailscale")
+        wrote = persist_values(resolve_config_path(getattr(args, "config", None)), values, "web.tailscale",
+                               check_only=check_only)
     except PersistError as exc:
         print(f"Could not write the config: {exc}", file=out)
         return 1
+    if check_only:
+        return 0
     print("wrote web.tailscale to the config. Restart the daemon to apply it." if wrote
           else "web.tailscale was already set that way.", file=out)
     return 0
@@ -367,7 +460,8 @@ def _off(args: argparse.Namespace, config: Mapping[str, Any], state: TailscaleSt
         elif kind == "taken":
             print(f"port {port} serves something else: left alone", file=out)
     for problem in state.problems:
-        print(f"note: {problem}", file=out)
+        print(f"WARNING: {problem}. No Serve entry can be seen, so none is removed; turning web.tailscale off still "
+              "makes the daemon answer no relayed request.", file=out)
     for command in commands:
         print(f"will run: tailscale {' '.join(command)}", file=out)
     print("will write: web.tailscale.enabled: false", file=out)
@@ -387,10 +481,9 @@ def _off(args: argparse.Namespace, config: Mapping[str, Any], state: TailscaleSt
 # ── doctor rows ──────────────────────────────────────────────────────────────
 
 def doctor_rows(config: Mapping[str, Any], *, state: TailscaleState | None = None,
-                handshake: Any = None) -> list[Any]:
+                handshake: Any = None, timeout: float = 5.0) -> list[Any]:
     """The "Tailscale HTTPS" rows: none at all when ``web.tailscale`` is absent. Each says what it could not check."""
     from prometheus.infra.doctor import DiagnosticCheck
-    from prometheus.web.bind import BindError, parse_bind
     from prometheus.web.loopback import is_loopback_address
     from prometheus.web.tailscale_serve import serve_settings
 
@@ -407,15 +500,17 @@ def doctor_rows(config: Mapping[str, Any], *, state: TailscaleState | None = Non
                                 "web.tailscale is set but the daemon ignores it (bad name or ports, no API token, or "
                                 "trusted_proxies covering loopback; the daemon log says which)",
                                 fix="Run `oara tailscale check`.")]
-    state = state if state is not None else read_state()
+    state = state if state is not None else read_state(timeout=max(timeout, 1.0) * 3)
     if state.problems:
         rows.append(DiagnosticCheck("Tailscale", "connectivity", "error", "; ".join(state.problems),
                                     fix="Serve, Funnel and the certificate were not checked."))
         return rows
     if not state.running:
         rows.append(DiagnosticCheck("Tailscale", "connectivity", "error",
-                                    f"not running (BackendState {state.backend_state or 'unknown'})"))
-    elif state.name != settings.name:
+                                    f"not running (BackendState {state.backend_state or 'unknown'})",
+                                    fix="Start Tailscale. Serve, Funnel and the certificate were not checked."))
+        return rows
+    if state.name != settings.name:
         rows.append(DiagnosticCheck("Tailscale", "connectivity", "error",
                                     f"this node is {state.name!r}, but web.tailscale.name is {settings.name!r}",
                                     fix="Run `oara tailscale setup` again."))
@@ -447,17 +542,16 @@ def doctor_rows(config: Mapping[str, Any], *, state: TailscaleState | None = Non
                                 f"ON for port(s) {', '.join(map(str, funnel))}: the public internet reaches them"
                                 if funnel else "off on both ports",
                                 fix=(f"tailscale funnel --https={funnel[0]} off" if funnel else None)))
-    try:
-        bind = parse_bind(web.get("bind", "127.0.0.1"), "web.bind")
-    except BindError:
-        bind = None
+    bind, why = effective_bind(config)
     if bind is None or not is_loopback_address(bind):
         rows.append(DiagnosticCheck("Tailscale bind", "connectivity", "error",
-                                    f"web.bind is {web.get('bind')!r}, not loopback: Serve plus a wide bind exposes "
-                                    "the daemon both ways", fix="Set web.bind: 127.0.0.1."))
+                                    f"the daemon will listen on {bind or why}, not loopback (web.bind, "
+                                    "PROMETHEUS_WEB_BIND, or unset, which is every interface): Serve plus a wide bind "
+                                    "exposes the daemon both ways", fix="Set web.bind: 127.0.0.1."))
     else:
-        rows.append(DiagnosticCheck("Tailscale bind", "connectivity", "ok", f"web.bind is {bind}"))
-    rows.append(_certificate_row(settings.name, settings.rest_port, handshake or tls_days_left))
+        rows.append(DiagnosticCheck("Tailscale bind", "connectivity", "ok", f"the daemon listens on {bind}"))
+    shake = handshake or (lambda name, port: tls_days_left(name, port, timeout=timeout))
+    rows.append(_certificate_row(settings.name, settings.rest_port, shake))
     return rows
 
 

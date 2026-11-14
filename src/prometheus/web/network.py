@@ -239,7 +239,7 @@ def _literal(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
-    return json.dumps(str(value), ensure_ascii=False)
+    return json.dumps(str(value))  # ASCII: a raw line separator would break every later edit of the file
 
 
 def _comments(text: str) -> int:
@@ -307,10 +307,12 @@ def replace_config(target: Path, updated: str) -> None:
         raise PersistError(f"could not write {real}: {exc}") from exc
 
 
-def persist_values(path: str | os.PathLike[str], values: Mapping[tuple[str, ...], Any], what: str) -> bool:
+def persist_values(path: str | os.PathLike[str], values: Mapping[tuple[str, ...], Any], what: str, *,
+                   check_only: bool = False) -> bool:
     """Set each ``(key path) -> value`` in the config file at *path*, the way :func:`persist_choice` does: every
-    other byte kept, comments included, verified, written atomically, never created. ``True`` when it wrote,
-    ``False`` when the file already says all of it. Raises :class:`PersistError` and leaves the file as it was."""
+    other byte kept, comments included, verified, written atomically, never created. ``True`` when it wrote (or,
+    with *check_only*, would write: everything but the write itself), ``False`` when the file already says all of
+    it. Raises :class:`PersistError` and leaves the file as it was."""
     target, original, document = read_config_text(path)
     expected = copy.deepcopy(document)
     changed = False
@@ -325,7 +327,8 @@ def persist_values(path: str | os.PathLike[str], values: Mapping[tuple[str, ...]
         return False
     updated = _edit_text(original, [(list(keys), _literal(value)) for keys, value in values.items()])
     verify_edit(original, updated, expected, target, what)
-    replace_config(target, updated)
+    if not check_only:
+        replace_config(target, updated)
     return True
 
 

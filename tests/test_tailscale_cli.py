@@ -321,7 +321,7 @@ def test_the_doctor_runs_the_rows():
 
     from prometheus.cli import doctor
 
-    assert "tailscale_doctor_rows(config)" in inspect.getsource(doctor.run_extended_checks)
+    assert "tailscale_doctor_rows(config, timeout=timeout)" in inspect.getsource(doctor.run_extended_checks)
 
 
 def test_the_daemon_settings_take_the_token_answer_from_the_cli(monkeypatch):

@@ -1564,11 +1564,11 @@ def check_network_discovery(
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def tailscale_doctor_rows(config: dict[str, Any]) -> list[DiagnosticCheck]:
+def tailscale_doctor_rows(config: dict[str, Any], timeout: float = 5.0) -> list[DiagnosticCheck]:
     """The "Tailscale HTTPS" rows (cli/tailscale.py): none without ``web.tailscale``."""
     from prometheus.cli.tailscale import doctor_rows
 
-    return doctor_rows(config)
+    return doctor_rows(config, timeout=timeout)
 
 
 def run_extended_checks(
@@ -1607,7 +1607,7 @@ def run_extended_checks(
         check_memory_extraction(config),
         check_whisper(config),
         *check_voice_remotes(config, timeout=timeout),
-        *tailscale_doctor_rows(config),
+        *tailscale_doctor_rows(config, timeout=timeout),
     ]
 
 
