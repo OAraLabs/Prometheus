@@ -260,6 +260,11 @@ class LCMConversationStore:
                 updated_at REAL NOT NULL
             );
         """)
+        # Chat projects (projects/store.py): made here, with the rest of the schema, so building the store later
+        # never commits mid-way through someone else's transaction.
+        from prometheus.projects.store import SCHEMA as _CHAT_PROJECTS_SCHEMA
+
+        self._conn.executescript(_CHAT_PROJECTS_SCHEMA)
         self._conn.commit()
         self._migrate_add_content_json()
         self._migrate_add_trust_fields()
@@ -1134,6 +1139,11 @@ class LCMConversationStore:
                 counts[table] = self._conn.execute(
                     f"DELETE FROM {table} WHERE session_id = ?", (session_id,)
                 ).rowcount if self._table_exists(table) else 0
+            if counts.get("session_chat_projects"):
+                # A membership change: clients holding a chat-projects rev must see it moved.
+                from prometheus.projects.store import bump_rev
+
+                bump_rev(self._conn)
 
             # fts5's 'delete' unlinks a document but leaves the TERM in the
             # index b-tree with an empty doclist, and VACUUM preserves that —

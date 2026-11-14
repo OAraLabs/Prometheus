@@ -24,8 +24,11 @@ from __future__ import annotations
 import re
 import secrets
 import sqlite3
+import threading
 import time
-from collections.abc import Iterable
+import unicodedata
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 NAME_MAX = 60
@@ -58,12 +61,22 @@ CREATE TABLE IF NOT EXISTS chat_projects_rev (
     id  INTEGER PRIMARY KEY CHECK (id = 1),
     rev INTEGER NOT NULL
 );
+INSERT OR IGNORE INTO chat_projects_rev (id, rev) VALUES (1, 0);
 """
 
 
 def clean_name(raw: str) -> str:
-    """Trimmed, inner whitespace collapsed, at most :data:`NAME_MAX` characters. ``""`` means no name."""
-    return re.sub(r"\s+", " ", raw or "").strip()[:NAME_MAX].strip()
+    """NFC, control and format characters removed (zero-width, direction overrides), whitespace collapsed, trimmed, at
+    most :data:`NAME_MAX` characters. ``""`` means no name."""
+    text = unicodedata.normalize("NFC", raw or "")
+    text = "".join(" " if ch.isspace() else ch for ch in text
+                   if ch.isspace() or unicodedata.category(ch) not in ("Cc", "Cf"))
+    return re.sub(r"\s+", " ", text).strip()[:NAME_MAX].strip()
+
+
+def fold_name(name: str) -> str:
+    """The identity of a name: two names that read the same are one project."""
+    return clean_name(name).casefold()
 
 
 class ProjectError(Exception):
@@ -80,6 +93,10 @@ class FolderInUse(ProjectError):
 
 class UnknownProject(ProjectError):
     kind = "unknown_project"
+
+
+class ImportKeyTaken(ProjectError):
+    kind = "import_key_taken"
 
 
 class WorkspaceSet(ProjectError):
@@ -124,10 +141,31 @@ class ChatProjectStore:
     """The store, on the conversation store's connection (``LCMConversationStore.chat_projects()``)."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
+        # The tables are made with the conversation store's own schema (LCMConversationStore.__init__), so building
+        # this object never commits anything mid-way through someone else's work.
         self._conn = conn
-        conn.executescript(SCHEMA)
-        conn.execute("INSERT OR IGNORE INTO chat_projects_rev (id, rev) VALUES (1, 0)")
-        conn.commit()
+        self._lock = threading.RLock()
+
+    @contextmanager
+    def _write(self) -> Iterator[None]:
+        """One write, all or nothing, without touching anyone else's work on the shared connection.
+
+        A SAVEPOINT, not ``with conn:``: the connection's context manager commits or rolls back the WHOLE connection,
+        so a refused write would discard another method's uncommitted rows. If no other transaction was open, the
+        write is committed; if one was, it joins it and commits with it.
+        """
+        with self._lock:
+            outer = self._conn.in_transaction
+            self._conn.execute("SAVEPOINT chat_projects")
+            try:
+                yield
+            except BaseException:
+                self._conn.execute("ROLLBACK TO chat_projects")
+                self._conn.execute("RELEASE chat_projects")
+                raise
+            self._conn.execute("RELEASE chat_projects")
+            if not outer and self._conn.in_transaction:
+                self._conn.commit()
 
     # ---------------------------------------------------------------- reads
     def rev(self) -> int:
@@ -152,7 +190,7 @@ class ChatProjectStore:
         return rows[0] if rows else None
 
     def by_name(self, name: str) -> Project | None:
-        folded = clean_name(name).lower()
+        folded = fold_name(name)
         rows = self._rows("WHERE p.name_folded = ?", (folded,)) if folded else []
         return rows[0] if rows else None
 
@@ -197,7 +235,7 @@ class ChatProjectStore:
 
     # --------------------------------------------------------------- writes
     def _bump(self) -> None:
-        self._conn.execute("UPDATE chat_projects_rev SET rev = rev + 1 WHERE id = 1")
+        bump_rev(self._conn)
 
     def insert(self, name: str, folder: str, *, managed: bool, import_key: str | None = None) -> Project:
         """A new project. :class:`NameTaken` / :class:`FolderInUse` when another project has the name or folder."""
@@ -207,20 +245,22 @@ class ChatProjectStore:
         now = time.time()
         pid = "cp_" + secrets.token_hex(6)
         try:
-            with self._conn:
+            with self._write():
                 position = self._conn.execute(
                     "SELECT COALESCE(MAX(position), 0) + 1 FROM chat_projects").fetchone()[0]
                 self._conn.execute(
                     "INSERT INTO chat_projects (id, name, name_folded, folder, folder_managed, import_key, position,"
                     " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (pid, clean, clean.lower(), folder, int(managed), import_key or None, position, now, now))
+                    (pid, clean, fold_name(clean), folder, int(managed), import_key or None, position, now, now))
                 self._bump()
         except sqlite3.IntegrityError as exc:
             message = str(exc)
-            if "name_folded" in message:
+            if "chat_projects.name_folded" in message:
                 raise NameTaken(f"a project is already called {clean!r}") from exc
-            if "folder" in message:
+            if "chat_projects.folder" in message:
                 raise FolderInUse("another project already uses that folder") from exc
+            if "chat_projects.import_key" in message:
+                raise ImportKeyTaken("a project was already imported under that key") from exc
             raise
         project = self.get(pid)
         assert project is not None
@@ -230,11 +270,13 @@ class ChatProjectStore:
         clean = clean_name(name)
         if not clean:
             raise ValueError("a project needs a name")
+        if self._conn.execute("SELECT 1 FROM chat_projects WHERE id = ?", (project_id,)).fetchone() is None:
+            raise UnknownProject("no such project")
         try:
-            with self._conn:
+            with self._write():
                 cur = self._conn.execute(
                     "UPDATE chat_projects SET name = ?, name_folded = ?, updated_at = ? WHERE id = ?",
-                    (clean, clean.lower(), time.time(), project_id))
+                    (clean, fold_name(clean), time.time(), project_id))
                 if cur.rowcount == 0:
                     raise UnknownProject("no such project")
                 self._bump()
@@ -249,9 +291,9 @@ class ChatProjectStore:
 
         Never touches the folder or any file in it.
         """
-        with self._conn:
-            if self._conn.execute("SELECT 1 FROM chat_projects WHERE id = ?", (project_id,)).fetchone() is None:
-                raise UnknownProject("no such project")
+        if self._conn.execute("SELECT 1 FROM chat_projects WHERE id = ?", (project_id,)).fetchone() is None:
+            raise UnknownProject("no such project")
+        with self._write():
             sessions = [r[0] for r in self._conn.execute(
                 "SELECT session_id FROM session_chat_projects WHERE project_id = ?", (project_id,)).fetchall()]
             # Every binding this project set, on members and on sessions since moved elsewhere as a label.
@@ -268,7 +310,10 @@ class ChatProjectStore:
         *keep_workspace* files as a label only: the membership is recorded and the workspace is left as it is (what a
         migration sends, so moving local projects in never changes where an old conversation writes).
         """
-        with self._conn:
+        if project_id is not None and self._conn.execute(
+                "SELECT 1 FROM chat_projects WHERE id = ?", (project_id,)).fetchone() is None:
+            raise UnknownProject("no such project")
+        with self._write():
             if project_id is None:
                 old = self.project_of(session_id)
                 self._conn.execute("DELETE FROM session_chat_projects WHERE session_id = ?", (session_id,))
@@ -295,7 +340,8 @@ class ChatProjectStore:
                 " filed_at = CASE WHEN session_chat_projects.project_id = excluded.project_id"
                 " THEN session_chat_projects.filed_at ELSE excluded.filed_at END",
                 (session_id, project_id, now))
-            if keep_workspace:
+            if keep_workspace or (current is not None and not bound_by_a_project and current[0] == folder):
+                # A label only, or the owner already bound this folder by hand: that binding stays theirs.
                 self._bump()
                 return FileResult(session_id, project_id, current[0] if current is not None else None)
             self._conn.execute(
@@ -307,3 +353,8 @@ class ChatProjectStore:
     def _clear_project_workspace(self, session_id: str, project_id: str) -> None:
         self._conn.execute(
             "DELETE FROM session_workspaces WHERE session_id = ? AND set_by = ?", (session_id, _set_by(project_id)))
+
+
+def bump_rev(conn: sqlite3.Connection) -> None:
+    """Raise the change counter (inside the caller's transaction). Also used by the conversation store's forget."""
+    conn.execute("UPDATE chat_projects_rev SET rev = rev + 1 WHERE id = 1")
