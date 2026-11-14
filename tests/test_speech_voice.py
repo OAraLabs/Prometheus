@@ -414,3 +414,29 @@ class TestReviewFixes:
             return loop.time() - t0
 
         assert _run(timed()) < 1.0  # two requests per check, both halves at once: ~0.6 s, not ~1.2 s
+
+
+class TestReviewRoundTwo:
+    def test_no_compression_is_asked_for_and_a_compressed_answer_is_refused(self, clock, monkeypatch):
+        import gzip
+
+        seen = []
+
+        def gzipping(request):
+            seen.append(request.headers.get("accept-encoding"))
+            if request.url.path == "/v1/audio/speech":
+                return httpx.Response(200, content=gzip.compress(b"RIFF\x00\x00\x00\x00WAVE" + b"\x00" * 10_000),
+                                      headers={"content-encoding": "gzip"})
+            return httpx.Response(200, json={})
+
+        real = httpx.AsyncClient
+        monkeypatch.setattr(voice_mod, "_client",
+                            lambda timeout: real(transport=httpx.MockTransport(gzipping), timeout=timeout))
+        v = _voice(_cfg("tts"), clock)
+        assert _unavailable(v.synthesize("Hi.")).reason == "failed"
+        _run(v.status())
+        assert seen and all(value == "identity" for value in seen)
+
+    def test_a_key_with_a_line_break_is_refused(self, box, clock, tmp_path, monkeypatch):
+        monkeypatch.setenv(KEY_ENV, "first-line\nsecond")
+        assert _unavailable(_voice(_cfg("tts"), clock).synthesize("Hi.")).reason == "refused"
