@@ -278,3 +278,23 @@ async def test_a_repeated_message_id_keeps_the_first_reply(tap):
         tap.observe({"type": "agent_state", "payload": {"state": "idle", "session_id": S}})
     reply = await tap.find(S, message_id="asst-7")
     assert _texts(reply) == "First. "
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_turn_without_chat_done_does_not_drop_a_later_queued_turn(tap):
+    """Re-check of #926: A, B and C open; A is cancelled (idle, no chat_done); B's first word ends A."""
+    def frame(kind, **payload):
+        tap.observe({"type": kind, "payload": {"session_id": S, **payload}})
+
+    for _ in range(3):
+        frame("agent_state", state="thinking")
+    frame("chat_delta", message_id="asst-1", content="A speaks. ")
+    frame("agent_state", state="idle")                     # A cancelled: no chat_done
+    frame("chat_delta", message_id="asst-2", content="B speaks. ")
+    frame("chat_done", message_id="asst-2")
+    frame("agent_state", state="idle")
+    frame("chat_delta", message_id="asst-3", content="C speaks. ")
+    frame("chat_done", message_id="asst-3")
+    frame("agent_state", state="idle")
+    reply_c = await tap.find(S, message_id="asst-3")
+    assert reply_c is not None and _texts(reply_c) == "C speaks. " and reply_c.ended == "complete"
