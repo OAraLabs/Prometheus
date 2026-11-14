@@ -22,6 +22,9 @@ from prometheus.speech import voice as voice_mod
 from prometheus.speech.voice import SENTENCES, Voice, VoiceUnavailable
 from tests.support.fake_voice_box import FakeVoiceBox
 
+# Note on the fake: a `status` override answers before routing and auth, so a test can make the box refuse or reject
+# one route outright (a 401 on speech with a good key, say), which a real box does only when misconfigured.
+
 KEY_ENV = "PROMETHEUS_SPEECH_TEST_KEY"
 KEY = "speech-test-key-" + "x" * 12
 URL = "http://127.0.0.1:8003"
@@ -207,26 +210,11 @@ class TestHealth:
         box.key = "another-key"
         assert _run(v.status())["tts"] == {"configured": True, "state": "down", "reason": "refused"}
 
-    def test_rejected_is_not_cleared_by_a_good_check(self, box, clock):
-        v = _voice(_cfg("tts"), clock)
-        box.status["/v1/audio/speech"] = (400, b"unknown voice")
-        _unavailable(v.synthesize("Hi."))
-        clock.now += 31
-        assert _run(v.status())["tts"] == {"configured": True, "state": "down", "reason": "rejected"}
-
-    def test_rejected_refuses_for_30_seconds_then_lets_a_call_try(self, box, clock):
-        v = _voice(_cfg("tts"), clock)
-        box.status["/v1/audio/speech"] = (400, b"unknown voice")
-        _unavailable(v.synthesize("Hi."))
-        assert _unavailable(v.ready("tts")).reason == "rejected"
-        clock.now += 31
-        _run(v.ready("tts"))
-
     def test_a_good_call_clears_any_down_state(self, box, clock):
         v = _voice(_cfg("tts"), clock)
-        box.status["/v1/audio/speech"] = (400, b"unknown voice")
+        box.key = "another-key"
         _unavailable(v.synthesize("Hi."))
-        del box.status["/v1/audio/speech"]
+        box.key = KEY
         _run(v.synthesize("Hi."))
         assert _run(v.status())["tts"]["state"] == "ok"
 
@@ -371,7 +359,7 @@ class TestReviewFixes:
 
             v._probe = slow_probe  # type: ignore[method-assign]
             checking = asyncio.ensure_future(v.status())
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
             clock.now += 1
             box.key = "another-key"
             with pytest.raises(VoiceUnavailable):
@@ -382,17 +370,6 @@ class TestReviewFixes:
 
         _run(race())
         assert v.state("tts") == {"configured": True, "state": "down", "reason": "refused"}
-
-    def test_a_failed_check_keeps_what_a_call_saw(self, box, clock):
-        v = _voice(_cfg("tts"), clock)
-        box.status["/v1/audio/speech"] = (400, b"unknown voice")
-        _unavailable(v.synthesize("Hi."))
-        clock.now += 31
-        box.down = True
-        _run(v.status())
-        box.down = False
-        clock.now += 31
-        assert _run(v.status())["tts"]["reason"] == "rejected"
 
     def test_the_boxes_text_is_one_log_line(self, box, clock, caplog):
         box.status["/v1/audio/speech"] = (400, b"bad voice\nERROR forged line")
@@ -440,3 +417,103 @@ class TestReviewRoundTwo:
     def test_a_key_with_a_line_break_is_refused(self, box, clock, tmp_path, monkeypatch):
         monkeypatch.setenv(KEY_ENV, "first-line\nsecond")
         assert _unavailable(_voice(_cfg("tts"), clock).synthesize("Hi.")).reason == "refused"
+
+
+class TestReviewTwo:
+    """Review 2 of #924."""
+
+    def test_a_rejected_request_never_turns_a_half_off_for_others(self, box, clock):
+        v = _voice(_cfg("stt"), clock)
+        box.status["/v1/audio/transcriptions"] = (413, b"file too large")
+        assert _unavailable(v.transcribe(b"x", "audio/ogg")).reason == "rejected"
+        assert v.state("stt") == {"configured": True, "state": "unknown"}
+        _run(v.ready("stt"))  # the next caller is not refused
+        del box.status["/v1/audio/transcriptions"]
+        assert _run(v.transcribe(b"x", "audio/ogg")) == "hello from the box"
+
+    def test_an_unusable_answer_is_about_that_request(self, box, clock):
+        v = _voice(_cfg("tts"), clock)
+        box.status["/v1/audio/speech"] = (200, b"not audio")
+        assert _unavailable(v.synthesize("Hi.")).reason == "failed"
+        _run(v.ready("tts"))
+
+    def test_a_check_that_began_before_a_good_call_does_not_overwrite_it(self, box, clock):
+        v = _voice(_cfg("tts"), clock)
+
+        async def race():
+            gate = asyncio.Event()
+
+            async def slow_failing_probe(settings):
+                await gate.wait()
+                return "unreachable"
+
+            v._probe = slow_failing_probe  # type: ignore[method-assign]
+            checking = asyncio.ensure_future(v.status())
+            await asyncio.sleep(0.01)  # the check has started (gather starts it a loop turn later)
+            clock.now += 1
+            await v.synthesize("Hi.")  # a good call after the check began
+            gate.set()
+            await checking
+
+        _run(race())
+        assert v.state("tts") == {"configured": True, "state": "ok"}
+        _run(v.ready("tts"))
+
+    def test_a_callers_mime_never_reaches_the_multipart_headers(self, box, clock):
+        _run(_voice(_cfg("stt"), clock).transcribe(b"x", 'audio/ogg\r\nContent-Disposition: form-data; name="model"'))
+        body = box.requests[-1].content
+        assert b"Content-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1" in body
+        assert body.count(b'name="model"') == 1
+        assert b"application/octet-stream" in body
+
+    def test_a_rotated_key_starts_afresh(self, box, clock, tmp_path):
+        v = _voice(_cfg("tts"), clock)
+        box.key = "the-new-key-" + "z" * 12
+        _unavailable(v.synthesize("Hi."))
+        assert _unavailable(v.ready("tts")).reason == "refused"
+        Path(tmp_path / "prom-env").write_text(f"{KEY_ENV}={box.key}\n")
+        _run(v.ready("tts"))
+        assert _run(v.status())["tts"] == {"configured": True, "state": "ok"}
+        assert len(v._health_by) == 1  # the old record was dropped
+
+    def test_a_changed_model_starts_afresh(self, box, clock):
+        cfg = _cfg("tts")
+        v = _voice(cfg, clock)
+        box.key = "another-key"
+        _unavailable(v.synthesize("Hi."))
+        cfg["tts"]["model"] = "tts-2"
+        assert v.state("tts") == {"configured": True, "state": "unknown"}
+
+    def test_a_redirect_is_not_followed(self, clock, monkeypatch):
+        seen = []
+
+        def redirecting(request):
+            seen.append(str(request.url))
+            return httpx.Response(307, headers={"location": "http://elsewhere.invalid/v1/audio/speech"})
+
+        real = httpx.AsyncClient
+        monkeypatch.setattr(voice_mod, "_client", lambda timeout: real(
+            transport=httpx.MockTransport(redirecting), timeout=timeout, follow_redirects=False))
+        assert _unavailable(_voice(_cfg("tts"), clock).synthesize("Hi.")).reason == "unreachable"
+        assert seen == ["http://127.0.0.1:8003/v1/audio/speech"]
+
+    def test_the_real_client_ignores_proxies_and_redirects(self):
+        client = voice_mod._client(httpx.Timeout(1.0))
+        try:
+            assert client.trust_env is False and client.follow_redirects is False
+        finally:
+            _run(client.aclose())
+
+    def test_a_bad_timeout_is_not_configured(self, box, clock):
+        cfg = _cfg("tts")
+        cfg["tts"]["timeout_seconds"] = "fast"
+        v = _voice(cfg, clock)
+        assert not v.configured("tts")
+        assert _unavailable(v.synthesize("Hi.")).reason == "not_configured"
+        assert _run(v.status())["tts"] == {"configured": False}
+
+    def test_a_url_cannot_forge_a_log_line(self, box, clock, caplog):
+        box.down = True
+        with caplog.at_level(logging.WARNING, logger="prometheus.speech.voice"):
+            _unavailable(_voice(_cfg("tts", url="http://127.0.0.1:8003/x\nERROR forged"), clock).synthesize("Hi."))
+        assert all("\n" not in r.getMessage() for r in caplog.records)
