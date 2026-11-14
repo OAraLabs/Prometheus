@@ -918,8 +918,9 @@ def test_an_old_ios_build_cannot_approve_typed_text(rest):
     assert res.status_code == 409, res.text
     assert "desktop or Telegram" in res.json()["error"]
     assert action._result is not ApprovalResult.APPROVED
+    # A desktop prompt is critical: a client that can show the text approves it with the digest it was served.
     res = rest.client.post(f"/api/approvals/{action.request_id}/approve",
-                           json={"scope": "once"},
+                           json={"scope": "once", "digest": rest.rig.channel.digest(action)},
                            headers={**_h(rest.phone["token"]),
                                     "X-Beacon-Caps": "approval-arguments"})
     assert res.status_code == 200, res.text

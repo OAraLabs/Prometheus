@@ -153,9 +153,11 @@ async def test_a_denied_lift_leaves_the_hold(rig):
 async def test_only_a_person_can_approve_a_lift(rig, who):
     await _held_by_token(rig)
     rid = (await rig.put_hold(None)).json()["pending"]["request_id"]
+    # A hold lift is critical: each credential sends the digest it was served, so what refuses is who it is.
+    digest = rig.queue.digest(rig.queue.pending[rid])
     if who == "global-token":
         async with rig.client(GLOBAL) as c:
-            r = await c.post(f"/api/approvals/{rid}/approve", json={"scope": "once"})
+            r = await c.post(f"/api/approvals/{rid}/approve", json={"scope": "once", "digest": digest})
         assert r.status_code in (401, 403) or r.json().get("ok") is False, r.text
     elif who == "held-device":
         async with rig.client(rig.relay["token"]) as c:
@@ -167,7 +169,7 @@ async def test_only_a_person_can_approve_a_lift(rig, who):
         # An owner device is the operator's credential, and its token is minted by a local route a model can
         # reach: it asks like the token does, and is not the approval.
         async with rig.client(rig.owner["token"]) as c:
-            r = await c.post(f"/api/approvals/{rid}/approve", json={"scope": "once"})
+            r = await c.post(f"/api/approvals/{rid}/approve", json={"scope": "once", "digest": digest})
         assert r.status_code in (401, 403) or r.json().get("ok") is False, r.text
     await _settle()
     assert rig.held() == "relay", f"{who} lifted the hold"
@@ -235,8 +237,12 @@ def test_a_full_tools_turn_cannot_lift_a_hold_through_the_api(rig):
                     "method": "PUT", "path": f"/api/devices/{rig.relay['id']}/profile", "body": {"profile": None}})]
             elif self.round == 2:
                 rid = replies[-1].json().get("pending", {}).get("request_id", "none")
+                # It fetched the request first (GET /api/approvals), so it sends the digest it was served: what
+                # refuses is the person check, not a missing digest (#925 review).
+                digest = rig.queue.digest(rig.queue.pending[rid]) if rid in rig.queue.pending else ""
                 content = [ToolUseBlock(id="t2", name="curl", input={
-                    "method": "POST", "path": f"/api/approvals/{rid}/approve", "body": {"scope": "once"}})]
+                    "method": "POST", "path": f"/api/approvals/{rid}/approve",
+                    "body": {"scope": "once", "digest": digest}})]
             else:
                 content = [TextBlock(text="done")]
             yield ApiMessageCompleteEvent(

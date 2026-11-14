@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import hmac
+import json
 import logging
+import secrets
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -392,6 +396,12 @@ def _humanise_window(seconds) -> str:
     return f"{int(seconds)} s"
 
 
+#: The key :meth:`ApprovalQueue.digest` is keyed with: one per daemon process, never stored, never sent. Every
+#: digest is made and checked in the daemon process (worker children never compute one); a route that ever moved
+#: out of it would need this key shared with it.
+_DIGEST_KEY = secrets.token_bytes(32)
+
+
 class ApprovalQueue:
     """Manages pending LEVEL 1 approval requests via Telegram.
 
@@ -556,6 +566,9 @@ class ApprovalQueue:
             # Answer in the app, never from a notification (permissions/critical.py). Computed HERE, once, so the
             # REST list, the approval_pending frame and the push cannot disagree.
             "critical": is_critical(action),
+            # What approving a critical request must echo back (``digest``). The push builds its own narrow body
+            # and never carries it.
+            "digest": self.digest(action),
             # Already redacted and truncated (see PendingAction.arguments).
             # None means "this call had no arguments worth showing", which is
             # different from {} and Beacon may render the difference.
@@ -607,6 +620,33 @@ class ApprovalQueue:
         constant-reading surface confidently wrong.
         """
         return self._timeout
+
+    def digest(self, action: PendingAction) -> str:
+        """HMAC-SHA256 over exactly what a client is shown of *action*: its id, tool, description, arguments view,
+        created and expiry times and critical flag (Beacon iOS item 3).
+
+        An HMAC under a key minted per daemon process (requests do not outlive the process either), so it cannot be
+        rebuilt from a push and a guess: served with the request wherever it is served (``serialize_pending``),
+        never in a push, and left out of the stored copy of the frame, so a client holds it only by fetching the
+        request. Never raises (an odd character or key in the arguments still digests). Approving a CRITICAL request needs it (the REST approve route): that proves
+        the client fetched this exact request, not that a person read it in the app. The derived ``extents`` are
+        left out on purpose: they can change with the grants while the request waits, and nothing approved depends
+        on the client having seen them.
+        """
+        shown = {
+            "request_id": action.request_id,
+            "tool_name": action.tool_name,
+            "description": action.description,
+            "arguments": action.arguments,
+            "created_at": action.created_at,
+            "expires_at": self.expires_at(action),
+            "critical": is_critical(action),
+        }
+        try:
+            canonical = json.dumps(shown, sort_keys=True, separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            canonical = repr(shown)                       # keys sort_keys cannot order: still fixed per request
+        return hmac.new(_DIGEST_KEY, canonical.encode("utf-8", "backslashreplace"), hashlib.sha256).hexdigest()
 
     def expires_at(self, action: PendingAction) -> float:
         """Epoch seconds at which this request's window closes.
@@ -1113,6 +1153,9 @@ class ApprovalQueues:
 
     def expires_at(self, action: PendingAction) -> float:
         return self._for(action).expires_at(action)
+
+    def digest(self, action: PendingAction) -> str:
+        return self._for(action).digest(action)
 
     async def approve(self, request_id: str, *, by: Approver,
                       scope: str | None = None, grant=None) -> bool:
