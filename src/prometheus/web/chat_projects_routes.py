@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -461,7 +462,10 @@ def register_chat_projects_routes(
         return _err(500, "io_error", "the file could not be read or written")
 
     async def _changed(change: str, project_id: str) -> None:
-        service.store().touch()  # a real rev move, so a client that follows rev re-reads
+        try:
+            service.store().touch()  # a real rev move, so a client that follows rev re-reads
+        except Exception:  # noqa: BLE001 - the change is saved; a missed rev is a missed hint, never a failed save
+            logger.warning("chat project %s: rev not raised after a %s change", project_id, change, exc_info=True)
         await service.notify(change, project_id)
 
     @app.get("/api/chat-projects/{project_id}/instructions", response_model=None)
@@ -525,6 +529,7 @@ def register_chat_projects_routes(
 
     @app.get("/api/chat-projects/{project_id}/files/{name}", response_model=None)
     async def get_file(project_id: str, name: str, request: Request) -> Any:
+        name = unicodedata.normalize("NFC", name)  # a Mac file picker may hand over the decomposed form
         import mimetypes
 
         p = _project_or_refusal(request, project_id)
@@ -547,6 +552,7 @@ def register_chat_projects_routes(
 
     @app.put("/api/chat-projects/{project_id}/files/{name}", response_model=None)
     async def put_file(project_id: str, name: str, request: Request, replace: str | None = None) -> Any:
+        name = unicodedata.normalize("NFC", name)  # a Mac file picker may hand over the decomposed form
         p = _project_or_refusal(request, project_id)
         if isinstance(p, JSONResponse):
             return p
@@ -579,6 +585,7 @@ def register_chat_projects_routes(
 
     @app.delete("/api/chat-projects/{project_id}/files/{name}", response_model=None)
     async def delete_file(project_id: str, name: str, request: Request) -> Any:
+        name = unicodedata.normalize("NFC", name)  # a Mac file picker may hand over the decomposed form
         p = _project_or_refusal(request, project_id)
         if isinstance(p, JSONResponse):
             return p

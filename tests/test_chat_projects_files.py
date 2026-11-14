@@ -387,3 +387,10 @@ def test_the_prompt_note_keeps_non_ascii_names_readable(world):
     (ref / "café.pdf").write_bytes(b"x")
     section = reference_section(p["folder"])
     assert '"café.pdf"' in section and section.startswith("# Reference files")
+
+
+def test_a_decomposed_name_is_stored_composed(world):
+    p = world.project()
+    r = world.call("op", "PUT", f"/api/chat-projects/{p['id']}/files/Cafe\u0301.txt", content=b"x")
+    assert r.status_code == 200 and r.json()["file"]["name"] == "Café.txt"
+    assert world.call("op", "GET", f"/api/chat-projects/{p['id']}/files/Cafe\u0301.txt").content == b"x"
