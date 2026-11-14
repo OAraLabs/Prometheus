@@ -609,6 +609,8 @@ class CuaDriverAdapter:
         self._unusable.pop(key, None)
         if why:
             self._dropped[key] = why
+        else:
+            self._dropped.pop(key, None)  # dropped for another reason: no old story outlives it
 
     def _assert_target(self, target: str) -> None:
         """Refuse an action labelled for another machine.
