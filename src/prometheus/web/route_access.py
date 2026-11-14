@@ -240,6 +240,7 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     # /api/projects
     ("GET", "/api/projects"),
     ("POST", "/api/chat-projects"),
+    ("GET", "/api/chat-project-suggestions"),
     ("PUT", "/api/chat-projects/{project_id}"),
     ("DELETE", "/api/chat-projects/{project_id}"),
     ("PUT", "/api/sessions/{session_id}/project"),

@@ -149,3 +149,12 @@ def test_suggestions_name_the_project_id():
     calls = [call(f"{KITCHEN.folder}/a"), call(f"{KITCHEN.folder}/b"), call(f"{KITCHEN.folder}/c")]
     hint = suggest(tally(calls, known=[KITCHEN], root=ROOT))
     assert hint is not None and hint.key == KITCHEN.id and hint.label == KITCHEN.name
+
+
+def test_a_project_folder_outside_home_is_still_found():
+    outside = KnownFolder(id="cp_cccccccccccc", name="Shared", folder="/srv/projects/shared")
+    calls = [call("/srv/projects/shared/a"), call("/srv/projects/shared/b"), call("/srv/projects/shared/c")]
+    hint = suggest(tally(calls, known=[outside], root="/srv/projects"))
+    assert hint is not None and hint.key == outside.id
+    assert projects_in_tool_input(json.dumps({"path": "/srv/projects/garden/x"}), root="/srv/projects") == [
+        ("garden", "garden")]

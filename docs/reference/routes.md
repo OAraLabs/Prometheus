@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 136 paths
+## Daemon app — 137 paths
 
 | Path | Methods |
 |---|---|
@@ -26,6 +26,7 @@ one is the explanation.
 | `/api/backends/{name}/probe` | POST |
 | `/api/benchmarks/run` | POST |
 | `/api/chat` | POST |
+| `/api/chat-project-suggestions` | GET |
 | `/api/chat-projects` | GET, POST |
 | `/api/chat-projects/{project_id}` | DELETE, GET, PUT |
 | `/api/chat/interrupt` | POST |

@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse
 from prometheus.memory.session_kind import is_machine_session
 from prometheus.projects.content import instructions_info, reference_names
 from prometheus.projects.folders import make_managed_folder, projects_root
+from prometheus.projects.suggest import KnownFolder, suggest, tally
 from prometheus.projects.store import (
     FolderInUse,
     ImportKeyTaken,
@@ -48,6 +49,9 @@ from prometheus.projects.store import (
 logger = logging.getLogger(__name__)
 
 _BODY_CAP = 64 * 1024
+#: Suggestions are computed for at most this many unfiled conversations, the most recently active.
+SUGGEST_SESSIONS = 200
+_SUGGEST_CACHE_MAX = 2000
 _IMPORT_KEY = re.compile(r"[\x21-\x7e]{1,200}")
 
 
@@ -84,6 +88,9 @@ class ChatProjectsService:
         self._conversation_store = conversation_store
         self._devices = devices
         self._session_exists = session_exists
+        # (session_id, its newest rowid, the projects rev) -> the suggestion, or None. An unchanged conversation is
+        # not read again; a new message or any project change makes a new key.
+        self._suggest_cache: dict[tuple[str, int, int], dict[str, Any] | None] = {}
 
     def store(self) -> Any:
         conv = self._conversation_store()
@@ -203,6 +210,65 @@ class ChatProjectsService:
         await self.notify("membership", project_id, session_id)
         return {"ok": True, "session_id": session_id, "chat_project_id": project_id, "workspace": result.workspace}
 
+    # ------------------------------------------------------------ suggestions
+    def suggestions(self) -> dict[str, Any]:
+        """The suggestion for each recent unfiled conversation (design 3.6). Owner only; the route checks."""
+        conv = self._conversation_store()
+        store = self.store()
+        if conv is None or store is None:
+            return {"suggestions": {}, "rev": 0}
+        projects = store.all()
+        known = [KnownFolder(p.id, p.name, p.folder) for p in projects]
+        root = str(projects_root(self._config))
+        rev = store.rev()
+        devices = self._devices()
+        owners = devices.owner_device_ids() if devices is not None else set()
+        rows = sorted(conv.list_sessions(), key=lambda r: r.get("last_timestamp") or 0.0, reverse=True)
+        filed = store.projects_of(r["session_id"] for r in rows)
+        out: dict[str, Any] = {}
+        considered = 0
+        for row in rows:
+            sid = row["session_id"]
+            if sid in filed or is_machine_session(sid):
+                continue
+            owner = devices.session_owner(sid) if devices is not None else None
+            if owner and owner not in owners:
+                continue  # a chat-only device's conversation: filing it takes the owner's explicit flag
+            considered += 1
+            if considered > SUGGEST_SESSIONS:
+                break
+            key = (sid, int(row.get("watermark") or 0), rev)
+            if key not in self._suggest_cache:
+                if len(self._suggest_cache) >= _SUGGEST_CACHE_MAX:
+                    self._suggest_cache.clear()
+                self._suggest_cache[key] = self._suggest_one(conv, sid, known, root, projects)
+            hint = self._suggest_cache[key]
+            if hint is not None:
+                out[sid] = hint
+        return {"suggestions": out, "rev": rev}
+
+    @staticmethod
+    def _suggest_one(conv: Any, sid: str, known: list[KnownFolder], root: str,
+                     projects: list[Project]) -> dict[str, Any] | None:
+        hint = suggest(tally(_tool_inputs(conv, sid), known=known, root=root))
+        if hint is None:
+            return None
+        project = None
+        by_id = {p.id: p for p in projects}
+        if hint.key in by_id:
+            project = by_id[hint.key]
+        else:
+            from prometheus.projects.store import fold_name
+
+            wanted = fold_name(hint.label)
+            for p in projects:
+                folder_key = Path(p.folder).name.lower()
+                if folder_key == hint.key or fold_name(p.name) == wanted:
+                    project = p
+                    break
+        return {"key": hint.key, "label": hint.label, "share": hint.share, "calls": hint.calls,
+                "project": {"id": project.id, "name": project.name} if project is not None else None}
+
     async def notify(self, change: str, project_id: str | None, session_id: str | None = None) -> None:
         """``chat_project_changed`` to owner sockets only (ids and a change kind)."""
         bridge = getattr(self._app.state, "ws_bridge", None)
@@ -215,6 +281,30 @@ class ChatProjectsService:
                 "rev": store.rev(), "project_id": project_id, "change": change, "session_id": session_id}})
         except Exception:  # noqa: BLE001 - a frame is a hint; clients refetch on refresh
             logger.debug("chat_project_changed not sent", exc_info=True)
+
+
+def _tool_inputs(conv: Any, session_id: str) -> list[str]:
+    """Each tool call's input in *session_id*, as JSON text (the desktop's evidence: ``tool_use`` blocks on assistant
+    rows). A row whose ``content_json`` is not usable is skipped."""
+    out: list[str] = []
+    for msg in conv.get_all_messages(session_id):
+        if getattr(msg, "role", None) != "assistant" or not getattr(msg, "content_json", None):
+            continue
+        try:
+            blocks = json.loads(msg.content_json)
+        except (ValueError, RecursionError, TypeError):
+            continue
+        if isinstance(blocks, dict):
+            blocks = blocks.get("content")
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if isinstance(block, dict) and block.get("type") == "tool_use" and "input" in block:
+                try:
+                    out.append(json.dumps(block["input"], ensure_ascii=False))
+                except (TypeError, ValueError, RecursionError):
+                    continue
+    return out
 
 
 def _remove_empty(folder: Path) -> None:
@@ -266,6 +356,14 @@ def register_chat_projects_routes(
             if v.id == project_id:
                 return {"id": v.id, "name": v.name, "session_ids": v.own_session_ids}
         return _err(404, "unknown_project", "no such project")
+
+    @app.get("/api/chat-project-suggestions", response_model=None)
+    async def chat_project_suggestions(request: Request) -> Any:
+        # Its own path: under /api/chat-projects/ it would match the chat-only {project_id} pattern.
+        refusal = _refuse(request)
+        if refusal is not None:
+            return refusal
+        return service.suggestions()
 
     @app.post("/api/chat-projects", response_model=None)
     async def create_chat_project(request: Request) -> Any:
