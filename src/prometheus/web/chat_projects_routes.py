@@ -50,6 +50,8 @@ from prometheus.projects.store import (
 logger = logging.getLogger(__name__)
 
 _BODY_CAP = 64 * 1024
+#: The most one reference-file upload may take to arrive.
+_UPLOAD_SECONDS = 300
 #: Suggestions are computed for at most this many unfiled conversations, the most recently active.
 SUGGEST_SESSIONS = 200
 _SUGGEST_CACHE_MAX = 2000
@@ -554,10 +556,15 @@ def register_chat_projects_routes(
             return _err(400, "bad_request", "replace is true or false")
         async with _uploads:
             body = bytearray()
-            async for chunk in request.stream():
-                body.extend(chunk)
-                if len(body) > _content.MAX_FILE_BYTES:
-                    return _err(413, "too_large", f"at most {_content.MAX_FILE_BYTES} bytes")
+            try:
+                # A stalled upload must not hold one of the two slots for ever.
+                async with asyncio.timeout(_UPLOAD_SECONDS):
+                    async for chunk in request.stream():
+                        body.extend(chunk)
+                        if len(body) > _content.MAX_FILE_BYTES:
+                            return _err(413, "too_large", f"at most {_content.MAX_FILE_BYTES} bytes")
+            except TimeoutError:
+                return _err(408, "timeout", f"the upload did not finish within {_UPLOAD_SECONDS} seconds")
             try:
                 info = await asyncio.to_thread(_content.write_reference, p.folder, name, body,
                                                replace=replace == "true")

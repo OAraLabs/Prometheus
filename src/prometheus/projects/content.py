@@ -238,7 +238,8 @@ def effective_files(folder: str | Path, config: dict | None = None) -> list[dict
     for i, (path, _label) in enumerate(found):
         entry: dict = {"path": str(path)}
         try:
-            chars = len(path.read_bytes()[:MAX_INSTRUCTIONS_BYTES + 1].decode("utf-8", "replace"))
+            with open(path, "rb") as fh:  # the loader follows links too; read at most the cap, never the whole file
+                chars = len(fh.read(MAX_INSTRUCTIONS_BYTES + 1).decode("utf-8", "replace"))
         except OSError:
             chars = 0
         entry["chars"] = chars
@@ -266,7 +267,6 @@ MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_FILES = 200
 PROMPT_NAMES = 50
 PROMPT_CHARS = 2000
-PROMPT_NAME_CHARS = 200
 _STALE_UPLOAD_SECONDS = 3600
 
 
@@ -433,7 +433,7 @@ def reference_section(folder: str | Path) -> str:
     shown: list[str] = []
     used = 0
     for name in names[:PROMPT_NAMES]:
-        quoted = json_quote(name if len(name) <= PROMPT_NAME_CHARS else name[:PROMPT_NAME_CHARS] + "…")
+        quoted = json_quote(name)  # names are at most 120 characters
         if used + len(quoted) > PROMPT_CHARS:
             break
         shown.append(quoted)
