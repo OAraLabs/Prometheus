@@ -396,7 +396,9 @@ def _humanise_window(seconds) -> str:
     return f"{int(seconds)} s"
 
 
-#: The key :meth:`ApprovalQueue.digest` is keyed with: one per daemon process, never stored, never sent.
+#: The key :meth:`ApprovalQueue.digest` is keyed with: one per daemon process, never stored, never sent. Every
+#: digest is made and checked in the daemon process (worker children never compute one); a route that ever moved
+#: out of it would need this key shared with it.
 _DIGEST_KEY = secrets.token_bytes(32)
 
 
@@ -620,7 +622,7 @@ class ApprovalQueue:
         return self._timeout
 
     def digest(self, action: PendingAction) -> str:
-        """sha256 over exactly what a client is shown of *action*: its id, tool, description, arguments view,
+        """HMAC-SHA256 over exactly what a client is shown of *action*: its id, tool, description, arguments view,
         created and expiry times and critical flag (Beacon iOS item 3).
 
         An HMAC under a key minted per daemon process (requests do not outlive the process either), so it cannot be
