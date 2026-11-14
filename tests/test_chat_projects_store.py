@@ -283,3 +283,69 @@ class TestBindingsNameTheirProject:
         store.file("s1", a.id)
         row = conv._conn.execute("SELECT set_by FROM session_workspaces WHERE session_id = 's1'").fetchone()
         assert row[0] == f"project:{a.id}"
+
+
+class TestReviewFixes:
+    """Review of #932."""
+
+    def test_a_hand_set_workspace_on_the_folder_is_not_taken_over(self, store, conv, tmp_path):
+        a = store.insert("A", _folder(tmp_path, "a"), managed=False)
+        conv.set_session_workspace("s1", a.folder, set_by="rest")
+        store.file("s1", a.id)
+        store.file("s1", None)
+        assert conv.get_session_workspace("s1") == a.folder  # still the owner's hand-set binding
+
+    def test_a_failed_write_never_rolls_back_other_work_on_the_connection(self, store, conv):
+        conv._conn.execute("INSERT INTO session_pins (session_id, pinned_at) VALUES ('kept', 1.0)")
+        with pytest.raises(UnknownProject):
+            store.rename("cp_000000000000", "X")
+        conv._conn.commit()
+        assert conv.is_session_pinned("kept")
+
+    def test_building_the_store_commits_nothing_of_anyone_elses(self, tmp_path):
+        conv = LCMConversationStore(tmp_path / "fresh.db")
+        conv._conn.execute("INSERT INTO session_pins (session_id, pinned_at) VALUES ('pending', 1.0)")
+        conv.chat_projects()
+        conv._conn.rollback()
+        assert not conv.is_session_pinned("pending")
+
+    def test_forgetting_a_filed_session_raises_rev(self, conv, store, tmp_path):
+        p = store.insert("A", _folder(tmp_path, "a"), managed=False)
+        store.file("s1", p.id)
+        before = store.rev()
+        conv.purge_session("s1")
+        assert store.rev() > before
+
+    def test_an_import_key_collision_is_its_own_error(self, store, tmp_path):
+        from prometheus.projects.store import ImportKeyTaken
+
+        store.insert("A", _folder(tmp_path, "a"), managed=False, import_key="k1")
+        with pytest.raises(ImportKeyTaken):
+            store.insert("B", _folder(tmp_path, "b"), managed=False, import_key="k1")
+
+    @pytest.mark.parametrize("twin", ["Café", "Ca​fé", "CAFÉ"])
+    def test_names_that_look_the_same_are_the_same(self, store, tmp_path, twin):
+        store.insert("Café", _folder(tmp_path, "a"), managed=False)
+        with pytest.raises(NameTaken):
+            store.insert(twin, _folder(tmp_path, "b"), managed=False)
+
+    def test_an_existing_root_keeps_its_mode(self, tmp_path):
+        root = tmp_path / "code"
+        root.mkdir(mode=0o755)
+        os.chmod(root, 0o755)
+        made = make_managed_folder(root, "X")
+        assert stat.S_IMODE(os.stat(root).st_mode) == 0o755
+        assert stat.S_IMODE(os.stat(made).st_mode) == 0o700
+
+    def test_a_symlinked_root_is_refused(self, tmp_path):
+        target = tmp_path / "real"
+        target.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(target)
+        with pytest.raises(ValueError):
+            make_managed_folder(link, "X")
+        assert list(target.iterdir()) == []
+
+    def test_the_folder_returned_is_resolved(self, tmp_path):
+        made = make_managed_folder(tmp_path / "r", "X")
+        assert made == made.resolve()
