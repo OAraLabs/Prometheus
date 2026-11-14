@@ -59,6 +59,10 @@ _ABBREVIATIONS = frozenset({"e.g", "i.e", "mr", "mrs", "ms", "dr", "vs", "st"})
 #: A bare URL longer than a phrase is still one phrase (it speaks as "link"), up to this length.
 URL_MAX = 2000
 _URL_START = re.compile(r"https?://")
+_SPACE = re.compile(r"\s")
+#: A fence run still growing at the end of the buffer is waited on only up to this length (a model looping on
+#: backticks must not make every delta rescan a longer run).
+RUN_WAIT_MAX = 64
 
 _SPEAKABLE = (
     (re.compile(r"^\s*([-*_=])(?:\s*\1){2,}\s*$", re.M), ""),              # a rule line
@@ -96,10 +100,8 @@ class Phrase:
 
 def _run_end(buf: str, at: int) -> int:
     """Where the run of ``buf[at]`` starting at *at* ends."""
-    end = at
-    while end < len(buf) and buf[end] == buf[at]:
-        end += 1
-    return end
+    rest = buf[at:]
+    return at + len(rest) - len(rest.lstrip(rest[0]))
 
 
 class PhraseCutter:
@@ -132,10 +134,12 @@ class PhraseCutter:
         self._spoken = 0        # characters spoken so far
         self._emitted = 0       # phrases spoken so far (drives the first-phrase rule)
         self._after_code = False
+        self._last_raw = ""
         # Inside an open fence: (fence character, opening run length, where the fence starts).
         self._fence: tuple[str, int, int] | None = None
-        # (end, spoken characters, is code) of each phrase given out, so a discard can take back what it drops.
-        self._ledger: list[tuple[int, int, bool]] = []
+        # (start, end, spoken characters, is code, raw text) of each phrase given out, so a discard can take back what
+        # it drops and give back the kept part of a phrase it cuts through.
+        self._ledger: list[tuple[int, int, int, bool, str]] = []
 
     @property
     def released(self) -> int:
@@ -187,11 +191,14 @@ class PhraseCutter:
         characters no longer count toward the cap, and a cap reached past *keep_chars* is lifted.
         """
         keep_chars = max(0, keep_chars)
-        while self._ledger and self._ledger[-1][0] > keep_chars:
-            _end, spoken, _code = self._ledger.pop()
+        straddled: tuple[int, str] | None = None
+        while self._ledger and self._ledger[-1][1] > keep_chars:
+            start, _end, spoken, code, raw = self._ledger.pop()
             self._spoken -= spoken
             self._emitted -= 1
-        self._after_code = bool(self._ledger) and self._ledger[-1][2]
+            if start < keep_chars and not code:
+                straddled = (start, raw[: keep_chars - start])
+        self._after_code = bool(self._ledger) and self._ledger[-1][3]
         if self.truncated:
             if keep_chars >= self._trunc_at:
                 return
@@ -202,6 +209,9 @@ class PhraseCutter:
             return
         if keep_chars >= self._base:
             self._buf = self._buf[: keep_chars - self._base]
+        elif straddled is not None and straddled[1].strip():
+            # A phrase given out ran past keep_chars: the client drops it, so its kept part is cut again.
+            self._base, self._buf = straddled
         else:
             # Phrases past keep_chars were already given out; the caller drops the ones it has not sent.
             self._buf = ""
@@ -226,7 +236,7 @@ class PhraseCutter:
             fence = _FENCE_RUN.search(window)
             if fence is not None and fence.start() == 0:
                 run = _run_end(self._buf, 0)
-                if run == len(self._buf):
+                if run == len(self._buf) and run < RUN_WAIT_MAX:
                     break  # the opening run may still be growing
                 self._fence = (self._buf[0], run, self._base)
                 self._buf = self._buf[run:]
@@ -249,6 +259,11 @@ class PhraseCutter:
             self._base += drop
             return None
         end = _run_end(self._buf, at)
+        if end == len(self._buf) and end - at < RUN_WAIT_MAX:
+            # The closing run may still be growing; a longer run is still one closer. finish() closes it.
+            self._buf = self._buf[at:]
+            self._base += at
+            return None
         self._buf = self._buf[end:]
         self._base += end
         self._fence = None
@@ -307,10 +322,9 @@ class PhraseCutter:
                 return i + 1
         if _URL_START.match(self._buf):
             # One long URL: one phrase, which speaks as "link", rather than its characters read out.
-            limit = self._buf[:URL_MAX + 1]
-            space = next((i for i, ch in enumerate(limit) if ch.isspace()), -1)
-            if space > 0:
-                return space
+            space = _SPACE.search(self._buf, 0, URL_MAX + 1)
+            if space is not None:
+                return space.start()
             if len(self._buf) <= URL_MAX:
                 return None  # the URL is still arriving
         return self.max_chars
@@ -325,6 +339,7 @@ class PhraseCutter:
         if not text:
             return []
         self._after_code = False
+        self._last_raw = raw
         return self._spend(Phrase(start, start + len(raw), text))
 
     def _code(self, start: int, end: int) -> list[Phrase]:
@@ -344,5 +359,6 @@ class PhraseCutter:
             return [Phrase(phrase.start, phrase.start, TOO_LONG)]
         self._spoken += len(phrase.text)
         self._emitted += 1
-        self._ledger.append((phrase.end, len(phrase.text), phrase.code))
+        raw = "" if phrase.code else self._last_raw
+        self._ledger.append((phrase.start, phrase.end, len(phrase.text), phrase.code, raw))
         return [phrase]
