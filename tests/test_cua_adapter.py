@@ -886,6 +886,8 @@ def test_an_action_result_with_an_error_is_a_failed_action_with_its_text(adapter
         a.act("click", _args())
     text = str(exc.value)
     assert "target_not_actionable" in text and "the element is disabled" in text
+    assert "clicked nothing" not in text  # summary can read back window content: never in the reason
+    assert "may have partly landed" in text  # CONFIRMED with an error: say it may have landed
     assert sum(name == "click" for name, _ in fake.calls) == 1  # no automatic retry
 
 
@@ -908,3 +910,43 @@ def test_a_real_action_result_with_an_error_is_a_failed_action(real_sdk):
     with pytest.raises(DriverUnavailable) as exc:
         cua._verdict("click", result, _args())
     assert "policy_denied" in str(exc.value) and "ask the owner" in str(exc.value)
+
+
+def test_a_stale_token_error_is_a_stale_snapshot(adapter):
+    a, fake = adapter(_window_state())
+    fake.result = _action_result(_Effect.REFUSED, error=_rec(code="stale_element_token", hint=None))
+    a.observe("mini", "scratch", 1, 2)
+    with pytest.raises(StaleSnapshot):
+        a.act("click", _args())
+
+
+def test_a_refused_error_says_it_did_not_land(adapter):
+    a, fake = adapter(_window_state())
+    fake.result = _action_result(_Effect.REFUSED, error=_rec(code="policy_denied", hint="request_permission"))
+    a.observe("mini", "scratch", 1, 2)
+    with pytest.raises(DriverUnavailable) as exc:
+        a.act("click", _args())
+    assert "did not land" in str(exc.value) and "request_permission" in str(exc.value)
+
+
+def test_the_fake_action_error_mirrors_the_real_one(real_sdk):
+    from cua_driver._native_contract import ActionError
+
+    assert set(vars(_rec(code="c", hint=None))) == _params(ActionError)
+
+
+def test_a_real_tool_result_whose_action_has_an_error(real_sdk):
+    from cua_driver._native_contract import ActionError
+
+    action = _real_action(real_sdk, "CONFIRMED", error=ActionError(code="focus_lost", hint=None))
+    with pytest.raises(DriverUnavailable) as exc:
+        cua._verdict("press_key", _real_tool_result(action), _args(key="return"))
+    assert "focus_lost" in str(exc.value)
+
+
+def test_a_real_stale_token_error_is_a_stale_snapshot(real_sdk):
+    from cua_driver._native_contract import ActionError
+
+    action = _real_action(real_sdk, "REFUSED", error=ActionError(code="stale_element_token", hint=None))
+    with pytest.raises(StaleSnapshot):
+        cua._verdict("click", action, _args())
