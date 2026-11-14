@@ -30,12 +30,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
+import logging
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
 from prometheus.speech.phrases import Phrase, PhraseCutter
-from prometheus.speech.voice import VoiceUnavailable
+from prometheus.speech.voice import SENTENCES, VoiceUnavailable
+
+logger = logging.getLogger(__name__)
 
 VERSION = 1
 MIME = "audio/wav"
@@ -79,6 +81,13 @@ async def speak(
             work.put_nowait((phrase, generation))
 
     async def cut() -> None:
+        try:
+            await _cut()
+        except Exception:  # noqa: BLE001 - a broken source must still end the stream
+            logger.warning("speech: the reply's source failed", exc_info=True)
+            out.put_nowait({"type": "done", "reason": "ended"})
+
+    async def _cut() -> None:
         nonlocal generation
         events = source.__aiter__()
         while True:
@@ -109,6 +118,16 @@ async def speak(
                 return
 
     async def synthesize() -> None:
+        try:
+            await _synthesize()
+        except Exception:  # noqa: BLE001 - an unexpected voice error must still end the stream, said as unusable
+            logger.warning("speech: synthesis failed unexpectedly", exc_info=True)
+            out.put_nowait({"type": "done", "reason": "unavailable", "voice": "failed",
+                            "message": SENTENCES["failed"], "resume_at": current["start"]})
+
+    current = {"start": 0}
+
+    async def _synthesize() -> None:
         index = 0
         while True:
             item = await work.get()
@@ -121,6 +140,7 @@ async def speak(
             phrase, gen = item
             if dropped(phrase, gen):
                 continue
+            current["start"] = phrase.start
             try:
                 audio = await voice.synthesize(phrase.text)
             except VoiceUnavailable as exc:
@@ -151,7 +171,7 @@ async def speak(
                 if line["type"] == "done":
                     return
             elif stop is not None and stop in finished:
-                yield {"type": "done", "reason": stop.result()}
+                yield {"type": "done", "reason": "ended" if stop.cancelled() else stop.result()}
                 return
             else:
                 yield {"type": "keepalive"}
@@ -160,6 +180,5 @@ async def speak(
             getter.cancel()
         for task in tasks:
             task.cancel()
-        for task in tasks:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        # gather collects every task's ending; a cancel aimed at this generator's own task still propagates.
+        await asyncio.gather(*tasks, return_exceptions=True)

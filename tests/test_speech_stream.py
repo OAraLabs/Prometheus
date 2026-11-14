@@ -214,3 +214,38 @@ async def test_a_client_that_goes_away_stops_synthesis(box, voice):
     await q.put(("text", "Two. Three. "))
     await asyncio.sleep(0.05)
     assert len(box.spoken) == spoken
+
+
+# --------------------------------------------------------------------------- review of #926
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_voice_error_still_ends_the_stream():
+    class Broken:
+        async def synthesize(self, text):
+            raise RuntimeError("a bug")
+
+    lines = await asyncio.wait_for(_collect(speak(text_source("Hello there. Bye."), Broken(), keepalive=0.05)), 2)
+    assert lines[-1] == {"type": "done", "reason": "unavailable", "voice": "failed",
+                         "message": "The voice server sent an answer that could not be used.", "resume_at": 0}
+
+
+@pytest.mark.asyncio
+async def test_a_source_that_raises_still_ends_the_stream(voice, box):
+    async def broken():
+        yield ("text", "Some ")
+        raise RuntimeError("source bug")
+
+    lines = await asyncio.wait_for(_collect(speak(broken(), voice, keepalive=0.05)), 2)
+    assert lines[-1] == {"type": "done", "reason": "ended"}
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_stop_ends_the_stream(box, voice):
+    q: asyncio.Queue = asyncio.Queue()
+    stop: asyncio.Future = asyncio.get_running_loop().create_future()
+    gen = speak(_queue_source(q), voice, stop=stop)
+    await gen.__anext__()
+    stop.cancel()
+    rest = [x async for x in gen]
+    assert rest[-1] == {"type": "done", "reason": "ended"}

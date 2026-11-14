@@ -14,7 +14,13 @@ A reply is a turn. Turns in a session run one at a time (the bridge holds a per-
   ``(session_id, message_id)``: ids are ``asst-<milliseconds>`` and can repeat across sessions;
 * it **ends** on its own ``chat_done`` (``interrupted`` or ``complete``), an ``error`` for the session (``failed``),
   or the count reaching zero (``ended``, or ``no_reply`` for a reply that never bound);
-* a frame while no turn is open is not a reply, and neither is a ``computer:`` id (a desktop task's ``chat_done``).
+* a frame while no turn is open is not a reply, and neither is a ``computer:`` id (a desktop task's ``chat_done``) nor
+  a desktop task's step (``tool_call_start`` with ``inputs.origin == "user_task"``);
+* a turn that ended but has not sent its ``idle`` yet is not open (the bridge still pushes and titles in between);
+* at most :data:`TEXT_KEEP` characters of a reply's text are kept.
+
+The tap must be registered when the bridge is made (the launcher does): a turn already running when it starts would
+be misread.
 
 A reply's ``events`` are ``("reply", message_id)``, ``("text", str)``, ``("boundary", None)`` (a tool call started),
 ``("discard", keep_chars)`` and, last, ``("end", reason)``. :meth:`Reply.follow` yields them in order as they come.
@@ -38,6 +44,8 @@ logger = logging.getLogger(__name__)
 
 #: How long a finished reply is kept for a stream that names its ``message_id``.
 FINISHED_KEEP = 120.0
+#: The most text kept per reply. Only the first 5,000 characters are ever spoken; the rest is slack for a discard.
+TEXT_KEEP = 64_000
 
 
 @dataclass(eq=False)
@@ -49,6 +57,7 @@ class Reply:
     events: list[tuple[str, Any]] = field(default_factory=list)
     ended: str | None = None
     ended_at: float | None = None
+    kept: int = 0
     _changed: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     def _add(self, kind: str, value: Any = None) -> None:
@@ -80,8 +89,16 @@ class _Session:
     finished: dict[str, Reply] = field(default_factory=dict)
     started: asyncio.Event = field(default_factory=asyncio.Event)
     waiters: int = 0
+    # Turns that ended (chat_done or error) and have not sent their idle yet. Between the two the bridge still does
+    # work (a push, the title), and a turn in that gap is not open: a stream opening then waits for the next one.
+    ended_awaiting_idle: int = 0
     # The reply of the turn that last started, for a waiter that wakes after it already ended.
     last_started: Reply | None = None
+
+
+def _open(session: _Session) -> int:
+    """Turns open in the session: counted in by thinking, out by idle, less those that ended and await their idle."""
+    return max(0, session.open_turns - session.ended_awaiting_idle)
 
 
 class ReplyTap:
@@ -118,8 +135,12 @@ class ReplyTap:
         mid = payload.get("message_id")
         if isinstance(mid, str) and mid.startswith("computer:"):
             return
+        if kind == "tool_call_start":
+            inputs = payload.get("inputs")
+            if isinstance(inputs, dict) and inputs.get("origin") == "user_task":
+                return  # a desktop task's step, not this reply's tool call
         session = self._sessions.get(sid)
-        if session is None or (session.open_turns == 0 and session.running is None):
+        if session is None or (_open(session) == 0 and session.running is None):
             return  # no turn is open: not a reply
         reply = session.running
         if reply is None:
@@ -134,7 +155,9 @@ class ReplyTap:
                 reply._bind(mid)
         if kind == "chat_delta":
             content = payload.get("content")
-            if isinstance(content, str) and content:
+            if isinstance(content, str) and content and reply.kept < TEXT_KEEP:
+                content = content[: TEXT_KEEP - reply.kept]
+                reply.kept += len(content)
                 reply._add("text", content)
         elif kind == "tool_call_start":
             reply._add("boundary")
@@ -152,25 +175,30 @@ class ReplyTap:
         session = self._sessions.setdefault(sid, _Session())
         if state == "thinking":
             session.open_turns += 1
-            if session.open_turns == 1 and session.running is None:
+            if session.running is None:
                 session.running = Reply(sid)
             session.last_started = session.running
             started, session.started = session.started, asyncio.Event()
             started.set()
         elif state == "idle":
             session.open_turns = max(0, session.open_turns - 1)
-            if session.open_turns == 0 and session.running is not None:
+            if session.ended_awaiting_idle > 0:
+                session.ended_awaiting_idle -= 1
+            if _open(session) == 0 and session.running is not None:
                 reply = session.running
-                self._end(session, "ended" if reply.message_id or reply.events else "no_reply")
+                self._end(session, "ended" if reply.message_id or reply.events else "no_reply", by_idle=True)
 
-    def _end(self, session: _Session, reason: str) -> None:
+    def _end(self, session: _Session, reason: str, *, by_idle: bool = False) -> None:
         reply = session.running
         if reply is None:
             return
         session.running = None
+        if not by_idle:
+            session.ended_awaiting_idle = min(session.open_turns, session.ended_awaiting_idle + 1)
         reply.ended, reply.ended_at = reason, self._clock()
         if reply.message_id is not None:
-            session.finished[reply.message_id] = reply
+            # Two turns can get the same asst-<ms> id; the first keeps it.
+            session.finished.setdefault(reply.message_id, reply)
         reply._add("end", reason)
 
     def _prune(self) -> None:
@@ -202,7 +230,7 @@ class ReplyTap:
             return session.finished.get(message_id)
         if session is not None and session.running is not None:
             return session.running
-        if session is not None and session.open_turns > 0:
+        if session is not None and _open(session) > 0:
             session.running = Reply(session_id)
             return session.running
         session = self._sessions.setdefault(session_id, _Session())
