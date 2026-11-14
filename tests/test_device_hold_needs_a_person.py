@@ -237,8 +237,12 @@ def test_a_full_tools_turn_cannot_lift_a_hold_through_the_api(rig):
                     "method": "PUT", "path": f"/api/devices/{rig.relay['id']}/profile", "body": {"profile": None}})]
             elif self.round == 2:
                 rid = replies[-1].json().get("pending", {}).get("request_id", "none")
+                # It fetched the request first (GET /api/approvals), so it sends the digest it was served: what
+                # refuses is the person check, not a missing digest (#925 review).
+                digest = rig.queue.digest(rig.queue.pending[rid]) if rid in rig.queue.pending else ""
                 content = [ToolUseBlock(id="t2", name="curl", input={
-                    "method": "POST", "path": f"/api/approvals/{rid}/approve", "body": {"scope": "once"}})]
+                    "method": "POST", "path": f"/api/approvals/{rid}/approve",
+                    "body": {"scope": "once", "digest": digest}})]
             else:
                 content = [TextBlock(text="done")]
             yield ApiMessageCompleteEvent(

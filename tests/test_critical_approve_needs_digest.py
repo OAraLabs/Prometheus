@@ -80,7 +80,7 @@ def test_every_served_request_carries_a_digest(d):
 def test_a_critical_approve_without_the_digest_answers_nothing(d):
     client, queue, critical, _ = d
     r = client.post(f"/api/approvals/{critical.request_id}/approve", headers=H, json={"scope": "once"})
-    assert r.status_code == 409 and r.json()["error"] == "digest_required"
+    assert r.status_code == 409 and r.json()["code"] == "digest_required" and "digest" in r.json()["error"]
     assert critical._result == ApprovalResult.TIMEOUT and critical.request_id in queue.pending
 
 
@@ -89,7 +89,7 @@ def test_a_critical_approve_with_another_digest_answers_nothing(d, wrong):
     client, queue, critical, plain = d
     body = {"scope": "once", "digest": wrong}
     r = client.post(f"/api/approvals/{critical.request_id}/approve", headers=H, json=body)
-    assert r.status_code == 409 and r.json()["error"] in ("digest_required", "digest_mismatch")
+    assert r.status_code == 409 and r.json()["code"] in ("digest_required", "digest_mismatch")
     assert critical._result == ApprovalResult.TIMEOUT
 
 
@@ -97,7 +97,7 @@ def test_another_requests_digest_is_not_this_ones(d):
     client, queue, critical, plain = d
     body = {"scope": "once", "digest": _served(client, plain.request_id)["digest"]}
     r = client.post(f"/api/approvals/{critical.request_id}/approve", headers=H, json=body)
-    assert r.status_code == 409 and r.json()["error"] == "digest_mismatch"
+    assert r.status_code == 409 and r.json()["code"] == "digest_mismatch"
     assert critical._result == ApprovalResult.TIMEOUT
 
 
@@ -126,7 +126,7 @@ def test_approve_all_never_approves_a_critical_request(d):
     critical request is approved one at a time, with its digest."""
     client, queue, critical, plain = d
     r = client.post("/api/approvals/all/approve", headers=H, json={"scope": "once"})
-    assert r.status_code == 409 and r.json()["error"] == "digest_required"
+    assert r.status_code == 409 and r.json()["code"] == "critical_pending"        # no digest can satisfy "all"
     assert critical._result == ApprovalResult.TIMEOUT and plain._result == ApprovalResult.TIMEOUT
 
 
@@ -185,8 +185,54 @@ def test_the_digest_is_the_same_in_the_list_and_the_frame_and_never_in_a_push():
 def test_the_digest_does_not_change_while_the_request_waits(d):
     client, queue, critical, _ = d
     first = _served(client, critical.request_id)["digest"]
-    queue.critical_rules = None                                     # nothing the digest covers depends on these
-    assert _served(client, critical.request_id)["digest"] == first
+    assert _served(client, critical.request_id)["digest"] == first == queue.digest(critical)
+
+
+# ── #925 review ──────────────────────────────────────────────────────────────
+
+def test_arguments_with_a_lone_surrogate_still_serialize_and_digest():
+    """Review M1: a lone surrogate (json.loads accepts one, a model can send one) made the digest raise after the
+    request was registered, so it sat in the queue until restart and the list answered 500."""
+    q = ApprovalQueue(security_gate=_Gate(), telegram_adapter=None)
+    a = PendingAction(request_id="c0c0c009", tool_name="bash", description="x", session_id="web:s1",
+                      arguments={"command": "echo \ud800"}, critical_matches=("command:echo",))
+    q._register(a)
+    served = q.serialize_pending(a)
+    assert len(served["digest"]) == 64 and served["digest"] == q.digest(a)
+    a2 = PendingAction(request_id="c0c0c00a", tool_name="bash", description="x", session_id="web:s1",
+                       arguments={1: "int key", "a": "str key"})
+    assert len(q.digest(a2)) == 64                                          # mixed keys: never raises either
+
+
+def test_the_digest_cannot_be_computed_from_what_a_push_or_a_guess_gives():
+    """Review L4: an unkeyed hash of the shown fields could be rebuilt from the push and a guess. It is keyed per
+    daemon process, so a client holds it only by fetching the request."""
+    import hashlib
+    import json
+
+    from prometheus.permissions.critical import is_critical
+
+    q = ApprovalQueue(security_gate=_Gate(), telegram_adapter=None)
+    a = PendingAction(request_id="c0c0c00b", tool_name="bash", description="rm -rf build", session_id="web:s1",
+                      arguments={"command": "rm -rf build"}, critical_matches=("command:rm -rf",))
+    q._register(a)
+    shown = {"request_id": a.request_id, "tool_name": a.tool_name, "description": a.description,
+             "arguments": a.arguments, "created_at": a.created_at, "expires_at": q.expires_at(a),
+             "critical": is_critical(a)}
+    for ensure_ascii in (True, False):
+        plain = hashlib.sha256(json.dumps(shown, sort_keys=True, separators=(",", ":"), ensure_ascii=ensure_ascii,
+                                          default=str).encode("utf-8")).hexdigest()
+        assert q.digest(a) != plain
+
+
+def test_the_stored_copy_of_the_frame_has_no_digest():
+    """Review session low: the approval_pending payload is stored (signal_events); the digest stays on the wire."""
+    from prometheus.sentinel.signals import ActivitySignal, SignalBus
+
+    live = ActivitySignal(kind="approval_pending", payload={"request_id": "c0c0c001", "digest": "ab" * 32},
+                          source="test")
+    stored = SignalBus.at_rest(live)
+    assert "digest" not in stored.payload and live.payload["digest"] == "ab" * 32
 
 
 def test_server_capabilities_lists_approval_digest():
