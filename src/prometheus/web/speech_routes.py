@@ -46,8 +46,9 @@ VERSION = 1
 #: The ``/api`` body cap (``web/server.py``); an upload is also held to ``gateway.media.max_file_size_mb``.
 BODY_CAP = 2 * 1024 * 1024
 SPEAK_MAX = 20_000
-#: The most a ``speak`` body may be: 20,000 characters, each up to 4 bytes, and the JSON around them.
-SPEAK_BODY_CAP = 4 * SPEAK_MAX + 1024
+#: The most a ``speak`` body may be: 20,000 characters, each up to 12 bytes (an emoji escaped as two \\uXXXX, as
+#: many JSON encoders write non-ASCII), and the JSON around them.
+SPEAK_BODY_CAP = 12 * SPEAK_MAX + 1024
 PER_CALLER = 2
 DEVICE_STREAMS = 4
 WAIT_DEFAULT = 30.0
@@ -275,11 +276,15 @@ def register_speech_routes(
             return _error(400, "bad_audio", "the bytes are not the declared audio type")
         if declared in _SIGNED_AUDIO and sniff_mime(data) != declared:
             return _error(400, "bad_audio", "the bytes are not the declared audio type")
+        if slot.stop.done():
+            return _error(401, "unauthorized", "the token was revoked")
         try:
             await service.voice.ready("stt")
             text = await service.voice.transcribe(data, declared, language)
         except VoiceUnavailable as exc:
             return _unavailable(exc)
+        if slot.stop.done() and slot.stop.result() == "revoked":
+            return _error(401, "unauthorized", "the token was revoked")
         return JSONResponse({"text": _LEADING.sub("", text)}, headers={"Cache-Control": "no-store"})
 
     @app.post("/api/speech/speak", response_model=None)

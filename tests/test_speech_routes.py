@@ -553,3 +553,11 @@ def test_a_bad_stt_timeout_never_breaks_the_subscribe_ack():
     cfg["stt"]["timeout_seconds"] = "30s"
     caps = WebSocketBridge(loop_context=object(), config=cfg)._server_capabilities()
     assert "voice_input" not in caps and "speech" not in caps
+
+
+@pytest.mark.asyncio
+async def test_escaped_non_ascii_text_within_the_limit_is_spoken(world, box):
+    body = json.dumps({"text": "é" * 20_000}).encode()  # ensure_ascii: 6 bytes a character
+    async with world.client("a") as c:
+        r = await c.post("/api/speech/speak", content=body, headers={"Content-Type": "application/json"})
+    assert r.status_code == 200
