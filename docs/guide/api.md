@@ -118,6 +118,19 @@ The code lives only in the daemon's memory, as a digest; a restart ends it. Noth
 | POST | `/api/chat/interrupt` | Stop the running agent turn in a session — the chat Stop button. `{"session_id": ...}`; idempotent (`stopped: false` when nothing is running). Completed rounds persist, a mid-generation partial is kept as an assistant turn, and every client sees the broadcast `chat_done{interrupted:true}`. HTTP twin of the WS `interrupt` frame |
 | POST | `/api/chat` | Send a chat message and wait for the reply. Body: `{"session_id": "my-session", "content": "..."}` (the field is `content`, not `message`). The turn runs in session `web:<session_id>`, starts from the same system prompt as `/api/chat/send` (memory files included), and returns `{"text", "turns", "usage", "served_by"}` when it ends. `served_by` names the model that answered (the fallback, when one took the turn) and is left out when no model answered. Optional `mcp_headers` (`{"<server>": {"Authorization": "Bearer ..."}}`) gives a named HTTP MCP server extra headers for this turn's calls only; see [Per-turn MCP headers](#per-turn-mcp-headers). `503` when the daemon hasn't wired the WebSocket bridge |
 
+### Speech — a reply read aloud
+
+Through the voice box Prometheus already uses (`stt.url` / `tts.url`, or one approved by its address). The owner and chat-only devices may call all four, with chat's limits; a device hears only its own sessions. The `subscribed` ack lists `speech` in `server_capabilities` when a voice box is set up. Design: [docs/design/speech-route.md](../design/speech-route.md).
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/speech` | What works now: `{"version": 1, "stt": {"configured", "state", "reason"?}, "tts": {...}, "audio": {"mime": "audio/wav"}, "limits": {...}}`. `state` is `ok`, `down` or `unknown`. Never the box's address or key |
+| POST | `/api/speech/transcribe` | Audio in (the body, with an audio `Content-Type` from `gateway.media`), `{"text"}` out; optional `language`. The app sends the text with `/api/chat/send`. `415`, `413`, `400 bad_audio`, `503 speech_unavailable` |
+| GET | `/api/sessions/{session_id}/speech` | The session's reply as an NDJSON stream (`application/x-ndjson`): `start`, `reply`, `phrase` (with base64 WAV), `discard`, `keepalive`, then one `done` with its `reason`. Optional `message_id` (a reply that is running or ended in the last 120 s) and `wait` (seconds to wait for the next turn, 1 to 120, default 30). Open it before sending, or pass the `message_id` from the first `chat_delta` |
+| POST | `/api/speech/speak` | `{"text"}` (up to 20,000 characters) as the same stream |
+
+When the voice box is down the answer is `503 {"error": "speech_unavailable", "voice", "message"}`, or a final `done` with `reason: "unavailable"`, `voice`, `message` and `resume_at` (where the unspoken text starts): the app reads the rest with its own voice and says so. At most two streams per caller and four from devices other than the owner's (`429 speech_busy`).
+
 ### OpenAI-compatible surface — `/v1`
 
 Any client that speaks the OpenAI chat-completions wire (Open WebUI, LobeChat, Continue, Zed, the `openai` SDKs) can point at the daemon with the same bearer token. Beacon stays the surface; this is the second door.
