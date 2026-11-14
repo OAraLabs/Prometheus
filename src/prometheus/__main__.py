@@ -1601,6 +1601,7 @@ def main() -> None:
     from prometheus.cli.scrub import add_scrub_subparser
     from prometheus.cli.service import add_install_service_subparser
     from prometheus.cli.setup import add_setup_subparser
+    from prometheus.cli.tailscale import add_tailscale_subparser
     from prometheus.cli.token import add_token_subparser
     add_setup_subparser(subparsers)
     add_token_subparser(subparsers)
@@ -1610,6 +1611,7 @@ def main() -> None:
     add_install_service_subparser(subparsers)
     add_gepa_subparser(subparsers)
     add_scrub_subparser(subparsers)
+    add_tailscale_subparser(subparsers)
 
     daemon_parser = subparsers.add_parser("daemon", help="Start always-on daemon")
     daemon_parser.add_argument(
@@ -1930,6 +1932,11 @@ def main() -> None:
     if args.command == "pair":
         from prometheus.cli.pair import run_pair_command
         sys.exit(run_pair_command(args, load_config(args.config)))
+
+    # `oara tailscale check|setup|off` — HTTPS over Tailscale with tailscale serve (dry run without --apply).
+    if args.command == "tailscale":
+        from prometheus.cli.tailscale import run_tailscale_command
+        sys.exit(run_tailscale_command(args, load_config(args.config)))
 
     # `oara doctor` — install diagnostics (exit nonzero on errors).
     if args.command == "doctor":

@@ -75,8 +75,11 @@ def _valid_port(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 65535
 
 
-def serve_settings(config: Mapping[str, Any] | None) -> ServeSettings | None:
-    """The validated ``web.tailscale`` block, or None (off). A bad block is dropped with a warning, never guessed at."""
+def serve_settings(config: Mapping[str, Any] | None, *, has_token: bool | None = None) -> ServeSettings | None:
+    """The validated ``web.tailscale`` block, or None (off). A bad block is dropped with a warning, never guessed at.
+
+    *has_token*: whether the daemon has an API token. None (the daemon) reads ``web.api_token`` and the environment,
+    where the daemon has put its token by now; the CLI passes what ``config.api_token.resolve_api_token`` found."""
     web = (config or {}).get("web") if isinstance(config, Mapping) else None
     if not isinstance(web, Mapping):
         return None
@@ -99,7 +102,8 @@ def serve_settings(config: Mapping[str, Any] | None) -> ServeSettings | None:
         logger.warning("web.tailscale: rest_port and ws_port must be two different ports from 1 to 65535: ignoring "
                        "the block (HTTPS over Tailscale is off)")
         return None
-    if not (web.get("api_token") or os.environ.get("PROMETHEUS_API_TOKEN")):
+    token = bool(web.get("api_token") or os.environ.get("PROMETHEUS_API_TOKEN")) if has_token is None else has_token
+    if not token:
         logger.warning("web.tailscale: this daemon has no API token, and an open daemon must not answer requests "
                        "relayed from the tailnet: ignoring the block (HTTPS over Tailscale is off). A token made "
                        "after the daemon started takes effect at the next restart.")
