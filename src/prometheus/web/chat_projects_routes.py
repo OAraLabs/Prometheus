@@ -137,7 +137,7 @@ class ChatProjectsService:
                 continue
         return homes
 
-    def validate(self, raw: str, *, exclude: str | None = None) -> tuple[Path | None, str | None]:
+    def validate(self, raw: str) -> tuple[Path | None, str | None]:
         """A folder a project may use, resolved, or why not (design 3.1 rule 3). Compared by file identity, never by
         spelling: macOS is case-insensitive, and a symlinked agent home must not hide what it points at."""
         from prometheus.context.workspace import validate_workspace_path
@@ -162,8 +162,6 @@ class ChatProjectsService:
             return None, "the projects root, or a folder that contains it, cannot be a project folder"
         store = self.store()
         for other in (store.all() if store is not None else []):
-            if other.folder == exclude:
-                continue
             o = Path(other.folder)
             oid = _ident(o)
             if oid is None:
@@ -208,7 +206,7 @@ class ChatProjectsService:
             return None, "the projects root is under security.denied_paths"
         store = self.store()
         projects = store.all() if store is not None else []
-        root_chain_existing = _chain(existing)
+        root_chain_existing = _chain(existing.resolve())
         for other in projects:
             oid = _ident(Path(other.folder))
             if oid is not None and oid in root_chain_existing:

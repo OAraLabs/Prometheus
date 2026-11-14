@@ -85,20 +85,12 @@ def session_exists(session_mgr: Any, conversation_store: Any, session_id: str) -
         return True
     if conversation_store is None:
         return False
-    if conversation_store.max_rowid(session_id) > 0:
-        return True
-    # A session the owner bound to a folder or filed in a chat project before its first message: it exists, so
+    # A session the owner bound to a folder or filed in a chat project before its first message exists too, so
     # no device can claim it (and inherit that binding) after a restart empties the in-memory sessions.
-    conn = getattr(conversation_store, "_conn", None)
-    if conn is None:
-        return False
-    for table in ("session_workspaces", "session_chat_projects"):
-        try:
-            if conn.execute(f"SELECT 1 FROM {table} WHERE session_id = ?", (session_id,)).fetchone():
-                return True
-        except Exception:  # noqa: BLE001 - a store without the table simply has no such row
-            continue
-    return False
+    has_rows = getattr(conversation_store, "has_session_rows", None)
+    if callable(has_rows):
+        return bool(has_rows(session_id))
+    return conversation_store.max_rowid(session_id) > 0
 
 
 def event_session_id(event: dict[str, Any]) -> str | None:
