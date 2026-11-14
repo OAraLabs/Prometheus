@@ -7019,6 +7019,13 @@ def create_app(
 
     register_pieces_routes(app, devices=_devices_or_create, auth_on=lambda: bool(_api_token))
 
+    # ── Speech: a reply read aloud through the voice box (docs/design/speech-route.md) ────
+    # The owner's and chat-only devices', like chat (web/route_access.py). The launcher lets the reply holder hear
+    # the bridge's frames (speech_routes.attach_bridge).
+    from prometheus.web.speech_routes import register_speech_routes
+
+    register_speech_routes(app, config=config, devices=_devices)
+
     # ── Static files (must be last — catch-all) ─────────────────────
 
     if static_dir:

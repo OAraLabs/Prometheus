@@ -79,6 +79,11 @@ class _TooLarge(Exception):
     pass
 
 
+def speech_configured(config: Mapping[str, Any] | None) -> bool:
+    """Whether a voice box is set for either half: the ``speech`` capability (configured, not answering)."""
+    return any(remote_settings(kind, config or {}) is not None for kind in KINDS)
+
+
 class VoiceUnavailable(Exception):
     """The voice box cannot do this now. ``reason`` is a key of :data:`SENTENCES`; ``message`` its sentence."""
 
