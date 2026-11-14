@@ -8,9 +8,10 @@ membership and its workspace binding together, in one transaction, so the two ca
 * ``session_chat_projects``: a session is in at most one project; presence is the filing.
 * ``chat_projects_rev``: one counter, raised in the same transaction as every change to a project or a membership.
 
-Filing binds the session's workspace to the project's folder with ``set_by = "project"``. A workspace set any other
-way is never replaced unless the caller says so (:class:`WorkspaceSet`). Unfiling, moving and deleting clear only a
-binding the project set. Deleting a project never touches the folder or a file in it.
+Filing binds the session's workspace to the project's folder with ``set_by = "project:<id>"``. A workspace set any
+other way is never replaced unless the caller says so (:class:`WorkspaceSet`). Unfiling, moving and deleting clear
+only a binding that same project set, so a session moved to another project as a label keeps (and, on the first
+project's delete, loses) the first project's binding correctly. Deleting a project never touches the folder or a file in it.
 
 Folder validation (``validate_workspace_path``) and the managed folder are the caller's: the store does not know the
 filesystem or the security config.
@@ -28,7 +29,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 NAME_MAX = 60
-SET_BY = "project"
+#: A binding a project set is ``set_by = "project:<id>"``: the id says which, so only that project clears it.
+SET_BY_PREFIX = "project:"
+
+
+def _set_by(project_id: str) -> str:
+    return SET_BY_PREFIX + project_id
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chat_projects (
@@ -248,8 +254,8 @@ class ChatProjectStore:
                 raise UnknownProject("no such project")
             sessions = [r[0] for r in self._conn.execute(
                 "SELECT session_id FROM session_chat_projects WHERE project_id = ?", (project_id,)).fetchall()]
-            for sid in sessions:
-                self._clear_project_workspace(sid)
+            # Every binding this project set, on members and on sessions since moved elsewhere as a label.
+            self._conn.execute("DELETE FROM session_workspaces WHERE set_by = ?", (_set_by(project_id),))
             self._conn.execute("DELETE FROM session_chat_projects WHERE project_id = ?", (project_id,))
             self._conn.execute("DELETE FROM chat_projects WHERE id = ?", (project_id,))
             self._bump()
@@ -264,17 +270,22 @@ class ChatProjectStore:
         """
         with self._conn:
             if project_id is None:
+                old = self.project_of(session_id)
                 self._conn.execute("DELETE FROM session_chat_projects WHERE session_id = ?", (session_id,))
-                self._clear_project_workspace(session_id)
+                if old is not None:
+                    self._clear_project_workspace(session_id, old)
                 self._bump()
-                return FileResult(session_id, None, None)
+                left = self._conn.execute(
+                    "SELECT path FROM session_workspaces WHERE session_id = ?", (session_id,)).fetchone()
+                return FileResult(session_id, None, left[0] if left else None)
             row = self._conn.execute("SELECT folder FROM chat_projects WHERE id = ?", (project_id,)).fetchone()
             if row is None:
                 raise UnknownProject("no such project")
             folder = row[0]
             current = self._conn.execute(
                 "SELECT path, set_by FROM session_workspaces WHERE session_id = ?", (session_id,)).fetchone()
-            if (not keep_workspace and current is not None and current[1] != SET_BY and current[0] != folder
+            bound_by_a_project = current is not None and str(current[1]).startswith(SET_BY_PREFIX)
+            if (not keep_workspace and current is not None and not bound_by_a_project and current[0] != folder
                     and not replace_workspace):
                 raise WorkspaceSet(current[0])
             now = time.time()
@@ -289,10 +300,10 @@ class ChatProjectStore:
                 return FileResult(session_id, project_id, current[0] if current is not None else None)
             self._conn.execute(
                 "INSERT OR REPLACE INTO session_workspaces (session_id, path, set_by, updated_at) VALUES (?, ?, ?, ?)",
-                (session_id, folder, SET_BY, now))
+                (session_id, folder, _set_by(project_id), now))
             self._bump()
         return FileResult(session_id, project_id, folder)
 
-    def _clear_project_workspace(self, session_id: str) -> None:
+    def _clear_project_workspace(self, session_id: str, project_id: str) -> None:
         self._conn.execute(
-            "DELETE FROM session_workspaces WHERE session_id = ? AND set_by = ?", (session_id, SET_BY))
+            "DELETE FROM session_workspaces WHERE session_id = ? AND set_by = ?", (session_id, _set_by(project_id)))
