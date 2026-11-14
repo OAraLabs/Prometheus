@@ -126,7 +126,8 @@ class ReplyTap:
         if not isinstance(sid, str) or not sid:
             return
         kind = frame.get("type")
-        self._prune()
+        if kind in ("agent_state", "chat_done"):
+            self._prune()  # not on every delta: a turn's ends are often enough
         if kind == "agent_state":
             self._agent_state(sid, payload.get("state"))
             return
@@ -149,8 +150,9 @@ class ReplyTap:
             if reply.message_id is None:
                 reply._bind(mid)
             elif reply.message_id != mid:
-                # Another turn's frame while this one never ended: end it, and this frame starts the next.
-                self._end(session, "ended")
+                # Another turn's frame while this one never sent chat_done (it was cancelled): its idle has already
+                # been counted, so it is not awaiting one.
+                self._end(session, "ended", by_idle=True)
                 reply = session.running = Reply(sid)
                 reply._bind(mid)
         if kind == "chat_delta":
