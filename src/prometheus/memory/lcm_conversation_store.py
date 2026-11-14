@@ -12,12 +12,16 @@ import sqlite3
 import time
 from collections.abc import Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from prometheus.config.paths import get_lcm_db_path
 from prometheus.memory.lcm_fts5 import sanitize_fts5_query
 from prometheus.memory.lcm_types import MessagePart
 from prometheus.security.log_redaction import redact_json_text, redact_secrets
+
+if TYPE_CHECKING:
+    from prometheus.projects.store import ChatProjectStore
 
 log = logging.getLogger(__name__)
 
@@ -1126,7 +1130,7 @@ class LCMConversationStore:
             #    here, not a silent survivor.
             for table in ("session_titles", "session_profiles", "session_pins",
                           "session_tombstones", "session_forks", "session_workspaces",
-                          "session_backends", "message_client_ids"):
+                          "session_backends", "message_client_ids", "session_chat_projects"):
                 counts[table] = self._conn.execute(
                     f"DELETE FROM {table} WHERE session_id = ?", (session_id,)
                 ).rowcount if self._table_exists(table) else 0
@@ -1160,6 +1164,16 @@ class LCMConversationStore:
         self._conn.execute("VACUUM")
         self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return counts
+
+    def chat_projects(self) -> ChatProjectStore:
+        """The chat projects store, on this connection (``projects/store.py``): filing a session changes its
+        membership and its workspace binding in one transaction. Made once, then kept."""
+        store = getattr(self, "_chat_projects", None)
+        if store is None:
+            from prometheus.projects.store import ChatProjectStore
+
+            store = self._chat_projects = ChatProjectStore(self._conn)
+        return store
 
     def _table_exists(self, name: str) -> bool:
         return bool(
