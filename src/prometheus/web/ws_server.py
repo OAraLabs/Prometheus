@@ -1085,6 +1085,9 @@ class WebSocketBridge:
         caps = ["voice_input"] if media_services.voice_input_available(self.config) else []
         caps += ["speech"] if speech_configured(self.config) else []
         caps.append("pause")          # PUT/DELETE /api/pause, `paused` on /api/status (engine/pause.py)
+        # Every serialized approval request says whether it must be answered in the app (permissions/critical.py),
+        # so a client can tell a missing ``critical`` (an older daemon) from ``false``.
+        caps.append("approval_critical")
         return [*caps, "projects"]  # chat projects (web/chat_projects_routes.py): always served
 
     async def _system_note(self, session_id: str, content: str) -> None:

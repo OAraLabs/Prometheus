@@ -101,6 +101,47 @@ def redact_arguments(
     return out or None
 
 
+def arguments_were_cut(
+    arguments: dict[str, Any] | None,
+    *,
+    max_value: int = MAX_VALUE_CHARS,
+    max_total: int = MAX_TOTAL_CHARS,
+) -> bool:
+    """Did :func:`redact_arguments` cut or mask anything a person would need to see?
+
+    True when a value was truncated, a value was redacted, or arguments were left out for the total limit. What
+    is left out ON PURPOSE (empty values, ``_private`` and noise keys) does not count. Computed from the RAW
+    arguments, at capture, with the same limits, so it describes exactly the view every surface shows. Never
+    raises: arguments it cannot read count as cut (the request is then answered in the app).
+    """
+    try:
+        return _were_cut(arguments, max_value=max_value, max_total=max_total)
+    except Exception:                                      # noqa: BLE001 - fail toward critical
+        return True
+
+
+def _were_cut(arguments: dict[str, Any] | None, *, max_value: int, max_total: int) -> bool:
+    if not arguments:
+        return False
+    total = 0
+    for key in sorted(arguments):
+        if key in _NOISE_KEYS or key.startswith("_"):
+            continue
+        full = _render_one(arguments[key], 10**9)
+        if full is None:
+            continue
+        if len(full) > max_value:
+            return True
+        masked = AuditLogger.redact(f"{key}={full}")
+        masked = masked[len(key) + 1:] if masked.startswith(f"{key}=") else masked
+        if masked != full:
+            return True
+        if total + len(masked) > max_total:
+            return True
+        total += len(masked)
+    return False
+
+
 def _render_one(value: Any, max_value: int) -> str | None:
     """One argument value as a string, or None to omit it entirely."""
     if value is None:

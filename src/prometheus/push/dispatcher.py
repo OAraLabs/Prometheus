@@ -116,6 +116,10 @@ class PushDispatcher:
             for target in self._approval_targets(desktop=True):
                 await self._deliver(target, desk)
             return
+        # A CRITICAL request (permissions/critical.py) is answered in the app: no category, so the notification
+        # offers no Approve, and ``critical: true`` so the phone can narrow before it fetches. Never sent as
+        # ``false``: a push is unauthenticated and the phone reads it only to narrow.
+        critical = payload.get("critical") is True
         body = {
             "aps": {
                 "alert": {
@@ -123,7 +127,7 @@ class PushDispatcher:
                     "body": f"{payload.get('tool_name', 'a tool')} — "
                             f"{first_line(str(payload.get('description') or ''))}",
                 },
-                "category": "APPROVAL",
+                **({} if critical else {"category": "APPROVAL"}),
                 "sound": "default",
                 # Correct HERE and nowhere else — an approval blocks a
                 # running turn.
@@ -133,6 +137,7 @@ class PushDispatcher:
             "request_id": payload.get("request_id"),
             "tool_name": payload.get("tool_name"),
             "expires_at": payload.get("expires_at"),
+            **({"critical": True} if critical else {}),
         }
         for target in self._approval_targets(desktop=False):
             await self._deliver(target, body)
