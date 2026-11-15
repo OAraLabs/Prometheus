@@ -28,6 +28,7 @@ from typing import Any
 from dataclasses import dataclass
 
 from prometheus.api.turn_errors import KIND_AUTH, KIND_BILLING
+from prometheus.engine import pause as _pause
 
 # Kinds where trying again with this credential cannot help. Deliberately NOT including
 # KIND_RATE_LIMIT (retried with backoff already), KIND_TIMEOUT or KIND_UNREACHABLE (transient by
@@ -297,6 +298,9 @@ async def stream_round_with_fallback(
         return
     except GeneratorExit:
         # Consumer stopped iterating — protocol signal, not a model failure.
+        raise
+    except _pause.Paused:
+        # Pause everything (engine/pause.py): not a model failure, and no other model may answer instead.
         raise
     except Exception as exc:  # noqa: BLE001 — classified, then acted on or re-raised
         from prometheus.api.turn_errors import classify_turn_error
