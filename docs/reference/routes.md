@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 144 paths
+## Daemon app — 145 paths
 
 | Path | Methods |
 |---|---|
@@ -92,6 +92,7 @@ one is the explanation.
 | `/api/pair/requests/{request_id}/deny` | POST |
 | `/api/pairs` | GET |
 | `/api/paperclip/wake` | POST |
+| `/api/pause` | DELETE, GET, PUT |
 | `/api/pieces` | GET |
 | `/api/pieces/probe` | POST |
 | `/api/pieces/{piece_id}` | DELETE |

@@ -145,6 +145,11 @@ WEB_DEFERRED: frozenset[str] = frozenset({
     # because #183-#186 added the command without listing it here.
     "claude", "gpt", "gemini", "xai", "grok", "local",
     "deepseek", "kimi", "glm", "mimo", "qwen",
+    # /person (which devices may resume a pause): the owner's Telegram only, by design. A web chat is a device,
+    # and a device must never mark one.
+    "person",
+    # /pause and /resume: the owner's in Telegram only. A device uses PUT/DELETE /api/pause.
+    "pause", "resume",
 })
 
 _SAME = object()  # sentinel: web uses the same command name as Telegram
@@ -325,6 +330,19 @@ MANIFEST: tuple[Family, ...] = (
     # is the recorded parity gap. On the web chat path it answers status and
     # stop and refuses to start: that path carries no person credential yet.
     Family("computer", ("cmd_computer",), _cmds("computer", "prometheus-computer", "computer")),
+    # The person mark (who may resume a pause). Set only by the OWNER in their own Telegram, so it is not offered
+    # on Slack or Discord (their owner checks are a chat's, not the daemon owner's) or the web (a device).
+    Family(
+        "person", ("cmd_person",), _cmds("person", None, None),
+        gap_reason=("owner-only by design: the mark lets a device resume a pause, so it is set from the owner's "
+                    "Telegram and nowhere else"),
+    ),
+    # Pause everything from the owner's Telegram. Owner-only for the same reason as /person; a device uses the REST
+    # routes (pausing needs the operator, resuming the person mark).
+    Family("pause", ("cmd_pause",), _cmds("pause", None, None),
+           gap_reason="owner-only by design: the owner's Telegram; devices use PUT /api/pause"),
+    Family("resume", ("cmd_resume",), _cmds("resume", None, None),
+           gap_reason="owner-only by design: the owner's Telegram; a device needs the person mark (DELETE /api/pause)"),
 )
 
 

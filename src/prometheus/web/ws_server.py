@@ -1084,6 +1084,7 @@ class WebSocketBridge:
 
         caps = ["voice_input"] if media_services.voice_input_available(self.config) else []
         caps += ["speech"] if speech_configured(self.config) else []
+        caps.append("pause")          # PUT/DELETE /api/pause, `paused` on /api/status (engine/pause.py)
         # Every serialized approval request says whether it must be answered in the app (permissions/critical.py),
         # so a client can tell a missing ``critical`` (an older daemon) from ``false``.
         caps.append("approval_critical")
@@ -1431,6 +1432,16 @@ class WebSocketBridge:
         dashboard uploads), run vision analysis to describe the image before
         passing to the agent — matching the Telegram gateway's flow.
         """
+        # Paused (engine/pause.py): a message starts no turn and is not kept to run on resume, and no slash command
+        # runs either (some start model work, such as /compact). Reads go through REST.
+        from prometheus.engine import pause as _pause
+
+        if (_paused := _pause.current()) is not None:
+            await self.broadcast({"type": "error", "timestamp": time.time(), "payload": {
+                "session_id": session_id, "client_msg_id": client_msg_id, "kind": "paused",
+                "message": "Prometheus is paused; nothing new runs until a person resumes it.",
+                "since": _paused.since}})
+            return
         # Slash commands first — they never become conversation turns. Resolve
         # the active session (non-creating) for /steer & friends, and pass a
         # get_or_create factory for /queue (which fires on a quiet chat).
