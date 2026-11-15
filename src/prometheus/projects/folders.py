@@ -17,7 +17,7 @@ import os
 import re
 import stat
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +42,7 @@ def slug(name: str) -> str:
     return out or "project"
 
 
-def make_managed_folder(root: Path, name: str) -> Path:
+def make_managed_folder(root: Path, name: str, *, skip: Callable[[Path], bool] | None = None) -> Path:
     """Make ``<root>/<slug>`` (or ``-2``, ``-3``, ...) with mode 0700, and the root too (0700) if it is missing.
 
     An existing root must be a plain directory owned by this user (``ValueError`` otherwise: a symlink or someone
@@ -64,6 +64,8 @@ def make_managed_folder(root: Path, name: str) -> Path:
     base = slug(name)
     for n in range(1, _MAX_SUFFIX):
         candidate = root / (base if n == 1 else f"{base}-{n}")
+        if skip is not None and skip(candidate):
+            continue  # a stored project's folder, even one since removed on disk
         try:
             candidate.mkdir(mode=0o700)
         except FileExistsError:

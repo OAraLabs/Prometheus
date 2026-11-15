@@ -53,6 +53,9 @@ EXPECTED_SCOPED_ALLOWED = {
     ("GET", "/api/events/recent"),
     ("GET", "/api/activity/recent"),
     ("POST", "/api/search"),
+    # chat projects: only those its own sessions are in, as id and name (the handlers filter)
+    ("GET", "/api/chat-projects"),
+    ("GET", "/api/chat-projects/{project_id}"),
     # speech, with chat's limits: a session's reply only for a session it owns (the session path guard)
     ("GET", "/api/speech"),
     ("POST", "/api/speech/transcribe"),

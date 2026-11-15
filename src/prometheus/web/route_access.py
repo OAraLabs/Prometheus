@@ -87,6 +87,9 @@ SCOPED_ALLOWED: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/events/recent"),
     ("GET", "/api/activity/recent"),                      # session-filtered for a scoped caller, like events
     ("POST", "/api/search"),
+    # chat projects: only those its own sessions are in, as id and name (the handlers filter)
+    ("GET", "/api/chat-projects"),
+    ("GET", "/api/chat-projects/{project_id}"),
     # speech, with chat's limits: a session's reply only for a session it owns (the session path guard)
     ("GET", "/api/speech"),
     ("POST", "/api/speech/transcribe"),
@@ -241,6 +244,10 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     ("PUT", "/api/project-file"),
     # /api/projects
     ("GET", "/api/projects"),
+    ("POST", "/api/chat-projects"),
+    ("PUT", "/api/chat-projects/{project_id}"),
+    ("DELETE", "/api/chat-projects/{project_id}"),
+    ("PUT", "/api/sessions/{session_id}/project"),
     ("POST", "/api/projects"),
     ("DELETE", "/api/projects/{project_id}"),
     ("PUT", "/api/projects/{project_id}"),
