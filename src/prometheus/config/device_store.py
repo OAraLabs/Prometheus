@@ -331,8 +331,8 @@ class DeviceStore:
     def approval_push_targets(self, *, desktop: bool) -> list[PushTarget]:
         """The push targets an APPROVAL push may reach: live owner devices, and, for a desktop prompt (whose push
         carries no content at all), also the live devices marked for computer use, which are the ones that may
-        answer it. A scoped device sees only its own sessions everywhere else and approves nothing but a desktop
-        prompt, so a push naming another session's tool and action must not reach it."""
+        answer it. A scoped device approves nothing but a desktop prompt, so a push naming another session's tool
+        and action must not reach it."""
         allowed = set(self.owner_device_ids())
         if desktop:
             allowed |= self.computer_device_ids()
