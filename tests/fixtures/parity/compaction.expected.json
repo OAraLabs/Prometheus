@@ -248,6 +248,32 @@
   },
   "home/.prometheus/data/lcm.db": {
    "sqlite": {
+    "chat_projects": {
+     "columns": [
+      "id",
+      "name",
+      "name_folded",
+      "folder",
+      "folder_managed",
+      "import_key",
+      "position",
+      "created_at",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "chat_projects_rev": {
+     "columns": [
+      "id",
+      "rev"
+     ],
+     "rows": [
+      [
+       1,
+       0
+      ]
+     ]
+    },
     "checkpoints": {
      "columns": [
       "id",
@@ -790,6 +816,14 @@
       "key",
       "set_by",
       "updated_at"
+     ],
+     "rows": []
+    },
+    "session_chat_projects": {
+     "columns": [
+      "session_id",
+      "project_id",
+      "filed_at"
      ],
      "rows": []
     },
@@ -2098,6 +2132,31 @@
       [
        "<uuid:37>",
        "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       82,
+       5,
+       null,
+       "desktop:parity-compact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       78,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:38>",
+       "<time>",
        "agent_loop",
        "tool_advertisement",
        "<ms>",
@@ -2123,31 +2182,6 @@
        null,
        "<node>",
        null,
-       null
-      ],
-      [
-       "<uuid:38>",
-       "<time>",
-       "session_titles",
-       "generate",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-         "stop_reason": "stop"
-        }
-       },
-       82,
-       5,
-       null,
-       "desktop:parity-compact",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       0,
-       78,
-       null,
-       "<node>",
-       "local",
        null
       ],
       [
