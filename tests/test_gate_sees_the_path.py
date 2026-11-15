@@ -379,6 +379,12 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
         "so the floor table is the subject. The real shell refusal is proven on macOS in the same file. "
         "Registered, not exempted: if that file stops calling evaluate directly this entry fails as stale."
     ),
+    "test_pause_floor.py": (
+        "the pause-everything state joins the always-denied floor: direct evaluate(file_path=...) calls read the "
+        "gate's decision for pause.json and its temp file under each config shape (default, gate off, a workspace "
+        "covering it), so the floor table is the subject. The real shell refusal is proven on macOS in the same "
+        "file. Registered, not exempted: if that file stops calling evaluate directly this entry fails as stale."
+    ),
     "test_startup_floor.py": (
         "what starts Prometheus joins the write floor: direct evaluate(file_path=...) calls read the gate's decision "
         "for each service file and install folder under each config shape (default, autonomous, a workspace covering "

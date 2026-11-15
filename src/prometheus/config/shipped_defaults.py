@@ -276,6 +276,20 @@ DENIED_PATHS_DEFAULTS_SHIPPED: tuple[tuple[str, ...], ...] = (
      "/*/.prometheus/node",
      "/*/.prometheus/data/mcp_servers.json*",
      "/*/.prometheus/xai_oauth.json*"),
+    # + the pause-everything state, read at boot: a shell that removed it would undo an emergency stop at the next
+    # restart. By prefix, so the daemon's pause.json.<hex>.tmp is covered.
+    ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
+     "/*/Library/Application Support/Prometheus/pairing",
+     "/*/.local/share/prometheus/pairing",
+     "/*/.prometheus/data/devices.db*",
+     "/*/.prometheus/data/cron_jobs.json*",
+     "/*/.prometheus/data/cron_history.jsonl*",
+     "/*/.prometheus/data/cron_undelivered.jsonl*",
+     "/*/.prometheus/data/cron_scheduler.pid*",
+     "/*/.prometheus/node",
+     "/*/.prometheus/data/mcp_servers.json*",
+     "/*/.prometheus/xai_oauth.json*",
+     "/*/.prometheus/data/pause.json*"),
 )
 
 SHIPPED_DENIED_PATHS: tuple[str, ...] = DENIED_PATHS_DEFAULTS_SHIPPED[-1]
