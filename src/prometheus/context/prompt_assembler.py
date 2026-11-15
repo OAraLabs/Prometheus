@@ -273,13 +273,44 @@ def project_files_section(config: dict, cwd: str | Path) -> str | None:
     # repo's AGENTS.md, which conflated the two documents.
     del bootstrap_cfg  # the registry gate lives in build_runtime_system_prompt
     registry_file = Path(get_config_dir()) / "AGENTS.md"
-    return load_project_files_prompt(
+    section = load_project_files_prompt(
         str(cwd),
         max_chars_per_file=max_chars,
         max_total_chars=max_total_chars,
         stack=stack_project_files,
         exclude_paths=(registry_file,),
     )
+    # A chat project's folder (docs/design/chat-projects.md 7): the names of its reference files, as data.
+    reference = _chat_project_reference(cwd)
+    if reference:
+        section = f"{section}\n\n{reference}" if section else reference
+    return section
+
+
+def _chat_project_reference(cwd: str | Path) -> str:
+    """The reference-file note when *cwd* is a chat project's folder, else ``""``. A read-only look-up; any failure is
+    ``""`` (a prompt is never refused for want of it)."""
+    import sqlite3
+
+    from prometheus.config import paths
+
+    try:
+        db = paths.get_lcm_db_path()
+        if not Path(db).exists():
+            return ""
+        folder = str(Path(cwd).resolve())
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            row = conn.execute("SELECT 1 FROM chat_projects WHERE folder = ?", (folder,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - no store, no table, a locked file: no note
+        return ""
+    if row is None:
+        return ""
+    from prometheus.projects.content import reference_section
+
+    return reference_section(folder)
 
 
 def build_runtime_system_prompt(
