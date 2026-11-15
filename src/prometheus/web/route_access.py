@@ -87,6 +87,11 @@ SCOPED_ALLOWED: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/events/recent"),
     ("GET", "/api/activity/recent"),                      # session-filtered for a scoped caller, like events
     ("POST", "/api/search"),
+    # speech, with chat's limits: a session's reply only for a session it owns (the session path guard)
+    ("GET", "/api/speech"),
+    ("POST", "/api/speech/transcribe"),
+    ("POST", "/api/speech/speak"),
+    ("GET", "/api/sessions/{session_id}/speech"),
     # the one desktop route open to every valid token: a stop can only end a task
     ("POST", "/api/computer/tasks/{task_id}/stop"),
     # the tool calls of its own sessions: seen and denied. The approve route is listed for a desktop prompt, which
