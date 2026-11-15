@@ -44,9 +44,11 @@ class _GatedBox(FakeVoiceBox):
         self.gate = asyncio.Event()
         self.gate.set()
         self.fail_after: int | None = None
+        self.waiting = 0  # speech requests that have reached the box (counted before the gate)
 
     async def ahandler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/audio/speech":
+            self.waiting += 1
             await self.gate.wait()
             if self.fail_after is not None and len(self.spoken) >= self.fail_after:
                 self.down = True
@@ -73,6 +75,14 @@ async def _collect(gen) -> list[dict]:
 
 def _phrases(lines) -> list[str]:
     return [line["text"] for line in lines if line["type"] == "phrase"]
+
+
+async def _until(predicate, timeout: float = 5.0) -> None:
+    """Wait for *predicate*: tests order events by state, never by sleeping a guessed interval."""
+    async def _poll() -> None:
+        while not predicate():
+            await asyncio.sleep(0.005)
+    await asyncio.wait_for(_poll(), timeout)
 
 
 async def _queue_source(q: asyncio.Queue):
@@ -156,16 +166,22 @@ async def test_the_box_failing_mid_stream_says_where_to_resume(box, voice):
 async def test_a_dropped_round_is_not_spoken(box, voice):
     box.gate.clear()
     q: asyncio.Queue = asyncio.Queue()
-    gen = speak(_queue_source(q), voice)
-    lines = [await gen.__anext__()]
+    lines: list[dict] = []
+
+    async def consume() -> None:
+        # Consumed from the start: speak() starts its tasks only once its first line has been taken.
+        async for line in speak(_queue_source(q), voice):
+            lines.append(line)
+
+    consumer = asyncio.ensure_future(consume())
     await q.put(("text", "Alpha one. Beta two. "))
-    await asyncio.sleep(0.05)  # both cut; the first waits on the box
+    await _until(lambda: box.waiting == 1)  # "Alpha one." is held at the box, "Beta two." behind it
     await q.put(("discard", 11))
-    await asyncio.sleep(0.02)
+    await _until(lambda: {"type": "discard", "keep_chars": 11} in lines)
     box.gate.set()
     await q.put(("text", "Gamma. "))
     await q.put(("end", "complete"))
-    lines += [x async for x in gen]
+    await asyncio.wait_for(consumer, 5)
     assert {"type": "discard", "keep_chars": 11} in lines
     assert _phrases(lines) == ["Alpha one.", "Gamma."]
     gamma = next(line for line in lines if line.get("text") == "Gamma.")
