@@ -9,11 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-<<<<<<< HEAD
 ## Daemon app — 141 paths
-=======
-## Daemon app — 140 paths
->>>>>>> origin/main
 
 | Path | Methods |
 |---|---|
@@ -30,10 +26,7 @@ one is the explanation.
 | `/api/backends/{name}/probe` | POST |
 | `/api/benchmarks/run` | POST |
 | `/api/chat` | POST |
-<<<<<<< HEAD
 | `/api/chat-project-suggestions` | GET |
-=======
->>>>>>> origin/main
 | `/api/chat-projects` | GET, POST |
 | `/api/chat-projects/{project_id}` | DELETE, GET, PUT |
 | `/api/chat/interrupt` | POST |
