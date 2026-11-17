@@ -49,8 +49,8 @@ def test_a_bearer_token_is_masked():
 
 def test_a_tokenised_url_is_masked_whatever_the_parameter_is_called():
     """The SHAPE layer — the half that catches the name nobody thought of."""
-    out = redact_arguments({"text": "https://x.test/cb?sig=QQQQQQQQQQQQQQQQ"})
-    assert "QQQQQQQQQQQQQQQQ" not in str(out)
+    out = redact_arguments({"text": "https://x.test/cb?sig=QQQQQQQQ12345678"})
+    assert "QQQQQQQQ12345678" not in str(out)
 
 
 def test_redaction_is_the_audit_redactor_not_a_second_one():

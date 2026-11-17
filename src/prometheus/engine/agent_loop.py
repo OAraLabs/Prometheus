@@ -5868,6 +5868,10 @@ async def _execute_tool_call(
     # The path the gate rules on, resolved: the file tool opens exactly this one, through no link
     # (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q). None when there is no gate or no path.
     _decided_path: str | None = None
+    # The owner approved this call because the tool asked for it (BaseTool.requires_owner_approval): set below only
+    # after a yes from the approval channel, and read by the tool through tool_context.OWNER_APPROVED.
+    _owner_approved = False
+    _owner_reason: str | None = None
     # Permission check (Sprint 4 + TRUST-CONTEXT)
     if context.permission_checker is not None:
         # THE DEFECT THIS REPLACES: `tool_input.get("file_path")` — a key NO
@@ -6035,6 +6039,12 @@ async def _execute_tool_call(
                 f"{_turn_author or 'a member of this chat'} asked for this, not the owner: "
                 f"{tool_name} runs only if the owner approves"
             )
+        _owner_reason = tool.requires_owner_approval(parsed_input) if hasattr(tool, "requires_owner_approval") else None
+        if _owner_reason and decision.action != "DENY":
+            # The owner's own approval, whatever the mode or a remembered grant allowed: each call on its own, with
+            # its arguments shown (GHSA-f68r-xfv4-83fr: the memory tool's changes to MEMORY.md and USER.md).
+            from prometheus.permissions.checker import PermissionDecision
+            decision = PermissionDecision.approve(_owner_reason)
         if not decision.allowed:
             # The gate's own queue is the fallback prompt. Resolved HERE, in
             # the one function every surface goes through, rather than wired
@@ -6069,6 +6079,7 @@ async def _execute_tool_call(
                         )
                         _LEGACY_PERMISSION_PROMPT_WARNED = True
                     confirmed = await _prompt(tool_name, decision.reason)
+                _owner_approved = bool(confirmed) and bool(_owner_reason)
                 if not confirmed:
                     if context.telemetry is not None:
                         context.telemetry.record(
@@ -6134,8 +6145,14 @@ async def _execute_tool_call(
     # Marks the span as a tool call for the one reader that must know: the
     # desktop door refuses to start from inside one (W3; engine/tool_context).
     # Set BEFORE wait_for so the task it creates inherits it.
-    from prometheus.engine.tool_context import TOOL_EXECUTION as _TOOL_EXECUTION
+    from prometheus.engine.tool_context import (
+        APPROVED_CARD as _APPROVED_CARD,
+        OWNER_APPROVED as _OWNER_APPROVED,
+        TOOL_EXECUTION as _TOOL_EXECUTION,
+    )
     _tool_ctx_token = _TOOL_EXECUTION.set(tool_name or "?")
+    _owner_approved_token = _OWNER_APPROVED.set(_owner_approved)
+    _approved_card_token = _APPROVED_CARD.set(_owner_reason if _owner_approved else None)
     try:
         result = await asyncio.wait_for(
             tool.execute(
@@ -6212,6 +6229,8 @@ async def _execute_tool_call(
         )
     finally:
         _TOOL_EXECUTION.reset(_tool_ctx_token)
+        _OWNER_APPROVED.reset(_owner_approved_token)
+        _APPROVED_CARD.reset(_approved_card_token)
     _latency_ms = (time.monotonic() - _t0) * 1000.0
 
     # WEAVE-PRESS: when a user-initiated bash command fails with

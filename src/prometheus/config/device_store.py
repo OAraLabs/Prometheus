@@ -328,6 +328,17 @@ class DeviceStore:
                            push_failures=int(r["push_failures"] or 0))
                 for r in rows]
 
+    def quiet_push_targets(self, session_id: str | None) -> list[PushTarget]:
+        """The push targets a QUIET push (turn or task finished) may reach: live owner devices, and the live device
+        that owns *session_id*. Such a push carries a line of content (a turn's is the first line of the reply), so a
+        scoped device hears only about its own sessions. No session: owners only."""
+        allowed = set(self.owner_device_ids())
+        if session_id:
+            owner = self.session_owner(session_id)
+            if owner:
+                allowed.add(owner)
+        return [t for t in self.push_targets() if t.id in allowed]
+
     def approval_push_targets(self, *, desktop: bool) -> list[PushTarget]:
         """The push targets an APPROVAL push may reach: live owner devices, and, for a desktop prompt (whose push
         carries no content at all), also the live devices marked for computer use, which are the ones that may

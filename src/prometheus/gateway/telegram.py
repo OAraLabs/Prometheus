@@ -33,6 +33,7 @@ from prometheus.config.paths import get_wiki_root
 from prometheus.gateway.config import Platform, PlatformConfig
 from prometheus.gateway.commands import cmd_anatomy, cmd_doctor, cmd_gate, cmd_profile
 from prometheus.sentinel.signals import ActivitySignal
+from prometheus.utils.file_extract import attachment_note, image_block, upload_block
 from prometheus.gateway.platform_base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -3078,9 +3079,9 @@ class TelegramAdapter(BasePlatformAdapter):
         # Try vision analysis to describe the image
         description = await self._describe_image(cached_path)
         if description:
-            user_text = f"[Image: {description}]\n{caption}".strip()
+            user_text = f"{image_block(description)}\n{caption}".strip()
         elif caption:
-            user_text = f"[The user sent a photo with caption:] {caption}"
+            user_text = f"{attachment_note('The user sent a photo with caption:')} {caption}"
         else:
             user_text = "[The user sent a photo]"
 
@@ -3250,11 +3251,11 @@ class TelegramAdapter(BasePlatformAdapter):
         if extracted:
             # Truncate if extracted text would overflow the context window
             extracted = self._truncate_for_context(extracted)
-            user_text = f"[Content of {original_name}]:\n{extracted}"
+            user_text = upload_block(original_name, extracted)
             if caption:
                 user_text = f"{caption}\n\n{user_text}"
         else:
-            user_text = caption or f"[The user sent a document: {original_name}]"
+            user_text = caption or attachment_note(f"The user sent a document: {original_name}")
 
         event = MessageEvent(
             chat_id=update.effective_chat.id,

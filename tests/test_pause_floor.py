@@ -55,7 +55,8 @@ def test_the_apparmor_profile_refuses_it():
 
 def test_the_shipped_denied_paths_name_it_and_an_older_shipped_list_still_upgrades():
     assert "/*/.prometheus/data/pause.json*" in SHIPPED_DENIED_PATHS
-    previous = DENIED_PATHS_DEFAULTS_SHIPPED[-2]
+    # The newest shipped list that does not yet name it (later lists add other entries on top).
+    previous = [lst for lst in DENIED_PATHS_DEFAULTS_SHIPPED if "/*/.prometheus/data/pause.json*" not in lst][-1]
     assert "/*/.prometheus/data/pause.json*" not in previous
     assert set(previous) < set(SHIPPED_DENIED_PATHS)
     template = (ROOT / "config" / "prometheus.yaml.default").read_text()

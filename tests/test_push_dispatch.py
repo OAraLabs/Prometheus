@@ -133,8 +133,8 @@ def test_approval_pushes_even_with_a_live_socket(tmp_path):
 
 def test_turn_completed_skips_only_the_live_device(tmp_path):
     store = _store(tmp_path)
-    live = _device(store, "watching", push_token="tok-live")
-    away = _device(store, "pocketed", push_token="tok-away")
+    live = _device(store, "watching", push_token="tok-live", owner=True)  # quiet pushes reach owner devices (scoped: own sessions only)
+    away = _device(store, "pocketed", push_token="tok-away", owner=True)  # quiet pushes reach owner devices (scoped: own sessions only)
     sender = _FakeSender()
     dispatcher = PushDispatcher(store, sender, _FakeBridge(live_ids=[live["id"]]))
 
@@ -150,7 +150,7 @@ def test_global_socket_does_not_suppress_the_phone(tmp_path):
     # THE bug the spec forbids: a desktop on the global token is not a device,
     # and its live socket must not swallow the phone's push.
     store = _store(tmp_path)
-    _device(store, "phone", push_token="tok-phone")
+    _device(store, "phone", push_token="tok-phone", owner=True)  # quiet pushes reach owner devices (scoped: own sessions only)
     sender = _FakeSender()
     dispatcher = PushDispatcher(store, sender, _FakeBridge(live_ids=["global"]))
 
@@ -176,7 +176,7 @@ def test_unrelated_signals_push_nothing(tmp_path):
 
 def test_410_clears_the_registration_permanently(tmp_path):
     store = _store(tmp_path)
-    d = _device(store, push_token="tok-dead")
+    d = _device(store, push_token="tok-dead", owner=True)  # quiet pushes reach owner devices (scoped: own sessions only)
     sender = _FakeSender()
     sender.outcomes["tok-dead"] = "unregistered"
     dispatcher = PushDispatcher(store, sender, _FakeBridge())
@@ -193,7 +193,7 @@ def test_410_clears_the_registration_permanently(tmp_path):
 
 def test_failures_mute_at_threshold_and_success_resets(tmp_path):
     store = _store(tmp_path)
-    d = _device(store, push_token="tok-flaky")
+    d = _device(store, push_token="tok-flaky", owner=True)  # quiet pushes reach owner devices (scoped: own sessions only)
     sender = _FakeSender()
     sender.outcomes["tok-flaky"] = "failed"
     dispatcher = PushDispatcher(store, sender, _FakeBridge())

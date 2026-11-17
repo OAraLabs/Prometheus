@@ -75,11 +75,13 @@ def test_a_desktop_prompt_reaches_owners_and_devices_marked_for_computer_use(tmp
         assert "tool_name" not in s["payload"] and "rm -rf" not in str(s["payload"])
 
 
-def test_the_quiet_pushes_are_unchanged(tmp_path):
+def test_a_quiet_push_for_a_session_no_scoped_device_owns_reaches_owner_devices_only(tmp_path):
+    # Was "the quiet pushes are unchanged" (every device). A turn's push carries the first line of the reply, so it
+    # now goes to owner devices and the device that owns the session: tests/test_quiet_push_scoped.py.
     sender = _Sender()
     asyncio.run(PushDispatcher(_world(tmp_path), sender, bridge=None).on_signal(
         _signal("turn_completed", {"session_id": "web:s1"})))
-    assert _tokens(sender) == ["tok-marked", "tok-owner", "tok-scoped"]
+    assert _tokens(sender) == ["tok-owner"]
 
 
 def test_a_store_that_cannot_name_its_owners_sends_no_approval_push():

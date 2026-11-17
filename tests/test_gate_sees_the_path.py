@@ -351,11 +351,17 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
         "not the proof."
     ),
     "test_cautious_permission_mode.py": (
-        "the new `cautious` mode's decision table (every model-run bash and every file write asks; reads and "
-        "user-typed commands do not), read straight out of evaluate(). The same file then drives a write and a "
+        "the new `cautious` mode's decision table (every model-run bash and every file write asks, in both "
+        "origins; reads do not), read straight out of evaluate(). The same file then drives a write and a "
         "shell command through _execute_tool_call with a prompt that answers no, and asserts nothing landed, so "
         "the direct calls are the table and the dispatch tests are the proof. Registered, not exempted: if that "
         "file stops calling evaluate directly this entry fails as stale."
+    ),
+    "test_cautious_asks_in_every_turn.py": (
+        "cautious's shell rule in the OWNER's turns (user origin), read straight out of evaluate(), with a trusted "
+        "command and a read as controls. The same file drives a held write_file and then the same write through "
+        "bash in a user-origin session through _execute_tool_call with a prompt that answers no, and asserts the "
+        "file is not there, so the direct calls are the table and the dispatch test is the proof."
     ),
     "test_devices_db_floor.py": (
         "the device registry joins the always-denied floor: direct evaluate(file_path=…) calls read the gate's "
@@ -416,6 +422,21 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
         "covered in the same file through _execute_tool_call: a write into a granted folder asks before the grant "
         "is loaded and does not after. Registered, not exempted: if that file stops calling evaluate directly "
         "this entry fails as stale."
+    ),
+    "test_bridge_reads_only_its_own_attachments.py": (
+        "GHSA-v65x: a message's text never becomes a file read. One CONTROL calls evaluate(file_path=…) directly to "
+        "read the gate's DECISION for a picture under ~/.ssh, so the test can show the gate denies it before it shows "
+        "that the old \"[Image: /path]\" marker no longer reaches it; the subject is that nothing opens the path, "
+        "not whether a caller delivers one. The delivery half is the same file driving the bridge's own send and "
+        "upload paths. Registered, not exempted: if that file stops calling evaluate directly this entry fails as stale."
+    ),
+    "test_credentials_folder_floor.py": (
+        "the credentials folder (~/.config/prometheus) is denied whole: direct evaluate(file_path=…) calls read the "
+        "gate's DECISION for each file in it (the env file's backup, the APNs signing key, a token file) for a read "
+        "and a write, with and without a configured denied_paths list, so the floor table is the subject, not "
+        "whether a caller delivers a path. The delivery half is covered by the tests of the file tools that "
+        "pass file_path to the gate, and the shell's half by the profile tests beside it. Registered, not exempted: "
+        "if that file stops calling evaluate directly this entry fails as stale."
     ),
     "test_denied_prune.py": (
         "P4.1 matcher-drift fix: THREE readers share one deny list — the gate, "

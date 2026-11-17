@@ -37,6 +37,16 @@ Provenance = Literal[
 ]
 
 
+#: The ``author`` of a message a SCOPED device sent (an approved phone, a server-to-server caller): not the owner,
+#: so nothing it says teaches (memory/extractor.py). Provenance stays "user", so the model sees it as before.
+SCOPED_DEVICE_AUTHOR = "scoped-device"
+#: The ``author`` of a turn the Paperclip gateway runs: its prompt is built from an issue tracker's titles and
+#: comments, external input, not the owner's words.
+PAPERCLIP_AUTHOR = "paperclip"
+#: Authors whose words never teach, whatever the row's provenance says.
+NOT_THE_OWNER = frozenset({SCOPED_DEVICE_AUTHOR, PAPERCLIP_AUTHOR})
+
+
 class TextBlock(BaseModel):
     """Plain text content."""
 
@@ -115,10 +125,16 @@ class ImageBlock(BaseModel):
         if self.data or not self.source_path:
             return self
         import base64
-        from pathlib import Path as _P
 
+        from prometheus.gateway.media_cache import cached_image
+
+        # Only a picture the daemon stored in its media cache (GHSA-v65x-3634-7pcm): a stored row that names any
+        # other file degrades like an evicted one, to the description or a marker.
+        path = cached_image(self.source_path)
+        if path is None:
+            return self
         try:
-            raw = _P(self.source_path).read_bytes()
+            raw = path.read_bytes()
         except OSError:
             return self
         return self.model_copy(update={"data": base64.b64encode(raw).decode("ascii")})

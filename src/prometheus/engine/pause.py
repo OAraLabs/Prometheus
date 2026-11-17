@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -106,7 +107,17 @@ def read_file(path: Path) -> PauseInfo | None:
     since, by, reason = data.get("since"), data.get("by"), data.get("reason", "")
     if not isinstance(since, (int, float)) or isinstance(since, bool) or not isinstance(by, str):
         return _unreadable("bad fields")
-    return PauseInfo(since=float(since), by=by, reason=reason if isinstance(reason, str) else "")
+    try:
+        when = float(since)
+    except (OverflowError, ValueError):                   # an integer too large for a float
+        return _unreadable("bad time")
+    if not math.isfinite(when) or not 0 <= when < SINCE_MAX:
+        return _unreadable("bad time")                    # Infinity, NaN, negative, or past what a clock shows
+    return PauseInfo(since=when, by=by, reason=reason if isinstance(reason, str) else "")
+
+
+#: Seconds since the epoch past which a ``since`` is nonsense (the year 5138): every clock function can show it.
+SINCE_MAX = 1e11
 
 
 def _write_file(path: Path, data: dict[str, Any]) -> None:
