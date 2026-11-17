@@ -73,8 +73,12 @@ def test_a_write_held_for_approval_cannot_go_through_the_shell_instead(tmp_path,
     assert not target.exists(), "the held write went through the shell"
 
 
-def test_default_and_strict_owner_turns_are_unchanged(tmp_path, ws):
+def test_default_and_strict_owner_turns_are_unchanged(tmp_path, ws, monkeypatch):
     # Only cautious promises that every shell command asks; default and strict run an ordinary one unasked.
+    # The bash tool falls back to the default workspace (~/.prometheus/workspace), which a clean machine (CI) does
+    # not have: give the test a scratch home that does, so it never depends on the machine's own.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home" / ".prometheus" / "workspace").mkdir(parents=True)
     marker = ws / "ran"
     for mode in ("default", "strict"):
         prompted: list = []
