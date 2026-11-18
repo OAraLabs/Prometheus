@@ -173,12 +173,6 @@
   "home/.prometheus/.daemon_started": {
    "replaced": "<boot-specific>"
   },
-  "home/.prometheus/MEMORY.md": {
-   "text": ""
-  },
-  "home/.prometheus/USER.md": {
-   "text": ""
-  },
   "home/.prometheus/checkpoints/blobs/19/19d70ba9a9361700cca7fa13c0bc307ec5a12a84d5311b4bcc8d3c2e37a83731": {
    "text": "widgets: 7\ngears: 3\nsprockets: 11\n"
   },
